@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.5.0](https://github.com/StayPirate/sentinel/compare/v0.4.0...v0.5.0) (2026-08-22)
+
+
+### Features
+
+* add admin fetcher config and audit-log reads ([#306](https://github.com/StayPirate/sentinel/issues/306)) ([5e498c5](https://github.com/StayPirate/sentinel/commit/5e498c571159703229f34ae6252f3fca7814b5bc))
+* add fetcher configuration mutation ([#307](https://github.com/StayPirate/sentinel/issues/307)) ([74bff8c](https://github.com/StayPirate/sentinel/commit/74bff8c58ab094043b88c505e48bb38431c4e825))
+* add fetcher persistence and audit foundation ([#257](https://github.com/StayPirate/sentinel/issues/257)) ([cf6ac43](https://github.com/StayPirate/sentinel/commit/cf6ac432f41341e125299bcd5c0da49c3aece6cb))
+* add generic run_fetcher task with atomic run acquisition ([#261](https://github.com/StayPirate/sentinel/issues/261)) ([19469ee](https://github.com/StayPirate/sentinel/commit/19469eeb7e63d3e830bb325ea2c842ccfbf3bf84)), closes [#242](https://github.com/StayPirate/sentinel/issues/242)
+* add public fetcher observation API ([#303](https://github.com/StayPirate/sentinel/issues/303)) ([9826cf5](https://github.com/StayPirate/sentinel/commit/9826cf55049060babf29e8e5995a3154653b6473))
+* add queued state to fetcher run lifecycle ([#311](https://github.com/StayPirate/sentinel/issues/311)) ([f0e5e15](https://github.com/StayPirate/sentinel/commit/f0e5e1537edde5ce894045dbe66fe4771b54c93a))
+* bootstrap fetcher configs during process startup ([#265](https://github.com/StayPirate/sentinel/issues/265)) ([6a0f2ef](https://github.com/StayPirate/sentinel/commit/6a0f2ef5051cc1f963418b22e7231de8af73e38d))
+* implement BaseFetcher lifecycle and registry ([#260](https://github.com/StayPirate/sentinel/issues/260)) ([1684986](https://github.com/StayPirate/sentinel/commit/168498617ae7a055c254ec0104f9a3adad803341))
+* reconcile RedBeat schedule against FetcherConfig at Beat startup ([#300](https://github.com/StayPirate/sentinel/issues/300)) ([17b0394](https://github.com/StayPirate/sentinel/commit/17b039456c316c265c6a6ce16891e9b133afee7d))
+
+
+### Bug Fixes
+
+* allow Renovate custom manager to scan backend/tests/conftest.py ([#285](https://github.com/StayPirate/sentinel/issues/285)) ([529c939](https://github.com/StayPirate/sentinel/commit/529c9396b44e70a19e0faa10bee7c0fd382a3154)), closes [#284](https://github.com/StayPirate/sentinel/issues/284)
+* configure explicit socket timeouts for RedBeat's Redis client ([#305](https://github.com/StayPirate/sentinel/issues/305)) ([70ba15b](https://github.com/StayPirate/sentinel/commit/70ba15b58a84b94876594b8f33476e43c306bf35)), closes [#304](https://github.com/StayPirate/sentinel/issues/304)
+* dispose async engine across Celery event-loop boundaries ([#296](https://github.com/StayPirate/sentinel/issues/296)) ([ac9cfbe](https://github.com/StayPirate/sentinel/commit/ac9cfbe80cbfa336924d9f8817599b25a784d0e3)), closes [#293](https://github.com/StayPirate/sentinel/issues/293)
+* finalize fetcher runs after setup failures ([#312](https://github.com/StayPirate/sentinel/issues/312)) ([6220fb2](https://github.com/StayPirate/sentinel/commit/6220fb27f4b55c978df710583a59c32defad1bca))
+* persist per-run Celery hard time limit for stale detection ([#315](https://github.com/StayPirate/sentinel/issues/315)) ([ab507af](https://github.com/StayPirate/sentinel/commit/ab507afbb89e66efef57b67f5484d892373842a7)), closes [#310](https://github.com/StayPirate/sentinel/issues/310)
+
+
+### Documentation
+
+* fix contradictions in fetcher-infrastructure run() lifecycle ([#299](https://github.com/StayPirate/sentinel/issues/299)) ([64f25c8](https://github.com/StayPirate/sentinel/commit/64f25c89d07a797a52c6b1d6b195422844695832))
+
 ## [0.4.0](https://github.com/StayPirate/sentinel/compare/v0.3.0...v0.4.0) (2026-08-14)
 
 
