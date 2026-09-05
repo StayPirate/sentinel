@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.5.1](https://github.com/StayPirate/sentinel/compare/v0.5.0...v0.5.1) (2026-09-05)
+
+
+### Bug Fixes
+
+* refine reviewer Bash permission boundaries ([#423](https://github.com/StayPirate/sentinel/issues/423)) ([428e475](https://github.com/StayPirate/sentinel/commit/428e475d9a192c6d887e100f3af958d7c16c5340))
+* standardize reviewer command permissions ([#413](https://github.com/StayPirate/sentinel/issues/413)) ([feac409](https://github.com/StayPirate/sentinel/commit/feac4096a609ff9d65aa98b1db0ceff9d03ff3ba))
+* synchronize image smoke service restarts ([#455](https://github.com/StayPirate/sentinel/issues/455)) ([c1ee811](https://github.com/StayPirate/sentinel/commit/c1ee8119320a47d6effbff682cf66d328597df95))
+
 ## [0.5.0](https://github.com/StayPirate/sentinel/compare/v0.4.0...v0.5.0) (2026-08-24)
 
 
