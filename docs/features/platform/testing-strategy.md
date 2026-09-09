@@ -662,6 +662,12 @@ section "Audit Trail Index"), tests MUST verify that the corresponding
 audit event is created in the same transaction with correct field
 values.
 
+When an owning mutation contract explicitly requires no event in a registered
+trail, tests MUST assert that absence as part of the boundary contract. In
+particular, effective and no-op `TicketPackageTrack.delivery_status` operations
+must create no `TicketAuditEvent`; their tests also assert the documented
+absence of assignment and Ticket reconciliation.
+
 The Audit Trail Index is the authoritative source for which audit
 trails exist. As of this writing, four audit trails are registered:
 
@@ -690,6 +696,9 @@ For each audit-producing mutation, the test MUST assert:
    (`comment`, `detail`, `target_user_id`, etc.) match the contract.
 5. **Atomicity**: the audit event and the mutation are visible within the
    same test transaction (i.e., no intermediate commit separates them).
+
+For an explicit no-event mutation, assert zero matching events before and after
+the operation and verify that rollback or retry cannot synthesize one.
 
 ### Immutability Testing
 

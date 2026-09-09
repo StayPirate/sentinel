@@ -1092,8 +1092,9 @@ never updated or removed by normal application workflows.
 #### TicketPackageTrack
 
 Records the affectedness and delivery status of a source package in a
-specific maintenance track within the context of a ticket. The VA sets
-the affectedness status at this level. The delivery status is maintained
+specific maintenance track within the context of a ticket. Caller authority and
+source-state rules for affectedness are defined in
+`docs/features/packages/package-model.md`. The delivery status is maintained
 by the system based on the authoritative IBS request-action and provenance
 rules in `docs/features/packages/ibs-submission-tracking.md`. See
 `docs/features/packages/package-model.md` for the three orthogonal
@@ -1105,8 +1106,8 @@ dimensions (affectedness, eligibility, delivery).
 | ticket_package_id | UUID      | FK(ticket_package.id), NOT NULL       | Parent package record              |
 | workflow_type     | VARCHAR(20) | NOT NULL                              | WorkflowType enum (`ibs` or `git`) |
 | reference         | VARCHAR(255) | NOT NULL                              | Track identifier: IBS codestream project name (e.g., `SUSE:SLE-15-SP6:Update`) or git branch name (e.g., `slfo-main`). Stored as a string — tracks are not maintained as a separate table because SMELT does not provide an independent listing. |
-| status            | VARCHAR(20) | NOT NULL, DEFAULT ANALYSIS            | PackageStatus enum (affectedness)  |
-| delivery_status   | VARCHAR(20) | NOT NULL, DEFAULT PENDING             | DeliveryStatus enum                |
+| status            | VARCHAR(20) | NOT NULL, DEFAULT ANALYSIS            | PackageStatus enum (affectedness); mutation authority is defined in `package-model.md` |
+| delivery_status   | VARCHAR(20) | NOT NULL, DEFAULT PENDING             | DeliveryStatus enum; independent from Ticket gates and has no Ticket audit event |
 | deleted_at        | TIMESTAMPTZ | nullable                              | Direct VA-exclusion timestamp. NULL = not directly VA-excluded. A record may still be effectively VA-excluded through its package or non-actionable because it has no actionable Products |
 | created_at        | TIMESTAMPTZ | NOT NULL, DEFAULT                     | Record creation timestamp          |
 | updated_at        | TIMESTAMPTZ | NOT NULL, DEFAULT                     | Record update timestamp            |

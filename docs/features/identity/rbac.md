@@ -14,8 +14,8 @@ request time from the user's roles.
 
 Capabilities are static enums defined in code. Each capability covers a
 cohesive set of operations that are logically granted or denied together.
-Endpoints are protected by a single capability via the
-`require_capability()` dependency.
+Endpoints are protected by capability checks applied according to their owning
+endpoint contract.
 
 #### Vulnerability Analyst Capabilities
 
@@ -23,7 +23,7 @@ Endpoints are protected by a single capability via the
 |---|---|
 | `create_ticket` | Create ticket manually |
 | `triage_ticket` | Assign/reassign ticket, change ticket status (all transitions: ignore, reopen, duplicate, revert-duplicate), associate CVE with ticket, set/update manual severity |
-| `manage_packages` | Add/remove packages from tickets, exclude/restore (package, track, product), change track affectedness status, override product eligibility |
+| `manage_packages` | Add/remove packages from tickets, exclude/restore (package, track, product), change track affectedness to any non-`FIXED` status, override product eligibility |
 | `manage_cvss` | Add/edit/delete SUSE CVSS assessments |
 | `manage_references` | Add/edit/delete ticket references |
 | `manage_confidentiality` | Set ticket confidentiality flag, list/grant/revoke access grants |
@@ -36,7 +36,7 @@ Endpoints are protected by a single capability via the
 | `manage_role_mappings` | Group-to-role mapping CRUD, preview role mapping |
 | `manage_settings` | View/update system settings, trigger CVSS recalculation, view settings audit log |
 | `manage_fetchers` | Trigger manual fetcher run, enable/disable fetchers, view/modify fetcher config, view fetcher audit log, view error details, view error tracebacks, view triggered_by_user identity, view disabled_by/enabled_by actors |
-| `admin_ticket_ops` | Force track to FIXED status |
+| `admin_ticket_ops` | Set track affectedness to `FIXED` from any status |
 
 > **Design note — capability granularity**: capabilities are intentionally
 > coarse (~11 total). The current three roles are well served by grouped
@@ -148,13 +148,13 @@ Any logged-in user, regardless of role. Includes all Public access plus:
 | Set/update manual severity | `triage_ticket` |
 | Add/remove packages from tickets | `manage_packages` |
 | Exclude/restore package, track, or product | `manage_packages` |
-| Change track affectedness status | `manage_packages` |
+| Change track affectedness to any non-`FIXED` status | `manage_packages` |
 | Override product eligibility | `manage_packages` |
 | Add/edit/delete SUSE CVSS assessments | `manage_cvss` |
 | Add/edit/delete ticket references | `manage_references` |
 | Set ticket confidentiality | `manage_confidentiality` |
 | Manage access grants on confidential tickets | `manage_confidentiality` |
-| Force track to FIXED status | `admin_ticket_ops` |
+| Set track affectedness to `FIXED` from any status | `admin_ticket_ops` |
 | Create local user | `manage_users` |
 | Update user fields | `manage_users` |
 | Manage user roles | `manage_users` |
@@ -360,6 +360,11 @@ required capability receives 403 regardless of whether the ticket
 exists — this prevents probing for ticket existence via differentiated
 error codes.
 
+For the track affectedness PATCH endpoint, `status = fixed` requires
+`admin_ticket_ops`; every other valid status requires `manage_packages`. This
+payload-dependent check occurs at step 2 before Ticket accessibility, and
+neither capability implies or supplements the other for that request.
+
 For CVE endpoints that are capability-protected and operate on a
 specific CVE, the same pattern applies with `require_accessible_cve`
 as step 3 — returning `404 CVE_NOT_FOUND` for non-existent or
@@ -437,7 +442,7 @@ here with the required authorization level and a link to the owning spec.
 | POST | `/api/v1/tickets/{ticket_id}/packages/{package_id}/restore` | `manage_packages` | [package-model](../packages/package-model.md#restore-package) |
 | POST | `/api/v1/tickets/{ticket_id}/packages/{package_id}/tracks/{track_id}/exclude` | `manage_packages` | [package-model](../packages/package-model.md#soft-delete-track) |
 | POST | `/api/v1/tickets/{ticket_id}/packages/{package_id}/tracks/{track_id}/restore` | `manage_packages` | [package-model](../packages/package-model.md#restore-track) |
-| PATCH | `/api/v1/tickets/{ticket_id}/packages/{package_id}/tracks/{track_id}` | `manage_packages` †admin_ticket_ops | [package-model](../packages/package-model.md#change-track-status) |
+| PATCH | `/api/v1/tickets/{ticket_id}/packages/{package_id}/tracks/{track_id}` | `manage_packages` for non-`fixed`; `admin_ticket_ops` for `fixed` | [package-model](../packages/package-model.md#change-track-status) |
 | POST | `/api/v1/tickets/{ticket_id}/packages/{package_id}/tracks/{track_id}/products/{ticket_package_product_id}/exclude` | `manage_packages` | [package-model](../packages/package-model.md#soft-delete-product) |
 | POST | `/api/v1/tickets/{ticket_id}/packages/{package_id}/tracks/{track_id}/products/{ticket_package_product_id}/restore` | `manage_packages` | [package-model](../packages/package-model.md#restore-product) |
 | PATCH | `/api/v1/tickets/{ticket_id}/packages/{package_id}/tracks/{track_id}/products/{ticket_package_product_id}` | `manage_packages` | [package-model](../packages/package-model.md#override-product-eligibility) |

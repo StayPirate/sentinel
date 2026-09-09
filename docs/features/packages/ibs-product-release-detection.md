@@ -405,6 +405,11 @@ do not violate this rule. No response body, parsed document, validator, cursor,
 or no-match result is retained across invocations in PostgreSQL, Redis, or the
 local filesystem.
 
+Candidate selection also retains the expected Ticket, package occurrence, and
+track occurrence for each Product occurrence. Together these values form the
+semantic locator passed to the package mutation boundary after I/O. Its concrete
+in-memory representation is an implementation choice.
+
 Known repository, advisory, scope-race, and per-occurrence database failures are
 converted to per-occurrence outcomes so siblings continue. `SoftTimeLimitExceeded`,
 `MemoryError`, failure to enumerate a trustworthy candidate set, and unexpected
@@ -420,8 +425,8 @@ caller-owned transaction:
 2. verify its Ticket, CVE, package, Product, and IBS workflow scope still match
    the selected evidence;
 3. if `released_at` is already non-NULL, return a concurrent/idempotent no-op;
-4. otherwise call `package_service.set_product_released_at()` with the selected
-   UTC issued time and advisory ID; and
+4. otherwise call `package_service.set_product_released_at()` with the complete
+   semantic locator, selected UTC issued time, and advisory ID; and
 5. commit once.
 
 `package_service` is the only owner of the mutation, Ticket reconciliation, and
@@ -434,7 +439,8 @@ operable-Ticket factual-update contract.
 
 Concurrent periodic, catch-up, or retry invocations serialize on the Ticket
 lock. Only the first effective NULL-to-timestamp change mutates or emits an
-event; later invocations are no-ops. Irreversibility means that contemporaneous
+event; later invocations receive the package service's `no_op` result and
+preserve the first committed timestamp. Irreversibility means that contemporaneous
 snapshots cannot replace the committed value.
 
 ## Irreversibility, Audit, and Observability

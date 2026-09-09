@@ -20,9 +20,24 @@ Each dimension is independently computable — its value depends only on
 its own inputs, never on the current state of another dimension.
 Status propagation does not affect eligibility computation, eligibility
 never changes the status label, and delivery tracking is fully
-independent from both. The three dimensions are combined only at
-observation points (the Resolved gate, the anomaly matrix, and
-presentation views) — never during computation or mutation.
+independent from both. The dimensions may be observed together only at
+the following exhaustive boundaries:
+
+- Ticket gate evaluation combines affectedness, eligibility,
+  actionability, and Product `released_at` as defined in `tickets.md`;
+  track `delivery_status` is not a gate input;
+- presentation fields and views may project multiple persisted values,
+  including `delivery_relevant`;
+- the affectedness/delivery anomaly matrix classifies combinations for
+  analyst attention without changing either value; and
+- post-mutation Ticket reconciliation may observe the gate-relevant
+  values after an owning mutation has completed.
+
+No other computation may derive one dimension from another or use one
+dimension to suppress an independently owned mutation. A caller may
+persist multiple independently computed results atomically when one
+workflow has established each result under its own contract; atomic
+persistence does not make either result an input to the other.
 
 The entity hierarchy (Ticket → Package → Track → Product) uses a
 workflow-agnostic abstraction ("track") that covers both IBS codestreams
@@ -91,8 +106,9 @@ Delivery progress is tracked independently from affectedness:
   update repository via `updateinfo.xml` verification
 
 The `delivery_status` is persisted as a column (not computed from request-action
-joins at query time) because the ticket resolution gate queries it frequently
-and anomaly detection benefits from having both axes on the same record.
+joins at query time) because request reconciliation, presentation, and anomaly
+detection require the accepted current fact without rebuilding it from joins.
+It is not an input to the Ticket resolution gates.
 Disalignment risk is mitigated by `package_service` and the authoritative
 `SyncIbsRequests` reconciliation (see
 [Delivery Reconciliation](#delivery-reconciliation)).
@@ -103,11 +119,12 @@ Disalignment risk is mitigated by `package_service` and the authoritative
 vulnerable" (`NOT_AFFECTED`). Both mean the code is not currently
 vulnerable, but they carry different history and workload implications.
 
-- `FIXED` is system-managed — set only by track release detection when a
+- `FIXED` is restricted — set only by track release detection when a
   structured source diff contains qualifying evidence for the Ticket CVE (see
   `docs/features/packages/ibs-track-release-detection.md`)
   or via the admin escape hatch (`admin_ticket_ops` capability)
-- The VA can change `FIXED` back to `AFFECTED` if the fix is insufficient
+- A caller with `manage_packages` can change `FIXED` back to `AFFECTED` or
+  `ANALYSIS`, or to any other non-`FIXED` affectedness state
 - No `is_status_override` flag is needed on tracks — the VA has direct
   control over non-FIXED target statuses
 
@@ -275,10 +292,11 @@ authorization, audit, and retention semantics.
 ### TicketPackageTrack
 
 Records the affectedness and delivery status of a source package in a
-specific maintenance track within the context of a ticket. The VA sets
-the affectedness status at this level. The delivery status is maintained
-by the system based on the authoritative IBS request-action and provenance
-rules in `ibs-submission-tracking.md`.
+specific maintenance track within the context of a ticket. Affectedness caller
+authority and source-state rules are defined in
+[Status Behavior](#status-behavior). Delivery status is maintained by the
+system based on the authoritative IBS request-action and provenance rules in
+`ibs-submission-tracking.md`.
 
 | Column | Type | Constraints | Description |
 |--------|------|-------------|-------------|
@@ -342,8 +360,10 @@ The package tracking model separates three independent dimensions:
 
 ### Axis 1: Affectedness (per track)
 
-Property of the source code relative to the CVE. Determined by the VA
-during analysis, or automatically by track release detection.
+Property of the source code relative to the CVE. Determined by a user with
+`manage_packages` during analysis, by an administrator with
+`admin_ticket_ops` for a forced `FIXED` result, or automatically by track
+release detection within the transition matrix below.
 Affectedness depends only on whether the source code contains the
 vulnerability — it is independent of CVSS thresholds, product
 lifecycle phase, and delivery pipeline state.
@@ -367,9 +387,9 @@ still requires attention (analysis pending or fix in progress).
 Other specifications that reference "final status" or "non-final status"
 use this classification as defined here.
 
-The VA sets affectedness at the **track level**. Products do not have
-their own affectedness status — they inherit the track's affectedness
-implicitly through the hierarchy.
+Affectedness is set at the **track level** under the human/admin/system
+authority matrix below. Products do not have their own affectedness status —
+they inherit the track's affectedness implicitly through the hierarchy.
 
 ### Axis 2: Eligibility (per product only)
 
@@ -428,7 +448,7 @@ never hardcoded. See `docs/features/tickets/cvss-scoring.md` and
 by setting `is_eligible_override = true`. When overridden, automatic
 eligibility recalculation skips the product.
 
-### Axis 3: Delivery (per track)
+### Axis 3: Delivery and Release Observation
 
 Factual observation of the fix's progress through the SUSE maintenance
 pipeline (request-action/incident provenance at the track level,
@@ -436,6 +456,12 @@ pipeline (request-action/incident provenance at the track level,
 records what Sentinel has established from IBS evidence; it is independent of
 whether the code is vulnerable (affectedness) or whether the product meets
 threshold criteria (eligibility).
+
+This axis has two distinct persisted facts: track `delivery_status` records
+maintenance-pipeline progress, while Product `released_at` confirms repository
+publication for one Product occurrence. Neither fact derives the other, and
+neither changes affectedness or eligibility. Only Product `released_at`, not
+track `delivery_status`, participates in the Resolved gate.
 
 | State | Meaning | Condition |
 |-------|---------|-----------|
@@ -648,14 +674,21 @@ defined in a dedicated specification.
 
 All track status changes and product eligibility overrides described in
 this section MUST go through the `package_service` module (see
-`docs/features/packages/package-service.md`), which ensures automatic
-ticket status re-evaluation after each change.
+`docs/features/packages/package-service.md`). An effective gate-relevant change
+causes Ticket status re-evaluation; a true no-op does not.
 
-### VA Sets a Status on a Track
+### Human Sets a Status on a Track
 
-1. Track status is set to the chosen value (via `package_service`)
-2. A `TicketAuditEvent` (`track_status_changed`) is created
-3. Ticket status is re-evaluated via `reconcile_ticket_status()`
+For an effective authorized change:
+
+1. Track status is set to the chosen value via `package_service`.
+2. A `TicketAuditEvent` (`track_status_changed`) is created with the true
+   locked old and new values.
+3. Ticket status is re-evaluated via `reconcile_ticket_status()`.
+
+If the locked track already has the requested status, the operation is a true
+no-op: it does not assign the actor, create an audit event, reconcile the
+Ticket, or register a post-commit effect.
 
 There is **no codestream eligibility rollup** — the track retains its
 affectedness status regardless of whether any product is eligible. The
@@ -674,8 +707,17 @@ whether any actionable Product under it has `eligible = true`.
 |------|----|------------|---------|
 | `AFFECTED` or `ANALYSIS` | `FIXED` | TicketPackageTrack | Track release detection finds qualifying canonical Ticket-CVE evidence in an expanded source diff |
 
-Records in a final status (`NOT_AFFECTED`, `FIXED`, `WONT_FIX`) are not
-eligible as source states for automatic transitions.
+Track release detection requests only `FIXED`. `ANALYSIS` and `AFFECTED` are
+the only automatic source states that can change. If external I/O began while
+one of those states was present but the locked state is now `NOT_AFFECTED`,
+`FIXED`, or `WONT_FIX`, the request is a protected no-op. Successful source
+examination may still advance the detector's checkpoint under
+`ibs-track-release-detection.md`. A system request whose target is anything
+other than `FIXED` is rejected, emits a sanitized warning, performs no
+mutation, assignment, audit, reconciliation, or post-commit effect, and causes
+the calling workflow's unit to fail. The caller consumes the `rejected` service
+result and routes it through its documented per-item failure handling; the
+service result itself does not prescribe an exception type.
 
 **Delivery status transitions** (system-managed):
 
@@ -721,12 +763,21 @@ catch-up paths. See
 
 ### Manual Transitions
 
-The VA can manually change the affectedness status of any track to
-`ANALYSIS`, `AFFECTED`, `NOT_AFFECTED`, or `WONT_FIX`. The VA cannot
-set a track to `FIXED` — this status is system-managed (set only by
-track release detection or via the admin escape hatch with
-`admin_ticket_ops` capability). The VA cannot manually change the
-delivery status — it is system-managed.
+Affectedness transition authority is exhaustive:
+
+| Caller authority | Requested target | Allowed source states | Outcome |
+|---|---|---|---|
+| Human with `manage_packages` | `ANALYSIS`, `AFFECTED`, `NOT_AFFECTED`, or `WONT_FIX` | Any affectedness state | Effective change, or true no-op when unchanged |
+| Human with `manage_packages` but without `admin_ticket_ops` | `FIXED` | Any | Authorization rejection before Ticket accessibility |
+| Human with `admin_ticket_ops` | `FIXED` | Any affectedness state | Forced effective change, or true no-op when already `FIXED`; `manage_packages` is not additionally required |
+| Human with only `admin_ticket_ops` | Any non-`FIXED` target | Any | Authorization rejection before Ticket accessibility |
+| System caller | `FIXED` | `ANALYSIS` or `AFFECTED` | Effective automatic change |
+| System caller | `FIXED` | `NOT_AFFECTED`, `FIXED`, or `WONT_FIX` | Protected no-op |
+| System caller | Any non-`FIXED` target | Any | Rejected workflow unit with warning and no effects |
+
+The capability union applies normally: a user holding both capabilities uses
+`admin_ticket_ops` for `FIXED` and `manage_packages` for every other target.
+Humans cannot change `delivery_status`; it is system-managed.
 
 ---
 
@@ -862,8 +913,8 @@ reconciles the Ticket once.
 
 ### Interaction with add_package_to_ticket
 
-The `add_package_to_ticket` function proceeds normally regardless of
-whether the `TicketPackage` is soft-deleted. It queries SMELT, and
+For internal re-resolution callers, `add_package_to_ticket` proceeds normally
+regardless of whether the `TicketPackage` is soft-deleted. It queries SMELT, and
 creates any missing `TicketPackageTrack` and `TicketPackageProduct`
 records. Existing records (active or soft-deleted) are skipped.
 It also performs the normal additive maintainership acquisition for that
@@ -874,12 +925,15 @@ New records are created with `deleted_at = NULL`. If the parent package or
 track is VA-excluded, these records are effectively VA-excluded through the
 hierarchy. If their Product is EOL, they are independently non-actionable.
 
-The **API handler** for `POST /api/v1/tickets/{ticket_id}/packages` is
-responsible for checking whether the `TicketPackage` is soft-deleted
-(`deleted_at IS NOT NULL`) **before** calling the function. If it is,
-the handler returns `409 PACKAGE_ALREADY_EXCLUDED` without invoking the
-function. Internal callers such as CVE ingestion call the function directly
-and benefit from the automatic exclusion via hierarchy. Track release
+The public `POST /api/v1/tickets/{ticket_id}/packages` call asks the package
+service to apply the public excluded-package guard. The service owns the
+state-dependent query and returns `409 PACKAGE_ALREADY_EXCLUDED` when the
+existing package occurrence is directly excluded. Ticket reactivation invokes
+the documented internal re-resolution mode, which may complete descendants and
+maintainership without restoring the package. CVE ingestion and Product catalog
+backfill omit existing soft-deleted package markers during their owning
+candidate selection and therefore do not need that bypass. API handlers do not
+query package-tree state or decide this business condition. Track release
 detection never calls this function because it reconciles only tracks that
 already exist.
 
@@ -1217,9 +1271,10 @@ name/version matching.
 
 ## Ticket Events for Package Changes
 
-Every modification to a ticket's package data MUST produce a
-`TicketAuditEvent` record for audit and traceability. The following event
-types are defined:
+Every modification represented in the table below MUST produce its specified
+`TicketAuditEvent` for audit and traceability. Delivery-status mutation is the
+explicit exception: it creates no Ticket event, assignment, or Ticket
+reconciliation. The following event types are defined:
 
 | Action | `event_type` | `user_id` | Details recorded |
 |--------|-------------|-----------|------------------|
@@ -1232,7 +1287,7 @@ types are defined:
 | VA restores package | `package_restored` | VA user | `package_name` |
 | VA restores track | `track_restored` | VA user | `track_name`, `package_name` |
 | VA restores product | `product_restored` | VA user | `track_name`, `package_name`, event-time Product name and CPE |
-| VA changes track status | `track_status_changed` | VA user | `track_name`, `package_name`, `old_status`, `new_status` |
+| Human or system changes track status | `track_status_changed` | Acting user for human changes; `NULL` for automatic release detection | `track_name`, `package_name`, `old_status`, `new_status` |
 | VA overrides or resets Product eligibility | `product_eligibility_changed` | VA user | `track_name`, `package_name`, event-time Product name and CPE, `old_eligible`, `new_eligible`, `reason = va_override`, and `override_action` |
 | Ticket created | `ticket_created` | `NULL` | Creation source description |
 | Product release detected | `product_released` | `NULL` | `track_name`, `package_name`, event-time Product name and CPE, `released_at`, `advisory_id` |
@@ -1320,8 +1375,8 @@ The following concerns are identical regardless of `workflow_type`:
 
 - `PackageStatus` enum and all valid transitions
 - `DeliveryStatus` enum (the delivery concept exists for both workflows)
-- Final-status immunity (records in `NOT_AFFECTED`, `FIXED`, or `WONT_FIX`
-  are never modified by automatic transitions)
+- Final-status protection (automatic `FIXED` requests against
+  `NOT_AFFECTED`, `FIXED`, or `WONT_FIX` are protected no-ops)
 - `package_service` module — operates on `TicketPackageTrack` and
   `TicketPackageProduct`
 - Ticket status gates (Analysis → Analyzed → Resolved)
@@ -1492,6 +1547,16 @@ periodic full-tree reconciler is introduced.
 ---
 
 ## API Endpoints
+
+Every endpoint below whose path contains package, track, or Product occurrence
+identifiers treats the complete path as one semantic locator. The package must
+belong to `{ticket_id}`, the track must belong to that package, and the Product
+occurrence must belong to that track. The package service locks the declared
+Ticket first and revalidates the complete chain under that lock. A missing ID
+or any ownership mismatch at any level returns the endpoint's existing `404
+RESOURCE_NOT_FOUND`; no endpoint reveals that a supplied child exists under a
+different path. API handlers pass the identifiers to the service and perform no
+business ORM lookup.
 
 ### Add Package to Ticket
 
@@ -1805,8 +1870,11 @@ and `non_actionable_reason = null`.
 PATCH /api/v1/tickets/{ticket_id}/packages/{package_id}/tracks/{track_id}
 ```
 
-Change the affectedness status of a track. Triggers TicketAuditEvent
-creation and ticket status re-evaluation via `package_service`.
+Change the affectedness status of a track. An effective change triggers
+TicketAuditEvent creation and Ticket status re-evaluation via
+`package_service`. If the locked status already equals the authorized target,
+the endpoint returns the current track with `200 OK` and produces no
+assignment, audit, reconciliation, or post-commit effect.
 
 **Request body**:
 
@@ -1820,9 +1888,11 @@ creation and ticket status re-evaluation via `package_service`.
 |-------|------|----------|-------------|
 | `status` | string | Yes | New status value. Valid values: `analysis`, `affected`, `not_affected`, `fixed`†, `wont_fix` |
 
-† Setting `status` to `FIXED` requires the `admin_ticket_ops` capability
-(Hard Conditional Check). Users with only `manage_packages` can set any
-other status but not `FIXED`.
+† Setting `status` to `FIXED` requires `admin_ticket_ops` instead of
+`manage_packages`; the capabilities are alternatives selected from the
+validated payload, not cumulative requirements. Every non-`FIXED` target
+requires `manage_packages`. The selected capability is checked before Ticket
+accessibility.
 
 **Response** (200 OK):
 
@@ -1867,8 +1937,8 @@ The response includes the updated track and all its child Products with their
 current eligibility and actionability, allowing the client to update
 the UI tree without a separate fetch.
 
-**`Capability: manage_packages`** | **`†admin_ticket_ops`** (Hard
-Conditional Check: required only when `status = FIXED`)
+**`Capability: admin_ticket_ops when status = fixed; manage_packages for every
+other status`**
 
 **Error responses**:
 
@@ -1885,8 +1955,9 @@ PATCH /api/v1/tickets/{ticket_id}/packages/{package_id}/tracks/{track_id}/produc
 ```
 
 Override the eligibility of a specific product. Sets
-`is_eligible_override = true`. Triggers TicketAuditEvent creation and
-ticket status re-evaluation via `package_service`.
+`is_eligible_override = true`. An effective override or reset triggers
+TicketAuditEvent creation and Ticket status re-evaluation via
+`package_service`; a true no-op produces neither.
 
 **Request body**:
 
@@ -1918,7 +1989,8 @@ reverts to automatic:
   (including tickets without an associated CVE), the 10.0 fallback applies —
    making the Product eligible unless the Reactive Support override applies.
 
-Both override and reset operations follow the same post-modification flow:
+For an effective override or reset, both operations follow the same
+post-modification flow:
 
 1. A `TicketAuditEvent` (`product_eligibility_changed`) is created
 2. A single ticket status re-evaluation is performed at the end of the
@@ -1926,6 +1998,11 @@ Both override and reset operations follow the same post-modification flow:
 
 This applies to all operations through this endpoint: setting an override,
 changing an override value, and resetting an override.
+
+If the locked Product occurrence already has the requested override state and
+value, or is already automatically managed when reset is requested, the
+endpoint returns the current Product with `200 OK` and performs no assignment,
+audit, Ticket reconciliation, or post-commit effect.
 
 **Response** (200 OK):
 
@@ -1953,7 +2030,7 @@ changing an override value, and resetting an override.
 
 | Status | Code | Condition |
 |--------|------|-----------|
-| 404 | `RESOURCE_NOT_FOUND` | Package or product not found on this ticket |
+| 404 | `RESOURCE_NOT_FOUND` | Package, track, or product not found on this ticket |
 
 ---
 
@@ -2130,8 +2207,10 @@ Product sync tasks (`sync_smelt_products`, `sync_aimaas_lifecycle`,
 
 - Adding/removing/excluding/restoring packages on a ticket requires the
   `manage_packages` capability
-- Changing track status or product eligibility requires the
-  `manage_packages` capability
+- Changing Product eligibility or changing a track to a non-`FIXED` status
+  requires `manage_packages`
+- Changing a track to `FIXED` requires `admin_ticket_ops` instead; it does not
+  additionally require `manage_packages`
 - Viewing affectedness data is publicly accessible (no authentication
   required):
   - `GET /api/v1/tickets/{ticket_id}/packages` — subject to

@@ -120,6 +120,14 @@ This ordering is security-significant: the capability check (step 2)
 fires before the accessibility check (step 3), preventing ticket
 existence probing via differentiated error codes.
 
+When validated payload content makes one capability substitute for another,
+step 2 determines the required capability without loading the Ticket and checks
+it before Ticket accessibility. For example, changing package track
+affectedness requires `admin_ticket_ops` when `status = fixed`, and
+`manage_packages` for every other status. A caller lacking the required
+capability receives the same generic 403 regardless of whether the Ticket or
+nested package-tree path exists.
+
 For CVE endpoints that are capability-protected and operate on a
 specific CVE, the same pattern applies:
 
@@ -540,12 +548,13 @@ schema failures), `500 INTERNAL_ERROR`, and the shared
 `DATE_RANGE_INVERTED` response for endpoints that declare both date range
 parameters. These are derivable and provide no endpoint-specific information.
 
-**Conditional authorization**: when an endpoint has authorization logic
-beyond the base `require_capability()` guard (e.g., a secondary
-capability required only for specific input values), document the
-condition in the **Behavior** section or capability declaration — not as
-a 403 row in the error table. The HTTP response is still the generic
-`AUTH_INSUFFICIENT_PERMISSION` (the consumer cannot distinguish it).
+**Conditional authorization**: when an endpoint has authorization logic beyond
+a fixed `require_capability()` guard, document the complete condition in the
+**Behavior** section or capability declaration — not as a 403 row in the error
+table. This includes both a secondary capability required for a specific field
+and payload-dependent substitution where one capability replaces another.
+The HTTP response is still the generic `AUTH_INSUFFICIENT_PERMISSION` (the
+consumer cannot distinguish it).
 
 **Pydantic-level validation**: constraints enforceable via Pydantic
 schema definitions (type, enum membership, string length, regex, cross-field
