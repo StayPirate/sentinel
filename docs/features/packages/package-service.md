@@ -161,19 +161,9 @@ operations such as `set_track_delivery_status()`, `set_product_released_at()`, a
 `recalculate_product_eligibility_for_ticket()` omit auto-assignment as stated
 in their sections. `add_package_records()` also omits assignment and
 reconciliation when maintainership associations are its only mutation.
-Exclusion and restoration operations are VA-only and require a non-null
-`acting_user_id`:
-
-1. Acquire `FOR UPDATE` on the declared Ticket row.
-2. Call `ensure_ticket_operable(ticket)`.
-3. Reload and validate the complete declared package-tree path.
-4. Call `auto_assign_actor()`.
-5. Validate the operation-specific exclusion/restoration precondition. A
-   failure rolls back the complete caller-owned transaction, including any
-   pending assignment.
-6. Apply the mutation and create the required `TicketAuditEvent`.
-7. Call `ticket_mutations.reconcile_ticket_status()`.
-8. Flush and return locked-current state.
+Exclusion and restoration operations are user-attributed only. Their shared
+contract below requires a non-null `acting_user_id` and places the direct-marker
+guard before auto-assignment.
 
 ### `set_track_status()`
 
@@ -409,7 +399,7 @@ The value records a stable security advisory-issued time that passed the
 complete validation contract at observation time. A later advisory retraction,
 correction, disappearance, repository failure, or no-match does not reverse or
 replace that accepted factual observation. Soft-deletion remains an independent
-VA exclusion decision and is not a release-correction mechanism.
+manual exclusion decision and is not a release-correction mechanism.
 
 **Callers**: IBS product release detection tasks only
 (`acting_user_id` is always `None`; auto-assignment does not apply).
@@ -783,229 +773,85 @@ associations are normal skip outcomes, not exceptions.
 
 ---
 
-### `soft_delete_ticket_package()`
+### Exclusion and restoration operations
 
-Soft-deletes a `TicketPackage` record (sets `deleted_at`).
+The six direct-marker operations share one complete Category A contract:
 
-**Parameters**:
+| Function | Target path after `ticket_id` | Required direct marker | Mutation | Event |
+|---|---|---|---|---|
+| `soft_delete_ticket_package()` | `package_id` | NULL | set to current UTC timestamp | `package_excluded` |
+| `soft_delete_ticket_package_track()` | `package_id`, `track_id` | NULL | set to current UTC timestamp | `track_excluded` |
+| `soft_delete_ticket_package_product()` | `package_id`, `track_id`, `ticket_package_product_id` | NULL | set to current UTC timestamp | `product_excluded` |
+| `restore_ticket_package()` | `package_id` | non-NULL | clear to NULL | `package_restored` |
+| `restore_ticket_package_track()` | `package_id`, `track_id` | non-NULL | clear to NULL | `track_restored` |
+| `restore_ticket_package_product()` | `package_id`, `track_id`, `ticket_package_product_id` | non-NULL | clear to NULL | `product_restored` |
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `db` | `AsyncSession` | Yes | Database session |
-| `ticket_id` | `UUID` | Yes | Declared parent Ticket to lock |
-| `package_id` | `UUID` | Yes | TicketPackage to soft-delete |
-| `acting_user_id` | `UUID` | Yes | VA performing the action |
+Each function receives `db: AsyncSession`, the UUID path shown above,
+`acting_user_id: UUID`, and an optional `evaluation_date: date`. The date is
+the UTC date for actionability, Ticket reconciliation, result projection, and
+the eventual mutation response. If omitted, the function captures it once at
+entry and returns enough semantic context for the caller to reuse it; the
+concrete result representation is an implementation choice.
 
-**Preconditions**:
+**Shared guards and behavior**:
 
-- Parent ticket must be operable (`ensure_ticket_operable`)
-- Package must exist and have `deleted_at IS NULL`
+1. Validate `acting_user_id` before any database operation. `None` raises
+   `ValueError`; exclusion and restoration have no system caller.
+2. Resolve one `evaluation_date`, then acquire `FOR UPDATE` on the declared
+   Ticket as the first database operation.
+3. Call `ensure_ticket_operable(ticket)`.
+4. Reload and validate the complete declared package-tree path under the lock.
+5. Inspect only the target's locked direct marker. An exclusion of a non-NULL
+   marker raises `PackageAlreadyExcludedError`; a restore of a NULL marker
+   raises `PackageNotExcludedError`. The guard runs before assignment or any
+   durable side effect.
+6. Call `auto_assign_actor()` only after the direct-marker guard succeeds.
+7. Change only the target marker as shown in the table. Ancestor and descendant
+   markers, affectedness, eligibility, delivery, release facts, and lifecycle
+   data remain unchanged.
+8. Create exactly one direct event from the table and call
+   `reconcile_ticket_status()` exactly once with the same `evaluation_date`.
+9. Flush and return the target's locked-current state with `actionable` and
+   `non_actionable_reason` projected using that date. Assignment and Ticket
+   status changes may create their independently owned events.
 
-**Behavior**:
+No ancestor exclusion, descendant state, EOL phase, child-existence condition,
+or availability of an actionable descendant is a guard. An exclusion can
+therefore create an independent direct marker beneath an excluded ancestor or
+on an already non-actionable target. A restore can succeed while the target
+remains non-actionable through an ancestor, EOL, or its descendant set.
 
-1. Acquire `FOR UPDATE` on the declared Ticket row
-2. Call `ensure_ticket_operable(ticket)`
-3. Reload and validate that `package_id` belongs to it
-4. Call `auto_assign_actor()`
-5. Validate the exclusion precondition
-6. Set `package.deleted_at = now()`
-7. Create `TicketAuditEvent` (`package_excluded`)
-8. Call `reconcile_ticket_status()` using the current UTC evaluation date
-9. Return updated package
+**Audit payloads** use the locked occurrence and the exact field contract in
+`ticket-audit-log.md`:
 
-Note: child tracks and products are NOT modified (hierarchical exclusion
-model — only the directly targeted record receives `deleted_at`).
+| Level | Exclusion `old_value` / `new_value` | Restore `old_value` / `new_value` | `detail` |
+|---|---|---|---|
+| Package | package name / NULL | NULL / package name | NULL |
+| Track | track reference / NULL | NULL / track reference | `track`, `package` |
+| Product | Product display name / NULL | NULL / Product display name | event-time `track`, `package`, `product_name`, `product_cpe` |
 
-**TicketAuditEvent**: `package_excluded`
+Every event has `user_id = acting_user_id` and `comment = NULL`. A rejected
+repeat call, path or operability failure, EOL-only transition, derived parent
+actionability change, or rolled-back transaction creates no exclusion or
+restoration event. Audit, reconciliation, database, constraint, and flush
+failures propagate unchanged and roll back the complete caller-owned
+transaction, including marker, assignment, and every audit or status effect.
 
----
+**Re-invocation and concurrency**: a successful same-direction re-invocation
+fails on the direct-marker guard without assignment, audit, reconciliation, or
+post-commit effect. Same-Ticket calls serialize on the Ticket lock:
 
-### `soft_delete_ticket_package_track()`
+- exclude/exclude has one success followed by
+  `PackageAlreadyExcludedError`;
+- restore/restore has one success followed by `PackageNotExcludedError`;
+- exclude/restore has no global priority: each caller applies its guard to the
+  committed-current state observed after acquiring the lock; and
+- ancestor/descendant calls may both succeed because each changes an
+  independent direct marker.
 
-Soft-deletes a `TicketPackageTrack` record.
-
-**Parameters**:
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `db` | `AsyncSession` | Yes | Database session |
-| `ticket_id` | `UUID` | Yes | Declared parent Ticket to lock |
-| `package_id` | `UUID` | Yes | Declared parent TicketPackage |
-| `track_id` | `UUID` | Yes | TicketPackageTrack to soft-delete |
-| `acting_user_id` | `UUID` | Yes | VA performing the action |
-
-**Preconditions**:
-
-- Parent ticket must be operable (`ensure_ticket_operable`)
-- Track must exist and have `deleted_at IS NULL`
-
-**Behavior**:
-
-1. Acquire `FOR UPDATE` on the declared Ticket row
-2. Call `ensure_ticket_operable(ticket)`
-3. Reload and validate the declared package/track chain
-4. Call `auto_assign_actor()`
-5. Validate the exclusion precondition
-6. Set `track.deleted_at = now()`
-7. Create `TicketAuditEvent` (`track_excluded`)
-8. Call `reconcile_ticket_status()` using the current UTC evaluation date
-9. Return updated track
-
-Note: child Products are not modified; they become effectively VA-excluded
-through the track marker.
-
-**TicketAuditEvent**: `track_excluded`
-
----
-
-### `soft_delete_ticket_package_product()`
-
-Soft-deletes a `TicketPackageProduct` record.
-
-**Parameters**:
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `db` | `AsyncSession` | Yes | Database session |
-| `ticket_id` | `UUID` | Yes | Declared parent Ticket to lock |
-| `package_id` | `UUID` | Yes | Declared parent TicketPackage |
-| `track_id` | `UUID` | Yes | Declared parent TicketPackageTrack |
-| `ticket_package_product_id` | `UUID` | Yes | TicketPackageProduct to soft-delete |
-| `acting_user_id` | `UUID` | Yes | VA performing the action |
-
-**Preconditions**:
-
-- Parent ticket must be operable (`ensure_ticket_operable`)
-- Product must exist and have `deleted_at IS NULL`
-- No ancestor-exclusion guard applies; a direct Product marker can be changed
-  while its parent remains VA-excluded
-
-**Behavior**:
-
-1. Acquire `FOR UPDATE` on the declared Ticket row
-2. Call `ensure_ticket_operable(ticket)`
-3. Reload and validate the declared package/track/Product chain
-4. Call `auto_assign_actor()`
-5. Validate the exclusion precondition
-6. Set `product.deleted_at = now()`
-7. Create `TicketAuditEvent` (`product_excluded`)
-   with the standard event-time Product subject detail
-8. Call `reconcile_ticket_status()` using the current UTC evaluation date
-9. Return updated product
-
-**TicketAuditEvent**: `product_excluded`
-
----
-
-### `restore_ticket_package()`
-
-Restores a soft-deleted `TicketPackage` record (clears `deleted_at`).
-
-**Parameters**:
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `db` | `AsyncSession` | Yes | Database session |
-| `ticket_id` | `UUID` | Yes | Declared parent Ticket to lock |
-| `package_id` | `UUID` | Yes | TicketPackage to restore |
-| `acting_user_id` | `UUID` | Yes | VA performing the action |
-
-**Preconditions**:
-
-- Parent ticket must be operable (`ensure_ticket_operable`)
-- Package must exist and have `deleted_at IS NOT NULL`
-- No descendant-existence or actionability guard applies
-
-**Behavior**:
-
-1. Acquire `FOR UPDATE` on the declared Ticket row
-2. Call `ensure_ticket_operable(ticket)`
-3. Reload and validate that `package_id` belongs to it
-4. Call `auto_assign_actor()`
-5. Validate the restoration precondition
-6. Clear `package.deleted_at`
-7. Create `TicketAuditEvent` (`package_restored`)
-8. Call `reconcile_ticket_status()` using the current UTC evaluation date
-9. Return updated package
-
-**TicketAuditEvent**: `package_restored`
-
----
-
-### `restore_ticket_package_track()`
-
-Restores a soft-deleted `TicketPackageTrack` record.
-
-**Parameters**:
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `db` | `AsyncSession` | Yes | Database session |
-| `ticket_id` | `UUID` | Yes | Declared parent Ticket to lock |
-| `package_id` | `UUID` | Yes | Declared parent TicketPackage |
-| `track_id` | `UUID` | Yes | TicketPackageTrack to restore |
-| `acting_user_id` | `UUID` | Yes | VA performing the action |
-
-**Preconditions**:
-
-- Parent ticket must be operable (`ensure_ticket_operable`)
-- Track must exist and have `deleted_at IS NOT NULL`
-- No ancestor-exclusion, descendant-existence, or actionability guard applies
-
-**Behavior**:
-
-1. Acquire `FOR UPDATE` on the declared Ticket row
-2. Call `ensure_ticket_operable(ticket)`
-3. Reload and validate the declared package/track chain
-4. Call `auto_assign_actor()`
-5. Validate the restoration precondition
-6. Clear `track.deleted_at`
-7. Create `TicketAuditEvent` (`track_restored`)
-   with the standard `track` and `package` detail keys
-8. Call `reconcile_ticket_status()` using the current UTC evaluation date
-9. Return updated track
-
-**TicketAuditEvent**: `track_restored`
-
----
-
-### `restore_ticket_package_product()`
-
-Restores a soft-deleted `TicketPackageProduct` record.
-
-**Parameters**:
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `db` | `AsyncSession` | Yes | Database session |
-| `ticket_id` | `UUID` | Yes | Declared parent Ticket to lock |
-| `package_id` | `UUID` | Yes | Declared parent TicketPackage |
-| `track_id` | `UUID` | Yes | Declared parent TicketPackageTrack |
-| `ticket_package_product_id` | `UUID` | Yes | TicketPackageProduct to restore |
-| `acting_user_id` | `UUID` | Yes | VA performing the action |
-
-**Preconditions**:
-
-- Parent ticket must be operable (`ensure_ticket_operable`)
-- Product must exist and have `deleted_at IS NOT NULL`
-- No ancestor-exclusion or lifecycle-actionability guard applies
-
-No child-existence pre-check required (product is a leaf record).
-
-**Behavior**:
-
-1. Acquire `FOR UPDATE` on the declared Ticket row
-2. Call `ensure_ticket_operable(ticket)`
-3. Reload and validate the declared package/track/Product chain
-4. Call `auto_assign_actor()`
-5. Validate the restoration precondition
-6. Clear `product.deleted_at`
-7. Create `TicketAuditEvent` (`product_restored`)
-   with the standard event-time Product subject detail
-8. Call `reconcile_ticket_status()` using the current UTC evaluation date
-9. Return updated product
-
-**TicketAuditEvent**: `product_restored`
+Each successful result represents the valid locked state during its serialized
+turn. A later concurrent transaction may naturally change effective
+actionability after that transaction commits.
 
 ## Orchestration Operations
 
@@ -1040,7 +886,9 @@ async def add_package_to_ticket(
    `package-model.md` to resolve all currently maintained tracks and products
    for the given package name (external I/O — no lock held). Do not use the
    separate paginated maintained sweep operation. Parse the response body
-   regardless of HTTP status and validate the JSend envelope structure.
+   regardless of HTTP status and validate the JSON/JSend envelope, HTTP/status
+   pairing, and every applicable codestream and supported-target field before a
+   database lookup.
 2. If connection, timeout, proxy, or remote-protocol failure remains after the
    shared transport retries, or the response cannot be parsed as JSON or has
    no recognized JSend `status` value, raise `SmeltUnavailableError`
@@ -1050,7 +898,7 @@ async def add_package_to_ticket(
    records are created.
 3. Verify that a complete Product catalog snapshot exists; if none exists,
    raise `ProductCatalogNotReadyError` before interpreting the response
-   content further. Readiness failure takes precedence over both
+   outcome further or matching CPEs. Readiness failure takes precedence over both
    package-not-found and targets-unresolved outcomes. Error precedence is
    defined in `product-catalog.md` (Catalog Readiness and Freshness).
 4. If SMELT returns a package-not-found response (HTTP 404 with a valid
@@ -1120,12 +968,16 @@ backfill do not select existing soft-deleted package markers. The concrete
 caller-context parameter is an implementation choice; the API handler does not
 perform the package lookup.
 
-**Idempotency**: every invocation repeats both external validation requests.
-Package-tree rows and maintainership associations are insert-if-missing. With
-unchanged valid source data and complete local state, no database mutation,
-audit event, assignment, reconciliation, or post-commit effect occurs. A later
-valid response or newly active matching User may make a repeated invocation add
-maintainer associations while package-tree counts remain unchanged.
+**Idempotency**: every invocation repeats the maintained-package validation
+request. It requests maintainership only after package-target resolution
+succeeds. Package-tree rows and maintainership associations are
+insert-if-missing. With unchanged valid source data and complete included local
+state, no database mutation, audit event, assignment, reconciliation, or
+post-commit effect occurs. A later valid response or newly active matching User
+may make a repeated invocation add maintainer associations while package-tree
+counts remain unchanged. Under public semantics, a directly excluded package
+instead raises `PackageAlreadyExcludedError`; fetched maintainer data is not
+persisted because the locked guard precedes every mutation.
 
 The returned semantic state is the delegated locked result. A
 `package_tree_changed` result may register the post-commit IBS catch-up only
@@ -1140,6 +992,11 @@ exceptions from step 7 propagate and roll back the caller-owned transaction.
 Maintainership-only transport,
 HTTP/envelope, JSON, and schema errors from step 6 are caught and converted to
 the documented warning plus empty set; they never escape this function.
+
+**Public error precedence**: authentication, capability, and Ticket
+accessibility are API prerequisites before this function. The orchestration
+then follows the canonical sequence in `package-model.md` (Adding Packages to a
+Ticket).
 
 **Error handling**:
 
@@ -1307,7 +1164,7 @@ async def search_packages(
 
 ## Exclusion and Actionability Invariant
 
-Every package-tree `deleted_at` mutation in this module is a direct VA action
+Every package-tree `deleted_at` mutation in this module is a direct authorized-user action
 on the selected package, track, or Product. No helper propagates exclusion to
 ancestors or descendants, and no system caller may invoke an exclusion or
 restore operation with a null actor.
@@ -1357,12 +1214,29 @@ the Ticket lock. Once one transaction sets a Product occurrence's
 `released_at`, every concurrent or repeated caller observes an irreversible
 no-op and cannot replace the selected advisory time.
 
+Exclusion, restoration, public addition, and internal re-resolution on the same
+Ticket use the same serialization boundary. In addition to the direct-marker
+outcomes defined above:
+
+- a public add that acquires the lock after an exclusion commits observes the
+  direct package marker and raises `PackageAlreadyExcludedError` before any
+  local mutation;
+- a public add that acquires the lock after a restore commits no longer has that
+  guard and proceeds to its locked no-op, maintainer-only, or package-tree
+  mutation outcome; and
+- internal re-resolution proceeds beneath a concurrently committed exclusion,
+  may add missing descendants or maintainers, and never clears any marker.
+
+Each caller returns state valid for its own serialized turn. The contract does
+not promise that a later transaction cannot change that state after commit.
+
 ## Service Exceptions
 
-All exceptions raised by `package_service` inherit from
-`PackageServiceError`. API endpoint handlers catch
-`PackageServiceError` subclasses and map them to the corresponding HTTP
-status code and error code per `api-spec.md`.
+Module-owned exceptions raised by `package_service` inherit from
+`PackageServiceError`. Shared service exceptions, `ValueError` caller-contract
+violations, and delegated database, audit, or reconciliation exceptions do not
+necessarily inherit from it. API endpoint handlers catch each documented
+API-facing module-owned or shared exception and map it per `api-spec.md`.
 
 ### API-facing exceptions
 
@@ -1396,7 +1270,7 @@ Handled by system callers directly (not mapped to HTTP responses):
 
 ## Excluded and Non-Actionable Records
 
-This section distinguishes Ticket operability, VA exclusion, and lifecycle
+This section distinguishes Ticket operability, manual exclusion, and lifecycle
 actionability, which have different semantics:
 
 ### Ticket-level operability
@@ -1413,7 +1287,7 @@ WARNING, and continue processing the next item.
 
 ### Package-tree exclusion and actionability
 
-Directly or effectively VA-excluded package-tree records and EOL Products
+Directly or effectively manually excluded package-tree records and EOL Products
 continue to receive updates within each owning process's Ticket-status scope.
 Local eligibility and lifecycle reconciliation may operate on all operable
 Tickets. External IBS release and delivery monitoring operates only on active
@@ -1424,11 +1298,11 @@ whether factual state can be updated within the applicable scope.
 Mutation functions (`set_track_status`, `set_track_delivery_status`,
 `set_product_eligibility`, `set_product_released_at`) do NOT require
 child-record `deleted_at IS NULL` as a precondition. This ensures that
-VA-excluded and EOL records remain current with reality, enabling accurate
+manually excluded and EOL records remain current with reality, enabling accurate
 re-evaluation if a marker is restored or lifecycle data changes.
 
 Restore functions require only that the targeted record is directly
-VA-excluded. A restore under an excluded ancestor, or a restore that leaves the
+excluded. A restore under an excluded ancestor, or a restore that leaves the
 record lifecycle-non-actionable, is valid because it removes one independent
 manual exclusion decision.
 
@@ -1447,7 +1321,10 @@ transitions. The test must cover:
   (e.g., restoring a soft-deleted track with non-final status)
 - **Independent exclusion scopes**: excluding or restoring one level does not
   modify ancestor or descendant markers; actionability and reason precedence
-  are recalculated correctly
+  are recalculated correctly. Cover all eight package/track/Product direct-marker
+  combinations, each combination with and without EOL, exclusion beneath an
+  excluded ancestor, parents with no actionable descendants, ancestor restore
+  with directly excluded descendants, and deterministic reason precedence
 - **Auto-assignment**: mutations on unassigned tickets trigger assignment
   to the acting VA; every direct-mutation no-op occurs before assignment,
   audit, Ticket reconciliation, and post-commit effects
@@ -1461,7 +1338,10 @@ transitions. The test must cover:
   alternative capability authorization before accessibility
 - **Concurrent direct mutations**: independent sessions serialize on the
   Ticket lock, return results from winner-current state, and preserve truthful
-  audit old/new values without duplicate assignment or reconciliation
+  audit old/new values without duplicate assignment or reconciliation. Cover
+  exclude/exclude, restore/restore, exclude/restore, independent
+  ancestor/descendant marker changes, public add racing with exclusion or
+  restore, and internal re-resolution racing with exclusion
 - **Automatic Product eligibility recalculation**: verify manual-override
   records are skipped; an `Ignored` or `Duplicated` Ticket is skipped without
   mutation, audit, or reconciliation; `Resolved` is processed; a fully
@@ -1470,7 +1350,9 @@ transitions. The test must cover:
   Ticket reconciliation
 - **Derived actionability**: verify Python/SQL lifecycle parity, all reason
   precedence cases, parent actionability, EOL entry/exit, and one shared UTC
-  evaluation date across rows and aggregate counts; a pure EOL entry/exit
+  evaluation date across mutation, reconciliation, result projection, response
+  rows, and aggregate counts, including a workflow that crosses midnight UTC;
+  a pure EOL entry/exit
   creates no package-tree exclusion/restoration audit event, while an actual
   Ticket status change still creates the ordinary `status_change` event
 - **Public Product identity**: package-tree Product responses expose
@@ -1481,6 +1363,12 @@ transitions. The test must cover:
   event-time Product name and CPE with package and track context; release
   events preserve the actual `released_at`, and VA eligibility events
   distinguish override set, change, and clear actions
+- **Exclusion/restore actor and rollback**: a null actor raises `ValueError`
+  before every database operation; successful direct-marker changes create
+  exactly one event with the acting user and exact old/new/detail payload;
+  repeated-call losers and EOL-only changes create none; audit,
+  reconciliation, and flush failures roll back marker, assignment, event, and
+  status effects; rejected repeats leave no durable side effect
 - **Maintainership acquisition**: every package-resolution invocation attempts
   the maintainership request after target validation and before locking;
   transport/HTTP/envelope/schema failures continue with an empty set and a

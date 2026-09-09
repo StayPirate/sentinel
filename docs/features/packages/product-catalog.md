@@ -658,7 +658,7 @@ eligibility and EOL-derived actionability when applicable.
      differs from the result under the committed threshold snapshot. This
      mismatch scan captures one UTC `evaluation_date` and uses it for every
      lifecycle-dependent eligibility comparison. It includes directly and
-     effectively VA-excluded records and EOL Products; exclusion and
+     effectively manually excluded records and EOL Products; exclusion and
      actionability do not suspend factual eligibility maintenance. The
      mismatch set recovers prior task-dispatch or per-Ticket failures.
   10. Enqueue the Product-level recalculation defined in

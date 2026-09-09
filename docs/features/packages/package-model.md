@@ -137,20 +137,22 @@ situations requiring VA attention. See
 
 ### 7. Manual exclusion and derived actionability
 
-Spurious packages, tracks, or Products are excluded by a VA through
+Spurious packages, tracks, or Products are excluded by an authorized acting
+user through
 hierarchical soft-deletion rather than an `IGNORED` status. Each `deleted_at`
-marker records an explicit VA decision at that exact scope; automated
+marker records an explicit user decision at that exact scope; automated
 workflows never set or clear these markers.
 
 Whether a record currently participates in operational work is represented by
-the derived `actionable` property. Actionability combines the hierarchical VA
+the derived `actionable` property. Actionability combines the hierarchical
+manual
 exclusion markers with the authoritative Product lifecycle phase. In
 particular, EOL is derived from AIMAAS lifecycle dates and never copied into a
 package-tree `deleted_at` field. See [Exclusion and Actionability](#exclusion-and-actionability).
 
 ### 8. Non-actionable records continue to receive factual updates
 
-VA-excluded and lifecycle-non-actionable records are omitted from operational
+Manually excluded and lifecycle-non-actionable records are omitted from operational
 views and gates, but they **continue to receive factual and independently
 derived updates** within the scope of each owning process. Local eligibility
 and lifecycle reconciliation continues while the Ticket is operable. External
@@ -275,7 +277,7 @@ the implicit grouping by `package_name` across
 | `id` | UUID | PK | Internal identifier |
 | `ticket_id` | UUID | FK(ticket.id), NOT NULL | Related ticket |
 | `package_name` | VARCHAR(255) | NOT NULL | Source package name |
-| `deleted_at` | TIMESTAMPTZ | nullable | Direct VA-exclusion timestamp. NULL = not directly VA-excluded |
+| `deleted_at` | TIMESTAMPTZ | nullable | Direct manual-exclusion timestamp. NULL = not directly excluded |
 | `created_at` | TIMESTAMPTZ | NOT NULL, DEFAULT | Record creation timestamp |
 | `updated_at` | TIMESTAMPTZ | NOT NULL, DEFAULT | Record update timestamp |
 
@@ -308,7 +310,7 @@ system based on the authoritative IBS request-action and provenance rules in
 | `reference` | VARCHAR(255) | NOT NULL | Track identifier: IBS codestream name or git branch name |
 | `status` | VARCHAR(20) | NOT NULL, DEFAULT ANALYSIS | Affectedness status |
 | `delivery_status` | VARCHAR(20) | NOT NULL, DEFAULT PENDING | Delivery pipeline status |
-| `deleted_at` | TIMESTAMPTZ | nullable | Direct VA-exclusion timestamp. NULL = not directly VA-excluded |
+| `deleted_at` | TIMESTAMPTZ | nullable | Direct manual-exclusion timestamp. NULL = not directly excluded |
 | `created_at` | TIMESTAMPTZ | NOT NULL, DEFAULT | Record creation timestamp |
 | `updated_at` | TIMESTAMPTZ | NOT NULL, DEFAULT | Record update timestamp |
 
@@ -340,7 +342,7 @@ eligibility and delivery confirmation.
 | `eligible` | BOOLEAN | NOT NULL, DEFAULT true | Effective eligibility |
 | `is_eligible_override` | BOOLEAN | NOT NULL, DEFAULT false | True if VA has manually set the eligibility |
 | `released_at` | TIMESTAMPTZ | nullable | Authoritative stable security advisory-issued time in UTC; NULL until Product release detection confirms a match |
-| `deleted_at` | TIMESTAMPTZ | nullable | Direct VA-exclusion timestamp. NULL = not directly VA-excluded |
+| `deleted_at` | TIMESTAMPTZ | nullable | Direct manual-exclusion timestamp. NULL = not directly excluded |
 | `created_at` | TIMESTAMPTZ | NOT NULL, DEFAULT | Record creation timestamp |
 | `updated_at` | TIMESTAMPTZ | NOT NULL, DEFAULT | Record update timestamp |
 
@@ -791,36 +793,67 @@ User-attributed callers cannot change `delivery_status`; it is system-managed.
 
 ### Manual Exclusion Markers
 
-The VA can soft-delete packages, tracks, or Products to exclude them from the
-Ticket. A non-null `deleted_at` is a durable record of an explicit VA decision
-at that exact scope:
+An authenticated user whose caller has verified `manage_packages` can
+soft-delete packages, tracks, or Products to exclude them from the Ticket. A
+non-null `deleted_at` is a durable record of that user's explicit decision at
+that exact scope:
 
-- `deleted_at IS NOT NULL` means directly VA-excluded;
-- `deleted_at IS NULL` means not directly VA-excluded.
+- `deleted_at IS NOT NULL` means directly excluded;
+- `deleted_at IS NULL` means not directly excluded.
 
-The acting VA is recorded in the corresponding `TicketAuditEvent`, not on the
-package-tree record. Automated workflows MUST NOT set or clear any package,
+The acting user is recorded in the corresponding `TicketAuditEvent`, not on
+the package-tree record. Automated workflows MUST NOT set or clear any package,
 track, or Product `deleted_at` field.
 
-Manual exclusion is hierarchical. Only the record targeted by the VA is
-modified:
+Manual exclusion is hierarchical. Only the record targeted by the acting user
+is modified:
 
 - excluding a package sets only `TicketPackage.deleted_at`;
 - excluding a track sets only `TicketPackageTrack.deleted_at`;
 - excluding a Product sets only `TicketPackageProduct.deleted_at`.
 
-A descendant is **effectively VA-excluded** when its own marker or any ancestor
+A descendant is **effectively excluded** when its own marker or any ancestor
 marker is non-null:
 
-| Record type | Effectively VA-excluded when |
+| Record type | Effectively excluded when |
 |-------------|------------------------------|
 | Package | `package.deleted_at IS NOT NULL` |
 | Track | `package.deleted_at IS NOT NULL` or `track.deleted_at IS NOT NULL` |
 | Product | `package.deleted_at IS NOT NULL`, `track.deleted_at IS NOT NULL`, or `product.deleted_at IS NOT NULL` |
 
 There is no automatic orphan soft-deletion. A parent with no participating
-descendants retains `deleted_at = NULL` unless a VA explicitly excludes that
-parent.
+descendants retains `deleted_at = NULL` unless an authorized user explicitly
+excludes that parent.
+
+The exclusion guard inspects only the selected record's direct marker. An
+exclude succeeds whenever that marker is NULL, including when an ancestor is
+already excluded, every descendant is excluded or EOL, or the target is
+already non-actionable for another reason. It sets only the selected marker.
+The operation therefore records an independent user intention even when the
+target was already effectively excluded and its current effective exclusion
+does not change. Descendant markers likewise do not prevent excluding a
+package or track.
+
+For one Product occurrence, all eight direct-marker combinations have the
+following deterministic meaning before applying lifecycle:
+
+| Package marker | Track marker | Product marker | Product effectively excluded | Product reason |
+|---|---|---|---|---|
+| clear | clear | clear | No | `NULL` |
+| clear | clear | set | Yes | `product_excluded` |
+| clear | set | clear | Yes | `track_excluded` |
+| clear | set | set | Yes | `track_excluded` |
+| set | clear | clear | Yes | `package_excluded` |
+| set | clear | set | Yes | `package_excluded` |
+| set | set | clear | Yes | `package_excluded` |
+| set | set | set | Yes | `package_excluded` |
+
+If the Product is EOL, each row keeps the same marker result and reason when a
+manual marker applies; only the all-clear row changes to non-actionable with
+reason `eol`. Thus reason precedence is package, then track, then Product, then
+EOL. Track and package actionability are then derived from whether any child is
+actionable; their `no_actionable_products` and `no_actionable_tracks` reasons
+never create or clear a marker.
 
 ### Derived Actionability
 
@@ -832,7 +865,7 @@ from current package-tree markers, Product lifecycle data, and one UTC
 product.actionable =
     package.deleted_at IS NULL
     AND track.deleted_at IS NULL
-    AND ticket_product.deleted_at IS NULL
+    AND product.deleted_at IS NULL
     AND (
         lifecycle_phase(catalog_product, evaluation_date) IS NULL
         OR lifecycle_phase(catalog_product, evaluation_date) != eol
@@ -874,26 +907,35 @@ describe the absence of actionable descendants without changing any parent
 row. Consumers MUST use these fields rather than infer current participation
 from `deleted_at` alone.
 
+A mutating request that changes package-tree participation or returns
+package-tree actionability data resolves one UTC `evaluation_date` for its
+complete workflow. The direct mutation, Ticket gate reconciliation,
+locked-current result projection, and API response reuse that date; a response
+serializer MUST NOT recapture the date after the mutation.
+Read-only requests independently capture one date for their complete response.
+Consequently, crossing midnight UTC cannot make one mutation reconcile against
+one date and return actionability computed against another.
+
 ### Gate Participation
 
 Actionability is an observation-point combination of manual exclusion and
 lifecycle; it does not modify affectedness, eligibility, or delivery.
 
 - The Analyzed gate's minimum-presence condition requires at least one track
-  that is not effectively VA-excluded. This proves that package analysis data
+  that is not effectively manually excluded. This proves that package analysis data
   exists even when every Product is currently EOL.
 - Only actionable tracks participate in the undecided-affectedness check and
   the Resolved gate.
 - Only actionable Products participate in Product-level resolution
   conditions.
-- Therefore a Ticket with at least one VA-included track but no actionable
+- Therefore a Ticket with at least one manually included track but no actionable
   tracks can be Resolved once the non-lifecycle Analyzed requirements are met.
   If a Product later leaves EOL, its track becomes actionable and normal gate
   reconciliation may regress the Ticket.
 
 ### Continued Updates
 
-Directly or effectively VA-excluded records and EOL Products continue to
+Directly or effectively manually excluded records and EOL Products continue to
 receive locally derived eligibility and lifecycle reconciliation while their
 Ticket is operable. External IBS delivery updates and release observations are
 limited to active Tickets (`New`, `Analysis`, or `Analyzed`). `Resolved`,
@@ -905,17 +947,23 @@ owning process's Ticket-status scope.
 
 ### Restore
 
-Restore clears `deleted_at` only on the directly VA-excluded record selected by
-the VA. It never modifies descendants and is permitted while an ancestor is
+Restore clears `deleted_at` only on the directly excluded record selected by
+the acting user. It never modifies descendants and is permitted while an ancestor is
 excluded or while the restored record remains non-actionable for another
 reason. No child-existence or actionability precondition applies.
 
 For example, restoring a Product while its track remains excluded clears the
-Product's direct marker but leaves it effectively VA-excluded through the
+Product's direct marker but leaves it effectively excluded through the
 track. Restoring a track while all its Products are EOL clears the manual
 marker but leaves the track non-actionable until at least one Product becomes
-actionable. Each effective restore creates one VA-attributed audit event and
+actionable. Each effective restore creates one acting-user-attributed audit event and
 reconciles the Ticket once.
+
+Entering or leaving EOL never sets or clears a direct marker, never invokes
+restore, and never creates an exclusion or restoration event. A Product that
+leaves EOL becomes actionable immediately when all three direct markers are
+clear; its ancestors derive their current actionability from the resulting
+descendant set.
 
 ### Interaction with add_package_to_ticket
 
@@ -928,7 +976,7 @@ package occurrence; any new association remains ineffective while the package
 is excluded.
 
 New records are created with `deleted_at = NULL`. If the parent package or
-track is VA-excluded, these records are effectively VA-excluded through the
+track is manually excluded, these records are effectively excluded through the
 hierarchy. If their Product is EOL, they are independently non-actionable.
 
 The public `POST /api/v1/tickets/{ticket_id}/packages` call asks the package
@@ -945,20 +993,20 @@ already exist.
 
 ### Ticket Events for Exclusion
 
-A single VA-attributed `TicketAuditEvent` is created for each effective
+A single acting-user-attributed `TicketAuditEvent` is created for each effective
 exclusion or restore operation, only for the directly affected record. Child
-records that become effectively VA-excluded through the hierarchy do not
+records that become effectively excluded through the hierarchy do not
 generate events. Derived EOL/actionability changes do not create exclusion or
 restore events because they do not mutate package-tree records.
 
 | Action | `event_type` | `user_id` | Details recorded |
 |--------|-------------|-----------|------------------|
-| VA soft-deletes a package | `package_excluded` | VA user | `package_name` |
-| VA soft-deletes a track | `track_excluded` | VA user | `track_name`, `package_name` |
-| VA soft-deletes a product | `product_excluded` | VA user | `track_name`, `package_name`, event-time Product name and CPE |
-| VA restores a package | `package_restored` | VA user | `package_name` |
-| VA restores a track | `track_restored` | VA user | `track_name`, `package_name` |
-| VA restores a product | `product_restored` | VA user | `track_name`, `package_name`, event-time Product name and CPE |
+| Authorized user soft-deletes a package | `package_excluded` | Acting user | `package_name` |
+| Authorized user soft-deletes a track | `track_excluded` | Acting user | `track_name`, `package_name` |
+| Authorized user soft-deletes a product | `product_excluded` | Acting user | `track_name`, `package_name`, event-time Product name and CPE |
+| Authorized user restores a package | `package_restored` | Acting user | `package_name` |
+| Authorized user restores a track | `track_restored` | Acting user | `track_name`, `package_name` |
+| Authorized user restores a product | `product_restored` | Acting user | `track_name`, `package_name`, event-time Product name and CPE |
 
 ---
 
@@ -1046,6 +1094,25 @@ add_package_to_ticket(ticket_id, package_name) -> AddPackageResult
      whether at least one IBS track was created. The concrete in-memory
      representation is an implementation choice.
 
+For the public endpoint, failures and outcomes have this strict precedence:
+
+1. authentication, `manage_packages`, and Ticket accessibility;
+2. maintained-package transport, JSON, JSend, HTTP-pairing, and applicable
+   structural response validation;
+3. Product catalog readiness;
+4. package-not-found classification;
+5. package-target resolution;
+6. best-effort maintainership acquisition;
+7. locked Ticket existence and operability;
+8. the existing package occurrence's direct exclusion marker;
+9. package-tree no-op, maintainer-only mutation, or effective package-tree
+   mutation.
+
+Accordingly, `PACKAGE_ALREADY_EXCLUDED` is decided only after every blocking
+external package-target gate and the best-effort maintainership request. The
+request may obtain valid maintainer emails, but the locked exclusion guard
+rejects before any package-tree or maintainer association is persisted.
+
 `package_service` handles idempotency (skipping existing records, including
 soft-deleted), initial status determination, eligibility logic, and additive
 maintainer association internally. A fully no-op package-tree invocation can
@@ -1053,7 +1120,7 @@ still add maintainers while all public creation counts remain zero. See
 `docs/features/packages/package-service.md`.
 
 New records are created with `deleted_at = NULL`. A new descendant under a
-VA-excluded parent is effectively VA-excluded through the hierarchy, and a new
+manually excluded parent is effectively excluded through the hierarchy, and a new
 EOL Product is non-actionable without any mutation. See
 [Exclusion and Actionability](#exclusion-and-actionability).
 
@@ -1083,7 +1150,7 @@ The following scenarios invoke `add_package_to_ticket`:
    package name,
    `add_package_to_ticket` is called. See
    `docs/features/tickets/cve-service.md` (Phase 2).
-2. **Manual**: the VA manually adds a package by name via the UI.
+2. **Manual**: an authorized user manually adds a package by name via the UI.
    `add_package_to_ticket` is called with the entered name.
 3. **Restore from soft-deletion**: restoring a package, track, or
    product clears its `deleted_at` only. New tracks/products that
@@ -1107,22 +1174,22 @@ The following scenarios invoke `add_package_to_ticket`:
 
 ### Package Management Constraints
 
-The VA manages packages at the **package level only**:
+An authorized user manages packages at the **package level only**:
 
-- The VA can **add** packages to a ticket.
-- The VA can **soft-delete** entire packages, individual tracks, or
+- The user can **add** packages to a ticket.
+- The user can **soft-delete** entire packages, individual tracks, or
   individual Products from a ticket (see
   [Exclusion and Actionability](#exclusion-and-actionability)).
-- The VA **cannot** add individual tracks or products — these are
+- The user **cannot** add individual tracks or products — these are
   determined exclusively by SMELT when a package is added via
   `add_package_to_ticket`.
-- The VA **can** change the affectedness status of individual tracks
+- The user **can** change the affectedness status of individual tracks
   (via the status dropdown) and override the eligibility of individual
   products.
 
 ### Removing a Package from a Ticket
 
-When a VA removes a package from a ticket, Sentinel performs a
+When an authorized user removes a package from a ticket, Sentinel performs a
 **soft-deletion** (see
 [Exclusion and Actionability](#exclusion-and-actionability)): `deleted_at`
 is set on the `TicketPackage` record only. Child `TicketPackageTrack`
@@ -1228,8 +1295,12 @@ removed by SMELT.
 **Processing**:
 
 1. Retrieve the response. If transport fails after shared retries, or the
-   response does not have a valid JSend envelope and an expected HTTP status,
-   raise `SmeltUnavailableError`.
+   response does not have a valid JSON/JSend envelope, expected HTTP/status
+   pairing, and applicable structural shape, raise `SmeltUnavailableError`.
+   For a non-empty successful response, this includes validating every
+   codestream identity and maintenance-process value, skipping known
+   unsupported `SLFO_IBS` entries as specified above, and validating all
+   targets of supported codestreams. No local Product lookup occurs yet.
 2. Require a ready Product catalog as defined in `product-catalog.md`. If no
    complete Product snapshot has committed, raise
    `ProductCatalogNotReadyError` before interpreting the response content.
@@ -1240,15 +1311,13 @@ removed by SMELT.
    `PackageNotFoundInSmeltError`. Any other combination of HTTP status and
    JSend `status` — including HTTP 200 with `status = "error"` — raises
    `SmeltUnavailableError`.
-4. Validate every codestream name and maintenance-process value. Skip each
-   `SLFO_IBS` codestream with the warning defined above. Validate all targets
-   belonging to the remaining supported codestreams.
-5. Map each supported codestream to one `workflow_type`: `SLFO` maps to `git`
+4. Map each structurally validated supported codestream to one `workflow_type`:
+   `SLFO` maps to `git`
    and `SLE_15` maps to `ibs`.
-6. Collect all `(codestream.name, workflow_type, product.cpe,
+5. Collect all `(codestream.name, workflow_type, product.cpe,
    product_definition.type)` records from supported entries. Apply the
    deduplication rule above.
-7. For each remaining record:
+6. For each remaining record:
    a. Look up the Product by exact `Product.cpe` match in the local catalog.
       If no local Product matches, ignore this triple and continue.
    b. Create or find a `TicketPackageTrack` with `reference =
@@ -1257,7 +1326,7 @@ removed by SMELT.
       soft-deleted).
    c. Create a `TicketPackageProduct` linking the track to the matched
       Product (if one does not already exist).
-8. If no Product was resolved across the entire response, including when all
+7. If no Product was resolved across the entire response, including when all
    returned codestreams were skipped as unsupported, fail with
    `PackageTargetsUnresolvedError`; no package-tree record is created.
 
@@ -1286,15 +1355,15 @@ reconciliation. The following event types are defined:
 
 | Action | `event_type` | `user_id` | Details recorded |
 |--------|-------------|-----------|------------------|
-| VA adds or completes package tree | `package_added` | VA user | `package_name` |
+| Authorized user adds or completes package tree | `package_added` | Acting user | `package_name` |
 | Package auto-added or completed (CVE ingestion or Product catalog backfill) | `package_added` | `NULL` | `package_name`, contextual `comment` |
 | Active User acquired as package maintainer | `package_maintainer_added` | `NULL` | Target username in `new_value`; package name in `detail` |
-| VA soft-deletes package | `package_excluded` | VA user | `package_name` |
-| VA soft-deletes track | `track_excluded` | VA user | `track_name`, `package_name` |
-| VA soft-deletes product | `product_excluded` | VA user | `track_name`, `package_name`, event-time Product name and CPE |
-| VA restores package | `package_restored` | VA user | `package_name` |
-| VA restores track | `track_restored` | VA user | `track_name`, `package_name` |
-| VA restores product | `product_restored` | VA user | `track_name`, `package_name`, event-time Product name and CPE |
+| Authorized user soft-deletes package | `package_excluded` | Acting user | `package_name` |
+| Authorized user soft-deletes track | `track_excluded` | Acting user | `track_name`, `package_name` |
+| Authorized user soft-deletes product | `product_excluded` | Acting user | `track_name`, `package_name`, event-time Product name and CPE |
+| Authorized user restores package | `package_restored` | Acting user | `package_name` |
+| Authorized user restores track | `track_restored` | Acting user | `track_name`, `package_name` |
+| Authorized user restores product | `product_restored` | Acting user | `track_name`, `package_name`, event-time Product name and CPE |
 | User-attributed or system change to track status | `track_status_changed` | Acting user for user-attributed changes; `NULL` for automatic release detection | `track_name`, `package_name`, `old_status`, `new_status` |
 | VA overrides or resets Product eligibility | `product_eligibility_changed` | VA user | `track_name`, `package_name`, event-time Product name and CPE, `old_eligible`, `new_eligible`, `reason = va_override`, and `override_action` |
 | Ticket created | `ticket_created` | `NULL` | Creation source description |
@@ -1302,7 +1371,7 @@ reconciliation. The following event types are defined:
 | Product eligibility recalculated | `product_eligibility_changed` | `NULL` | `track_name`, `package_name`, event-time Product name and CPE, `old_eligible`, `new_eligible`, `reason` |
 
 - `user_id = NULL` indicates an automatic system action. For
-  `package_added`, this distinguishes manual additions (VA user) from
+  `package_added`, this distinguishes manual additions (acting user) from
   automatic ones (CVE ingestion or Product catalog backfill). The `comment` field
   provides context for automatic additions.
 - Exactly one `package_added` event is created when an invocation creates at
@@ -1442,7 +1511,7 @@ codestream namespace as the other.
 IBS polling and RabbitMQ processing consider active Tickets only (`New`,
 `Analysis`, `Analyzed`). `Resolved`, `Ignored`, and `Duplicated` Tickets do not
 contribute monitored tracks or Product occurrences. Within an active Ticket,
-VA exclusion, lifecycle actionability, and EOL do not narrow factual release
+manual exclusion, lifecycle actionability, and EOL do not narrow factual release
 or delivery observation. A consumer may omit records already in a conclusive
 state of its own dimension, such as `released_at IS NOT NULL` or track
 affectedness statuses that automatic release detection cannot change.
@@ -1627,15 +1696,20 @@ added, all counts will be zero in the `created` fields.
 | 503 | `PRODUCT_CATALOG_NOT_READY` | No complete SMELT Product catalog snapshot has committed yet |
 | 503 | `SMELT_UNAVAILABLE` | SMELT did not produce a valid successful response |
 
+These rows are not ordered by HTTP status. The endpoint applies the strict
+sequence in [Adding Packages to a Ticket](#adding-packages-to-a-ticket).
+
 **Idempotency**: safe to call multiple times for the same **active**
 package. If the package is already fully resolved, the response will
 report zero created records. If the package is soft-deleted, the endpoint
-returns 409 `PACKAGE_ALREADY_EXCLUDED` — the VA must use the restore
+returns 409 `PACKAGE_ALREADY_EXCLUDED` — the acting user must use the restore
 endpoint to re-include it. The request still performs SMELT and current-catalog
 validation and then the best-effort maintainership request before determining
-that the package tree is complete, so documented blocking SMELT/catalog errors
-may be returned on a repeat call and missing maintainers may be added while the
-public creation counts remain zero.
+locked package state, so documented blocking SMELT/catalog errors may be
+returned on a repeat call. For an included package, missing maintainers may be
+added while the public creation counts remain zero. For a directly excluded
+package, the subsequent guard returns `PACKAGE_ALREADY_EXCLUDED` before any
+fetched maintainer association or other database mutation is persisted.
 
 ---
 
@@ -1646,7 +1720,7 @@ POST /api/v1/tickets/{ticket_id}/packages/{package_id}/exclude
 ```
 
 Soft-delete a package from the Ticket. Sets `deleted_at` on the package record
-only; tracks and Products are not modified but become effectively VA-excluded
+only; tracks and Products are not modified but become effectively excluded
 through the hierarchy. Creates a single `TicketAuditEvent`.
 See [Exclusion and Actionability](#exclusion-and-actionability) for the full
 behavior.
@@ -1685,7 +1759,7 @@ Analyzed gate).
 POST /api/v1/tickets/{ticket_id}/packages/{package_id}/restore
 ```
 
-Restore a directly VA-excluded package. Clears `deleted_at` on the package
+Restore a directly excluded package. Clears `deleted_at` on the package
 record only; child records are not modified. The package may remain
 non-actionable because every track is excluded or has no actionable Product.
 Creates a single `TicketAuditEvent`. See
@@ -1725,8 +1799,26 @@ POST /api/v1/tickets/{ticket_id}/packages/{package_id}/tracks/{track_id}/exclude
 ```
 
 Soft-delete a track from the ticket. Sets `deleted_at` on the track record
-only; Products under it are not modified but become effectively VA-excluded
-through the hierarchy. Creates one VA-attributed `TicketAuditEvent`.
+only; Products under it are not modified but become effectively excluded
+through the hierarchy. Creates one acting-user-attributed `TicketAuditEvent`.
+
+The operation is also valid beneath an already excluded package. In that case
+it records the track's independent direct marker, while the response reason is
+`package_excluded` because ancestor reasons take precedence over
+`track_excluded`.
+
+For example, the successful response beneath an excluded package contains the
+new direct track marker but reports:
+
+```json
+{
+  "data": {
+    "reference": "SUSE:SLE-15-SP6:Update",
+    "actionable": false,
+    "non_actionable_reason": "package_excluded"
+  }
+}
+```
 
 After the soft-delete, the system
 reconciles ticket status via `package_service`. This is necessary
@@ -1762,7 +1854,7 @@ by ticket gates (Resolved gate and Analyzed gate).
 POST /api/v1/tickets/{ticket_id}/packages/{package_id}/tracks/{track_id}/restore
 ```
 
-Restore a directly VA-excluded track. Clears `deleted_at` on the track record
+Restore a directly excluded track. Clears `deleted_at` on the track record
 only; Product markers are not modified. The track may remain non-actionable
 because every Product is individually excluded or EOL. Creates a single
 `TicketAuditEvent`.
@@ -1800,9 +1892,20 @@ response instead returns `actionable = false` and
 POST /api/v1/tickets/{ticket_id}/packages/{package_id}/tracks/{track_id}/products/{ticket_package_product_id}/exclude
 ```
 
-Soft-delete a single Product from a track. Creates one VA-attributed
+Soft-delete a single Product from a track. Creates one acting-user-attributed
 `TicketAuditEvent` for the excluded record. Parent markers are never changed
 automatically.
+
+The operation is valid beneath an excluded package or track and while the
+Product is EOL. It records the Product's independent direct marker even though
+effective participation is already false. The response reason remains
+`package_excluded` or `track_excluded` when either applies; otherwise
+`product_excluded` takes precedence over `eol`.
+
+For example, excluding an EOL Product beneath an excluded track succeeds and
+reports `non_actionable_reason = "track_excluded"`; after the track is
+restored, the still-directly-excluded Product reports
+`non_actionable_reason = "product_excluded"`, not `eol`.
 
 After the soft-delete, the system
 reconciles ticket status via `package_service`. This is necessary
@@ -1840,7 +1943,7 @@ by ticket gates (Resolved gate and Analyzed gate).
 POST /api/v1/tickets/{ticket_id}/packages/{package_id}/tracks/{track_id}/products/{ticket_package_product_id}/restore
 ```
 
-Restore a directly VA-excluded Product. Clears `deleted_at` on the Product
+Restore a directly excluded Product. Clears `deleted_at` on the Product
 record. No child, ancestor, or lifecycle pre-check applies. Creates a single
 `TicketAuditEvent`.
 
@@ -2050,7 +2153,7 @@ GET /api/v1/tickets/{ticket_id}/packages
 ```
 
 Returns the complete package tree for a specific Ticket — all packages,
-tracks, and Products including non-actionable records. Direct VA-exclusion
+tracks, and Products including non-actionable records. Direct manual-exclusion
 timestamps and current actionability are visible on each level. Identical data
 to the `packages` field in
 `TicketDetail` from `GET /api/v1/tickets/{ticket_id}`, but available as
@@ -2063,7 +2166,7 @@ a standalone endpoint for clients that only need package data.
 | **Guard** | `require_accessible_ticket` (404 for missing/confidential tickets) |
 | **Pagination** | No — package count per ticket is bounded (typically 1-5, rarely >20) |
 | **Envelope** | `{"data": [...]}` (unpaginated list) |
-| **Excluded records** | All package/track/Product records are returned, including directly or effectively VA-excluded and lifecycle-non-actionable records |
+| **Excluded records** | All package/track/Product records are returned, including directly or effectively manually excluded and lifecycle-non-actionable records |
 | **Actionability** | Every level includes derived `actionable` and `non_actionable_reason` values evaluated with one UTC date shared by the response |
 | **Response schema** | `PackageDetail[]` — reuses the existing schema (full tree: package -> tracks -> products) |
 | **Sorting** | Fixed alphabetical order by `package_name`. Client-controlled sorting (`sort_by`/`sort_order`) is not supported — the dataset has bounded cardinality and fixed ordering provides consistent display without configuration overhead. |
@@ -2098,7 +2201,7 @@ once per ticket in the results.
 | **`Access: Public`** | Consistent with `GET /api/v1/tickets` |
 | **`Authentication: Optional`** | Resolves caller identity for confidentiality filtering |
 | **Confidentiality** | Packages belonging to confidential tickets are excluded for unauthorized callers (same filter as `GET /api/v1/tickets`). The endpoint handler constructs `confidential_ticket_filter()` and passes it to `search_packages(confidentiality_filter=...)` |
-| **Non-actionable packages** | Always excluded. This includes directly VA-excluded packages and packages with no actionable tracks |
+| **Non-actionable packages** | Always excluded. This includes directly excluded packages and packages with no actionable tracks |
 | **Pagination** | Yes — `page` (default 1), `per_page` (default 20, max 100) |
 | **Envelope** | `{"data": [...], "meta": {"total": N, "page": P, "per_page": PP}}` |
 | **Delegation** | Delegates to `package_service.search_packages()` |

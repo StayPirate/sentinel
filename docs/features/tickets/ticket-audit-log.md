@@ -34,10 +34,10 @@ boundary, which is intentionally not represented by an event type.
 | `duplicate_set` | Ticket marked as duplicate | VA user | `NULL` | `SNTL-{n}` identifier of the original ticket | `NULL` | `NULL` |
 | `duplicate_removed` | Duplicate mark reverted | VA user | `SNTL-{n}` identifier of the original ticket | `NULL` | `NULL` | `NULL` |
 | `duplicate_target_changed` | Atomic repoint: the ticket's `duplicate_of_id` was updated within the same transaction as the triggering mark-as-duplicate operation, because the ticket's previous target was itself marked as duplicate | `NULL` | `SNTL-{n}` identifier of the previous target | `SNTL-{n}` identifier of the new target | `NULL` | `{"triggered_by_ticket": "SNTL-{n}"}` — the identifier of the ticket whose mark-as-duplicate operation triggered this repoint |
-| `package_added` | Package tree created or incrementally completed (manual or automatic). One event per invocation that creates at least one package, track, or Product record; child records do not generate separate events. A completely no-op invocation creates no `package_added` event. | VA user for manual, `NULL` for automatic | `NULL` | Package name | `NULL` for manual; contextual description for automatic (e.g., `"CPE match"`, `"vendor:product match"`, `"resolved_packages"`, `"Product catalog backfill"`) | `NULL` |
+| `package_added` | Package tree created or incrementally completed (manual or automatic). One event per invocation that creates at least one package, track, or Product record; child records do not generate separate events. A completely no-op invocation creates no `package_added` event. | Acting user for manual, `NULL` for automatic | `NULL` | Package name | `NULL` for manual; contextual description for automatic (e.g., `"CPE match"`, `"vendor:product match"`, `"resolved_packages"`, `"Product catalog backfill"`) | `NULL` |
 | `package_maintainer_added` | Package resolution creates one `TicketPackageMaintainer` association | `NULL` | `NULL` | Event-time target username | `NULL` | `{"package": "fictional-package"}` |
-| `package_excluded` | Package directly soft-deleted by a VA. Child tracks and Products are not modified and do not generate events; they become effectively VA-excluded through the hierarchy | VA user | Package name | `NULL` | `NULL` | `NULL` |
-| `package_restored` | Directly excluded package restored to ticket. Only the package record is restored — child records are not modified | VA user | `NULL` | Package name | `NULL` | `NULL` |
+| `package_excluded` | Package directly soft-deleted by an authorized acting user. Child tracks and Products are not modified and do not generate events; they become effectively excluded through the hierarchy | Acting user | Package name | `NULL` | `NULL` | `NULL` |
+| `package_restored` | Directly excluded package restored to ticket. Only the package record is restored — child records are not modified | Acting user | `NULL` | Package name | `NULL` | `NULL` |
 | `track_status_changed` | Track status changed (VA action, admin force-FIXED, or release detection) | Acting user for user-attributed changes, `NULL` for automatic transitions (e.g., release detected sets FIXED) | Old status | New status | `NULL` | `{"track": "...", "package": "..."}` (see detail contract) |
 | `product_released` | Product release detected via updateinfo.xml | `NULL` | `NULL` | Advisory-issued `released_at` timestamp in UTC ISO 8601 format | `NULL` | Product subject plus `advisory_id` (see detail contract) |
 | `ticket_created` | Ticket created (CVE ingestion or manual creation) | `NULL` for automatic creation, creating user for manual creation | `NULL` | `NULL` | Creation source description (e.g., `"CVE ingested from NVD"` or `"Ticket created manually"`) | `NULL` |
@@ -54,10 +54,10 @@ boundary, which is intentionally not represented by an event type.
 > emitted by `associate_cve()` itself (not by `recalculate_cvss_chain()`).
 | `cvss_assessment_changed` | CVSS assessment added, modified, or removed | VA user for SUSE changes, `NULL` for external sync | Previous `"provider_name vX.Y score"` or `NULL` if new | Current `"provider_name vX.Y score"` or `NULL` if removed | `NULL` | `NULL` |
 | `product_eligibility_changed` | Product eligibility changed due to CVSS recalculation, lifecycle phase transition (Reactive Support), threshold change, or VA override | VA user for VA overrides, `NULL` for system-triggered changes | Old eligibility (`true` or `false`) | New eligibility (`true` or `false`) | `NULL` | Product subject plus `reason` and conditional `override_action` (see detail contract) |
-| `track_excluded` | Track directly soft-deleted by a VA. Child Products are not modified and do not generate events; they become effectively VA-excluded through the hierarchy | VA user | Track name | `NULL` | `NULL` | `{"track": "...", "package": "..."}` (see detail contract) |
-| `track_restored` | Directly excluded track restored to ticket. Only the track record is restored — child products are not modified | VA user | `NULL` | Track name | `NULL` | `{"track": "...", "package": "..."}` (see detail contract) |
-| `product_excluded` | Product directly soft-deleted by a VA | VA user | Product display name | `NULL` | `NULL` | Product subject (see detail contract) |
-| `product_restored` | Directly excluded product restored to ticket | VA user | `NULL` | Product display name | `NULL` | Product subject (see detail contract) |
+| `track_excluded` | Track directly soft-deleted by an authorized acting user. Child Products are not modified and do not generate events; they become effectively excluded through the hierarchy | Acting user | Track name | `NULL` | `NULL` | `{"track": "...", "package": "..."}` (see detail contract) |
+| `track_restored` | Directly excluded track restored to ticket. Only the track record is restored — child products are not modified | Acting user | `NULL` | Track name | `NULL` | `{"track": "...", "package": "..."}` (see detail contract) |
+| `product_excluded` | Product directly soft-deleted by an authorized acting user | Acting user | Product display name | `NULL` | `NULL` | Product subject (see detail contract) |
+| `product_restored` | Directly excluded product restored to ticket | Acting user | `NULL` | Product display name | `NULL` | Product subject (see detail contract) |
 | `confidentiality_changed` | Ticket `is_confidential` flag toggled | Acting user | `"true"` or `"false"` | `"true"` or `"false"` | `NULL` | `NULL` |
 | `access_grant_added` | User manually granted explicit access to a confidential ticket | Acting user | `NULL` | Target username | `NULL` | `NULL` |
 | `access_grant_removed` | User manually revoked explicit access to a confidential ticket | Acting user | Target username | `NULL` | `NULL` | `NULL` |
@@ -96,6 +96,12 @@ boundary, which is intentionally not represented by an event type.
 - Product subject fields are event-time snapshots. Services populate them from
   the locked mutation context before changing the row. Audit reads and search
   never join current Product data to reconstruct historical meaning.
+- Every effective direct exclusion or restoration creates exactly one event of
+  its corresponding type for the selected marker, even when effective
+  actionability was already false or remains false because of an ancestor or
+  EOL. Assignment and Ticket status changes, when applicable, are separate
+  events. Repeated-call losers, path/operability rejection, rollback, and
+  lifecycle-only actionability changes create no exclusion/restoration event.
 - All events include an implicit `created_at` timestamp set by the database
   default.
 
@@ -315,6 +321,13 @@ Tests for any Ticket mutation that requires an event MUST verify:
     inactive-user, and unmatched-email outcomes create none
 11. Delivery-status mutation creates no Ticket event, assignment, or Ticket
     reconciliation, both for an effective transition and an idempotent no-op
+12. Each package, track, and Product exclusion/restore persists exactly one
+    direct event with the authenticated acting user and exact payload; adding a
+    marker beneath an excluded ancestor and restoring beneath an ancestor or
+    EOL still emits that event
+13. Repeated-call losers, path/operability rejection, EOL-only changes, and
+    audit/reconciliation/flush rollback leave zero direct exclusion or restore
+    events and zero other durable effects
 
 See Guardrail 6 (Mandatory testing) and Guardrail 11 (Ticket event logging)
 in `AGENTS.md` for enforcement.

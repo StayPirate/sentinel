@@ -312,9 +312,11 @@ than the intermediate `Analysis` value. Passing
 
 `reconcile_ticket_status` is idempotent and may be called multiple times in a
 composed transaction. Each call evaluates the Ticket's current data using one
-UTC evaluation date captured for that invocation. Package exclusion and
-restore operations call it once after their single direct mutation; derived
-actionability never creates an intermediate package-tree mutation chain.
+UTC evaluation date captured for that invocation or supplied by the owning
+workflow. Package exclusion and restore operations call it once after their
+single direct mutation and reuse that supplied date for result and response
+projection; derived actionability never creates an intermediate package-tree
+mutation chain.
 
 ## Concurrency Control
 
@@ -427,7 +429,8 @@ when the CVE has an associated ticket. Ticketless CVEs skip this check
 
 ## Gate-Relevant Mutation Operations
 
-Each function below follows the same pattern:
+Each ticket-mutation function below follows the same pattern unless its own
+contract places semantic no-op or operation-specific guards before assignment:
 
 1. Acquire `FOR UPDATE` on the parent Ticket row
 2. Call `ensure_ticket_operable(ticket)`
@@ -443,6 +446,13 @@ Package-centric gate-relevant mutations (`set_track_status`,
 `add_package_records`, soft-delete/restore for packages, tracks, and
 products) have been moved to `package_service` — see
 `docs/features/packages/package-service.md`.
+
+Package exclusion and restoration specifically validate their direct marker
+before `auto_assign_actor()` and call `reconcile_ticket_status()` exactly once
+only after an effective direct mutation. They pass the UTC `evaluation_date`
+chosen by the owning package workflow so gate evaluation and the mutation
+response use the same temporal boundary. EOL or another derived actionability
+change never creates an exclusion/restoration mutation chain.
 
 `set_track_delivery_status()` is package-owned but is intentionally absent from
 this gate-relevant pattern: delivery is not a Ticket gate input, and that
