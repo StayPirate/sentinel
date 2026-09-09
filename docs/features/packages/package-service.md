@@ -66,8 +66,8 @@ the authenticated user as `acting_user_id`. Passing `None` from an API
 handler is a bug — it would silently bypass auto-assignment. `None` is
 reserved exclusively for system entry points.
 
-`set_product_eligibility()` is narrower: it is a human-only override boundary
-and requires a non-null actor. Product- and CVSS-originated automatic
+`set_product_eligibility()` is narrower: it is a user-attributed override
+boundary and requires a non-null actor. Product- and CVSS-originated automatic
 eligibility recalculation use their dedicated system boundaries instead.
 
 ### Relationship with other modules
@@ -189,16 +189,16 @@ Sets the affectedness status of a `TicketPackageTrack` record.
 | `track_id` | `UUID` | Yes | TicketPackageTrack to modify |
 | `status` | `PackageStatus` | Yes | New status value |
 | `acting_user_id` | `UUID \| None` | No | Who is performing the action |
-| `force` | `bool` | No | Caller-verified admin marker (default `False`) — required for a human `FIXED` request |
+| `force` | `bool` | No | Caller-verified admin marker (default `False`) — required for a user-attributed `FIXED` request |
 
 **Preconditions**:
 
 - Parent ticket must be operable (`ensure_ticket_operable`)
 - Package and track must exist under the declared Ticket/package path
 - Status must be a valid `PackageStatus` value
-- Human callers use `force=True` only after verifying `admin_ticket_ops` for a
-  `FIXED` target. They use `force=False` only after verifying `manage_packages`
-  for a non-`FIXED` target
+- User-attributed callers use `force=True` only after verifying
+  `admin_ticket_ops` for a `FIXED` target. They use `force=False` only after
+  verifying `manage_packages` for a non-`FIXED` target
 
 **Behavior**:
 
@@ -208,10 +208,10 @@ Sets the affectedness status of a `TicketPackageTrack` record.
 3. Reload the declared package/track chain under the lock. A missing or
    mismatched level raises its existing not-found exception.
 4. Apply caller authority to the requested target:
-   - a human `FIXED` request requires `force=True`;
-   - a human non-`FIXED` request requires `force=False`; and
+   - a user-attributed `FIXED` request requires `force=True`;
+   - a user-attributed non-`FIXED` request requires `force=False`; and
    - a system request accepts only `FIXED`.
-5. For a prohibited human target/marker combination, raise
+5. For a prohibited user-attributed target/marker combination, raise
    `TrackFixedStatusRestrictedError` without side effects. For a prohibited
    system non-`FIXED` target, emit one sanitized warning and return `rejected`
    without mutation, assignment, audit, reconciliation, or post-commit effect.
@@ -220,8 +220,8 @@ Sets the affectedness status of a `TicketPackageTrack` record.
 7. If a system `FIXED` request observes `NOT_AFFECTED`, `FIXED`, or `WONT_FIX`,
    return the protected `no_op` outcome. The release workflow may still accept
    its separately owned checkpoint after successful examination.
-8. For an effective human change, call `auto_assign_actor()`; system changes
-   never assign.
+8. For an effective user-attributed change, call `auto_assign_actor()`; system
+   changes never assign.
 9. Update `TicketPackageTrack.status`, create one `track_status_changed` event
    with the locked old value and requested new value, and call
    `reconcile_ticket_status()`.
@@ -235,12 +235,11 @@ reconciliation, or post-commit effect. A repeated prohibited automatic target
 remains `rejected` and repeats only its sanitized warning.
 
 **FIXED restriction**: `FIXED` is restricted — only system callers
-(`acting_user_id = None`) or admin callers with `force=True` can set it
-(step 5). The service does NOT query the RBAC system — it trusts the
-caller to have verified the `admin_ticket_ops` capability before passing
-`force=True`. CLI commands MUST verify `admin_ticket_ops` before passing
-`force=True`. Passing `force=True` without capability verification is a
-bug.
+(`acting_user_id = None`) or user-attributed callers with `force=True` can set
+it (step 5). The service does NOT query the RBAC system — it trusts the caller
+to have verified the `admin_ticket_ops` capability before passing `force=True`.
+CLI commands MUST verify `admin_ticket_ops` before passing `force=True`.
+Passing `force=True` without capability verification is a bug.
 
 System callers leave `force` at its default. The marker is not evaluated when
 `acting_user_id` is `None`.
@@ -253,8 +252,8 @@ to fail: the caller consumes `rejected` and applies its own documented per-item
 failure handling. This enforces the invariant from
 `package-model.md`
 ([Automatic Transitions](package-model.md#automatic-transitions)) that
-final-status records are not changed by automatic transitions. Human callers
-can transition from any state to any non-`FIXED` target after
+final-status records are not changed by automatic transitions. User-attributed
+callers can transition from any state to any non-`FIXED` target after
 `manage_packages` verification, or to `FIXED` from any state after
 `admin_ticket_ops` verification.
 
@@ -444,7 +443,7 @@ Sets or resets the eligibility override of a `TicketPackageProduct` record.
 | `track_id` | `UUID` | Yes | Declared parent TicketPackageTrack |
 | `ticket_package_product_id` | `UUID` | Yes | TicketPackageProduct to modify |
 | `eligible` | `bool \| None` | Yes | New eligibility value (`true`/`false` for override, `None` to reset to automatic calculation) |
-| `acting_user_id` | `UUID` | Yes | Human performing the override or reset |
+| `acting_user_id` | `UUID` | Yes | Acting user attributed to the override or reset |
 
 **Preconditions**:
 
@@ -1381,7 +1380,7 @@ Caught by endpoint handlers and mapped to HTTP responses:
 | `ProductCatalogNotReadyError` | 503 | `PRODUCT_CATALOG_NOT_READY` | No complete SMELT Product catalog snapshot has committed |
 | `PackageNotFoundInSmeltError` | 422 | `PACKAGE_NOT_FOUND_IN_SMELT` | SMELT returns zero tracks |
 | `PackageTargetsUnresolvedError` | 422 | `PACKAGE_TARGETS_UNRESOLVED` | SMELT returns tracks but no target resolves through the current Product catalog snapshot |
-| `TrackFixedStatusRestrictedError` | 403 | `AUTH_INSUFFICIENT_PERMISSION` | Human caller uses the admin force marker inconsistently with the requested affectedness target |
+| `TrackFixedStatusRestrictedError` | 403 | `AUTH_INSUFFICIENT_PERMISSION` | User-attributed caller uses the admin force marker inconsistently with the requested affectedness target |
 
 † Shared exception — inherits from `ServiceError`, not from
 `PackageServiceError`. Handlers must catch it explicitly.
@@ -1455,10 +1454,10 @@ transitions. The test must cover:
   mutation validates the complete declared path under the Ticket lock; test a
   correct path, each missing level, and each child-belongs-to-another-parent
   mismatch, all without mutating or revealing the other occurrence
-- **Affectedness authority matrix**: cover every source state with human
-  non-`FIXED`, admin `FIXED`, system `FIXED`, protected final-state no-op, and
-  rejected system non-`FIXED` outcomes; verify alternative
-  `manage_packages`/`admin_ticket_ops` authorization before accessibility
+- **Affectedness authority matrix**: cover every source state with
+  `manage_packages` non-`FIXED`, `admin_ticket_ops` `FIXED`, system `FIXED`,
+  protected final-state no-op, and rejected system non-`FIXED` outcomes; verify
+  alternative capability authorization before accessibility
 - **Concurrent direct mutations**: independent sessions serialize on the
   Ticket lock, return results from winner-current state, and preserve truthful
   audit old/new values without duplicate assignment or reconciliation

@@ -387,9 +387,10 @@ still requires attention (analysis pending or fix in progress).
 Other specifications that reference "final status" or "non-final status"
 use this classification as defined here.
 
-Affectedness is set at the **track level** under the human/admin/system
-authority matrix below. Products do not have their own affectedness status —
-they inherit the track's affectedness implicitly through the hierarchy.
+Affectedness is set at the **track level** under the caller-capability and
+system-authority matrix below. Products do not have their own affectedness
+status — they inherit the track's affectedness implicitly through the
+hierarchy.
 
 ### Axis 2: Eligibility (per product only)
 
@@ -677,7 +678,7 @@ this section MUST go through the `package_service` module (see
 `docs/features/packages/package-service.md`). An effective gate-relevant change
 causes Ticket status re-evaluation; a true no-op does not.
 
-### Human Sets a Status on a Track
+### User-Attributed Status Change
 
 For an effective authorized change:
 
@@ -765,19 +766,22 @@ catch-up paths. See
 
 Affectedness transition authority is exhaustive:
 
+In this matrix, a user-attributed caller supplies a non-null `acting_user_id`;
+a system caller supplies `None`.
+
 | Caller authority | Requested target | Allowed source states | Outcome |
 |---|---|---|---|
-| Human with `manage_packages` | `ANALYSIS`, `AFFECTED`, `NOT_AFFECTED`, or `WONT_FIX` | Any affectedness state | Effective change, or true no-op when unchanged |
-| Human with `manage_packages` but without `admin_ticket_ops` | `FIXED` | Any | Authorization rejection before Ticket accessibility |
-| Human with `admin_ticket_ops` | `FIXED` | Any affectedness state | Forced effective change, or true no-op when already `FIXED`; `manage_packages` is not additionally required |
-| Human with only `admin_ticket_ops` | Any non-`FIXED` target | Any | Authorization rejection before Ticket accessibility |
+| User-attributed caller with `manage_packages` | `ANALYSIS`, `AFFECTED`, `NOT_AFFECTED`, or `WONT_FIX` | Any affectedness state | Effective change, or true no-op when unchanged |
+| User-attributed caller with `manage_packages` but without `admin_ticket_ops` | `FIXED` | Any | Authorization rejection before Ticket accessibility |
+| User-attributed caller with `admin_ticket_ops` | `FIXED` | Any affectedness state | Forced effective change, or true no-op when already `FIXED`; `manage_packages` is not additionally required |
+| User-attributed caller with only `admin_ticket_ops` | Any non-`FIXED` target | Any | Authorization rejection before Ticket accessibility |
 | System caller | `FIXED` | `ANALYSIS` or `AFFECTED` | Effective automatic change |
 | System caller | `FIXED` | `NOT_AFFECTED`, `FIXED`, or `WONT_FIX` | Protected no-op |
 | System caller | Any non-`FIXED` target | Any | Rejected workflow unit with warning and no effects |
 
 The capability union applies normally: a user holding both capabilities uses
 `admin_ticket_ops` for `FIXED` and `manage_packages` for every other target.
-Humans cannot change `delivery_status`; it is system-managed.
+User-attributed callers cannot change `delivery_status`; it is system-managed.
 
 ---
 
@@ -1287,7 +1291,7 @@ reconciliation. The following event types are defined:
 | VA restores package | `package_restored` | VA user | `package_name` |
 | VA restores track | `track_restored` | VA user | `track_name`, `package_name` |
 | VA restores product | `product_restored` | VA user | `track_name`, `package_name`, event-time Product name and CPE |
-| Human or system changes track status | `track_status_changed` | Acting user for human changes; `NULL` for automatic release detection | `track_name`, `package_name`, `old_status`, `new_status` |
+| User-attributed or system change to track status | `track_status_changed` | Acting user for user-attributed changes; `NULL` for automatic release detection | `track_name`, `package_name`, `old_status`, `new_status` |
 | VA overrides or resets Product eligibility | `product_eligibility_changed` | VA user | `track_name`, `package_name`, event-time Product name and CPE, `old_eligible`, `new_eligible`, `reason = va_override`, and `override_action` |
 | Ticket created | `ticket_created` | `NULL` | Creation source description |
 | Product release detected | `product_released` | `NULL` | `track_name`, `package_name`, event-time Product name and CPE, `released_at`, `advisory_id` |
