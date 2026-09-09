@@ -3,8 +3,10 @@
 ## Purpose
 
 Provide a complete, searchable audit trail for every ticket in Sentinel. Every
-modification to a ticket or its related data (status, assignee, duplicate
-links, packages, tracks, products) MUST produce a `TicketAuditEvent` record.
+modification to a ticket or its related data MUST produce a `TicketAuditEvent`,
+except `TicketPackageTrack.delivery_status`: that sole named package-policy
+exception records an independently derived delivery fact but creates no Ticket
+audit event, assignment, or Ticket reconciliation.
 Users can browse, filter, and search the history through the audit-log API
 endpoint.
 
@@ -22,7 +24,8 @@ each event type must be populated.
 ### Event Type Contract
 
 Every service that mutates a ticket MUST create a `TicketAuditEvent` with the
-fields populated according to this table:
+fields populated according to this table, except the named delivery-status
+boundary, which is intentionally not represented by an event type.
 
 | `event_type` | Trigger | `user_id` | `old_value` | `new_value` | `comment` | `detail` |
 |---|---|---|---|---|---|---|
@@ -35,7 +38,7 @@ fields populated according to this table:
 | `package_maintainer_added` | Package resolution creates one `TicketPackageMaintainer` association | `NULL` | `NULL` | Event-time target username | `NULL` | `{"package": "fictional-package"}` |
 | `package_excluded` | Package directly soft-deleted by a VA. Child tracks and Products are not modified and do not generate events; they become effectively VA-excluded through the hierarchy | VA user | Package name | `NULL` | `NULL` | `NULL` |
 | `package_restored` | Directly excluded package restored to ticket. Only the package record is restored — child records are not modified | VA user | `NULL` | Package name | `NULL` | `NULL` |
-| `track_status_changed` | Track status changed (VA action, admin force-FIXED, or release detection) | VA user for manual changes, `NULL` for automatic transitions (e.g., release detected sets FIXED) | Old status | New status | `NULL` | `{"track": "...", "package": "..."}` (see detail contract) |
+| `track_status_changed` | Track status changed (VA action, admin force-FIXED, or release detection) | Acting user for user-attributed changes, `NULL` for automatic transitions (e.g., release detected sets FIXED) | Old status | New status | `NULL` | `{"track": "...", "package": "..."}` (see detail contract) |
 | `product_released` | Product release detected via updateinfo.xml | `NULL` | `NULL` | Advisory-issued `released_at` timestamp in UTC ISO 8601 format | `NULL` | Product subject plus `advisory_id` (see detail contract) |
 | `ticket_created` | Ticket created (CVE ingestion or manual creation) | `NULL` for automatic creation, creating user for manual creation | `NULL` | `NULL` | Creation source description (e.g., `"CVE ingested from NVD"` or `"Ticket created manually"`) | `NULL` |
 | `cve_associated` | CVE associated with a ticket that previously had no CVE | VA user | `NULL` | CVE-ID string (e.g., `"CVE-2024-1234"`) | `NULL` | `NULL` |
@@ -73,6 +76,9 @@ fields populated according to this table:
   Product release mutation. No-match, malformed or retracted advisory,
   repository failure, duplicate evidence, and idempotent or concurrent no-op
   outcomes create no Ticket audit event.
+- `delivery_status` changes create no `TicketAuditEvent`. Request/action
+  provenance and the persisted track value are their domain evidence; no
+  `delivery_status_changed` event exists.
 - `old_value` and `new_value` store human-readable strings. For enum values,
   store the enum name (e.g., `AFFECTED`, `NOT_AFFECTED`). For user
   references, store the username.
@@ -243,10 +249,12 @@ Confidentiality filtering is enforced centrally — see `docs/api-spec.md`
 
 ## Service Contract
 
-Every service function that modifies a ticket MUST create a `TicketAuditEvent` as
-part of the same database transaction. This ensures atomicity — if the
-mutation succeeds, the event is guaranteed to be recorded; if the mutation
-fails, no orphan event is created.
+Every service function that modifies a ticket MUST create a `TicketAuditEvent`
+as part of the same database transaction, except
+`set_track_delivery_status()`. This ensures atomicity — if an audited mutation
+succeeds, the event is guaranteed to be recorded; if the mutation fails, no
+orphan event is created. The named delivery-status no-event contract is not a
+failure of atomicity.
 
 ### Implementation Guidelines
 
@@ -262,8 +270,9 @@ fails, no orphan event is created.
    create events, ensuring consistent field population and registration
    in the global audit trail registry.
 
-4. **No silent mutations**: if a service modifies ticket data without
-   creating a `TicketAuditEvent`, it is a bug. See Guardrail 11 in `AGENTS.md`.
+4. **No silent mutations**: if a service modifies Ticket-related data without
+   creating a `TicketAuditEvent`, it is a bug, except for the explicit
+   `delivery_status` boundary.
 
 5. **detail validation**: `TicketAuditLog` MUST override `log_event()` to
    validate that `detail` contains only keys defined in the JSONB Schema
@@ -283,7 +292,7 @@ fails, no orphan event is created.
 
 ## Testing Requirements
 
-Tests for any ticket-mutating service MUST verify:
+Tests for any Ticket mutation that requires an event MUST verify:
 
 1. A `TicketAuditEvent` record is created after the operation
 2. The `event_type` matches the expected value
@@ -304,6 +313,8 @@ Tests for any ticket-mutating service MUST verify:
 10. Maintainer acquisition creates one `package_maintainer_added` event per new
     association, with exact detail schema and system attribution; duplicate,
     inactive-user, and unmatched-email outcomes create none
+11. Delivery-status mutation creates no Ticket event, assignment, or Ticket
+    reconciliation, both for an effective transition and an idempotent no-op
 
 See Guardrail 6 (Mandatory testing) and Guardrail 11 (Ticket event logging)
 in `AGENTS.md` for enforcement.

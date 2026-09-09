@@ -393,10 +393,11 @@ wake-ups. No caller has a reduced correlation or delivery algorithm.
 
 ### Scope Identity
 
-One scope is the exact tuple:
+One scope is the exact semantic locator:
 
 ```text
-(Ticket CVE, logical package, codestream, TicketPackageTrack.id)
+(Ticket.id, Ticket CVE, TicketPackage.id, logical package,
+ TicketPackageTrack.id, codestream)
 ```
 
 The selected track must belong to an active Ticket and have
@@ -438,7 +439,9 @@ For each selected scope:
    after `observation_started_at`, or if the track's delivery value differs from
    the value observed before external I/O.
 9. Apply any effective delivery transition through
-   `package_service.set_track_delivery_status()` in the same transaction.
+   `package_service.set_track_delivery_status()` with the complete Ticket,
+   package, and track locator in the same transaction. Consume `changed` or
+   `no_op` from locked-current state; delivery has no `rejected` outcome.
 10. Flush and commit the request, action, correlation, and delivery outcome
     atomically. On any local failure, roll back all changes for this scope.
 

@@ -118,8 +118,10 @@ evidence.
 
 ## Shared Reconciliation Boundary
 
-Polling, catch-up, and package-commit processing provide a set of existing
-track IDs to the same service-layer reconciliation boundary. The boundary
+Polling, catch-up, and package-commit processing provide existing semantic
+track locators to the same service-layer reconciliation boundary. Each locator
+identifies the expected Ticket, package occurrence, and track occurrence; its
+concrete in-memory representation is an implementation choice. The boundary
 returns one terminal outcome per supplied track: updated, successfully examined
 without a domain update, or failed. It may group external work,
 but each track retains an independent database and metric outcome.
@@ -128,13 +130,14 @@ Conceptual signature:
 
 ```python
 async def reconcile_ibs_track_releases(
-    track_ids: Collection[UUID],
+    tracks: Collection[TrackReleaseLocator],
 ) -> Sequence[TrackReleaseOutcome]:
     ...
 ```
 
-`track_ids` contains existing candidate IDs selected by the caller. Duplicate
-IDs are processed once. An empty collection returns an empty sequence without
+Each locator contains the existing track ID plus sufficient expected Ticket and
+package identity for locked ownership revalidation. Duplicate track IDs are
+processed once. An empty collection returns an empty sequence without
 IBS or database work. Each outcome identifies the input `track_id` and exactly
 one result:
 
@@ -245,7 +248,8 @@ For one track, the local transaction then:
 3. re-evaluates the track's current status under the lock;
 4. when the Ticket CVE has qualifying evidence and the track is still
    `ANALYSIS` or `AFFECTED`, calls
-   `package_service.set_track_status(..., FIXED, acting_user_id=None)`;
+   `package_service.set_track_status(...)` with the complete semantic locator,
+   `FIXED`, and `acting_user_id=None`;
 5. when no qualifying evidence exists, or the current track status is already
    final, leaves affectedness unchanged; and
 6. creates or advances the checkpoint to the examined current expanded
@@ -265,9 +269,12 @@ operable-Ticket mutation and in-flight catch-up contracts.
 If the track no longer exists, no longer belongs to the expected Ticket/package
 scope, or has lost its Ticket CVE association, the reconciliation fails and no
 checkpoint advances. If its status became `NOT_AFFECTED`, `FIXED`, or
-`WONT_FIX`, successful examination advances the checkpoint without changing
-status or creating an audit event. This prevents old evidence from overriding a
-later VA decision if the track subsequently returns to a non-final status.
+`WONT_FIX`, the package service returns the protected no-op result; successful
+examination advances the checkpoint without changing status, assigning,
+reconciling, or creating an audit event. This prevents old evidence from
+overriding a later VA decision if the track subsequently returns to a non-final
+status. A `rejected` result is a local workflow failure and does not advance the
+checkpoint; this is defensive, because this detector always requests `FIXED`.
 
 ### Checkpoint Concurrency
 

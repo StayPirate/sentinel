@@ -207,7 +207,7 @@ layer.
 | New        | Created automatically (CVE ingestion or external source). Not yet assigned to any VA. |
 | Analysis   | Assigned to an VA who is actively analyzing — filling in affectedness data. |
 | Analyzed   | All required data has been filled in. Ready for updates to be prepared. |
-| Resolved   | Every actionable track is resolution-complete: either in a conclusive affectedness status, fully delivered (`FIXED` + all actionable eligible Products released), or factually affected with no actionable eligible Products remaining. |
+| Resolved   | Every actionable track is resolution-complete: either in a conclusive affectedness status, publication-confirmed (`FIXED` + all actionable eligible Products released), or factually affected with no actionable eligible Products remaining. Track `delivery_status` is not a gate input. |
 | Ignored    | The issue does not require action. Can only be set from New or Analysis. See design note below. |
 | Duplicated | Duplicate of another ticket. Links to the original. Reversible. |
 
@@ -312,11 +312,18 @@ A track is **resolution-complete** when any of:
 
 A track in `ANALYSIS` is never resolution-complete.
 
+The gate observes affectedness, derived actionability, Product eligibility, and
+Product `released_at` exactly as listed above. Track `delivery_status` is not an
+input to this gate or to the Analyzed gate. It records independent maintenance
+pipeline evidence and may be projected alongside gate-relevant fields without
+constraining them.
+
 Note: clause (b) uses universal quantification over actionable eligible
 Products. If a `FIXED` track has no actionable eligible Products, the
 condition is vacuously satisfied
-and the track is resolution-complete. This is the intended behavior — a
-fix was delivered and no eligible product is pending confirmation.
+and the track is resolution-complete. This is the intended behavior — the
+source fix was confirmed and no eligible Product is pending publication
+confirmation.
 
 Clause (c) enables auto-resolution for the legitimate scenario where a
 track is genuinely affected (code vulnerable) but all products under it

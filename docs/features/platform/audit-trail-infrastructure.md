@@ -289,15 +289,18 @@ record state changes, not access attempts.
 ## Atomicity
 
 Every audit event MUST be created in the same database transaction as the
-mutation it records. If the mutation is rolled back, the audit event must
-not persist. This is enforced by using `BaseAuditLog.log_event()` with the
-same `AsyncSession` as the mutation.
+mutation it records. If the mutation is rolled back, the audit event must not
+persist. This is enforced by using `BaseAuditLog.log_event()` with the same
+`AsyncSession` as the mutation. Every mutation requires its corresponding audit
+event except the explicitly documented `TicketPackageTrack.delivery_status`
+boundary, which creates no Ticket audit event.
 
 If `log_event()` fails for any reason (FK constraint violation, invalid
 event_type, serialization error), the entire transaction — including the
 business mutation — MUST roll back. The caller MUST NOT catch exceptions
-from `log_event()` separately from the main transaction. No mutation can
-exist without its corresponding audit event.
+from `log_event()` separately from the main transaction. Except for the named
+delivery-status boundary above, no mutation can exist without its corresponding
+audit event.
 
 `log_event()` MUST force the pending insert to reach the database before
 returning, so constraint violations (FK, NOT NULL, CHECK) surface at the

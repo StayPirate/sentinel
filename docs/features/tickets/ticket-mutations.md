@@ -13,7 +13,8 @@ Package-centric mutations (track status, delivery status, product eligibility,
 soft-deletion/restore, record creation, and additive maintainer association) are
 handled by `package_service` (`docs/features/packages/package-service.md`).
 
-Without this centralization, each caller would need to independently:
+Without this centralization, each gate-relevant caller would need to
+independently:
 
 - Acquire the correct row-level lock
 - Apply the data mutation
@@ -143,9 +144,10 @@ external code.
 ## `reconcile_ticket_status()`
 
 The sole authority for reconciling a ticket's status and assignment
-state with current reality. This function is internal to the module —
-external code interacts with it indirectly through the public mutation
-functions.
+state with current reality. This is a shared service-internal primitive, not an
+API, CLI, task, or consumer operation. Owning mutation services call it only
+after their effective gate-relevant mutations while already holding the Ticket
+lock. Entry points never invoke it directly.
 
 **Purpose**: Reconciles the ticket's status and assignment state with
 current reality (gate conditions + data freshness).
@@ -417,7 +419,7 @@ function.
 |--------|----------------------------------------------|
 | `ticket_mutations` | `upsert_cvss_assessment`\*, `delete_cvss_assessment`\*, `set_severity_manual` |
 | `ticket_service` | `associate_cve`, `assign_ticket`, `ignore_ticket`, `mark_as_duplicate`, `set_confidentiality`, `grant_access`, `revoke_access` |
-| `package_service` | `set_track_status`, `set_track_delivery_status`, `set_product_eligibility`, `set_product_released_at`, and other mutation functions |
+| `package_service` | Gate-relevant mutations call the guard; `set_track_delivery_status` also calls it for operability but remains outside assignment, audit, and Ticket reconciliation |
 
 \* CVSS functions call `ensure_ticket_operable` **conditionally** — only
 when the CVE has an associated ticket. Ticketless CVEs skip this check
@@ -436,11 +438,16 @@ Each function below follows the same pattern:
 7. Call `reconcile_ticket_status()`
 8. Return the updated record
 
-Package-centric mutations (`set_track_status`, `set_track_delivery_status`,
+Package-centric gate-relevant mutations (`set_track_status`,
 `set_product_eligibility`, `set_product_released_at`,
 `add_package_records`, soft-delete/restore for packages, tracks, and
 products) have been moved to `package_service` — see
 `docs/features/packages/package-service.md`.
+
+`set_track_delivery_status()` is package-owned but is intentionally absent from
+this gate-relevant pattern: delivery is not a Ticket gate input, and that
+operation performs no assignment, Ticket reconciliation, or Ticket audit
+event.
 
 ### CVSS Vector Parsing
 
@@ -918,8 +925,9 @@ status gates MUST go through the appropriate centralized module:
   creation, additive maintainership association)
 - **CVSS and severity mutations**: `ticket_mutations`
   (`CVECVSSAssessment` records, manual severity)
-- **Ticket status evaluation**: `ticket_mutations` (called after any
-  gate-relevant mutation)
+- **Ticket status evaluation**: `ticket_mutations` (the shared
+  service-internal primitive is called after an effective gate-relevant
+  mutation; delivery-status mutation is explicitly not gate-relevant)
 
 Direct modification of gate-relevant records outside the owning module is a bug,
 with one architectural exception:
