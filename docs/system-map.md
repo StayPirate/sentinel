@@ -834,7 +834,7 @@ other feature:
 | [references](features/tickets/ticket-references.md) | Ingestion | External links on tickets (auto and manual) |
 | [cpe-package-mapping](features/packages/cpe-package-mapping.md) | Ingestion | CPE-to-package resolution via static mapping file |
 | [ibs-integration](features/integrations/ibs-integration.md) | Integration | IBS API client for source info, diffs, and requests |
-| [ibs-rabbitmq-integration](features/integrations/ibs-rabbitmq-integration.md) | Integration | Real-time release detection via IBS RabbitMQ |
+| [ibs-rabbitmq-integration](features/integrations/ibs-rabbitmq-integration.md) | Integration | Real-time IBS track-release and request/submission acceleration via RabbitMQ |
 | [ibs-submission-tracking](features/packages/ibs-submission-tracking.md) | Integration | Current IBS request actions, exact track correlation, and delivery reconciliation |
 | [ibs-track-release-detection](features/packages/ibs-track-release-detection.md) | Integration | Existing-track reconciliation via expanded IBS source state and per-track checkpoints |
 | [ibs-product-release-detection](features/packages/ibs-product-release-detection.md) | Integration | Product release reconciliation via validated stable security advisories and exact source-package matches |

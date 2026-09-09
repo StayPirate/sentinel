@@ -212,7 +212,7 @@ matching is exact equality against lowercase `User.email`.
 Every invocation of `add_package_to_ticket()` attempts maintainership
 acquisition, including:
 
-- manual, CVE-ingestion, and release-detection package additions;
+- manual and CVE-ingestion package additions;
 - package-tree invocations that become a complete database no-op;
 - IBS and Git/SLFO package results;
 - Product catalog backfill; and
