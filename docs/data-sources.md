@@ -715,15 +715,18 @@ attribute it exposes.
 - **Access**: REST API at `smelt.suse.de/api`. Key endpoints:
   - `v1/basic/products/` relative to the API prefix (paginated) — product
     listing
-  - `experimental/v2/maintained/?package={name}&include_reactive_ltss=true`
-    relative to the API prefix (non-paginated) — unified resolver that
-    combines IBS channel records with Git/SLFO Product SBOM records. Returns
-    codestream-grouped entries with direct Product CPE, the authoritative
-    codestream `maintenance_process_type`, target-level Product-definition
-    provenance (`product_definition.type`: `channel` or `compose`), and
-    aggregated targets. Sentinel consumes only the fields required for
-    package resolution (see `package-model.md`, SMELT Query for Package
-    Resolution)
+  - `experimental/v2/maintained/{package_name}?include_reactive_ltss=true`
+    relative to the API prefix (non-paginated) — package-scoped unified
+    resolver that combines IBS channel records with Git/SLFO Product SBOM
+    records. Returns codestream-grouped entries with direct Product CPE, the
+    authoritative codestream `maintenance_process_type`, target-level
+    Product-definition provenance (`product_definition.type`: `channel` or
+    `compose`), and aggregated targets. Sentinel consumes only the fields
+    required for package resolution (see `package-model.md`, SMELT Query for
+    Package Resolution)
+  - `experimental/v2/maintained/` relative to the API prefix (paginated) —
+    sweep operation with optional source-package, binary, and codestream
+    filters. It is not used for Sentinel's per-package resolution
   - `experimental/v2/packages/{package_name}/maintainership` relative to the
     API prefix (non-paginated) - package maintainership across IBS and
     Git/SLFO sources. Sentinel consumes only non-null individual emails from
@@ -739,11 +742,12 @@ attribute it exposes.
   `results`; SMELT currently serializes continuation metadata with an HTTP URL
   even for HTTPS requests; Sentinel constructs every page request from the
   configured HTTPS API prefix and treats continuation URLs only as consistency
-  metadata. The maintained-package endpoint (`experimental/v2/maintained/`)
-  uses a JSend envelope `{status, data}` and returns all results in a single
-  non-paginated response. The maintainership endpoint also uses JSend, is
-  non-paginated, and exposes no freshness marker. These endpoints require no
-  authentication.
+  metadata. The package-scoped maintained endpoint
+  (`experimental/v2/maintained/{package_name}`) uses a JSend envelope
+  `{status, data}` and returns all results in a single non-paginated response.
+  The maintained sweep operation is paginated within the JSend `data` object.
+  The maintainership endpoint also uses JSend, is non-paginated, and exposes
+  no freshness marker. These endpoints require no authentication.
 - **Maintainership contract status**: the structured identity response is
   merged upstream but was not yet deployed-and-verified on 2026-09-03. Deployed
   OpenAPI and representative live responses are a mandatory implementation
@@ -874,7 +878,7 @@ delivery topology from being conflated:
 | Product lifecycle dates and CVSS thresholds | AIMAAS | AIMAAS API |
 | IBS package/codestream-to-target mapping | IBS `SUSE:Channels` | SMELT channel resolver |
 | Historical IBS channel location | IBS `SUSE:Channels:EOL` | SMELT, only when explicitly relevant |
-| Git package/codestream-to-Product mapping | Released Product SBOM and Product-compose data | Active SMELT v2 `experimental/v2/maintained/` compose-target resolution |
+| Git package/codestream-to-Product mapping | Released Product SBOM and Product-compose data | Active SMELT v2 package-scoped `experimental/v2/maintained/{package_name}` compose-target resolution |
 | Architecture, extension/module, release-stage, and migration structure | SCC | SMELT today; possible future direct enrichment |
 
 CPE is the cross-source Product reconciliation key when present. Exact CPE

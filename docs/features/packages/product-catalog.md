@@ -249,10 +249,11 @@ the HTTP scheme defect in continuation metadata. Using the fixed page size and
 server-provided `total_pages` avoids depending on either an inferred default or
 the requested page size being applied unchanged.
 
-The maintained-package endpoint (`experimental/v2/maintained/`) is not
-paginated; it returns all results in a single JSend response. Its envelope and
-processing contract are defined in `package-model.md` (SMELT Query for Package
-Resolution).
+The package-scoped maintained endpoint
+(`experimental/v2/maintained/{package_name}`) is not paginated; it returns all
+results in a single JSend response. This is distinct from the paginated
+maintained sweep operation. Its envelope and processing contract are defined in
+`package-model.md` (SMELT Query for Package Resolution).
 
 ### Product Sync
 

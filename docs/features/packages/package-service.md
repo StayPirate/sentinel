@@ -1036,10 +1036,11 @@ async def add_package_to_ticket(
 
 **Behavior**:
 
-1. Query the SMELT v2 maintained-package endpoint to resolve all currently
-   maintained tracks and products for the given package name (external I/O —
-   no lock held). Parse the response body regardless of HTTP status and
-   validate the JSend envelope structure.
+1. Query the SMELT v2 package-scoped maintained endpoint defined in
+   `package-model.md` to resolve all currently maintained tracks and products
+   for the given package name (external I/O — no lock held). Do not use the
+   separate paginated maintained sweep operation. Parse the response body
+   regardless of HTTP status and validate the JSend envelope structure.
 2. If connection, timeout, proxy, or remote-protocol failure remains after the
    shared transport retries, or the response cannot be parsed as JSON or has
    no recognized JSend `status` value, raise `SmeltUnavailableError`

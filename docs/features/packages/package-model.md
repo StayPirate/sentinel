@@ -225,11 +225,13 @@ that provides:
    `docs/features/packages/product-catalog.md` (SMELT Integration) for the
    product sync specification.
 2. **Per-package maintenance info**
-   (`experimental/v2/maintained/` relative to the configured SMELT API
-   prefix): given a source package name, returns the list of codestreams
-   where the package is maintained and the Products it is shipped to,
-   with direct CPE identification, authoritative codestream maintenance
-   process, and target-level Product-definition provenance.
+   (package-scoped `experimental/v2/maintained/{package_name}` relative to the
+   configured SMELT API prefix): returns the list of codestreams where the
+   package is maintained and the Products it is shipped to, with direct CPE
+   identification, authoritative codestream maintenance process, and
+   target-level Product-definition provenance. See
+   [SMELT Query for Package Resolution](#smelt-query-for-package-resolution)
+   for the complete request contract.
 3. **Per-package maintainership**
    (`experimental/v2/packages/{package_name}/maintainership` relative to the
    configured API prefix): returns direct users and groups with members.
@@ -1133,11 +1135,13 @@ When `add_package_to_ticket` resolves a package, it calls the SMELT v2
 maintained-package endpoint:
 
 ```
-experimental/v2/maintained/?package={url_encode(name)}&include_reactive_ltss=true
+experimental/v2/maintained/{url_encode(name)}?include_reactive_ltss=true
 ```
 
-The `package` value is URL-encoded before interpolation. The response is a
-single non-paginated JSend envelope.
+The package name is URL-encoded before interpolation into the path segment.
+This package-scoped operation is distinct from the paginated
+`experimental/v2/maintained/` sweep operation. The response is a single
+non-paginated JSend envelope.
 
 **Envelope and error handling**:
 
@@ -1163,10 +1167,10 @@ single non-paginated JSend envelope.
 - Any non-200 response other than the valid 404 package-not-found response,
   any body that cannot be parsed as JSON, any unrecognized `status` field, or
   any entry-validation failure maps to `SmeltUnavailableError`.
-- Live verification confirmed that the `package` filter is case-sensitive:
-  canonical `kernel-default` returned results, while case variants returned
-  the error envelope. Sentinel does not normalize package-name case before
-  the query.
+- Live verification confirmed that the package-name path segment is
+  case-sensitive: canonical `kernel-default` returned results, while case
+  variants returned the error envelope. Sentinel does not normalize
+  package-name case before constructing the request.
 
 **Entry validation**:
 
@@ -1589,7 +1593,8 @@ behavior.
 | `package_name` | string | Yes | Max 255 chars. Pattern: `^[a-zA-Z0-9][a-zA-Z0-9._+\-]{0,253}[a-zA-Z0-9]$` (min 2 chars). Only alphanumeric, dots, underscores, hyphens, and plus signs allowed. | Source package name |
 
 The `package_name` value is URL-encoded before interpolation in the SMELT
-API query (`experimental/v2/maintained/?package={url_encode(name)}`).
+package-scoped path
+(`experimental/v2/maintained/{url_encode(name)}?include_reactive_ltss=true`).
 This prevents injection of URL control characters regardless of validation.
 
 **Response** (201 Created):
