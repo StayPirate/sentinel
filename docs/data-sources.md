@@ -1164,8 +1164,9 @@ feature documentation (not its implementation status):
 | `sync_osv_advisories` | OSV (osv.dev) | Daily at 05:00 UTC (`0 5 * * *`) | None | None (no rate limits) | GIT fix/introduce commits (CVEAffectedVersion), ecosystem affected versions (CVEAffectedVersion with ecosystem), references (TicketReference), external identifiers (GHSA/PYSEC/RUSTSEC), resolved packages (best-effort SMELT). `source_container = "osv"` | [cve-sync-osv.md](features/tickets/cve-sync-osv.md#fetcher-definition) | Complete |
 | `evaluate_failed_cve_sources` | Local (no external source) | Daily at 06:00 UTC (`0 6 * * *`) | N/A | N/A | Dispatches retry for CVESource failure records with active tickets (within 30-day window) | [cve-source-failure-retry.md](features/platform/cve-source-failure-retry.md#fetcher-evaluate_failed_cve_sources) | Complete |
 
-Note: `IBSEventConsumer` (real-time codestream release detection via IBS
-RabbitMQ) is a continuous service, not a `BaseFetcher` subclass. See
+Note: `IBSEventConsumer` provides IBS RabbitMQ acceleration for both track
+release reconciliation and IBS request/submission reconciliation. It is a
+continuous service, not a `BaseFetcher` subclass. See
 `docs/features/integrations/ibs-rabbitmq-integration.md`.
 
 Note: the test-only system fetcher under `backend/tests/support/` is
