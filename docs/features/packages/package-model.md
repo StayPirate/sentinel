@@ -1150,7 +1150,7 @@ The following scenarios invoke `add_package_to_ticket`:
    package name,
    `add_package_to_ticket` is called. See
    `docs/features/tickets/cve-service.md` (Phase 2).
-2. **Manual**: the VA manually adds a package by name via the UI.
+2. **Manual**: an authorized user manually adds a package by name via the UI.
    `add_package_to_ticket` is called with the entered name.
 3. **Restore from soft-deletion**: restoring a package, track, or
    product clears its `deleted_at` only. New tracks/products that
@@ -1174,22 +1174,22 @@ The following scenarios invoke `add_package_to_ticket`:
 
 ### Package Management Constraints
 
-The VA manages packages at the **package level only**:
+An authorized user manages packages at the **package level only**:
 
-- The VA can **add** packages to a ticket.
-- The VA can **soft-delete** entire packages, individual tracks, or
+- The user can **add** packages to a ticket.
+- The user can **soft-delete** entire packages, individual tracks, or
   individual Products from a ticket (see
   [Exclusion and Actionability](#exclusion-and-actionability)).
-- The VA **cannot** add individual tracks or products — these are
+- The user **cannot** add individual tracks or products — these are
   determined exclusively by SMELT when a package is added via
   `add_package_to_ticket`.
-- The VA **can** change the affectedness status of individual tracks
+- The user **can** change the affectedness status of individual tracks
   (via the status dropdown) and override the eligibility of individual
   products.
 
 ### Removing a Package from a Ticket
 
-When a VA removes a package from a ticket, Sentinel performs a
+When an authorized user removes a package from a ticket, Sentinel performs a
 **soft-deletion** (see
 [Exclusion and Actionability](#exclusion-and-actionability)): `deleted_at`
 is set on the `TicketPackage` record only. Child `TicketPackageTrack`
