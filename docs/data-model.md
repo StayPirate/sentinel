@@ -872,11 +872,12 @@ for the full transition diagram, gates, and rules.
 Summary:
 - New -> Analysis (manual: assignment or any modifying operation)
 - New -> Ignored (manual or automatic: CVE rejection)
-- Analysis -> Analyzed (automatic: all gates met — at least one package,
-  no track records in ANALYSIS, severity set, SUSE CVSS
+- Analysis -> Analyzed (automatic: all gates met — at least one manually
+  included track, no actionable track in ANALYSIS, severity set, SUSE CVSS
   provided if CVE present)
 - Analysis -> Ignored (manual)
-- Analyzed -> Resolved (automatic: all tracks resolution-complete)
+- Analyzed -> Resolved (automatic: every actionable track is
+  resolution-complete)
 - Analyzed -> Analysis (automatic: gate conditions no longer met)
 - Resolved -> Analyzed (automatic: resolved gates broken, analyzed gates
   still met)
@@ -898,12 +899,13 @@ further to `Analyzed` or `Resolved` if gate conditions are satisfied.
 
 **Status categories**:
 - **Active tickets**: tickets in status `New`, `Analysis`, or `Analyzed`.
-  These are actively monitored: CVSS
-   sync, release detection, and recalculation chains apply to active
-   tickets.
+  These contribute to Ticket-scoped external monitoring. Local reconciliation
+  also applies according to each owning mutation contract.
 - **Inactive tickets**: tickets in status `Resolved`, `Ignored`, or
-  `Duplicated`. These are no longer monitored: CVSS sync and
-   recalculation chains skip inactive tickets.
+  `Duplicated`. They do not contribute Ticket-scoped external monitoring.
+  `Resolved` remains operable and can receive local lifecycle, actionability,
+  CVSS, or eligibility reconciliation that returns it to an active status;
+  `Ignored` and `Duplicated` remain in the manual zone.
 
 #### TicketStatus Enum
 
@@ -916,7 +918,7 @@ Alembic migration.
 | `New` | Newly created ticket, no analysis started |
 | `Analysis` | Under active analysis by a VA |
 | `Analyzed` | All analysis gates met; awaiting resolution |
-| `Resolved` | All tracks resolution-complete |
+| `Resolved` | Every actionable track is resolution-complete |
 | `Ignored` | Ticket dismissed (e.g., not applicable, CVE rejected) |
 | `Duplicated` | Ticket marked as duplicate of another ticket |
 
@@ -997,16 +999,16 @@ contract is in `docs/features/tickets/ticket-audit-log.md`.
 | duplicate_set              | Ticket was marked as duplicate of another          |
 | duplicate_removed          | Duplicate mark was reverted                        |
 | duplicate_target_changed   | Atomic repoint: the ticket's `duplicate_of_id` was updated because its previous target was marked as duplicate. `old_value` is the previous target identifier (`SNTL-{n}`). `new_value` is the new target identifier. `user_id` is NULL (system action). `detail` contains `{"triggered_by_ticket": "SNTL-{n}"}` identifying the ticket whose mark-as-duplicate operation triggered this repoint. |
-| package_added              | Package tree added or completed (manual by VA or automatic via CVE ingestion or Product catalog backfill). `user_id` is set for VA actions, NULL for automatic. `comment` provides context for automatic additions. A complete no-op creates no event. |
+| package_added              | Package tree added or completed (manual by an authorized acting user or automatic via CVE ingestion or Product catalog backfill). `user_id` is set for user actions, NULL for automatic. `comment` provides context for automatic additions. A complete no-op creates no event. |
 | package_maintainer_added   | Package resolution associated an existing active User with a TicketPackage. `user_id` is NULL, `old_value` is NULL, `new_value` is the event-time target username, `comment` is NULL, and `detail` contains `{"package": "fictional-package"}`. |
-| package_excluded           | Package directly soft-deleted from the Ticket by a VA. `old_value` contains the package name and `user_id` identifies the VA. `detail` is NULL. Child records are not modified; they become effectively VA-excluded through the hierarchy. |
-| package_restored           | Directly soft-deleted package restored by VA. `new_value` contains the package name. `user_id` is the VA who performed the action. Only the package record is restored — child records are not modified. |
+| package_excluded           | Package directly soft-deleted from the Ticket by an authorized acting user. `old_value` contains the package name and `user_id` identifies the actor. `detail` is NULL. Child records are not modified; they become effectively excluded through the hierarchy. |
+| package_restored           | Directly soft-deleted package restored by an authorized acting user. `new_value` contains the package name. `user_id` identifies the actor. Only the package record is restored — child records are not modified. |
 | track_status_changed       | Track affectedness status changed. `user_id` is set for VA-initiated changes, `NULL` for automatic transitions (e.g., release detected sets FIXED). `detail` carries `{"track", "package"}` context. |
-| track_excluded             | Track directly soft-deleted from the Ticket by a VA. `old_value` contains the track reference, `user_id` identifies the VA, and `detail` carries `{"track", "package"}` context. Child Products are not modified; they become effectively VA-excluded through the hierarchy. |
-| track_restored             | Directly soft-deleted track restored by VA. `new_value` contains the track reference, `detail` carries `{"track", "package"}`, and `user_id` is the VA. Only the track record is restored — child products are not modified. |
+| track_excluded             | Track directly soft-deleted from the Ticket by an authorized acting user. `old_value` contains the track reference, `user_id` identifies the actor, and `detail` carries `{"track", "package"}` context. Child Products are not modified; they become effectively excluded through the hierarchy. |
+| track_restored             | Directly soft-deleted track restored by an authorized acting user. `new_value` contains the track reference, `detail` carries `{"track", "package"}`, and `user_id` identifies the actor. Only the track record is restored — child products are not modified. |
 | product_released           | Product release detected via updateinfo.xml advisory. `new_value` contains the advisory-issued `released_at` timestamp in UTC ISO 8601 format. `detail` carries event-time Product name/CPE plus track, package, and advisory context. |
-| product_excluded           | Product directly soft-deleted from the Ticket by a VA. `old_value` contains the Product display name, `user_id` identifies the VA, and `detail` carries the event-time Product name/CPE plus track and package. EOL is derived and never emits this event. |
-| product_restored           | Directly soft-deleted product restored by VA. `new_value` contains the Product display name, `detail` carries the event-time Product name/CPE plus track and package, and `user_id` is the VA. |
+| product_excluded           | Product directly soft-deleted from the Ticket by an authorized acting user. `old_value` contains the Product display name, `user_id` identifies the actor, and `detail` carries the event-time Product name/CPE plus track and package. EOL is derived and never emits this event. |
+| product_restored           | Directly soft-deleted Product restored by an authorized acting user. `new_value` contains the Product display name, `detail` carries the event-time Product name/CPE plus track and package, and `user_id` identifies the actor. |
 | ticket_created             | Ticket created. Always the first event in a ticket's history. `user_id` is NULL for automatic creation (system event) or set to the creating user for manual creation. `comment` describes the creation source (e.g., `"CVE ingested from NVD"`, `"CVE fix detected in {package} ({codestream})"`, `"Ticket created manually"`) |
 | cve_associated             | A CVE was associated with a ticket that previously had no CVE. `user_id` is set to the VA who performed the action. `old_value` is NULL. `new_value` is the CVE-ID string (e.g., `"CVE-2024-1234"`). |
 | severity_changed           | NULL for automatic CVSS recalculation, acting user's UUID for manual severity (`set_severity_manual()`) or CVE association handover (`associate_cve()`). |
@@ -1053,7 +1055,7 @@ entity for tracks and products. See
 | id           | UUID      | PK                           | Internal identifier                |
 | ticket_id    | UUID      | FK(ticket.id), NOT NULL      | Related ticket                     |
 | package_name | VARCHAR(255) | NOT NULL                     | Source package name                |
-| deleted_at   | TIMESTAMPTZ | nullable                     | Direct VA-exclusion timestamp. NULL = not directly VA-excluded. The package can still be non-actionable when it has no actionable tracks |
+| deleted_at   | TIMESTAMPTZ | nullable                     | Direct manual-exclusion timestamp. NULL = not directly excluded. The package can still be non-actionable when it has no actionable tracks |
 | created_at   | TIMESTAMPTZ | NOT NULL, DEFAULT            | Record creation timestamp          |
 | updated_at   | TIMESTAMPTZ | NOT NULL, DEFAULT            | Record update timestamp            |
 
@@ -1108,7 +1110,7 @@ dimensions (affectedness, eligibility, delivery).
 | reference         | VARCHAR(255) | NOT NULL                              | Track identifier: IBS codestream project name (e.g., `SUSE:SLE-15-SP6:Update`) or git branch name (e.g., `slfo-main`). Stored as a string — tracks are not maintained as a separate table because SMELT does not provide an independent listing. |
 | status            | VARCHAR(20) | NOT NULL, DEFAULT ANALYSIS            | PackageStatus enum (affectedness); mutation authority is defined in `package-model.md` |
 | delivery_status   | VARCHAR(20) | NOT NULL, DEFAULT PENDING             | DeliveryStatus enum; independent from Ticket gates and has no Ticket audit event |
-| deleted_at        | TIMESTAMPTZ | nullable                              | Direct VA-exclusion timestamp. NULL = not directly VA-excluded. A record may still be effectively VA-excluded through its package or non-actionable because it has no actionable Products |
+| deleted_at        | TIMESTAMPTZ | nullable                              | Direct manual-exclusion timestamp. NULL = not directly excluded. A record may still be effectively excluded through its package or non-actionable because it has no actionable Products |
 | created_at        | TIMESTAMPTZ | NOT NULL, DEFAULT                     | Record creation timestamp          |
 | updated_at        | TIMESTAMPTZ | NOT NULL, DEFAULT                     | Record update timestamp            |
 
@@ -1135,16 +1137,17 @@ override model.
 | eligible                 | BOOLEAN   | NOT NULL, DEFAULT true                      | Whether the product will receive the fix |
 | is_eligible_override     | BOOLEAN   | NOT NULL, DEFAULT false                     | True if VA manually set the eligibility |
 | released_at              | TIMESTAMPTZ | nullable                                    | Authoritative stable security advisory-issued time in UTC; NULL until Product release detection confirms an exact match. Sentinel observation time remains available through `updated_at` and the audit event's `created_at` |
-| deleted_at               | TIMESTAMPTZ | nullable                                    | Direct VA-exclusion timestamp. NULL = not directly VA-excluded. Current actionability also depends on ancestor markers and the catalog Product lifecycle phase |
+| deleted_at               | TIMESTAMPTZ | nullable                                    | Direct manual-exclusion timestamp. NULL = not directly excluded. Current actionability also depends on ancestor markers and the catalog Product lifecycle phase |
 | created_at               | TIMESTAMPTZ | NOT NULL, DEFAULT                           | Record creation timestamp          |
 | updated_at               | TIMESTAMPTZ | NOT NULL, DEFAULT                           | Record update timestamp            |
 
 **Unique constraint**: (ticket_package_track_id, product_id)
 
 > **Exclusion and actionability semantics**: package-tree `deleted_at` fields
-> are modified only by VA exclusion/restore operations. They do not block
+> are modified only by authorized user exclusion/restore operations. They do not block
 > factual mutations on operable Tickets. Current actionability is derived from
-> the hierarchy and Product lifecycle and is not persisted. See
+> the hierarchy and Product lifecycle and is not persisted; lifecycle phase and
+> `non_actionable_reason` are likewise not columns. See
 > `docs/features/packages/package-service.md` (Excluded and Non-Actionable
 > Records) for the full semantics.
 

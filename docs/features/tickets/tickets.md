@@ -261,7 +261,7 @@ The system automatically transitions a ticket from Analysis to Analyzed
 when ALL of the following conditions are met:
 
 1. **At least one manually included track**: at least one
-   `TicketPackageTrack` must not be effectively VA-excluded through its own or
+   `TicketPackageTrack` must not be effectively manually excluded through its own or
    its package's `deleted_at`. Product lifecycle does not affect this
    structural completeness check.
 2. **All actionable track affectedness decided**: no actionable
@@ -954,17 +954,17 @@ distinct valid value (CVSS score 0.0), not equivalent to JSON `null`.
 
 **Exclusion and actionability visibility**: package, track, and Product
 entities include a `deleted_at` field (`datetime | null`) that indicates only
-direct VA exclusion at that level. They also include derived `actionable` and
+direct manual exclusion at that level. They also include derived `actionable` and
 `non_actionable_reason` fields. In single-ticket views (`TicketDetail`, `GET
 /api/v1/tickets/{ticket_id}/packages`), all records are returned
 including non-actionable ones. In cross-ticket search (`GET /api/v1/packages`),
 non-actionable packages are excluded. See `docs/features/packages/package-model.md`
 for the canonical predicates and reason precedence.
 
-Every response that contains `PackageDetail` captures one UTC evaluation date
-after its mutations have completed and uses it for the complete package tree.
-This applies to Ticket detail, package detail, and every mutation endpoint that
-returns `TicketDetail`; one response never mixes lifecycle dates across rows.
+Ticket detail, package detail, and every mutation endpoint that returns
+package-tree data or `TicketDetail` follow the canonical evaluation-date
+capture and reuse contract in `docs/features/packages/package-model.md`
+(Derived Actionability).
 
 #### Shared Sub-Schemas
 
@@ -1016,7 +1016,7 @@ Source status is available via `GET /api/v1/cves/{cve_id}/sources` — see
 | `is_eligible_override` | boolean | `true` if VA manually set eligibility |
 | `released_at` | datetime \| null | Authoritative issued time of the validated stable security advisory that established Product release, serialized in UTC; `null` until confirmed |
 | `lifecycle_phase` | string \| null | Current Product lifecycle phase for the response's UTC evaluation date |
-| `deleted_at` | datetime \| null | Direct VA-exclusion timestamp |
+| `deleted_at` | datetime \| null | Direct manual-exclusion timestamp |
 | `actionable` | boolean | Whether the Product currently participates in operational decisions |
 | `non_actionable_reason` | string \| null | `package_excluded`, `track_excluded`, `product_excluded`, or `eol` according to canonical precedence; `null` when actionable |
 
@@ -1031,8 +1031,8 @@ Source status is available via `GET /api/v1/cves/{cve_id}/sources` — see
 | `delivery_status` | string | DeliveryStatus enum: `pending`, `in_progress`, `released` |
 | `delivery_relevant` | boolean | Computed field (see `docs/features/packages/package-model.md`) |
 | `products` | ProductDetail[] | Products under this track |
-| `deleted_at` | datetime \| null | Direct VA-exclusion timestamp |
-| `actionable` | boolean | Whether the track has at least one actionable Product and is not VA-excluded |
+| `deleted_at` | datetime \| null | Direct manual-exclusion timestamp |
+| `actionable` | boolean | Whether the track has at least one actionable Product and is not manually excluded |
 | `non_actionable_reason` | string \| null | `package_excluded`, `track_excluded`, or `no_actionable_products`; `null` when actionable |
 
 **PackageDetail** — package within a ticket (detail view only):
@@ -1042,8 +1042,8 @@ Source status is available via `GET /api/v1/cves/{cve_id}/sources` — see
 | `id` | UUID | TicketPackage primary key |
 | `package_name` | string | Source package name |
 | `tracks` | TrackDetail[] | Tracks (codestreams) for this package |
-| `deleted_at` | datetime \| null | Direct VA-exclusion timestamp |
-| `actionable` | boolean | Whether the package has at least one actionable track and is not VA-excluded |
+| `deleted_at` | datetime \| null | Direct manual-exclusion timestamp |
+| `actionable` | boolean | Whether the package has at least one actionable track and is not manually excluded |
 | `non_actionable_reason` | string \| null | `package_excluded` or `no_actionable_tracks`; `null` when actionable |
 
 #### TicketSummary

@@ -63,7 +63,7 @@ The fetcher is idempotent and maintains no lifecycle cursor or phase cache.
    `TicketPackageProduct` on an operable Ticket has stored eligibility that
    differs from the complete current eligibility result. Operable Tickets are
    `New`, `Analysis`, `Analyzed`, or `Resolved`; `Ignored` and `Duplicated`
-   remain in the manual zone. Include directly and effectively VA-excluded
+   remain in the manual zone. Include directly and effectively manually excluded
    records and EOL Products in this scan; exclusion and actionability do not
    suspend factual eligibility maintenance. Candidate discovery may prefilter
    obvious mismatches, but mutation always recomputes from current persisted
@@ -156,7 +156,7 @@ value raises `ValueError` and performs no work.
 
 1. Capture one UTC `evaluation_date` for the complete task invocation.
 2. In a read-only session, select distinct IDs of operable Tickets containing
-   the Product. Include directly and effectively VA-excluded records and EOL
+   the Product. Include directly and effectively manually excluded records and EOL
    records; a Ticket containing only overrides may produce a harmless no-op.
 3. Process Ticket IDs sequentially. For each ID, open a fresh session and
    independent transaction, invoke
@@ -190,7 +190,7 @@ not use this task; they remain owned by
 override of the shared per-Ticket catch-up contract. The passed session is used
 only to verify that the Ticket exists and enumerate distinct catalog Product
 IDs currently linked to its package tree. This enumeration includes directly
-and effectively VA-excluded records and EOL Products. A missing Ticket or an
+and effectively manually excluded records and EOL Products. A missing Ticket or an
 empty package tree returns silently.
 
 For every Product ID, the method opens an independent session and transaction
@@ -219,7 +219,7 @@ Lifecycle processing creates audit events only for persisted mutations:
 
 EOL entry, EOL exit, and parent actionability changes create no package-tree
 audit event because they do not mutate package-tree state. Exclusion and
-restore events remain exclusive to VA actions.
+restore events remain exclusive to authorized acting-user actions.
 
 ## Integration with AIMAAS Synchronization
 
@@ -239,7 +239,7 @@ eligible Product can invalidate resolution.
 
 - Lifecycle evaluation and Product eligibility tasks are internal system
   workflows with no user authentication.
-- No lifecycle workflow can set or clear a VA exclusion or eligibility
+- No lifecycle workflow can set or clear a manual exclusion or eligibility
   override.
 - All Ticket mutations remain serialized by the Ticket row lock and audited in
   the same transaction when persisted state changes.
