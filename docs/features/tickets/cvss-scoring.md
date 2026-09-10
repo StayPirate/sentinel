@@ -2,498 +2,522 @@
 
 ## Purpose
 
-Manage CVSS (Common Vulnerability Scoring System) assessments from multiple
-providers for each CVE. Sentinel ingests CVSS data from external sources,
-allows vulnerability analysts (VAs) to provide SUSE's own assessment, and uses
-the scores to derive severity, determine product eligibility, and control
-ticket workflow progression.
+Manage Common Vulnerability Scoring System (CVSS) Base assessments from
+multiple providers for each CVE. This specification is the central authority
+for accepted vectors, parsing and canonicalization, assessment representation,
+severity and eligibility score resolution, provider ownership, and the CVSS
+API representation.
 
-## Key Principles
+Sentinel stores each provider's assessment independently. The vector is the
+only input authority: version, Base score, assessment severity, and expanded
+Base metrics are always derived locally from the vector.
 
-1. **Multi-provider**: each CVE can have CVSS assessments from multiple
-   providers (NVD, CNA vendors, Red Hat, SUSE). Each assessment is stored
-   independently.
-2. **Multi-version**: Sentinel supports CVSS v3.1 and v4.0 as its primary
-   decision versions. A single provider may supply assessments for one or
-   both versions. Other versions (e.g., v2.0, v3.0) may arrive from
-   external sources and are stored. All stored versions participate in
-   the Severity Resolution Cascade as fallback (steps 2 and 4) — if they
-   are the only available score, they are used for severity derivation
-   rather than falling back to absent. Only the configured default version
-   (v3.1 or v4.0) is used for the Eligibility Score Resolution.
-3. **Configurable default version**: a system-wide setting determines which
-   CVSS version is used for all automated decisions (severity, eligibility). Initially set to `3.1`, changeable by Admin. See
-   `docs/features/platform/system-settings.md`.
-4. **SUSE assessment is authoritative**: when Sentinel needs a CVSS score to
-   make a decision, it follows one of the two resolution strategies defined
-   below (Severity Resolution Cascade or Eligibility Score Resolution),
-   both of which prioritize SUSE's assessment.
-5. **Default version awareness**: every component of the system that needs
-   a CVSS score for any decision MUST resolve the version from the system
-   configuration — never hardcode `3.1` or `4.0`.
-6. **Always derived from vector**: the `vector_string` is the single
-   source of truth for all CVSS assessments. Score, version, and
-   severity are never accepted as independent inputs — they are always
-   parsed and derived locally from the vector string using the `cvss`
-   library. Providers that supply only a numeric score without a valid
-   vector string are not imported.
-   **Two-level severity derivation**: severity at the per-assessment level
-   (`CVECVSSAssessment.severity`) is derived using the library's
-   version-specific FIRST scale (v2: Low/Medium/High; v3/v4:
-   None/Low/Medium/High/Critical). Severity at the ticket level
-   (`CVE.severity`) is derived from the resolved score via
-   `calculate_severity()` using the unified v3/v4 scale regardless of
-   source version. See "Severity Rating Scale" below.
+## Core Distinctions
 
-## CVSS Score Resolution
+The following values have different meanings and MUST NOT be substituted for
+one another:
 
-Sentinel uses two distinct resolution strategies depending on the consumer.
-Each is described below.
+1. **Assessment severity** belongs to one `CVECVSSAssessment`. CVSS v2.0 uses
+   Sentinel's legacy three-label qualitative mapping; v3.0, v3.1, and v4.0 use
+   the FIRST qualitative scale. CVSS v2.0 produces `low`, `medium`, or `high`;
+   v3.0, v3.1, and v4.0 produce `none`, `low`, `medium`, `high`, or `critical`.
+2. **Resolved CVE severity** belongs to `CVE.severity`. It uses the unified
+   `none`, `low`, `medium`, `high`, `critical` scale defined below, regardless
+   of the version of the winning assessment. It is `NULL` only when resolution
+   is absent.
+3. **Eligibility score** is a separate pure resolution result. It uses only a
+   SUSE assessment for the configured default version, with a conservative
+   fallback. It is not the Severity Resolution Cascade result.
+
+The `default_cvss_version` setting is either `3.1` or `4.0`. It selects the
+preferred version in the Severity Resolution Cascade and the required version
+for Eligibility Score Resolution. It does not exclude v2.0 or v3.0 from
+severity resolution and does not make one version control all severity.
+
+## Accepted Base Vectors
+
+Sentinel accepts exactly complete CVSS Base vectors for versions `2.0`, `3.0`,
+`3.1`, and `4.0`. Temporal, Environmental, Threat, and Supplemental metrics
+are not accepted. A vector with any non-Base metric is invalid even when a
+third-party CVSS library could calculate a Base score from it.
+
+### Input Rules
+
+Validation and normalization occur in this order:
+
+1. The received string must contain at most 200 characters **before** any
+   trimming. Pydantic enforces the JSON string type, required-field rule, and
+   this received-length limit.
+2. Sentinel trims leading and trailing whitespace only. It never removes or
+   changes whitespace inside the vector.
+3. The remaining syntax must use the official case for the version prefix,
+   metric abbreviations, and metric values. Case variants are rejected rather
+   than repaired.
+4. CVSS v2.0 is unprefixed. CVSS v3.0, v3.1, and v4.0 require exactly
+   `CVSS:3.0/`, `CVSS:3.1/`, and `CVSS:4.0/`, respectively. Any other or
+   mismatched prefix is invalid.
+5. Input Base metrics may appear in any order. For v4.0 this is an explicit
+   Sentinel compatibility extension to FIRST's fixed-order vector grammar;
+   Sentinel still emits only the standard fixed order.
+6. Every required Base metric for the detected version must occur exactly
+   once. Missing, duplicate, unknown, or non-Base metrics are invalid.
+7. Successful output is canonical: it uses the official prefix rule and the
+   FIRST Base metric order listed below. The canonical vector is the value
+   persisted and returned by the API.
+
+Empty input after trimming, embedded whitespace, an unsupported version, and
+any violation of rules 3 through 6 produce `InvalidCVSSVectorError`, exposed by
+the CVSS API as `422 CVSS_INVALID_VECTOR`. They are domain vector failures, not
+Pydantic shape failures. Pydantic type, required-field, and pre-trim length
+failures produce the global `422 VALIDATION_ERROR` response instead.
+
+### Stable Parsed Result
+
+The shared parser accepts one string and returns one immutable semantic result:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `canonical_vector` | `str` | Canonical complete Base vector |
+| `version` | `Literal["2.0", "3.0", "3.1", "4.0"]` | Exact detected version |
+| `score` | `Decimal` | Locally calculated Base score, from `0.0` through `10.0` |
+| `severity` | version-specific severity enum | Severity from the version-specific mapping below |
+| `metrics` | version-specific typed Base-metrics result | Expanded metrics for the detected version |
+
+Callers never supply score, version, severity, or expanded metrics as an
+independent authority. All manual and external ingestion paths use this shared
+parser. A source-neutral CVE record parser extracts candidate vector strings
+and delegates each candidate to this parser; it skips a rejected external
+candidate according to its own per-entry ingestion contract rather than
+reimplementing CVSS semantics.
+
+### CVSS v2.0 Base Metrics
+
+Canonical order: `AV/AC/Au/C/I/A`.
+
+| Metric | Meaning | Official vector values | API wire values |
+|---|---|---|---|
+| `AV` | Access Vector | `L`, `A`, `N` | `local`, `adjacent_network`, `network` |
+| `AC` | Access Complexity | `H`, `M`, `L` | `high`, `medium`, `low` |
+| `Au` | Authentication | `M`, `S`, `N` | `multiple`, `single`, `none` |
+| `C` | Confidentiality Impact | `N`, `P`, `C` | `none`, `partial`, `complete` |
+| `I` | Integrity Impact | `N`, `P`, `C` | `none`, `partial`, `complete` |
+| `A` | Availability Impact | `N`, `P`, `C` | `none`, `partial`, `complete` |
+
+Expanded API shape:
+
+```json
+{
+  "access_vector": "network",
+  "access_complexity": "low",
+  "authentication": "none",
+  "confidentiality_impact": "complete",
+  "integrity_impact": "complete",
+  "availability_impact": "complete"
+}
+```
+
+### CVSS v3.0 and v3.1 Base Metrics
+
+Both versions have the same Base metric shape. Their version identities and
+prefixes remain distinct. Canonical order: `AV/AC/PR/UI/S/C/I/A`.
+
+| Metric | Meaning | Official vector values | API wire values |
+|---|---|---|---|
+| `AV` | Attack Vector | `N`, `A`, `L`, `P` | `network`, `adjacent`, `local`, `physical` |
+| `AC` | Attack Complexity | `L`, `H` | `low`, `high` |
+| `PR` | Privileges Required | `N`, `L`, `H` | `none`, `low`, `high` |
+| `UI` | User Interaction | `N`, `R` | `none`, `required` |
+| `S` | Scope | `U`, `C` | `unchanged`, `changed` |
+| `C` | Confidentiality Impact | `N`, `L`, `H` | `none`, `low`, `high` |
+| `I` | Integrity Impact | `N`, `L`, `H` | `none`, `low`, `high` |
+| `A` | Availability Impact | `N`, `L`, `H` | `none`, `low`, `high` |
+
+Expanded API shape:
+
+```json
+{
+  "attack_vector": "network",
+  "attack_complexity": "low",
+  "privileges_required": "none",
+  "user_interaction": "none",
+  "scope": "unchanged",
+  "confidentiality_impact": "high",
+  "integrity_impact": "high",
+  "availability_impact": "high"
+}
+```
+
+### CVSS v4.0 Base Metrics
+
+Canonical order: `AV/AC/AT/PR/UI/VC/VI/VA/SC/SI/SA`.
+
+| Metric | Meaning | Official vector values | API wire values |
+|---|---|---|---|
+| `AV` | Attack Vector | `N`, `A`, `L`, `P` | `network`, `adjacent`, `local`, `physical` |
+| `AC` | Attack Complexity | `L`, `H` | `low`, `high` |
+| `AT` | Attack Requirements | `N`, `P` | `none`, `present` |
+| `PR` | Privileges Required | `N`, `L`, `H` | `none`, `low`, `high` |
+| `UI` | User Interaction | `N`, `P`, `A` | `none`, `passive`, `active` |
+| `VC` | Vulnerable System Confidentiality | `H`, `L`, `N` | `high`, `low`, `none` |
+| `VI` | Vulnerable System Integrity | `H`, `L`, `N` | `high`, `low`, `none` |
+| `VA` | Vulnerable System Availability | `H`, `L`, `N` | `high`, `low`, `none` |
+| `SC` | Subsequent System Confidentiality | `H`, `L`, `N` | `high`, `low`, `none` |
+| `SI` | Subsequent System Integrity | `H`, `L`, `N` | `high`, `low`, `none` |
+| `SA` | Subsequent System Availability | `H`, `L`, `N` | `high`, `low`, `none` |
+
+Expanded API shape:
+
+```json
+{
+  "attack_vector": "network",
+  "attack_complexity": "low",
+  "attack_requirements": "none",
+  "privileges_required": "none",
+  "user_interaction": "none",
+  "vulnerable_system_confidentiality": "high",
+  "vulnerable_system_integrity": "high",
+  "vulnerable_system_availability": "high",
+  "subsequent_system_confidentiality": "none",
+  "subsequent_system_integrity": "none",
+  "subsequent_system_availability": "none"
+}
+```
+
+## Severity
+
+### Version-Specific Assessment Severity
+
+`CVECVSSAssessment.severity` is calculated with the version-specific mapping
+below and stored as a lowercase classification label. The v2.0 mapping is
+Sentinel's NVD-compatible legacy qualitative mapping; v3.0, v3.1, and v4.0 use
+the FIRST qualitative scale.
+
+| Version | Score | Assessment severity |
+|---|---|---|
+| 2.0 | 0.0-3.9 | `low` |
+| 2.0 | 4.0-6.9 | `medium` |
+| 2.0 | 7.0-10.0 | `high` |
+| 3.0, 3.1, 4.0 | 0.0 | `none` |
+| 3.0, 3.1, 4.0 | 0.1-3.9 | `low` |
+| 3.0, 3.1, 4.0 | 4.0-6.9 | `medium` |
+| 3.0, 3.1, 4.0 | 7.0-8.9 | `high` |
+| 3.0, 3.1, 4.0 | 9.0-10.0 | `critical` |
+
+In particular, a v2.0 score of `0.0` has assessment severity `low`, as defined
+by the v2.0 scale. That does not control the unified CVE severity.
+
+### Unified CVE Severity
+
+After the Severity Resolution Cascade selects an assessment, Sentinel maps its
+score to the following unified scale without regard to the source version:
+
+| Score | Unified severity |
+|---|---|
+| 0.0 | `none` |
+| 0.1-3.9 | `low` |
+| 4.0-6.9 | `medium` |
+| 7.0-8.9 | `high` |
+| 9.0-10.0 | `critical` |
+
+The `none` label is a resolved score of exactly `0.0`; SQL `NULL` means no
+assessment won the cascade. `CVE.severity` is denormalized from this result and
+is never accepted as manual input. Tickets without a CVE continue to use
+`Ticket.severity_manual` under `tickets.md`; that separate field is not a CVSS
+assessment.
 
 ### Severity Resolution Cascade
 
-Used for: severity derivation, display, and any future
-informational/triage logic.
-
-This cascade resolves the best available CVSS score, preferring SUSE's
-assessment and the configured default version, but falling back to other
-providers and versions to maximize informational coverage:
-
-1. **SUSE assessment, default version**. If SUSE has published an
-   assessment for the configured default CVSS version, use this score.
-2. **SUSE assessment, other version**. If SUSE has published an assessment
-   for a non-default version, use it. If multiple non-default versions
-   exist, prefer the highest by version priority order
-   (`4.0 > 3.1 > 3.0 > 2.0`).
-3. **Highest provider, default version**. If at least one external provider
-   has an assessment for the default version, use the highest score among
-   them.
-4. **Highest provider, other version**. If at least one external provider
-   has an assessment for any non-default version, use the highest score
-   among those. If multiple non-default versions exist, prefer the
-   highest by version priority order (`4.0 > 3.1 > 3.0 > 2.0`); within
-   the same version, prefer the highest score.
-5. **Absent**. No provider has published any assessment for any version.
-   The score is treated as absent (`CVE.severity` is set to `NULL`).
-
-**Cross-version severity mapping**: when the resolved score comes from a
-version other than the default (steps 2 or 4), severity is mapped using
-the rating scale thresholds specific to that score's version. Sentinel
-uses the standard CVSS thresholds for each version (see Severity Rating
-Scale above).
-
-**SUSE Internal Severity Scale**: internally, SUSE processes also utilize a
-non-standard rating scale consisting of four tiers: Low, Moderate, Important,
-and Critical. For the purposes of Sentinel's core database representation,
-API endpoints, and calculation logic, the standard CVSS scale (Low, Medium,
-High, Critical) is used exclusively. Where external SUSE metadata (such as
-IBS/OBS patchinfo/updateinfo.xml files) contains the internal scale (e.g.,
-Moderate, Important), these values are treated as informational or mapped
-statically to their standard CVSS counterparts (Moderate → Medium, Important
-→ High) on the boundary, with no impact on core data models or calculations.
-
-This cascade is implemented by `resolve_severity_score` in
-`services/cvss.py`.
-
-### Eligibility Score Resolution
-
-Used for: product eligibility threshold comparison (see
-`docs/features/packages/package-model.md`, Axis 2: Eligibility).
-
-This resolution uses **only** the SUSE assessment of the configured default
-CVSS version. No fallback to other providers or other versions is applied:
-
-1. **SUSE assessment, default version**. If present, use this score.
-2. **Not resolvable**. If the SUSE assessment for the default version does
-   not exist (for any reason: the ticket has no associated CVE, the CVE
-   has no SUSE assessment, or SUSE has not scored the default version),
-   the score is treated as **10.0** (worst-case, conservative approach —
-    the Product is always eligible unless excluded by the Reactive Support
-   override).
-
-**Rationale**: eligibility drives automated decisions about which products
-receive a fix. Only the authoritative internal assessment (SUSE) should
-determine this. External provider scores are informational and useful for
-triage (severity cascade) but not authoritative for eligibility decisions.
-The 10.0 fallback ensures that products are never silently excluded before
-SUSE has assessed the vulnerability — blocked resolution is visible and
-correctable; silent omission is not.
-
-This resolution is implemented by `resolve_eligibility_score` in
-`services/cvss.py`.
-
-## Providers
-
-### Provider Model
-
-Each CVSS assessment is identified by the tuple `(cve_id, provider_name,
-cvss_version)`. The `provider_name` is a human-readable string stored
-directly on the assessment record.
-
-### External Providers
-
-#### NVD (Primary)
-
-- **Source**: NVD REST API v2 (`services.nvd.nist.gov/rest/json/cves/2.0`)
-- **Type**: independent assessment by NVD analysts
-- **Identified by**: `source` field with value `nvd@nist.gov`,
-  `type: "Primary"` in the API response
-- **Provider name in Sentinel**: `"NVD"`
-- **CVSS versions**: v2.0, v3.0, v3.1, and v4.0 (all metric arrays
-  present in the NVD API response are extracted)
-- **Fetch mechanism**: extracted from `cvssMetricV2`, `cvssMetricV30`,
-  `cvssMetricV31`, and `cvssMetricV40` arrays in the NVD CVE API
-  response
-
-#### CNA (via NVD Secondary)
-
-- **Source**: NVD REST API v2, assessments with `type: "Secondary"`
-- **Type**: assessment provided by the CVE Numbering Authority (the vendor
-  or organization that assigned the CVE)
-- **Identified by**: `source` field containing the CNA's email (e.g.,
-  `secure@intel.com`), `type: "Secondary"`
-- **Provider name in Sentinel**: resolved to a human-readable name using the
-  NVD Source API (`services.nvd.nist.gov/rest/json/source/2.0`). For
-  example, `secure@intel.com` resolves to `"Intel Corporation"`
-- **CVSS versions**: varies by CNA; may include v3.1, v4.0, or both
-- **Name resolution**: during CVE sync, the ingestion service resolves
-  `source` email addresses to display names via the NVD Source API. See
-  `docs/features/tickets/cve-sync-nvd.md` (NVD Source API Caching) for
-  the caching strategy
-- **Convergence with direct sources**: both NVD Secondary and direct-source
-  fetchers (e.g., Red Hat) write to the same UPSERT conflict key
-  `(cve_id, provider_name, cvss_version)` — last-writer-wins. Since direct
-  sources run on independent schedules, data converges to the direct-source
-  value within one fetcher cycle. Temporary oscillation (NVD overwriting a
-  fresher direct-source score between cycles) is transient and harmless —
-  CVSS scores rarely change after publication
-
-#### Red Hat
-
-- **Source**: Red Hat Security Data API
-  (`access.redhat.com/hydra/rest/securitydata/cve/{CVE-ID}.json`)
-- **Type**: independent assessment by Red Hat Product Security
-- **Provider name in Sentinel**: `"Red Hat"`
-- **CVSS versions**: v2.0 and v3.x (version derived from vector string
-  prefix). v4.0 will be supported when Red Hat adds it
-- **Response format**: the `cvss3` object contains `cvss3_base_score`
-  (string), `cvss3_scoring_vector` (string), and `status` (`"draft"` or
-  `"verified"`). Only the vector string is used — the score is recomputed
-  locally by the `cvss` library for consistency
-- **Deduplication**: if Red Hat also appears as a CNA Secondary in NVD
-  (same provider name `"Red Hat"`), both write to the same UPSERT conflict
-  key — last-writer-wins. Since Red Hat runs daily (after NVD's 6h cycle),
-  the Red Hat value typically persists
-
-### Internal Provider
-
-#### SUSE
-
-- **Source**: manual input by VA
-- **Provider name in Sentinel**: `"SUSE"`
-- **CVSS versions**: the VA MUST provide both v3.1 and v4.0 assessments
-  before the ticket can progress beyond Analysis (see Workflow Gates)
-- **Input method**: the VA enters a CVSS vector string (which embeds the
-  version in its prefix); the backend derives the CVSS version from the
-  prefix and calculates the score automatically using the `cvss` library
-- **Editability**: CVSS mutations are subject to
-  `ensure_ticket_operable()` when the CVE has an associated ticket —
-   mutations are rejected with `409 TICKET_NOT_MUTABLE` if the ticket is
-   in Ignored or Duplicated status. Ticketless CVEs are always mutable. Changes trigger
-  severity and eligibility recalculation
-
-## CVSS Versions
-
-### CVSS v3.1 — Base Metrics
-
-8 base metrics parsed from the vector string:
-
-| Abbreviation | Metric               | Possible Values                  |
-|--------------|----------------------|----------------------------------|
-| AV           | Attack Vector        | Network, Adjacent, Local, Physical |
-| AC           | Attack Complexity    | Low, High                        |
-| PR           | Privileges Required  | None, Low, High                  |
-| UI           | User Interaction     | None, Required                   |
-| S            | Scope                | Unchanged, Changed               |
-| C            | Confidentiality      | None, Low, High                  |
-| I            | Integrity            | None, Low, High                  |
-| A            | Availability         | None, Low, High                  |
-
-### CVSS v4.0 — Base Metrics
-
-11 base metrics parsed from the vector string:
-
-| Abbreviation | Metric                       | Possible Values                  |
-|--------------|------------------------------|----------------------------------|
-| AV           | Attack Vector                | Network, Adjacent, Local, Physical |
-| AC           | Attack Complexity            | Low, High                        |
-| AT           | Attack Requirements          | None, Present                    |
-| PR           | Privileges Required          | None, Low, High                  |
-| UI           | User Interaction             | None, Passive, Active            |
-| VC           | Vuln. Confidentiality Impact | None, Low, High                  |
-| VI           | Vuln. Integrity Impact       | None, Low, High                  |
-| VA           | Vuln. Availability Impact    | None, Low, High                  |
-| SC           | Sub. Confidentiality Impact  | None, Low, High                  |
-| SI           | Sub. Integrity Impact        | None, Low, High                  |
-| SA           | Sub. Availability Impact     | None, Low, High                  |
-
-### Severity Rating Scale
-
-Both CVSS v3.1 and v4.0 use the same severity rating scale:
-
-| Score Range | Severity |
-|-------------|----------|
-| 0.0         | None     |
-| 0.1 – 3.9  | Low      |
-| 4.0 – 6.9  | Medium   |
-| 7.0 – 8.9  | High     |
-| 9.0 – 10.0 | Critical |
-
-A score of exactly 0.0 maps to severity `None` — this is a valid CVSS
-rating indicating no security impact, distinct from `NULL` (no assessment
-available / unresolved).
-
-## Severity Derivation
-
-The `severity` field on the CVE table is a denormalized, nullable field,
-always derived from CVSS assessments. It is never set manually.
-`NULL` indicates that no CVSS assessment is available from any provider
-(unresolved). The enum value `None` indicates a resolved CVSS score of
-exactly 0.0 (the standard CVSS "None" rating — no security impact).
-
-**Note**: for tickets without a CVE, severity is determined by the
-`severity_manual` field on the Ticket, set manually by the VA. The
-CVE severity derivation described below applies only to tickets with an
-associated CVE. See `docs/features/tickets/tickets.md` (Severity Resolution)
-for the unified resolution logic.
-
-### Calculation Rules
-
-1. Resolve the CVSS score using the **Severity resolution cascade** (see
-   above): SUSE default version → SUSE other version → highest provider
-   default version → highest provider other version → absent
-2. If a score is found: map it to a severity using the rating scale
-   thresholds for the version of that score
-3. If no score is found (absent): `CVE.severity` is set to `NULL`
-   (unresolved)
-
-### When Severity is Recalculated
-
-Severity is recalculated whenever:
-
-- A CVSS assessment is added, modified, or removed for the CVE
-- The system-wide default CVSS version is changed by an Admin
-- A ticket transitions from an inactive status (Resolved, Ignored,
-  Duplicated) to an active status — `recalculate_cvss_chain()` is
-  called synchronously by `reconcile_ticket_status()` when it detects
-  the transition, plus `catch_up()` tasks are enqueued internally
-- A CVE is associated with a ticket (or a ticket is created with a
-   CVE) — `recalculate_cvss_chain()` is called synchronously within
-   the transaction (see `ticket-service.md`, `associate_cve()` step 9)
-
-### Severity Override by CVSS
-
-The SUSE CVSS assessment is mandatory for ticket progression (see Workflow
-Gates). Once both SUSE assessments (v3.1 and v4.0) are provided, the
-severity is always calculated automatically from the SUSE score of the
-default version. There is no manual severity selection.
-
-## Workflow Gates
-
-### SUSE CVSS Required for Ticket Progression (Tickets with CVE)
-
-The SUSE CVSS v3.1 and v4.0 assessments are a prerequisite for the
-Analysis → Analyzed gate (see [`tickets.md`](tickets.md), Gate condition
-\#4). This ensures severity and eligibility are computable before the
-ticket progresses.
-
-**Tickets without CVE**: this gate does not apply. Instead, the VA must
-set `severity_manual` before the ticket can progress. See
-[`tickets.md`](tickets.md) (Gate: Analysis → Analyzed) for the full gate
-conditions applicable to all ticket types.
-
-## Eligibility Threshold
-
-Product eligibility for security updates is determined by comparing a CVSS
-score against the product's `cvss_threshold` (from AIMAAS). The score
-selection follows the **Eligibility Score Resolution** cascade (see above)
-— no fallback to other providers is applied.
-
-See `docs/features/packages/package-model.md` for the full eligibility logic.
-
-## Data Sync
-
-### NVD Sync (Incremental)
-
-The `sync_nvd_cves` fetcher runs every 6 hours and ingests CVSS
-assessments (Primary and Secondary) from the NVD REST API v2. CNA
-display names for Secondary assessments are resolved via the NVD Source
-API. Changes are persisted via `cve_service` (see
-[`cve-service.md`](cve-service.md)). If any CVSS assessment changed for
-a CVE with an active ticket, the recalculation chain is triggered (see
-Recalculation Chain below).
-
-For the full fetcher definition — including the incremental algorithm,
-NVD Source API caching strategy, first-run behavior, and error handling
-— see [`cve-sync-nvd.md`](cve-sync-nvd.md) (Fetcher:
-`sync_nvd_cves`).
-
-### Red Hat Sync
-
-Red Hat's API does NOT support incremental fetching (no
-`modified_after` parameter). The `sync_redhat_cves` fetcher runs daily
-(03:00 UTC) and re-fetches Red Hat data for all CVEs with active
-tickets.
-
-Red Hat provides both CVSS v3 and CVSS v2 assessments. Both versions
-are imported as `CVECVSSAssessment` records with
-`provider_name = "Red Hat"`. The fetcher also extracts CWE
-identifiers, references, and source package names from the same API
-response.
-
-**Scope gap**: the fetch scope is "CVEs with active tickets" due to
-Red Hat API rate limits. CVEs whose tickets are in Ignored,
-Duplicated, or Resolved status do NOT receive Red Hat CVSS updates
-during the inactive period. This gap is mitigated by the `catch_up()`
-mechanism: when a ticket is reactivated, the default `catch_up()`
-(inherited from `BaseCVEFetcher`) calls `fetch_single(cve_id)` to
-retrieve the latest Red Hat data. See
-[fetcher-infrastructure.md](../platform/fetcher-infrastructure.md)
-("Per-Ticket Catch-Up: `catch_up()` Method").
-
-For the full fetcher definition — including the complete algorithm,
-CWE/reference extraction, package best-effort addition, error
-handling, and `fetch_single` method — see
-[`cve-sync-redhat.md`](cve-sync-redhat.md) (Fetcher: `sync_redhat_cves`).
-
-### Sync Scope
-
-CVSS sync scope varies by fetcher:
-
-- **NVD** (`sync_nvd_cves`): global scope — fetches all CVEs modified
-  in the time window, regardless of ticket status. Persistence is
-  unrestricted (consistent with the Data Convention below)
-- **Red Hat** (`sync_redhat_cves`): scoped to CVEs with **active
-  tickets** — tickets in status `New`, `Analysis`, or `Analyzed` (see
-  `docs/data-model.md` for the authoritative definition of active
-  tickets). This restriction exists because the Red Hat API requires
-  per-CVE lookups (no bulk/incremental endpoint)
-
-When a ticket transitions to `Resolved`, `Ignored`, or `Duplicated`,
-Red Hat CVSS sync stops monitoring that CVE. NVD data continues to be
-persisted regardless of ticket status (time-window-based fetching is
-independent of ticket lifecycle). In both cases, existing CVSS data
-remains in the database. If the ticket is later reopened, the
-recalculation chain re-derives severity and eligibility from the
-current `CVECVSSAssessment` records (which may have been updated by
-NVD in the interim).
-
-### CVSS Fetcher Data Convention
-
-CVSS fetchers MUST separate data persistence (`CVECVSSAssessment` records)
-from recalculation of derived data (severity, eligibility, ticket status):
-
-1. **Persistence scope**: the ticket-status filter ("active tickets only")
-   applies ONLY to the recalculation chain, NEVER to the persistence of
-   `CVECVSSAssessment` records — unless the external API's design or rate
-   limits make broader persistence impractical (e.g., per-CVE lookup APIs
-   with no bulk/incremental endpoint).
-2. **Gap documentation**: when a fetcher's fetch scope is narrower than
-   "all CVEs with tickets" due to API constraints, the fetcher's
-   specification MUST document the gap explicitly and the system MUST
-   provide a catch-up mechanism (via `catch_up()`) for tickets
-   reactivated after a period of inactivity.
-3. **Goal**: `CVECVSSAssessment` records are as complete as possible
-   regardless of ticket lifecycle state. Reopened tickets converge to
-   accurate derived data quickly via the synchronous recalculation
-   chain (immediate best-effort) followed by asynchronous `catch_up()`
-   tasks (data catch-up).
-
-## Recalculation Chain
-
-When a CVSS assessment changes (added, modified, or removed) for a CVE
-with an active ticket, Sentinel performs the following recalculation:
-
-1. **Recalculate severity**: call `resolve_severity_score()` (5-step
-   severity cascade) to determine the new resolved score. If a score is
-   found, map it to a severity label via `calculate_severity()`. If no
-   score is found (absent), set `CVE.severity` to `NULL`. If severity changed,
-   update the CVE's `severity` field.
-2. **Recalculate product eligibility**: call `resolve_eligibility_score()`
-   (2-step SUSE-only cascade — separate call with different semantics; the
-   eligibility score may differ from the severity score when SUSE has not
-   assessed the default version). Re-evaluate the `eligible` flag for every
-   `TicketPackageProduct` linked to the ticket (including soft-deleted
-   products — see [`package-model.md`](../packages/package-model.md) Design
-   Decision 8), applying the eligibility rules defined in
-   [`package-model.md`](../packages/package-model.md) (Axis 2: Eligibility).
-   *(Note: because of the strictly unidirectional dependency from `package_service` to `ticket_mutations`, these eligibility updates are executed inline directly within the `ticket_mutations` module during CVSS mutations. See [`ticket-mutations.md`](ticket-mutations.md) for the module boundary contract.)*
-3. **Ticket status re-evaluation**: call `reconcile_ticket_status()` to
-   re-evaluate the ticket status based on current gate conditions (see
-   [`ticket-mutations.md`](ticket-mutations.md)).
-   **Note**: for VA-initiated SUSE CVSS changes on a Resolved ticket,
-   this re-evaluation may cause a status regression. Automated sync (NVD,
-   Red Hat) and default CVSS version changes only process active tickets
-   (New, Analysis, Analyzed) — Resolved tickets are excluded from those
-   scopes.
-4. **Audit trail**: create `TicketAuditEvent` records for each change
-   (severity, product eligibility, ticket status). See
-   [`ticket-mutations.md`](ticket-mutations.md) for the per-operation
-   audit contract and [`ticket-audit-log.md`](ticket-audit-log.md) for
-   event field semantics.
+`resolve_severity_score(assessments, default_cvss_version)` is pure and receives
+the complete, unfiltered set of assessments for one CVE. Pre-filtering by
+provider or version is a caller bug. The configured default must be `3.1` or
+`4.0`.
+
+Each candidate receives the following deterministic key, compared in the
+listed order:
+
+1. **Cascade step**, ascending:
+   1. canonical SUSE assessment at the default version;
+   2. canonical SUSE assessment at another accepted version;
+   3. non-SUSE assessment at the default version;
+   4. non-SUSE assessment at another accepted version.
+2. **Applicable version priority**, highest first: `4.0`, `3.1`, `3.0`,
+   `2.0`. Within default-version steps there is only one applicable version,
+   so this component is equal for every candidate in that step.
+3. **Score**, descending.
+4. **Provider name**, ascending by Unicode code-point lexical order on the
+   exact persisted string. This comparison is performed independently of
+   database collation and locale.
+
+The natural-key uniqueness of `(cve_id, provider_name, cvss_version)` makes
+this key total for a valid assessment set. Input order and database row order
+cannot change the winner.
+
+The function returns either one stable result or absence:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `score` | `Decimal` | Winning assessment's Base score |
+| `version` | accepted-version literal | Winning assessment's exact version |
+| `provider` | `str` | Winning assessment's canonical persisted provider name |
+| `label` | unified severity enum | Severity calculated from `score` using the unified scale |
+
+Absence means the CVE has no assessment and therefore has
+`CVE.severity = NULL`. Ticket existence and Ticket status never cause severity
+resolution to be skipped.
+
+### SUSE Internal Severity Terminology
+
+External SUSE metadata may use `Moderate` and `Important`. Those labels are not
+CVSS assessment severity or unified CVE severity. Owning ingestion contracts
+may treat them as informational or map them at their boundary; they never
+replace vector-derived values in this specification.
+
+## Eligibility Score Resolution
+
+`resolve_eligibility_score(assessments, default_cvss_version)` is pure and also
+receives the complete, unfiltered assessment set. It returns exactly:
+
+```text
+{score: Decimal, source: suse | fallback}
+```
+
+Resolution is:
+
+1. If the canonical SUSE assessment for the configured default version exists,
+   return its score with `source = suse`.
+2. Otherwise return `10.0` with `source = fallback`.
+
+There is no fallback to another version or external provider. The result always
+exists, including for a ticketless CVE or a Ticket without a CVE. Product
+threshold, lifecycle, override, persistence, audit, and Ticket reconciliation
+behavior are owned by `package-model.md` and `package-service.md`. CVSS code
+returns this result and a propagation disposition; it does not mutate Product
+eligibility under this contract.
+
+Severity and eligibility are deliberately separate. A consumer MUST NOT use
+the Severity Resolution Cascade winner for eligibility or use the eligibility
+fallback to populate `CVE.severity`.
+
+## Provider Identity and Authority
+
+Each assessment is identified by `(cve_id, provider_name, cvss_version)`.
+Provider names are human-readable and otherwise source-owned.
+
+`SUSE` is the reserved internal provider identity. To test whether any supplied
+provider name is reserved, trim its outer whitespace and apply Unicode
+case-folding, then compare with the case-folded string `suse`. Every equivalent
+value, including whitespace and case variants, is reserved. The only stored
+form is exactly `SUSE`.
+
+Caller authority is exhaustive:
+
+| Caller category | Allowed operations |
+|---|---|
+| Authorized user through the existing SUSE API | Create, update, or delete only canonical `SUSE` assessments |
+| Trusted system ingestion | Create or update only non-reserved external-provider assessments |
+| Any consumer API caller | No mutation of external-provider assessments |
+
+An ingestion caller that supplies `SUSE` or any reserved equivalent is
+rejected before persistence. Source-specific normalization of non-reserved
+provider names remains with each ingestion specification. System ingestion
+does not delete external assessments: if a source stops publishing an
+assessment, Sentinel retains the last persisted value until an explicit
+source-owned withdrawal contract exists.
+
+## Assessment Persistence and Ticket Status
+
+An effective assessment create, update, or delete first maintains CVE-owned
+state: the canonical assessment and the resolved `CVE.severity`. Ticket-owned
+Product eligibility and gate effects are a separate propagation concern.
+
+The mutation result includes the committed assessment action (`created`,
+`updated`, `unchanged`, `deleted`, or `not_found` as applicable), the new
+Severity Resolution result, whether unified severity changed, and one of these
+propagation dispositions:
+
+- `not_applicable`: no associated Ticket;
+- `immediate`: the package-owned propagation contract may run in the current
+  workflow;
+- `deferred_until_reactivation`: Ticket-owned propagation waits for the
+  reactivation workflow; or
+- `none`: the serialized operation made no effective mutation.
+
+The following matrix is authoritative:
+
+| CVE/Ticket state | Manual SUSE mutation | External assessment update |
+|---|---|---|
+| No associated Ticket | Persist and recalculate; `not_applicable` | Persist and recalculate; `not_applicable` |
+| `New` | Persist and recalculate; `immediate` | Persist and recalculate; `immediate` |
+| `Analysis` | Persist and recalculate; `immediate` | Persist and recalculate; `immediate` |
+| `Analyzed` | Persist and recalculate; `immediate` | Persist and recalculate; `immediate` |
+| `Resolved` | Persist and recalculate; `immediate` | Persist and recalculate; `deferred_until_reactivation` |
+| `Ignored` | Reject with `TICKET_NOT_MUTABLE`; no result | Persist and recalculate; `deferred_until_reactivation` |
+| `Duplicated` | Reject with `TICKET_NOT_MUTABLE`; no result | Persist and recalculate; `deferred_until_reactivation` |
+
+External persistence is source-owned CVE maintenance and therefore is not
+blocked by Ticket manual-zone immutability. Deferral never delays the direct
+assessment write, `CVE.severity`, or their direct Ticket audit records. It
+delays only package-owned and gate-owned propagation.
+
+A manual SUSE mutation on a `Resolved` Ticket is immediate because it is
+intentional, authorized Ticket work. An external update on the same Ticket is
+CVE maintenance and leaves Ticket-owned propagation to reactivation.
+
+### Direct Audit Summary
+
+If the CVE has an associated Ticket, every effective assessment mutation
+creates `cvss_assessment_changed` in the same transaction. A manual SUSE
+mutation uses the acting user; external ingestion uses the system actor
+(`user_id = NULL`). The event's old and new values reflect the actual
+serialized assessment states.
+
+If unified `CVE.severity` changes, the same transaction also creates
+`severity_changed`. This derived event always uses the system actor, including
+when a user supplied the SUSE vector. Ticketless CVEs create no
+`TicketAuditEvent`; this specification introduces no CVE audit trail.
+
+Rejected requests raise and return no mutation result. Unchanged, not-found,
+and rolled-back outcomes create no direct event. Audit failure rolls back the
+assessment, `CVE.severity`, and every other change in the caller-owned
+transaction.
+
+### Serialization and Concurrent Outcomes
+
+Assessment mutations serialize on the `CVE` root. When both CVE-owned and
+Ticket-owned state participate, the global root-lock order is `CVE` then
+`Ticket`. Ticketless mutations therefore still have a serialization root, and
+concurrent association of a Ticket cannot invert lock order.
+
+After obtaining the applicable locks, the operation reloads the assessment and
+association state before classifying its result. Create, update, unchanged,
+delete, and not-found outcomes, metrics, HTTP status, direct audit old/new
+values, and propagation disposition all reflect that serialized state, not an
+unlocked pre-read. A waiting equal upsert is `unchanged`; a waiting delete after
+another delete is `not_found`. `cve_service.upsert_cve()` composes under the
+same CVE root and does not acquire a second root in the opposite order.
+
+Services flush but do not commit or roll back. The caller owns the transaction.
+
+## Workflow Gate
+
+For a Ticket with a CVE, canonical SUSE v3.1 and v4.0 assessments are both
+required for the Analysis to Analyzed gate. SUSE v2.0 and v3.0 assessments are
+valid and stored but do not satisfy this gate. Tickets without a CVE use their
+manual severity gate instead. See `tickets.md` for the complete gate.
+
+## External Synchronization
+
+External fetchers persist every accepted assessment available within their
+own source scope. Persistence is conceptually independent of recalculation
+scope and Ticket status. A source whose API or rate limits require a narrower
+fetch scope documents that limitation and provides the applicable catch-up
+behavior in its owning fetcher specification.
+
+Current provider examples include NVD, CNA organizations, and Red Hat. Their
+source URLs, extraction rules, schedules, provider-name normalization, and
+catch-up behavior remain in their owning fetcher specifications. All of them
+use the common parser, reserved-name rule, and persistence matrix above.
 
 ## API Endpoints
 
+The existing CVSS endpoints and authorization levels are unchanged.
+
+### Shared Assessment Item
+
+GET and POST serialize exactly the same assessment item schema:
+
+| Field | Type | Contract |
+|---|---|---|
+| `id` | UUID | Assessment identifier |
+| `provider_name` | string | Canonical persisted provider name |
+| `cvss_version` | `2.0`, `3.0`, `3.1`, or `4.0` | Exact vector version |
+| `score` | decimal number | Calculated Base score |
+| `severity` | version-specific lowercase enum | Assessment severity, not unified CVE severity |
+| `vector_string` | string | Canonical complete Base vector |
+| `metrics` | version-discriminated metrics object | Exact shape defined in Accepted Base Vectors |
+| `created_at` | UTC datetime | Creation timestamp with `Z` suffix |
+| `updated_at` | UTC datetime | Last-update timestamp with `Z` suffix |
+
+Metric and severity wire values are lowercase with underscores for multi-word
+values. The `cvss_version` discriminator determines the exact `metrics` shape;
+fields from another version are never present and metrics are never returned as
+an untyped abbreviation map.
+
 ### Get CVSS Assessments for a CVE
 
-```
+```text
 GET /api/v1/cves/{cve_id}/cvss
 ```
 
 **`Access: Public`**
 **`Authentication: Optional`**
 
-The `{cve_id}` path parameter accepts a CVE-ID string (e.g.,
-`CVE-2025-1234`). See `docs/api-spec.md` (CVE Identifier Resolution).
+The path uses the CVE Identifier Resolution contract in `docs/api-spec.md`.
+The endpoint returns one bounded composite resource and is not paginated.
+Client-controlled sorting is not supported because the bounded assessment set
+has one canonical order. Assessments are ordered by version `4.0`, `3.1`,
+`3.0`, `2.0`, then provider name ascending using the same code-point lexical
+comparison as resolution. This list order is independent of which assessment
+wins severity.
 
-Response: composite CVSS view for the CVE — the list of raw assessments
-alongside the computed severity and eligibility results, returned as a
-single conceptual resource in the `data` envelope. Pagination is
-intentionally omitted — the number of CVSS assessments per CVE is
-naturally bounded (one per provider-version combination, typically fewer
-than 20 records). Client-controlled sorting is not supported; assessments
-are returned in a fixed order grouped by CVSS version.
+`severity` is the stable Severity Resolution result or JSON `null` when absent.
+`eligibility` is always present and is the stable Eligibility Score Resolution
+result.
 
 ```json
 {
   "data": {
     "assessments": [
       {
-        "id": "uuid",
+        "id": "01994c20-7c00-7000-8000-000000000001",
         "provider_name": "NVD",
+        "cvss_version": "4.0",
+        "score": 9.3,
+        "severity": "critical",
+        "vector_string": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N",
+        "metrics": {
+          "attack_vector": "network",
+          "attack_complexity": "low",
+          "attack_requirements": "none",
+          "privileges_required": "none",
+          "user_interaction": "none",
+          "vulnerable_system_confidentiality": "high",
+          "vulnerable_system_integrity": "high",
+          "vulnerable_system_availability": "high",
+          "subsequent_system_confidentiality": "none",
+          "subsequent_system_integrity": "none",
+          "subsequent_system_availability": "none"
+        },
+        "created_at": "2026-09-10T10:30:00Z",
+        "updated_at": "2026-09-10T10:30:00Z"
+      },
+      {
+        "id": "01994c20-7c00-7000-8000-000000000002",
+        "provider_name": "SUSE",
         "cvss_version": "3.1",
         "score": 9.8,
+        "severity": "critical",
         "vector_string": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
         "metrics": {
-          "attack_vector": "Network",
-          "attack_complexity": "Low",
-          "privileges_required": "None",
-          "user_interaction": "None",
-          "scope": "Unchanged",
-          "confidentiality": "High",
-          "integrity": "High",
-          "availability": "High"
+          "attack_vector": "network",
+          "attack_complexity": "low",
+          "privileges_required": "none",
+          "user_interaction": "none",
+          "scope": "unchanged",
+          "confidentiality_impact": "high",
+          "integrity_impact": "high",
+          "availability_impact": "high"
         },
-        "created_at": "2025-03-15T10:30:00Z",
-        "updated_at": "2025-03-15T10:30:00Z"
+        "created_at": "2026-09-10T10:31:00Z",
+        "updated_at": "2026-09-10T10:31:00Z"
       }
     ],
     "default_cvss_version": "3.1",
     "severity": {
       "score": 9.8,
       "version": "3.1",
-      "provider": "NVD",
-      "label": "Critical"
+      "provider": "SUSE",
+      "label": "critical"
     },
     "eligibility": {
       "score": 9.8,
@@ -503,53 +527,14 @@ are returned in a fixed order grouped by CVSS version.
 }
 ```
 
-The `severity` and `eligibility` objects expose the results of the two
-distinct CVSS resolution strategies:
-
-- **`severity`**: result of the Severity Resolution Cascade (5-step,
-  multi-provider). `score` is the resolved CVSS score, `version` is the
-  CVSS version of the resolved score (e.g., `"3.1"`, `"4.0"`), `provider`
-  is the provider that supplied it, and `label` is the severity rating
-  (`"None"`, `"Low"`, `"Medium"`, `"High"`, `"Critical"`). Used for
-  display and triage.
-
-  The `severity` object is formally `null` when no CVSS assessments are
-  available (Absent severity cascade step 5).
-
-  The `severity.provider` matches the `provider_name` column of
-  `CVECVSSAssessment` (VARCHAR(100), set open, with examples such as
-  `"NVD"`, `"SUSE"`, `"Red Hat"`, or CNA names like `"Intel Corporation"`).
-- **`eligibility`**: result of the Eligibility Score Resolution (2-step,
-  SUSE-only). `score` is the CVSS score used for product eligibility
-  threshold comparison. `source` indicates where the score came from:
-  `"suse"` when the score comes from a SUSE assessment for the default
-  version, `"fallback"` when no SUSE assessment exists for the default
-  version (score defaults to 10.0 — conservative worst-case). Used for
-  product eligibility threshold comparison.
-
-Example response when no CVSS assessments are available (absent severity):
-
-```json
-{
-  "data": {
-    "assessments": [],
-    "default_cvss_version": "3.1",
-    "severity": null,
-    "eligibility": {
-      "score": 10.0,
-      "source": "fallback"
-    }
-  }
-}
-```
+When there are no assessments, `assessments` is empty, `severity` is `null`,
+and `eligibility` is `{"score": 10.0, "source": "fallback"}`.
 
 ### Set or Update SUSE CVSS Assessment
 
-```
+```text
 POST /api/v1/cves/{cve_id}/cvss/suse
 ```
-
-Request body:
 
 ```json
 {
@@ -557,293 +542,155 @@ Request body:
 }
 ```
 
-- `vector_string`: valid CVSS vector string (maximum 200 characters). The CVSS version is derived from the
-  vector prefix (`CVSS:4.0/` → 4.0, `CVSS:3.1/` → 3.1, `CVSS:3.0/` → 3.0,
-  no prefix → 2.0). The base score is computed automatically by the `cvss`
-  library.
+`vector_string` is a required JSON string with a maximum received length of
+200 characters. The shared parser applies the remaining domain rules. All four
+accepted versions may be stored for SUSE; only v3.1 and v4.0 satisfy the
+workflow gate.
 
-The API accepts any valid CVSS version for SUSE assessments (including v2.0
-and v3.0 from historical or cross-referenced data). However, the ticket
-progression gate requires SUSE assessments for both v3.1 AND v4.0 (see
-Workflow Gates) — assessments for other versions are stored but do not
-satisfy the gate. The UI presents only v3.1 and v4.0 as input options to
-VAs.
-
-The backend parses the vector, derives the version and score, and saves the
-assessment via `upsert_cvss_assessment()`. If an existing SUSE assessment for
-the derived version exists, it is updated; otherwise a new one is created.
-Triggers recalculation chain (unless the vector is unchanged — no-op
-short-circuit).
-
-Response: **201 Created** when a new assessment is created, **200 OK** when
-an existing one is updated or unchanged. The response body is the assessment
-object wrapped in the standard `{"data": ...}` envelope.
-
-**Note on POST with upsert semantics**: POST is used instead of PATCH or PUT
-because the target resource is not fully identified by the URL — the CVSS
-version (which determines which specific assessment record is created or
-updated) is derived from parsing the vector prefix in the request body, not
-from an explicit path parameter. Additionally, the operation may create a new
-entity rather than update an existing field, making POST semantically
-appropriate per the "Mutation Patterns" convention in `api-spec.md`. The
-differentiated response codes (201 for creation, 200 for update) make the
-upsert behavior explicit to clients.
-
-**Error responses**:
+The endpoint returns the shared assessment item in the standard `data`
+envelope. It returns **201 Created only when this serialized invocation is the
+create winner**. It returns **200 OK** for an update or unchanged result,
+including a concurrent caller that waited and found the same canonical vector
+already created. POST remains appropriate because the vector determines the
+version component of the target natural key.
 
 | Status | Code | Condition |
-|--------|------|-----------|
-| 422 | `CVSS_INVALID_VECTOR` | Vector string is malformed or unparseable |
-
-The `TICKET_NOT_MUTABLE` scoped response applies only when the CVE has an
-associated ticket. CVEs without an associated ticket are always mutable.
+|---|---|---|
+| 422 | `CVSS_INVALID_VECTOR` | String passes Pydantic shape checks but violates the accepted Base-vector contract |
 
 **`Capability: manage_cvss`**
 
 ### Delete SUSE CVSS Assessment
 
-```
+```text
 DELETE /api/v1/cves/{cve_id}/cvss/suse/{cvss_version}
 ```
 
-The `{cvss_version}` path parameter accepts: `2.0`, `3.0`, `3.1`, `4.0`.
-Unrecognized values are treated as not found (404
-`CVSS_ASSESSMENT_NOT_FOUND`).
-
-Removes the SUSE CVSS assessment for the specified version. Triggers
-recalculation chain. The ticket may no longer meet the progression gate
-requirements.
-
-Response: 204 No Content.
-
-**Error responses**:
+`cvss_version` accepts exactly `2.0`, `3.0`, `3.1`, or `4.0`. An unrecognized
+value or absent canonical SUSE assessment returns the existing not-found error.
+An effective delete returns 204 No Content.
 
 | Status | Code | Condition |
-|--------|------|-----------|
-| 404 | `CVSS_ASSESSMENT_NOT_FOUND` | No SUSE assessment exists for the specified version |
-
-The `TICKET_NOT_MUTABLE` scoped response applies only when the CVE has an
-associated ticket. CVEs without an associated ticket are always mutable.
+|---|---|---|
+| 404 | `CVSS_ASSESSMENT_NOT_FOUND` | No canonical SUSE assessment exists for the accepted version |
 
 **`Capability: manage_cvss`**
 
-## Service Architecture
+## Service Boundaries
 
-CVSS logic is split across two service modules with distinct
-responsibilities:
+### Pure CVSS Logic
 
-### `services/cvss.py` — Pure Resolution Logic
+`services/cvss.py` contains database-free functions:
 
-This module contains **read-only, side-effect-free** functions that
-implement the CVSS resolution and scoring algorithms. These functions
-never mutate the database — they receive data and return results.
+| Function | Input | Output |
+|---|---|---|
+| `validate_cvss_vector` | received vector string | Stable parsed result or `InvalidCVSSVectorError` |
+| `resolve_severity_score` | complete assessment set, default version | Stable severity result or absence |
+| `resolve_eligibility_score` | complete assessment set, default version | Stable `{score, source}` result |
+| `calculate_severity` | `Decimal` score | Unified severity label |
 
-| Function                    | Input                                      | Output                          | Description                                              |
-|-----------------------------|--------------------------------------------|---------------------------------|----------------------------------------------------------|
-| `resolve_severity_score`    | CVE assessments, default CVSS version      | (score, version, provider) or None | Implements the severity resolution cascade (5-step: SUSE default → SUSE other version → highest provider default → highest provider other → absent) |
-| `resolve_eligibility_score` | CVE assessments, default CVSS version      | Decimal (score)                 | Implements the eligibility score resolution (2-step, SUSE-only: SUSE default version → 10.0 fallback). Always returns a value |
-| `calculate_severity`        | CVSS score (float)                         | Severity enum                   | Maps score to severity using the rating scale            |
-| `validate_cvss_vector`      | Vector string                              | Parsed metrics + version + calculated score | Parses vector, detects version from prefix, validates format, and computes the base score |
+The functions are deterministic and side-effect-free. They perform no database
+access and never read settings directly; callers pass the configured default
+version.
 
-> **Input contract**: both `resolve_severity_score` and
-> `resolve_eligibility_score` receive the **complete, unfiltered** set of
-> all `CVECVSSAssessment` records associated with the CVE (from all
-> providers and all CVSS versions), plus the system's configured default
-> CVSS version. Filtering by provider and/or version is the internal
-> responsibility of each function — never the caller's. Passing a
-> pre-filtered subset is a caller bug, because it may alter fallback
-> behavior (e.g., removing non-SUSE assessments would suppress the
-> severity cascade's provider fallback steps). This design preserves
-> function purity (database-free, side-effect-free) and encapsulates the
-> resolution strategy entirely within each function.
+### Persistence and Propagation Boundary
 
-These functions are used in two contexts:
+The CVSS mutation service owns assessment persistence, `CVE.severity`, direct
+audit records, lock ordering, and the stable committed result. Package-owned
+services consume that result to implement Product eligibility propagation and
+Ticket reconciliation according to their own contract. The resolution
+algorithms are never copied into either mutation boundary.
 
-1. **Read path** (API `GET .../cvss`): to compute the `severity.score`,
-   `severity.version`, `severity.provider`, `severity.label`, and
-   `eligibility.score` response fields without any side effects
-2. **Write path** (via `ticket_mutations`): as building blocks for the
-   recalculation chain — `ticket_mutations` calls these functions to
-   determine the new severity and eligibility, then persists the results
+Changing `default_cvss_version` retains the system-settings endpoint, batch,
+and recovery contracts in `system-settings.md`. This specification defines the
+pure results that such workflows consume; it does not redefine settings
+mutation, Redis coordination, task scope, or recovery.
 
-### `services/ticket_mutations.py` — CVSS Mutations
+## Required Tests
 
-All operations that create, update, or delete `CVECVSSAssessment`
-records MUST go through the `ticket_mutations` module. The module
-exposes `upsert_cvss_assessment()` (create-or-update) and
-`delete_cvss_assessment()`. When a CVSS mutation function is invoked,
-it conceptually: locks the ticket, validates operability, persists the
-assessment change, resolves derived data, emits audit events, and
-reconciles ticket status — all within a single database transaction
-(atomicity guarantee).
+Implementation must provide the following coverage in addition to the shared
+testing strategy.
 
-Two resolution functions from `services/cvss.py` are invoked during
-the write path, each serving a distinct purpose:
+### Parser Unit Tests
 
-- **`resolve_severity_score()`** (5-step cascade): determines the
-  resolved CVSS score used to derive `CVE.severity`. This is the
-  exclusive source of truth for `CVE.severity` — `resolve_eligibility_score()`
-  is never used for this purpose. When the cascade returns no score
-  (absent), `CVE.severity` is set to `NULL` (unresolved).
-- **`resolve_eligibility_score()`** (2-step SUSE-only cascade):
-  determines the score compared against product CVSS thresholds to
-  evaluate `TicketPackageProduct.eligible`. This is the exclusive
-  source of truth for product eligibility — `resolve_severity_score()`
-  is never used for this purpose.
+- One valid complete vector and correct canonical parsed result for every
+  accepted version, including every Base metric field and lowercase wire value.
+- Arbitrary metric order canonicalizes to FIRST order for every version.
+- Received lengths of exactly 200 and 201 characters, proving length is checked
+  before trimming; leading and trailing whitespace at a valid length; empty
+  after trim; and embedded whitespace.
+- Official-case acceptance and rejection of lowercase or mixed-case prefixes,
+  abbreviations, and values; v2.0 unprefixed acceptance; missing or unexpected
+  prefixes for every version.
+- Every required metric missing in turn, every duplicate metric, unknown
+  metrics, and representative Temporal, Environmental, Threat, and Supplemental
+  metrics.
+- Score boundaries and version-specific assessment severity, including v2.0
+  score `0.0` as assessment `low` and v3/v4 score `0.0` as assessment `none`.
+- Proof that supplied numeric score, version, severity, or metrics cannot enter
+  the parsing interface as independent authorities.
 
-The resolution cascade logic is **never reimplemented** inside
-`ticket_mutations` — it always delegates to `services/cvss.py`.
+### Resolution Unit Tests
 
-For per-function implementation details (parameters, pre-conditions,
-step sequences), see `docs/features/tickets/ticket-mutations.md`.
+- Every Severity Resolution Cascade step, absent result, and unified severity
+  boundary at `0.0`, `0.1`, `3.9`, `4.0`, `6.9`, `7.0`, `8.9`, `9.0`, and
+  `10.0`, including a v2.0 winner mapped to the unified scale.
+- Default-version preference, all non-default version priorities, descending
+  score, ascending provider tie-break, Unicode code-point ordering that differs
+  from database collation, and shuffled input producing an identical result.
+- Eligibility SUSE/default success and every fallback cause, with exact Decimal
+  score and `suse` or `fallback` source; proof that another SUSE version and a
+  higher external score do not participate.
+- Reserved SUSE comparison across canonical, case, and outer-whitespace
+  variants.
 
-### `services/settings.py` — System Settings
+### Persistence and API Tests
 
-The default CVSS version is read from the `SystemSetting` table via a
-dedicated settings service module. `services/cvss.py` does not access
-`SystemSetting` directly — the caller (API endpoint or
-`ticket_mutations` function) resolves the default version and passes it
-as a parameter. This keeps `cvss.py` free of database dependencies and
-makes it straightforward to test with any CVSS version.
-
-## Chain Execution Model
-
-The recalculation chain is a **synchronous service-layer operation**
-executed within the same database transaction as the CVSS change that
-triggered it. This guarantees atomicity: if the CVSS change is committed,
-the severity, eligibility, and ticket state adjustments are committed
-together.
-
-**Exception — batch recalculation on default version change**: when the
-Admin changes the default CVSS version (see
-`docs/features/platform/system-settings.md`), the chain must run for all
-active tickets with a CVE. This batch operation is executed as an
-asynchronous Celery task (`recalc_active_tickets`) to avoid blocking the
-API response.
-
-The PATCH endpoint acquires a **recalculation slot** (Redis key
-`cvss_recalc_active`, `SET NX EX 900`) before committing the setting
-change. This slot serves as a Redis liveness probe, a flip-flop guard
-(409 if a batch is already running), and a crash-recovery safety net
-(900-second TTL auto-expires if the worker crashes). See
-`docs/features/platform/system-settings.md` (Impact of changing the
-default version) for the full commit-first endpoint flow.
-
-The task:
-
-1. Iterates all active tickets with a CVE (status: New, Analysis,
-   Analyzed; `cve_id IS NOT NULL`)
-2. For each ticket, calls
-   `ticket_mutations.recalculate_cvss_chain()` — a dedicated entry
-   point that recalculates derived data without modifying any
-   `CVECVSSAssessment` record (see
-   `docs/features/tickets/ticket-mutations.md`). The task passes
-   `default_cvss_version` explicitly (received as a task argument from
-   the endpoint) to ensure all tickets in the batch use the same version
-3. Each ticket is processed in an **independent database transaction**
-   (isolation: a failure on one ticket does not roll back others)
-4. On error for a single ticket, the task logs the error with the
-   ticket ID and continues with the remaining tickets
-5. On completion (or failure), calls `release_slot()` (`DEL
-   cvss_recalc_active`) and logs completion metrics (total tickets
-   processed, successes, failures) to structured application logs
-
-The task has a hard timeout (`time_limit=900`) matching the slot TTL.
-This ensures the task is terminated before its slot can expire,
-preventing concurrent batches with conflicting version arguments.
-
-A dedicated endpoint
-(`POST /api/v1/admin/settings/default-cvss-version/recalculate`) allows
-the admin to manually re-trigger the batch for recovery after partial
-failures. It uses the same slot acquisition and enqueue logic. See
-`docs/features/platform/system-settings.md` (Trigger CVSS
-Recalculation).
-
-**Idempotency**: `recalculate_cvss_chain()` is idempotent —
-re-processing tickets already updated produces the same result.
-Per-ticket `FOR UPDATE` locks serialize concurrent mutations on the
-same ticket (e.g., batch running alongside a normal CVSS sync).
-
-## Ticket Reactivation: CVSS Catch-Up
-
-When a ticket transitions from an inactive status (Resolved, Ignored,
-Duplicated) to an active status (Analysis, Analyzed), two catch-up
-mechanisms execute to reconcile CVSS-derived data:
-
-1. **Synchronous** (within the reactivation transaction):
-   `recalculate_cvss_chain()` is called to reconcile derived data
-   (severity, eligibility) with the current `default_cvss_version` and
-   any `CVECVSSAssessment` updates that occurred while the ticket was
-   inactive. This provides immediate best-effort accuracy using
-   whatever assessment data is already persisted.
-
-2. **Asynchronous**: `reconcile_ticket_status()` registers one post-commit
-   reactivation workflow. That workflow first re-resolves the Ticket's
-   persisted package markers through SMELT, then enqueues `catch_up()` for
-   every registered fetcher via `get_catch_up_fetchers()` — not limited to
-   CVSS fetchers. This catches up on data that was not fetched during the
-   inactive period, while ensuring package-oriented catch-up sees the current
-   tree. Each `catch_up()` task operates independently; if it discovers changed
-   data, the normal mutation path handles the recalculation chain.
-
-Both mechanisms are handled internally by `reconcile_ticket_status()`
-(step 4) — no caller or endpoint handler action is required.
-
-The ticket may transition rapidly as async tasks complete (e.g.,
-re-open → Analysis, then a fetch discovers a release → Resolved). This
-is expected and correct behavior — the system converges to the accurate
-state.
-
-See [`ticket-mutations.md`](ticket-mutations.md) for the
-`reconcile_ticket_status()` step 4 behavior and
-`recalculate_cvss_chain()` contract,
-[`ticket-service.md`](ticket-service.md) for the reactivation context,
-and [`fetcher-infrastructure.md`](../platform/fetcher-infrastructure.md)
-for the `catch_up()` method contract.
-
-## Background Tasks
-
-The `sync_nvd_cves` fetcher (defined in
-`docs/features/tickets/cve-sync-nvd.md`) also produces CVSS assessments
-during CVE ingestion. See "NVD Sync (Incremental)" above for the
-consumer-oriented summary.
+- Manual SUSE create, update, unchanged, and delete, plus external create,
+  update, unchanged, retained-on-source-absence behavior, and rejection of
+  every reserved-name variant from system ingestion.
+- Ticketless CVEs and associated Tickets in each of `New`, `Analysis`,
+  `Analyzed`, `Resolved`, `Ignored`, and `Duplicated`, covering the complete
+  persistence matrix and propagation disposition.
+- Immediate `CVE.severity` maintenance for external updates in every Ticket
+  status and for ticketless CVEs; no assessment means `NULL`, while score 0.0
+  means unified `none`.
+- Exact direct audit count, actor, old/new values, no-op absence, and atomic
+  rollback. Manual assessment events use the acting user; external assessment
+  and every derived severity event use the system actor; ticketless changes
+  create no Ticket event.
+- Two-session lock tests for concurrent equal and differing upserts,
+  upsert/delete, delete/delete, Ticket association races, and composition with
+  CVE ingestion. Assert `CVE` then `Ticket` acquisition, truthful winner action,
+  HTTP status, metric, audit value, and propagation disposition.
+- GET and POST reuse of the same item schema for all four versions; exact
+  version-discriminated metric shapes; lowercase enum values; canonical vector;
+  deterministic `4.0 > 3.1 > 3.0 > 2.0`, provider-ascending list order;
+  nullable severity; and always-present eligibility.
+- POST returns 201 only to the serialized create winner and 200 to update and
+  unchanged outcomes. DELETE covers each accepted path version, not found,
+  and manual-zone rejection.
+- Public optional-auth GET behavior, `manage_cvss` authorization on mutations,
+  CVE accessibility, global Pydantic validation responses, and the domain
+  `CVSS_INVALID_VECTOR` response without changing external HTTP mappings.
 
 ## Data Model
 
-See `docs/data-model.md` for the full schema. This feature introduces the
-`CVECVSSAssessment` table and modifies the `CVE` table.
-
-## Security
-
-- Viewing CVSS data: publicly accessible (no authentication required)
-- Adding/editing/deleting SUSE CVSS: `manage_cvss` capability
-- Changing default CVSS version: `manage_settings` capability (see
-  `docs/features/platform/system-settings.md`)
-- External CVSS data is read-only — cannot be modified through Sentinel
+See `docs/data-model.md`. This contract uses the existing `CVE.severity` and
+`CVECVSSAssessment` columns, unique constraint, and timestamps. It requires no
+new table, column, enum, constraint, or migration.
 
 ## Cross-references
 
-- `docs/features/tickets/tickets.md` — Ticket lifecycle, gate conditions
-  (Analysis → Analyzed, Analyzed → Resolved), centralized status evaluation
-- `docs/features/tickets/ticket-mutations.md` — CVSS mutation functions,
-  `recalculate_cvss_chain()`, `reconcile_ticket_status()`, per-operation
-  audit contract, module boundary, manual-zone exit operations
-- `docs/features/tickets/ticket-service.md` — Non-gate ticket lifecycle
-  operations, un-ignore / un-duplicate hooks
-- `docs/features/tickets/ticket-audit-log.md` — `TicketAuditEvent` type
-  contract, field semantics
-- `docs/features/tickets/cve-service.md` — CVE Service Layer
-  (`upsert_cve()`, `CVEIngestPayload`, Phase 1/Phase 2 transaction model)
-- `docs/features/tickets/cve-sync-nvd.md` — `sync_nvd_cves` fetcher
-  definition (incremental algorithm, NVD Source API caching)
-- `docs/features/packages/package-model.md` — Three Orthogonal Dimensions,
-  Axis 2: Eligibility (rules, override model, Reactive Support)
-- `docs/features/platform/system-settings.md` — `default_cvss_version`
-  setting, batch recalculation trigger
-- `docs/features/platform/fetcher-infrastructure.md` — `BaseFetcher`
-  contract, `catch_up()` method, sub-operation exception
-- `docs/features/platform/cve-fetcher-infrastructure.md` — `BaseCVEFetcher`
-  contract, `fetch_single` capability
-- `docs/api-spec.md` — global API conventions (envelope format, error codes,
-  pagination, shared 422 responses), CVE Accessibility Check, CVE Identifier
-  Resolution
+- `docs/features/tickets/tickets.md` - Ticket severity and workflow gates
+- `docs/features/tickets/ticket-mutations.md` - CVSS mutation service
+- `docs/features/tickets/ticket-audit-log.md` - Direct Ticket audit fields
+- `docs/features/tickets/cve-service.md` - Source-neutral CVE ingestion
+- `docs/features/platform/cve-record-parser.md` - CVE Record extraction
+- `docs/features/packages/package-model.md` - Orthogonal eligibility rules
+- `docs/features/packages/package-service.md` - Package-owned propagation
+- `docs/features/platform/system-settings.md` - Default-version operations
+- `docs/features/platform/testing-strategy.md` - Test tiers and requirements
+- `docs/features/identity/rbac.md` - Capabilities and endpoint permission map
+- `docs/api-spec.md` - API envelopes, validation, and scoped responses
+- `docs/data-model.md` - Persisted CVE and assessment schema

@@ -12,6 +12,9 @@ module and `package_service`.
 Package-centric mutations (track status, delivery status, product eligibility,
 soft-deletion/restore, record creation, and additive maintainer association) are
 handled by `package_service` (`docs/features/packages/package-service.md`).
+CVSS mutation functions maintain CVE-owned assessment and severity state and
+return the deterministic eligibility result and propagation disposition needed
+by that package-owned boundary; they do not modify Product eligibility.
 
 Without this centralization, each gate-relevant caller would need to
 independently:
@@ -81,12 +84,19 @@ trusted internal processes — capability checks do not apply to them.
 Adding a new caller that passes a non-None `acting_user_id` without
 having verified the corresponding capability is a security bug.
 
+CVSS assessment mutations additionally require an explicit typed caller
+category. `CVSSMutationCaller.MANUAL_SUSE` identifies an authorized consumer
+operation on the internal SUSE assessment, and
+`CVSSMutationCaller.TRUSTED_EXTERNAL_INGESTION` identifies a trusted
+source-ingestion operation on a non-SUSE assessment. Caller authority is never
+inferred from whether `acting_user_id` is `NULL`.
+
 ### Relationship with other modules
 
 | Module | Relationship |
 |--------|-------------|
 | `services/cvss.py` | `ticket_mutations` delegates CVSS resolution and severity calculation to pure functions in `cvss.py`. The resolution cascade logic is never reimplemented inside `ticket_mutations` |
-| `services/package_service.py` | Handles all package-centric mutations (track status, delivery status, product eligibility, soft-delete/restore, record creation) and package queries. `package_service` imports `reconcile_ticket_status()`, `auto_assign_actor()`, and `ensure_ticket_operable()` from `ticket_mutations`. The dependency is unidirectional: `package_service` -> `ticket_mutations` |
+| `services/package_service.py` | Handles all package-centric mutations (track status, delivery status, product eligibility, soft-delete/restore, record creation) and package queries. CVSS mutation results provide a deterministic eligibility result and propagation disposition for this owner to consume. `package_service` imports `reconcile_ticket_status()`, `auto_assign_actor()`, and `ensure_ticket_operable()` from `ticket_mutations`; `ticket_mutations` does not mutate package records |
 | `services/ticket_service.py` | Handles non-gate operations (assignment, CVE association, mark-as-duplicate, set-confidentiality, access grants). See [ticket-service.md](ticket-service.md) for the full contract. These operations use the same FOR UPDATE pattern and import `ensure_ticket_operable()` from `ticket_mutations` |
 
 ## State Machine Zones
@@ -96,9 +106,11 @@ are valid:
 
 ### Gate zone (Analysis, Analyzed, Resolved)
 
-Status is determined automatically by `reconcile_ticket_status` based on
-gate conditions. The `ticket_mutations` module operates exclusively on
-tickets in this zone (with the exception of manual-zone exit functions).
+Status is determined automatically by `reconcile_ticket_status` based on gate
+conditions. Consumer-facing `ticket_mutations` operations act on Tickets in
+this zone, with the documented manual-zone exit exceptions. Trusted external
+CVSS ingestion is CVE-owned maintenance and follows the separate status matrix
+below.
 
 `New` is a pre-state, not part of the gate zone. A ticket in `New` status
 has never been claimed by a VA. The `New → Analysis` transition is an
@@ -133,9 +145,10 @@ new_value = Analyzed`).
 
 The post-transition catch-up is initiated internally by
 `reconcile_ticket_status()` step 4 when it detects the inactive-state exit.
-Synchronous CVSS recalculation remains in the transaction; the function
-registers the package-tree and fetcher recovery workflow for post-commit
-execution. No action is needed by the calling function or endpoint handler.
+The function registers the package-tree and fetcher recovery workflow for
+post-commit execution. It does not recalculate CVE-owned severity while holding
+the Ticket lock. No action is needed by the calling function or endpoint
+handler.
 
 Only the two manual-zone exit functions (`reopen_from_ignored`,
 `revert_duplicate`) call this helper. It is never called directly by
@@ -158,9 +171,6 @@ current reality (gate conditions + data freshness).
   evaluation
 - May null `assignee_id` and create an `assignment` audit event if the
   current assignee is inactive (inactive assignee sanitization)
-- May call `recalculate_cvss_chain()` when an inactive → active
-  transition is detected (producing `severity_changed` and
-  `product_eligibility_changed` audit events if derived values change)
 - May register the package-tree and fetcher catch-up workflow for post-commit
   execution when an inactive → active transition is detected
 
@@ -210,52 +220,32 @@ beyond status changes.
      variable at the start of the function (regression cases)
    - Resolve `new_status`: the status determined by step 2 (regardless of
      whether step 3 produced a change — see note below)
-   - If `effective_previous ∈ {Resolved, Ignored, Duplicated}` AND
-     `new_status ≠ effective_previous`:
-      1. If `ticket.cve_id IS NOT NULL`: call
-          `recalculate_cvss_chain(ticket_id, evaluation_date=evaluation_date)`
-          (reads `default_cvss_version` internally; if the setting is absent,
-          the exception propagates — this indicates a deployment error and
-          the transaction rolls back).
-         If `ticket.cve_id IS NULL`: skip (tickets without a CVE derive
-         severity from `severity_manual`, not from CVSS assessments —
-         there is nothing to recalculate)
-      2. Register one post-commit reactivation workflow. Its package-domain
-         phase first re-resolves every persisted package marker, including
-         soft-deleted markers, through `package_service`; after those
-         per-package transactions finish, it enqueues `catch_up()` for every
-         registered fetcher via `get_catch_up_fetchers()`. Registration does
-         not introduce a `ticket_mutations` → `package_service` import: the
-         post-commit workflow owner performs that orchestration. Registration
-         proceeds regardless of whether step 4.1 was skipped. The workflow and
-         failure isolation contract are defined in `package-service.md`
-         (Package-tree reactivation workflow) and `package-model.md`
-         (Reactivation and Convergence)
+    - If `effective_previous ∈ {Resolved, Ignored, Duplicated}` AND
+      `new_status ≠ effective_previous`, register one post-commit reactivation
+      workflow. Its package-domain phase first re-resolves every persisted
+      package marker, including soft-deleted markers, through
+      `package_service`; after those per-package transactions finish, it
+      enqueues `catch_up()` for every registered fetcher via
+      `get_catch_up_fetchers()`. Registration does not introduce a
+      `ticket_mutations` → `package_service` import: the post-commit workflow
+      owner performs that orchestration. The workflow and failure isolation
+      contract are defined in `package-service.md` (Package-tree reactivation
+      workflow) and `package-model.md` (Reactivation and Convergence)
    - **Note**: step 4 is independent of step 3. In the
      `_reenter_gate_zone()` case, the caller has already set the status
      before invoking reconcile; step 3 sees no change but step 4
      correctly detects the inactive-state exit via `previous_status`.
-     Post-commit workflow registration is unconditional after
-     `recalculate_cvss_chain()` returns — it does not re-check ticket
-     status
+      Post-commit workflow registration follows the inactive-state exit check;
+      it does not re-check Ticket status after registration
    - **Registration deduplication**: recursive reconciliation within the same
      caller-owned transaction registers at most one reactivation workflow for
      the Ticket. Duplicate workflows across separate transactions remain safe
      because package resolution and all catch-ups are idempotent.
-   - **Recursion termination**: `recalculate_cvss_chain()` calls
-      `reconcile_ticket_status()` at its step 7. This inner call may
-      re-trigger step 4 at most once: when the outer call set the ticket
-      to Resolved (gates satisfied with pre-inactivity data) and the
-      recalculation invalidates a gate, the inner call regresses the
-      ticket to Analysis with `effective_previous` = Resolved — which is
-      in the trigger set. The second `recalculate_cvss_chain()` call is
-      idempotent (same inputs within the same transaction), producing no
-      mutations. The innermost `reconcile_ticket_status()` sees an active
-      status (Analysis or Analyzed) as `effective_previous`, which is not
-      in the trigger set. Maximum recursion depth: 2 reconcile calls
-      (outer → inner → innermost no-op). No infinite recursion risk —
-      termination is guaranteed by idempotency of
-      `recalculate_cvss_chain()`
+   - `reconcile_ticket_status()` never acquires or re-acquires a CVE lock. CVSS
+     assessment mutations already maintain `CVE.severity`; package-domain
+     reactivation owns eligibility convergence from persisted current inputs.
+     Keeping this Ticket-locked primitive free of CVE acquisition prevents a
+     `Ticket` then `CVE` inversion against the global CVSS lock order.
    - **Cost in the common case**: zero. When no inactive → active
      transition occurs (the overwhelmingly common path), step 4 is a
      single enum comparison
@@ -377,8 +367,9 @@ appropriate: background tasks log and skip; API endpoints return 404.
 The function assumes the caller has already acquired `FOR UPDATE` on the
 ticket. This is always the case because every caller — both within
 `ticket_mutations` and in external modules (`package_service`,
-`ticket_service`) — acquires `FOR UPDATE` on the ticket as its first
-operation before calling `reconcile_ticket_status()`.
+`ticket_service`) — acquires `FOR UPDATE` on the Ticket before calling
+`reconcile_ticket_status()`. A workflow that also owns a CVE lock acquires it
+first under the global `CVE` then `Ticket` order.
 
 ## `ensure_ticket_operable()`
 
@@ -414,25 +405,28 @@ function.
   mutability guard
 - `revert_duplicate` — must operate on Duplicated tickets; skips
   mutability guard
+- Trusted external CVSS ingestion — maintains source-owned CVE assessment and
+  severity state in every Ticket status and follows the propagation
+  disposition defined by the CVSS status matrix
 
 **Consumers**:
 
 | Module | Functions that call `ensure_ticket_operable` |
 |--------|----------------------------------------------|
-| `ticket_mutations` | `upsert_cvss_assessment`\*, `delete_cvss_assessment`\*, `set_severity_manual` |
+| `ticket_mutations` | Manual-SUSE `upsert_cvss_assessment`, `delete_cvss_assessment`, `set_severity_manual` |
 | `ticket_service` | `associate_cve`, `assign_ticket`, `ignore_ticket`, `mark_as_duplicate`, `set_confidentiality`, `grant_access`, `revoke_access` |
 | `package_service` | Gate-relevant mutations call the guard; `set_track_delivery_status` also calls it for operability but remains outside assignment, audit, and Ticket reconciliation |
 
-\* CVSS functions call `ensure_ticket_operable` **conditionally** — only
-when the CVE has an associated ticket. Ticketless CVEs skip this check
-(see `upsert_cvss_assessment()` below).
+Trusted external ingestion does not call this guard. It may maintain
+CVE-owned assessment and severity state in every Ticket status but must obey
+the propagation disposition returned by the mutation.
 
 ## Gate-Relevant Mutation Operations
 
 Each ticket-mutation function below follows the same pattern unless its own
 contract places semantic no-op or operation-specific guards before assignment:
 
-1. Acquire `FOR UPDATE` on the parent Ticket row
+1. Acquire `FOR UPDATE` on the owning root row
 2. Call `ensure_ticket_operable(ticket)`
 3. Call `auto_assign_actor()`
 4. Validate additional preconditions
@@ -463,9 +457,95 @@ event.
 
 The `cvss` Python library (PyPI: `cvss`, maintained by Red Hat Product
 Security) is used for vector parsing, version detection, and score
-computation. See Key Principle 6 ("Always derived from vector") in
-[cvss-scoring.md](cvss-scoring.md#key-principles) for the system-wide
-ingestion rule that governs how scores and versions are handled.
+computation. See
+[Accepted Base Vectors](cvss-scoring.md#accepted-base-vectors) for the
+system-wide ingestion rule that governs how scores and versions are handled.
+
+Parsing and caller/provider validation use request input only and may run before
+the transaction's first database operation. For a CVSS assessment mutation,
+the first persistent read is always `SELECT ... FOR UPDATE` on the owning CVE.
+If that CVE has an associated Ticket, the function then acquires
+`SELECT ... FOR UPDATE` on the Ticket. Every operation that can participate in
+both roots follows this global `CVE` then `Ticket` order.
+
+### CVSS Mutation Authority and Result
+
+The reserved provider comparison is `provider.strip().casefold() == "suse"`.
+Every equivalent case or surrounding-whitespace form is reserved. The only
+stored internal provider value is the canonical string `SUSE`.
+
+| Caller category | Provider authority | Delete authority | Actor |
+|---|---|---|---|
+| `MANUAL_SUSE` | May create or update only the reserved SUSE assessment; the stored provider is canonicalized to `SUSE` | May delete only `SUSE` | `acting_user_id` is required and identifies the authorized user |
+| `TRUSTED_EXTERNAL_INGESTION` | May create or update only a non-reserved provider supplied by its owning ingestion contract | None; upstream omission retains the last persisted assessment | System (`acting_user_id` must be `NULL`) |
+
+A caller/provider or caller/actor mismatch is an internal contract violation:
+it raises `ValueError` before persistent state is read and returns no mutation
+result. It has no audit event or other side effect. Source-specific
+normalization of non-reserved provider names remains with each ingestion
+contract.
+
+Both mutation functions communicate one transaction-local
+`CVSSAssessmentMutationResult`, or an equivalent typed structure, containing:
+
+| Field | Contract |
+|---|---|
+| `assessment` | The locked-current persisted assessment after create/update/unchanged, the deleted assessment snapshot after delete, or `NULL` for not found |
+| `action` | Exactly `created`, `updated`, `unchanged`, `deleted`, or `not_found`, determined after both roots are locked |
+| `severity_resolution` | The committed-current Severity Resolution result, including score, version, provider, and unified label, or the explicit absent result |
+| `eligibility_resolution` | The committed-current Eligibility Score Resolution result: score plus `suse` or `fallback`; this is a handoff value and does not authorize Product mutation in this module |
+| `propagation` | `immediate`, `deferred_until_reactivation`, `not_applicable`, or `none`, as defined below |
+
+The result is valid inside the caller-owned transaction. It is not evidence of
+durability until that transaction commits. Callers use `action` for HTTP and
+metric classification: `created` maps to 201 and `record_created()`, `updated`
+maps to 200 and `record_updated()`, and `unchanged` maps to 200 with no metric.
+Delete maps `deleted` to 204 and `not_found` to the existing 404
+`CVSS_ASSESSMENT_NOT_FOUND` response. No caller may classify an outcome from an
+unlocked pre-read.
+
+Propagation dispositions describe the required package-domain handoff without
+prescribing its runtime mechanism:
+
+- `immediate`: an associated Ticket may receive package-owned eligibility and
+  Ticket gate propagation in the current workflow.
+- `deferred_until_reactivation`: an external mutation associated with a
+  `Resolved`, `Ignored`, or `Duplicated` Ticket is retained for package-owned
+  propagation when that Ticket reactivates. For manual-zone Tickets this means
+  after the explicit manual-zone exit.
+- `not_applicable`: the CVE has no associated Ticket, so there is no Product
+  eligibility or Ticket state to propagate.
+- `none`: the serialized outcome is `unchanged` or `not_found`, so there is no
+  effective mutation to propagate.
+
+The disposition is part of every successful result and is actionable only for
+`created`, `updated`, or `deleted`. `unchanged` and `not_found` return the
+current resolution values with `propagation = none`.
+
+An authority rejection, manual-zone rejection, unchanged result, not-found
+result, waiting concurrent no-op, or caller rollback creates no durable audit,
+assignment, Product eligibility, Ticket status, metric, or post-commit effect.
+An effective mutation and its direct audit records are atomic: audit or flush
+failure propagates and rolls back the assessment and `CVE.severity` together.
+
+### CVSS Status Matrix
+
+| Associated Ticket status | Manual SUSE upsert/delete | Trusted external upsert | Effective-mutation propagation |
+|---|---|---|---|
+| No Ticket | Allowed | Allowed | `not_applicable` |
+| `New` | Allowed | Allowed | `immediate` |
+| `Analysis` | Allowed | Allowed | `immediate` |
+| `Analyzed` | Allowed | Allowed | `immediate` |
+| `Resolved` | Allowed | Allowed | Manual SUSE: `immediate`; external: `deferred_until_reactivation` |
+| `Ignored` | Reject with `TicketNotMutableError`; no result | Allowed | External: `deferred_until_reactivation` |
+| `Duplicated` | Reject with `TicketNotMutableError`; no result | Allowed | External: `deferred_until_reactivation` |
+
+External delete is rejected for every row of the matrix. An effective
+assessment mutation always recomputes and persists `CVE.severity`, including
+for a ticketless CVE and a CVE associated with an inactive Ticket. The mutation
+does not change Product eligibility, a package-tree record, assignment, or
+Ticket status. Those effects remain with their owning contracts and consume
+only an applicable committed handoff.
 
 ### `upsert_cvss_assessment()`
 
@@ -483,96 +563,72 @@ new one is created.
 | `cve_id` | `UUID` | Yes | CVE that receives the assessment |
 | `provider` | `str` | Yes | Assessment provider (e.g., `"SUSE"`, `"NVD"`) |
 | `vector_string` | `str` | Yes | CVSS vector string (version, score, and severity derived from it) |
-| `acting_user_id` | `UUID \| None` | No | Who is performing the action |
+| `caller` | `CVSSMutationCaller` | Yes | `MANUAL_SUSE` or `TRUSTED_EXTERNAL_INGESTION`; authority is not inferred from actor presence |
+| `acting_user_id` | `UUID \| None` | Yes | Required for `MANUAL_SUSE`; must be `NULL` for trusted external ingestion |
+| `default_cvss_version` | `str \| None` | No | Version used for severity and eligibility resolution. If `None`, read it once from `settings_service.get_default_cvss_version(db)` after root locking |
 
 **Preconditions**:
 
-- CVE must exist for `cve_id` — the FK constraint on
-  `CVECVSSAssessment.cve_id` requires a valid CVE. API endpoints resolve
-  and validate the CVE path parameter before calling this function;
-  `cve_service.upsert_cve()` creates the CVE before calling this function.
-  The function does not check CVE existence explicitly — an invalid
-  `cve_id` produces an `IntegrityError` from the database.
 - Vector must be parseable — raises `InvalidCVSSVectorError`
+- CVE must exist for `cve_id`; absence is an internal caller-contract violation
+  and raises `ValueError` after the required CVE lock query. API callers cannot
+  reach this case because CVE accessibility resolves the path first
+- Caller category, actor, and provider must satisfy the authority table
 
-**Persistence mechanism**: SQL `INSERT ... ON CONFLICT DO UPDATE` on the
-unique constraint `(cve_id, provider_name, cvss_version)`. This
-guarantees atomicity at the database level — concurrent upserts for the
-same natural key are serialized by PostgreSQL. This is consistent with
-the `ON CONFLICT DO UPDATE` strategy documented in `cve-service.md`
-(Child Table Deduplication) for all child tables with stable unique
-constraints.
-
-**Return type**: `tuple[CVECVSSAssessment, AssessmentUpsertAction]` —
-where `AssessmentUpsertAction` is a three-valued enum:
-
-| Value | Meaning | Metric |
-|-------|---------|--------|
-| `CREATED` | New record inserted | `record_created()` |
-| `UPDATED` | Existing record modified (vector changed) | `record_updated()` |
-| `UNCHANGED` | Existing record identical (no-op) | — (no metric) |
-
-`AssessmentUpsertAction` is a separate type from
-`cve_service.UpsertAction` despite having the same members. The
-semantics differ: `cve_service.UpsertAction.unchanged` means "no global
-CVE fields contributed" (child data may still have been upserted),
-whereas `AssessmentUpsertAction.UNCHANGED` means "the assessment vector
-is identical, no mutation occurred at all." Distinct types prevent
-accidental conflation in code that handles both return values.
+**Return type**: `CVSSAssessmentMutationResult`, as defined above.
 
 **Behavior**:
 
-1. Parse the vector string with the `cvss` library. Derive version,
-   score, and severity. If parsing fails, raise `InvalidCVSSVectorError`
-2. `SELECT` existing `CVECVSSAssessment` for `(cve_id, provider,
-   derived_version)`. Capture the existing record (if any) for old-value
-   determination and no-op detection
-3. **No-op short-circuit**: if an existing record was found and
-   `existing.vector_string == incoming_vector_string`, return
-   `(existing, UNCHANGED)` immediately — no database write, no lock
-   acquisition, no recalculation chain, no audit event. This prevents
-   unnecessary lock contention and recalculation overhead during bulk
-   fetcher re-syncs where most CVSS data has not changed. Note: the
-   short-circuit bypasses `auto_assign_actor()` because no mutation
-   occurred — this is correct and consistent with the principle that
-   side effects are triggered by state changes, not by intent to change
-4. Look up the ticket associated with the CVE (if any)
-5. If a ticket exists:
-   a. Acquire `FOR UPDATE` on the Ticket row
-   b. Call `ensure_ticket_operable(ticket)` — if the ticket is in a
-      non-mutable status, the function raises `TicketNotMutableError`.
-      No assessment write has occurred at this point, so no rollback of
-      assessment data is needed
-6. Execute `INSERT ... ON CONFLICT DO UPDATE` with the parsed
-   vector_string, computed score, and derived severity. Determine action:
-   - **No existing record** (step 2 returned nothing): `CREATED`
-   - **Existing record with different vector**: `UPDATED`
-7. If a ticket exists:
-   a. Call `auto_assign_actor(ticket, acting_user_id, db)`
-   b. Create `TicketAuditEvent` (`cvss_assessment_changed`). The
-      `old_value` is derived from the `SELECT` in step 2: `NULL` if the
-      record was created, `"provider vX.Y old_score"` if updated
-   c. Call `recalculate_cvss_chain(ticket_id,
-      acting_user_id=acting_user_id)` — reads `default_cvss_version`
-      internally, recalculates severity and product eligibility, creates
-      derived audit events (`severity_changed`,
-      `product_eligibility_changed`) when values change, and calls
-      `reconcile_ticket_status()` internally (post-transition catch-up,
-      if triggered, is handled by reconcile step 4)
-8. If no ticket exists (ticketless CVE): skip steps 5 and 7 — the CVSS
-   assessment is stored but no ticket side effects are triggered
-9. Return `(assessment, action)`
+1. Validate caller/provider authority and parse the vector using only input
+   data. Derive the exact version, canonical vector, decimal score, and
+   version-specific assessment severity. Parsing failure raises
+   `InvalidCVSSVectorError` before database access.
+2. As the first persistent read, load the CVE with `FOR UPDATE`. If it does not
+   exist, raise `ValueError` for the internal caller-contract violation.
+3. Load the Ticket associated with that locked CVE, if any, with `FOR UPDATE`.
+   This makes concurrent association compose in `CVE` then `Ticket` order.
+4. Apply the status matrix. Manual SUSE callers reject a locked manual-zone
+   Ticket before any write; external ingestion remains allowed.
+5. Resolve `default_cvss_version`: if the parameter is `None`, read it once from
+   `settings_service.get_default_cvss_version(db)`. Use this one value for both
+   severity and eligibility resolution in this invocation.
+6. Load the existing assessment for the canonical natural key under the CVE
+   lock. Compare its persisted canonical vector with the incoming canonical
+   vector, not with raw input text.
+7. Classify and apply `created`, `updated`, or `unchanged` from that serialized
+   state. `unchanged` resolves and returns the current severity and eligibility
+   values without assignment, audit, severity write, package propagation,
+   Ticket reconciliation, or metric.
+8. For an effective create/update, persist the canonical vector and all parsed
+   fields. Re-resolve the complete committed-current assessment set and always
+   persist the resulting unified value to `CVE.severity`, including when its
+   value is unchanged.
+9. If a Ticket exists, create `cvss_assessment_changed` first. If unified
+   severity changed, create `severity_changed` second. Both records are direct
+   consequences of the committed assessment mutation and are created in every
+   Ticket status; they are not deferred with package propagation. Do not
+   auto-assign the Ticket.
+10. Resolve the separate Eligibility Score result and return it with the status-
+   and-caller-derived propagation disposition. The function itself performs no
+   Product or Ticket mutation and invokes no post-commit effect. This
+   specification does not define the package-owned consumer of that handoff.
+11. Flush and return `CVSSAssessmentMutationResult`.
 
 **Audit event values**:
 
 | Action | `old_value` | `new_value` |
 |--------|-------------|-------------|
-| `CREATED` | `NULL` | `"provider vX.Y score"` |
-| `UPDATED` | `"provider vX.Y old_score"` | `"provider vX.Y new_score"` |
-| `UNCHANGED` | — (no audit event created) | — |
+| `created` | `NULL` | Canonical assessment value |
+| `updated` | Previous canonical assessment value | Current canonical assessment value |
+| `unchanged` | No event | No event |
 
-**TicketAuditEvent**: `cvss_assessment_changed` (only when the CVE has
-an associated ticket and the action is `CREATED` or `UPDATED`)
+The exact canonical assessment value is
+`"{provider_name} v{cvss_version} {vector_string} ({score:.1f})"`.
+
+**TicketAuditEvent**: `cvss_assessment_changed` for an effective mutation when
+the CVE has an associated Ticket, in every Ticket status. Its actor is the
+manual SUSE user or `NULL` for external ingestion. A changed derived severity
+adds `severity_changed` with `user_id = NULL`.
 
 ---
 
@@ -590,35 +646,48 @@ callers to resolve the assessment ID.
 | `cve_id` | `UUID` | Yes | CVE owning the assessment |
 | `provider` | `str` | Yes | Assessment provider |
 | `cvss_version` | `str` | Yes | CVSS version (`"3.1"`, `"4.0"`, etc.) |
-| `acting_user_id` | `UUID \| None` | No | Who is performing the action |
+| `caller` | `CVSSMutationCaller` | Yes | Must be `MANUAL_SUSE`; external deletion is never authorized |
+| `acting_user_id` | `UUID` | Yes | Authorized user performing the SUSE deletion |
+| `default_cvss_version` | `str \| None` | No | Version used for severity and eligibility resolution. If `None`, read it once from `settings_service.get_default_cvss_version(db)` after root locking |
 
 **Preconditions**:
 
-- Assessment must exist for `(cve_id, provider, cvss_version)` — raises
-  `CVSSAssessmentNotFoundError` (HTTP 404,
-  `error_code: "CVSS_ASSESSMENT_NOT_FOUND"`)
+- Caller must have manual SUSE authority and provider must resolve to canonical
+  `SUSE`
+
+**Return type**: `CVSSAssessmentMutationResult`, as defined above. The
+`not_found` action maps to `CVSSAssessmentNotFoundError` at the API boundary.
 
 **Behavior**:
 
-1. Look up the assessment by `(cve_id, provider, cvss_version)`
-2. Look up the ticket associated with the assessment's CVE (if any)
-3. If a ticket exists:
-   a. Acquire `FOR UPDATE` on the Ticket row
-   b. Call `ensure_ticket_operable(ticket)`
-4. Delete the assessment record
-5. If a ticket exists:
-   a. Call `auto_assign_actor(ticket, acting_user_id, db)`
-   b. Create `TicketAuditEvent` (`cvss_assessment_changed`,
-      `old_value = "provider vX.Y score"`, `new_value = NULL`)
-   c. Call `recalculate_cvss_chain(ticket_id,
-      acting_user_id=acting_user_id)` — reads `default_cvss_version`
-      internally, recalculates severity and product eligibility, creates
-      derived audit events when values change, and calls
-      `reconcile_ticket_status()` internally
-6. If no ticket exists: skip audit event and chain
+1. Validate caller/provider authority and the accepted version using only input
+   data. External caller categories and external providers raise `ValueError`;
+   they cannot use this deletion boundary.
+2. As the first persistent read, load the CVE with `FOR UPDATE`; then load its
+   associated Ticket, if any, with `FOR UPDATE`. A missing CVE is an internal
+   caller-contract violation and raises `ValueError`; API callers cannot reach
+   it because CVE accessibility resolves the path first.
+3. Apply the status matrix. Reject manual-zone Tickets before any write.
+4. Resolve `default_cvss_version`: if the parameter is `None`, read it once from
+   `settings_service.get_default_cvss_version(db)`. Use this one value for both
+   severity and eligibility resolution in this invocation.
+5. Load the canonical SUSE assessment under the CVE lock. If absent, resolve
+   and return the current severity and eligibility values with `not_found`, but
+   perform no write, audit event, package propagation, or metric.
+6. Snapshot the canonical audit value and delete the assessment. Re-resolve the
+   complete remaining assessment set and always persist the resulting unified
+   value, including `NULL`, to `CVE.severity`.
+7. If a Ticket exists, create `cvss_assessment_changed` first with the snapshot
+   as `old_value` and `NULL` as `new_value`. If unified severity changed, create
+   system-attributed `severity_changed` second. Do not auto-assign the Ticket.
+8. Resolve the separate Eligibility Score result, derive propagation from the
+   status matrix, flush, and return `deleted` with the complete handoff. This
+   function does not mutate Product eligibility or Ticket status.
 
-**TicketAuditEvent**: `cvss_assessment_changed` (only when the CVE has
-an associated ticket)
+**TicketAuditEvent**: `cvss_assessment_changed` for `deleted` when the CVE has
+an associated Ticket, in every status; `severity_changed` follows when the
+unified severity changed. Both use `detail = NULL`. `not_found`, rejection, and
+rollback leave no event.
 
 ---
 
@@ -668,60 +737,57 @@ resolution cascade and `severity_manual` is not applicable.
 
 ### `recalculate_cvss_chain()`
 
-Recalculates severity and product eligibility for a ticket based on
-current CVSS assessments and the active default CVSS version. This
-function does NOT create, update, or delete any `CVECVSSAssessment`
-record — it only recalculates derived data.
+Recalculates CVE-owned severity from current assessments and returns the
+separate deterministic eligibility handoff for a Ticket. It does not create,
+update, or delete a `CVECVSSAssessment`, mutate Product eligibility, or
+reconcile Ticket status. The historical function name describes its role in a
+larger composed workflow; it does not transfer package mutation ownership into
+this module.
 
-**Callers**: `upsert_cvss_assessment()`, `delete_cvss_assessment()`,
-`associate_cve()` (ticket-service, with `suppress_severity_event=True`),
-`reconcile_ticket_status()` step 4 (post-transition catch-up), and the
-batch recalculation Celery task triggered by a default CVSS version
-change (see `docs/features/platform/system-settings.md`).
+**Callers**: `associate_cve()` and the batch recalculation Celery task triggered
+by a default CVSS version change (see
+`docs/features/platform/system-settings.md`). This contract defines no
+Ticket-reactivation caller.
 
 **Parameters**:
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `db` | `AsyncSession` | Yes | Database session |
-| `ticket_id` | `UUID` | Yes | Ticket to recalculate |
+| `cve_id` | `UUID` | Yes | CVE whose assessment set and associated Ticket, if any, are recalculated |
 | `default_cvss_version` | `str \| None` | No | The CVSS version to use for severity resolution and eligibility evaluation. If `None` (default), the function reads the current version from `settings_service.get_default_cvss_version(db)`. The batch recalculation task provides this explicitly (passed as a task argument from the triggering endpoint) to ensure all tickets in a batch use the same version. Other callers should typically omit this parameter |
-| `acting_user_id` | `UUID \| None` | No | Who triggered the recalculation (typically `None` for system-initiated batch operations) |
-| `suppress_severity_event` | `bool` | No | Default `False`. When `True`, suppresses emission of the `severity_changed` audit event. Used exclusively by `associate_cve()`, which owns the severity handover event and needs to use the ticket's previous `severity_manual` (not `CVE.severity`) as `old_value`. All other callers MUST NOT set this to `True` |
-| `evaluation_date` | `date \| None` | No | UTC date used for every lifecycle predicate in this function, including the Reactive Support check in step 5 and final status reconciliation. If omitted, capture the current UTC date once at function entry |
+| `evaluation_date` | `date \| None` | No | UTC date carried with the handoff so the composed package propagation and Ticket reconciliation can use one temporal input. If omitted, capture the current UTC date once at function entry |
 
 **Behavior**:
 
-1. Acquire `FOR UPDATE` on the Ticket row
+1. Acquire `FOR UPDATE` on the CVE as the first persistent read, then load and
+   lock its associated Ticket, if any. A CVE without an associated Ticket uses
+   `not_applicable`.
 2. Resolve `default_cvss_version`: if the parameter is `None`, read
    from `settings_service.get_default_cvss_version(db)`. Call
-   `cvss.resolve_severity_score()` with the resolved version to
-   determine the new resolved score
-3. If `resolve_severity_score()` returned a score, map it to a severity
-   label via `cvss.calculate_severity()` (score 0.0 maps to `None`).
-   If `resolve_severity_score()` returned `None` (absent), the new
-   severity is `NULL` (unresolved).
-   If severity changed, update `CVE.severity`
+   `cvss.resolve_severity_score()` with the complete assessment set to obtain
+   the committed-current resolution.
+3. Persist its unified label, or `NULL` for absent, to `CVE.severity`, and
+   report the true old and new values when they differ. The caller owns the
+   context-specific direct `severity_changed` event in the same transaction.
 4. Call `cvss.resolve_eligibility_score()` with the resolved
-   `default_cvss_version` to determine the eligibility score
-5. Re-evaluate `eligible` for each `TicketPackageProduct` linked to the
-   ticket (including soft-deleted products — see `package-model.md` Design Decision 8) using the eligibility score:
-   - Products with `is_eligible_override = true` are not modified
-    - Products in Reactive Support remain `eligible = false` regardless
-6. Create `TicketAuditEvent` records for each change:
-    - `severity_changed` if severity changed AND
-      `suppress_severity_event` is `False`
-    - `product_eligibility_changed` for each Product whose eligibility changed,
-      with the standard event-time Product subject detail and `reason = "cvss"`
-7. Call `reconcile_ticket_status(evaluation_date=evaluation_date)` so the
-   complete recalculation chain uses one temporal input
+   `default_cvss_version` to obtain the score and `suse`/`fallback` source.
+5. Derive the propagation disposition from the current Ticket status and the
+   owning workflow's documented caller category. A default-version workflow
+   follows its separately documented target scope.
+6. Flush and return the severity resolution, eligibility resolution, whether
+   severity changed, propagation disposition, and `evaluation_date`. This
+   specification defines the handoff value but not its package-owned consumer.
 
-**TicketAuditEvent**: `severity_changed` (if severity changed and
-`suppress_severity_event` is `False`) +
-`product_eligibility_changed` (for each affected product)
+**TicketAuditEvent**: none directly. A caller that receives changed old/new
+severity creates the required system-attributed `severity_changed` in the same
+transaction. `associate_cve()` substitutes its manual-to-derived handover
+values and emits exactly one such event. Product eligibility events belong to
+the package mutation that applies the handoff.
 
-**Idempotency**: safe to call multiple times — if nothing has changed
-since the last call, no mutations or audit events are produced.
+**Idempotency**: safe to call multiple times. With unchanged assessments and
+default version, severity and its audit are a no-op and the same pure handoff is
+returned.
 
 ---
 
@@ -939,41 +1005,18 @@ status gates MUST go through the appropriate centralized module:
   service-internal primitive is called after an effective gate-relevant
   mutation; delivery-status mutation is explicitly not gate-relevant)
 
-Direct modification of gate-relevant records outside the owning module is a bug,
-with one architectural exception:
-
-### Exception: CVSS Recalculation Chain Eligibility Mutations
-
-The architectural dependency is strictly unidirectional: `package_service` depends
-on `ticket_mutations`, but `ticket_mutations` does NOT depend on `package_service`
-(to prevent circular dependencies).
-
-Consequently, when a CVSS mutation triggers the Recalculation Chain, the resulting
-automatic, deterministic product eligibility updates are performed inline directly
-within `ticket_mutations`. These updates are not standalone product mutations but rather
-system-wide consequences of the CVSS score change. The chain specification in
-`docs/features/tickets/cvss-scoring.md` guarantees that all required side effects —
-the generation of `product_eligibility_changed` audit events and the call to
-`reconcile_ticket_status()` — are executed atomically in the same transaction.
-
-All standalone product eligibility mutations (such as manual overrides by a VA,
-automated resets, and product lifecycle phase transitions) remain the exclusive
-responsibility of `package_service`.
-
-The platform-wide recalculation after an Admin changes
-`default_cvss_version` remains part of the CVSS exception above: its batch task
-calls `recalculate_cvss_chain()` once per active Ticket in independent
-transactions. Product threshold and Reactive Support changes instead use the
-standalone automatic `package_service` operation defined in
-`docs/features/packages/package-service.md`; they do not call the global CVSS
-batch and never create manual overrides.
+Direct modification of gate-relevant records outside the owning module is a
+bug. In particular, `ticket_mutations` owns CVSS assessments and CVE severity,
+while `package_service` owns Product eligibility. CVSS functions return the
+deterministic Eligibility Score result and propagation disposition required for
+composition; this handoff does not permit direct package writes in
+`ticket_mutations`.
 
 Non-gate ticket lifecycle operations live in `ticket_service` — see
 `docs/features/tickets/ticket-service.md`. Some of these operations
-call `reconcile_ticket_status` (directly or via
-`recalculate_cvss_chain()`) due to indirect gate effects: CVE
-association calls `recalculate_cvss_chain()` (which calls reconcile
-internally) because it changes the severity source; assignment calls
+compose `recalculate_cvss_chain()`, package-owned propagation, and
+`reconcile_ticket_status` due to indirect gate effects. CVE association uses
+this composition because it changes the severity source; assignment calls
 `reconcile_ticket_status` directly for promotion evaluation. The
 per-function documentation in `ticket-service.md` specifies exactly
 which operations call `reconcile_ticket_status` and why.
@@ -988,9 +1031,24 @@ severity, manual-zone exits). The test must cover:
 - **Forward transitions**: CVSS and severity changes causing ticket
   advancement
 - **Backward transitions**: CVSS deletion breaking gate conditions
-- **No-op cases**: mutations that do not affect gate conditions
+- **No-op cases**: unchanged assessment requests and mutations whose resolved
+  severity stays unchanged
 - **Edge cases**: ticket without CVE (no SUSE CVSS gate), manual
   severity on CVE-less ticket
+- **CVSS status matrix**: manual and trusted-external callers across a
+  ticketless CVE and every Ticket status, including external persistence with
+  `deferred_until_reactivation` package propagation
+- **CVE severity ownership**: every effective assessment create, update, and
+  delete updates ticketless and inactive-state `CVE.severity`
+- **Serialized outcomes**: canonical-vector no-op, create/update and
+  delete/not-found races, concurrent upsert/upsert, upsert/delete, and
+  association/CVSS mutation using independent database sessions; each result,
+  HTTP/metric classification, audit payload, and handoff reflects the committed
+  winner after `CVE` then `Ticket` locking
+- **Authority and audit**: reserved SUSE variants, caller/actor mismatch,
+  external-delete rejection, every-status direct events when a Ticket exists,
+  ticketless no-event behavior, system-derived severity attribution, event
+  ordering, and rollback atomicity
 - **Manual-zone exits**: `reopen_from_ignored` and `revert_duplicate`
   producing correct status transitions
 
@@ -1009,13 +1067,18 @@ them to the corresponding HTTP status code and error code per
 |-----------|------|------|-------------|
 | `TicketNotFoundError` † | 404 | `TICKET_NOT_FOUND` | Ticket ID does not exist |
 | `TicketNotMutableError` † | 409 | `TICKET_NOT_MUTABLE` | Ticket is in manual zone (Ignored or Duplicated) |
-| `CVSSAssessmentNotFoundError` | 404 | `CVSS_ASSESSMENT_NOT_FOUND` | No assessment exists for the given natural key `(cve_id, provider, cvss_version)` |
+| `CVSSAssessmentNotFoundError` | 404 | `CVSS_ASSESSMENT_NOT_FOUND` | No SUSE assessment exists for the accepted `(cve_id, cvss_version)` after the CVE itself was resolved |
 | `InvalidCVSSVectorError` | 422 | `CVSS_INVALID_VECTOR` | CVSS vector string is malformed or invalid |
 | `InvalidTransitionError` † | 409 | `TICKET_INVALID_TRANSITION` | Requested status transition is not allowed |
 | `SeverityDerivedError` † | 409 | `TICKET_SEVERITY_DERIVED` | Cannot manually set severity when it is auto-derived |
 
 † Shared exception — inherits from `ServiceError`, not from
 `TicketMutationsError`. Handlers must catch it explicitly.
+
+Caller-category/provider mismatches, external delete attempts, and a missing
+CVE UUID supplied directly by an internal caller raise `ValueError`. These are
+internal contract violations and do not introduce API error codes. API routes
+resolve CVE accessibility before invoking this service.
 
 Package-specific exceptions (`TrackNotFoundError`, `ProductNotFoundError`,
 `PackageNotFoundError`) are defined in `package_service` — see

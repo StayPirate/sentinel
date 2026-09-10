@@ -85,7 +85,7 @@ revoking explicit access.
 |--------|-------------|
 | `services/ticket_mutations.py` | `ticket_service` imports `reconcile_ticket_status()`, `recalculate_cvss_chain()`, `auto_assign_actor()`, and `ensure_ticket_operable()` from `ticket_mutations`. The dependency is unidirectional: `ticket_service` → `ticket_mutations`. Neither module imports from the other in the reverse direction |
 | `services/package_service.py` | No direct dependency. Both modules independently depend on `ticket_mutations` for status evaluation |
-| `services/cvss.py` | No direct dependency. CVSS resolution is triggered indirectly via `reconcile_ticket_status()` |
+| `services/cvss.py` | No direct dependency. CVSS resolution is delegated through `ticket_mutations.recalculate_cvss_chain()` where this service requires it |
 
 ## Scope Boundary
 
@@ -125,17 +125,20 @@ own check raises `InvalidTransitionError`. This ordering is contractual.
 
 ### Concurrency control
 
-All mutation operations that modify the Ticket row follow the
+All mutation operations that modify only the Ticket root follow the
 pessimistic locking pattern defined in `docs/conventions.md`
 (Transaction and Locking) and extended by `ticket-mutations.md`
 (Concurrency Control). Every such operation acquires `FOR UPDATE` on the
 Ticket row as its first database operation.
 
-The single exception is `create_ticket()`, which performs an INSERT —
-no row-level lock is needed. The CVE uniqueness constraint is enforced
-at the database level; concurrent INSERTs for the same CVE are handled
-via `IntegrityError` catch-and-map (see `create_ticket` behavioral
-steps).
+`associate_cve()` participates in both CVE-owned and Ticket-owned state and
+therefore uses the global root order: lock the CVE first, then the Ticket. This
+is the only existing-row exception in this module to the Ticket-first rule.
+
+Creating a CVE-less Ticket performs only an INSERT and needs no existing-root
+lock. When `create_ticket()` associates a CVE, it resolves and locks that CVE
+before inserting the Ticket. The Ticket uniqueness constraint remains the
+final defense against concurrent INSERTs for the same CVE.
 
 ## Ticket Lifecycle Operations
 
@@ -177,7 +180,10 @@ manually" or "CVE ingested from NVD"). Defined in
 
 **Behavioral steps**:
 
-1. If `cve_id` provided: resolve CVE via CVE Resolution Behavior
+1. If `cve_id` is provided, resolve CVE via CVE Resolution Behavior and retain
+   `FOR UPDATE` on the CVE before reading association state or inserting the
+   Ticket. A newly inserted CVE is already owned by the transaction. If no CVE
+   is provided, no row lock is required
 2. INSERT new Ticket row with initial fields (all unspecified columns
    use database defaults: `duplicate_of_id = NULL`,
    `updated_at = now(UTC)`, etc.)
@@ -185,7 +191,9 @@ manually" or "CVE ingested from NVD"). Defined in
    - If `acting_user_id` is not None AND user holds VA role:
      `status = Analysis`, `assignee_id = acting_user_id`
    - Otherwise: `status = New`
-4. Create `TicketAuditEvent` (`ticket_created`, comment from `source`)
+4. Create `TicketAuditEvent` (`ticket_created`, comment from `source`). This is
+   always the first event in the Ticket's history, before every optional
+   severity, assignment, or CVE-association event below
 5. If `severity_manual` provided: create `TicketAuditEvent`
    (`severity_changed`, `old_value = NULL`, `new_value = <severity>`)
 6. If assigned (step 3): create `TicketAuditEvent` (`assignment`)
@@ -198,7 +206,9 @@ between concurrent creation for the same CVE), the service catches the
 exception and raises `TicketCVEConflictError`. The API handler maps this
 to `409 TICKET_CVE_CONFLICT`.
 
-**Locking**: None (INSERT).
+**Locking**: none for CVE-less creation. CVE-associated creation locks the CVE
+before the Ticket INSERT. This serializes association state with concurrent
+CVSS mutations; the new Ticket row itself has no pre-existing row to lock.
 
 **reconcile_ticket_status**: Not called — initial status is determined by
 fixed rules, and the ticket cannot have packages at creation time.
@@ -216,7 +226,7 @@ async def associate_cve(
     *,
     ticket_id: UUID,
     cve_id: str,
-    acting_user_id: UUID | None,
+    acting_user_id: UUID,
 ) -> Ticket:
 ```
 
@@ -228,78 +238,79 @@ async def associate_cve(
 
 **Behavioral steps**:
 
-1. Acquire `FOR UPDATE` on the Ticket row
-2. Call `ensure_ticket_operable(ticket)`
-3. Verify `ticket.cve_id IS NULL` (else `TicketCVEAlreadySetError`)
-4. Resolve CVE via CVE Resolution Behavior (may raise
-    `TicketCVEConflictError` if CVE is already associated with another
-    ticket)
-5. `auto_assign_actor(ticket, acting_user_id)`
-6. Capture `previous_severity = ticket.severity_manual` (may be `NULL`)
-7. Set `ticket.cve_id` and clear `ticket.severity_manual = NULL` (same
+1. Resolve or create the local CVE through CVE Resolution Behavior without
+   holding a Ticket lock. For an existing CVE, the resolution query acquires
+   `FOR UPDATE` as its first persistent read; a newly inserted CVE becomes the
+   transaction's locked root. No external I/O occurs in this transaction.
+2. Retain the CVE `FOR UPDATE` lock established by step 1.
+3. Acquire `FOR UPDATE` on the Ticket row.
+4. Call `ensure_ticket_operable(ticket)`.
+5. Verify `ticket.cve_id IS NULL` (else `TicketCVEAlreadySetError`) and, under
+   the CVE lock, verify that no other Ticket is associated with the CVE (else
+   `TicketCVEConflictError`).
+6. `auto_assign_actor(ticket, acting_user_id)`.
+7. Capture `previous_severity = ticket.severity_manual` (may be `NULL`).
+8. Set `ticket.cve_id` and clear `ticket.severity_manual = NULL` (same
     UPDATE — maintains `chk_ticket_severity_manual_cve_exclusive`)
-8. Create `TicketAuditEvent` (`cve_associated`)
-9. Call `recalculate_cvss_chain(ticket_id,
-    acting_user_id=acting_user_id,
-    suppress_severity_event=True)` — reads `default_cvss_version`
-    internally, recalculates severity (now CVSS-cascade-derived) and
-    product eligibility using the CVE's existing assessments, then calls
-    `reconcile_ticket_status()` internally. Gate #3 (severity set) and
-    gate #4 (SUSE CVSS provided) may now fail, causing regression to
-    Analysis. The `suppress_severity_event=True` flag prevents
-    `recalculate_cvss_chain` from emitting its own `severity_changed`
-    event — this function owns the handover event (step 10)
-10. Determine `new_severity`: the value of `cve.severity` after step 9
-    (may be `NULL` if no CVSS data exists). If
-    `previous_severity != new_severity`, create `TicketAuditEvent`
-    (`severity_changed`, `user_id = acting_user_id`,
+9. Create `TicketAuditEvent` (`cve_associated`,
+    `user_id = acting_user_id`).
+10. Call `recalculate_cvss_chain(cve.id)`. The same-transaction re-locks
+    preserve the CVE-then-Ticket order and observe all assessment mutations
+    committed before this operation acquired the CVE lock.
+11. Determine `new_severity` from the committed-current CVE severity (possibly
+    `NULL`). If `previous_severity != new_severity`, create
+    `TicketAuditEvent` (`severity_changed`, `user_id = NULL`,
     `old_value = previous_severity`, `new_value = new_severity`,
     `detail = NULL`). This event captures the handover from manual to
-    CVSS-derived severity
-11. Return updated Ticket
+    CVSS-derived severity; Sentinel derived it, so the associating user is not
+    its actor.
+12. Return the immediate eligibility handoff to the owning composition. This
+    specification does not define its package-domain consumer. Call
+    `reconcile_ticket_status()` for the association's currently defined Ticket
+    effects; gate #3 (severity set) and gate #4 (SUSE CVSS provided) may now
+    fail, causing regression to Analysis.
+13. Return updated Ticket.
 
-**Locking**: FOR UPDATE on Ticket row. Step 4 (CVE Resolution Behavior)
-executes entirely within the locked transaction but involves only local
-database operations: a `SELECT` on the CVE table and possibly an `INSERT`
-of a minimal CVE record via `ensure_cve_exists()`. No synchronous
-external HTTP calls or Redis/Celery operations occur while the lock is
-held. `recalculate_cvss_chain()` (step 9) re-acquires `FOR UPDATE` on
-the same row within the same transaction (PostgreSQL same-transaction
-re-lock, no-op). Task dispatch via `trigger_on_demand_fetch()` is the
-endpoint handler's responsibility and MUST occur after `db.commit()`,
-outside the locked transaction.
+**Locking**: `FOR UPDATE` on CVE, then `FOR UPDATE` on Ticket. CVE Resolution
+Behavior involves only local database operations and may insert a minimal CVE
+before that row can be locked. No synchronous external HTTP call or
+Redis/Celery operation occurs while either lock is held. Re-locking either row
+inside `recalculate_cvss_chain()` is a same-transaction no-op. Task dispatch via
+`trigger_on_demand_fetch()` is the endpoint handler's responsibility and MUST
+occur after `db.commit()`, outside the locked transaction.
 
-**recalculate_cvss_chain**: YES (with `suppress_severity_event=True`) —
-associating a CVE changes the severity resolution source.
-`recalculate_cvss_chain()` recalculates severity via
-`resolve_severity_score()` (5-step cascade using the CVE's existing
-assessments) and product eligibility via `resolve_eligibility_score()`
-(SUSE-only, 2-step). If the CVE has no assessments (e.g., MITRE-sourced
-CVE with no CVSS data), severity resolves to `null` (gate #3 fails) and
-eligibility remains at the 10.0 conservative fallback — the chain is
-effectively a no-op for eligibility in this case. The final
-`reconcile_ticket_status()` call (chain step 7) evaluates gates and may
-regress the ticket to Analysis.
+This order serializes correctly with CVSS mutation. If the CVSS mutation locks
+the CVE first, association waits and then consumes its committed severity. If
+association locks first, the CVSS mutation waits, then observes the associated
+Ticket and applies its direct-audit and propagation contract. Neither path can
+use a pre-lock assessment or association snapshot.
 
-The `suppress_severity_event=True` parameter prevents
-`recalculate_cvss_chain` from emitting its own `severity_changed` event
-in this path. `associate_cve` owns the handover event (step 10), which
-uses the captured `previous_severity` (the VA's manual value) as
-`old_value` — information that `recalculate_cvss_chain` does not have
-access to (it only sees the CVE's previous `severity` field).
+**recalculate_cvss_chain**: YES. Associating a CVE changes the Ticket's
+severity source. The function confirms the CVE-owned severity from the complete
+locked assessment set and returns the separate Eligibility Score result. The
+result is available to the package-owned boundary; this specification does not
+define that boundary's consumption.
+If the CVE has no assessments, severity resolves to `null` (gate #3 fails) and
+eligibility uses the 10.0 conservative fallback.
+
+`associate_cve` owns the manual-to-derived handover event because it retains
+the previous `severity_manual` value. The delegated calculation reports any
+CVE severity change but emits no event directly; association emits exactly one
+handover event when the source transition changes the effective value.
 
 **Note on pre-existing CVSS assessments**: If the CVE being associated
 already has `CVECVSSAssessment` records (e.g., from a prior NVD sync), these
 assessments are immediately available to the CVSS resolution cascade.
-`recalculate_cvss_chain()` uses them to derive severity and recalculate
-product eligibility without requiring a fresh NVD fetch.
+`recalculate_cvss_chain()` uses them to confirm severity and produce the
+package-domain eligibility handoff without requiring a fresh NVD fetch.
 
 **Audit events**: `cve_associated` (always). `severity_changed` (if
 `previous_severity != new_severity` — captures the manual→derived
-handover; emitted by `associate_cve`, not by `recalculate_cvss_chain`).
-Possibly `assignment` and `status_change` (from auto-assign). Possibly
-`product_eligibility_changed` (from recalculate chain). Possibly
-`status_change` (from reconcile).
+handover; emitted by `associate_cve` with `user_id = NULL`, not attributed to
+the associating user). `cve_associated` retains `user_id = acting_user_id`.
+Possibly `assignment` and `status_change` (from auto-assign), and possibly
+`status_change` from reconciliation. This contract does not create a Product
+eligibility event.
 
 ### assign_ticket
 
@@ -496,18 +507,8 @@ mutations or audit events persist.
 ## Ticket Reactivation
 
 When a ticket transitions from an inactive status (Resolved, Ignored, or
-Duplicated) back to an active status, the system executes two catch-up
-mechanisms to reconcile the ticket's state with data that may have
-changed during the inactive period:
-
-1. **Synchronous — CVSS chain recalculation**: reconciles CVSS-derived
-   data (severity, product eligibility) with the current
-   `default_cvss_version` and any `CVECVSSAssessment` updates that
-   occurred while the ticket was inactive. Automated CVSS sync scopes to
-   active tickets — inactive tickets are excluded, so per-ticket CVSS
-   data may be stale.
-
-2. **Asynchronous — package-tree then per-ticket fetcher catch-up**: first
+Duplicated) back to an active status, the system registers the asynchronous
+package-tree then per-ticket fetcher catch-up. It first
    re-resolves every persisted package marker through SMELT, including
    soft-deleted markers without restoring them, then catches up on external
    data against the resulting tree (e.g., Red Hat CVSS updates — the
@@ -517,10 +518,14 @@ changed during the inactive period:
    [fetcher-infrastructure.md](../platform/fetcher-infrastructure.md)
    ("Per-Ticket Catch-Up: `catch_up()` Method") for the method contract.
 
-Both mechanisms are initiated internally by `reconcile_ticket_status()`
-(step 4) when it detects an inactive-state exit. CVSS recalculation is
-transactional; the package/fetcher workflow runs after commit. No action is
-needed by endpoint handlers or callers. This applies to all three
+The workflow is registered internally by `reconcile_ticket_status()` (step 4)
+when it detects an inactive-state exit and runs after commit. CVSS assessment
+mutations maintain `CVE.severity` in every status. A setting-only default-version
+change remains subject to the inactive-CVE convergence limitation in
+`system-settings.md`; this reactivation path does not acquire a CVE lock while
+holding the Ticket lock. The package-owned reactivation workflow resolves
+current eligibility from persisted inputs. No action is needed by endpoint
+handlers or callers. This applies to all three
 inactive → active paths:
 
 - `reopen_from_ignored()` — Ignored → active (via
@@ -761,7 +766,7 @@ ticket_mutations (infrastructure)
 | ticket_service function | ensure_ticket_operable | reconcile_ticket_status | recalculate_cvss_chain | auto_assign_actor |
 |------------------------|:----------------------:|:----------------------:|:---------------------:|:---------------------:|
 | create_ticket          | —                      | —                      | —                     | —                     |
-| associate_cve          | ✓                      | (via chain)            | ✓                     | ✓                     |
+| associate_cve          | ✓                      | ✓                      | ✓                     | ✓                     |
 | assign_ticket          | ✓                      | ✓                      | —                     | —                     |
 | ignore_ticket          | ✓                      | —                      | —                     | ✓                     |
 | mark_as_duplicate      | ✓                      | —                      | —                     | ✓                     |
@@ -819,6 +824,12 @@ behavior of `ticket_service` operations:
 7. **grant_access concurrent requests**: simulate concurrent
    `grant_access` calls for the same user/ticket → verify one creates
    the grant and the other returns idempotent success
+
+8. **CVE association and assessment race**: use independent sessions to race
+   `associate_cve()` with a CVSS assessment mutation. Verify CVE-then-Ticket
+   lock serialization, committed-current severity and eligibility handoff,
+   acting-user `cve_associated` followed by system `severity_changed` when the
+   handover changes value, and no stale or duplicate event from the loser
 
 ## Cross-references
 

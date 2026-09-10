@@ -179,7 +179,9 @@ layer.
 1. If the ticket has a CVE (`cve_id IS NOT NULL`): severity =
    `cve.severity` (derived from CVSS assessments via the resolution
    cascade — see `docs/features/tickets/cvss-scoring.md`). Note:
-   `cve.severity` can be `null` if no CVSS data is available yet
+   `cve.severity` can be `null` if no CVSS data is available yet. It is
+   CVE-owned state and remains current when the CVE is ticketless or associated
+   with an inactive Ticket; Product eligibility propagation is separate
 2. If the ticket does not have a CVE (`cve_id IS NULL`): severity =
    `ticket.severity_manual`
 3. If neither is available: severity = `null` (unresolved)
@@ -287,10 +289,11 @@ every operation that modifies gate-relevant data. There is no manual
 "Mark as Analyzed" action — the transition happens as soon as all
 conditions are satisfied.
 
-Conversely, if any of these conditions ceases to be met (e.g., a package
-is added with tracks in ANALYSIS, a SUSE CVSS assessment is deleted, or
-severity becomes undetermined), the ticket automatically transitions back
-from Analyzed to Analysis.
+Conversely, when an owning mutation workflow invokes centralized status
+evaluation after any condition ceases to be met (for example, a package is
+added with tracks in ANALYSIS, a committed SUSE CVSS deletion is consumed by
+its Ticket-scoped propagation workflow, or severity becomes undetermined), the
+ticket transitions back from Analyzed to Analysis.
 
 ### Gate: Analyzed → Resolved
 
@@ -329,9 +332,10 @@ Clause (c) enables auto-resolution for the legitimate scenario where a
 track is genuinely affected (code vulnerable) but all products under it
 are ineligible — there is nothing to wait for, and the "affected, no
 fix" fact is preserved (the track stays `AFFECTED`). If a product later
-becomes eligible and actionable (CVSS recalculation, AIMAAS threshold update,
-Product restore, or correction of an EOL lifecycle date), clause (c) ceases to
-hold and the Ticket automatically reverts to Analyzed.
+becomes eligible and actionable through its owning mutation workflow (for
+example, package-owned application of a CVSS handoff, an AIMAAS threshold
+update, Product restore, or correction of an EOL lifecycle date), clause (c)
+ceases to hold and centralized reconciliation reverts the Ticket to Analyzed.
 
 This evaluation is performed by the centralized status evaluation
 function after every operation that modifies track statuses, product
@@ -342,12 +346,12 @@ the Resolved predicate is intentionally true because lifecycle leaves no
 current work.
 There is no manual "Mark as Resolved" action.
 
-Conversely, if any track ceases to be resolution-complete (e.g., CVSS
-recalculation changes product eligibility, a VA resets a track status
-from a final state to `AFFECTED`, or a product is restored under an
-`AFFECTED` track), the ticket automatically transitions back from
-Resolved to Analyzed (or to Analysis, if the "Analyzed" gates are also
-no longer met).
+Conversely, if any track ceases to be resolution-complete (for example,
+package-owned application of a CVSS handoff changes Product eligibility, a VA
+resets a track status from a final state to `AFFECTED`, or a Product is restored
+under an `AFFECTED` track), the owning mutation workflow invokes centralized
+reconciliation and the Ticket transitions back from Resolved to Analyzed (or to
+Analysis, if the "Analyzed" gates are also no longer met).
 
 ### Automatic Status Evaluation
 
@@ -619,10 +623,13 @@ Both transitions go through `ticket_mutations.reopen_from_ignored()`:
 See [ticket-mutations.md](ticket-mutations.md#reopen_from_ignored) for
 the full function contract.
 
-All other modifications on Ignored tickets are blocked — mutation
+All other consumer modifications on Ignored tickets are blocked — mutation
 endpoints return 409 `TICKET_NOT_MUTABLE` (same guard as Duplicated).
 This prevents gate-relevant data from accumulating while the ticket is
 in the manual zone, which would cause unexpected status jumps on reopen.
+Trusted external CVSS ingestion remains the narrow source-owned exception
+defined under Modifications in Inactive Statuses; it does not apply Ticket-
+scoped propagation before reactivation.
 See [Mutability Guard](#mutability-guard) for enforcement details.
 
 ### Modifications in Inactive Statuses
@@ -632,14 +639,20 @@ included in ticket-scoped external monitoring. Global source synchronization
 and local derived reconciliation may still update source-owned or derived data;
 they do not poll an inactive Ticket's external package scope.
 
-- **Resolved**: modifying gate-relevant data triggers centralized status
-  evaluation, which may regress the ticket to Analyzed or Analysis
+- **Resolved**: an authorized consumer mutation may apply its documented
+  Ticket-scoped consequences immediately and trigger centralized status
+  evaluation. Source-owned external CVSS ingestion persists its assessment and
+  refreshes `CVE.severity` immediately, but defers Product eligibility and
+  Ticket gate propagation until reactivation
 - **Ignored and Duplicated** (manual zone): mutation endpoints return
   409 `TICKET_NOT_MUTABLE` via `ensure_ticket_operable()` in the service
   layer. Only the dedicated exit endpoints (`POST .../reopen` for
   Ignored, `POST .../revert-duplicate` for Duplicated) bypass this
-  guard. See [Mutability Guard](#mutability-guard) for the enforcement
-  mechanism.
+  guard. Trusted source ingestion is not a consumer mutation endpoint: it may
+  persist non-SUSE external CVSS assessments and refresh `CVE.severity`, while
+  Product eligibility, assignment, gates, and status propagation remain
+  deferred until reactivation after manual-zone exit. See
+  [Mutability Guard](#mutability-guard) for the consumer enforcement mechanism.
 
 ### Mutability Guard
 
@@ -658,7 +671,15 @@ def ensure_ticket_operable(ticket: Ticket) -> None:
 **Scope**:
 - Applied to: all service-layer functions that modify ticket data
 - NOT applied to: read operations, manual-zone exit functions
-  (`reopen_from_ignored`, `revert_duplicate`)
+  (`reopen_from_ignored`, `revert_duplicate`), or trusted source ingestion that
+  modifies only source-owned external CVSS assessment and CVE-derived severity
+
+This source-ingestion boundary does not weaken manual-zone immutability:
+authenticated consumer APIs may mutate only the internal SUSE assessment and
+remain subject to `TICKET_NOT_MUTABLE`; they cannot use the trusted external
+caller category. Package eligibility behavior remains delegated to the package
+domain and follows the CVSS mutation's `immediate`,
+`deferred_until_reactivation`, `not_applicable`, or `none` handoff.
 
 **Relationship with `require_accessible_ticket`**: the accessibility
 check is a router-level API dependency (applies to all operations on a

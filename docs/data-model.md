@@ -496,13 +496,20 @@ Represents a Common Vulnerability and Exposure entry.
 | cve_id         | VARCHAR(20)  | UNIQUE, NOT NULL     | CVE identifier (e.g., CVE-2024-1234) |
 | title          | VARCHAR(256) |                      | Brief summary from the CNA (CVE 5.x `containers.cna.title`). Populated by fetchers that parse CVE JSON 5.x format (`sync_mitre_cves`, `sync_kernel_cves`). Null when the CNA does not provide a title. Max 256 chars per CVE schema specification |
 | description    | TEXT         |                      | Vulnerability description       |
-| severity       | VARCHAR(20)  | nullable               | Critical, High, Medium, Low, None — denormalized field, always derived from CVSS assessments via the resolution cascade (see `docs/features/tickets/cvss-scoring.md`). `NULL` when no CVSS assessment is available from any provider (unresolved). `None` is a valid severity value representing a CVSS score of exactly 0.0 (the standard CVSS "None" rating). Recalculated whenever CVSS assessments change or the default CVSS version is modified. |
+| severity       | VARCHAR(20)  | nullable               | Critical, High, Medium, Low, None - denormalized unified CVE severity from the deterministic CVSS Severity Resolution Cascade. `NULL` means unresolved; `None` means a resolved score of exactly 0.0. See `docs/features/tickets/cvss-scoring.md` |
 | published_date | TIMESTAMPTZ    |                      | Date CVE was published         |
 | modified_date  | TIMESTAMPTZ    |                      | Date CVE was last modified     |
 | cve_state      | VARCHAR(20)  | NOT NULL, DEFAULT PUBLISHED | CveState: PUBLISHED, REJECTED. Populated by any discovery fetcher: `sync_mitre_cves` (from `cveMetadata.state`), `sync_nvd_cves` (from `vulnStatus = Rejected`), `sync_kernel_cves` (from file path: `published/` vs `rejected/`). See `docs/features/tickets/cve-tracking.md` for rejection handling rules |
 | date_rejected  | TIMESTAMPTZ  | nullable             | From CVE JSON 5.x `cveMetadata.dateRejected`. Set when `cve_state` transitions to `REJECTED`, cleared when it reverts to `PUBLISHED` |
 | created_at     | TIMESTAMPTZ    | NOT NULL, DEFAULT    | Record creation timestamp      |
 | updated_at     | TIMESTAMPTZ    | NOT NULL, DEFAULT    | Record update timestamp        |
+
+`CVE.severity` uses the same unified five-label scale regardless of the
+winning assessment's CVSS version. Assessment persistence recalculates it for
+ticketless CVEs and for CVEs associated with any Ticket status. The
+default-version batch also recalculates it for CVEs associated with active
+Tickets, subject to the target-set limitation in
+`docs/features/platform/system-settings.md`. API wire values are lowercase.
 
 #### CveState Enum
 
@@ -602,11 +609,11 @@ See `docs/features/tickets/cvss-scoring.md` for the full specification.
 |---------------|---------------|----------------------------------------|------------------------------------|
 | id            | UUID          | PK                                     | Internal identifier                |
 | cve_id        | UUID          | FK(cve.id) ON DELETE CASCADE, NOT NULL | Related CVE                        |
-| provider_name | VARCHAR(100) | NOT NULL                               | Human-readable provider name (e.g., `"NVD"`, `"Intel Corporation"`, `"Red Hat"`, `"SUSE"`) |
-| cvss_version  | VARCHAR(10)   | NOT NULL                               | CVSS version (e.g., `"3.1"`, `"4.0"`, `"2.0"`) |
-| score         | DECIMAL(3,1)  | NOT NULL                               | Calculated base score (0.0-10.0)   |
-| severity      | VARCHAR(10)   | NOT NULL                               | Qualitative severity derived from vector string: `"none"`, `"low"`, `"medium"`, `"high"`, `"critical"` (stored lowercase) |
-| vector_string | VARCHAR(200)  | NOT NULL                               | Full CVSS vector string            |
+| provider_name | VARCHAR(100) | NOT NULL                               | Canonical human-readable provider name; exact `"SUSE"` is reserved for the internal assessment |
+| cvss_version  | VARCHAR(10)   | NOT NULL                               | Closed vector-derived set: `"2.0"`, `"3.0"`, `"3.1"`, or `"4.0"` |
+| score         | DECIMAL(3,1)  | NOT NULL                               | Vector-derived Base score from 0.0 through 10.0 |
+| severity      | VARCHAR(10)   | NOT NULL                               | Lowercase version-specific severity derived from the vector; v2.0 uses Sentinel's legacy three-label mapping and v3/v4 use the FIRST scale |
+| vector_string | VARCHAR(200)  | NOT NULL                               | Canonical complete Base vector in FIRST metric order |
 | created_at    | TIMESTAMPTZ     | NOT NULL, DEFAULT                      | Record creation timestamp          |
 | updated_at    | TIMESTAMPTZ     | NOT NULL, DEFAULT                      | Record update timestamp            |
 
@@ -616,16 +623,19 @@ See `docs/features/tickets/cvss-scoring.md` for the full specification.
 - `provider_name` for NVD Primary assessments is always `"NVD"`
 - `provider_name` for NVD Secondary (CNA) assessments is resolved from the
   NVD Source API to a human-readable name (e.g., `"Intel Corporation"`)
-- `provider_name` for the SUSE internal assessment is always `"SUSE"`
-- `severity` is derived from the vector string using the `cvss` Python
-  library's `.severities()[0]` method — never accepted as external input.
-  The library returns title-case labels (e.g., `"Critical"`); these are
-  normalized to lowercase before storage (e.g., `"critical"`). The library
-  applies the version-specific FIRST qualitative rating scale: CVSS v2
-  vectors produce labels from {low, medium, high}; v3/v4 vectors produce
-  labels from {none, low, medium, high, critical}. This per-assessment
-  severity is distinct from `CVE.severity`, which uses a unified scale for
-  operational prioritization (see `docs/features/tickets/cvss-scoring.md`)
+- `provider_name` for the SUSE internal assessment is always `"SUSE"`. Any
+  input equal to `SUSE` after outer trimming and Unicode case-folding is
+  reserved and cannot be persisted by an external ingestion caller
+- `cvss_version`, `score`, `severity`, and `vector_string` are one consistent
+  vector-derived unit. Score, version, severity, and expanded metrics are never
+  accepted as independent persistence authorities. The shared parser accepts
+  only complete Base vectors and canonicalizes metric order before storage
+- Per-assessment `severity` remains version-specific. It is distinct from
+  `CVE.severity`, which is derived from the deterministic winning assessment
+  and uses one unified five-label scale for every source version. The winner is
+  consistent across application and database environments because provider
+  ties use explicit Unicode code-point lexical ordering rather than database
+  collation
 - When a direct source (e.g., Red Hat API) provides data that also exists
   as an NVD Secondary, both write to the same UPSERT conflict key
   `(cve_id, provider_name, cvss_version)` — last-writer-wins. Since all
@@ -826,7 +836,8 @@ require a wide DECIMAL scale.
 CVEs with **active tickets** (New, Analysis, Analyzed). When a ticket
 transitions to an inactive status, the CVEEPSSScore record is **retained**
 but no longer refreshed — consistent with the CVSS lifecycle pattern
-(`docs/features/tickets/cvss-scoring.md`, Sync Scope). If the ticket later
+(`docs/features/tickets/cvss-scoring.md`, External Synchronization). If the
+ticket later
 returns to an active status, the fetcher resumes refreshing the record on
 its next run.
 
@@ -1010,10 +1021,10 @@ contract is in `docs/features/tickets/ticket-audit-log.md`.
 | product_excluded           | Product directly soft-deleted from the Ticket by an authorized acting user. `old_value` contains the Product display name, `user_id` identifies the actor, and `detail` carries the event-time Product name/CPE plus track and package. EOL is derived and never emits this event. |
 | product_restored           | Directly soft-deleted Product restored by an authorized acting user. `new_value` contains the Product display name, `detail` carries the event-time Product name/CPE plus track and package, and `user_id` identifies the actor. |
 | ticket_created             | Ticket created. Always the first event in a ticket's history. `user_id` is NULL for automatic creation (system event) or set to the creating user for manual creation. `comment` describes the creation source (e.g., `"CVE ingested from NVD"`, `"CVE fix detected in {package} ({codestream})"`, `"Ticket created manually"`) |
-| cve_associated             | A CVE was associated with a ticket that previously had no CVE. `user_id` is set to the VA who performed the action. `old_value` is NULL. `new_value` is the CVE-ID string (e.g., `"CVE-2024-1234"`). |
-| severity_changed           | NULL for automatic CVSS recalculation, acting user's UUID for manual severity (`set_severity_manual()`) or CVE association handover (`associate_cve()`). |
-| cvss_assessment_changed    | A CVSS assessment was added, modified, or removed. `old_value` contains previous `"provider_name vX.Y score"` (or NULL if new). `new_value` contains current value (or NULL if removed). `comment` is NULL. `user_id` set for SUSE changes, NULL for external sync. |
-| product_eligibility_changed | Product eligibility changed due to CVSS score recalculation, lifecycle phase transition (Reactive Support), reactivation catch-up, threshold change, or VA override. `old_value` and `new_value` contain the eligibility value (`true`/`false`). `user_id` is set for VA overrides, NULL for system-triggered changes. `detail` carries event-time Product name/CPE plus track, package, and `reason`, where reason is `reactive_ltss`, `threshold`, `reactivation`, `cvss`, or `va_override`. VA override events additionally carry `override_action = set`, `changed`, or `cleared`. |
+| cve_associated             | A CVE was associated with a ticket that previously had no CVE. `user_id` is the acting user for explicit association, the creating user when included in user-driven Ticket creation, or NULL for automatic Ticket creation. `old_value` is NULL. `new_value` is the CVE-ID string (e.g., `"CVE-2024-1234"`). |
+| severity_changed           | `user_id` is NULL for automatic CVSS recalculation and for the derived severity handover during `associate_cve()`; it is the acting user's UUID only for direct manual severity changes through `set_severity_manual()`. |
+| cvss_assessment_changed    | A CVSS assessment was added, modified, or removed. `old_value` and `new_value` use the canonical `"provider_name vX.Y vector_string (score)"` representation, with NULL for the absent side. `comment` and `detail` are NULL. `user_id` is set for manual SUSE changes and NULL for external ingestion. |
+| product_eligibility_changed | Product eligibility changed through its package-owned mutation boundary because of a lifecycle phase transition (Reactive Support), reactivation catch-up, threshold change, VA override, or application of a committed CVSS handoff. `old_value` and `new_value` contain the eligibility value (`true`/`false`). `user_id` is set for VA overrides, NULL for system-triggered changes. `detail` carries event-time Product name/CPE plus track, package, and `reason`, where reason is `reactive_ltss`, `threshold`, `reactivation`, `cvss`, or `va_override`; `cvss` is reserved for the package-owned CVSS-handoff consumer. VA override events additionally carry `override_action = set`, `changed`, or `cleared`. |
 | confidentiality_changed     | Ticket `is_confidential` flag was toggled by a VA. `old_value` and `new_value` contain `"true"` or `"false"`. `detail` is NULL. See `docs/features/tickets/tickets.md` (Confidential Tickets). |
 | access_grant_added          | VA manually granted a user explicit access to a confidential ticket. `old_value` is NULL. `new_value` is the target username. `detail` is NULL. |
 | access_grant_removed        | VA manually revoked a user's explicit access to a confidential ticket. `old_value` is the target username. `new_value` is NULL. `detail` is NULL. |

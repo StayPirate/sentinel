@@ -1034,10 +1034,10 @@ product.
 Standalone eligibility changes go through `package_service`. Product-originated
 automatic recalculation groups all matching records by Ticket, locks and
 processes one Ticket transaction at a time, and calls
-`reconcile_ticket_status()` once only when at least one value changed. The CVSS
-recalculation chain remains the documented architectural exception owned by
-`ticket_mutations`. Both paths skip manual overrides and continue updating
-soft-deleted records under operable Tickets.
+`reconcile_ticket_status()` once only when at least one value changed. CVSS
+mutation code returns a committed eligibility handoff but does not write Product
+eligibility directly. Automatic Product mutations skip manual overrides and
+continue updating soft-deleted records under operable Tickets.
 
 ---
 
