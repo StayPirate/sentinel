@@ -180,9 +180,9 @@ current committed inputs. No Product-wide transaction, progress table, outbox,
 additional distributed lock, or exactly-once mechanism is introduced.
 
 CVSS assessment changes and the platform-wide `default_cvss_version` batch do
-not use this task; they remain owned by
-`ticket_mutations.recalculate_cvss_chain()` as specified in
-`docs/features/tickets/cvss-scoring.md`.
+not use this task; their CVE-owned behavior remains specified in
+`docs/features/tickets/cvss-scoring.md` and
+`docs/features/platform/system-settings.md`.
 
 ## Catch-Up
 
@@ -203,9 +203,9 @@ the final failure according to the shared custom `catch_up()` contract.
 
 The Ticket has already re-entered the gate zone before catch-up is invoked, so
 each Product transaction may reconcile the Ticket from current eligibility and
-actionability. This also covers Tickets without a CVE, for which the standard
-CVSS reactivation step has no severity work. No exclusion restoration is
-needed: EOL participation is always derived from current Product dates.
+actionability. This also covers Tickets without a CVE, for which CVSS inputs are
+not applicable. No exclusion restoration is needed: EOL participation is
+always derived from current Product dates.
 
 ## TicketAuditEvent Records
 

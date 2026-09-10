@@ -75,13 +75,43 @@ failed). The task has a hard timeout (`time_limit=900`) matching the
 slot TTL — this ensures the task is terminated before its slot can
 expire, preventing concurrent batches with conflicting versions.
 
+The CVSS resolution functions return pure resolved results; changing the
+setting does not alter any assessment. This batch is the existing
+orchestration that applies those results to persisted derived state for
+active Tickets and their CVEs. Its target set remains exactly active
+Tickets with a CVE. `recalculate_cvss_chain()` maintains CVE-owned
+severity and returns the eligibility resolution and propagation
+disposition. The package-domain consumer of that handoff is outside this
+specification; this batch contract does not define Product mutation.
+
+For each active Ticket transaction, when the returned old and new unified
+severity differ, the batch creates the required system-attributed
+`severity_changed` record before committing. An unchanged severity creates no
+Ticket event. This contract does not consume the returned eligibility handoff or
+perform an additional Ticket-status reconciliation; those Ticket-scoped effects
+belong to the package propagation contract.
+
+**Current convergence limitation**: the setting-change batch does not
+visit ticketless CVEs or CVEs associated only with inactive Tickets
+(`Resolved`, `Ignored`, or `Duplicated`). Their persisted
+`CVE.severity` can therefore continue to reflect the previous default
+version after the setting changes. This contract defines no CVE-severity
+recalculation on reactivation, so an inactive Ticket follows the same rule as a
+ticketless CVE: a later effective assessment mutation recalculates it under the
+then-current default. The reactivation propagation contract owns any future
+convergence from current persisted inputs. This limitation does not change the
+pure resolution returned when callers calculate it on demand, and it does not
+introduce a wider batch, task, Redis key, recovery path, or package eligibility
+behavior.
+
 The slot key has a fixed TTL of 900 seconds (internal constant). In
 normal operation the task completes in seconds/minutes and releases the
 slot immediately. The TTL serves only as a crash-recovery safety net: if
 the worker dies without releasing the slot, the key self-expires and the
 admin can retry.
 
-See `docs/features/tickets/cvss-scoring.md` (Chain Execution Model) for
+See `docs/features/tickets/cvss-scoring.md` (Persistence and Propagation
+Boundary) for
 additional details on the batch task behavior.
 
 ## Bootstrap

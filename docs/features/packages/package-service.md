@@ -74,7 +74,7 @@ eligibility recalculation use their dedicated system boundaries instead.
 
 | Module | Relationship |
 |--------|-------------|
-| `services/ticket_mutations.py` | `package_service` imports `reconcile_ticket_status()`, `auto_assign_actor()`, and `ensure_ticket_operable()` from `ticket_mutations`. The code dependency remains unidirectional: `package_service` depends on `ticket_mutations`, but `ticket_mutations` does NOT import `package_service`. `reconcile_ticket_status()` performs transactional CVSS recalculation and registers the package-service-owned reactivation workflow for execution by the post-commit workflow owner; the caller does not invoke package catch-up directly |
+| `services/ticket_mutations.py` | `package_service` imports `reconcile_ticket_status()`, `auto_assign_actor()`, and `ensure_ticket_operable()` from `ticket_mutations`. The code dependency remains unidirectional: `package_service` depends on `ticket_mutations`, but `ticket_mutations` does NOT import `package_service`. `reconcile_ticket_status()` registers the package-service-owned reactivation workflow for execution by the post-commit workflow owner; the caller does not invoke package catch-up directly |
 | `services/cvss.py` | `package_service` delegates eligibility calculation to `resolve_eligibility_score()` in `cvss.py` (SUSE-only, 2-step cascade — see Eligibility Score Resolution in `docs/features/tickets/cvss-scoring.md`) |
 | `core/filters.py` | `search_packages()` receives a `confidentiality_filter` (a SQLAlchemy `ColumnElement`) built by the endpoint handler via `confidential_ticket_filter()`. The service function is unaware of access rules |
 
@@ -515,8 +515,8 @@ Recalculates system-managed eligibility for one catalog Product within one
 operable Ticket. This is the mutation boundary used after an AIMAAS threshold
 change or a Reactive Support lifecycle change. It is separate from
 `set_product_eligibility()`, whose boolean path creates a VA override, and
-from `ticket_mutations.recalculate_cvss_chain()`, which owns CVSS assessment
-changes and the platform-wide `default_cvss_version` batch.
+from the CVSS assessment mutation boundaries and the platform-wide
+`default_cvss_version` batch documented by their owning specifications.
 
 **Parameters**:
 
