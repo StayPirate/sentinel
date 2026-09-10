@@ -137,16 +137,33 @@ Do not skip required tests at the user's request; explain the requirement. Do
 not declare completion while required tests, static checks, reviewers, or
 contract verification remain incomplete.
 
-Invoke every reviewer selected by the trigger matrix below. Reviewer findings
-are hypotheses: independently verify each against the actual authority and
-scenario. Discard speculative, already handled, obvious, over-documenting, or
-disproportionate findings. Use the smallest sufficient correction. A resolution
-that adds a table, state, abstraction, dependency, configuration option,
-exception hierarchy, workflow branch, or substantial specification machinery
-requires a user decision before implementation. Confirmed Critical or High
-security findings are mandatory and cannot be discarded as disproportionate.
-Do not implement discarded findings; mention materially important discards and
-their rationale in the PR summary.
+Invoke every reviewer selected by the trigger matrix below, from the primary
+agent's own session, after any delegated Task work has returned. OpenCode's
+Task tool enforces a subagent nesting limit (`subagent_depth`, default `1`
+in this project): a session started via Task cannot itself invoke another
+subagent, and its own attempt to call Task fails with a depth-limit error. A
+task must never route around this — for example by shelling out to a new
+OpenCode process such as `opencode run` — to simulate invoking a reviewer or
+another subagent; that is a prohibited workaround. If delegated work
+implicates a reviewer trigger, the task must report that in its result text
+instead of attempting to invoke it.
+
+After a task returns, the primary agent is responsible for validating the
+delegated changes, either by inspecting them directly, by invoking the
+reviewers the trigger matrix requires for that kind of change, or both. The
+trigger matrix's own conditions remain the sole authority on which reviewers
+are mandatory for a given change; delegating work to a task neither adds nor
+removes that obligation, and only the primary agent may invoke a reviewer.
+
+Reviewer findings are hypotheses: independently verify each against the actual
+authority and scenario. Discard speculative, already handled, obvious,
+over-documenting, or disproportionate findings. Use the smallest sufficient
+correction. A resolution that adds a table, state, abstraction, dependency,
+configuration option, exception hierarchy, workflow branch, or substantial
+specification machinery requires a user decision before implementation.
+Confirmed Critical or High security findings are mandatory and cannot be
+discarded as disproportionate. Do not implement discarded findings; mention
+materially important discards and their rationale in the PR summary.
 
 ### Legacy guardrail references
 
