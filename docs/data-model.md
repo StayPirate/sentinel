@@ -507,8 +507,8 @@ Represents a Common Vulnerability and Exposure entry.
 `CVE.severity` uses the same unified five-label scale regardless of the
 winning assessment's CVSS version. Assessment persistence recalculates it for
 ticketless CVEs and for CVEs associated with any Ticket status. The
-default-version batch also recalculates it for CVEs associated with active
-Tickets, subject to the target-set limitation in
+default-version batch recalculates it for every persisted CVE; Ticket-scoped
+Product and gate effects follow the state matrix in
 `docs/features/platform/system-settings.md`. API wire values are lowercase.
 
 #### CveState Enum
@@ -884,8 +884,9 @@ Summary:
 - New -> Analysis (manual: assignment or any modifying operation)
 - New -> Ignored (manual or automatic: CVE rejection)
 - Analysis -> Analyzed (automatic: all gates met — at least one manually
-  included track, no actionable track in ANALYSIS, severity set, SUSE CVSS
-  provided if CVE present)
+  included track, no actionable track in ANALYSIS, severity set, and at least
+  one canonical SUSE assessment in any accepted CVSS version if a CVE is
+  present)
 - Analysis -> Ignored (manual)
 - Analyzed -> Resolved (automatic: every actionable track is
   resolution-complete)
@@ -896,17 +897,19 @@ Summary:
   broken)
 - Any except Ignored and Duplicated -> Duplicated (manual, reversible)
 - Duplicated -> (evaluated status) (manual: revert via
-  `_reenter_gate_zone`; reassigns to the reverting VA)
+  `ticket_service.revert_duplicate()`; reassigns to the reverting VA)
 - Ignored -> (evaluated status) (manual: VA assigns; or automatic:
-  system reopens via `_reenter_gate_zone`)
+  system reopens through `ticket_service.reopen_from_ignored()`)
 
 Forward and reverse transitions between Analysis, Analyzed, and Resolved
 are handled automatically by the `ticket_mutations` module — see
 `docs/features/tickets/ticket-mutations.md`.
-Exits from the manual zone (Ignored, Duplicated) use the shared
-`_reenter_gate_zone` helper which sets `status = Analysis` (floor of
-the gate zone) and calls `reconcile_ticket_status`, which may promote
-further to `Analyzed` or `Resolved` if gate conditions are satisfied.
+For exits from the manual zone (Ignored, Duplicated), the public
+`ticket_service` workflow sets `status = Analysis` (floor of the gate zone),
+then its private `_complete_manual_zone_exit()` helper synchronously converges
+existing automatic Product eligibility and calls `reconcile_ticket_status`
+exactly once, which may promote further to `Analyzed` or `Resolved` if gate
+conditions are satisfied.
 
 **Status categories**:
 - **Active tickets**: tickets in status `New`, `Analysis`, or `Analyzed`.
@@ -1024,7 +1027,7 @@ contract is in `docs/features/tickets/ticket-audit-log.md`.
 | cve_associated             | A CVE was associated with a ticket that previously had no CVE. `user_id` is the acting user for explicit association, the creating user when included in user-driven Ticket creation, or NULL for automatic Ticket creation. `old_value` is NULL. `new_value` is the CVE-ID string (e.g., `"CVE-2024-1234"`). |
 | severity_changed           | `user_id` is NULL for automatic CVSS recalculation and for the derived severity handover during `associate_cve()`; it is the acting user's UUID only for direct manual severity changes through `set_severity_manual()`. |
 | cvss_assessment_changed    | A CVSS assessment was added, modified, or removed. `old_value` and `new_value` use the canonical `"provider_name vX.Y vector_string (score)"` representation, with NULL for the absent side. `comment` and `detail` are NULL. `user_id` is set for manual SUSE changes and NULL for external ingestion. |
-| product_eligibility_changed | Product eligibility changed through its package-owned mutation boundary because of a lifecycle phase transition (Reactive Support), reactivation catch-up, threshold change, VA override, or application of a committed CVSS handoff. `old_value` and `new_value` contain the eligibility value (`true`/`false`). `user_id` is set for VA overrides, NULL for system-triggered changes. `detail` carries event-time Product name/CPE plus track, package, and `reason`, where reason is `reactive_ltss`, `threshold`, `reactivation`, `cvss`, or `va_override`; `cvss` is reserved for the package-owned CVSS-handoff consumer. VA override events additionally carry `override_action = set`, `changed`, or `cleared`. |
+| product_eligibility_changed | Product eligibility or its override ownership changed through an ordinary package boundary or the narrow atomic CVSS-chain exception. Causes are lifecycle phase transition (Reactive Support), synchronous manual-zone exit, threshold change, VA override, assessment propagation, or default-version propagation. `old_value` and `new_value` contain eligibility (`true`/`false`) and may be equal for a metadata-only override set/clear. `user_id` is set for VA overrides and NULL for system-triggered changes. `detail` carries event-time Product name/CPE plus track, package, and `reason`: `reactive_ltss`, `threshold`, `reactivation`, `cvss`, or `va_override`. VA override events additionally carry `override_action = set`, `changed`, or `cleared`. |
 | confidentiality_changed     | Ticket `is_confidential` flag was toggled by a VA. `old_value` and `new_value` contain `"true"` or `"false"`. `detail` is NULL. See `docs/features/tickets/tickets.md` (Confidential Tickets). |
 | access_grant_added          | VA manually granted a user explicit access to a confidential ticket. `old_value` is NULL. `new_value` is the target username. `detail` is NULL. |
 | access_grant_removed        | VA manually revoked a user's explicit access to a confidential ticket. `old_value` is the target username. `new_value` is NULL. `detail` is NULL. |
@@ -1153,6 +1156,10 @@ override model.
 | updated_at               | TIMESTAMPTZ | NOT NULL, DEFAULT                           | Record update timestamp            |
 
 **Unique constraint**: (ticket_package_track_id, product_id)
+
+When `is_eligible_override = true`, automatic workflows do not modify
+`eligible`. See `docs/features/packages/package-model.md` (Override Model) for
+the full set, clear, recalculation, and narrow CVSS-chain ownership semantics.
 
 > **Exclusion and actionability semantics**: package-tree `deleted_at` fields
 > are modified only by authorized user exclusion/restore operations. They do not block

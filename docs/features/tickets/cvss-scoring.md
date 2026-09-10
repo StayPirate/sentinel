@@ -290,9 +290,10 @@ Resolution is:
 There is no fallback to another version or external provider. The result always
 exists, including for a ticketless CVE or a Ticket without a CVE. Product
 threshold, lifecycle, override, persistence, audit, and Ticket reconciliation
-behavior are owned by `package-model.md` and `package-service.md`. CVSS code
-returns this result and a propagation disposition; it does not mutate Product
-eligibility under this contract.
+behavior are owned by `package-model.md`, `package-service.md`, and the narrow
+atomic CVSS-chain exception in `ticket-mutations.md`. The exception applies the
+package-model-owned pure evaluator; it does not change this resolution or create
+a second formula owner.
 
 Severity and eligibility are deliberately separate. A consumer MUST NOT use
 the Severity Resolution Cascade winner for eligibility or use the eligibility
@@ -336,8 +337,8 @@ Severity Resolution result, whether unified severity changed, and one of these
 propagation dispositions:
 
 - `not_applicable`: no associated Ticket;
-- `immediate`: the package-owned propagation contract may run in the current
-  workflow;
+- `immediate`: the current locked CVSS chain applies automatic Product
+  eligibility and any required final Ticket reconciliation before returning;
 - `deferred_until_reactivation`: Ticket-owned propagation waits for the
   reactivation workflow; or
 - `none`: the serialized operation made no effective mutation.
@@ -350,7 +351,7 @@ The following matrix is authoritative:
 | `New` | Persist and recalculate; `immediate` | Persist and recalculate; `immediate` |
 | `Analysis` | Persist and recalculate; `immediate` | Persist and recalculate; `immediate` |
 | `Analyzed` | Persist and recalculate; `immediate` | Persist and recalculate; `immediate` |
-| `Resolved` | Persist and recalculate; `immediate` | Persist and recalculate; `deferred_until_reactivation` |
+| `Resolved` | Persist and recalculate; `immediate` | Persist and recalculate; `immediate` |
 | `Ignored` | Reject with `TICKET_NOT_MUTABLE`; no result | Persist and recalculate; `deferred_until_reactivation` |
 | `Duplicated` | Reject with `TICKET_NOT_MUTABLE`; no result | Persist and recalculate; `deferred_until_reactivation` |
 
@@ -359,9 +360,14 @@ blocked by Ticket manual-zone immutability. Deferral never delays the direct
 assessment write, `CVE.severity`, or their direct Ticket audit records. It
 delays only package-owned and gate-owned propagation.
 
-A manual SUSE mutation on a `Resolved` Ticket is immediate because it is
-intentional, authorized Ticket work. An external update on the same Ticket is
-CVE maintenance and leaves Ticket-owned propagation to reactivation.
+`Resolved` is part of the gate zone. Manual SUSE mutation and trusted external
+ingestion therefore both apply automatic Product eligibility immediately and
+may cause an ordinary gate-driven regression. Only `Ignored` and `Duplicated`
+defer Product and gate effects until their explicit manual-zone exit.
+
+Only an effective manual SUSE mutation may apply ordinary auto-assignment after
+the serialized no-op/not-found classification. Trusted external ingestion and
+default-version recalculation are system actions and never assign.
 
 ### Direct Audit Summary
 
@@ -380,6 +386,12 @@ Rejected requests raise and return no mutation result. Unchanged, not-found,
 and rolled-back outcomes create no direct event. Audit failure rolls back the
 assessment, `CVE.severity`, and every other change in the caller-owned
 transaction.
+
+For an effective manual SUSE chain, deterministic insertion order is optional
+`assignment`, optional system `New → Analysis`, `cvss_assessment_changed`,
+optional derived `severity_changed`, changed-Product eligibility events ordered
+by `TicketPackageProduct.id`, and optional final gate `status_change`. Deferred
+external mutations stop after the direct CVSS records.
 
 ### Serialization and Concurrent Outcomes
 
@@ -400,10 +412,12 @@ Services flush but do not commit or roll back. The caller owns the transaction.
 
 ## Workflow Gate
 
-For a Ticket with a CVE, canonical SUSE v3.1 and v4.0 assessments are both
-required for the Analysis to Analyzed gate. SUSE v2.0 and v3.0 assessments are
-valid and stored but do not satisfy this gate. Tickets without a CVE use their
-manual severity gate instead. See `tickets.md` for the complete gate.
+For a Ticket with a CVE, the Analysis to Analyzed gate requires at least one
+canonical `SUSE` assessment in any version currently accepted by Sentinel.
+SUSE v2.0, v3.0, v3.1, or v4.0 each satisfies the gate. An assessment from any
+other provider does not, and a SUSE assessment in the configured default
+version is not specifically required. Tickets without a CVE use their manual
+severity gate instead. See `tickets.md` for the complete gate.
 
 ## External Synchronization
 
@@ -544,8 +558,8 @@ POST /api/v1/cves/{cve_id}/cvss/suse
 
 `vector_string` is a required JSON string with a maximum received length of
 200 characters. The shared parser applies the remaining domain rules. All four
-accepted versions may be stored for SUSE; only v3.1 and v4.0 satisfy the
-workflow gate.
+accepted versions may be stored for SUSE, and any one canonical SUSE assessment
+in an accepted version satisfies the workflow gate.
 
 The endpoint returns the shared assessment item in the standard `data`
 envelope. It returns **201 Created only when this serialized invocation is the
@@ -596,10 +610,13 @@ version.
 ### Persistence and Propagation Boundary
 
 The CVSS mutation service owns assessment persistence, `CVE.severity`, direct
-audit records, lock ordering, and the stable committed result. Package-owned
-services consume that result to implement Product eligibility propagation and
-Ticket reconciliation according to their own contract. The resolution
-algorithms are never copied into either mutation boundary.
+audit records, lock ordering, and the stable committed result. For an immediate
+disposition it also applies the sole narrow write exception: system-managed
+Product eligibility is updated inline, through the package-model-owned pure
+evaluator, before one final Ticket reconciliation. `package_service` retains
+all ordinary Product mutation ownership and is not imported by
+`ticket_mutations`. Resolution and eligibility algorithms are never copied
+into either mutation boundary.
 
 Changing `default_cvss_version` retains the system-settings endpoint, batch,
 and recovery contracts in `system-settings.md`. This specification defines the
@@ -651,7 +668,23 @@ testing strategy.
   every reserved-name variant from system ingestion.
 - Ticketless CVEs and associated Tickets in each of `New`, `Analysis`,
   `Analyzed`, `Resolved`, `Ignored`, and `Duplicated`, covering the complete
-  persistence matrix and propagation disposition.
+  persistence matrix, immediate propagation including both caller categories on
+  `Resolved`, Product deferral only in the manual zone, and manual-SUSE
+  assignment behavior.
+- Gate completeness with exactly one canonical SUSE assessment in turn for
+  each accepted version; an external-only assessment set; adding the first
+  SUSE assessment; deleting the last SUSE assessment; and adding or deleting
+  one of multiple SUSE assessments while another remains.
+- With default v4.0 and only a canonical SUSE v2.0, v3.0, or v3.1 assessment,
+  prove independently that severity follows the full cascade, eligibility uses
+  the 10.0 fallback, and the SUSE workflow gate is satisfied.
+- Trusted external CVSS on `Resolved`, starting from converged Product values,
+  proves that the immediate chain reloads current inputs but does not change the
+  Eligibility Score Resolution because external assessments never participate
+  in it. A stale automatic Product value is still repaired from the current
+  eligibility inputs. Manual SUSE and default-version cases separately cover
+  false-to-true regression, true-to-false preservation or advancement,
+  override skips, and at most one final reconciliation.
 - Immediate `CVE.severity` maintenance for external updates in every Ticket
   status and for ticketless CVEs; no assessment means `NULL`, while score 0.0
   means unified `none`.
@@ -663,6 +696,10 @@ testing strategy.
   upsert/delete, delete/delete, Ticket association races, and composition with
   CVE ingestion. Assert `CVE` then `Ticket` acquisition, truthful winner action,
   HTTP status, metric, audit value, and propagation disposition.
+- Cross-reference the complete Product formula, audit ordering, one-date,
+  one-reconciliation, rollback, association, reactivation, default-version,
+  and CVSS/override race coverage required by `ticket-mutations.md` and
+  `package-service.md`; parser and resolution tests remain owned here.
 - GET and POST reuse of the same item schema for all four versions; exact
   version-discriminated metric shapes; lowercase enum values; canonical vector;
   deterministic `4.0 > 3.1 > 3.0 > 2.0`, provider-ascending list order;
@@ -688,7 +725,7 @@ new table, column, enum, constraint, or migration.
 - `docs/features/tickets/cve-service.md` - Source-neutral CVE ingestion
 - `docs/features/platform/cve-record-parser.md` - CVE Record extraction
 - `docs/features/packages/package-model.md` - Orthogonal eligibility rules
-- `docs/features/packages/package-service.md` - Package-owned propagation
+- `docs/features/packages/package-service.md` - Ordinary Product mutation and reactivation ownership
 - `docs/features/platform/system-settings.md` - Default-version operations
 - `docs/features/platform/testing-strategy.md` - Test tiers and requirements
 - `docs/features/identity/rbac.md` - Capabilities and endpoint permission map

@@ -43,19 +43,8 @@ boundary, which is intentionally not represented by an event type.
 | `ticket_created` | Ticket created (CVE ingestion or manual creation) | `NULL` for automatic creation, creating user for manual creation | `NULL` | `NULL` | Creation source description (e.g., `"CVE ingested from NVD"` or `"Ticket created manually"`) | `NULL` |
 | `cve_associated` | CVE associated with a ticket that previously had no CVE | Acting user for explicit association; creating user or `NULL` when included in Ticket creation | `NULL` | CVE-ID string (e.g., `"CVE-2024-1234"`) | `NULL` | `NULL` |
 | `severity_changed` | CVSS resolution changes `CVE.severity`, VA sets/clears manual severity, or CVE association hands over from manual to CVSS-derived severity | `NULL` for every CVSS-derived value, including association handover; acting user only for direct `set_severity_manual()` | Old severity (e.g., `High`) or `NULL` | New severity (e.g., `Critical`) or `NULL` | `NULL` | `NULL` |
-
-> **Note**: `old_value` and `new_value` can be `NULL` for `severity_changed`
-> events. When severity transitions from unresolved (`NULL`) to a resolved
-> value, `old_value` is `NULL`. When all CVSS assessments are deleted and
-> severity becomes unresolved, `new_value` is `NULL`. When `associate_cve()`
-> triggers the handover from manual to CVSS-derived severity, `old_value` is
-> the previous `severity_manual` value and `new_value` is the CVSS-derived
-> severity (or `NULL` if the CVE has no CVSS data yet). This event is
-> emitted by `associate_cve()` itself (not by `recalculate_cvss_chain()`) with
-> `user_id = NULL`, because Sentinel derives the result even though a user
-> initiated the association.
 | `cvss_assessment_changed` | CVSS assessment added, modified, or removed | Acting user for manual SUSE changes, `NULL` for trusted external ingestion | Previous canonical `"provider_name vX.Y vector_string (score)"` or `NULL` if new | Current canonical `"provider_name vX.Y vector_string (score)"` or `NULL` if removed | `NULL` | `NULL` |
-| `product_eligibility_changed` | Product eligibility changed due to CVSS recalculation, lifecycle phase transition (Reactive Support), threshold change, or VA override | VA user for VA overrides, `NULL` for system-triggered changes | Old eligibility (`true` or `false`) | New eligibility (`true` or `false`) | `NULL` | Product subject plus `reason` and conditional `override_action` (see detail contract) |
+| `product_eligibility_changed` | Product eligibility or its manual-override ownership changed due to CVSS/default-version recalculation, reactivation, lifecycle phase transition (Reactive Support), threshold change, or VA override | VA user for VA overrides, `NULL` for system-triggered changes | Old eligibility (`true` or `false`) | New eligibility (`true` or `false`); may equal old value for a metadata-only override set/clear | `NULL` | Product subject plus `reason` and conditional `override_action` (see detail contract) |
 | `track_excluded` | Track directly soft-deleted by an authorized acting user. Child Products are not modified and do not generate events; they become effectively excluded through the hierarchy | Acting user | Track name | `NULL` | `NULL` | `{"track": "...", "package": "..."}` (see detail contract) |
 | `track_restored` | Directly excluded track restored to ticket. Only the track record is restored — child products are not modified | Acting user | `NULL` | Track name | `NULL` | `{"track": "...", "package": "..."}` (see detail contract) |
 | `product_excluded` | Product directly soft-deleted by an authorized acting user | Acting user | Product display name | `NULL` | `NULL` | Product subject (see detail contract) |
@@ -69,6 +58,16 @@ boundary, which is intentionally not represented by an event type.
 | `reference_type_changed` | Manual reference type changed via PATCH | Acting user | Previous type (e.g., `advisory`) or `NULL` | New type (e.g., `patch`) or `NULL` | `NULL` | `{"url": "..."}` (see detail contract) |
 | `reference_title_changed` | Manual reference title changed via PATCH | Acting user | Previous title or `NULL` | New title or `NULL` | `NULL` | `{"url": "..."}` (see detail contract) |
 | `reference_description_changed` | Manual reference description changed via PATCH | Acting user | Previous description or `NULL` | New description or `NULL` | `NULL` | `{"url": "..."}` (see detail contract) |
+
+> **Severity value note**: `old_value` and `new_value` can be `NULL` for
+> `severity_changed`. A transition from unresolved to resolved uses
+> `old_value = NULL`; deleting the last winning assessment may produce
+> `new_value = NULL`. For the manual-to-derived handover triggered by
+> `associate_cve()`, the old value is the previous `severity_manual` and the
+> new value is the CVSS-derived severity or `NULL`. `recalculate_cvss_chain()`
+> emits this event from the previous value supplied by `associate_cve()`, with
+> `user_id = NULL`, because Sentinel derives the result even though a user
+> initiated the association.
 
 **Rules**:
 
@@ -100,10 +99,21 @@ boundary, which is intentionally not represented by an event type.
 - Event insertion order is deterministic. Ticket creation records
   `ticket_created` first, before optional initial events. CVE association
   records `cve_associated` before its derived severity handover. An effective
-  assessment mutation records `cvss_assessment_changed` before any derived
-  `severity_changed`. Package eligibility and Ticket status events, when their
-  owning operations apply an immediate handoff, follow these direct CVSS
-  records.
+  manual SUSE chain records optional `assignment`, optional system
+  `New → Analysis`, `cvss_assessment_changed`, optional derived
+  `severity_changed`, automatic Product eligibility events, and optional final
+  gate `status_change`, in that order. An external chain begins with
+  `cvss_assessment_changed` because it never assigns. Product events are ordered
+  by `TicketPackageProduct.id` ascending; the UUID is an ordering input and is
+  not included in `detail`.
+- Automatic Product recalculation creates exactly one event for each occurrence
+  whose persisted boolean changes. Override-skipped, unchanged, manual-zone-
+  deferred or skipped, rejected, not-found, and rolled-back Product outcomes
+  create none. `Resolved` is not a deferred state. A VA override set or clear
+  remains an effective metadata
+  mutation when `is_eligible_override` changes even if the boolean does not;
+  that one event truthfully carries equal old/new booleans and the applicable
+  `override_action`.
 - `comment` is used exclusively for system-generated human-readable
   descriptions (e.g., creation source, deactivation reason, detection
   context). It is NOT populated by user input — no API endpoint exposes
@@ -160,13 +170,12 @@ types not listed here MUST set `detail` to `NULL`.
   acquisition that finds the association already present emits no event.
 - `product_eligibility_changed`: `reason` values are `reactive_ltss`,
   `threshold`, `reactivation`, `cvss`, or `va_override`. Product-originated
-  automatic recalculation (`reactive_ltss`, `threshold`, or `reactivation`)
-  emits one event per changed
+  automatic recalculation (`reactive_ltss` or `threshold`), synchronous
+  manual-zone-exit convergence (`reactivation`), and the atomic assessment or
+  default-version chain (`cvss`) emit one event per changed
   `TicketPackageProduct`, with `user_id = NULL` and `comment = NULL`, in the
   same per-Ticket transaction as the eligibility update. Unchanged and
-  manual-override records emit no event. `cvss` is reserved for the
-  package-owned consumer that applies a committed CVSS eligibility handoff;
-  this audit specification does not define that mutation workflow. When
+  manual-override records emit no event. When
   `reason = va_override`,
   `override_action` is required and equals `set` when automatic management
   becomes a manual override, `changed` when an existing override changes
@@ -362,6 +371,21 @@ Tests for any Ticket mutation that requires an event MUST verify:
 16. CVSS-derived `severity_changed` always has `user_id = NULL`, including the
     association handover, while the preceding `cve_associated` retains the
     acting user; tests assert the documented event order
+17. Manual-SUSE CVSS chains assert optional assignment and system
+    `New → Analysis` precede direct CVSS records, changed automatic Product
+    events follow severity in `TicketPackageProduct.id` order, and any final
+    gate status event is last. External and default-version system chains never
+    create assignment
+18. Automatic eligibility tests assert exact actor, reason, cardinality, and
+    no-event behavior for unchanged, override-skipped, manual-zone-deferred or
+    skipped, rejected, not-found, concurrent no-op, and rollback outcomes;
+    `Resolved` chains assert immediate Product events when values change
+19. Override set/change/clear tests assert that a marker-changing metadata-only
+    mutation creates one event even when `old_value == new_value`, while a true
+    marker-and-value no-op creates none
+20. Whole-chain rollback tests inject settings, database, eligibility, audit,
+    flush, and reconciliation failures and assert no durable assessment,
+    severity, assignment, Product, Ticket-status, or audit effect
 
 See Guardrail 6 (Mandatory testing) and Guardrail 11 (Ticket event logging)
 in `AGENTS.md` for enforcement.

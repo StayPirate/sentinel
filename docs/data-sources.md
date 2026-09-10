@@ -857,7 +857,11 @@ security update.
   `sync_aimaas_thresholds` triggers immediate eligibility re-evaluation.
   When lifecycle dates change, the separate `evaluate_lifecycle_transitions`
   fetcher reconciles resulting eligibility and Ticket-gate effects on its next
-  scheduled run. The CPE map endpoint is not consumed
+  scheduled run. An explicit `Ignored` or `Duplicated` exit separately
+  converges existing automatic Product eligibility synchronously before its
+  final gate result; a `Resolved` regression already receives ordinary gate-
+  zone eligibility maintenance. The CPE map
+  endpoint is not consumed
   at runtime; it may serve only as an out-of-band input to reviewed updates
   of `backend/app/data/cpe-package-mapping.json`, whose canonical contract
   is defined in `docs/features/packages/cpe-package-mapping.md`

@@ -43,7 +43,7 @@ no exclusion provenance, restore mutation, or package-tree audit event.
 | Source | Local (no external source) |
 | Scope | Product eligibility mismatches and gate-zone Tickets requiring lifecycle-aware reconciliation |
 | Auth | N/A |
-| `participates_in_catch_up` | `True` — restores current automatic eligibility after a Ticket leaves the manual zone |
+| `participates_in_catch_up` | `True` — verifies lifecycle-aware gate state after reactivation; it does not repeat eligibility calculation already owned by the triggering or manual-zone-exit workflow |
 | Custom settings | No |
 
 The default schedule follows `sync_smelt_products` at 01:00 UTC,
@@ -149,7 +149,7 @@ independent schedule or dashboard entry.
 | Parameter | Type | Meaning |
 |-----------|------|---------|
 | `catalog_product_id` | `UUID` | Internal catalog `Product.id` |
-| `reason` | `Literal["threshold", "reactive_ltss", "reactivation"]` | Trigger recorded in changed-record audit events |
+| `reason` | `Literal["threshold", "reactive_ltss"]` | Trigger recorded in changed-record audit events |
 
 The task validates `reason` before opening a database session. An unsupported
 value raises `ValueError` and performs no work.
@@ -187,25 +187,31 @@ not use this task; their CVE-owned behavior remains specified in
 ## Catch-Up
 
 `EvaluateLifecycleTransitions.catch_up(ticket_id, session)` is a custom
-override of the shared per-Ticket catch-up contract. The passed session is used
-only to verify that the Ticket exists and enumerate distinct catalog Product
-IDs currently linked to its package tree. This enumeration includes directly
-and effectively manually excluded records and EOL Products. A missing Ticket or an
-empty package tree returns silently.
+override of the shared per-Ticket catch-up contract and a current-state safety
+net. For a manual-zone exit, the synchronous package-domain boundary has already
+recalculated every existing system-managed Product with one UTC
+`evaluation_date`, created any `reason = reactivation` events, and performed
+the transition's single final gate reconciliation. For a `Resolved` regression,
+the triggering gate-zone workflow has already maintained current eligibility.
+The catch-up therefore verifies current lifecycle/actionability state and
+normally returns without a mutation. It never recalculates existing Product
+eligibility as part of this reactivation invocation.
 
-For every Product ID, the method opens an independent session and transaction
-and invokes `package_service.recalculate_product_eligibility_for_ticket()` for
-the same `ticket_id`, with reason `reactivation` and one UTC
-`evaluation_date` captured for the complete catch-up invocation. Products are
-processed sequentially; a
-failure is logged and later Products continue. If all Products fail, propagate
-the final failure according to the shared custom `catch_up()` contract.
+The passed session is used only to verify that the Ticket exists and determine
+whether current persisted status differs from current lifecycle-aware gates. A
+missing Ticket, empty package tree, or converged Ticket returns silently. When a
+later committed Product creation or lifecycle change leaves a mismatch, the
+method delegates only current Ticket gate reconciliation through the ordinary
+package service boundary; it does not recalculate Product eligibility, replay
+the synchronous manual-zone-exit Product events, or reconcile once per catalog
+Product. A distinct later committed lifecycle or Product creation mutation may
+use its ordinary eligibility owner. No exclusion restoration is needed: EOL
+participation is always derived from current Product dates.
 
-The Ticket has already re-entered the gate zone before catch-up is invoked, so
-each Product transaction may reconcile the Ticket from current eligibility and
-actionability. This also covers Tickets without a CVE, for which CVSS inputs are
-not applicable. No exclusion restoration is needed: EOL participation is
-always derived from current Product dates.
+The delegated reconciliation is the sole item in this custom catch-up
+invocation. If it fails, the exception propagates to `run_catch_up` for the
+shared retry classification; there is no partial-success case to return or
+later sibling item to continue.
 
 ## TicketAuditEvent Records
 
@@ -214,12 +220,14 @@ Lifecycle processing creates audit events only for persisted mutations:
 | Mutation | `event_type` | `user_id` | `detail.reason` |
 |----------|--------------|-----------|-----------------|
 | Product eligibility changes during periodic lifecycle evaluation | `product_eligibility_changed` | `NULL` | `reactive_ltss` |
-| Product eligibility changes during lifecycle catch-up | `product_eligibility_changed` | `NULL` | `reactivation` |
 | Ticket gate status changes because current actionability or eligibility changed | `status_change` | `NULL` | N/A |
 
 EOL entry, EOL exit, and parent actionability changes create no package-tree
 audit event because they do not mutate package-tree state. Exclusion and
 restore events remain exclusive to authorized acting-user actions.
+The package-owned synchronous manual-zone-exit boundary creates any
+`reason = reactivation` eligibility events before this catch-up begins; see
+`package-service.md` (Synchronous manual-zone-exit eligibility convergence).
 
 ## Integration with AIMAAS Synchronization
 

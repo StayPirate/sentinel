@@ -2,11 +2,12 @@
 
 ## Purpose
 
-Centralize all package-centric operations — mutations on `TicketPackage`,
+Centralize ordinary package-centric operations — mutations on `TicketPackage`,
 `TicketPackageMaintainer`, `TicketPackageTrack`, and `TicketPackageProduct`
 records, orchestration with external systems (SMELT), and package query
-functions — in a single service module (`package_service`). This
-ensures that:
+functions — in a single service module (`package_service`). The sole exception
+is automatic `TicketPackageProduct.eligible` mutation inside the atomic CVSS
+chain documented in `ticket-mutations.md`. This ensures that:
 
 - `ticket_mutations.reconcile_ticket_status()` is always called after
   gate-relevant package changes
@@ -74,8 +75,9 @@ eligibility recalculation use their dedicated system boundaries instead.
 
 | Module | Relationship |
 |--------|-------------|
-| `services/ticket_mutations.py` | `package_service` imports `reconcile_ticket_status()`, `auto_assign_actor()`, and `ensure_ticket_operable()` from `ticket_mutations`. The code dependency remains unidirectional: `package_service` depends on `ticket_mutations`, but `ticket_mutations` does NOT import `package_service`. `reconcile_ticket_status()` registers the package-service-owned reactivation workflow for execution by the post-commit workflow owner; the caller does not invoke package catch-up directly |
-| `services/cvss.py` | `package_service` delegates eligibility calculation to `resolve_eligibility_score()` in `cvss.py` (SUSE-only, 2-step cascade — see Eligibility Score Resolution in `docs/features/tickets/cvss-scoring.md`) |
+| `services/ticket_mutations.py` | `package_service` imports `reconcile_ticket_status()`, `auto_assign_actor()`, and `ensure_ticket_operable()` from `ticket_mutations`. The code dependency remains unidirectional: `package_service` depends on `ticket_mutations`, but `ticket_mutations` does NOT import `package_service`. The CVSS chain may update only system-managed Product eligibility inline through the shared pure evaluator; this narrow exception does not transfer any other package mutation ownership. `reconcile_ticket_status()` registers the post-commit package-tree recovery workflow; the caller does not invoke catch-up directly |
+| `services/ticket_service.py` | `ticket_service` is the higher-level owner of manual-zone exit workflows and invokes this module's synchronous eligibility boundary with an already locked Ticket. `package_service` does not import or call back into `ticket_service` |
+| `services/cvss.py` | `package_service` delegates score selection to `resolve_eligibility_score()` in `cvss.py` (SUSE-only, 2-step cascade — see Eligibility Score Resolution in `docs/features/tickets/cvss-scoring.md`) and applies the one pure complete eligibility evaluator required by `package-model.md`. `ticket_mutations` reuses that evaluator without importing `package_service` |
 | `core/filters.py` | `search_packages()` receives a `confidentiality_filter` (a SQLAlchemy `ColumnElement`) built by the endpoint handler via `confidential_ticket_filter()`. The service function is unaware of access rules |
 
 ### Module invariant: I/O-then-Lock pattern
@@ -434,6 +436,7 @@ Sets or resets the eligibility override of a `TicketPackageProduct` record.
 | `ticket_package_product_id` | `UUID` | Yes | TicketPackageProduct to modify |
 | `eligible` | `bool \| None` | Yes | New eligibility value (`true`/`false` for override, `None` to reset to automatic calculation) |
 | `acting_user_id` | `UUID` | Yes | Acting user attributed to the override or reset |
+| `evaluation_date` | `date \| None` | No | UTC date shared by lifecycle evaluation, reconciliation, result projection, and any package-tree mutation response. If omitted, capture once at entry |
 
 **Preconditions**:
 
@@ -483,6 +486,10 @@ If `eligible` is `None` (reset to automatic):
 10. Call `reconcile_ticket_status()`
 11. Flush and return `changed` with the updated product
 
+Both paths reuse the one `evaluation_date` for lifecycle evaluation,
+eligibility, actionability, final Ticket reconciliation, result projection, and
+any response containing package-tree state.
+
 > **Note**: Eligibility recalculation delegates to
 > `cvss.resolve_eligibility_score()` (SUSE assessment of the default
 > version only; fallback to 10.0 if no SUSE assessment exists). Since this
@@ -500,6 +507,13 @@ Every no-op above occurs before auto-assignment and therefore produces no
 assignment, eligibility event, Ticket reconciliation, or post-commit effect.
 After a concurrent winner commits, the waiting caller determines override
 action and audit old/new values from the reloaded locked state.
+
+Clearing an existing override is effective even when the automatic evaluator
+returns the same boolean already stored in `eligible`: the marker changes from
+true to false, the event records equal truthful boolean `old_value` and
+`new_value` plus `override_action = cleared`, and the occurrence immediately
+returns to automatic management. Later CVSS, default-version, threshold,
+lifecycle, or reactivation workflows may update it.
 
 **Exceptions**: a null actor is a caller contract violation; declared-path
 lookup raises `TicketNotFoundError`, `PackageNotFoundError`,
@@ -525,7 +539,7 @@ from the CVSS assessment mutation boundaries and the platform-wide
 | `db` | `AsyncSession` | Yes | Caller-owned database session |
 | `ticket_id` | `UUID` | Yes | Ticket whose matching package Products are recalculated |
 | `catalog_product_id` | `UUID` | Yes | Internal catalog `Product.id`, not a `TicketPackageProduct.id` |
-| `reason` | `Literal["threshold", "reactive_ltss", "reactivation"]` | Yes | System trigger recorded in each audit event |
+| `reason` | `Literal["threshold", "reactive_ltss"]` | Yes | System trigger recorded in each audit event |
 | `evaluation_date` | `date \| None` | No | UTC date used for lifecycle rules and final actionability reconciliation. If omitted, capture once at function entry |
 
 **Preconditions and guards**:
@@ -537,7 +551,7 @@ from the CVSS assessment mutation boundaries and the platform-wide
   `TicketNotMutableError`. Including `Resolved` lets threshold and lifecycle
   corrections invalidate resolution.
 - The calling task validates `reason` before invoking this typed service
-  boundary; callers pass only `threshold`, `reactive_ltss`, or `reactivation`.
+  boundary; callers pass only `threshold` or `reactive_ltss`.
 
 **Behavior**:
 
@@ -560,7 +574,8 @@ from the CVSS assessment mutation boundaries and the platform-wide
    `product_eligibility_changed` event in the same transaction. Set
    `user_id = NULL`, `comment = NULL`, preserve the true old and new boolean
    values, and populate the standard Product subject and `reason` detail keys
-   defined in `ticket-audit-log.md`.
+   defined in `ticket-audit-log.md`. Process changed records in ascending
+   `TicketPackageProduct.id` order.
 7. If at least one record changed, call `reconcile_ticket_status()` exactly
    once after all updates and audit events, using that `evaluation_date` for
    all actionability checks. If no value changed, return a no-op result without
@@ -586,6 +601,49 @@ root does not exist; shared settings, database, eligibility-resolution,
 audit-validation, and reconciliation exceptions propagate unchanged. Any
 exception rolls back the caller's whole Ticket transaction, including its
 eligibility updates and audit events.
+
+---
+
+### Synchronous manual-zone-exit eligibility convergence
+
+The package domain owns recalculation of existing automatic Product
+occurrences when an `Ignored` or `Duplicated` Ticket explicitly enters the gate
+zone. This is a
+composable caller-owned transaction boundary invoked only by
+`ticket_service._complete_manual_zone_exit()` after the public workflow has
+locked the Ticket and set its intermediate status to `Analysis`; its concrete
+package-boundary name and return type are implementation choices.
+
+Its semantic inputs are `db: AsyncSession`, the locked `Ticket`, and one UTC
+`evaluation_date`. It:
+
+1. loads the complete current assessment set, current persisted
+   `default_cvss_version`, and every Product occurrence with its current
+   threshold, lifecycle dates, override marker, and eligibility value;
+2. includes directly or effectively excluded and EOL occurrences, but skips
+   every `is_eligible_override = true` occurrence without changing it or
+   creating an event;
+3. applies the canonical pure eligibility evaluator to all remaining
+   occurrences and updates only booleans that differ;
+4. creates one system-attributed `product_eligibility_changed` event per changed
+   occurrence, with `reason = reactivation`, in ascending
+   `TicketPackageProduct.id` order; and
+5. flushes and returns examined, override-skipped, and changed counts without
+   committing, rolling back, assigning, reconciling, or reacquiring the Ticket
+   lock.
+
+The manual-zone-exit caller owns one final `reconcile_ticket_status()` invocation
+after this boundary. This function never acquires a CVE lock, recalculates or
+writes `CVE.severity`, performs external/Redis/Celery I/O, restores exclusion,
+or creates package descendants. It reads current committed CVE-owned state only;
+a concurrent CVSS workflow follows `CVE` then `Ticket` and subsequently
+recomputes from winner-current state. Any settings, database, eligibility,
+audit, or flush error escapes and rolls back the complete manual-zone-exit
+transaction.
+
+Re-invocation with the same date and current inputs is a no-op. An `Ignored` or
+`Duplicated` Ticket is never passed directly: the owning exit workflow first
+validates its exact source state and sets the intermediate gate-zone floor.
 
 ---
 
@@ -1028,11 +1086,15 @@ do not auto-assign. `add_package_to_ticket()` does not apply it.
 
 ### Package-tree reactivation workflow
 
-This workflow is the package-domain first phase after an inactive Ticket enters
-an active status. Its conceptual input is `ticket_id: UUID`; it returns no
-domain value. It is idempotent and creates audit events only through effective
-delegated `add_package_to_ticket()` mutations. It is an orchestration boundary,
-not a caller-owned composable service function: the workflow owner opens and
+This workflow is the post-commit package-tree recovery phase after an inactive
+Ticket enters an active status. Before `Ignored` or `Duplicated` exits,
+automatic Product eligibility has converged through the special synchronous
+manual-zone boundary; before a `Resolved` regression, the triggering ordinary
+gate-zone mutation has already maintained eligibility. Its
+conceptual input is `ticket_id: UUID`; it returns no domain value. It is
+idempotent and creates audit events only through effective delegated
+`add_package_to_ticket()` mutations. It is an orchestration boundary, not a
+caller-owned composable service function: the workflow owner opens and
 completes one independent transaction per package while the delegated
 `package_service` functions retain their module-wide no-commit contract.
 
@@ -1183,8 +1245,10 @@ initial status is always `ANALYSIS` and `delivery_status` is `PENDING`.
 When it creates a new `TicketPackageProduct` record, eligibility is
 calculated at creation time. See `docs/features/packages/package-model.md`
 ([Axis 2: Eligibility](package-model.md#axis-2-eligibility-per-product-only))
-for the computation rules. Products do not have their own status — they
-inherit affectedness implicitly from the parent track.
+for the computation rules. This uses the same pure complete evaluator as
+override clear, threshold/lifecycle recalculation, synchronous manual-zone exit,
+and the narrow CVSS-chain exception. Products do not have their own status —
+they inherit affectedness implicitly from the parent track.
 
 This logic is internal to `package_service` — callers (including
 `add_package_to_ticket`) do not specify initial values.
@@ -1195,10 +1259,13 @@ The generic pessimistic locking pattern and transaction hygiene rules
 are defined in `docs/conventions.md` (Transaction and Locking). This
 section documents package-specific refinements only.
 
-All mutation functions in this module acquire `FOR UPDATE` on the parent
-Ticket row as the first operation. This serializes concurrent package
-mutations on the same ticket at the database level. The lock is released
-automatically when the transaction commits or rolls back.
+Public and independently invoked mutation functions in this module acquire
+`FOR UPDATE` on the parent Ticket row as the first operation. This serializes
+concurrent package mutations on the same ticket at the database level. The
+synchronous manual-zone-exit boundary is the explicit compositional exception:
+it requires the Ticket already locked by `ticket_service` and never reacquires
+that lock. The lock is released automatically when the transaction commits or
+rolls back.
 
 The I/O-then-Lock invariant (see Architecture section) is an additional
 constraint specific to this module: orchestration functions that perform
@@ -1275,10 +1342,13 @@ actionability, which have different semantics:
 
 ### Ticket-level operability
 
-Non-operable tickets (Ignored or Duplicated) MUST NOT
-receive any package mutations. `ensure_ticket_operable(ticket)` enforces
-this for all mutation functions in this module (including
-`set_product_released_at`). Automated callers (release detection
+Non-operable tickets (Ignored or Duplicated) MUST NOT receive ordinary package
+mutations. `ensure_ticket_operable(ticket)` enforces this for every
+independently invoked mutation function in this module (including
+`set_product_released_at`). The synchronous manual-zone-exit boundary is not an
+ordinary mutation on a manual-zone Ticket: `ticket_service` first validates the
+exact source status under lock and sets the `Analysis` floor before invoking
+it. Automated callers (release detection
 fetchers, IBS RabbitMQ consumer) scope their queries to active tickets
 at query time (a stricter subset — excludes Resolved in addition to
 non-operable statuses); the guard fires only in race conditions.
@@ -1348,6 +1418,20 @@ transitions. The test must cover:
   converged Ticket is a no-op; and multiple changed
   `TicketPackageProduct` records produce one event per record followed by one
   Ticket reconciliation
+- **Override metadata transitions**: setting, changing, and clearing an
+  override use one evaluation date and current locked inputs; clearing an
+  existing override is effective even when the boolean remains equal, creates
+  exactly one event with equal old/new values and `override_action = cleared`,
+  and permits later automatic CVSS mutation
+- **Synchronous manual-zone-exit eligibility**: for both `Ignored` and
+  `Duplicated`, every existing automatic Product
+  occurrence converges from current PostgreSQL assessment, setting, threshold,
+  lifecycle, and override inputs before the exit caller's single final
+  gate evaluation; events use `reason = reactivation` and occurrence-ID order;
+  verify `ticket_service` supplies the already locked Ticket and one shared
+  date; overrides produce no event; this package boundary performs no Ticket-
+  lock reacquisition, CVE lock, severity write, assignment, network I/O, or
+  reconciliation
 - **Derived actionability**: verify Python/SQL lifecycle parity, all reason
   precedence cases, parent actionability, EOL entry/exit, and one shared UTC
   evaluation date across mutation, reconciliation, result projection, response

@@ -6,8 +6,8 @@ Core workflow entity — CVE ingestion, triage, severity, and audit trail.
 
 ```
 tickets.md              Ticket lifecycle, status gates, API endpoints
-ticket-service.md       ticket_service module contract (non-gate lifecycle operations, confidentiality management)
-ticket-mutations.md     ticket_mutations module contract (CVSS/severity mutations, status evaluation, manual-zone exits)
+ticket-service.md       ticket_service module contract (Ticket lifecycle operations, cross-domain compositions)
+ticket-mutations.md     ticket_mutations module contract (CVSS/severity mutations, status evaluation primitives)
 cve-tracking.md         CVE tracking feature (business rules, API endpoints, CVE rejection handling)
 cve-sync-nvd.md         NVD fetcher specification
 cve-sync-mitre.md       MITRE cvelistV5 fetcher specification
@@ -26,15 +26,15 @@ ticket-references.md    External links on tickets (auto-classified by type, manu
 
 - `tickets.md` is the central spec — it defines the ticket entity,
   status machine, gate conditions, and API endpoints.
-- `ticket-service.md` is the service-layer companion for non-gate
-  operations — it defines the `ticket_service` module contract (creation,
-  CVE association, assignment, ignore, mark-as-duplicate,
-  confidentiality, access grants). Some operations call
-  `reconcile_ticket_status` due to indirect gate effects.
+- `ticket-service.md` is the service-layer companion for Ticket lifecycle
+  operations and cross-domain compositions — it defines the `ticket_service`
+  module contract (creation, CVE association, assignment, manual-zone entry and
+  exit, confidentiality, access grants). Some operations compose package or
+  CVSS boundaries with `reconcile_ticket_status` due to indirect gate effects.
 - `ticket-mutations.md` is the service-layer companion for gate-relevant
   mutations — it defines the `ticket_mutations` module contract
-  (CVSS/severity mutations, status evaluation, manual-zone exits,
-  concurrency control, `auto_assign_actor()`).
+  (CVSS/severity mutations, status evaluation primitives, concurrency control,
+  `auto_assign_actor()`).
   Package-centric mutations are in `packages/package-service.md`.
 - `cve-tracking.md` feeds tickets: each ingested CVE creates a ticket.
   Individual CVE fetcher specs follow common conventions defined in
