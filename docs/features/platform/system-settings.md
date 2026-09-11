@@ -20,9 +20,10 @@ mutations are implemented in `backend/app/services/settings.py`.
 
 ### Default CVSS Version
 
-Controls which CVSS version Sentinel uses for all automated decisions. This
-setting affects the entire platform — severity derivation, eligibility
-threshold comparison, and any future logic that depends on a CVSS score.
+Selects the preferred version in the cross-version Severity Resolution Cascade
+and the exact canonical SUSE version used for Eligibility Score Resolution. It
+does not exclude other accepted versions from severity and does not control the
+version-independent SUSE-assessment presence gate.
 
 | Property        | Value                            |
 |-----------------|----------------------------------|
@@ -44,7 +45,9 @@ executes the following sequence:
    cross-cutting rule for idempotent no-ops)
 3. **Acquire recalculation slot**: `SET cvss_recalc_active <timestamp>
    NX EX 900` on Redis. This step serves as both a Redis liveness probe
-   and a flip-flop guard:
+   and an admission guard. The complete batch execution contract must replace
+   or renew this admission state before the all-CVE operation is implemented so
+   mutual exclusion lasts for the complete run:
    - If slot acquisition raises any `RedisError` → return 503
      `REDIS_UNAVAILABLE` (nothing committed)
    - If the key already exists (a recalculation is in progress) → return
@@ -53,7 +56,7 @@ executes the following sequence:
    the database. If the commit fails: release the slot (`DEL
    cvss_recalc_active`) and return 500
 5. **Enqueue** the batch recalculation Celery task
-   (`recalc_active_tickets`) with the new version as an explicit
+   (`recalculate_cvss_derived_state`) with the new version as an explicit
    argument. If the enqueue fails: release the slot and return 200 with
    `recalculation_scheduled: false` (the primary operation — the setting
    change — succeeded; the admin can use the manual re-run endpoint to
@@ -65,50 +68,60 @@ durable record. No ticket mutation can occur without the setting change
 being audited. This prevents phantom mutations (ticket audit events
 without a recorded cause).
 
-The batch task (`recalc_active_tickets`) iterates all active tickets
-with a CVE (status: New, Analysis, Analyzed; `cve_id IS NOT NULL`) and
-calls `ticket_mutations.recalculate_cvss_chain()` for each ticket in an
-independent database transaction. Failures on individual tickets are
-logged and skipped. On completion (or failure), the task releases the
-slot (`DEL cvss_recalc_active`) and logs metrics (total, succeeded,
-failed). The task has a hard timeout (`time_limit=900`) matching the
-slot TTL — this ensures the task is terminated before its slot can
-expire, preventing concurrent batches with conflicting versions.
+The batch operation (`recalculate_cvss_derived_state`) visits every persisted
+CVE and calls `ticket_mutations.recalculate_cvss_chain()` in default-version
+mode for each CVE in an independent database transaction. Failures on
+individual CVEs are logged and skipped. It logs total, succeeded, and failed
+counts. Task publication, mutual exclusion for the complete run, timeout,
+completion cleanup, and crash recovery must form one execution contract whose
+guard cannot expire while a run can still mutate data. The fixed 900-second
+slot described by the current endpoint sequence does not by itself satisfy that
+contract for the all-CVE semantic target and is not a guarantee that the
+operation completes in that interval.
 
 The CVSS resolution functions return pure resolved results; changing the
-setting does not alter any assessment. This batch is the existing
-orchestration that applies those results to persisted derived state for
-active Tickets and their CVEs. Its target set remains exactly active
-Tickets with a CVE. `recalculate_cvss_chain()` maintains CVE-owned
-severity and returns the eligibility resolution and propagation
-disposition. The package-domain consumer of that handoff is outside this
-specification; this batch contract does not define Product mutation.
+setting does not alter any assessment. The batch applies those results to
+persisted derived state with this exhaustive side-effect matrix:
 
-For each active Ticket transaction, when the returned old and new unified
-severity differ, the batch creates the required system-attributed
-`severity_changed` record before committing. An unchanged severity creates no
-Ticket event. This contract does not consume the returned eligibility handoff or
-perform an additional Ticket-status reconciliation; those Ticket-scoped effects
-belong to the package propagation contract.
+| Associated Ticket state | Batch effect |
+|---|---|
+| No Ticket | Recalculate `CVE.severity`; there is no Ticket audit target |
+| `New` | Recalculate severity and every automatic Product occurrence; remain `New` and perform no gate reconciliation because system work never assigns |
+| `Analysis`, `Analyzed`, `Resolved` | Recalculate severity and every automatic Product occurrence, then perform at most one final Ticket reconciliation. `Resolved` may regress normally to `Analyzed` or `Analysis` |
+| `Ignored`, `Duplicated` | Recalculate `CVE.severity` only at the operational-state level; if it changed and a Ticket exists, create the direct system-attributed `severity_changed` event. Do not mutate Product eligibility, assignment, Ticket status, manual-zone state, or gates |
 
-**Current convergence limitation**: the setting-change batch does not
-visit ticketless CVEs or CVEs associated only with inactive Tickets
-(`Resolved`, `Ignored`, or `Duplicated`). Their persisted
-`CVE.severity` can therefore continue to reflect the previous default
-version after the setting changes. This contract defines no CVE-severity
-recalculation on reactivation, so an inactive Ticket follows the same rule as a
-ticketless CVE: a later effective assessment mutation recalculates it under the
-then-current default. The reactivation propagation contract owns any future
-convergence from current persisted inputs. This limitation does not change the
-pure resolution returned when callers calculate it on demand, and it does not
-introduce a wider batch, task, Redis key, recovery path, or package eligibility
-behavior.
+Every applicable gate-zone or `New` Product update uses current persisted
+assessments, Product threshold and lifecycle inputs, and override markers;
+manual overrides are skipped. Changed automatic occurrences create system-attributed
+`product_eligibility_changed` events with `reason = cvss`, ordered by
+`TicketPackageProduct.id`. An unchanged value creates no Product event.
 
-The slot key has a fixed TTL of 900 seconds (internal constant). In
-normal operation the task completes in seconds/minutes and releases the
-slot immediately. The TTL serves only as a crash-recovery safety net: if
-the worker dies without releasing the slot, the key self-expires and the
-admin can retry.
+`recalculate_cvss_chain()` creates a system-attributed `severity_changed`
+record whenever an associated Ticket's old and new unified severity differ,
+before any Product event. It never creates `cvss_assessment_changed`, because
+the setting change does not alter an assessment. One CVE transaction uses one
+UTC `evaluation_date`; any local settings, database, eligibility, audit, flush,
+or reconciliation error rolls back that complete CVE unit and the batch
+continues with the next CVE.
+
+Visiting a `Resolved` Ticket may regress it through ordinary gate evaluation and
+register the normal post-commit package-tree and fetcher catch-up. Visiting an
+`Ignored` or `Duplicated` Ticket cannot exit its manual zone or register that
+work; Product eligibility and gates for those Tickets converge only through the
+owning manual-zone-exit workflow.
+
+This section defines the semantic target and the existing task identity and
+manual-recovery operation. It does not prescribe keyset pagination, persistent
+progress, leases, or an impact-preview contract. The operational execution
+contract must be reassessed separately for the all-CVE population; in
+particular, this semantic target does not assert that one sequential pass can
+complete within the current fixed slot and task lifetime.
+
+The currently documented endpoint slot has a fixed TTL of 900 seconds (internal
+constant). It remains the immediate admission guard for the endpoint sequence,
+but the complete operation must not rely on expiry as permission for another
+run while a prior run may still be active. The all-CVE execution contract owns
+the corresponding completion release and crash-recovery behavior.
 
 See `docs/features/tickets/cvss-scoring.md` (Persistence and Propagation
 Boundary) for
@@ -314,16 +327,18 @@ Values of `recalculation_scheduled`:
 POST /api/v1/admin/settings/default-cvss-version/recalculate
 ```
 
-Manually triggers a CVSS recalculation batch for all active tickets
-with a CVE, using the current `default_cvss_version` value. Used for
+Manually triggers a CVSS recalculation batch for all persisted CVEs, using the
+current `default_cvss_version` value. Used for
 recovery after partial batch failures or as a general refresh mechanism.
 
 The endpoint uses the same shared logic as the PATCH side-effect:
 
 1. Read the current `default_cvss_version` from the database
 2. Acquire the recalculation slot (`SET cvss_recalc_active <timestamp>
-   NX EX 900`)
-3. Enqueue `recalc_active_tickets(version)`. On failure: release slot
+   NX EX 900`) as the current admission guard. This guard does not by itself
+   provide complete-run mutual exclusion for the `all_cves` scope; the same
+   future execution-contract requirement as the PATCH path applies
+3. Enqueue `recalculate_cvss_derived_state(version)`. On failure: release slot
    and return 503
 4. Return 202 Accepted
 
@@ -338,7 +353,7 @@ No setting change is made. No `SettingAuditEvent` is created.
   "data": {
     "message": "Recalculation batch enqueued",
     "default_cvss_version": "4.0",
-    "scope": "active_tickets_with_cve"
+    "scope": "all_cves"
   }
 }
 ```

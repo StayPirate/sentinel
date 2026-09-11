@@ -590,7 +590,7 @@ flowchart TD
     NEW -->|"assignment or<br/>any modifying operation"| ANALYSIS
     NEW -->|"manual or<br/>NVD rejection"| IGNORED
 
-    ANALYSIS -->|"✓ all gates met:<br/>≥1 package,<br/>no ANALYSIS statuses,<br/>severity set,<br/>SUSE CVSS (if CVE)"| ANALYZED
+    ANALYSIS -->|"✓ all gates met:<br/>≥1 included track,<br/>no actionable ANALYSIS tracks,<br/>severity set,<br/>≥1 accepted-version SUSE CVSS (if CVE)"| ANALYZED
     ANALYSIS -->|"manual"| IGNORED
 
     ANALYZED -->|"✓ all tracks<br/>resolution-complete"| RESOLVED
@@ -604,8 +604,8 @@ flowchart TD
     ANALYZED -->|"manual"| DUPLICATED
     RESOLVED -->|"manual"| DUPLICATED
 
-    DUPLICATED -->|"revert:<br/>_reenter_gate_zone"| ANALYSIS
-    IGNORED -->|"reopen:<br/>_reenter_gate_zone"| ANALYSIS
+    DUPLICATED -->|"ticket_service<br/>revert"| ANALYSIS
+    IGNORED -->|"ticket_service<br/>reopen"| ANALYSIS
 
     style NEW fill:#dbeafe,stroke:#2563eb
     style ANALYSIS fill:#fef9c3,stroke:#ca8a04
@@ -619,7 +619,8 @@ flowchart TD
 - At least one manually included `TicketPackageTrack`
 - No actionable `TicketPackageTrack` in `ANALYSIS` status
 - Severity is determined (not `NULL`)
-- If CVE is associated: SUSE CVSS v3.1 and v4.0 assessments exist
+- If CVE is associated: at least one canonical SUSE assessment exists in any
+  accepted CVSS version (currently v2.0, v3.0, v3.1, or v4.0)
 
 **Resolved gate**: every actionable `TicketPackageTrack` is
 resolution-complete: (a) `NOT_AFFECTED`/`WONT_FIX`, or (b) `FIXED` with
@@ -667,7 +668,7 @@ flowchart TD
 
     subgraph gates_ref["Gate Conditions"]
         direction LR
-        G1["<b>Gate #1 (→ Analyzed)</b><br/>① ≥1 manually included track<br/>② all actionable tracks decided<br/>③ severity determined<br/>④ SUSE CVSS v3.1 + v4.0 (CVE only)"]
+        G1["<b>Gate #1 (→ Analyzed)</b><br/>① ≥1 manually included track<br/>② all actionable tracks decided<br/>③ severity determined<br/>④ ≥1 canonical SUSE assessment in any accepted version (CVE only)"]
         G2["<b>Gate #2 (→ Resolved)</b><br/>Every actionable track is resolution-complete:<br/>(a) NOT_AFFECTED / WONT_FIX, or<br/>(b) FIXED + all actionable eligible Products released, or<br/>(c) AFFECTED + no actionable eligible Products"]
     end
 
@@ -682,8 +683,8 @@ flowchart TD
     RESOLVED -->|"mark duplicate"| DUPLICATED
 
     %% Re-entry from manual zone to gate zone
-    IGNORED -->|"reopen →<br/>_reenter_gate_zone()"| ANALYSIS
-    DUPLICATED -->|"revert →<br/>_reenter_gate_zone()"| ANALYSIS
+    IGNORED -->|"ticket_service<br/>reopen"| ANALYSIS
+    DUPLICATED -->|"ticket_service<br/>revert"| ANALYSIS
 
     %% Styling
     style pre fill:#dbeafe,stroke:#2563eb
@@ -710,9 +711,11 @@ flowchart TD
 | Gate zone | `Analysis`, `Analyzed`, `Resolved` | `reconcile_ticket_status()` — sole authority | Allowed; each triggers reconciliation |
 | Non-gate zone | `Ignored`, `Duplicated` | Explicit user actions | **Blocked** (`TicketNotMutableError` → 409) |
 
-Re-entry from the non-gate zone always passes through `_reenter_gate_zone()`,
-which sets the floor (`Analysis`) and calls `reconcile_ticket_status()` to
-promote to the correct status in a single transaction.
+For re-entry from the non-gate zone, the public `ticket_service` workflow sets
+the floor (`Analysis`), then its private `_complete_manual_zone_exit()` helper
+invokes the package-owned synchronous convergence for existing automatic
+Product eligibility and calls `ticket_mutations.reconcile_ticket_status()`
+exactly once to promote to the correct status in a single transaction.
 
 ---
 

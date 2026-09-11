@@ -2,9 +2,9 @@
 
 ## Purpose
 
-Centralize ticket-centric operations that modify data relevant to ticket
-status gates — CVSS assessment management, manual severity, and
-manual-zone exits — in a single service module (`ticket_mutations`).
+Centralize ticket-centric primitives that modify or evaluate data relevant to
+ticket status gates — CVSS assessment management, manual severity, and status
+reconciliation — in a single service module (`ticket_mutations`).
 This module also provides the shared `reconcile_ticket_status()` function
 and the `auto_assign_actor()` helper, which are called by both this
 module and `package_service`.
@@ -12,9 +12,17 @@ module and `package_service`.
 Package-centric mutations (track status, delivery status, product eligibility,
 soft-deletion/restore, record creation, and additive maintainer association) are
 handled by `package_service` (`docs/features/packages/package-service.md`).
-CVSS mutation functions maintain CVE-owned assessment and severity state and
-return the deterministic eligibility result and propagation disposition needed
-by that package-owned boundary; they do not modify Product eligibility.
+The sole exception is the atomic CVSS chain: its mutation functions maintain
+CVE-owned assessment and severity state and may update system-managed Product
+eligibility inline before one final Ticket reconciliation. The formula remains
+owned by `package-model.md`; the exception neither imports `package_service`
+nor permits overrides or any other package mutation.
+
+Consumer-facing manual-zone exits are Ticket lifecycle compositions owned by
+`ticket_service`. They retain the Ticket lock while calling the package-owned
+synchronous eligibility boundary and then this module's
+`reconcile_ticket_status()` primitive exactly once. Neither lower service
+imports `ticket_service`.
 
 Without this centralization, each gate-relevant caller would need to
 independently:
@@ -54,9 +62,8 @@ caller.
 
 This matches the `user_service` pattern — the module applies mutations
 and creates audit events, but the transaction boundary is the caller's
-decision. This enables callers to compose multiple operations within a
-single transaction when needed (e.g., `revert_duplicate` clears
-`duplicate_of_id` then calls `_reenter_gate_zone`).
+decision. This enables higher-level services to compose these primitives with
+other service boundaries in one transaction when needed.
 
 ### Acting user convention
 
@@ -96,8 +103,8 @@ inferred from whether `acting_user_id` is `NULL`.
 | Module | Relationship |
 |--------|-------------|
 | `services/cvss.py` | `ticket_mutations` delegates CVSS resolution and severity calculation to pure functions in `cvss.py`. The resolution cascade logic is never reimplemented inside `ticket_mutations` |
-| `services/package_service.py` | Handles all package-centric mutations (track status, delivery status, product eligibility, soft-delete/restore, record creation) and package queries. CVSS mutation results provide a deterministic eligibility result and propagation disposition for this owner to consume. `package_service` imports `reconcile_ticket_status()`, `auto_assign_actor()`, and `ensure_ticket_operable()` from `ticket_mutations`; `ticket_mutations` does not mutate package records |
-| `services/ticket_service.py` | Handles non-gate operations (assignment, CVE association, mark-as-duplicate, set-confidentiality, access grants). See [ticket-service.md](ticket-service.md) for the full contract. These operations use the same FOR UPDATE pattern and import `ensure_ticket_operable()` from `ticket_mutations` |
+| `services/package_service.py` | Handles ordinary package-centric mutations (track status, delivery status, standalone eligibility overrides, Product-originated recalculation, synchronous manual-zone-exit convergence, soft-delete/restore, record creation) and package queries. `package_service` imports `reconcile_ticket_status()`, `auto_assign_actor()`, and `ensure_ticket_operable()` from `ticket_mutations`; `ticket_mutations` does not import `package_service`. The atomic CVSS chain is the sole exception allowed to update system-managed Product eligibility inline, using the package-model-owned pure evaluator without copying the formula |
+| `services/ticket_service.py` | Handles Ticket lifecycle operations and cross-domain Ticket compositions, including manual-zone exits. It may import both `package_service` and the primitives in this module; neither lower service imports `ticket_service`. See [ticket-service.md](ticket-service.md) for the full contract |
 
 ## State Machine Zones
 
@@ -126,33 +133,17 @@ Gate-relevant mutations are blocked at the service layer by
 `ensure_ticket_operable()` (raises `TicketNotMutableError` → 409
 `TICKET_NOT_MUTABLE`).
 
-### `_reenter_gate_zone()` (private helper)
+### Manual-zone exit composition
 
-To exit the manual zone, an explicit operation must call the private
-helper `_reenter_gate_zone()`:
-
-1. Saves the ticket's current status (Ignored or Duplicated) as
-   `original_status`
-2. Sets `status = Analysis` (floor of the gate zone)
-3. Calls `reconcile_ticket_status(previous_status=original_status)`
-
-This produces a single `TicketAuditEvent` with the real transition
-(e.g., `old_value = Ignored, new_value = Analysis`). If the Analyzed
-or Resolved gates are already satisfied, `reconcile_ticket_status`
-promotes the ticket further in the same call and the audit event
-reflects the final target (e.g., `old_value = Ignored,
-new_value = Analyzed`).
-
-The post-transition catch-up is initiated internally by
-`reconcile_ticket_status()` step 4 when it detects the inactive-state exit.
-The function registers the package-tree and fetcher recovery workflow for
-post-commit execution. It does not recalculate CVE-owned severity while holding
-the Ticket lock. No action is needed by the calling function or endpoint
-handler.
-
-Only the two manual-zone exit functions (`reopen_from_ignored`,
-`revert_duplicate`) call this helper. It is never called directly by
-external code.
+Manual-zone exit is an explicit composition owned by `ticket_service`; see
+[ticket-service.md](ticket-service.md#_complete_manual_zone_exit) for its
+authoritative common finalization. Each public exit workflow prepares the
+`Analysis` floor, then the private helper converges Product eligibility and
+calls this module's `reconcile_ticket_status()` exactly once as its final
+database mutation, with the original manual-zone status as `previous_status`
+and the same UTC `evaluation_date`. The primitive records the real transition
+and registers the post-commit reactivation workflow when the final status
+leaves the manual zone.
 
 ## `reconcile_ticket_status()`
 
@@ -215,14 +206,19 @@ beyond status changes.
      from the ticket's current status field
 4. **Post-transition catch-up** (inactive-state exit detection):
    - Resolve `effective_previous`: use `previous_status` parameter if
-     provided (reactivation cases via `_reenter_gate_zone()`), otherwise
+      provided (manual-zone exits finalized by
+      `ticket_service._complete_manual_zone_exit()`), otherwise
      capture the ticket's status before gate evaluation as a local
      variable at the start of the function (regression cases)
    - Resolve `new_status`: the status determined by step 2 (regardless of
      whether step 3 produced a change — see note below)
     - If `effective_previous ∈ {Resolved, Ignored, Duplicated}` AND
       `new_status ≠ effective_previous`, register one post-commit reactivation
-      workflow. Its package-domain phase first re-resolves every persisted
+      workflow. For `Ignored` or `Duplicated`, the owning manual-zone exit MUST
+      already have synchronously converged automatic Product eligibility before
+      this final gate evaluation. A `Resolved` regression instead follows an
+      ordinary gate-zone mutation whose eligibility inputs are already current.
+      The post-commit package-domain phase re-resolves every persisted
       package marker, including soft-deleted markers, through
       `package_service`; after those per-package transactions finish, it
       enqueues `catch_up()` for every registered fetcher via
@@ -232,7 +228,8 @@ beyond status changes.
       contract are defined in `package-service.md` (Package-tree reactivation
       workflow) and `package-model.md` (Reactivation and Convergence)
    - **Note**: step 4 is independent of step 3. In the
-     `_reenter_gate_zone()` case, the caller has already set the status
+      `ticket_service._complete_manual_zone_exit()` case, the public workflow
+      has already set the status
      before invoking reconcile; step 3 sees no change but step 4
      correctly detects the inactive-state exit via `previous_status`.
       Post-commit workflow registration follows the inactive-state exit check;
@@ -241,9 +238,10 @@ beyond status changes.
      caller-owned transaction registers at most one reactivation workflow for
      the Ticket. Duplicate workflows across separate transactions remain safe
      because package resolution and all catch-ups are idempotent.
-   - `reconcile_ticket_status()` never acquires or re-acquires a CVE lock. CVSS
-     assessment mutations already maintain `CVE.severity`; package-domain
-     reactivation owns eligibility convergence from persisted current inputs.
+    - `reconcile_ticket_status()` never acquires or re-acquires a CVE lock and
+      never starts another eligibility chain. CVSS
+      assessment mutations already maintain `CVE.severity`; package-domain
+      manual-zone exit owns the special synchronous eligibility convergence.
      Keeping this Ticket-locked primitive free of CVE acquisition prevents a
      `Ticket` then `CVE` inversion against the global CVSS lock order.
    - **Cost in the common case**: zero. When no inactive → active
@@ -290,8 +288,9 @@ status — the ticket remains in its current gate-zone status.
 ### `previous_status` parameter
 
 The `previous_status` parameter exists to handle manual-zone exit
-operations correctly. When `_reenter_gate_zone()` sets `status = Analysis`
-before calling `reconcile_ticket_status`, if the function then promotes
+operations correctly. The public `ticket_service` workflow sets
+`status = Analysis` before `_complete_manual_zone_exit()` calls
+`reconcile_ticket_status`; if the function then promotes
 the ticket further (to `Analyzed` or `Resolved`), the audit event must
 record the real transition origin (e.g., `old_value = Ignored`) rather
 than the intermediate `Analysis` value. Passing
@@ -401,9 +400,9 @@ function.
 
 **Opt-out cases**:
 
-- `reopen_from_ignored` — must operate on Ignored tickets; skips
+- `ticket_service.reopen_from_ignored` — must operate on Ignored tickets; skips
   mutability guard
-- `revert_duplicate` — must operate on Duplicated tickets; skips
+- `ticket_service.revert_duplicate` — must operate on Duplicated tickets; skips
   mutability guard
 - Trusted external CVSS ingestion — maintains source-owned CVE assessment and
   severity state in every Ticket status and follows the propagation
@@ -434,6 +433,12 @@ contract places semantic no-op or operation-specific guards before assignment:
 6. Create `TicketAuditEvent`
 7. Call `reconcile_ticket_status()`
 8. Return the updated record
+
+Manual SUSE CVSS mutation is such an operation-specific ordering: caller and
+provider authority, manual-zone mutability, and serialized effective-action
+classification precede `auto_assign_actor()`. Only an effective manual SUSE
+create, update, or delete may assign. Trusted external ingestion and
+default-version recalculation are system actions and never assign.
 
 Package-centric gate-relevant mutations (`set_track_status`,
 `set_product_eligibility`, `set_product_released_at`,
@@ -493,8 +498,11 @@ Both mutation functions communicate one transaction-local
 | `assessment` | The locked-current persisted assessment after create/update/unchanged, the deleted assessment snapshot after delete, or `NULL` for not found |
 | `action` | Exactly `created`, `updated`, `unchanged`, `deleted`, or `not_found`, determined after both roots are locked |
 | `severity_resolution` | The committed-current Severity Resolution result, including score, version, provider, and unified label, or the explicit absent result |
-| `eligibility_resolution` | The committed-current Eligibility Score Resolution result: score plus `suse` or `fallback`; this is a handoff value and does not authorize Product mutation in this module |
+| `eligibility_resolution` | The committed-current Eligibility Score Resolution result: score plus `suse` or `fallback`, used by the package-model-owned evaluator |
 | `propagation` | `immediate`, `deferred_until_reactivation`, `not_applicable`, or `none`, as defined below |
+| `evaluation_date` | The single UTC date used by lifecycle evaluation, eligibility, actionability, reconciliation, result projection, and any response containing package-tree state |
+| Product summary | Examined, override-skipped, and changed occurrence counts for applied immediate propagation; all zero otherwise |
+| Ticket summary | Whether auto-assignment occurred and whether one final reconciliation ran |
 
 The result is valid inside the caller-owned transaction. It is not evidence of
 durability until that transaction commits. Callers use `action` for HTTP and
@@ -504,14 +512,12 @@ Delete maps `deleted` to 204 and `not_found` to the existing 404
 `CVSS_ASSESSMENT_NOT_FOUND` response. No caller may classify an outcome from an
 unlocked pre-read.
 
-Propagation dispositions describe the required package-domain handoff without
-prescribing its runtime mechanism:
+Propagation dispositions describe the completed Ticket-scoped outcome:
 
-- `immediate`: an associated Ticket may receive package-owned eligibility and
-  Ticket gate propagation in the current workflow.
-- `deferred_until_reactivation`: an external mutation associated with a
-  `Resolved`, `Ignored`, or `Duplicated` Ticket is retained for package-owned
-  propagation when that Ticket reactivates. For manual-zone Tickets this means
+- `immediate`: the current locked workflow MUST apply automatic Product
+  eligibility and any required final Ticket reconciliation before returning.
+- `deferred_until_reactivation`: an external mutation associated with an
+  `Ignored` or `Duplicated` Ticket is retained for package-owned propagation
   after the explicit manual-zone exit.
 - `not_applicable`: the CVE has no associated Ticket, so there is no Product
   eligibility or Ticket state to propagate.
@@ -523,29 +529,47 @@ The disposition is part of every successful result and is actionable only for
 current resolution values with `propagation = none`.
 
 An authority rejection, manual-zone rejection, unchanged result, not-found
-result, waiting concurrent no-op, or caller rollback creates no durable audit,
-assignment, Product eligibility, Ticket status, metric, or post-commit effect.
-An effective mutation and its direct audit records are atomic: audit or flush
-failure propagates and rolls back the assessment and `CVE.severity` together.
+result, waiting concurrent no-op, deferred Product outcome, or caller rollback
+creates no assignment, Product eligibility event, Product mutation, or final
+Ticket reconciliation. Direct assessment and derived-severity records remain
+immediate for effective deferred assessment mutations. Any settings, database,
+eligibility, audit, flush, or reconciliation failure propagates and rolls back
+the complete caller-owned chain: assessment, `CVE.severity`, assignment,
+Product eligibility, Ticket status, and every audit event.
 
 ### CVSS Status Matrix
 
-| Associated Ticket status | Manual SUSE upsert/delete | Trusted external upsert | Effective-mutation propagation |
+| Associated Ticket status | Manual SUSE upsert/delete | Trusted external upsert | Effective Ticket-scoped outcome |
 |---|---|---|---|
-| No Ticket | Allowed | Allowed | `not_applicable` |
-| `New` | Allowed | Allowed | `immediate` |
-| `Analysis` | Allowed | Allowed | `immediate` |
-| `Analyzed` | Allowed | Allowed | `immediate` |
-| `Resolved` | Allowed | Allowed | Manual SUSE: `immediate`; external: `deferred_until_reactivation` |
-| `Ignored` | Reject with `TicketNotMutableError`; no result | Allowed | External: `deferred_until_reactivation` |
-| `Duplicated` | Reject with `TicketNotMutableError`; no result | Allowed | External: `deferred_until_reactivation` |
+| No Ticket | Allowed | Allowed | `not_applicable`; CVE-owned state only |
+| `New` | Allowed; effective mutation may auto-assign the VA | Allowed; never assigns | `immediate`; an unassigned `New` remains outside gate reconciliation unless manual auto-assignment first moves it to `Analysis` |
+| `Analysis` | Allowed; effective mutation may auto-assign the VA | Allowed; never assigns | `immediate` eligibility and at most one final reconciliation |
+| `Analyzed` | Allowed; effective mutation may auto-assign the VA | Allowed; never assigns | `immediate` eligibility and at most one final reconciliation |
+| `Resolved` | Allowed; effective mutation may auto-assign the VA | Allowed; never assigns | `immediate` eligibility and at most one final reconciliation; ordinary regression to `Analyzed` or `Analysis` is allowed |
+| `Ignored` | Reject with `TicketNotMutableError`; no result | Allowed; never assigns | External CVE-owned state and direct audit only; Product/gate effects wait for explicit exit |
+| `Duplicated` | Reject with `TicketNotMutableError`; no result | Allowed; never assigns | External CVE-owned state and direct audit only; Product/gate effects wait for explicit exit |
 
 External delete is rejected for every row of the matrix. An effective
 assessment mutation always recomputes and persists `CVE.severity`, including
-for a ticketless CVE and a CVE associated with an inactive Ticket. The mutation
-does not change Product eligibility, a package-tree record, assignment, or
-Ticket status. Those effects remain with their owning contracts and consume
-only an applicable committed handoff.
+for a ticketless CVE and a CVE associated with an inactive Ticket. Automatic
+eligibility includes every Product occurrence regardless of exclusion,
+actionability, or affectedness and skips only manual overrides. Immediate
+propagation performs a final reconciliation only when a gate input changed or
+manual assignment moved `New` into `Analysis`: Product eligibility changed,
+unified severity changed, or the existence of any canonical SUSE assessment
+across accepted versions changed between absent and present.
+It still performs at most one such reconciliation after every direct and
+Product audit record. An effective non-SUSE update that changes none of those
+gate inputs does not reconcile.
+
+Default-version recalculation uses the same state rows but is always a system
+operation. It targets every persisted CVE: ticketless CVEs receive severity
+only; `New` receives severity plus automatic eligibility but remains outside
+gate reconciliation; `Analysis`, `Analyzed`, and `Resolved` receive severity
+plus automatic eligibility and at most one reconciliation; `Ignored` and
+`Duplicated` receive severity and a direct `severity_changed` event when that
+value changes, but no eligibility, assignment, status, manual-zone exit, or
+final reconciliation effect.
 
 ### `upsert_cvss_assessment()`
 
@@ -566,6 +590,7 @@ new one is created.
 | `caller` | `CVSSMutationCaller` | Yes | `MANUAL_SUSE` or `TRUSTED_EXTERNAL_INGESTION`; authority is not inferred from actor presence |
 | `acting_user_id` | `UUID \| None` | Yes | Required for `MANUAL_SUSE`; must be `NULL` for trusted external ingestion |
 | `default_cvss_version` | `str \| None` | No | Version used for severity and eligibility resolution. If `None`, read it once from `settings_service.get_default_cvss_version(db)` after root locking |
+| `evaluation_date` | `date \| None` | No | UTC date for the complete immediate Product/reconciliation chain. If omitted, capture once at function entry |
 
 **Preconditions**:
 
@@ -603,16 +628,26 @@ new one is created.
    fields. Re-resolve the complete committed-current assessment set and always
    persist the resulting unified value to `CVE.severity`, including when its
    value is unchanged.
-9. If a Ticket exists, create `cvss_assessment_changed` first. If unified
-   severity changed, create `severity_changed` second. Both records are direct
-   consequences of the committed assessment mutation and are created in every
-   Ticket status; they are not deferred with package propagation. Do not
-   auto-assign the Ticket.
-10. Resolve the separate Eligibility Score result and return it with the status-
-   and-caller-derived propagation disposition. The function itself performs no
-   Product or Ticket mutation and invokes no post-commit effect. This
-   specification does not define the package-owned consumer of that handoff.
-11. Flush and return `CVSSAssessmentMutationResult`.
+9. For an effective manual SUSE mutation with an associated Ticket, call
+   `auto_assign_actor()` after the serialized action is known. External
+   ingestion never calls it. If assignment moves `New` to `Analysis`, its
+   `assignment` and system `status_change` records precede the CVSS records.
+10. If a Ticket exists, create `cvss_assessment_changed`. If unified severity
+    changed, create `severity_changed` next. Both are direct consequences and
+    are created in every Ticket status; they are not deferred with Product
+    propagation.
+11. Resolve the Eligibility Score result. For `immediate`, reload every Product
+    occurrence and its current threshold, lifecycle inputs, override marker,
+    and eligibility under the held roots. Apply the canonical pure evaluator,
+    skip overrides, and update changed booleans only. Create one system-
+    attributed `product_eligibility_changed` event per change with
+    `reason = cvss`, ordered by `TicketPackageProduct.id`.
+12. If the Ticket is now in the gate zone and this effective chain changed a
+    gate input or moved `New` into `Analysis`, call
+    `reconcile_ticket_status()` exactly once with the same `evaluation_date`.
+    Deferred, ticketless, and still-unassigned `New` outcomes do not reconcile.
+13. Flush and return `CVSSAssessmentMutationResult`. Perform no network,
+    Redis, Celery, or other post-commit effect while either root lock is held.
 
 **Audit event values**:
 
@@ -649,6 +684,7 @@ callers to resolve the assessment ID.
 | `caller` | `CVSSMutationCaller` | Yes | Must be `MANUAL_SUSE`; external deletion is never authorized |
 | `acting_user_id` | `UUID` | Yes | Authorized user performing the SUSE deletion |
 | `default_cvss_version` | `str \| None` | No | Version used for severity and eligibility resolution. If `None`, read it once from `settings_service.get_default_cvss_version(db)` after root locking |
+| `evaluation_date` | `date \| None` | No | UTC date for the complete immediate Product/reconciliation chain. If omitted, capture once at function entry |
 
 **Preconditions**:
 
@@ -677,17 +713,24 @@ callers to resolve the assessment ID.
 6. Snapshot the canonical audit value and delete the assessment. Re-resolve the
    complete remaining assessment set and always persist the resulting unified
    value, including `NULL`, to `CVE.severity`.
-7. If a Ticket exists, create `cvss_assessment_changed` first with the snapshot
-   as `old_value` and `NULL` as `new_value`. If unified severity changed, create
-   system-attributed `severity_changed` second. Do not auto-assign the Ticket.
-8. Resolve the separate Eligibility Score result, derive propagation from the
-   status matrix, flush, and return `deleted` with the complete handoff. This
-   function does not mutate Product eligibility or Ticket status.
+7. If a Ticket exists, call `auto_assign_actor()` for the effective manual
+   mutation. Its optional assignment and `New → Analysis` events precede the
+   direct delete events.
+8. Create `cvss_assessment_changed` with the snapshot as `old_value` and `NULL`
+   as `new_value`. If unified severity changed, create system-attributed
+   `severity_changed` next.
+9. Resolve the Eligibility Score result and derive propagation from the status
+   matrix. For `immediate`, apply the same locked-current automatic Product
+   procedure, event ordering, and override skip as upsert step 11.
+10. Perform at most one final reconciliation under the same trigger and
+    `evaluation_date` rule as upsert step 12, then flush and return `deleted`.
+    Perform no network, Redis, Celery, or other post-commit effect under locks.
 
-**TicketAuditEvent**: `cvss_assessment_changed` for `deleted` when the CVE has
-an associated Ticket, in every status; `severity_changed` follows when the
-unified severity changed. Both use `detail = NULL`. `not_found`, rejection, and
-rollback leave no event.
+**TicketAuditEvent**: optional assignment and `New → Analysis`, then
+`cvss_assessment_changed` for `deleted`, optional `severity_changed`, Product
+eligibility events in occurrence-ID order, and optional final gate
+`status_change`. Direct CVSS records use `detail = NULL`. `not_found`,
+rejection, and rollback leave no event or other side effect.
 
 ---
 
@@ -737,12 +780,10 @@ resolution cascade and `severity_manual` is not applicable.
 
 ### `recalculate_cvss_chain()`
 
-Recalculates CVE-owned severity from current assessments and returns the
-separate deterministic eligibility handoff for a Ticket. It does not create,
-update, or delete a `CVECVSSAssessment`, mutate Product eligibility, or
-reconcile Ticket status. The historical function name describes its role in a
-larger composed workflow; it does not transfer package mutation ownership into
-this module.
+Recalculates CVE-owned severity from current assessments and, according to its
+typed invocation mode and locked Ticket state, applies the narrow automatic
+Product eligibility exception. It does not create, update, or delete a
+`CVECVSSAssessment` and never changes an override.
 
 **Callers**: `associate_cve()` and the batch recalculation Celery task triggered
 by a default CVSS version change (see
@@ -755,132 +796,67 @@ Ticket-reactivation caller.
 |-----------|------|----------|-------------|
 | `db` | `AsyncSession` | Yes | Database session |
 | `cve_id` | `UUID` | Yes | CVE whose assessment set and associated Ticket, if any, are recalculated |
-| `default_cvss_version` | `str \| None` | No | The CVSS version to use for severity resolution and eligibility evaluation. If `None` (default), the function reads the current version from `settings_service.get_default_cvss_version(db)`. The batch recalculation task provides this explicitly (passed as a task argument from the triggering endpoint) to ensure all tickets in a batch use the same version. Other callers should typically omit this parameter |
-| `evaluation_date` | `date \| None` | No | UTC date carried with the handoff so the composed package propagation and Ticket reconciliation can use one temporal input. If omitted, capture the current UTC date once at function entry |
+| `mode` | association or default-version semantic mode | Yes | Selects the caller-owned composition and its state-specific side effects; the concrete enum/type is an implementation choice |
+| `association_previous_severity` | `Severity \| None` | Conditional | Required in association mode, where it carries the Ticket's pre-association manual severity, including `NULL`; omitted in default-version mode |
+| `default_cvss_version` | `str \| None` | No | The CVSS version to use for severity resolution and eligibility evaluation. If `None` (default), the function reads the current version from `settings_service.get_default_cvss_version(db)`. The batch recalculation task provides this explicitly (passed as a task argument from the triggering endpoint) to ensure all CVEs in a batch use the same version. Other callers should typically omit this parameter |
+| `evaluation_date` | `date \| None` | No | UTC date used by Product propagation and Ticket reconciliation as one temporal input. If omitted, capture once at function entry |
 
 **Behavior**:
 
 1. Acquire `FOR UPDATE` on the CVE as the first persistent read, then load and
    lock its associated Ticket, if any. A CVE without an associated Ticket uses
-   `not_applicable`.
+   `not_applicable`. This function does not call `ensure_ticket_operable()`:
+   association mode has already passed that caller-owned guard, while default-
+   version mode must maintain CVE-owned severity for every Ticket status and
+   applies only the state-specific Product/gate effects below.
 2. Resolve `default_cvss_version`: if the parameter is `None`, read
    from `settings_service.get_default_cvss_version(db)`. Call
    `cvss.resolve_severity_score()` with the complete assessment set to obtain
    the committed-current resolution.
-3. Persist its unified label, or `NULL` for absent, to `CVE.severity`, and
-   report the true old and new values when they differ. The caller owns the
-   context-specific direct `severity_changed` event in the same transaction.
+3. Capture the old `CVE.severity`, then persist the resolved unified label, or
+   `NULL` for absent. When a Ticket exists and the applicable old and new
+   effective severity differ, create the system-attributed `severity_changed`
+   event before any Product event. Association mode compares
+   `association_previous_severity` with the new CVE severity so the event
+   records the manual-to-derived handover; default-version mode compares the
+   old and new CVE severity. A ticketless CVE creates no Ticket event.
 4. Call `cvss.resolve_eligibility_score()` with the resolved
    `default_cvss_version` to obtain the score and `suse`/`fallback` source.
-5. Derive the propagation disposition from the current Ticket status and the
-   owning workflow's documented caller category. A default-version workflow
-   follows its separately documented target scope.
-6. Flush and return the severity resolution, eligibility resolution, whether
-   severity changed, propagation disposition, and `evaluation_date`. This
-   specification defines the handoff value but not its package-owned consumer.
+5. Apply the selected mode:
+   - **association**: use the newly associated Ticket and current persisted
+     inputs to recalculate every automatic Product occurrence. Do not assign;
+     `associate_cve()` already performed its one assignment step. Create Product
+     events in occurrence-ID order after the handover event. Return the result
+     so the association owner performs its one final reconciliation.
+   - **default version**: apply the default-version state matrix to the supplied
+     CVE. The owning `recalculate_cvss_derived_state` operation invokes this
+     mode once for every persisted CVE. A ticketless CVE receives severity
+      only. `New` receives automatic eligibility but no gate reconciliation.
+      `Analysis`, `Analyzed`, and `Resolved` receive automatic eligibility and,
+      when a gate input changed, this function performs exactly one final
+      reconciliation after all severity and Product events. A `Resolved`
+      regression registers the normal post-commit package-tree and fetcher
+      catch-up. `Ignored` and `Duplicated` receive only CVE severity and its
+      direct event when changed. No state assigns or exits the manual zone.
+6. For an applicable Product phase, reload current Product thresholds,
+   lifecycle dates, overrides, and booleans under the roots; use the shared pure
+   evaluator; create `reason = cvss` events in ascending occurrence-ID order;
+   and never alter overrides. Use the one `evaluation_date` throughout.
+7. Flush and return severity resolution, eligibility resolution, changed and
+   skipped Product counts, whether severity changed, propagation, whether one
+   reconciliation ran, and `evaluation_date`.
 
-**TicketAuditEvent**: none directly. A caller that receives changed old/new
-severity creates the required system-attributed `severity_changed` in the same
-transaction. `associate_cve()` substitutes its manual-to-derived handover
-values and emits exactly one such event. Product eligibility events belong to
-the package mutation that applies the handoff.
+**TicketAuditEvent**: this function creates the required system-attributed
+`severity_changed` event when effective severity changes. Association mode uses
+the caller-supplied pre-association manual value so exactly one event records the
+manual-to-derived handover. The function then creates one system-attributed
+`product_eligibility_changed` event per changed automatic occurrence when its
+mode applies Product propagation. Default-version reconciliation may append one
+final `status_change`; association leaves that final event to its caller.
 
 **Idempotency**: safe to call multiple times. With unchanged assessments and
-default version, severity and its audit are a no-op and the same pure handoff is
-returned.
-
----
-
-## Manual-Zone Exit Operations
-
-These operations transition tickets out of the manual zone (Ignored or
-Duplicated) back into the gate zone.
-
-### `reopen_from_ignored()`
-
-Reopens a ticket from Ignored status.
-
-**Parameters**:
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `db` | `AsyncSession` | Yes | Database session |
-| `ticket_id` | `UUID` | Yes | Ticket to reopen |
-| `acting_user_id` | `UUID \| None` | No | Who is performing the action |
-
-**Preconditions**:
-
-- Ticket must exist
-- Ticket must be in `Ignored` status
-
-**Behavior**:
-
-1. Acquire `FOR UPDATE` on the Ticket row
-2. Verify current status is Ignored
-3. Call `auto_assign_actor(ticket, acting_user_id, db, force=True)`:
-   - `acting_user_id` is `None` (system): ticket retains current
-     assignee; `reconcile_ticket_status` handles inactive assignees in
-     the final step
-   - `acting_user_id` is VA: becomes new assignee
-   - `acting_user_id` is non-VA: ticket retains current assignee;
-     `reconcile_ticket_status` handles inactive assignees in the final
-     step
-4. Call `_reenter_gate_zone()`:
-   - Saves `original_status = Ignored`
-   - Sets `status = Analysis` (floor of the gate zone)
-   - Calls `reconcile_ticket_status(previous_status=Ignored)`
-   - Produces `status_change` event with
-     `old_value = Ignored, new_value = Analysis` (or `Analyzed`/`Resolved`
-     if gate conditions are already satisfied)
-
-**TicketAuditEvent**: `status_change` (via `reconcile_ticket_status`) +
-optionally `assignment` (via `auto_assign_actor`)
-
----
-
-### `revert_duplicate()`
-
-Reverts a ticket from Duplicated status.
-
-**Parameters**:
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `db` | `AsyncSession` | Yes | Database session |
-| `ticket_id` | `UUID` | Yes | Ticket to revert |
-| `acting_user_id` | `UUID \| None` | No | User performing the revert. Currently no system caller exists; this signature enables future system-initiated revert scenarios |
-
-**Preconditions**:
-
-- Ticket must exist
-- Ticket must be in `Duplicated` status
-
-**Behavior**:
-
-1. Acquire `FOR UPDATE` on the Ticket row
-2. Verify current status is Duplicated
-3. Clear `duplicate_of_id` (set to NULL)
-4. Call `auto_assign_actor(ticket, acting_user_id, db, force=True)`:
-   assigns the acting user if they hold the `vulnerability_analyst`
-   role; otherwise the ticket retains its current assignee
-5. Create `TicketAuditEvent` (`duplicate_removed`)
-6. Call `_reenter_gate_zone()`:
-   - Saves `original_status = Duplicated`
-   - Sets `status = Analysis` (floor of the gate zone)
-   - Calls `reconcile_ticket_status(previous_status=Duplicated)`
-   - Outcome: Analysis, Analyzed, or Resolved based on current gate
-     conditions (independent of assignee presence)
-
-Produces two `TicketAuditEvent` records in the same transaction:
-`duplicate_removed` (user action) followed by `status_change` with
-`old_value = Duplicated, new_value = (evaluated target)`.
-
-**TicketAuditEvent**: `duplicate_removed` + `status_change`
-
-The revert is non-retroactive: if other tickets were previously
-repointed away from this ticket (via `duplicate_target_changed`
-events), they are not affected by this revert — they remain
-pointing to their current target.
+default version, severity, Product values, and audit are no-ops and the same
+current result is returned.
 
 ## Utility Functions
 
@@ -942,11 +918,11 @@ async def auto_assign_actor(
     When force=False (default): assigns only if ticket is currently
     unassigned. Used by all gate-relevant mutations as step 2.
 
-    When force=True: assigns regardless of current assignee. Used by
-    manual-zone exit functions (reopen_from_ignored, revert_duplicate)
-    to take ownership. External callers (`package_service`,
-    `ticket_service`, API handlers, background tasks) MUST NOT pass
-    `force=True` — doing so is a bug.
+    When force=True: assigns regardless of current assignee. Used only by
+    ticket_service manual-zone exit functions (reopen_from_ignored,
+    revert_duplicate) to take ownership. Other ticket_service functions,
+    package_service, API handlers, and background tasks MUST NOT pass
+    force=True — doing so is a bug.
 
     Returns True if assignment was applied (audit event created),
     False otherwise.
@@ -979,8 +955,8 @@ async def auto_assign_actor(
 
 ## Related Operations
 
-Non-gate ticket lifecycle operations (assignment, CVE association,
-mark-as-duplicate, set-confidentiality, access grant
+Ticket lifecycle operations and cross-domain compositions (assignment, CVE
+association, manual-zone entry and exit, confidentiality, and access-grant
 management) live in `ticket_service` —
 see [ticket-service.md](ticket-service.md) for the full service contract.
 
@@ -992,31 +968,34 @@ after assignment, status reconciliation after restore).
 
 ## Contract
 
-Every service-layer operation that modifies data relevant to ticket
-status gates MUST go through the appropriate centralized module:
+Every service-layer operation that modifies data relevant to Ticket status
+gates MUST go through the appropriate centralized module:
 
 - **Package/track/product mutations**: `package_service`
   (`TicketPackageTrack` status, delivery status, standalone
   `TicketPackageProduct` eligibility overrides, soft-delete/restore, record
   creation, additive maintainership association)
 - **CVSS and severity mutations**: `ticket_mutations`
-  (`CVECVSSAssessment` records, manual severity)
+  (`CVECVSSAssessment` records, manual severity, and the narrow atomic write of
+  system-managed Product eligibility required by a CVSS/default-version chain)
 - **Ticket status evaluation**: `ticket_mutations` (the shared
   service-internal primitive is called after an effective gate-relevant
   mutation; delivery-status mutation is explicitly not gate-relevant)
 
 Direct modification of gate-relevant records outside the owning module is a
-bug. In particular, `ticket_mutations` owns CVSS assessments and CVE severity,
-while `package_service` owns Product eligibility. CVSS functions return the
-deterministic Eligibility Score result and propagation disposition required for
-composition; this handoff does not permit direct package writes in
-`ticket_mutations`.
+bug. `package_service` owns every standalone, creation, threshold, lifecycle,
+override, and manual-zone-exit eligibility mutation. The sole exception lets
+`ticket_mutations` update only automatic Product eligibility inline while it
+owns the `CVE` then `Ticket` locks for the atomic CVSS chain. It reuses the one
+package-model evaluator, does not import `package_service`, and may not mutate
+affectedness, delivery, release, exclusion, hierarchy, or override state.
 
-Non-gate ticket lifecycle operations live in `ticket_service` — see
-`docs/features/tickets/ticket-service.md`. Some of these operations
-compose `recalculate_cvss_chain()`, package-owned propagation, and
-`reconcile_ticket_status` due to indirect gate effects. CVE association uses
-this composition because it changes the severity source; assignment calls
+Ticket lifecycle operations and cross-domain Ticket compositions live in
+`ticket_service` — see `docs/features/tickets/ticket-service.md`. Some of these
+operations compose package or CVSS boundaries with `reconcile_ticket_status`
+due to indirect gate effects. CVE association uses this composition because it
+changes the severity source; manual-zone exits compose package-owned
+eligibility convergence before their final gate evaluation; assignment calls
 `reconcile_ticket_status` directly for promotion evaluation. The
 per-function documentation in `ticket-service.md` specifies exactly
 which operations call `reconcile_ticket_status` and why.
@@ -1025,36 +1004,72 @@ which operations call `reconcile_ticket_status` and why.
 
 A parametrized integration test MUST be implemented to verify that the
 `ticket_mutations` module produces the correct ticket status after every
-type of ticket-centric mutation (CVSS assessment operations, manual
-severity, manual-zone exits). The test must cover:
+ticket-centric primitive it owns (CVSS assessment operations, manual severity,
+and status reconciliation). The test must cover:
 
 - **Forward transitions**: CVSS and severity changes causing ticket
   advancement
 - **Backward transitions**: CVSS deletion breaking gate conditions
-- **No-op cases**: unchanged assessment requests and mutations whose resolved
-  severity stays unchanged
+- **No-op cases**: serialized `unchanged` and `not_found` assessment outcomes.
+  Effective mutations whose resolved severity stays unchanged separately prove
+  that SUSE-presence, eligibility, and reconciliation consequences still apply
 - **Edge cases**: ticket without CVE (no SUSE CVSS gate), manual
   severity on CVE-less ticket
 - **CVSS status matrix**: manual and trusted-external callers across a
   ticketless CVE and every Ticket status, including external persistence with
-  `deferred_until_reactivation` package propagation
+  `deferred_until_reactivation` package propagation only for `Ignored` and
+  `Duplicated`; verify both caller categories are immediate on `Resolved`,
+  manual rejection in the manual zone, and no Product or reconciliation effect
+  for unchanged, not-found, rejected, deferred, or rolled-back outcomes
+- **Eligibility formula and boundaries**: override-first precedence,
+  Reactive Support for automatic records only, NULL threshold as `0.0`, NULL
+  lifecycle as no lifecycle override, SUSE/default-version score or 10.0
+  fallback including CVE-less Tickets, and proof that EOL, exclusion,
+  affectedness, delivery, and severity-cascade winners are not inputs
+- **Manual SUSE assignment**: an effective manual create, update, or delete
+  assigns an unassigned Ticket only when the actor holds the VA role, after
+  no-op/not-found classification; `New` produces assignment then system
+  `New → Analysis`; external and default-version callers never assign
 - **CVE severity ownership**: every effective assessment create, update, and
   delete updates ticketless and inactive-state `CVE.severity`
 - **Serialized outcomes**: canonical-vector no-op, create/update and
   delete/not-found races, concurrent upsert/upsert, upsert/delete, and
   association/CVSS mutation using independent database sessions; each result,
-  HTTP/metric classification, audit payload, and handoff reflects the committed
-  winner after `CVE` then `Ticket` locking
+  HTTP/metric classification, audit payload, and propagation result reflects
+  the committed winner after `CVE` then `Ticket` locking
 - **Authority and audit**: reserved SUSE variants, caller/actor mismatch,
   external-delete rejection, every-status direct events when a Ticket exists,
   ticketless no-event behavior, system-derived severity attribution, event
-  ordering, and rollback atomicity
-- **Manual-zone exits**: `reopen_from_ignored` and `revert_duplicate`
-  producing correct status transitions
+  ordering, Product event ordering by `TicketPackageProduct.id`, exact
+  `reason = cvss`/`reactivation`, override and state skips, metadata-only
+  override clear with equal boolean old/new values, and rollback atomicity
+- **Complete atomic chain**: one UTC `evaluation_date` across lifecycle,
+  eligibility, actionability, reconciliation, result, and package-tree
+  response; at most one final reconciliation after all Product events; and
+  rollback of assessment, severity, assignment, Product values, Ticket status,
+  and every event for settings, database, audit, flush, or reconciliation error
+- **Composed workflows**: CVE association consumes pre-existing assessments,
+  updates automatic Products without a second assignment, and reconciles once;
+  default-version processing visits every persisted CVE, applies Product/gate
+  effects to `New`, `Analysis`, `Analyzed`, and `Resolved`, permits ordinary
+  `Resolved` regression, and never exits `Ignored` or `Duplicated`; the
+  `reconcile_ticket_status()` primitive supports the ticket-service-owned
+  manual-zone exit after package convergence without acquiring a CVE lock
+- **SUSE gate independence**: each accepted SUSE version alone satisfies the
+  gate; external-only assessments do not; first-SUSE and last-SUSE changes may
+  trigger reconciliation, while another SUSE addition or removal leaves the
+  completeness predicate unchanged; default-version eligibility and the full
+  severity cascade remain independent
+- **Independent-session races**: CVSS/CVSS, CVSS/override,
+  CVSS/reactivation, and default-version/CVSS races recompute from
+  winner-current assessments, setting, threshold, lifecycle, override,
+  Product, and Ticket state and never duplicate assignment, Product events, or
+  final reconciliation
 
 Package-centric mutation tests are specified in
 `docs/features/packages/package-service.md` (Architectural Test
-Requirement).
+Requirement). Complete manual-zone exit composition tests are specified in
+`docs/features/tickets/ticket-service.md` (Architectural Test Requirement).
 
 ## Service Exceptions
 
@@ -1080,6 +1095,11 @@ CVE UUID supplied directly by an internal caller raise `ValueError`. These are
 internal contract violations and do not introduce API error codes. API routes
 resolve CVE accessibility before invoking this service.
 
+When a CVSS boundary must read the current default version,
+`RequiredSystemSettingMissingError` from `settings_service` propagates
+unchanged, rolls back the caller-owned transaction, and is exposed only through
+the global non-sensitive `500 INTERNAL_ERROR` response.
+
 Package-specific exceptions (`TrackNotFoundError`, `ProductNotFoundError`,
 `PackageNotFoundError`) are defined in `package_service` — see
 `docs/features/packages/package-service.md`.
@@ -1103,8 +1123,8 @@ Package-specific exceptions (`TrackNotFoundError`, `ProductNotFoundError`,
   unassignment (complementary to inactive assignee sanitization)
 - `docs/conventions.md` — Transaction and Locking (generic pessimistic
   locking pattern)
-- `docs/features/tickets/ticket-service.md` — non-gate ticket lifecycle
-  operations, ticket reactivation hooks (imports
+- `docs/features/tickets/ticket-service.md` — Ticket lifecycle operations,
+  manual-zone exit composition, and reactivation hooks (imports
   `reconcile_ticket_status()`, `recalculate_cvss_chain()`,
   `auto_assign_actor()`, `ensure_ticket_operable()`)
 - `docs/features/platform/system-settings.md` — default CVSS version

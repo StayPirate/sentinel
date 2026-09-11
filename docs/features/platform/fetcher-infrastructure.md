@@ -773,8 +773,8 @@ inactive-state exit (Resolved, Ignored, or Duplicated → active). All inactive
 → active transitions converge on this single invocation point:
 
 - Gate-driven regression: Resolved → active (automatic)
-- Un-ignore: Ignored → active (via `_reenter_gate_zone()`)
-- Un-duplicate: Duplicated → active (via `_reenter_gate_zone()`)
+- Un-ignore: Ignored → active (via `ticket_service.reopen_from_ignored()`)
+- Un-duplicate: Duplicated → active (via `ticket_service.revert_duplicate()`)
 
 After the transition commits, the package-domain phase re-resolves persisted
 package markers. It then calls `get_catch_up_fetchers()` and enqueues a
@@ -798,7 +798,7 @@ successfully added records.
 | `detect_ibs_track_releases` | IBS tracks in active tickets | **Custom override** | Extract the Ticket's eligible IBS tracks and apply the same per-track checkpoint/current-state reconciliation as periodic execution |
 | `detect_ibs_product_releases` | Product occurrences below IBS tracks in active tickets | **Custom override** | Check current `updateinfo.xml` data, including valid advisories that predate reactivation |
 | `sync_ibs_requests` | IBS tracks in active tickets | **Custom override** | Apply the same complete per-track request, correlation, provenance, and delivery reconciliation as periodic execution |
-| `evaluate_lifecycle_transitions` | Product eligibility and gate-zone Ticket lifecycle reconciliation | **Custom override** | Extract Ticket Products after manual-zone exit → recalculate lifecycle-driven eligibility; EOL actionability itself is derived |
+| `evaluate_lifecycle_transitions` | Product eligibility and gate-zone Ticket lifecycle reconciliation | **Custom override** | Verify lifecycle-aware current state after manual-zone eligibility convergence or an ordinary `Resolved` regression; EOL actionability itself is derived |
 
 `sync_ibs_requests.catch_up()` has no reduced catch-up algorithm: it
 applies the complete periodic reconciliation independently to every

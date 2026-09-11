@@ -2,9 +2,9 @@
 
 ## Purpose
 
-Centralize non-gate ticket lifecycle operations — creation, CVE
-association, assignment, manual-zone entries, and confidentiality
-management — in a single service module
+Centralize Ticket lifecycle operations and cross-domain Ticket compositions —
+creation, CVE association, assignment, manual-zone entry and exit, and
+confidentiality management — in a single service module
 (`ticket_service`). This ensures that:
 
 - `FOR UPDATE` locking is consistently applied on the Ticket row
@@ -16,11 +16,12 @@ management — in a single service module
   point
 - Business rules (idempotency) are enforced regardless of entry point
 
-Gate-relevant mutations (CVSS assessments, manual severity,
-manual-zone exits) are handled by `ticket_mutations`
-(`docs/features/tickets/ticket-mutations.md`). Package-centric mutations
-are handled by `package_service`
-(`docs/features/packages/package-service.md`).
+Gate primitives and CVSS/severity mutations are handled by
+`ticket_mutations` (`docs/features/tickets/ticket-mutations.md`).
+Package-centric mutations are handled by `package_service`
+(`docs/features/packages/package-service.md`). This service may compose both
+lower services while it owns one Ticket lifecycle workflow; neither lower
+service imports `ticket_service`.
 
 Read-only operations (listing tickets, retrieving ticket details,
 searching) are not centralized in this service because they carry no
@@ -84,23 +85,23 @@ revoking explicit access.
 | Module | Relationship |
 |--------|-------------|
 | `services/ticket_mutations.py` | `ticket_service` imports `reconcile_ticket_status()`, `recalculate_cvss_chain()`, `auto_assign_actor()`, and `ensure_ticket_operable()` from `ticket_mutations`. The dependency is unidirectional: `ticket_service` → `ticket_mutations`. Neither module imports from the other in the reverse direction |
-| `services/package_service.py` | No direct dependency. Both modules independently depend on `ticket_mutations` for status evaluation |
+| `services/package_service.py` | `ticket_service` invokes the package-owned synchronous eligibility boundary during manual-zone exits while retaining the Ticket lock. `package_service` does not import `ticket_service`; both modules depend on `ticket_mutations` for status evaluation |
 | `services/cvss.py` | No direct dependency. CVSS resolution is delegated through `ticket_mutations.recalculate_cvss_chain()` where this service requires it |
 
 ## Scope Boundary
 
-The following ticket mutation endpoints route to `ticket_mutations`,
-not `ticket_service`, because they are gate-relevant or manual-zone
-exit operations:
+The following gate primitive endpoint routes directly to
+`ticket_mutations`, while manual-zone exit endpoints route to this service as
+cross-domain Ticket lifecycle compositions:
 
 | Endpoint | Function | Reason |
 |----------|----------|--------|
-| `PATCH .../severity` | `set_severity_manual()` | Gate-relevant (severity affects Analyzed gate #3) |
-| `POST .../reopen` | `reopen_from_ignored()` | Manual-zone exit (re-enters gate zone via `_reenter_gate_zone()`) |
-| `POST .../revert-duplicate` | `revert_duplicate()` | Manual-zone exit (re-enters gate zone via `_reenter_gate_zone()`) |
+| `PATCH .../severity` | `ticket_mutations.set_severity_manual()` | Gate-relevant severity primitive |
+| `POST .../reopen` | `ticket_service.reopen_from_ignored()` | Manual-zone exit composition |
+| `POST .../revert-duplicate` | `ticket_service.revert_duplicate()` | Manual-zone exit composition |
 
-See [ticket-mutations.md](ticket-mutations.md) for these operations'
-contracts.
+See [ticket-mutations.md](ticket-mutations.md) for the severity and shared gate
+primitives. The complete manual-zone exit contracts are defined below.
 
 ### Operability guard
 
@@ -113,9 +114,12 @@ Operations that modify the Ticket row (all mutation functions except
 
 Explicit opt-outs (functions that do NOT call `ensure_ticket_operable`):
 
-- `ignore_ticket` — calls `ensure_ticket_operable` (which catches
-  Ignored/Duplicated), then applies its own status check (New/Analysis
-  required). See ordering constraint below
+- `reopen_from_ignored` and `revert_duplicate` — validate their exact manual-
+  zone source state instead because they are its dedicated exits
+
+`ignore_ticket` calls `ensure_ticket_operable` (which catches
+Ignored/Duplicated), then applies its own status check (New/Analysis required).
+See ordering constraint below.
 
 **Ordering constraint for `ignore_ticket`**:
 `ensure_ticket_operable` executes first. For Ignored/Duplicated tickets
@@ -254,22 +258,21 @@ async def associate_cve(
     UPDATE — maintains `chk_ticket_severity_manual_cve_exclusive`)
 9. Create `TicketAuditEvent` (`cve_associated`,
     `user_id = acting_user_id`).
-10. Call `recalculate_cvss_chain(cve.id)`. The same-transaction re-locks
-    preserve the CVE-then-Ticket order and observe all assessment mutations
-    committed before this operation acquired the CVE lock.
-11. Determine `new_severity` from the committed-current CVE severity (possibly
-    `NULL`). If `previous_severity != new_severity`, create
-    `TicketAuditEvent` (`severity_changed`, `user_id = NULL`,
-    `old_value = previous_severity`, `new_value = new_severity`,
-    `detail = NULL`). This event captures the handover from manual to
-    CVSS-derived severity; Sentinel derived it, so the associating user is not
-    its actor.
-12. Return the immediate eligibility handoff to the owning composition. This
-    specification does not define its package-domain consumer. Call
-    `reconcile_ticket_status()` for the association's currently defined Ticket
-    effects; gate #3 (severity set) and gate #4 (SUSE CVSS provided) may now
-    fail, causing regression to Analysis.
-13. Return updated Ticket.
+10. Call `recalculate_cvss_chain()` in association mode with `cve.id` and
+    `association_previous_severity = previous_severity`. The same-transaction
+    re-locks preserve the CVE-then-Ticket order and observe all assessment
+    mutations committed before this operation acquired the CVE lock. The chain
+    confirms CVE-owned severity, creates the optional manual-to-derived
+    `severity_changed` handover, then recalculates every system-managed Product
+    through the narrow exception. Changed-Product events are system-attributed,
+    use `reason = cvss`, and are ordered by `TicketPackageProduct.id` after the
+    handover event.
+11. Call `reconcile_ticket_status()` exactly once after the handover and all
+    Product events, using the same UTC `evaluation_date`. Gate #3 (severity set)
+    and gate #4 (at least one canonical SUSE assessment in any accepted
+    version) may now fail, causing regression to Analysis. Do not auto-assign a
+    second time.
+12. Return the updated Ticket.
 
 **Locking**: `FOR UPDATE` on CVE, then `FOR UPDATE` on Ticket. CVE Resolution
 Behavior involves only local database operations and may insert a minimal CVE
@@ -285,32 +288,37 @@ association locks first, the CVSS mutation waits, then observes the associated
 Ticket and applies its direct-audit and propagation contract. Neither path can
 use a pre-lock assessment or association snapshot.
 
-**recalculate_cvss_chain**: YES. Associating a CVE changes the Ticket's
-severity source. The function confirms the CVE-owned severity from the complete
-locked assessment set and returns the separate Eligibility Score result. The
-result is available to the package-owned boundary; this specification does not
-define that boundary's consumption.
+**recalculate_cvss_chain**: YES, in association mode. Associating a CVE changes
+the Ticket's severity source. The function confirms CVE-owned severity from the
+complete locked assessment set and applies automatic Product eligibility
+inline through the package-model-owned evaluator.
 If the CVE has no assessments, severity resolves to `null` (gate #3 fails) and
 eligibility uses the 10.0 conservative fallback.
 
-`associate_cve` owns the manual-to-derived handover event because it retains
-the previous `severity_manual` value. The delegated calculation reports any
-CVE severity change but emits no event directly; association emits exactly one
-handover event when the source transition changes the effective value.
+`associate_cve` captures and passes the previous `severity_manual` value; the
+delegated calculation creates exactly one handover event when the source
+transition changes the effective value.
 
 **Note on pre-existing CVSS assessments**: If the CVE being associated
 already has `CVECVSSAssessment` records (e.g., from a prior NVD sync), these
 assessments are immediately available to the CVSS resolution cascade.
-`recalculate_cvss_chain()` uses them to confirm severity and produce the
-package-domain eligibility handoff without requiring a fresh NVD fetch.
+`recalculate_cvss_chain()` uses them to confirm severity and update automatic
+Product eligibility without requiring a fresh NVD fetch.
 
 **Audit events**: `cve_associated` (always). `severity_changed` (if
 `previous_severity != new_severity` — captures the manual→derived
-handover; emitted by `associate_cve` with `user_id = NULL`, not attributed to
-the associating user). `cve_associated` retains `user_id = acting_user_id`.
+handover; emitted by `recalculate_cvss_chain()` from the previous value supplied
+by `associate_cve`, with `user_id = NULL`, not attributed to the associating
+user). `cve_associated` retains `user_id = acting_user_id`.
 Possibly `assignment` and `status_change` (from auto-assign), and possibly
-`status_change` from reconciliation. This contract does not create a Product
-eligibility event.
+`status_change` from reconciliation. It creates one Product eligibility event
+per changed automatic occurrence, followed by at most one gate-derived
+`status_change`. Optional assignment and its `New → Analysis` event precede
+`cve_associated`; Product events follow the handover event.
+
+Any settings, database, eligibility, audit, flush, or reconciliation error
+escapes and rolls back association, manual-severity clearing, assignment,
+Product values, Ticket status, and every event together.
 
 ### assign_ticket
 
@@ -504,11 +512,140 @@ manual zone.
 conflict, or database error), the entire transaction rolls back. No
 mutations or audit events persist.
 
+## Manual-Zone Exit Operations
+
+These Ticket lifecycle workflows compose the package-owned synchronous
+eligibility boundary with the gate primitives in `ticket_mutations`. The
+composition remains in this higher-level service so `ticket_mutations` never
+imports `package_service` and the CVSS chain remains its sole inline Product-
+eligibility ownership exception.
+
+### `_complete_manual_zone_exit()`
+
+Only `reopen_from_ignored()` and `revert_duplicate()` call this helper, after
+they acquire the Ticket lock, validate and preserve the exact source status,
+and prepare the Ticket at the `Analysis` floor. Entry points and lower services
+never call it directly.
+
+Its semantic inputs are the caller-owned session, the locked Ticket already at
+`Analysis`, the preserved `original_status`, and one UTC `evaluation_date`.
+For `original_status = Duplicated`, `duplicate_of_id` must already be `NULL`.
+
+**Behavioral steps**:
+
+1. Invoke the package-owned synchronous manual-zone-exit eligibility boundary
+   with the already locked Ticket and `evaluation_date`. The boundary reloads
+   current persisted assessment, setting, threshold, lifecycle, override, and
+   Product inputs; it neither reacquires the Ticket lock nor assigns or
+   reconciles.
+2. Call `ticket_mutations.reconcile_ticket_status()` exactly once with
+   `previous_status=original_status` and the same `evaluation_date`.
+
+Changed automatic Product events use the system actor,
+`reason = reactivation`, and ascending `TicketPackageProduct.id` order before
+the final `status_change`. The helper performs no CVE write or CVE lock,
+external I/O, Redis command, task publication, commit, or rollback. Any
+settings, database, eligibility, audit, flush, or reconciliation error escapes
+and rolls back the complete caller-owned transaction.
+
+### `reopen_from_ignored()`
+
+Reopens a Ticket from `Ignored` through the shared manual-zone exit
+composition.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `db` | `AsyncSession` | Yes | Caller-owned database session |
+| `ticket_id` | `UUID` | Yes | Ticket to reopen |
+| `acting_user_id` | `UUID \| None` | No | Acting user, or `NULL` for the documented system reopen |
+
+**Preconditions**: the Ticket exists and its locked-current status is
+`Ignored`; otherwise raise `TicketNotFoundError` or
+`InvalidTransitionError`, respectively.
+
+**Behavioral steps**:
+
+1. Acquire `FOR UPDATE` on the Ticket as the first database operation and
+   validate `Ignored`.
+2. Preserve `original_status = Ignored` and resolve one UTC `evaluation_date`.
+3. Call `ticket_mutations.auto_assign_actor(..., force=True)`. A VA actor
+   becomes the assignee; a non-VA actor or system caller leaves the current
+   assignee unchanged. Final reconciliation sanitizes an inactive assignee.
+4. Set `status = Analysis`, then call `_complete_manual_zone_exit()` with the
+   preserved source status and date and return the resulting Ticket. Its final
+   status is `Analysis`, `Analyzed`, or `Resolved` from current gate inputs.
+
+**Audit events**: optional `assignment`, zero or more system-attributed
+`product_eligibility_changed` events, then one system-attributed
+`status_change` from `Ignored` to the final evaluated status.
+
+**Locking and transaction**: the function retains its Ticket `FOR UPDATE` lock
+through assignment, package convergence, audit, and final reconciliation. It
+flushes but does not commit or roll back. Any escaping error rolls back all of
+these effects in the caller-owned transaction.
+
+**Return and idempotency**: returns the updated Ticket after flush. A request
+whose locked-current status is no longer `Ignored` is rejected rather than
+silently replayed; after a successful exit, retry requires a new state decision.
+
+### `revert_duplicate()`
+
+Reverts a Ticket from `Duplicated` through the shared manual-zone exit
+composition. Repointing performed when it was marked duplicate remains
+non-retroactive; other Tickets keep their current targets.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `db` | `AsyncSession` | Yes | Caller-owned database session |
+| `ticket_id` | `UUID` | Yes | Ticket to revert |
+| `acting_user_id` | `UUID \| None` | No | Acting user; no system caller currently exists |
+
+**Preconditions**: the Ticket exists and its locked-current status is
+`Duplicated`; otherwise raise `TicketNotFoundError` or
+`InvalidTransitionError`, respectively.
+
+**Behavioral steps**:
+
+1. Acquire `FOR UPDATE` on the Ticket as the first database operation and
+   validate `Duplicated`.
+2. Preserve `original_status = Duplicated`, capture the current duplicate
+   target's `SNTL-{n}` identifier as `original_target_identifier`, and resolve
+   one UTC `evaluation_date`.
+3. Call `ticket_mutations.auto_assign_actor(..., force=True)`. A VA actor
+   becomes the assignee; otherwise the current assignee is retained.
+4. Clear `duplicate_of_id` and set `status = Analysis` consecutively before
+   any operation that may flush. Both values are therefore written together,
+   preserving
+   `chk_ticket_duplicate_status_coherence`.
+5. Create the acting-user `duplicate_removed` event with
+   `old_value = original_target_identifier` and `new_value = NULL`.
+6. Call `_complete_manual_zone_exit()` with the preserved source status and
+   date and return the resulting Ticket. Its final
+   status is `Analysis`, `Analyzed`, or `Resolved` from current gate inputs.
+
+**Audit events**: optional `assignment`, `duplicate_removed`, zero or more
+system-attributed `product_eligibility_changed` events, then one
+system-attributed `status_change` from `Duplicated` to the final evaluated
+status. Every event and mutation is atomic in the caller-owned transaction.
+
+**Locking and transaction**: the function retains its Ticket `FOR UPDATE` lock
+through assignment, duplicate-link removal, audit, package convergence, and
+final reconciliation. It flushes but does not commit or roll back. Any escaping
+error rolls back the duplicate-link clear and every other effect.
+
+**Return and idempotency**: returns the updated Ticket after flush. A request
+whose locked-current status is no longer `Duplicated` is rejected rather than
+silently replayed; a successful revert never repoints other Tickets.
+
 ## Ticket Reactivation
 
-When a ticket transitions from an inactive status (Resolved, Ignored, or
-Duplicated) back to an active status, the system registers the asynchronous
-package-tree then per-ticket fetcher catch-up. It first
+When a Ticket transitions from an inactive status (Resolved, Ignored, or
+Duplicated) back to an active status, it registers the asynchronous package-tree
+and per-ticket fetcher catch-up. An explicit `Ignored` or `Duplicated` exit first
+converges existing system-managed Product eligibility synchronously from current
+PostgreSQL inputs before its final gate result. A `Resolved` regression is
+instead produced by an ordinary gate-zone mutation that has already maintained
+current eligibility. The post-commit workflow
    re-resolves every persisted package marker through SMELT, including
    soft-deleted markers without restoring them, then catches up on external
    data against the resulting tree (e.g., Red Hat CVSS updates — the
@@ -518,26 +655,28 @@ package-tree then per-ticket fetcher catch-up. It first
    [fetcher-infrastructure.md](../platform/fetcher-infrastructure.md)
    ("Per-Ticket Catch-Up: `catch_up()` Method") for the method contract.
 
-The workflow is registered internally by `reconcile_ticket_status()` (step 4)
-when it detects an inactive-state exit and runs after commit. CVSS assessment
-mutations maintain `CVE.severity` in every status. A setting-only default-version
-change remains subject to the inactive-CVE convergence limitation in
-`system-settings.md`; this reactivation path does not acquire a CVE lock while
-holding the Ticket lock. The package-owned reactivation workflow resolves
-current eligibility from persisted inputs. No action is needed by endpoint
-handlers or callers. This applies to all three
+The workflow is registered internally by `reconcile_ticket_status()` when it
+detects an inactive-state exit and runs after commit. CVSS assessment and
+default-version workflows already maintain `CVE.severity` in every status; this
+reactivation path neither recalculates severity nor acquires a CVE lock while
+holding the Ticket lock. The package-owned synchronous boundary used by manual-
+zone exits resolves current eligibility from persisted inputs with
+`reason = reactivation`. No action is needed by endpoint handlers or other
+callers. This applies to all three
 inactive → active paths:
 
-- `reopen_from_ignored()` — Ignored → active (via
-  [ticket-mutations.md](ticket-mutations.md), `_reenter_gate_zone()`)
-- `revert_duplicate()` — Duplicated → active (via
-  [ticket-mutations.md](ticket-mutations.md), `_reenter_gate_zone()`)
+- `reopen_from_ignored()` — Ignored → active via this service's private
+  `_complete_manual_zone_exit()` finalization
+- `revert_duplicate()` — Duplicated → active via the same composition
 - Gate-driven regression — Resolved → active (automatic, via any
   mutation that unsatisfies a gate)
 
 ### Convergence behavior
 
-The ticket may transition rapidly as async tasks complete. For example,
+The Ticket's first final gate result after a manual-zone exit, and the mutation
+that regresses a `Resolved` Ticket, already reflects current automatic
+eligibility. The Ticket may still transition as asynchronous external
+catch-up completes. For example,
 if a release was detected while the ticket was inactive, the IBS
 catch-up may set tracks to FIXED and products to released, causing the
 ticket to reach Resolved shortly after reactivation. This is expected
@@ -549,7 +688,9 @@ behavior — the system converges to the accurate state.
   recalculation trigger rationale
 - [ticket-mutations.md](ticket-mutations.md) —
   `reconcile_ticket_status()` step 4, `recalculate_cvss_chain()`
-  contract, `_reenter_gate_zone()` helper
+  contract, assignment and operability primitives
+- [package-service.md](../packages/package-service.md) — synchronous manual-
+  zone-exit eligibility boundary
 - [fetcher-infrastructure.md](../platform/fetcher-infrastructure.md) —
   `catch_up()` method contract
 
@@ -760,20 +901,25 @@ ticket_mutations (infrastructure)
          ▲                ▲
          │                │
   ticket_service    package_service
-  (non-gate ops)    (package ops)
+  (Ticket flows)    (package ops)
+         │                ▲
+         └────────────────┘
+          manual-zone exit
 ```
 
-| ticket_service function | ensure_ticket_operable | reconcile_ticket_status | recalculate_cvss_chain | auto_assign_actor |
-|------------------------|:----------------------:|:----------------------:|:---------------------:|:---------------------:|
-| create_ticket          | —                      | —                      | —                     | —                     |
-| associate_cve          | ✓                      | ✓                      | ✓                     | ✓                     |
-| assign_ticket          | ✓                      | ✓                      | —                     | —                     |
-| ignore_ticket          | ✓                      | —                      | —                     | ✓                     |
-| mark_as_duplicate      | ✓                      | —                      | —                     | ✓                     |
-| set_confidentiality    | ✓                      | —                      | —                     | —                     |
-| grant_access           | ✓                      | —                      | —                     | —                     |
-| revoke_access          | ✓                      | —                      | —                     | —                     |
-| list_access_grants     | —                      | —                      | —                     | —                     |
+| ticket_service function | ensure_ticket_operable | reconcile_ticket_status | recalculate_cvss_chain | auto_assign_actor | package convergence |
+|------------------------|:----------------------:|:----------------------:|:---------------------:|:---------------------:|:-------------------:|
+| create_ticket          | —                      | —                      | —                     | —                     | —                   |
+| associate_cve          | ✓                      | ✓                      | ✓                     | ✓                     | —                   |
+| assign_ticket          | ✓                      | ✓                      | —                     | —                     | —                   |
+| ignore_ticket          | ✓                      | —                      | —                     | ✓                     | —                   |
+| mark_as_duplicate      | ✓                      | —                      | —                     | ✓                     | —                   |
+| reopen_from_ignored    | —                      | ✓                      | —                     | ✓                     | ✓                   |
+| revert_duplicate       | —                      | ✓                      | —                     | ✓                     | ✓                   |
+| set_confidentiality    | ✓                      | —                      | —                     | —                     | —                   |
+| grant_access           | ✓                      | —                      | —                     | —                     | —                   |
+| revoke_access          | ✓                      | —                      | —                     | —                     | —                   |
+| list_access_grants     | —                      | —                      | —                     | —                     | —                   |
 
 ## Architectural Test Requirement
 
@@ -781,9 +927,9 @@ The following integration tests MUST be implemented to verify correct
 behavior of `ticket_service` operations:
 
 1. **CVE association causes status regression**: create a ticket without
-   CVE, set `severity_manual`, add a package with tracks in final
-   status to reach Analyzed. Associate a CVE → verify ticket regresses
-   to Analysis (gate #3 and #4 fail)
+   CVE, set `severity_manual`, and add a package with tracks in final status to
+   reach Analyzed. Associate a CVE whose assessment set is empty, then verify
+   the ticket regresses to Analysis because gates #3 and #4 fail
 
 2. **Assignment promotes New → Analysis explicitly**: create a ticket in
    New status. Assign a VA → verify ticket promotes to Analysis and a
@@ -827,9 +973,25 @@ behavior of `ticket_service` operations:
 
 8. **CVE association and assessment race**: use independent sessions to race
    `associate_cve()` with a CVSS assessment mutation. Verify CVE-then-Ticket
-   lock serialization, committed-current severity and eligibility handoff,
+   lock serialization, committed-current severity and applied eligibility,
    acting-user `cve_associated` followed by system `severity_changed` when the
-   handover changes value, and no stale or duplicate event from the loser
+   handover changes value, Product events in occurrence-ID order, one shared
+   evaluation date, one final reconciliation, and no stale or duplicate event
+   or second assignment from the loser
+9. **Manual-zone exit composition**: for both `reopen_from_ignored()` and
+   `revert_duplicate()`, verify this service owns the Ticket lock and direct
+   lifecycle/audit mutations, invokes the package-owned synchronous boundary
+   with the same `evaluation_date`, and then invokes
+   `reconcile_ticket_status()` exactly once. Cover VA, non-VA, and documented
+   system assignment behavior; current-input eligibility convergence and
+   override skips; Product-event ID ordering before final status; exact-source-
+   state rejection; complete rollback on package or reconciliation failure;
+   and a race with CVSS mutation that never acquires Ticket then CVE or creates
+   duplicate events. For revert, force an autoflush-capable role lookup and
+   prove `duplicate_of_id = NULL` and the `Analysis` floor are flushed together
+   without violating `chk_ticket_duplicate_status_coherence`; assert that the
+   `duplicate_removed` event uses the pre-clear target's `SNTL-{n}` identifier
+   as `old_value` and `NULL` as `new_value`
 
 ## Cross-references
 

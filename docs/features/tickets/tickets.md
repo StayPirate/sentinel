@@ -111,6 +111,9 @@ An VA can associate a CVE with a ticket that does not yet have one, via
     (unresolved) if the CVE data has not been fetched yet; updated
     automatically once CVSS data arrives from the on-demand fetch
   - CVSS sync and release tracking begin applying to the ticket
+  - Existing system-managed Product eligibility is recalculated immediately
+    from current assessments, default version, Product thresholds, and
+    lifecycle dates; manual overrides are preserved
   - The ticket may regress from Analyzed to Analysis if CVSS data has
     not arrived yet (gate #3 and #4 may fail)
 
@@ -252,8 +255,8 @@ New ──→ Analysis ──────────→ Analyzed ────�
 | Resolved   | Analyzed   | "Resolved" gate conditions no longer met, but "Analyzed" gates still met | Automatic | System (triggered by user or system action) |
 | Resolved   | Analysis   | Both "Resolved" and "Analyzed" gate conditions no longer met | Automatic    | System (triggered by user or system action) |
 | New, Analysis, Analyzed, Resolved | Duplicated | User marks ticket as duplicate | Manual | `triage_ticket` |
-| Duplicated | (evaluated) | User reverts duplicate status; `_reenter_gate_zone` determines target | Manual | `triage_ticket` (assignment only if actor holds VA role) |
-| Ignored    | (evaluated) | User reopens or system reopens (e.g., CVE rejection revert); `_reenter_gate_zone` determines target | Manual / Automatic | `triage_ticket` or System (assignment only if actor holds VA role) |
+| Duplicated | (evaluated) | User reverts duplicate status; the workflow prepares `Analysis` and completes gate evaluation | Manual | `triage_ticket` (assignment only if actor holds VA role) |
+| Ignored    | (evaluated) | User or system reopens (e.g., CVE rejection revert); the workflow prepares `Analysis` and completes gate evaluation | Manual / Automatic | `triage_ticket` or System (assignment only if actor holds VA role) |
 
 **Note on CVE Rejections**: When a CVE's `cve_state` changes to `REJECTED` (detectable from any discovery fetcher — NVD, MITRE, or kernel), only tickets in `New` status are automatically transitioned to `Ignored`. Tickets in `Analysis` or later statuses are NOT automatically transitioned — the VA must review the rejection manually. For the complete flow regarding CVE rejections and rejection reverts, see `docs/features/tickets/cve-tracking.md` ("Rejection handling" and "Rejection revert handling").
 
@@ -274,14 +277,13 @@ when ALL of the following conditions are met:
    severity and satisfies this gate. For tickets with CVE, this is
    derived from CVSS. For tickets without CVE, `severity_manual`
    must be set by the VA
-4. **SUSE CVSS provided** (only for tickets with CVE): the VA must have
-   provided BOTH SUSE CVSS v3.1 AND v4.0 assessments (see
-   `docs/features/tickets/cvss-scoring.md`). Note: this is a data
-   completeness requirement — both versions are always required regardless
-   of the system-wide `default_cvss_version` setting. That setting (see
-   `cvss-scoring.md`) controls which version is used for operational
-   decisions (severity resolution, eligibility threshold comparison) but
-   does not affect this gate, which ensures complete CVSS data coverage
+4. **SUSE CVSS provided** (only for tickets with CVE): at least one canonical
+   `SUSE` assessment must exist in any CVSS version currently accepted by
+   Sentinel. The current accepted set is v2.0, v3.0, v3.1, and v4.0; any one
+   of them satisfies this gate. Assessments from other providers do not. A
+   canonical SUSE assessment at the configured `default_cvss_version` does
+   not need to be present: the setting controls severity preference and
+   eligibility score selection, not this SUSE data-presence gate.
 
 This evaluation is performed automatically by the centralized status
 evaluation function (see "Centralized Status Evaluation" below) after
@@ -333,7 +335,7 @@ track is genuinely affected (code vulnerable) but all products under it
 are ineligible — there is nothing to wait for, and the "affected, no
 fix" fact is preserved (the track stays `AFFECTED`). If a product later
 becomes eligible and actionable through its owning mutation workflow (for
-example, package-owned application of a CVSS handoff, an AIMAAS threshold
+example, atomic CVSS propagation, an AIMAAS threshold
 update, Product restore, or correction of an EOL lifecycle date), clause (c)
 ceases to hold and centralized reconciliation reverts the Ticket to Analyzed.
 
@@ -344,10 +346,17 @@ reachable when the Analyzed gate is also met (which requires at least one
 manually included track). The actionable-track set may be empty, in which case
 the Resolved predicate is intentionally true because lifecycle leaves no
 current work.
-There is no manual "Mark as Resolved" action.
+There is no manual "Mark as Resolved" action and no generic force-Resolved
+operation. When policy-driven eligibility makes a previously resolved Ticket
+actionable again, the VA records the actual domain decision through existing
+mutations: `WONT_FIX` when no fix will be produced for the complete track, a
+Product-specific manual `eligible = false` override when that Product will not
+receive a fix despite automatic policy, or exclusion only when the package,
+track, or Product is outside Ticket scope. These mutations retain their
+ordinary audit and reconciliation behavior.
 
 Conversely, if any track ceases to be resolution-complete (for example,
-package-owned application of a CVSS handoff changes Product eligibility, a VA
+atomic CVSS propagation changes Product eligibility, a VA
 resets a track status from a final state to `AFFECTED`, or a Product is restored
 under an `AFFECTED` track), the owning mutation workflow invokes centralized
 reconciliation and the Ticket transitions back from Resolved to Analyzed (or to
@@ -380,6 +389,14 @@ assignment via the PATCH assignee endpoint). Once a ticket leaves
 Reverse transitions between `Analysis`, `Analyzed`, and `Resolved`
 are not special cases — they emerge naturally when gate conditions are
 no longer met.
+
+An owning composed workflow establishes all of its current gate inputs before
+the one final call to `reconcile_ticket_status()`. In particular, immediate
+CVSS propagation, including propagation on `Resolved`, applies every applicable
+automatic Product update from one UTC `evaluation_date`. An explicit
+`Ignored` or `Duplicated` exit first performs its separate synchronous
+eligibility convergence. The status evaluator never launches a second
+eligibility chain.
 
 All automatic transitions (status promotion and demotion within the
 gate zone, the `New → Analysis` promotion) create a `TicketAuditEvent`
@@ -553,7 +570,7 @@ events, atomicity guarantee).
 #### Revert-Duplicate Operation
 
 When reverting a ticket from Duplicated status
-(`ticket_mutations.revert_duplicate()`):
+(`ticket_service.revert_duplicate()`):
 
 - `duplicate_of_id` is cleared (set to NULL)
 - If the acting user holds the `vulnerability_analyst` role, the ticket
@@ -561,11 +578,13 @@ When reverting a ticket from Duplicated status
   (e.g., a `restricted_analyst`), the reassignment step is skipped — the
   ticket retains its current assignee (or remains unassigned)
 - The ticket re-enters the gate zone; `reconcile_ticket_status`
-  determines the correct status based on current gate conditions
-- Creates two `TicketAuditEvent` records: `duplicate_removed` (user
-  action) + `status_change` (system action)
+  determines the correct status based on current gate conditions only after
+  existing automatic Product eligibility synchronously converges from current
+  PostgreSQL inputs
+- Creates `duplicate_removed`, plus any optional assignment and synchronous
+  Product eligibility events, followed by one final system `status_change`
 
-See [ticket-mutations.md](ticket-mutations.md#revert_duplicate) for the
+See [ticket-service.md](ticket-service.md#revert_duplicate) for the
 full function contract.
 
 The revert is non-retroactive: if other tickets were repointed away
@@ -612,15 +631,16 @@ operates on Ignored tickets. Two exit transitions are allowed:
    deactivated. This handles cases like CVE rejection reverts (see
    `docs/features/tickets/cve-tracking.md`, "Rejection revert handling").
 
-Both transitions go through `ticket_mutations.reopen_from_ignored()`:
+Both transitions go through `ticket_service.reopen_from_ignored()`:
 1. Acquires `FOR UPDATE` on the ticket
 2. Verifies current status is Ignored
 3. Sets assignee (if applicable)
-4. Re-enters the gate zone at `Analysis` (the unconditional floor);
-   `reconcile_ticket_status` evaluates upward and may promote to
+4. Re-enters the gate zone at `Analysis` (the unconditional floor),
+   synchronously converges existing automatic Product eligibility from current
+   PostgreSQL inputs, then calls `reconcile_ticket_status` once; it may promote to
    `Analyzed` or `Resolved` if gate conditions are already satisfied
 
-See [ticket-mutations.md](ticket-mutations.md#reopen_from_ignored) for
+See [ticket-service.md](ticket-service.md#reopen_from_ignored) for
 the full function contract.
 
 All other consumer modifications on Ignored tickets are blocked — mutation
@@ -641,9 +661,12 @@ they do not poll an inactive Ticket's external package scope.
 
 - **Resolved**: an authorized consumer mutation may apply its documented
   Ticket-scoped consequences immediately and trigger centralized status
-  evaluation. Source-owned external CVSS ingestion persists its assessment and
-  refreshes `CVE.severity` immediately, but defers Product eligibility and
-  Ticket gate propagation until reactivation
+  evaluation. Effective manual SUSE mutation, source-owned external CVSS
+  ingestion, and default-version recalculation all maintain automatic Product
+  eligibility immediately and run at most one final gate reconciliation. A
+  resulting `Resolved → Analyzed` or `Resolved → Analysis` transition is an
+  ordinary gate-zone regression. `Resolved` remains outside ticket-scoped
+  external monitoring until such a regression places it in the active scope
 - **Ignored and Duplicated** (manual zone): mutation endpoints return
   409 `TICKET_NOT_MUTABLE` via `ensure_ticket_operable()` in the service
   layer. Only the dedicated exit endpoints (`POST .../reopen` for
@@ -677,9 +700,9 @@ def ensure_ticket_operable(ticket: Ticket) -> None:
 This source-ingestion boundary does not weaken manual-zone immutability:
 authenticated consumer APIs may mutate only the internal SUSE assessment and
 remain subject to `TICKET_NOT_MUTABLE`; they cannot use the trusted external
-caller category. Package eligibility behavior remains delegated to the package
-domain and follows the CVSS mutation's `immediate`,
-`deferred_until_reactivation`, `not_applicable`, or `none` handoff.
+caller category. Package eligibility behavior follows the CVSS mutation's
+`immediate`, `deferred_until_reactivation`, `not_applicable`, or `none`
+disposition and the narrow atomic boundary in `ticket-mutations.md`.
 
 **Relationship with `require_accessible_ticket`**: the accessibility
 check is a router-level API dependency (applies to all operations on a
@@ -698,6 +721,7 @@ features behave differently:
 | Feature | Behavior |
 |---------|----------|
 | CVSS scoring | Not applicable — no CVE means no CVSS assessments |
+| Product eligibility | Automatic calculation still applies using the conservative 10.0 eligibility fallback; this does not make CVSS itself applicable |
 | CVSS sync (NVD, Red Hat) | Not applicable — ticket is skipped |
 | Severity | Manual via `severity_manual` (editable by VA) |
 | Release tracking (track) | Not applicable — track-level detection relies on CVE-ID in IBS diffs |
@@ -1454,10 +1478,12 @@ POST /api/v1/tickets/{ticket_id}/reopen
 Reopens an Ignored ticket. If the calling user holds the
 `vulnerability_analyst` role, they become the new assignee; otherwise,
 the ticket retains its current assignee (or remains unassigned). After
-assignment (if applicable), `_reenter_gate_zone()` re-enters the gate
-zone at the unconditional `Analysis` floor and evaluates upward — the
-result is Analysis, Analyzed, or Resolved based on current gate
-conditions, independent of assignee presence. See [Ignored](#ignored)
+assignment (if applicable), the workflow enters the gate zone at the
+unconditional `Analysis` floor, then
+`ticket_service._complete_manual_zone_exit()` synchronously converges existing
+automatic Product eligibility and evaluates upward exactly once. The
+result is Analysis, Analyzed, or Resolved based on current gate conditions,
+independent of assignee presence. See [Ignored](#ignored)
 for the full reopen behavior and audit trail.
 
 No request body is required.
@@ -1483,11 +1509,13 @@ POST /api/v1/tickets/{ticket_id}/revert-duplicate
 **`Capability: triage_ticket`**
 - **Response schema**: `TicketDetail`
 
-Reverts a Duplicated ticket to its previous status. If the user who
+Reverts a Duplicated ticket into the gate zone. If the user who
 performed the revert holds the `vulnerability_analyst` role, the ticket
 is reassigned to them; otherwise, the ticket retains its current
-assignee. After restoring the status, `reconcile_ticket_status`
-reconciles with current gate conditions.
+assignee. After clearing the duplicate link, the service enters the
+`Analysis` floor, synchronously converges existing automatic Product
+eligibility, and evaluates upward exactly once. The result is `Analysis`,
+`Analyzed`, or `Resolved` from current gate conditions.
 See [Duplicate Handling](#duplicate-handling) for revert behavior and
 status reconciliation.
 
@@ -1658,9 +1686,10 @@ table:
 
 ## Cross-references
 
-- `docs/features/tickets/ticket-service.md` — service-layer contract for
-  non-gate ticket lifecycle operations and confidentiality management
-- `docs/features/tickets/ticket-mutations.md` — ticket-centric mutations,
+- `docs/features/tickets/ticket-service.md` — service-layer contract for Ticket
+  lifecycle operations, cross-domain compositions, and confidentiality
+  management
+- `docs/features/tickets/ticket-mutations.md` — CVSS/severity mutations,
   `reconcile_ticket_status()`, `auto_assign_actor()`, concurrency rules,
   and architectural test requirements
 - `docs/features/packages/package-service.md` — package-centric mutations,

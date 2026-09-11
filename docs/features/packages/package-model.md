@@ -90,8 +90,10 @@ Product eligibility (whether a product will receive the fix) is a
 separate persisted boolean (`eligible`) on `TicketPackageProduct`, with
 its own override mechanism (`is_eligible_override`). The track retains
 its affectedness status regardless of whether any product is eligible.
-CVSS score changes only flip the `eligible` flag — no status changes,
-no rollup chains.
+Eligibility recalculation never changes affectedness or delivery and has
+no rollup chain. After an owning workflow has completed all eligibility
+changes, Ticket gate reconciliation may observe the new values at the
+documented post-mutation boundary.
 
 ### 4. Delivery as a separate dimension
 
@@ -422,36 +424,49 @@ products block ticket resolution (the Resolved gate requires
 FIXED tracks). This is the intended safety net — blocked resolution is
 visible and correctable; silent omission of eligible products is not.
 
-**Eligibility rules** (evaluated in order):
+**Eligibility rules** (evaluated in order for one Product occurrence):
 
-1. **Reactive Support override**: if the Product is currently in the
-   `reactive_support` lifecycle phase,
-   `eligible = false` regardless of CVSS score.
-   A `NULL` lifecycle phase means that lifecycle is unavailable; it does not
-   activate this override and does not otherwise force either eligibility
-   value. The remaining CVSS threshold rules still apply.
-2. **Check CVSS threshold**: read `Product.cvss_threshold`, which is
-   synchronized from AIMAAS. NULL means an implicit threshold of 0 (all CVEs
-   eligible).
-3. **Resolve the CVSS score**: via the Eligibility Score Resolution (see
-   `docs/features/tickets/cvss-scoring.md`). Only the SUSE assessment of
-   the system-wide default CVSS version is used — no fallback to other
-   providers or other versions:
-   - SUSE assessment of the default version present → use this score
-   - Not resolvable (ticket has no CVE, CVE has no SUSE assessment for
-     the default version, or SUSE has not scored the default version) →
-     treat as **10.0** (worst-case; the product is always eligible)
-4. **Apply threshold**: if the resolved CVSS score is below the product's
-   threshold, `eligible = false`. Otherwise, `eligible = true`.
+1. **Preserve a manual override**: when `is_eligible_override = true`, retain
+   the persisted `eligible` value. Automatic workflows skip the occurrence
+   without changing either field or creating an eligibility event.
+2. **Apply the Reactive Support rule to automatic records**: when the Product
+   is currently in the `reactive_support` lifecycle phase, set
+   `eligible = false` regardless of CVSS score. A `NULL` lifecycle phase means
+   that lifecycle is unavailable; it does not activate this rule and does not
+   otherwise force either eligibility value.
+3. **Resolve the threshold**: read `Product.cvss_threshold`, synchronized from
+   AIMAAS. `NULL` means an implicit threshold of `0.0`.
+4. **Resolve the eligibility score** through the Eligibility Score Resolution
+   in `docs/features/tickets/cvss-scoring.md`. Only the canonical SUSE
+   assessment of the system-wide default CVSS version is used:
+   - when that assessment exists, use its score;
+   - otherwise use **10.0**, including when the Ticket has no CVE.
+5. **Compare**: set `eligible = false` when the score is below the threshold;
+   otherwise set `eligible = true`.
+
+The CVE-less fallback is a package eligibility input only. It does not make
+CVSS assessments, CVSS synchronization, or CVSS API operations applicable to a
+Ticket without a CVE.
+
+The complete automatic evaluator takes only the current override marker,
+lifecycle phase, Product threshold, and Eligibility Score Resolution as inputs.
+Ticket status, affectedness, delivery, Product release state, EOL, and direct or
+effective manual exclusion are not formula inputs. EOL and exclusion affect
+derived actionability and meet eligibility only at Ticket gates. Every creation,
+override-clear, threshold, lifecycle, reactivation, CVSS, and default-version
+workflow MUST use one shared pure service-layer implementation of these ordered
+rules rather than copying the formula. Its concrete function name and module are
+implementation choices; it performs no database access, mutation, audit, or
+I/O and raises no domain exception for valid typed inputs.
 
 **Important**: the CVSS version used for threshold comparison MUST always
 be resolved from the system-wide default CVSS version configuration —
 never hardcoded. See `docs/features/tickets/cvss-scoring.md` and
 `docs/features/platform/system-settings.md`.
 
-**Override model**: the VA can override eligibility on individual products
-by setting `is_eligible_override = true`. When overridden, automatic
-eligibility recalculation skips the product.
+**Override model**: the VA can override eligibility on individual Products by
+setting `is_eligible_override = true`. Rule 1 above is authoritative for every
+automatic workflow.
 
 ### Axis 3: Delivery and Release Observation
 
@@ -936,14 +951,15 @@ lifecycle; it does not modify affectedness, eligibility, or delivery.
 ### Continued Updates
 
 Directly or effectively manually excluded records and EOL Products continue to
-receive locally derived eligibility and lifecycle reconciliation while their
-Ticket is operable. External IBS delivery updates and release observations are
-limited to active Tickets (`New`, `Analysis`, or `Analyzed`). `Resolved`,
-`Ignored`, and `Duplicated` Tickets do not contribute recurring IBS work. When
-any inactive Ticket returns to an active status, the reactivation workflow
-reconciles its package tree and then runs the applicable per-ticket catch-up
-behavior. Exclusion and lifecycle state never suppress an update within the
-owning process's Ticket-status scope.
+receive locally derived eligibility and lifecycle reconciliation within each
+owning workflow's Ticket-status scope. Exclusion and EOL never suppress a
+permitted eligibility update. The CVSS state/caller matrix in
+`ticket-mutations.md` maintains CVSS- and default-version-originated Product
+updates immediately throughout the gate zone, including `Resolved`. It defers
+them only in the `Ignored` and `Duplicated` manual zone; explicit manual-zone
+exit converges current automatic eligibility before its final gate result. External IBS
+delivery updates and release observations remain limited to active Tickets
+(`New`, `Analysis`, or `Analyzed`).
 
 ### Restore
 
@@ -1031,13 +1047,32 @@ automatically via CVSS threshold + lifecycle phase calculation. When
 `is_eligible_override = true`, automatic recalculation skips the
 product.
 
-Standalone eligibility changes go through `package_service`. Product-originated
-automatic recalculation groups all matching records by Ticket, locks and
-processes one Ticket transaction at a time, and calls
-`reconcile_ticket_status()` once only when at least one value changed. CVSS
-mutation code returns a committed eligibility handoff but does not write Product
-eligibility directly. Automatic Product mutations skip manual overrides and
-continue updating soft-deleted records under operable Tickets.
+Standalone overrides, record creation, Product-threshold/lifecycle
+recalculation, and synchronous manual-zone-exit convergence go through
+`package_service`. Product-originated automatic recalculation groups all
+matching records by Ticket, locks and processes one Ticket transaction at a
+time, and calls `reconcile_ticket_status()` once only when at least one value
+changed.
+
+The higher-level `ticket_service` owns each manual-zone exit workflow. While it
+retains the Ticket lock, it invokes the package-owned synchronous convergence
+boundary and then the `ticket_mutations` gate-reconciliation primitive. This
+composition does not make either lower service import `ticket_service` and does
+not transfer Product mutation ownership.
+
+The sole ownership exception is the atomic CVSS chain in `ticket_mutations`.
+That chain may update system-managed `TicketPackageProduct.eligible` inline for
+an associated Ticket so assessment, unified severity, eligibility, audit, and
+one final Ticket reconciliation commit or roll back together. It MUST use the
+same pure evaluator defined above, MUST NOT import `package_service`, and MUST
+NOT set or clear an override or perform any other package mutation.
+
+Clearing an existing override always returns the Product occurrence to
+automatic management and recalculates it from current inputs. The clear is an
+effective metadata mutation even when the calculated boolean equals the
+persisted `eligible` value; its audit event then truthfully has equal
+`old_value` and `new_value` and records `override_action = cleared`. Subsequent
+automatic workflows may update the occurrence normally.
 
 ---
 
@@ -1383,6 +1418,12 @@ reconciliation. The following event types are defined:
   not trigger Ticket reconciliation. Existing, unmatched, or inactive-user
   outcomes create no event.
 - All events include an implicit `created_at` timestamp.
+- Automatic recalculation creates one event only for each Product occurrence
+  whose persisted boolean changes. The CVSS chain and synchronous manual-zone exit
+  order multiple events by `TicketPackageProduct.id` ascending. CVSS assessment
+  and default-version propagation use `reason = cvss`; manual-zone exit uses
+  `reason = reactivation`. Override-skipped and unchanged automatic occurrences
+  create no event.
 - The "Details recorded" column lists the values stored in the event's
   `old_value`, `new_value`, `comment`, and structured `detail` fields. See
   `docs/features/tickets/ticket-audit-log.md` for the exact field mapping
@@ -1429,15 +1470,18 @@ product's update repository.
 
 ## Ticket Lifecycle Integration
 
-All track status and product eligibility changes go through the
-`package_service` module, which automatically reconciles ticket status
-after each change. See `docs/features/tickets/tickets.md` (Ticket
-Lifecycle) for the authoritative gate conditions and status transition
-rules, and `docs/features/packages/package-service.md` for the module
+Track status and ordinary Product eligibility changes go through
+`package_service`, which reconciles Ticket status after each completed
+gate-relevant mutation. The atomic CVSS-chain exception described in
+[Override Model](#override-model) applies all of its automatic Product changes
+before at most one final reconciliation. See `docs/features/tickets/tickets.md`
+(Ticket Lifecycle) for the authoritative gate conditions and status transition
+rules, and `docs/features/packages/package-service.md` for the ordinary module
 contract, including:
 
-- **Analysis → Analyzed**: requires at least one package, all tracks
-  decided, severity set, SUSE CVSS provided
+- **Analysis → Analyzed**: requires at least one manually included track, all
+  actionable tracks decided, severity set, and, for a Ticket with a CVE, at
+  least one canonical SUSE assessment in any accepted CVSS version
 - **Analyzed → Resolved**: requires every actionable track to
   be resolution-complete — either (a) `NOT_AFFECTED`/`WONT_FIX`, or
   (b) `FIXED` with all actionable eligible Products released, or
@@ -1539,19 +1583,43 @@ cannot rediscover skipped current state.
 
 ### Reactivation and convergence
 
-When an inactive Ticket enters an active status, package-domain catch-up has
-two ordered phases:
+When a Ticket leaves the `Ignored` or `Duplicated` manual zone, convergence has
+one synchronous PostgreSQL phase. Every inactive-to-active transition,
+including an ordinary `Resolved` regression, then has two post-commit package-
+domain phases:
 
-1. Re-resolve every persisted package name through the normal SMELT package
+1. For a manual-zone exit, before the relevant final Ticket gate result,
+   recalculate every existing
+   system-managed `TicketPackageProduct` from the current persisted assessment
+   set, current `default_cvss_version`, current Product threshold and lifecycle
+   dates, and current override marker. Use one UTC `evaluation_date`, include
+   directly or effectively excluded and EOL occurrences, skip overrides, and
+   order changed-Product events by `TicketPackageProduct.id` with
+   `reason = reactivation`. This phase never recalculates or writes
+   `CVE.severity`, never acquires a CVE lock after the Ticket lock, performs no
+   network, Redis, or Celery I/O, and participates in the manual-zone-exit
+   `ticket_service` caller-owned transaction. That lifecycle owner performs at
+   most one final Ticket reconciliation after all changes.
+2. After that transaction commits, re-resolve every persisted package name
+   through the normal SMELT package
    resolution, maintainership acquisition, and idempotent package mutation
    path. This includes soft-deleted package markers. Existing records and
    exclusion markers are preserved; only missing tracks, Product occurrences,
    and maintainer associations are created. Each package is an independent
    unit so one failure does not roll back successful siblings.
-2. After the package-tree and maintainership phase has committed its successful
-   units, run the IBS request, IBS track-release, and IBS Product-release catch-up
-   operations against the resulting tree. Failure to resolve one package does
-   not prevent catch-up for records that already exist.
+3. After the package-tree and maintainership phase has committed its successful
+   units, run the registered per-Ticket catch-up operations against the
+   resulting tree, including IBS request, IBS track-release, IBS Product-release,
+   and lifecycle evaluation. Failure to resolve one package does not prevent
+   catch-up for records that already exist.
+
+No special synchronous eligibility pass precedes a `Resolved` regression:
+ordinary local CVSS, default-version, threshold, and lifecycle workflows already
+maintain eligibility in that gate-zone state. New Product occurrences created
+in phase 2 calculate eligibility immediately
+through the same canonical evaluator. The later lifecycle catch-up is a safety
+net for current-state mismatches, not the mechanism that first establishes
+eligibility for a final manual-zone-exit gate result.
 
 The workflow recovers current authoritative facts needed to represent the
 active Ticket; it does not reproduce every external transition that occurred
