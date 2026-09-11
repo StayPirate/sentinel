@@ -538,7 +538,7 @@ flowchart LR
         direction TB
         REQ_EVENT["IBS RabbitMQ consumer:<br/>inline request-number wake-up"]
         REQ_PERIODIC["sync_ibs_requests<br/>(daily 02:30 UTC)"]
-        REQ_CATCHUP["Package-add / reactivation<br/>catch-up"]
+        REQ_CATCHUP["Package-add / Ticket convergence<br/>catch-up"]
         CURRENT["Point-fetch current request detail<br/>+ action diffs and source history"]
         SHARED["Shared authoritative<br/>track-scope reconciliation"]
         subgraph request_tx["One atomic track-scope PostgreSQL transaction"]
@@ -623,8 +623,9 @@ flowchart TD
   accepted CVSS version (currently v2.0, v3.0, v3.1, or v4.0)
 
 **Resolved gate**: every actionable `TicketPackageTrack` is
-resolution-complete: (a) `NOT_AFFECTED`/`WONT_FIX`, or (b) `FIXED` with
-all actionable eligible Products having `released_at IS NOT NULL`, or
+resolution-complete: (a) `NOT_AFFECTED`/`WONT_FIX`, or (b) `FIXED`, with all
+actionable eligible Products having `released_at IS NOT NULL` when the Ticket
+has a CVE and no release requirement when it is CVE-less, or
 (c) `AFFECTED` with no actionable eligible Products. Actionability combines
 manual hierarchical exclusion with derived Product EOL; it is not persisted.
 Delivery status
@@ -669,7 +670,7 @@ flowchart TD
     subgraph gates_ref["Gate Conditions"]
         direction LR
         G1["<b>Gate #1 (→ Analyzed)</b><br/>① ≥1 manually included track<br/>② all actionable tracks decided<br/>③ severity determined<br/>④ ≥1 canonical SUSE assessment in any accepted version (CVE only)"]
-        G2["<b>Gate #2 (→ Resolved)</b><br/>Every actionable track is resolution-complete:<br/>(a) NOT_AFFECTED / WONT_FIX, or<br/>(b) FIXED + all actionable eligible Products released, or<br/>(c) AFFECTED + no actionable eligible Products"]
+        G2["<b>Gate #2 (→ Resolved)</b><br/>Every actionable track is resolution-complete:<br/>(a) NOT_AFFECTED / WONT_FIX, or<br/>(b) FIXED + CVE-aware Product release rule, or<br/>(c) AFFECTED + no actionable eligible Products"]
     end
 
     %% Entry from pre-state to gate zone

@@ -33,7 +33,7 @@ All recurring IBS request work is rooted in tracks belonging to active Tickets
 VA exclusion, Product lifecycle, actionability, affectedness status, and Product
 eligibility do not narrow factual request or delivery reconciliation. Inactive
 Tickets retain previously recognized evidence but do not contribute recurring
-work. Reactivation invokes the targeted catch-up defined below.
+work. Ticket convergence invokes the targeted catch-up defined below.
 
 The persisted workflow discriminator is authoritative. A Git track's
 `reference` is never sent to an IBS request, source-history, or diff operation
@@ -388,7 +388,7 @@ invoke affectedness or Product-release mutations.
 ## Shared Authoritative Reconciliation
 
 The same track-scoped operation is used by the daily fetcher, package-add
-acceleration, Ticket-reactivation catch-up, and RabbitMQ request-number
+acceleration, Ticket-convergence catch-up, and RabbitMQ request-number
 wake-ups. No caller has a reduced correlation or delivery algorithm.
 
 ### Scope Identity
@@ -478,9 +478,9 @@ package addition. The daily complete fetcher remains the permanent recovery
 owner. There is no `correlate_submission_request` or
 dedicated submission-correlation or discovery Celery task.
 
-### Ticket Reactivation
+### Ticket Convergence
 
-`SyncIbsRequests.participates_in_catch_up = True`. The established reactivation
+`SyncIbsRequests.participates_in_catch_up = True`. The established Ticket convergence
 workflow re-resolves package trees first and then invokes this fetcher's
 `catch_up(ticket_id, session)` through the generic `run_catch_up` wrapper. The
 catch-up silently returns when the Ticket or relevant IBS tracks do not exist.
@@ -806,7 +806,7 @@ Implementation coverage must include:
   regression, and stale-negative concurrency with independent sessions;
 - atomic request/action/join/delivery commit and rollback, including successful
   sibling scopes when another fails;
-- first run, long gap, re-enable, package-add and reactivation catch-up,
+- first run, long gap, re-enable, package-add and Ticket-convergence catch-up,
   duplicate/out-of-order event acceleration, and fetcher metric precedence;
 - API authentication, confidential-Ticket visibility, action deduplication,
   exact filters, pagination, deterministic sorting, and response schemas; and
@@ -835,7 +835,7 @@ failed package-add acceleration, tracks added after older requests, request
 reopens, supersession, and partial prior runs without a cursor or temporal
 window.
 
-Package-add catch-up, Ticket-reactivation catch-up, manual generic fetcher runs,
+Package-add catch-up, Ticket-convergence catch-up, manual generic fetcher runs,
 and RabbitMQ events only reduce latency. They all use the same idempotent
 reconciliation and cannot establish a different domain result.
 
@@ -872,7 +872,7 @@ status, metrics, and sanitized logs, never by another delivery state.
 - `docs/features/integrations/ibs-rabbitmq-integration.md` - request wake-up,
   acknowledgement, process, and heartbeat contracts.
 - `docs/features/packages/package-model.md` - orthogonal dimensions, strict IBS
-  applicability, active-Ticket scope, and reactivation ordering.
+  applicability, active-Ticket scope, and Ticket convergence ordering.
 - `docs/features/packages/package-service.md` - centralized delivery mutation
   and Ticket locking.
 - `docs/features/packages/ibs-track-release-detection.md` - independent

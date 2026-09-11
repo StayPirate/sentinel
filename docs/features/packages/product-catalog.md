@@ -369,7 +369,7 @@ current Product CPE resolution are not blocked.
 Product catalog backfill is an on-demand Celery sub-operation of
 `sync_smelt_products`, not an independently scheduled `BaseFetcher`. It is
 unrelated to the reserved `BaseFetcher.catch_up(ticket_id, session)` mechanism
-used when an inactive ticket becomes active.
+dispatched by Ticket convergence.
 
 Backfill is triggered when the Product catalog snapshot introduces at least
 one newly current Product (a CPE that was not present in the previous
@@ -448,7 +448,7 @@ change to SMELT's per-package track topology. Sentinel does not periodically
 query the maintained-package endpoint for every active package. A new track
 whose Products were all already current in the previous catalog snapshot can
 therefore remain absent from a continuously active Ticket until another
-package-resolution trigger occurs. Ticket reactivation re-resolves all of that
+package-resolution trigger occurs. Ticket convergence re-resolves all of that
 Ticket's persisted package markers and repairs this case. This is the accepted
 package-tree discovery gap defined in `package-model.md` (IBS Workflow
 Applicability and Convergence); no generic topology reconciler is added.

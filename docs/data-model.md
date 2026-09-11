@@ -877,6 +877,11 @@ See `docs/features/tickets/tickets.md` for the full ticket specification.
 
 **Deletion policy**: Tickets MUST NOT be deleted from the database. There is no soft-delete mechanism at the ticket level. Tickets that are no longer relevant are transitioned to Ignored or Duplicated status.
 
+**Ticket convergence state**: none. The convergence root Celery task ID is
+transient correlation data and is not stored in `Ticket`, `FetcherRun`, or a
+separate run/progress table. Recovery reruns the complete idempotent workflow
+from current PostgreSQL state.
+
 **Status transitions**: see `docs/features/tickets/tickets.md` (Ticket Lifecycle)
 for the full transition diagram, gates, and rules.
 
@@ -897,9 +902,17 @@ Summary:
   broken)
 - Any except Ignored and Duplicated -> Duplicated (manual, reversible)
 - Duplicated -> (evaluated status) (manual: revert via
-  `ticket_service.revert_duplicate()`; reassigns to the reverting VA)
-- Ignored -> (evaluated status) (manual: VA assigns; or automatic:
-  system reopens through `ticket_service.reopen_from_ignored()`)
+  `ticket_service.revert_duplicate()`; a VA actor becomes assignee, while a
+  non-VA actor retains the current assignee)
+- Ignored -> (evaluated status) (manual or automatic via
+  `ticket_service.reopen_from_ignored()`; a VA actor becomes assignee, while a
+  non-VA or system caller retains the current assignee)
+
+`REJECTED -> PUBLISHED` reopens every currently `Ignored` associated Ticket;
+the decision uses current CVE/Ticket state and never audit-derived provenance.
+Every successful manual-zone exit registers post-commit Ticket convergence,
+including an immediate `Resolved` result. Inactive-assignee sanitation applies
+only when the final result is `Analysis` or `Analyzed`.
 
 Forward and reverse transitions between Analysis, Analyzed, and Resolved
 are handled automatically by the `ticket_mutations` module — see
@@ -929,12 +942,12 @@ Alembic migration.
 
 | Value | Description |
 |-------|-------------|
-| `New` | Newly created ticket, no analysis started |
-| `Analysis` | Under active analysis by a VA |
-| `Analyzed` | All analysis gates met; awaiting resolution |
-| `Resolved` | Every actionable track is resolution-complete |
-| `Ignored` | Ticket dismissed (e.g., not applicable, CVE rejected) |
-| `Duplicated` | Ticket marked as duplicate of another ticket |
+| `New` | Initial pre-gate state; the Ticket has not yet been admitted to automatic gate evaluation |
+| `Analysis` | Gate-zone floor; at least one Analyzed-gate condition is false |
+| `Analyzed` | Every Analyzed-gate condition is true, but at least one actionable track is not resolution-complete |
+| `Resolved` | Every Analyzed-gate condition is true and every actionable track is resolution-complete under the CVE-aware gate formula |
+| `Ignored` | Manual-zone isolation for an issue not currently being worked |
+| `Duplicated` | Manual-zone isolation for a Ticket represented by another non-Duplicated Ticket |
 
 See `docs/features/tickets/tickets.md` (Ticket Lifecycle) for the full
 transition diagram, gates, and rules.
@@ -1122,7 +1135,7 @@ dimensions (affectedness, eligibility, delivery).
 | ticket_package_id | UUID      | FK(ticket_package.id), NOT NULL       | Parent package record              |
 | workflow_type     | VARCHAR(20) | NOT NULL                              | WorkflowType enum (`ibs` or `git`) |
 | reference         | VARCHAR(255) | NOT NULL                              | Track identifier: IBS codestream project name (e.g., `SUSE:SLE-15-SP6:Update`) or git branch name (e.g., `slfo-main`). Stored as a string — tracks are not maintained as a separate table because SMELT does not provide an independent listing. |
-| status            | VARCHAR(20) | NOT NULL, DEFAULT ANALYSIS            | PackageStatus enum (affectedness); mutation authority is defined in `package-model.md` |
+| status            | VARCHAR(20) | NOT NULL, DEFAULT ANALYSIS            | PackageStatus enum (affectedness); mutation authority is defined in `package-model.md`. User `FIXED` authority is `admin_ticket_ops` for any Ticket or `manage_packages` only for a locked-current CVE-less Ticket |
 | delivery_status   | VARCHAR(20) | NOT NULL, DEFAULT PENDING             | DeliveryStatus enum; independent from Ticket gates and has no Ticket audit event |
 | deleted_at        | TIMESTAMPTZ | nullable                              | Direct manual-exclusion timestamp. NULL = not directly excluded. A record may still be effectively excluded through its package or non-actionable because it has no actionable Products |
 | created_at        | TIMESTAMPTZ | NOT NULL, DEFAULT                     | Record creation timestamp          |
@@ -1150,7 +1163,7 @@ override model.
 | product_id               | UUID      | FK(product.id), NOT NULL                    | Related product                    |
 | eligible                 | BOOLEAN   | NOT NULL, DEFAULT true                      | Whether the product will receive the fix |
 | is_eligible_override     | BOOLEAN   | NOT NULL, DEFAULT false                     | True if VA manually set the eligibility |
-| released_at              | TIMESTAMPTZ | nullable                                    | Authoritative stable security advisory-issued time in UTC; NULL until Product release detection confirms an exact match. Sentinel observation time remains available through `updated_at` and the audit event's `created_at` |
+| released_at              | TIMESTAMPTZ | nullable                                    | Authoritative stable security advisory-issued time in UTC; NULL until Product release detection confirms an exact match. A CVE-less `FIXED` track can be resolution-complete while this remains NULL; Sentinel never fabricates publication evidence. Observation time remains available through `updated_at` and the audit event's `created_at` |
 | deleted_at               | TIMESTAMPTZ | nullable                                    | Direct manual-exclusion timestamp. NULL = not directly excluded. Current actionability also depends on ancestor markers and the catalog Product lifecycle phase |
 | created_at               | TIMESTAMPTZ | NOT NULL, DEFAULT                           | Record creation timestamp          |
 | updated_at               | TIMESTAMPTZ | NOT NULL, DEFAULT                           | Record update timestamp            |

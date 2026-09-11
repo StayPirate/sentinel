@@ -213,6 +213,10 @@ volume mounted. This is achieved via a dedicated Celery queue:
   If `None`, no queue parameter is passed and Celery uses default
   routing. This ensures on-demand fetches for git-based fetchers
   reach the worker with the volume mounted
+- **`catch_up()` routing**: Ticket convergence applies the same rule when
+  publishing the generic `run_catch_up` task. Git-based catch-ups therefore
+  reach the `git` worker, while a fetcher whose `queue` is `None` uses default
+  routing
 
 In single-worker deployments (local dev, simple container runtime), all
 queues are consumed by the same worker process and no explicit routing

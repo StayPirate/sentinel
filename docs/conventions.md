@@ -778,11 +778,11 @@ as short as possible. Two categories of work are forbidden inside it:
    transaction is opened. This pattern is not subject to the No Network I/O
    prohibition.
 
-   Ticket reactivation is not an exception: its recovery publication occurs
+   Ticket convergence is not an exception: its recovery publication occurs
    only after commit, as defined in
    `docs/features/platform/fetcher-infrastructure.md` (Per-Ticket Catch-Up,
    Post-commit enqueue) and `docs/features/packages/package-model.md`
-   (Reactivation and convergence). No pre-commit enqueue exception applies.
+   (Ticket Convergence). No pre-commit enqueue exception applies.
 
 2. **No expensive queries**: analytical queries, aggregations over
    large tables, or computationally intensive operations MUST be

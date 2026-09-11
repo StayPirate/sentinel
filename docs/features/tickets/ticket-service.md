@@ -50,13 +50,15 @@ calls within it; they do not create a new event loop for each mutation. See
 
 ### Transaction ownership
 
-The module does NOT commit or roll back. All operations execute within
-the caller's database session. Commit responsibility belongs to the
-caller.
+All operations accept the caller's database session and do not commit or roll
+back. Commit responsibility belongs to the caller. Functions that require an
+external post-commit effect register it with the caller-owned transaction;
+the API transaction dependency commits and releases locks before executing the
+effect.
 
-This matches the `ticket_mutations`, `package_service`, and
-`user_service` pattern — the module applies mutations and creates audit
-events, but the transaction boundary is the caller's decision.
+This matches the `ticket_mutations`, `package_service`, and `user_service`
+pattern: service functions apply mutations, create audit events, or register
+post-commit work while the caller owns transaction completion.
 
 ### Acting user convention
 
@@ -99,6 +101,7 @@ cross-domain Ticket lifecycle compositions:
 | `PATCH .../severity` | `ticket_mutations.set_severity_manual()` | Gate-relevant severity primitive |
 | `POST .../reopen` | `ticket_service.reopen_from_ignored()` | Manual-zone exit composition |
 | `POST .../revert-duplicate` | `ticket_service.revert_duplicate()` | Manual-zone exit composition |
+| `POST .../rerun-reactivation` | `ticket_service.dispatch_ticket_convergence()` | Complete asynchronous recovery dispatch |
 
 See [ticket-mutations.md](ticket-mutations.md) for the severity and shared gate
 primitives. The complete manual-zone exit contracts are defined below.
@@ -540,10 +543,14 @@ For `original_status = Duplicated`, `duplicate_of_id` must already be `NULL`.
    reconciles.
 2. Call `ticket_mutations.reconcile_ticket_status()` exactly once with
    `previous_status=original_status` and the same `evaluation_date`.
+3. Ensure the reconciliation result has registered one post-commit Ticket
+   convergence workflow for this successful manual-zone exit, including when
+   the evaluated result is `Resolved`.
 
 Changed automatic Product events use the system actor,
-`reason = reactivation`, and ascending `TicketPackageProduct.id` order before
-the final `status_change`. The helper performs no CVE write or CVE lock,
+`reason = reactivation`, and ascending `TicketPackageProduct.id` order. Any
+inactive-assignee sanitation event follows those Product events; the final
+`status_change` remains last. The helper performs no CVE write or CVE lock,
 external I/O, Redis command, task publication, commit, or rollback. Any
 settings, database, eligibility, audit, flush, or reconciliation error escapes
 and rolls back the complete caller-owned transaction.
@@ -570,13 +577,16 @@ composition.
 2. Preserve `original_status = Ignored` and resolve one UTC `evaluation_date`.
 3. Call `ticket_mutations.auto_assign_actor(..., force=True)`. A VA actor
    becomes the assignee; a non-VA actor or system caller leaves the current
-   assignee unchanged. Final reconciliation sanitizes an inactive assignee.
+   assignee unchanged. Final reconciliation sanitizes an inactive assignee only
+   when the final status is `Analysis` or `Analyzed`; a final `Resolved` result
+   retains it.
 4. Set `status = Analysis`, then call `_complete_manual_zone_exit()` with the
    preserved source status and date and return the resulting Ticket. Its final
    status is `Analysis`, `Analyzed`, or `Resolved` from current gate inputs.
 
-**Audit events**: optional `assignment`, zero or more system-attributed
-`product_eligibility_changed` events, then one system-attributed
+**Audit events**: optional actor assignment, zero or more system-attributed
+`product_eligibility_changed` events, optional inactive-assignee sanitation
+`assignment`, then one system-attributed
 `status_change` from `Ignored` to the final evaluated status.
 
 **Locking and transaction**: the function retains its Ticket `FOR UPDATE` lock
@@ -623,8 +633,9 @@ non-retroactive; other Tickets keep their current targets.
    date and return the resulting Ticket. Its final
    status is `Analysis`, `Analyzed`, or `Resolved` from current gate inputs.
 
-**Audit events**: optional `assignment`, `duplicate_removed`, zero or more
-system-attributed `product_eligibility_changed` events, then one
+**Audit events**: optional actor assignment, `duplicate_removed`, zero or more
+system-attributed `product_eligibility_changed` events, optional
+inactive-assignee sanitation `assignment`, then one
 system-attributed `status_change` from `Duplicated` to the final evaluated
 status. Every event and mutation is atomic in the caller-owned transaction.
 
@@ -637,11 +648,12 @@ error rolls back the duplicate-link clear and every other effect.
 whose locked-current status is no longer `Duplicated` is rejected rather than
 silently replayed; a successful revert never repoints other Tickets.
 
-## Ticket Reactivation
+## Ticket Convergence
 
-When a Ticket transitions from an inactive status (Resolved, Ignored, or
-Duplicated) back to an active status, it registers the asynchronous package-tree
-and per-ticket fetcher catch-up. An explicit `Ignored` or `Duplicated` exit first
+Every successful `Ignored` or `Duplicated` exit registers the asynchronous
+package-tree and per-ticket fetcher catch-up, even if its immediate gate result
+is `Resolved`. An ordinary `Resolved` regression registers the same workflow.
+An explicit `Ignored` or `Duplicated` exit first
 converges existing system-managed Product eligibility synchronously from current
 PostgreSQL inputs before its final gate result. A `Resolved` regression is
 instead produced by an ordinary gate-zone mutation that has already maintained
@@ -650,26 +662,39 @@ current eligibility. The post-commit workflow
    soft-deleted markers without restoring them, then catches up on external
    data against the resulting tree (e.g., Red Hat CVSS updates — the
    `sync_redhat_cves` fetcher scopes to active tickets and skips inactive
-   ones). See `docs/features/packages/package-model.md` (Reactivation and
-   Convergence) and
+   ones). See `docs/features/packages/package-model.md` (Ticket Convergence)
+   and
    [fetcher-infrastructure.md](../platform/fetcher-infrastructure.md)
    ("Per-Ticket Catch-Up: `catch_up()` Method") for the method contract.
 
-The workflow is registered internally by `reconcile_ticket_status()` when it
-detects an inactive-state exit and runs after commit. CVSS assessment and
+The workflow is registered internally by `reconcile_ticket_status()` from the
+preserved manual-zone source status or a `Resolved` regression and runs after
+commit. CVSS assessment and
 default-version workflows already maintain `CVE.severity` in every status; this
-reactivation path neither recalculates severity nor acquires a CVE lock while
+convergence path neither recalculates severity nor acquires a CVE lock while
 holding the Ticket lock. The package-owned synchronous boundary used by manual-
 zone exits resolves current eligibility from persisted inputs with
 `reason = reactivation`. No action is needed by endpoint handlers or other
-callers. This applies to all three
-inactive → active paths:
+callers. Registration applies to:
 
-- `reopen_from_ignored()` — Ignored → active via this service's private
+- `reopen_from_ignored()` — Ignored → any gate-zone result via this service's private
   `_complete_manual_zone_exit()` finalization
-- `revert_duplicate()` — Duplicated → active via the same composition
+- `revert_duplicate()` — Duplicated → any gate-zone result via the same composition
 - Gate-driven regression — Resolved → active (automatic, via any
   mutation that unsatisfies a gate)
+
+Publication registered by these automatic mutation paths is best-effort. If
+the post-commit callback cannot publish the root convergence task, it logs one
+sanitized structured ERROR with `ticket_id` and the request or task correlation
+already bound to that execution context, then returns normally. The committed
+Ticket/package mutation and its normal success response are retained; the
+failure does not become `CELERY_UNAVAILABLE`. Recovery is a complete explicit
+rerun through `POST /api/v1/tickets/{ticket_id}/rerun-reactivation`.
+
+This differs intentionally from that explicit rerun endpoint: dispatch is the
+requested operation there, so its initial publication failure returns 503 and
+no Ticket mutation has been committed. Neither path adds a requesting-user log
+field; API request correlation uses the existing `request_id` contract.
 
 ### Convergence behavior
 
@@ -679,20 +704,72 @@ eligibility. The Ticket may still transition as asynchronous external
 catch-up completes. For example,
 if a release was detected while the ticket was inactive, the IBS
 catch-up may set tracks to FIXED and products to released, causing the
-ticket to reach Resolved shortly after reactivation. This is expected
+ticket to reach Resolved shortly after convergence begins. This is expected
 behavior — the system converges to the accurate state.
+
+### `dispatch_ticket_convergence()`
+
+Service boundary used by
+`POST /api/v1/tickets/{ticket_id}/rerun-reactivation`. It validates current
+state under the caller-owned transaction and registers publication as a
+post-commit effect, so no broker I/O occurs while the Ticket lock is held.
+
+```python
+async def dispatch_ticket_convergence(
+    db: AsyncSession,
+    *,
+    ticket_id: UUID,
+) -> str:
+```
+
+**Preconditions and guards**:
+
+- The API has already authenticated the caller, verified either
+  `triage_ticket` or `manage_fetchers`, and resolved Ticket accessibility.
+- The Ticket must still exist and its locked-current status must be `Analysis`,
+  `Analyzed`, or `Resolved`. Absence raises `TicketNotFoundError`; `New`,
+  `Ignored`, or `Duplicated` raises `InvalidTransitionError`.
+- The function does not call `ensure_ticket_operable()`.
+
+**Behavior**:
+
+1. Load the Ticket by canonical UUID with `FOR UPDATE` as the first database
+   operation and evaluate the guards above from locked-current state.
+2. Allocate the transient Celery task ID without performing broker I/O.
+3. Register one post-commit callback that publishes the root Ticket
+   convergence task with the canonical `ticket_id` and allocated task ID.
+   No Ticket field or audit event is changed.
+4. Return the allocated root task ID. The caller maps it to
+   `TicketConvergenceDispatchResponse` and HTTP 202.
+
+The caller-owned transaction commits and releases the lock before the callback
+publishes. If initial publication raises, the callback raises
+`TicketConvergenceDispatchError`; the function-scoped API transaction boundary
+maps it to 503 before transmitting the response. No compensation row exists
+because this workflow deliberately has no durable run resource. A broker
+acknowledgement may be ambiguous, so the task may still execute despite the 503
+response. Re-invocation is intentionally accepted and registers another
+complete workflow. Concurrent calls serialize only the locked status check;
+they do not coalesce publication. The function creates no `TicketAuditEvent`.
+
+The function propagates `TicketNotFoundError`, `InvalidTransitionError`,
+`TicketConvergenceDispatchError`, and database exceptions. It does not expose
+package-specific or catch-up exceptions synchronously because those occur in
+the dispatched workflow.
 
 ### Cross-references
 
 - [cvss-scoring.md](cvss-scoring.md) — CVSS resolution cascade,
   recalculation trigger rationale
 - [ticket-mutations.md](ticket-mutations.md) —
-  `reconcile_ticket_status()` step 4, `recalculate_cvss_chain()`
+  `reconcile_ticket_status()` step 5, `recalculate_cvss_chain()`
   contract, assignment and operability primitives
 - [package-service.md](../packages/package-service.md) — synchronous manual-
-  zone-exit eligibility boundary
+  zone-exit eligibility boundary and complete Ticket convergence workflow
 - [fetcher-infrastructure.md](../platform/fetcher-infrastructure.md) —
   `catch_up()` method contract
+- [tickets.md](tickets.md#rerun-ticket-convergence) — operator rerun API,
+  authorization order, response, and errors
 
 ## Confidentiality Management
 
@@ -883,6 +960,7 @@ to the corresponding HTTP status code and error code per `api-spec.md`.
 | `DuplicateConcurrentModificationError` | 409 | `TICKET_DUPLICATE_CONCURRENT_MODIFICATION` | NOWAIT lock on a dependent failed (concurrent operation on the duplicate group) |
 | `SeverityDerivedError` † | 409 | `TICKET_SEVERITY_DERIVED` | Cannot manually set severity when it is auto-derived |
 | `TicketNotConfidentialError` | 409 | `TICKET_NOT_CONFIDENTIAL` | Operation requires a confidential ticket |
+| `TicketConvergenceDispatchError` | 503 | `CELERY_UNAVAILABLE` | Initial publication of the root Ticket convergence task failed |
 | `UserNotFoundError` † | 404 | `USER_NOT_FOUND` | Referenced user does not exist |
 | `CVEIdFormatError` † | 422 | `CVE_INVALID_FORMAT` | CVE-ID passed to `ensure_cve_exists()` does not match `^CVE-[0-9]{4}-[0-9]{4,}$` (defense-in-depth; fires only if caller omits pre-validation) |
 
@@ -916,6 +994,7 @@ ticket_mutations (infrastructure)
 | mark_as_duplicate      | ✓                      | —                      | —                     | ✓                     | —                   |
 | reopen_from_ignored    | —                      | ✓                      | —                     | ✓                     | ✓                   |
 | revert_duplicate       | —                      | ✓                      | —                     | ✓                     | ✓                   |
+| dispatch_ticket_convergence | —                  | —                      | —                     | —                     | —                   |
 | set_confidentiality    | ✓                      | —                      | —                     | —                     | —                   |
 | grant_access           | ✓                      | —                      | —                     | —                     | —                   |
 | revoke_access          | ✓                      | —                      | —                     | —                     | —                   |
@@ -992,6 +1071,18 @@ behavior of `ticket_service` operations:
    without violating `chk_ticket_duplicate_status_coherence`; assert that the
    `duplicate_removed` event uses the pre-clear target's `SNTL-{n}` identifier
    as `old_value` and `NULL` as `new_value`
+10. **Manual-zone convergence registration**: both exit workflows register one
+    post-commit Ticket convergence workflow for final `Analysis`, `Analyzed`,
+    and `Resolved`; inactive assignees are cleared only for final `Analysis` or
+    `Analyzed` and retained for final `Resolved`; automatic publication failure
+    is logged and swallowed after commit, preserving the mutation's success
+    response and requiring the complete operator rerun
+11. **Operator convergence dispatch**: verify locked-current acceptance for
+    `Analysis`, `Analyzed`, and `Resolved`; rejection of `New`, `Ignored`, and
+    `Duplicated` with `InvalidTransitionError`; commit and lock release before
+    publication; canonical Ticket UUID and root task UUID return; repeated and
+    concurrent publication without conflict; broker failure mapping; ambiguous
+    acknowledgement tolerance; and no Ticket mutation or audit event
 
 ## Cross-references
 

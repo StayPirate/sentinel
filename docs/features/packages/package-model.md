@@ -121,10 +121,11 @@ Disalignment risk is mitigated by `package_service` and the authoritative
 vulnerable" (`NOT_AFFECTED`). Both mean the code is not currently
 vulnerable, but they carry different history and workload implications.
 
-- `FIXED` is restricted — set only by track release detection when a
-  structured source diff contains qualifying evidence for the Ticket CVE (see
-  `docs/features/packages/ibs-track-release-detection.md`)
-  or via the admin escape hatch (`admin_ticket_ops` capability)
+- `FIXED` is restricted — set by track release detection when a structured
+  source diff contains qualifying evidence for the Ticket CVE (see
+  `docs/features/packages/ibs-track-release-detection.md`), by
+  `admin_ticket_ops` for any Ticket, or by `manage_packages` only when the
+  locked-current Ticket has `cve_id IS NULL`
 - A caller with `manage_packages` can change `FIXED` back to `AFFECTED` or
   `ANALYSIS`, or to any other non-`FIXED` affectedness state
 - No `is_status_override` flag is needed on tracks — the VA has direct
@@ -366,10 +367,11 @@ The package tracking model separates three independent dimensions:
 
 ### Axis 1: Affectedness (per track)
 
-Property of the source code relative to the CVE. Determined by a user with
-`manage_packages` during analysis, by an administrator with
-`admin_ticket_ops` for a forced `FIXED` result, or automatically by track
-release detection within the transition matrix below.
+Property of the source code relative to the tracked issue. Determined by a user
+with `manage_packages` during analysis (including `FIXED` only for a
+locked-current CVE-less Ticket), by an administrator with `admin_ticket_ops`
+for `FIXED` on any Ticket, or automatically by track release detection within
+the transition matrix below.
 Affectedness depends only on whether the source code contains the
 vulnerability — it is independent of CVSS thresholds, product
 lifecycle phase, and delivery pipeline state.
@@ -377,10 +379,10 @@ lifecycle phase, and delivery pipeline state.
 | State | Meaning |
 |-------|---------|
 | `ANALYSIS` | Not yet determined |
-| `AFFECTED` | Code is vulnerable, fix needed |
-| `NOT_AFFECTED` | Code was never vulnerable to this CVE |
-| `FIXED` | Code was vulnerable, fix has been applied |
-| `WONT_FIX` | Code is vulnerable, decision not to fix |
+| `AFFECTED` | Code is affected by the tracked security issue; a fix is needed |
+| `NOT_AFFECTED` | Code was never affected by the tracked security issue |
+| `FIXED` | Code was affected and the source fix has been applied |
+| `WONT_FIX` | Code is affected; the decision is not to fix it |
 
 **Status classification**: statuses are classified as either *final* or
 *non-final*. A final status indicates that no further work is expected on
@@ -453,7 +455,7 @@ lifecycle phase, Product threshold, and Eligibility Score Resolution as inputs.
 Ticket status, affectedness, delivery, Product release state, EOL, and direct or
 effective manual exclusion are not formula inputs. EOL and exclusion affect
 derived actionability and meet eligibility only at Ticket gates. Every creation,
-override-clear, threshold, lifecycle, reactivation, CVSS, and default-version
+override-clear, threshold, lifecycle, convergence, CVSS, and default-version
 workflow MUST use one shared pure service-layer implementation of these ordered
 rules rather than copying the formula. Its concrete function name and module are
 implementation choices; it performs no database access, mutation, audit, or
@@ -490,7 +492,7 @@ track `delivery_status`, participates in the Resolved gate.
 | `RELEASED` | Release to the track is proven | Exact accepted-RR and source/target provenance proves that the RR released the effective SR contents; this state is irreversible |
 
 The delivery status is updated only by the shared authoritative IBS request
-reconciliation. IBS RabbitMQ events, package-add catch-up, Ticket-reactivation
+reconciliation. IBS RabbitMQ events, package-add catch-up, Ticket-convergence
 catch-up, and the daily `SyncIbsRequests` fetcher all invoke that same
 reconciliation and cannot establish different results.
 
@@ -663,7 +665,7 @@ context of the current affectedness — see
 | `NOT_AFFECTED` | `PENDING` | **No** | | Not affected; default delivery state is not meaningful and proves no negative |
 | `NOT_AFFECTED` | `IN_PROGRESS` | Yes | Yes | SR in progress for unaffected code — possible confusion |
 | `NOT_AFFECTED` | `RELEASED` | Yes | Yes | Fix released for unaffected code — possible confusion |
-| `FIXED` | `PENDING` | **No** | | Fix confirmed via track release detection; delivery progress not established and not meaningful here |
+| `FIXED` | `PENDING` | **No** | | Fix confirmed automatically, by admin force, or by a CVE-less manual decision; delivery progress not established and not meaningful here |
 | `FIXED` | `IN_PROGRESS` | Yes | | Fix confirmed, SR still in pipeline |
 | `FIXED` | `RELEASED` | Yes | | Fix confirmed and delivered |
 | `WONT_FIX` | `PENDING` | **No** | | Decided not to fix; delivery is the system default — not meaningful |
@@ -791,15 +793,21 @@ a system caller supplies `None`.
 | Caller authority | Requested target | Allowed source states | Outcome |
 |---|---|---|---|
 | User-attributed caller with `manage_packages` | `ANALYSIS`, `AFFECTED`, `NOT_AFFECTED`, or `WONT_FIX` | Any affectedness state | Effective change, or true no-op when unchanged |
-| User-attributed caller with `manage_packages` but without `admin_ticket_ops` | `FIXED` | Any | Authorization rejection before Ticket accessibility |
+| User-attributed caller with `manage_packages` but without `admin_ticket_ops` | `FIXED` | Any affectedness state | After Ticket accessibility and under the Ticket lock: effective change or true no-op only when `Ticket.cve_id IS NULL`; otherwise generic authorization rejection without exposing the CVE condition before accessibility |
 | User-attributed caller with `admin_ticket_ops` | `FIXED` | Any affectedness state | Forced effective change, or true no-op when already `FIXED`; `manage_packages` is not additionally required |
 | User-attributed caller with only `admin_ticket_ops` | Any non-`FIXED` target | Any | Authorization rejection before Ticket accessibility |
 | System caller | `FIXED` | `ANALYSIS` or `AFFECTED` | Effective automatic change |
 | System caller | `FIXED` | `NOT_AFFECTED`, `FIXED`, or `WONT_FIX` | Protected no-op |
 | System caller | Any non-`FIXED` target | Any | Rejected workflow unit with warning and no effects |
 
-The capability union applies normally: a user holding both capabilities uses
-`admin_ticket_ops` for `FIXED` and `manage_packages` for every other target.
+For a `FIXED` request, the pre-access capability check accepts the union
+`admin_ticket_ops OR manage_packages`; a caller lacking both receives the same
+generic 403 before Ticket accessibility. After accessibility, the locked Ticket
+decides whether the `manage_packages` alternative is sufficient. A user holding
+both capabilities uses unrestricted `admin_ticket_ops`; a user holding only
+`manage_packages` is rejected for a CVE-associated Ticket without revealing
+that condition to callers who failed the pre-access check. Every non-`FIXED`
+target requires `manage_packages` alone.
 User-attributed callers cannot change `delivery_status`; it is system-managed.
 
 ---
@@ -998,7 +1006,7 @@ hierarchy. If their Product is EOL, they are independently non-actionable.
 The public `POST /api/v1/tickets/{ticket_id}/packages` call asks the package
 service to apply the public excluded-package guard. The service owns the
 state-dependent query and returns `409 PACKAGE_ALREADY_EXCLUDED` when the
-existing package occurrence is directly excluded. Ticket reactivation invokes
+existing package occurrence is directly excluded. Ticket convergence invokes
 the documented internal re-resolution mode, which may complete descendants and
 maintainership without restoring the package. CVE ingestion and Product catalog
 backfill omit existing soft-deleted package markers during their owning
@@ -1199,13 +1207,14 @@ The following scenarios invoke `add_package_to_ticket`:
    scan because a currently EOL Product can later become actionable without a
    new catalog association. See `product-catalog.md` (Product Catalog
    Backfill).
-5. **Ticket reactivation**: after an inactive Ticket enters an active status,
-   the package reactivation workflow calls `add_package_to_ticket` once for
+5. **Ticket convergence**: after a manual-zone exit (including one that
+   evaluates immediately to `Resolved`) or an ordinary `Resolved` regression,
+   the Ticket convergence workflow calls `add_package_to_ticket` once for
    every persisted `TicketPackage.package_name`, including package markers that
    are soft-deleted. Existing exclusion markers are preserved; missing tracks
    and Products are created but no record is restored. The complete package
-   reactivation contract is defined in
-   [Reactivation and Convergence](#reactivation-and-convergence).
+   convergence contract is defined in
+   [Ticket Convergence](#ticket-convergence).
 
 ### Package Management Constraints
 
@@ -1482,10 +1491,11 @@ contract, including:
 - **Analysis → Analyzed**: requires at least one manually included track, all
   actionable tracks decided, severity set, and, for a Ticket with a CVE, at
   least one canonical SUSE assessment in any accepted CVSS version
-- **Analyzed → Resolved**: requires every actionable track to
-  be resolution-complete — either (a) `NOT_AFFECTED`/`WONT_FIX`, or
-  (b) `FIXED` with all actionable eligible Products released, or
-  (c) `AFFECTED` with no actionable eligible Products remaining
+- **Analyzed → Resolved**: requires every actionable track to be
+  resolution-complete — either (a) `NOT_AFFECTED`/`WONT_FIX`, (b) `FIXED`
+  with all actionable eligible Products released for a CVE-associated Ticket,
+  or `FIXED` without release evidence for a CVE-less Ticket, or (c) `AFFECTED`
+  with no actionable eligible Products remaining
 - Reverse transitions when gate conditions are no longer met
 
 ---
@@ -1567,7 +1577,7 @@ mechanisms. The permanent ownership boundary is:
 
 | Concern | Acceleration | Permanent recovery owner | Applicable records |
 |---------|--------------|--------------------------|--------------------|
-| Package tree | Explicit package addition; Product catalog backfill when a Product becomes newly current | Re-resolution on Ticket reactivation; no periodic per-package SMELT scan | Every persisted package marker on the reactivated Ticket, including soft-deleted markers |
+| Package tree | Explicit package addition; Product catalog backfill when a Product becomes newly current | Re-resolution by Ticket convergence; no periodic per-package SMELT scan | Every persisted package marker on the converging Ticket, including soft-deleted markers |
 | Maintainership | Every successful package-target resolution, including a package-tree no-op | A later invocation of the same idempotent package-resolution operation; no periodic owner | Every TicketPackage occurrence, package-wide across IBS and Git/SLFO tracks |
 | SR/RR discovery and correlation | New-IBS-track generic per-Ticket catch-up; IBS RabbitMQ request events | Complete daily `sync_ibs_requests` reconciliation | IBS tracks of active Tickets |
 | Track release observation | IBS RabbitMQ `package.commit` | `detect_ibs_track_releases` | IBS tracks of active Tickets |
@@ -1581,12 +1591,12 @@ records need no distinct first-run branch. Incremental windows, checksums, and
 cursors are optimizations and MUST NOT be presented as full recovery when they
 cannot rediscover skipped current state.
 
-### Reactivation and convergence
+### Ticket Convergence
 
 When a Ticket leaves the `Ignored` or `Duplicated` manual zone, convergence has
-one synchronous PostgreSQL phase. Every inactive-to-active transition,
-including an ordinary `Resolved` regression, then has two post-commit package-
-domain phases:
+one synchronous PostgreSQL phase. Every successful manual-zone exit, including
+one whose immediate result is `Resolved`, and every ordinary `Resolved`
+regression then has two post-commit package-domain phases:
 
 1. For a manual-zone exit, before the relevant final Ticket gate result,
    recalculate every existing
@@ -1607,11 +1617,11 @@ domain phases:
    exclusion markers are preserved; only missing tracks, Product occurrences,
    and maintainer associations are created. Each package is an independent
    unit so one failure does not roll back successful siblings.
-3. After the package-tree and maintainership phase has committed its successful
-   units, run the registered per-Ticket catch-up operations against the
-   resulting tree, including IBS request, IBS track-release, IBS Product-release,
-   and lifecycle evaluation. Failure to resolve one package does not prevent
-   catch-up for records that already exist.
+3. After every package has been attempted and successful package units have
+   committed, attempt dispatch of **every** registered per-Ticket catch-up
+   against the resulting tree, including IBS request, IBS track-release, IBS
+   Product-release, and lifecycle evaluation. Failure to resolve one package or
+   to dispatch an earlier catch-up does not prevent later dispatch attempts.
 
 No special synchronous eligibility pass precedes a `Resolved` regression:
 ordinary local CVSS, default-version, threshold, and lifecycle workflows already
@@ -1628,20 +1638,40 @@ advisory sets `released_at` to its original issue time, and an SR/RR catch-up
 recovers current authoritative request actions and resulting delivery status
 rather than every intermediate request state.
 
-The ordering above is a behavioral contract. Whether it is implemented with
-task chaining, post-commit callbacks, or another equivalent mechanism is an
-implementation choice. Reactivation work is idempotent. Per-item failures and
-final catch-up failure after the shared retry policy are logged with the
-sanitized cause, `ticket_id`, owning operation, affected item identity, and
-`celery_task_id`. No durable per-ticket catch-up progress table is introduced.
-A terminal failure of package enumeration, package-tree orchestration, catch-up
-dispatch, or an individual catch-up requires an observable operator-triggered
-rerun of the same complete idempotent workflow for `ticket_id`. Successful
-package units and catch-ups may repeat safely; the rerun does not resume from a
-persisted progress position. The concrete operator interface MUST be defined
-before the workflow is implemented. This is required in particular because
-there is no periodic full-tree SMELT scan; the complete daily request
-reconciliation cannot create a track omitted by package resolution.
+The ordering above is a behavioral contract. The root Ticket convergence
+wrapper retries its complete workflow three times with 5, 10, and 20 second
+backoff when enumeration or accumulated catch-up publication failures make the
+wrapper fail. Each retry starts again at
+package enumeration; successful package units and previously published
+catch-ups may repeat safely. After the final attempt, the wrapper logs terminal
+failure and requires a complete operator rerun through
+`POST /api/v1/tickets/{ticket_id}/rerun-reactivation`.
+
+Package-specific failures are logged and isolated rather than raised to the
+wrapper. Catch-up dispatch failures are accumulated while all registered
+dispatches are attempted, then surfaced together to the wrapper. Once
+published, each catch-up owns its existing independent retry and terminal
+failure behavior; its later failure cannot roll back or fail the completed root
+wrapper. Structured logs distinguish completed, package-partial, retrying,
+terminal-wrapper, and individual-catch-up-terminal outcomes using `ticket_id`,
+phase or fetcher, item identity when applicable, sanitized cause, and the
+current Celery task ID.
+
+Concurrent automatic workflows and operator reruns are accepted. They may
+duplicate package requests and catch-ups but converge through current
+PostgreSQL state, Ticket-root locking, and existing uniqueness/idempotency
+contracts. There is no exact deduplication, coalescing, Redis guard, durable
+progress or resume position, `FetcherRun`, periodic full-tree SMELT scan, or
+workflow-specific audit event. The generic single-fetcher trigger is not an
+equivalent recovery operation because it omits package enumeration and the
+ordered complete catch-up roster.
+
+Initial publication by an automatically registered post-commit effect is
+best-effort. Failure is logged after the triggering mutation commits and does
+not replace that mutation's normal success response with an infrastructure
+error. The explicit operator rerun remains the recovery path. Its own initial
+publication failure returns `503 CELERY_UNAVAILABLE` because dispatch is the
+requested operation and no domain mutation precedes it.
 
 ### Checkpoint safety
 
@@ -1670,7 +1700,7 @@ package-resolution trigger. Product catalog backfill re-resolves existing active
 package trees only when a Product becomes newly current. Consequently, a new
 SMELT track composed entirely of Products already present in the catalog can
 remain absent from a continuously active Ticket until another package
-resolution trigger occurs, such as Ticket reactivation, explicit addition, or
+resolution trigger occurs, such as Ticket convergence, explicit addition, or
 another owning workflow. This is a known and accepted load-versus-freshness
 trade-off; no generic backfill framework, failed-resolution registry, or
 periodic full-tree reconciler is introduced.
@@ -2068,11 +2098,13 @@ assignment, audit, reconciliation, or post-commit effect.
 |-------|------|----------|-------------|
 | `status` | string | Yes | New status value. Valid values: `analysis`, `affected`, `not_affected`, `fixed`†, `wont_fix` |
 
-† Setting `status` to `FIXED` requires `admin_ticket_ops` instead of
-`manage_packages`; the capabilities are alternatives selected from the
-validated payload, not cumulative requirements. Every non-`FIXED` target
-requires `manage_packages`. The selected capability is checked before Ticket
-accessibility.
+† Setting `status` to `FIXED` accepts either `admin_ticket_ops` or
+`manage_packages` at the pre-access capability check. Under the Ticket lock,
+`admin_ticket_ops` permits any Ticket; `manage_packages` alone permits only a
+Ticket whose locked-current `cve_id` is `NULL`. Every non-`FIXED` target
+requires `manage_packages`. A caller lacking either alternative receives the
+generic 403 before Ticket accessibility; the CVE-less restriction is checked
+only after accessibility and does not provide a probing oracle.
 
 **Response** (200 OK):
 
@@ -2117,8 +2149,8 @@ The response includes the updated track and all its child Products with their
 current eligibility and actionability, allowing the client to update
 the UI tree without a separate fetch.
 
-**`Capability: admin_ticket_ops when status = fixed; manage_packages for every
-other status`**
+**`Capability: admin_ticket_ops OR manage_packages when status = fixed;
+manage_packages for every other status`**
 
 **Error responses**:
 
@@ -2357,7 +2389,7 @@ Product sync tasks (`sync_smelt_products`, `sync_aimaas_lifecycle`,
 - `sync_ibs_requests`: complete daily state-based fetcher (02:30 UTC) that
   reconciles current IBS request actions and track delivery for all IBS tracks
   belonging to active Tickets. It is the permanent recovery owner; package-add,
-  reactivation, and RabbitMQ paths invoke the same algorithm only to reduce
+  convergence, and RabbitMQ paths invoke the same algorithm only to reduce
   latency. See `docs/features/packages/ibs-submission-tracking.md`.
 - `detect_ibs_track_releases`: periodic task (every 24 hours at 02:00
   UTC via Celery Beat) that runs the `DetectIbsTrackReleases` fetcher and its
@@ -2389,8 +2421,8 @@ Product sync tasks (`sync_smelt_products`, `sync_aimaas_lifecycle`,
   `manage_packages` capability
 - Changing Product eligibility or changing a track to a non-`FIXED` status
   requires `manage_packages`
-- Changing a track to `FIXED` requires `admin_ticket_ops` instead; it does not
-  additionally require `manage_packages`
+- Changing a track to `FIXED` requires `admin_ticket_ops` for an unrestricted
+  change, or `manage_packages` when the locked-current Ticket is CVE-less
 - Viewing affectedness data is publicly accessible (no authentication
   required):
   - `GET /api/v1/tickets/{ticket_id}/packages` — subject to

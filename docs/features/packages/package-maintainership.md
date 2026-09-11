@@ -216,7 +216,7 @@ acquisition, including:
 - package-tree invocations that become a complete database no-op;
 - IBS and Git/SLFO package results;
 - Product catalog backfill; and
-- Ticket reactivation, including persisted soft-deleted package markers.
+- Ticket convergence, including persisted soft-deleted package markers.
 
 The ordered external phase is:
 
@@ -360,7 +360,7 @@ An operator can idempotently repeat the existing
 `POST /api/v1/tickets/{ticket_id}/packages` for an included package. A directly
 soft-deleted package returns `409 PACKAGE_ALREADY_EXCLUDED` on that public
 endpoint. Package restore only reactivates retained associations and performs
-no I/O. A later internal Ticket-reactivation workflow does resolve soft-deleted
+no I/O. A later internal Ticket convergence workflow does resolve soft-deleted
 package markers and may add associations, but they cannot grant effective
 access until the package is restored. Sentinel deliberately introduces no new
 operator endpoint, task, fetcher, configuration, progress state, or identity
@@ -403,7 +403,7 @@ Implementation coverage must include:
 - lowercase/global email deduplication, exact active-User matching, unmatched
   and inactive skips, and acquisition after later User creation/reactivation;
 - additive no-removal behavior after omission/failure and package-tree no-op
-  acquisition for IBS, Git/SLFO, reactivation, and `active_ticket_only` race
+  acquisition for IBS, Git/SLFO, Ticket convergence, and `active_ticket_only` race
   skip;
 - concurrent invocations proving Ticket-lock serialization and the unique
   constraint backstop;

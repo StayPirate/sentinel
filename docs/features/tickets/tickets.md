@@ -209,12 +209,12 @@ layer.
 
 | Status     | Description |
 |------------|-------------|
-| New        | Created automatically (CVE ingestion or external source). Not yet assigned to any VA. |
-| Analysis   | Assigned to an VA who is actively analyzing — filling in affectedness data. |
-| Analyzed   | All required data has been filled in. Ready for updates to be prepared. |
-| Resolved   | Every actionable track is resolution-complete: either in a conclusive affectedness status, publication-confirmed (`FIXED` + all actionable eligible Products released), or factually affected with no actionable eligible Products remaining. Track `delivery_status` is not a gate input. |
-| Ignored    | The issue does not require action. Can only be set from New or Analysis. See design note below. |
-| Duplicated | Duplicate of another ticket. Links to the original. Reversible. |
+| New        | Initial pre-gate state. The Ticket has not yet been admitted to automatic gate evaluation. Assignment presence does not define the status. |
+| Analysis   | Gate-zone floor. At least one Analyzed-gate condition is currently false, or the Ticket has just left `New` or the manual zone and has not qualified for a higher gate result. Assignment is irrelevant. |
+| Analyzed   | Every Analyzed-gate condition is true and at least one actionable track is not resolution-complete. Assignment is irrelevant. |
+| Resolved   | Every Analyzed-gate condition is true and every actionable track is resolution-complete under the CVE-aware formula below. Assignment is irrelevant; track `delivery_status` is not a gate input. |
+| Ignored    | Manual-zone isolation for an issue that is not currently being worked. It can be entered manually only from `New` or `Analysis`, or automatically from `New` after CVE rejection. Gates and ordinary mutations do not operate in this status. |
+| Duplicated | Manual-zone isolation for a Ticket represented by another non-Duplicated Ticket. The duplicate link is required and the status is reversible through its dedicated exit workflow. |
 
 **Design note — why Analyzed → Ignored is intentionally excluded**: A ticket
 in Analyzed status has had all its packages and tracks fully evaluated. If a VA
@@ -230,40 +230,68 @@ Ignored Ticket. The regression path ensures a clean state.
 ### Status Transition Diagram
 
 ```
-                     automatic         automatic
-New ──→ Analysis ──────────→ Analyzed ──────────→ Resolved
- │         │    ◄────────────    │    ◄────────────
- │         │     automatic       │     automatic
- ├──→ Ignored (from New or Analysis only)
- │         ◄── Ignored → Analysis (VA assigns or system reopen)
- │
- └──→ Duplicated (from any operable status, reversible)
-      (New, Analysis, Analyzed, Resolved → Duplicated)
+                         highest-valid gate result
+New ──assignment──→ Analysis ⇄ Analyzed ⇄ Resolved
+ │                     ╲_________________╱
+ ├──manual/rejection──→ Ignored ──dedicated exit──→ evaluated gate status
+ └──manual────────────→ Duplicated ─dedicated exit→ evaluated gate status
+
+Analysis ──manual──→ Ignored
+Analysis / Analyzed / Resolved ──manual──→ Duplicated
 ```
 
 ### Status Transitions
 
-| From       | To         | Trigger                                                | Mode               | Who                                    |
-|------------|------------|--------------------------------------------------------|--------------------|----------------------------------------|
-| New        | Analysis   | First assignment of a VA (explicit or implicit via any modifying operation); one-way irreversible | Manual (explicit) or Manual (implicit) | `assign_ticket`, `auto_assign_actor` |
-| New        | Ignored    | User clicks "Ignore" action                            | Manual             | `triage_ticket`                        |
-| New        | Ignored    | CVE is rejected (`cve_state` → `REJECTED`)             | Automatic          | System                                 |
-| Analysis   | Analyzed   | All "Analyzed" gate conditions met                     | Automatic          | System                                 |
-| Analysis   | Ignored    | User determines issue is not relevant                  | Manual             | `triage_ticket`                        |
-| Analyzed   | Resolved   | All "Resolved" gate conditions met                     | Automatic          | System                                 |
-| Analyzed   | Analysis   | "Analyzed" gate conditions no longer met               | Automatic          | System (triggered by user or system action) |
-| Resolved   | Analyzed   | "Resolved" gate conditions no longer met, but "Analyzed" gates still met | Automatic | System (triggered by user or system action) |
-| Resolved   | Analysis   | Both "Resolved" and "Analyzed" gate conditions no longer met | Automatic    | System (triggered by user or system action) |
-| New, Analysis, Analyzed, Resolved | Duplicated | User marks ticket as duplicate | Manual | `triage_ticket` |
-| Duplicated | (evaluated) | User reverts duplicate status; the workflow prepares `Analysis` and completes gate evaluation | Manual | `triage_ticket` (assignment only if actor holds VA role) |
-| Ignored    | (evaluated) | User or system reopens (e.g., CVE rejection revert); the workflow prepares `Analysis` and completes gate evaluation | Manual / Automatic | `triage_ticket` or System (assignment only if actor holds VA role) |
+The following matrix is exhaustive. A transition not represented by one of its
+rows is illegal. "Evaluated" means the owner prepares the `Analysis` floor and
+then records one semantic transition from the preserved source status to the
+highest valid gate-zone status (`Analysis`, `Analyzed`, or `Resolved`).
+
+| From | To | Trigger | Mode and actor | Owning service/function |
+|---|---|---|---|---|
+| `New` | `Analysis` | First explicit assignment, or implicit assignment by a qualifying modifying operation | Explicit or implicit user action; status event is system-attributed | `ticket_service.assign_ticket()` or `ticket_mutations.auto_assign_actor()` |
+| `New` | `Ignored` | User invokes Ignore | Manual; acting user | `ticket_service.ignore_ticket()` |
+| `New` | `Ignored` | Associated CVE changes to `REJECTED` | Automatic; system | `cve_service.upsert_cve()` applies the rejection rule |
+| `Analysis` | `Ignored` | User invokes Ignore | Manual; acting user | `ticket_service.ignore_ticket()` |
+| `New`, `Analysis`, `Analyzed`, `Resolved` | `Duplicated` | User marks the Ticket as duplicate | Manual; acting user | `ticket_service.mark_as_duplicate()` |
+| `Ignored` | evaluated `Analysis`, `Analyzed`, or `Resolved` | User invokes Reopen, or associated CVE changes from `REJECTED` to `PUBLISHED` | Manual or automatic; final status event is system-attributed | `ticket_service.reopen_from_ignored()` and `_complete_manual_zone_exit()` |
+| `Duplicated` | evaluated `Analysis`, `Analyzed`, or `Resolved` | User invokes Revert Duplicate | Manual; final status event is system-attributed | `ticket_service.revert_duplicate()` and `_complete_manual_zone_exit()` |
+| `Analysis` | `Analyzed` or `Resolved` | A gate-relevant mutation makes the corresponding status the highest valid result | Automatic; system | `ticket_mutations.reconcile_ticket_status()` |
+| `Analyzed` | `Analysis` or `Resolved` | A gate-relevant mutation changes the highest valid result | Automatic; system | `ticket_mutations.reconcile_ticket_status()` |
+| `Resolved` | `Analysis` or `Analyzed` | A gate-relevant mutation invalidates resolution | Automatic; system | `ticket_mutations.reconcile_ticket_status()` |
+
+For a user action on a `New` Ticket, the existing auto-assignment rule still
+applies. A VA actor records `New -> Analysis` before the requested Ignore or
+Duplicate transition; a non-VA actor cannot be assigned and may record the
+direct `New -> Ignored` or `New -> Duplicated` transition. These are the same
+matrix paths, not additional legal targets.
 
 **Note on CVE Rejections**: When a CVE's `cve_state` changes to `REJECTED` (detectable from any discovery fetcher — NVD, MITRE, or kernel), only tickets in `New` status are automatically transitioned to `Ignored`. Tickets in `Analysis` or later statuses are NOT automatically transitioned — the VA must review the rejection manually. For the complete flow regarding CVE rejections and rejection reverts, see `docs/features/tickets/cve-tracking.md` ("Rejection handling" and "Rejection revert handling").
 
 ### Gate: Analysis → Analyzed
 
-The system automatically transitions a ticket from Analysis to Analyzed
-when ALL of the following conditions are met:
+For one shared UTC `evaluation_date`, define:
+
+- `M` as every persisted track whose package and track `deleted_at` are both
+  `NULL` (the manually included tracks). Product markers and lifecycle do not
+  affect membership in `M`.
+- `A` as every actionable track under the canonical package-model predicate.
+  Therefore `A` is a subset of `M` and a track belongs to `A` only when it has
+  at least one actionable Product.
+
+The Analyzed predicate is exactly:
+
+```text
+|M| >= 1
+AND every track in A has status != ANALYSIS
+AND resolved Ticket severity IS NOT NULL
+AND (
+    Ticket.cve_id IS NULL
+    OR at least one canonical SUSE assessment exists in an accepted version
+)
+```
+
+In prose, all of the following conditions must be met:
 
 1. **At least one manually included track**: at least one
    `TicketPackageTrack` must not be effectively manually excluded through its own or
@@ -299,18 +327,35 @@ ticket transitions back from Analyzed to Analysis.
 
 ### Gate: Analyzed → Resolved
 
-The system automatically transitions a ticket from Analyzed to Resolved
-when **every actionable `TicketPackageTrack` is resolution-complete**. Manual
-exclusion and lifecycle-derived participation are combined by the canonical
-predicates in `docs/features/packages/package-model.md` (Exclusion and
-Actionability). For each track, only actionable Products are considered when
-evaluating Product-level conditions.
+The Resolved predicate is the Analyzed predicate above AND universal
+resolution completeness over `A`. For each actionable track `t`, let `AP(t)`
+be its actionable Products and `AEP(t)` the members of `AP(t)` whose persisted
+`eligible` value is true. Track `t` is resolution-complete exactly when:
+
+```text
+t.status IN {NOT_AFFECTED, WONT_FIX}
+OR (
+    t.status = FIXED
+    AND (
+        Ticket.cve_id IS NULL
+        OR every Product in AEP(t) has released_at IS NOT NULL
+    )
+)
+OR (t.status = AFFECTED AND AEP(t) is empty)
+```
+
+Manual exclusion and lifecycle-derived participation are combined only by the
+canonical predicates in `docs/features/packages/package-model.md` (Exclusion
+and Actionability). The gate observes the resulting sets; it does not make
+affectedness, eligibility, delivery, or actionability computations depend on
+one another.
 
 A track is **resolution-complete** when any of:
 
 - **(a)** `status` is `NOT_AFFECTED` or `WONT_FIX`, OR
-- **(b)** `status = FIXED` AND every actionable eligible Product
-  (`eligible = true`) under it has `released_at IS NOT NULL`, OR
+- **(b)** `status = FIXED` AND either the Ticket has no CVE, or every
+  actionable eligible Product (`eligible = true`) under it has
+  `released_at IS NOT NULL`, OR
 - **(c)** `status = AFFECTED` AND it has no actionable eligible Products (all
   actionable Products have `eligible = false`, or no actionable Product
   exists).
@@ -323,12 +368,15 @@ input to this gate or to the Analyzed gate. It records independent maintenance
 pipeline evidence and may be projected alongside gate-relevant fields without
 constraining them.
 
-Note: clause (b) uses universal quantification over actionable eligible
-Products. If a `FIXED` track has no actionable eligible Products, the
-condition is vacuously satisfied
-and the track is resolution-complete. This is the intended behavior — the
-source fix was confirmed and no eligible Product is pending publication
-confirmation.
+For a Ticket with a CVE, clause (b) uses universal quantification over
+actionable eligible Products. If a `FIXED` track has no actionable eligible
+Products, the publication condition is vacuously true. For a Ticket without a
+CVE, `FIXED` itself is the available source-fix confirmation and the track is
+resolution-complete regardless of Product `released_at`. This exception never
+writes or fabricates publication evidence: every `released_at` remains `NULL`
+until its owning detector establishes a real advisory. Associating a CVE later
+immediately restores the ordinary publication condition and may regress the
+Ticket until every then-actionable eligible Product is confirmed released.
 
 Clause (c) enables auto-resolution for the legitimate scenario where a
 track is genuinely affected (code vulnerable) but all products under it
@@ -362,6 +410,34 @@ under an `AFFECTED` track), the owning mutation workflow invokes centralized
 reconciliation and the Ticket transitions back from Resolved to Analyzed (or to
 Analysis, if the "Analyzed" gates are also no longer met).
 
+#### Deterministic Gate Edge Cases
+
+- No manually included track makes the Analyzed predicate false, even when the
+  actionable-track set is empty.
+- At least one manually included track with no actionable tracks (including an
+  all-EOL tree) satisfies the structural condition. If severity and the
+  CVE-specific SUSE condition are also satisfied, both gates are true and the
+  Ticket is `Resolved` by empty-set universal quantification.
+- A manually included track with no Product is non-actionable. It contributes
+  to `M`, does not block on `ANALYSIS`, and does not participate in the Resolved
+  quantification.
+- Package or track exclusion removes a track from both `M` and `A`. Product
+  exclusion or EOL removes only that Product from Product-level participation;
+  the track remains actionable if another actionable Product exists.
+- Missing lifecycle data means no lifecycle override and therefore does not
+  make a Product non-actionable. Missing Products do not create implicit
+  lifecycle or release facts.
+- Eligibility overrides participate through the persisted effective
+  `eligible` value. `eligible = false` removes an actionable Product from
+  `AEP(t)`; clearing the override restores the automatic formula and may
+  regress or advance the Ticket.
+- An actionable `ANALYSIS` track always prevents Analyzed. A non-actionable
+  `ANALYSIS` track does not.
+- Later exclusion, restoration, lifecycle, affectedness, eligibility,
+  severity, SUSE-assessment, Product-creation, release, or CVE-association
+  changes are evaluated from current state and may move the Ticket in either
+  direction. No prior gate result is sticky.
+
 ### Automatic Status Evaluation
 
 Forward and reverse transitions between Analysis, Analyzed, and
@@ -389,6 +465,28 @@ assignment via the PATCH assignee endpoint). Once a ticket leaves
 Reverse transitions between `Analysis`, `Analyzed`, and `Resolved`
 are not special cases — they emerge naturally when gate conditions are
 no longer met.
+
+#### Gate Input and Reconciliation Ownership
+
+Every change capable of changing a gate has exactly one mutation owner and one
+final reconciliation boundary:
+
+| Gate input or derived set | Change source | Reconciliation owner |
+|---|---|---|
+| Manual severity | `ticket_mutations.set_severity_manual()` | The same function after the effective mutation |
+| CVE association and severity-source handover | `ticket_service.associate_cve()` | The composed association workflow after CVSS and Product propagation |
+| CVE severity, canonical-SUSE presence, and CVSS-originated automatic eligibility | CVSS mutation/default-version chains in `ticket_mutations` | The owning chain, at most once after all effective Product changes |
+| Track affectedness | `package_service.set_track_status()` | The same function after an effective change |
+| Product eligibility override or automatic Product-originated recalculation | `package_service` | The owning package mutation after all Product changes |
+| Product `released_at` | `package_service.set_product_released_at()` | The same function after the first effective release observation |
+| Package, track, or Product direct exclusion/restoration | `package_service` | The same direct-marker mutation using its one evaluation date |
+| Package-tree creation | `package_service.add_package_records()` | The same function when at least one package-tree record is created |
+| Lifecycle-derived actionability or passage of the UTC date | `package_service.reconcile_lifecycle_actionability_for_ticket()` | One reconciliation for the selected gate-zone Ticket |
+| Manual-zone exit | `ticket_service._complete_manual_zone_exit()` | Exactly one reconciliation after synchronous automatic-eligibility convergence |
+
+No gate derives its own affectedness, eligibility, delivery, release, exclusion,
+or lifecycle value. A true no-op does not reconcile unless an owning
+date-driven lifecycle workflow explicitly evaluates derived actionability.
 
 An owning composed workflow establishes all of its current gate inputs before
 the one final call to `reconcile_ticket_status()`. In particular, immediate
@@ -418,9 +516,9 @@ actionability-aware gate evaluation, and architectural test requirements.
 >   `assignee_id = NULL` (an orphaned ticket awaiting reassignment).
 >   This is a valid and expected state, visible in the unassigned queue
 >   (`?assignee=none`).
-> - `New` is a pre-state: it means the ticket has never been claimed by
->   a VA. Once a ticket transitions from `New` to `Analysis`, it never
->   returns to `New` under normal operation.
+> - `New` is the initial pre-gate state: the Ticket has not yet been admitted
+>   to automatic gate evaluation. Once a ticket transitions from `New` to
+>   `Analysis`, it never returns to `New` under normal operation.
 > - `reconcile_ticket_status` never pushes a ticket below `Analysis`.
 >   The floor of the gate zone is `Analysis`, not `New`.
 > - When `assignee_id` is `NULL` on a ticket in `Analysis` or later,
@@ -626,9 +724,10 @@ Ignored is a **manual-zone status** — `reconcile_ticket_status` never
 operates on Ignored tickets. Two exit transitions are allowed:
 
 1. **VA assigns themselves (manual):** the VA becomes the assignee.
-2. **System reopens (automatic):** the last active assignee is restored,
-   or no assignee is set if none exists or the previous one is
-   deactivated. This handles cases like CVE rejection reverts (see
+2. **System reopens (automatic):** the current assignee is retained, including
+   an inactive assignee when the final gate result is `Resolved`. Final
+   reconciliation clears an inactive assignee only for `Analysis` or
+   `Analyzed`. This handles cases like CVE rejection reverts (see
    `docs/features/tickets/cve-tracking.md`, "Rejection revert handling").
 
 Both transitions go through `ticket_service.reopen_from_ignored()`:
@@ -640,6 +739,15 @@ Both transitions go through `ticket_service.reopen_from_ignored()`:
    PostgreSQL inputs, then calls `reconcile_ticket_status` once; it may promote to
    `Analyzed` or `Resolved` if gate conditions are already satisfied
 
+Every successful manual-zone exit registers the post-commit Ticket convergence
+workflow, including an exit whose immediate gate result is `Resolved`. If the
+final result is `Analysis` or `Analyzed`, reconciliation clears an inactive
+assignee; if it is `Resolved`, the existing assignee is retained even when that
+user is inactive. Failure to publish this automatically registered workflow is
+best-effort: it is logged after commit and does not change the successful
+manual-zone-exit response. An operator can recover it through the complete
+rerun action below.
+
 See [ticket-service.md](ticket-service.md#reopen_from_ignored) for
 the full function contract.
 
@@ -649,7 +757,7 @@ This prevents gate-relevant data from accumulating while the ticket is
 in the manual zone, which would cause unexpected status jumps on reopen.
 Trusted external CVSS ingestion remains the narrow source-owned exception
 defined under Modifications in Inactive Statuses; it does not apply Ticket-
-scoped propagation before reactivation.
+  scoped propagation before Ticket convergence.
 See [Mutability Guard](#mutability-guard) for enforcement details.
 
 ### Modifications in Inactive Statuses
@@ -674,7 +782,7 @@ they do not poll an inactive Ticket's external package scope.
   guard. Trusted source ingestion is not a consumer mutation endpoint: it may
   persist non-SUSE external CVSS assessments and refresh `CVE.severity`, while
   Product eligibility, assignment, gates, and status propagation remain
-  deferred until reactivation after manual-zone exit. See
+  deferred until Ticket convergence after manual-zone exit. See
   [Mutability Guard](#mutability-guard) for the consumer enforcement mechanism.
 
 ### Mutability Guard
@@ -732,7 +840,12 @@ features behave differently:
 
 Packages, tracks, and products can still be added and managed
 normally. The VA can set affectedness statuses and the ticket can
-progress through the full lifecycle.
+progress through the full lifecycle. A caller with `manage_packages` may set a
+track to `FIXED` from any affectedness state while the locked-current Ticket is
+CVE-less; `admin_ticket_ops` may do so for any Ticket. On a CVE-less Ticket,
+an actionable `FIXED` track is resolution-complete without `released_at`.
+Sentinel does not invent release evidence. Associating a CVE later restores the
+ordinary CVE-backed publication gate and may regress the Ticket.
 
 ## Confidential Tickets
 
@@ -1137,6 +1250,18 @@ the database column `duplicate_of_id` (UUID FK). No resolution is
 needed — the stored UUID always references a non-Duplicated
 ticket.
 
+#### TicketConvergenceDispatchResponse
+
+Returned only by the asynchronous Ticket convergence rerun action.
+
+| Field | Type | Description |
+|---|---|---|
+| `ticket_id` | UUID | Canonical internal UUID of the accessible Ticket, even when the path used `SNTL-{n}` |
+| `task_id` | string | Transient Celery ID of the newly published root convergence task |
+
+The `task_id` is correlation data only. It is not a durable run resource, has
+no status or progress endpoint, and is not a `FetcherRun` identifier.
+
 #### Endpoint → Schema Mapping
 
 | Endpoint | Response Schema |
@@ -1151,6 +1276,7 @@ ticket.
 | `POST .../duplicate` | `TicketDetail` |
 | `POST .../reopen` | `TicketDetail` |
 | `POST .../revert-duplicate` | `TicketDetail` |
+| `POST .../rerun-reactivation` | `TicketConvergenceDispatchResponse` (202 Accepted) |
 | `PATCH .../confidentiality` | `TicketDetail` |
 
 ### List Tickets
@@ -1531,6 +1657,81 @@ Response: `TicketDetail` object in standard `{"data": ...}` envelope
 This endpoint is **not** subject to `ensure_ticket_operable` (it is the
 dedicated exit from the Duplicated manual-zone status).
 
+### Rerun Ticket Convergence
+
+```text
+POST /api/v1/tickets/{ticket_id}/rerun-reactivation
+```
+
+Reruns the complete Ticket convergence workflow from its beginning. This is an
+asynchronous recovery action for a terminal convergence-wrapper failure or an
+individual catch-up failure; it does not directly change Ticket status.
+
+**`Capability: triage_ticket OR manage_fetchers`**
+
+The capabilities are alternatives. The authorization dependency accepts the
+request when the authenticated caller holds either capability and returns the
+same generic `403 AUTH_INSUFFICIENT_PERMISSION` when neither is present.
+
+**Request body**: none.
+
+**Response** (`202 Accepted`):
+
+```json
+{
+  "data": {
+    "ticket_id": "01994c20-7c00-7000-8000-000000000001",
+    "task_id": "01994c20-7c00-7000-8000-000000000002"
+  }
+}
+```
+
+The response uses `TicketConvergenceDispatchResponse`; see
+[Response Schemas](#response-schemas).
+
+**Behavior and ordering**:
+
+1. Authenticate the caller.
+2. Require at least one of `triage_ticket` or `manage_fetchers`, without loading
+   the Ticket. A caller lacking both receives the generic 403 before Ticket
+   accessibility, regardless of Ticket existence.
+3. Resolve Ticket accessibility. A missing Ticket or an invisible confidential
+   Ticket returns `404 TICKET_NOT_FOUND`; either capability alone never grants
+   visibility.
+4. Under `FOR UPDATE`, reload the current Ticket and require status
+   `Analysis`, `Analyzed`, or `Resolved`. `New`, `Ignored`, and `Duplicated`
+   raise `InvalidTransitionError` and return
+   `409 TICKET_INVALID_TRANSITION`. Release the transaction and lock before
+   broker I/O.
+5. Publish one root Ticket convergence workflow task and return its ID with
+   202. If initial publication raises, return `503 CELERY_UNAVAILABLE` with no
+   durable run or progress record. An ambiguous broker acknowledgement may
+   still have accepted the task; a later request may therefore duplicate work.
+
+This endpoint does not call `ensure_ticket_operable()` and never returns
+`TICKET_NOT_MUTABLE`. Repeated and concurrent accepted requests are allowed;
+they never return a conflict and each may publish a complete workflow. The
+workflow's current-state, idempotent mutation boundaries make duplicate work
+safe.
+
+The action creates no dedicated `TicketAuditEvent`. The request and workflow
+outcomes are operational evidence in structured logs; effective delegated
+package, eligibility, release, affectedness, and status mutations create only
+their existing domain events. Request-side logs use the existing `request_id`
+correlation and do not add a separate requesting-user field. A generic
+`POST /api/v1/fetchers/{fetcher_name}/trigger` runs one complete fetcher over
+its normal scope and is not equivalent: it neither enumerates this Ticket's
+persisted package markers nor preserves the ordered complete convergence
+workflow. No package/phase/fetcher selector, progress API, or CLI wrapper is
+defined.
+
+**Error responses**:
+
+| Status | Code | Condition |
+|---|---|---|
+| 409 | `TICKET_INVALID_TRANSITION` | Locked-current status is `New`, `Ignored`, or `Duplicated` |
+| 503 | `CELERY_UNAVAILABLE` | Initial publication of the root Ticket convergence task failed |
+
 ### Set Confidentiality
 
 ```
@@ -1679,6 +1880,8 @@ table:
 - Creating tickets: `create_ticket` capability
 - Assigning, changing status, associating CVE, setting manual severity:
   `triage_ticket` capability
+- Rerunning complete Ticket convergence: `triage_ticket` OR
+  `manage_fetchers`, plus ordinary Ticket visibility
 - Managing packages: `manage_packages` capability
 - Setting confidentiality, managing access grants: `manage_confidentiality`
   capability

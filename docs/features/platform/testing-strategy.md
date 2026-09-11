@@ -1562,6 +1562,24 @@ Every new or modified service function MUST be tested for:
   two-session pattern described in Database Strategy — Concurrency
   Testing
 
+Ticket gate and convergence changes additionally require:
+
+- exhaustive status-transition coverage and highest-valid-status evaluation;
+- Analyzed and Resolved formulas over empty sets, all-EOL trees, missing
+  Products/lifecycle data, independently excluded descendants, eligibility
+  overrides, CVE-less `FIXED`, CVE association after CVE-less resolution, and
+  forward/reverse corrections;
+- `REJECTED -> PUBLISHED` reopening every currently `Ignored` associated Ticket
+  without consulting audit history.
+
+The owning service specifications define detailed Ticket-convergence test
+matrices: see `ticket-service.md` (Architectural Test Requirement, manual-zone
+registration and operator dispatch) and `package-service.md` (Architectural
+Test Requirement, affectedness authority and Ticket convergence workflow).
+Those tests distinguish best-effort automatic publication failure after a
+successful committed mutation from the explicit rerun endpoint's 503
+publication failure.
+
 ### Application-Owned Redis Operations
 
 Every application-owned Redis operation, regardless of application layer or

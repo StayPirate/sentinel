@@ -22,8 +22,8 @@ endpoint contract.
 | Capability | Operations Covered |
 |---|---|
 | `create_ticket` | Create ticket manually |
-| `triage_ticket` | Assign/reassign ticket, change ticket status (all transitions: ignore, reopen, duplicate, revert-duplicate), associate CVE with ticket, set/update manual severity |
-| `manage_packages` | Add/remove packages from tickets, exclude/restore (package, track, product), change track affectedness to any non-`FIXED` status, override product eligibility |
+| `triage_ticket` | Assign/reassign ticket, change ticket status (all transitions: ignore, reopen, duplicate, revert-duplicate), associate CVE with ticket, set/update manual severity, rerun complete Ticket convergence |
+| `manage_packages` | Add/remove packages from tickets, exclude/restore (package, track, product), change track affectedness to any non-`FIXED` status, set `FIXED` only on a locked-current CVE-less Ticket, override product eligibility |
 | `manage_cvss` | Add/edit/delete SUSE CVSS assessments |
 | `manage_references` | Add/edit/delete ticket references |
 | `manage_confidentiality` | Set ticket confidentiality flag, list/grant/revoke access grants |
@@ -35,7 +35,7 @@ endpoint contract.
 | `manage_users` | Create local users, update user fields, manage user roles, reset password, deactivate/reactivate, unlock, view deactivation impact, view/revoke all API keys, view admin-scoped identity audit log |
 | `manage_role_mappings` | Group-to-role mapping CRUD, preview role mapping |
 | `manage_settings` | View/update system settings, trigger CVSS recalculation, view settings audit log |
-| `manage_fetchers` | Trigger manual fetcher run, enable/disable fetchers, view/modify fetcher config, view fetcher audit log, view error details, view error tracebacks, view triggered_by_user identity, view disabled_by/enabled_by actors |
+| `manage_fetchers` | Trigger manual fetcher run, rerun complete Ticket convergence for an accessible eligible Ticket, enable/disable fetchers, view/modify fetcher config, view fetcher audit log, view error details, view error tracebacks, view triggered_by_user identity, view disabled_by/enabled_by actors |
 | `admin_ticket_ops` | Set track affectedness to `FIXED` from any status |
 
 > **Design note — capability granularity**: capabilities are intentionally
@@ -149,12 +149,14 @@ Any logged-in user, regardless of role. Includes all Public access plus:
 | Add/remove packages from tickets | `manage_packages` |
 | Exclude/restore package, track, or product | `manage_packages` |
 | Change track affectedness to any non-`FIXED` status | `manage_packages` |
+| Set track affectedness to `FIXED` when the locked-current Ticket has no CVE | `manage_packages` |
 | Override product eligibility | `manage_packages` |
 | Add/edit/delete SUSE CVSS assessments | `manage_cvss` |
 | Add/edit/delete ticket references | `manage_references` |
 | Set ticket confidentiality | `manage_confidentiality` |
 | Manage access grants on confidential tickets | `manage_confidentiality` |
 | Set track affectedness to `FIXED` from any status | `admin_ticket_ops` |
+| Rerun complete Ticket convergence | `triage_ticket` OR `manage_fetchers` |
 | Create local user | `manage_users` |
 | Update user fields | `manage_users` |
 | Manage user roles | `manage_users` |
@@ -360,10 +362,17 @@ required capability receives 403 regardless of whether the ticket
 exists — this prevents probing for ticket existence via differentiated
 error codes.
 
-For the track affectedness PATCH endpoint, `status = fixed` requires
-`admin_ticket_ops`; every other valid status requires `manage_packages`. This
-payload-dependent check occurs at step 2 before Ticket accessibility, and
-neither capability implies or supplements the other for that request.
+For the track affectedness PATCH endpoint, `status = fixed` accepts
+`admin_ticket_ops OR manage_packages` before Ticket accessibility. Under the
+Ticket lock, `admin_ticket_ops` permits any Ticket while `manage_packages` alone
+permits only a Ticket with `cve_id IS NULL`. Every other valid status requires
+`manage_packages`. A caller lacking both alternatives receives the same generic
+403 before accessibility; the CVE condition is never evaluated for that caller.
+
+For Ticket convergence rerun, step 2 likewise accepts `triage_ticket OR
+manage_fetchers`. Neither capability grants visibility. After accessibility,
+the service checks locked-current status eligibility; this asynchronous
+dispatch action does not use `ensure_ticket_operable()`.
 
 For CVE endpoints that are capability-protected and operate on a
 specific CVE, the same pattern applies with `require_accessible_cve`
@@ -426,6 +435,7 @@ here with the required authorization level and a link to the owning spec.
 | POST | `/api/v1/tickets/{ticket_id}/reopen` | `triage_ticket` | [tickets](../tickets/tickets.md#reopen-ticket) |
 | POST | `/api/v1/tickets/{ticket_id}/duplicate` | `triage_ticket` | [tickets](../tickets/tickets.md#mark-ticket-as-duplicate) |
 | POST | `/api/v1/tickets/{ticket_id}/revert-duplicate` | `triage_ticket` | [tickets](../tickets/tickets.md#revert-duplicate-status) |
+| POST | `/api/v1/tickets/{ticket_id}/rerun-reactivation` | `triage_ticket` OR `manage_fetchers` | [tickets](../tickets/tickets.md#rerun-ticket-convergence) |
 | PATCH | `/api/v1/tickets/{ticket_id}/confidentiality` | `manage_confidentiality` | [tickets](../tickets/tickets.md#set-confidentiality) |
 | GET | `/api/v1/tickets/{ticket_id}/access` | `manage_confidentiality` | [tickets](../tickets/tickets.md#list-access-grants) |
 | POST | `/api/v1/tickets/{ticket_id}/access` | `manage_confidentiality` | [tickets](../tickets/tickets.md#grant-access) |
@@ -442,7 +452,7 @@ here with the required authorization level and a link to the owning spec.
 | POST | `/api/v1/tickets/{ticket_id}/packages/{package_id}/restore` | `manage_packages` | [package-model](../packages/package-model.md#restore-package) |
 | POST | `/api/v1/tickets/{ticket_id}/packages/{package_id}/tracks/{track_id}/exclude` | `manage_packages` | [package-model](../packages/package-model.md#soft-delete-track) |
 | POST | `/api/v1/tickets/{ticket_id}/packages/{package_id}/tracks/{track_id}/restore` | `manage_packages` | [package-model](../packages/package-model.md#restore-track) |
-| PATCH | `/api/v1/tickets/{ticket_id}/packages/{package_id}/tracks/{track_id}` | `manage_packages` for non-`fixed`; `admin_ticket_ops` for `fixed` | [package-model](../packages/package-model.md#change-track-status) |
+| PATCH | `/api/v1/tickets/{ticket_id}/packages/{package_id}/tracks/{track_id}` | `manage_packages` for non-`fixed`; `admin_ticket_ops` OR `manage_packages` for `fixed` (the latter only when the locked Ticket is CVE-less) | [package-model](../packages/package-model.md#change-track-status) |
 | POST | `/api/v1/tickets/{ticket_id}/packages/{package_id}/tracks/{track_id}/products/{ticket_package_product_id}/exclude` | `manage_packages` | [package-model](../packages/package-model.md#soft-delete-product) |
 | POST | `/api/v1/tickets/{ticket_id}/packages/{package_id}/tracks/{track_id}/products/{ticket_package_product_id}/restore` | `manage_packages` | [package-model](../packages/package-model.md#restore-product) |
 | PATCH | `/api/v1/tickets/{ticket_id}/packages/{package_id}/tracks/{track_id}/products/{ticket_package_product_id}` | `manage_packages` | [package-model](../packages/package-model.md#override-product-eligibility) |

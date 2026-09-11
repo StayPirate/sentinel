@@ -36,7 +36,7 @@ maintainer.md                            Maintainer operations (pending fixes, i
   Depends on `ticket_mutations.reconcile_ticket_status()`.
 - `ibs-submission-tracking.md` owns IBS request/action persistence and track
   delivery reconciliation. Its daily fetcher is the correctness owner;
-  package-add and reactivation catch-up, manual runs, and RabbitMQ request
+  package-add and Ticket-convergence catch-up, manual runs, and RabbitMQ request
   events accelerate the same reconciliation.
 - `package-maintainership.md` owns SMELT-backed acquisition and the additive
   `TicketPackageMaintainer` relation used by confidential visibility and the

@@ -433,7 +433,7 @@ caller-owned transaction:
 the atomic `product_released` event. A database, audit, or reconciliation
 failure rolls back the complete occurrence transaction. If the Ticket moved to
 `Ignored` or `Duplicated`, or the occurrence/CVE/workflow identity changed, the
-occurrence fails without mutation. An in-flight occurrence selected while
+occurrence returns a successful stale/inapplicable no-op without mutation. An in-flight occurrence selected while
 active may complete after the Ticket becomes `Resolved`, consistent with the
 operable-Ticket factual-update contract.
 
@@ -522,7 +522,7 @@ relevant occurrence returns silently.
 Catch-up applies the same current/historical repository tiers, complete
 validation, timestamp selection, per-invocation deduplication, and independent
 per-occurrence transactions as periodic execution. Advisories that predate the
-Ticket or reactivation remain discoverable and retain their original issued
+Ticket or Ticket convergence remain discoverable and retain their original issued
 time. Per-occurrence failures are logged and siblings continue. Partial success
 returns normally; when every selected occurrence fails, catch-up propagates
 according to the shared non-CVE `run_catch_up` contract. Concurrent catch-up and

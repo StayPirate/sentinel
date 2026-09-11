@@ -119,9 +119,10 @@ this zone, with the documented manual-zone exit exceptions. Trusted external
 CVSS ingestion is CVE-owned maintenance and follows the separate status matrix
 below.
 
-`New` is a pre-state, not part of the gate zone. A ticket in `New` status
-has never been claimed by a VA. The `New → Analysis` transition is an
-explicit one-way event triggered by assignment, not a gate evaluation.
+`New` is the initial pre-gate state, not part of the gate zone. A Ticket in
+`New` has not yet been admitted to automatic gate evaluation; assignment
+presence does not define the status. The `New → Analysis` transition is an
+explicit one-way event triggered by an assignment action, not a gate evaluation.
 `reconcile_ticket_status` skips tickets in `New` status entirely — the
 floor of the gate zone is `Analysis`.
 
@@ -142,8 +143,8 @@ authoritative common finalization. Each public exit workflow prepares the
 calls this module's `reconcile_ticket_status()` exactly once as its final
 database mutation, with the original manual-zone status as `previous_status`
 and the same UTC `evaluation_date`. The primitive records the real transition
-and registers the post-commit reactivation workflow when the final status
-leaves the manual zone.
+and registers the post-commit Ticket convergence workflow for every successful
+manual-zone exit, including when the final evaluated status is `Resolved`.
 
 ## `reconcile_ticket_status()`
 
@@ -163,7 +164,7 @@ current reality (gate conditions + data freshness).
 - May null `assignee_id` and create an `assignment` audit event if the
   current assignee is inactive (inactive assignee sanitization)
 - May register the package-tree and fetcher catch-up workflow for post-commit
-  execution when an inactive → active transition is detected
+  execution after any manual-zone exit or a `Resolved` gate regression
 
 Callers must be aware that invoking this function may produce mutations
 beyond status changes.
@@ -198,56 +199,68 @@ beyond status changes.
      status is Analyzed
    - Otherwise → status is Analysis (unconditional floor; this function
      never produces `New`)
-3. If the determined status differs from the current status, or if
+3. If the determined status is `Analysis` or `Analyzed`, perform Inactive
+   Assignee Sanitization before any final status audit event. Its system
+   `assignment` event therefore precedes the final `status_change`. A
+   `Resolved` result retains the assignee and creates no sanitation event.
+4. If the determined status differs from the current status, or if
    `previous_status` is provided and differs from the determined status:
    - Update `ticket.status`
    - Create `TicketAuditEvent` with `event_type = status_change`
    - `old_value` is taken from `previous_status` if provided; otherwise
      from the ticket's current status field
-4. **Post-transition catch-up** (inactive-state exit detection):
+5. **Post-transition Ticket convergence registration**:
    - Resolve `effective_previous`: use `previous_status` parameter if
       provided (manual-zone exits finalized by
       `ticket_service._complete_manual_zone_exit()`), otherwise
      capture the ticket's status before gate evaluation as a local
      variable at the start of the function (regression cases)
-   - Resolve `new_status`: the status determined by step 2 (regardless of
-     whether step 3 produced a change — see note below)
-    - If `effective_previous ∈ {Resolved, Ignored, Duplicated}` AND
-      `new_status ≠ effective_previous`, register one post-commit reactivation
-      workflow. For `Ignored` or `Duplicated`, the owning manual-zone exit MUST
-      already have synchronously converged automatic Product eligibility before
-      this final gate evaluation. A `Resolved` regression instead follows an
-      ordinary gate-zone mutation whose eligibility inputs are already current.
-      The post-commit package-domain phase re-resolves every persisted
-      package marker, including soft-deleted markers, through
-      `package_service`; after those per-package transactions finish, it
-      enqueues `catch_up()` for every registered fetcher via
-      `get_catch_up_fetchers()`. Registration does not introduce a
-      `ticket_mutations` → `package_service` import: the post-commit workflow
-      owner performs that orchestration. The workflow and failure isolation
-      contract are defined in `package-service.md` (Package-tree reactivation
-      workflow) and `package-model.md` (Reactivation and Convergence)
-   - **Note**: step 4 is independent of step 3. In the
+    - Resolve `new_status`: the status determined by step 2 (regardless of
+      whether step 4 produced a change — see note below)
+   - If `effective_previous ∈ {Ignored, Duplicated}`, register one post-commit
+     Ticket convergence workflow for every successful exit, whether
+     `new_status` is `Analysis`, `Analyzed`, or `Resolved`.
+   - If `effective_previous = Resolved` and `new_status ∈ {Analysis,
+     Analyzed}`, register the same workflow. A no-change `Resolved` evaluation
+     does not register it.
+   - For `Ignored` or `Duplicated`, the owning manual-zone exit MUST already
+     have synchronously converged automatic Product eligibility before this
+     final gate evaluation. A `Resolved` regression instead follows an
+     ordinary gate-zone mutation whose eligibility inputs are already current.
+     The post-commit package-domain phase re-resolves every persisted
+     package marker, including soft-deleted markers, through
+     `package_service`; after those per-package transactions finish, it
+     attempts to enqueue `catch_up()` for every registered fetcher via
+     `get_catch_up_fetchers()`. Registration does not introduce a
+     `ticket_mutations` → `package_service` import: the post-commit workflow
+     owner performs that orchestration. The workflow and failure isolation
+     contract are defined in `package-service.md` (`run_ticket_convergence()`
+     workflow) and `package-model.md` (Ticket Convergence).
+   - Publication by this automatically registered post-commit effect is
+     best-effort. A publication failure logs one sanitized structured ERROR and
+     does not replace the already-committed mutation's success response with
+     `CELERY_UNAVAILABLE`. Recovery uses the complete explicit rerun endpoint.
+   - **Note**: step 5 is independent of step 4. In the
       `ticket_service._complete_manual_zone_exit()` case, the public workflow
       has already set the status
-     before invoking reconcile; step 3 sees no change but step 4
-     correctly detects the inactive-state exit via `previous_status`.
-      Post-commit workflow registration follows the inactive-state exit check;
-      it does not re-check Ticket status after registration
+     before invoking reconcile; step 4 sees no change but step 5
+     correctly detects the manual-zone exit via `previous_status`.
+     Post-commit workflow registration follows the preserved source status;
+     it does not re-check Ticket status after registration.
    - **Registration deduplication**: recursive reconciliation within the same
-     caller-owned transaction registers at most one reactivation workflow for
-     the Ticket. Duplicate workflows across separate transactions remain safe
-     because package resolution and all catch-ups are idempotent.
-    - `reconcile_ticket_status()` never acquires or re-acquires a CVE lock and
-      never starts another eligibility chain. CVSS
-      assessment mutations already maintain `CVE.severity`; package-domain
-      manual-zone exit owns the special synchronous eligibility convergence.
+     caller-owned transaction registers at most one Ticket convergence
+     workflow for the Ticket. Duplicate workflows across separate transactions
+     remain safe because package resolution and all catch-ups are idempotent.
+   - `reconcile_ticket_status()` never acquires or re-acquires a CVE lock and
+     never starts another eligibility chain. CVSS assessment mutations already
+     maintain `CVE.severity`; package-domain manual-zone exit owns the special
+     synchronous eligibility convergence.
      Keeping this Ticket-locked primitive free of CVE acquisition prevents a
      `Ticket` then `CVE` inversion against the global CVSS lock order.
-   - **Cost in the common case**: zero. When no inactive → active
-     transition occurs (the overwhelmingly common path), step 4 is a
-     single enum comparison
-5. The function operates within the same database transaction as the
+   - **Cost in the common case**: zero. When no manual-zone exit or `Resolved`
+     regression occurs (the overwhelmingly common path), step 5 is a small
+     status comparison
+6. The function operates within the same database transaction as the
    triggering operation (atomicity guarantee)
 
 Every query performed by one invocation, including aggregate and existence
@@ -256,8 +269,9 @@ the lifecycle phase or actionability result.
 
 ### Inactive Assignee Sanitization
 
-After determining the ticket's "natural" status via gate evaluation, if
-the resulting status is active (Analysis or Analyzed) and
+As behavior step 3, after determining the ticket's natural status via gate
+evaluation and before any final status audit event, if
+the resulting status is `Analysis` or `Analyzed` and
 `assignee_id` points to an inactive user:
 
 1. Set `assignee_id = NULL`
@@ -268,9 +282,10 @@ the resulting status is active (Analysis or Analyzed) and
    ticket {ticket_id} during reconciliation — this should have been
    handled by _unassign_active_tickets"`
 
-If the resulting status is inactive (Resolved, Ignored, Duplicated): no
-assignee check is performed — an inactive ticket does not need an
-active assignee.
+If the resulting status is `Resolved`, no assignee check is performed. This
+includes a manual-zone exit that evaluates directly to `Resolved`: an inactive
+assignee is retained. `reconcile_ticket_status()` is not invoked for a Ticket
+that remains `Ignored` or `Duplicated`.
 
 This mechanism complements the bulk unassignment performed by
 `deactivate_user` (see
@@ -787,8 +802,8 @@ Product eligibility exception. It does not create, update, or delete a
 
 **Callers**: `associate_cve()` and the batch recalculation Celery task triggered
 by a default CVSS version change (see
-`docs/features/platform/system-settings.md`). This contract defines no
-Ticket-reactivation caller.
+`docs/features/platform/system-settings.md`). This contract defines no Ticket
+convergence caller.
 
 **Parameters**:
 
@@ -1124,7 +1139,7 @@ Package-specific exceptions (`TrackNotFoundError`, `ProductNotFoundError`,
 - `docs/conventions.md` — Transaction and Locking (generic pessimistic
   locking pattern)
 - `docs/features/tickets/ticket-service.md` — Ticket lifecycle operations,
-  manual-zone exit composition, and reactivation hooks (imports
+  manual-zone exit composition, and Ticket convergence hooks (imports
   `reconcile_ticket_status()`, `recalculate_cvss_chain()`,
   `auto_assign_actor()`, `ensure_ticket_operable()`)
 - `docs/features/platform/system-settings.md` — default CVSS version
