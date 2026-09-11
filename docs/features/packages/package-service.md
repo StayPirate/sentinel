@@ -181,16 +181,19 @@ Sets the affectedness status of a `TicketPackageTrack` record.
 | `track_id` | `UUID` | Yes | TicketPackageTrack to modify |
 | `status` | `PackageStatus` | Yes | New status value |
 | `acting_user_id` | `UUID \| None` | No | Who is performing the action |
-| `force` | `bool` | No | Caller-verified admin marker (default `False`) — required for a user-attributed `FIXED` request |
+| `force` | `bool` | No | Caller-verified `admin_ticket_ops` marker (default `False`) for unrestricted user-attributed `FIXED`; `False` also permits `FIXED` when the locked-current Ticket is CVE-less and the caller verified `manage_packages` |
 
 **Preconditions**:
 
 - Parent ticket must be operable (`ensure_ticket_operable`)
 - Package and track must exist under the declared Ticket/package path
 - Status must be a valid `PackageStatus` value
-- User-attributed callers use `force=True` only after verifying
-  `admin_ticket_ops` for a `FIXED` target. They use `force=False` only after
-  verifying `manage_packages` for a non-`FIXED` target
+- For a user-attributed `FIXED` target, the API has verified
+  `admin_ticket_ops OR manage_packages`; `force=True` means the caller has
+  `admin_ticket_ops`, while `force=False` means it has `manage_packages` and
+  the service must require locked-current `ticket.cve_id IS NULL`
+- User-attributed non-`FIXED` targets require caller-verified
+  `manage_packages` and `force=False`
 
 **Behavior**:
 
@@ -200,11 +203,14 @@ Sets the affectedness status of a `TicketPackageTrack` record.
 3. Reload the declared package/track chain under the lock. A missing or
    mismatched level raises its existing not-found exception.
 4. Apply caller authority to the requested target:
-   - a user-attributed `FIXED` request requires `force=True`;
+   - a user-attributed `FIXED` request with `force=True` is unrestricted;
+   - a user-attributed `FIXED` request with `force=False` requires
+     `ticket.cve_id IS NULL` under the held Ticket lock;
    - a user-attributed non-`FIXED` request requires `force=False`; and
    - a system request accepts only `FIXED`.
-5. For a prohibited user-attributed target/marker combination, raise
-   `TrackFixedStatusRestrictedError` without side effects. For a prohibited
+5. For a prohibited user-attributed target/marker or CVE condition, raise
+   `TrackFixedStatusRestrictedError` without side effects. The locked Ticket
+   condition is never checked before API accessibility. For a prohibited
    system non-`FIXED` target, emit one sanitized warning and return `rejected`
    without mutation, assignment, audit, reconciliation, or post-commit effect.
 6. If the locked status equals the target, return `no_op` before
@@ -226,12 +232,13 @@ final-state outcomes are true no-ops with no assignment, audit,
 reconciliation, or post-commit effect. A repeated prohibited automatic target
 remains `rejected` and repeats only its sanitized warning.
 
-**FIXED restriction**: `FIXED` is restricted — only system callers
-(`acting_user_id = None`) or user-attributed callers with `force=True` can set
-it (step 5). The service does NOT query the RBAC system — it trusts the caller
-to have verified the `admin_ticket_ops` capability before passing `force=True`.
-CLI commands MUST verify `admin_ticket_ops` before passing `force=True`.
-Passing `force=True` without capability verification is a bug.
+**FIXED restriction**: system callers retain their narrow automatic authority.
+For a user-attributed call, `force=True` requires caller-verified
+`admin_ticket_ops` and permits any locked-current Ticket. `force=False`
+requires caller-verified `manage_packages` and permits `FIXED` only when the
+locked-current Ticket has `cve_id IS NULL`. The service does not query RBAC,
+but it does enforce the CVE-less condition under the Ticket lock. Passing
+`force=True` without capability verification is a bug.
 
 System callers leave `force` at its default. The marker is not evaluated when
 `acting_user_id` is `None`.
@@ -247,7 +254,8 @@ failure handling. This enforces the invariant from
 final-status records are not changed by automatic transitions. User-attributed
 callers can transition from any state to any non-`FIXED` target after
 `manage_packages` verification, or to `FIXED` from any state after
-`admin_ticket_ops` verification.
+`admin_ticket_ops` verification or, for a CVE-less Ticket only,
+`manage_packages` verification.
 
 **Exceptions**: declared-path lookup raises `TicketNotFoundError`,
 `PackageNotFoundError`, or `TrackNotFoundError`; operability and authorization
@@ -513,7 +521,7 @@ returns the same boolean already stored in `eligible`: the marker changes from
 true to false, the event records equal truthful boolean `old_value` and
 `new_value` plus `override_action = cleared`, and the occurrence immediately
 returns to automatic management. Later CVSS, default-version, threshold,
-lifecycle, or reactivation workflows may update it.
+lifecycle, or Ticket convergence workflows may update it.
 
 **Exceptions**: a null actor is a caller contract violation; declared-path
 lookup raises `TicketNotFoundError`, `PackageNotFoundError`,
@@ -683,8 +691,8 @@ async def reconcile_lifecycle_actionability_for_ticket(
    transaction.
 
 The delegated reconciliation creates the ordinary `status_change` event if
-the Ticket changes status and performs the established inactive-to-active
-catch-up if a `Resolved` Ticket regresses. This function creates no separate
+the Ticket changes status and registers Ticket convergence if a `Resolved`
+Ticket regresses. This function creates no separate
 audit event because actionability itself is not persisted. It never calls
 `auto_assign_actor()` and never modifies exclusion markers, eligibility,
 affectedness, or delivery state.
@@ -717,7 +725,7 @@ Called by `add_package_to_ticket` after SMELT resolution completes.
 | `acting_user_id` | `UUID \| None` | No | Who is performing the action |
 | `audit_comment` | `str \| None` | No | System-generated context for `package_added`; `NULL` for user actions |
 | `active_ticket_only` | `bool` | No | When true, skip without mutation if the locked Ticket is not active; used by Product catalog backfill |
-| `allow_excluded_reresolution` | `bool` | No | Semantic caller context. `False` for the public add endpoint and internal callers whose candidate selection excludes existing soft-deleted packages; `True` for Ticket reactivation, which intentionally re-resolves persisted excluded package markers without restoring them. The concrete parameter name or grouping is an implementation choice |
+| `allow_excluded_reresolution` | `bool` | No | Semantic caller context. `False` for the public add endpoint and internal callers whose candidate selection excludes existing soft-deleted packages; `True` for Ticket convergence, which intentionally re-resolves persisted excluded package markers without restoring them. The concrete parameter name or grouping is an implementation choice |
 
 `ResolvedTrackData` names the semantic input boundary; it does not require a
 particular dataclass, `TypedDict`, Pydantic model, or other concrete in-memory
@@ -1011,7 +1019,7 @@ batch selection is skipped under the Ticket row lock.
 
 `allow_excluded_reresolution` is false for the public endpoint, CVE ingestion,
 and Product catalog backfill. The latter two already omit existing soft-deleted
-packages during their owning candidate-selection contracts. Ticket reactivation
+packages during their owning candidate-selection contracts. Ticket convergence
 sets it to true because it intentionally enumerates every persisted package
 marker, including directly excluded ones. Its concrete name or grouping with
 other internal caller context is an implementation choice.
@@ -1019,7 +1027,7 @@ other internal caller context is an implementation choice.
 The public API invocation also declares public-add semantics. After external
 target and maintainership I/O, the locked mutation boundary rejects an existing
 directly excluded package occurrence with `PackageAlreadyExcludedError` rather
-than restoring or completing it. Ticket reactivation uses re-resolution
+than restoring or completing it. Ticket convergence uses re-resolution
 semantics and may complete missing descendants or maintainers beneath an
 excluded package without clearing any marker. CVE ingestion and Product catalog
 backfill do not select existing soft-deleted package markers. The concrete
@@ -1084,26 +1092,41 @@ Ticket).
 that at least one package-tree record is missing. Maintainer associations alone
 do not auto-assign. `add_package_to_ticket()` does not apply it.
 
-### Package-tree reactivation workflow
+### `run_ticket_convergence()` workflow
 
-This workflow is the post-commit package-tree recovery phase after an inactive
-Ticket enters an active status. Before `Ignored` or `Duplicated` exits,
+The async service workflow has this semantic signature:
+
+```python
+async def run_ticket_convergence(
+    *,
+    ticket_id: UUID,
+    session_factory: async_sessionmaker,
+) -> None:
+```
+
+It is the complete post-commit recovery phase after every
+manual-zone exit, including an exit that evaluates immediately to `Resolved`,
+and after an ordinary `Resolved` regression. Before `Ignored` or `Duplicated` exits,
 automatic Product eligibility has converged through the special synchronous
 manual-zone boundary; before a `Resolved` regression, the triggering ordinary
-gate-zone mutation has already maintained eligibility. Its
-conceptual input is `ticket_id: UUID`; it returns no domain value. It is
-idempotent and creates audit events only through effective delegated
-`add_package_to_ticket()` mutations. It is an orchestration boundary, not a
-caller-owned composable service function: the workflow owner opens and
+gate-zone mutation has already maintained eligibility. It is an orchestration
+boundary, not a caller-owned composable service function: the workflow owner opens and
 completes one independent transaction per package while the delegated
 `package_service` functions retain their module-wide no-commit contract.
+
+**Audit events**: none of its own. Effective delegated package and maintainer
+mutations create their ordinary events.
+
+**Re-invocation**: idempotent with respect to current persisted state. It
+repeats external requests and catch-up publication by design, while delegated
+database operations remain insert-if-missing or current-state reconciliations.
 
 After the status-transition transaction commits, the workflow:
 
 1. Reads every persisted package name for the Ticket, including soft-deleted
    `TicketPackage` records.
 2. Calls `add_package_to_ticket()` once per distinct package name with system
-   attribution and reactivation audit context. It processes and commits each
+   attribution and the existing `reason = reactivation` audit context. It processes and commits each
    package independently. Existing package, track, Product, and exclusion state
    is preserved; missing descendants and additive maintainer associations may
    be created. A soft-deleted package's association remains ineffective until
@@ -1111,33 +1134,70 @@ After the status-transition transaction commits, the workflow:
 3. Logs each failed package with the sanitized cause, `ticket_id`, package
    name, and `celery_task_id`, then continues. A failed package does not roll
    back successful siblings.
-4. After every package has been attempted, dispatches the registered
-   per-ticket fetcher catch-ups. Catch-up therefore observes every package-tree
-   addition that committed successfully. Existing records remain eligible for
-   catch-up even when another package failed re-resolution.
+4. After every package has been attempted, attempts dispatch of every
+   registered per-ticket fetcher catch-up. It continues through the complete
+   roster when an earlier publication fails, accumulates all dispatch failures,
+   and raises the aggregate only after the last attempt. Catch-up therefore
+   observes every package-tree addition that committed successfully. Existing
+   records remain eligible for catch-up even when another package failed
+   re-resolution.
 
 If the Ticket does not exist or has no persisted package marker, package-tree
-resolution is a no-op and catch-up dispatch still proceeds. Errors propagated
-by an individual `add_package_to_ticket()` invocation are isolated only when
-they are package-specific resolution or validation failures; step 3 logs them
-and processing continues. An infrastructure failure that prevents reliable
-enumeration, completion of a package transaction, or catch-up dispatch escapes
-to the workflow wrapper. The wrapper retries the complete idempotent workflow
-according to the shared `run_catch_up` classification and limits: three retries
-with 5, 10, and 20 second backoff for retryable failures, and immediate terminal
-failure for non-retryable failures.
+resolution is a no-op and catch-up dispatch still proceeds. A package-specific
+resolution or validation failure from one `add_package_to_ticket()` unit rolls
+back that package transaction, logs the sanitized failure, and does not prevent
+the next package. If `TicketNotMutableError` reports that the Ticket re-entered
+the manual zone during the loop, roll back that package unit and treat it as a
+successful stale/inapplicable no-op rather than a package failure. An
+infrastructure failure that prevents reliable enumeration
+or transaction completion, and the aggregate of catch-up dispatch failures,
+escapes to the root workflow wrapper.
+The wrapper retry policy below repeats enumeration, all package attempts, and
+all catch-up dispatch attempts; it never resumes from partial progress.
 
-Each dispatched catch-up then uses its own shared `run_catch_up` retry policy;
-its failure does not propagate back to the already-completed package-tree
+Each successfully dispatched catch-up then uses its own shared `run_catch_up`
+retry policy. Its failure does not propagate back to the already-completed root
 wrapper. A terminal wrapper or individual catch-up failure emits a structured
 ERROR log identifying `ticket_id`, the failed workflow phase or fetcher,
 sanitized cause, and `celery_task_id`. Either terminal outcome requires an
-operator-triggered rerun of the same complete workflow for `ticket_id`; it does
+operator-triggered rerun through
+`POST /api/v1/tickets/{ticket_id}/rerun-reactivation`; it does
 not resume from partial progress because successful package units and catch-ups
-are idempotent. The concrete operator interface MUST be defined before this
-workflow is implemented; no durable progress table or periodic full-tree
-reconciliation is introduced. The workflow performs no audit logging of its
-own and does not restore any soft-deleted record.
+are idempotent. Structured INFO/WARNING/ERROR logs distinguish completed,
+partial package failure, retrying, terminal wrapper failure, and individual
+catch-up terminal failure. They include `ticket_id`, phase or fetcher, item
+identity where applicable, sanitized cause, and the task-bound
+`celery_task_id`. No durable progress table, resume state, Redis guard, exact
+deduplication, `FetcherRun`, or periodic full-tree reconciliation is introduced.
+The workflow performs no audit logging of its own and does not restore any
+soft-deleted record.
+
+Repeated and concurrent workflow invocations are accepted. They can duplicate
+SMELT requests and catch-up publications but do not conflict or coalesce;
+current-state reads, Ticket-root locking, uniqueness constraints, and delegated
+idempotency produce convergence.
+
+The workflow has no current-status guard at execution time. Automatic
+registration already reflects a qualifying transition, and the operator API
+performs its locked status check before publication; a later status change does
+not cancel factual convergence work. If the Ticket no longer exists, package
+enumeration is empty and catch-up dispatch still follows the registered roster,
+whose methods apply their own silent missing-Ticket guards. Package-specific
+resolution and validation exceptions are caught and logged as described above;
+manual-zone stale/inapplicable no-ops are not logged as package failures.
+Reliable-enumeration or transaction-completion failures and the accumulated
+catch-up-publication failure escape the async workflow to the bound Celery
+wrapper, which retries the same `ticket_id`; after retry exhaustion the wrapper
+logs terminal failure and returns no result. These are the only exceptions that
+leave the workflow boundary.
+
+The bound synchronous Celery wrapper receives `ticket_id: str`, validates and
+converts it to UUID, invokes the async workflow through exactly one
+`asyncio.run()`, and disposes the shared pooled engine before that event loop
+closes. A malformed task argument is a non-retryable caller-contract failure.
+Every other escaping workflow failure retries the complete workflow three times
+with countdowns of 5, 10, and 20 seconds; exhaustion emits the terminal log.
+The wrapper returns `None` and creates no `FetcherRun`.
 
 The post-commit registration and task/callback composition mechanism is an
 implementation choice. The behavioral ordering and per-package transaction
@@ -1322,7 +1382,7 @@ Caught by endpoint handlers and mapped to HTTP responses:
 | `ProductCatalogNotReadyError` | 503 | `PRODUCT_CATALOG_NOT_READY` | No complete SMELT Product catalog snapshot has committed |
 | `PackageNotFoundInSmeltError` | 422 | `PACKAGE_NOT_FOUND_IN_SMELT` | SMELT returns zero tracks |
 | `PackageTargetsUnresolvedError` | 422 | `PACKAGE_TARGETS_UNRESOLVED` | SMELT returns tracks but no target resolves through the current Product catalog snapshot |
-| `TrackFixedStatusRestrictedError` | 403 | `AUTH_INSUFFICIENT_PERMISSION` | User-attributed caller uses the admin force marker inconsistently with the requested affectedness target |
+| `TrackFixedStatusRestrictedError` | 403 | `AUTH_INSUFFICIENT_PERMISSION` | User-attributed caller uses the admin force marker inconsistently, or requests `FIXED` with only `manage_packages` while the locked-current Ticket has a CVE |
 
 † Shared exception — inherits from `ServiceError`, not from
 `PackageServiceError`. Handlers must catch it explicitly.
@@ -1403,9 +1463,11 @@ transitions. The test must cover:
   correct path, each missing level, and each child-belongs-to-another-parent
   mismatch, all without mutating or revealing the other occurrence
 - **Affectedness authority matrix**: cover every source state with
-  `manage_packages` non-`FIXED`, `admin_ticket_ops` `FIXED`, system `FIXED`,
-  protected final-state no-op, and rejected system non-`FIXED` outcomes; verify
-  alternative capability authorization before accessibility
+  `manage_packages` non-`FIXED`, `manage_packages` `FIXED` on a locked CVE-less
+  Ticket, rejection of that same request after CVE association,
+  `admin_ticket_ops` `FIXED`, system `FIXED`, protected final-state no-op, and
+  rejected system non-`FIXED` outcomes; verify generic alternative-capability
+  authorization before accessibility and the CVE-less condition only afterward
 - **Concurrent direct mutations**: independent sessions serialize on the
   Ticket lock, return results from winner-current state, and preserve truthful
   audit old/new values without duplicate assignment or reconciliation. Cover
@@ -1496,6 +1558,13 @@ transitions. The test must cover:
   IBS track is created, no publication for every documented non-triggering
   outcome, no publication before commit, and best-effort failure without
   rollback; no dedicated submission task is used
+- **Ticket convergence workflow**: enumerate included and soft-deleted package
+  markers; run SMELT target and maintainership resolution for every package;
+  commit successful packages independently; isolate every package failure;
+  attempt all registered catch-up publications and aggregate dispatch failures;
+  retry the complete workflow at 5/10/20 seconds; log terminal outcomes; accept
+  concurrent duplicate workflows; and create no progress row, `FetcherRun`,
+  Redis guard, restoration, or workflow audit event
 
 ## Cross-references
 

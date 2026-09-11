@@ -43,6 +43,8 @@ authorization level using one of the following formats:
 - **`Access: Authenticated`** — any logged-in user regardless of role
 - **`Capability: <capability_name>`** — requires the specified capability
   (e.g., `Capability: create_ticket`)
+- **`Capability: <capability_a> OR <capability_b>`** — requires at least one
+  listed capability; see Authorization Chain Evaluation Order
 
 The intentional field name change between `Access` and `Capability`
 serves as a visual indicator: `Access` means "authentication level
@@ -120,13 +122,15 @@ This ordering is security-significant: the capability check (step 2)
 fires before the accessibility check (step 3), preventing ticket
 existence probing via differentiated error codes.
 
-When validated payload content makes one capability substitute for another,
-step 2 determines the required capability without loading the Ticket and checks
-it before Ticket accessibility. For example, changing package track
-affectedness requires `admin_ticket_ops` when `status = fixed`, and
-`manage_packages` for every other status. A caller lacking the required
-capability receives the same generic 403 regardless of whether the Ticket or
-nested package-tree path exists.
+When an operation accepts alternative capabilities, step 2 checks the
+documented capability union without loading the Ticket. A caller lacking every
+alternative receives the same generic 403 regardless of whether the Ticket or
+nested resource exists. Any condition that requires current Ticket state is
+then enforced only after accessibility and under the Ticket lock. For example,
+`status = fixed` accepts `admin_ticket_ops OR manage_packages` before
+accessibility; under lock, `manage_packages` alone is sufficient only when
+`Ticket.cve_id IS NULL`. Ticket convergence rerun similarly accepts
+`triage_ticket OR manage_fetchers`, then checks status eligibility under lock.
 
 For CVE endpoints that are capability-protected and operate on a
 specific CVE, the same pattern applies:

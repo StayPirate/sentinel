@@ -465,20 +465,21 @@ the `CVENotInSource` signal class are defined in
 
 Fetchers whose `execute()` scope is filtered by ticket status (e.g.,
 `sync_redhat_cves` scopes to CVEs with active tickets) skip inactive
-tickets during periodic runs. When a ticket is reactivated (from
-Ignored, Duplicated, or Resolved), the system enqueues per-ticket
-catch-up tasks to recover data missed during the inactive period.
+tickets during periodic runs. Ticket convergence enqueues per-ticket catch-up
+tasks after every manual-zone exit and every `Resolved` regression to recover
+data missed while the Ticket was outside ticket-scoped monitoring. A
+manual-zone exit registers catch-up even when its immediate gate result is
+`Resolved`.
 
 The catch-up mechanism is a method on `BaseFetcher`:
 
 ```python
 async def catch_up(self, ticket_id: str, session: AsyncSession) -> None:
-    """Per-ticket catch-up after reactivation.
+    """Per-ticket catch-up during Ticket convergence.
 
-    Called when a ticket transitions from an inactive status
-    (Ignored, Duplicated, Resolved) to an active status. The
-    fetcher retrieves data that was missed during the inactive
-    period.
+    Called after a manual-zone exit or a Resolved regression. The fetcher
+    retrieves data missed while the Ticket was outside ticket-scoped
+    monitoring.
 
     Optional. Only applicable to fetchers whose execute() scope
     is filtered by ticket status. Global fetchers (product catalog,
@@ -495,7 +496,7 @@ async def catch_up(self, ticket_id: str, session: AsyncSession) -> None:
 ```python
 class BaseFetcher:
     async def catch_up(self, ticket_id: str, session: AsyncSession) -> None:
-        """Per-ticket catch-up after reactivation.
+        """Per-ticket catch-up during Ticket convergence.
 
         Override point. BaseCVEFetcher provides the default
         implementation for CVE fetchers. Non-CVE fetchers override
@@ -609,9 +610,16 @@ def run_catch_up(self, fetcher_name: str, ticket_id: str) -> None:
     except (NotImplementedError, CVENotInSource, ValueError):
         return  # already handled inside _run — defensive outer catch
     except Exception as e:
-        if is_retryable_condition(e):
+        if is_retryable_condition(e) and self.request.retries < self.max_retries:
             self.retry(exc=e, countdown=5 * 2 ** self.request.retries)
-        raise  # non-retryable — task fails permanently
+        logger.error(
+            "ticket_catch_up_failed",
+            ticket_id=ticket_id,
+            fetcher_name=fetcher_name,
+            cause=type(e).__name__,
+            celery_task_id=self.request.id,
+        )
+        raise  # non-retryable or retries exhausted — task fails permanently
 ```
 
 `run_catch_up` is a Celery `bind=True` task. `self.retry(exc=e,
@@ -732,22 +740,38 @@ execution. The following additional rules apply:
     The method MUST only propagate an exception when all items have
     failed, indicating infrastructure failure. Partial failure (some
     items succeed, some fail) MUST result in a normal return — the
-    failed items are logged per-item with `ticket_id`, fetcher name, affected
+    failed items are logged at WARNING with `ticket_id`, fetcher name, affected
     item identity, sanitized cause, and the task-bound `celery_task_id`.
     Recovery then follows the owning feature's contract. When periodic
     `execute()` cannot rediscover the same historical work, the owner MUST
     document the accepted limitation and an explicit idempotent operator rerun
     path rather than claim automatic periodic recovery
+    A Ticket that re-enters `Ignored` or `Duplicated` while catch-up is running
+    is an expected stale/inapplicable no-op, not an item failure. The override
+    rolls back any uncommitted local unit and returns normally when no relevant
+    item remains; it MUST NOT propagate a terminal failure or require operator
+    rerun for that state race.
+- **Terminal observability**: after retry exhaustion, or immediately for an
+  unhandled non-retryable catch-up failure, `run_catch_up` emits one structured
+  ERROR with `ticket_id`, `fetcher_name`, sanitized cause, and the task-bound
+  `celery_task_id`. It creates no `FetcherRun` or workflow audit event. Recovery
+  for a Ticket-convergence catch-up is the complete operator rerun defined by
+  `POST /api/v1/tickets/{ticket_id}/rerun-reactivation`, not a claim that the
+  generic single-fetcher trigger reproduces the ordered workflow.
 - **Post-commit enqueue**: `run_catch_up` tasks MUST be enqueued
   after the caller's transaction commits, consistent with the
   post-commit enqueue pattern used by `trigger_on_demand_fetch()`.
   Enqueuing before commit risks catch-up tasks running against
   uncommitted data.
-  `reconcile_ticket_status()` registers, but does not publish, the
-  reactivation workflow during its caller-owned transaction. After commit,
+  `reconcile_ticket_status()` registers, but does not publish, the Ticket
+  convergence workflow during its caller-owned transaction. After commit,
   that workflow completes package-tree re-resolution before it enqueues the
-  registered `run_catch_up` tasks. See `package-model.md` (Reactivation and
+  registered `run_catch_up` tasks. See `package-model.md` (Ticket
   Convergence).
+  Each publication uses the participating fetcher class's `queue` attribute:
+  pass `queue=fetcher_cls.queue` when it is non-`None`, and omit the parameter
+  otherwise. This preserves the worker-affinity contract for
+  `BaseGitFetcher` catch-up while leaving ordinary fetchers on default routing.
 - **Concurrency safety**: no guard on ticket status is required before
   executing `catch_up()`. If a ticket is re-deactivated after catch-up
   tasks are enqueued but before they execute, the tasks run to
@@ -755,32 +779,34 @@ execution. The following additional rules apply:
   `catch_up()` are factually correct (the external data is real
   regardless of ticket status), and `reconcile_ticket_status()`
   respects the current ticket status. Duplicate enqueuing (e.g., two
-  rapid reactivations) is also safe because `catch_up()` is idempotent.
+  rapid convergence requests) is also safe because `catch_up()` is idempotent.
   **Concurrent catch-up and periodic execution**: if a ticket is
-  reactivated shortly before a periodic `execute()` run, both
+  converged shortly before a periodic `execute()` run, both
   `catch_up()` and `execute()` may call `fetch_single()` for the same
   CVE concurrently. This is safe — `upsert_cve()` uses `FOR UPDATE`
   locks and unique constraints, so the second call is a no-op or an
   idempotent update. The duplicated external API call is acceptable
-  given the low frequency of reactivation events relative to periodic
+  given the low frequency of convergence events relative to periodic
   schedules
 
 ### Invocation points
 
-The reactivation workflow that eventually enqueues `catch_up()` is registered
-exclusively by `reconcile_ticket_status()` (step 4) when it detects an
-inactive-state exit (Resolved, Ignored, or Duplicated → active). All inactive
-→ active transitions converge on this single invocation point:
+The Ticket convergence workflow that eventually enqueues `catch_up()` is
+registered exclusively by `reconcile_ticket_status()` (step 5) for every
+successful `Ignored` or `Duplicated` exit, including an immediate `Resolved`
+result, and for every `Resolved` regression to an active status. All such
+registrations converge on this single invocation point:
 
 - Gate-driven regression: Resolved → active (automatic)
-- Un-ignore: Ignored → active (via `ticket_service.reopen_from_ignored()`)
-- Un-duplicate: Duplicated → active (via `ticket_service.revert_duplicate()`)
+- Un-ignore: Ignored → gate zone (via `ticket_service.reopen_from_ignored()`)
+- Un-duplicate: Duplicated → gate zone (via `ticket_service.revert_duplicate()`)
 
 After the transition commits, the package-domain phase re-resolves persisted
-package markers. It then calls `get_catch_up_fetchers()` and enqueues a
-`run_catch_up` Celery task for each registered fetcher. Package-tree failure is
-isolated per package and does not prevent catch-up against existing or
-successfully added records.
+package markers. It then calls `get_catch_up_fetchers()` and attempts a
+`run_catch_up` Celery publication for every registered fetcher. Package-tree
+failure is isolated per package, and one publication failure does not stop
+later publication attempts. Dispatch failures are accumulated and surfaced to
+the root Ticket convergence wrapper after the complete roster is attempted.
 
 ### Fetcher inventory
 
@@ -796,22 +822,24 @@ successfully added records.
 | `sync_ghsa_advisories` | All advisories (global) — but has `fetch_single` | **Inherited from `BaseCVEFetcher`** | Same as NVD |
 | `sync_osv_advisories` | CVEs with active tickets | **Inherited from `BaseCVEFetcher`** | Extract `cve_id` → call OSV API → upsert affected versions/refs/packages |
 | `detect_ibs_track_releases` | IBS tracks in active tickets | **Custom override** | Extract the Ticket's eligible IBS tracks and apply the same per-track checkpoint/current-state reconciliation as periodic execution |
-| `detect_ibs_product_releases` | Product occurrences below IBS tracks in active tickets | **Custom override** | Check current `updateinfo.xml` data, including valid advisories that predate reactivation |
+| `detect_ibs_product_releases` | Product occurrences below IBS tracks in active tickets | **Custom override** | Check current `updateinfo.xml` data, including valid advisories that predate Ticket convergence |
 | `sync_ibs_requests` | IBS tracks in active tickets | **Custom override** | Apply the same complete per-track request, correlation, provenance, and delivery reconciliation as periodic execution |
 | `evaluate_lifecycle_transitions` | Product eligibility and gate-zone Ticket lifecycle reconciliation | **Custom override** | Verify lifecycle-aware current state after manual-zone eligibility convergence or an ordinary `Resolved` regression; EOL actionability itself is derived |
 
 `sync_ibs_requests.catch_up()` has no reduced catch-up algorithm: it
 applies the complete periodic reconciliation independently to every
 relevant IBS track under the Ticket. The fetcher declares no custom
-settings, and operator reruns use the existing generic manual fetcher
-trigger. The complete domain contract remains in
+settings. A generic manual fetcher trigger can still accelerate the complete
+system-wide periodic reconciliation, but recovery from a terminal
+Ticket-scoped catch-up failure uses the complete Ticket convergence rerun; the
+generic trigger is not a substitute for that ordered workflow. The complete domain contract remains in
 `docs/features/packages/ibs-submission-tracking.md`.
 
 Note: for NVD, MITRE, and kernel CVE fetchers, `execute()` is global
 (not filtered by ticket status), but they still benefit from
 `catch_up()` because their `fetch_single()` method already exists for
 on-demand discovery. The default `catch_up()` inherited from
-`BaseCVEFetcher` gives them ticket reactivation support for free.
+`BaseCVEFetcher` gives them Ticket convergence support for free.
 
 #### Fetchers that do NOT need `catch_up()` (global scope)
 
@@ -826,7 +854,7 @@ Note: `sync_cisa_kev` inherits from `BaseCVEFetcher` but is excluded from
 catch-up because its `supports_fetch_single = False` attribute causes
 `participates_in_catch_up` to be auto-derived as `False` via
 `BaseCVEFetcher.__init_subclass__`. Its `execute()` syncs the entire catalog
-on every run — there is no gap to recover after ticket reactivation. The CISA
+on every run — there is no gap to recover after Ticket convergence. The CISA
 KEV catalog is monolithic with no per-CVE API, so `fetch_single_cve` is never
 dispatched for this fetcher either. In contrast,
 `sync_nvd_cves`, `sync_mitre_cves`, `sync_kernel_cves`,

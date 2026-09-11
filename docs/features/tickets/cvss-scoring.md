@@ -340,7 +340,7 @@ propagation dispositions:
 - `immediate`: the current locked CVSS chain applies automatic Product
   eligibility and any required final Ticket reconciliation before returning;
 - `deferred_until_reactivation`: Ticket-owned propagation waits for the
-  reactivation workflow; or
+  Ticket convergence workflow registered by manual-zone exit; or
 - `none`: the serialized operation made no effective mutation.
 
 The following matrix is authoritative:
@@ -697,7 +697,7 @@ testing strategy.
   CVE ingestion. Assert `CVE` then `Ticket` acquisition, truthful winner action,
   HTTP status, metric, audit value, and propagation disposition.
 - Cross-reference the complete Product formula, audit ordering, one-date,
-  one-reconciliation, rollback, association, reactivation, default-version,
+  one-reconciliation, rollback, association, convergence, default-version,
   and CVSS/override race coverage required by `ticket-mutations.md` and
   `package-service.md`; parser and resolution tests remain owned here.
 - GET and POST reuse of the same item schema for all four versions; exact
@@ -725,7 +725,7 @@ new table, column, enum, constraint, or migration.
 - `docs/features/tickets/cve-service.md` - Source-neutral CVE ingestion
 - `docs/features/platform/cve-record-parser.md` - CVE Record extraction
 - `docs/features/packages/package-model.md` - Orthogonal eligibility rules
-- `docs/features/packages/package-service.md` - Ordinary Product mutation and reactivation ownership
+- `docs/features/packages/package-service.md` - Ordinary Product mutation and Ticket convergence ownership
 - `docs/features/platform/system-settings.md` - Default-version operations
 - `docs/features/platform/testing-strategy.md` - Test tiers and requirements
 - `docs/features/identity/rbac.md` - Capabilities and endpoint permission map

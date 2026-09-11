@@ -261,8 +261,9 @@ them fails, all local effects for that track roll back and the old checkpoint
 remains. The detector never creates a second audit event.
 
 If the Ticket moved to `Ignored` or `Duplicated` before the local transaction,
-the package-service operability guard rejects the mutation; the track fails and
-retains its old checkpoint. A track selected while active may still complete a
+the package-service operability guard rejects the mutation; the track returns a
+successful stale/inapplicable no-op and retains its old checkpoint. A track
+selected while active may still complete a
 factual update after a concurrent transition to `Resolved`, consistent with the
 operable-Ticket mutation and in-flight catch-up contracts.
 
@@ -408,7 +409,7 @@ HTTP status codes, and bounded reason categories may be logged.
 | Malformed or interrupted source-info XML | Fail every dependent track in that request | Same as above |
 | Source diff HTTP or parser failure | Fail every dependent track sharing that diff | Same as above |
 | Persisted history authoritatively unavailable | Warn and use `orev=0`; fail only if fallback fails | Current-state fallback, then ordinary retry |
-| Ticket becomes `Ignored`/`Duplicated`, track disappears, or scope identity changes | Roll back local work and fail that track | Reactivation or later corrected invocation |
+| Ticket becomes `Ignored`/`Duplicated`, track disappears, or scope identity changes | Roll back local work and return a successful stale/inapplicable no-op for that track | Later qualifying Ticket convergence or corrected invocation |
 | Concurrent checkpoint predecessor changed | Already-complete no-op, re-evaluate, or fail without writing stale state | Current or later invocation |
 | Status becomes final during I/O | Leave status unchanged; accept examined checkpoint | None |
 | No matching CVE evidence | Leave status unchanged; accept examined checkpoint | None |
@@ -539,7 +540,7 @@ delivery order, and duplicate delivery are not checkpoint authority.
 ## Cross-references
 
 - `package-model.md` — workflow scope, active Tickets, release dimensions,
-  reactivation, and checkpoint safety
+  Ticket convergence, and checkpoint safety
 - `package-service.md` — status mutation, Ticket locking, audit ownership, and
   Ticket reconciliation
 - `../integrations/ibs-integration.md` — IBS HTTP and XML contracts

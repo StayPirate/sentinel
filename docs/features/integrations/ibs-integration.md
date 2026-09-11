@@ -30,7 +30,7 @@ below a Git track is outside IBS scope. Package maintainership is not an IBS
 consumer: Sentinel obtains it exclusively from SMELT for both IBS and Git/SLFO
 package occurrences.
 
-The complete active-ticket, reactivation, acceleration, and recovery ownership
+The complete active-ticket, Ticket-convergence, acceleration, and recovery ownership
 contract is defined in `docs/features/packages/package-model.md` (IBS Workflow
 Applicability and Convergence).
 
@@ -637,7 +637,7 @@ path use this same boundary. Full behavior is documented in
   correlation, provenance, and delivery reconciliation for the finite set of
   active-Ticket IBS tracks. It has no cursor or temporal lookback setting. The
   existing generic fetcher catch-up accelerates the same reconciliation after
-  package addition and Ticket reactivation. Request RabbitMQ events invoke it
+  package addition and Ticket convergence. Request RabbitMQ events invoke it
   inline for relevant track scopes; there is no dedicated correlation or
   discovery Celery task. See
   `docs/features/packages/ibs-submission-tracking.md`.
@@ -658,7 +658,7 @@ path use this same boundary. Full behavior is documented in
    Package-tree exclusion and actionability)
 4. Every IBS consumer selects `TicketPackageTrack.workflow_type = ibs`; a Git
    reference is never interpreted as an IBS project
-5. Ordinary IBS polling covers active Tickets only. Ticket reactivation first
+5. Ordinary IBS polling covers active Tickets only. Ticket convergence first
    reconciles its package tree, then runs targeted source-specific catch-up
 6. Track release detection reconciles only existing represented tracks. It
    never discovers CVEs or creates Tickets, packages, tracks, or Products

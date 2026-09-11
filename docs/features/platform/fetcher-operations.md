@@ -32,6 +32,14 @@ The `GET /api/v1/ibs-consumer/status` endpoint is defined in
 observes the standalone IBS RabbitMQ consumer and is not a fetcher
 operation.
 
+The Ticket-scoped recovery action
+`POST /api/v1/tickets/{ticket_id}/rerun-reactivation` is defined in
+`docs/features/tickets/tickets.md`, not here. It dispatches the complete Ticket
+convergence workflow: package and maintainership re-resolution followed by all
+registered catch-ups. Triggering one fetcher through
+`POST /api/v1/fetchers/{fetcher_name}/trigger` is not equivalent and cannot
+replace that recovery action.
+
 ## Fetcher Operations Service
 
 ### Module Location
@@ -1212,6 +1220,13 @@ single-CVE fetches via standalone Celery tasks (not through this trigger
 endpoint). These on-demand fetches are sub-operations that do not create
 `FetcherRun` records. See `docs/features/tickets/cve-service.md`,
 "On-Demand Fetch: fetch_single_cve".
+
+**Note on Ticket convergence**: this endpoint always executes one named
+fetcher's normal complete scope and creates a `FetcherRun`. It does not
+enumerate one Ticket's package markers, preserve Ticket convergence ordering,
+or dispatch the complete per-Ticket catch-up roster. Use
+`POST /api/v1/tickets/{ticket_id}/rerun-reactivation` for that operation; its
+root task ID is transient and is not a `FetcherRun`.
 
 ### Get Fetcher Config
 

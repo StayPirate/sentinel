@@ -43,7 +43,7 @@ no exclusion provenance, restore mutation, or package-tree audit event.
 | Source | Local (no external source) |
 | Scope | Product eligibility mismatches and gate-zone Tickets requiring lifecycle-aware reconciliation |
 | Auth | N/A |
-| `participates_in_catch_up` | `True` — verifies lifecycle-aware gate state after reactivation; it does not repeat eligibility calculation already owned by the triggering or manual-zone-exit workflow |
+| `participates_in_catch_up` | `True` — verifies lifecycle-aware gate state during Ticket convergence; it does not repeat eligibility calculation already owned by the triggering or manual-zone-exit workflow |
 | Custom settings | No |
 
 The default schedule follows `sync_smelt_products` at 01:00 UTC,
@@ -195,7 +195,7 @@ the transition's single final gate reconciliation. For a `Resolved` regression,
 the triggering gate-zone workflow has already maintained current eligibility.
 The catch-up therefore verifies current lifecycle/actionability state and
 normally returns without a mutation. It never recalculates existing Product
-eligibility as part of this reactivation invocation.
+eligibility as part of this Ticket convergence invocation.
 
 The passed session is used only to verify that the Ticket exists and determine
 whether current persisted status differs from current lifecycle-aware gates. A

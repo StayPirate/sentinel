@@ -38,7 +38,7 @@ boundary, which is intentionally not represented by an event type.
 | `package_maintainer_added` | Package resolution creates one `TicketPackageMaintainer` association | `NULL` | `NULL` | Event-time target username | `NULL` | `{"package": "fictional-package"}` |
 | `package_excluded` | Package directly soft-deleted by an authorized acting user. Child tracks and Products are not modified and do not generate events; they become effectively excluded through the hierarchy | Acting user | Package name | `NULL` | `NULL` | `NULL` |
 | `package_restored` | Directly excluded package restored to ticket. Only the package record is restored — child records are not modified | Acting user | `NULL` | Package name | `NULL` | `NULL` |
-| `track_status_changed` | Track status changed (VA action, admin force-FIXED, or release detection) | Acting user for user-attributed changes, `NULL` for automatic transitions (e.g., release detected sets FIXED) | Old status | New status | `NULL` | `{"track": "...", "package": "..."}` (see detail contract) |
+| `track_status_changed` | Track status changed (authorized user action, including CVE-less `manage_packages` or unrestricted `admin_ticket_ops` FIXED, or release detection) | Acting user for user-attributed changes, `NULL` for automatic transitions (e.g., release detected sets FIXED) | Old status | New status | `NULL` | `{"track": "...", "package": "..."}` (see detail contract) |
 | `product_released` | Product release detected via updateinfo.xml | `NULL` | `NULL` | Advisory-issued `released_at` timestamp in UTC ISO 8601 format | `NULL` | Product subject plus `advisory_id` (see detail contract) |
 | `ticket_created` | Ticket created (CVE ingestion or manual creation) | `NULL` for automatic creation, creating user for manual creation | `NULL` | `NULL` | Creation source description (e.g., `"CVE ingested from NVD"` or `"Ticket created manually"`) | `NULL` |
 | `cve_associated` | CVE associated with a ticket that previously had no CVE | Acting user for explicit association; creating user or `NULL` when included in Ticket creation | `NULL` | CVE-ID string (e.g., `"CVE-2024-1234"`) | `NULL` | `NULL` |
@@ -136,6 +136,12 @@ boundary, which is intentionally not represented by an event type.
   lifecycle-only actionability changes create no exclusion/restoration event.
 - All events include an implicit `created_at` timestamp set by the database
   default.
+- Dispatching or executing the Ticket convergence workflow, including an
+  operator rerun, creates no event of its own. Effective delegated domain
+  mutations retain their existing event contracts. Operational request,
+  retry, partial-failure, and terminal-failure evidence belongs in structured
+  logs; audit history is never used as workflow provenance or current-state
+  input.
 
 ### detail JSONB Schema Contract
 
@@ -373,9 +379,11 @@ Tests for any Ticket mutation that requires an event MUST verify:
     acting user; tests assert the documented event order
 17. Manual-SUSE CVSS chains assert optional assignment and system
     `New → Analysis` precede direct CVSS records, changed automatic Product
-    events follow severity in `TicketPackageProduct.id` order, and any final
-    gate status event is last. External and default-version system chains never
-    create assignment
+    events follow severity in `TicketPackageProduct.id` order, optional
+    inactive-assignee sanitation follows all gate-input mutations, and any
+    final gate status event is last. External and default-version system chains
+    never auto-assign an actor, but may create the system sanitation event when
+    their final result is `Analysis` or `Analyzed`
 18. Automatic eligibility tests assert exact actor, reason, cardinality, and
     no-event behavior for unchanged, override-skipped, manual-zone-deferred or
     skipped, rejected, not-found, concurrent no-op, and rollback outcomes;
