@@ -29,6 +29,28 @@ required by the routing rules below. Read only what the task needs, but read the
 complete named section, including its nested subsections and any authority that
 it directly requires. Do not recursively follow merely informational links.
 
+For localized work, the unit of required reading is the **complete governing
+contract**, not mechanically the entire file that contains it. A complete
+governing contract includes:
+
+- the document's scope and authority rules that determine how to interpret the
+  affected content;
+- the complete affected section, including nested subsections;
+- applicable defaults, invariants, exceptions, and definitions declared
+  elsewhere in the same document;
+- sections of directly invoked authorities needed to interpret or change the
+  contract; and
+- relevant reverse references whose callers, consumers, or dependent contracts
+  could be affected by the change.
+
+Use contents tables, heading searches, symbol searches, and references to locate
+these parts before reading them. Search results and summaries are navigation
+aids, not substitutes for reading the resulting contract. Expand to the
+complete document when the contract boundary is unclear, the change affects a
+document-wide invariant, or targeted inspection reveals broader coupling. The
+explicit full-document and full-owning-specification requirements below still
+take precedence.
+
 Inspect the actual filesystem, not only tracked files. Ignored and untracked
 files may contain important local work. Read an existing file before
 overwriting or modifying it.
@@ -37,6 +59,41 @@ Routes are cumulative: apply every matching route. If the scope expands, route
 again and complete the additional reads before proceeding in the expanded
 area. Plan, Explore, primary agents, and fresh reviewer subagents each route
 independently; never assume that a child session inherited a parent's reads.
+
+### Change-scoped review and incremental follow-up
+
+For a review tied to a change, start from the declared scope and diff, then read
+the complete governing contracts and implementation dependencies needed to
+assess that change. Use targeted repository-wide searches to discover reverse
+references, duplicate registrations, callers, consumers, and invariant impact;
+do not turn those searches into exhaustive file reads unless a match or an
+applicable contract requires it. A specialist review is not a whole-repository
+audit unless its trigger, the change's demonstrated impact, or the user
+explicitly requires one. If the impact cannot be bounded confidently, expand
+the review rather than assuming locality.
+
+The declared scope is the caller's stated task together with the tracking
+issue's Scope, Acceptance criteria, and later scope decisions when an issue
+exists. The diff shows the submitted change but does not override an explicit
+scope commitment or deferral.
+
+The primary agent may resume the same reviewer child session for a follow-up to
+the same work item when the reviewer role, repository base, declared scope, and
+applicable authorities are unchanged and the prior context remains available.
+Pass the new diff or changed material and the previous findings; the reviewer
+must reread changed contracts and code, verify the resolutions, and check the
+delta for regressions. Start a fresh reviewer session when any validity
+condition fails, the earlier context was compacted or is uncertain, or the
+review scope changed materially. Session reuse never allows a reviewer to rely
+on the primary agent's unverified summary or skip a mandatory review. Separate
+per-spec sessions required for full-repository coherence or gap analysis remain
+independent.
+
+Reviewer reports prioritize findings and evidence. Keep positive summaries to
+one concise statement and omit empty optional finding categories unless the
+specialist output contract requires a fixed table or section. Always retain the
+reviewed scope, material limitations, concrete evidence for each finding, and
+the required verdict or recommendation.
 
 ### Stop conditions before retained work
 
@@ -184,19 +241,20 @@ authority:
 
 Complete applicable reads before the first concrete recommendation, retained
 edit, external-evidence capture, reviewer finding, or governed workflow action.
-Minimal inspection needed to classify the task may occur first. For a localized
-change, read the named relevant sections; read the complete document for a new
-feature, architectural boundary, cross-layer design, broad refactor, or
-genuinely cross-cutting change.
+Minimal inspection needed to classify the task may occur first. For localized
+work, read the complete governing contract as defined above. Read the complete
+document for a new feature, architectural boundary, cross-layer design, broad
+refactor, genuinely cross-cutting change, or whenever the governing contract
+cannot be bounded confidently.
 
 ### Product and architecture
 
 - **Feature behavior or implementation:** read the complete owning feature
-  specification and every cross-cutting contract it directly invokes before
-  planning behavior or editing. Also read the API-first design constraint before
-  defining a consumer-facing operation, and ensure every required operation and
-  query capability has an API surface. Recheck the owning spec during
-  conformance review.
+  specification and the complete governing contract from every cross-cutting
+  authority it directly invokes before planning behavior or editing. Also read
+  the API-first design constraint before defining a consumer-facing operation,
+  and ensure every required operation and query capability has an API surface.
+  Recheck the owning spec during conformance review.
 - **New feature, architecture boundary, cross-layer dependency, persistence
   choice, runtime process, or integration classification:** read complete
   `docs/architecture.md` before recommending a design or starting retained
@@ -248,12 +306,18 @@ genuinely cross-cutting change.
 - **Celery task, worker, or Beat lifecycle:** read the relevant infrastructure
   spec, Backend Layer Architecture, and sync/cross-loop conventions before
   proceeding.
-- **Fetcher:** read complete
-  `docs/features/platform/fetcher-infrastructure.md`; also read CVE and Git
-  fetcher infrastructure when applicable, plus the owning fetcher spec and
-  registry in `docs/data-sources.md`. `BaseGitFetcher` subclasses use inherited
-  delta-flow hooks and do not override `execute()`. Distinguish documented
-  sub-operation tasks from independently scheduled fetchers.
+- **Fetcher:** read the complete applicable governing contracts in
+  `docs/features/platform/fetcher-infrastructure.md`, including classification,
+  the relevant base lifecycle, documentation, registry, and task integration;
+  add settings, HTTP, schedule, concurrency, stale-run, or audit contracts when
+  the change implicates them. Also read the applicable governing contracts in
+  the CVE and Git fetcher infrastructure specifications, the complete owning
+  fetcher spec, and the registry entry in `docs/data-sources.md`.
+  `BaseGitFetcher` subclasses use inherited delta-flow hooks and do not override
+  `execute()`. Distinguish documented sub-operation tasks from independently
+  scheduled fetchers. Read an infrastructure specification completely when a
+  new base abstraction or cross-cutting lifecycle change prevents a narrower
+  contract boundary.
 - **Redis, cache, distributed guard, or post-commit publication:** read the
   complete Redis and Transaction Hygiene conventions, the architecture
   persistence decisions, and the owning feature's key, TTL, value, and
@@ -295,7 +359,10 @@ genuinely cross-cutting change.
   apply Function Specification Completeness; for API-facing service errors,
   apply Service Exception Conventions and the `docs/api-spec.md` error registry.
 - **API, schema, configuration, source, deployment, or CLI contract:** read the
-  corresponding complete cross-cutting document before changing its contract.
+  complete governing contract in the corresponding cross-cutting document
+  before changing it. Read that document completely when adding or changing a
+  shared convention, document-wide invariant, or contract whose impact cannot
+  be bounded confidently.
 - **Roadmap language in behavioral documentation:** read Roadmap Independence
   before proceeding. Planning identifiers belong in planning artifacts or
   issues, not behavioral authorities.
@@ -309,7 +376,9 @@ genuinely cross-cutting change.
   files are not hot-reloaded.
 - **Reviewer work:** read the reviewer's definition, the applicable trigger
   below, every route matching the reviewed change, the issue/PR including
-  comments, and changed files before producing findings or a verdict.
+  comments, changed files, and the complete governing contracts before
+  producing findings or a verdict. Apply Change-scoped review and incremental
+  follow-up; reviewer-specific broader reads still take precedence.
 
 ### GitHub and release workflow
 

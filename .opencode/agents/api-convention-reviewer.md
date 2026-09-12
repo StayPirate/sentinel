@@ -140,15 +140,17 @@ API conventions so that implementation can proceed without design ambiguity.
 
 ## Before reviewing
 
-1. Read `docs/api-spec.md` — focus on the thematic convention sections
+1. Read the applicable governing contracts in `docs/api-spec.md`, including
+   the thematic convention sections
    (Fundamentals, Authentication and Authorization, Request Conventions,
    Response Conventions, Identifier Resolution, Mutation Conventions,
    Naming Conventions)
 2. Read the feature spec provided for review
-3. If the spec references other feature specs that define related endpoints,
-   read those for context (first level of depth only)
-4. Read `docs/data-model.md` if the spec defines endpoints that return or
-   mutate data entities — verify field names and types are consistent
+3. If changed endpoint contracts invoke related endpoints in other feature
+   specs, read the first-level contracts needed to interpret that relationship
+4. Read the applicable entity contracts in `docs/data-model.md` if the spec
+   defines endpoints that return or mutate data entities — verify field names
+   and types are consistent
 5. Read the **Endpoint Permission Map** in `docs/features/identity/rbac.md`
 
 ## What to check

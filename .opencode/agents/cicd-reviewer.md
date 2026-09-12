@@ -160,19 +160,19 @@ plausibly defeat the check rather than merely fail it:
 
 ## Before reviewing
 
-1. Read `docs/deployment.md` — **CI Pipeline** (workflow inventory,
-   workflow conventions, container build conventions) and **Release
-   Process** (pipeline chain, image tag semantics, configuration files,
-   repository secret). This is the authoritative source for CI/CD
-   conventions; the reviewer does not carry its own copy
-2. Read `docs/conventions.md` — Shell Scripting (embedded shell,
-   `actionlint`, tool pinning) and Runtime Version (Python version
-   source of truth)
-3. Read `docs/features/platform/testing-strategy.md` — Image / Container
+1. Establish the changed pipeline path and interacting artifacts from the diff
+2. Read the applicable governing contracts in `docs/deployment.md`: CI Pipeline
+   for workflow inventory and build conventions, and Release Process only when
+   the release chain, image tags, release configuration, or repository secrets
+   are implicated
+3. Read the applicable Shell Scripting and Runtime Version contracts in
+   `docs/conventions.md`
+4. Read `docs/features/platform/testing-strategy.md` — Image / Container
    Smoke Testing, if the change touches the image build or smoke path
-4. Read the changed artifacts and the workflows they interact with
-5. Inspect the diff (`git diff`) to distinguish what changed from
-   pre-existing content
+5. Read the changed artifacts and every workflow or script on the interacting
+   trigger, artifact, gate, or publication path. Use targeted searches to find
+   consumers; do not inspect unrelated workflows merely because they share the
+   directory
 
 ## What to check
 

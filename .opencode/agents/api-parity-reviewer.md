@@ -141,24 +141,22 @@ pagination, and sorting capabilities.
 
 ## Before reviewing
 
-1. Read `docs/api-spec.md` for shared API conventions
-2. Read `docs/architecture.md` to understand the system design
-3. Read feature specs relevant to the change being reviewed to understand
-   what operations and API endpoints are defined
-4. Read the Endpoint Permission Map in `docs/features/identity/rbac.md` as the
-   cross-cutting endpoint index
-5. List specs in `docs/features/**/` and read only those relevant to the
-   change being reviewed
-6. List files in `backend/app/api/v1/` to identify implemented endpoints
-7. If the review is triggered by a specific change, read the changed files
-   and their corresponding specs
+1. Establish the changed consumer-facing operations and query capabilities from
+   the declared scope and diff
+2. Read the complete owning feature specs, the API-first design constraint, and
+   the applicable governing contracts in `docs/api-spec.md`
+3. Read the relevant rows in the Endpoint Permission Map and the endpoint,
+   schema, service, task, or CLI implementation involved
+4. Use targeted searches for alternate consumer entry points and related API
+   routes. Do not inventory every feature spec or API module unless the review
+   is explicitly repository-wide or the operation's impact cannot be bounded
 
 ## What to check
 
 ### Operational completeness
 
-- Does every operation defined in a feature spec (create, read, update,
-  delete, workflow transition) have a corresponding REST API endpoint?
+- Does every operation in the reviewed scope (create, read, update, delete,
+  workflow transition) have a corresponding REST API endpoint?
 - Are workflow actions (assign, ignore, change status, mark as duplicate,
   reassign, etc.) exposed as dedicated API endpoints, not just as implicit
   side effects of a generic update?
@@ -177,19 +175,18 @@ pagination, and sorting capabilities.
 
 ### Query completeness
 
-- Is every filter defined in a feature spec also exposed as an API query
-  parameter?
-- Is every sort option defined in a feature spec also available via API
-  query parameters?
+- Is every filter in the reviewed scope also exposed as an API query parameter?
+- Is every sort option in the reviewed scope also available via API query
+  parameters?
 - Does the API support pagination on all list endpoints?
 - If a feature spec defines free-text search, does the API expose an
   equivalent search parameter?
 
 ### Specification completeness
 
-- Does every operation described in feature specs (`docs/features/`) have a
-  formally specified API endpoint (HTTP method, URL path, request body,
-  response schema, status codes)?
+- Does every operation in the reviewed feature-spec scope have a formally
+  specified API endpoint (HTTP method, URL path, request body, response schema,
+  status codes)?
 - Does the Endpoint Permission Map contain each endpoint defined by the
   relevant feature specs, with a link to its owning endpoint section? Flag
   missing, extra, stale, or mismatched rows

@@ -136,21 +136,23 @@ structural complexity without presenting it to the user for a decision.
 
 ## Before reviewing
 
-Before reviewing, read these documents:
+Before reviewing:
 
-1. Read `docs/features/identity/identity-audit-log.md` to understand the event type
-   contract — which event types exist, and what field values are expected
-   for each
-2. Read `docs/data-model.md` — specifically the `IdentityAuditEvent` table and the
-   `IdentityAuditEventType` enum
-3. Read `docs/features/platform/audit-trail-infrastructure.md` — understand
-   `BaseAuditLog`, `AuditEventMixin`, atomicity rules
-4. Read `docs/features/identity/user-service.md` — the centralized service
-   for all user mutations
-5. Read `docs/features/identity/api-key-service.md` — the centralized service
-   for API key lifecycle
-6. Read the owning identity specification for every other identity entity in
-   scope, especially `identity-provisioning.md` for `RoleMapping`
+1. Identify every identity mutation and event type in the declared scope and
+   diff
+2. Read the applicable event contracts in
+   `docs/features/identity/identity-audit-log.md`, including the detail schema,
+   field values, and no-event behavior for those mutations
+3. Read the `IdentityAuditEvent` and `IdentityAuditEventType` contracts in
+   `docs/data-model.md` and the applicable `BaseAuditLog`, `AuditEventMixin`,
+   and atomicity contracts in the audit infrastructure specification
+4. Read `user-service.md` for User or UserRole mutations and
+   `api-key-service.md` for API-key mutations
+5. Read the complete owning identity specification for every other identity
+   entity in scope, especially `identity-provisioning.md` for `RoleMapping`
+6. Use targeted searches for direct writes and callers outside the centralized
+   owners. Expand to the complete audit or service specifications when the
+   mutation inventory or ownership impact cannot be bounded confidently
 
 ## What to check
 
