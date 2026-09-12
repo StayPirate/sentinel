@@ -131,12 +131,20 @@ structural complexity without presenting it to the user for a decision.
 
 ## Before reviewing
 
-1. Read `docs/data-model.md` to understand the current schema specification
-2. Read `docs/conventions.md` for SQLAlchemy and naming conventions
-3. Read all model files in `backend/app/models/`
-4. Read any new or modified migration files in `backend/alembic/versions/`
-5. If the change relates to a feature, read the corresponding spec in
-   `docs/features/**/`
+1. Establish the changed entities, relationships, constraints, enums, and
+   migrations from the declared scope and diff
+2. Read their complete governing contracts in `docs/data-model.md`, including
+   the relevant overview diagram and Notes, and the applicable SQLAlchemy,
+   timestamp, naming, and enum conventions in `docs/conventions.md`
+3. Read the changed model and migration files plus directly related models
+   needed to assess relationships and constraints
+4. Use targeted repository-wide searches for reverse relationships, duplicate
+   table or constraint names, enum use, and migration dependencies; read a
+   matched file when it can affect the review, not merely because it is another
+   model
+5. If the change relates to a feature, read the corresponding owning spec in
+   `docs/features/**/`. Expand to all models or the complete data-model document
+   only for a repository-wide audit or impact that cannot be bounded
 
 ## What to check
 
@@ -198,18 +206,17 @@ structural complexity without presenting it to the user for a decision.
 
 ### Diagram-table coherence
 
-- Does every entity in the ER diagram (the overview section at the top of
-  `docs/data-model.md`) have a corresponding detailed table definition
-  later in the file?
-- Does every core entity and cross-domain relationship promised by the
-  overview appear in the appropriate diagram? Domain diagrams may use
+- Does every changed or directly related entity shown in the relevant ER
+  diagram have a corresponding detailed table definition?
+- Does every in-scope core entity and cross-domain relationship promised by
+  the overview appear in the appropriate diagram? Domain diagrams may use
   primary-key-only stubs for referenced entities
-- Do the relationships (foreign keys, cardinality) shown in the diagram
-  match the FK columns defined in the table definitions?
+- Do the in-scope relationships (foreign keys, cardinality) shown in the
+  diagram match the FK columns defined in the table definitions?
 - Are entity names identical between the diagram and the table definitions?
-- Are the key columns promised by the diagram contract (primary keys, foreign
-  keys, and discriminant fields) represented where needed to make the shown
-  relationships and entity roles accurate?
+- Are the key columns promised by the in-scope diagram contract (primary keys,
+  foreign keys, and discriminant fields) represented where needed to make the
+  shown relationships and entity roles accurate?
 
 ### Diagram readability
 

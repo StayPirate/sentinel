@@ -133,12 +133,17 @@ presenting it to the user for a decision.
 
 ## Before reviewing
 
-1. Read `docs/features/platform/testing-strategy.md` for the full testing
-   strategy (test pyramid, fixtures, coverage policy, audit trail testing,
-   mandatory test scenarios)
-2. Read the implementation code that is being tested
-3. Read the corresponding feature specification in `docs/features/**/`
-4. Read `docs/conventions.md` for testing style conventions
+1. Establish the changed behavior and test scope from the declared scope and
+   diff
+2. Read the applicable governing contracts in
+   `docs/features/platform/testing-strategy.md`, including the test tier,
+   fixtures, required scenarios, and audit testing when relevant
+3. Read the implementation code being tested and the complete corresponding
+   feature specification in `docs/features/**/`
+4. Read the applicable testing style conventions in `docs/conventions.md` and
+   targeted neighboring tests needed to assess fixture and assertion patterns.
+   Read the complete testing strategy only when the change alters shared test
+   infrastructure or its impact cannot be bounded
 
 ## What to check
 

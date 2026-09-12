@@ -135,24 +135,27 @@ structural complexity without presenting it to the user for a decision.
 
 ## Before reviewing
 
-1. Read the specification that was created or modified (provided as context
-   by the caller)
-2. Scan the specification for references to other documents:
+1. Read the complete specification that was created or modified (provided as
+   context by the caller) and identify the contracts changed by the diff
+2. Scan those changed contracts for references to other documents:
    - Explicit references (e.g., "see `docs/features/packages/package-model.md`")
    - References to `docs/data-model.md`, `docs/api-spec.md`, or
      `docs/architecture.md`
    - Implicit references: mentions of concepts, entities, statuses, or
      flows that are defined or detailed in other specs
-3. Read all referenced specifications (first level of depth only — do NOT
-   follow references from the referenced specs)
-4. Read `docs/data-model.md` if it is referenced or if the spec defines or
-   modifies any data entity
-5. Read `docs/api-spec.md` if the spec defines or modifies API endpoints
-6. Read `docs/configuration.md` if the spec defines or references any
-   environment variable or configuration setting
+3. Read first-level referenced contracts needed to interpret or compare the
+   changed obligations. Do not mechanically read informational references, and
+   do not follow references from those supporting contracts
+4. Read the applicable governing contracts in `docs/data-model.md` if the spec
+   defines or modifies a data entity
+5. Read the applicable governing contracts in `docs/api-spec.md` if the spec
+   defines or modifies API endpoints
+6. Read the applicable governing contracts in `docs/configuration.md` if the
+   spec defines or references a configuration setting
 
 Do NOT load all specs in `docs/features/**/`. Only load the specs directly
-referenced by or closely related to the one under review.
+needed by or closely related to the changed obligations. Expand when impact
+cannot be bounded confidently.
 
 ## What to check
 

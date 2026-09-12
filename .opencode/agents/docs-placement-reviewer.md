@@ -135,9 +135,10 @@ structural complexity without presenting it to the user for a decision.
 
 ## Before reviewing
 
-1. Read the file(s) that were created or modified (provided as context by
-   the caller)
-2. Read the cross-cutting documents that might be relevant:
+1. Read the complete changed contracts in the file(s) created or modified and
+   identify the candidate rule's actual scope
+2. Read the applicable governing contracts in cross-cutting documents that
+   might already own the rule:
    - `docs/conventions.md` — code patterns, naming, style
    - `docs/api-spec.md` — API envelope, errors, pagination, shared behaviors
    - `docs/data-model.md` — entities, relationships, constraints
@@ -145,8 +146,8 @@ structural complexity without presenting it to the user for a decision.
     - `docs/configuration.md` — env vars, configuration patterns
     Only read the ones that are relevant to the content under review (do NOT
    read all of them mechanically)
-3. If the modified spec references other feature specs, read those to check
-   for duplication or inconsistency
+3. If the modified contract invokes other feature specs, read the first-level
+   contracts needed to check ownership, duplication, or inconsistency
 4. Scan the modified file for:
    - Rules or patterns that could apply to other features
    - Repeated statements across sections within the same file

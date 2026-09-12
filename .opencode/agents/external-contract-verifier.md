@@ -142,8 +142,9 @@ structural complexity without presenting it to the user for a decision.
 
 1. Read the relevant fetcher specification to understand the documented
    response field mappings and expected structure
-2. Read `docs/data-sources.md` for service metadata (endpoint URLs,
-   authentication methods, rate limits, pagination patterns)
+2. Read the relevant source entry and applicable shared contracts in
+   `docs/data-sources.md` for endpoint URLs, authentication methods, rate
+   limits, and pagination patterns
 3. Read the implementation code being reviewed (parser, client, or fetcher)
 4. Inspect the sanitized fixture and recorded implementation or PR evidence
    for the live contract verification

@@ -133,23 +133,23 @@ structural complexity without presenting it to the user for a decision.
 
 ## Before reviewing
 
-1. Read `docs/api-spec.md` for shared API conventions
-2. Read `docs/architecture.md` to understand the documented system design
-3. Read `docs/data-model.md` to understand the documented schema
-4. Read `docs/conventions.md` for documentation and code style requirements
-5. Read the Endpoint Permission Map in `docs/features/identity/rbac.md` when
+1. Establish the declared scope and inspect the diff or changed files first
+2. Read the owning specifications and the complete governing contracts from
+   `docs/api-spec.md`, `docs/architecture.md`, `docs/data-model.md`, and
+   `docs/conventions.md` only when the changed documentation implicates them
+3. Read the Endpoint Permission Map in `docs/features/identity/rbac.md` when
    endpoints are in scope
-6. List all files in `backend/app/api/v1/` to identify implemented endpoints
-7. List all specs in `docs/features/**/` to identify existing feature specs
-8. If the review is triggered by a specific change, read the changed files and
-   their corresponding specs
+4. Inspect the corresponding implementation and targeted reverse references
+   needed to test the changed documentation; do not inventory all endpoints,
+   services, models, or feature specs unless the requested review is explicitly
+   repository-wide or the impact cannot be bounded
 
 ## What to check
 
 ### API documentation coverage
 
-- Is every endpoint implemented in `backend/app/api/v1/` documented in its
-  owning feature spec and indexed in the Endpoint Permission Map?
+- Is every endpoint in the reviewed scope documented in its owning feature spec
+  and indexed in the Endpoint Permission Map?
 - Does every FastAPI route decorator include a `summary` and `description`
   parameter?
 - Are request/response schemas documented with examples where helpful?
@@ -161,9 +161,8 @@ structural complexity without presenting it to the user for a decision.
 
 ### Feature specification coverage
 
-- Does every implemented feature (identifiable by service modules in
-  `backend/app/services/`) have
-  a corresponding specification in `docs/features/**/`?
+- Does every implemented feature in the reviewed scope have a corresponding
+  specification in `docs/features/**/`?
 - Are feature specs up to date with the current implementation? Flag any
   behavior described in the spec that is not implemented, or implemented
   behavior or guarantee that requires a contract but is not reflected in the
@@ -177,17 +176,18 @@ structural complexity without presenting it to the user for a decision.
 
 ### Data model coherence
 
-- Does `docs/data-model.md` accurately reflect the SQLAlchemy models in
-  `backend/app/models/`?
-- Are all tables, columns, relationships, and constraints documented?
+- Does the reviewed portion of `docs/data-model.md` accurately reflect the
+  SQLAlchemy models in scope?
+- Are all in-scope tables, columns, relationships, and constraints documented?
 - Are new models added to the spec before or together with the
   implementation?
 
 ### Architecture accuracy
 
-- Does `docs/architecture.md` reflect the current state of the system?
-- Are all external integrations listed and accurately described?
-- Are component interactions and data flows up to date?
+- Does the reviewed portion of `docs/architecture.md` reflect the current
+  state of the system?
+- Are external integrations in scope listed and accurately described?
+- Are affected component interactions and data flows up to date?
 - If new services, task workers, or integrations have been added, are they
   documented?
 

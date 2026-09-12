@@ -132,19 +132,21 @@ structural complexity without presenting it to the user for a decision.
 
 ## Before reviewing
 
-1. Read `docs/features/platform/fetcher-infrastructure.md` for the generic
-   lifecycle, data model, and compliance contract
-2. Read `docs/features/platform/cve-fetcher-infrastructure.md` for CVE
-   fetchers and `docs/features/platform/git-fetcher-infrastructure.md` for
-   git-based fetchers when applicable
-3. Read `backend/app/services/base_fetcher.py`,
-   `backend/app/services/base_cve_fetcher.py`, and
-   `backend/app/services/base_git_fetcher.py` when present and applicable
-4. Read all fetcher files in `backend/app/services/` and
-   `backend/app/tasks/`
-5. Read `docs/conventions.md` for naming and style conventions
-6. If the fetcher relates to a specific feature, read the corresponding
-   spec in `docs/features/**/`
+1. Classify the changed operation, then read the complete governing contracts
+   for that classification and lifecycle in
+   `docs/features/platform/fetcher-infrastructure.md`
+2. Read the applicable governing contracts in the CVE and Git fetcher
+   infrastructure specs only when the fetcher uses those specializations
+3. Read the applicable base implementation, the changed fetcher, its registry
+   and discovery wiring, its task integration, tests, and complete owning spec
+4. Use targeted repository-wide searches for duplicate fetcher names,
+   registrations, direct Celery scheduling, and bypasses of the applicable
+   base; inspect matches that can affect compliance instead of reading every
+   service and task file
+5. Read applicable naming and style contracts in `docs/conventions.md`. Expand
+   to the complete infrastructure specs or all fetchers only for changes to the
+   shared lifecycle, registry mechanism, base abstractions, or an explicitly
+   repository-wide audit
 
 ## What to check
 

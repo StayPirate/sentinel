@@ -27,6 +27,11 @@ prerequisites already exist and are tested. If a prerequisite or required
 contract is absent, stop rather than creating it ad hoc. State the plan, then
 proceed unless it exposes a decision that requires the user.
 
+The complete-owning-specification requirement above remains mandatory for
+backend feature implementation. For supporting cross-cutting authorities, use
+the complete governing-contract rule in `AGENTS.md` and expand to the full
+document whenever the contract boundary or impact cannot be bounded safely.
+
 ## Gap Protocol
 
 A specification gap exists only when implementation would require inventing
@@ -85,6 +90,12 @@ After implementation, invoke every reviewer required by the applicable
 trigger and skip rules in `AGENTS.md`. Evaluate each finding independently
 under Guardrail 26 before acting; obtain a user decision before a resolution
 that adds structural complexity.
+
+Scope each review from the declared change and applicable contracts, then let
+the reviewer expand for demonstrated dependencies or unresolved impact. For a
+follow-up to the same review, resume the same reviewer session only under the
+validity conditions in `AGENTS.md`; otherwise start a fresh session. Never use
+session reuse to skip an independently required review.
 
 Run `@spec-conformance-reviewer` for every pull request regardless of changed
 paths: once before opening the PR and again before marking a substantively

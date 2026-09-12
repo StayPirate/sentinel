@@ -149,12 +149,17 @@ Do NOT report findings about them:
 
 ## Before reviewing
 
-1. Read `docs/conventions.md` for project conventions
-2. Read `docs/architecture.md` to understand the system architecture
-3. If the change relates to a feature, read the corresponding spec in
-   `docs/features/**/`
-4. If authentication or authorization is involved, read `docs/features/identity/rbac.md`
-5. Read all files involved in the change (models, schemas, services, endpoints)
+1. Establish the changed trust boundaries, inputs, privileges, secrets,
+   external calls, and dependencies from the declared scope and diff
+2. Read the complete owning feature spec and applicable governing contracts in
+   `docs/conventions.md` and `docs/architecture.md`; do not load unrelated
+   security or architecture sections mechanically
+3. If authentication or authorization is involved, read the applicable RBAC
+   contract and Endpoint Permission Map rows
+4. Read the changed files and follow security-relevant data and control flow
+   through direct callers, dependencies, and consumers. Use targeted searches
+   to discover additional paths; expand when the trust boundary cannot be
+   bounded safely
 
 ## What to check
 

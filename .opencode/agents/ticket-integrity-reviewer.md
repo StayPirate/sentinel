@@ -143,24 +143,28 @@ remain findings.
 
 ## Before reviewing
 
-1. Read `docs/features/tickets/ticket-audit-log.md` completely, including its
-   mutation/event matrix, no-event boundaries, actor rules, field contracts,
-   ordering, locking, atomicity, and testing requirements
-2. Read `docs/features/platform/audit-trail-infrastructure.md`, especially
-   Operational State Authority, Idempotent No-ops, Atomicity, Actor Field, and
-   the Audit Trail Index
-3. Read `docs/data-model.md` — specifically `TicketAuditEvent` and
-   `TicketAuditEventType`
-4. Read `docs/features/packages/package-model.md`, especially Three Orthogonal
-   Dimensions, and `docs/features/tickets/tickets.md`, especially Automatic
-   Status Evaluation and Gate Input and Reconciliation Ownership
-5. Read `docs/features/tickets/ticket-mutations.md`,
-   `docs/features/tickets/ticket-service.md`, and every other owning mutation
-   specification relevant to the change
-6. Read complete Transaction and Locking rules in `docs/conventions.md`
-7. Read all changed or relevant services, tasks, and corresponding tests
+1. Identify every Ticket-related mutation and event type in the declared scope
+   and diff
+2. Read the applicable contracts in `ticket-audit-log.md`, including the
+   mutation/event matrix rows, no-event boundaries, actor and field contracts,
+   ordering, locking, atomicity, and testing requirements for those mutations
+3. Read the applicable Operational State Authority, Idempotent No-ops,
+   Atomicity, Actor Field, and Audit Trail Index contracts in the audit
+   infrastructure specification
+4. Read the `TicketAuditEvent` and `TicketAuditEventType` contracts in
+   `docs/data-model.md`
+5. Read Three Orthogonal Dimensions in `package-model.md` and the applicable
+   status-evaluation, gate-input, and reconciliation-ownership contracts in
+   `tickets.md` when the mutation can affect those dimensions or gates
+6. Read the complete owning mutation specifications relevant to the change,
+   including `ticket-mutations.md`, `ticket-service.md`, or package-service
+   contracts as applicable, plus complete Transaction and Locking rules
+7. Read all changed or relevant services, tasks, and corresponding tests, and
+   use targeted searches for direct writes and callers outside the centralized
+   owners
 8. For a feature-spec change, read the complete changed specification and every
-   directly invoked owning contract
+   directly invoked owning contract. Expand to the complete audit or mutation
+   specifications whenever the mutation inventory or impact cannot be bounded
 
 ## What to check
 

@@ -15,6 +15,14 @@ inherits files read by its parent. OpenCode configuration-time files are not
 hot-reloaded, so restart OpenCode after changing this policy, the project
 configuration, prompts, agents, commands, or skills.
 
+For localized work, agents read the complete governing contract rather than
+mechanically loading every line of each supporting file. That contract includes
+the affected section and its nested content, governing scope, applicable
+defaults and invariants, required references, and relevant reverse references.
+Full-document and full-owning-specification requirements still apply where
+`AGENTS.md` says so, and uncertain impact expands the read rather than narrowing
+it by assumption.
+
 ## Primary Agents
 
 Primary agents are the main interaction modes, switchable with the Tab key.
@@ -74,6 +82,15 @@ contract verifier can query upstream services and intentionally allows
 family denies. `backend/tests/test_opencode_agent_permissions.py` keeps the
 baseline, ordering, comment, and three role-specific profiles synchronized
 across all reviewer definitions.
+
+Change-triggered reviews begin from the declared scope and diff, then expand
+through applicable contracts and demonstrated dependencies. They use targeted
+repository-wide searches for callers, consumers, registrations, and reverse
+references instead of treating every invocation as a repository-wide audit.
+The primary agent may resume the same reviewer child session for a follow-up
+delta only while its role, base, scope, authorities, and retained context remain
+valid; otherwise it starts a fresh reviewer session. Reports keep positive
+summaries brief while preserving scope, limitations, evidence, and verdicts.
 
 | Agent | Type | Trigger | Purpose |
 |-------|------|---------|---------|

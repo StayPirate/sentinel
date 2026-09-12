@@ -43,10 +43,17 @@ prescribing interchangeable implementation details.
 
 Before editing:
 
-1. Inspect the actual filesystem and read the complete affected document.
-2. Find and read directly related specifications and authoritative
-   cross-cutting documents so the change does not duplicate or contradict
-   existing contracts.
+1. Inspect the actual filesystem and locate the affected contract. For a
+   localized change, read the complete governing contract defined in
+   `AGENTS.md`: document scope, the complete affected section, applicable
+   defaults/invariants/exceptions, required references, and relevant reverse
+   references. Read the complete document when that boundary is unclear or the
+   change is document-wide, cross-cutting, architectural, or a new feature.
+2. Find and read the complete governing contracts from directly related
+   specifications and authoritative cross-cutting documents so the change does
+   not duplicate or contradict existing contracts. Do not load unrelated
+   portions of a supporting document merely because it contains one applicable
+   contract.
 3. Apply the file-placement, language, fictional-data, and information-
    placement rules in `AGENTS.md`, especially Guardrails 2, 4, 21, and 23.
    Obtain the user decision required by Guardrail 21 before consolidating,
@@ -61,6 +68,12 @@ After documentation or OpenCode tooling work, invoke every reviewer required
 by the applicable trigger and skip rules in `AGENTS.md`. Evaluate each finding
 under Guardrail 26 before acting; obtain a user decision before a resolution
 that adds structural complexity.
+
+Scope each review from the declared change and applicable contracts, then let
+the reviewer expand for demonstrated dependencies or unresolved impact. For a
+follow-up to the same review, resume the same reviewer session only under the
+validity conditions in `AGENTS.md`; otherwise start a fresh session. Never use
+session reuse to skip an independently required review.
 
 Run `@spec-conformance-reviewer` for every pull request regardless of changed
 paths: once before opening the PR and again before marking a substantively

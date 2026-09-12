@@ -158,20 +158,23 @@ Fall back to `webfetch` only if `gh` is unavailable or fails.
 
 ## Before reviewing
 
-1. Read the specification provided as context by the caller
-2. Read `docs/architecture.md` to understand the system context
-3. Read `docs/data-model.md` only when the specification defines, mutates, or
-   relies on persisted entities
-4. Scan the specification for references to other documents:
+1. Read the complete specification provided as context by the caller and
+   identify the contracts added or substantially changed
+2. Read the applicable governing contracts in `docs/architecture.md`
+3. Read the applicable governing contracts in `docs/data-model.md` only when
+   the specification defines, mutates, or relies on persisted entities
+4. Scan the changed contracts for references to other documents:
    - Explicit references (e.g., "see `docs/features/packages/package-model.md`")
    - References to `docs/api-spec.md` or `docs/conventions.md`
    - Implicit references: mentions of concepts, entities, or flows detailed
      in other specs
-5. Read all directly referenced specifications (first level only — do NOT
-   follow references from the referenced specs)
+5. Read first-level referenced contracts needed to interpret or assess the
+   changed design. Do not mechanically read a referenced document when the
+   reference is informational and cannot affect the design under review
 
 Do NOT load all specs in `docs/features/**/`. Only load the specs directly
-referenced by or closely related to the one under review.
+needed by or closely related to the changed design. Expand when impact cannot
+be bounded confidently.
 
 ## What to check
 
