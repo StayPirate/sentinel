@@ -286,6 +286,8 @@ sentinel manage-user deactivate \
 8. Delegates to `user_service.deactivate_user()` with
    `acting_user_id = None` and
    `reason = "deactivated via CLI (manage-user deactivate)"`
+   as identity-audit lifecycle context. Any derived Ticket unassignment uses
+   the canonical Ticket comment reason `user deactivated` instead.
 9. After the workflow commits, purges session cache using the returned
    `DeactivationResult.invalidated_session_ids`. Redis failure is best-effort
    and does not turn a committed deactivation into a command failure
@@ -958,6 +960,8 @@ revocation, session invalidation, ticket unassignment).
 2. Delegate to `user_service.deactivate_user()` with
    `acting_user_id = authenticated_admin.id` and
    `reason = "deactivated by admin via API"`
+   as identity-audit lifecycle context. Any derived Ticket unassignment uses
+   the canonical Ticket comment reason `user deactivated` instead.
 3. After the API workflow commits, purge session cache using the
    `DeactivationResult.invalidated_session_ids` returned by the service
 4. Return HTTP 200 with the updated or unchanged user profile in the standard

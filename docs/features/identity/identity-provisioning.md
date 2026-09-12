@@ -241,7 +241,10 @@ Response (**200**):
    `UserRole` records tagged with this mapping's `(role, group_name)`
    and returns `affected_users_count`. If the acting admin would lose
    their only source of admin role, the service raises
-   `SelfRoleRemovalError`
+   `SelfRoleRemovalError`. If the deleted mapping removes a user's final
+   `vulnerability_analyst` origin, the derived Ticket unassignment is
+   system-attributed and uses exact reason
+   `vulnerability_analyst role removed after role mapping deletion`
 3. Delete the `RoleMapping` record
 4. Create `IdentityAuditEvent` with
    `event_type = role_mapping_deleted` via

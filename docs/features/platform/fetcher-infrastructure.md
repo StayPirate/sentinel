@@ -3851,7 +3851,9 @@ callers MUST invoke it only when a mutation actually occurs.
 actor, invalid field combinations, unknown detail keys) and all
 database/flush exceptions propagate to the caller. The caller's
 transaction rolls back both the business mutation and the audit
-event — no mutation can exist without its corresponding audit event.
+event. This fetcher-domain mutation has a required event; explicit no-event
+boundaries in other domains follow their own specifications and do not weaken
+this contract.
 
 ## Open Questions
 

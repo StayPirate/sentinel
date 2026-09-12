@@ -23,7 +23,7 @@ to all audit trail tables:
 |---|---|---|---|
 | `id` | UUID | PK | Internal identifier |
 | `created_at` | TIMESTAMPTZ | NOT NULL, server default, indexed | When the event occurred |
-| `user_id` | UUID | FK(user.id) ON DELETE RESTRICT, nullable, indexed | Actor. NULL for system-initiated actions |
+| `user_id` | UUID | FK(user.id) ON DELETE RESTRICT, nullable, indexed | Actor of the semantic event. NULL for system-attributed consequences or when no authenticated Sentinel user is attributable |
 
 Sentinel only performs soft-delete (deactivation) on users, never
 hard-delete. The FK on `user_id` uses `ON DELETE RESTRICT` explicitly
@@ -288,19 +288,21 @@ record state changes, not access attempts.
 
 ## Atomicity
 
-Every audit event MUST be created in the same database transaction as the
-mutation it records. If the mutation is rolled back, the audit event must not
-persist. This is enforced by using `BaseAuditLog.log_event()` with the same
-`AsyncSession` as the mutation. Every mutation requires its corresponding audit
-event except the explicitly documented `TicketPackageTrack.delivery_status`
-boundary, which creates no Ticket audit event.
+Every audit event required by an owning domain contract MUST be created in the
+same database transaction as the mutation it records. If the mutation is rolled
+back, the audit event must not persist. This is enforced by using
+`BaseAuditLog.log_event()` with the same `AsyncSession` as the mutation. An
+owning domain may instead define an explicit no-event boundary for an effective
+factual or operational mutation; that absence is intentional and is not an
+atomicity failure.
 
 If `log_event()` fails for any reason (FK constraint violation, invalid
 event_type, serialization error), the entire transaction — including the
-business mutation — MUST roll back. The caller MUST NOT catch exceptions
-from `log_event()` separately from the main transaction. Except for the named
-delivery-status boundary above, no mutation can exist without its corresponding
-audit event.
+business mutation — MUST roll back. The caller MUST NOT catch exceptions from
+`log_event()` separately from the main transaction. A mutation covered by a
+registered audit trail must have either its required event contract or an
+explicit no-event contract in the owning domain specification; lacking both is
+a specification defect.
 
 `log_event()` MUST force the pending insert to reach the database before
 returning, so constraint violations (FK, NOT NULL, CHECK) surface at the
@@ -311,9 +313,13 @@ caller's transaction governs durability.
 
 - `user_id` is inherited from `AuditEventMixin` and is nullable at the
   database level in all audit event models
-- `user_id` is set when the action was initiated by a human user
-- `user_id` is `NULL` when no authenticated Sentinel user is attributable to
-  the workflow (e.g., CLI, background task, external sync, automated detection)
+- `user_id` identifies the actor of the semantic event represented. A direct
+  authenticated user action uses that user's UUID. A derived consequence may
+  use `NULL` even when a user initiated the containing workflow, when the owning
+  domain contract attributes that consequence to the system
+- `user_id` is also `NULL` when no authenticated Sentinel user is attributable
+  to the operation (e.g., CLI, background task, external sync, automated
+  detection)
 - Subclasses that only record human-initiated actions (e.g.,
   `SettingAuditLog`, `FetcherAuditLog`) MUST override `log_event()` to
   validate that `user_id` is provided, raising `ValueError` if it is
@@ -419,9 +425,10 @@ rationale.
 
 Guardrail 11 (AGENTS.md) and reviewer agents
 (`@ticket-integrity-reviewer`, `@identity-integrity-reviewer`) verify
-audit compliance during PR review. Integration tests for each mutation
-service should verify the corresponding audit event is created. No
-additional runtime detection mechanism is needed at this time.
+audit compliance during PR review. Integration tests for each mutation service
+verify the exact event sequence required by the owning contract or the exact
+absence required by an explicit no-event boundary. No additional runtime
+detection mechanism is needed at this time.
 
 ## Filtering
 

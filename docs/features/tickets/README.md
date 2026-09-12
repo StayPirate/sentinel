@@ -41,5 +41,5 @@ ticket-references.md    External links on tickets (auto-classified by type, manu
   `docs/features/platform/cve-fetcher-infrastructure.md` (CVE Fetcher Conventions).
 - `cvss-scoring.md` drives ticket severity and product eligibility
   (consumed by `tickets.md` and `packages/package-model.md`).
-- `ticket-audit-log.md` defines the event contract that all ticket-mutating
-  operations must satisfy.
+- `ticket-audit-log.md` defines the event-or-explicit-no-event contract that all
+  Ticket-related mutations must satisfy.

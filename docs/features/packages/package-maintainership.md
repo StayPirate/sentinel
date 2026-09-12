@@ -241,9 +241,10 @@ Under the Ticket lock, `add_package_records()`:
    inactive Ticket creates neither package records nor maintainer associations;
 2. creates or finds the `TicketPackage` and normal package tree;
 3. queries users whose lowercase `User.email` exactly matches the supplied set
-   and whose `active` value is true at this mutation time;
-4. inserts one missing `TicketPackageMaintainer` per matching user, relying on
-   the unique constraint as a concurrency backstop; and
+   and whose `active` value is true at this mutation time, ordering matches by
+   `User.id` ascending;
+4. inserts one missing `TicketPackageMaintainer` per matching user in that
+   order, relying on the unique constraint as a concurrency backstop; and
 5. creates the required audit event for every inserted association in the same
    caller-owned transaction.
 
@@ -269,7 +270,9 @@ maintainer count.
 
 Each newly inserted association creates exactly one atomic
 `package_maintainer_added` `TicketAuditEvent`. The exact field and `detail`
-contract is owned by `docs/features/tickets/ticket-audit-log.md`.
+contract is owned by `docs/features/tickets/ticket-audit-log.md`. When one
+invocation inserts multiple associations, their events use ascending `User.id`
+order.
 
 The event and association use the same session and transaction. Audit failure
 rolls back the association and all package-tree changes in that invocation.
@@ -410,7 +413,8 @@ Implementation coverage must include:
 - sequential re-invocation with unchanged input producing no duplicate
   association or audit event;
 - one exact atomic `package_maintainer_added` event per new association and no
-  event for skipped associations, including rollback on audit failure;
+  event for skipped associations, ascending `User.id` event order for one
+  invocation, including rollback on audit failure;
 - no auto-assignment or Ticket reconciliation for association-only mutation,
   with unchanged package-tree behavior when both kinds of mutation occur;
 - Product catalog backfill attempting acquisition on package-tree no-ops while

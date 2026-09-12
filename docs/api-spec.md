@@ -320,9 +320,10 @@ redundant and MAY be omitted.
 
 The secondary sort uses the same direction as `sort_order`. It is an
 implementation-level concern — the `id` tiebreaker is NOT exposed as a
-client-visible query parameter and is not documented in per-endpoint
-query parameter tables. Per-endpoint specifications reference this
-cross-cutting rule instead of repeating the secondary sort detail.
+client-visible query parameter and is not documented in per-endpoint query
+parameter tables. Per-endpoint specifications reference this cross-cutting rule
+instead of repeating the secondary sort detail. A fixed-order paginated
+endpoint applies the same requirement even without client-controlled sorting.
 
 #### Nullable Sort Field Ordering
 

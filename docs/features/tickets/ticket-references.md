@@ -464,6 +464,17 @@ All functions receive the database session from the caller (never create
 their own) to ensure transactional atomicity with the surrounding
 operation.
 
+Manual POST, PATCH, and DELETE mutations use the parent Ticket as their
+serialization root. After input-only validation, the first persistent read
+acquires `FOR UPDATE` on `ticket_id`. The service then resolves the target
+reference, when applicable, under that lock and scopes it to
+`(ticket_id, reference_id)`. Mutation classification, `old_value`, `new_value`,
+and URL snapshots come only from this locked-current state. The unique
+`(ticket_id, url)` constraint remains the final defense against concurrent
+manual creation and automatic upsert races. Automatic fetcher upserts retain
+their owning per-CVE transaction and conflict-merge contract; they do not
+acquire Ticket after a CVE lock or create Ticket audit events.
+
 ### `upsert_references` signature
 
 ```python
@@ -656,6 +667,11 @@ Adds a manual reference to a ticket.
 - A `reference_added` audit event is created with `new_value` = the
   normalized URL
 
+The service holds the parent Ticket lock while classifying the normalized URL
+and inserting the reference and event. If a concurrent create or automatic
+upsert wins the unique key, the manual request returns `RESOURCE_CONFLICT` and
+creates no event.
+
 **`Capability: manage_references`**
 
 **Error responses**:
@@ -711,6 +727,9 @@ At least one field must be provided.
   `reference_title_changed`, or `reference_description_changed`
 - A PATCH that changes multiple fields generates multiple audit events in
   the same transaction
+- Changed-field events use this fixed insertion order:
+  `reference_url_changed`, `reference_type_changed`,
+  `reference_title_changed`, `reference_description_changed`
 - The `detail` field on type/title/description events carries the
   post-normalization URL as locator (`{"url": "..."}`)
 
@@ -761,6 +780,10 @@ A valid reference belonging to a different ticket returns
 - A `reference_deleted` audit event is created with `old_value` = the
   reference URL
 
+If the locked lookup is missing, belongs to another Ticket, or was already
+deleted by a concurrent winner, the operation returns the documented not-found
+outcome and creates no event.
+
 **`Capability: manage_references`**
 
 **Error responses**:
@@ -786,6 +809,13 @@ All reference audit events set `user_id` to the acting user.
 `comment` is always `NULL`. See `docs/features/tickets/ticket-audit-log.md`
 for the full event type contract and detail JSONB schema.
 
+Rejected, unchanged, not-found, and concurrent-loser manual outcomes create no
+event. Every effective manual mutation and all of its events flush in the same
+caller-owned transaction; an audit or database failure rolls back the complete
+reference mutation. Automatic reference insert/update is an explicit no-event
+boundary: current rows and fetcher execution history are its evidence, and
+audit history is never reference state or upsert idempotency input.
+
 ## Security
 
 - Reference list is publicly accessible (no authentication required)
@@ -806,6 +836,18 @@ for the full event type contract and detail JSONB schema.
   containing control characters (U+0000–U+001F, U+007F), eliminating
   injection vectors from embedded control sequences in URL strings
 - See `docs/features/identity/rbac.md` for the full permission model
+
+## Testing Requirements
+
+Implementation tests cover manual POST, PATCH, and DELETE with the parent
+Ticket lock, exact event actor/values/comment/detail, rollback on audit failure,
+and no-event outcomes for rejection, not found, unchanged PATCH fields, and a
+concurrent loser. A multi-field PATCH asserts the fixed URL, type, title,
+description event order. Independent-session tests prove that competing manual
+mutations serialize on the Ticket and do not record stale old values.
+
+Fetcher-upsert tests assert zero Ticket events for effective insert/update and
+no-op outcomes while preserving current rows and fetcher execution evidence.
 
 ## Boundary with CVEExternalIdentifier
 

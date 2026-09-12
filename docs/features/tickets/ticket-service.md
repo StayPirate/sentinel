@@ -8,7 +8,8 @@ confidentiality management — in a single service module
 (`ticket_service`). This ensures that:
 
 - `FOR UPDATE` locking is consistently applied on the Ticket row
-- `TicketAuditEvent` records are always created atomically
+- every `TicketAuditEvent` required by the owning domain contract is created
+  atomically, while explicit no-event boundaries remain intentional
 - `reconcile_ticket_status()` is called when operations have side effects
   on gate conditions (severity changes, status reconciliation)
 - `auto_assign_actor()` is applied uniformly for unassigned tickets
@@ -62,8 +63,8 @@ post-commit work while the caller owns transaction completion.
 
 ### Acting user convention
 
-All mutation operations accept an `acting_user_id: UUID | None`
-parameter:
+Mutation operations accept an `acting_user_id: UUID | None` parameter when the
+owning contract supports both direct and system callers:
 
 - `UUID` — action performed by an authenticated user. Enables
   auto-assignment on unassigned tickets if the user holds the
@@ -81,6 +82,12 @@ reserved exclusively for system entry points.
 `acting_user_id: UUID` (non-optional) because these operations are
 inherently user-initiated — there is no system scenario for granting or
 revoking explicit access.
+
+`assign_ticket()`, `ignore_ticket()`, `mark_as_duplicate()`,
+`revert_duplicate()`, `set_confidentiality()`, and direct access-grant
+operations require a non-null authorized acting user. Their API handlers must
+not use system attribution. `create_ticket()` and `reopen_from_ignored()` retain
+their documented system callers.
 
 ### Relationship with other modules
 
@@ -163,14 +170,17 @@ async def create_ticket(
     severity_manual: Severity | None = None,
     is_confidential: bool = False,
     source: TicketCreationSource,
+    ingestion_source: CVESourceType | None = None,
 ) -> Ticket:
 ```
 
-`TicketCreationSource` is a service-layer-only Python enum (not a
-database column — it is never persisted). Values: `manual` and
-`cve_ingestion`. It determines the audit event comment (e.g., "Ticket created
-manually" or "CVE ingested from NVD"). Defined in
-`backend/app/services/ticket_service.py`.
+`TicketCreationSource` is a service-layer-only Python enum (not a database
+column) with values `manual` and `cve_ingestion`. `ingestion_source` is required
+exactly when `source = cve_ingestion` and forbidden for `manual`; mismatches
+raise `ValueError` before database access. The source identifier maps to the
+canonical labels in `cve-service.md`, producing exactly
+`Ticket created manually` or `CVE ingested from {source}`. The concrete private
+mapping location is an implementation choice.
 
 **Preconditions**:
 
@@ -198,12 +208,13 @@ manually" or "CVE ingested from NVD"). Defined in
    - If `acting_user_id` is not None AND user holds VA role:
      `status = Analysis`, `assignee_id = acting_user_id`
    - Otherwise: `status = New`
-4. Create `TicketAuditEvent` (`ticket_created`, comment from `source`). This is
+4. Create `TicketAuditEvent` (`ticket_created`) with the exact canonical
+   comment selected from `source` and `ingestion_source`. This is
    always the first event in the Ticket's history, before every optional
    severity, assignment, or CVE-association event below
-5. If `severity_manual` provided: create `TicketAuditEvent`
+5. If assigned (step 3): create `TicketAuditEvent` (`assignment`)
+6. If `severity_manual` provided: create `TicketAuditEvent`
    (`severity_changed`, `old_value = NULL`, `new_value = <severity>`)
-6. If assigned (step 3): create `TicketAuditEvent` (`assignment`)
 7. If CVE associated: create `TicketAuditEvent` (`cve_associated`)
 8. Return the created Ticket
 
@@ -220,8 +231,9 @@ CVSS mutations; the new Ticket row itself has no pre-existing row to lock.
 **reconcile_ticket_status**: Not called — initial status is determined by
 fixed rules, and the ticket cannot have packages at creation time.
 
-**Audit events**: Up to 4 (`ticket_created`, `severity_changed`,
-`assignment`, `cve_associated`).
+**Audit events**: Up to 4, in this order: `ticket_created`, optional
+`assignment`, optional `severity_changed`, and optional `cve_associated`.
+Every event except `ticket_created` uses `comment = NULL`.
 
 ### associate_cve
 
@@ -333,7 +345,7 @@ async def assign_ticket(
     *,
     ticket_id: UUID,
     assignee_id: UUID,
-    acting_user_id: UUID | None,
+    acting_user_id: UUID,
 ) -> Ticket:
 ```
 
@@ -376,7 +388,8 @@ if conditions are met.
 
 **Audit events**: `assignment` (only if assignee actually changes).
 Possibly `status_change` (explicit `New → Analysis` in step 7 and/or
-further promotion from `reconcile_ticket_status`).
+further promotion from `reconcile_ticket_status`). Assignment promotion and
+ordinary gate events use `comment = NULL`.
 
 **auto_assign_actor**: Not called — this operation performs an explicit
 assignment to a specified user, which supersedes implicit
@@ -391,7 +404,7 @@ async def ignore_ticket(
     db: AsyncSession,
     *,
     ticket_id: UUID,
-    acting_user_id: UUID | None,
+    acting_user_id: UUID,
 ) -> Ticket:
 ```
 
@@ -422,7 +435,7 @@ into the manual zone. `reconcile_ticket_status` never operates on
 Ignored tickets.
 
 **Audit events**: `status_change`. Possibly `assignment` (from
-auto-assign).
+auto-assign). Both use `comment = NULL`.
 
 ### mark_as_duplicate
 
@@ -436,7 +449,7 @@ async def mark_as_duplicate(
     *,
     ticket_id: UUID,
     duplicate_of_id: UUID,
-    acting_user_id: UUID | None,
+    acting_user_id: UUID,
 ) -> Ticket:
 ```
 
@@ -510,6 +523,10 @@ manual zone.
 - Plus any events produced by `auto_assign_actor` (e.g.,
   `status_change` for `New → Analysis`, `assignment`) — see
   `ticket-mutations.md`
+
+Dependent `duplicate_target_changed` events follow the UUID order of the
+locked dependent rows from Phase 2. All normal status and duplicate comments
+are `NULL`.
 
 **Atomicity guarantee**: if any step fails (validation, NOWAIT
 conflict, or database error), the entire transaction rolls back. No
@@ -587,7 +604,8 @@ composition.
 **Audit events**: optional actor assignment, zero or more system-attributed
 `product_eligibility_changed` events, optional inactive-assignee sanitation
 `assignment`, then one system-attributed
-`status_change` from `Ignored` to the final evaluated status.
+`status_change` from `Ignored` to the final evaluated status. All comments are
+`NULL` except a sanitation assignment's canonical unassignment comment.
 
 **Locking and transaction**: the function retains its Ticket `FOR UPDATE` lock
 through assignment, package convergence, audit, and final reconciliation. It
@@ -608,7 +626,7 @@ non-retroactive; other Tickets keep their current targets.
 |---|---|---|---|
 | `db` | `AsyncSession` | Yes | Caller-owned database session |
 | `ticket_id` | `UUID` | Yes | Ticket to revert |
-| `acting_user_id` | `UUID \| None` | No | Acting user; no system caller currently exists |
+| `acting_user_id` | `UUID` | Yes | Authorized acting user |
 
 **Preconditions**: the Ticket exists and its locked-current status is
 `Duplicated`; otherwise raise `TicketNotFoundError` or
@@ -637,7 +655,9 @@ non-retroactive; other Tickets keep their current targets.
 system-attributed `product_eligibility_changed` events, optional
 inactive-assignee sanitation `assignment`, then one
 system-attributed `status_change` from `Duplicated` to the final evaluated
-status. Every event and mutation is atomic in the caller-owned transaction.
+status. All comments are `NULL` except a sanitation assignment's canonical
+unassignment comment. Every event and mutation is atomic in the caller-owned
+transaction.
 
 **Locking and transaction**: the function retains its Ticket `FOR UPDATE` lock
 through assignment, duplicate-link removal, audit, package convergence, and
@@ -783,7 +803,7 @@ async def set_confidentiality(
     *,
     ticket_id: UUID,
     is_confidential: bool,
-    acting_user_id: UUID | None,
+    acting_user_id: UUID,
 ) -> Ticket:
 ```
 
@@ -808,13 +828,18 @@ become inert (the confidentiality filter no longer restricts access).
 Stale grants are cleaned up by a periodic task (weekly, 14-day delay).
 See `tickets.md` (Stale Access Grant Cleanup) for details.
 
+That periodic cleanup is a separate housekeeping boundary. It locks qualifying
+Tickets in UUID order, revalidates their non-confidential age condition,
+deletes current grants idempotently, and creates no
+`access_grant_removed` event.
+
 **Locking**: FOR UPDATE on Ticket row.
 
 **reconcile_ticket_status**: NOT called — confidentiality is not
 gate-relevant.
 
 **Audit events**: `confidentiality_changed` (only if value actually
-changes).
+changes), with `comment = NULL`.
 
 ### grant_access
 
@@ -1019,7 +1044,7 @@ behavior of `ticket_service` operations:
 3. **Assignment idempotency**: assign a ticket to user X, then assign
    again to user X → verify no audit event is created on the second call
 
-7. **`New → Analysis` promotion coverage** (parametrized): every code
+4. **`New → Analysis` promotion coverage** (parametrized): every code
    path that sets `assignee_id` on a `New` ticket MUST produce a
    `status_change` event with `old_value = "New"` and
    `new_value = "Analysis"`. Paths to cover: `assign_ticket()` (explicit
@@ -1029,35 +1054,36 @@ behavior of `ticket_service` operations:
    future code paths that set `assignee_id` without performing the
    `New → Analysis` transition.
 
-4. **Mark-as-duplicate with dependents (atomic repoint)**: mark ticket B as
+5. **Mark-as-duplicate with dependents (atomic repoint)**: mark ticket B as
    duplicate of C, where tickets A1 and A2 currently point to B. Verify:
    (a) A1 and A2 are atomically repointed to C, (b)
-   `duplicate_target_changed` events are created for A1 and A2, (c)
+   `duplicate_target_changed` events are created for A1 and A2 in their locked
+   UUID order, (c)
    `duplicate_set` and `status_change` events are created for B
 
-5. **Concurrent modification conflict**: hold a lock on a dependent
+6. **Concurrent modification conflict**: hold a lock on a dependent
    ticket (simulating a concurrent revert). Call `mark_as_duplicate`
    on the dependent's target. Verify: (a) the operation raises
    `DuplicateConcurrentModificationError`, (b) the transaction is
    rolled back (no mutations, no audit events persist), (c) retrying
    after the lock is released succeeds normally
 
-6. **CVE uniqueness race condition**: simulate concurrent `create_ticket`
+7. **CVE uniqueness race condition**: simulate concurrent `create_ticket`
    calls for the same CVE → verify one succeeds and the other raises
    `TicketCVEConflictError`
 
-7. **grant_access concurrent requests**: simulate concurrent
+8. **grant_access concurrent requests**: simulate concurrent
    `grant_access` calls for the same user/ticket → verify one creates
    the grant and the other returns idempotent success
 
-8. **CVE association and assessment race**: use independent sessions to race
+9. **CVE association and assessment race**: use independent sessions to race
    `associate_cve()` with a CVSS assessment mutation. Verify CVE-then-Ticket
    lock serialization, committed-current severity and applied eligibility,
    acting-user `cve_associated` followed by system `severity_changed` when the
    handover changes value, Product events in occurrence-ID order, one shared
    evaluation date, one final reconciliation, and no stale or duplicate event
    or second assignment from the loser
-9. **Manual-zone exit composition**: for both `reopen_from_ignored()` and
+10. **Manual-zone exit composition**: for both `reopen_from_ignored()` and
    `revert_duplicate()`, verify this service owns the Ticket lock and direct
    lifecycle/audit mutations, invokes the package-owned synchronous boundary
    with the same `evaluation_date`, and then invokes
@@ -1071,18 +1097,27 @@ behavior of `ticket_service` operations:
    without violating `chk_ticket_duplicate_status_coherence`; assert that the
    `duplicate_removed` event uses the pre-clear target's `SNTL-{n}` identifier
    as `old_value` and `NULL` as `new_value`
-10. **Manual-zone convergence registration**: both exit workflows register one
+11. **Manual-zone convergence registration**: both exit workflows register one
     post-commit Ticket convergence workflow for final `Analysis`, `Analyzed`,
     and `Resolved`; inactive assignees are cleared only for final `Analysis` or
     `Analyzed` and retained for final `Resolved`; automatic publication failure
     is logged and swallowed after commit, preserving the mutation's success
     response and requiring the complete operator rerun
-11. **Operator convergence dispatch**: verify locked-current acceptance for
+12. **Operator convergence dispatch**: verify locked-current acceptance for
     `Analysis`, `Analyzed`, and `Resolved`; rejection of `New`, `Ignored`, and
     `Duplicated` with `InvalidTransitionError`; commit and lock release before
     publication; canonical Ticket UUID and root task UUID return; repeated and
     concurrent publication without conflict; broker failure mapping; ambiguous
     acknowledgement tolerance; and no Ticket mutation or audit event
+13. **Canonical comments and creation order**: manual and every canonical CVE
+    source create the exact `ticket_created.comment`; creation keeps
+    `ticket_created`, optional assignment, optional manual severity, and
+    optional CVE association order. Normal status transitions use NULL comments,
+    while rejection uses exactly `CVE rejected`
+14. **Confidentiality and grants**: direct changes assert exact acting-user
+    events and no-op absence; stale-grant cleanup covers deterministic Ticket
+    selection, locked revalidation, idempotent/concurrent cleanup, rollback, and
+    zero `access_grant_removed` events
 
 ## Cross-references
 
