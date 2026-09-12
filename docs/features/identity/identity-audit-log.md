@@ -116,15 +116,19 @@ Event types not listed here MUST set `detail` to `NULL`.
   keys, whether the mapping is applied by external synchronization or by an
   authenticated role-mapping create/delete operation. `source` equals
   `"external_sync"` to identify the external origin of the role, while
-  `mapping` identifies the external group/role mapping that caused it
+  `mapping` identifies the external group/role mapping that caused it.
   As a validation rule, `source` and `mapping` are required together: either
-  both are present or `detail` is `NULL`
+  both are present or `detail` is `NULL`.
 - `user_created`: manual API and CLI creation uses `detail = NULL`; external
   synchronization requires `{"source": "external_sync"}`
 - `user_deactivated`, `user_reactivated`, `email_changed`,
   `full_name_changed`, and `username_changed`: an external-sync mutation requires
   `source = "external_sync"`; authenticated API and manual CLI mutations omit
   the key. `user_deactivated.reason` remains required for every source
+- `user_deactivated.detail.reason` is identity-lifecycle context and is
+  independent of Ticket unassignment comments. A derived Ticket unassignment
+  always uses the canonical Ticket reason `user deactivated`, regardless of
+  whether the identity event describes an API, CLI, or external-sync cause.
 - `api_key_revoked`: the `reason` key is present only for bulk
   revocations triggered by user deactivation. For individual manual
   revocations, `detail` contains only `key_id`

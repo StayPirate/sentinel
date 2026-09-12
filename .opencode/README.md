@@ -92,7 +92,7 @@ across all reviewer definitions.
 | `@spec-gap-analyzer` | Reviewer | Guardrail 17 | Identifies uncovered functional cases and missing edge-case handling in specs |
 | `@test-reviewer` | Reviewer | Guardrail 6 | Reviews new feature/module tests and bug regression tests for coverage, audit assertions, and testing conventions |
 | `@identity-integrity-reviewer` | Reviewer | Guardrail 11 | Verifies identity audit integrity and centralized service ownership, reporting undefined RoleMapping persistence ownership as a specification gap |
-| `@ticket-integrity-reviewer` | Reviewer | Guardrail 11 | Verifies TicketAuditEvent audit trail and ticket_mutations module compliance |
+| `@ticket-integrity-reviewer` | Reviewer | Guardrail 11 | Verifies Ticket audit event/no-event contracts, centralized mutation ownership, locking, and transaction hygiene |
 
 `@spec-conformance-reviewer` is the only subagent whose trigger is a moment
 rather than a kind of change: it runs on every pull request, before the pull

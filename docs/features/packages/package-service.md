@@ -57,8 +57,9 @@ multiple operations within a single transaction when needed (e.g.,
 User-facing mutation operations accept an `acting_user_id: UUID | None`
 parameter where both user and system callers are supported:
 
-- `UUID` — action performed by an authenticated VA (enables
-  auto-assignment on unassigned tickets)
+- `UUID` — action performed by an authorized acting user (enables
+  auto-assignment on unassigned tickets only when that user holds the
+  `vulnerability_analyst` role)
 - `None` — system action (release detection, product lifecycle
   transitions). Auto-assignment does not apply
 
@@ -324,7 +325,7 @@ no external I/O.
 
 The operation never calls `auto_assign_actor()` or
 `reconcile_ticket_status()`. Delivery is an independently derived system fact,
-not a VA mutation or a Ticket gate input. It does not generate a
+not an authorized-user mutation or a Ticket gate input. It does not generate a
 `TicketAuditEvent`; request/action provenance is retained by IBS submission
 tracking, while the Ticket timeline records the independent
 `track_status_changed` and `product_released` milestones.
@@ -536,8 +537,8 @@ back the caller-owned transaction.
 Recalculates system-managed eligibility for one catalog Product within one
 operable Ticket. This is the mutation boundary used after an AIMAAS threshold
 change or a Reactive Support lifecycle change. It is separate from
-`set_product_eligibility()`, whose boolean path creates a VA override, and
-from the CVSS assessment mutation boundaries and the platform-wide
+`set_product_eligibility()`, whose boolean path creates an authorized-user
+override, and from the CVSS assessment mutation boundaries and the platform-wide
 `default_cvss_version` batch documented by their owning specifications.
 
 **Parameters**:
@@ -723,7 +724,7 @@ Called by `add_package_to_ticket` after SMELT resolution completes.
 | `tracks` | `list[ResolvedTrackData]` | Yes | Fully validated and locally resolved track/Product data; semantic shape defined below |
 | `maintainer_emails` | `set[str]` | Yes | Fully validated, lowercase, globally deduplicated individual emails from the maintainership response; empty on a valid no-maintainer result or non-blocking maintainership failure |
 | `acting_user_id` | `UUID \| None` | No | Who is performing the action |
-| `audit_comment` | `str \| None` | No | System-generated context for `package_added`; `NULL` for user actions |
+| `audit_comment` | `Literal["CVE package resolution", "Product catalog backfill", "Ticket convergence"] \| None` | No | Closed system context for `package_added`; `NULL` for user actions |
 | `active_ticket_only` | `bool` | No | When true, skip without mutation if the locked Ticket is not active; used by Product catalog backfill |
 | `allow_excluded_reresolution` | `bool` | No | Semantic caller context. `False` for the public add endpoint and internal callers whose candidate selection excludes existing soft-deleted packages; `True` for Ticket convergence, which intentionally re-resolves persisted excluded package markers without restoring them. The concrete parameter name or grouping is an implementation choice |
 
@@ -797,7 +798,7 @@ remain implementation choices as long as they preserve this contract.
 > Hygiene Rules, even when creating dozens of products in a single
 > `add_package_records()` call.
 
-10. For each missing active-user match, create one
+10. For each missing active-user match in ascending `User.id` order, create one
    `TicketPackageMaintainer` and one system-attributed
    `package_maintainer_added` event with the exact payload in
    `ticket-audit-log.md`.
@@ -940,7 +941,11 @@ async def add_package_to_ticket(
     ticket_id: UUID,
     package_name: str,
     acting_user_id: UUID | None = None,
-    audit_comment: str | None = None,
+    audit_comment: Literal[
+        "CVE package resolution",
+        "Product catalog backfill",
+        "Ticket convergence",
+    ] | None = None,
     active_ticket_only: bool = False,
     allow_excluded_reresolution: bool = False,
 ) -> AddPackageResult:
@@ -1008,10 +1013,11 @@ async def add_package_to_ticket(
    applies. The result does not prescribe a concrete dataclass or collection
    type.
 
-`audit_comment` is internal system context for `package_added`. API callers
-always pass `NULL`. Product catalog backfill passes
-`Product catalog backfill`. Other automatic callers pass the contextual
-comment defined by their owning workflow.
+`audit_comment` is closed internal system context for `package_added`. API
+callers always pass `NULL`; CVE ingestion passes `CVE package resolution`;
+Product catalog backfill passes `Product catalog backfill`; and Ticket
+convergence passes `Ticket convergence`. No caller supplies any other value or
+free-form text.
 
 `active_ticket_only` is false for normal API and automatic callers. Product
 catalog backfill sets it to true so a Ticket that became inactive after
@@ -1126,7 +1132,7 @@ After the status-transition transaction commits, the workflow:
 1. Reads every persisted package name for the Ticket, including soft-deleted
    `TicketPackage` records.
 2. Calls `add_package_to_ticket()` once per distinct package name with system
-   attribution and the existing `reason = reactivation` audit context. It processes and commits each
+   attribution and `audit_comment = "Ticket convergence"`. It processes and commits each
    package independently. Existing package, track, Product, and exclusion state
    is preserved; missing descendants and additive maintainer associations may
    be created. A soft-deleted package's association remains ineffective until
@@ -1507,7 +1513,7 @@ transitions. The test must cover:
   `ticket_package_product_id` as the package-tree occurrence
 - **Human-readable Product audit subjects**: every Product event persists the
   event-time Product name and CPE with package and track context; release
-  events preserve the actual `released_at`, and VA eligibility events
+  events preserve the actual `released_at`, and authorized-user eligibility events
   distinguish override set, change, and clear actions
 - **Exclusion/restore actor and rollback**: a null actor raises `ValueError`
   before every database operation; successful direct-marker changes create
@@ -1522,7 +1528,8 @@ transitions. The test must cover:
   email; only current active exact-email User matches are associated; a
   package-tree no-op, including Product catalog backfill, can add associations;
   concurrent calls serialize; sequential unchanged re-invocation creates no
-  duplicate row or event; every new association has one atomic system event;
+  duplicate row or event; every new association has one atomic system event in
+  ascending `User.id` order;
   association-only mutation does not assign or reconcile, leaves public result
   fields/counts unchanged, and later omission/failure never removes rows;
   maintainer visibility does not grant any capability-protected mutation
@@ -1549,6 +1556,9 @@ transitions. The test must cover:
   truthful created/skipped counts, and distinct package-tree change,
   package-tree no-op, maintainer-only, and skipped-inactive outcomes; only an
   effective package-tree change assigns and reconciles
+- **Package audit comments**: manual package addition uses `comment = NULL`;
+  CVE resolution, Product catalog backfill, and Ticket convergence use their
+  exact canonical comments; no other `audit_comment` value is accepted
 - **Dimension independence**: affectedness, eligibility, track delivery, and
   Product release observations do not mutate or suppress one another; the
   Ticket gate ignores `delivery_status`, while independently computed results

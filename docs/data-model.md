@@ -478,7 +478,7 @@ specification.
 |---|---|---|---|
 | id | UUID | PK | Internal identifier |
 | created_at | TIMESTAMPTZ | NOT NULL, server default, indexed | When the event occurred |
-| user_id | UUID | FK(user.id) ON DELETE RESTRICT, nullable, indexed | Actor who performed the action. NULL for system-initiated actions |
+| user_id | UUID | FK(user.id) ON DELETE RESTRICT, nullable, indexed | Actor of the semantic event. NULL for system-attributed consequences and operations without an authenticated Sentinel actor |
 
 **Location**: `backend/app/models/mixins.py`
 
@@ -992,21 +992,21 @@ for the three-tier classification mechanism.
 
 #### TicketAuditEvent
 
-Audit log of all changes to a ticket. Inherits `id`, `created_at`, and
-`user_id` from `AuditEventMixin`. Each event represents a discrete
-action (status change, assignment, duplicate operation, or automated
-system action).
+Audit log of the semantic Ticket events required by the canonical
+mutation/event matrix. Inherits `id`, `created_at`, and `user_id` from
+`AuditEventMixin`. Explicit no-event factual and operational mutations are not
+represented in this table.
 
 | Column      | Type        | Constraints            | Description                                |
 |-------------|-------------|------------------------|--------------------------------------------|
 | id          | UUID        | Inherited from AuditEventMixin | Internal identifier                |
 | ticket_id   | UUID        | FK(ticket.id), NOT NULL| Related ticket                             |
-| user_id     | UUID        | Inherited from AuditEventMixin | User who performed the action. NULL for automated system actions (e.g., release detection or CVE ingestion). |
+| user_id     | UUID        | Inherited from AuditEventMixin | Actor of the semantic event. NULL for system-attributed derived consequences and automated actions. |
 | event_type  | VARCHAR(50) | NOT NULL               | See TicketAuditEventType enum below             |
 | old_value   | TEXT        | nullable               | Previous value (e.g., old status, old assignee username) |
 | new_value   | TEXT        | nullable               | New value (e.g., new status, new assignee username) |
 | comment     | TEXT        | nullable               | Human-readable system-generated description for automated events (e.g., creation source, deactivation reason). Not populated by user input. See `docs/features/tickets/ticket-audit-log.md` |
-| detail      | JSONB       | nullable               | Additional structured context. Schema validated per event type — see `docs/features/tickets/ticket-audit-log.md` (detail JSONB Schema Contract) |
+| detail      | JSONB       | nullable               | Additional structured context. Schema validated per event type and limited to deterministic compact JSON of at most 4096 UTF-8 bytes — see `docs/features/tickets/ticket-audit-log.md` (detail JSONB Schema Contract) |
 | created_at  | TIMESTAMPTZ | Inherited from AuditEventMixin | When the event occurred            |
 
 #### TicketAuditEventType Enum
@@ -1021,29 +1021,29 @@ contract is in `docs/features/tickets/ticket-audit-log.md`.
 
 | Value                      | Description                                        |
 |----------------------------|----------------------------------------------------|
-| status_change              | Ticket status was changed                          |
-| assignment                 | Ticket was assigned or reassigned                  |
+| status_change              | Ticket status changed. Direct manual transitions use the acting user; derived transitions use NULL. `comment` is exactly `CVE rejected` for CVE rejection and NULL otherwise. |
+| assignment                 | Ticket was assigned, reassigned, or system-unassigned. Direct assignment, reassignment, and auto-assignment use the acting user; system unassignment uses NULL. System unassignment uses `Unassigned from {username}: {reason}` with the closed reason vocabulary in `ticket-audit-log.md`; other assignment comments are NULL. |
 | duplicate_set              | Ticket was marked as duplicate of another          |
 | duplicate_removed          | Duplicate mark was reverted                        |
 | duplicate_target_changed   | Atomic repoint: the ticket's `duplicate_of_id` was updated because its previous target was marked as duplicate. `old_value` is the previous target identifier (`SNTL-{n}`). `new_value` is the new target identifier. `user_id` is NULL (system action). `detail` contains `{"triggered_by_ticket": "SNTL-{n}"}` identifying the ticket whose mark-as-duplicate operation triggered this repoint. |
-| package_added              | Package tree added or completed (manual by an authorized acting user or automatic via CVE ingestion or Product catalog backfill). `user_id` is set for user actions, NULL for automatic. `comment` provides context for automatic additions. A complete no-op creates no event. |
+| package_added              | Package tree added or completed (manual by an authorized acting user or automatic). `user_id` is set for direct user actions and NULL for automatic workflows. `comment` is NULL for the user API or exactly `CVE package resolution`, `Product catalog backfill`, or `Ticket convergence`. A complete no-op creates no event. |
 | package_maintainer_added   | Package resolution associated an existing active User with a TicketPackage. `user_id` is NULL, `old_value` is NULL, `new_value` is the event-time target username, `comment` is NULL, and `detail` contains `{"package": "fictional-package"}`. |
 | package_excluded           | Package directly soft-deleted from the Ticket by an authorized acting user. `old_value` contains the package name and `user_id` identifies the actor. `detail` is NULL. Child records are not modified; they become effectively excluded through the hierarchy. |
 | package_restored           | Directly soft-deleted package restored by an authorized acting user. `new_value` contains the package name. `user_id` identifies the actor. Only the package record is restored — child records are not modified. |
-| track_status_changed       | Track affectedness status changed. `user_id` is set for VA-initiated changes, `NULL` for automatic transitions (e.g., release detected sets FIXED). `detail` carries `{"track", "package"}` context. |
+| track_status_changed       | Track affectedness status changed. `user_id` is set for an authorized acting user's direct change and `NULL` for automatic transitions (e.g., release detected sets FIXED). `detail` carries `{"track", "package"}` context. |
 | track_excluded             | Track directly soft-deleted from the Ticket by an authorized acting user. `old_value` contains the track reference, `user_id` identifies the actor, and `detail` carries `{"track", "package"}` context. Child Products are not modified; they become effectively excluded through the hierarchy. |
 | track_restored             | Directly soft-deleted track restored by an authorized acting user. `new_value` contains the track reference, `detail` carries `{"track", "package"}`, and `user_id` identifies the actor. Only the track record is restored — child products are not modified. |
 | product_released           | Product release detected via updateinfo.xml advisory. `new_value` contains the advisory-issued `released_at` timestamp in UTC ISO 8601 format. `detail` carries event-time Product name/CPE plus track, package, and advisory context. |
 | product_excluded           | Product directly soft-deleted from the Ticket by an authorized acting user. `old_value` contains the Product display name, `user_id` identifies the actor, and `detail` carries the event-time Product name/CPE plus track and package. EOL is derived and never emits this event. |
 | product_restored           | Directly soft-deleted Product restored by an authorized acting user. `new_value` contains the Product display name, `detail` carries the event-time Product name/CPE plus track and package, and `user_id` identifies the actor. |
-| ticket_created             | Ticket created. Always the first event in a ticket's history. `user_id` is NULL for automatic creation (system event) or set to the creating user for manual creation. `comment` describes the creation source (e.g., `"CVE ingested from NVD"`, `"CVE fix detected in {package} ({codestream})"`, `"Ticket created manually"`) |
+| ticket_created             | Ticket created. Always the first event in a ticket's history. `user_id` is NULL for automatic creation or set to the creating user for manual creation. `comment` is exactly `Ticket created manually` or `CVE ingested from {source}` using the canonical CVESourceType label in `docs/features/tickets/cve-service.md`. |
 | cve_associated             | A CVE was associated with a ticket that previously had no CVE. `user_id` is the acting user for explicit association, the creating user when included in user-driven Ticket creation, or NULL for automatic Ticket creation. `old_value` is NULL. `new_value` is the CVE-ID string (e.g., `"CVE-2024-1234"`). |
 | severity_changed           | `user_id` is NULL for automatic CVSS recalculation and for the derived severity handover during `associate_cve()`; it is the acting user's UUID only for direct manual severity changes through `set_severity_manual()`. |
 | cvss_assessment_changed    | A CVSS assessment was added, modified, or removed. `old_value` and `new_value` use the canonical `"provider_name vX.Y vector_string (score)"` representation, with NULL for the absent side. `comment` and `detail` are NULL. `user_id` is set for manual SUSE changes and NULL for external ingestion. |
-| product_eligibility_changed | Product eligibility or its override ownership changed through an ordinary package boundary or the narrow atomic CVSS-chain exception. Causes are lifecycle phase transition (Reactive Support), synchronous manual-zone exit, threshold change, VA override, assessment propagation, or default-version propagation. `old_value` and `new_value` contain eligibility (`true`/`false`) and may be equal for a metadata-only override set/clear. `user_id` is set for VA overrides and NULL for system-triggered changes. `detail` carries event-time Product name/CPE plus track, package, and `reason`: `reactive_ltss`, `threshold`, `reactivation`, `cvss`, or `va_override`. VA override events additionally carry `override_action = set`, `changed`, or `cleared`. |
-| confidentiality_changed     | Ticket `is_confidential` flag was toggled by a VA. `old_value` and `new_value` contain `"true"` or `"false"`. `detail` is NULL. See `docs/features/tickets/tickets.md` (Confidential Tickets). |
-| access_grant_added          | VA manually granted a user explicit access to a confidential ticket. `old_value` is NULL. `new_value` is the target username. `detail` is NULL. |
-| access_grant_removed        | VA manually revoked a user's explicit access to a confidential ticket. `old_value` is the target username. `new_value` is NULL. `detail` is NULL. |
+| product_eligibility_changed | Product eligibility or its override ownership changed through an ordinary package boundary or the narrow atomic CVSS-chain exception. Causes are lifecycle phase transition (Reactive Support), synchronous manual-zone exit, threshold change, authorized-user override, assessment propagation, or default-version propagation. `old_value` and `new_value` contain eligibility (`true`/`false`) and may be equal for a metadata-only override set/clear. `user_id` is set for a direct authorized-user override and NULL for system-triggered changes. `detail` carries event-time Product name/CPE plus track, package, and `reason`: `reactive_ltss`, `threshold`, `reactivation`, `cvss`, or `va_override`. Direct override events additionally carry `override_action = set`, `changed`, or `cleared`. |
+| confidentiality_changed     | Ticket `is_confidential` flag was toggled by an authorized acting user. `old_value` and `new_value` contain `"true"` or `"false"`. `detail` is NULL. See `docs/features/tickets/tickets.md` (Confidential Tickets). |
+| access_grant_added          | Authorized acting user manually granted a user explicit access to a confidential ticket. `old_value` is NULL. `new_value` is the target username. `detail` is NULL. |
+| access_grant_removed        | Authorized acting user manually revoked a user's explicit access to a confidential ticket. `old_value` is the target username. `new_value` is NULL. Stale-grant housekeeping creates no event. `detail` is NULL. |
 | reference_added             | Manual reference added to ticket. `user_id` is the acting user. `old_value` is NULL. `new_value` is the reference URL. `detail` is NULL. |
 | reference_deleted           | Manual reference deleted from ticket. `user_id` is the acting user. `old_value` is the reference URL. `new_value` is NULL. `detail` is NULL. |
 | reference_url_changed       | Manual reference URL changed. `user_id` is the acting user. `old_value` is the previous URL. `new_value` is the new URL. `detail` is NULL. |
@@ -1051,11 +1051,18 @@ contract is in `docs/features/tickets/ticket-audit-log.md`.
 | reference_title_changed     | Manual reference title changed. `user_id` is the acting user. `old_value` is the previous title (or NULL). `new_value` is the new title (or NULL). `detail` carries `{"url": "..."}` locator. |
 | reference_description_changed | Manual reference description changed. `user_id` is the acting user. `old_value` is the previous description (or NULL). `new_value` is the new description (or NULL). `detail` carries `{"url": "..."}` locator. |
 
+The enum remains exactly 29 values. No Ticket event exists for track delivery,
+IBS request/action/correlation evidence, track-release checkpoints, derived
+actionability, automatic reference upserts, Ticket convergence workflow
+outcomes, ticketless CVE state, or stale non-confidential access-grant cleanup.
+Effective delegated domain mutations retain their ordinary event types. See the
+canonical matrix in `docs/features/tickets/ticket-audit-log.md`.
+
 #### TicketAccessGrant
 
-Explicit access grants for confidential tickets. Each record represents
-a manual grant from a VA to a specific user. Composite primary key on
-`(ticket_id, user_id)`.
+Explicit access grants for confidential tickets. Each record represents a
+manual grant from an authorized acting user to a specific user. Composite
+primary key on `(ticket_id, user_id)`.
 
 See `docs/features/tickets/tickets.md` (Confidential Tickets) for the full
 specification.
@@ -1064,7 +1071,7 @@ specification.
 |---------------|-------------|------------------------------|--------------------------------------|
 | ticket_id     | UUID        | PK, FK(ticket.id) ON DELETE RESTRICT | The confidential ticket            |
 | user_id       | UUID        | PK, FK(user.id) ON DELETE RESTRICT   | The user granted access            |
-| granted_by_id | UUID        | FK(user.id) ON DELETE RESTRICT, NOT NULL | The VA who granted the access |
+| granted_by_id | UUID        | FK(user.id) ON DELETE RESTRICT, NOT NULL | The authorized acting user who granted access |
 | granted_at    | TIMESTAMPTZ | NOT NULL, DEFAULT            | When the grant was created           |
 
 *Note: ON DELETE RESTRICT is used because tickets are never deleted from
@@ -1162,7 +1169,7 @@ override model.
 | ticket_package_track_id  | UUID      | FK(ticket_package_track.id), NOT NULL       | Parent track record                |
 | product_id               | UUID      | FK(product.id), NOT NULL                    | Related product                    |
 | eligible                 | BOOLEAN   | NOT NULL, DEFAULT true                      | Whether the product will receive the fix |
-| is_eligible_override     | BOOLEAN   | NOT NULL, DEFAULT false                     | True if VA manually set the eligibility |
+| is_eligible_override     | BOOLEAN   | NOT NULL, DEFAULT false                     | True if an authorized acting user manually set eligibility |
 | released_at              | TIMESTAMPTZ | nullable                                    | Authoritative stable security advisory-issued time in UTC; NULL until Product release detection confirms an exact match. A CVE-less `FIXED` track can be resolution-complete while this remains NULL; Sentinel never fabricates publication evidence. Observation time remains available through `updated_at` and the audit event's `created_at` |
 | deleted_at               | TIMESTAMPTZ | nullable                                    | Direct manual-exclusion timestamp. NULL = not directly excluded. Current actionability also depends on ancestor markers and the catalog Product lifecycle phase |
 | created_at               | TIMESTAMPTZ | NOT NULL, DEFAULT                           | Record creation timestamp          |

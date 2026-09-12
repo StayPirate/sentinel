@@ -279,31 +279,41 @@ shared logic used by multiple public operations.
 
 #### `_unassign_active_tickets(db, user_id, reason)`
 
-Performs bulk ticket unassignment for a user. No guard on roles or active
-status — executes the unassignment unconditionally.
+Performs bulk Ticket unassignment for a user. `reason` is one of the exact
+closed values `user deactivated`, `vulnerability_analyst role removed`,
+`vulnerability_analyst role removed by external sync`, or
+`vulnerability_analyst role removed after role mapping deletion`. The separate
+reconciliation sanitation value `inactive assignee` is not passed to this
+identity-owned helper. No guard on roles or active status applies here.
+The caller has already locked the User root; this helper therefore preserves
+the global `User` then ordered `Ticket` lock order.
 
 **Behavior**:
 
-1. Query all tickets where `assignee_id = user_id` and status is active
+1. Query candidate Ticket IDs where `assignee_id = user_id` and status is active
    (New, Analysis, or Analyzed — see
-   `docs/features/tickets/tickets.md` § Status Categories). Note: `New`
-   tickets should never have an assignee under the current invariant
-   (see Architectural Invariant in `tickets.md`). They are included in
-   the query scope as a defensive measure — if an assignment code-path
-   bug produces a `New + assigned` ticket, this function will clear it
-   along with the regular unassignment batch.
-2. For each matching ticket (iterated individually, not as a bulk
-   update): acquire `SELECT ... FOR UPDATE` on the Ticket row before
-   clearing `assignee_id`. This prevents a concurrent `assign_ticket`
-   transaction from committing between the read of the current assignee
-   username and the write of `assignee_id = NULL`, which would produce a
-   stale `old_value` in the `assignment` audit event.
-3. Set `assignee_id = NULL`
+   `docs/features/tickets/tickets.md` § Status Categories), ordered by Ticket
+   UUID ascending. `New` tickets should never have an assignee under the current
+   invariant (see Architectural Invariant in `tickets.md`). They remain in the
+   defensive query scope so an assignment-path bug is corrected with the
+   regular unassignment batch.
+2. For each candidate (iterated individually, not as a bulk update): acquire
+   `SELECT ... FOR UPDATE` on the Ticket row, then revalidate locked-current
+   `assignee_id = user_id` and active status. A row that no longer matches is a
+   no-op. This preserves the User-then-Ticket lock order and prevents stale
+   audit values or duplicate events.
+3. Set `assignee_id = NULL` only after successful revalidation.
 4. Create a `TicketAuditEvent` with `event_type = assignment`:
    - `user_id = NULL` (system action)
    - `old_value` = user's username
    - `new_value` = `NULL`
    - `comment` = `"Unassigned from {username}: {reason}"`
+   - `detail = NULL`
+
+Events follow the same ascending Ticket UUID order. A waiting or repeated call
+that observes no matching assignment creates no event. Audit validation,
+insertion, flush, or database failure escapes and rolls back the complete
+caller-owned identity workflow.
 
 Unassignment does **not** change ticket status — the ticket remains in
 its current gate-zone status (Analysis or Analyzed) and is visible in
@@ -662,7 +672,7 @@ has no callers.
 6. VA role loss check: if `role` is `vulnerability_analyst` and
    `to_remove` is non-empty, call
    `_unassign_tickets_on_va_role_loss(db, user_id,
-   "vulnerability_analyst role removed (external sync)")` for each user in
+   "vulnerability_analyst role removed by external sync")` for each user in
    `to_remove`, processed in ascending User UUID order. A consistent order
    avoids deadlocks between concurrent bulk role operations
 7. For each user in `to_add`, create `IdentityAuditEvent` with
@@ -722,7 +732,7 @@ Used when a role mapping is deleted via
 3. Delete all matching `UserRole` records
 4. VA role loss check: if `role` is `vulnerability_analyst`, call
    `_unassign_tickets_on_va_role_loss(db, user_id,
-   "vulnerability_analyst role removed (role mapping deleted)")` for each user
+   "vulnerability_analyst role removed after role mapping deletion")` for each user
    in `affected_user_ids`, processed in ascending User UUID order. A consistent
    order avoids deadlocks between concurrent bulk role operations
 5. For each removed `UserRole`, create `IdentityAuditEvent` with
@@ -751,7 +761,7 @@ Deactivates a user account and triggers all associated side effects.
 |----------------|-----------------------------|----------|--------------------------------------|
 | `user_id`      | `UUID`                      | Yes      | User to deactivate                   |
 | `acting_user_id` | `UUID \| None`            | No       | Who is performing the action         |
-| `reason`       | `str`                       | Yes      | Human-readable reason (used in TicketAuditEvent comments) |
+| `reason`       | `str`                       | Yes      | Identity-lifecycle context stored in `user_deactivated.detail`; not copied into Ticket audit comments |
 
 **Preconditions**:
 
@@ -792,8 +802,8 @@ database transaction, in this specific order):
    session service contract.
 3. Set `User.active = false`
 4. Unassign active tickets: call
-   `_unassign_active_tickets(db, user_id, reason)` where `reason` is the
-   value passed to `deactivate_user()`. This clears `assignee_id` on all
+   `_unassign_active_tickets(db, user_id, "user deactivated")`. The caller's
+   `reason` remains identity-lifecycle context only. This clears `assignee_id` on all
    active tickets and creates `TicketAuditEvent` records — all within the
    same transaction. Ticket status is
    not changed (see Architectural Invariant in `tickets.md`). See
@@ -1068,6 +1078,12 @@ operations perform a single logical write and atomicity is less critical.
 their identity audit events are mandatory side effects and therefore must be
 atomic with their lifecycle writes.
 
+For deactivation, the caller-provided identity reason and the canonical Ticket
+unassignment reason are deliberately independent. Every required identity and
+Ticket event is flushed in the same transaction; failure of either audit trail
+rolls back user lifecycle, roles, API keys, sessions, Ticket assignments, and
+all events in that workflow.
+
 ## Concurrency Considerations
 
 ### Concurrent deactivation from multiple entry points
@@ -1121,6 +1137,12 @@ them (`FOR UPDATE` in the role helper conflicts with `FOR NO KEY UPDATE` in
 deactivation). The first to commit performs the unassignment; the second finds
 no assigned tickets (or finds the user already inactive) and is a no-op. No
 duplicate TicketAuditEvents are created.
+
+Independent-session tests cover the User-then-ascending-Ticket lock order,
+locked-current predicate revalidation, and one system `assignment` event per
+effective unassignment. They assert the exact four identity-owned reason values,
+`detail = NULL`, no event for an already-cleared or no-longer-active candidate,
+and complete rollback of identity and Ticket changes after an audit failure.
 
 ### Assignment concurrent with deactivation or role loss
 

@@ -385,6 +385,14 @@ All effective changes use `package_service.set_track_delivery_status()` with
 system attribution. Delivery changes create no Ticket audit event and do not
 invoke affectedness or Product-release mutations.
 
+Creating or updating `IBSRequest`, `IBSRequestAction`, or
+`IBSRequestActionTrack` evidence likewise creates no `TicketAuditEvent` by
+itself. Request discovery, observation classification, RabbitMQ wake-up, and
+unchanged, stale, inapplicable, incomplete, or failed outcomes create no Ticket
+event. When reconciliation delegates an independent audited domain mutation,
+that mutation retains only its ordinary event contract. Audit history is never
+request state, correlation provenance, delivery authority, or idempotency state.
+
 ## Shared Authoritative Reconciliation
 
 The same track-scoped operation is used by the daily fetcher, package-add
@@ -806,6 +814,10 @@ Implementation coverage must include:
   regression, and stale-negative concurrency with independent sessions;
 - atomic request/action/join/delivery commit and rollback, including successful
   sibling scopes when another fails;
+- zero Ticket-event assertions for effective and unchanged request, action,
+  correlation, delivery, stale/inapplicable, incomplete, failed, and wake-up
+  outcomes except where another delegated domain mutation requires its ordinary
+  event;
 - first run, long gap, re-enable, package-add and Ticket-convergence catch-up,
   duplicate/out-of-order event acceleration, and fetcher metric precedence;
 - API authentication, confidential-Ticket visibility, action deduplication,

@@ -96,7 +96,8 @@ ticket creation or via explicit association), the following rules apply:
 
 ### Associating a CVE Later
 
-An VA can associate a CVE with a ticket that does not yet have one, via
+An authorized acting user can associate a CVE with a ticket that does not yet
+have one, via
 `POST /api/v1/tickets/{ticket_id}/associate-cve`.
 
 **Rules**:
@@ -132,7 +133,8 @@ sources), a ticket is created automatically. See
 - `status`: `New`
 - `assignee_id`: `NULL`
 - `TicketAuditEvent`: `event_type = ticket_created`, `user_id = NULL`,
-  `comment` = fetcher source description (e.g., `"CVE ingested from NVD"`)
+  `comment = "CVE ingested from {source}"`, where `{source}` is the canonical
+  human-readable `CVESourceType` label in `cve-service.md`
 
 ### Manual Creation
 
@@ -193,14 +195,14 @@ layer.
 
 - `Ticket.severity_manual`: VARCHAR(20) (Critical, High, Medium, Low, None),
   nullable
-- Set manually by the VA via the API or UI
+- Set manually by an authorized acting user via the API or UI
 - Only used when `cve_id IS NULL`
 - Mutually exclusive with `cve_id` at the database level
   (`chk_ticket_severity_manual_cve_exclusive`): at most one can be
   non-NULL at any given time
 - When a CVE is associated later (`associate_cve`), `severity_manual` is
   cleared to `NULL` in the same transaction. The automatic severity from
-  CVSS takes over. The VA's previous manual assessment is preserved in
+  CVSS takes over. The acting user's previous manual assessment is preserved in
   the audit trail (`severity_changed` events)
 
 ## Ticket Lifecycle
@@ -304,7 +306,7 @@ In prose, all of the following conditions must be met:
    `NULL`). Severity `None` (CVSS score 0.0) IS a valid determined
    severity and satisfies this gate. For tickets with CVE, this is
    derived from CVSS. For tickets without CVE, `severity_manual`
-   must be set by the VA
+   must be set by an authorized acting user
 4. **SUSE CVSS provided** (only for tickets with CVE): at least one canonical
    `SUSE` assessment must exist in any CVSS version currently accepted by
    Sentinel. The current accepted set is v2.0, v3.0, v3.1, and v4.0; any one
@@ -396,7 +398,8 @@ the Resolved predicate is intentionally true because lifecycle leaves no
 current work.
 There is no manual "Mark as Resolved" action and no generic force-Resolved
 operation. When policy-driven eligibility makes a previously resolved Ticket
-actionable again, the VA records the actual domain decision through existing
+actionable again, an authorized acting user records the actual domain decision
+through existing
 mutations: `WONT_FIX` when no fix will be produced for the complete track, a
 Product-specific manual `eligible = false` override when that Product will not
 receive a fix despite automatic policy, or exclusion only when the package,
@@ -404,7 +407,7 @@ track, or Product is outside Ticket scope. These mutations retain their
 ordinary audit and reconciliation behavior.
 
 Conversely, if any track ceases to be resolution-complete (for example,
-atomic CVSS propagation changes Product eligibility, a VA
+atomic CVSS propagation changes Product eligibility, an authorized acting user
 resets a track status from a final state to `AFFECTED`, or a Product is restored
 under an `AFFECTED` track), the owning mutation workflow invokes centralized
 reconciliation and the Ticket transitions back from Resolved to Analyzed (or to
@@ -499,7 +502,7 @@ eligibility chain.
 All automatic transitions (status promotion and demotion within the
 gate zone, the `New → Analysis` promotion) create a `TicketAuditEvent`
 with `user_id = NULL` (system action), even when the underlying data
-change was initiated by a VA.
+change was initiated by an authorized acting user.
 
 See [ticket-mutations.md](ticket-mutations.md) for the full function
 contract, inactive assignee sanitization, concurrency control rules,
@@ -521,11 +524,10 @@ actionability-aware gate evaluation, and architectural test requirements.
 >   `Analysis`, it never returns to `New` under normal operation.
 > - `reconcile_ticket_status` never pushes a ticket below `Analysis`.
 >   The floor of the gate zone is `Analysis`, not `New`.
-> - When `assignee_id` is `NULL` on a ticket in `Analysis` or later,
->   the ticket's audit trail MUST contain an `assignment` event
->   documenting the unassignment. An orphaned ticket without a
->   corresponding unassignment audit event indicates a bug in the
->   mutation path that cleared `assignee_id`.
+> - Whenever a mutation clears a non-NULL `assignee_id`, the Ticket audit trail
+>   contains the corresponding `assignment` event. A Ticket that has never been
+>   assigned may validly remain unassigned in the gate zone without an
+>   unassignment event.
 >
 > Tickets created directly by a VA (`create_ticket()` with a VA actor)
 > start at `Analysis` and bypass `New` entirely — no `New → Analysis`
@@ -831,7 +833,7 @@ features behave differently:
 | CVSS scoring | Not applicable — no CVE means no CVSS assessments |
 | Product eligibility | Automatic calculation still applies using the conservative 10.0 eligibility fallback; this does not make CVSS itself applicable |
 | CVSS sync (NVD, Red Hat) | Not applicable — ticket is skipped |
-| Severity | Manual via `severity_manual` (editable by VA) |
+| Severity | Manual via `severity_manual` (editable by an authorized acting user) |
 | Release tracking (track) | Not applicable — track-level detection relies on CVE-ID in IBS diffs |
 | Release tracking (product) | Not applicable — product-level detection relies on CVE-ID in `updateinfo.xml` |
 | CVE rejection handling | Not applicable — no CVE means no `cve_state` changes |
@@ -839,7 +841,7 @@ features behave differently:
 | Gate: SUSE CVSS required | Not applicable — severity is set via `severity_manual` instead |
 
 Packages, tracks, and products can still be added and managed
-normally. The VA can set affectedness statuses and the ticket can
+normally. An authorized acting user can set affectedness statuses and the ticket can
 progress through the full lifecycle. A caller with `manage_packages` may set a
 track to `FIXED` from any affectedness state while the locked-current Ticket is
 CVE-less; `admin_ticket_ops` may do so for any Ticket. On a CVE-less Ticket,
@@ -1076,14 +1078,30 @@ To prevent infinite database growth, a Celery Beat background task
   `docs/features/platform/fetcher-infrastructure.md` ("Non-Fetcher
   Periodic Tasks").
 - **Schedule**: Weekly, Sunday at 04:00 UTC.
-- **Logic**: Deletes all `TicketAccessGrant` records belonging to
-  tickets where `is_confidential = FALSE` AND `updated_at` is older
-  than 14 days.
+- **Selection**: select candidate Ticket UUIDs where
+  `is_confidential = FALSE` and `updated_at` is older than 14 days, ordered by
+  Ticket UUID ascending.
+- **Mutation unit**: process each candidate in its own caller-owned transaction.
+  Acquire `FOR UPDATE` on that Ticket, then revalidate its locked-current
+  confidentiality and age. A Ticket that is missing, confidential again, no
+  longer old enough, or already has no grants is a successful no-op.
+- **Logic**: delete every currently present `TicketAccessGrant` belonging to the
+  qualifying locked Ticket and flush. A database or flush failure rolls back
+  that Ticket's cleanup unit and escapes to the task owner; successful prior
+  units remain committed.
+- **Audit boundary**: cleanup creates no `TicketAuditEvent`. These grants were
+  already inert while the Ticket was non-confidential; housekeeping is not a
+  manual revocation and must not create `access_grant_removed`.
 
 This single condition covers all cases:
 
 - Embargo lifted (ticket made non-confidential) → grants cleaned after
   14 days
+
+Repeated or concurrent runs serialize per Ticket and are idempotent: once one
+run removes the grants, a waiting or later run observes an empty set and creates
+no write or event. Audit history is never consulted to select or classify
+cleanup work.
 
 ## API Endpoints
 
@@ -1171,7 +1189,7 @@ Source status is available via `GET /api/v1/cves/{cve_id}/sources` — see
 | `product_cpe` | string | Canonical public identity of the related catalog Product |
 | `product_name` | string | Product display name (from `Product.display_name`) |
 | `eligible` | boolean | Whether this product receives the fix |
-| `is_eligible_override` | boolean | `true` if VA manually set eligibility |
+| `is_eligible_override` | boolean | `true` if an authorized acting user manually set eligibility |
 | `released_at` | datetime \| null | Authoritative issued time of the validated stable security advisory that established Product release, serialized in UTC; `null` until confirmed |
 | `lifecycle_phase` | string \| null | Current Product lifecycle phase for the response's UTC evaluation date |
 | `deleted_at` | datetime \| null | Direct manual-exclusion timestamp |
@@ -1861,7 +1879,7 @@ table:
 | cve_id            | UUID        | FK(cve.id), UNIQUE, nullable | Associated CVE (optional) |
 | status            | VARCHAR(20) | NOT NULL, DEFAULT New        | Ticket status |
 | assignee_id       | UUID        | FK(user.id), nullable        | Assigned VA |
-| severity_manual | VARCHAR(20) | nullable                     | Manual severity (Critical, High, Medium, Low, None). NULL = not set (unresolved). `None` = VA explicitly set informational severity (CVSS score 0.0). Used when `cve_id IS NULL`. Cleared to NULL by `associate_cve` when a CVE is linked. Mutually exclusive with `cve_id` (`chk_ticket_severity_manual_cve_exclusive`) |
+| severity_manual | VARCHAR(20) | nullable                     | Manual severity (Critical, High, Medium, Low, None). NULL = not set (unresolved). `None` = an authorized acting user explicitly set informational severity (CVSS score 0.0). Used when `cve_id IS NULL`. Cleared to NULL by `associate_cve` when a CVE is linked. Mutually exclusive with `cve_id` (`chk_ticket_severity_manual_cve_exclusive`) |
 | duplicate_of_id   | UUID        | FK(ticket.id), nullable      | Original ticket when Duplicated |
 | created_at        | TIMESTAMPTZ   | NOT NULL, DEFAULT            | Record creation timestamp |
 | updated_at        | TIMESTAMPTZ   | NOT NULL, DEFAULT            | Record update timestamp |

@@ -656,17 +656,16 @@ Coverage is measured by `pytest-cov` with the following settings (in
 
 ### General Rule
 
-For every mutation covered by any audit trail registered in the Audit
-Trail Index (`docs/features/platform/audit-trail-infrastructure.md`,
-section "Audit Trail Index"), tests MUST verify that the corresponding
-audit event is created in the same transaction with correct field
-values.
+For every mutation covered by any audit trail registered in the Audit Trail
+Index (`docs/features/platform/audit-trail-infrastructure.md`, section "Audit
+Trail Index"), tests MUST verify the owning domain's exact event contract or
+explicit no-event contract.
 
 When an owning mutation contract explicitly requires no event in a registered
-trail, tests MUST assert that absence as part of the boundary contract. In
-particular, effective and no-op `TicketPackageTrack.delivery_status` operations
-must create no `TicketAuditEvent`; their tests also assert the documented
-absence of assignment and Ticket reconciliation.
+trail, tests MUST assert that absence as part of the boundary contract. For the
+Ticket trail, the complete audited/no-event inventory is the canonical matrix in
+`ticket-audit-log.md`; delivery is one of several intentional no-event
+boundaries rather than a global exception.
 
 The Audit Trail Index is the authoritative source for which audit
 trails exist. As of this writing, four audit trails are registered:
@@ -690,15 +689,28 @@ For each audit-producing mutation, the test MUST assert:
    created (no missing, no duplicates).
 2. **Event type**: the `event_type` value matches the contract table in
    the owning spec.
-3. **Actor**: `user_id` is set for user-initiated actions and `NULL` for
-   system/automated actions.
+3. **Actor**: `user_id` matches the semantic event actor, including `NULL` for
+   system-attributed derived consequences inside a user-initiated workflow.
 4. **Payload**: `old_value`, `new_value`, and any domain-specific fields
    (`comment`, `detail`, `target_user_id`, etc.) match the contract.
-5. **Atomicity**: the audit event and the mutation are visible within the
+5. **Ordering**: direct, derived, and multi-record events appear in the exact
+   deterministic order required by the owning contract.
+6. **Atomicity**: the audit event and the mutation are visible within the
    same test transaction (i.e., no intermediate commit separates them).
 
 For an explicit no-event mutation, assert zero matching events before and after
 the operation and verify that rollback or retry cannot synthesize one.
+
+Ticket audit coverage includes all rows in the canonical mutation/no-event
+matrix. Multi-record tests assert Product events by
+`TicketPackageProduct.id`, maintainer events by `User.id`, duplicate-dependent
+events by locked Ticket UUID, and reference PATCH events in URL/type/title/
+description order. Independent-session tests prove serialized winner/loser
+behavior without stale old values. Ticket audit API tests include equal
+`created_at` values and prove stable `created_at DESC, id DESC` pagination.
+Architecture and service tests also prove that audit history is never queried
+to determine current state, authorization, idempotency, restoration,
+reactivation, provenance, or recovery.
 
 ### Immutability Testing
 

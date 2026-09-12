@@ -638,9 +638,9 @@ here with the required authorization level and a link to the owning spec.
     - **Retroactive** (role removal): if a user loses the
       `vulnerability_analyst` role entirely (no remaining `UserRole`
       records from any origin), all their active ticket assignments (New,
-      Analysis, Analyzed) are automatically unassigned, with
-      corresponding `TicketAuditEvent` records and status reconciliation
-      — identical to the behavior on user deactivation. See
+      Analysis, Analyzed) are automatically unassigned, with one system
+      `assignment` `TicketAuditEvent` per effective clear. Ticket status is not
+      changed and reconciliation is not invoked. See
       `docs/features/identity/user-service.md`,
       `_unassign_tickets_on_va_role_loss()`
 11. **Auto-assignment**: when a user modifies an unassigned ticket, the

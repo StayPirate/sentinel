@@ -277,7 +277,7 @@ the resulting status is `Analysis` or `Analyzed` and
 1. Set `assignee_id = NULL`
 2. Create `TicketAuditEvent` with `event_type = assignment`
    (system-initiated, `user_id = NULL`,
-   `comment = "Unassigned from {username}: employee deactivated"`)
+   `comment = "Unassigned from {username}: inactive assignee"`)
 3. Emit a warning-level log: `"Inactive assignee {user_id} detected on
    ticket {ticket_id} during reconciliation — this should have been
    handled by _unassign_active_tickets"`
@@ -760,7 +760,7 @@ Sets or clears the `severity_manual` field on a ticket.
 | `db` | `AsyncSession` | Yes | Database session |
 | `ticket_id` | `UUID` | Yes | Ticket to modify |
 | `severity` | `Severity \| None` | Yes | New severity value (`Critical`, `High`, `Medium`, `Low`, or `None` for CVSS score 0.0 / informational), or Python `None` to clear the value (sets `severity_manual` to SQL `NULL` = unresolved) |
-| `acting_user_id` | `UUID \| None` | No | Who is performing the action |
+| `acting_user_id` | `UUID` | Yes | Authorized acting user performing the action |
 
 **Preconditions**:
 

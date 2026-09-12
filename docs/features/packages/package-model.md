@@ -128,8 +128,8 @@ vulnerable, but they carry different history and workload implications.
   locked-current Ticket has `cve_id IS NULL`
 - A caller with `manage_packages` can change `FIXED` back to `AFFECTED` or
   `ANALYSIS`, or to any other non-`FIXED` affectedness state
-- No `is_status_override` flag is needed on tracks — the VA has direct
-  control over non-FIXED target statuses
+- No `is_status_override` flag is needed on tracks — an authorized acting user
+  with `manage_packages` has direct control over non-`FIXED` target statuses
 
 ### 6. Affectedness and delivery are independent axes
 
@@ -343,7 +343,7 @@ eligibility and delivery confirmation.
 | `ticket_package_track_id` | UUID | FK(ticket_package_track.id), NOT NULL | Parent track record |
 | `product_id` | UUID | FK(product.id), NOT NULL | Related product |
 | `eligible` | BOOLEAN | NOT NULL, DEFAULT true | Effective eligibility |
-| `is_eligible_override` | BOOLEAN | NOT NULL, DEFAULT false | True if VA has manually set the eligibility |
+| `is_eligible_override` | BOOLEAN | NOT NULL, DEFAULT false | True if an authorized acting user manually set the eligibility |
 | `released_at` | TIMESTAMPTZ | nullable | Authoritative stable security advisory-issued time in UTC; NULL until Product release detection confirms a match |
 | `deleted_at` | TIMESTAMPTZ | nullable | Direct manual-exclusion timestamp. NULL = not directly excluded |
 | `created_at` | TIMESTAMPTZ | NOT NULL, DEFAULT | Record creation timestamp |
@@ -466,8 +466,9 @@ be resolved from the system-wide default CVSS version configuration —
 never hardcoded. See `docs/features/tickets/cvss-scoring.md` and
 `docs/features/platform/system-settings.md`.
 
-**Override model**: the VA can override eligibility on individual Products by
-setting `is_eligible_override = true`. Rule 1 above is authoritative for every
+**Override model**: an authorized acting user with `manage_packages` can
+override eligibility on individual Products by setting
+`is_eligible_override = true`. Rule 1 above is authoritative for every
 automatic workflow.
 
 ### Axis 3: Delivery and Release Observation
@@ -563,7 +564,7 @@ consumer-facing guidance:
 The delivery pipeline maps to the SUSE maintenance process as follows:
 
 ```
-VA sets track to AFFECTED
+Authorized user sets track to AFFECTED
         |
         v
 Maintainer prepares fix
@@ -717,7 +718,7 @@ affectedness status regardless of whether any product is eligible. The
 question "is there work to do on this track?" is answered by checking
 whether any actionable Product under it has `eligible = true`.
 
-### VA Overrides Product Eligibility
+### Authorized-User Overrides Product Eligibility
 
 1. Product `eligible` is set to the chosen value
 2. `is_eligible_override` is set to `true`
@@ -1048,7 +1049,7 @@ Product-level eligibility has an override mechanism:
 | Column | Type | Default | Description |
 |--------|------|---------|-------------|
 | `eligible` | bool | calculated | Effective eligibility |
-| `is_eligible_override` | bool | false | VA has manually set the eligibility |
+| `is_eligible_override` | bool | false | An authorized acting user has manually set the eligibility |
 
 When `is_eligible_override = false`, the system maintains `eligible`
 automatically via CVSS threshold + lifecycle phase calculation. When
@@ -1392,15 +1393,16 @@ name/version matching.
 
 ## Ticket Events for Package Changes
 
-Every modification represented in the table below MUST produce its specified
-`TicketAuditEvent` for audit and traceability. Delivery-status mutation is the
-explicit exception: it creates no Ticket event, assignment, or Ticket
-reconciliation. The following event types are defined:
+Every effective mutation represented in the table below produces its specified
+`TicketAuditEvent`. Other factual and operational boundaries use the explicit
+no-event contracts in `ticket-audit-log.md`; delivery status, checkpoints,
+derived actionability, and Ticket convergence are not missing audit coverage.
+The following event types are defined:
 
 | Action | `event_type` | `user_id` | Details recorded |
 |--------|-------------|-----------|------------------|
 | Authorized user adds or completes package tree | `package_added` | Acting user | `package_name` |
-| Package auto-added or completed (CVE ingestion or Product catalog backfill) | `package_added` | `NULL` | `package_name`, contextual `comment` |
+| Package auto-added or completed | `package_added` | `NULL` | `package_name`; exact `comment` is `CVE package resolution`, `Product catalog backfill`, or `Ticket convergence` |
 | Active User acquired as package maintainer | `package_maintainer_added` | `NULL` | Target username in `new_value`; package name in `detail` |
 | Authorized user soft-deletes package | `package_excluded` | Acting user | `package_name` |
 | Authorized user soft-deletes track | `track_excluded` | Acting user | `track_name`, `package_name` |
@@ -1409,22 +1411,23 @@ reconciliation. The following event types are defined:
 | Authorized user restores track | `track_restored` | Acting user | `track_name`, `package_name` |
 | Authorized user restores product | `product_restored` | Acting user | `track_name`, `package_name`, event-time Product name and CPE |
 | User-attributed or system change to track status | `track_status_changed` | Acting user for user-attributed changes; `NULL` for automatic release detection | `track_name`, `package_name`, `old_status`, `new_status` |
-| VA overrides or resets Product eligibility | `product_eligibility_changed` | VA user | `track_name`, `package_name`, event-time Product name and CPE, `old_eligible`, `new_eligible`, `reason = va_override`, and `override_action` |
+| Authorized user overrides or resets Product eligibility | `product_eligibility_changed` | Acting user | `track_name`, `package_name`, event-time Product name and CPE, `old_eligible`, `new_eligible`, `reason = va_override`, and `override_action` |
 | Ticket created | `ticket_created` | `NULL` | Creation source description |
 | Product release detected | `product_released` | `NULL` | `track_name`, `package_name`, event-time Product name and CPE, `released_at`, `advisory_id` |
 | Product eligibility recalculated | `product_eligibility_changed` | `NULL` | `track_name`, `package_name`, event-time Product name and CPE, `old_eligible`, `new_eligible`, `reason` |
 
 - `user_id = NULL` indicates an automatic system action. For
   `package_added`, this distinguishes manual additions (acting user) from
-  automatic ones (CVE ingestion or Product catalog backfill). The `comment` field
-  provides context for automatic additions.
+  automatic ones. Manual additions use `comment = NULL`; automatic additions
+  use only the three exact values listed in the table.
 - Exactly one `package_added` event is created when an invocation creates at
   least one package, track, or Product record. A completely no-op invocation
   creates no `package_added` event. Product catalog backfill uses the fixed
   comment `Product catalog backfill`.
 - Exactly one `package_maintainer_added` event is created per new association,
-  including on a package-tree no-op. These events are system-attributed and do
-  not trigger Ticket reconciliation. Existing, unmatched, or inactive-user
+  including on a package-tree no-op. Multiple events from one invocation are
+  emitted in ascending `User.id` order. These events are system-attributed and
+  do not trigger Ticket reconciliation. Existing, unmatched, or inactive-user
   outcomes create no event.
 - All events include an implicit `created_at` timestamp.
 - Automatic recalculation creates one event only for each Product occurrence
