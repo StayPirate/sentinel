@@ -85,12 +85,12 @@ ticket creation or via explicit association), the following rules apply:
 - **On-demand fetch**: if the CVE does not exist in the Sentinel
   database, a minimal CVE record (only `cve_id` set) is created via
   `ensure_cve_exists()` (see `docs/features/tickets/cve-service.md`).
-  The operation proceeds immediately with the minimal record. After the
-  transaction commits, the endpoint handler calls
-  `trigger_on_demand_fetch()` to dispatch background fetch tasks. This
-  dispatch occurs unconditionally (regardless of whether the CVE was
-  newly created or already existed), with Redis deduplication preventing
-  redundant work.
+  The operation proceeds immediately with the minimal record. The API workflow
+  registers `trigger_on_demand_fetch()` as a post-commit effect; the shared
+  transaction dependency commits and releases database locks before dispatch.
+  This dispatch occurs unconditionally (regardless of whether the CVE was newly
+  created or already existed), with Redis deduplication preventing redundant
+  work.
 - **Normal**: if the CVE exists and is not associated with any ticket,
   the association proceeds directly
 
@@ -647,18 +647,22 @@ and a Duplicated ticket must be reverted first.
 
 Steps:
 
-1. Verify the ticket is operable (`ensure_ticket_operable` in the
+1. Lock source and target in the deterministic order defined by
+   `ticket_service.mark_as_duplicate()` and require both locked-current Tickets
+   to satisfy the canonical visibility predicate. A missing or inaccessible
+   root returns 404 `TICKET_NOT_FOUND`.
+2. Verify the source ticket is operable (`ensure_ticket_operable` in the
    service layer — rejects Ignored and Duplicated).
-2. Verify the target ticket is not in Duplicated status (else 409
+3. Verify the target ticket is not in Duplicated status (else 409
    `TICKET_DUPLICATE_TARGET_DUPLICATED`).
-3. Verify the target is not the source ticket (else 400
+4. Verify the target is not the source ticket (else 400
    `TICKET_SELF_DUPLICATE`).
-4. Set `duplicate_of_id = target_id` and `status = Duplicated`.
-5. Atomically repoint all tickets whose `duplicate_of_id` points to
+5. Set `duplicate_of_id = target_id` and `status = Duplicated`.
+6. Atomically repoint all tickets whose `duplicate_of_id` points to
    the source ticket to point to the target instead. One
    `duplicate_target_changed` audit event is created per repointed
    ticket.
-6. If a dependent ticket is locked by a concurrent operation, the
+7. If a dependent ticket is locked by a concurrent operation, the
    entire transaction rolls back (409
    `TICKET_DUPLICATE_CONCURRENT_MODIFICATION`). The client should
    re-read source and target state before retrying.
@@ -814,14 +818,15 @@ caller category. Package eligibility behavior follows the CVSS mutation's
 `immediate`, `deferred_until_reactivation`, `not_applicable`, or `none`
 disposition and the narrow atomic boundary in `ticket-mutations.md`.
 
-**Relationship with `require_accessible_ticket`**: the accessibility
-check is a router-level API dependency (applies to all operations on a
-single ticket, including reads — see `docs/api-spec.md`, Ticket
-Accessibility Check). `ensure_ticket_operable` is a service-layer guard
-(applied by all mutation functions). The two guards are independent
-checks: accessibility is verified at the API layer before the request
-reaches the service; operability is verified at the service layer under
-the `FOR UPDATE` lock (the authoritative check).
+**Relationship with Ticket accessibility**: `docs/features/identity/rbac.md`
+owns the canonical visibility predicate and `docs/api-spec.md` owns the request
+flows. For a consumer mutation, the mutation service evaluates accessibility
+from locked-current Ticket state before this operability guard. The checks are
+independent: visibility determines whether the caller may observe the Ticket;
+operability determines whether the already-accessible Ticket can accept the
+mutation. A thin API dependency may perform a delegated preliminary check where
+the request flow requires one, but that check never replaces locked-current
+mutation accessibility.
 
 ## Tickets Without CVE: Behavioral Differences
 
@@ -858,14 +863,16 @@ disclosure.
 
 - **Confidentiality Flag**: A boolean state (`is_confidential`) on the
   Ticket entity that determines if the ticket is under embargo.
-- **Visibility mechanisms**: confidential visibility follows scope, explicit
-  manual grants, and additive package-maintainer associations.
+- **Visibility predicate**: `docs/features/identity/rbac.md` (Scope and
+  Confidential Ticket Visibility) is the single normative definition. This
+  specification applies it but does not restate or implement a second variant.
 - **Confidentiality Filtering**: Confidential tickets are excluded at
   the database query level for unauthorized and unauthenticated users.
   They do not appear in list results, are not returned by detail
-  endpoints, and leave no visible trace (no placeholders, no redacted
-  entries). Authorized users see confidential tickets normally alongside
-  non-confidential ones.
+  endpoints, and produce no placeholder or redacted resource representation.
+  The identifier-only exceptions under Identifier Disclosure Boundary do not
+  expose protected content. Authorized users see confidential tickets normally
+  alongside non-confidential ones.
 
 Ticket response objects (both list and detail) MUST include the
 `is_confidential: boolean` field. This field is always present — there
@@ -877,49 +884,57 @@ and the `is_confidential` column on the Ticket table.
 
 ### Authorization Rules
 
-When a ticket is `is_confidential=True`, any read/write HTTP request
-MUST be evaluated against these rules. Access is **GRANTED** if the user
-meets at least one condition:
+Every consumer-facing Ticket-derived operation applies the canonical predicate
+from `rbac.md`. Its branches are additive, visibility never grants capability,
+and anonymous access is limited to non-confidential Tickets without grant or
+maintainer lookup. Package exclusion disables only the maintainership branch
+through that package and restore reactivates it. Track/Product exclusion,
+lifecycle or EOL, affectedness, eligibility, delivery, and Ticket status have no
+visibility effect.
 
-1. **Scope-based**: The user's effective scope is `all` (see
-   `docs/features/identity/rbac.md`, Scope).
-2. **Explicit Grant**: The user's `id` exists in the `TicketAccessGrant`
-   table for the requested `ticket_id`.
-3. **Package maintainer**: The user's `id` matches a
-   `TicketPackageMaintainer.user_id` whose parent `TicketPackage` belongs to
-   the Ticket and has `deleted_at IS NULL`.
-
-The "full access" conferred by rules 2 or 3 means visibility plus only the
-operations permitted by the user's existing capabilities. Neither mechanism
-grants capabilities.
-
-*Dynamic Access Note:* A maintainer gains access when a package occurrence is
-associated with their User ID and loses access the moment the last qualifying
-package is excluded. Restoring the package reactivates the retained association
-without external I/O. Track and Product exclusion, lifecycle actionability,
-Ticket resolution, and later SMELT omission do not revoke package-wide access.
-A package whose Products are all EOL remains qualifying until excluded.
-
-If no condition is met, or if the user is unauthenticated, the
-confidential ticket is **invisible**: it is excluded from list queries
-and detail endpoints return `404 Not Found`. Unauthenticated users never
-see confidential tickets.
-
-*Note: System background tasks (Celery fetchers, event consumers) bypass
-these rules and process confidential tickets normally.*
+Internal system workflows outside a consumer caller context, including Celery
+fetchers and event consumers, do not use HTTP scope. Their selection and status
+rules are defined by their owning background-workflow specifications.
 
 ### Confidentiality Filtering
 
-Confidential tickets are filtered at the database query level.
-Unauthorized and unauthenticated users never see them — no placeholders,
-no redacted entries, no trace of their existence.
+Confidentiality is enforced by model-aware service queries, not by endpoint-
+built SQL or a Core model utility. The API resolves authentication and
+resource-independent capabilities, delegates caller information to services,
+and maps inaccessible outcomes. Services own the database predicate and the
+Ticket-, CVE-, package-, reference-, audit-, submission-, and maintainer-query
+shapes that consume it.
+
+#### Read Atomicity
+
+A protected read MUST constrain the same database result it returns by the
+canonical Ticket visibility predicate. A preliminary existence or visibility
+lookup followed by an unconstrained resource query is insufficient.
+
+- Single-resource and nested-resource reads select the Ticket and requested
+  Ticket-derived data within one visibility-constrained service operation. A
+  missing Ticket, an inaccessible Ticket, or a nested resource that cannot be
+  returned under that Ticket's visibility contract produces the resource-
+  appropriate not-found response.
+- List, search, and count operations establish the visible candidate set before
+  client filters, sorting, total calculation, and page slicing. `meta.total`,
+  rows, and aggregates therefore describe only visible candidates.
+- An assembled Ticket-derived response uses one coherent observation point for
+  the Ticket and its components. No component may be selected from a later
+  unconstrained Ticket state after an earlier visibility decision. The
+  implementation may use one SQL statement, a database snapshot, or another
+  mechanism that provides this guarantee; this specification does not prescribe
+  the SQL or transaction shape.
+- If a grant, maintainership path, or confidentiality state is revoked after a
+  completed response's observation point, that response remains valid. A later
+  request observes the later committed state and is denied when no visibility
+  branch remains.
 
 **Ticket List (`GET /api/v1/tickets`)**:
 The list query includes only non-confidential tickets plus confidential
-tickets for which the current user satisfies at least one authorization
-rule from [Authorization Rules](#authorization-rules). For
-unauthenticated users, only non-confidential tickets are returned.
-Pagination counts reflect only the tickets visible to the caller.
+tickets satisfying the canonical predicate. For unauthenticated users, only
+non-confidential tickets are returned. Every filter, search term, sort,
+pagination operation, and total applies to that visible candidate set.
 
 **Package Search (`GET /api/v1/packages`)**:
 The cross-ticket package search endpoint applies the same
@@ -929,99 +944,63 @@ confidential tickets are excluded for unauthorized callers. See
 Tickets).
 
 **Maintainer Dashboard (`GET /api/v1/my/packages/*`)**:
-The maintainer dashboard endpoints MUST apply the same confidentiality
-filtering as the ticket list. Although the package-maintainer association used
-by the dashboard already coincides with authorization rule 3
-([Authorization Rules](#authorization-rules)), the confidentiality filter
-MUST be applied explicitly as defense in depth — protecting against
-future changes to the dashboard query logic that might inadvertently
-bypass the authorization check.
+The maintainer dashboard service applies canonical Ticket visibility to the
+same query results used for rows and totals. For
+`GET /api/v1/my/packages/ticket/{ticket_id}`, missing and inaccessible Tickets
+return `404 TICKET_NOT_FOUND` before Ticket status, maintainer membership,
+`error_state`, or `duplicate_of` is projected.
 
 **CVE Detail (`GET /api/v1/cves/{cve_id}/...`)**:
-All endpoints under `/api/v1/cves/{cve_id}/` are subject to the
-`require_accessible_cve` router-level dependency (see `docs/api-spec.md`,
-CVE Accessibility Check). If the CVE is linked to a confidential ticket
-that the caller is not authorized to access, the endpoint returns
-`404 CVE_NOT_FOUND` — indistinguishable from a non-existent CVE. CVEs
-without an associated ticket are freely accessible.
+All endpoints under `/api/v1/cves/{cve_id}/` use the service-delegated CVE
+accessibility role in `docs/api-spec.md`. Ticketless CVEs are public. An
+associated CVE is selected only when its Ticket satisfies the canonical
+predicate. Missing and inaccessible outcomes both return `404 CVE_NOT_FOUND`,
+never a Ticket code.
 
 **CVE List (`GET /api/v1/cves`)**:
-The list query applies confidentiality filtering via LEFT JOIN to the
-Ticket table using `confidential_ticket_filter()`. CVEs associated with
-confidential tickets are silently excluded for unauthorized callers,
-consistent with the `GET /api/v1/tickets` pattern. CVEs
-without an associated ticket are always included. Pagination counts
-reflect only the CVEs visible to the caller.
+The service-owned list query includes Ticketless CVEs and CVEs whose associated
+Ticket satisfies the canonical predicate. Filtering, sorting, totals, and page
+slicing apply to that set.
 
-#### Shared Utility: `confidential_ticket_filter()`
+#### Mutation Atomicity
 
-The confidentiality filtering logic is implemented as a shared stateless
-function in `backend/app/core/filters.py`. It returns a SQLAlchemy
-`ColumnElement` (a WHERE clause fragment) that any query can apply. The
-endpoint handler constructs the filter; the service function receives it
-as a parameter.
+Consumer mutations authorize against the locked-current pre-mutation Ticket.
+After authentication and any resource-independent capability check, the
+mutation service acquires the applicable roots in its owning lock order,
+including each protected Ticket, and applies the canonical predicate to each
+protected Ticket before operability,
+nested-resource ownership, state or transition guards, no-op classification,
+writes, auto-assignment, audit, reconciliation, or post-commit-effect
+registration. Multi-root operations retain the deterministic lock order in
+their owning mutation contract.
 
-```python
-# backend/app/core/filters.py
+If the Ticket is missing or inaccessible at that point, the operation returns
+`TICKET_NOT_FOUND` and performs zero writes, assignment, audit events,
+reconciliation, or post-commit effects. Caller identity, roles, and effective
+scope resolved at request start are not reconstructed mid-request; Ticket-side
+confidentiality, grants, and included-package maintainership are read from the
+locked-current database state.
 
-def confidential_ticket_filter(
-    ticket_id_col: Column,          # e.g., Ticket.id or TicketPackage.ticket_id
-    is_confidential_col: Column,    # e.g., Ticket.is_confidential
-    caller_scope: Scope | None,     # None for unauthenticated
-    caller_user_id: UUID | None,    # grants and maintainership lookup
-) -> ColumnElement:
-    """Build a SQL filter expression for confidential ticket visibility.
+A permitted workflow that requires external I/O before locking follows the
+fourth flow in `docs/api-spec.md`: preliminary service-owned accessibility,
+external I/O without a lock, then authoritative locked-current accessibility.
+An external failure before the lock retains its documented precedence even if
+visibility was concurrently removed; no extra lookup replaces it with 404.
 
-    Returns a boolean SQL expression that evaluates to TRUE for rows
-    the caller is authorized to see. Apply with query.where(...).
+If a mutation was accessible in its locked pre-state and that mutation itself
+removes the actor's final visibility path, the mutation and its ordinary success
+response complete. For example, a restricted analyst who sees a confidential
+Ticket only by maintaining its last included package may exclude that package.
+The exclusion, audit, reconciliation, and response succeed normally; later
+requests evaluate the committed post-state and return `TICKET_NOT_FOUND` unless
+another visibility branch applies.
 
-    Visibility rules (from rbac.md, Scope and Confidential Ticket
-    Visibility):
-    - Scope 'all': see everything (returns TRUE)
-    - Unauthenticated (scope is None): only non-confidential
-    - Scope 'non_confidential': non-confidential OR any of:
-        - TicketAccessGrant exists for (ticket_id, user_id)
-        - TicketPackageMaintainer exists for caller_user_id through an
-          included TicketPackage
-    """
-```
+#### Identifier Disclosure Boundary
 
-**Behavior**:
-
-```
-IF caller_scope is None:
-    return is_confidential_col == False  # unauthenticated
-
-IF caller_scope == Scope.ALL:
-    return literal(True)  # no filter -- scope 'all' sees everything
-
-return OR(
-    is_confidential_col == False,
-    EXISTS(TicketAccessGrant for caller_user_id),
-    EXISTS(TicketPackageMaintainer for caller_user_id through an included package),
-)
-```
-
-**Design properties**:
-
-- **Stateless**: pure function, no side effects, no database calls
-- **Decoupled**: accepts column references, not model instances — works
-  with any query shape (ticket list, package list, CVE details, etc.)
-- **Testable**: can be tested in isolation by inspecting the generated
-  SQL expression
-- **Single responsibility**: the handler knows the user; the service
-  knows the query; the filter knows the rules
-
-**Consumers**:
-
-| Consumer | `ticket_id_col` | Notes |
-|----------|-----------------|-------|
-| `GET /api/v1/tickets` | `Ticket.id` | Ticket list endpoint |
-| `GET /api/v1/cves` | `Ticket.id` (via JOIN from CVE) | CVE list endpoint |
-| `GET /api/v1/packages` | `Ticket.id` (via JOIN) | Cross-ticket package search |
-| `GET /api/v1/my/packages/*` | `Ticket.id` (via JOIN) | Maintainer operations |
-| `require_accessible_ticket` | `Ticket.id` | Single-ticket access guard |
-| `require_accessible_cve` | `Ticket.id` (via JOIN from CVE) | Single-CVE access guard |
+Ticket UUIDs, `SNTL-{n}` identifiers, and CVE IDs are identifiers, not
+confidential Ticket content. Confidentiality still hides protected Ticket-
+derived content and direct reads, but it does not add identifier redaction,
+alternate states, or lookup machinery.
 
 **Accepted risk — `duplicate_of_id` and confidential targets**: A
 Duplicated ticket that is non-confidential may have a
@@ -1035,13 +1014,16 @@ title, CVE, severity, or package data leaks; (b) creating the
 duplicate link requires `triage_ticket` capability — users with
 this capability via the `vulnerability_analyst` role already have
 scope `all`; `restricted_analyst` users have `non_confidential`
-scope but only reach this code path for non-confidential source
-tickets; (c) the reverse scenario (target becomes confidential
-after the link is created) is rare and the leak is limited to
-existence inference; (d) implementing bidirectional cascading
-confidentiality adds significant complexity (reverse traversal,
-audit events, revert semantics) disproportionate to the severity
-of the information leak.
+scope but initial duplicate targeting requires target accessibility; (c) the
+principal exception is a target that becomes inaccessible after the link is
+created; and (d) the leak is limited to an identifier. Following that identifier
+may return `404 TICKET_NOT_FOUND`.
+
+The existing `409 TICKET_CVE_CONFLICT` response likewise retains
+`existing_ticket_id` even when that Ticket is not otherwise visible. The global
+CVE-source listing may expose CVE IDs without joining through Ticket visibility.
+These are bounded identifier-only exceptions; they do not permit protected
+Ticket content or direct inaccessible-resource reads.
 
 ### Audit Trail
 
@@ -1606,7 +1588,7 @@ Response: `TicketDetail` object in standard `{"data": ...}` envelope
 | Status | Code | Condition |
 |--------|------|-----------|
 | 400 | `TICKET_SELF_DUPLICATE` | Source and target are the same ticket |
-| 404 | `TICKET_NOT_FOUND` | Target ticket (`duplicate_of_id`) does not exist |
+| 404 | `TICKET_NOT_FOUND` | Target Ticket (`duplicate_of_id`) is missing or inaccessible |
 | 409 | `TICKET_DUPLICATE_TARGET_DUPLICATED` | Target ticket is itself Duplicated (use its target instead) |
 | 409 | `TICKET_DUPLICATE_CONCURRENT_MODIFICATION` | A dependent is locked by a concurrent operation; retry |
 
@@ -1713,10 +1695,10 @@ The response uses `TicketConvergenceDispatchResponse`; see
 2. Require at least one of `triage_ticket` or `manage_fetchers`, without loading
    the Ticket. A caller lacking both receives the generic 403 before Ticket
    accessibility, regardless of Ticket existence.
-3. Resolve Ticket accessibility. A missing Ticket or an invisible confidential
-   Ticket returns `404 TICKET_NOT_FOUND`; either capability alone never grants
-   visibility.
-4. Under `FOR UPDATE`, reload the current Ticket and require status
+3. Under `FOR UPDATE`, resolve the locked-current Ticket and its accessibility.
+   A missing or invisible Ticket returns `404 TICKET_NOT_FOUND`; either
+   capability alone never grants visibility.
+4. From that same locked state, require status
    `Analysis`, `Analyzed`, or `Resolved`. `New`, `Ignored`, and `Duplicated`
    raise `InvalidTransitionError` and return
    `409 TICKET_INVALID_TRANSITION`. Release the transaction and lock before

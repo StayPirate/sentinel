@@ -629,10 +629,26 @@ Both endpoints inherit the ticket accessibility check. Anonymous callers can
 read non-confidential Tickets; confidential Ticket existence and data remain
 hidden according to the shared visibility contract.
 
+The service query for each endpoint selects distinct actions through the parent
+Ticket constrained by the canonical visibility predicate from
+`docs/features/identity/rbac.md`. This constraint is part of the same database
+result or view used for action deduplication, counting, pagination, and item
+projection. A preliminary router or dependency check may provide the shared
+HTTP denial response, but it cannot authorize a later unconstrained action
+query. Missing and inaccessible parents both return `404 TICKET_NOT_FOUND`.
+Model-aware ORM construction remains in the Service layer; endpoint handlers do
+not build or pass visibility expressions.
+
 ### Common Query Rules
 
 Both endpoints support standard `page` (default 1) and `per_page` (default 20,
 maximum 100) pagination. Filters combine with AND semantics.
+
+Action deduplication occurs within the caller-visible candidate set. The page
+items and `meta.total` count the same distinct visible
+`IBSRequestAction.id` values after all mandatory Ticket/path constraints and
+client filters; invisible joins neither contribute to the count nor move
+visible actions between pages.
 
 `state` accepts one exact value from `new`, `review`, `accepted`, `declined`,
 `revoked`, `superseded`, or `deleted`. Invalid enum values follow the shared
@@ -821,14 +837,17 @@ Implementation coverage must include:
 - first run, long gap, re-enable, package-add and Ticket-convergence catch-up,
   duplicate/out-of-order event acceleration, and fetcher metric precedence;
 - API authentication, confidential-Ticket visibility, action deduplication,
-  exact filters, pagination, deterministic sorting, and response schemas; and
+  exact filters, pagination, deterministic sorting, and response schemas,
+  including missing/inaccessible 404 equivalence and one visibility-constrained
+  distinct candidate set for items and totals; and
 - log, API, and persistence assertions proving that authors, actors, comments,
   descriptions, raw payloads, credentials, and raw response bodies are absent.
 
 ## Security and Privacy
 
-- The public read endpoints process optional authentication and enforce the
-  shared confidential-Ticket visibility rules before querying actions.
+- The public read endpoints process optional authentication, and their service
+  queries select actions through an accessible parent Ticket in the same
+  database result used for deduplication, counts, pages, and projection.
 - IBS HTTP requests use existing configured credentials and the shared TLS and
   HTTP-client contracts. Credentials never enter persisted request evidence,
   API output, metrics, or logs.

@@ -464,16 +464,41 @@ All functions receive the database session from the caller (never create
 their own) to ensure transactional atomicity with the surrounding
 operation.
 
+Consumer-facing functions apply the one canonical Ticket visibility predicate
+from `docs/features/identity/rbac.md` (Scope and Confidential Ticket
+Visibility). Capability-protected API routes check `manage_references` before
+the first service resource lookup. Model-aware accessibility and reference
+queries belong to `reference_service`; API handlers and Core do not construct
+them. The caller-context representation and SQL formulation are implementation
+choices.
+
+`list_references()` selects references through an accessible parent Ticket in
+the same database operation or equivalent single database view. A missing or
+inaccessible parent returns `404 TICKET_NOT_FOUND`; it never returns
+`{"data": []}` for that case. Source/type filtering and ordering apply only
+after the accessible parent has constrained the result.
+
 Manual POST, PATCH, and DELETE mutations use the parent Ticket as their
 serialization root. After input-only validation, the first persistent read
-acquires `FOR UPDATE` on `ticket_id`. The service then resolves the target
-reference, when applicable, under that lock and scopes it to
-`(ticket_id, reference_id)`. Mutation classification, `old_value`, `new_value`,
-and URL snapshots come only from this locked-current state. The unique
-`(ticket_id, url)` constraint remains the final defense against concurrent
-manual creation and automatic upsert races. Automatic fetcher upserts retain
-their owning per-CVE transaction and conflict-merge contract; they do not
-acquire Ticket after a CVE lock or create Ticket audit events.
+acquires `FOR UPDATE` on `ticket_id`. It then evaluates accessibility from the
+locked-current Ticket as the authoritative mutation decision before resolving a
+target reference or evaluating
+reference ownership, source/editability, conflict, or no-op state. The target
+reference, when applicable, is resolved under that lock and scoped to
+`(ticket_id, reference_id)`. Access denial therefore precedes
+`RESOURCE_NOT_FOUND`, `RESOURCE_NOT_EDITABLE`, and `RESOURCE_CONFLICT`, returns
+`TICKET_NOT_FOUND`, and creates no reference write or audit event. Mutation
+ordering is exactly capability at the API boundary, Ticket lock,
+locked-current accessibility, reference ownership and source/editability,
+conflict or no-op classification, then mutation and audit. `old_value`,
+`new_value`, and URL snapshots come only from this locked-current state. The
+unique `(ticket_id, url)` constraint remains the final defense against
+concurrent manual creation and automatic upsert races. Automatic fetcher
+upserts retain their owning per-CVE transaction and conflict-merge contract;
+they do not acquire Ticket after a CVE lock, create Ticket audit events, or
+acquire an HTTP user's scope. This accessibility ordering does not add an
+operability or manual-zone restriction; the Manual references policy above
+remains unchanged.
 
 ### `upsert_references` signature
 
@@ -554,9 +579,10 @@ result set.
 | `article`  | 4             |
 | `NULL`     | 5 (last)      |
 
-Client-controlled sorting is not supported (small dataset, defined
-grouping order). When a ticket has no references (or all are filtered
-out), the response returns `{"data": []}`.
+Client-controlled sorting is not supported (small dataset, defined grouping
+order). When an accessible ticket has no references (or all are filtered out),
+the response returns `{"data": []}`. The accessible parent is selected in the
+same database operation or view as the reference result.
 
 **Response** (200 OK):
 
@@ -668,7 +694,8 @@ Adds a manual reference to a ticket.
   normalized URL
 
 The service holds the parent Ticket lock while classifying the normalized URL
-and inserting the reference and event. If a concurrent create or automatic
+and, after locked-current accessibility succeeds, inserting the reference and
+event. If a concurrent create or automatic
 upsert wins the unique key, the manual request returns `RESOURCE_CONFLICT` and
 creates no event.
 
@@ -818,9 +845,12 @@ audit history is never reference state or upsert idempotency input.
 
 ## Security
 
-- Reference list is publicly accessible (no authentication required)
+- Reference list is Public with optional authentication. Anonymous callers see
+  references only for non-confidential Tickets; authenticated callers use the
+  canonical Ticket visibility predicate
 - Adding, editing, and deleting references requires the `manage_references`
-  capability
+  capability before resource lookup, followed by locked-current Ticket
+  accessibility in the service
 - Edit and delete operations are restricted to manual references
   (see Mutability)
 - All manual references are editable/deletable by any user with the
@@ -845,6 +875,15 @@ and no-event outcomes for rejection, not found, unchanged PATCH fields, and a
 concurrent loser. A multi-field PATCH asserts the fixed URL, type, title,
 description event order. Independent-session tests prove that competing manual
 mutations serialize on the Ticket and do not record stale old values.
+
+Accessibility tests cover anonymous, effective scope `all`, explicit grant,
+included-package maintainership, and inaccessible parents. List tests prove the
+accessible parent and references are selected in one database operation or
+equivalent view and distinguish an accessible empty list from
+`TICKET_NOT_FOUND`. Mutation races revoke the caller's last visibility path
+before the Ticket lock and assert `TICKET_NOT_FOUND` precedes reference
+ownership, editability, conflict, and no-op outcomes with zero durable write or
+event. Automatic fetcher upserts remain trusted and unscoped.
 
 Fetcher-upsert tests assert zero Ticket events for effective insert/update and
 no-op outcomes while preserving current rows and fetcher execution evidence.

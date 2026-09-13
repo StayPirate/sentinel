@@ -91,6 +91,29 @@ trusted internal processes — capability checks do not apply to them.
 Adding a new caller that passes a non-None `acting_user_id` without
 having verified the corresponding capability is a security bug.
 
+Capability is checked by the API before its first service resource lookup. For
+consumer-facing operations, capability does not replace Ticket visibility. The
+service operation performs authoritative accessibility revalidation after its
+required roots are locked, using the one canonical predicate in
+`docs/features/identity/rbac.md` (Scope and Confidential Ticket Visibility),
+and before status/operability guards, assessment lookup, no-op classification,
+assignment, writes, audit, Product propagation, reconciliation, or post-commit
+registration. The caller-category/context representation and query mechanism
+are implementation choices.
+
+Manual severity is a Ticket-path operation, so missing or inaccessible returns
+`404 TICKET_NOT_FOUND`. Manual SUSE CVSS operations are CVE-path operations, so
+missing or inaccessible returns `404 CVE_NOT_FOUND`, including when access is
+denied by the associated locked-current Ticket. Every accessibility denial has
+zero side effects. CVEs without an associated Ticket remain accessible under
+the CVE contract.
+
+Trusted external ingestion, default-version recalculation, and other specified
+system operations do not acquire an HTTP user's scope and do not apply consumer
+visibility filtering. Caller category is explicit and is not inferred solely
+from `acting_user_id`; the existing typed CVSS caller category remains
+authoritative for assessment mutations.
+
 CVSS assessment mutations additionally require an explicit typed caller
 category. `CVSSMutationCaller.MANUAL_SUSE` identifies an authorized consumer
 operation on the internal SUSE assessment, and
@@ -441,13 +464,15 @@ Each ticket-mutation function below follows the same pattern unless its own
 contract places semantic no-op or operation-specific guards before assignment:
 
 1. Acquire `FOR UPDATE` on the owning root row
-2. Call `ensure_ticket_operable(ticket)`
-3. Call `auto_assign_actor()`
-4. Validate additional preconditions
-5. Apply the mutation
-6. Create `TicketAuditEvent`
-7. Call `reconcile_ticket_status()`
-8. Return the updated record
+2. For a consumer operation, revalidate accessibility from the locked-current
+   required roots
+3. Call `ensure_ticket_operable(ticket)`
+4. Call `auto_assign_actor()`
+5. Validate additional preconditions
+6. Apply the mutation
+7. Create `TicketAuditEvent`
+8. Call `reconcile_ticket_status()`
+9. Return the updated record
 
 Manual SUSE CVSS mutation is such an operation-specific ordering: caller and
 provider authority, manual-zone mutability, and serialized effective-action
@@ -610,9 +635,9 @@ new one is created.
 **Preconditions**:
 
 - Vector must be parseable — raises `InvalidCVSSVectorError`
-- CVE must exist for `cve_id`; absence is an internal caller-contract violation
-  and raises `ValueError` after the required CVE lock query. API callers cannot
-  reach this case because CVE accessibility resolves the path first
+- CVE must exist for `cve_id`; locked-current absence returns `CVE_NOT_FOUND`
+  for a manual consumer call. For trusted external ingestion it remains an
+  internal caller-contract violation and raises `ValueError`
 - Caller category, actor, and provider must satisfy the authority table
 
 **Return type**: `CVSSAssessmentMutationResult`, as defined above.
@@ -624,44 +649,50 @@ new one is created.
    version-specific assessment severity. Parsing failure raises
    `InvalidCVSSVectorError` before database access.
 2. As the first persistent read, load the CVE with `FOR UPDATE`. If it does not
-   exist, raise `ValueError` for the internal caller-contract violation.
+   exist, return the CVE-path `CVE_NOT_FOUND` outcome for `MANUAL_SUSE`; for
+   `TRUSTED_EXTERNAL_INGESTION`, raise `ValueError` for the internal
+   caller-contract violation.
 3. Load the Ticket associated with that locked CVE, if any, with `FOR UPDATE`.
    This makes concurrent association compose in `CVE` then `Ticket` order.
-4. Apply the status matrix. Manual SUSE callers reject a locked manual-zone
+4. For `MANUAL_SUSE`, revalidate CVE accessibility from the locked CVE and its
+   locked-current associated Ticket before reading assessment state. Denial is
+   the CVE-path `CVE_NOT_FOUND` outcome. `TRUSTED_EXTERNAL_INGESTION` does not
+   acquire consumer scope.
+5. Apply the status matrix. Manual SUSE callers reject a locked manual-zone
    Ticket before any write; external ingestion remains allowed.
-5. Resolve `default_cvss_version`: if the parameter is `None`, read it once from
+6. Resolve `default_cvss_version`: if the parameter is `None`, read it once from
    `settings_service.get_default_cvss_version(db)`. Use this one value for both
    severity and eligibility resolution in this invocation.
-6. Load the existing assessment for the canonical natural key under the CVE
+7. Load the existing assessment for the canonical natural key under the CVE
    lock. Compare its persisted canonical vector with the incoming canonical
    vector, not with raw input text.
-7. Classify and apply `created`, `updated`, or `unchanged` from that serialized
+8. Classify and apply `created`, `updated`, or `unchanged` from that serialized
    state. `unchanged` resolves and returns the current severity and eligibility
    values without assignment, audit, severity write, package propagation,
    Ticket reconciliation, or metric.
-8. For an effective create/update, persist the canonical vector and all parsed
+9. For an effective create/update, persist the canonical vector and all parsed
    fields. Re-resolve the complete committed-current assessment set and always
    persist the resulting unified value to `CVE.severity`, including when its
    value is unchanged.
-9. For an effective manual SUSE mutation with an associated Ticket, call
+10. For an effective manual SUSE mutation with an associated Ticket, call
    `auto_assign_actor()` after the serialized action is known. External
    ingestion never calls it. If assignment moves `New` to `Analysis`, its
    `assignment` and system `status_change` records precede the CVSS records.
-10. If a Ticket exists, create `cvss_assessment_changed`. If unified severity
+11. If a Ticket exists, create `cvss_assessment_changed`. If unified severity
     changed, create `severity_changed` next. Both are direct consequences and
     are created in every Ticket status; they are not deferred with Product
     propagation.
-11. Resolve the Eligibility Score result. For `immediate`, reload every Product
+12. Resolve the Eligibility Score result. For `immediate`, reload every Product
     occurrence and its current threshold, lifecycle inputs, override marker,
     and eligibility under the held roots. Apply the canonical pure evaluator,
     skip overrides, and update changed booleans only. Create one system-
     attributed `product_eligibility_changed` event per change with
     `reason = cvss`, ordered by `TicketPackageProduct.id`.
-12. If the Ticket is now in the gate zone and this effective chain changed a
+13. If the Ticket is now in the gate zone and this effective chain changed a
     gate input or moved `New` into `Analysis`, call
     `reconcile_ticket_status()` exactly once with the same `evaluation_date`.
     Deferred, ticketless, and still-unassigned `New` outcomes do not reconcile.
-13. Flush and return `CVSSAssessmentMutationResult`. Perform no network,
+14. Flush and return `CVSSAssessmentMutationResult`. Perform no network,
     Redis, Celery, or other post-commit effect while either root lock is held.
 
 **Audit event values**:
@@ -715,30 +746,32 @@ callers to resolve the assessment ID.
    data. External caller categories and external providers raise `ValueError`;
    they cannot use this deletion boundary.
 2. As the first persistent read, load the CVE with `FOR UPDATE`; then load its
-   associated Ticket, if any, with `FOR UPDATE`. A missing CVE is an internal
-   caller-contract violation and raises `ValueError`; API callers cannot reach
-   it because CVE accessibility resolves the path first.
-3. Apply the status matrix. Reject manual-zone Tickets before any write.
-4. Resolve `default_cvss_version`: if the parameter is `None`, read it once from
+   associated Ticket, if any, with `FOR UPDATE`. A missing CVE produces the
+   consumer CVE-path `CVE_NOT_FOUND` outcome.
+3. Revalidate consumer CVE accessibility from the locked CVE and its
+   locked-current associated Ticket. Denial produces `CVE_NOT_FOUND` before
+   status, assessment existence, no-op, assignment, or mutation decisions.
+4. Apply the status matrix. Reject manual-zone Tickets before any write.
+5. Resolve `default_cvss_version`: if the parameter is `None`, read it once from
    `settings_service.get_default_cvss_version(db)`. Use this one value for both
    severity and eligibility resolution in this invocation.
-5. Load the canonical SUSE assessment under the CVE lock. If absent, resolve
+6. Load the canonical SUSE assessment under the CVE lock. If absent, resolve
    and return the current severity and eligibility values with `not_found`, but
    perform no write, audit event, package propagation, or metric.
-6. Snapshot the canonical audit value and delete the assessment. Re-resolve the
+7. Snapshot the canonical audit value and delete the assessment. Re-resolve the
    complete remaining assessment set and always persist the resulting unified
    value, including `NULL`, to `CVE.severity`.
-7. If a Ticket exists, call `auto_assign_actor()` for the effective manual
+8. If a Ticket exists, call `auto_assign_actor()` for the effective manual
    mutation. Its optional assignment and `New → Analysis` events precede the
    direct delete events.
-8. Create `cvss_assessment_changed` with the snapshot as `old_value` and `NULL`
+9. Create `cvss_assessment_changed` with the snapshot as `old_value` and `NULL`
    as `new_value`. If unified severity changed, create system-attributed
    `severity_changed` next.
-9. Resolve the Eligibility Score result and derive propagation from the status
-   matrix. For `immediate`, apply the same locked-current automatic Product
-   procedure, event ordering, and override skip as upsert step 11.
-10. Perform at most one final reconciliation under the same trigger and
-    `evaluation_date` rule as upsert step 12, then flush and return `deleted`.
+10. Resolve the Eligibility Score result and derive propagation from the status
+    matrix. For `immediate`, apply the same locked-current automatic Product
+    procedure, event ordering, and override skip as upsert step 12.
+11. Perform at most one final reconciliation under the same trigger and
+    `evaluation_date` rule as upsert step 13, then flush and return `deleted`.
     Perform no network, Redis, Celery, or other post-commit effect under locks.
 
 **TicketAuditEvent**: optional assignment and `New → Analysis`, then
@@ -772,14 +805,17 @@ Sets or clears the `severity_manual` field on a ticket.
 **Behavior**:
 
 1. Acquire `FOR UPDATE` on the Ticket row
-2. Call `ensure_ticket_operable(ticket)`
-3. Validate preconditions
-4. If severity unchanged, return (no-op)
-5. Call `auto_assign_actor(ticket, acting_user_id, db)`
-6. Update `ticket.severity_manual`
-7. Create `TicketAuditEvent` (`severity_changed`, `user_id = acting_user_id`)
-8. Call `reconcile_ticket_status()`
-9. Return updated ticket
+2. Revalidate consumer accessibility from the locked-current Ticket. Missing or
+   inaccessible produces `TICKET_NOT_FOUND` before operability, derived-severity,
+   or no-op decisions
+3. Call `ensure_ticket_operable(ticket)`
+4. Validate preconditions
+5. If severity unchanged, return (no-op)
+6. Call `auto_assign_actor(ticket, acting_user_id, db)`
+7. Update `ticket.severity_manual`
+8. Create `TicketAuditEvent` (`severity_changed`, `user_id = acting_user_id`)
+9. Call `reconcile_ticket_status()`
+10. Return updated ticket
 
 **Gate relevance**: setting `severity_manual` affects the ticket's
 resolved severity, which is gate-relevant (Analyzed gate #3 requires
@@ -823,7 +859,11 @@ convergence caller.
    `not_applicable`. This function does not call `ensure_ticket_operable()`:
    association mode has already passed that caller-owned guard, while default-
    version mode must maintain CVE-owned severity for every Ticket status and
-   applies only the state-specific Product/gate effects below.
+   applies only the state-specific Product/gate effects below. Association mode
+   likewise relies on `associate_cve()` having completed locked-current consumer
+   accessibility under the same caller-owned CVE-then-Ticket transaction; this
+   function performs no independent caller-scope evaluation. Default-version
+   mode is a system operation and has no consumer scope.
 2. Resolve `default_cvss_version`: if the parameter is `None`, read
    from `settings_service.get_default_cvss_version(db)`. Call
    `cvss.resolve_severity_score()` with the complete assessment set to obtain
@@ -1080,6 +1120,14 @@ and status reconciliation). The test must cover:
   winner-current assessments, setting, threshold, lifecycle, override,
   Product, and Ticket state and never duplicate assignment, Product events, or
   final reconciliation
+- **Locked-current consumer accessibility**: for manual severity and manual SUSE
+  CVSS upsert/delete, race preliminary delegated access with confidentiality, explicit
+  grant, and last included-package maintainership changes. Verify
+  accessibility is revalidated only after the required Ticket or CVE-then-Ticket
+  roots are locked; Ticket paths return `TICKET_NOT_FOUND`, CVE paths return
+  `CVE_NOT_FOUND`; and denial leaves assessment, severity, assignment, Product,
+  Ticket status, audit, reconciliation, and post-commit state unchanged. Trusted
+  external ingestion and system recalculation remain unscoped
 
 Package-centric mutation tests are specified in
 `docs/features/packages/package-service.md` (Architectural Test
@@ -1095,7 +1143,7 @@ them to the corresponding HTTP status code and error code per
 
 | Exception | HTTP | Code | Raised when |
 |-----------|------|------|-------------|
-| `TicketNotFoundError` † | 404 | `TICKET_NOT_FOUND` | Ticket ID does not exist |
+| `TicketNotFoundError` † | 404 | `TICKET_NOT_FOUND` | Ticket ID does not exist or is inaccessible on a consumer Ticket path |
 | `TicketNotMutableError` † | 409 | `TICKET_NOT_MUTABLE` | Ticket is in manual zone (Ignored or Duplicated) |
 | `CVSSAssessmentNotFoundError` | 404 | `CVSS_ASSESSMENT_NOT_FOUND` | No SUSE assessment exists for the accepted `(cve_id, cvss_version)` after the CVE itself was resolved |
 | `InvalidCVSSVectorError` | 422 | `CVSS_INVALID_VECTOR` | CVSS vector string is malformed or invalid |
@@ -1106,9 +1154,12 @@ them to the corresponding HTTP status code and error code per
 `TicketMutationsError`. Handlers must catch it explicitly.
 
 Caller-category/provider mismatches, external delete attempts, and a missing
-CVE UUID supplied directly by an internal caller raise `ValueError`. These are
-internal contract violations and do not introduce API error codes. API routes
-resolve CVE accessibility before invoking this service.
+CVE UUID supplied by trusted external ingestion raise `ValueError`. These are
+internal contract violations and do not introduce API error codes. Consumer
+CVE routes may perform delegated preliminary accessibility before invoking this
+service and map a locked-current authoritative accessibility denial to the scoped
+`404 CVE_NOT_FOUND` response without requiring a particular internal exception
+or result type.
 
 When a CVSS boundary must read the current default version,
 `RequiredSystemSettingMissingError` from `settings_service` propagates
@@ -1146,4 +1197,6 @@ Package-specific exceptions (`TrackNotFoundError`, `ProductNotFoundError`,
   change triggering batch `recalculate_cvss_chain()` via Celery task
 - `docs/features/platform/fetcher-infrastructure.md` — `catch_up()`
   per-ticket catch-up method contract
-- `docs/api-spec.md` — general API conventions
+- `docs/features/identity/rbac.md` — canonical Ticket visibility predicate and
+  capability/visibility orthogonality
+- `docs/api-spec.md` — general API conventions and scoped accessibility

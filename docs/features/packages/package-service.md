@@ -79,7 +79,43 @@ eligibility recalculation use their dedicated system boundaries instead.
 | `services/ticket_mutations.py` | `package_service` imports `reconcile_ticket_status()`, `auto_assign_actor()`, and `ensure_ticket_operable()` from `ticket_mutations`. The code dependency remains unidirectional: `package_service` depends on `ticket_mutations`, but `ticket_mutations` does NOT import `package_service`. The CVSS chain may update only system-managed Product eligibility inline through the shared pure evaluator; this narrow exception does not transfer any other package mutation ownership. `reconcile_ticket_status()` registers the post-commit package-tree recovery workflow; the caller does not invoke catch-up directly |
 | `services/ticket_service.py` | `ticket_service` is the higher-level owner of manual-zone exit workflows and invokes this module's synchronous eligibility boundary with an already locked Ticket. `package_service` does not import or call back into `ticket_service` |
 | `services/cvss.py` | `package_service` delegates score selection to `resolve_eligibility_score()` in `cvss.py` (SUSE-only, 2-step cascade — see Eligibility Score Resolution in `docs/features/tickets/cvss-scoring.md`) and applies the one pure complete eligibility evaluator required by `package-model.md`. `ticket_mutations` reuses that evaluator without importing `package_service` |
-| `core/filters.py` | `search_packages()` receives a `confidentiality_filter` (a SQLAlchemy `ColumnElement`) built by the endpoint handler via `confidential_ticket_filter()`. The service function is unaware of access rules |
+| Ticket visibility | Consumer-facing package queries and mutations receive caller context and apply the one canonical Ticket visibility predicate from `docs/features/identity/rbac.md`. Model-aware ORM construction and database evaluation remain in the Service layer; API dependencies and handlers do not build or pass SQLAlchemy expressions |
+
+### Consumer caller context and Ticket accessibility
+
+Consumer-facing operations receive enough caller context to evaluate the
+canonical Ticket visibility predicate from `docs/features/identity/rbac.md`
+(Scope and Confidential Ticket Visibility). The exact typed representation is
+an implementation choice. A caller context identifies an anonymous request, an
+authenticated user's ID and effective scope, or an explicit internal system
+invocation; it is not a pre-built ORM expression. Anonymous callers cannot
+satisfy grant or maintainership branches.
+Consumer-facing calls additionally supply this request-resolved caller
+information through an implementation-chosen typed boundary. The specification
+does not require a class, tuple, helper interface, parameter layout, or
+dependency-injection mechanism.
+
+Read operations constrain the same database result or view from which they
+return protected data. A preliminary existence or accessibility lookup does not
+authorize a later unconstrained package-tree query. Counts, pages, and
+aggregates are derived from the same caller-visible candidate set as returned
+items.
+
+For a consumer mutation, the service acquires the Ticket root lock and then
+evaluates locked-current accessibility before operability, nested ownership,
+state-dependent guards, no-op classification, writes, auto-assignment, audit,
+Ticket reconciliation, or post-commit registration. A missing or inaccessible
+Ticket raises `TicketNotFoundError`, mapped to `404 TICKET_NOT_FOUND`, with no
+local side effect. This locked check is authoritative even when an API
+prerequisite performed an earlier accessibility check. An authorized mutation
+may itself remove the actor's final visibility path; it still returns its
+ordinary success result, while later requests evaluate the committed state.
+
+Internal system operations do not receive or apply HTTP caller scope. Their
+existing selection, Ticket-status, ownership, locking, and mutation contracts
+remain authoritative. A service boundary used by both consumer and system
+callers distinguishes those invocation contexts explicitly without treating a
+missing consumer context as system authority.
 
 ### Module invariant: I/O-then-Lock pattern
 
@@ -141,8 +177,9 @@ semantic identity to name its expected Ticket/package/track path. At minimum:
 The concrete parameter grouping is an implementation choice; no locator class,
 dataclass, or private lookup helper is required. The public service contract is
 that the function locks the declared Ticket as its first state-dependent
-database operation, then reloads and validates the complete nested chain under
-that lock before deciding a mutation, no-op, audit value, or return value. A
+database operation, applies locked-current accessibility for a consumer caller,
+then reloads and validates the complete nested chain under that lock before
+deciding a mutation, no-op, audit value, or return value. A
 missing identifier or an identifier that belongs to another declared parent is
 reported through the existing package-, track-, or Product-not-found exception
 for the targeted level. It never mutates the occurrence found under the other
@@ -184,6 +221,11 @@ Sets the affectedness status of a `TicketPackageTrack` record.
 | `acting_user_id` | `UUID \| None` | No | Who is performing the action |
 | `force` | `bool` | No | Caller-verified `admin_ticket_ops` marker (default `False`) for unrestricted user-attributed `FIXED`; `False` also permits `FIXED` when the locked-current Ticket is CVE-less and the caller verified `manage_packages` |
 
+User-attributed calls additionally supply the authenticated User ID and
+request-resolved effective scope through the module-level consumer caller
+boundary. System calls use their explicit internal context and do not apply HTTP
+scope.
+
 **Preconditions**:
 
 - Parent ticket must be operable (`ensure_ticket_operable`)
@@ -200,31 +242,34 @@ Sets the affectedness status of a `TicketPackageTrack` record.
 
 1. Acquire `FOR UPDATE` on `ticket_id` as the first state-dependent database
    operation.
-2. Call `ensure_ticket_operable(ticket)`.
-3. Reload the declared package/track chain under the lock. A missing or
+2. For a consumer caller, evaluate canonical Ticket accessibility against the
+   locked-current Ticket. Missing and inaccessible both raise
+   `TicketNotFoundError`.
+3. Call `ensure_ticket_operable(ticket)`.
+4. Reload the declared package/track chain under the lock. A missing or
    mismatched level raises its existing not-found exception.
-4. Apply caller authority to the requested target:
+5. Apply caller authority to the requested target:
    - a user-attributed `FIXED` request with `force=True` is unrestricted;
    - a user-attributed `FIXED` request with `force=False` requires
      `ticket.cve_id IS NULL` under the held Ticket lock;
    - a user-attributed non-`FIXED` request requires `force=False`; and
    - a system request accepts only `FIXED`.
-5. For a prohibited user-attributed target/marker or CVE condition, raise
+6. For a prohibited user-attributed target/marker or CVE condition, raise
    `TrackFixedStatusRestrictedError` without side effects. The locked Ticket
    condition is never checked before API accessibility. For a prohibited
    system non-`FIXED` target, emit one sanitized warning and return `rejected`
    without mutation, assignment, audit, reconciliation, or post-commit effect.
-6. If the locked status equals the target, return `no_op` before
+7. If the locked status equals the target, return `no_op` before
    auto-assignment and every other side effect.
-7. If a system `FIXED` request observes `NOT_AFFECTED`, `FIXED`, or `WONT_FIX`,
+8. If a system `FIXED` request observes `NOT_AFFECTED`, `FIXED`, or `WONT_FIX`,
    return the protected `no_op` outcome. The release workflow may still accept
    its separately owned checkpoint after successful examination.
-8. For an effective user-attributed change, call `auto_assign_actor()`; system
+9. For an effective user-attributed change, call `auto_assign_actor()`; system
    changes never assign.
-9. Update `TicketPackageTrack.status`, create one `track_status_changed` event
+10. Update `TicketPackageTrack.status`, create one `track_status_changed` event
    with the locked old value and requested new value, and call
    `reconcile_ticket_status()`.
-10. Flush and return `changed` with the updated track.
+11. Flush and return `changed` with the updated track.
 
 **TicketAuditEvent**: `track_status_changed`
 
@@ -447,6 +492,9 @@ Sets or resets the eligibility override of a `TicketPackageProduct` record.
 | `acting_user_id` | `UUID` | Yes | Acting user attributed to the override or reset |
 | `evaluation_date` | `date \| None` | No | UTC date shared by lifecycle evaluation, reconciliation, result projection, and any package-tree mutation response. If omitted, capture once at entry |
 
+The consumer call additionally supplies the authenticated User ID and
+request-resolved effective scope through the module-level caller boundary.
+
 **Preconditions**:
 
 - Parent ticket must be operable (`ensure_ticket_operable`)
@@ -461,39 +509,43 @@ If `eligible` is `bool` (override):
 
 1. Acquire `FOR UPDATE` on the declared Ticket row as the first state-dependent
    database operation
-2. Call `ensure_ticket_operable(ticket)`
-3. Reload and validate the complete declared path
-4. If `TicketPackageProduct.eligible == eligible` AND
+2. Evaluate canonical locked-current Ticket accessibility for the consumer;
+   missing and inaccessible both raise `TicketNotFoundError`
+3. Call `ensure_ticket_operable(ticket)`
+4. Reload and validate the complete declared path
+5. If `TicketPackageProduct.eligible == eligible` AND
    `is_eligible_override == true`, return `no_op` before assignment
-5. Call `auto_assign_actor()`
-6. Update `TicketPackageProduct.eligible` to the given value
-7. Set `TicketPackageProduct.is_eligible_override = true`
-8. Create `TicketAuditEvent` (`product_eligibility_changed`) with the standard
+6. Call `auto_assign_actor()`
+7. Update `TicketPackageProduct.eligible` to the given value
+8. Set `TicketPackageProduct.is_eligible_override = true`
+9. Create `TicketAuditEvent` (`product_eligibility_changed`) with the standard
    Product subject, `reason = "va_override"`, and `override_action = "set"`
    when the previous value was system-managed or `override_action = "changed"`
    when an existing override changed value
-9. Call `reconcile_ticket_status()`
-10. Flush and return `changed` with the updated product
+10. Call `reconcile_ticket_status()`
+11. Flush and return `changed` with the updated product
 
 If `eligible` is `None` (reset to automatic):
 
 1. Acquire `FOR UPDATE` on the declared Ticket row as the first state-dependent
    database operation
-2. Call `ensure_ticket_operable(ticket)`
-3. Reload and validate the complete declared path
-4. If `is_eligible_override == false`, return `no_op` before assignment
-5. Call `auto_assign_actor()`
-6. Set `TicketPackageProduct.is_eligible_override = false`
-7. Recalculate eligibility using all automatic rules in
+2. Evaluate canonical locked-current Ticket accessibility for the consumer;
+   missing and inaccessible both raise `TicketNotFoundError`
+3. Call `ensure_ticket_operable(ticket)`
+4. Reload and validate the complete declared path
+5. If `is_eligible_override == false`, return `no_op` before assignment
+6. Call `auto_assign_actor()`
+7. Set `TicketPackageProduct.is_eligible_override = false`
+8. Recalculate eligibility using all automatic rules in
    `docs/features/packages/package-model.md` (Axis 2: Eligibility), including
    the Reactive Support rule and the threshold comparison based on
    `cvss.resolve_eligibility_score()`.
-8. Update `TicketPackageProduct.eligible` to the calculated value
-9. Create `TicketAuditEvent` (`product_eligibility_changed`) with the standard
+9. Update `TicketPackageProduct.eligible` to the calculated value
+10. Create `TicketAuditEvent` (`product_eligibility_changed`) with the standard
    Product subject, `reason = "va_override"`, and
    `override_action = "cleared"`
-10. Call `reconcile_ticket_status()`
-11. Flush and return `changed` with the updated product
+11. Call `reconcile_ticket_status()`
+12. Flush and return `changed` with the updated product
 
 Both paths reuse the one `evaluation_date` for lifecycle evaluation,
 eligibility, actionability, final Ticket reconciliation, result projection, and
@@ -728,6 +780,10 @@ Called by `add_package_to_ticket` after SMELT resolution completes.
 | `active_ticket_only` | `bool` | No | When true, skip without mutation if the locked Ticket is not active; used by Product catalog backfill |
 | `allow_excluded_reresolution` | `bool` | No | Semantic caller context. `False` for the public add endpoint and internal callers whose candidate selection excludes existing soft-deleted packages; `True` for Ticket convergence, which intentionally re-resolves persisted excluded package markers without restoring them. The concrete parameter name or grouping is an implementation choice |
 
+Consumer-facing invocations additionally supply the authenticated caller's User
+ID and effective scope through the module-level caller boundary. Internal system
+invocations use their explicit non-HTTP context instead.
+
 `ResolvedTrackData` names the semantic input boundary; it does not require a
 particular dataclass, `TypedDict`, Pydantic model, or other concrete in-memory
 representation. Each item contains:
@@ -759,25 +815,29 @@ remain implementation choices as long as they preserve this contract.
 **Behavior**:
 
 1. Acquire `FOR UPDATE` on the Ticket row
-2. If `active_ticket_only` is true and the locked Ticket status is not `New`,
+2. For a consumer caller, evaluate canonical Ticket accessibility against the
+   locked-current state. Missing and inaccessible both raise
+   `TicketNotFoundError` before any package or maintainer effect.
+3. If `active_ticket_only` is true and the locked Ticket status is not `New`,
    `Analysis`, or `Analyzed`, return a no-op result before assignment,
    reconciliation, or audit creation.
-3. Call `ensure_ticket_operable(ticket)`
-4. Validate preconditions, identify the existing package occurrence or prepare
-   its creation, and determine which package, track, Product, and maintainer
-   records are missing under the lock. Query exact matching Users with `active
-   = true`; unmatched and inactive users do not create associations.
-5. If an existing package occurrence has `deleted_at IS NOT NULL` and
+4. Call `ensure_ticket_operable(ticket)`
+5. Identify the existing package occurrence or prepare its creation.
+6. If an existing package occurrence has `deleted_at IS NOT NULL` and
    `allow_excluded_reresolution` is false, raise
    `PackageAlreadyExcludedError` before creating a record, association, audit
    event, assignment, reconciliation, or result. This guard precedes every
    no-op or maintainer-only outcome.
-6. If no record or association is missing, return a no-op result before
+7. Validate the remaining preconditions and determine which package, track,
+   Product, and maintainer records are missing under the lock. Query exact
+   matching Users with `active = true`; unmatched and inactive users do not
+   create associations.
+8. If no record or association is missing, return a no-op result before
    auto-assignment, reconciliation, or audit creation.
-7. Call `auto_assign_actor()` only if at least one package-tree record is
+9. Call `auto_assign_actor()` only if at least one package-tree record is
    missing. Maintainer-only mutation does not assign the actor.
-8. Create or skip `TicketPackage` (idempotent — skip if exists)
-9. For each track in `tracks`:
+10. Create or skip `TicketPackage` (idempotent — skip if exists)
+11. For each track in `tracks`:
    - Create or skip `TicketPackageTrack` (idempotent — skip if exists,
      including soft-deleted records)
    - If newly created, initial status: `ANALYSIS`, delivery_status:
@@ -798,14 +858,14 @@ remain implementation choices as long as they preserve this contract.
 > Hygiene Rules, even when creating dozens of products in a single
 > `add_package_records()` call.
 
-10. For each missing active-user match in ascending `User.id` order, create one
+12. For each missing active-user match in ascending `User.id` order, create one
    `TicketPackageMaintainer` and one system-attributed
    `package_maintainer_added` event with the exact payload in
    `ticket-audit-log.md`.
-11. If a package-tree record was created, create one `TicketAuditEvent`
+13. If a package-tree record was created, create one `TicketAuditEvent`
     (`package_added`) using `audit_comment` and call
     `reconcile_ticket_status()`. Maintainer-only mutation performs neither.
-12. Flush and return the existing package-tree result. Maintainer additions do
+14. Flush and return the existing package-tree result. Maintainer additions do
     not alter public counts or add a public result field. Internally, the
     result distinguishes `package_tree_changed`, `package_tree_no_op`,
     `maintainer_only`, and `active_ticket_only_skipped`, while preserving the
@@ -854,11 +914,13 @@ The six direct-marker operations share one complete Category A contract:
 | `restore_ticket_package_product()` | `package_id`, `track_id`, `ticket_package_product_id` | non-NULL | clear to NULL | `product_restored` |
 
 Each function receives `db: AsyncSession`, the UUID path shown above,
-`acting_user_id: UUID`, and an optional `evaluation_date: date`. The date is
-the UTC date for actionability, Ticket reconciliation, result projection, and
-the eventual mutation response. If omitted, the function captures it once at
-entry and returns enough semantic context for the caller to reuse it; the
-concrete result representation is an implementation choice.
+`acting_user_id: UUID`, the request-resolved consumer caller information, and an
+optional `evaluation_date: date`. The caller information uses the module-level
+implementation-chosen typed boundary. The date is the UTC date for actionability,
+Ticket reconciliation, result projection, and the eventual mutation response.
+If omitted, the function captures it once at entry and returns enough semantic
+context for the caller to reuse it; the concrete result representation is an
+implementation choice.
 
 **Shared guards and behavior**:
 
@@ -866,19 +928,21 @@ concrete result representation is an implementation choice.
    `ValueError`; exclusion and restoration have no system caller.
 2. Resolve one `evaluation_date`, then acquire `FOR UPDATE` on the declared
    Ticket as the first database operation.
-3. Call `ensure_ticket_operable(ticket)`.
-4. Reload and validate the complete declared package-tree path under the lock.
-5. Inspect only the target's locked direct marker. An exclusion of a non-NULL
+3. Evaluate canonical locked-current Ticket accessibility. Missing and
+   inaccessible both raise `TicketNotFoundError`.
+4. Call `ensure_ticket_operable(ticket)`.
+5. Reload and validate the complete declared package-tree path under the lock.
+6. Inspect only the target's locked direct marker. An exclusion of a non-NULL
    marker raises `PackageAlreadyExcludedError`; a restore of a NULL marker
    raises `PackageNotExcludedError`. The guard runs before assignment or any
    durable side effect.
-6. Call `auto_assign_actor()` only after the direct-marker guard succeeds.
-7. Change only the target marker as shown in the table. Ancestor and descendant
+7. Call `auto_assign_actor()` only after the direct-marker guard succeeds.
+8. Change only the target marker as shown in the table. Ancestor and descendant
    markers, affectedness, eligibility, delivery, release facts, and lifecycle
    data remain unchanged.
-8. Create exactly one direct event from the table and call
+9. Create exactly one direct event from the table and call
    `reconcile_ticket_status()` exactly once with the same `evaluation_date`.
-9. Flush and return the target's locked-current state with `actionable` and
+10. Flush and return the target's locked-current state with `actionable` and
    `non_actionable_reason` projected using that date. Assignment and Ticket
    status changes may create their independently owned events.
 
@@ -953,33 +1017,39 @@ async def add_package_to_ticket(
 
 **Behavior**:
 
-1. Query the SMELT v2 package-scoped maintained endpoint defined in
+1. For a consumer-facing invocation, evaluate preliminary Ticket accessibility
+   in PostgreSQL with the canonical predicate and consumer caller context.
+   Missing and inaccessible both raise `TicketNotFoundError`. This check
+   acquires no mutation lock and cannot authorize the later mutation by itself.
+   Internal system invocations skip HTTP accessibility under their explicit
+   invocation context.
+2. Query the SMELT v2 package-scoped maintained endpoint defined in
    `package-model.md` to resolve all currently maintained tracks and products
    for the given package name (external I/O — no lock held). Do not use the
    separate paginated maintained sweep operation. Parse the response body
    regardless of HTTP status and validate the JSON/JSend envelope, HTTP/status
    pairing, and every applicable codestream and supported-target field before a
    database lookup.
-2. If connection, timeout, proxy, or remote-protocol failure remains after the
+3. If connection, timeout, proxy, or remote-protocol failure remains after the
    shared transport retries, or the response cannot be parsed as JSON or has
    no recognized JSend `status` value, raise `SmeltUnavailableError`
    corresponding to `503 SMELT_UNAVAILABLE`. The only recognized `status`
    values are `success` and `error` (see `package-model.md`, SMELT Query for
    Package Resolution); JSend `fail` and any other value are unrecognized. No
    records are created.
-3. Verify that a complete Product catalog snapshot exists; if none exists,
+4. Verify that a complete Product catalog snapshot exists; if none exists,
    raise `ProductCatalogNotReadyError` before interpreting the response
    outcome further or matching CPEs. Readiness failure takes precedence over both
    package-not-found and targets-unresolved outcomes. Error precedence is
    defined in `product-catalog.md` (Catalog Readiness and Freshness).
-4. If SMELT returns a package-not-found response (HTTP 404 with a valid
+5. If SMELT returns a package-not-found response (HTTP 404 with a valid
    `status = "error"` envelope, or HTTP 200 with `status = "success"` and an
    empty `data` array), raise `PackageNotFoundInSmeltError` corresponding to
    `422 PACKAGE_NOT_FOUND_IN_SMELT`. Any other HTTP status and JSend `status`
    combination — including a non-200 response and HTTP 200 with
    `status = "error"` — raises `SmeltUnavailableError`. No records are
    created.
-5. Filter known unsupported codestreams, map `workflow_type` from the
+6. Filter known unsupported codestreams, map `workflow_type` from the
    authoritative `codestream.maintenance_process_type`, and apply the
    synthetic same-CPE channel/compose deduplication rule as specified in
    `package-model.md` (SMELT Query for Package Resolution). Match the
@@ -989,7 +1059,7 @@ async def add_package_to_ticket(
    required structured warnings before mutation. If no Product CPE resolves to
    a local Product across supported codestreams, raise
    `PackageTargetsUnresolvedError`. No records are created.
-6. After target resolution succeeds, call the SMELT package maintainership
+7. After target resolution succeeds, call the SMELT package maintainership
    endpoint with no codestream filter. Parse and validate the complete response,
    then collect only non-null direct-user and group-member emails, lowercase
    them, and deduplicate globally. Any transport, HTTP/envelope, JSON, or schema
@@ -997,19 +1067,24 @@ async def add_package_to_ticket(
    non-blocking: emit the sanitized warning defined in
    `package-maintainership.md`, use an empty email set, and continue. A valid
    empty/no-email response also supplies an empty set without warning.
-7. Delegate all record creation and maintainer association to
+8. Delegate all record creation and maintainer association to
    `add_package_records()` — this is where
-   the `FOR UPDATE` lock is acquired.
-8. If step 7 created at least one track whose persisted `workflow_type` is
+   the `FOR UPDATE` lock is acquired. For a consumer-facing invocation, the
+   delegated boundary re-evaluates canonical accessibility from locked-current
+   persisted state before operability, the direct excluded-package guard, no-op
+   classification, any package/maintainer write, assignment, audit,
+   reconciliation, or post-commit registration. Ephemeral maintainer data
+   fetched in step 7 is not persisted yet and cannot authorize this invocation.
+9. If step 8 created at least one track whose persisted `workflow_type` is
    `ibs`, register one best-effort post-commit invocation of the existing
    generic `run_catch_up("sync_ibs_requests", ticket_id)` mechanism. A
    package-only, Product-only, Git-track-only, maintainer-only, fully no-op, or
    `active_ticket_only` skip registers no effect. It never executes before the
    database commit succeeds, and no dedicated submission discovery or
    correlation task is introduced.
-9. Return an `AddPackageResult` with creation/skip counts and the identities
+10. Return an `AddPackageResult` with creation/skip counts and the identities
    plus persisted workflow types of newly created tracks, or an equivalent
-   semantic signal that lets the workflow owner determine whether step 8
+   semantic signal that lets the workflow owner determine whether step 9
    applies. The result does not prescribe a concrete dataclass or collection
    type.
 
@@ -1058,33 +1133,37 @@ when its newly created track signal includes an IBS track;
 register it.
 
 **Escaping exceptions**: package-target, Product-catalog, and SMELT availability
-exceptions from steps 1-5 escape according to the Service Exceptions table.
+exceptions from steps 2-6 escape according to the Service Exceptions table.
 `PackageAlreadyExcludedError`, database, audit, and delegated service
-exceptions from step 7 propagate and roll back the caller-owned transaction.
+exceptions from step 8 propagate and roll back the caller-owned transaction.
 Maintainership-only transport,
-HTTP/envelope, JSON, and schema errors from step 6 are caught and converted to
+HTTP/envelope, JSON, and schema errors from step 7 are caught and converted to
 the documented warning plus empty set; they never escape this function.
 
-**Public error precedence**: authentication, capability, and Ticket
-accessibility are API prerequisites before this function. The orchestration
-then follows the canonical sequence in `package-model.md` (Adding Packages to a
-Ticket).
+**Public error precedence**: authentication and capability are API
+prerequisites. Preliminary Ticket accessibility precedes external work. If it
+succeeds but access is lost concurrently, an external failure before the lock
+retains its documented external error; the workflow performs no extra lookup to
+replace that error with 404. If external work succeeds, the locked-current
+accessibility check is authoritative and access loss yields `404
+TICKET_NOT_FOUND` with no local side effect. The complete sequence is in
+`package-model.md` (Adding Packages to a Ticket).
 
 **Error handling**:
 
-- **Steps 1–5 (package-target validation gate)**: blocking. If any of these
+- **Steps 2–6 (package-target validation gate)**: blocking. If any of these
   steps fails,
   the function raises without side effects (no database writes occur). The
   endpoint handler translates service-layer exceptions to the corresponding
   HTTP error codes defined in `package-model.md`.
-- **Step 6 (maintainership acquisition)**: non-blocking for its own failures.
+- **Step 7 (maintainership acquisition)**: non-blocking for its own failures.
   It can only reduce new maintainer additions to zero; it never changes
   package-target errors or removes an association.
-- **Step 7 (record creation)**: transactional. Record creation occurs
+- **Step 8 (record creation)**: transactional. Record creation occurs
   under the `FOR UPDATE` lock acquired by `add_package_records()`. If any
   failure occurs during this step, the transaction is rolled back and no
   records are persisted.
-- **Step 8 (post-commit effect)**: best-effort. The API transaction
+- **Step 9 (post-commit effect)**: best-effort. The API transaction
   dependency or other workflow owner executes these effects only after its
   caller-owned transaction commits. Failures do not roll back the created
   records.
@@ -1225,23 +1304,33 @@ async def get_ticket_packages(
 ) -> list[PackageDetail]:
 ```
 
+Consumer-facing calls additionally supply request-resolved caller information
+through the module-level implementation-chosen boundary.
+
 **Behavior**:
 
-1. Query all `TicketPackage` records for the ticket (including
-   soft-deleted)
-2. For each package, load all tracks and products (including
-   soft-deleted), with `deleted_at` visible
-3. Compute `delivery_relevant`, `actionable`, and
+1. Select the Ticket and complete package tree through the canonical Ticket
+   visibility predicate in one coherent database operation or view used to assemble
+   the response. A missing or inaccessible Ticket raises
+   `TicketNotFoundError`; no unconstrained follow-up tree query is authorized by
+   a preliminary check.
+2. Within that coherent operation or view, include all `TicketPackage` records
+   for the ticket, including soft-deleted records.
+3. Include every package's tracks and products, including soft-deleted records,
+   with `deleted_at` visible, without observing them from a later incompatible
+   database view.
+4. Compute `delivery_relevant`, `actionable`, and
    `non_actionable_reason` for every level using the supplied UTC
    `evaluation_date` and the canonical predicates from `package-model.md`
-4. Do not load or project maintainer identities.
-5. Return assembled `PackageDetail[]`, sorted alphabetically by
+5. Do not load or project maintainer identities.
+6. Return assembled `PackageDetail[]`, sorted alphabetically by
    `package_name`
 
 **No locking needed** — this is a read-only operation.
-**No filtering** — the caller (endpoint handler) is responsible for
-access control via `require_accessible_ticket` before invoking this
-function.
+The endpoint may retain a thin preliminary accessibility dependency for shared
+HTTP response handling, but this service query is the authoritative read
+constraint. The endpoint does not build the visibility predicate or perform a
+business ORM query.
 
 This function is called by both `GET /api/v1/tickets/{ticket_id}/packages`
 and `GET /api/v1/tickets/{ticket_id}` (to populate the `packages` field
@@ -1255,7 +1344,6 @@ confidentiality enforcement.
 ```python
 async def search_packages(
     db: AsyncSession,
-    confidentiality_filter: ColumnElement,  # from confidential_ticket_filter()
     evaluation_date: date,
     search: str | None = None,
     name: str | None = None,
@@ -1267,26 +1355,33 @@ async def search_packages(
 ) -> PaginatedResult[PackageListItem]:
 ```
 
+Consumer-facing calls additionally supply request-resolved caller information
+through the module-level implementation-chosen boundary.
+
 **Behavior**:
 
-1. Build base query joining `TicketPackage` -> `Ticket`
+1. Build one caller-visible candidate set by joining `TicketPackage` ->
+   `Ticket` and constructing the canonical Ticket visibility predicate in the
+   Service layer from the request-resolved caller information. The endpoint
+   supplies no model columns or pre-built SQLAlchemy expression.
 2. Exclude non-actionable packages using the canonical SQL actionability
    predicate and the supplied UTC `evaluation_date`
-3. Apply `confidentiality_filter` (pre-built by the endpoint handler
-   via `confidential_ticket_filter()` — see
-   `docs/features/tickets/tickets.md`, Confidentiality Filtering)
-4. Apply `ticket_status` filter (if provided; invalid values silently
+3. Apply `ticket_status` filter (if provided; invalid values silently
    ignored)
-5. Apply `search` (ILIKE `%term%` substring match on `package_name`) or
+4. Apply `search` (ILIKE `%term%` substring match on `package_name`) or
    `name` (exact match)
-6. Apply sorting (`sort_by`/`sort_order`; deterministic tiebreaker per
+5. Apply sorting (`sort_by`/`sort_order`; deterministic tiebreaker per
    `docs/api-spec.md`, Deterministic Pagination Ordering)
-7. Execute paginated query
-8. Compute `track_summary` via SQL aggregation (`COUNT(*) FILTER (WHERE
+6. Compute `meta.total`, apply pagination, and return items from that same
+   visible candidate set. Invisible rows never contribute to the count or move
+   visible rows between pages.
+7. Compute `track_summary` via SQL aggregation (`COUNT(*) FILTER (WHERE
    status = ...)`) in the same query — NOT as Python post-processing —
    to avoid N+1 query patterns. Count only actionable tracks using the same
    `evaluation_date` as step 2
-9. Return paginated `PackageListItem[]`
+8. Return paginated `PackageListItem[]`. Items, `meta.total`, package
+   actionability, and every track aggregate use the one supplied
+   `evaluation_date` and the same visible candidate set.
 
 **No locking needed** — this is a read-only operation.
 
@@ -1377,7 +1472,7 @@ Caught by endpoint handlers and mapped to HTTP responses:
 
 | Exception | HTTP | Code | Raised when |
 |-----------|------|------|-------------|
-| `TicketNotFoundError` † | 404 | `TICKET_NOT_FOUND` | `FOR UPDATE` returns no row |
+| `TicketNotFoundError` † | 404 | `TICKET_NOT_FOUND` | The declared Ticket is missing or inaccessible in a consumer read selection or locked mutation |
 | `TicketNotMutableError` † | 409 | `TICKET_NOT_MUTABLE` | Ticket is in manual zone (defense in depth — API layer catches first) |
 | `TrackNotFoundError` | 404 | `RESOURCE_NOT_FOUND` | Track ID does not exist under the declared Ticket/package path |
 | `ProductNotFoundError` | 404 | `RESOURCE_NOT_FOUND` | Product occurrence ID does not exist under the declared Ticket/package/track path |
@@ -1468,6 +1563,15 @@ transitions. The test must cover:
   mutation validates the complete declared path under the Ticket lock; test a
   correct path, each missing level, and each child-belongs-to-another-parent
   mismatch, all without mutating or revealing the other occurrence
+- **Atomic consumer accessibility**: cover anonymous, scope-`all`, explicit
+  grant, included-package maintainer, package exclusion/restore, and multiple
+  qualifying-package branches. Read queries constrain returned trees, package
+  items, totals, pages, and aggregates in the same database result. Consumer
+  mutations re-evaluate accessibility after the Ticket lock and before every
+  state-dependent guard or side effect; concurrent access loss returns
+  `TICKET_NOT_FOUND` with no mutation, assignment, audit, reconciliation, or
+  post-commit registration. A successful package exclusion that removes the
+  actor's own final path still returns its ordinary locked-pre-state result
 - **Affectedness authority matrix**: cover every source state with
   `manage_packages` non-`FIXED`, `manage_packages` `FIXED` on a locked CVE-less
   Ticket, rejection of that same request after CVE association,
@@ -1532,7 +1636,10 @@ transitions. The test must cover:
   ascending `User.id` order;
   association-only mutation does not assign or reconcile, leaves public result
   fields/counts unchanged, and later omission/failure never removes rows;
-  maintainer visibility does not grant any capability-protected mutation
+  maintainer visibility does not grant any capability-protected mutation;
+  fetched but unpersisted maintainer data cannot authorize that invocation;
+  verify external-error precedence after preliminary access loss and locked
+  `TICKET_NOT_FOUND` with zero local effects after successful I/O
 - **Track release composition**: verify IBS I/O completes before the Ticket
   lock; an effective automatic `FIXED` transition, its one service-owned audit
   event, Ticket reconciliation, and checkpoint advancement commit atomically;
@@ -1580,8 +1687,10 @@ transitions. The test must cover:
 
 - `docs/features/tickets/ticket-mutations.md` — `reconcile_ticket_status()`,
   `auto_assign_actor()`, `ensure_ticket_operable()`, ticket-centric mutations
-- `docs/features/tickets/tickets.md` — ticket lifecycle, gate
-  conditions, confidentiality filtering (`confidential_ticket_filter()`)
+- `docs/features/tickets/tickets.md` — ticket lifecycle, gate conditions, and
+  confidentiality filtering
+- `docs/features/identity/rbac.md` — canonical Ticket visibility predicate and
+  capability/visibility orthogonality
 - `docs/features/tickets/ticket-audit-log.md` — event type contract
 - `docs/features/packages/product-catalog.md` — current repository mappings
   and Product catalog backfill

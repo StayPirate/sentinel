@@ -285,8 +285,9 @@ workflow removes an association.
 
 ## Confidential Ticket Visibility
 
-For an authenticated caller with `caller_user_id`, a confidential Ticket is
-visible when any ordinary visibility rule succeeds, including:
+The one canonical Ticket visibility predicate is owned by
+`docs/features/identity/rbac.md` (Scope and Confidential Ticket Visibility).
+Maintainership contributes its package-wide branch to that predicate:
 
 ```text
 EXISTS TicketPackageMaintainer
@@ -296,11 +297,12 @@ WHERE TicketPackageMaintainer.user_id = caller_user_id
   AND TicketPackage.deleted_at IS NULL
 ```
 
-The complete predicate is therefore: Ticket is non-confidential, caller scope
-is `all`, an explicit `TicketAccessGrant` exists, **or** the included-package
-maintainer predicate above succeeds. `confidential_ticket_filter()` needs no
-caller email parameter. Authentication already guarantees that the caller's
-current User is active.
+This document does not own or repeat the complete formula. Every Ticket-derived
+consumer query combines this branch through the canonical predicate in its
+Service-owned model-aware query. API handlers do not build or pass ORM
+expressions. Authentication already guarantees that an authenticated caller's
+current User is active; anonymous evaluation performs no grant or
+maintainership lookup.
 
 Package exclusion disables every association below that package immediately.
 Access remains if another included package qualifies. Package restore
@@ -317,6 +319,24 @@ caller's existing capabilities permit. Sentinel MUST NOT create an automatic
 
 Associations are acquired whether or not a Ticket is confidential at the time,
 so a later confidentiality change uses already persisted provenance.
+
+PostgreSQL `TicketPackageMaintainer` and `TicketPackage.deleted_at` state is the
+authority at the query or locked-mutation observation point. Preliminary access
+does not preserve authority across a later read or mutation. In particular:
+
+- if package exclusion commits before a consumer mutation acquires the Ticket
+  lock and removes the caller's final qualifying path, locked-current
+  accessibility returns `404 TICKET_NOT_FOUND` with zero side effects;
+- if scope `all`, an explicit grant, or another included maintained package
+  still qualifies, exclusion of one package does not deny access because the
+  canonical branches are independently sufficient;
+- if package restore commits first, the retained association qualifies again
+  and the waiting operation continues through its ordinary guards; and
+- an exclusion authorized from the locked pre-mutation state may remove the
+  actor's own final path and still return its ordinary success response. Later
+  requests evaluate the excluded committed state.
+
+Track or Product exclusion remains irrelevant to this package-wide branch.
 
 ## API Privacy and Filtering
 
@@ -369,6 +389,14 @@ access until the package is restored. Sentinel deliberately introduces no new
 operator endpoint, task, fetcher, configuration, progress state, or identity
 hook for this limitation.
 
+The consumer-facing recovery paths still apply ordinary Ticket accessibility.
+An actor whose own authorized exclusion removed their final visibility path
+cannot use a later consumer re-add or restore request by virtue of the retained
+association alone. Only a caller with another qualifying visibility branch can
+invoke restore. The trusted internal convergence workflow may add latent
+associations, but it has no restore authority, does not clear the package's
+exclusion marker, and cannot substitute for that consumer restore.
+
 ## Security and Privacy
 
 - SMELT-provided individual emails are personal data used only transiently for
@@ -382,6 +410,9 @@ hook for this limitation.
   existing durable associations. Package-tree creation remains available.
 - PostgreSQL associations, not SMELT responses or audit events, are the source
   of current maintainership visibility and workbench provenance.
+- Newly fetched, unpersisted SMELT maintainer data cannot authorize the same
+  package-add invocation. Acquisition and all existing SMELT parsing,
+  best-effort failure, and add-only semantics remain unchanged.
 
 ## Implementation Gate
 
@@ -422,6 +453,9 @@ Implementation coverage must include:
 - confidential visibility for each scope/grant/maintainer branch, package
   exclusion/later restore, another qualifying package, track/Product exclusion,
   Resolved Tickets, non-confidential Tickets, and unauthenticated callers;
+- independent-session exclusion/restore races proving locked-current
+  authorization, `TICKET_NOT_FOUND` with zero side effects after concurrent
+  access loss, and successful self-removal of the actor's last path;
 - a maintainer without the required capability remaining unable to invoke a
   capability-protected Ticket mutation despite having visibility;
 - Ticket `maintainer` filtering by UUID and username, unknown-filter empty

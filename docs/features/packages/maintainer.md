@@ -41,6 +41,20 @@ All three sections include only actionable tracks according to
 shared by the result and pagination count. A manually excluded scope or a track
 with no actionable Products does not appear in the maintainer work queue.
 
+Each pending, in-progress, and completed service query combines two distinct
+predicates:
+
+- the canonical Ticket visibility predicate from
+  `docs/features/identity/rbac.md`, evaluated for the authenticated caller; and
+- the workbench ownership predicate requiring that same caller's
+  `TicketPackageMaintainer` association to the returned package occurrence.
+
+Neither predicate substitutes for the other. The Service layer owns their
+model-aware ORM construction; the endpoint supplies caller context and does not
+build SQL expressions. Returned items, `meta.total`, and pagination all derive
+from the same caller-visible, caller-maintained candidate set and the same
+`evaluation_date`.
+
 ### Pending Fixes
 
 Codestreams where:
@@ -113,16 +127,26 @@ When the per-ticket endpoint cannot return the normal three-section
 response, it returns an error state instead. Evaluation order (first match
 wins):
 
-1. Ticket does not exist → 404 `TICKET_NOT_FOUND`
-2. Ticket status is not `Analyzed` → 200 with `error_state` (status-specific)
-3. User is not a maintainer of any package in the ticket → 200 with `error_state`
-4. All checks pass → 200 with normal data
+1. Authentication completes.
+2. The service selects the Ticket through the canonical visibility predicate;
+   missing and inaccessible are indistinguishable and return 404
+   `TICKET_NOT_FOUND`.
+3. Project the accessible Ticket's status. A status other than `Analyzed`
+   returns its status-specific 200 `error_state`.
+4. Evaluate the caller's package-maintainer membership. No maintained package
+   returns 200 `no_packages`.
+5. All checks pass → 200 with normal data filtered to the caller's maintained
+   packages.
+
+The status and maintainer checks cannot run first or authorize a later
+unconstrained query. No status-specific or `no_packages` response may reveal a
+missing or inaccessible Ticket.
 
 **Error state conditions:**
 
 | Condition | HTTP | Error state type |
 |-----------|------|------------------|
-| Ticket does not exist | 404 | — (standard error response) |
+| Ticket does not exist or is inaccessible | 404 | — (standard `TICKET_NOT_FOUND` response) |
 | Ticket status is `New` or `Analysis` | 200 | `not_analyzed` |
 | Ticket status is `Resolved` | 200 | `resolved` |
 | Ticket status is `Ignored` | 200 | `ignored` |
@@ -282,7 +306,7 @@ specific ticket, filtered to the authenticated user's packages.
 | Code | Error Code | Condition |
 |------|------------|-----------|
 | 200  | — | Ticket exists — response contains either normal data or an error state object |
-| 404  | `TICKET_NOT_FOUND` | Ticket does not exist |
+| 404  | `TICKET_NOT_FOUND` | Ticket does not exist or is inaccessible |
 
 **Response (normal view)**: returned when ticket status is `Analyzed` and
 the user is a maintainer of at least one package. Object with three arrays
@@ -365,13 +389,11 @@ containing the `SNTL-{n}` identifier of the target ticket.
 - Users can only see data for package occurrences associated to their User ID
 - The per-ticket endpoint filters by the authenticated user's packages;
   users cannot see other maintainers' pending work through this endpoint
-- **Confidentiality filtering**: all maintainer endpoints MUST apply
-  `confidential_ticket_filter()` (see
-  `docs/features/tickets/tickets.md`, Confidentiality Filtering) to
-  exclude packages belonging to confidential tickets that the caller is
-  not authorized to access. Although the package-maintainer association already
-  coincides with the maintainer visibility rule, the confidentiality filter
-  MUST be applied explicitly as defense in depth
+- **Confidentiality filtering**: all maintainer service queries apply the
+  canonical Ticket visibility predicate independently from workbench ownership.
+  Package association can satisfy the maintainership branch of visibility, but
+  the complete predicate remains explicit in the same query so future
+  workbench changes cannot bypass confidentiality
 
 ## Performance Considerations
 
@@ -404,6 +426,7 @@ return a significant number of rows. Mitigation strategies:
 
 - `docs/features/packages/package-maintainership.md` — package-wide
   association acquisition and visibility
+- `docs/features/identity/rbac.md` — canonical Ticket visibility predicate
 - `docs/features/packages/package-model.md` — TicketPackageTrack status
   and delivery status model
 - `docs/features/packages/ibs-submission-tracking.md` — normalized IBS request

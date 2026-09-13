@@ -24,11 +24,16 @@ Package-centric mutations are handled by `package_service`
 lower services while it owns one Ticket lifecycle workflow; neither lower
 service imports `ticket_service`.
 
-Read-only operations (listing tickets, retrieving ticket details,
-searching) are not centralized in this service because they carry no
-business logic, side effects, or audit trail requirements. They are
-implemented directly in API endpoint handlers (see
-`docs/features/tickets/tickets.md`).
+Read-only Ticket operations (listing, detail, and search) require a
+service-capable boundary because they contain model-aware visibility and
+business query construction. They need not live in `ticket_service`, but they
+MUST NOT be implemented as business ORM queries in API handlers or Core. API
+handlers remain thin and delegate these reads to the applicable service-owned
+query boundary (see `docs/features/tickets/tickets.md`). Each consumer-facing
+read constrains the rows, assembled detail, and pagination count it returns by
+the canonical visibility predicate in the same database operation or equivalent
+single database view; a preliminary accessibility decision alone is not
+sufficient.
 
 ## Architecture
 
@@ -88,6 +93,47 @@ revoking explicit access.
 operations require a non-null authorized acting user. Their API handlers must
 not use system attribution. `create_ticket()` and `reopen_from_ignored()` retain
 their documented system callers.
+
+### Caller category and Ticket accessibility
+
+Consumer-facing service operations consume the one canonical Ticket visibility
+predicate from `docs/features/identity/rbac.md` (Scope and Confidential Ticket
+Visibility) without defining another semantic variant. Anonymous reads use the
+canonical anonymous behavior and therefore do not query grants or
+maintainership. Services own every model-aware query or operation needed to
+apply the predicate; Core and API handlers do not construct business ORM
+queries. The concrete caller-context representation, helper shape, and SQL
+formulation are implementation choices.
+
+API capability checks complete before the first service resource lookup. For a
+consumer-facing mutation, an API accessibility decision may reject early but is
+not authoritative after a lock wait. Once the operation acquires every required
+root lock in its documented order, it MUST revalidate accessibility from the
+locked-current Ticket state before operability, nested-resource ownership,
+status guards, no-op classification, assignment, writes, audit,
+reconciliation, or post-commit-effect registration. An inaccessible or missing
+Ticket on a Ticket resource path produces `404 TICKET_NOT_FOUND` with no local
+write, audit event, reconciliation, or registered post-commit effect. This
+ordering does not alter any function's existing lock order.
+
+A trusted internal or system call does not acquire an HTTP caller's scope and
+does not apply consumer visibility filtering. Service boundaries distinguish
+that caller category from consumer-facing use proportionately; they do not
+infer it merely from an optional actor field or require a particular public
+helper or context type.
+
+If an approved consumer workflow performs external I/O before its Ticket lock,
+its preliminary service-delegated accessibility check permits that phase. A
+documented external failure that occurs before the lock retains its existing
+precedence; the workflow does not perform another database lookup solely to
+replace it with a not-found response. After successful external I/O, locked-current
+accessibility is authoritative at the mutation boundary. A concurrent loss of
+visibility there denies the mutation with zero local side effects.
+
+Authorization uses the locked pre-mutation state. If an authorized mutation's
+own effect removes the caller's final visibility path, the mutation still
+commits and returns its ordinary success response. Later requests evaluate the
+committed post-state.
 
 ### Relationship with other modules
 
@@ -263,17 +309,21 @@ async def associate_cve(
    transaction's locked root. No external I/O occurs in this transaction.
 2. Retain the CVE `FOR UPDATE` lock established by step 1.
 3. Acquire `FOR UPDATE` on the Ticket row.
-4. Call `ensure_ticket_operable(ticket)`.
-5. Verify `ticket.cve_id IS NULL` (else `TicketCVEAlreadySetError`) and, under
+4. For a consumer call, revalidate Ticket accessibility from the locked-current
+   Ticket. Capability has already been checked before CVE or Ticket lookup. An
+   inaccessible Ticket returns `TICKET_NOT_FOUND` even though this workflow
+   locked the CVE first.
+5. Call `ensure_ticket_operable(ticket)`.
+6. Verify `ticket.cve_id IS NULL` (else `TicketCVEAlreadySetError`) and, under
    the CVE lock, verify that no other Ticket is associated with the CVE (else
    `TicketCVEConflictError`).
-6. `auto_assign_actor(ticket, acting_user_id)`.
-7. Capture `previous_severity = ticket.severity_manual` (may be `NULL`).
-8. Set `ticket.cve_id` and clear `ticket.severity_manual = NULL` (same
+7. `auto_assign_actor(ticket, acting_user_id)`.
+8. Capture `previous_severity = ticket.severity_manual` (may be `NULL`).
+9. Set `ticket.cve_id` and clear `ticket.severity_manual = NULL` (same
     UPDATE — maintains `chk_ticket_severity_manual_cve_exclusive`)
-9. Create `TicketAuditEvent` (`cve_associated`,
+10. Create `TicketAuditEvent` (`cve_associated`,
     `user_id = acting_user_id`).
-10. Call `recalculate_cvss_chain()` in association mode with `cve.id` and
+11. Call `recalculate_cvss_chain()` in association mode with `cve.id` and
     `association_previous_severity = previous_severity`. The same-transaction
     re-locks preserve the CVE-then-Ticket order and observe all assessment
     mutations committed before this operation acquired the CVE lock. The chain
@@ -282,20 +332,20 @@ async def associate_cve(
     through the narrow exception. Changed-Product events are system-attributed,
     use `reason = cvss`, and are ordered by `TicketPackageProduct.id` after the
     handover event.
-11. Call `reconcile_ticket_status()` exactly once after the handover and all
+12. Call `reconcile_ticket_status()` exactly once after the handover and all
     Product events, using the same UTC `evaluation_date`. Gate #3 (severity set)
     and gate #4 (at least one canonical SUSE assessment in any accepted
     version) may now fail, causing regression to Analysis. Do not auto-assign a
     second time.
-12. Return the updated Ticket.
+13. Return the updated Ticket.
 
 **Locking**: `FOR UPDATE` on CVE, then `FOR UPDATE` on Ticket. CVE Resolution
 Behavior involves only local database operations and may insert a minimal CVE
 before that row can be locked. No synchronous external HTTP call or
 Redis/Celery operation occurs while either lock is held. Re-locking either row
-inside `recalculate_cvss_chain()` is a same-transaction no-op. Task dispatch via
-`trigger_on_demand_fetch()` is the endpoint handler's responsibility and MUST
-occur after `db.commit()`, outside the locked transaction.
+inside `recalculate_cvss_chain()` is a same-transaction no-op. The API workflow
+registers `trigger_on_demand_fetch()` as a post-commit effect; the shared
+transaction dependency executes it only after commit and lock release.
 
 This order serializes correctly with CVSS mutation. If the CVSS mutation locks
 the CVE first, association waits and then consumes its committed severity. If
@@ -309,6 +359,11 @@ complete locked assessment set and applies automatic Product eligibility
 inline through the package-model-owned evaluator.
 If the CVE has no assessments, severity resolves to `null` (gate #3 fails) and
 eligibility uses the 10.0 conservative fallback.
+
+A `TicketCVEConflictError` continues to expose the documented
+`existing_ticket_id` even when that conflicting Ticket is otherwise
+inaccessible. Ticket and CVE identifiers are not confidential Ticket content;
+this does not authorize following the identifier to protected data.
 
 `associate_cve` captures and passes the previous `severity_manual` value; the
 delegated calculation creates exactly one handover event when the source
@@ -358,23 +413,25 @@ async def assign_ticket(
 **Behavioral steps**:
 
 1. Acquire `FOR UPDATE` on the Ticket row
-2. Call `ensure_ticket_operable(ticket)`
-3. Validate target user (active — else `AssigneeInactiveError`;
+2. Revalidate consumer accessibility from the locked-current Ticket; denial
+   returns `TICKET_NOT_FOUND` before target-user or operability errors
+3. Call `ensure_ticket_operable(ticket)`
+4. Validate target user (active — else `AssigneeInactiveError`;
     holds VA role — else `AssigneeNotVAError`)
-4. **Idempotency check**: if `ticket.assignee_id == assignee_id`, return
+5. **Idempotency check**: if `ticket.assignee_id == assignee_id`, return
     ticket unchanged (no audit event, no status evaluation)
-5. Set `ticket.assignee_id = assignee_id`
-6. Create `TicketAuditEvent` (`assignment`)
-7. If `ticket.status == New`: set `ticket.status = Analysis`, create
+6. Set `ticket.assignee_id = assignee_id`
+7. Create `TicketAuditEvent` (`assignment`)
+8. If `ticket.status == New`: set `ticket.status = Analysis`, create
     `TicketAuditEvent` (`status_change`, `user_id = NULL`,
     `old_value = "New"`, `new_value = "Analysis"`) — this is the explicit
     `New → Analysis` transition (see Architectural Invariant in
     `tickets.md`); the `status_change` event is created here, not by
     `reconcile_ticket_status`
-8. Call `reconcile_ticket_status(ticket)` — evaluates further promotion
+9. Call `reconcile_ticket_status(ticket)` — evaluates further promotion
     from `Analysis` upward; may produce a second `status_change` event
     if `Analyzed` or `Resolved` gate conditions are already satisfied
-9. Return updated Ticket
+10. Return updated Ticket
 
 **Locking**: FOR UPDATE on Ticket row.
 
@@ -382,12 +439,12 @@ async def assign_ticket(
 existing data satisfies gates above `Analysis` (Analyzed or Resolved).
 While `ticket-mutations.md` classifies assignment as "not gate-relevant"
 in the sense that it does not modify CVSS/severity/package data, the
-explicit `New → Analysis` transition in step 7 means the ticket is now
+explicit `New → Analysis` transition in step 8 means the ticket is now
 in the gate zone and `reconcile_ticket_status` can promote it further
 if conditions are met.
 
 **Audit events**: `assignment` (only if assignee actually changes).
-Possibly `status_change` (explicit `New → Analysis` in step 7 and/or
+Possibly `status_change` (explicit `New → Analysis` in step 8 and/or
 further promotion from `reconcile_ticket_status`). Assignment promotion and
 ordinary gate events use `comment = NULL`.
 
@@ -418,15 +475,17 @@ async def ignore_ticket(
 **Behavioral steps**:
 
 1. Acquire `FOR UPDATE` on the Ticket row
-2. Call `ensure_ticket_operable(ticket)` — rejects Ignored or Duplicated
+2. Revalidate consumer accessibility from the locked-current Ticket; denial
+   returns `TICKET_NOT_FOUND` before status or operability errors
+3. Call `ensure_ticket_operable(ticket)` — rejects Ignored or Duplicated
    (`TicketNotMutableError`) tickets
-3. Verify status is New or Analysis (else `InvalidTransitionError` —
+4. Verify status is New or Analysis (else `InvalidTransitionError` —
    this catches Analyzed and Resolved, which pass `ensure_ticket_operable`
    but are not valid source states for ignore)
-4. `auto_assign_actor(ticket, acting_user_id)`
-5. Set `ticket.status = Ignored`
-6. Create `TicketAuditEvent` (`status_change`)
-7. Return updated Ticket
+5. `auto_assign_actor(ticket, acting_user_id)`
+6. Set `ticket.status = Ignored`
+7. Create `TicketAuditEvent` (`status_change`)
+8. Return updated Ticket
 
 **Locking**: FOR UPDATE on Ticket row.
 
@@ -455,10 +514,11 @@ async def mark_as_duplicate(
 
 **Preconditions**:
 
-- Source ticket must exist (else `TicketNotFoundError`)
-- Target ticket must exist (else `TicketNotFoundError`)
-- Target ticket must be accessible to the acting user (API-layer scope
-  check; confidential target without access → 404)
+- Source ticket must exist and be accessible to the acting user from its
+  locked-current state (else `TicketNotFoundError`)
+- Target ticket must exist and be accessible to the acting user from its
+  locked-current state (else `TicketNotFoundError`). An initially inaccessible
+  target cannot be selected
 - Source ticket must be operable (`ensure_ticket_operable`)
 - Target must not be in Duplicated status (else
   `DuplicateTargetIsDuplicatedError`)
@@ -468,12 +528,12 @@ async def mark_as_duplicate(
 
 1. **Phase 1 — lock and validate roots**:
    a. Determine lock order: `first = min(source_id, target_id)`,
-      `second = max(source_id, target_id)`
+       `second = max(source_id, target_id)`
    b. `SELECT ... WHERE id = first FOR UPDATE` — lock first root
-   c. Validate the first root immediately (operable if source,
-      non-Duplicated if target)
-   d. `SELECT ... WHERE id = second FOR UPDATE` — lock second root
-   e. Validate the second root immediately
+   c. `SELECT ... WHERE id = second FOR UPDATE` — lock second root
+   d. Revalidate accessibility for both locked-current roots
+   e. Validate both role-specific guards (operable for the source,
+      non-Duplicated for the target)
    f. Validate source != target (else `SelfDuplicateError`)
 2. **Phase 2 — lock dependents**:
    `SELECT ... WHERE duplicate_of_id = source_id ORDER BY id FOR UPDATE NOWAIT`
@@ -500,6 +560,14 @@ async def mark_as_duplicate(
       - Dependents are repointed as a system action (`user_id = NULL`);
         no confidentiality access check is applied to dependent tickets
 4. Return updated source ticket
+
+The source and target visibility decisions are both made from the locked-current
+rows and both must pass before Phase 2 or any mutation. Missing and inaccessible
+roots produce the same `TICKET_NOT_FOUND` outcome. Dependents remain a trusted
+system consequence of the authorized source mutation and are not independently
+visibility-checked. After a link is established, `duplicate_of` may continue to
+expose the stored target `SNTL-{n}` identifier if that target later becomes
+inaccessible; following that identifier then returns `TICKET_NOT_FOUND`.
 
 **Post-operation**: no post-commit work. Everything is atomic.
 
@@ -590,7 +658,11 @@ composition.
 **Behavioral steps**:
 
 1. Acquire `FOR UPDATE` on the Ticket as the first database operation and
-   validate `Ignored`.
+   for a consumer call revalidate locked-current accessibility before validating
+   `Ignored`. The documented trusted system reopen does not acquire user scope.
+   The caller identifies that trusted invocation explicitly through the
+   implementation-chosen service boundary; `acting_user_id = NULL` by itself
+   never grants system authority.
 2. Preserve `original_status = Ignored` and resolve one UTC `evaluation_date`.
 3. Call `ticket_mutations.auto_assign_actor(..., force=True)`. A VA actor
    becomes the assignee; a non-VA actor or system caller leaves the current
@@ -635,7 +707,8 @@ non-retroactive; other Tickets keep their current targets.
 **Behavioral steps**:
 
 1. Acquire `FOR UPDATE` on the Ticket as the first database operation and
-   validate `Duplicated`.
+   revalidate locked-current consumer accessibility before validating
+   `Duplicated`.
 2. Preserve `original_status = Duplicated`, capture the current duplicate
    target's `SNTL-{n}` identifier as `original_target_identifier`, and resolve
    one UTC `evaluation_date`.
@@ -742,10 +815,17 @@ async def dispatch_ticket_convergence(
 ) -> str:
 ```
 
+Consumer invocations additionally supply the request-resolved caller information
+needed by the canonical visibility predicate through the module-level
+implementation-chosen boundary. The displayed signature does not prescribe that
+boundary's concrete parameter or context shape.
+
 **Preconditions and guards**:
 
-- The API has already authenticated the caller, verified either
-  `triage_ticket` or `manage_fetchers`, and resolved Ticket accessibility.
+- The API has already authenticated the caller and verified either
+  `triage_ticket` or `manage_fetchers` before service resource lookup. If a thin
+  API boundary also performed preliminary Ticket accessibility, that decision
+  is not authoritative after a lock wait.
 - The Ticket must still exist and its locked-current status must be `Analysis`,
   `Analyzed`, or `Resolved`. Absence raises `TicketNotFoundError`; `New`,
   `Ignored`, or `Duplicated` raises `InvalidTransitionError`.
@@ -754,7 +834,9 @@ async def dispatch_ticket_convergence(
 **Behavior**:
 
 1. Load the Ticket by canonical UUID with `FOR UPDATE` as the first database
-   operation and evaluate the guards above from locked-current state.
+   operation, revalidate consumer accessibility, and only then evaluate status
+   eligibility from locked-current state. Missing or inaccessible returns
+   `TICKET_NOT_FOUND` and registers no callback.
 2. Allocate the transient Celery task ID without performing broker I/O.
 3. Register one post-commit callback that publishes the root Ticket
    convergence task with the canonical `ticket_id` and allocated task ID.
@@ -815,12 +897,14 @@ async def set_confidentiality(
 **Behavioral steps**:
 
 1. Acquire `FOR UPDATE` on the Ticket row
-2. Call `ensure_ticket_operable(ticket)`
-3. **Idempotency check**: if `ticket.is_confidential == is_confidential`,
+2. Revalidate consumer accessibility from the locked-current Ticket; denial
+   returns `TICKET_NOT_FOUND` before operability or no-op classification
+3. Call `ensure_ticket_operable(ticket)`
+4. **Idempotency check**: if `ticket.is_confidential == is_confidential`,
     return ticket unchanged (no audit event)
-4. Set `ticket.is_confidential = is_confidential`
-5. Create `TicketAuditEvent` (`confidentiality_changed`)
-6. Return updated Ticket
+5. Set `ticket.is_confidential = is_confidential`
+6. Create `TicketAuditEvent` (`confidentiality_changed`)
+7. Return updated Ticket
 
 **Note on access grants**: When setting `is_confidential = false`,
 existing `TicketAccessGrant` records are NOT deleted immediately. They
@@ -869,15 +953,18 @@ async def grant_access(
 **Behavioral steps**:
 
 1. Acquire `FOR UPDATE` on the Ticket row
-2. Call `ensure_ticket_operable(ticket)`
-3. Verify ticket is confidential (else `TicketNotConfidentialError`)
-4. Verify target user is active (else `InactiveUserError`)
-5. **Idempotency check**: if grant already exists for this user, return
+2. Revalidate consumer accessibility from the locked-current Ticket; denial
+   returns `TICKET_NOT_FOUND` before confidentiality, target-user, or no-op
+   decisions
+3. Call `ensure_ticket_operable(ticket)`
+4. Verify ticket is confidential (else `TicketNotConfidentialError`)
+5. Verify target user is active (else `InactiveUserError`)
+6. **Idempotency check**: if grant already exists for this user, return
     existing grant unchanged (no audit event)
-6. INSERT `TicketAccessGrant` record (`ticket_id`, `user_id`,
+7. INSERT `TicketAccessGrant` record (`ticket_id`, `user_id`,
     `granted_by = acting_user_id`, `granted_at = now(UTC)`)
-7. Create `TicketAuditEvent` (`access_grant_added`)
-8. Return the created grant
+8. Create `TicketAuditEvent` (`access_grant_added`)
+9. Return the created grant
 
 **Concurrency**: If two concurrent requests attempt to grant access to
 the same user, the UNIQUE constraint on `TicketAccessGrant`
@@ -918,13 +1005,16 @@ async def revoke_access(
 **Behavioral steps**:
 
 1. Acquire `FOR UPDATE` on the Ticket row
-2. Call `ensure_ticket_operable(ticket)`
-3. Verify ticket is confidential (else `TicketNotConfidentialError`)
-4. **Idempotency check**: if grant does not exist for this user, return
+2. Revalidate consumer accessibility from the locked-current Ticket; denial
+   returns `TICKET_NOT_FOUND` before confidentiality, target-user, or no-op
+   decisions
+3. Call `ensure_ticket_operable(ticket)`
+4. Verify ticket is confidential (else `TicketNotConfidentialError`)
+5. **Idempotency check**: if grant does not exist for this user, return
     without side effects (no audit event)
-5. Delete `TicketAccessGrant` record
-6. Create `TicketAuditEvent` (`access_grant_removed`)
-7. Return
+6. Delete `TicketAccessGrant` record
+7. Create `TicketAuditEvent` (`access_grant_removed`)
+8. Return
 
 **Locking**: FOR UPDATE on Ticket row (provides immutability guard
 consistency with other mutation functions).
@@ -945,6 +1035,10 @@ async def list_access_grants(
 ) -> list[TicketAccessGrant]:
 ```
 
+Consumer use also supplies the caller information required to evaluate the
+canonical visibility predicate. Its concrete parameter or context shape is an
+implementation choice.
+
 **Preconditions**:
 
 - Ticket must be confidential (`is_confidential = true`; else
@@ -953,10 +1047,13 @@ async def list_access_grants(
 
 **Behavioral steps**:
 
-1. Verify ticket is confidential (else `TicketNotConfidentialError`)
-2. Query `TicketAccessGrant` records for the ticket, ordered by
+1. Select the parent Ticket and its grants through the canonical accessibility
+   predicate in one database operation or equivalent single database view. A
+   missing or inaccessible Ticket raises `TicketNotFoundError`; it never returns
+   an empty list for that case.
+2. Verify ticket is confidential (else `TicketNotConfidentialError`)
+3. Return `TicketAccessGrant` records for the ticket, ordered by
    `granted_at` ascending
-3. Return list
 
 **Locking**: None (read-only).
 
@@ -972,7 +1069,7 @@ to the corresponding HTTP status code and error code per `api-spec.md`.
 
 | Exception | HTTP | Code | Raised when |
 |-----------|------|------|-------------|
-| `TicketNotFoundError` † | 404 | `TICKET_NOT_FOUND` | Ticket ID does not exist |
+| `TicketNotFoundError` † | 404 | `TICKET_NOT_FOUND` | Ticket ID does not exist or is inaccessible on a consumer Ticket path |
 | `TicketNotMutableError` † | 409 | `TICKET_NOT_MUTABLE` | Ticket is in manual zone (Ignored or Duplicated) |
 | `InvalidTransitionError` † | 409 | `TICKET_INVALID_TRANSITION` | Requested status transition is not allowed |
 | `TicketCVEAlreadySetError` | 400 | `TICKET_CVE_ALREADY_SET` | Ticket already has a CVE associated |
@@ -1118,6 +1215,20 @@ behavior of `ticket_service` operations:
     events and no-op absence; stale-grant cleanup covers deterministic Ticket
     selection, locked revalidation, idempotent/concurrent cleanup, rollback, and
     zero `access_grant_removed` events
+15. **Locked-current accessibility**: for every consumer mutation above, use
+    independent sessions to change confidentiality, the caller's grant, or the
+    last included-package maintainership path between preliminary delegated access and
+    root-lock acquisition. Verify the locked-current decision wins, denial maps
+    to `TICKET_NOT_FOUND`, and denial leaves zero assignment, write, audit,
+    reconciliation, or post-commit registration. Cover CVE-then-Ticket
+    association, both ordered duplicate roots, manual-zone exits, convergence
+    dispatch, confidentiality, and grants. Separately verify that an authorized
+    mutation which itself removes the caller's last visibility path returns its
+    normal success response and only later requests are denied
+16. **Accessible reads**: grant listing selects through the accessible parent
+    in the same database operation or view, returns an ordinary empty list only
+    for an accessible Ticket with no grants, and cannot return rows selected
+    after visibility is lost
 
 ## Cross-references
 
@@ -1131,7 +1242,7 @@ behavior of `ticket_service` operations:
   "CVE Resolution Behavior")
 - `docs/features/tickets/cve-service.md` — On-Demand Fetch: fetch_single_cve
 - `docs/features/identity/rbac.md` — capability definitions
-  (`triage_ticket`, `manage_confidentiality`,
-  `create_ticket`)
+  (`triage_ticket`, `manage_confidentiality`, `create_ticket`) and the canonical
+  Ticket visibility predicate
 - `docs/conventions.md` — Transaction and Locking pattern
 - `docs/api-spec.md` — general API conventions, error code categories
