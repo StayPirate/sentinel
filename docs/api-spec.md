@@ -85,12 +85,12 @@ or recovery contracts must remain independent of stale credentials. Adding
 another exception requires an explicit contract in its owning specification;
 endpoint authors MUST NOT infer optional authentication from `Access: Public`.
 
-**Scope** is an orthogonal dimension applied as an implicit query filter
-(not at the endpoint level). Scope controls confidential ticket
-visibility — it is evaluated by `confidential_ticket_filter()` and
-`require_accessible_ticket`, not by endpoint decorators. See
-`docs/features/identity/rbac.md` (Scope and Confidential Ticket
-Visibility) for details.
+**Scope** is an orthogonal visibility input, not an endpoint capability.
+Consumer-facing services receive request-resolved caller information and apply
+the canonical Ticket visibility predicate from `docs/features/identity/rbac.md`
+to their model-aware queries. Thin API dependencies may delegate resource
+selection to those services and map an inaccessible result to HTTP, but API and
+Core do not construct the business ORM predicate.
 
 The authorization declared in the owning feature specification is the
 **authoritative source**. `docs/features/identity/rbac.md` maintains a
@@ -99,54 +99,79 @@ it is not the source of truth.
 
 #### Authorization Chain Evaluation Order
 
-For ticket endpoints that are capability-protected and operate on a
-specific ticket, the authorization chain evaluates in this exact order:
+Ticket- and CVE-derived consumer operations use exactly one of these four
+flows. In every flow, authentication resolves caller information once for the
+request. Services consume that information; they do not reload roles or
+reconstruct the caller during later query or mutation phases.
 
-1. **Authentication** (`get_current_user`) — returns 401 if not
-   authenticated
-2. **Capability** (`require_capability`) — returns 403
-   `AUTH_INSUFFICIENT_PERMISSION` if the user lacks the required
-   capability. This check does not depend on the specific ticket
-3. **Ticket accessibility** (`require_accessible_ticket`) — returns 404
-   for non-existent or invisible tickets
+1. **Optional-authentication public read**:
+   1. Run `get_optional_current_user`. No selected credential yields the
+      anonymous caller; a selected invalid credential returns 401 before any
+      resource query.
+   2. A service selects the requested Ticket-, CVE-, or nested resource with
+      accessibility constraining the same database result that is returned.
+      Missing and inaccessible resources have the resource-specific not-found
+      outcome.
+2. **Authenticated or capability-protected read**:
+   1. Authenticate the caller.
+   2. If the operation declares a capability, check it without loading the
+      protected resource. Failure returns 403
+      `AUTH_INSUFFICIENT_PERMISSION` regardless of resource existence.
+   3. A service performs one visibility-constrained resource selection and
+      returns that selected result. Authenticated operations without a
+      capability begin with step 1 and continue directly to this step.
+3. **Mutation without external pre-lock I/O**:
+   1. Authenticate and check every declared resource-independent capability
+      before resource lookup.
+   2. The mutation service acquires the applicable roots in its owning lock
+      order, including each protected Ticket, and evaluates canonical Ticket
+      accessibility from locked-current Ticket and visibility-relationship
+      state. A missing or inaccessible resource returns its path's not-found
+      response (`TICKET_NOT_FOUND` for a Ticket path or `CVE_NOT_FOUND` for a
+      CVE path) with no mutation effect. Multi-root operations retain their
+      owning deterministic lock order.
+   3. Only after locked-current accessibility succeeds may the service evaluate
+      operability, nested-resource ownership, status or state guards, no-op
+      classification, writes, audit, reconciliation, and post-commit effects.
+4. **Mutation with permitted external pre-lock I/O**:
+   1. Authenticate and check every declared resource-independent capability
+      before resource lookup.
+   2. Perform a preliminary service-owned accessibility selection before
+      external I/O. Missing or inaccessible resources return the appropriate
+      not-found response without external I/O.
+   3. Complete the permitted external phase with no Ticket lock held. If this
+      phase fails, return its documented external error. Do not perform another
+      lookup solely to replace that failure with a concurrent 404.
+   4. If external I/O succeeds, acquire the Ticket lock and perform the same
+      authoritative locked-current accessibility and subsequent guard ordering
+      as flow 3.
 
-For mutation endpoints, a fourth check occurs at the **service layer**
-(not as an API dependency):
+The locked-current check in mutation flows closes the stale-access window. If
+another transaction removed visibility before lock acquisition, denial causes
+zero writes, assignment, audit events, reconciliation, or post-commit effects.
+If an authorized mutation itself removes the actor's final visibility path, it
+still completes and returns its ordinary success response; later requests use
+the committed post-state.
 
-4. **Operability guard** (`ensure_ticket_operable`) — raises 409
-   `TICKET_NOT_MUTABLE` if the ticket is in Ignored or Duplicated
-   status. This check executes under the `FOR UPDATE` lock and is the
-   authoritative enforcement
-
-This ordering is security-significant: the capability check (step 2)
-fires before the accessibility check (step 3), preventing ticket
-existence probing via differentiated error codes.
-
-When an operation accepts alternative capabilities, step 2 checks the
+When an operation accepts alternative capabilities, the capability step checks the
 documented capability union without loading the Ticket. A caller lacking every
 alternative receives the same generic 403 regardless of whether the Ticket or
-nested resource exists. Any condition that requires current Ticket state is
-then enforced only after accessibility and under the Ticket lock. For example,
+nested resource exists. Any mutation condition that requires current Ticket
+state is then enforced only after locked-current accessibility under the Ticket
+lock. For example,
 `status = fixed` accepts `admin_ticket_ops OR manage_packages` before
 accessibility; under lock, `manage_packages` alone is sufficient only when
 `Ticket.cve_id IS NULL`. Ticket convergence rerun similarly accepts
 `triage_ticket OR manage_fetchers`, then checks status eligibility under lock.
 
-For CVE endpoints that are capability-protected and operate on a
-specific CVE, the same pattern applies:
+For a CVE operation, the selected CVE is accessible when it has no associated
+Ticket or when its associated Ticket satisfies the canonical Ticket visibility
+predicate. Capability-protected CVE operations check capability before this
+selection. Every denial from missing or inaccessible CVE selection returns 404
+`CVE_NOT_FOUND`, never a Ticket error code.
 
-1. **Authentication** (`get_current_user`) — returns 401
-2. **Capability** (`require_capability`) — returns 403
-   `AUTH_INSUFFICIENT_PERMISSION`
-3. **CVE accessibility** (`require_accessible_cve`) — returns 404
-   `CVE_NOT_FOUND` for non-existent or inaccessible CVEs
-
-For every Public endpoint with optional authentication under
-`/cves/{cve_id}/`, optional authentication runs first and CVE accessibility is
-then step 2. An absent credential yields an anonymous caller; a selected
-invalid credential returns 401 before accessibility is evaluated.
-
-For non-ticket, non-CVE endpoints, only steps 1 and 2 apply.
+Non-Ticket, non-CVE endpoints follow their declared authentication and
+capability requirements without a Ticket accessibility step.
 
 ## Request Conventions
 
@@ -583,23 +608,20 @@ per-endpoint error tables.
 
 #### Ticket Accessibility Check
 
-All endpoints under `/api/v1/tickets/{ticket_id}/` — including the ticket
-detail endpoint itself — are subject to a centralized accessibility check
-enforced by a router-level shared dependency (`require_accessible_ticket`).
+All endpoints under `/api/v1/tickets/{ticket_id}/`, plus any operation whose
+path identifies a Ticket by another prefix, use the Ticket accessibility
+boundary role conventionally named `require_accessible_ticket`. The name
+describes observable boundary behavior, not a Core ORM implementation or a
+mandatory standalone preliminary query. A thin API dependency may perform the
+role by delegating to a service; a service may satisfy it directly as part of
+the read selection or locked mutation required by the flow above.
 
-The dependency evaluates conditions in this exact order:
-
-1. **Existence**: if the ticket does not exist, return `404 TICKET_NOT_FOUND`
-2. **Confidentiality**: if the ticket is confidential
-   (`is_confidential=TRUE`) and the caller does not satisfy any
-    visibility rule from `docs/features/identity/rbac.md` (Scope and
-    Confidential Ticket Visibility) — scope `all`, explicit
-    `TicketAccessGrant`, or included-package maintainer association — return `404
-    TICKET_NOT_FOUND` — indistinguishable from a non-existent ticket.
-    The confidentiality evaluation reuses the shared
-    `confidential_ticket_filter()` utility (see
-    `docs/features/tickets/tickets.md`, Confidentiality Filtering) with
-    the single-ticket column reference
+The service applies the single canonical predicate in
+`docs/features/identity/rbac.md`. If the Ticket is missing or does not satisfy
+that predicate, return `404 TICKET_NOT_FOUND`; these cases are
+indistinguishable. Reads select the returned Ticket or Ticket-derived resource
+under that predicate. Mutations apply it to locked-current state as specified
+by their flow.
 
 | Status | Code              | Condition                                            |
 |--------|-------------------|------------------------------------------------------|
@@ -607,24 +629,18 @@ The dependency evaluates conditions in this exact order:
 
 #### CVE Accessibility Check
 
-All endpoints under `/api/v1/cves/{cve_id}/` are subject to a
-centralized accessibility check enforced by a router-level shared
-dependency (`require_accessible_cve`). This dependency is applied via
-`dependencies=[...]` on the `APIRouter`, mirroring the
-`require_accessible_ticket` pattern on the ticket router.
+All endpoints under `/api/v1/cves/{cve_id}/` use the CVE accessibility boundary
+role conventionally named `require_accessible_cve`. As with the Ticket role,
+this is observable behavior delegated to a model-aware service, not a Core ORM
+implementation or a required router-level preliminary query.
 
-The dependency evaluates conditions in this exact order:
+The service parses CVE-ID syntax through the pure Core parser, then resolves the
+database resource and applies these semantics in the selected result:
 
-1. **Existence**: resolve the CVE by CVE-ID string (see CVE Identifier
-   Resolution below). If no CVE matches, return `404 CVE_NOT_FOUND`
-2. **Associated ticket check**: if the CVE has an associated ticket:
-   a. **Confidentiality**: if the ticket is confidential
-      (`is_confidential=TRUE`) and the caller does not satisfy any
-      visibility rule from `docs/features/identity/rbac.md` (Scope and
-      Confidential Ticket Visibility), return `404 CVE_NOT_FOUND` —
-      indistinguishable from a non-existent CVE
-3. **No associated ticket**: if the CVE has no associated ticket, it is
-   freely accessible — CVE data is inherently public
+1. A CVE with no associated Ticket is public.
+2. A CVE with an associated Ticket is accessible exactly when that Ticket
+   satisfies the canonical Ticket visibility predicate.
+3. A malformed, missing, or inaccessible CVE returns `404 CVE_NOT_FOUND`.
 
 | Status | Code              | Condition                                           |
 |--------|-------------------|-----------------------------------------------------|
@@ -639,33 +655,40 @@ from `ensure_ticket_operable()` at the service layer. This applies
 only when the CVE has an associated ticket in a manual-zone status
 (see Manual-Zone Mutability Guard below)
 
-Unauthenticated callers (`current_user=None`): step 2a always denies
-access when the ticket is confidential — unauthenticated users can never
-satisfy any visibility rule. This is consistent with
-`confidential_ticket_filter()` behavior for unauthenticated requests.
+Anonymous selection never performs grant or maintainer lookup and therefore
+includes an associated CVE only when its Ticket is non-confidential. The CVE
+boundary consumes the canonical Ticket predicate rather than implementing a
+second semantic predicate. `GET /api/v1/cves` applies the same association rule
+inside its service-owned list query.
 
-**Relationship to `require_accessible_ticket`**: this dependency applies
-the same confidentiality rules as `require_accessible_ticket`, with two
-differences: (1) all denial cases return `404 CVE_NOT_FOUND` instead of
-differentiating error codes, and (2) CVEs without an associated ticket
-are freely accessible because CVE data is inherently public.
+#### Maintainer Ticket Accessibility Check
 
-The two dependencies are intentionally kept as separate, self-contained
-implementations — no shared abstraction is introduced. The access rules
-are equivalent by convention, documented with this explicit
-cross-reference.
+`GET /api/v1/my/packages/ticket/{ticket_id}` is not under the Ticket router, but
+its path identifies one Ticket and therefore derives the same `404
+TICKET_NOT_FOUND` scoped response. The service selects an accessible Ticket
+before evaluating Ticket status, maintainer membership, `error_state`, or
+`duplicate_of`. A missing or inaccessible Ticket is indistinguishable; no
+status-specific or `no_packages` projection may reveal it first.
 
-Unlike the ticket router, no endpoints need to be excluded from this
-check.
+#### Anti-Enumeration Boundary
 
-**Location**: `backend/app/core/dependencies.py` (alongside
-`require_accessible_ticket`). User loading remains in the owning service layer
-per User Identifier Resolution below.
+The not-found rules above conceal protected Ticket-derived content and direct
+resource reads: a caller cannot distinguish a missing Ticket/CVE from one made
+inaccessible by an associated confidential Ticket. This guarantee does not make
+Ticket UUIDs, `SNTL-{n}` identifiers, or CVE IDs confidential data.
 
-**Note**: the `GET /api/v1/cves` list endpoint lives on the parent
-`/api/v1/cves/` router, NOT on the `/api/v1/cves/{cve_id}/` sub-router.
-It is not covered by this dependency — confidentiality filtering is
-handled inline via `confidential_ticket_filter()`.
+Existing identifier-only contracts remain unchanged:
+
+- a visible Duplicated Ticket may return `duplicate_of = SNTL-{n}` even when
+  following that target now returns `TICKET_NOT_FOUND`;
+- `TICKET_CVE_CONFLICT` retains `existing_ticket_id`, including when that
+  Ticket is otherwise inaccessible; and
+- the global CVE-source listing may return CVE IDs without applying Ticket
+  visibility.
+
+These bounded exceptions expose identifiers only. They do not expose protected
+Ticket content, authorize a direct read, add a capability, or change any
+resource-accessibility result.
 
 #### Manual-Zone Mutability Guard
 
@@ -712,6 +735,7 @@ The derivation tables below are the single normative source of truth.
 |---|---|
 | `/api/v1/tickets/{ticket_id}/**` | `404 TICKET_NOT_FOUND` |
 | `/api/v1/cves/{cve_id}/**` | `404 CVE_NOT_FOUND` |
+| `/api/v1/my/packages/ticket/{ticket_id}` | `404 TICKET_NOT_FOUND` |
 | Mutation (POST/PATCH/DELETE) under `/api/v1/tickets/{ticket_id}/**` | + `409 TICKET_NOT_MUTABLE` |
 | Mutation (POST/PATCH/DELETE) under `/api/v1/cves/{cve_id}/**` | + `409 TICKET_NOT_MUTABLE` (only when CVE has associated ticket) |
 | Any other path | None |
@@ -827,15 +851,11 @@ UUID necessary as a stable reference) and Ticket identifiers (where
 no external natural key exists), the CVE-ID is immutable and
 externally assigned — the internal UUID serves no external purpose.
 
-Implementation note: a reusable `resolve_cve_identifier` dependency
-in `backend/app/core/dependencies.py`. This dependency validates the
-CVE-ID format, performs the lookup, and returns `404 CVE_NOT_FOUND`
-on mismatch or absence.
-
-The CVE-ID format pattern used by this resolution function is the
-canonical `CVE_ID_PATTERN` defined in `backend/app/core/identifiers.py`
-(anchored regex `^CVE-[0-9]{4}-[0-9]{4,}$`). This is the single
-source of truth for CVE-ID format validation across all layers.
+The CVE-ID format parser is pure and may live in Core. The canonical
+`CVE_ID_PATTERN` in `backend/app/core/identifiers.py` (anchored regex
+`^CVE-[0-9]{4}-[0-9]{4,}$`) is the single source of truth for syntax
+validation. Database resolution and accessibility selection belong to a
+service; API dependencies do not perform the ORM lookup.
 
 ### Product Identifier Resolution
 

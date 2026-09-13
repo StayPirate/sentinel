@@ -754,6 +754,7 @@ shape.
 | Model conventions | `backend/tests/test_architecture/test_model_conventions.py` | Over every table in `Base.metadata`: primary key column type is UUID (`docs/conventions.md`, SQLAlchemy Conventions), except the small, explicit per-table exception list documented in `docs/data-model.md` (Notes) for natural-key configuration tables (e.g. `SystemSetting.key`); every UUID primary key column declares both `default=uuid.uuid7` and `server_default=text("uuidv7()")` (`docs/conventions.md`, SQLAlchemy Conventions); every `DateTime` column is timezone-aware, i.e. `DateTime(timezone=True)` (`docs/conventions.md`, Timestamps & Timezones); no PostgreSQL ENUM type (`sa.Enum`/`postgresql.ENUM`) is used (`docs/conventions.md`, Enum Storage Strategy) |
 | Audit immutability | `backend/tests/test_architecture/test_audit_immutability.py` | Over every service module in `app/services/`: no `sqlalchemy.update()` or `sqlalchemy.delete()` call targets a model whose class inherits `AuditEventMixin` (`docs/features/platform/audit-trail-infrastructure.md`, Immutability). Discovers audit event models dynamically via `AuditEventMixin.__subclasses__()`, so it starts enforcing automatically as each concrete audit trail (ticket, identity, setting, fetcher) is implemented — no update to this test is needed when a new trail is added |
 | Layer dependencies | `backend/tests/test_architecture/test_layer_dependencies.py` | The dependency direction of the Backend Layer Architecture table in `docs/architecture.md` — a module in a given layer does not import a layer that is not listed as an allowed dependency for it. Both runtime and type-checking-only (`TYPE_CHECKING`-guarded) imports are checked, since either represents a coupling the architecture forbids |
+| Ticket accessibility boundaries | `backend/tests/test_architecture/test_ticket_accessibility.py` | Core imports no Model or Service modules; API modules contain no business ORM query or Ticket-visibility predicate; every new or changed protected read delegates to a service-owned model-aware operation; and authorization or mutation code never queries Ticket audit history as current visibility state. Behavioral tests, rather than an attempted semantic static comparison, prove every consumer implements the complete canonical predicate |
 | Workflow job timeouts | `backend/tests/test_architecture/test_workflow_timeouts.py` | Every job across all `.github/workflows/*.yml` (or `.yaml`) files declares a job-level `timeout-minutes` — GitHub's 360-minute default could otherwise occupy a runner and its `concurrency` group for up to six hours on a hung step |
 | Documentation links | `backend/tests/test_docs_links.py` | Every relative Markdown link (`[text](path)` or `[text](path#anchor)`) in an existing tracked `.md` file resolves to an existing file or directory. Tracked files deleted in the candidate worktree are excluded. `http(s)://` and `mailto:` links and anchor-only links (`#section`) are out of scope. A link whose entire `[text](target)` construct is wrapped in inline code spans (`` `[text](target)` ``) is also out of scope — this is a literal, illustrative example of link syntax (e.g. in `AGENTS.md`, Endpoint Permission Map maintenance), not a real link, and is not meant to resolve to a file. The test only detects and reports broken links; resolving them (fixing the link, creating the missing file, or removing the reference) is a judgement call left to whoever introduced or is reviewing the change |
 | CPE canonical data | `backend/tests/test_services/test_cpe_mapping.py` | The committed `app/data/cpe-package-mapping.json` is valid UTF-8 JSON with no textual or semantic duplicate keys; every key round-trips through the canonical grammar and is sorted; every package list satisfies the mapping contract. The same focused module tests the parser, package-relative loader, cache, resolvers, and resource packaging defined in `docs/features/packages/cpe-package-mapping.md`. The normal blocking pytest suite is the CI owner; no CPE-specific workflow or generic worker-startup check is required |
@@ -1591,6 +1592,153 @@ Test Requirement, affectedness authority and Ticket convergence workflow).
 Those tests distinguish best-effort automatic publication failure after a
 successful committed mutation from the explicit rerun endpoint's 503
 publication failure.
+
+### Ticket Accessibility
+
+When Ticket accessibility or a Ticket-derived read or mutation is affected,
+integration and e2e coverage MUST apply this canonical matrix. These tests use
+real PostgreSQL. Every race uses `db_session_factory` sessions with independent
+connections and transactions plus deterministic synchronization at the
+relevant read, I/O, lock, commit, or publication boundary; two tasks sharing
+`db_session` and timing-only sleeps are not concurrency evidence. Distribute
+the matrix between service integration tests and endpoint e2e tests according
+to the boundary under test; every case need not be repeated at both tiers.
+
+This matrix owns the shared visibility, atomicity, and disclosure guarantees.
+Feature-specific matrices continue to own response fields, package-policy
+formulas, reference behavior, audit payloads, CVSS resolution, submission
+projection, and workbench classification; they MUST NOT restate a different
+visibility predicate.
+
+**Canonical predicate:**
+
+| Case | Required assertion |
+|---|---|
+| Non-confidential Ticket | Visible to anonymous and authenticated callers regardless of scope, grant, or maintainership |
+| Anonymous caller | Confidential Ticket is invisible; no grant or maintainer lookup can authorize the caller |
+| Invalid selected optional credential | Returns the global 401 before visibility evaluation; it never falls back to anonymous access |
+| Effective scope `all` | Confidential Ticket is visible without a grant or maintainer association |
+| Explicit grant | An authenticated `non_confidential`-scope caller can see only the granted confidential Ticket |
+| Included-package maintainer | The persisted `TicketPackageMaintainer.user_id` association makes the confidential Ticket visible while its parent `TicketPackage.deleted_at IS NULL` |
+| Package exclusion and restore | Excluding the caller's last qualifying package removes access; restoring it reactivates the retained association without external I/O |
+| Track or Product exclusion | Does not remove package-wide maintainer visibility |
+| Other package and Ticket state | Product EOL, affectedness, eligibility, delivery, Product release state, and Ticket status do not change visibility |
+| Multiple qualifying packages | Excluding one package preserves access while another included maintained package remains; access is lost only after the last qualifying package is excluded |
+| Authenticated user with no roles | Has effective `non_confidential` scope and can gain visibility through a grant or included-package maintainership, but gains no capability |
+| Visibility without capability | Protected reads succeed, while a capability-protected mutation returns 403; conversely, a capability never makes an otherwise invisible Ticket visible |
+
+**List and count reads:**
+
+- Ticket lists, CVE lists, cross-Ticket package search, Ticket audit lists,
+  submission/release lists, and maintainer workbench lists are exercised with
+  mixed visible and invisible Tickets. No returned item may derive from an
+  invisible Ticket, and every paginated `meta.total` excludes invisible rows.
+  A scoped audit or submission/release request for an invisible Ticket returns
+  the resource-appropriate 404 rather than an empty collection.
+- Visibility is part of the database selection before sorting and pagination.
+  Count and items derive from one coherent database view, not merely the same
+  caller predicate evaluated by independently observed statements.
+  Implementations MUST NOT count broadly and remove invisible rows in Python or
+  apply a Python visibility post-filter after pagination.
+- At least one independent-session race per query shape changes
+  confidentiality, revokes the caller's grant, or excludes the caller's last
+  qualifying package after a preliminary resolution point but before the
+  protected selection. For a CVE list query, this also includes changing a
+  CVE-to-Ticket association so an initially ticketless or otherwise visible CVE
+  becomes inaccessible before protected selection. The response must not expose
+  a row selected after access was lost. This race must fail an implementation
+  that performs an unconstrained protected query after a stale split
+  accessibility check.
+
+**Single, nested, and assembled reads:**
+
+- Parameterize Ticket detail, package tree, references, Ticket audit,
+  submission requests, release requests, CVSS assessments, and per-CVE source
+  status over missing, visible, and inaccessible resources and over concurrent
+  confidentiality, grant, included-package, and CVE-to-Ticket association
+  changes where the resource is CVE-derived. Maintainer per-Ticket detail is
+  included and evaluates accessibility before status or package membership
+  projection.
+- A successful response's root and all PostgreSQL-backed nested or separately
+  assembled content are bound to one coherent database view in which the
+  caller can access the Ticket. A response must never combine a stale
+  successful access decision with Ticket, CVE, package, reference, event,
+  submission, CVSS, or durable source-status content selected after visibility
+  was lost. A specified best-effort transient overlay, such as source-status
+  Redis `pending`, runs only after that coherent protected selection and cannot
+  expose another protected resource. An implementation may satisfy this with
+  any database mechanism that preserves the contract; tests assert the
+  observable result rather than a private SQL shape.
+- The concurrency coverage includes both loss and acquisition of visibility.
+  It accepts a complete response from a coherent pre-change view or the
+  resource-appropriate not-found response, as allowed by the transaction view,
+  but never a mixed response assembled across incompatible views.
+- Resolve authenticated identity, roles, and effective scope once for a request.
+  A deterministic concurrent role change proves that an in-flight read or
+  mutation does not reconstruct that caller state midway through the request;
+  the committed role change applies to the next request.
+
+**Locked mutations:**
+
+- For every user-facing Ticket, CVE, or nested-resource mutation family, use
+  two sessions to prove the authoritative accessibility decision is made from
+  locked-current state. Session A pauses after any preliminary API check, when
+  one exists, or immediately before root-lock acquisition otherwise. Session B
+  then commits, in separate cases, making the Ticket confidential, revoking
+  A's grant, excluding A's last included maintained package, or changing the
+  CVE-to-Ticket association for a CVE-scoped operation. A subsequently acquires
+  the Ticket lock and must receive `404 TICKET_NOT_FOUND`, or `404
+  CVE_NOT_FOUND` for a CVE-scoped operation.
+- Each denied race asserts zero domain write, Ticket audit event, assignment,
+  reconciliation, post-commit callback, and task dispatch. Nested-resource,
+  operability, status, idempotency, and no-op decisions must not precede the
+  locked-current accessibility denial.
+- The converse self-loss case is explicit: a `restricted_analyst` authorized
+  through the last included package may successfully exclude that package.
+  Authorization uses the locked pre-mutation state, the ordinary mutation and
+  response succeed, and a subsequent request after commit returns 404 unless
+  another visibility rule applies.
+
+**External I/O and post-commit effects:**
+
+- An I/O-then-lock workflow such as package addition holds no Ticket lock while
+  calling SMELT. An independent session must be able to acquire and commit the
+  Ticket lock while the external boundary is deterministically paused.
+- If preliminary accessibility passed, another session removes visibility,
+  and the external operation then fails before the lock boundary, the
+  documented external error retains precedence. The workflow does not perform
+  an extra accessibility lookup solely to replace that failure with 404.
+- If external I/O succeeds after the same visibility-loss race, the mutation
+  boundary acquires the Ticket lock, revalidates accessibility, and returns the
+  resource-appropriate 404 with zero local write, association, audit,
+  assignment, reconciliation, or dispatch. A maintainer association discovered
+  by that request cannot authorize the request that would create it.
+- Broker publication and every other post-commit effect are absent on denied
+  or rolled-back paths and are observed only after the owning database commit
+  succeeds and the Ticket lock is released.
+
+**Authentication, authorization, and anti-enumeration:**
+
+- Missing or invalid mandatory credentials, and invalid selected optional
+  credentials, produce the global 401 before capability or accessibility work.
+  A capability-protected path returns the generic 403 before any Ticket, CVE,
+  or nested-resource lookup when the caller lacks the required capability.
+- For each direct protected read and mutation, a missing resource and an
+  inaccessible resource have identical status, code, and complete response
+  body. Ticket-scoped paths use `TICKET_NOT_FOUND`; CVE-scoped paths use
+  `CVE_NOT_FOUND` and never substitute the other resource's code.
+- The per-Ticket maintainer workbench returns 404 before inspecting or
+  projecting Ticket status, `duplicate_of`, or `no_packages`; missing and
+  inaccessible Tickets therefore cannot be distinguished through an error
+  state.
+- Tests preserve only the documented identifier-only exceptions: a visible
+  Duplicated Ticket may retain `duplicate_of = SNTL-{n}` when its target later
+  becomes inaccessible; `TICKET_CVE_CONFLICT` may include
+  `existing_ticket_id` for an inaccessible conflicting Ticket; and the global
+  CVE-source listing may expose public CVE IDs without Ticket visibility
+  scoping. Following a protected Ticket/CVE identifier still applies ordinary
+  accessibility, and none of these exceptions may expose Ticket-derived
+  content or create another bypass.
 
 ### Application-Owned Redis Operations
 

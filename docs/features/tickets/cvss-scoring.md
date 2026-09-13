@@ -400,6 +400,28 @@ Ticket-owned state participate, the global root-lock order is `CVE` then
 `Ticket`. Ticketless mutations therefore still have a serialization root, and
 concurrent association of a Ticket cannot invert lock order.
 
+For manual SUSE mutation APIs, authentication and the `manage_cvss` capability
+check complete before any CVE lookup. The mutation service then locks the CVE
+root, resolves the association under that lock, locks the currently associated
+Ticket root when one exists, confirms the association from locked-current state,
+and evaluates CVE accessibility as the projection of the canonical Ticket
+visibility predicate in
+`docs/features/identity/rbac.md`. A ticketless CVE is accessible. A missing CVE
+and an inaccessible associated CVE both produce `404 CVE_NOT_FOUND`; denial
+occurs before manual-zone/status guards, no-op or not-found classification,
+assignment, assessment or severity writes, audit, Product propagation, or
+Ticket reconciliation. Input-only schema validation and vector parsing may run
+before database locking, but they do not authorize or expose persisted state.
+
+This locked-current check is the sole authoritative accessibility decision. A
+thin API dependency may also have established preliminary accessibility, but is
+not required for this mutation flow. If confidentiality, an
+explicit grant, package maintainership, package inclusion, or the CVE-Ticket
+association changes before lock acquisition, the operation uses the state seen
+after the roots are locked. Trusted external and system mutation callers do not
+use user visibility and retain their existing persistence and propagation
+behavior.
+
 After obtaining the applicable locks, the operation reloads the assessment and
 association state before classifying its result. Create, update, unchanged,
 delete, and not-found outcomes, metrics, HTTP status, direct audit old/new
@@ -473,6 +495,16 @@ has one canonical order. Assessments are ordered by version `4.0`, `3.1`,
 `3.0`, `2.0`, then provider name ascending using the same code-point lexical
 comparison as resolution. This list order is independent of which assessment
 wins severity.
+
+The API handler remains thin and delegates the read to a service-owned ORM
+query. The CVE, its current Ticket association, Ticket-derived accessibility,
+configured default CVSS version, complete assessment set, severity result, and
+eligibility result are selected from one coherent database view. A ticketless
+CVE is visible; an associated CVE is visible if and only if its Ticket satisfies
+the canonical visibility predicate in `docs/features/identity/rbac.md`. The
+database result itself is visibility-constrained rather than authorized by a
+preliminary lookup. Missing and inaccessible CVEs both return `404
+CVE_NOT_FOUND` without exposing CVE or Ticket-derived content.
 
 `severity` is the stable Severity Resolution result or JSON `null` when absent.
 `eligibility` is always present and is the stable Eligibility Score Resolution
@@ -696,6 +728,14 @@ testing strategy.
   upsert/delete, delete/delete, Ticket association races, and composition with
   CVE ingestion. Assert `CVE` then `Ticket` acquisition, truthful winner action,
   HTTP status, metric, audit value, and propagation disposition.
+- Manual API concurrency tests change confidentiality, explicit grants,
+  included-package maintainership, and CVE-Ticket association between a
+  preliminary check and lock acquisition when such a check exists, or while the
+  operation is paused immediately before lock acquisition otherwise. They assert
+  locked-current accessibility, indistinguishable `CVE_NOT_FOUND` denial, and
+  zero assignment, assessment/severity write, audit, propagation, or
+  reconciliation on denial. Trusted external and system mutation behavior
+  remains unchanged.
 - Cross-reference the complete Product formula, audit ordering, one-date,
   one-reconciliation, rollback, association, convergence, default-version,
   and CVSS/override race coverage required by `ticket-mutations.md` and
@@ -708,8 +748,10 @@ testing strategy.
   unchanged outcomes. DELETE covers each accepted path version, not found,
   and manual-zone rejection.
 - Public optional-auth GET behavior, `manage_cvss` authorization on mutations,
-  CVE accessibility, global Pydantic validation responses, and the domain
-  `CVSS_INVALID_VECTOR` response without changing external HTTP mappings.
+  ticketless and associated-CVE accessibility, coherent composite GET
+  selection, missing/inaccessible anti-enumeration, global Pydantic validation
+  responses, and the domain `CVSS_INVALID_VECTOR` response without changing
+  external HTTP mappings.
 
 ## Data Model
 

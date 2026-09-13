@@ -65,13 +65,17 @@ scope of `non_confidential`. Unauthenticated users have no scope (treated
 as `None` — only non-confidential tickets visible, no grant/maintainership
 checks).
 
-> **Design note — scope is API-layer only**: scope is enforced at the API
-> layer via `confidential_ticket_filter()` in query endpoints and
-> `require_accessible_ticket` in single-ticket endpoints. It does not
-> apply to the service layer or background tasks. Celery workers,
-> fetchers, and event consumers process all tickets (including
-> confidential ones) without scope restrictions. Scope is an
-> access-control concept, not a data-partitioning concept.
+> **Design note — consumer caller scope**: scope is part of the caller
+> information consumed by service-owned, model-aware accessibility queries for
+> consumer-facing operations. Thin API dependencies may resolve transport-level
+> authentication, delegate to a service, and map a denial to HTTP, but API and
+> Core do not build Ticket ORM predicates. Internal system workflows such as
+> Celery workers, fetchers, and event consumers do not act as a consumer caller
+> and do not use HTTP scope; their Ticket selection follows their owning
+> workflow contracts. They MUST NOT be silently treated as anonymous or routed
+> through a consumer accessibility operation that would narrow their selection
+> to non-confidential Tickets. Scope is an access-control concept, not a
+> data-partitioning concept.
 
 ### Predefined Roles
 
@@ -218,23 +222,51 @@ optional authentication.
 
 ## Scope and Confidential Ticket Visibility
 
-Scope determines the **default** visibility of confidential tickets. It
-does NOT override explicit per-ticket access mechanisms.
+This section is the single normative definition of Ticket visibility. Other
+specifications identify consumers and atomicity requirements but MUST NOT define
+another semantic predicate.
 
-A ticket is visible to a user if ANY of the following is true:
+For an authenticated caller, a Ticket is visible exactly when at least one of
+these additive branches is true:
 
-1. The ticket is not confidential (always visible to everyone)
-2. The user's effective scope is `all`
-3. The user has an explicit `TicketAccessGrant` for this ticket
-4. The user's ID matches a `TicketPackageMaintainer.user_id` whose parent
-   `TicketPackage` belongs to this Ticket and has `deleted_at IS NULL`
+```text
+Ticket.is_confidential IS FALSE
+OR effective_scope = all
+OR EXISTS TicketAccessGrant(
+       ticket_id = Ticket.id,
+       user_id = caller_user_id
+   )
+OR EXISTS TicketPackageMaintainer
+   JOIN TicketPackage
+     ON TicketPackage.id = TicketPackageMaintainer.ticket_package_id
+   WHERE TicketPackage.ticket_id = Ticket.id
+     AND TicketPackageMaintainer.user_id = caller_user_id
+     AND TicketPackage.deleted_at IS NULL
+```
 
-The persisted user-ID association is package-wide. Track/Product exclusion,
-Product lifecycle, and Ticket resolution do not revoke it; package exclusion
-disables it until restore. Maintainership creates no `TicketAccessGrant`.
-Like an explicit grant, maintainership changes visibility only. It grants no
-capability; the caller can perform only operations already permitted by their
-roles.
+For an anonymous caller, visibility is exactly
+`Ticket.is_confidential IS FALSE`. The query does not evaluate a grant or
+maintainer branch because there is no caller identity. A selected invalid
+credential is not anonymous: optional and mandatory authentication return 401
+before visibility evaluation.
+
+Each branch is independently sufficient. Failure of one branch never disables
+another qualifying branch. In particular, excluding the last qualifying
+`TicketPackage` disables only its maintainership branch; restoring that package
+reactivates the retained association without external I/O. Another included
+qualifying package continues to provide visibility throughout.
+
+The package-maintainer association is package-wide. Track exclusion, Product
+exclusion, Product lifecycle or EOL, track affectedness, Product eligibility,
+track delivery, Ticket status, and Ticket resolution do not affect this
+predicate. Package exclusion affects it only through
+`TicketPackage.deleted_at IS NULL`. Maintainership creates no
+`TicketAccessGrant`.
+
+Visibility never grants a capability. An explicit grant or maintainership
+association changes only whether the consumer may observe the Ticket-derived
+resource; the caller can perform only operations separately permitted by the
+caller's capabilities.
 
 This means a user with `manage_confidentiality` capability can grant
 explicit access to a confidential ticket to a user with
@@ -256,38 +288,37 @@ are independent:
 
 Both checks must pass for a write operation to succeed.
 
-The `confidential_ticket_filter()` function uses `caller_scope` instead
-of `caller_is_privileged`:
-
-```python
-def confidential_ticket_filter(
-    ...,
-    caller_scope: Scope | None,     # None for unauthenticated
-    caller_user_id: UUID | None,
-    ...
-)
-```
-
-When `caller_scope` is `None` (unauthenticated), the function
-short-circuits: only non-confidential tickets are returned, and
-grant/maintainership checks are skipped (no user identity to match against).
-
 ### Optional Principal to Caller Context
 
 Public endpoints that depend on caller identity obtain
 `AuthenticatedPrincipal | None` from `get_optional_current_user` before
-building visibility or field-level authorization rules.
+delegating visibility or field-level authorization to a consumer-facing
+service.
 
-- For `None`, pass `caller_scope=None` and `caller_user_id=None`. No roles are
-  loaded and grant/maintainership checks remain
-  disabled as described above.
-- For an `AuthenticatedPrincipal`, load the user's current roles, resolve the
-  effective scope using the normal Scope resolution rule, and pass that scope
-  together with `principal.user.id`.
+- For `None`, the request is anonymous. No roles are loaded and the service
+  evaluates only the non-confidential branch.
+- For an `AuthenticatedPrincipal`, resolve the user's current roles and
+  effective scope once for the request and provide that information, together
+  with the authenticated user ID, to every consumer-facing service operation
+  that needs Ticket visibility.
 
 Only a completely validated principal reaches this mapping. A selected invalid
 credential returns 401 at the authentication boundary before confidentiality,
 resource accessibility, or optional field-level capability checks execute.
+
+The concrete in-memory representation of this caller information is an
+implementation choice; this specification does not require a new caller-context
+type. A request does not reconstruct or refresh the caller's roles, scope, or
+identity between preliminary external-I/O authorization and a later locked
+mutation. Ticket-side inputs are different: a read obtains them from the same
+database view/result that supplies the response, and a mutation obtains them
+from locked-current state. Consequently, committed role changes affect the next
+request, while concurrent Ticket, grant, or package changes are observed at the
+applicable database selection or lock boundary within the current request.
+
+The canonical cross-cutting test matrix for this predicate, its service/API
+consumers, concurrency, and anti-enumeration behavior is in
+`docs/features/platform/testing-strategy.md` (Ticket Accessibility).
 
 ## Endpoint Authorization
 
@@ -335,32 +366,13 @@ guard).
 
 ### Authorization Chain Evaluation Order
 
-For ticket endpoints that are capability-protected and operate on a
-specific ticket, the authorization chain evaluates in this order:
-
-1. **Authentication** (`get_current_user`) — resolve the authenticated
-   principal. Returns 401 if not authenticated.
-2. **Capability** (`require_capability`) — check the principal's user has
-   the required capability. Returns 403 `AUTH_INSUFFICIENT_PERMISSION` if
-   not. This check is user-level (does not depend on the specific
-   ticket), so it does not leak information about ticket existence.
-3. **Ticket accessibility** (`require_accessible_ticket`) — check that
-   the ticket exists and is visible to the caller (scope + grant + package
-   maintainership). Returns 404 for invisible tickets.
-
-For mutation endpoints, a fourth check occurs at the **service layer**
-(not as an API dependency):
-
-4. **Operability guard** (`ensure_ticket_operable`) — rejects mutations
-   on tickets in a manual-zone status (409 `TICKET_NOT_MUTABLE`). This
-   check executes under the `FOR UPDATE` lock and is the authoritative
-   enforcement.
-
-This ordering is security-significant: the capability check (step 2)
-fires before the accessibility check (step 3). A user without the
-required capability receives 403 regardless of whether the ticket
-exists — this prevents probing for ticket existence via differentiated
-error codes.
+The exact optional-authentication read, authenticated/capability read, mutation
+without external pre-lock I/O, and mutation with external pre-lock I/O flows are
+defined in `docs/api-spec.md` (Authorization Chain Evaluation Order). They all
+apply this section's one visibility predicate. Capability failure precedes
+protected-resource lookup; reads constrain the selected result by visibility;
+and mutations make locked-current accessibility authoritative before
+operability, nested-resource, status, no-op, or write decisions.
 
 For the track affectedness PATCH endpoint, `status = fixed` accepts
 `admin_ticket_ops OR manage_packages` before Ticket accessibility. Under the
@@ -369,20 +381,19 @@ permits only a Ticket with `cve_id IS NULL`. Every other valid status requires
 `manage_packages`. A caller lacking both alternatives receives the same generic
 403 before accessibility; the CVE condition is never evaluated for that caller.
 
-For Ticket convergence rerun, step 2 likewise accepts `triage_ticket OR
-manage_fetchers`. Neither capability grants visibility. After accessibility,
-the service checks locked-current status eligibility; this asynchronous
-dispatch action does not use `ensure_ticket_operable()`.
+For Ticket convergence rerun, the capability step accepts `triage_ticket OR
+manage_fetchers`. Neither capability grants visibility. The service then checks
+locked-current accessibility before locked-current status eligibility; this
+asynchronous dispatch action does not use `ensure_ticket_operable()`.
 
-For CVE endpoints that are capability-protected and operate on a
-specific CVE, the same pattern applies with `require_accessible_cve`
-as step 3 — returning `404 CVE_NOT_FOUND` for non-existent or
-inaccessible CVEs (see `docs/api-spec.md`, CVE Accessibility Check).
-For the exact ordering on Public CVE endpoints with optional authentication,
-see `docs/api-spec.md` (Authorization Chain Evaluation Order).
+For CVE endpoints, a ticketless CVE is public and an associated CVE consumes
+this exact Ticket predicate. Missing and inaccessible outcomes return
+`CVE_NOT_FOUND`, never a Ticket code. See `docs/api-spec.md` (CVE Accessibility
+Check).
 
-For non-ticket, non-CVE endpoints (user management, settings,
-fetchers), only steps 1 and 2 apply.
+Non-Ticket, non-CVE endpoints (user management, settings, fetchers) follow their
+declared authentication and capability requirements without a Ticket
+accessibility step.
 
 ## Endpoint Permission Map
 
@@ -692,8 +703,8 @@ API key lifecycle behavior.
 
 ### Permission Checking
 
-- Permissions are checked at the API endpoint level using FastAPI
-  dependencies
+- Resource-independent authentication and capability checks are applied at the
+  API boundary using FastAPI dependencies
 - A `require_capability()` dependency factory returns a dependency that
   checks whether the current user holds the required capability through
   any of their roles
@@ -702,9 +713,11 @@ API key lifecycle behavior.
   do not require authentication
 - The `require_capability()` check loads the user's roles from the
   `UserRole` junction table, then checks each role's static capability set
-- **Scope filtering** is applied separately by
-  `confidential_ticket_filter()` and `require_accessible_ticket`, not at
-  the endpoint decorator level
+- Consumer-facing services apply this section's canonical Ticket visibility
+  predicate in model-aware database queries. Boundary roles such as
+  `require_accessible_ticket` and `require_accessible_cve` may be represented by
+  thin API dependencies that delegate to those services and map the result;
+  they are not Core ORM utilities
 - Role changes take effect on the user's next request. A request already
   in progress continues with the permissions loaded at its start. This is
   the expected behavior and requires no additional synchronization

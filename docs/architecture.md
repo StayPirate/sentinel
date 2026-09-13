@@ -207,10 +207,10 @@ order does not imply additional dependencies.
 
 | Layer | Location | Responsibility | May depend on |
 |---|---|---|---|
-| **API** | `app/api/` (`app/api/v1/` for versioned routes) | Thin endpoint handlers and API dependencies: validate input, call services, return responses. No business logic. | Service, Schema, Model (for DI type annotations), Core |
+| **API** | `app/api/` (`app/api/v1/` for versioned routes) | Thin endpoint handlers and API dependencies: validate input, resolve transport-level caller state, call services, map service outcomes to HTTP, and return responses. No business logic or business database queries. | Service, Schema, Model (for DI type annotations), Core |
 | **CLI** | `app/cli/` | Thin command handlers: parse arguments, call services, format output. No business logic. | Service, Model (only where an owning specification explicitly permits a trivial read-only query), Core |
 | **Task** | `app/tasks/` | Thin Celery task wrappers that call services, plus worker and Beat lifecycle signal handlers that necessarily depend on services. | Service, Core |
-| **Service** | `app/services/` | All business logic and business database operations. Accept typed parameters and return typed results. | Model, Core |
+| **Service** | `app/services/` | All business logic and business database operations, including model-aware accessibility predicates and visibility-constrained resource queries. Accept typed parameters and return typed results. | Model, Core |
 | **Schema** | `app/schemas/` | Pydantic models for request/response validation and serialization. | Model (for `from_attributes`), Core |
 | **Model** | `app/models/` | SQLAlchemy ORM models: tables, columns, relationships, constraints. | Core (for enums only) |
 | **Core** | `app/core/` | Cross-cutting concerns: authentication, authorization, configuration, exceptions, and enums. | (no application imports) |
@@ -222,6 +222,14 @@ order does not imply additional dependencies.
   owning specification explicitly authorizes it. A CLI may execute a trivial
   read-only query under the same explicit-specification exception, although an
   existing service query boundary is preferred.
+- Consumer-facing services receive the caller information needed by their
+  owning access-control contract and own model-aware accessibility queries.
+  Thin API dependencies may delegate to those services and translate an
+  inaccessible result to the required HTTP response, but neither handlers nor
+  dependencies construct business ORM predicates. Core may parse transport-
+  independent identifier syntax or perform other pure authorization
+  computation; it does not import application models or services and does not
+  query application state.
 - Entry-point infrastructure may manage session and transaction completion,
   but that responsibility does not move business database operations out of
   services. Composable services receiving a caller-supplied `AsyncSession`
@@ -229,7 +237,9 @@ order does not imply additional dependencies.
   complete CLI workflow, or a complete task workflow owns one commit on
   success or one rollback on failure, as defined in `docs/conventions.md`
   (Caller-Owned Service Transactions).
-- Core has no application-level imports and remains a leaf dependency.
+- Core has no application-level imports and remains a leaf dependency. These
+  accessibility responsibilities use the existing Service and API layers; they
+  do not introduce another layer.
 
 ---
 

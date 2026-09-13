@@ -406,6 +406,15 @@ exemption removal there so it is not forgotten.
   layer because Core has no application imports. Identity consumers use
   `user_service.resolve_user_identifier()` as specified in
   `docs/features/identity/user-service.md`
+- **Model-aware resource resolution**: the same placement rule applies to
+  Ticket and CVE accessibility. Pure identifier syntax parsing may live in
+  Core. Database resolution, the canonical Ticket visibility predicate, and
+  queries that constrain returned resources by that predicate belong to a
+  service because they depend on application models. API handlers and
+  dependencies may pass parsed input and request-resolved caller information to
+  the service and map its result to HTTP; they MUST NOT construct or execute the
+  business ORM predicate. This is parallel to service-owned User resolution and
+  preserves Core's no-application-import boundary.
 
 - **Capability-based authorization**: use `require_capability()` as the
   standard authorization dependency for capability-protected endpoints.
@@ -424,10 +433,11 @@ exemption removal there so it is not forgotten.
   The dependency returns an `AuthenticatedPrincipal` carrying both the
   active `User` and the `CredentialKind` (`jwt` or `api_key`) — see
   `docs/features/identity/authentication.md` (Authenticated Principal).
-  Scope filtering (confidential ticket visibility) is handled by shared query
-  utilities and API dependencies (`confidential_ticket_filter()`,
-  `require_accessible_ticket`), not per-endpoint logic. See
-  `docs/features/identity/rbac.md` for the full authorization model
+  Ticket visibility is resolved once per request from authenticated caller
+  state and enforced by service-owned model-aware queries using the canonical
+  predicate in `docs/features/identity/rbac.md`. Thin API dependencies may
+  delegate that work and map the service outcome, but neither API nor Core
+  builds a SQLAlchemy visibility expression
 
 - **Cross-cutting query parameter constraints**: enforce global constraints
   (such as the 500-character string parameter length limit defined in

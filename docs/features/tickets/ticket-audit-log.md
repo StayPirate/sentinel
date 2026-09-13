@@ -403,6 +403,15 @@ supported (timeline display requires chronological ordering).
 Confidentiality filtering is enforced centrally — see `docs/api-spec.md`
 ([Scoped Responses](../../api-spec.md#scoped-responses)).
 
+The event page and `meta.total` are both constrained by the same accessible
+parent Ticket in one database operation or equivalent single database view,
+using the canonical predicate in `docs/features/identity/rbac.md` (Scope and
+Confidential Ticket Visibility). Missing and inaccessible Tickets both return
+`404 TICKET_NOT_FOUND`; an inaccessible Ticket never produces an empty event
+page or a zero count. Ticket accessibility constrains the query before actor,
+event-type, search, or date filters and before pagination. The count and page
+therefore cannot be derived from different visibility decisions.
+
 ## Service Contract
 
 Every event required by the owning domain contract is part of the same database
@@ -410,6 +419,12 @@ transaction as its mutation. If an audited mutation succeeds, its complete
 event sequence is guaranteed to be recorded; if it fails, no orphan event is
 created. An explicit no-event boundary in the canonical matrix is intentional
 and is not a failure of atomicity.
+
+Audit reads are model-aware service operations. API handlers delegate list and
+count construction to a service-capable boundary rather than issuing business
+ORM queries, and Core has no model imports. Audit history is historical evidence
+only: no event, actor, payload, or inferred history may be an input to Ticket
+accessibility or any current authorization decision.
 
 ### Implementation Guidelines
 
@@ -522,6 +537,12 @@ required event sequence or explicit no-event outcome. For audited mutations:
 24. Tests and architecture review prove no mutation, authorization,
     idempotency, restoration, reactivation, provenance, or recovery path reads
     Ticket audit history as current operational state
+25. Audit API tests cover scope `all`, explicit grant, included-package
+    maintainership, loss of the final visibility path, and inaccessible/missing
+    Tickets. They prove list rows and `meta.total` use the same accessible
+    Ticket/database view, accessibility is applied before actor/search/date and
+    other event filters, and an inaccessible Ticket returns `TICKET_NOT_FOUND`
+    rather than an empty page or zero count
 
 See Guardrail 6 (Mandatory testing) and Guardrail 11 (Ticket event logging)
 in `AGENTS.md` for enforcement.
@@ -539,3 +560,6 @@ Indefinite. TicketAuditEvent records are never automatically deleted.
 - `docs/conventions.md` — Audit Trail
 - `docs/api-spec.md` — global API conventions (envelope format, error codes,
   pagination, shared 422 responses)
+- `docs/features/identity/rbac.md` — canonical Ticket visibility predicate
+- `docs/features/platform/testing-strategy.md` — shared Ticket accessibility
+  matrix

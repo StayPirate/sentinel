@@ -1140,22 +1140,32 @@ add_package_to_ticket(ticket_id, package_name) -> AddPackageResult
 
 For the public endpoint, failures and outcomes have this strict precedence:
 
-1. authentication, `manage_packages`, and Ticket accessibility;
-2. maintained-package transport, JSON, JSend, HTTP-pairing, and applicable
+1. authentication and `manage_packages`;
+2. preliminary Ticket accessibility using the canonical predicate from
+   `docs/features/identity/rbac.md`;
+3. maintained-package transport, JSON, JSend, HTTP-pairing, and applicable
    structural response validation;
-3. Product catalog readiness;
-4. package-not-found classification;
-5. package-target resolution;
-6. best-effort maintainership acquisition;
-7. locked Ticket existence and operability;
-8. the existing package occurrence's direct exclusion marker;
-9. package-tree no-op, maintainer-only mutation, or effective package-tree
+4. Product catalog readiness;
+5. package-not-found classification;
+6. package-target resolution;
+7. best-effort maintainership acquisition;
+8. Ticket lock and authoritative locked-current accessibility using persisted
+   state only;
+9. Ticket operability;
+10. the existing package occurrence's direct exclusion marker;
+11. package-tree no-op, maintainer-only mutation, or effective package-tree
    mutation.
 
 Accordingly, `PACKAGE_ALREADY_EXCLUDED` is decided only after every blocking
 external package-target gate and the best-effort maintainership request. The
 request may obtain valid maintainer emails, but the locked exclusion guard
 rejects before any package-tree or maintainer association is persisted.
+Newly fetched maintainer data cannot satisfy step 8 for the same request because
+it is not yet persisted. If preliminary access succeeds and is lost while
+external work runs, a blocking external failure retains its documented error.
+If external work succeeds, the locked-current check returns `404
+TICKET_NOT_FOUND` with no local write, assignment, audit, reconciliation, or
+post-commit registration.
 
 `package_service` handles idempotency (skipping existing records, including
 soft-deleted), initial status determination, eligibility logic, and additive
@@ -1726,15 +1736,26 @@ periodic full-tree reconciler is introduced.
 
 ## API Endpoints
 
-Every endpoint below whose path contains package, track, or Product occurrence
-identifiers treats the complete path as one semantic locator. The package must
-belong to `{ticket_id}`, the track must belong to that package, and the Product
-occurrence must belong to that track. The package service locks the declared
-Ticket first and revalidates the complete chain under that lock. A missing ID
+Every mutation endpoint below whose path contains package, track, or Product
+occurrence identifiers treats the complete path as one semantic locator. The
+package must belong to `{ticket_id}`, the track must belong to that package, and
+the Product occurrence must belong to that track. The package service locks the declared
+Ticket first, evaluates canonical locked-current accessibility for a consumer
+caller, and then revalidates the complete chain under that lock. Operability,
+nested ownership, state guards, no-op decisions, writes, assignment, audit,
+reconciliation, and post-commit registration all follow accessibility. A
+missing or inaccessible Ticket returns `404 TICKET_NOT_FOUND`; a missing ID
 or any ownership mismatch at any level returns the endpoint's existing `404
 RESOURCE_NOT_FOUND`; no endpoint reveals that a supplied child exists under a
 different path. API handlers pass the identifiers to the service and perform no
 business ORM lookup.
+
+Internal system package operations do not apply HTTP caller scope. Their
+existing Ticket-status selection and locked mutation contracts continue
+unchanged. An authorized consumer mutation may itself remove the actor's last
+visibility path, such as excluding the final qualifying maintained package. It
+uses locked pre-mutation accessibility, returns the ordinary success response,
+and affects only later requests' visibility.
 
 ### Add Package to Ticket
 
@@ -2266,7 +2287,7 @@ a standalone endpoint for clients that only need package data.
 |--------|--------|
 | **`Access: Public`** | Consistent with `GET /api/v1/tickets/{ticket_id}` |
 | **`Authentication: Optional`** | Resolves caller identity for ticket accessibility |
-| **Guard** | `require_accessible_ticket` (404 for missing/confidential tickets) |
+| **Accessibility** | `package_service.get_ticket_packages()` selects the complete tree through a Ticket satisfying the canonical visibility predicate in the same database result/view. Missing and inaccessible both return `404 TICKET_NOT_FOUND`; a preliminary shared dependency cannot authorize an unconstrained follow-up query |
 | **Pagination** | No — package count per ticket is bounded (typically 1-5, rarely >20) |
 | **Envelope** | `{"data": [...]}` (unpaginated list) |
 | **Excluded records** | All package/track/Product records are returned, including directly or effectively manually excluded and lifecycle-non-actionable records |
@@ -2303,7 +2324,7 @@ once per ticket in the results.
 |--------|--------|
 | **`Access: Public`** | Consistent with `GET /api/v1/tickets` |
 | **`Authentication: Optional`** | Resolves caller identity for confidentiality filtering |
-| **Confidentiality** | Packages belonging to confidential tickets are excluded for unauthorized callers (same filter as `GET /api/v1/tickets`). The endpoint handler constructs `confidential_ticket_filter()` and passes it to `search_packages(confidentiality_filter=...)` |
+| **Confidentiality** | `package_service.search_packages()` receives caller context and constructs the canonical Ticket visibility predicate in the Service layer. The endpoint builds no ORM filter. Returned items, `meta.total`, pagination, and track aggregates derive from the same visible candidate set |
 | **Non-actionable packages** | Always excluded. This includes directly excluded packages and packages with no actionable tracks |
 | **Pagination** | Yes — `page` (default 1), `per_page` (default 20, max 100) |
 | **Envelope** | `{"data": [...], "meta": {"total": N, "page": P, "per_page": PP}}` |
@@ -2368,7 +2389,8 @@ itself is a ticket.
 
 **`track_summary`** (`TrackSummary`) — aggregated track status counts for the
 package within this Ticket. Counts only actionable tracks, using the same UTC
-`evaluation_date` as package filtering and pagination:
+`evaluation_date` as package filtering and pagination. The item, total, and
+aggregate query paths all retain the same Ticket visibility constraint:
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -2428,11 +2450,12 @@ Product sync tasks (`sync_smelt_products`, `sync_aimaas_lifecycle`,
   change, or `manage_packages` when the locked-current Ticket is CVE-less
 - Viewing affectedness data is publicly accessible (no authentication
   required):
-  - `GET /api/v1/tickets/{ticket_id}/packages` — subject to
-    `require_accessible_ticket` (confidentiality check)
-  - `GET /api/v1/packages` — packages belonging to confidential tickets
-    are excluded for unauthorized callers via
-    `confidential_ticket_filter()`
+  - `GET /api/v1/tickets/{ticket_id}/packages` selects the returned tree through
+    an accessible Ticket in the same database result/view
+  - `GET /api/v1/packages` applies the canonical Ticket visibility predicate in
+    the package service to items, totals, pages, and aggregates
+- API handlers and dependencies do not construct model-aware visibility
+  expressions or perform package business ORM queries
 
 ---
 
@@ -2474,8 +2497,10 @@ Product sync tasks (`sync_smelt_products`, `sync_aimaas_lifecycle`,
   mutations, orchestration, and query operations
 - `docs/features/packages/product-catalog.md` — product catalog, SMELT
   product sync, AIMAAS lifecycle/threshold sync, `GET /api/v1/products`
-- `docs/features/tickets/tickets.md` — ticket lifecycle, status gates,
-  confidentiality filtering (`confidential_ticket_filter()`)
+- `docs/features/tickets/tickets.md` — ticket lifecycle, status gates, and
+  confidentiality filtering
+- `docs/features/identity/rbac.md` — canonical Ticket visibility predicate and
+  authorization ordering
 - `docs/features/tickets/ticket-mutations.md` — ticket-centric mutations,
   `reconcile_ticket_status()`, `auto_assign_actor()`
 - `docs/features/tickets/cvss-scoring.md` — CVSS resolution cascade,
