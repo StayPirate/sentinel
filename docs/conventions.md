@@ -1467,8 +1467,7 @@ the commit message on `master`.
 - **Reviewers**: applicable reviewer agents must be invoked and
   findings addressed (per existing guardrails).
 - **Human approval**: the repository owner must explicitly authorize
-  the merge by referencing the PR number, unless the `/review-renovate`
-  exception in `AGENTS.md` (Guardrail 25) applies.
+  the merge by referencing the PR number.
 
 ### Issue and PR Body Formatting
 
