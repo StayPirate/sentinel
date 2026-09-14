@@ -157,6 +157,10 @@ Gate-relevant mutations are blocked at the service layer by
 `ensure_ticket_operable()` (raises `TicketNotMutableError` → 409
 `TICKET_NOT_MUTABLE`).
 
+Confidentiality and explicit access-grant mutations are not gate-relevant.
+Their owning `ticket_service` contracts explicitly permit them in the manual
+zone without assignment, reconciliation, status change, or manual-zone exit.
+
 ### Manual-zone exit composition
 
 Manual-zone exit is an explicit composition owned by `ticket_service`; see
@@ -442,6 +446,12 @@ function.
   mutability guard
 - `ticket_service.revert_duplicate` — must operate on Duplicated tickets; skips
   mutability guard
+- `ticket_service.set_confidentiality` — visibility-only mutation valid in
+  every Ticket status
+- `ticket_service.grant_access` and `ticket_service.revoke_access` — explicit
+  visibility mutations valid in every Ticket status
+- `ticket_service.dispatch_ticket_convergence` — validates its own eligible
+  status set and never produces `TICKET_NOT_MUTABLE`
 - Trusted external CVSS ingestion — maintains source-owned CVE assessment and
   severity state in every Ticket status and follows the propagation
   disposition defined by the CVSS status matrix
@@ -451,7 +461,7 @@ function.
 | Module | Functions that call `ensure_ticket_operable` |
 |--------|----------------------------------------------|
 | `ticket_mutations` | Manual-SUSE `upsert_cvss_assessment`, `delete_cvss_assessment`, `set_severity_manual` |
-| `ticket_service` | `associate_cve`, `assign_ticket`, `ignore_ticket`, `mark_as_duplicate`, `set_confidentiality`, `grant_access`, `revoke_access` |
+| `ticket_service` | `associate_cve`, `assign_ticket`, `ignore_ticket`, `mark_as_duplicate` |
 | `package_service` | Gate-relevant mutations call the guard; `set_track_delivery_status` also calls it for operability but remains outside assignment, audit, and Ticket reconciliation |
 
 Trusted external ingestion does not call this guard. It may maintain

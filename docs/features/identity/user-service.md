@@ -176,6 +176,13 @@ available on inactive users via both CLI and API. This allows admins to
 prepare accounts before reactivation (e.g., assign appropriate roles, set
 a new password).
 
+Deactivation does not delete or modify `TicketAccessGrant` or
+`TicketPackageMaintainer` rows. Those retained visibility relationships are
+unusable while the User cannot authenticate and become usable again after
+reactivation if they still satisfy their ordinary Ticket-side conditions. A
+separate successful Ticket declassification may delete explicit grants while
+the User is inactive; reactivation does not recreate them.
+
 ## User Deletion
 
 User deletion is not supported. Deactivation is the terminal state of the
@@ -210,6 +217,16 @@ Return the matching User row without loading response-specific relationships.
 Raise `UserNotFoundError` when no row matches. Profile-shaped functions load
 their own relationships explicitly. The function is read-only and
 deterministic for a fixed database snapshot.
+
+This function is the ordinary required-result read boundary. Cross-domain
+mutations that must make the User an ordered locking root, defer absence until a
+protected parent-resource check, or both still use this service's exact UUID-or-
+username matching semantics through a user-domain boundary. That lock-aware
+boundary may return a matched locked User or an absent result without raising
+immediately, as required by the owning mutation contract. Its private helper,
+optional parameter, or equivalent result shape is an implementation choice; it
+does not create a second identifier-resolution policy or permit another service
+to duplicate the matching rules.
 
 #### `list_users(session, filters, pagination, sorting)`
 
@@ -250,6 +267,10 @@ counting remains owned by `api_key_service.count_non_revoked_keys()`.
 This ticket-dependent read belongs only to the deactivation workflow; the
 general user query boundary contains identifier resolution, list, and detail
 reads.
+
+The preview does not count explicit grants or package-maintainer associations:
+deactivation retains both and therefore does not perform a mutation whose
+cardinality belongs in the impact response.
 
 ### Mutation Result Types
 
@@ -809,6 +830,11 @@ database transaction, in this specific order):
    not changed (see Architectural Invariant in `tickets.md`). See
    Private Helpers for the full contract.
 
+The database phase performs no `TicketAccessGrant` or
+`TicketPackageMaintainer` mutation. Existing relationships remain persisted;
+the inactive User cannot authenticate to exercise them. Deactivation creates no
+`access_grant_added` or `access_grant_removed` event.
+
 After the database steps, create `user_deactivated`, flush every mutation and
 audit record, and return. The event uses `user_id = acting_user_id`,
 `target_user_id = user_id`, `old_value = "active"`, and
@@ -850,7 +876,8 @@ external source when applicable. API key revocations produce individual
 `docs/features/identity/identity-audit-log.md`.
 
 **TicketAuditEvent**: yes — one `assignment` event per unassigned ticket (see
-`docs/features/tickets/ticket-audit-log.md` for the event type contract)
+`docs/features/tickets/ticket-audit-log.md` for the event type contract). No
+grant event is created because no grant row is changed.
 
 ### `reactivate_user()`
 
@@ -910,7 +937,14 @@ human caller on an external user.
 - Role assignments are unchanged (roles are not affected by
   deactivation/reactivation)
 
-**TicketAuditEvent**: none (reactivation is not a ticket mutation)
+Retained `TicketAccessGrant` and `TicketPackageMaintainer` rows are not
+restored because they were never removed. They become usable through ordinary
+authentication and Ticket visibility on later requests. Explicit grants
+deleted by a confidentiality `true` to `false` transition while the User was
+inactive remain deleted and are not recreated.
+
+**TicketAuditEvent**: none (reactivation is not a ticket mutation and does not
+change grants)
 
 **IdentityAuditEvent**: `user_reactivated`. See
 `docs/features/identity/identity-audit-log.md`.
@@ -1155,6 +1189,24 @@ locking contracts are reconciled together; changing either lock order
 in isolation could introduce a User↔Ticket deadlock. Operators repair the state
 through ordinary ticket reassignment. No periodic reconciliation mechanism is
 introduced solely for this race.
+
+### Access grant concurrent with user lifecycle or rename
+
+Access-grant creation and revocation use the global User-then-Ticket root order
+defined in `ticket-service.md`. They lock the target User before the Ticket, so
+deactivation, reactivation, and username changes for that target cannot
+interleave with target activity validation, grant classification, or the event
+username snapshot.
+
+For grant creation, if deactivation commits first, a missing grant is rejected
+with `USER_INACTIVE`; an already-existing grant remains an idempotent result and
+is retained. If creation commits first, it creates one grant and one
+`access_grant_added`, and later deactivation retains that row. If reactivation
+commits first, an absent grant may be created; if the grant operation observes
+the inactive User first, it is rejected and later reactivation does not alter
+that completed result. Rename/grant and rename/revoke outcomes use either the
+committed old username or committed new username consistently according to
+lock order, never a mixed identity snapshot.
 
 ### Redis operations and lock scope
 

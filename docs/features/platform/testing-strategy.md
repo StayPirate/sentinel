@@ -1740,6 +1740,89 @@ visibility predicate.
   accessibility, and none of these exceptions may expose Ticket-derived
   content or create another bypass.
 
+**Confidentiality and explicit access grants:**
+
+- Exercise `set_confidentiality`, `grant_access`, and `revoke_access` on every
+  Ticket status, including `Ignored` and `Duplicated`. Manual-zone cases must
+  succeed through their explicit `ensure_ticket_operable()` opt-out without
+  assignment, gate reconciliation, status change, manual-zone exit, or
+  `TICKET_NOT_MUTABLE`.
+- A same-value confidentiality request is a true no-op. An effective `true` to
+  `false` transition changes the flag, deletes every explicit grant, and creates
+  exactly one acting-user `confidentiality_changed` event with no
+  `access_grant_removed` events. Inject grant-deletion, audit, database, and
+  flush failures and assert complete rollback of the flag, grants, and event.
+- After declassification, `false` to `true` creates only its own
+  `confidentiality_changed` event and does not recreate manual grants. Persisted
+  `TicketPackageMaintainer` rows remain unchanged throughout; after
+  reclassification an active associated user qualifies through an included
+  package, while an excluded package remains non-qualifying until restored.
+  No transition invokes SMELT or maintainership acquisition.
+- Grant listing returns complete current `UserSummary` objects for target and
+  grantor and uses fixed `granted_at ASC, user_id ASC` ordering, including
+  equal timestamps. Deactivated users remain complete with `active = false`.
+  An accessible non-confidential Ticket returns
+  `409 TICKET_NOT_CONFIDENTIAL`, while missing or inaccessible Tickets retain
+  the scoped `404 TICKET_NOT_FOUND` outcome rather than returning an empty list.
+- Grant creation exercises target UUID and username forms, target absence,
+  confidential-state guard, new active target, new inactive target, existing
+  active target, and existing inactive target. New creation returns 201 with
+  one grant/event; either existing case returns 200 with original
+  `granted_by`/`granted_at` and no event; only an absent grant for an inactive
+  target returns `409 USER_INACTIVE`.
+- Revoke exercises target UUID and username forms, active and inactive targets,
+  existing and absent grants, and the confidential-state guard. An effective
+  revoke returns 204 and creates one exact `access_grant_removed`; an absent
+  grant returns 204 with no event.
+- Every grant mutation proves Ticket accessibility is authoritative before a
+  deferred target-not-found, inactive, confidentiality, or no-op result. Missing
+  and inaccessible Tickets remain indistinguishable and disclose no target
+  state even though the User root is resolved first for lock ordering. After
+  accessibility succeeds, confidentiality precedes the deferred target result:
+  an accessible non-confidential Ticket returns `TICKET_NOT_CONFIDENTIAL`
+  whether the target exists or not, and `USER_NOT_FOUND` is reachable only for
+  an accessible confidential Ticket.
+- Use independently connected sessions and deterministic lock-boundary
+  synchronization for each race below. Assert serialized return status, final
+  rows, original provenance, and exact event order/cardinality:
+  - grant/grant: one 201 `created`, one 200 `already_exists`, one row, one add
+    event;
+  - grant/revoke: grant then revoke leaves no row with add then remove events;
+    no-op revoke then grant leaves one row with only the add event;
+  - revoke/revoke: at most one effective deletion and remove event;
+  - confidentiality/confidentiality: same-value waiters are no-ops and opposing
+    effective changes each use their true locked old value in commit order;
+  - confidentiality/grant: declassification first causes the waiter to reject
+    a non-confidential Ticket; grant first creates its add event before the one
+    confidentiality event and the final state contains no grant;
+  - confidentiality/revoke: declassification first causes revoke to reject;
+    revoke first produces its remove event before the confidentiality event;
+  - deactivation/grant: deactivation first rejects absent-grant creation with
+    `USER_INACTIVE`, while grant first creates one row/event and later
+    deactivation retains the row with an inactive current projection;
+  - reactivation/grant: reactivation first permits creation, while grant first
+    observes inactivity and is rejected without a later retroactive effect;
+  - rename/grant and rename/revoke: event username and target identity come
+    from one stabilized User state, never mixed pre/post-rename values.
+- A model-level constraint test proves direct duplicate
+  `(ticket_id, user_id)` insertion is rejected, retaining the unique key as a
+  database backstop. Separately, the public `grant_access()` race test follows
+  the mandatory User-then-Ticket locks and proves that a same-target waiter
+  observes `already_exists` without reaching a unique violation, so the
+  caller-owned PostgreSQL transaction remains usable. A service implementation
+  must not catch a unique violation and then query in the same aborted
+  transaction; the test must fail such an implementation rather than forcing a
+  normally unreachable violation through the public path.
+- Grant and revoke failure tests inject audit and flush failures and assert
+  atomic rollback: grant creation leaves neither row nor event, and revoke
+  restores the row while removing its pending event. Caller-requested rollback
+  after either service returns has the same complete result.
+- User deactivation and reactivation tests assert that neither operation
+  inserts, updates, or deletes grant rows or creates grant events. Reactivation
+  restores usability only for a still-present grant; a grant deleted by
+  declassification remains absent. Deactivation-impact API and CLI tests assert
+  no grant or maintainership count is present because those rows are retained.
+
 ### Application-Owned Redis Operations
 
 Every application-owned Redis operation, regardless of application layer or

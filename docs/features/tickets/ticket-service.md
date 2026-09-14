@@ -13,8 +13,8 @@ confidentiality management — in a single service module
 - `reconcile_ticket_status()` is called when operations have side effects
   on gate conditions (severity changes, status reconciliation)
 - `auto_assign_actor()` is applied uniformly for unassigned tickets
-- `ensure_ticket_operable()` enforces mutability regardless of entry
-  point
+- `ensure_ticket_operable()` enforces mutability except for the explicit
+  lifecycle, dispatch, and visibility-only opt-outs documented below
 - Business rules (idempotency) are enforced regardless of entry point
 
 Gate primitives and CVSS/severity mutations are handled by
@@ -161,9 +161,9 @@ primitives. The complete manual-zone exit contracts are defined below.
 
 ### Operability guard
 
-Operations that modify the Ticket row (all mutation functions except
-`create_ticket`) call `ensure_ticket_operable(ticket)` from
-`ticket_mutations` after acquiring `FOR UPDATE`. This checks:
+Ordinary operations that modify the Ticket row call
+`ensure_ticket_operable(ticket)` from `ticket_mutations` after acquiring
+`FOR UPDATE`. This checks:
 
 1. **Mutability guard**: status ∈ {Ignored, Duplicated} →
    `TicketNotMutableError`
@@ -172,6 +172,10 @@ Explicit opt-outs (functions that do NOT call `ensure_ticket_operable`):
 
 - `reopen_from_ignored` and `revert_duplicate` — validate their exact manual-
   zone source state instead because they are its dedicated exits
+- `set_confidentiality`, `grant_access`, and `revoke_access` — visibility-only
+  operations valid in every Ticket status; they neither assign, reconcile, nor
+  exit the manual zone
+- `dispatch_ticket_convergence` — validates its own eligible status set
 
 `ignore_ticket` calls `ensure_ticket_operable` (which catches
 Ignored/Duplicated), then applies its own status check (New/Analysis required).
@@ -193,7 +197,30 @@ Ticket row as its first database operation.
 
 `associate_cve()` participates in both CVE-owned and Ticket-owned state and
 therefore uses the global root order: lock the CVE first, then the Ticket. This
-is the only existing-row exception in this module to the Ticket-first rule.
+is one existing-row exception in this module to the Ticket-first rule; the
+User-then-Ticket access-grant exception is defined next.
+
+Access-grant operations that identify a target user participate in User and
+Ticket state without mutating the User. They use the global `User` then `Ticket`
+root order so target activity and username remain stable against concurrent
+deactivation, reactivation, or rename. Target resolution may discover absence
+before the Ticket lock, but the operation defers `UserNotFoundError` until after
+locked-current Ticket accessibility succeeds. Missing or inaccessible Tickets
+therefore still produce `TICKET_NOT_FOUND` without disclosing the target-user
+result. Each direct grant/revoke invocation begins while its caller-owned
+transaction holds no Ticket row lock; composing a Ticket-first operation before
+one of these functions would invert the global order.
+
+The matching semantics remain owned by `user_service`: valid UUID input selects
+`User.id`, all other input selects the exact stored username, and no match is an
+absent result. The grant workflow uses that user-domain boundary in a
+lock-aware, deferred-error form so it can retain the matched User lock or the
+absence result while it performs the Ticket check. It does not duplicate
+identifier parsing/matching in `ticket_service` and does not call the ordinary
+read-only `resolve_user_identifier()` in a way that would raise before Ticket
+accessibility. The concrete private helper, optional parameter, or equivalent
+service result used to provide this behavior is an implementation choice, not a
+new consumer operation.
 
 Creating a CVE-less Ticket performs only an INSERT and needs no existing-root
 lock. When `create_ticket()` associates a CVE, it resolves and locks that CVE
@@ -891,39 +918,57 @@ async def set_confidentiality(
 
 **Preconditions**:
 
-- Ticket must be operable (`ensure_ticket_operable`)
 - Requires `manage_confidentiality` capability (enforced at API layer)
 
 **Behavioral steps**:
 
 1. Acquire `FOR UPDATE` on the Ticket row
 2. Revalidate consumer accessibility from the locked-current Ticket; denial
-   returns `TICKET_NOT_FOUND` before operability or no-op classification
-3. Call `ensure_ticket_operable(ticket)`
-4. **Idempotency check**: if `ticket.is_confidential == is_confidential`,
+   returns `TICKET_NOT_FOUND` before no-op classification
+3. **Idempotency check**: if `ticket.is_confidential == is_confidential`,
     return ticket unchanged (no audit event)
-5. Set `ticket.is_confidential = is_confidential`
-6. Create `TicketAuditEvent` (`confidentiality_changed`)
-7. Return updated Ticket
+4. Preserve the locked current flag as the event's `old_value`, then set
+   `ticket.is_confidential = is_confidential`.
+5. For an effective `true` to `false` transition, delete every
+   `TicketAccessGrant` belonging to the Ticket in the same transaction. These
+   automatic deletions create no `access_grant_removed` events. For
+   `false` to `true`, create no grant and perform no external lookup.
+6. Create exactly one `TicketAuditEvent` (`confidentiality_changed`) with the
+   preserved and requested boolean strings.
+7. Flush the flag, grant deletions, and event, then return the locked-current
+   updated Ticket.
 
-**Note on access grants**: When setting `is_confidential = false`,
-existing `TicketAccessGrant` records are NOT deleted immediately. They
-become inert (the confidentiality filter no longer restricts access).
-Stale grants are cleaned up by a periodic task (weekly, 14-day delay).
-See `tickets.md` (Stale Access Grant Cleanup) for details.
-
-That periodic cleanup is a separate housekeeping boundary. It locks qualifying
-Tickets in UUID order, revalidates their non-confidential age condition,
-deletes current grants idempotently, and creates no
-`access_grant_removed` event.
+`TicketPackageMaintainer` rows are not grants and are never modified by this
+operation. When confidentiality becomes true, existing associations qualify
+through the canonical visibility predicate while their package is included and
+the caller can authenticate. The transition performs no SMELT request or
+maintainership acquisition.
 
 **Locking**: FOR UPDATE on Ticket row.
+
+**Concurrency and result**: concurrent confidentiality, grant, and revoke
+operations serialize on this Ticket lock. Each caller classifies its result
+from the state observed after waiting. A same-value waiter is a no-op. Opposing
+effective toggles each create one event in serialization order. If
+declassification wins before a grant or revoke, that waiter observes a
+non-confidential Ticket and is rejected by its normal guard. If grant or revoke
+wins first, its effective event precedes `confidentiality_changed`; a subsequent
+declassification deletes every then-current grant. No caller returns a stale
+pre-lock Ticket or grant result.
+
+**Transaction and rollback**: the function calls neither commit nor rollback.
+Any grant-deletion, audit, database, or flush failure escapes and causes the
+caller-owned transaction to roll back the flag, every deletion, and the event
+together. A caller rollback after return has the same complete effect.
 
 **reconcile_ticket_status**: NOT called — confidentiality is not
 gate-relevant.
 
-**Audit events**: `confidentiality_changed` (only if value actually
-changes), with `comment = NULL`.
+**auto_assign_actor**: Not called. Confidentiality changes visibility only.
+
+**Audit events**: `confidentiality_changed` only when the flag actually
+changes, with `comment = NULL`. Automatic grant deletion creates no additional
+event.
 
 ### grant_access
 
@@ -934,51 +979,93 @@ async def grant_access(
     db: AsyncSession,
     *,
     ticket_id: UUID,
-    target_user_id: UUID,
+    target_user: str,
     acting_user_id: UUID,
-) -> TicketAccessGrant:
+) -> AccessGrantMutationResult:
 ```
+
+`target_user` accepts a UUID or exact username under `docs/api-spec.md` (User
+Identifier Resolution). `AccessGrantMutationResult` is a transaction-local
+typed result with `grant: TicketAccessGrant` and `action`, whose value is
+exactly `created` or `already_exists`. The API maps `created` to 201 and
+`already_exists` to 200; callers never infer this status from an unlocked
+pre-read.
 
 **Preconditions**:
 
-- Ticket must be operable (`ensure_ticket_operable`)
 - Ticket must be confidential (`is_confidential = true`; else
   `TicketNotConfidentialError`)
 - Target user must exist (else `UserNotFoundError`)
-- Target user must be active (else `InactiveUserError`). Note: this
-  check does not apply to `revoke_access` — revoking a grant from an
+- Creation for a target without an existing grant requires that target to be
+  active (else `InactiveUserError`). This check does not apply to an existing
+  idempotent grant result or to `revoke_access` — revoking a grant from an
   inactive user is a legitimate cleanup operation
 - Requires `manage_confidentiality` capability (enforced at API layer)
 
 **Behavioral steps**:
 
-1. Acquire `FOR UPDATE` on the Ticket row
-2. Revalidate consumer accessibility from the locked-current Ticket; denial
-   returns `TICKET_NOT_FOUND` before confidentiality, target-user, or no-op
-   decisions
-3. Call `ensure_ticket_operable(ticket)`
-4. Verify ticket is confidential (else `TicketNotConfidentialError`)
-5. Verify target user is active (else `InactiveUserError`)
-6. **Idempotency check**: if grant already exists for this user, return
-    existing grant unchanged (no audit event)
-7. INSERT `TicketAccessGrant` record (`ticket_id`, `user_id`,
+1. Resolve the target identifier and acquire `FOR NO KEY UPDATE` on the matching
+   User as the first persistent root operation. Preserve absence without raising
+   it yet. A matched row remains locked through the operation, stabilizing its
+   ID, username, and active state without unnecessarily conflicting with
+   foreign-key `FOR KEY SHARE` validation.
+2. Acquire `FOR UPDATE` on the Ticket row.
+3. Revalidate consumer accessibility from the locked-current Ticket. Missing or
+   inaccessible returns `TICKET_NOT_FOUND` before confidentiality,
+   target-user, activity, or no-op decisions.
+4. Verify the Ticket is confidential (else `TicketNotConfidentialError`). This
+   function does not call `ensure_ticket_operable()`. This guard precedes the
+   deferred target-user result, so an accessible non-confidential Ticket returns
+   `TICKET_NOT_CONFIDENTIAL` regardless of whether the target exists.
+5. If the target was absent, raise `UserNotFoundError`. This result is reachable
+   only for an accessible confidential Ticket.
+6. Load the grant for the stabilized target under the Ticket lock. If it
+   already exists, return `already_exists` with the original `granted_by` and
+   `granted_at`.
+   Do not validate `User.active`, rewrite provenance, or create an event.
+7. For an absent grant, verify the locked target User is active (else
+   `InactiveUserError`).
+8. INSERT `TicketAccessGrant` record (`ticket_id`, `user_id`,
     `granted_by = acting_user_id`, `granted_at = now(UTC)`)
-8. Create `TicketAuditEvent` (`access_grant_added`)
-9. Return the created grant
+9. Create `TicketAuditEvent` (`access_grant_added`) whose `new_value` is the
+   stabilized current target username.
+10. Flush the grant and event, then return `created` with the new grant.
 
-**Concurrency**: If two concurrent requests attempt to grant access to
-the same user, the UNIQUE constraint on `TicketAccessGrant`
-(`ticket_id`, `user_id`) prevents duplicates. The service catches the
-resulting `IntegrityError` and treats it as an idempotent success
-(returns the existing grant, no audit event).
+**Concurrency**: the User-then-Ticket locks serialize target lifecycle/rename
+with the grant decision and serialize all grant/confidentiality operations for
+one Ticket. Concurrent identical grants produce one `created` result and one
+event; each waiter returns the winner-current row as `already_exists`, including
+when a later deactivation made its current target projection inactive. The
+UNIQUE constraint on `(ticket_id, user_id)` remains a database backstop, but the
+contract does not permit continuing in a PostgreSQL transaction aborted by a
+unique violation. Any conflict-safe mechanism that preserves the caller-owned
+transaction and winner's original provenance is valid.
 
-**Locking**: FOR UPDATE on Ticket row (provides immutability guard
-consistency with other mutation functions).
+If deactivation wins the User lock, an absent grant is rejected with
+`InactiveUserError`; an existing grant still returns `already_exists`. If grant
+creation wins, it commits one grant/event and later deactivation retains the
+grant. If reactivation wins, new creation may proceed; if an absent-grant call
+observes the inactive User first, it is rejected and a later reactivation does
+not retroactively change that result. A concurrent rename either commits first
+and supplies the stabilized new username or waits until after this operation;
+audit content never mixes target identities.
+
+**Locking**: `FOR NO KEY UPDATE` on target User, then `FOR UPDATE` on Ticket.
+Target absence is deferred until after Ticket accessibility as described above.
+The function requires no pre-existing Ticket lock in the caller-owned
+transaction.
 
 **reconcile_ticket_status**: NOT called — access grants are not
 gate-relevant.
 
+**auto_assign_actor**: Not called. A grant is not a Ticket work mutation.
+
 **Audit events**: `access_grant_added` (only if grant is new).
+
+**Transaction and exceptions**: the function flushes but neither commits nor
+rolls back. It propagates the documented service exceptions plus database,
+audit, and flush failures. Any failure or caller rollback leaves no grant or
+event.
 
 ### revoke_access
 
@@ -989,14 +1076,13 @@ async def revoke_access(
     db: AsyncSession,
     *,
     ticket_id: UUID,
-    target_user_id: UUID,
+    target_user: str,
     acting_user_id: UUID,
 ) -> None:
 ```
 
 **Preconditions**:
 
-- Ticket must be operable (`ensure_ticket_operable`)
 - Ticket must be confidential (`is_confidential = true`; else
   `TicketNotConfidentialError`)
 - Target user must exist (else `UserNotFoundError`)
@@ -1004,22 +1090,43 @@ async def revoke_access(
 
 **Behavioral steps**:
 
-1. Acquire `FOR UPDATE` on the Ticket row
-2. Revalidate consumer accessibility from the locked-current Ticket; denial
+1. Resolve and lock the target User as `grant_access()` does, preserving absence
+   until the Ticket accessibility decision. Activity is not a revoke guard.
+2. Acquire `FOR UPDATE` on the Ticket row.
+3. Revalidate locked-current Ticket accessibility. Missing or inaccessible
    returns `TICKET_NOT_FOUND` before confidentiality, target-user, or no-op
-   decisions
-3. Call `ensure_ticket_operable(ticket)`
-4. Verify ticket is confidential (else `TicketNotConfidentialError`)
-5. **Idempotency check**: if grant does not exist for this user, return
-    without side effects (no audit event)
-6. Delete `TicketAccessGrant` record
-7. Create `TicketAuditEvent` (`access_grant_removed`)
-8. Return
+   decisions.
+4. Verify the Ticket is confidential (else `TicketNotConfidentialError`). This
+   function does not call `ensure_ticket_operable()`. This guard precedes the
+   deferred target-user result, so an accessible non-confidential Ticket returns
+   `TICKET_NOT_CONFIDENTIAL` regardless of whether the target exists.
+5. If the target was absent, raise `UserNotFoundError`. This result is reachable
+   only for an accessible confidential Ticket.
+6. **Idempotency check**: if grant does not exist for this user, return without
+   side effects (no audit event)
+7. Delete `TicketAccessGrant` record
+8. Create `TicketAuditEvent` (`access_grant_removed`) whose `old_value` is the
+   stabilized current target username
+9. Flush the deletion and event, then return
 
-**Locking**: FOR UPDATE on Ticket row (provides immutability guard
-consistency with other mutation functions).
+**Locking**: `FOR NO KEY UPDATE` on target User, then `FOR UPDATE` on Ticket. The
+function requires no pre-existing Ticket lock in the caller-owned transaction.
+
+**Concurrency**: grant/revoke and revoke/revoke serialize on the Ticket after
+the target User. The result follows commit order: grant then revoke leaves no
+grant and creates add then remove events; no-op revoke then grant leaves the new
+grant and only the add event; two revokes create at most one remove event.
+Concurrent rename follows the same stabilized-username rule as grant. The
+confidentiality race follows `set_confidentiality()`'s winner-current contract.
+
+**Transaction and exceptions**: the function flushes but neither commits nor
+rolls back. It propagates the documented service exceptions plus database,
+audit, and flush failures. Failure or caller rollback restores the grant and
+removes the event together.
 
 **reconcile_ticket_status**: NOT called.
+
+**auto_assign_actor**: Not called. Revocation changes visibility only.
 
 **Audit events**: `access_grant_removed` (only if grant existed).
 
@@ -1053,7 +1160,11 @@ implementation choice.
    an empty list for that case.
 2. Verify ticket is confidential (else `TicketNotConfidentialError`)
 3. Return `TicketAccessGrant` records for the ticket, ordered by
-   `granted_at` ascending
+   `granted_at` ascending and `user_id` ascending
+
+The response projection resolves both target and grantor through complete
+current `UserSummary` objects. Inactive users remain present with
+`active = false`; neither inactivity nor reactivation mutates the grant.
 
 **Locking**: None (read-only).
 
@@ -1076,7 +1187,7 @@ to the corresponding HTTP status code and error code per `api-spec.md`.
 | `TicketCVEConflictError` | 409 | `TICKET_CVE_CONFLICT` | CVE is already associated with another ticket |
 | `AssigneeNotVAError` | 400 | `TICKET_ASSIGNEE_NOT_VA` | Target user lacks the vulnerability_analyst role |
 | `AssigneeInactiveError` | 409 | `TICKET_ASSIGNEE_INACTIVE` | Target user is inactive (for assignment) |
-| `InactiveUserError` † | 409 | `USER_INACTIVE` | Target user is inactive (for access grant) |
+| `InactiveUserError` † | 409 | `USER_INACTIVE` | A new access grant is requested for an inactive target that has no existing grant |
 | `SelfDuplicateError` | 400 | `TICKET_SELF_DUPLICATE` | Ticket cannot be marked as duplicate of itself |
 | `DuplicateTargetIsDuplicatedError` | 409 | `TICKET_DUPLICATE_TARGET_DUPLICATED` | Target ticket is already in Duplicated status |
 | `DuplicateConcurrentModificationError` | 409 | `TICKET_DUPLICATE_CONCURRENT_MODIFICATION` | NOWAIT lock on a dependent failed (concurrent operation on the duplicate group) |
@@ -1117,9 +1228,9 @@ ticket_mutations (infrastructure)
 | reopen_from_ignored    | —                      | ✓                      | —                     | ✓                     | ✓                   |
 | revert_duplicate       | —                      | ✓                      | —                     | ✓                     | ✓                   |
 | dispatch_ticket_convergence | —                  | —                      | —                     | —                     | —                   |
-| set_confidentiality    | ✓                      | —                      | —                     | —                     | —                   |
-| grant_access           | ✓                      | —                      | —                     | —                     | —                   |
-| revoke_access          | ✓                      | —                      | —                     | —                     | —                   |
+| set_confidentiality    | —                      | —                      | —                     | —                     | —                   |
+| grant_access           | —                      | —                      | —                     | —                     | —                   |
+| revoke_access          | —                      | —                      | —                     | —                     | —                   |
 | list_access_grants     | —                      | —                      | —                     | —                     | —                   |
 
 ## Architectural Test Requirement
@@ -1212,9 +1323,12 @@ behavior of `ticket_service` operations:
     optional CVE association order. Normal status transitions use NULL comments,
     while rejection uses exactly `CVE rejected`
 14. **Confidentiality and grants**: direct changes assert exact acting-user
-    events and no-op absence; stale-grant cleanup covers deterministic Ticket
-    selection, locked revalidation, idempotent/concurrent cleanup, rollback, and
-    zero `access_grant_removed` events
+    events and no-op absence; `true` to `false` atomically deletes every grant
+    with only `confidentiality_changed`, complete rollback on deletion/audit/
+    flush failure, retained maintainer associations, and no manual-grant
+    recreation on `false` to `true`. Grant responses distinguish `created` from
+    `already_exists`, preserve original provenance, project inactive users, and
+    order lists by grant time then target UUID
 15. **Locked-current accessibility**: for every consumer mutation above, use
     independent sessions to change confidentiality, the caller's grant, or the
     last included-package maintainership path between preliminary delegated access and

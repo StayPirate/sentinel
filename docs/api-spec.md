@@ -692,21 +692,26 @@ resource-accessibility result.
 
 #### Manual-Zone Mutability Guard
 
-Tickets in the **manual zone** (status `Ignored` or `Duplicated`) are
-immutable — mutation endpoints return `409 TICKET_NOT_MUTABLE`. This is
-enforced at the service layer by `ensure_ticket_operable()` (defined in
-`ticket_mutations`), which is called by all mutation functions after
-acquiring `FOR UPDATE` on the ticket row.
+Tickets in the **manual zone** (status `Ignored` or `Duplicated`) reject
+ordinary workflow and gate-relevant mutation endpoints with `409
+TICKET_NOT_MUTABLE`. This is enforced at the service layer by
+`ensure_ticket_operable()` (defined in `ticket_mutations`) after acquiring
+`FOR UPDATE` on the Ticket row. An owning mutation contract may declare a
+genuine exception when the operation is independent from Ticket workflow and
+gate state.
 
 | Status | Code                  | Condition                                          |
 |--------|-----------------------|----------------------------------------------------|
 | 409    | `TICKET_NOT_MUTABLE`  | Ticket is in Ignored or Duplicated status          |
 
-**Exceptions** — the following service functions are excluded from this
-check because they manage the manual-zone exit lifecycle:
+**Exceptions** — the following service functions are excluded from this check:
 
-- `reopen_from_ignored` (exit Ignored)
-- `revert_duplicate` (exit Duplicated)
+- `reopen_from_ignored` and `revert_duplicate`, which manage the dedicated
+  manual-zone exit lifecycle;
+- `set_confidentiality`, `grant_access`, and `revoke_access`, which change only
+  Ticket visibility state and neither assign nor reconcile or exit the manual
+  zone; and
+- `dispatch_ticket_convergence`, which validates its own eligible status set.
 
 Read endpoints (GET) are never subject to this guard.
 
@@ -736,7 +741,7 @@ The derivation tables below are the single normative source of truth.
 | `/api/v1/tickets/{ticket_id}/**` | `404 TICKET_NOT_FOUND` |
 | `/api/v1/cves/{cve_id}/**` | `404 CVE_NOT_FOUND` |
 | `/api/v1/my/packages/ticket/{ticket_id}` | `404 TICKET_NOT_FOUND` |
-| Mutation (POST/PATCH/DELETE) under `/api/v1/tickets/{ticket_id}/**` | + `409 TICKET_NOT_MUTABLE` |
+| Mutation (POST/PATCH/DELETE) under `/api/v1/tickets/{ticket_id}/**` | + `409 TICKET_NOT_MUTABLE`, except when the owning endpoint contract declares an opt-out from `ensure_ticket_operable()` |
 | Mutation (POST/PATCH/DELETE) under `/api/v1/cves/{cve_id}/**` | + `409 TICKET_NOT_MUTABLE` (only when CVE has associated ticket) |
 | Any other path | None |
 
@@ -751,8 +756,8 @@ Note: `TICKET_NOT_MUTABLE` applies only to mutation endpoints
 under the same routers receive only the `NOT_FOUND` scoped response.
 The mechanism behind `TICKET_NOT_MUTABLE` is `ensure_ticket_operable()`
 — see Manual-Zone Mutability Guard above. Endpoints excluded from
-`ensure_ticket_operable()` (manual-zone exit endpoints, async dispatch
-endpoints) are annotated per-endpoint and do not produce
+`ensure_ticket_operable()` (manual-zone exit, visibility-only, and async
+dispatch endpoints) are annotated per-endpoint and do not produce
 `TICKET_NOT_MUTABLE`.
 
 #### Genuine Exceptions

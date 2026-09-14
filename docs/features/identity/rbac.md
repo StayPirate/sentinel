@@ -250,6 +250,14 @@ maintainer branch because there is no caller identity. A selected invalid
 credential is not anonymous: optional and mandatory authentication return 401
 before visibility evaluation.
 
+Authentication guarantees that an authenticated caller's current User is
+active. Deactivation therefore makes an existing explicit grant temporarily
+unusable without deleting it or changing this predicate; reactivation makes the
+same retained grant usable on a later authenticated request. A successful
+declassification deletes all explicit grants atomically, so re-enabling
+confidentiality never revives those deleted rows. These lifecycle rules do not
+add an activity term to the Ticket-side predicate.
+
 Each branch is independently sufficient. Failure of one branch never disables
 another qualifying branch. In particular, excluding the last qualifying
 `TicketPackage` disables only its maintainership branch; restoring that package
@@ -262,6 +270,10 @@ track delivery, Ticket status, and Ticket resolution do not affect this
 predicate. Package exclusion affects it only through
 `TicketPackage.deleted_at IS NULL`. Maintainership creates no
 `TicketAccessGrant`.
+
+User deactivation likewise does not delete a `TicketPackageMaintainer` row.
+While inactive, the user cannot authenticate and therefore cannot exercise it;
+after reactivation, an included-package association qualifies again normally.
 
 Visibility never grants a capability. An explicit grant or maintainership
 association changes only whether the consumer may observe the Ticket-derived

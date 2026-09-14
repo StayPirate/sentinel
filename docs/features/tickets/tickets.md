@@ -759,8 +759,12 @@ the full function contract.
 
 All other consumer modifications on Ignored tickets are blocked — mutation
 endpoints return 409 `TICKET_NOT_MUTABLE` (same guard as Duplicated).
-This prevents gate-relevant data from accumulating while the ticket is
-in the manual zone, which would cause unexpected status jumps on reopen.
+The visibility-only operations `set_confidentiality()`, `grant_access()`, and
+`revoke_access()` are explicit exceptions alongside the dedicated manual-zone
+exit operations. They may run while the Ticket remains Ignored or Duplicated,
+but never assign, reconcile gates, change status, or exit the manual zone.
+Blocking gate-relevant data prevents unexpected status jumps on reopen without
+preventing an authorized user from correcting access to embargoed content.
 Trusted external CVSS ingestion remains the narrow source-owned exception
 defined under Modifications in Inactive Statuses; it does not apply Ticket-
   scoped propagation before Ticket convergence.
@@ -781,11 +785,13 @@ they do not poll an inactive Ticket's external package scope.
   resulting `Resolved → Analyzed` or `Resolved → Analysis` transition is an
   ordinary gate-zone regression. `Resolved` remains outside ticket-scoped
   external monitoring until such a regression places it in the active scope
-- **Ignored and Duplicated** (manual zone): mutation endpoints return
-  409 `TICKET_NOT_MUTABLE` via `ensure_ticket_operable()` in the service
-  layer. Only the dedicated exit endpoints (`POST .../reopen` for
-  Ignored, `POST .../revert-duplicate` for Duplicated) bypass this
-  guard. Trusted source ingestion is not a consumer mutation endpoint: it may
+- **Ignored and Duplicated** (manual zone): gate-relevant and ordinary Ticket
+  mutation endpoints return 409 `TICKET_NOT_MUTABLE` via
+  `ensure_ticket_operable()` in the service layer. The dedicated exit endpoints
+  (`POST .../reopen` for Ignored, `POST .../revert-duplicate` for Duplicated)
+  and the visibility-only confidentiality/grant mutations bypass this guard for
+  their separately documented purposes. Trusted source ingestion is not a
+  consumer mutation endpoint: it may
   persist non-SUSE external CVSS assessments and refresh `CVE.severity`, while
   Product eligibility, assignment, gates, and status propagation remain
   deferred until Ticket convergence after manual-zone exit. See
@@ -795,9 +801,9 @@ they do not poll an inactive Ticket's external package scope.
 
 Enforcement of the manual-zone mutability guard is
 centralized in the service-layer function `ensure_ticket_operable()`
-(defined in `ticket_mutations`). This function is called by all mutation
-functions in `ticket_mutations`, `ticket_service`, and `package_service`
-after acquiring `FOR UPDATE` on the ticket row.
+(defined in `ticket_mutations`). Mutation functions in `ticket_mutations`,
+`ticket_service`, and `package_service` call it after acquiring `FOR UPDATE` on
+the Ticket row unless their owning contract declares an explicit opt-out.
 
 ```python
 def ensure_ticket_operable(ticket: Ticket) -> None:
@@ -806,10 +812,13 @@ def ensure_ticket_operable(ticket: Ticket) -> None:
 ```
 
 **Scope**:
-- Applied to: all service-layer functions that modify ticket data
-- NOT applied to: read operations, manual-zone exit functions
-  (`reopen_from_ignored`, `revert_duplicate`), or trusted source ingestion that
-  modifies only source-owned external CVSS assessment and CVE-derived severity
+- Applied to: service-layer mutations unless their owning contract declares an
+  explicit opt-out
+- NOT applied to: read operations; manual-zone exit functions
+  (`reopen_from_ignored`, `revert_duplicate`); visibility-only
+  `set_confidentiality`, `grant_access`, and `revoke_access`; asynchronous
+  convergence dispatch; or trusted source ingestion that modifies only
+  source-owned external CVSS assessment and CVE-derived severity
 
 This source-ingestion boundary does not weaken manual-zone immutability:
 authenticated consumer APIs may mutate only the internal SUSE assessment and
@@ -1042,48 +1051,14 @@ currently confidential because the retained association can govern a later
 confidentiality state. Package exclusion/restoration events record the dynamic
 loss/return of effective access; no maintainer-removal event exists.
 
+An effective `true` to `false` confidentiality transition deletes every manual
+grant atomically but creates only the one `confidentiality_changed` event. The
+automatic deletions are consequences of declassification, not manual revokes,
+and therefore create no `access_grant_removed` events. User deactivation and
+reactivation do not mutate grants and likewise create no grant event.
+
 See `docs/features/tickets/ticket-audit-log.md` for the audit event
 contract and detail JSONB schema.
-
-### Stale Access Grant Cleanup
-
-When a ticket's `is_confidential` flag is set to `FALSE` (embargo
-lifted), the explicit `TicketAccessGrant`
-records remain in the database inertly.
-
-To prevent infinite database growth, a Celery Beat background task
-(`cleanup_stale_ticket_access_grants`) will be implemented:
-
-- **Type**: Plain Celery Beat task (NOT a `BaseFetcher`, as it does not
-  fetch external data). Registered as a static `beat_schedule` entry;
-  the Beat registration mechanism is fully specified in
-  `docs/features/platform/fetcher-infrastructure.md` ("Non-Fetcher
-  Periodic Tasks").
-- **Schedule**: Weekly, Sunday at 04:00 UTC.
-- **Selection**: select candidate Ticket UUIDs where
-  `is_confidential = FALSE` and `updated_at` is older than 14 days, ordered by
-  Ticket UUID ascending.
-- **Mutation unit**: process each candidate in its own caller-owned transaction.
-  Acquire `FOR UPDATE` on that Ticket, then revalidate its locked-current
-  confidentiality and age. A Ticket that is missing, confidential again, no
-  longer old enough, or already has no grants is a successful no-op.
-- **Logic**: delete every currently present `TicketAccessGrant` belonging to the
-  qualifying locked Ticket and flush. A database or flush failure rolls back
-  that Ticket's cleanup unit and escapes to the task owner; successful prior
-  units remain committed.
-- **Audit boundary**: cleanup creates no `TicketAuditEvent`. These grants were
-  already inert while the Ticket was non-confidential; housekeeping is not a
-  manual revocation and must not create `access_grant_removed`.
-
-This single condition covers all cases:
-
-- Embargo lifted (ticket made non-confidential) → grants cleaned after
-  14 days
-
-Repeated or concurrent runs serialize per Ticket and are idempotent: once one
-run removes the grants, a waiting or later run observes an empty set and creates
-no write or event. Audit history is never consulted to select or classify
-cleanup work.
 
 ## API Endpoints
 
@@ -1130,6 +1105,19 @@ capture and reuse contract in `docs/features/packages/package-model.md`
 `id` (UUID), `username` (string), `full_name` (string | null), `active`
 (boolean). See `docs/api-spec.md`, "User References in Responses" for
 the canonical definition.
+
+**TicketAccessGrantResponse** — current projection of one explicit manual
+grant:
+
+| Field | Type | Description |
+|---|---|---|
+| `user` | UserSummary | Current target-user profile, including `active = false` when deactivated |
+| `granted_at` | datetime | Original grant creation time in UTC |
+| `granted_by` | UserSummary | Current profile of the user who created the grant |
+
+Both user references are complete because users are never physically deleted.
+Deactivation changes only the current `active` projection; it does not rewrite
+or remove grant provenance.
 
 **CVESummary** — compact CVE representation for list views:
 
@@ -1278,6 +1266,9 @@ no status or progress endpoint, and is not a `FetcherRun` identifier.
 | `POST .../revert-duplicate` | `TicketDetail` |
 | `POST .../rerun-reactivation` | `TicketConvergenceDispatchResponse` (202 Accepted) |
 | `PATCH .../confidentiality` | `TicketDetail` |
+| `GET .../access` | `TicketAccessGrantResponse[]` (unpaginated) |
+| `POST .../access` | `TicketAccessGrantResponse` (200 existing, 201 created) |
+| `DELETE .../access/{user}` | No body (204 No Content) |
 
 ### List Tickets
 
@@ -1748,6 +1739,20 @@ Sets the confidentiality status of a ticket. See
 [ticket-service.md](ticket-service.md#set_confidentiality) for the
 service-layer contract (locking, audit events).
 
+An effective transition to non-confidential deletes all explicit manual grants
+atomically. A later transition back to confidential does not recreate them.
+Persisted package-maintainer associations are not grants and remain unchanged.
+The grant deletion is an intrinsic confidentiality-state consequence, so the
+client-facing operation remains a field-setting PATCH under the mutation
+conventions in `docs/api-spec.md`. Although the grant rows are separate
+entities, they have no valid retained lifecycle after the parent becomes
+non-confidential; their deletion is therefore a mandatory cascade of setting
+the parent field, not a separately requested destruction command.
+This endpoint is a genuine exception to the mutation-path derivation of
+`TICKET_NOT_MUTABLE`: it does not call `ensure_ticket_operable()` and is valid
+while the Ticket remains Ignored or Duplicated because it changes visibility,
+not workflow or gate state.
+
 Response: `TicketDetail` object in standard `{"data": ...}` envelope
 (200 OK).
 
@@ -1790,6 +1795,12 @@ List all users with explicit access grants for a confidential ticket.
   *Note: Unpaginated because explicit access grants per ticket are a
   bounded dataset (typically a handful of users).*
 
+The response uses `TicketAccessGrantResponse` and is ordered by
+`granted_at ASC, user.id ASC`. Inactive target or granting users remain fully
+projected from current User state with `active = false`. This fixed order is not
+client-configurable; `sort_by` and `sort_order` are not accepted because the
+unpaginated dataset is bounded and has one canonical provenance order.
+
 **Error responses**:
 
 | Status | Code | Condition |
@@ -1806,17 +1817,19 @@ Grant explicit access to a user on a confidential ticket.
 
 **`Capability: manage_confidentiality`**
 - **Request body**: `{ "user": str }` (Accepts UUID or username per User
-  Identifier Resolution convention; backend resolves via
-  `resolve_user_identifier`).
+  Identifier Resolution convention; the service stabilizes the target under
+  the User-then-Ticket lock contract in `ticket-service.md`).
 - **Idempotency**: If the grant already exists, returns 200 OK with the
   existing grant data (reflecting the original `granted_by` and
-  `granted_at`), without creating an audit event. Otherwise, creates the
-  grant and returns 201 Created.
+  `granted_at`), without creating an audit event. This existing-grant result
+  applies even when the target is currently inactive and returns that target
+  with `active = false`. Otherwise, creation requires an active target, creates
+  the grant, and returns 201 Created.
 - **Response** (200 OK or 201 Created): The grant object wrapped in the
   standard `{"data": <grant>}` envelope. The grant object has the same
   shape as items in the list response.
-- **Audit**: Creates `TicketAuditEvent` with
-  `event_type = access_grant_added`.
+- **Audit**: A newly created grant creates `TicketAuditEvent` with
+  `event_type = access_grant_added`; an existing grant creates no event.
 
 **Error responses**:
 
@@ -1824,6 +1837,12 @@ Grant explicit access to a user on a confidential ticket.
 |--------|------|-----------|
 | 404 | `USER_NOT_FOUND` | Target user not found |
 | 409 | `TICKET_NOT_CONFIDENTIAL` | Ticket is not confidential |
+| 409 | `USER_INACTIVE` | Target user is inactive and no grant currently exists |
+
+This endpoint is a genuine exception to the mutation-path derivation of
+`TICKET_NOT_MUTABLE`: it does not call `ensure_ticket_operable()`, is valid
+while the confidential Ticket remains Ignored or Duplicated, and does not
+assign, reconcile, or change Ticket status.
 
 #### Revoke Access
 
@@ -1833,14 +1852,14 @@ DELETE /api/v1/tickets/{ticket_id}/access/{user}
 
 Revoke explicit access from a user on a confidential ticket. The
 `{user}` path parameter is of type `str` and accepts either a UUID or
-username.
+username. Revocation remains valid when that user is inactive.
 
 **`Capability: manage_confidentiality`**
 - **Idempotency**: If the grant does not exist, returns 204 No Content
   without creating an audit event.
 - **Response**: 204 No Content.
-- **Audit**: Creates `TicketAuditEvent` with
-  `event_type = access_grant_removed`.
+- **Audit**: An effective deletion creates `TicketAuditEvent` with
+  `event_type = access_grant_removed`; an absent-grant no-op creates no event.
 
 **Error responses**:
 
@@ -1848,6 +1867,11 @@ username.
 |--------|------|-----------|
 | 404 | `USER_NOT_FOUND` | Target user not found |
 | 409 | `TICKET_NOT_CONFIDENTIAL` | Ticket is not confidential |
+
+This endpoint is a genuine exception to the mutation-path derivation of
+`TICKET_NOT_MUTABLE`: it does not call `ensure_ticket_operable()`, is valid
+while the confidential Ticket remains Ignored or Duplicated, and does not
+assign, reconcile, or change Ticket status.
 
 ## Data Model
 
