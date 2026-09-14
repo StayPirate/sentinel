@@ -52,7 +52,7 @@ event type.
 | `track_restored` | Directly excluded track restored to ticket. Only the track record is restored — child products are not modified | Acting user | `NULL` | Track name | `NULL` | `{"track": "...", "package": "..."}` (see detail contract) |
 | `product_excluded` | Product directly soft-deleted by an authorized acting user | Acting user | Product display name | `NULL` | `NULL` | Product subject (see detail contract) |
 | `product_restored` | Directly excluded product restored to ticket | Acting user | `NULL` | Product display name | `NULL` | Product subject (see detail contract) |
-| `confidentiality_changed` | Ticket `is_confidential` flag toggled | Acting user | `"true"` or `"false"` | `"true"` or `"false"` | `NULL` | `NULL` |
+| `confidentiality_changed` | Ticket `is_confidential` flag toggled; when changing `true` to `false`, all explicit grants are deleted in the same transaction | Acting user | `"true"` or `"false"` | `"true"` or `"false"` | `NULL` | `NULL` |
 | `access_grant_added` | User manually granted explicit access to a confidential ticket | Acting user | `NULL` | Target username | `NULL` | `NULL` |
 | `access_grant_removed` | User manually revoked explicit access to a confidential ticket | Acting user | Target username | `NULL` | `NULL` | `NULL` |
 | `reference_added` | Manual reference added to ticket | Acting user | `NULL` | Reference URL | `NULL` | `NULL` |
@@ -146,6 +146,13 @@ event type.
   EOL. Assignment and Ticket status changes, when applicable, are separate
   events. Repeated-call losers, path/operability rejection, rollback, and
   lifecycle-only actionability changes create no exclusion/restoration event.
+- An effective confidentiality `true` to `false` transition creates exactly one
+  `confidentiality_changed` event. Its automatic deletion of every
+  `TicketAccessGrant` creates no `access_grant_removed` event; that type is
+  reserved for an effective manual revoke. User deactivation and reactivation
+  retain grants and create no grant event. A later `false` to `true` transition
+  does not recreate deleted grants and creates only its own
+  `confidentiality_changed` event.
 - All events include an implicit `created_at` timestamp set by the database
   default.
 - Dispatching or executing the Ticket convergence workflow, including an
@@ -208,7 +215,8 @@ an intentional no-event contract, not missing audit coverage.
 | Product release confirmation | One `product_released`; optional final status | System | `package_service`; Ticket lock after external I/O |
 | Product eligibility or override ownership change | One `product_eligibility_changed` per changed occurrence; optional final status | Acting user for direct override; system for automatic changes | `package_service`, or the narrow CVSS-chain exception; owning Ticket lock after CVE lock when applicable |
 | Direct package, track, or Product exclusion/restoration | Exactly one corresponding direct event; ordinary assignment/status events remain separate | Acting user | `package_service`; Ticket lock |
-| Confidentiality toggle or manual access grant/revoke | One `confidentiality_changed`, `access_grant_added`, or `access_grant_removed` | Acting user | `ticket_service`; Ticket lock |
+| Confidentiality toggle or manual access grant/revoke | One `confidentiality_changed`, `access_grant_added`, or `access_grant_removed`. Effective `true` to `false` deletes all grants atomically but produces only `confidentiality_changed` | Acting user | `ticket_service`; target User then Ticket for grant/revoke, Ticket for confidentiality |
+| User deactivation or reactivation with retained Ticket grants | None for grants; ordinary identity and Ticket-unassignment events remain unchanged | N/A for grant state | `user_service`; User root and its documented side effects |
 | Manual reference create/update/delete | One direct event, or one event per changed PATCH field | Acting user | `reference_service`; parent Ticket lock |
 | Automatic reference upsert | None; fetcher execution and current rows are the evidence | N/A | `reference_service`; owning ingestion transaction |
 | Effective or unchanged `delivery_status` processing | None; no assignment or Ticket reconciliation | N/A | `package_service`; Ticket lock |
@@ -216,7 +224,6 @@ an intentional no-event contract, not missing audit coverage.
 | `TrackReleaseCheckpoint` create/advance/no-op | None; an accompanying affectedness mutation retains `track_status_changed` | N/A | Track release workflow; Ticket lock and expected-predecessor validation |
 | EOL entry/exit or derived actionability change | None for the derived change; an actual Ticket status change retains `status_change` | System for resulting status | Product/lifecycle owner; Ticket lock only for reconciliation |
 | Ticket convergence registration, dispatch, execution, retry, partial/terminal failure, or operator rerun | None for the workflow outcome; effective delegated mutations retain their normal events | N/A | Ticket convergence owner; per-domain locks |
-| Stale non-confidential access-grant cleanup | None; housekeeping is not a manual `access_grant_removed` action | N/A | Ticket cleanup service; ordered Ticket locks |
 | Product catalog source mutation or workflow-only dispatch/checkpoint outcome | None; later per-Ticket delegated mutations retain their normal events | N/A | Owning catalog/workflow service |
 
 For every row, a rejected, not-found, unchanged, stale/inapplicable,
@@ -494,7 +501,8 @@ required event sequence or explicit no-event outcome. For audited mutations:
 12. Every explicit no-event matrix row has a zero-event assertion for its
     effective and no-op outcomes where applicable, including delivery, IBS
     evidence, checkpoints, derived actionability, automatic references,
-    convergence outcomes, ticketless CVE/CVSS changes, and stale-grant cleanup
+    convergence outcomes, ticketless CVE/CVSS changes, automatic
+    declassification deletion, and deactivation/reactivation grant retention
 13. Each package, track, and Product exclusion/restore persists exactly one
     direct event with the authenticated acting user and exact payload; adding a
     marker beneath an excluded ancestor and restoring beneath an ancestor or

@@ -2118,7 +2118,7 @@ signal handler** registered in the Celery app module.
 
 3. RedBeatScheduler.setup_schedule()
    → Installs/refreshes non-fetcher static entries from app.conf.beat_schedule
-     (cleanup_sessions, cleanup_stale_ticket_access_grants)
+     (currently cleanup_sessions)
    → Removes static entries that were deleted from beat_schedule since last run
    → (native redbeat behavior — Sentinel does not modify this step)
 
@@ -2750,13 +2750,11 @@ document), redbeat reinstalls each static entry with no prior
 non-fetcher periodic task fires **once**, shortly after the Beat restart
 that follows the data-loss event, ahead of its normal weekly schedule.
 
-This is expected, accepted behavior — not a bug — because both existing
-non-fetcher periodic tasks (`cleanup_sessions` and
-`cleanup_stale_ticket_access_grants`) are idempotent deletion queries
-with static, time-based filter conditions (e.g.,
-`updated_at < now() - interval '14 days'`); running one extra time ahead
-of schedule deletes only rows that were already eligible for deletion
-and has no correctness impact.
+This is expected, accepted behavior — not a bug — because the current
+non-fetcher periodic task, `cleanup_sessions`, is an idempotent deletion query
+with its own static, time-based eligibility condition. Running one extra time
+ahead of schedule deletes only rows that were already eligible for deletion and
+has no correctness impact.
 
 Contrast this with fetcher entries, whose custom reconciliation computes
 `due_at` from the cron schedule relative to current time specifically to
@@ -2774,14 +2772,6 @@ behavior.
 | Task | Status | Owning specification |
 |------|--------|---------------------|
 | `cleanup_sessions` | Implemented | `docs/features/identity/authentication.md` (Session cleanup) |
-| `cleanup_stale_ticket_access_grants` | Not yet registered | `docs/features/tickets/tickets.md` (Stale Access Grant Cleanup) |
-
-Tasks with status "Not yet registered" are defined in their owning
-specification but not yet present in the `beat_schedule` dict. They are
-added when their owning feature is implemented. Reconciliation step 4
-handles all non-fetcher entries identically (the
-`task != "run_fetcher"` pre-filter protects them regardless of when
-they are added).
 
 The business logic, deletion criteria, and schedule of each task are
 owned by their respective specifications — this section owns only the

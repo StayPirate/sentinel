@@ -264,6 +264,8 @@ sentinel manage-user deactivate \
      `api_key_service.count_non_revoked_keys()` (including expired keys)
    - Count of active sessions, active assigned tickets, and whether this is the
      last active Admin from `user_service.get_deactivation_impact()`
+   - Explicit Ticket grants and package-maintainer associations are not counted
+     because deactivation retains them
 6. Displays the impact summary:
    ```
    About to deactivate user '{username}':
@@ -949,7 +951,9 @@ POST /api/v1/admin/users/{user}/deactivate
 **`Capability: manage_users`**
 
 Deactivate a user account. Triggers significant side effects (API key
-revocation, session invalidation, ticket unassignment).
+revocation, session invalidation, ticket unassignment). Existing explicit
+Ticket grants and package-maintainer associations are retained but cannot be
+exercised while the user is inactive.
 
 **Request body**: none (empty body or omitted).
 
@@ -979,7 +983,8 @@ revocation, session invalidation, ticket unassignment).
 
 See `docs/features/identity/user-service.md` for the full side effect contract
 (API key revocation, session invalidation, ticket unassignment on
-deactivation).
+deactivation). Deactivation creates no grant event and the impact response does
+not count grants or maintainership rows because neither is mutated.
 
 **Response**: user profile in `{"data": {...}}` envelope (see
 `GET /api/v1/users/{user}` in Public API endpoints above for the full
@@ -994,6 +999,11 @@ POST /api/v1/admin/users/{user}/reactivate
 **`Capability: manage_users`**
 
 Reactivate a previously deactivated user account.
+
+Retained explicit grants and package-maintainer associations become usable
+again under their ordinary Ticket visibility conditions. Reactivation does not
+recreate a grant deleted by a successful Ticket declassification and creates no
+Ticket grant event.
 
 **Request body**: none (empty body or omitted).
 
@@ -1101,6 +1111,10 @@ When the user is already inactive, the response contains zeroed counts:
 | `api_keys_count`       | `int`         | Non-revoked API keys that will be revoked, including expired keys |
 | `sessions_count`       | `int`         | Active sessions that will be invalidated         |
 | `tickets_count`        | `int`         | Active tickets assigned to this user that will be unassigned |
+
+Explicit Ticket grants and package-maintainer associations are intentionally
+absent from this schema. Deactivation retains them, so they are not impact
+mutations or counts.
 
 **Semantics**: this endpoint returns a point-in-time snapshot of the
 user's current state. The response is purely informational — the

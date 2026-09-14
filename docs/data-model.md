@@ -1043,7 +1043,7 @@ contract is in `docs/features/tickets/ticket-audit-log.md`.
 | product_eligibility_changed | Product eligibility or its override ownership changed through an ordinary package boundary or the narrow atomic CVSS-chain exception. Causes are lifecycle phase transition (Reactive Support), synchronous manual-zone exit, threshold change, authorized-user override, assessment propagation, or default-version propagation. `old_value` and `new_value` contain eligibility (`true`/`false`) and may be equal for a metadata-only override set/clear. `user_id` is set for a direct authorized-user override and NULL for system-triggered changes. `detail` carries event-time Product name/CPE plus track, package, and `reason`: `reactive_ltss`, `threshold`, `reactivation`, `cvss`, or `va_override`. Direct override events additionally carry `override_action = set`, `changed`, or `cleared`. |
 | confidentiality_changed     | Ticket `is_confidential` flag was toggled by an authorized acting user. `old_value` and `new_value` contain `"true"` or `"false"`. `detail` is NULL. See `docs/features/tickets/tickets.md` (Confidential Tickets). |
 | access_grant_added          | Authorized acting user manually granted a user explicit access to a confidential ticket. `old_value` is NULL. `new_value` is the target username. `detail` is NULL. |
-| access_grant_removed        | Authorized acting user manually revoked a user's explicit access to a confidential ticket. `old_value` is the target username. `new_value` is NULL. Stale-grant housekeeping creates no event. `detail` is NULL. |
+| access_grant_removed        | Authorized acting user manually revoked a user's explicit access to a confidential ticket. `old_value` is the target username. `new_value` is NULL. Automatic grant deletion during declassification creates no event. `detail` is NULL. |
 | reference_added             | Manual reference added to ticket. `user_id` is the acting user. `old_value` is NULL. `new_value` is the reference URL. `detail` is NULL. |
 | reference_deleted           | Manual reference deleted from ticket. `user_id` is the acting user. `old_value` is the reference URL. `new_value` is NULL. `detail` is NULL. |
 | reference_url_changed       | Manual reference URL changed. `user_id` is the acting user. `old_value` is the previous URL. `new_value` is the new URL. `detail` is NULL. |
@@ -1054,7 +1054,8 @@ contract is in `docs/features/tickets/ticket-audit-log.md`.
 The enum remains exactly 29 values. No Ticket event exists for track delivery,
 IBS request/action/correlation evidence, track-release checkpoints, derived
 actionability, automatic reference upserts, Ticket convergence workflow
-outcomes, ticketless CVE state, or stale non-confidential access-grant cleanup.
+outcomes, ticketless CVE state, user deactivation/reactivation grant retention,
+or automatic grant deletion during declassification.
 Effective delegated domain mutations retain their ordinary event types. See the
 canonical matrix in `docs/features/tickets/ticket-audit-log.md`.
 
@@ -1076,6 +1077,14 @@ specification.
 
 *Note: ON DELETE RESTRICT is used because tickets are never deleted from
 the database; users are deactivated, not deleted.*
+
+User deactivation retains a grant row even though the inactive user cannot
+authenticate to exercise it. Reactivation makes that retained row usable again
+under the canonical visibility predicate. An effective Ticket confidentiality
+transition from true to false hard-deletes every grant for that Ticket in the
+same transaction as the flag change and its one audit event; a later transition
+to true does not recreate those rows. No additional status, timestamp, history,
+or cleanup-progress column is required.
 
 ### Package Model
 #### TicketPackage
