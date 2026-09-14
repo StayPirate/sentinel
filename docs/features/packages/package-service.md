@@ -1296,24 +1296,29 @@ Convergence) and `fetcher-infrastructure.md` (Per-Ticket Catch-Up).
 Returns the complete package tree for a ticket, including soft-deleted
 records (with `deleted_at` visible on each level).
 
-```python
-async def get_ticket_packages(
-    db: AsyncSession,
-    ticket_id: UUID,
-    evaluation_date: date,
-) -> list[PackageDetail]:
-```
+The standalone consumer operation accepts `db: AsyncSession`, a public
+`ticket_id: str` containing canonical `SNTL-{n}`, one `evaluation_date: date`,
+and request-resolved caller information through the module-level
+implementation-chosen boundary. When `ticket_service.get_ticket_detail()`
+composes the same package-owned projection, it supplies the already selected
+internal Ticket UUID and the coherent observation/date context owned by that
+detail operation. The implementation may use one public function with typed
+semantic modes or an internal projection helper; that private shape is not a
+contract and never makes the UUID an API locator.
 
-Consumer-facing calls additionally supply request-resolved caller information
-through the module-level implementation-chosen boundary.
+The service returns a package-domain semantic projection equivalent to
+`PackageDetail[]`, not a Pydantic schema. Concrete typed records are an
+implementation choice.
 
 **Behavior**:
 
-1. Select the Ticket and complete package tree through the canonical Ticket
-   visibility predicate in one coherent database operation or view used to assemble
-   the response. A missing or inaccessible Ticket raises
-   `TicketNotFoundError`; no unconstrained follow-up tree query is authorized by
-   a preliminary check.
+1. For the standalone consumer operation, parse and resolve the SNTL-only
+   locator and select the Ticket and complete package tree through the canonical
+   Ticket visibility predicate in one coherent database operation or view used
+   to assemble the response. A malformed value, Ticket UUID, missing Ticket, or
+   inaccessible Ticket raises `TicketNotFoundError`; no unconstrained follow-up
+   tree query is authorized by a preliminary check. Composed Ticket-detail use
+   remains inside its caller's already established coherent protected view.
 2. Within that coherent operation or view, include all `TicketPackage` records
    for the ticket, including soft-deleted records.
 3. Include every package's tracks and products, including soft-deleted records,
@@ -1323,8 +1328,12 @@ through the module-level implementation-chosen boundary.
    `non_actionable_reason` for every level using the supplied UTC
    `evaluation_date` and the canonical predicates from `package-model.md`
 5. Do not load or project maintainer identities.
-6. Return assembled `PackageDetail[]`, sorted alphabetically by
-   `package_name`
+6. Return the assembled tree. Sort packages by `package_name`, tracks by
+   `reference`, and Products by `product_cpe`, all in ascending Unicode
+   code-point order independent of database collation. Use the corresponding
+   `TicketPackage.id`, `TicketPackageTrack.id`, or
+   `TicketPackageProduct.id` as the final ascending tie-breaker when distinct
+   persisted records otherwise compare equal.
 
 **No locking needed** — this is a read-only operation.
 The endpoint may retain a thin preliminary accessibility dependency for shared
@@ -1332,31 +1341,29 @@ HTTP response handling, but this service query is the authoritative read
 constraint. The endpoint does not build the visibility predicate or perform a
 business ORM query.
 
-This function is called by both `GET /api/v1/tickets/{ticket_id}/packages`
-and `GET /api/v1/tickets/{ticket_id}` (to populate the `packages` field
-in `TicketDetail`).
+This projection contract serves both
+`GET /api/v1/tickets/{ticket_id}/packages` and
+`ticket_service.get_ticket_detail()` (to populate `TicketDetail.packages`).
+Database exceptions propagate unchanged; the operation creates no audit event
+and does not commit or roll back.
 
 ### `search_packages()`
 
 Searches packages across all tickets with filtering, pagination, and
 confidentiality enforcement.
 
-```python
-async def search_packages(
-    db: AsyncSession,
-    evaluation_date: date,
-    search: str | None = None,
-    name: str | None = None,
-    ticket_status: list[TicketStatus] | None = None,
-    sort_by: Literal["package_name", "created_at"] = "created_at",
-    sort_order: Literal["asc", "desc"] = "desc",
-    page: int = 1,
-    per_page: int = 20,
-) -> PaginatedResult[PackageListItem]:
-```
-
-Consumer-facing calls additionally supply request-resolved caller information
-through the module-level implementation-chosen boundary.
+Conceptual inputs are `db: AsyncSession`, `evaluation_date: date`, optional
+`search: str`, optional exact `name: str`, optional repeatable
+`ticket_status` represented by supplied state plus its valid `TicketStatus`
+members, `sort_by` (`package_name` or `created_at`, default
+`created_at`), `sort_order` (`asc` or `desc`, default `desc`), positive `page`,
+and `per_page` from 1 through 100. Consumer-facing calls additionally supply
+request-resolved caller information through the module-level
+implementation-chosen boundary. The transport schema enforces `search` and
+`name` exclusivity by evaluating `search` presence with the outer-whitespace
+rule without replacing its value; the service performs the one effective trim
+in step 4. The service returns compact package-domain item
+projections with `total`, `page`, and `per_page`, without depending on Pydantic.
 
 **Behavior**:
 
@@ -1364,26 +1371,40 @@ through the module-level implementation-chosen boundary.
    `Ticket` and constructing the canonical Ticket visibility predicate in the
    Service layer from the request-resolved caller information. The endpoint
    supplies no model columns or pre-built SQLAlchemy expression.
-2. Exclude non-actionable packages using the canonical SQL actionability
-   predicate and the supplied UTC `evaluation_date`
-3. Apply `ticket_status` filter (if provided; invalid values silently
-   ignored)
-4. Apply `search` (ILIKE `%term%` substring match on `package_name`) or
-   `name` (exact match)
-5. Apply sorting (`sort_by`/`sort_order`; deterministic tiebreaker per
-   `docs/api-spec.md`, Deterministic Pagination Ordering)
+2. Exclude every non-actionable package using the canonical actionability
+   predicate and the supplied UTC `evaluation_date`. The compact endpoint
+   returns only actionable package occurrences and does not add direct marker,
+   reason, lifecycle, delivery, maintainer-identity, or maintainer-count fields
+   from the full tree.
+3. Apply `ticket_status` when provided. Values within the repeatable filter use
+   OR. The typed semantic input preserves omission versus a supplied filter
+   whose invalid members were all removed; the latter produces an empty page.
+   Other filters compose with AND.
+4. Normalize `search` by trimming outer whitespace once. An empty result means
+   no substring filter. Match package names case-insensitively with percent,
+   underscore, and backslash treated literally rather than as SQL pattern
+   syntax. Apply `name` as the declared case-sensitive exact match.
+5. Apply sorting. `package_name` uses Unicode code-point order independent of
+   database collation; `created_at` uses timestamp order. Append internal
+   `TicketPackage.id` in the requested direction as the deterministic
+   tie-breaker.
 6. Compute `meta.total`, apply pagination, and return items from that same
    visible candidate set. Invisible rows never contribute to the count or move
    visible rows between pages.
-7. Compute `track_summary` via SQL aggregation (`COUNT(*) FILTER (WHERE
-   status = ...)`) in the same query — NOT as Python post-processing —
-   to avoid N+1 query patterns. Count only actionable tracks using the same
-   `evaluation_date` as step 2
+7. Compute `track_summary` for each returned occurrence from only actionable
+   tracks using the same `evaluation_date` as step 2. Query count must remain
+   bounded independently of page size and result cardinality; per-item database
+   queries and other N+1 behavior are forbidden. The contract does not require
+   one SQL statement or prescribe SQL aggregation syntax.
 8. Return paginated `PackageListItem[]`. Items, `meta.total`, package
    actionability, and every track aggregate use the one supplied
    `evaluation_date` and the same visible candidate set.
 
 **No locking needed** — this is a read-only operation.
+An accessible empty candidate set and a page beyond the last return an empty
+item collection with the correct total. Database exceptions propagate
+unchanged. The operation creates no audit event and does not commit or roll
+back.
 
 ## Exclusion and Actionability Invariant
 
@@ -1472,7 +1493,7 @@ Caught by endpoint handlers and mapped to HTTP responses:
 
 | Exception | HTTP | Code | Raised when |
 |-----------|------|------|-------------|
-| `TicketNotFoundError` † | 404 | `TICKET_NOT_FOUND` | The declared Ticket is missing or inaccessible in a consumer read selection or locked mutation |
+| `TicketNotFoundError` † | 404 | `TICKET_NOT_FOUND` | A consumer Ticket locator is malformed, missing, or inaccessible, or an internal declared Ticket UUID is absent |
 | `TicketNotMutableError` † | 409 | `TICKET_NOT_MUTABLE` | Ticket is in manual zone (defense in depth — API layer catches first) |
 | `TrackNotFoundError` | 404 | `RESOURCE_NOT_FOUND` | Track ID does not exist under the declared Ticket/package path |
 | `ProductNotFoundError` | 404 | `RESOURCE_NOT_FOUND` | Product occurrence ID does not exist under the declared Ticket/package/track path |

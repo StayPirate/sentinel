@@ -540,6 +540,11 @@ via `_classify_type()`.
 
 ## API Endpoints
 
+Every `{ticket_id}` path and every response `ticket_id` follows
+`docs/api-spec.md` (Ticket Identifier Resolution) and therefore contains only
+canonical `SNTL-{n}`. `TicketReference.id` remains the public UUID of the
+reference sub-resource and is unchanged.
+
 ### List References
 
 ```
@@ -591,7 +596,7 @@ same database operation or view as the reference result.
   "data": [
     {
       "id": "uuid",
-      "ticket_id": "uuid",
+      "ticket_id": "SNTL-42",
       "url": "https://nvd.nist.gov/vuln/detail/CVE-2026-3317",
       "title": "NVD",
       "description": null,
@@ -602,7 +607,7 @@ same database operation or view as the reference result.
     },
     {
       "id": "uuid",
-      "ticket_id": "uuid",
+      "ticket_id": "SNTL-42",
       "url": "https://github.com/example/project/commit/a1b2c3",
       "title": null,
       "description": null,
@@ -613,7 +618,7 @@ same database operation or view as the reference result.
     },
     {
       "id": "uuid",
-      "ticket_id": "uuid",
+      "ticket_id": "SNTL-42",
       "url": "https://bugzilla.suse.com/show_bug.cgi?id=12345",
       "title": "SUSE Bugzilla #12345",
       "description": "Upstream confirmed the fix; tracking SUSE-side packaging",
@@ -658,7 +663,7 @@ Adds a manual reference to a ticket.
 {
   "data": {
     "id": "uuid",
-    "ticket_id": "uuid",
+    "ticket_id": "SNTL-42",
     "url": "https://bugzilla.suse.com/show_bug.cgi?id=12345",
     "title": "SUSE Bugzilla #12345",
     "description": "Upstream confirmed the fix; tracking SUSE-side packaging",
@@ -766,7 +771,7 @@ At least one field must be provided.
 {
   "data": {
     "id": "uuid",
-    "ticket_id": "uuid",
+    "ticket_id": "SNTL-42",
     "url": "https://bugzilla.suse.com/show_bug.cgi?id=12345",
     "title": "Updated title",
     "description": "Added context after further analysis",

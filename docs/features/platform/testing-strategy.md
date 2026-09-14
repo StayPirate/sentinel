@@ -1728,17 +1728,79 @@ visibility predicate.
   body. Ticket-scoped paths use `TICKET_NOT_FOUND`; CVE-scoped paths use
   `CVE_NOT_FOUND` and never substitute the other resource's code.
 - The per-Ticket maintainer workbench returns 404 before inspecting or
-  projecting Ticket status, `duplicate_of`, or `no_packages`; missing and
+  projecting Ticket status, `duplicate_of_ticket_id`, or `no_packages`; missing and
   inaccessible Tickets therefore cannot be distinguished through an error
   state.
 - Tests preserve only the documented identifier-only exceptions: a visible
-  Duplicated Ticket may retain `duplicate_of = SNTL-{n}` when its target later
+  Duplicated Ticket may retain `duplicate_of_ticket_id = SNTL-{n}` when its target later
   becomes inaccessible; `TICKET_CVE_CONFLICT` may include
   `existing_ticket_id` for an inaccessible conflicting Ticket; and the global
   CVE-source listing may expose public CVE IDs without Ticket visibility
   scoping. Following a protected Ticket/CVE identifier still applies ordinary
   accessibility, and none of these exceptions may expose Ticket-derived
   content or create another bypass.
+
+**Ticket identifier and read-contract coverage:**
+
+- Unit tests for the pure Ticket parser accept `SNTL-1` and the maximum
+  positive PostgreSQL `INTEGER` value. They reject lowercase prefixes,
+  whitespace, signs, zero, missing digits, leading-zero padding, overflow,
+  UUIDs, and trailing content without trimming or normalization.
+- E2E tests parameterize every `{ticket_id}` path family over malformed input,
+  a Ticket UUID, a well-formed missing SNTL value, and an inaccessible Ticket.
+  Each produces the same complete `404 TICKET_NOT_FOUND` response. A malformed
+  body `duplicate_of_ticket_id` instead produces the global Pydantic `422
+  VALIDATION_ERROR`; a well-formed missing or inaccessible target produces
+  `TICKET_NOT_FOUND`.
+- Generated OpenAPI and representative response-schema tests prove that a
+  Ticket root or embedded reference exposes only `ticket_id: SNTL-{n}`, a
+  duplicate target uses only `duplicate_of_ticket_id`, and CVE conflict metadata
+  uses `existing_ticket_id: SNTL-{n}`. Ticket `id`, `identifier`, and
+  `ticket_sequence_id` fields and Ticket UUID path alternatives are absent.
+  User, package/track/Product occurrence, reference, event, IBS action, and task
+  UUIDs remain present where their owning contracts require them.
+- Ticket list integration tests cover every search branch, outer-whitespace
+  normalization, whitespace-only omission, literal percent/underscore/backslash,
+  AND across different filters, OR within repeatable enum filters, all-invalid
+  enum filters, `assignee=none` before resolution, and unknown optional
+  assignee/maintainer values producing an empty page. Package-name search and
+  `package_names` exclude directly excluded package occurrences.
+- Ticket list tests create one-to-many package, maintainer, and external-ID
+  fan-out and prove one row per Ticket plus an uninflated filtered total. They
+  cover equal primary sort keys, semantic severity/status ordering, nullable
+  severity, exact package-name deduplication and Unicode code-point ordering,
+  the internal UUID tie-breaker, and a page beyond the last.
+- Ticket detail tests cover CVE-less and CVE-associated Tickets, nullable and
+  complete current assignee projection, direct duplicate target sequence
+  projection without target-content access or chain following, external-ID and
+  package-tree ordering, and absence of inline CVSS assessments and maintainer
+  identities.
+- Independent-session detail races at the protected selection boundary accept
+  an entirely pre-change response, an entirely post-change response, or the
+  applicable not-found outcome, but reject a mixed root/CVE/assignee/duplicate/
+  package tree. Mutation tests prove every endpoint declaring `TicketDetail`
+  assembles the post-mutation state inside the caller-owned transaction and
+  rolls the mutation and audit back if final assembly fails.
+- Controlled-clock tests cross UTC midnight and prove one `evaluation_date` is
+  reused by Ticket detail, package detail, package search candidate selection,
+  track aggregates, mutation reconciliation, and mutation response assembly.
+  A serializer never captures a second date.
+- Package query tests cover SNTL-only parent resolution, complete tree marker/
+  lifecycle/actionability/reason/delivery projection, canonical nested ordering,
+  exact-name and normalized literal-substring search, actionable-only compact
+  items, all Ticket status filters, coherent totals/aggregates, equal sort keys,
+  and beyond-last pages. Query-count assertions prove bounded database work
+  independent of page size and fail per-item/N+1 loading without prescribing a
+  particular SQL statement.
+- Ticket audit API and service tests cover SNTL-only parent resolution before
+  every filter, all-invalid event types, unknown optional actors, `system`, UUID
+  and exact-username actors, normalized literal search, inclusive date bounds,
+  fixed `created_at DESC, id DESC` ordering, equal timestamps, beyond-last
+  pages, and coherent filtered totals. Non-null actors are complete current User
+  references including nullable `full_name` and current `active`; system events
+  use `null`. Tests also prove the parent-scope query can use the required
+  `TicketAuditEvent.ticket_id` index and never derives current state from audit
+  history.
 
 **Confidentiality and explicit access grants:**
 

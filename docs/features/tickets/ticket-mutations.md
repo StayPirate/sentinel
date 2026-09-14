@@ -503,6 +503,12 @@ chosen by the owning package workflow so gate evaluation and the mutation
 response use the same temporal boundary. EOL or another derived actionability
 change never creates an exclusion/restoration mutation chain.
 
+When a consumer mutation endpoint declares `TicketDetail`, its owning workflow
+follows the assembly, accessibility-reuse, evaluation-date, and rollback
+contract in `ticket-service.md` (`get_ticket_detail()`). Gate-relevant functions
+accept the workflow's date and pass it to reconciliation; a function that does
+not otherwise use the date leaves it unchanged for final assembly.
+
 `set_track_delivery_status()` is package-owned but is intentionally absent from
 this gate-relevant pattern: delivery is not a Ticket gate input, and that
 operation performs no assignment, Ticket reconciliation, or Ticket audit
@@ -804,6 +810,7 @@ Sets or clears the `severity_manual` field on a ticket.
 | `ticket_id` | `UUID` | Yes | Ticket to modify |
 | `severity` | `Severity \| None` | Yes | New severity value (`Critical`, `High`, `Medium`, `Low`, or `None` for CVSS score 0.0 / informational), or Python `None` to clear the value (sets `severity_manual` to SQL `NULL` = unresolved) |
 | `acting_user_id` | `UUID` | Yes | Authorized acting user performing the action |
+| `evaluation_date` | `date \| None` | No | UTC date shared by reconciliation and any TicketDetail response; capture once at entry when omitted |
 
 **Preconditions**:
 
@@ -824,7 +831,8 @@ Sets or clears the `severity_manual` field on a ticket.
 6. Call `auto_assign_actor(ticket, acting_user_id, db)`
 7. Update `ticket.severity_manual`
 8. Create `TicketAuditEvent` (`severity_changed`, `user_id = acting_user_id`)
-9. Call `reconcile_ticket_status()`
+9. Call `reconcile_ticket_status()` with the supplied or once-captured
+   `evaluation_date`
 10. Return updated ticket
 
 **Gate relevance**: setting `severity_manual` affects the ticket's
@@ -1153,7 +1161,7 @@ them to the corresponding HTTP status code and error code per
 
 | Exception | HTTP | Code | Raised when |
 |-----------|------|------|-------------|
-| `TicketNotFoundError` † | 404 | `TICKET_NOT_FOUND` | Ticket ID does not exist or is inaccessible on a consumer Ticket path |
+| `TicketNotFoundError` † | 404 | `TICKET_NOT_FOUND` | Consumer Ticket locator is malformed, does not exist, or identifies an inaccessible Ticket; an internal UUID lookup may also be absent |
 | `TicketNotMutableError` † | 409 | `TICKET_NOT_MUTABLE` | Ticket is in manual zone (Ignored or Duplicated) |
 | `CVSSAssessmentNotFoundError` | 404 | `CVSS_ASSESSMENT_NOT_FOUND` | No SUSE assessment exists for the accepted `(cve_id, cvss_version)` after the CVE itself was resolved |
 | `InvalidCVSSVectorError` | 422 | `CVSS_INVALID_VECTOR` | CVSS vector string is malformed or invalid |
