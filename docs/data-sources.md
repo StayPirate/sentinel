@@ -748,12 +748,6 @@ attribute it exposes.
   The maintained sweep operation is paginated within the JSend `data` object.
   The maintainership endpoint also uses JSend, is non-paginated, and exposes
   no freshness marker. These endpoints require no authentication.
-- **Maintainership contract status**: the structured identity response is
-  merged upstream but was not yet deployed-and-verified on 2026-09-03. Deployed
-  OpenAPI and representative live responses are a mandatory implementation
-  gate. SMELT exposes no freshness SLA or response timestamp; Sentinel
-  assignments are additive, so freshness is not used for revocation. See
-  `package-maintainership.md` for the evidence, exact field contract, and gate.
 - **Source semantics**:
   - IBS package resolution originates from declarative `SUSE:Channels`
     records. With Reactive LTSS explicitly requested
