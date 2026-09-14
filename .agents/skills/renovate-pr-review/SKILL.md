@@ -12,11 +12,6 @@ Use this workflow to discover, assess, and process Renovate updates with minimal
 interaction while preserving repository policy, reviewer independence, and
 fresh-CI guarantees.
 
-Each assessment is identified by the pull request number, current default-branch
-SHA, and pull request head SHA. Diff analysis, reviewer verdicts, checks, commit
-statuses, workflow runs, and the primary-agent verdict are valid only for that
-identity. A fixed delay never proves freshness; delays are only polling cadence.
-
 ## Authority and safety boundary
 
 A skill supplies procedure; it never grants permissions or merge authority.
@@ -57,10 +52,6 @@ insufficient, or the correct outcome is ambiguous. Continue with independent
 updates and collect necessary user decisions at the end. Confirmed Critical or
 High security findings always block. A resolution that adds structural
 complexity requires a user decision.
-
-The primary agent must state its own final verdict for the current evaluation
-identity. A reviewer verdict, green pull-request summary, mergeable state, or
-elapsed waiting period cannot substitute for that decision.
 
 ## 1. Discover repository and dashboard
 
@@ -128,11 +119,6 @@ For every retained pull request record:
 - changed files and affected Sentinel execution paths;
 - dependency relationships with other pull requests.
 
-Record the current default-branch SHA alongside the inventory. After every
-merge, list open pull requests again and rebuild the retained inventory rather
-than continuing from the original list. Renovate may create, replace, close,
-rebase, or otherwise change branches between merges.
-
 Choose a stable order and state it briefly:
 
 1. prerequisites of other updates;
@@ -143,28 +129,20 @@ Choose a stable order and state it briefly:
 6. major or potentially breaking updates;
 7. ascending pull request number as a tie-breaker.
 
+Recompute the remaining inventory after every merge because Renovate may
+rebase, replace, close, or create branches.
+
 ## 4. Analyze one pull request
 
 Process only one pull request at a time. Other pull requests may be inventoried,
 but their final assessment must use their later rebased head.
 
-Before analysis, refresh the default-branch SHA and pull request head SHA. Use
-the hosting service's compare API or repository ancestry to prove that the
-default-branch commit is an ancestor of the head; mergeability alone is not
-evidence that the head contains the current base. Do not analyze a behind head.
+For the current head:
 
-For the current evaluation identity:
-
-1. Read the complete pull request body, issue comments, reviews, review comments,
-   review threads, commits, and diff without output truncation. Use paginated
-   APIs when needed; commands such as `head` that silently omit content are not
-   acceptable evidence.
-2. The primary agent must verify every release in the update range directly
-   against authoritative upstream release notes, changelogs, migration guides,
-   advisories, relevant known regressions, and an upstream comparison when the
-   host provides one. Record the source URLs or API endpoints and the relevant
-   facts. Renovate's summary is untrusted navigation and is never sole evidence;
-   a reviewer cannot perform this primary-agent obligation on its behalf.
+1. Read the pull request body, comments, commits, and complete diff.
+2. Verify every release in the update range using authoritative upstream
+   release notes, changelogs, migration guides, advisories, and relevant known
+   regressions. Treat Renovate's summary as navigation, not sole evidence.
 3. Search Sentinel for actual uses, configuration, imports, inputs, outputs,
    assumptions, transitive constraints, lockfile changes, and interacting
    pipeline paths.
@@ -179,11 +157,7 @@ For the current evaluation identity:
      Dockerfile integration;
    - grouped updates: each component and their combined effect;
    - major updates: every migration requirement and breaking change.
-5. Verify artifact identity separately from behavior: resolve action tags to
-   commits, image tags to digests and architectures, and release artifacts to
-   their authoritative identity as applicable. Identity verification does not
-   replace release analysis.
-6. Note only upstream capabilities with a concrete and materially useful
+5. Note only upstream capabilities with a concrete and materially useful
    Sentinel application. Keep these notes short.
 
 ## 5. Invoke applicable reviewers
@@ -192,15 +166,6 @@ Run every reviewer selected by the host repository's trigger matrix from the
 primary session. Review the explicit remote pull request while the local tree
 may remain on the default branch. Do not invoke a reviewer merely to duplicate
 an effective automated check.
-
-For each pull request, record every potentially applicable reviewer as
-`required` or `not required` with a short reason. Treat a dependency as
-security-sensitive, and therefore invoke the security reviewer when repository
-policy requires it, when its code receives credentials or write permissions,
-runs on untrusted input, installs or resolves dependencies, produces runtime or
-release artifacts, or participates in security scanning or another supply-chain
-trust boundary. A CI/CD review that discusses security does not replace an
-independently triggered security review.
 
 Give each reviewer:
 
@@ -229,103 +194,33 @@ authority, diff, upstream change, and Sentinel usage. Record a concise rationale
 for any materially important finding that is discarded. Deduplicate overlapping
 findings. The primary agent owns the final verdict.
 
-Record the reviewed head SHA with each verdict. A verdict without a confirmed
-head identity is insufficient.
-
 ## 6. Verify the current head and checks
 
 Immediately before deciding or merging:
 
-1. Refresh the default-branch SHA, pull request base and head SHAs, merge state,
-   unresolved conversations, commits, closing-issue references, checks, commit
-   statuses, and workflow runs.
-2. Verify again that the pull request targets the current default branch and its
-   head contains the current default-branch commit, using repository ancestry or
-   the hosting service's compare API. A merely mergeable but behind head is
-   insufficient.
-3. Query checks by the exact head SHA through the Checks API, commit statuses by
-   the exact head SHA through the Statuses API, and workflow runs filtered by
-   the exact head SHA. A pull-request rollup such as `gh pr checks` is useful for
-   display but is not sufficient freshness evidence by itself.
-4. Build the expected evidence set from the union of branch-protection required
-   checks, checks and statuses already observed for this pull request (including
-   its prior head), workflows applicable to the changed paths, and
-   repository-required gates. Wait for every expected item to materialize; a
-   partial or not yet created set is pending, never successful. An empty set is
-   acceptable only when effective repository rules require no checks, no check
-   or status was observed for this pull request, and every candidate workflow is
-   provably inapplicable under the unchanged applicability rules below.
-   Determine workflow applicability from the workflow's current event, branch,
-   `paths`, `paths-ignore`, and job conditions against the complete changed-file
-   set; do not infer it from workflow names. If branch protection is unavailable
-   or uses another rules mechanism, query the host's effective rules and verify
-   them against repository policy. A permissions error, unsupported rules
-   mechanism, or other inability to determine the complete expected set is
-   inconclusive and requires quarantine.
-5. Require every applicable item for the exact head to reach a successful
-   terminal result. Failed, cancelled, timed-out, action-required, stale, or
-   pending results block the merge. Exclude a skipped workflow or job from the
-   expected set only when an unchanged event, path, branch, or job condition
-   proves it inapplicable and repository policy permits the skip. Once an item
-   is expected, a skipped result blocks the merge. A change to the condition of
-   a gate that scans code or dependencies, handles secrets, checks supply-chain
-   or artifact integrity, or protects publication requires security review and
-   explicit final-report disclosure.
-6. After the evidence first appears complete and successful, wait a short
-   stability interval of at least 30 seconds, then refresh the complete
-   evaluation identity and evidence set. Require two consecutive identical,
-   successful observations of names, provider or App identities, statuses, and
-   conclusions. The interval is race protection, not evidence.
-7. If the base or head changed during analysis or review, discard the stale
-   final verdict. Compare the complete old and new patches, not only file names.
-   Recheck commit identities and integration against the new base. When the
-   patch and declared scope remain equivalent and the repository's reviewer
-   follow-up rules permit it, resume each applicable reviewer with the new head,
-   complete patch or delta, and prior findings; otherwise start a fresh review.
-   In either case, obtain an explicit reviewer verdict for the new head and
-   issue a new primary-agent verdict. Never declare that a prior review simply
-   remains valid.
-8. Confirm there are no unresolved review conversations and no newly added
+1. Refresh the default-branch SHA, pull request head SHA, merge state,
+   unresolved conversations, commits, closing-issue references, and checks.
+2. Verify the pull request head contains the current default-branch commit,
+   using repository ancestry or the hosting service's compare API. A merely
+   mergeable but behind head is insufficient.
+3. Require every applicable check for that exact head to be complete and
+   successful. Do not reuse results from an earlier head. Failed, cancelled,
+   timed-out, action-required, stale, or pending checks block the merge.
+4. If the head changed during analysis or review, discard the stale final
+   verdict and repeat the affected analysis and reviews for the new diff.
+5. Confirm there are no unresolved review conversations and no newly added
    non-Renovate commits.
-9. Require the pull request's closing-issue reference list to be empty. A
+6. Require the pull request's closing-issue reference list to be empty. A
    closing keyword in the pull request body can close an issue as a side effect
    of the merge, so any linked closing issue removes automatic merge authority
    and requires a user decision.
 
-Use a monotonic 30-minute deadline for check and workflow materialization and
-completion, with short polling intervals. A fixed sleep between pull requests
-must never replace the SHA-specific gates above. Quarantine on timeout or when
-the expected evidence set cannot be determined confidently.
-
-On GitHub, use the equivalent of these SHA-bound reads rather than relying on a
-PR-number rollup; paginate list endpoints and preserve provider or App identity
-alongside each context name:
-
-```text
-GET /repos/{owner}/{repo}/branches/{branch}/protection/required_status_checks
-GET /repos/{owner}/{repo}/commits/{head_sha}/check-runs
-GET /repos/{owner}/{repo}/commits/{head_sha}/status
-GET /repos/{owner}/{repo}/actions/runs?head_sha={head_sha}
-GET /repos/{owner}/{repo}/compare/{default_branch_sha}...{head_sha}
-```
-
-For the last comparison, only `ahead` or `identical` proves that the head
-contains the default-branch commit; `behind` or `diverged` fails the gate. Apply
-the same direction rule whenever proving ancestry. To prove a merge commit is
-on the updated default branch, compare `{merge_commit}...{default_branch_sha}`
-and likewise require `ahead` or `identical`.
-
 ## 7. Merge only a clean pull request
 
 When advance authorization is active and the final result is `Clean`, perform a
-squash merge guarded by the exact head SHA. After the stability window passes,
-rebuild the open Renovate inventory and snapshot the number, branch, and head
-SHA of every remaining pull request so a later rebase cannot be confused with a
-head that was already updated. Perform this snapshot before every merge, even
-when only one successor remains. Then refresh the current evaluation identity,
-ancestry, merge state, conversations, commits, and complete SHA-bound evidence
-one final time. Require them to remain unchanged and successful, and run the
-merge command immediately with no intervening operation:
+squash merge guarded by the exact head SHA. Immediately before the merge,
+snapshot the head SHA of every remaining open Renovate pull request so a later
+rebase cannot be confused with a head that was already updated:
 
 ```text
 gh pr merge <number> --squash --match-head-commit <head-sha>
@@ -333,9 +228,7 @@ gh pr merge <number> --squash --match-head-commit <head-sha>
 
 Never pass `--admin`. If the command fails, the head changes, or any gate no
 longer holds, do not retry blindly; refresh and reassess. Verify the pull
-request is merged, refresh the default-branch SHA, and use ancestry or the
-hosting service's compare API to prove that the reported merge commit is present
-on the default branch before selecting a successor.
+request is merged and its merge commit is present on the default branch.
 
 Without advance authorization, report the evidence and wait for the merge
 authorization required by repository policy.
@@ -351,22 +244,15 @@ not assess or merge it until all of the following are true:
 - checks belong to that new head;
 - all applicable checks on that head complete successfully.
 
-The successor remains pending until the SHA-specific evidence set and stability
-window in step 6 also pass. A green rollup from the prior head, a temporarily
-empty check list, or elapsed time is not fresh CI evidence.
-
 If Renovate closes or replaces the pull request, rebuild the inventory. If the
 rebase or checks time out, quarantine it and continue with an independent pull
 request. Never trigger the dashboard's bulk rebase checkbox.
 
 ## 9. Check for resolved issues
 
-After all possible merges, run targeted open-issue searches using the updated
-dependency names, old and new versions, fixed upstream bug terms, removed
-workarounds, newly available capabilities, and relevant technical terms found
-in the authoritative release evidence. Do not infer absence from a truncated
-list of issue titles. Read the complete body and comments of each credible
-candidate.
+After all possible merges, search open repository issues using the updated
+dependency names, fixed upstream bug terms, removed workarounds, and newly
+available capabilities. Read the body and comments of each credible candidate.
 Report an issue only when the merged result demonstrably satisfies its outcome
 and acceptance criteria; topical similarity is insufficient.
 
@@ -397,10 +283,3 @@ Keep progress messages compact. Finish with:
 - issue-closure candidates requiring approval, if any;
 - discarded material reviewer findings and their brief rationale;
 - any remaining risks or incomplete verification.
-
-For every processed pull request, retain enough evidence to substantiate the
-summary: merged or quarantined head SHA, current-base ancestry result,
-authoritative upstream sources, complete-patch comparison after any rebase,
-reviewers and the head each reviewed, exact-head checks/statuses/workflow runs,
-and post-merge reachability when merged. Do not claim identical diffs, fresh CI,
-or no remaining risk unless the recorded evidence proves it.
