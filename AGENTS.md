@@ -115,7 +115,7 @@ the authoritative architecture/conventions. Core locations are:
 | Architecture, API, schema, configuration, sources, deployment, conventions | Corresponding `docs/*.md` authority |
 | Models / schemas / API / services / tasks / CLI | `backend/app/{models,schemas,api/v1,services,tasks,cli}/` |
 | Migrations / backend utilities / tests | `backend/alembic/versions/`, `backend/scripts/`, `backend/tests/` |
-| Repository orchestration / Git hooks / OpenCode tooling | `scripts/`, `.githooks/`, `.opencode/`; portable Agent Skills in `.agents/skills/` |
+| Repository orchestration / Git hooks / OpenCode tooling | `scripts/`, `.githooks/`, `.opencode/` |
 | TLS certificates / drafts / review archive | `backend/certs/`, `docs/drafts/`, `docs/reviews/` |
 
 If a requested location is wrong, stop, identify the correct location, and ask
@@ -181,19 +181,6 @@ Approval of changes is not merge authorization. After a confirmed squash
 merge, synchronize and prune local refs and delete the merged local topic
 branch; this specific cleanup is permitted despite the general destructive-Git
 gate above.
-
-The `/review-renovate` command is the sole exception to the per-PR wait above.
-Its explicit invocation by the repository owner grants advance authorization,
-for that command invocation only, to squash-merge a pull request generated and
-maintained exclusively by Renovate when the final primary-agent evaluation is
-clean under the `renovate-pr-review` skill. The agent must still verify the
-current head, current base, all applicable checks and reviewers, unresolved
-conversations, and every other skill gate immediately before merging; it must
-use head-SHA matching and must never use administrator bypass. A confirmed
-finding, unresolved uncertainty, non-Renovate commit, changed head, or unmet
-gate removes the advance authorization for that pull request. The direct or
-automatic loading of the skill is not advance authorization, and the exception
-does not authorize closing issues or merging any other kind of pull request.
 
 ### Quality and findings
 
@@ -384,10 +371,9 @@ cannot be bounded confidently.
   options.
 - **OpenCode agent, prompt, command, skill, configuration, or policy:** read
   affected definitions, `opencode.json`, and `.opencode/README.md`; load the
-  `customize-opencode` skill before proceeding. Portable Agent Skills live in
-  `.agents/skills/`; OpenCode-specific agents, prompts, and commands remain in
-  `.opencode/`. Validate resolved configuration and restart OpenCode before
-  behavioral conclusions because configuration-time files are not hot-reloaded.
+  `customize-opencode` skill before proceeding. Validate resolved configuration
+  and restart OpenCode before behavioral conclusions because configuration-time
+  files are not hot-reloaded.
 - **Reviewer work:** read the reviewer's definition, the applicable trigger
   below, every route matching the reviewed change, the issue/PR including
   comments, changed files, and the complete governing contracts before
