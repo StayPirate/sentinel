@@ -93,20 +93,6 @@ TLS trust, timeout, and transport retry policy as other SMELT requests. It is an
 unauthenticated, non-paginated GET. The package path segment is URL-encoded.
 Sentinel sends no codestream filter.
 
-The response shape below is source-inspected from merged SMELT MR
-`tools/smelt!1992` (merge commit
-`4448a860c1581c8031a70edba39239cbb61241f7`, successful pipeline). The
-production endpoint still returned its legacy string arrays during sanitized
-verification on 2026-09-03. Deployed-contract
-verification MUST be completed before implementation begins: deployed OpenAPI
-and representative live responses must verify every consumed field and
-behavior. The merged source contract is sufficient to specify Sentinel
-behavior, but it is not yet a deployed-and-verified implementation contract.
-
-SMELT issue `tools/smelt#1461` concerns population of the collective group
-email only. Sentinel neither consumes nor persists that field, so that issue is
-informational and does not block specification or implementation.
-
 ### Successful response
 
 HTTP 200 uses a JSend success envelope:
@@ -163,8 +149,7 @@ the enclosing source shape needed to identify the response: usernames, group
 names, collective group emails, codestream names/URLs, and unknown additional
 fields cannot create an association. This deliberately avoids making
 authorization availability depend on collective metadata that Sentinel does
-not trust or store. The deployed-contract verification must correct this
-specification before implementation if requiredness or nullability differs.
+not trust or store.
 
 ### Missing and invalid responses
 
@@ -413,17 +398,6 @@ exclusion marker, and cannot substitute for that consumer restore.
 - Newly fetched, unpersisted SMELT maintainer data cannot authorize the same
   package-add invocation. Acquisition and all existing SMELT parsing,
   best-effort failure, and add-only semantics remain unchanged.
-
-## Implementation Gate
-
-Implementation MUST NOT begin until SMELT MR `tools/smelt!1992` is confirmed
-deployed and deployed OpenAPI plus sanitized live responses verify field paths,
-requiredness, nullability, empty/missing cases, cardinality, deduplication
-behavior, 404 behavior, authentication, pagination, freshness metadata, and the
-non-joinable codestream namespaces. A mismatch is a specification gap and must
-be resolved in documentation before parser work. The GitHub work item tracking
-this external verification remains coordination evidence, not behavioral
-authority.
 
 ## Testing Requirements
 
