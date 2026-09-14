@@ -1,0 +1,29 @@
+{
+  "source": "Read-only GitHub REST and GraphQL inspection of merged PR #522",
+  "captured_at": "2026-09-14T18:00:00Z",
+  "sanitization": "Repository and personal identifiers were replaced with fictional values; GitHub field names, nesting, collection wrappers, and nullability were preserved.",
+  "observed_live": [
+    "repository and pull request",
+    "one resolved Renovate-authored commit with a GitHub web-flow committer",
+    "one changed file",
+    "one issue comment",
+    "empty reviews and review comments",
+    "seven classic branch-protection contexts bound to GitHub Actions",
+    "successful exact-head check runs from GitHub Actions, Codecov, and GitHub Advanced Security",
+    "empty commit statuses",
+    "exact-head workflow runs including GitHub-managed CodeQL with a dynamic path",
+    "branch protection and effective branch rules",
+    "ruleset detail with permission-gated bypass_actors omitted",
+    "compare result",
+    "open pull request inventory",
+    "empty GraphQL reviewThreads and closingIssuesReferences connections"
+  ],
+  "documentation_only_or_synthetic": [
+    "non-empty commit statuses",
+    "non-empty reviews",
+    "non-empty review comments",
+    "non-empty review threads",
+    "nested review-thread comment pagination",
+    "multi-page pagination mechanics"
+  ]
+}

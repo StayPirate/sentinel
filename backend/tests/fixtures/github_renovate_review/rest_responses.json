@@ -1,0 +1,92 @@
+{
+  "repository": {
+    "full_name": "example-org/example-repo",
+    "default_branch": "main"
+  },
+  "default_branch": {
+    "name": "main",
+    "commit": {"sha": "base111"}
+  },
+  "pull_request": {
+    "number": 42,
+    "title": "chore(deps): update fictional dependency",
+    "html_url": "https://github.example/example-org/example-repo/pull/42",
+    "state": "open",
+    "draft": false,
+    "merged": false,
+    "mergeable_state": "clean",
+    "body": "Fictional dependency update body.\n",
+    "user": {"login": "renovate[bot]", "id": 29139614, "type": "Bot"},
+    "base": {"ref": "main", "sha": "base111"},
+    "head": {"ref": "renovate/example-2.x", "sha": "head222"},
+    "merge_commit_sha": null
+  },
+  "commits_pages": [
+    [
+      {
+        "sha": "head222",
+        "commit": {
+          "message": "chore(deps): update fictional dependency",
+          "author": {"name": "renovate[bot]", "email": "bot@example.invalid", "date": "2026-09-14T17:41:24Z"},
+          "committer": {"name": "GitHub", "email": "noreply@example.invalid", "date": "2026-09-14T17:41:24Z"}
+        },
+        "author": {"login": "renovate[bot]", "id": 29139614, "type": "Bot"},
+        "committer": {"login": "web-flow", "id": 19864447, "type": "User"}
+      }
+    ]
+  ],
+  "files_pages": [
+    [{"sha": "blob333", "filename": "example.lock", "status": "modified", "additions": 1, "deletions": 1, "changes": 2}]
+  ],
+  "issue_comments_pages": [
+    [{"id": 1001, "user": {"login": "coverage-bot", "id": 2001, "type": "Bot"}, "body": "Fictional coverage result.", "created_at": "2026-09-14T17:44:58Z", "updated_at": "2026-09-14T17:44:58Z"}]
+  ],
+  "reviews_pages": [[]],
+  "review_comments_pages": [[]],
+  "check_runs_pages": [
+    {
+      "total_count": 7,
+      "check_runs": [
+        {"id": 3001, "name": "Backend Lint", "head_sha": "head222", "status": "completed", "conclusion": "success", "app": {"id": 15368, "slug": "github-actions", "name": "GitHub Actions"}},
+        {"id": 3002, "name": "Backend Type Check", "head_sha": "head222", "status": "completed", "conclusion": "success", "app": {"id": 15368, "slug": "github-actions", "name": "GitHub Actions"}},
+        {"id": 3003, "name": "Backend Security Scan", "head_sha": "head222", "status": "completed", "conclusion": "success", "app": {"id": 15368, "slug": "github-actions", "name": "GitHub Actions"}},
+        {"id": 3004, "name": "Backend Tests", "head_sha": "head222", "status": "completed", "conclusion": "success", "app": {"id": 15368, "slug": "github-actions", "name": "GitHub Actions"}},
+        {"id": 3005, "name": "Image Smoke Test", "head_sha": "head222", "status": "completed", "conclusion": "success", "app": {"id": 15368, "slug": "github-actions", "name": "GitHub Actions"}},
+        {"id": 3006, "name": "Shell Lint", "head_sha": "head222", "status": "completed", "conclusion": "success", "app": {"id": 15368, "slug": "github-actions", "name": "GitHub Actions"}},
+        {"id": 3007, "name": "PR Metadata", "head_sha": "head222", "status": "completed", "conclusion": "success", "app": {"id": 15368, "slug": "github-actions", "name": "GitHub Actions"}}
+      ]
+    }
+  ],
+  "statuses_pages": [[]],
+  "workflow_runs_pages": [
+    {"total_count": 1, "workflow_runs": [{"id": 4001, "workflow_id": 5001, "path": ".github/workflows/ci.yml", "name": "CI", "head_sha": "head222", "status": "completed", "conclusion": "success"}]}
+  ],
+  "branch_protection": {
+    "required_status_checks": {
+      "strict": true,
+      "contexts": ["Backend Lint", "Backend Type Check", "Backend Security Scan", "Backend Tests", "Image Smoke Test", "Shell Lint", "PR Metadata"],
+      "checks": [
+        {"context": "Backend Lint", "app_id": 15368},
+        {"context": "Backend Type Check", "app_id": 15368},
+        {"context": "Backend Security Scan", "app_id": 15368},
+        {"context": "Backend Tests", "app_id": 15368},
+        {"context": "Image Smoke Test", "app_id": 15368},
+        {"context": "Shell Lint", "app_id": 15368},
+        {"context": "PR Metadata", "app_id": 15368}
+      ]
+    },
+    "required_conversation_resolution": {"enabled": true}
+  },
+  "effective_rules": [
+    {"type": "deletion", "ruleset_source_type": "Repository", "ruleset_source": "example-org/example-repo", "ruleset_id": 6001},
+    {"type": "non_fast_forward", "ruleset_source_type": "Repository", "ruleset_source": "example-org/example-repo", "ruleset_id": 6001}
+  ],
+  "rulesets_pages": [
+    [{"id": 6001, "name": "protect main", "target": "branch", "source_type": "Repository", "source": "example-org/example-repo", "enforcement": "active"}]
+  ],
+  "ruleset_detail": {"id": 6001, "name": "protect main", "target": "branch", "enforcement": "active", "conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []}}, "rules": [{"type": "deletion"}, {"type": "non_fast_forward"}]},
+  "compare": {"status": "ahead", "ahead_by": 1, "behind_by": 0, "base_commit": {"sha": "base111"}, "merge_base_commit": {"sha": "base111"}},
+  "open_prs_pages": [
+    [{"number": 42, "base": {"ref": "main", "sha": "base111"}, "head": {"ref": "renovate/example-2.x", "sha": "head222"}, "user": {"login": "renovate[bot]", "id": 29139614, "type": "Bot"}}]
+  ]
+}

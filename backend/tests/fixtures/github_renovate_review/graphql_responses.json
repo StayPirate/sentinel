@@ -1,0 +1,30 @@
+{
+  "review_threads_pages": [
+    {
+      "data": {
+        "repository": {
+          "pullRequest": {
+            "reviewThreads": {
+              "nodes": [],
+              "pageInfo": {"hasNextPage": false, "endCursor": null}
+            }
+          }
+        }
+      }
+    }
+  ],
+  "closing_issues_pages": [
+    {
+      "data": {
+        "repository": {
+          "pullRequest": {
+            "closingIssuesReferences": {
+              "nodes": [],
+              "pageInfo": {"hasNextPage": false, "endCursor": null}
+            }
+          }
+        }
+      }
+    }
+  ]
+}
