@@ -150,14 +150,18 @@ missing or inaccessible Ticket.
 | Ticket status is `New` or `Analysis` | 200 | `not_analyzed` |
 | Ticket status is `Resolved` | 200 | `resolved` |
 | Ticket status is `Ignored` | 200 | `ignored` |
-| Ticket status is `Duplicated` | 200 | `duplicated` (includes `duplicate_of`) |
+| Ticket status is `Duplicated` | 200 | `duplicated` (includes `duplicate_of_ticket_id`) |
 | User is not a maintainer | 200 | `no_packages` |
 
-**Duplicated link**: the `duplicate_of` value in the error-state
+**Duplicated link**: the `duplicate_of_ticket_id` value in the error-state
 response is the `SNTL-{n}` identifier of the target ticket (always
 non-Duplicated).
 
 ## API Endpoints
+
+Every response `ticket_id` and the `{ticket_id}` in the per-Ticket path use the
+canonical `SNTL-{n}` Ticket identity from `docs/api-spec.md`. The workbench does
+not expose a parallel Ticket UUID or sequence-number field.
 
 ### Pending Packages
 
@@ -181,8 +185,7 @@ Returns pending fixes for the authenticated user.
 ```json
 {
   "package_name": "kernel-default",
-  "ticket_id": "550e8400-e29b-41d4-a716-446655440000",
-  "ticket_sequence_id": 42,
+  "ticket_id": "SNTL-42",
   "cve_id": "CVE-2026-1234",
   "severity": "high",
   "reference": "SLE-15-SP6",
@@ -193,8 +196,7 @@ Returns pending fixes for the authenticated user.
 | Field | Type | Description |
 |-------|------|-------------|
 | package_name | string | Source package name |
-| ticket_id | uuid | Ticket UUID |
-| ticket_sequence_id | integer | Ticket sequence number (for `SNTL-{n}` display) |
+| ticket_id | string | Canonical Ticket identity (`SNTL-{n}`) |
 | cve_id | string \| null | CVE identifier (null if ticket has no CVE) |
 | severity | string \| null | Resolved severity: critical, high, medium, low, none (null if unresolved) |
 | reference | string | Target codestream name |
@@ -222,8 +224,7 @@ details, using the standard `{"data": [...], "meta": {"total", "page", "per_page
 ```json
 {
   "package_name": "kernel-default",
-  "ticket_id": "550e8400-e29b-41d4-a716-446655440000",
-  "ticket_sequence_id": 42,
+  "ticket_id": "SNTL-42",
   "cve_id": "CVE-2026-1234",
   "reference": "SLE-15-SP6",
   "submission_chain": {
@@ -238,8 +239,7 @@ details, using the standard `{"data": [...], "meta": {"total", "page", "per_page
 | Field | Type | Description |
 |-------|------|-------------|
 | package_name | string | Source package name |
-| ticket_id | uuid | Ticket UUID |
-| ticket_sequence_id | integer | Ticket sequence number |
+| ticket_id | string | Canonical Ticket identity (`SNTL-{n}`) |
 | cve_id | string \| null | CVE identifier |
 | reference | string | Target codestream name |
 | submission_chain | object | Authoritative in-progress action chain for this codestream, projected through exact action-track joins |
@@ -271,8 +271,7 @@ and release date, using the standard `{"data": [...], "meta": {"total", "page", 
 ```json
 {
   "package_name": "kernel-default",
-  "ticket_id": "550e8400-e29b-41d4-a716-446655440000",
-  "ticket_sequence_id": 42,
+  "ticket_id": "SNTL-42",
   "cve_id": "CVE-2026-1234",
   "reference": "SLE-15-SP6",
   "submission_chain": {
@@ -287,8 +286,7 @@ and release date, using the standard `{"data": [...], "meta": {"total", "page", 
 | Field | Type | Description |
 |-------|------|-------------|
 | package_name | string | Source package name |
-| ticket_id | uuid | Ticket UUID |
-| ticket_sequence_id | integer | Ticket sequence number |
+| ticket_id | string | Canonical Ticket identity (`SNTL-{n}`) |
 | cve_id | string \| null | CVE identifier |
 | reference | string | Target codestream name |
 | submission_chain | object | Proven chain containing the effective SR and accepted RR action correlated directly to this track |
@@ -361,7 +359,7 @@ or the user is not a maintainer. Object with an `error_state` key:
   "data": {
     "error_state": {
       "type": "not_analyzed",
-      "duplicate_of": null
+      "duplicate_of_ticket_id": null
     }
   }
 }
@@ -372,13 +370,13 @@ or the user is not a maintainer. Object with an `error_state` key:
   "data": {
     "error_state": {
       "type": "duplicated",
-      "duplicate_of": "SNTL-42"
+      "duplicate_of_ticket_id": "SNTL-42"
     }
   }
 }
 ```
 
-The `duplicate_of` field is populated only for the `duplicated` type,
+The `duplicate_of_ticket_id` field is populated only for the `duplicated` type,
 containing the `SNTL-{n}` identifier of the target ticket.
 
 ## Security

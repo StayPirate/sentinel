@@ -347,11 +347,14 @@ tie-breaker for equal transaction timestamps and stable pagination). Sorting
 is fixed — client-controlled `sort_by` / `sort_order` parameters are not
 supported (timeline display requires chronological ordering).
 
+The parent `ticket_id` uses the SNTL-only Ticket identity. The event's own `id`
+and a non-null actor's `id` retain their event and User UUID contracts.
+
 **Path parameters**:
 
 | Parameter   | Type | Description          |
 |-------------|------|----------------------|
-| `ticket_id` | UUID or `SNTL-{n}` | The ticket identifier (supports dual lookup) |
+| `ticket_id` | string | Canonical Ticket identity (`SNTL-{n}`) |
 
 **Query parameters**:
 
@@ -361,7 +364,7 @@ supported (timeline display requires chronological ordering).
 | `per_page`   | int    | 20      | Items per page (max 100) |
 | `event_type` | string (repeatable) | —       | Filter by event type. Multiple values use OR semantics (e.g., `?event_type=status_change&event_type=assignment`). See `docs/api-spec.md` (Enum Filter Validation) for handling of invalid values |
 | `actor`      | string | —       | Filter by actor: user UUID, username, or `system` for automated events (where `user_id IS NULL`). If omitted, all actors are returned. |
-| `search`     | string | —       | Case-insensitive substring search across `comment`, `old_value`, `new_value`, and `detail` (cast to text). Matches on any field are included (OR logic). If omitted, no text filtering is applied. |
+| `search`     | string | —       | Case-insensitive substring search across `comment`, `old_value`, `new_value`, and `detail` (cast to text). Matches on any field are included (OR logic). Outer whitespace is trimmed once; an empty result means no text filter. `%`, `_`, and backslash are literal characters rather than SQL pattern syntax. |
 | `from_date`  | string | —       | ISO 8601 date/datetime. Include events from this date onwards (inclusive) |
 | `to_date`    | string | —       | ISO 8601 date/datetime. Include events up to this date (inclusive) |
 
@@ -372,7 +375,7 @@ supported (timeline display requires chronological ordering).
   "data": [
     {
       "id": "uuid",
-      "ticket_id": "uuid",
+      "ticket_id": "SNTL-42",
       "event_type": "status_change",
       "old_value": "New",
       "new_value": "Analysis",
@@ -381,8 +384,8 @@ supported (timeline display requires chronological ordering).
       "created_at": "2025-03-15T10:30:00Z",
       "actor": {
         "id": "uuid",
-        "username": "jdoe",
-        "full_name": "John Doe",
+        "username": "fictional.analyst",
+        "full_name": "Fictional Analyst",
         "active": true
       }
     }
@@ -398,12 +401,12 @@ supported (timeline display requires chronological ordering).
 **Notes**:
 
 - `actor` is `null` for system-generated events (where `user_id IS NULL`).
-- `actor` contains `id`, `username`, and `full_name` for user-initiated
-  events.
-- The `search` filter performs a case-insensitive `ILIKE '%term%'` on
-  `comment`, `old_value`, `new_value`, and `detail::text` (OR). This allows
-  searching for product names, track names, statuses, or any contextual data
-  across all event fields.
+- `actor` is the complete current User reference (`id`, `username`, nullable
+  `full_name`, and current `active`) for user-initiated events.
+- The `search` filter applies its normalized literal case-insensitive substring
+  to `comment`, `old_value`, `new_value`, and `detail::text` with OR semantics.
+  This allows searching for product names, track names, statuses, or contextual
+  data across all event fields without exposing SQL wildcard syntax.
 
 **`Access: Authenticated`**
 
@@ -428,10 +431,55 @@ created. An explicit no-event boundary in the canonical matrix is intentional
 and is not a failure of atomicity.
 
 Audit reads are model-aware service operations. API handlers delegate list and
-count construction to a service-capable boundary rather than issuing business
-ORM queries, and Core has no model imports. Audit history is historical evidence
-only: no event, actor, payload, or inferred history may be an input to Ticket
-accessibility or any current authorization decision.
+count construction to `list_ticket_events()` in the service layer rather than
+issuing business ORM queries, and Core has no model imports. Audit history is
+historical evidence only: no event, actor, payload, or inferred history may be
+an input to Ticket accessibility or any current authorization or operational
+state decision.
+
+### `list_ticket_events()`
+
+This Category B operation accepts `db: AsyncSession`, public
+`ticket_id: str`, request-resolved authenticated caller information, repeatable
+`event_type` supplied state plus valid values, optional `actor: str`, optional
+`search: str`, optional normalized `from_date`/`to_date` bounds, positive `page`, and
+`per_page` from 1 through 100. The result contains service-layer event
+projections plus `total`, `page`, and `per_page`; it does not return or depend on
+Pydantic schemas. It creates no event, acquires no mutation lock, and does not
+commit or roll back. Database exceptions propagate unchanged.
+
+Behavior:
+
+1. Parse and resolve `ticket_id` using the SNTL-only Ticket Identifier
+   Resolution contract and select the parent through the canonical visibility
+   predicate. Malformed values, Ticket UUIDs, missing Tickets, and inaccessible
+   Tickets raise `TicketNotFoundError` before any event filter is evaluated.
+2. Apply repeatable `event_type` with OR semantics. The typed semantic input
+   preserves omission versus supplied-but-empty state after invalid members are
+   removed. The latter returns an empty page only after the accessible parent
+   has been established.
+3. Apply `actor` through `BaseAuditLog.filter_by_actor()`. Literal `system`
+   matches `user_id IS NULL`; a UUID matches User ID; all other values match
+   exact username. An unknown optional actor yields an empty page rather than
+   `UserNotFoundError`, but only for an accessible Ticket.
+4. Normalize `search` by trimming outer whitespace once. Empty means absent;
+   percent, underscore, and backslash remain literal. Match case-insensitive
+   substrings across the four declared fields with OR semantics.
+5. Apply inclusive date bounds through `BaseAuditLog.apply_date_filters()` and
+   the shared UTC interpretation. Different supplied filter parameters compose
+   with AND.
+6. Order by `created_at DESC, id DESC`, compute `total` after all filters and
+   before page slicing, and return the requested page. A page beyond the last is
+   empty with the correct total.
+7. Project each event's `ticket_id` as the parent `SNTL-{n}`. Project a non-null
+   actor from the current User row as the complete reference (`id`, `username`,
+   nullable `full_name`, current `active`); system events use `actor = null`.
+
+Parent accessibility, filtered events, actor projection, count, ordering, and
+page derive from one coherent PostgreSQL observation. Concurrent changes may be
+observed entirely before or after that view, never as a page/count or actor/event
+mixture from incompatible views. Join fan-out cannot duplicate events or inflate
+the total.
 
 ### Implementation Guidelines
 

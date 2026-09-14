@@ -2,9 +2,10 @@
 
 ## Purpose
 
-Centralize Ticket lifecycle operations and cross-domain Ticket compositions —
-creation, CVE association, assignment, manual-zone entry and exit, and
-confidentiality management — in a single service module
+Centralize Ticket reads, lifecycle operations, and cross-domain Ticket
+compositions — listing, detail assembly, creation, CVE association, assignment,
+manual-zone entry and exit, and confidentiality management — in a single
+service module
 (`ticket_service`). This ensures that:
 
 - `FOR UPDATE` locking is consistently applied on the Ticket row
@@ -24,16 +25,13 @@ Package-centric mutations are handled by `package_service`
 lower services while it owns one Ticket lifecycle workflow; neither lower
 service imports `ticket_service`.
 
-Read-only Ticket operations (listing, detail, and search) require a
-service-capable boundary because they contain model-aware visibility and
-business query construction. They need not live in `ticket_service`, but they
-MUST NOT be implemented as business ORM queries in API handlers or Core. API
-handlers remain thin and delegate these reads to the applicable service-owned
-query boundary (see `docs/features/tickets/tickets.md`). Each consumer-facing
-read constrains the rows, assembled detail, and pagination count it returns by
-the canonical visibility predicate in the same database operation or equivalent
-single database view; a preliminary accessibility decision alone is not
-sufficient.
+Read-only Ticket listing, search, SNTL resolution, and detail assembly live in
+`ticket_service`. They MUST NOT be implemented as business ORM queries in API
+handlers or Core. This module composes package-owned query/projection behavior
+without duplicating package policy. Each consumer-facing read constrains the
+rows, assembled detail, and pagination count it returns by the canonical
+visibility predicate in the same database operation or equivalent single
+database view; a preliminary accessibility decision alone is not sufficient.
 
 ## Architecture
 
@@ -140,7 +138,7 @@ committed post-state.
 | Module | Relationship |
 |--------|-------------|
 | `services/ticket_mutations.py` | `ticket_service` imports `reconcile_ticket_status()`, `recalculate_cvss_chain()`, `auto_assign_actor()`, and `ensure_ticket_operable()` from `ticket_mutations`. The dependency is unidirectional: `ticket_service` → `ticket_mutations`. Neither module imports from the other in the reverse direction |
-| `services/package_service.py` | `ticket_service` invokes the package-owned synchronous eligibility boundary during manual-zone exits while retaining the Ticket lock. `package_service` does not import `ticket_service`; both modules depend on `ticket_mutations` for status evaluation |
+| `services/package_service.py` | `ticket_service` invokes package-owned projection behavior for Ticket detail and the synchronous eligibility boundary during manual-zone exits. `package_service` does not import `ticket_service`; both modules depend on `ticket_mutations` for status evaluation |
 | `services/cvss.py` | No direct dependency. CVSS resolution is delegated through `ticket_mutations.recalculate_cvss_chain()` where this service requires it |
 
 ## Scope Boundary
@@ -226,6 +224,147 @@ Creating a CVE-less Ticket performs only an INSERT and needs no existing-root
 lock. When `create_ticket()` associates a CVE, it resolves and locks that CVE
 before inserting the Ticket. The Ticket uniqueness constraint remains the
 final defense against concurrent INSERTs for the same CVE.
+
+## Ticket Query Operations
+
+These Category B operations are read-only and use the caller's `AsyncSession`.
+They create no audit event, acquire no mutation lock, and never commit or roll
+back. They return service-layer semantic projections rather than Pydantic
+schemas; concrete dataclasses, typed mappings, query helpers, and SQL statement
+shapes are implementation choices. Database exceptions propagate unchanged.
+
+All consumer calls receive the request-resolved caller information described
+under Caller category and Ticket accessibility. The exact parameter that
+carries it is intentionally omitted from the conceptual signatures below.
+
+### Ticket locator resolution
+
+Consumer-facing Ticket locators follow `docs/api-spec.md` (Ticket Identifier
+Resolution). A service-owned resolution operation accepts `db: AsyncSession`, a
+`ticket_id: str` containing canonical `SNTL-{n}`, and caller information. It
+parses the grammar and positive PostgreSQL `INTEGER` bound, selects
+`Ticket.sequence_id = n`, and applies the canonical visibility predicate.
+
+Malformed input, an external Ticket UUID, a missing sequence, and an
+inaccessible Ticket all produce `TicketNotFoundError`. A successful result
+contains the internal `Ticket.id` UUID and enough selected Ticket state for its
+caller; it never makes that UUID a consumer response field. A mutation may use
+the resolved UUID as its internal service locator, but its owning mutation
+service still performs the documented locked-current accessibility check. The
+preliminary resolution does not authorize later unconstrained work.
+
+For a single protected read, the owning query may integrate syntax,
+sequence-resolution, visibility, and response selection rather than calling a
+standalone resolver. The observable result and layer ownership are identical.
+
+### `list_tickets()`
+
+Conceptual semantic inputs are:
+
+| Input | Type | Default | Meaning |
+|---|---|---|---|
+| `db` | `AsyncSession` | required | Caller-owned session |
+| `search` | `str \| None` | `None` | Ticket multi-field search |
+| `status` | supplied-state plus collection of valid `TicketStatus` | omitted | Repeatable OR filter, preserving omitted versus supplied-but-empty after validation |
+| `assignee` | `str \| None` | `None` | User UUID, exact username, or literal `none` |
+| `severity` | supplied-state plus collection of valid resolved-severity filters | omitted | Repeatable OR filter including `none` and `unresolved`, preserving omitted versus supplied-but-empty after validation |
+| `maintainer` | `str \| None` | `None` | User UUID or exact username |
+| `sort_by` | `created_at`, `updated_at`, `severity`, `status`, or `ticket_id` | `created_at` | Primary sort |
+| `sort_order` | `asc` or `desc` | `desc` | Sort direction |
+| `page` | positive integer | `1` | One-indexed page |
+| `per_page` | integer 1–100 | `20` | Page size |
+
+The result contains a collection of Ticket summary projections plus `total`,
+`page`, and `per_page`. Its behavior is:
+
+1. Build one candidate set of Tickets satisfying the canonical visibility
+   predicate. Anonymous calls evaluate no grant or maintainership branch.
+2. Normalize `search` by trimming outer whitespace once. An empty result means
+   no search filter. Percent, underscore, and backslash remain literal input;
+   they do not become SQL pattern syntax. Apply the field-specific OR matching
+   rules in `tickets.md` only to directly included package occurrences and
+   current CVE/external-identifier state.
+3. Apply simultaneously supplied client filters with AND semantics. Values
+   inside one repeatable status or severity filter use OR semantics. The API
+   passes whether the filter was supplied together with its valid members in an
+   implementation-chosen typed form, so an all-invalid supplied filter yields
+   an empty page while omission applies no filter. Handle literal
+   `assignee=none` before User resolution. An unknown optional assignee or
+   maintainer identifier yields an empty page rather than
+   `UserNotFoundError`; maintainer matching uses an included
+   `TicketPackage.deleted_at IS NULL` occurrence.
+4. Resolve severity exactly once per Ticket using the canonical Ticket severity
+   cascade. Severity filtering, semantic sorting, and projection all use that
+   same value, including the distinction between resolved `None` and SQL NULL.
+5. Collapse all one-to-many joins to one logical Ticket. Package, maintainer,
+   and external-identifier fan-out must not duplicate rows or inflate `total`.
+6. Project `package_names` from directly included package occurrences only,
+   deduplicate exact persisted strings, and sort them in ascending Unicode
+   code-point order. Database or deployment collation is not the API order.
+7. Apply the requested primary order and an internal `Ticket.id` UUID
+   tie-breaker in the same direction. `ticket_id` sorting uses numeric
+   `sequence_id`; status and severity use the semantic ranks and nullable rules
+   in `docs/api-spec.md`.
+8. Compute `total` after visibility and every filter but before page slicing,
+   then return the requested page. A page beyond the last is an empty
+   collection with the correct total.
+
+Rows, total, resolved users and severity, sorting, and pagination derive from
+one coherent PostgreSQL observation. A concurrent commit may be observed
+entirely before or entirely after that view, never as a count/page mismatch
+assembled from incompatible views.
+
+### `get_ticket_detail()`
+
+The consumer operation accepts `db: AsyncSession`, a public `ticket_id: str`,
+caller information, and optionally an already selected UTC `evaluation_date`.
+When the date is absent, it captures the current UTC calendar date exactly once
+at entry. Mutation workflows that return `TicketDetail` instead supply their
+existing workflow date and the internal UUID of the locked post-mutation
+Ticket. The concrete overload/helper arrangement is an implementation choice;
+no Pydantic type enters the Service layer.
+
+The result is the semantic projection represented by `TicketDetail` in
+`tickets.md`. The operation:
+
+1. Resolves a public locator through the SNTL-only contract and selects the root
+   through the canonical visibility predicate. Missing, malformed, UUID, and
+   inaccessible locators raise `TicketNotFoundError`.
+2. Projects the root fields, resolved severity, complete current assignee
+   reference, and expanded current CVE fields. CVSS assessments are not inline;
+   they remain in their dedicated sub-resource.
+3. Orders CVE external identifiers by ascending Unicode code point of source,
+   then identifier, with `CVEExternalIdentifier.id` as the final tie-breaker.
+4. If `duplicate_of_id` is non-null, selects only the target's immutable
+   `sequence_id` to produce `duplicate_of_ticket_id`. It does not follow a
+   duplicate chain, expose target content, or apply a second protected-content
+   lookup. This is the bounded identifier-only disclosure contract.
+5. Composes the package-owned complete tree projection with the same
+   `evaluation_date`. Package names, track references, and Product CPEs use
+   ascending Unicode code-point order with the corresponding occurrence UUID
+   as final tie-breaker. Maintainer identities are not loaded or projected.
+
+The root accessibility decision and every PostgreSQL-backed component use one
+coherent observation point. A concurrent mutation may yield an entirely
+pre-change detail, an entirely post-change detail, or the applicable not-found
+outcome, but never a mixed response. The implementation may use one statement,
+a transaction snapshot, or another equivalent mechanism; this specification
+does not prescribe it.
+
+Every mutation endpoint declaring `TicketDetail` delegates its final response
+assembly to this same contract inside the caller-owned transaction after its
+mutation has produced the post-state. A mutation that already needs an
+`evaluation_date` for eligibility, actionability, or reconciliation supplies
+that date. Every other such mutation captures one UTC date at workflow entry
+solely for its complete final projection. Serializers do not recapture it.
+
+Assembly consumes the transaction-owned new Ticket for creation, or the
+mutation's locked Ticket and successful locked-pre-state authorization for an
+existing root, rather than applying a second post-mutation visibility decision.
+Therefore a mutation that removes the actor's final visibility path still
+returns its ordinary post-mutation detail, while the next request is denied. If
+assembly fails, the exception escapes and the caller rolls back the mutation
+and its audit events.
 
 ## Ticket Lifecycle Operations
 
@@ -319,8 +458,13 @@ async def associate_cve(
     ticket_id: UUID,
     cve_id: str,
     acting_user_id: UUID,
+    evaluation_date: date | None = None,
 ) -> Ticket:
 ```
+
+For an API workflow returning `TicketDetail`, the caller captures one UTC date
+and supplies it here and to final detail assembly. Another internal caller may
+omit it; the function then captures one date at entry for its complete chain.
 
 **Preconditions**:
 
@@ -350,8 +494,9 @@ async def associate_cve(
     UPDATE — maintains `chk_ticket_severity_manual_cve_exclusive`)
 10. Create `TicketAuditEvent` (`cve_associated`,
     `user_id = acting_user_id`).
-11. Call `recalculate_cvss_chain()` in association mode with `cve.id` and
-    `association_previous_severity = previous_severity`. The same-transaction
+11. Resolve `evaluation_date` from the supplied value or capture it once, then
+    call `recalculate_cvss_chain()` in association mode with `cve.id`,
+    `association_previous_severity = previous_severity`, and that date. The same-transaction
     re-locks preserve the CVE-then-Ticket order and observe all assessment
     mutations committed before this operation acquired the CVE lock. The chain
     confirms CVE-owned severity, creates the optional manual-to-derived
@@ -388,9 +533,10 @@ If the CVE has no assessments, severity resolves to `null` (gate #3 fails) and
 eligibility uses the 10.0 conservative fallback.
 
 A `TicketCVEConflictError` continues to expose the documented
-`existing_ticket_id` even when that conflicting Ticket is otherwise
-inaccessible. Ticket and CVE identifiers are not confidential Ticket content;
-this does not authorize following the identifier to protected data.
+`existing_ticket_id` as the conflicting Ticket's `SNTL-{n}` identity even when
+that Ticket is otherwise inaccessible. Ticket and CVE identifiers are not
+confidential Ticket content; this does not authorize following the identifier
+to protected data.
 
 `associate_cve` captures and passes the previous `severity_manual` value; the
 delegated calculation creates exactly one handover event when the source
@@ -428,8 +574,13 @@ async def assign_ticket(
     ticket_id: UUID,
     assignee_id: UUID,
     acting_user_id: UUID,
+    evaluation_date: date | None = None,
 ) -> Ticket:
 ```
+
+For an API workflow returning `TicketDetail`, the caller supplies the same UTC
+date to this function and final detail assembly. Other callers may omit it; the
+function captures one date at entry if reconciliation becomes applicable.
 
 **Preconditions**:
 
@@ -455,7 +606,8 @@ async def assign_ticket(
     `New → Analysis` transition (see Architectural Invariant in
     `tickets.md`); the `status_change` event is created here, not by
     `reconcile_ticket_status`
-9. Call `reconcile_ticket_status(ticket)` — evaluates further promotion
+9. Call `reconcile_ticket_status(ticket, evaluation_date=evaluation_date)` —
+    using the supplied date or the one captured at entry, evaluates further promotion
     from `Analysis` upward; may produce a second `status_change` event
     if `Analyzed` or `Resolved` gate conditions are already satisfied
 10. Return updated Ticket
@@ -592,9 +744,10 @@ The source and target visibility decisions are both made from the locked-current
 rows and both must pass before Phase 2 or any mutation. Missing and inaccessible
 roots produce the same `TICKET_NOT_FOUND` outcome. Dependents remain a trusted
 system consequence of the authorized source mutation and are not independently
-visibility-checked. After a link is established, `duplicate_of` may continue to
-expose the stored target `SNTL-{n}` identifier if that target later becomes
-inaccessible; following that identifier then returns `TICKET_NOT_FOUND`.
+visibility-checked. After a link is established, `duplicate_of_ticket_id` may
+continue to expose the stored target `SNTL-{n}` identifier if that target later
+becomes inaccessible; following that identifier then returns
+`TICKET_NOT_FOUND`.
 
 **Post-operation**: no post-commit work. Everything is atomic.
 
@@ -677,6 +830,7 @@ composition.
 | `db` | `AsyncSession` | Yes | Caller-owned database session |
 | `ticket_id` | `UUID` | Yes | Ticket to reopen |
 | `acting_user_id` | `UUID \| None` | No | Acting user, or `NULL` for the documented system reopen |
+| `evaluation_date` | `date \| None` | No | UTC date shared by synchronous eligibility, reconciliation, and any TicketDetail response; capture once at entry when omitted |
 
 **Preconditions**: the Ticket exists and its locked-current status is
 `Ignored`; otherwise raise `TicketNotFoundError` or
@@ -690,7 +844,8 @@ composition.
    The caller identifies that trusted invocation explicitly through the
    implementation-chosen service boundary; `acting_user_id = NULL` by itself
    never grants system authority.
-2. Preserve `original_status = Ignored` and resolve one UTC `evaluation_date`.
+2. Preserve `original_status = Ignored` and resolve `evaluation_date` from the
+   supplied value or capture it once.
 3. Call `ticket_mutations.auto_assign_actor(..., force=True)`. A VA actor
    becomes the assignee; a non-VA actor or system caller leaves the current
    assignee unchanged. Final reconciliation sanitizes an inactive assignee only
@@ -726,6 +881,7 @@ non-retroactive; other Tickets keep their current targets.
 | `db` | `AsyncSession` | Yes | Caller-owned database session |
 | `ticket_id` | `UUID` | Yes | Ticket to revert |
 | `acting_user_id` | `UUID` | Yes | Authorized acting user |
+| `evaluation_date` | `date \| None` | No | UTC date shared by synchronous eligibility, reconciliation, and any TicketDetail response; capture once at entry when omitted |
 
 **Preconditions**: the Ticket exists and its locked-current status is
 `Duplicated`; otherwise raise `TicketNotFoundError` or
@@ -738,7 +894,7 @@ non-retroactive; other Tickets keep their current targets.
    `Duplicated`.
 2. Preserve `original_status = Duplicated`, capture the current duplicate
    target's `SNTL-{n}` identifier as `original_target_identifier`, and resolve
-   one UTC `evaluation_date`.
+   `evaluation_date` from the supplied value or capture it once.
 3. Call `ticket_mutations.auto_assign_actor(..., force=True)`. A VA actor
    becomes the assignee; otherwise the current assignee is retained.
 4. Clear `duplicate_of_id` and set `status = Analysis` consecutively before
@@ -1180,7 +1336,7 @@ to the corresponding HTTP status code and error code per `api-spec.md`.
 
 | Exception | HTTP | Code | Raised when |
 |-----------|------|------|-------------|
-| `TicketNotFoundError` † | 404 | `TICKET_NOT_FOUND` | Ticket ID does not exist or is inaccessible on a consumer Ticket path |
+| `TicketNotFoundError` † | 404 | `TICKET_NOT_FOUND` | Consumer Ticket locator is malformed, does not exist, or identifies an inaccessible Ticket; internal callers may also use it for an absent UUID |
 | `TicketNotMutableError` † | 409 | `TICKET_NOT_MUTABLE` | Ticket is in manual zone (Ignored or Duplicated) |
 | `InvalidTransitionError` † | 409 | `TICKET_INVALID_TRANSITION` | Requested status transition is not allowed |
 | `TicketCVEAlreadySetError` | 400 | `TICKET_CVE_ALREADY_SET` | Ticket already has a CVE associated |

@@ -1009,6 +1009,13 @@ represented in this table.
 | detail      | JSONB       | nullable               | Additional structured context. Schema validated per event type and limited to deterministic compact JSON of at most 4096 UTF-8 bytes — see `docs/features/tickets/ticket-audit-log.md` (detail JSONB Schema Contract) |
 | created_at  | TIMESTAMPTZ | Inherited from AuditEventMixin | When the event occurred            |
 
+**Indexes**:
+
+- `ticket_id` — mandatory parent-scope filter for every Ticket audit query, as
+  required by `docs/features/platform/audit-trail-infrastructure.md`. The
+  inherited indexes on `created_at` and nullable actor `user_id` cover the
+  shared date and actor filters.
+
 #### TicketAuditEventType Enum
 
 Classifies the action recorded in a `TicketAuditEvent`. Category B —

@@ -1736,6 +1736,11 @@ periodic full-tree reconciler is introduced.
 
 ## API Endpoints
 
+Every `{ticket_id}` path and every response field that identifies the parent
+Ticket follows `docs/api-spec.md` (Ticket Identifier Resolution) and uses only
+canonical `SNTL-{n}`. UUIDs for `TicketPackage`, `TicketPackageTrack`, and
+`TicketPackageProduct` occurrences remain public nested-resource locators.
+
 Every mutation endpoint below whose path contains package, track, or Product
 occurrence identifiers treats the complete path as one semantic locator. The
 package must belong to `{ticket_id}`, the track must belong to that package, and
@@ -2135,7 +2140,7 @@ only after accessibility and does not provide a probing oracle.
 ```json
 {
   "data": {
-    "ticket_id": "uuid",
+    "ticket_id": "SNTL-42",
     "package_name": "openssl-3",
     "reference": "SUSE:SLE-15-SP6:Update",
     "status": "affected",
@@ -2245,7 +2250,7 @@ audit, Ticket reconciliation, or post-commit effect.
 ```json
 {
   "data": {
-    "ticket_id": "uuid",
+    "ticket_id": "SNTL-42",
     "package_name": "openssl-3",
     "reference": "SUSE:SLE-15-SP6:Update",
     "id": "uuid",
@@ -2293,7 +2298,7 @@ a standalone endpoint for clients that only need package data.
 | **Excluded records** | All package/track/Product records are returned, including directly or effectively manually excluded and lifecycle-non-actionable records |
 | **Actionability** | Every level includes derived `actionable` and `non_actionable_reason` values evaluated with one UTC date shared by the response |
 | **Response schema** | `PackageDetail[]` — reuses the existing schema (full tree: package -> tracks -> products) |
-| **Sorting** | Fixed alphabetical order by `package_name`. Client-controlled sorting (`sort_by`/`sort_order`) is not supported — the dataset has bounded cardinality and fixed ordering provides consistent display without configuration overhead. |
+| **Sorting** | Fixed ascending Unicode code-point order by `package_name`, independent of database collation; `TicketPackage.id` is the final tie-breaker. Tracks use `reference` then track UUID, and Products use `product_cpe` then occurrence UUID under the same ordering rule. Client-controlled sorting (`sort_by`/`sort_order`) is not supported because the dataset is bounded and has one canonical display order. |
 | **Delegation** | Delegates to `package_service.get_ticket_packages()` |
 
 **Response** (200 OK):
@@ -2334,7 +2339,7 @@ once per ticket in the results.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `search` | string | Substring match on `package_name` (case-insensitive, equivalent to SQL ILIKE `%term%`). Max 500 chars |
+| `search` | string | Case-insensitive substring match on `package_name`. Outer whitespace is trimmed once; an empty result means no search filter. `%`, `_`, and backslash are literal characters, not SQL pattern syntax. Max 500 chars |
 | `name` | string | Exact match on `package_name`. Max 500 chars |
 | `ticket_status` | string (repeatable) | Ticket statuses to include: `new`, `analysis`, `analyzed`, `resolved`, `ignored`, `duplicated`. Repeatable — multiple values are specified as separate query parameters (e.g., `?ticket_status=new&ticket_status=analysis`). Invalid values are silently ignored per `api-spec.md` (Enum Filter Validation). If all values are invalid, an empty result set is returned. Default: no filter (all statuses) |
 | `sort_by` | string | `package_name` or `created_at` (default: `created_at`). Refers to `TicketPackage.created_at` (the date the package was added to the ticket), not `Ticket.created_at`. Deterministic tiebreaker per `docs/api-spec.md` (Deterministic Pagination Ordering) |
@@ -2344,6 +2349,13 @@ once per ticket in the results.
 
 `search` and `name` are mutually exclusive. If both are provided,
 return 422 `VALIDATION_ERROR`.
+
+The global 500-character limit applies to each raw query value first. Within
+that bound, the Pydantic cross-field validator evaluates `search` presence using
+the same outer-whitespace rule without replacing the value passed to the
+service. A whitespace-only `search` is absent and may be combined with `name`;
+a non-empty normalized `search` combined with `name` returns 422. The service
+then performs the one effective trim before query construction.
 
 Pagination constraints follow the standard rule in `docs/api-spec.md`
 (Pagination).
@@ -2360,8 +2372,7 @@ itself is a ticket.
   "id": "uuid",
   "package_name": "openssl-3",
   "ticket": {
-    "id": "uuid",
-    "identifier": "SNTL-123",
+    "ticket_id": "SNTL-123",
     "status": "analysis",
     "severity": "high"
   },
@@ -2382,8 +2393,7 @@ itself is a ticket.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `id` | UUID | Ticket ID |
-| `identifier` | string | Human-readable identifier (e.g., `SNTL-123`) |
+| `ticket_id` | string | Canonical Ticket identity (e.g., `SNTL-123`) |
 | `status` | string | Current ticket status |
 | `severity` | string \| null | Ticket severity |
 

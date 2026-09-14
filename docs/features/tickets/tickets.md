@@ -13,12 +13,12 @@ ticket-related behavior.
 
 ## Ticket Identification
 
-Every ticket has two identifiers:
+Every Ticket has one public identifier and one internal database identifier:
 
 | Identifier | Format | Purpose |
 |------------|--------|---------|
-| `id` | UUID | Internal primary key, used in all foreign key relationships and API paths |
-| `sequence_id` | Auto-increment integer, exposed as `SNTL-{n}` | Human-readable identifier for UI display, search, communication, and API lookup |
+| `id` | UUIDv7 | Internal primary key used by foreign keys, services, tasks, locks, and internal ordering; never accepted or returned as Ticket identity by the API |
+| `sequence_id` | Auto-increment integer, exposed as `SNTL-{n}` | Unique immutable consumer-facing Ticket identity for paths, responses, UI display, search, and communication |
 
 ### SNTL-{n} Format
 
@@ -26,20 +26,20 @@ Every ticket has two identifiers:
   creation. It is unique and immutable.
 - The human-readable form is `SNTL-{sequence_id}` (e.g., `SNTL-1`,
   `SNTL-42`, `SNTL-1337`). No zero-padding.
-- `SNTL-{n}` is the primary label shown in logs, events, and external
-  communications.
+- The canonical grammar is `^SNTL-[1-9][0-9]*$`, with the numeric value within
+  the positive PostgreSQL `INTEGER` range. It is uppercase and is not trimmed,
+  case-normalized, sign-normalized, or padding-normalized.
+- `SNTL-{n}` is the sole Ticket identity in the consumer-facing API. Internal
+  service/task payloads and structured operational logs retain their owning
+  UUID contracts.
 
-### API Dual Lookup
+### API Lookup
 
-All API endpoints that accept a `{ticket_id}` path parameter support
-dual lookup:
-
-- **UUID**: `GET /api/v1/tickets/a1b2c3d4-...` — standard UUID lookup
-- **SNTL-{n}**: `GET /api/v1/tickets/SNTL-42` — resolved via
-  `sequence_id` lookup
-
-The backend detects the format automatically (UUIDs contain hyphens and
-hex characters; `SNTL-{n}` starts with the literal prefix `SNTL-`).
+All `{ticket_id}` API path parameters accept only canonical `SNTL-{n}` values
+and resolve them through `sequence_id`. Malformed values, Ticket UUIDs, missing
+Tickets, and inaccessible Tickets all return `404 TICKET_NOT_FOUND` as defined
+by `docs/api-spec.md` (Ticket Identifier Resolution). The API does not perform
+format detection or provide a UUID compatibility alias.
 
 ### Search
 
@@ -56,11 +56,17 @@ the following fields. A ticket matches if any field matches.
   and `CVE-2024-1200`). The `CVE-` prefix is optional if the format is
   recognizable as year-number (e.g., `2024-1234`).
 - **Package names**: case-insensitive substring match (ILIKE). Matches
-  any package associated with the ticket whose name contains the search
-  term.
+  any directly included package (`TicketPackage.deleted_at IS NULL`) whose
+  name contains the search term.
 - **External identifiers** (if the ticket has an associated CVE with
   external identifiers): prefix-match on the identifier string (e.g.,
   `GHSA-xxxx` matches `GHSA-xxxx-yyyy-zzzz`). Case-insensitive.
+
+The service trims leading and trailing whitespace from `search` once. If the
+result is empty, no text search is applied. Percent, underscore, and backslash
+are literal input characters rather than SQL wildcard or escape syntax. These
+normalization rules do not change the field-specific case and prefix semantics
+above.
 
 ## CVE Association
 
@@ -80,8 +86,8 @@ ticket creation or via explicit association), the following rules apply:
 
 - **Conflict**: if the CVE exists in the database and is already
   associated with another ticket, the operation fails with 409 Conflict.
-  The response body includes `existing_ticket_id` (UUID) to identify
-  the conflicting ticket
+  The response body includes `existing_ticket_id` (`SNTL-{n}`) to identify
+  the conflicting Ticket
 - **On-demand fetch**: if the CVE does not exist in the Sentinel
   database, a minimal CVE record (only `cve_id` set) is created via
   `ensure_cve_exists()` (see `docs/features/tickets/cve-service.md`).
@@ -698,9 +704,10 @@ target.
 
 #### API Response Behavior
 
-`duplicate_of_id` always points to a non-Duplicated ticket. The
-API field `duplicate_of` is the `SNTL-{n}` format of the stored
-UUID — a direct conversion with no resolution step. The raw
+`duplicate_of_id` always points to a non-Duplicated Ticket. The API field
+`duplicate_of_ticket_id` contains that target's `SNTL-{n}` identity. Projection
+selects the referenced Ticket's `sequence_id` directly without following a
+duplicate chain or applying a second protected-content lookup. The raw
 `duplicate_of_id` UUID is not exposed in the API.
 
 #### Invariant
@@ -957,7 +964,7 @@ The maintainer dashboard service applies canonical Ticket visibility to the
 same query results used for rows and totals. For
 `GET /api/v1/my/packages/ticket/{ticket_id}`, missing and inaccessible Tickets
 return `404 TICKET_NOT_FOUND` before Ticket status, maintainer membership,
-`error_state`, or `duplicate_of` is projected.
+`error_state`, or `duplicate_of_ticket_id` is projected.
 
 **CVE Detail (`GET /api/v1/cves/{cve_id}/...`)**:
 All endpoints under `/api/v1/cves/{cve_id}/` use the service-delegated CVE
@@ -1006,12 +1013,12 @@ another visibility branch applies.
 
 #### Identifier Disclosure Boundary
 
-Ticket UUIDs, `SNTL-{n}` identifiers, and CVE IDs are identifiers, not
-confidential Ticket content. Confidentiality still hides protected Ticket-
-derived content and direct reads, but it does not add identifier redaction,
-alternate states, or lookup machinery.
+`SNTL-{n}` and CVE IDs are identifiers, not confidential Ticket content.
+Confidentiality still hides protected Ticket-derived content and direct reads,
+but it does not add identifier redaction, alternate states, or lookup
+machinery. Ticket UUIDs are internal and are not an API representation.
 
-**Accepted risk — `duplicate_of_id` and confidential targets**: A
+**Accepted risk — `duplicate_of_ticket_id` and confidential targets**: A
 Duplicated ticket that is non-confidential may have a
 `duplicate_of_id` pointing to a confidential ticket. The target
 identifier (`SNTL-{n}`) appears in public API responses. This
@@ -1199,44 +1206,40 @@ views without the full package tree.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `id` | UUID | Ticket primary key |
-| `identifier` | string | Human-readable identifier (`SNTL-{n}`) |
+| `ticket_id` | string | Canonical Ticket identity (`SNTL-{n}`) |
 | `status` | string | TicketStatus enum: `new`, `analysis`, `analyzed`, `resolved`, `ignored`, `duplicated` |
 | `severity` | string \| null | Resolved severity (CVSS-derived → manual fallback). Values: `critical`, `high`, `medium`, `low`, `none`, or `null` if unresolved. `null` = no CVSS data and no manual severity set. `"none"` = CVSS score 0.0 (informational) |
 | `assignee` | UserSummary \| null | Assigned VA, or `null` if unassigned |
 | `cve` | CVESummary \| null | Associated CVE summary, or `null` if no CVE |
-| `duplicate_of` | string \| null | Duplicate target identifier (`SNTL-{n}`), or `null` |
+| `duplicate_of_ticket_id` | string \| null | Duplicate target Ticket identity (`SNTL-{n}`), or `null` |
 | `is_confidential` | boolean | Whether the ticket is confidential |
-| `package_names` | string[] | Flat list of package names whose `TicketPackage.deleted_at IS NULL` (e.g., `["curl", "openssl-3"]`). Product lifecycle actionability does not remove an associated package name |
+| `package_names` | string[] | Exact-deduplicated package names whose `TicketPackage.deleted_at IS NULL`, ordered by ascending Unicode code point (e.g., `["curl", "openssl-3"]`). Product lifecycle actionability does not remove an included package name |
 | `created_at` | datetime | Creation timestamp (UTC) |
 | `updated_at` | datetime | Last modification timestamp (UTC) |
 
 #### TicketDetail
 
-Returned by the detail endpoint and all mutation endpoints. Extends
-TicketSummary with the full package tree and expanded CVE data.
+Returned by the detail endpoint and all mutation endpoints. It repeats the
+shared Ticket fields explicitly, replaces the compact `package_names`
+projection with the full package tree, and uses expanded CVE data.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `id` | UUID | Ticket primary key |
-| `identifier` | string | Human-readable identifier (`SNTL-{n}`) |
+| `ticket_id` | string | Canonical Ticket identity (`SNTL-{n}`) |
 | `status` | string | TicketStatus enum: `new`, `analysis`, `analyzed`, `resolved`, `ignored`, `duplicated` |
 | `severity` | string \| null | Resolved severity (CVSS-derived → manual fallback). Values: `critical`, `high`, `medium`, `low`, `none`, or `null` if unresolved. `null` = no CVSS data and no manual severity set. `"none"` = CVSS score 0.0 (informational) |
 | `assignee` | UserSummary \| null | Assigned VA, or `null` if unassigned |
 | `cve` | CVEDetail \| null | Expanded CVE data with dates, or `null` if no CVE |
-| `duplicate_of` | string \| null | Duplicate target identifier (`SNTL-{n}`), or `null` |
+| `duplicate_of_ticket_id` | string \| null | Duplicate target Ticket identity (`SNTL-{n}`), or `null` |
 | `is_confidential` | boolean | Whether the ticket is confidential |
 | `packages` | PackageDetail[] | Full package/track/product tree; maintainer identities are not exposed |
 | `created_at` | datetime | Creation timestamp (UTC) |
 | `updated_at` | datetime | Last modification timestamp (UTC) |
 
-Note: TicketDetail does not include `package_names` — the same
-information is available from `packages[].package_name`.
-
-Note: the API field `duplicate_of` is the `SNTL-{n}` format of
-the database column `duplicate_of_id` (UUID FK). No resolution is
-needed — the stored UUID always references a non-Duplicated
-ticket.
+`TicketDetail` does not include `package_names`; `packages[].package_name`
+provides the full-tree equivalent. `duplicate_of_ticket_id` is selected from
+the referenced target's `sequence_id`; no duplicate chain is followed and no
+other target content is loaded or exposed.
 
 #### TicketConvergenceDispatchResponse
 
@@ -1244,7 +1247,7 @@ Returned only by the asynchronous Ticket convergence rerun action.
 
 | Field | Type | Description |
 |---|---|---|
-| `ticket_id` | UUID | Canonical internal UUID of the accessible Ticket, even when the path used `SNTL-{n}` |
+| `ticket_id` | string | Canonical external identity of the accessible Ticket (`SNTL-{n}`) |
 | `task_id` | string | Transient Celery ID of the newly published root convergence task |
 
 The `task_id` is correlation data only. It is not a durable run resource, has
@@ -1310,7 +1313,7 @@ Query parameters:
 - `per_page` (integer, optional): items per page (default: 20).
 - `sort_by` (string, optional): field to sort by (default: `created_at`).
   Valid values: `created_at`, `updated_at`, `severity` (semantic ordering, see Sorting),
-  `status` (semantic ordering, see Sorting), `identifier` (sorts by numeric `sequence_id`).
+  `status` (semantic ordering, see Sorting), `ticket_id` (sorts by numeric `sequence_id`).
 - `sort_order` (string, optional): `asc` or `desc` (default: `desc`).
 
 Response: paginated `TicketSummary` array in standard
@@ -1326,16 +1329,13 @@ GET /api/v1/tickets/{ticket_id}
 **`Authentication: Optional`**
 - **Response schema**: `TicketDetail`
 
-Returns a single ticket by UUID or `SNTL-{n}`. The `packages` field
-in the response is populated via
-`package_service.get_ticket_packages()` — the same function used by
-`GET /api/v1/tickets/{ticket_id}/packages`. The response includes
-the full package/track/product tree. Maintainer identities and source
-maintainership data are not included.
-
-The endpoint captures one UTC evaluation date and passes it to
-`get_ticket_packages()` so every lifecycle phase, actionability value, and
-reason in the tree uses the same temporal input.
+Returns a single Ticket by canonical `SNTL-{n}` through
+`ticket_service.get_ticket_detail()`. The service owns SNTL resolution,
+visibility-constrained selection, CVE and assignee projection, duplicate-target
+identity, and composition of the package-owned full tree. Maintainer identities
+and source maintainership data are not included. The endpoint validates
+transport input, supplies caller information, maps service outcomes, and
+performs no business ORM query or response assembly.
 
 Response: `TicketDetail` object in standard `{"data": ...}` envelope
 (200 OK).
@@ -1391,7 +1391,7 @@ Response: `TicketDetail` object in standard `{"data": ...}` envelope
 | Status | Code | Condition |
 |--------|------|-----------|
 | 422 | `CVE_INVALID_FORMAT` | `cve_id` provided but does not match `^CVE-[0-9]{4}-[0-9]{4,}$` or exceeds 20 characters |
-| 409 | `TICKET_CVE_CONFLICT` | CVE is already associated with another ticket. Response includes `existing_ticket_id` (UUID) |
+| 409 | `TICKET_CVE_CONFLICT` | CVE is already associated with another Ticket. Response includes `existing_ticket_id` (`SNTL-{n}`) |
 | 409 | `TICKET_SEVERITY_DERIVED` | Both `cve_id` and `severity` provided; severity is auto-derived from CVSS |
 
 ### Associate CVE
@@ -1430,7 +1430,7 @@ Response: `TicketDetail` object in standard `{"data": ...}` envelope
 |--------|------|-----------|
 | 422 | `CVE_INVALID_FORMAT` | `cve_id` does not match `^CVE-[0-9]{4}-[0-9]{4,}$` or exceeds 20 characters |
 | 400 | `TICKET_CVE_ALREADY_SET` | Ticket already has a CVE associated |
-| 409 | `TICKET_CVE_CONFLICT` | CVE is already associated with another ticket. Response includes `existing_ticket_id` (UUID) |
+| 409 | `TICKET_CVE_CONFLICT` | CVE is already associated with another Ticket. Response includes `existing_ticket_id` (`SNTL-{n}`) |
 
 ### Set Severity Manual
 
@@ -1564,12 +1564,12 @@ Request body:
 
 ```json
 {
-  "duplicate_of_id": "SNTL-42"
+  "duplicate_of_ticket_id": "SNTL-42"
 }
 ```
 
-- `duplicate_of_id` (string, required): UUID or `SNTL-{n}` of the
-  target ticket
+- `duplicate_of_ticket_id` (string, required): canonical `SNTL-{n}` identity of
+  the target Ticket. Malformed syntax is a Pydantic `422 VALIDATION_ERROR`
 
 Response: `TicketDetail` object in standard `{"data": ...}` envelope
 (200 OK).
@@ -1579,7 +1579,7 @@ Response: `TicketDetail` object in standard `{"data": ...}` envelope
 | Status | Code | Condition |
 |--------|------|-----------|
 | 400 | `TICKET_SELF_DUPLICATE` | Source and target are the same ticket |
-| 404 | `TICKET_NOT_FOUND` | Target Ticket (`duplicate_of_id`) is missing or inaccessible |
+| 404 | `TICKET_NOT_FOUND` | The well-formed target `duplicate_of_ticket_id` is missing or inaccessible |
 | 409 | `TICKET_DUPLICATE_TARGET_DUPLICATED` | Target ticket is itself Duplicated (use its target instead) |
 | 409 | `TICKET_DUPLICATE_CONCURRENT_MODIFICATION` | A dependent is locked by a concurrent operation; retry |
 
@@ -1671,7 +1671,7 @@ same generic `403 AUTH_INSUFFICIENT_PERMISSION` when neither is present.
 ```json
 {
   "data": {
-    "ticket_id": "01994c20-7c00-7000-8000-000000000001",
+    "ticket_id": "SNTL-42",
     "task_id": "01994c20-7c00-7000-8000-000000000002"
   }
 }

@@ -616,16 +616,17 @@ mandatory standalone preliminary query. A thin API dependency may perform the
 role by delegating to a service; a service may satisfy it directly as part of
 the read selection or locked mutation required by the flow above.
 
-The service applies the single canonical predicate in
-`docs/features/identity/rbac.md`. If the Ticket is missing or does not satisfy
-that predicate, return `404 TICKET_NOT_FOUND`; these cases are
-indistinguishable. Reads select the returned Ticket or Ticket-derived resource
-under that predicate. Mutations apply it to locked-current state as specified
-by their flow.
+The path value follows Ticket Identifier Resolution below. The service applies
+the single canonical predicate in `docs/features/identity/rbac.md`. A malformed
+locator, a Ticket UUID supplied as the locator, a well-formed locator with no
+matching Ticket, and an inaccessible Ticket all return the same `404
+TICKET_NOT_FOUND` response. These outcomes are indistinguishable. Reads select
+the returned Ticket or Ticket-derived resource under the predicate. Mutations
+apply it to locked-current state as specified by their flow.
 
 | Status | Code              | Condition                                            |
 |--------|-------------------|------------------------------------------------------|
-| 404    | `TICKET_NOT_FOUND`| Ticket does not exist, or is confidential and caller is not authorized |
+| 404    | `TICKET_NOT_FOUND`| Ticket locator is invalid, does not exist, or identifies a Ticket inaccessible to the caller |
 
 #### CVE Accessibility Check
 
@@ -667,7 +668,8 @@ inside its service-owned list query.
 its path identifies one Ticket and therefore derives the same `404
 TICKET_NOT_FOUND` scoped response. The service selects an accessible Ticket
 before evaluating Ticket status, maintainer membership, `error_state`, or
-`duplicate_of`. A missing or inaccessible Ticket is indistinguishable; no
+`duplicate_of_ticket_id`. A missing or inaccessible Ticket is
+indistinguishable; no
 status-specific or `no_packages` projection may reveal it first.
 
 #### Anti-Enumeration Boundary
@@ -675,14 +677,16 @@ status-specific or `no_packages` projection may reveal it first.
 The not-found rules above conceal protected Ticket-derived content and direct
 resource reads: a caller cannot distinguish a missing Ticket/CVE from one made
 inaccessible by an associated confidential Ticket. This guarantee does not make
-Ticket UUIDs, `SNTL-{n}` identifiers, or CVE IDs confidential data.
+`SNTL-{n}` identifiers or CVE IDs confidential data. A Ticket UUID is an
+internal identifier and is not part of the API contract.
 
 Existing identifier-only contracts remain unchanged:
 
-- a visible Duplicated Ticket may return `duplicate_of = SNTL-{n}` even when
-  following that target now returns `TICKET_NOT_FOUND`;
+- a visible Duplicated Ticket may return `duplicate_of_ticket_id = SNTL-{n}`
+  even when following that target now returns `TICKET_NOT_FOUND`;
 - `TICKET_CVE_CONFLICT` retains `existing_ticket_id`, including when that
-  Ticket is otherwise inaccessible; and
+  Ticket is otherwise inaccessible; the value is the conflicting Ticket's
+  `SNTL-{n}` identifier; and
 - the global CVE-source listing may return CVE IDs without applying Ticket
   visibility.
 
@@ -776,6 +780,43 @@ be used — the derivation rules apply uniformly by access level and path.
 
 ## Identifier Resolution
 
+### Ticket Identifier Resolution
+
+`SNTL-{n}` is the sole consumer-facing Ticket identity. Every `{ticket_id}`
+path value and every Ticket reference in a request or response uses the
+canonical uppercase form `SNTL-{n}`. `Ticket.id` remains the internal UUIDv7
+primary key used by PostgreSQL relationships, service and task boundaries,
+locking, and internal deterministic ordering. The API never accepts that UUID
+as a Ticket locator and never serializes it as a Ticket identity.
+
+The canonical grammar is `^SNTL-[1-9][0-9]*$`, with `n` no greater than the
+positive PostgreSQL `INTEGER` maximum. Parsing performs no trimming, case
+normalization, sign handling, or zero-padding normalization. Lowercase prefixes,
+leading or trailing whitespace, `SNTL-0`, signed values, padded values such as
+`SNTL-0042`, overflow, UUIDs, and every other shape are malformed.
+
+For a Ticket path, syntax parsing and database resolution deliberately share
+the scoped not-found contract: malformed, missing, and inaccessible values all
+produce `404 TICKET_NOT_FOUND`. The pure grammar/range parser may live in Core;
+lookup by the unique `Ticket.sequence_id` and application of Ticket visibility
+belong to the Service layer. API dependencies may pass through or parse the
+string and map the service outcome, but they perform no Ticket ORM query.
+
+A request-body field that names another Ticket uses the same canonical value
+grammar but ordinary Pydantic validation semantics. In particular,
+`duplicate_of_ticket_id` with malformed syntax produces the global `422
+VALIDATION_ERROR`; a well-formed target that is missing or inaccessible
+produces `404 TICKET_NOT_FOUND`. Response fields use `ticket_id` for a root or
+embedded Ticket reference, `duplicate_of_ticket_id` for a duplicate target, and
+`existing_ticket_id` in `TICKET_CVE_CONFLICT`. Parallel Ticket fields named
+`id`, `identifier`, or `ticket_sequence_id` are not exposed.
+
+This rule is specific to Ticket identity. UUIDs that identify Users,
+TicketPackage/Track/Product occurrences, Ticket references, audit events, IBS
+request actions, tasks, and other non-Ticket resources retain their owning API
+contracts. Structured operational logs and internal Celery/service payloads
+also retain their owning internal Ticket UUID contracts.
+
 ### User Identifier Resolution
 
 All parameters that identify a user — whether path parameters, query
@@ -849,12 +890,11 @@ never accepted as input and is not exposed in API responses.
   lookup is by the `CVE.cve_id` column (UNIQUE indexed)
 - Otherwise, return `404 CVE_NOT_FOUND`
 
-The CVE-ID string is the natural, globally unique identifier used
-across all security tooling (NVD, MITRE, advisories). Unlike User
-identifiers (where the username is mutable via external sync, making the
-UUID necessary as a stable reference) and Ticket identifiers (where
-no external natural key exists), the CVE-ID is immutable and
-externally assigned — the internal UUID serves no external purpose.
+The CVE-ID string is the natural, globally unique identifier used across all
+security tooling (NVD, MITRE, advisories). Like the Sentinel-minted immutable
+Ticket identifier, it provides the complete public identity while the internal
+UUID serves no external purpose. User identity remains different because a
+mutable username and stable UUID are both accepted under the User contract.
 
 The CVE-ID format parser is pure and may live in Core. The canonical
 `CVE_ID_PATTERN` in `backend/app/core/identifiers.py` (anchored regex
