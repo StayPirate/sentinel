@@ -11,6 +11,7 @@ You may edit only:
 
 - `docs/**`
 - `AGENTS.md`
+- `.agents/**`
 - `.opencode/**`
 - `opencode.json`
 

@@ -21,6 +21,7 @@
           "*": "deny",
           "docs/**": "allow",
           "AGENTS.md": "allow",
+          ".agents/**": "allow",
           ".opencode/**": "allow",
           "opencode.json": "allow"
         },

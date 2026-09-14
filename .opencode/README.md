@@ -1,7 +1,8 @@
 # OpenCode Tooling
 
-This directory contains the OpenCode agent, command, and skill definitions
-for the Sentinel project. This README serves as a quick-reference catalog.
+This directory contains the OpenCode-specific agent, command, and prompt
+definitions for the Sentinel project. Portable Agent Skills live in
+`.agents/skills/`. This README serves as a quick-reference catalog.
 
 `AGENTS.md` is the always-on operational kernel. It owns safety gates,
 reviewer triggers, and cumulative authority routing. Detailed product,
@@ -31,7 +32,7 @@ They are configured in `opencode.json`.
 | Agent | Scope | Permissions |
 |-------|-------|-------------|
 | **Plan** | Analysis and planning | Read-only (built-in) |
-| **Spec** | Specifications, project policy, and OpenCode configuration | Edit: `docs/**`, `AGENTS.md`, `.opencode/**`, `opencode.json`; shell: Git/GitHub workflow, read-only inspection, tests |
+| **Spec** | Specifications, project policy, and OpenCode configuration | Edit: `docs/**`, `AGENTS.md`, `.agents/**`, `.opencode/**`, `opencode.json`; shell: Git/GitHub workflow, read-only inspection, tests |
 | **Code** | Implementation, tests, CI/CD, infrastructure | Edit: all files (`docs/**` requires confirmation) |
 
 - **Plan** — read-only mode for analysis, planning, and discussion without
@@ -133,16 +134,18 @@ Commands are defined in `.opencode/commands/` and invoked with `/command-name`.
 | Command | Purpose |
 |---------|---------|
 | `/idea` | Add a new idea to the brainstorming list in `docs/drafts/ideas.md` |
+| `/review-renovate` | Run the guarded Renovate review and sequential merge workflow through the Code agent |
 
 ## Skills
 
-Skills are defined in `.opencode/skills/` and provide guided, multi-step
-workflows for common tasks. They are loaded automatically when a task matches
-their description.
+Skills provide guided, multi-step workflows for common tasks. Sentinel stores
+them in the client-agnostic `.agents/skills/` discovery location, which
+OpenCode loads automatically when a task matches a skill description.
 
 | Skill | Purpose |
 |-------|---------|
 | `new-api-endpoint` | Guided workflow for adding/modifying an endpoint in an existing feature (schema, service, thin route, tests, and reviews) |
+| `renovate-pr-review` | Discovers, reviews, and sequentially processes Renovate dependency pull requests with rebase, CI, reviewer, and merge-safety gates |
 
 ## Directory Structure
 
@@ -153,7 +156,9 @@ their description.
 ├── prompts/          # Primary agent prompt files
 │   ├── spec.md       # Spec agent instructions
 │   └── code.md       # Code agent instructions
-├── skills/           # Multi-step workflow definitions
 ├── package.json      # Plugin dependency (@opencode-ai/plugin)
 └── README.md         # This file
+
+.agents/
+└── skills/            # Portable Agent Skills (one directory per skill)
 ```
