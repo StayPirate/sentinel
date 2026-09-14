@@ -130,6 +130,12 @@ Follow `AGENTS.md` Guardrail 25 in full, including Git prohibitions, work-item
 selection, topic branches, spec-first sequencing, PR requirements, and the
 explicit PR-number merge authorization gate.
 
+The narrowly scoped `/review-renovate` advance-authorization exception is
+defined by `AGENTS.md` and referenced by `docs/conventions.md`. Apply it only
+while executing that command and only after following the complete
+`renovate-pr-review` skill. Loading the skill directly or automatically never
+grants merge authorization.
+
 A concrete implementation, fix, refactor, test, CI, or other retained
 modification automatically starts that workflow. Announce the issue or
 exemption, branch, and scope, then proceed without waiting for a separate
