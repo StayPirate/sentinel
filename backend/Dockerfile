@@ -18,7 +18,7 @@ FROM python:${PYTHON_VERSION}-slim@${PYTHON_BASE_DIGEST} AS builder
 
 # Pin the uv version used to build this image (keep in sync with the
 # `version:` input of astral-sh/setup-uv in .github/workflows/ci.yml)
-COPY --from=ghcr.io/astral-sh/uv:0.12.10 /uv /bin/uv
+COPY --from=ghcr.io/astral-sh/uv:0.12.13 /uv /bin/uv
 
 # Use the Python interpreter already present in this base image instead
 # of letting uv download its own managed interpreter
