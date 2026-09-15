@@ -1593,6 +1593,53 @@ Those tests distinguish best-effort automatic publication failure after a
 successful committed mutation from the explicit rerun endpoint's 503
 publication failure.
 
+### CVE Ingestion Persistence
+
+When `CVEIngestPayload`, `upsert_cve()`, `ensure_cve_exists()`, child
+persistence, or `record_source_status()` is implemented or changed, tests must
+cover this complete matrix:
+
+- Every nullable global field independently: omitted preserves, explicit null
+  clears, a value sets/replaces, and an equal supplied value is a no-op.
+  `cve_state` omission preserves, explicit null is rejected before writes, and
+  both Enum values are accepted.
+- `PUBLISHED` always leaves `date_rejected` null, including a
+  `REJECTED -> PUBLISHED` merge that omits the date. Explicit
+  `PUBLISHED + non-null date_rejected` rejects the complete payload before any
+  CVE, child, source-status, Ticket, or audit write. For `REJECTED`, exercise
+  omitted, explicit-null, and timestamp date inputs.
+- For CVSS, CWE, external identifiers, SSVC, KEV, and EPSS, exercise omitted,
+  explicit null, empty collection where applicable, create, effective update,
+  equality, and retain behavior. Assert that rejection alone deletes none of
+  them.
+- For each child conflict key, identical normalized duplicates collapse and
+  conflicting same-key content rejects the complete payload before writes.
+  Include the affected-version safety-net key and fields outside that key.
+- Affected-version scopes cover unobserved, non-empty replacement, observed
+  empty replacement, explicit removal, equal replacement, repeated empty/remove
+  no-op, and multiple scopes where one operation cannot change another. Empty
+  and removed scopes leave no marker row.
+- `UpsertResult.action` covers serialized insert winner `created`; every global
+  and child effective change as `updated`; all-equal/retained input as
+  `unchanged`; and exclusion of source-status timestamps, Ticket creation,
+  references, delegated audit, and post-ingest work. Successful results always
+  contain a Ticket.
+- Concurrent create/create and create/ensure races use independent PostgreSQL
+  sessions. Assert one insert winner, loser `updated` or `unchanged` as
+  applicable, the loser's caller-owned transaction remains usable for an
+  unrelated write, and a rolled-back apparent winner allows another caller to
+  become the creator. Service calls never commit or roll back.
+- Same-source status races cover every success/failure/missing ordering with
+  independent sessions and deterministic synchronization. Assert the last
+  successfully serialized write wins, `fetched_at` is the statement's database
+  wall-clock instant rather than transaction start, a repeated failure preserves
+  `first_failed_at`, success/missing clears it, a later failure starts a new
+  streak, and rollback or failed writes preserve prior committed state.
+
+Unit tests additionally prove that `BaseCVEFetcher` accepts only
+`CVESourceType` members, rejects raw strings at import time, and converts to
+`.value` only in persistent, registry, API/wire, and Redis-key outputs.
+
 ### Ticket Accessibility
 
 When Ticket accessibility or a Ticket-derived read or mutation is affected,

@@ -499,8 +499,8 @@ Represents a Common Vulnerability and Exposure entry.
 | severity       | VARCHAR(20)  | nullable               | Critical, High, Medium, Low, None - denormalized unified CVE severity from the deterministic CVSS Severity Resolution Cascade. `NULL` means unresolved; `None` means a resolved score of exactly 0.0. See `docs/features/tickets/cvss-scoring.md` |
 | published_date | TIMESTAMPTZ    |                      | Date CVE was published         |
 | modified_date  | TIMESTAMPTZ    |                      | Date CVE was last modified     |
-| cve_state      | VARCHAR(20)  | NOT NULL, DEFAULT PUBLISHED | CveState: PUBLISHED, REJECTED. Populated by any discovery fetcher: `sync_mitre_cves` (from `cveMetadata.state`), `sync_nvd_cves` (from `vulnStatus = Rejected`), `sync_kernel_cves` (from file path: `published/` vs `rejected/`). See `docs/features/tickets/cve-tracking.md` for rejection handling rules |
-| date_rejected  | TIMESTAMPTZ  | nullable             | From CVE JSON 5.x `cveMetadata.dateRejected`. Set when `cve_state` transitions to `REJECTED`, cleared when it reverts to `PUBLISHED` |
+| cve_state      | VARCHAR(20)  | NOT NULL, DEFAULT PUBLISHED | CveState: PUBLISHED, REJECTED. Populated by any discovery fetcher: `sync_mitre_cves` (from `cveMetadata.state`), `sync_nvd_cves` (from `vulnStatus = Rejected`), `sync_kernel_cves` (from file path: `published/` vs `rejected/`). `PUBLISHED` requires `date_rejected IS NULL`; the service enforces this invariant. See `docs/features/tickets/cve-tracking.md` for rejection handling rules |
+| date_rejected  | TIMESTAMPTZ  | nullable             | From CVE JSON 5.x `cveMetadata.dateRejected`. May be present only while `cve_state = REJECTED`; any resulting `PUBLISHED` state clears it even when the current source omits the field |
 | created_at     | TIMESTAMPTZ    | NOT NULL, DEFAULT    | Record creation timestamp      |
 | updated_at     | TIMESTAMPTZ    | NOT NULL, DEFAULT    | Record update timestamp        |
 
@@ -538,12 +538,17 @@ See `docs/features/tickets/cve-service.md`.
 | cve_id      | UUID          | FK(cve.id) ON DELETE CASCADE, NOT NULL | Related CVE                   |
 | source      | VARCHAR(100)  | NOT NULL                           | Provider identifier (e.g., `"nvd"`, `"mitre"`, `"kernel"`, `"redhat"`). Stored as lowercase. The valid values are defined by the `CVESourceType` Python Enum in `app/core/enums.py` (evolving value set — new sources are added as the ingestion pipeline expands). Column is VARCHAR(100) — Category B classification enum. Note: despite the shared column name `source`, each table uses a different value format. `CVESource.source` stores CVESourceType identifiers (lowercase, e.g., `"nvd"`). `CVEExternalIdentifier.source` stores naming authority labels (VARCHAR, Python Enum, e.g., `GHSA`). `CVECWE.source` stores provider names (mixed case, e.g., `"NVD"`, `"Red Hat"`). `TicketReference.source` stores `BaseFetcher.name` (e.g., `"sync_nvd_cves"`) or `"manual"` |
 | status      | VARCHAR(20)   | NOT NULL                           | Fetch outcome: `success` (data written), `failure` (retries exhausted), `missing` (CVE not in source). CVESourceFetchStatus — validated by Python Enum in `app/core/enums.py` (Category B — classification). No default — always written explicitly by the caller |
-| fetched_at  | TIMESTAMPTZ   | NOT NULL                           | Timestamp of the last fetch attempt (success, failure, or missing) |
-| first_failed_at | TIMESTAMPTZ | nullable                          | Timestamp when the current failure streak began. Set to now() on first transition to failure (when currently NULL). Preserved on subsequent failure writes. Cleared to NULL on success or missing writes. See `docs/features/tickets/cve-service.md` (`record_source_status`) for write semantics and `docs/features/platform/cve-source-failure-retry.md` for the retry mechanism |
+| fetched_at  | TIMESTAMPTZ   | NOT NULL                           | Database wall-clock instant of the latest successfully serialized status mutation (success, failure, or missing), not attempt start or transaction start |
+| first_failed_at | TIMESTAMPTZ | nullable                          | Database wall-clock instant when the current failure streak began. Set from the same mutation instant as `fetched_at` when a serialized failure observes NULL, preserved on later failures, and cleared by success or missing. See `docs/features/tickets/cve-service.md` (`record_source_status`) for write semantics and `docs/features/platform/cve-source-failure-retry.md` for the retry mechanism |
 | created_at  | TIMESTAMPTZ   | NOT NULL, DEFAULT                  | Record creation timestamp          |
 | updated_at  | TIMESTAMPTZ   | NOT NULL, DEFAULT                  | Record update timestamp            |
 
 **Unique constraint**: (cve_id, source)
+
+This row is latest state, not status history. Concurrent periodic, catch-up,
+retry, and on-demand writes to one unique key serialize atomically. The last
+successfully serialized write determines the persisted status and timestamps;
+rollback or a failed write leaves the previous committed row unchanged.
 
 **Derived predicate — "stalled"**: `status = 'failure' AND
 first_failed_at < now() - 30 days`. Not a stored column, ENUM value, or
@@ -570,6 +575,11 @@ labels stored in `CVESource.source`. Category B — classification enum
 (Python Enum in `app/core/enums.py`, no CHECK constraint). The database
 column is `VARCHAR(100)`. Adding a new source requires only a code
 change.
+
+Internal fetcher and CVE persistence boundaries pass Enum members; this column
+stores the lowercase `.value`. See
+`docs/features/platform/cve-fetcher-infrastructure.md` (Internal and boundary
+representations) for the complete boundary-conversion contract.
 
 | Value | Description |
 |-------|-------------|
@@ -641,6 +651,9 @@ See `docs/features/tickets/cvss-scoring.md` for the full specification.
   `(cve_id, provider_name, cvss_version)` — last-writer-wins. Since all
   fetchers run on regular schedules, data converges to the most recent
   value within one cycle
+- External ingestion is additive: omitted, explicit-null, or empty assessment
+  input retains existing rows. A supplied equal vector-derived unit is a no-op;
+  no fetcher deletion is inferred from source absence
 
 #### CVEExternalIdentifier
 
@@ -670,6 +683,8 @@ globally unique within its naming system.
 - External identifiers persist regardless of ticket status or existence
 - The `url` column stores the canonical advisory URL for UI convenience
   (e.g., `https://github.com/advisories/GHSA-xxxx-xxxx-xxxx`)
+- External-identifier ingestion is additive. Omitted, explicit-null, or empty
+  input retains existing rows; supplied equal content is a no-op
 
 #### CVEExternalIdentifierSource Python Enum
 
@@ -706,7 +721,7 @@ the general affected version model. See
 |--------|------|-------------|-------------|
 | id | UUID | PK | Internal identifier |
 | cve_id | UUID | FK(cve.id) ON DELETE CASCADE, NOT NULL | Parent CVE |
-| source_container | VARCHAR(100) | NOT NULL | Provenance: `"cna"`, `"adp:CISA-ADP"`, etc. Scope key for delete-and-reinsert — see fetcher contract in `docs/features/tickets/cve-service.md` (Child Table Deduplication). Both MITRE and kernel fetchers write `"cna"` (same CNA data) |
+| source_container | VARCHAR(100) | NOT NULL | Provenance: `"cna"`, `"adp:CISA-ADP"`, etc. Scope key for explicit replacement/removal — see `docs/features/tickets/cve-service.md` (Affected-Version Snapshot Operations). Both MITRE and kernel fetchers write `"cna"` (same CNA data) |
 | vendor | VARCHAR(255) | nullable | Vendor name (e.g., "Linux", "Siemens") |
 | product | TEXT | nullable | Product name (e.g., "Linux", "SCALANCE XC-300"). TEXT because some CNAs list entire product families in this field |
 | package_url | TEXT | nullable | PURL identifier (CVE 5.2.0+). Useful for identifying vendored dependencies (npm, PyPI, Go) inside SUSE RPMs |
@@ -724,18 +739,20 @@ the general affected version model. See
 | default_status | VARCHAR(20) | nullable | Entry-level baseline status from `affected[].defaultStatus`. Same value set as `status`. NULL when absent from source JSON (semantically equivalent to `"unknown"` per CVE 5.x schema). Shared by all version entries from the same parent `affected[]` entry |
 | created_at | TIMESTAMPTZ | NOT NULL, DEFAULT | Record creation timestamp |
 
-Records are replaced (delete-and-reinsert per `(cve_id,
-source_container)`), never updated in place — only `created_at` is
-included (no `updated_at`).
+Rows for a scope are replaced only by an explicit `replace` operation or
+deleted by an explicit `remove` operation for `(cve_id, source_container)`.
+An unmentioned scope remains unchanged. Rows are never updated in place — only
+`created_at` is included (no `updated_at`). An observed empty replacement and a
+removed scope both leave zero rows and require no marker row; their distinction
+exists only in the operation being applied, not as durable extra state.
 
-**Deduplication**: delete-and-reinsert per `(cve_id, source_container)`.
-Each `upsert_cve()` call deletes all existing rows for the given
-`(cve_id, source_container)` and inserts the complete set from the
-payload. This is a documented exception to the `ON CONFLICT DO UPDATE`
-pattern used by other child tables (`CVECWE`, `CVECVSSAssessment`,
-etc.). Those tables have stable record identity — individual records
-persist and are updated in place. `CVEAffectedVersion` has snapshot
-semantics — the entire set is replaced per source on each sync.
+**Snapshot application**: a `replace` operation deletes all existing rows for
+the given `(cve_id, source_container)` and inserts the complete supplied set,
+which may be empty. A `remove` operation deletes that scope. This is a
+documented exception to the additive pattern used by other child tables.
+Semantic equality is determined from the complete normalized row set before
+physical replacement, so an equal replacement is a no-op for
+`UpsertResult.action` even if an implementation uses delete-and-reinsert.
 
 **Safety-net unique constraint** (for data integrity, not used for
 `ON CONFLICT`):
@@ -756,6 +773,15 @@ properties of the entry, not identity — two entries differing only in
 status would be semantically contradictory. Different
 `source_container` values independently own their own set of rows.
 
+Within one canonical payload, the safety-net unique columns are the entry
+conflict key. Identical normalized duplicates collapse. Two entries with that
+key but differing in any other persisted field are contradictory and invalidate
+the payload before writes.
+
+These persistence semantics require no new table, column, persisted enum,
+constraint, or migration. Empty and removed scopes are represented by row
+absence after an explicit operation, not by durable marker state.
+
 #### CVECWE
 
 Stores CWE (Common Weakness Enumeration) identifiers from multiple
@@ -773,6 +799,9 @@ for VA triage.
 | updated_at | TIMESTAMPTZ | NOT NULL, DEFAULT | Record update timestamp |
 
 **Unique constraint**: (cve_id, cwe_id, source)
+
+Ingestion is additive. Omitted, explicit-null, or empty CWE input retains all
+rows. Identical same-key input is a no-op; no source omission deletes a CWE.
 
 #### CVESSVCAssessment
 
@@ -792,6 +821,9 @@ decision points. Although CISA is currently the only SSVC provider
 | created_at | TIMESTAMPTZ | NOT NULL, DEFAULT | Record creation timestamp |
 | updated_at | TIMESTAMPTZ | NOT NULL, DEFAULT | Record update timestamp |
 
+Ingestion is additive. Omitted input retains the row; supplied equal content is
+a no-op. There is no ingestion deletion operation.
+
 #### CVEKEVEntry
 
 Stores CISA Known Exploited Vulnerabilities catalog data. Although it
@@ -806,6 +838,9 @@ lean and gives the `sync_cisa_kev` fetcher a clean upsert target.
 | reference_url | TEXT | nullable | URL to KEV catalog entry |
 | created_at | TIMESTAMPTZ | NOT NULL, DEFAULT | Record creation timestamp |
 | updated_at | TIMESTAMPTZ | NOT NULL, DEFAULT | Record update timestamp |
+
+Ingestion is additive. Omitted input retains the row; supplied equal content is
+a no-op. Catalog absence and CVE rejection do not delete the row.
 
 #### CVEEPSSScore
 
@@ -822,6 +857,10 @@ not a time series — the record is overwritten on each daily sync.
 | assessed_at | DATE | NOT NULL | Date of the EPSS assessment |
 | created_at | TIMESTAMPTZ | NOT NULL, DEFAULT | Record creation timestamp |
 | updated_at | TIMESTAMPTZ | NOT NULL, DEFAULT | Record update timestamp |
+
+Ingestion is additive. Omitted input retains the row; supplied equal score,
+percentile, and assessment date are a no-op. A later missing response does not
+delete the row.
 
 **FLOAT vs DECIMAL**: EPSS scores use `FLOAT` instead of the
 `DECIMAL(3,1)` used by `CVECVSSAssessment.score`. CVSS scores are
@@ -1899,8 +1938,8 @@ retained provenance.
   replaced rather than updated in place. `TicketAccessGrant` uses
   `granted_at` instead of `created_at` (semantically identical for
   write-once records) and has no `updated_at` —
-  `CVEAffectedVersion` records are replaced via delete-and-reinsert during
-  sync, never updated in place;
+  `CVEAffectedVersion` rows in an explicitly replaced scope may be realized via
+  delete-and-reinsert, never updated in place;
   `ApiKey` uses `last_used_at` and `revoked_at` as the authoritative
   timestamps for its only in-place changes, so a generic `updated_at` would
   be redundant;

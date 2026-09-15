@@ -198,8 +198,9 @@ backport verification.
   patches, affected source files (`programFiles`)
 - **Access**: Git repository at
   `https://git.kernel.org/pub/scm/linux/security/vulns.git/`. Each CVE is
-  a JSON file in CVE Record 5.1.1 format (published) or 5.0 format
-  (rejected), organized by year. No authentication required. Sync via
+  a CVE Record Format 5.x JSON file organized by publication state and year;
+  directory state does not imply one fixed schema minor version. No
+  authentication required. Sync via
   bare clone + fetch (plain bare clone; `git.kernel.org` does not
   support partial clone, but all fetchers use plain bare clones
   regardless)

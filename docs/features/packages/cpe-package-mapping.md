@@ -447,8 +447,8 @@ unexpected loader exceptions unchanged.
 | Consumer | Where | How |
 |----------|-------|-----|
 | CVE ingestion pipeline — NVD CPE (Phase 2) | `cve_service` | For each CPE entry selected as a package candidate by the NVD ingestion contract, call `resolve_cpe_packages(cpe_criteria)` and collect all returned package names into a single set |
-| CVE ingestion pipeline — affected[] CPE (Phase 2) | `cve_service` | For each `AffectedVersionEntry` with a non-null `cpe` field (from `CVEIngestPayload.affected_versions`), call `resolve_cpe_packages(cpe)` and add results to the same package set |
-| CVE ingestion pipeline — affected[] vendor:product (Phase 2) | `cve_service` | For each `AffectedVersionEntry` with non-null `vendor` and `product` (from `CVEIngestPayload.affected_versions`), call `resolve_vendor_product(vendor, product)` and add results to the same package set |
+| CVE ingestion pipeline — affected[] CPE (Phase 2) | `cve_service` | For each `AffectedVersionEntry` with a non-null `cpe` field in a `replace` operation from `CVEIngestPayload.affected_version_operations`, call `resolve_cpe_packages(cpe)` and add results to the same package set. Empty replacements and removals contribute no candidates |
+| CVE ingestion pipeline — affected[] vendor:product (Phase 2) | `cve_service` | For each `AffectedVersionEntry` with non-null `vendor` and `product` in a `replace` operation from `CVEIngestPayload.affected_version_operations`, call `resolve_vendor_product(vendor, product)` and add results to the same package set. Empty replacements and removals contribute no candidates |
 | CVE ingestion pipeline — resolved_packages (Phase 2) | `cve_service` | Pre-resolved package names from the payload (`CVEIngestPayload.resolved_packages`) are added directly to the package set without mapping resolution |
 | `fetch_single_cve` (on-demand) | `cve_service` | Same as above (all applicable sources from the payload), triggered by on-demand CVE fetch |
 
