@@ -325,6 +325,14 @@ does not delete external assessments: if a source stops publishing an
 assessment, Sentinel retains the last persisted value until an explicit
 source-owned withdrawal contract exists.
 
+For one canonical ingestion payload, the conflict key is `(cve_id,
+provider_name, derived cvss_version)` after provider normalization and vector
+canonicalization. Identical same-key entries collapse. If same-key entries
+derive different canonical vectors, the canonical payload is contradictory and
+`upsert_cve()` rejects it before any persistent write; payload order does not
+select a winner. A source parser may retain an explicitly documented
+source-format rule before constructing that canonical payload.
+
 ## Assessment Persistence and Ticket Status
 
 An effective assessment create, update, or delete first maintains CVE-owned
@@ -698,6 +706,9 @@ testing strategy.
 - Manual SUSE create, update, unchanged, and delete, plus external create,
   update, unchanged, retained-on-source-absence behavior, and rejection of
   every reserved-name variant from system ingestion.
+- Canonical ingestion duplicates with one conflict key: identical normalized
+  vectors collapse, conflicting vectors reject the payload before writes, and
+  a source-specific pre-payload deduplication rule remains independently tested.
 - Ticketless CVEs and associated Tickets in each of `New`, `Analysis`,
   `Analyzed`, `Resolved`, `Ignored`, and `Duplicated`, covering the complete
   persistence matrix, immediate propagation including both caller categories on

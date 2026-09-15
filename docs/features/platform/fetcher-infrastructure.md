@@ -328,7 +328,7 @@ optional `fetch_single()` (override required when
 ```python
 class SyncNvdCves(BaseCVEFetcher):
     name = "sync_nvd_cves"                 # registry key (BaseFetcher contract)
-    cve_source_type = "nvd"                # CVESourceType identifier (BaseCVEFetcher contract)
+    cve_source_type = CVESourceType.NVD     # Enum member (BaseCVEFetcher contract)
     description = "Sync CVEs from NVD REST API v2"
     default_schedule = "0 */6 * * *"
     source_reference_url_pattern = "https://nvd.nist.gov/vuln/detail/{cve_id}"
@@ -345,7 +345,7 @@ class SyncNvdCves(BaseCVEFetcher):
 ```python
 class SyncRedhatCves(BaseCVEFetcher):
     name = "sync_redhat_cves"              # registry key
-    cve_source_type = "redhat"             # CVESourceType identifier
+    cve_source_type = CVESourceType.REDHAT  # Enum member
     description = "Sync CVE data from Red Hat Security API"
     default_schedule = "0 3 * * *"
 
@@ -1158,7 +1158,7 @@ the invalid field.
     is added to `FETCHER_REGISTRY`. If any validation fails, the
     registry is not modified — no partial registration can occur.
 
-CVE-specific validation (`cve_source_type` uniqueness, Enum membership)
+CVE-specific validation (`cve_source_type` uniqueness, Enum member type)
 is handled by `BaseCVEFetcher.__init_subclass__` — see
 `docs/features/platform/cve-fetcher-infrastructure.md` (BaseCVEFetcher
 Class).

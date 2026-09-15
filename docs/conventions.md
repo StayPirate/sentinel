@@ -623,7 +623,8 @@ class CVESourceType(StrEnum):
     ...
 
 source: Mapped[str] = mapped_column(String(100), nullable=False)
-# Validation in service layer: CVESourceType(value) raises ValueError if invalid
+# Internal callers pass CVESourceType; persistence stores source.value.
+# Reading an untyped boundary value validates with CVESourceType(value).
 ```
 
 See `docs/data-model.md` (Notes) for the classification of every enum

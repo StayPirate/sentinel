@@ -998,7 +998,7 @@ These are the extension points for concrete subclasses:
 
 | Method | Required? | Default | Purpose |
 |--------|-----------|---------|---------|
-| `process_item(path, content, session)` | **Yes** (abstract) | — | Process a single file from the delta. Calls `self.record_created()` or `self.record_updated()` on success |
+| `process_item(path, content, session)` | **Yes** (abstract) | — | Process a single file from the delta. For CVE subclasses, maps `UpsertResult.action`: calls `record_created()` for `created`, `record_updated()` for `updated`, and neither for `unchanged` |
 | `filter_delta_files(file_list)` | No | Return all | Filter raw delta output to relevant files (e.g., only `.json` in specific dirs) |
 | `deduplicate_items(file_list)` | No | No-op | Deduplicate items before processing (e.g., same CVE-ID in both `published/` and `rejected/`) |
 
@@ -1018,14 +1018,15 @@ The core extension point. Receives:
 
 The hook is responsible for:
 1. Parsing the content and applying business logic (upsert, etc.)
-2. Calling `self.record_created()` or `self.record_updated()` to report
-   the outcome (same pattern as non-git `BaseFetcher` subclasses)
+2. Reporting the outcome. CVE subclasses map `UpsertResult.action` exactly:
+   `created` calls `self.record_created()`, `updated` calls
+   `self.record_updated()`, and `unchanged` calls neither
 3. Returning `PostIngestTasks` if post-ingest dispatch is needed, or
    `None` in two cases: (a) the item was skipped (already up-to-date,
    no work done — no metric is recorded), or (b) the item was
-   processed but no post-ingest tasks are needed (e.g.,
-   enrichment-only upsert with no ticket or no CPE data — metric IS
-   recorded). Both `None` cases result in
+   processed but no post-ingest tasks are needed (e.g., enrichment-only upsert
+   with no package-resolution data). Its metric follows `UpsertResult.action`
+   and therefore may be absent for `unchanged`. Both `None` cases result in
    `commit_and_dispatch(session, None)` — the template commits without
    dispatching Phase 2 tasks
 
