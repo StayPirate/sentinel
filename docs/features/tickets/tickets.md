@@ -971,12 +971,16 @@ confidential tickets are excluded for unauthorized callers. See
 `docs/features/packages/package-model.md` (Search Packages Across
 Tickets).
 
-**Maintainer Dashboard (`GET /api/v1/my/packages/*`)**:
-The maintainer dashboard service applies canonical Ticket visibility to the
-same query results used for rows and totals. For
-`GET /api/v1/my/packages/ticket/{ticket_id}`, missing and inaccessible Tickets
-return `404 TICKET_NOT_FOUND` before Ticket status, maintainer membership,
-`error_state`, or `duplicate_of_ticket_id` is projected.
+**Maintainer Workbench (`GET /api/v1/my/packages/*`)**:
+The maintainer workbench service applies canonical Ticket visibility to the
+same query results used for rows and totals. Ticket status determines workbench
+participation only through the classification contract in
+`docs/features/packages/maintainer.md`; this specification does not define a
+second workbench predicate. For
+`GET /api/v1/my/packages/tickets/{ticket_id}`, malformed, UUID-shaped, missing,
+and inaccessible Tickets return `404 TICKET_NOT_FOUND` before Ticket status,
+maintainer ownership, or package data is projected. An accessible Ticket with
+no qualifying caller work returns the normal three empty collections.
 
 **CVE Detail (`GET /api/v1/cves/{cve_id}/...`)**:
 All endpoints under `/api/v1/cves/{cve_id}/` use the service-delegated CVE
@@ -1940,3 +1944,5 @@ table:
 - `docs/features/identity/rbac.md` — Endpoint Permission Map
 - `docs/features/packages/package-maintainership.md` — package-wide maintainer
   acquisition and dynamic visibility
+- `docs/features/packages/maintainer.md` — authoritative maintainer workbench
+  classification and per-Ticket response

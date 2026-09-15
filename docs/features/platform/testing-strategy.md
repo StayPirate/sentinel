@@ -1728,9 +1728,10 @@ visibility predicate.
   body. Ticket-scoped paths use `TICKET_NOT_FOUND`; CVE-scoped paths use
   `CVE_NOT_FOUND` and never substitute the other resource's code.
 - The per-Ticket maintainer workbench returns 404 before inspecting or
-  projecting Ticket status, `duplicate_of_ticket_id`, or `no_packages`; missing and
-  inaccessible Tickets therefore cannot be distinguished through an error
-  state.
+  projecting Ticket status, maintainer ownership, or package data. Missing and
+  inaccessible Tickets are therefore indistinguishable, while an accessible
+  Ticket with no qualifying caller work returns the normal three empty
+  collections rather than an alternate state.
 - Tests preserve only the documented identifier-only exceptions: a visible
   Duplicated Ticket may retain `duplicate_of_ticket_id = SNTL-{n}` when its target later
   becomes inaccessible; `TICKET_CVE_CONFLICT` may include
@@ -1884,6 +1885,124 @@ visibility predicate.
   restores usability only for a still-present grant; a grant deleted by
   declassification remains absent. Deactivation-impact API and CLI tests assert
   no grant or maintainership count is present because those rows are retained.
+
+### Maintainer Workbench
+
+When the maintainer workbench service or API is implemented or changed, unit,
+integration, and e2e coverage MUST apply the complete matrix below. The shared
+Ticket Accessibility matrix remains authoritative for the visibility predicate;
+these cases add workbench ownership, classification, projection, and response
+requirements without defining another visibility rule.
+
+**Authentication, visibility, and ownership:**
+
+- All four endpoints reject missing or invalid credentials with the global
+  `401 AUTH_NOT_AUTHENTICATED`. An authenticated user needs no role or
+  capability.
+- Exercise every canonical Ticket visibility branch: non-confidential, effective
+  scope `all`, explicit grant, and included-package maintainership. Also cover
+  anonymous denial, selected-invalid-credential denial, and a confidential
+  Ticket with no qualifying branch.
+- Prove visibility and workbench ownership independently. Scope `all` or an
+  explicit grant can make a Ticket visible but cannot return a package without
+  the caller's persisted `TicketPackageMaintainer` association. Conversely, an
+  association through an included package supplies both its canonical
+  visibility branch and workbench ownership, but creates no capability.
+- Cover an included caller-maintained package, a directly excluded package, a
+  retained association after package exclusion, restoration of that package,
+  and another included maintained package preserving visibility. Track or
+  Product exclusion affects actionability but does not delete or narrow the
+  package-wide association.
+- The per-Ticket endpoint is parameterized over malformed input, lowercase or
+  padded SNTL forms, a Ticket UUID, a well-formed missing Ticket, and an
+  inaccessible Ticket. Every case returns the same complete `404
+  TICKET_NOT_FOUND` body before Ticket status, package ownership, or workbench
+  data is projected.
+
+**Classification and dimension boundaries:**
+
+- Cover every Ticket status: `New`, `Analysis`, `Analyzed`, `Resolved`,
+  `Ignored`, and `Duplicated`. `Analysis` and `Analyzed` can contribute pending,
+  in-progress, and completed rows; `Resolved` can contribute only completed;
+  all other combinations are excluded.
+- Pending requires an actionable exact track with affectedness `affected`,
+  delivery `pending`, and at least one actionable Product whose persisted
+  `eligible` value is true.
+- In progress requires an actionable exact track with affectedness `affected`
+  or `fixed`, delivery `in_progress`, and at least one actionable Product whose
+  persisted `eligible` value is true.
+- Completed requires an actionable exact track with delivery `released` and
+  does not require an eligible Product. Exercise all affectedness values to
+  prove completed classification does not silently replace its documented
+  predicates with a second gate.
+- Parameterize package, track, and Product direct exclusion; ancestor-effective
+  exclusion; no Product; all Products excluded or EOL; mixed actionable and
+  non-actionable Products; all actionable Products ineligible; and at least one
+  actionable eligible Product. Reuse one controlled UTC `evaluation_date` for
+  rows and totals, including a request crossing midnight UTC.
+- Exercise `ibs` and `git` tracks with the same persisted fact combinations.
+  `workflow_type` is projected accurately, and Git classification performs no
+  IBS correlation and invents no submission or delivery fact.
+- Prove classification is a read-only presentation gate: it changes no
+  affectedness, eligibility, actionability input, delivery value, Ticket status,
+  or package marker.
+
+**Filtering, ordering, pagination, and fan-out:**
+
+- `package` is a case-sensitive exact match. Cover exact success, case variant,
+  prefix, substring, alias-like, leading/trailing whitespace, and another
+  declared filter composing with AND semantics.
+- Exercise both `severity` and `package` sorting in both directions. Severity
+  follows the semantic rank, unresolved null severity remains last, and package
+  names use Unicode code-point ordering independent of database collation.
+- Create equal primary sort keys and prove the internal
+  `TicketPackageTrack.id` same-direction tie-breaker yields stable pages with no
+  duplicate or omitted row. Cover minimum and maximum `per_page`, invalid
+  pagination and sort values, an empty candidate set, and a page beyond the last
+  with the correct total.
+- Multiple actionable eligible Products below one track, multiple unrelated
+  Product rows, duplicate join paths, and multiple maintainer associations must
+  still produce one row per exact `TicketPackageTrack` and an uninflated total.
+  Multiple exact tracks below one package remain distinct rows.
+- Items, totals, and pages derive from one visible, caller-owned,
+  classification-qualified PostgreSQL candidate set. Query-count assertions
+  remain bounded independently of page size and result cardinality and fail a
+  Python post-filter or per-item/Product N+1 implementation.
+
+**Per-Ticket response and concurrency:**
+
+- The successful response always has exactly `pending`, `in_progress`, and
+  `completed` arrays under `data`, with no `meta`, `error_state`, or
+  `no_packages`. An accessible Ticket with no caller association or no
+  qualifying track returns all three arrays empty for every non-participating
+  Ticket-status and package-policy cause.
+- Every array uses fixed `package_name`, `reference`, and internal track-ID
+  ascending ordering. One track appears in at most one array. The response is
+  assembled from one coherent PostgreSQL observation and is not composed from
+  three independently drifting endpoint calls.
+- Independent-session races deterministically change confidentiality, revoke
+  the final explicit grant, exclude the final package supplying a visibility or
+  ownership path, restore a qualifying package, or change the final qualifying
+  Product's actionability/eligibility at the protected selection boundary. The
+  result may be wholly before or wholly after the committed change as allowed by
+  its database view, but rows, totals, and per-Ticket arrays cannot mix
+  incompatible observations or disclose post-loss data.
+
+**Projection, privacy, and side effects:**
+
+- Global and per-Ticket items contain exactly `package_name`, canonical
+  `ticket_id`, nullable `cve_id`, nullable resolved `severity`,
+  `workflow_type`, `reference`, affectedness `status`, and `delivery_status`,
+  all using lowercase API enum values.
+- Generated OpenAPI and response tests prove absence of Ticket UUIDs,
+  maintainer IDs, usernames, emails, groups, association counts, SMELT payload
+  or provenance, `submission_chain`, effective SR/proving RR fields,
+  `analyzed_at`, `first_sr_created_at`, completion timestamps, waiting
+  durations, and temporal lookback or sort parameters.
+- Service tests prove all four functions acquire no mutation lock, write no
+  database row, create no `TicketAuditEvent`, perform no commit or rollback,
+  enqueue no task, and perform no external or Redis I/O. Database exceptions
+  propagate; empty global and accessible per-Ticket results are normal outcomes.
 
 ### Ticket References
 

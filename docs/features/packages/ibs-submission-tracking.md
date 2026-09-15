@@ -625,6 +625,12 @@ action into the requested Ticket never duplicate that action. Persisted history
 is returned regardless of current Ticket status, track affectedness, exclusion,
 or actionability.
 
+These endpoints are also the read surface for correlated IBS evidence that a
+consumer may inspect alongside a maintainer workbench row. They expose distinct
+current request actions and their exact states; the workbench does not select or
+label one effective SR, proving RR, or authoritative historical submission
+chain from them.
+
 Both endpoints inherit the ticket accessibility check. Anonymous callers can
 read non-confidential Tickets; confidential Ticket existence and data remain
 hidden according to the shared visibility contract.
@@ -906,6 +912,8 @@ status, metrics, and sanitized logs, never by another delivery state.
   applicability, active-Ticket scope, and Ticket convergence ordering.
 - `docs/features/packages/package-service.md` - centralized delivery mutation
   and Ticket locking.
+- `docs/features/packages/maintainer.md` - current-state workbench projection;
+  correlated request actions remain a separate evidence surface.
 - `docs/features/packages/ibs-track-release-detection.md` - independent
   affectedness release detection.
 - `docs/features/packages/ibs-product-release-detection.md` - independent

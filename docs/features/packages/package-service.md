@@ -1406,6 +1406,118 @@ item collection with the correct total. Database exceptions propagate
 unchanged. The operation creates no audit event and does not commit or roll
 back.
 
+### Maintainer workbench queries
+
+The four maintainer workbench operations are Category B read-only operations.
+They own all model-aware selection, classification, filtering, counting,
+ordering, and projection defined by
+`docs/features/packages/maintainer.md`. API handlers supply typed values and do
+not build or pass ORM expressions.
+
+The three global-list operations have this common semantic signature:
+
+```python
+async def list_maintainer_<classification>_work(
+    db: AsyncSession,
+    caller_user_id: UUID,
+    effective_scope: Literal["all", "non_confidential"],
+    evaluation_date: date,
+    package: str | None,
+    sort_by: Literal["severity", "package"],
+    sort_order: Literal["asc", "desc"],
+    page: int,
+    per_page: int,
+) -> MaintainerWorkPage:
+```
+
+The result name above describes a semantic typed output and does not require
+that concrete class name. The implementation may use the module-level typed
+caller boundary instead of separate user and scope parameters, provided both
+values remain explicit and request-resolved. A
+`MaintainerWorkPage` contains workbench item projections plus coherent `total`,
+`page`, and `per_page` values and is independent of Pydantic schemas.
+
+The concrete operations and their classification are:
+
+| Operation | Classification contract |
+|---|---|
+| `list_maintainer_pending_work()` | [Pending](maintainer.md#pending) |
+| `list_maintainer_in_progress_work()` | [In progress](maintainer.md#in-progress) |
+| `list_maintainer_completed_work()` | [Completed](maintainer.md#completed) |
+
+Each global operation:
+
+1. constructs one candidate set whose exact track belongs to a Ticket visible
+   under the canonical predicate and whose included parent package has a
+   `TicketPackageMaintainer` association for `caller_user_id`;
+2. applies the operation's exact Ticket-status, track-actionability,
+   affectedness, delivery, and actionable-eligible-Product conditions from
+   `maintainer.md`, all with the supplied UTC `evaluation_date`;
+3. evaluates Product qualification with `EXISTS` or an equivalent database
+   existence mechanism so multiple qualifying Products cannot fan out one
+   `TicketPackageTrack` into multiple rows;
+4. applies optional `package` as a case-sensitive exact package-name match and
+   composes it with all mandatory predicates using AND;
+5. applies `severity` semantic ordering or Unicode code-point `package` ordering
+   in the requested direction, with `TicketPackageTrack.id` as the final
+   same-direction internal tie-breaker;
+6. computes `total`, applies page slicing, and projects exactly one semantic
+   workbench item per qualifying track from that same candidate set and
+   coherent PostgreSQL observation; and
+7. returns an empty page with `total = 0` when no candidate qualifies, or an
+   empty page with the correct nonzero total when `page` is beyond the last.
+
+Visibility, ownership, Product existence, and classification are database
+constraints applied before counting and pagination. The service does not load a
+broad page and post-filter it in Python. Query count remains bounded
+independently of result cardinality and page size; per-item or per-Product N+1
+queries are forbidden. The contract does not require one SQL statement or
+prescribe a specific SQL aggregation form.
+
+The per-Ticket operation has this semantic signature:
+
+```python
+async def get_maintainer_ticket_work(
+    db: AsyncSession,
+    ticket_id: str,
+    caller_user_id: UUID,
+    effective_scope: Literal["all", "non_confidential"],
+    evaluation_date: date,
+) -> MaintainerTicketWork:
+```
+
+The same typed-boundary flexibility applies. `MaintainerTicketWork` contains
+the three semantic item collections `pending`, `in_progress`, and `completed`;
+it is not a Pydantic response schema.
+
+`get_maintainer_ticket_work()`:
+
+1. parses the canonical `SNTL-{n}` locator and selects the Ticket through the
+   canonical visibility predicate as part of the coherent PostgreSQL view used
+   for all three result collections. A malformed locator, Ticket UUID, missing
+   Ticket, or inaccessible Ticket raises `TicketNotFoundError` before status,
+   ownership, or package projection;
+2. within that view, constructs the caller-owned exact-track set and applies all
+   three classifications from `maintainer.md` with one `evaluation_date`;
+3. uses database existence semantics for Product eligibility and returns at
+   most one item per exact track in exactly one collection;
+4. orders each collection by ascending Unicode code point of `package_name`,
+   then `reference`, then internal `TicketPackageTrack.id`; and
+5. returns all three collections empty when the accessible Ticket has no
+   qualifying caller work, regardless of whether the cause is Ticket status,
+   package ownership, actionability, affectedness, eligibility, or delivery.
+
+The complete aggregate is bounded by one Ticket and is not paginated. The
+Ticket, accessibility, ownership, classification inputs, and three projections
+derive from one coherent observation; independently observed queries must not
+assemble a mixed result across a concurrent visibility or package change.
+
+All four functions acquire no mutation lock, create no audit event, perform no
+external or Redis I/O, enqueue no task, and do not commit or roll back. Database
+exceptions propagate unchanged. Only `get_maintainer_ticket_work()` raises the
+shared `TicketNotFoundError`; an empty global workbench is an ordinary
+successful result.
+
 ## Exclusion and Actionability Invariant
 
 Every package-tree `deleted_at` mutation in this module is a direct authorized-user action
@@ -1703,6 +1815,18 @@ transitions. The test must cover:
   retry the complete workflow at 5/10/20 seconds; log terminal outcomes; accept
   concurrent duplicate workflows; and create no progress row, `FetcherRun`,
   Redis guard, restoration, or workflow audit event
+- **Maintainer workbench queries**: verify each exact classification and Ticket
+  status boundary from `maintainer.md`; canonical visibility and included-
+  package caller ownership are both required; actionable eligible Product
+  checks use existence semantics without Product or maintainer fan-out; one
+  exact track yields one row; filtering is exact and case-sensitive; semantic
+  severity and package ordering plus internal track-ID tie-breaking produce
+  stable pages and coherent totals; a beyond-last page is empty; the per-Ticket
+  aggregate has fixed collection ordering and returns three empty collections
+  for accessible no-work Tickets; malformed, UUID-shaped, missing, and
+  inaccessible locators raise `TicketNotFoundError`; query-count assertions
+  reject N+1 work; and every query creates no lock, write, audit event, commit,
+  rollback, external I/O, Redis I/O, or task dispatch
 
 ## Cross-references
 
@@ -1731,6 +1855,8 @@ transitions. The test must cover:
   IBS event consumption
 - `docs/features/packages/package-maintainership.md` — SMELT maintainership
   acquisition, additive associations, privacy, and visibility
+- `docs/features/packages/maintainer.md` — maintainer workbench classification,
+  response, filtering, ordering, and per-Ticket contracts
 - `docs/conventions.md` — Transaction and Locking (pessimistic locking,
   I/O-then-Lock corollary)
 - `docs/api-spec.md` — general API conventions

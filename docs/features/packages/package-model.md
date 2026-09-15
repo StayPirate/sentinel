@@ -27,7 +27,10 @@ the following exhaustive boundaries:
   actionability, and Product `released_at` as defined in `tickets.md`;
   track `delivery_status` is not a gate input;
 - presentation fields and views may project multiple persisted values,
-  including `delivery_relevant`;
+  including `delivery_relevant`; the maintainer workbench may additionally use
+  affectedness, persisted Product eligibility, actionability, and persisted
+  delivery together only for its classification presentation gate in
+  `maintainer.md`;
 - the affectedness/delivery anomaly matrix classifies combinations for
   analyst attention without changing either value; and
 - post-mutation Ticket reconciliation may observe the gate-relevant
@@ -1530,6 +1533,8 @@ The following concerns are identical regardless of `workflow_type`:
 - Maintainership acquisition - one additive user association per
   `TicketPackage` occurrence, package-wide across all its tracks. The same
   SMELT endpoint serves IBS and Git/SLFO packages without a codestream join
+- Maintainer workbench classification - both workflows use the same persisted
+  affectedness, eligibility, actionability, and delivery presentation gate
 
 The following concerns are workflow-specific (service layer only):
 
@@ -1545,6 +1550,10 @@ The following concerns are workflow-specific (service layer only):
 Maintainership is not represented as workflow-specific because it is
 package-wide within a `TicketPackage`; its discovery and identity rules are in
 `docs/features/packages/package-maintainership.md`.
+
+The workbench's Git boundary, including its prohibition against inventing a
+submission or delivery mechanism, is owned by
+`docs/features/packages/maintainer.md`.
 
 ## IBS Workflow Applicability and Convergence
 
@@ -2528,5 +2537,7 @@ Product sync tasks (`sync_smelt_products`, `sync_aimaas_lifecycle`,
   Reactive Support handling
 - `docs/features/packages/package-maintainership.md` — package-wide maintainer
   acquisition, persistence, privacy, and authorization
+- `docs/features/packages/maintainer.md` — workflow-agnostic maintainer
+  workbench presentation gate
 - `docs/features/platform/system-settings.md` — default CVSS version configuration
 - `docs/data-model.md` — full database schema
