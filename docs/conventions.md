@@ -125,8 +125,9 @@ Rules:
 - Do not use "cascade" for propagation/side-effect sequences
 - The term "chain" in this convention refers exclusively to mutation
   propagation. Pre-existing domain-specific uses of "chain" in other
-   contexts are unrelated and unaffected: "submission chain"
-   (IBS SR/incident/RR pipeline in `maintainer.md`), "manager chain"
+  contexts are unrelated and unaffected: "submission chain"
+   (IBS SR/incident/RR pipeline in
+   `docs/features/packages/ibs-submission-tracking.md`), "manager chain"
    (reporting hierarchy in `docs/data-model.md`), "certificate chain"
   (TLS)
 

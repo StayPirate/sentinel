@@ -136,7 +136,7 @@ Any logged-in user, regardless of role. Includes all Public access plus:
 - View own profile (`/api/v1/users/me`)
 - Manage own API keys (list, create, revoke)
 - View own identity audit log (`/api/v1/users/me/audit-log`)
-- View maintainer dashboard (own pending, in-progress, and completed packages)
+- View maintainer workbench (own pending, in-progress, and completed packages)
 - View ticket audit logs
 
 ## Permission Matrix
@@ -200,7 +200,7 @@ Any logged-in user, regardless of role. Includes all Public access plus:
 | View own profile | Authenticated |
 | Manage own API keys | Authenticated |
 | View own identity audit log | Authenticated |
-| View maintainer dashboard | Authenticated |
+| View maintainer workbench | Authenticated |
 | View ticket audit log | Authenticated |
 
 ### Public Operations
@@ -546,7 +546,7 @@ here with the required authorization level and a link to the owning spec.
 | GET | `/api/v1/my/packages/pending` | Authenticated | [maintainer](../packages/maintainer.md#pending-packages) |
 | GET | `/api/v1/my/packages/in-progress` | Authenticated | [maintainer](../packages/maintainer.md#in-progress-packages) |
 | GET | `/api/v1/my/packages/completed` | Authenticated | [maintainer](../packages/maintainer.md#completed-packages) |
-| GET | `/api/v1/my/packages/ticket/{ticket_id}` | Authenticated | [maintainer](../packages/maintainer.md#package-details-for-ticket) |
+| GET | `/api/v1/my/packages/tickets/{ticket_id}` | Authenticated | [maintainer](../packages/maintainer.md#package-details-for-ticket) |
 
 ### Administration
 

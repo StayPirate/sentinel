@@ -351,8 +351,13 @@ historical package association.
 
 The maintainer workbench identifies the authenticated caller by
 `TicketPackageMaintainer.user_id`, not by email or group membership. One
-association selects all actionable tracks under the included package occurrence.
-The workbench's endpoint, queue, response, Ticket-status, and actionability
+association supplies ownership for all tracks under the included package
+occurrence. A workbench row additionally requires that exact track to satisfy
+the owning classification and actionability contract; an association through a
+different same-named package occurrence, an excluded package, or only a
+different Ticket never qualifies. The canonical Ticket visibility predicate is
+also applied independently to the same candidate set.
+The workbench's endpoint, query, response, Ticket-status, and actionability
 contracts remain owned by `docs/features/packages/maintainer.md`.
 
 ## Recovery and Accepted Limitations
@@ -394,7 +399,7 @@ exclusion marker, and cannot substitute for that consumer restore.
 - Invalid or partial source data fails closed for **new** access while preserving
   existing durable associations. Package-tree creation remains available.
 - PostgreSQL associations, not SMELT responses or audit events, are the source
-  of current maintainership visibility and workbench provenance.
+  of current maintainership visibility and workbench ownership.
 - Newly fetched, unpersisted SMELT maintainer data cannot authorize the same
   package-add invocation. Acquisition and all existing SMELT parsing,
   best-effort failure, and add-only semantics remain unchanged.

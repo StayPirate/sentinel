@@ -664,13 +664,16 @@ inside its service-owned list query.
 
 #### Maintainer Ticket Accessibility Check
 
-`GET /api/v1/my/packages/ticket/{ticket_id}` is not under the Ticket router, but
+`GET /api/v1/my/packages/tickets/{ticket_id}` is not under the Ticket router, but
 its path identifies one Ticket and therefore derives the same `404
 TICKET_NOT_FOUND` scoped response. The service selects an accessible Ticket
-before evaluating Ticket status, maintainer membership, `error_state`, or
-`duplicate_of_ticket_id`. A missing or inaccessible Ticket is
-indistinguishable; no
-status-specific or `no_packages` projection may reveal it first.
+as part of the coherent PostgreSQL view that supplies all three workbench
+collections. A malformed locator, Ticket UUID, missing Ticket, and inaccessible
+Ticket are indistinguishable. Ticket status, maintainer ownership, and package
+classification are evaluated only after accessibility succeeds. An accessible
+Ticket with no qualifying caller work returns the normal three empty
+collections; it does not return a status- or ownership-specific alternate
+shape.
 
 #### Anti-Enumeration Boundary
 
@@ -747,7 +750,7 @@ The derivation tables below are the single normative source of truth.
 |---|---|
 | `/api/v1/tickets/{ticket_id}/**` | `404 TICKET_NOT_FOUND` |
 | `/api/v1/cves/{cve_id}/**` | `404 CVE_NOT_FOUND` |
-| `/api/v1/my/packages/ticket/{ticket_id}` | `404 TICKET_NOT_FOUND` |
+| `/api/v1/my/packages/tickets/{ticket_id}` | `404 TICKET_NOT_FOUND` |
 | Mutation (POST/PATCH/DELETE) under `/api/v1/tickets/{ticket_id}/**` | + `409 TICKET_NOT_MUTABLE`, except when the owning endpoint contract declares an opt-out from `ensure_ticket_operable()` |
 | Mutation (POST/PATCH/DELETE) under `/api/v1/cves/{cve_id}/**` | + `409 TICKET_NOT_MUTABLE` (only when CVE has associated ticket) |
 | Any other path | None |

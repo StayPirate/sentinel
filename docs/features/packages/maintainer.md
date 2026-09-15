@@ -2,438 +2,327 @@
 
 ## Purpose
 
-Provide package maintainers with API access to their pending
-work, in-progress submissions, and completed releases across all packages
-they maintain. This gives maintainers immediate visibility into what needs
-fixing, what is already in the pipeline, and what has been recently
-released — without requiring them to search through individual tickets.
+Provide an authenticated package maintainer with four bounded workbench views:
+pending fixes, in-progress delivery, completed delivery, and all three
+classifications for one Ticket. The workbench is package-centric and lets a
+Vulnerability Analyst share one Ticket URL without exposing work owned by
+other maintainers.
 
-Additionally, a per-ticket endpoint allows Vulnerability Analysts to share
-a focused link with a maintainer showing exactly what needs to be done for
-a specific ticket.
+The workbench is a current-state PostgreSQL projection. It does not reconstruct
+historical workflow chronology or make audit or external request history the
+authority for current classification.
 
-## Target Audience
+## User Identification and Ownership
 
-This feature targets **package maintainers** associated with one or more
-Ticket package occurrences. It complements the
-VA-focused ticket workflow by providing a package-centric perspective on
-security update work.
+The authenticated caller is identified by `User.id`. Workbench ownership for
+one row requires that same ID to have a persisted
+`TicketPackageMaintainer.user_id` association through the row's parent
+`TicketPackage`, with `TicketPackage.deleted_at IS NULL`. Runtime email or
+group matching, newly fetched SMELT data, and audit history are not ownership
+inputs.
 
-## User Identification
+One association is package-wide and applies to every track under its included
+`TicketPackage`, regardless of `workflow_type`, reference, or which person
+performed a delivery action. Track and Product exclusion do not change the
+association, but they affect current actionability and therefore workbench
+participation. An excluded parent package does not qualify for ownership or
+visibility until restored.
 
-A user is identified as a maintainer through
-`TicketPackageMaintainer.user_id` (see
-`docs/features/packages/package-maintainership.md`). The authenticated User ID
-must match the association; runtime email or group matching is not used. If a
-user has no package association, all endpoints return empty results.
+Every workbench candidate independently satisfies both:
 
-### Package-wide visibility
+1. the canonical Ticket visibility predicate in
+   `docs/features/identity/rbac.md`; and
+2. the caller-owned included-package predicate above.
 
-One association applies to every track under its `TicketPackage`. The data is
-package-centric regardless of whether SMELT originally discovered the user
-directly or through group membership and regardless of which individual
-performed a specific action. Sentinel stores no group provenance.
+Neither predicate substitutes for the other. Maintainership grants no
+capability, and another visibility branch does not make an unmaintained package
+the caller's work. A caller with no qualifying package association receives
+empty results after any required Ticket accessibility check succeeds.
 
-## Filtering Criteria
+## Workbench Row and Privacy Contract
 
-All three sections include only actionable tracks according to
-`package-model.md` (Exclusion and Actionability), evaluated with one UTC date
-shared by the result and pagination count. A manually excluded scope or a track
-with no actionable Products does not appear in the maintainer work queue.
+One workbench item represents one exact `TicketPackageTrack`. Multiple tracks
+under one package occurrence are distinct rows. Product and maintainer joins
+must not fan out or duplicate that row. `TicketPackageTrack.id` is an internal
+ordering tie-breaker; it is not exposed as another workbench identifier.
 
-Each pending, in-progress, and completed service query combines two distinct
-predicates:
+All workbench sections use this item schema:
 
-- the canonical Ticket visibility predicate from
-  `docs/features/identity/rbac.md`, evaluated for the authenticated caller; and
-- the workbench ownership predicate requiring that same caller's
-  `TicketPackageMaintainer` association to the returned package occurrence.
+| Field | Type | Contract |
+|---|---|---|
+| `package_name` | string | Persisted `TicketPackage.package_name` |
+| `ticket_id` | string | Canonical consumer-facing Ticket identity (`SNTL-{n}`) |
+| `cve_id` | string or null | Associated CVE identifier; null for a CVE-less Ticket |
+| `severity` | string or null | Resolved Ticket severity: `critical`, `high`, `medium`, `low`, `none`, or null when unresolved |
+| `workflow_type` | string | Persisted track workflow: `ibs` or `git` |
+| `reference` | string | Persisted IBS codestream project or Git branch reference |
+| `status` | string | Persisted affectedness: `analysis`, `affected`, `not_affected`, `fixed`, or `wont_fix` |
+| `delivery_status` | string | Persisted delivery: `pending`, `in_progress`, or `released` |
 
-Neither predicate substitutes for the other. The Service layer owns their
-model-aware ORM construction; the endpoint supplies caller context and does not
-build SQL expressions. Returned items, `meta.total`, and pagination all derive
-from the same caller-visible, caller-maintained candidate set and the same
-`evaluation_date`.
-
-### Pending Fixes
-
-Codestreams where:
-
-1. The user is associated as a maintainer of the parent package occurrence
-2. The `TicketPackageTrack.status` is `AFFECTED`
-3. The parent ticket status is `Analyzed` (the VA has confirmed that
-   fixes are needed)
-4. `TicketPackageTrack.delivery_status` is `PENDING`
-
-These represent actionable work for which Sentinel has not established current
-delivery progress. `PENDING` is not proof that no SR exists or that the latest
-synchronization completed; synchronization health remains separate from the
-maintainer projection.
-
-### In Progress
-
-Codestreams where:
-
-1. The user is associated as a maintainer of the parent package occurrence
-2. `TicketPackageTrack.delivery_status` is `IN_PROGRESS`
-3. The displayed chain is projected through exact `IBSRequestActionTrack`
-   joins from authoritative request actions: a relevant SR in exact state
-   `new` or `review`, or the effective accepted SR/incident chain, with any
-   directly correlated RR action shown in its exact current state. An accepted
-   RR is not treated as completed unless the source/target provenance proof
-   established `RELEASED`
-
-### Completed
-
-Codestreams where:
-
-1. The user is associated as a maintainer of the parent package occurrence
-2. `TicketPackageTrack.delivery_status` is `RELEASED`
-3. The displayed chain contains the effective SR and the directly correlated
-   accepted `maintenance_release` action whose exact source/target provenance
-   proved release to this track
-
-These represent proven completed delivery work. A track with
-`TicketPackageTrack.status = FIXED` alone does not appear here because
-affectedness and delivery are orthogonal dimensions; an accepted RR without the
-required provenance proof is likewise insufficient.
-
-For both chain-bearing sections, the projection uses the same effective-SR and
-accepted-RR provenance rules that produced the track's delivery status. It
-joins actions to the exact track through `IBSRequestActionTrack`; request-level
-incident equality is never a substitute for that join. Where an effective
-accepted SR/incident exists, the chain uses that effective SR. Otherwise, an
-in-progress chain uses the most recent relevant `new` or `review` SR by
-`IBSRequest.upstream_created_at`, with `IBSRequestAction.id` as the deterministic
-descending tiebreaker. An RR is shown only when its action is directly
-correlated to the track and belongs to the selected SR/incident chain. A
-completed chain uses the exact accepted RR that satisfied release provenance;
-an in-progress chain uses the most recent such RR by
-`IBSRequest.upstream_created_at` and the same action-ID tiebreaker. Every
-displayed request state is the exact current `new`, `review`, `accepted`,
-`declined`, `revoked`, `superseded`, or `deleted` value from its parent
-`IBSRequest`.
-
-## Per-Ticket View
-
-The per-ticket endpoint returns all three sections (pending, in-progress,
-completed) for a specific ticket, filtered to only the packages where the
-requesting user is an associated maintainer. Packages in the ticket
-that the user does not maintain are excluded.
-
-### Evaluation Order
-
-When the per-ticket endpoint cannot return the normal three-section
-response, it returns an error state instead. Evaluation order (first match
-wins):
-
-1. Authentication completes.
-2. The service selects the Ticket through the canonical visibility predicate;
-   missing and inaccessible are indistinguishable and return 404
-   `TICKET_NOT_FOUND`.
-3. Project the accessible Ticket's status. A status other than `Analyzed`
-   returns its status-specific 200 `error_state`.
-4. Evaluate the caller's package-maintainer membership. No maintained package
-   returns 200 `no_packages`.
-5. All checks pass → 200 with normal data filtered to the caller's maintained
-   packages.
-
-The status and maintainer checks cannot run first or authorize a later
-unconstrained query. No status-specific or `no_packages` response may reveal a
-missing or inaccessible Ticket.
-
-**Error state conditions:**
-
-| Condition | HTTP | Error state type |
-|-----------|------|------------------|
-| Ticket does not exist or is inaccessible | 404 | — (standard `TICKET_NOT_FOUND` response) |
-| Ticket status is `New` or `Analysis` | 200 | `not_analyzed` |
-| Ticket status is `Resolved` | 200 | `resolved` |
-| Ticket status is `Ignored` | 200 | `ignored` |
-| Ticket status is `Duplicated` | 200 | `duplicated` (includes `duplicate_of_ticket_id`) |
-| User is not a maintainer | 200 | `no_packages` |
-
-**Duplicated link**: the `duplicate_of_ticket_id` value in the error-state
-response is the `SNTL-{n}` identifier of the target ticket (always
-non-Duplicated).
-
-## API Endpoints
-
-Every response `ticket_id` and the `{ticket_id}` in the per-Ticket path use the
-canonical `SNTL-{n}` Ticket identity from `docs/api-spec.md`. The workbench does
-not expose a parallel Ticket UUID or sequence-number field.
-
-### Pending Packages
-
-Returns pending fixes for the authenticated user.
-
-**Query parameters:**
-
-| Parameter  | Type    | Default | Description                         |
-|------------|---------|---------|-------------------------------------|
-| package    | string  | —       | Filter by package name              |
-| page       | integer | 1       | Page number                         |
-| per_page   | integer | 20      | Items per page                      |
-| sort_by    | string  | severity| Sort field: severity (semantic ordering, see Sorting), waiting |
-| sort_order | string  | desc    | Sort direction: asc, desc           |
-
-**Response**: paginated list of pending fix items using the standard
-`{"data": [...], "meta": {"total", "page", "per_page"}}` envelope.
-
-**Response item schema:**
+Example:
 
 ```json
 {
-  "package_name": "kernel-default",
+  "package_name": "fictional-kernel",
   "ticket_id": "SNTL-42",
   "cve_id": "CVE-2026-1234",
   "severity": "high",
-  "reference": "SLE-15-SP6",
-  "analyzed_at": "2026-04-15T10:30:00Z"
+  "workflow_type": "ibs",
+  "reference": "SUSE:SLE-15-SP6:Update",
+  "status": "affected",
+  "delivery_status": "pending"
 }
 ```
 
-| Field | Type | Description |
-|-------|------|-------------|
-| package_name | string | Source package name |
-| ticket_id | string | Canonical Ticket identity (`SNTL-{n}`) |
-| cve_id | string \| null | CVE identifier (null if ticket has no CVE) |
-| severity | string \| null | Resolved severity: critical, high, medium, low, none (null if unresolved) |
-| reference | string | Target codestream name |
-| analyzed_at | datetime | When the ticket entered `Analyzed` status (consumers compute "Waiting" from this) |
+The response does not expose maintainer identity, username, email, group,
+association count, source payload, or SMELT provenance. It also does not expose
+or derive a submission chain, an effective SR, a proving RR, `analyzed_at`,
+`first_sr_created_at`, an authoritative completion timestamp, waiting duration,
+or any chronology synthesized from generic row timestamps or audit history.
+Correlated IBS request actions and their exact current states remain available
+through the Ticket
+[submission-request](ibs-submission-tracking.md#list-submission-requests) and
+[release-request](ibs-submission-tracking.md#list-release-requests) endpoints;
+those actions are evidence associated with the track, not a uniquely
+reconstructible historical chain for this projection.
+
+## Classification
+
+All classifications use one UTC `evaluation_date` for the complete result and
+apply the canonical actionability predicates in `package-model.md`. Combining
+affectedness, eligibility, actionability, and delivery here is an allowed
+presentation gate only. It does not derive or mutate one package dimension from
+another.
+
+### Pending
+
+A track is pending exactly when all of these conditions hold:
+
+1. the parent Ticket status is `Analysis` or `Analyzed`;
+2. the exact track is actionable;
+3. `TicketPackageTrack.status = AFFECTED`;
+4. `TicketPackageTrack.delivery_status = PENDING`; and
+5. at least one Product below the exact track is actionable and has persisted
+   `eligible = true`.
+
+`PENDING` means relevant current delivery progress has not been established. It
+does not prove that no submission exists or that synchronization succeeded.
+
+### In Progress
+
+A track is in progress exactly when all of these conditions hold:
+
+1. the parent Ticket status is `Analysis` or `Analyzed`;
+2. the exact track is actionable;
+3. `TicketPackageTrack.status` is `AFFECTED` or `FIXED`;
+4. `TicketPackageTrack.delivery_status = IN_PROGRESS`; and
+5. at least one Product below the exact track is actionable and has persisted
+   `eligible = true`.
+
+### Completed
+
+A track is completed exactly when all of these conditions hold:
+
+1. the parent Ticket status is `Analysis`, `Analyzed`, or `Resolved`;
+2. the exact track is actionable; and
+3. `TicketPackageTrack.delivery_status = RELEASED`.
+
+Completed classification does not require an eligible Product. The persisted
+irreversible delivery fact remains useful completion history even when current
+eligibility no longer requires work.
+
+### Ticket Status and Workflow Boundaries
+
+`Analysis` participates because one track can have a decided affectedness while
+another track remains under analysis. `New` is excluded because no track-level
+analysis decision is admitted to active workbench presentation. `Ignored` and
+`Duplicated` are excluded because they are isolated in the manual zone.
+`Resolved` contributes only completed rows; pending and in-progress rows require
+an active gate-zone Ticket.
+
+The classification is workflow-agnostic and applies equally to persisted `ibs`
+and `git` tracks. The persisted `workflow_type` is authoritative. The workbench
+does not send a Git reference to IBS, correlate it to an IBS request, create a
+Git delivery fact, or define Git submission and release mechanisms. A Git row
+is classified only from the package facts already persisted by their owning
+workflows.
+
+## Shared Global-List Query Contract
+
+The pending, in-progress, and completed endpoints share these query parameters:
+
+| Parameter | Type | Default | Contract |
+|---|---|---|---|
+| `package` | string | — | Case-sensitive exact match against `TicketPackage.package_name`; no trimming, aliasing, substring matching, or case normalization; max 500 characters |
+| `page` | integer | 1 | Standard page number, minimum 1 |
+| `per_page` | integer | 20 | Standard page size, minimum 1 and maximum 100 |
+| `sort_by` | string | `severity` | `severity` (semantic ordering; see `docs/api-spec.md`, Sorting) or `package` |
+| `sort_order` | string | `desc` | `asc` or `desc` |
+
+Different supplied filters compose with AND semantics. Invalid pagination or
+sort values return the global `422 VALIDATION_ERROR`. A page beyond the last
+returns an empty `data` array with the correct `meta.total`.
+
+`severity` follows `docs/api-spec.md` (Semantic Sort Fields and Nullable Sort
+Field Ordering). `package` orders `package_name` by Unicode code point,
+independent of database collation. The internal deterministic pagination
+tie-breaker required by `docs/api-spec.md` (Deterministic Pagination Ordering)
+is `TicketPackageTrack.id`. The lists expose no temporal filter or sort: `days`,
+`waiting`, `since`, and `released` are not declared query parameters.
+
+Each global list returns the standard paginated envelope:
+
+```json
+{
+  "data": [],
+  "meta": {
+    "total": 0,
+    "page": 1,
+    "per_page": 20
+  }
+}
+```
+
+Rows, `meta.total`, ordering, and page slicing derive from the same
+caller-visible, caller-owned candidate set and the same `evaluation_date`.
+Visibility and Product-eligibility checks occur in PostgreSQL before counting
+and pagination; no Python post-filter may remove rows from a broad page.
+
+## API Endpoints
+
+All four endpoints use mandatory authentication, receive the authenticated User
+ID and request-resolved effective scope, capture one UTC `evaluation_date`, and
+delegate model-aware query construction to `package_service`. Handlers do not
+construct ORM predicates or perform response fan-out queries.
+
+### Pending Packages
+
+```http
+GET /api/v1/my/packages/pending
+```
+
+**`Access: Authenticated`**
+
+Returns tracks satisfying [Pending](#pending). It accepts the shared global-list
+query parameters and returns workbench items in the paginated envelope.
+
+Delegates to `package_service.list_maintainer_pending_work()`.
 
 ### In-Progress Packages
 
-Returns in-progress submissions for the authenticated user.
-
-**Query parameters:**
-
-| Parameter  | Type    | Default | Description                         |
-|------------|---------|---------|-------------------------------------|
-| package    | string  | —       | Filter by package name              |
-| page       | integer | 1       | Page number                         |
-| per_page   | integer | 20      | Items per page                      |
-| sort_by    | string  | since   | Sort field: since, package          |
-| sort_order | string  | desc    | Sort direction: asc, desc           |
-
-**Response**: paginated list of in-progress items with submission chain
-details, using the standard `{"data": [...], "meta": {"total", "page", "per_page"}}` envelope.
-
-**Response item schema:**
-
-```json
-{
-  "package_name": "kernel-default",
-  "ticket_id": "SNTL-42",
-  "cve_id": "CVE-2026-1234",
-  "reference": "SLE-15-SP6",
-  "submission_chain": {
-    "sr": {"number": 12345, "state": "accepted"},
-    "incident": {"number": 67890},
-    "rr": {"number": 11111, "state": "review"}
-  },
-  "first_sr_created_at": "2026-04-20T08:00:00Z"
-}
+```http
+GET /api/v1/my/packages/in-progress
 ```
 
-| Field | Type | Description |
-|-------|------|-------------|
-| package_name | string | Source package name |
-| ticket_id | string | Canonical Ticket identity (`SNTL-{n}`) |
-| cve_id | string \| null | CVE identifier |
-| reference | string | Target codestream name |
-| submission_chain | object | Authoritative in-progress action chain for this codestream, projected through exact action-track joins |
-| submission_chain.sr | object | Relevant or effective maintenance-incident request: `number` (int), exact current `state` (string) |
-| submission_chain.incident | object \| null | Maintenance incident: `number` (int) |
-| submission_chain.rr | object \| null | Directly correlated maintenance-release request, if present: `number` (int), exact current `state` (string). Acceptance alone does not imply proven release |
-| first_sr_created_at | datetime | Earliest `upstream_created_at` among maintenance-incident actions directly correlated to the track (consumers compute "Since") |
+**`Access: Authenticated`**
+
+Returns tracks satisfying [In Progress](#in-progress). It accepts the shared
+global-list query parameters and returns workbench items in the paginated
+envelope.
+
+Delegates to `package_service.list_maintainer_in_progress_work()`.
 
 ### Completed Packages
 
-Returns completed releases for the authenticated user.
-
-**Query parameters:**
-
-| Parameter  | Type    | Default  | Description                        |
-|------------|---------|----------|------------------------------------|
-| package    | string  | —        | Filter by package name             |
-| days       | integer | 30       | Number of days to look back        |
-| page       | integer | 1        | Page number                        |
-| per_page   | integer | 20       | Items per page                     |
-| sort_by    | string  | released | Sort field: released, package      |
-| sort_order | string  | desc     | Sort direction: asc, desc          |
-
-**Response**: paginated list of completed items with full submission chain
-and release date, using the standard `{"data": [...], "meta": {"total", "page", "per_page"}}` envelope.
-
-**Response item schema:**
-
-```json
-{
-  "package_name": "kernel-default",
-  "ticket_id": "SNTL-42",
-  "cve_id": "CVE-2026-1234",
-  "reference": "SLE-15-SP6",
-  "submission_chain": {
-    "sr": {"number": 12345, "state": "accepted"},
-    "incident": {"number": 67890},
-    "rr": {"number": 11111, "state": "accepted"}
-  },
-  "released_at": "2026-04-25T14:00:00Z"
-}
+```http
+GET /api/v1/my/packages/completed
 ```
 
-| Field | Type | Description |
-|-------|------|-------------|
-| package_name | string | Source package name |
-| ticket_id | string | Canonical Ticket identity (`SNTL-{n}`) |
-| cve_id | string \| null | CVE identifier |
-| reference | string | Target codestream name |
-| submission_chain | object | Proven chain containing the effective SR and accepted RR action correlated directly to this track |
-| released_at | datetime | Proven accepted RR's `upstream_updated_at`, representing when IBS entered the accepted state; this is not `TicketPackageProduct.released_at` |
+**`Access: Authenticated`**
 
-The `days` filter and `released` sorting use this projected `released_at`.
+Returns tracks satisfying [Completed](#completed). It accepts the shared
+global-list query parameters and returns workbench items in the paginated
+envelope.
+
+Delegates to `package_service.list_maintainer_completed_work()`.
 
 ### Package Details for Ticket
 
-Returns all three sections (pending, in-progress, completed) for a
-specific ticket, filtered to the authenticated user's packages.
+```http
+GET /api/v1/my/packages/tickets/{ticket_id}
+```
 
-**Status codes:**
+**`Access: Authenticated`**
 
-| Code | Error Code | Condition |
-|------|------------|-----------|
-| 200  | — | Ticket exists — response contains either normal data or an error state object |
-| 404  | `TICKET_NOT_FOUND` | Ticket does not exist or is inaccessible |
-
-**Response (normal view)**: returned when ticket status is `Analyzed` and
-the user is a maintainer of at least one package. Object with three arrays
-using a reduced item schema (ticket-level fields like `severity` and
-`cve_id` are excluded since they are available from the ticket header):
+`{ticket_id}` accepts only canonical `SNTL-{n}`. The endpoint returns every
+qualifying caller-owned track for that Ticket, partitioned by the same three
+classifications from one coherent PostgreSQL observation:
 
 ```json
 {
   "data": {
-    "pending": [
-      {
-        "package_name": "kernel-default",
-        "reference": "SLE-15-SP6",
-        "status": "AFFECTED"
-      }
-    ],
-    "in_progress": [
-      {
-        "package_name": "kernel-default",
-        "reference": "SLE-15-SP6",
-        "submission_chain": {
-          "sr": {"number": 12345, "state": "accepted"},
-          "incident": {"number": 67890},
-          "rr": null
-        },
-        "first_sr_created_at": "2026-04-20T08:00:00Z"
-      }
-    ],
-    "completed": [
-      {
-        "package_name": "kernel-default",
-        "reference": "SLE-15-SP6",
-        "submission_chain": {
-          "sr": {"number": 12345, "state": "accepted"},
-          "incident": {"number": 67890},
-          "rr": {"number": 11111, "state": "accepted"}
-        },
-        "released_at": "2026-04-25T14:00:00Z"
-      }
-    ]
+    "pending": [],
+    "in_progress": [],
+    "completed": []
   }
 }
 ```
 
-No pagination (a single ticket has a bounded number of codestreams).
+Each array contains the shared workbench item schema. An item can satisfy only
+one classification because its persisted delivery status has one value.
+Arrays use fixed ascending Unicode code-point order by `package_name`, then
+`reference`, with `TicketPackageTrack.id ASC` as the final internal tie-breaker.
+Client-controlled sorting is not supported because one Ticket has a bounded
+track set and the endpoint provides one canonical sharing order.
 
-**Response (error state)**: returned when ticket status is not `Analyzed`
-or the user is not a maintainer. Object with an `error_state` key:
+The endpoint is unpaginated and therefore has no `meta`: a Ticket's persisted
+track set is bounded by its package tree. It delegates to
+`package_service.get_maintainer_ticket_work()`.
 
-```json
-{
-  "data": {
-    "error_state": {
-      "type": "not_analyzed",
-      "duplicate_of_ticket_id": null
-    }
-  }
-}
-```
+The service first resolves the locator and selects the Ticket through the
+canonical visibility predicate as part of the coherent view that supplies the
+response. A malformed locator, Ticket UUID, well-formed missing Ticket, and
+inaccessible Ticket all return the derived scoped `404 TICKET_NOT_FOUND`.
+Only after accessibility succeeds does the service evaluate caller ownership
+and classification. An accessible Ticket with no qualifying caller work —
+including `New`, `Ignored`, `Duplicated`, or a Ticket with no caller-maintained
+included package — returns 200 with all three arrays empty. The endpoint has no
+status-specific response union, `error_state`, or `no_packages` outcome.
 
-```json
-{
-  "data": {
-    "error_state": {
-      "type": "duplicated",
-      "duplicate_of_ticket_id": "SNTL-42"
-    }
-  }
-}
-```
+## Consistency, Side Effects, and Performance
 
-The `duplicate_of_ticket_id` field is populated only for the `duplicated` type,
-containing the `SNTL-{n}` identifier of the target ticket.
+Each list or per-Ticket result is assembled from one coherent PostgreSQL
+observation. A concurrent confidentiality change, grant revocation, package
+exclusion, or removal of another qualifying visibility path may be observed
+entirely before or after that observation, but cannot produce rows, totals, or
+arrays assembled across incompatible visibility states.
 
-## Security
+These are read-only operations. They acquire no mutation lock, write no row,
+create no audit event, enqueue no task, perform no external or Redis I/O, and do
+not commit or roll back the caller-owned transaction. Query work is bounded by
+the page or one Ticket; Product eligibility uses existence semantics rather
+than row fan-out, and response projection must avoid per-item/N+1 database
+queries.
 
-- All endpoints require authentication
-- No capability restriction — any authenticated user can access their own
-  maintainer data
-- Users can only see data for package occurrences associated to their User ID
-- The per-ticket endpoint filters by the authenticated user's packages;
-  users cannot see other maintainers' pending work through this endpoint
-- **Confidentiality filtering**: all maintainer service queries apply the
-  canonical Ticket visibility predicate independently from workbench ownership.
-  Package association can satisfy the maintainership branch of visibility, but
-  the complete predicate remains explicit in the same query so future
-  workbench changes cannot bypass confidentiality
+## Security and Privacy
 
-## Performance Considerations
-
-The "Pending Fixes" query involves a multi-table join:
-
-```
-User.id
-  → TicketPackageMaintainer → TicketPackage
-    → TicketPackageTrack (status = AFFECTED, delivery_status = PENDING)
-      → Ticket (status = Analyzed)
-```
-
-For users who maintain many packages (e.g., kernel team), this could
-return a significant number of rows. Mitigation strategies:
-
-- **Pagination**: all endpoints are paginated (default 20 items per page)
-- **Indexes**: use `TicketPackageMaintainer.user_id`, the unique
-  `(ticket_package_id, user_id)` key, and existing package/track/Ticket keys
-- **Future**: if performance becomes an issue, consider a materialized
-  view or periodic pre-computation of the maintainer work queue
-
-## Future Considerations
-
-- **Claim mechanism**: ability to claim a pending fix to signal that someone is
-  working on it
-- **Metrics**: aggregate statistics (average time to fix, submission
-  success rate) per maintainer or team
+- Mandatory authentication identifies the workbench owner; no capability is
+  required.
+- Canonical Ticket visibility and persisted maintainership ownership are
+  independent mandatory predicates for every returned row.
+- Missing and inaccessible per-Ticket locators are indistinguishable before
+  status, ownership, or package data is projected.
+- Responses expose no maintainer identity, personal identifier, group, source
+  payload, SMELT provenance, or internal Ticket UUID.
+- `SNTL-{n}` is the only Ticket identity in paths and response items.
 
 ## Dependencies
 
-- `docs/features/packages/package-maintainership.md` — package-wide
-  association acquisition and visibility
-- `docs/features/identity/rbac.md` — canonical Ticket visibility predicate
-- `docs/features/packages/package-model.md` — TicketPackageTrack status
-  and delivery status model
-- `docs/features/packages/ibs-submission-tracking.md` — normalized IBS request
-  actions, exact states, action-track joins, and delivery provenance for
-  pending/in-progress/completed views
-- `docs/features/tickets/tickets.md` — ticket status lifecycle and
-  confidentiality model
+- `docs/features/packages/package-service.md` — service-owned query contracts
+- `docs/features/packages/package-maintainership.md` — package-wide persisted
+  ownership and privacy
+- `docs/features/packages/package-model.md` — orthogonal dimensions,
+  actionability, workflow discriminator, and presentation boundary
+- `docs/features/tickets/tickets.md` — Ticket lifecycle and severity resolution
+- `docs/features/identity/rbac.md` — canonical Ticket visibility predicate and
+  authenticated endpoint map
+- `docs/features/packages/ibs-submission-tracking.md` — separate correlated IBS
+  request-action read surfaces
 
-## Cross-references
+## Cross-References
 
-- `docs/api-spec.md` — global API conventions (envelope format, error codes,
-  pagination, shared 422 responses)
+- `docs/api-spec.md` — authentication, Ticket identity, envelopes, filtering,
+  pagination, sorting, and derived responses
+- `docs/features/platform/testing-strategy.md` — Maintainer Workbench and Ticket
+  Accessibility test matrices
+- `docs/data-model.md` — authoritative persisted schema
