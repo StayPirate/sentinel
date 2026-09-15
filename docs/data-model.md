@@ -961,9 +961,9 @@ manually by users with the `manage_references` capability. See
 
 | Column      | Type                       | Constraints                  | Description                        |
 |-------------|----------------------------|------------------------------|------------------------------------|
-| id          | UUID                       | PK                           | Internal identifier                |
+| id          | UUID                       | PK                           | Public identifier of this nested TicketReference sub-resource; distinct from the parent Ticket identity |
 | ticket_id   | UUID                       | FK(ticket.id) ON DELETE CASCADE, NOT NULL | Related ticket                     |
-| url         | VARCHAR(2048)              | NOT NULL                     | URL of the external resource. Stored in normalized form: scheme + host lowercased, `http` upgraded to `https`, empty trailing slash removed (see `docs/features/tickets/ticket-references.md`, Upsert Strategy § URL Normalization) |
+| url         | VARCHAR(2048)              | NOT NULL                     | URL of the external resource. Stored in normalized form: scheme and host lowercased, `http` upgraded to `https`, and only the slash representing an otherwise-empty root path removed (see `docs/features/tickets/ticket-references.md`, URL Boundary § URL Normalization) |
 | title       | VARCHAR(500)               | nullable                     | Human-readable label               |
 | description | VARCHAR(2000)              | nullable                     | Short note explaining relevance    |
 | type        | VARCHAR(20)                | nullable                     | Content classification. NULL = uncategorized |
@@ -971,7 +971,12 @@ manually by users with the `manage_references` capability. See
 | created_at  | TIMESTAMPTZ                | NOT NULL, DEFAULT            | Record creation timestamp          |
 | updated_at  | TIMESTAMPTZ                | NOT NULL, DEFAULT            | Record update timestamp            |
 
-**Unique constraint**: (ticket_id, url)
+**Unique constraint**: `(ticket_id, url)`, where `url` is the normalized stored
+value.
+
+`TicketReference.id` is serialized and accepted as the UUID locator for this
+nested sub-resource. This does not change `Ticket.id`: the parent Ticket UUID
+remains internal, and consumer-facing Ticket identity remains `SNTL-{n}`.
 
 #### ReferenceType Enum
 

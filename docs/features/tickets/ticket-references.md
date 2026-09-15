@@ -2,600 +2,767 @@
 
 ## Purpose
 
-Provide a curated collection of external links on each ticket that helps
-Vulnerability Analysts study and understand the vulnerability being
-tracked. References connect tickets to external resources such as NVD
-entries, vendor advisories, GitHub Security Advisories, upstream patches,
-commits, pull requests, bug tracker entries, blog posts, and any other
-relevant web resource.
+Ticket references are curated external links that help Vulnerability Analysts
+research a Ticket. They may point to advisories, patches, commits, pull
+requests, issue trackers, mailing-list posts, or other relevant web resources.
 
-References come from two sources:
+References have one of two ownership classes:
 
-- **Automatic**: created by CVE fetchers during ingestion. Each fetcher
-  adds its own source URL (if it has a human-readable page) plus all
-  references extracted from the CVE data. Automatic references are
-  system-managed and cannot be edited or deleted by users.
-- **Manual**: added by users with the `manage_references` capability
-  through the API for any purpose (e.g., linking a Bugzilla bug, an
-  upstream commit, a blog post with analysis). Manual references can be
-  freely edited and deleted by any user with the `manage_references`
-  capability.
+- **Automatic references** are created and updated by CVE fetchers. Their
+  `source` is the stable `BaseFetcher.name` of the owning fetcher. Users cannot
+  edit or delete them.
+- **Manual references** are created through the Ticket reference API. Their
+  `source` is exactly `manual`; any user with the `manage_references`
+  capability and access to the parent Ticket may edit or delete them.
 
-All references are stored in a single `TicketReference` table associated
-with the ticket, regardless of their origin. The UI presents references
-grouped by type so the VA can quickly scan them and follow relevant links
-for deeper analysis.
+Both classes use the same URL validation, normalization, identity, storage,
+classification, and projection contracts. All references are stored in the
+single `TicketReference` table. This specification does not introduce a
+history or per-source table, outbound URL validation, a record cap, pagination
+state, or a generic ingestion framework.
 
 ## Data Model
 
-See `docs/data-model.md` for the full schema. Key entities:
+`docs/data-model.md` owns the schema. The relevant entities are
+`TicketReference` and the `ReferenceType` classification enum.
 
-- **ReferenceType**: content classification enum
-- **TicketReference**: stores external links associated with a ticket
+### ReferenceType
 
-### ReferenceType Enum
+| Value | Meaning |
+|---|---|
+| `advisory` | Security advisory, vulnerability database entry, or vendor notice |
+| `patch` | Patch, commit, pull request, or merge request |
+| `issue` | Bug or issue tracker entry |
+| `article` | Write-up, mailing-list post, or other technical article |
 
-Classifies the content that a reference URL points to.
-
-| Value      | Description                                              |
-|------------|----------------------------------------------------------|
-| `advisory` | Security advisory (NVD, GHSA, vendor advisory, VDB entry) |
-| `patch`    | Fix artifact: patch, commit, pull request, merge request |
-| `issue`    | Bug tracker entry, issue report                          |
-| `article`  | Blog post, write-up, technical analysis, mailing list post |
-
-A `NULL` type means the reference could not be classified by any
-available mechanism (upstream tags, URL pattern matching, or explicit
-user choice). It is functionally equivalent to "uncategorized".
+`NULL` means uncategorized. It is a valid persisted and API value, not another
+enum member.
 
 ### TicketReference
 
-| Column      | Type                       | Constraints                  | Description                        |
-|-------------|----------------------------|------------------------------|------------------------------------|
-| id          | UUID                       | PK                           | Internal identifier                |
-| ticket_id   | UUID                       | FK(ticket.id) ON DELETE CASCADE, NOT NULL | Related ticket                     |
-| url         | VARCHAR(2048)              | NOT NULL                     | URL of the external resource       |
-| title       | VARCHAR(500)               | nullable                     | Human-readable label               |
-| description | VARCHAR(2000)              | nullable                     | Short note explaining relevance    |
-| type        | VARCHAR(20)                | nullable                     | Content classification. NULL = uncategorized |
-| source      | VARCHAR(100)               | NOT NULL                     | Origin: fetcher name (e.g., `"sync_nvd_cves"`) or `"manual"` for user-added references |
-| created_at  | TIMESTAMPTZ                | NOT NULL, DEFAULT            | Record creation timestamp          |
-| updated_at  | TIMESTAMPTZ                | NOT NULL, DEFAULT            | Record update timestamp            |
+| Column | Type | Contract |
+|---|---|---|
+| `id` | UUID | Public identifier for the nested reference resource |
+| `ticket_id` | UUID | Parent Ticket foreign key; part of URL identity |
+| `url` | VARCHAR(2048) | Validated and normalized URL; unique with `ticket_id` |
+| `title` | VARCHAR(500), nullable | Human-readable label |
+| `description` | VARCHAR(2000), nullable | Editorial context; automatic inputs leave it `NULL` |
+| `type` | VARCHAR(20), nullable | `ReferenceType`, or `NULL` when uncategorized |
+| `source` | VARCHAR(100) | Stable fetcher name, or exactly `manual` |
+| `created_at` | TIMESTAMPTZ | Creation timestamp |
+| `updated_at` | TIMESTAMPTZ | Last effective update timestamp |
 
-**Unique constraint**: `(ticket_id, url)` — a URL cannot appear twice on
-the same ticket.
+The unique constraint `(ticket_id, url)` is evaluated on the normalized URL.
+It is the final database backstop for all concurrent writers.
 
-**Field lengths**:
-- `url`: max 2048 characters (covers virtually all real URLs)
-- `title`: max 500 characters
-- `description`: max 2000 characters
+`manual` is reserved for rows created and managed by the manual consumer
+functions. An automatic caller must pass its stable
+`BaseFetcher.name`, which must be non-empty, no longer than 100 characters, and
+must not equal `manual`. Renaming a fetcher requires a data migration for its
+existing `TicketReference.source` values; otherwise its old rows would become
+different-source rows under the merge rules below.
+
+## Semantic Types
+
+These are service-boundary contracts. They describe typed meaning rather than
+mandating dataclasses, `TypedDict`, Pydantic models, or another concrete Python
+representation.
+
+### AutomaticReferenceInput
+
+```python
+AutomaticReferenceInput(
+    url: object,
+    title: str | None = None,
+    upstream_tags: Sequence[str] | None = None,
+    explicit_type: ReferenceType | None = None,
+)
+```
+
+- `url` is typed as `object` at this untrusted ingestion boundary so the
+  service can apply the documented skip behavior to `None`, non-string, and
+  malformed upstream values rather than relying on a false string guarantee.
+- `title` is optional upstream or source-provided text.
+- `upstream_tags` are optional source labels used only for classification.
+  They are not persisted.
+- `explicit_type` is an optional explicit `ReferenceType` hint and has the highest
+  classification priority. `None` means no explicit hint.
+
+This input is an in-memory transfer contract only. It is not a persisted
+entity, API resource, or additional state. A fetcher's own human-readable CVE
+page is supplied as a separate `AutomaticReferenceInput` with an explicit
+title and `explicit_type = advisory`. Structured upstream inputs may likewise
+provide their known title and type. For example, an OSV reference may carry
+its mapped type and a Red Hat Bugzilla reference may carry its description as
+the title and `explicit_type = issue`; `reference_service` does not branch on
+fetcher names.
+
+### ManualReferenceCreateInput
+
+```python
+ManualReferenceCreateInput(
+    url: str,
+    title: str | None = None,
+    description: str | None = None,
+    type: ReferenceType | None | Unset = UNSET,
+)
+```
+
+`url` is required. Omitted `title` and `description` persist as `NULL`.
+Omitted `type` requests URL-pattern classification; an explicit `null` stores
+`NULL` and suppresses automatic classification.
+
+### ManualReferenceUpdateInput
+
+```python
+ManualReferenceUpdateInput(
+    url: str | Unset = UNSET,
+    title: str | None | Unset = UNSET,
+    description: str | None | Unset = UNSET,
+    type: ReferenceType | None | Unset = UNSET,
+)
+```
+
+The semantic input preserves supplied-field information. Omission preserves
+the current value; `null` clears nullable `title`, `description`, or `type`;
+`url` cannot be `null`. At least one field must be supplied. Changing `url`
+without supplying `type` preserves the existing type rather than reclassifying
+it.
+
+### TicketReferenceProjection
+
+All service responses and API `TicketReferenceResponse` objects use this
+shape:
+
+```python
+TicketReferenceProjection(
+    id: UUID,
+    ticket_id: str,
+    url: str,
+    title: str | None,
+    description: str | None,
+    type: ReferenceType | None,
+    source: str,
+    created_at: datetime,
+    updated_at: datetime,
+)
+```
+
+`ticket_id` is the canonical `SNTL-{n}` identity, never the internal Ticket
+UUID. `url` is always the persisted normalized value. Timestamps are UTC and
+serialize with a `Z` suffix at the API boundary.
+
+## URL Boundary
+
+### URL Normalization
+
+Automatic and manual references use exactly one service-enforced algorithm.
+For each URL, in this order:
+
+1. Require a string with at least one character. Do not trim or otherwise
+   repair the input.
+2. Reject a pre-parse value longer than 2048 characters or containing any
+   control character U+0000 through U+001F or U+007F.
+3. Parse the complete value as an absolute URL. Accept only `http` or `https`,
+   case-insensitively. Require a syntactically valid, non-empty host. Reject
+   any user-information component, including a username or password, whether
+   or not a password is present.
+4. Lowercase the scheme and host and replace `http` with `https`.
+5. Remove the path slash only when it is the slash representing an otherwise
+   empty root path. Preserve an explicit port, every non-root path, query, and
+   fragment literally except for canonicalization required by the selected URL
+   parser to produce a valid parsed URL. Do not remove a non-root trailing
+   slash, a query, or a fragment.
+6. Reject a normalized value longer than 2048 characters and recheck the
+   scheme, host, user-information, and control-character invariants.
+
+The resulting string is the stored URL, the input to URL-pattern
+classification, and the `(ticket_id, url)` identity. For example,
+`HTTP://Example.COM/` normalizes to `https://example.com`, while
+`https://example.com/path/`, `https://example.com?view=full`, and
+`https://example.com#analysis` retain their non-host components.
+
+The algorithm is deliberately lexical. The service performs no DNS lookup,
+address resolution, `HEAD`, `GET`, TLS handshake, redirect follow, reachability
+test, or other outbound operation. It does not determine whether the resource
+exists or is safe to visit.
+
+Pydantic request schemas enforce transport shape, nullability, enum membership,
+and declared string lengths. The service independently reruns all domain and
+data-integrity checks for every caller. Manual service callers that violate a
+typed input contract receive `ValueError`; API requests are rejected by the
+corresponding Pydantic rule as `422 VALIDATION_ERROR` before service mutation.
+
+Titles, when non-NULL, must be strings of 1 through 500 characters and must not
+be whitespace-only. Descriptions, when non-NULL, must be strings of 1 through
+2000 characters and must not be whitespace-only. These values are not trimmed.
+
+### Automatic Rejection Logging
+
+An invalid automatic candidate is skipped and processing continues. One
+WARNING records only the canonical CVE ID, automatic source, and one of the
+closed reason categories `url_not_string`, `url_empty`, `url_too_long`,
+`invalid_url`, `invalid_scheme`, `invalid_host`, `userinfo_forbidden`,
+`control_character`, or `invalid_metadata`. It never records the raw URL,
+title, description, query, fragment, user information, credential material, or
+an exception string that could contain those values.
+
+Manual invalid input is rejected; it is never converted into an automatic
+skip-and-continue outcome.
 
 ## Type Auto-Classification
 
-References receive a `type` value through three mechanisms, applied in
-priority order.
+Automatic references use the first applicable source in this order:
 
-### Classification Priority
+1. `AutomaticReferenceInput.explicit_type`.
+2. A recognized `upstream_tags` mapping.
+3. Pattern matching against the normalized URL.
+4. `NULL`.
 
-1. **Explicit choice** (highest): the user provides `type` in the API
-   request (manual references only)
-2. **CVE source tag mapping**: the fetcher maps upstream tags (e.g., NVD
-   reference tags) to a `ReferenceType` value
-3. **URL pattern matching**: the system infers `type` from known URL
-   patterns
-4. **Default** (lowest): `NULL` (uncategorized)
+Manual POST uses its explicit `type`, including explicit `NULL`; only an
+omitted type uses normalized-URL pattern matching and then `NULL`. PATCH never
+implicitly reclassifies an existing reference.
 
 ### CVE Source Tag Mapping
 
-When a CVE fetcher processes references from upstream data, each
-reference may carry tags from the source. NVD API v2 uses Title Case
-strings (e.g., `"Vendor Advisory"`); MITRE CVE JSON 5.x uses kebab-case
-(e.g., `"vendor-advisory"`). Both formats are mapped to `ReferenceType`
-values but are **not stored** on the `TicketReference` record — they are
-consumed during classification only.
+NVD Title Case and MITRE kebab-case equivalents map as follows. Unknown tags
+do not fail the candidate. When multiple recognized tags map to different
+types, priority is `patch`, `advisory`, `issue`, then `article`.
 
-| NVD Tag                  | MITRE Tag              | ReferenceType |
-|--------------------------|------------------------|---------------|
-| `Patch`                  | `patch`                | `patch`       |
-| `Vendor Advisory`        | `vendor-advisory`      | `advisory`    |
-| `Third Party Advisory`   | `third-party-advisory` | `advisory`    |
-| `US Government Resource` | `government-resource`  | `advisory`    |
-| `VDB Entry`              | `vdb-entry`            | `advisory`    |
-| `Issue Tracking`         | `issue-tracking`       | `issue`       |
-| `Exploit`                | `exploit`              | `article`     |
-| `Mailing List`           | `mailing-list`         | `article`     |
-| `Release Notes`          | `release-notes`        | `article`     |
-| `Technical Description`  | `technical-description`| `article`     |
-| `Mitigation`             | `mitigation`           | `article`     |
-| `Press/Media Coverage`   | `media-coverage`       | `article`     |
-| `Tool Signature`         | `signature`            | `article`     |
-| `Broken Link`            | `broken-link`          | `NULL`        |
-| `Not Applicable`         | `not-applicable`       | `NULL`        |
-| `Permissions Required`   | `permissions-required` | `NULL`        |
-| `URL Repurposed`         | —                      | `NULL`        |
-| `Product`                | `product`              | `NULL`        |
-| —                        | `customer-entitlement` | `NULL`        |
-| —                        | `related`              | `NULL`        |
-| All others / no tags     |                        | `NULL`        |
+| NVD tag | MITRE tag | Type |
+|---|---|---|
+| `Patch` | `patch` | `patch` |
+| `Vendor Advisory` | `vendor-advisory` | `advisory` |
+| `Third Party Advisory` | `third-party-advisory` | `advisory` |
+| `US Government Resource` | `government-resource` | `advisory` |
+| `VDB Entry` | `vdb-entry` | `advisory` |
+| `Issue Tracking` | `issue-tracking` | `issue` |
+| `Exploit` | `exploit` | `article` |
+| `Mailing List` | `mailing-list` | `article` |
+| `Release Notes` | `release-notes` | `article` |
+| `Technical Description` | `technical-description` | `article` |
+| `Mitigation` | `mitigation` | `article` |
+| `Press/Media Coverage` | `media-coverage` | `article` |
+| `Tool Signature` | `signature` | `article` |
+| `Broken Link` | `broken-link` | `NULL` |
+| `Not Applicable` | `not-applicable` | `NULL` |
+| `Permissions Required` | `permissions-required` | `NULL` |
+| `URL Repurposed` | - | `NULL` |
+| `Product` | `product` | `NULL` |
+| - | `customer-entitlement` | `NULL` |
+| - | `related` | `NULL` |
 
-When a reference has multiple tags, the highest-priority type wins.
-Priority order: `patch` > `advisory` > `issue` > `article`.
+A tag mapped to `NULL` does not prevent later recognized tags or URL-pattern
+classification from supplying a type.
 
-### URL Pattern Matching
+### URL Pattern Mapping
 
-When no upstream tag is available (or tags do not map to a known type),
-the system attempts to infer the type from the URL. This applies to
-both automatic and manual references.
+Patterns match host and path case-insensitively. Case-insensitive path matching
+is an intentional classification heuristic; it does not alter the stored path.
 
-| URL Pattern                              | ReferenceType |
-|------------------------------------------|---------------|
-| `github.com/*/commit/*`                  | `patch`       |
-| `github.com/*/pull/*`                    | `patch`       |
-| `gitlab.com/*/commit/*`                  | `patch`       |
-| `gitlab.com/*/-/merge_requests/*`        | `patch`       |
-| `git.kernel.org/*/commit/*`              | `patch`       |
-| `github.com/advisories/GHSA-*`          | `advisory`    |
-| `github.com/*/security/advisories/*`    | `advisory`    |
-| `nvd.nist.gov/vuln/detail/*`            | `advisory`    |
-| `cve.org/CVERecord*`                    | `advisory`    |
-| `access.redhat.com/security/cve/*`      | `advisory`    |
-| `access.redhat.com/errata/*`            | `advisory`    |
-| `ubuntu.com/security/CVE-*`             | `advisory`    |
-| `www.debian.org/security/*`             | `advisory`    |
-| `security.gentoo.org/*`                 | `advisory`    |
-| `www.oracle.com/security-alerts/*`      | `advisory`    |
-| `security.netapp.com/advisory/*`        | `advisory`    |
-| `www.zerodayinitiative.com/advisories/*`| `advisory`    |
-| `msrc.microsoft.com/*`                  | `advisory`    |
-| `support.apple.com/*`                   | `advisory`    |
-| `www.mozilla.org/*/security/advisories/*`| `advisory`   |
-| `errata.almalinux.org/*`               | `advisory`    |
-| `bugzilla.suse.com/*`                   | `issue`       |
-| `bugzilla.redhat.com/*`                 | `issue`       |
-| `bugs.launchpad.net/*`                  | `issue`       |
-| `savannah.gnu.org/bugs/*`              | `issue`       |
-| `sourceware.org/bugzilla/*`            | `issue`       |
-| `lists.fedoraproject.org/*`            | `article`     |
-| `www.openwall.com/lists/*`             | `article`     |
-| `seclists.org/*`                       | `article`     |
-| `www.exploit-db.com/*`                 | `article`     |
-| `lists.apache.org/*`                   | `article`     |
+| Pattern | Type |
+|---|---|
+| `github.com/*/commit/*`, `github.com/*/pull/*` | `patch` |
+| `gitlab.com/*/commit/*`, `gitlab.com/*/-/merge_requests/*` | `patch` |
+| `git.kernel.org/*/commit/*` | `patch` |
+| `github.com/advisories/GHSA-*` | `advisory` |
+| `github.com/*/security/advisories/*` | `advisory` |
+| `nvd.nist.gov/vuln/detail/*`, `cve.org/CVERecord*` | `advisory` |
+| `access.redhat.com/security/cve/*`, `access.redhat.com/errata/*` | `advisory` |
+| `ubuntu.com/security/CVE-*`, `www.debian.org/security/*` | `advisory` |
+| `security.gentoo.org/*`, `www.oracle.com/security-alerts/*` | `advisory` |
+| `security.netapp.com/advisory/*` | `advisory` |
+| `www.zerodayinitiative.com/advisories/*` | `advisory` |
+| `msrc.microsoft.com/*`, `support.apple.com/*` | `advisory` |
+| `www.mozilla.org/*/security/advisories/*` | `advisory` |
+| `errata.almalinux.org/*` | `advisory` |
+| `bugzilla.suse.com/*`, `bugzilla.redhat.com/*` | `issue` |
+| `bugs.launchpad.net/*`, `savannah.gnu.org/bugs/*` | `issue` |
+| `sourceware.org/bugzilla/*` | `issue` |
+| `lists.fedoraproject.org/*`, `www.openwall.com/lists/*` | `article` |
+| `seclists.org/*`, `www.exploit-db.com/*`, `lists.apache.org/*` | `article` |
 
-Patterns are matched case-insensitively against the URL host and path.
-Case-insensitive host matching conforms to RFC 3986 §3.2.2.
-Case-insensitive path matching deviates from RFC 3986 §3.3 (which
-defines paths as case-sensitive). This is a deliberate choice: it
-broadens classification matching without narrowing it, and the risk of
-false-positive classification is negligible because the URL patterns
-target well-known domains where path case variants point to the same
-resource.
+An unmatched URL remains `NULL`. New patterns affect only references created
+or effectively updated after the code change; no retroactive reclassification
+is implied.
 
-URLs that do not match any pattern remain with `type = NULL`
-(uncategorized).
+## Automatic Ingestion
 
-The pattern list is maintained in code and can be extended without schema
-changes. Adding a new pattern does not retroactively reclassify existing
-references — new patterns apply only to references created or updated
-after the change.
+### Source Reference
 
-## Fetcher Integration
+`BaseCVEFetcher.source_reference_url_pattern`, when non-NULL, formats a source
+URL using the single `{cve_id}` placeholder. Fetchers whose page cannot be
+derived from a CVE ID, such as a GHSA page, may construct the source candidate
+directly. A fetcher with no human-readable page passes `source_reference=None`.
 
-### source_reference_url_pattern
+The caller supplies a source candidate with the source's explicit title and
+`explicit_type = advisory`; `reference_service` does not derive labels from
+the fetcher name. The source candidate remains independent from upstream
+references, so callers invoke `upsert_references()` even when the upstream list
+is empty.
 
-CVE fetchers that inherit from `BaseCVEFetcher` (see
-`docs/features/platform/cve-fetcher-infrastructure.md`) have an optional class
-attribute `source_reference_url_pattern` that defines the URL pattern for
-the fetcher's human-readable CVE page.
+### Deterministic Candidate Preparation
 
-```python
-class SyncNvdCves(BaseCVEFetcher):
-    name = "sync_nvd_cves"
-    description = "Incremental CVE sync from NVD"
-    default_schedule = "0 */6 * * *"
-    source_reference_url_pattern: str | None = "https://nvd.nist.gov/vuln/detail/{cve_id}"
+`upsert_references()` completes candidate preparation before comparing any
+candidate with database state:
 
-class SyncMitreCves(BaseGitFetcher):  # inherits BaseCVEFetcher via BaseGitFetcher
-    name = "sync_mitre_cves"
-    description = "Syncs CVEs from MITRE"
-    default_schedule = "0 */6 * * *"
-    source_reference_url_pattern: str | None = "https://cve.org/CVERecord?id={cve_id}"
-```
+1. Form one ordered sequence: the optional source candidate first, followed by
+   upstream candidates in their original order.
+2. Validate and normalize every candidate with the shared URL and metadata
+   boundary. Log and remove invalid candidates without changing the relative
+   order of valid candidates.
+3. Classify every valid candidate from explicit type, tags, normalized URL, and
+   `NULL`, in that order.
+4. Coalesce same-input candidates with the same normalized URL. The first
+   candidate owns the position and every non-NULL field it supplied. Later
+   duplicates only fill its missing `title` or `type` with non-NULL values.
+   Because the source candidate is first and explicitly supplies its title and
+   advisory type, an upstream duplicate cannot overwrite those fields.
 
-- When `source_reference_url_pattern` is set, the fetcher creates a
-  `TicketReference` with the URL built from the pattern (replacing
-  `{cve_id}` with the actual CVE ID).
-- When `source_reference_url_pattern` is `None`, the fetcher does not
-  use the automatic `{cve_id}` template mechanism to build the source
-  URL. It may still create a source `TicketReference` by passing a
-  manually constructed `source_url` to `upsert_references()` — for
-  example, `sync_ghsa_advisories` uses the advisory's `html_url`
-  (which contains the GHSA-ID, not the CVE-ID) and `sync_kernel_cves`
-  constructs the URL from the git file path. If the fetcher passes
-  `source_url=None`, no source reference is created (but upstream
-  references from CVE data are still processed).
-- The pattern uses `{cve_id}` as the only placeholder, formatted with
-  the CVE identifier (e.g., `CVE-2026-3317`).
+Automatic inputs do not provide `description`; inserts use `description =
+NULL`, and automatic upsert never changes an existing description.
 
-**Convention for new CVE fetchers**: when implementing a new fetcher that
-ingests CVE data, the implementer must determine whether the fetcher's
-source has a human-readable web page for each CVE. If it does,
-`source_reference_url_pattern` must be set with the appropriate URL
-pattern so that the URL is automatically added as a `TicketReference`.
+### Database Merge Rules
 
-### Ingestion Flow
+Prepared candidates are applied in their deterministic order. The current
+serialized database row for `(ticket_id, normalized_url)` controls each result:
 
-When a CVE fetcher processes a CVE (new or updated), the following
-reference-related steps are performed **after** the ticket exists (i.e.,
-after CVE upsert and ticket creation for new CVEs). The fetcher calls
-`reference_service.upsert_references()` (see Service Layer) with:
+- **No row**: insert the candidate with `source` equal to the automatic source.
+- **Same automatic source**: update only candidate fields with a non-NULL
+  prepared value. This is the merge meaning of explicitly provided: a title is
+  provided only when the input carries a valid non-NULL title, and a type is
+  provided only when explicit type, tags, or normalized-URL classification
+  resolves to a non-NULL type. An absent title or a classification result of
+  `NULL` does not clear persisted data. The source and description remain
+  unchanged.
+- **Different automatic source**: retain the source of the serialized first
+  owner. Fill only currently `NULL` title or type fields from non-NULL candidate
+  values. Never overwrite non-NULL fields or description.
+- **Manual row**: leave every field untouched. This rule takes precedence over
+  all fill-null behavior.
 
-- `source`: the fetcher name (e.g., `"sync_nvd_cves"`)
-- `source_url`: the source reference URL — built from
-  `source_reference_url_pattern` when the pattern is defined, or
-  manually constructed by the fetcher when the URL is not derivable
-  from the CVE-ID alone, or `None` if no source reference applies
-- `upstream_references`: the normalized list of references from the CVE
-  data
+There is no stale deletion. A source removing a URL does not delete or clear
+the accumulated reference.
 
-**URL acceptance gate**: before writing any URL to the database (both
-source reference and upstream references), `upsert_references()` applies a
-lightweight validation gate:
+The implementation may use any PostgreSQL/SQLAlchemy conflict mechanism that
+preserves these outcomes, candidate order, and the caller's still-usable
+transaction. It must not catch a unique `IntegrityError` and then query in the
+same aborted transaction. A nested savepoint, conflict-aware statement,
+locking, retry around an isolated candidate operation, or another equivalent
+mechanism is acceptable; no particular SQL construct is mandated.
 
-1. Value must be a non-empty string (`None`, non-string types, or empty
-   string `""` → skip)
-2. Length ≤ 2048 characters
-3. No control characters (U+0000–U+001F, U+007F)
-4. Scheme must be `http` or `https`
+Concurrent automatic writers may serialize in either order. The transaction
+that creates a new identity first owns `source`; the other observes that
+current row and applies same-source or different-source rules. Concurrent
+same-source writes apply explicitly supplied non-NULL fields in serialization
+order. The final row must equal one valid serialized execution, and both
+transactions remain usable after a handled uniqueness race.
 
-URLs failing any criterion are skipped (not inserted or updated), the
-violation is logged at WARNING level with the CVE ID and source for
-operational visibility, and processing continues with the remaining
-references (skip-and-continue strategy).
+Re-invocation with the same normalized candidates is idempotent once all
+non-NULL fill opportunities are satisfied: it creates no duplicate and makes
+no effective update. Reordering upstream candidates may change which duplicate
+candidate supplies the first non-NULL value, so callers must preserve upstream
+order.
 
-This gate is defense-in-depth for data arriving from external sources
-(NVD, MITRE, etc.) where no Pydantic schema boundary exists. Manual
-references validated at the API layer by Pydantic `HttpUrl` will never
-reach this gate with invalid data, but the gate remains active for all
-paths as a safety net.
+## Mutability and Concurrency
 
-**URL normalization**: before storage, all URLs are normalized as described
-in the Upsert Strategy § URL Normalization section below. The unique
-constraint `(ticket_id, url)` operates on the post-normalization value.
+### Manual-Zone Exception
 
-The service performs the following steps:
+Manual POST, PATCH, and DELETE are valid for every Ticket status, including
+`Ignored` and `Duplicated`. They are explicit owning-contract exceptions to
+`ensure_ticket_operable()` because they modify supplementary editorial
+metadata, not Ticket workflow or package-gate state. They never assign a user,
+reconcile gates, change status, or exit the manual zone, and they never return
+`TICKET_NOT_MUTABLE`.
 
-1. **Source reference** (if `source_url` is provided): upsert a
-   `TicketReference` with:
-   - `url`: the source URL (e.g.,
-     `https://nvd.nist.gov/vuln/detail/CVE-2026-3317`)
-   - `title`: short label derived from the source name (e.g., `"NVD"`
-     for `sync_nvd_cves`, `"MITRE"` for `sync_mitre_cves`)
-   - `type`: `advisory` (source pages are always advisories)
-   - `source`: fetcher name (e.g., `"sync_nvd_cves"`)
+Automatic upsert likewise remains independent of Ticket status and consumer
+scope. It is trusted ingestion within the owning per-CVE transaction and does
+not acquire an HTTP caller's accessibility context.
 
-2. **CVE data references**: for each reference in `upstream_references`,
-   upsert a `TicketReference` with:
-   - `url`: the reference URL from the CVE data
-   - `title`: from the reference's `name` field when available (MITRE
-     CVE JSON 5.x and kernel CVE data provide this field; NVD API v2
-     does not). `NULL` when absent
-   - `description`: `NULL`
-   - `type`: auto-classified from source tags, then URL pattern, then
-     `NULL` (see Type Auto-Classification)
-       - `source`: fetcher name (e.g., `"sync_nvd_cves"`)
+### Manual Mutation Ordering
 
-When `upstream_references` is an empty list, step 2 is a no-op — no
-reference records are created or updated from CVE data. Step 1 (source
-reference) executes normally if `source_url` is provided. The caller
-must not skip the `upsert_references()` call when there are no upstream
-references, because source reference creation is independent.
+Service-level URL and field validation, including URL normalization, is
+input-only work and may complete before any database access. Each manual
+mutation then uses the parent Ticket as its serialization root. Its first
+persistent read locks the Ticket row `FOR UPDATE`. Under that lock it performs,
+in order:
 
-**Transaction boundary**: `upsert_references()` runs in the **same
-per-CVE transaction** as `cve_service.upsert_cve()`. Both write to the
-session buffer; the caller commits via `commit_and_dispatch()` after
-both operations complete. Since all `upsert_references()` failure modes
-are handled internally (URL validation gate: skip-and-continue;
-IntegrityError: catch-and-merge), no exception propagates to the caller
-under normal operation. Each individual reference upsert is independent
-— if a single reference fails (e.g., a URL from upstream data exceeds
-the 2048-character limit), the service logs the failure and continues
-with the remaining references (skip-and-continue).
+1. Resolve the canonical SNTL locator and evaluate Ticket accessibility from
+   locked-current Ticket and visibility-relationship state. Missing, malformed,
+   and inaccessible parents raise `TicketNotFoundError`.
+2. For PATCH or DELETE, resolve the reference by
+   `(ticket_internal_id, reference_id)`. A missing reference or a UUID belonging
+   to another Ticket raises `ReferenceNotFoundError`.
+3. For PATCH or DELETE, require `source = manual`; otherwise raise
+   `ReferenceNotEditableError`.
+4. Evaluate any conflict for the already-normalized supplied URL. A conflicting
+   different reference raises `ReferenceConflictError`.
+5. Compare supplied values with locked-current persisted values. An
+   equivalent-only PATCH is a true no-op.
+6. Apply the effective mutation and its exact audit event or events, then flush
+   all pending reference and audit writes before returning.
 
-There is no stale reference cleanup step. Fetchers only insert and update
-references — they never delete them. If an upstream source removes a
-reference URL, the corresponding `TicketReference` remains in Sentinel.
-This is by design: references are informational links collected over
-time, and removal from an upstream source does not invalidate the
-information at the URL.
+Capability checking occurs at the API boundary before the service performs its
+first resource lookup. Accessibility denial therefore precedes nested missing,
+editability, conflict, and no-op outcomes. Every audit value and URL locator is
+derived from serialized current state, never stale pre-lock state.
 
-### Upsert Strategy
+### Race Outcomes
 
-#### URL Normalization
+Manual operations on one Ticket serialize through the Ticket lock:
 
-Before comparison or storage, every URL (automatic and manual) is
-normalized:
+- **create/create, same normalized URL**: the first committed creator returns
+  success with one `reference_added` event. The waiter returns
+  `ReferenceConflictError` with no event. If the first transaction rolls back,
+  the waiter may create normally.
+- **update/update, same reference**: each committed effective update applies in
+  lock order and audits its true serialized old and new values. A waiter whose
+  requested state is already current is a no-op with no event.
+- **update/update, different references competing for one normalized URL**: the
+  first committed update claims the identity and records its true change. The
+  waiter observes the locked-current conflict, raises `ReferenceConflictError`,
+  and creates no event. If the first transaction rolls back, the waiter may
+  update normally.
+- **update/delete**: update first yields its change events, after which delete
+  may remove that current row and emit `reference_deleted`. Delete first causes
+  the waiting update to receive `ReferenceNotFoundError` with no event.
+- **delete/delete**: the first committed delete returns 204 and emits one
+  `reference_deleted`; the waiter receives `ReferenceNotFoundError` with no
+  event.
 
-1. **Scheme + host lowercased** (per RFC 3986 §3.1 and §3.2.2)
-2. **`http://` normalized to `https://`**
-3. **Trailing slash removed** when the path is empty or consists only
-   of `"/"`
+Automatic upsert does not independently acquire the Ticket lock. Its calling
+per-CVE transaction may already hold that lock because `upsert_cve()` acquired
+it while applying Ticket-associated CVSS or lifecycle consequences; when so,
+manual mutations serialize on that existing lock. Otherwise the unique key and
+chosen transaction-safe merge mechanism serialize automatic/manual identity
+races. Both paths have the same observable outcomes:
 
-Normalization is applied at insertion time — the stored `url` field
-contains the normalized form, so the uniqueness constraint
-`(ticket_id, url)` automatically prevents near-duplicates.
+- If automatic insertion owns the normalized URL before manual create or a
+  manual URL change, the manual operation returns `ReferenceConflictError` and
+  creates no event.
+- If the manual row owns the normalized URL first, automatic upsert observes a
+  manual winner and leaves every field untouched.
+- Automatic upsert that observes an existing manual row while a PATCH keeps
+  that identity has no effect. A manual PATCH that changes identity and a
+  concurrent automatic insertion produce the serialized conflict-or-manual-
+  winner outcomes above.
+- If manual DELETE commits before automatic processing of that URL, automatic
+  upsert may create an automatic row. If automatic processing serializes
+  against the existing manual row first, it leaves that row untouched and the
+  later delete removes it. Either final state must correspond to the actual
+  database serialization.
+- If a manual PATCH moves a reference away from an identity before automatic
+  processing reaches that identity, automatic upsert may create an automatic
+  row at the old URL. If automatic processing observes the manual row first, it
+  leaves that row untouched and the later PATCH moves it, leaving no row at the
+  old URL. For a PATCH moving to the automatic candidate's identity, automatic
+  first causes the manual conflict; manual first owns that identity and causes
+  automatic fill behavior to skip the manual winner.
+- A manual PATCH or DELETE that targets an already automatic row always reaches
+  `ReferenceNotEditableError` after locked-current accessibility and scoped
+  lookup. Concurrent automatic changes do not make that row consumer-editable
+  and create no Ticket event.
 
-#### Match Rules
-
-References are matched by `(ticket_id, url)` — the unique constraint,
-evaluated against the normalized URL.
-
-- **New URL**: INSERT a new `TicketReference` with all fields from the
-  fetcher data.
-- **Existing URL, same source**: UPDATE `title`, `description`, and
-  `type` if the fetcher provides new values. Since users cannot edit
-  automatic references, the fetcher is the sole writer and can safely
-  overwrite all fields.
-- **Existing URL, different source**: fill in NULL fields only. For each
-  of `type`, `title`, and `description`: if the existing value is NULL
-  and the new source provides a non-NULL value, update the field.
-  Non-NULL values are never overwritten by a different source.
-- **Existing URL, manual source**: if the existing reference has
-  `source = "manual"`, the fetcher skips it entirely — no fields are
-  updated. This rule takes precedence over the cross-source
-  fill-in-NULL-only rule above.
-
-**Source field stability**: the `source` column is a stable identifier — the upsert strategy's same-source vs. different-source logic depends on its consistency over time. If a fetcher is renamed (its `BaseFetcher.name` attribute changes), an Alembic data migration is required to update the `source` field on existing `TicketReference` records. Without such migration, references from the renamed fetcher would be treated as originating from a "different source", degrading update propagation to fill-NULL-only semantics. See `docs/features/platform/fetcher-infrastructure.md` for the fetcher naming contract.
-
-References are upserted individually within the batch. Each reference is
-attempted as an INSERT. If the unique constraint `(ticket_id, url)` is
-violated, the service catches the `IntegrityError`, re-queries the
-existing record, and applies the merge rules above.
-
-### Race Condition: Manual vs. Automatic
-
-If a user adds a manual reference for a URL that a fetcher creates
-moments later (or vice versa), the unique constraint prevents
-duplicates:
-
-- **Fetcher wins first**: the user's POST returns
-  `409 RESOURCE_CONFLICT`. The user cannot edit the automatic
-  reference (`409 RESOURCE_NOT_EDITABLE`). Any custom title or
-  description the user intended is lost. The user can add a manual
-  reference with a different URL if needed (e.g., a more specific
-  anchor fragment).
-- **User wins first**: the fetcher encounters the manual reference
-  during upsert. Per the "existing URL, manual source" rule above,
-  the fetcher skips it entirely — the user's title, description, and
-  type are preserved.
-
-This asymmetry is by design: manual references have editorial intent
-that should not be overwritten by automated systems. The reverse
-direction (automatic reference blocking a manual addition) is an
-accepted trade-off — the URL is already present on the ticket and
-accessible to the VA.
-
-### Example
-
-When the NVD fetcher processes CVE-2026-3317 for the first time, it
-creates the following `TicketReference` records:
-
-| url | title | type | source |
-|-----|-------|------|--------|
-| `https://nvd.nist.gov/vuln/detail/CVE-2026-3317` | `NVD` | `advisory` | `sync_nvd_cves` |
-| `https://github.com/example/project/commit/a1b2c3` | NULL | `patch` | `sync_nvd_cves` |
-| `https://www.example.com/en/security-notice/vuln-2026-001` | NULL | `advisory` | `sync_nvd_cves` |
-
-If the MITRE fetcher later processes the same CVE and finds the same
-GitHub commit URL, it skips that reference (already exists with
-`source = "sync_nvd_cves"`). It adds only references with new URLs.
-
-## Mutability
-
-### Manual references
-
-Users with the `manage_references` capability can add, edit, and delete
-manual references (`source = "manual"`) on any ticket **regardless of
-ticket status**, including tickets in an inactive status (Resolved, Ignored,
-Duplicated).
-References are supplementary metadata — adding, editing, or removing a
-link does not constitute a ticket state change and is not subject to the
-`ensure_ticket_operable()` guard.
-
-### Automatic references
-
-Automatic references (`source != "manual"`) are system-managed. They are
-created and updated exclusively by fetchers. Users **cannot** edit or
-delete automatic references through the API — the PATCH and DELETE
-endpoints reject operations on automatic references with
-`409 RESOURCE_NOT_EDITABLE`.
-
-This separation ensures:
-
-- **No delete+re-creation cycle**: users cannot delete an automatic
-  reference that the fetcher would re-create on the next sync
-- **No edit conflicts**: fetchers can safely update their references
-  without overwriting user edits
-- **Clear ownership**: fetchers own their references, users own theirs
-
-**Tickets in inactive statuses**: fetchers still call
-`upsert_references()` for tickets in inactive statuses (Resolved, Ignored,
-Duplicated). `cve_service.upsert_cve()` processes CVE data regardless
-of ticket status, and reference upserts follow the same policy —
-existing references may be updated with new upstream data, and new
-references from upstream are added. However, tickets in inactive statuses
-will not receive new automatic references in practice unless the CVE
-data itself is updated upstream, since the fetcher only processes CVEs
-that have changed.
-
-### CVE lifecycle events
-
-- **CVE association with an existing CVE**: when a known CVE is
-  associated with a ticket (via `associate-cve` or ticket creation with
-  `cve_id`), references are **not** populated immediately. They are
-  created by the periodic sync cycle when the fetcher next processes this
-  CVE. This delay is accepted behavior — the VA can add manual
-  references in the meantime if needed.
-
-When a CVE is associated with a ticket that already has manual references
-(e.g., references added by a VA while the ticket had no CVE), the
-fetcher applies the standard upsert strategy at the next sync cycle.
-URLs already present as manual references are skipped per the "existing
-URL, manual source" match rule — the VA's chosen title, description, and
-type are preserved. Only URLs not yet present on the ticket are added as
-automatic references. See the Upsert Strategy section for the full merge
-rules.
+No rejected operation, race loser, or rolled-back transaction creates an audit
+event. Database, audit, or flush failure rolls back the complete caller-owned
+transaction.
 
 ## Service Layer
 
-All reference operations are implemented through `reference_service`
-(`backend/app/services/reference_service.py`). Endpoint handlers and
-fetchers delegate to this service rather than performing database
-operations directly.
+`reference_service` owns all reference queries, mutations, URL processing,
+classification, accessibility-constrained selection, and conflict handling.
+API handlers and fetchers are thin callers and do not issue reference business
+queries.
 
-| Function | Caller | Responsibility |
-|----------|--------|----------------|
-| `upsert_references()` | CVE fetchers (`execute`, `fetch_single`) | Batch upsert of automatic references with type classification and source ownership |
-| `create_reference()` | API POST handler | Create a manual reference with `source="manual"`, auto-classify type from URL |
-| `update_reference()` | API PATCH handler | Update a manual reference, enforce immutability of automatic references, preserve type on URL change unless explicitly provided |
-| `delete_reference()` | API DELETE handler | Delete a manual reference, enforce immutability of automatic references |
-| `list_references()` | API GET handler | Query references with optional filters, ordered by type priority |
+All functions accept a caller-supplied `AsyncSession`. They flush when needed
+to expose generated IDs, persisted projections, audit rows, or constraint
+failures, but never commit or roll back. The API transaction dependency or
+fetcher's complete per-CVE workflow owns commit on success and rollback on any
+escaping exception. No function performs network I/O.
 
-All functions receive the database session from the caller (never create
-their own) to ensure transactional atomicity with the surrounding
-operation.
+Request-resolved `CallerContext` below means the authenticated user ID and
+effective scope for an authenticated caller, or the explicit anonymous caller.
+Its concrete in-memory representation is an implementation choice. Every manual
+mutation requires an authenticated caller and uses that caller's User UUID as
+the audit actor. An anonymous caller at this boundary is a programming error
+that raises `ValueError` before database access; an API handler must always
+satisfy this precondition after its `manage_references` check.
 
-Consumer-facing functions apply the one canonical Ticket visibility predicate
-from `docs/features/identity/rbac.md` (Scope and Confidential Ticket
-Visibility). Capability-protected API routes check `manage_references` before
-the first service resource lookup. Model-aware accessibility and reference
-queries belong to `reference_service`; API handlers and Core do not construct
-them. The caller-context representation and SQL formulation are implementation
-choices.
+### Service Exceptions
 
-`list_references()` selects references through an accessible parent Ticket in
-the same database operation or equivalent single database view. A missing or
-inaccessible parent returns `404 TICKET_NOT_FOUND`; it never returns
-`{"data": []}` for that case. Source/type filtering and ordering apply only
-after the accessible parent has constrained the result.
+`ReferenceServiceError` inherits from `ServiceError`. Every module-owned
+exception inherits from `ReferenceServiceError`. `TicketNotFoundError` is
+shared and inherits directly from `ServiceError`, so handlers catch it
+separately. Database, transaction, audit, parser-programming, and other
+unexpected infrastructure exceptions are not translated into domain conflicts;
+they propagate unchanged.
 
-Manual POST, PATCH, and DELETE mutations use the parent Ticket as their
-serialization root. After input-only validation, the first persistent read
-acquires `FOR UPDATE` on `ticket_id`. It then evaluates accessibility from the
-locked-current Ticket as the authoritative mutation decision before resolving a
-target reference or evaluating
-reference ownership, source/editability, conflict, or no-op state. The target
-reference, when applicable, is resolved under that lock and scoped to
-`(ticket_id, reference_id)`. Access denial therefore precedes
-`RESOURCE_NOT_FOUND`, `RESOURCE_NOT_EDITABLE`, and `RESOURCE_CONFLICT`, returns
-`TICKET_NOT_FOUND`, and creates no reference write or audit event. Mutation
-ordering is exactly capability at the API boundary, Ticket lock,
-locked-current accessibility, reference ownership and source/editability,
-conflict or no-op classification, then mutation and audit. `old_value`,
-`new_value`, and URL snapshots come only from this locked-current state. The
-unique `(ticket_id, url)` constraint remains the final defense against
-concurrent manual creation and automatic upsert races. Automatic fetcher
-upserts retain their owning per-CVE transaction and conflict-merge contract;
-they do not acquire Ticket after a CVE lock, create Ticket audit events, or
-acquire an HTTP user's scope. This accessibility ordering does not add an
-operability or manual-zone restriction; the Manual references policy above
-remains unchanged.
+| Exception | HTTP | Code | Raised when |
+|---|---:|---|---|
+| `TicketNotFoundError` † | 404 | `TICKET_NOT_FOUND` | Ticket locator is malformed, missing, or inaccessible to the caller |
+| `ReferenceNotFoundError` | 404 | `RESOURCE_NOT_FOUND` | Nested reference does not exist under the accessible parent Ticket |
+| `ReferenceNotEditableError` | 409 | `RESOURCE_NOT_EDITABLE` | A consumer attempts to update or delete an automatic reference |
+| `ReferenceConflictError` | 409 | `RESOURCE_CONFLICT` | Another reference already owns the requested normalized URL on the Ticket |
 
-### `upsert_references` signature
+† Shared exception; not a subclass of `ReferenceServiceError`.
+
+API handlers catch each documented exception explicitly and map it to the
+listed status and code. An optional `ServiceError` defense-in-depth fallback
+does not replace those catches.
+
+System-internal validation and infrastructure failures are distinct from API
+domain conflicts:
+
+| Exception | Raised when | Handling |
+|---|---|---|
+| `ValueError` | A non-API caller violates a semantic input contract, including the automatic source/CVE context or a manual field invariant | Propagate; the workflow owner rolls back |
+| Database, transaction, audit, cancellation, or programming exception | The service cannot complete its documented operation for a reason other than the exact normalized-URL uniqueness conflict | Propagate unchanged; the workflow owner rolls back |
+
+### `upsert_references()`
+
+Category A signature:
 
 ```python
 async def upsert_references(
     session: AsyncSession,
     ticket_id: UUID,
+    cve_id: str,
     source: str,
-    source_url: str | None,
-    upstream_references: list[UpstreamReference],
+    source_reference: AutomaticReferenceInput | None,
+    upstream_references: Sequence[AutomaticReferenceInput],
 ) -> None
 ```
 
-- `source`: the fetcher name (e.g., `"sync_nvd_cves"`)
-- `source_url`: the fetcher's human-readable CVE page URL, either
-  pre-built from `source_reference_url_pattern` or manually
-  constructed by the fetcher when the source URL is not derivable
-  from the CVE-ID (e.g., GHSA advisory URLs use the GHSA-ID). `None`
-  if the fetcher does not produce a source reference for this CVE
-- `upstream_references`: normalized list of references extracted from the
-  CVE data by the fetcher, typed as:
+The internal `ticket_id` identifies the Ticket already established by the CVE
+ingestion workflow. `cve_id` is the canonical CVE ID used only for bounded
+rejection logging and must satisfy the canonical CVE identifier contract in
+`docs/api-spec.md` (CVE Identifier Resolution). `source` must be the calling
+fetcher's stable `BaseFetcher.name`, not `manual`.
 
-  ```python
-  class UpstreamReference(TypedDict):
-      url: str                  # Reference URL from the CVE data
-      tags: list[str] | None    # Upstream tags (e.g., ["Patch", "Vendor Advisory"])
-      name: str | None          # Reference title from upstream data
-  ```
+The function validates the automatic source contract, prepares every candidate
+before database comparison, and applies the deterministic merge rules above.
+An invalid candidate is logged, skipped, and does not prevent later candidates
+from processing. An invalid automatic `source` or malformed `cve_id` raises
+`ValueError` before persistent work and is not a candidate rejection. The
+function does not perform a redundant parent lookup: if a write is attempted
+for an absent internal Ticket, the database integrity exception propagates; if
+there is no valid candidate to write, the empty operation returns `None`.
 
-  `name` is the reference title from the upstream data (MITRE CVE JSON
-  5.x `name` field), or `None` when the source does not provide it (NVD
-  API v2). `tags` carries the source classification labels consumed
-  during type auto-classification (see CVE Source Tag Mapping)
+The result is always `None`. The function creates no Ticket audit event for an
+insert, update, no-op, rejected candidate, or handled race. Re-invocation and
+concurrency follow Automatic Ingestion. It flushes effective writes and handled
+collision outcomes as needed before returning so generated state and constraint
+failures are resolved inside its boundary. Unexpected database, transaction,
+audit-independent infrastructure, parser-programming, cancellation, and other
+errors propagate unchanged. The caller then rolls back the complete per-CVE
+transaction, including the CVE mutation and every reference candidate; the
+function never converts such failures into skip-and-continue.
 
-The function handles: source reference creation, type classification
-(tag mapping -> URL pattern -> default), and the upsert strategy (see
-Upsert Strategy). Type classification logic is implemented internally
-via `_classify_type()`.
+### `create_reference()`
+
+Category A signature:
+
+```python
+async def create_reference(
+    session: AsyncSession,
+    ticket_id: str,
+    caller: CallerContext,
+    input: ManualReferenceCreateInput,
+) -> TicketReferenceProjection
+```
+
+After the shared manual mutation ordering, normalize the URL, determine type
+from explicit supplied state or URL classification, and insert a row with
+`source = manual`. Return the flushed persisted projection. Create exactly one
+`reference_added` event with acting `user_id`, `old_value = NULL`, `new_value`
+equal to the normalized URL, and `comment = detail = NULL`.
+
+A pre-existing normalized identity, including an automatic row, raises
+`ReferenceConflictError`. Re-invocation after a successful commit is therefore
+not idempotent: it conflicts and creates no second event. Before commit, caller
+rollback removes both row and event. The function propagates the service
+exceptions above, `ValueError` for a non-transport caller's invalid semantic
+input, audit validation errors, and unexpected database/transaction errors.
+
+### `update_reference()`
+
+Category A signature:
+
+```python
+async def update_reference(
+    session: AsyncSession,
+    ticket_id: str,
+    reference_id: UUID,
+    caller: CallerContext,
+    input: ManualReferenceUpdateInput,
+) -> TicketReferenceProjection
+```
+
+Apply partial-update semantics after locked accessibility, nested ownership,
+editability, and conflict checks. Normalize a supplied URL before comparison
+and response projection. Omitted fields preserve current values; explicit
+`NULL` clears nullable fields. A supplied URL without a supplied type preserves
+the current type.
+
+Create one event for each field whose persisted value changes, in fixed order:
+
+1. `reference_url_changed`: old and new normalized URLs; `detail = NULL`.
+2. `reference_type_changed`: old and new enum values or `NULL`;
+   `detail = {"url": <post-update normalized URL>}`.
+3. `reference_title_changed`: old and new title or `NULL`; same URL detail.
+4. `reference_description_changed`: old and new description or `NULL`; same URL
+   detail.
+
+Every event uses the acting user and `comment = NULL`. A multi-field PATCH and
+all events are one transaction. If every supplied value is equivalent to the
+serialized current value, return that current projection without writing the
+row, changing `updated_at`, or creating an event. Repeating an effective PATCH
+with the same input is therefore a no-op after the first commit.
+
+The function propagates the service exceptions above, `ValueError` for invalid
+non-transport semantic input, audit validation errors, and unexpected
+database/transaction errors. Failure or caller rollback leaves all fields,
+`updated_at`, and events unchanged.
+
+### `delete_reference()`
+
+Category A signature:
+
+```python
+async def delete_reference(
+    session: AsyncSession,
+    ticket_id: str,
+    reference_id: UUID,
+    caller: CallerContext,
+) -> None
+```
+
+After locked accessibility, scoped nested lookup, and editability checks,
+delete the manual row and create exactly one `reference_deleted` event with the
+acting user, `old_value` equal to its normalized URL, `new_value = NULL`, and
+`comment = detail = NULL`. Flush both before returning `None`.
+
+Re-invocation after commit raises `ReferenceNotFoundError` and creates no event.
+The function propagates the service exceptions above, audit validation errors,
+and unexpected database/transaction errors. Failure or caller rollback retains
+the row and removes the pending event.
+
+### `list_references()`
+
+Category B signature:
+
+```python
+async def list_references(
+    session: AsyncSession,
+    ticket_id: str,
+    caller: CallerContext,
+    source: str | None,
+    type: ReferenceType | None,
+    type_was_supplied: bool,
+) -> list[TicketReferenceProjection]
+```
+
+Resolve the canonical SNTL locator and select references through the canonical
+Ticket visibility predicate in one database operation or equivalent coherent
+PostgreSQL view. Malformed, missing, and inaccessible Tickets raise the shared
+`TicketNotFoundError` before filters are evaluated. `source`, when supplied, is
+an exact case-sensitive match. A valid `type` is an exact enum match. Filters
+combine with AND. `type_was_supplied = True` with `type = None` represents a
+supplied invalid enum value removed at the API boundary and returns an empty
+list, but only after parent accessibility succeeds.
+
+Order by fixed type priority `advisory`, `patch`, `issue`, `article`, `NULL`,
+then `created_at ASC`, then `id ASC`. Return the complete unpaginated list of
+projections. There is no count, cursor, page metadata, client-controlled sort,
+or mutation lock. The function creates no event and does not flush. It
+propagates `TicketNotFoundError` and database/transaction exceptions unchanged.
+
+## API Schemas
+
+Pydantic owns transport parsing and OpenAPI shape; service inputs preserve the
+semantic supplied/omitted distinctions.
+
+### TicketReferenceCreate
+
+| Field | Type | Required | Rules |
+|---|---|---:|---|
+| `url` | string | yes | Shared URL boundary; maximum 2048 before and after normalization |
+| `title` | string or null | no | 1-500 characters when non-NULL; not whitespace-only |
+| `description` | string or null | no | 1-2000 characters when non-NULL; not whitespace-only |
+| `type` | `ReferenceType` or null | no | Omitted classifies by URL; explicit null stores uncategorized |
+
+### TicketReferenceUpdate
+
+| Field | Type | Required | Rules |
+|---|---|---:|---|
+| `url` | string | no | Same URL rules; explicit null is invalid |
+| `title` | string or null | no | Null clears; omitted preserves |
+| `description` | string or null | no | Null clears; omitted preserves |
+| `type` | `ReferenceType` or null | no | Null clears; omitted preserves |
+
+An empty object is rejected with `422 VALIDATION_ERROR` and message `At least
+one field must be provided.` `{"url": null}` is also `422 VALIDATION_ERROR`.
+Pydantic distinguishes omission from explicit null.
+
+### TicketReferenceResponse
+
+| Field | Type | Nullability |
+|---|---|---|
+| `id` | UUID | non-null |
+| `ticket_id` | string (`SNTL-{n}`) | non-null |
+| `url` | string | non-null, normalized persisted value |
+| `title` | string | nullable |
+| `description` | string | nullable |
+| `type` | `ReferenceType` | nullable |
+| `source` | string | non-null |
+| `created_at` | UTC datetime | non-null |
+| `updated_at` | UTC datetime | non-null |
+
+POST and PATCH always serialize the service's flushed persisted projection, so
+their response URL is normalized even when the request used another equivalent
+form.
 
 ## API Endpoints
 
-Every `{ticket_id}` path and every response `ticket_id` follows
-`docs/api-spec.md` (Ticket Identifier Resolution) and therefore contains only
-canonical `SNTL-{n}`. `TicketReference.id` remains the public UUID of the
-reference sub-resource and is unchanged.
+Every `{ticket_id}` is the canonical `SNTL-{n}` locator. Each
+`{reference_id}` is a TicketReference UUID and is always resolved under its
+path parent. Responses use the standard `{"data": ...}` envelope except the
+204 response. Global and Ticket-scoped errors derive from `docs/api-spec.md`;
+endpoint tables below contain only endpoint-specific service errors.
 
 ### List References
 
-```
+```text
 GET /api/v1/tickets/{ticket_id}/references
 ```
 
 **`Access: Public`**
+
 **`Authentication: Optional`**
 
-Returns all references for a ticket (both automatic and manual). This
-endpoint is **not paginated** because the number of references per ticket
-is expected to be small (typically fewer than 30). All references are
-returned in a single response.
+Returns every automatic and manual reference visible through the parent
+Ticket. The endpoint is intentionally unpaginated because references are a
+small Ticket-scoped editorial collection. It makes no cursor or future
+pagination compatibility promise.
 
-**Operational limit**: the design is optimized for ≤ 200 references per ticket. No hard cap is enforced. If production monitoring reveals tickets consistently exceeding this threshold, cursor-based pagination will be introduced as a backwards-compatible addition (the unpaginated response remains the default; pagination activates only when a `cursor` parameter is provided).
+| Query parameter | Type | Behavior |
+|---|---|---|
+| `source` | string | Exact, case-sensitive source match |
+| `type` | single `ReferenceType` | Exact match; invalid values follow global enum-filter semantics |
 
-**Query parameters**:
+Both filters combine with AND. A non-matching source or invalid supplied type
+returns `{"data": []}` only for an accessible Ticket. Client-controlled sort
+parameters are not supported; undeclared parameters are ignored. Ordering is
+fixed at type priority (`advisory`, `patch`, `issue`, `article`, uncategorized),
+then `created_at ASC`, then `id ASC`.
 
-| Parameter | Type   | Default | Description                                              |
-|-----------|--------|---------|----------------------------------------------------------|
-| source    | string | —       | Filter by source (e.g., `"sync_nvd_cves"`, `"manual"`)  |
-| type      | string | —       | Filter by type (e.g., `"patch"`, `"advisory"`)           |
-
-The `type` parameter follows the enum filter validation convention in
-`docs/api-spec.md` — invalid values are silently ignored. The `source`
-parameter is a free-form string; non-matching values return an empty
-result set.
-
-**Sorting**: results are ordered by type group priority, then by
-`created_at` ascending within each group. The type group order is:
-
-| Type       | Sort Priority |
-|------------|---------------|
-| `advisory` | 1             |
-| `patch`    | 2             |
-| `issue`    | 3             |
-| `article`  | 4             |
-| `NULL`     | 5 (last)      |
-
-Client-controlled sorting is not supported (small dataset, defined grouping
-order). When an accessible ticket has no references (or all are filtered out),
-the response returns `{"data": []}`. The accessible parent is selected in the
-same database operation or view as the reference result.
-
-**Response** (200 OK):
+**Response: 200 OK**
 
 ```json
 {
   "data": [
     {
-      "id": "uuid",
+      "id": "019b3b4e-4a00-7000-8000-000000000001",
       "ticket_id": "SNTL-42",
       "url": "https://nvd.nist.gov/vuln/detail/CVE-2026-3317",
       "title": "NVD",
@@ -604,69 +771,45 @@ same database operation or view as the reference result.
       "source": "sync_nvd_cves",
       "created_at": "2026-04-21T10:20:00Z",
       "updated_at": "2026-04-21T10:20:00Z"
-    },
-    {
-      "id": "uuid",
-      "ticket_id": "SNTL-42",
-      "url": "https://github.com/example/project/commit/a1b2c3",
-      "title": null,
-      "description": null,
-      "type": "patch",
-      "source": "sync_nvd_cves",
-      "created_at": "2026-04-21T10:20:00Z",
-      "updated_at": "2026-04-21T10:20:00Z"
-    },
-    {
-      "id": "uuid",
-      "ticket_id": "SNTL-42",
-      "url": "https://bugzilla.suse.com/show_bug.cgi?id=12345",
-      "title": "SUSE Bugzilla #12345",
-      "description": "Upstream confirmed the fix; tracking SUSE-side packaging",
-      "type": "issue",
-      "source": "manual",
-      "created_at": "2026-04-21T14:30:00Z",
-      "updated_at": "2026-04-21T14:30:00Z"
     }
   ]
 }
 ```
 
+Parent accessibility has precedence over filter emptiness. A malformed,
+missing, or inaccessible parent returns the scoped `TICKET_NOT_FOUND`, never an
+empty collection.
+
 ### Add Reference
 
-```
+```text
 POST /api/v1/tickets/{ticket_id}/references
 ```
 
-Adds a manual reference to a ticket.
+**`Capability: manage_references`**
 
-**Request body**:
+Creates one manual reference from `TicketReferenceCreate` and returns the
+persisted `TicketReferenceResponse`.
 
 ```json
 {
-  "url": "https://bugzilla.suse.com/show_bug.cgi?id=12345",
-  "title": "SUSE Bugzilla #12345",
-  "description": "Upstream confirmed the fix; tracking SUSE-side packaging",
+  "url": "http://issues.example.test/tickets/12345",
+  "title": "Fictional packaging issue",
+  "description": "Tracks the downstream packaging review",
   "type": "issue"
 }
 ```
 
-| Field       | Type   | Required | Description                                |
-|-------------|--------|----------|--------------------------------------------|
-| url         | string | yes      | URL of the external resource               |
-| title       | string | no       | Human-readable label                       |
-| description | string | no       | Short note explaining relevance            |
-| type        | string | no       | Content type (`advisory`, `patch`, `issue`, `article`). If omitted, auto-detected from URL pattern; `null` if no pattern matches |
-
-**Response** (201 Created):
+**Response: 201 Created**
 
 ```json
 {
   "data": {
-    "id": "uuid",
+    "id": "019b3b4e-4a00-7000-8000-000000000002",
     "ticket_id": "SNTL-42",
-    "url": "https://bugzilla.suse.com/show_bug.cgi?id=12345",
-    "title": "SUSE Bugzilla #12345",
-    "description": "Upstream confirmed the fix; tracking SUSE-side packaging",
+    "url": "https://issues.example.test/tickets/12345",
+    "title": "Fictional packaging issue",
+    "description": "Tracks the downstream packaging review",
     "type": "issue",
     "source": "manual",
     "created_at": "2026-04-21T14:30:00Z",
@@ -675,262 +818,147 @@ Adds a manual reference to a ticket.
 }
 ```
 
-**Validation rules**:
-- `url` is validated as a Pydantic `HttpUrl` type, which enforces RFC 3986
-  conformance. This guarantees: scheme is `https` or `http` (other schemes
-  such as `javascript:`, `data:`, `ftp:` are rejected), a non-empty host
-  component is present, and control characters (U+0000–U+001F, U+007F)
-  are rejected. After validation, URL normalization is applied (see Upsert
-  Strategy § URL Normalization); the post-normalization scheme is always
-  `https://`. Only `https://` URLs are stored
-- `url` must not exceed 2048 characters
-- `url` must not already exist for this ticket (unique constraint)
-- `title`, if provided, must not exceed 500 characters or be
-  blank/whitespace-only
-- `description`, if provided, must not exceed 2000 characters or be
-  blank/whitespace-only
-- `type`, if provided, must be a valid `ReferenceType` value
+Capability denial precedes Ticket lookup. The service then locks the Ticket and
+checks locked-current accessibility before conflict and creation. The endpoint
+is an explicit manual-zone exception: it does not call
+`ensure_ticket_operable()`, performs no assignment or reconciliation, and does
+not produce `TICKET_NOT_MUTABLE` for `Ignored` or `Duplicated` Tickets.
 
-**Side effects**:
-- `source` is always set to `"manual"`
-- `type` is set to the provided value, or auto-detected from URL pattern,
-  or `null` if no pattern matches
-- A `reference_added` audit event is created with `new_value` = the
-  normalized URL
-
-The service holds the parent Ticket lock while classifying the normalized URL
-and, after locked-current accessibility succeeds, inserting the reference and
-event. If a concurrent create or automatic
-upsert wins the unique key, the manual request returns `RESOURCE_CONFLICT` and
-creates no event.
-
-**`Capability: manage_references`**
-
-**Error responses**:
-
-| Status | Code                | Condition                                     |
-|--------|---------------------|-----------------------------------------------|
-| 409    | `RESOURCE_CONFLICT` | URL already exists for this ticket             |
+| Status | Code | Condition |
+|---:|---|---|
+| 409 | `RESOURCE_CONFLICT` | Another reference owns the normalized URL on this Ticket |
 
 ### Update Reference
 
-```
+```text
 PATCH /api/v1/tickets/{ticket_id}/references/{reference_id}
 ```
 
-Updates an existing manual reference (see Mutability for the
-automatic/manual distinction). Follows partial update semantics (see
-`docs/api-spec.md`, Partial Update Semantics). Sending `null` for
-`title` or `description` clears the field.
-
-The `reference_id` lookup is scoped to the `ticket_id` in the URL path.
-A valid reference belonging to a different ticket returns
-`404 RESOURCE_NOT_FOUND`.
-
-When `url` is changed without an explicit `type` in the request body,
-the existing `type` value is preserved unchanged. Automatic
-re-classification from URL pattern matching applies only at creation time
-(POST without `type`). To re-classify after a URL change, the client must
-include `type` explicitly in the PATCH body (including `null` to reset to
-uncategorized).
-
-**Request body**:
-
-```json
-{
-  "title": "Updated title",
-  "description": "Added context after further analysis",
-  "type": "patch"
-}
-```
-
-| Field       | Type   | Required | Description                     |
-|-------------|--------|----------|---------------------------------|
-| url         | string | no       | URL of the external resource    |
-| title       | string | no       | Human-readable label            |
-| description | string | no       | Short note explaining relevance |
-| type        | string | no       | Content type                    |
-
-At least one field must be provided.
-
-**Side effects**:
-- For each field that changes, a corresponding audit event is created:
-  `reference_url_changed`, `reference_type_changed`,
-  `reference_title_changed`, or `reference_description_changed`
-- A PATCH that changes multiple fields generates multiple audit events in
-  the same transaction
-- Changed-field events use this fixed insertion order:
-  `reference_url_changed`, `reference_type_changed`,
-  `reference_title_changed`, `reference_description_changed`
-- The `detail` field on type/title/description events carries the
-  post-normalization URL as locator (`{"url": "..."}`)
-
-**Response** (200 OK):
-
-```json
-{
-  "data": {
-    "id": "uuid",
-    "ticket_id": "SNTL-42",
-    "url": "https://bugzilla.suse.com/show_bug.cgi?id=12345",
-    "title": "Updated title",
-    "description": "Added context after further analysis",
-    "type": "patch",
-    "source": "manual",
-    "created_at": "2026-04-21T14:30:00Z",
-    "updated_at": "2026-04-22T09:15:00Z"
-  }
-}
-```
-
 **`Capability: manage_references`**
 
-**Error responses**:
+Applies `TicketReferenceUpdate` partial-update semantics to a manual reference
+and returns its persisted `TicketReferenceResponse`. The UUID lookup is scoped
+by `(ticket_id, reference_id)`; a reference belonging to another Ticket is not
+found. URL normalization occurs before conflict and equality comparison.
 
-| Status | Code                    | Condition                                                |
-|--------|-------------------------|----------------------------------------------------------|
-| 404    | `RESOURCE_NOT_FOUND`    | Reference does not exist on this ticket                  |
-| 409    | `RESOURCE_NOT_EDITABLE` | Reference is automatic (`source != "manual"`) — cannot be modified by users |
-| 409    | `RESOURCE_CONFLICT`     | URL already exists for this ticket (if URL was changed)  |
+```json
+{
+  "title": "Updated fictional issue title",
+  "description": null
+}
+```
+
+**Response: 200 OK**
+
+The response uses the same envelope and fields as POST. An equivalent-only
+PATCH returns 200 with the current projection, creates no event, and does not
+change `updated_at`.
+
+Error precedence after capability is locked-current `TICKET_NOT_FOUND`, nested
+`RESOURCE_NOT_FOUND`, `RESOURCE_NOT_EDITABLE`, normalized URL
+`RESOURCE_CONFLICT`, then no-op or effective update. This endpoint is an
+explicit manual-zone exception and never produces `TICKET_NOT_MUTABLE`.
+
+| Status | Code | Condition |
+|---:|---|---|
+| 404 | `RESOURCE_NOT_FOUND` | Reference does not exist under this Ticket |
+| 409 | `RESOURCE_NOT_EDITABLE` | Reference is automatic |
+| 409 | `RESOURCE_CONFLICT` | Another reference owns the requested normalized URL |
 
 ### Delete Reference
 
-```
+```text
 DELETE /api/v1/tickets/{ticket_id}/references/{reference_id}
 ```
 
-Deletes a manual reference (see Mutability for the automatic/manual
-distinction).
-
-The `reference_id` lookup is scoped to the `ticket_id` in the URL path.
-A valid reference belonging to a different ticket returns
-`404 RESOURCE_NOT_FOUND`.
-
-**Response** (204 No Content)
-
-**Side effects**:
-- A `reference_deleted` audit event is created with `old_value` = the
-  reference URL
-
-If the locked lookup is missing, belongs to another Ticket, or was already
-deleted by a concurrent winner, the operation returns the documented not-found
-outcome and creates no event.
-
 **`Capability: manage_references`**
 
-**Error responses**:
+Deletes a manual reference selected by `(ticket_id, reference_id)`.
 
-| Status | Code                    | Condition                                        |
-|--------|-------------------------|--------------------------------------------------|
-| 404    | `RESOURCE_NOT_FOUND`    | Reference does not exist on this ticket           |
-| 409    | `RESOURCE_NOT_EDITABLE` | Reference is automatic (`source != "manual"`) — cannot be deleted by users |
+**Response: 204 No Content**
 
-## Ticket Event Logging
+The response has no body. Error precedence after capability is locked-current
+`TICKET_NOT_FOUND`, nested `RESOURCE_NOT_FOUND`, then
+`RESOURCE_NOT_EDITABLE`. This endpoint is an explicit manual-zone exception
+and never produces `TICKET_NOT_MUTABLE`.
 
-Manual reference mutations generate `TicketAuditEvent` records. Automatic
-reference operations (fetcher-driven) do NOT generate audit events — they
-are traceable via fetcher execution history.
+| Status | Code | Condition |
+|---:|---|---|
+| 404 | `RESOURCE_NOT_FOUND` | Reference does not exist under this Ticket |
+| 409 | `RESOURCE_NOT_EDITABLE` | Reference is automatic |
 
-| Operation | Event types created |
-|-----------|---------------------|
-| Add (POST) | `reference_added` |
-| Update (PATCH) | One event per changed field: `reference_url_changed`, `reference_type_changed`, `reference_title_changed`, `reference_description_changed` |
-| Delete (DELETE) | `reference_deleted` |
+## Ticket Audit Events
 
-All reference audit events set `user_id` to the acting user.
-`comment` is always `NULL`. See `docs/features/tickets/ticket-audit-log.md`
-for the full event type contract and detail JSONB schema.
+Manual mutations use the six existing reference event types. Automatic
+upsert, including effective insert and update, creates no Ticket audit event.
 
-Rejected, unchanged, not-found, and concurrent-loser manual outcomes create no
-event. Every effective manual mutation and all of its events flush in the same
-caller-owned transaction; an audit or database failure rolls back the complete
-reference mutation. Automatic reference insert/update is an explicit no-event
-boundary: current rows and fetcher execution history are its evidence, and
-audit history is never reference state or upsert idempotency input.
+| Outcome | Event | `old_value` | `new_value` | `detail` |
+|---|---|---|---|---|
+| Manual create | `reference_added` | `NULL` | Normalized URL | `NULL` |
+| Manual delete | `reference_deleted` | Normalized URL | `NULL` | `NULL` |
+| URL changed | `reference_url_changed` | Previous normalized URL | New normalized URL | `NULL` |
+| Type changed | `reference_type_changed` | Previous type or `NULL` | New type or `NULL` | `{"url": <post-update URL>}` |
+| Title changed | `reference_title_changed` | Previous title or `NULL` | New title or `NULL` | `{"url": <post-update URL>}` |
+| Description changed | `reference_description_changed` | Previous description or `NULL` | New description or `NULL` | `{"url": <post-update URL>}` |
 
-## Security
+All six use the acting user's UUID and `comment = NULL`. A multi-field PATCH
+inserts events in URL, type, title, description order. Values and detail come
+from serialized persisted state under the Ticket lock. The mutation and every
+required event are flushed in the same caller-owned transaction.
 
-- Reference list is Public with optional authentication. Anonymous callers see
-  references only for non-confidential Tickets; authenticated callers use the
-  canonical Ticket visibility predicate
-- Adding, editing, and deleting references requires the `manage_references`
-  capability before resource lookup, followed by locked-current Ticket
-  accessibility in the service
-- Edit and delete operations are restricted to manual references
-  (see Mutability)
-- All manual references are editable/deletable by any user with the
-  `manage_references` capability, regardless of who created them. All
-  mutations are recorded in the ticket audit log for accountability
-- URL scheme is restricted to `https://` after normalization (input
-  `http://` is upgraded; all other schemes are rejected)
-- The URL acceptance gate in `upsert_references()` provides defense-in-depth
-  against injection vectors from compromised upstream sources (NVD, MITRE,
-  etc.) by enforcing scheme, length, and control character validation on all
-  automatic references before database insertion
-- RFC 3986 conformance (enforced by Pydantic `HttpUrl`) rejects URLs
-  containing control characters (U+0000–U+001F, U+007F), eliminating
-  injection vectors from embedded control sequences in URL strings
-- See `docs/features/identity/rbac.md` for the full permission model
+Invalid automatic candidates, all automatic inserts/updates/no-ops, manual
+validation rejection, inaccessible or missing resources, noneditable targets,
+conflicts, equivalent PATCHes, concurrent losers, and rolled-back operations
+create zero events. Audit history is never an input to reference state,
+ownership, authorization, conflict handling, classification, or idempotency.
+
+## Security and Privacy
+
+- Public listing uses optional authentication and the canonical Ticket
+  visibility predicate. Anonymous callers see references only for
+  non-confidential Tickets.
+- Manual writes require `manage_references` before resource lookup and
+  locked-current Ticket accessibility before nested state is disclosed.
+- Only `source = manual` rows are consumer-editable.
+- The shared URL boundary rejects non-HTTP(S), hostless, credential-bearing,
+  control-character, and overlength values without dereferencing them.
+- Automatic validation logs contain only CVE ID, source, and a bounded reason;
+  they do not expose submitted reference content.
+- Service and API layers perform no DNS, HTTP, TLS, or other outbound URL
+  validation, so URL submission cannot be used as an SSRF primitive in this
+  feature.
 
 ## Testing Requirements
 
-Implementation tests cover manual POST, PATCH, and DELETE with the parent
-Ticket lock, exact event actor/values/comment/detail, rollback on audit failure,
-and no-event outcomes for rejection, not found, unchanged PATCH fields, and a
-concurrent loser. A multi-field PATCH asserts the fixed URL, type, title,
-description event order. Independent-session tests prove that competing manual
-mutations serialize on the Ticket and do not record stale old values.
-
-Accessibility tests cover anonymous, effective scope `all`, explicit grant,
-included-package maintainership, and inaccessible parents. List tests prove the
-accessible parent and references are selected in one database operation or
-equivalent view and distinguish an accessible empty list from
-`TICKET_NOT_FOUND`. Mutation races revoke the caller's last visibility path
-before the Ticket lock and assert `TICKET_NOT_FOUND` precedes reference
-ownership, editability, conflict, and no-op outcomes with zero durable write or
-event. Automatic fetcher upserts remain trusted and unscoped.
-
-Fetcher-upsert tests assert zero Ticket events for effective insert/update and
-no-op outcomes while preserving current rows and fetcher execution evidence.
+`docs/features/platform/testing-strategy.md` (Ticket References) owns the
+complete URL, schema, service, API, accessibility, audit, rollback, concurrency,
+transaction-usability, and zero-outbound-call matrix for this feature. Every
+behavior and no-event boundary in this specification must have coverage there;
+tests use independent database sessions for lock and uniqueness races rather
+than simulating concurrency inside one transaction.
 
 ## Boundary with CVEExternalIdentifier
 
-`TicketReference` and `CVEExternalIdentifier` (see `docs/data-model.md`)
-are related but distinct concepts:
+`TicketReference` is a Ticket-scoped research link. `CVEExternalIdentifier` is
+a CVE-scoped identity mapping used for identifier search. A GHSA may therefore
+appear in both: its identifier and canonical URL support CVE identity lookup,
+while its TicketReference URL supports the analyst's research workflow. The two
+records have independent ownership and lifecycle contracts.
 
-| Aspect      | TicketReference                               | CVEExternalIdentifier                          |
-|-------------|-----------------------------------------------|------------------------------------------------|
-| **Purpose** | Clickable links for the VA to research the vulnerability | Identity mapping: "this CVE is also known as GHSA-xxx" |
-| **Scope**   | Ticket-level (one ticket, many links)         | CVE-level (one CVE, many external IDs)         |
-| **Source**   | Automatic (fetchers) + manual (VAs)           | Automatic only (fetchers, read-only)           |
-| **Content** | Any relevant URL (advisories, patches, blogs) | Structured identifiers from naming authorities |
+## Dependencies and Cross-References
 
-A GitHub Security Advisory (GHSA) will typically appear in both:
-- `CVEExternalIdentifier`: stores the `GHSA-xxxx-xxxx-xxxx` identifier
-  and its canonical URL
-- `TicketReference`: stores the same URL as a clickable advisory link
-  for the VA
-
-This is not redundancy — they serve different consumers and are
-maintained independently. `CVEExternalIdentifier` feeds ticket search
-(searching by GHSA-ID finds the ticket). `TicketReference` feeds the
-VA's research workflow.
-
-## Dependencies
-
-- `docs/features/tickets/cve-tracking.md` — CVE ingestion flow creates
-  references. Contains the full `sync_nvd_cves` fetcher definition
-  (algorithm, NVD Source API caching, metrics)
-- `docs/features/platform/cve-fetcher-infrastructure.md` — `BaseCVEFetcher`
-  contract for `source_reference_url_pattern`
-- `docs/features/tickets/cve-service.md` — `UpsertResult` usage for
-  post-upsert reference creation
-
-## Cross-references
-
-- `docs/api-spec.md` — global API conventions (envelope format, error
-  codes, pagination, shared 422 responses)
-- `docs/features/identity/rbac.md` — `manage_references` capability,
-  endpoint permission map
-- `docs/data-model.md` — `TicketReference` table definition,
-  `ReferenceType` enum, `CVEExternalIdentifier` boundary
+- `docs/api-spec.md` - envelopes, errors, authorization order, identifiers,
+  filtering, and partial updates
+- `docs/data-model.md` - `TicketReference`, `ReferenceType`, and uniqueness
+- `docs/features/identity/rbac.md` - `manage_references`, endpoint permission
+  map, and canonical Ticket visibility
+- `docs/features/platform/audit-trail-infrastructure.md` - audit atomicity and
+  operational-state separation
+- `docs/features/platform/cve-fetcher-infrastructure.md` - CVE fetcher contract
+- `docs/features/platform/fetcher-infrastructure.md` - stable fetcher identity
+- `docs/features/platform/logging.md` - secrets and PII discipline
+- `docs/features/platform/testing-strategy.md` - service, concurrency,
+  accessibility, API, and audit testing
+- `docs/features/tickets/cve-service.md` - per-CVE transaction composition
+- `docs/features/tickets/ticket-audit-log.md` - exact reference event contracts
+- `docs/features/tickets/tickets.md` - Ticket status and manual-zone guard

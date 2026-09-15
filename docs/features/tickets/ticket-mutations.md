@@ -157,9 +157,11 @@ Gate-relevant mutations are blocked at the service layer by
 `ensure_ticket_operable()` (raises `TicketNotMutableError` → 409
 `TICKET_NOT_MUTABLE`).
 
-Confidentiality and explicit access-grant mutations are not gate-relevant.
-Their owning `ticket_service` contracts explicitly permit them in the manual
-zone without assignment, reconciliation, status change, or manual-zone exit.
+Confidentiality, explicit access-grant, and manual reference mutations are not
+gate-relevant. Their owning `ticket_service` or `reference_service` contracts
+explicitly permit them in the manual zone without assignment, reconciliation,
+status change, or manual-zone exit. Manual references are supplementary
+editorial metadata rather than Ticket workflow or package-gate state.
 
 ### Manual-zone exit composition
 
@@ -450,6 +452,9 @@ function.
   every Ticket status
 - `ticket_service.grant_access` and `ticket_service.revoke_access` — explicit
   visibility mutations valid in every Ticket status
+- `reference_service.create_reference`, `reference_service.update_reference`,
+  and `reference_service.delete_reference` — supplementary editorial metadata
+  mutations valid in every Ticket status
 - `ticket_service.dispatch_ticket_convergence` — validates its own eligible
   status set and never produces `TICKET_NOT_MUTABLE`
 - Trusted external CVSS ingestion — maintains source-owned CVE assessment and
@@ -965,6 +970,9 @@ a `FOR UPDATE` lock (`ticket_mutations`, `package_service`,
 
 This rule does not apply to system operations (`acting_user_id = None`)
 or to users without the `vulnerability_analyst` role.
+Manual reference create, update, and delete also do not call this helper: they
+change supplementary editorial metadata without assignment, gate
+reconciliation, status change, or manual-zone exit.
 It also does not apply when a `package_service` invocation creates only
 system-derived `TicketPackageMaintainer` associations. The package service does
 not call this helper for that association-only mutation; it calls the helper

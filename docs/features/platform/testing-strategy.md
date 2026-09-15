@@ -1885,6 +1885,140 @@ visibility predicate.
   declassification remains absent. Deactivation-impact API and CLI tests assert
   no grant or maintainership count is present because those rows are retained.
 
+### Ticket References
+
+When Ticket-reference validation, services, endpoints, audit behavior, or
+fetcher integration is affected, unit, integration, and e2e tests MUST cover
+the complete matrix below. Manual and automatic inputs exercise the same
+service-enforced URL boundary; API schema tests additionally verify the manual
+transport contract.
+
+**URL validity, normalization, and identity:**
+
+| Case | Required assertion |
+|---|---|
+| Accepted schemes and host | `http` and `https` with a valid non-empty host are accepted; every other scheme, a missing or empty host, and malformed URL structure are rejected |
+| Embedded user information | User information or credentials in the authority component are rejected, including username-only and username/password forms |
+| Control characters | Every U+0000-U+001F character and U+007F is rejected rather than stripped or encoded |
+| Length | Exactly 2048 characters before and after normalization is accepted when otherwise valid; a value exceeding either pre-normalization or post-normalization length is rejected |
+| Scheme and host case | Scheme and host are lowercased without changing path, query, or fragment case |
+| HTTP upgrade | `http` normalizes to `https` before classification, comparison, and storage |
+| Empty root path | Only the slash representing an otherwise-empty root path is removed; a non-root path and its trailing slash are preserved |
+| Preserved components | Explicit port, non-root path, query, and fragment are preserved exactly except for the scheme and host normalization above |
+| Normalized collision | Raw URLs that normalize to the same value have one `(ticket_id, url)` identity; manual creation returns `RESOURCE_CONFLICT`, while automatic upsert follows its source-ownership merge rules |
+| Ticket scope | The same normalized URL may exist on different Tickets; uniqueness is not global |
+
+Tests use fictional hosts and values. Validation and classification tests
+install spies or failing substitutes at outbound networking boundaries and
+prove that manual and automatic reference processing performs zero URL
+dereference, DNS resolution, probe, HTTP request, or other outbound URL call.
+Rejected automatic candidates are skipped while remaining candidates continue;
+their WARNING logs contain only the permitted bounded operational context and
+reason, never the raw URL, title, description, query, fragment, user
+information, credential material, or unsafe exception text.
+
+**POST and PATCH field states:**
+
+| Field | POST omitted | POST `null` | POST value | PATCH omitted | PATCH `null` | PATCH value |
+|---|---|---|---|---|---|---|
+| `url` | `422 VALIDATION_ERROR` | `422 VALIDATION_ERROR` | Validate and normalize; create or conflict on normalized identity | Preserve current URL | `422 VALIDATION_ERROR` | Validate and normalize; update, no-op, or conflict on normalized identity |
+| `title` | Persist `NULL` | Persist `NULL` | Validate and persist the value | Preserve current value | Clear to `NULL` | Validate and persist the value |
+| `description` | Persist `NULL` | Persist `NULL` | Validate and persist the value | Preserve current value | Clear to `NULL` | Validate and persist the value |
+| `type` | Classify from normalized URL, then use `NULL` when unmatched | Persist explicit `NULL` without classification | Validate and persist the explicit value | Preserve current value, including when URL changes | Clear to `NULL` without classification | Validate and persist the explicit value |
+
+POST tests include title and description blank and maximum-length boundaries.
+PATCH tests cover every field alone, all fields together, an empty object,
+equivalent values, and mixed omitted/null/value payloads. They prove an omitted
+`type` preserves the existing value when `url` changes, while explicit `null`
+clears it.
+
+**Service and endpoint behavior:**
+
+- `upsert_references()` covers absent and present source references; empty,
+  mixed-validity, and repeated automatic candidate lists; explicit type hint,
+  mapped-tag, normalized-URL-pattern, and `NULL` classification precedence;
+  same-source non-NULL field updates, different-source fill-NULL-only merge,
+  and manual source priority; deterministic re-invocation; skip-and-continue
+  candidate validation; and propagation of unexpected database, transaction,
+  and programming failures so the caller can roll back the complete per-CVE
+  transaction. Its result remains `None`.
+- `create_reference()` covers successful manual creation, normalized conflict,
+  every validation guard, locked-current Ticket accessibility, and response
+  projection from the created row.
+- `update_reference()` covers wrong-parent and missing reference, automatic
+  source rejection, every PATCH field state, normalized conflict, equivalent
+  no-op, locked-current changed-field classification, and response projection
+  from the updated row.
+- `delete_reference()` covers wrong-parent and missing reference, automatic
+  source rejection, effective deletion, and a waiting deletion loser that
+  observes not found.
+- `list_references()` covers an accessible empty result, source-only,
+  type-only, and combined filters; an all-invalid enum filter; fixed type
+  priority `advisory`, `patch`, `issue`, `article`, `NULL`; ascending
+  `created_at` then `id` within a group; and no client-controlled sorting or
+  pagination.
+- Service and endpoint tests assert the documented exception inheritance and
+  mappings, including the separate shared `TicketNotFoundError` catch.
+  Unexpected database and infrastructure failures propagate unchanged and are
+  never converted to `RESOURCE_CONFLICT`, `RESOURCE_NOT_FOUND`, or another
+  domain outcome.
+
+The three manual mutation functions are exercised on every Ticket status.
+`Ignored` and `Duplicated` succeed through their explicit
+`ensure_ticket_operable()` opt-out and never return `TICKET_NOT_MUTABLE`.
+Every manual reference mutation proves that assignment, Ticket status, package
+or Product state, gate reconciliation, manual-zone exit, and post-commit Ticket
+convergence remain unchanged. `Resolved` has the same non-gate behavior.
+
+Reference endpoint accessibility applies the canonical Ticket matrix above.
+GET tests cover anonymous access to non-confidential Tickets, denial for an
+anonymous confidential Ticket, denial for an authenticated
+`non_confidential`-scope caller without another visibility branch,
+authenticated effective scope `all`, explicit grant, included-package
+maintainership, and loss of each final visibility path. Mutation tests
+additionally prove `manage_references` is required before resource lookup and
+does not itself grant visibility. Missing and inaccessible parents return
+identical `TICKET_NOT_FOUND` responses. A valid reference UUID under the wrong
+parent and an unknown reference UUID return identical `RESOURCE_NOT_FOUND`
+responses only after locked-current parent accessibility succeeds; neither case
+leaks the actual parent.
+
+**Audit, rollback, and concurrency:**
+
+- Effective POST and DELETE each create exactly one acting-user
+  `reference_added` or `reference_deleted` event. Effective PATCH creates one
+  event for each effectively changed field, ordered URL, type, title, then
+  description, with exact old/new values, `comment = NULL`, and the documented
+  URL detail. Values and action classification derive from serialized
+  locked-current state.
+- Automatic insert/update/no-op, rejected manual operations, missing or
+  wrong-parent references, equivalent PATCH no-ops, normalized conflicts,
+  concurrent losers, and rolled-back operations create zero reference events.
+  Inject database, audit-validation, audit-insert, and flush failures and prove
+  the reference rows and all events roll back atomically. Caller-requested
+  rollback after a service returns has the same result.
+- Independent-session manual/manual races cover create/create for one
+  normalized identity, update/update with truthful sequential old values,
+  update/delete in both commit orders, delete/delete, and URL changes that
+  collide with another manual row. Exactly the effective serialized winners
+  mutate or emit events; losers return the documented conflict or not-found
+  outcome with no stale event.
+- Independent-session manual/automatic races cover both commit orders for
+  create/upsert of one normalized identity, automatic upsert against an
+  existing manual row, manual URL update colliding with an automatic row, and
+  manual delete concurrent with automatic processing. Final source ownership,
+  fields, return or error outcome, and event cardinality follow the serialized
+  winner and manual-priority rules; automatic work never emits a Ticket event.
+  Include one transaction where `upsert_cve()` already holds the Ticket lock
+  through Ticket-associated CVSS processing and one where automatic reference
+  work reaches the unique-key boundary without that pre-existing lock.
+- Force automatic unique-key conflicts through the public upsert boundary and
+  prove each conflict is merged or skipped without aborting the caller-owned
+  PostgreSQL transaction. A subsequent reference and unrelated per-CVE write in
+  that same transaction must flush and commit successfully. Unexpected failures
+  propagate so the caller rolls back the complete per-CVE transaction; they are
+  not converted to skip-and-continue outcomes.
+
 ### Application-Owned Redis Operations
 
 Every application-owned Redis operation, regardless of application layer or

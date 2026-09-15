@@ -714,7 +714,10 @@ gate state.
   manual-zone exit lifecycle;
 - `set_confidentiality`, `grant_access`, and `revoke_access`, which change only
   Ticket visibility state and neither assign nor reconcile or exit the manual
-  zone; and
+  zone;
+- `create_reference`, `update_reference`, and `delete_reference`, which change
+  only supplementary editorial metadata and do not assign, reconcile, change
+  status, or exit the manual zone; and
 - `dispatch_ticket_convergence`, which validates its own eligible status set.
 
 Read endpoints (GET) are never subject to this guard.
@@ -760,9 +763,11 @@ Note: `TICKET_NOT_MUTABLE` applies only to mutation endpoints
 under the same routers receive only the `NOT_FOUND` scoped response.
 The mechanism behind `TICKET_NOT_MUTABLE` is `ensure_ticket_operable()`
 — see Manual-Zone Mutability Guard above. Endpoints excluded from
-`ensure_ticket_operable()` (manual-zone exit, visibility-only, and async
-dispatch endpoints) are annotated per-endpoint and do not produce
-`TICKET_NOT_MUTABLE`.
+`ensure_ticket_operable()` (manual-zone exit, visibility-only, supplementary
+manual-reference, and async dispatch endpoints) are annotated per-endpoint and
+do not produce `TICKET_NOT_MUTABLE`. In particular, manual reference POST,
+PATCH, and DELETE remain valid for `Ignored` and `Duplicated` Tickets and never
+derive this response.
 
 #### Genuine Exceptions
 
