@@ -620,6 +620,10 @@ This rule does not apply to system operations (background tasks,
 automated ingestion) or to users without the `vulnerability_analyst`
 role.
 
+Manual reference create, update, and delete are also excluded. They modify only
+supplementary editorial metadata and never call `auto_assign_actor()`, reconcile
+gates, change Ticket status, or exit the manual zone.
+
 A package-resolution invocation whose only mutation is creation of
 system-derived `TicketPackageMaintainer` associations is also excluded. It does
 not represent the acting user's package-tree decision and does not invoke
@@ -764,14 +768,17 @@ rerun action below.
 See [ticket-service.md](ticket-service.md#reopen_from_ignored) for
 the full function contract.
 
-All other consumer modifications on Ignored tickets are blocked — mutation
-endpoints return 409 `TICKET_NOT_MUTABLE` (same guard as Duplicated).
-The visibility-only operations `set_confidentiality()`, `grant_access()`, and
-`revoke_access()` are explicit exceptions alongside the dedicated manual-zone
-exit operations. They may run while the Ticket remains Ignored or Duplicated,
-but never assign, reconcile gates, change status, or exit the manual zone.
-Blocking gate-relevant data prevents unexpected status jumps on reopen without
-preventing an authorized user from correcting access to embargoed content.
+Other consumer modifications on Ignored tickets are blocked — mutation
+endpoints return 409 `TICKET_NOT_MUTABLE` (same guard as Duplicated) unless
+their owning contract declares an explicit opt-out. The visibility-only
+operations `set_confidentiality()`, `grant_access()`, and `revoke_access()` and
+the supplementary editorial metadata operations `create_reference()`,
+`update_reference()`, and `delete_reference()` are explicit exceptions
+alongside the dedicated manual-zone exit operations. They may run while the
+Ticket remains Ignored or Duplicated, but never assign, reconcile gates, change
+status, or exit the manual zone. Blocking gate-relevant data prevents
+unexpected status jumps on reopen without preventing an authorized user from
+correcting access to embargoed content or curating reference links.
 Trusted external CVSS ingestion remains the narrow source-owned exception
 defined under Modifications in Inactive Statuses; it does not apply Ticket-
   scoped propagation before Ticket convergence.
@@ -797,8 +804,11 @@ they do not poll an inactive Ticket's external package scope.
   `ensure_ticket_operable()` in the service layer. The dedicated exit endpoints
   (`POST .../reopen` for Ignored, `POST .../revert-duplicate` for Duplicated)
   and the visibility-only confidentiality/grant mutations bypass this guard for
-  their separately documented purposes. Trusted source ingestion is not a
-  consumer mutation endpoint: it may
+  their separately documented purposes. Manual reference create, update, and
+  delete likewise bypass it because they change only supplementary editorial
+  metadata. These reference operations do not assign, reconcile, change status,
+  or exit the manual zone. Trusted source ingestion is not a consumer mutation
+  endpoint: it may
   persist non-SUSE external CVSS assessments and refresh `CVE.severity`, while
   Product eligibility, assignment, gates, and status propagation remain
   deferred until Ticket convergence after manual-zone exit. See
@@ -823,9 +833,11 @@ def ensure_ticket_operable(ticket: Ticket) -> None:
   explicit opt-out
 - NOT applied to: read operations; manual-zone exit functions
   (`reopen_from_ignored`, `revert_duplicate`); visibility-only
-  `set_confidentiality`, `grant_access`, and `revoke_access`; asynchronous
-  convergence dispatch; or trusted source ingestion that modifies only
-  source-owned external CVSS assessment and CVE-derived severity
+  `set_confidentiality`, `grant_access`, and `revoke_access`; supplementary
+  editorial metadata functions `create_reference`, `update_reference`, and
+  `delete_reference`; asynchronous convergence dispatch; or trusted source
+  ingestion that modifies only source-owned external CVSS assessment and
+  CVE-derived severity
 
 This source-ingestion boundary does not weaken manual-zone immutability:
 authenticated consumer APIs may mutate only the internal SUSE assessment and
