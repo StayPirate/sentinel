@@ -421,9 +421,11 @@ erDiagram
 
 ### CVE Ingestion
 
-How CVEs flow from external sources into Sentinel and trigger ticket creation.
-See [features/tickets/cve-tracking.md](features/tickets/cve-tracking.md) and
-[features/tickets/cvss-scoring.md](features/tickets/cvss-scoring.md).
+How CVEs flow from external sources into Sentinel, trigger ticket creation, and
+hand package candidates to post-commit resolution. See
+[features/tickets/cve-tracking.md](features/tickets/cve-tracking.md),
+[features/tickets/cvss-scoring.md](features/tickets/cvss-scoring.md), and
+[features/packages/package-service.md](features/packages/package-service.md).
 
 ```mermaid
 flowchart LR
@@ -452,6 +454,10 @@ flowchart LR
         EVENT["Create<br/>TicketAuditEvent"]
     end
 
+    COMMIT["Commit CVE transaction<br/>and release locks"]
+    HANDOFF["Post-commit best-effort<br/>resolve_ticket_packages"]
+    PACKAGE_TX["Package service<br/>one transaction per package"]
+
     NVD --> SYNC_NVD
     MITRE --> SYNC_MITRE
     RH --> SYNC_RH
@@ -468,6 +474,11 @@ flowchart LR
     SEV --> ELIG_EVAL
     NEW_TKT --> EVENT
     ELIG_EVAL --> EVENT
+    CVE_REC --> COMMIT
+    REF_REC --> COMMIT
+    EVENT --> COMMIT
+    COMMIT -.->|"best-effort publish"| HANDOFF
+    HANDOFF --> PACKAGE_TX
 
     style sources fill:#f3e8ff,stroke:#7c3aed
     style celery fill:#fce7f3,stroke:#db2777
@@ -488,12 +499,13 @@ and [features/packages/ibs-submission-tracking.md](features/packages/ibs-submiss
 flowchart LR
     subgraph add_pkg["Package Addition"]
         VA_ADD["VA adds package<br/>to ticket"]
-        CPE_MATCH["Auto-add via<br/>CVE ingestion"]
+        CPE_MATCH["Post-commit task:<br/>resolve_ticket_packages"]
     end
 
     subgraph resolve["Resolution (on-demand)"]
         SMELT_Q["Query SMELT<br/>maintained (v2)"]
         SMELT_M["Query SMELT<br/>maintainership"]
+        PACKAGE_UNIT["Independent transaction<br/>(one package)"]
         CREATE_CS["Create<br/>TicketPackageTrack<br/>(per codestream)"]
         CREATE_PR["Create<br/>TicketPackageProduct<br/>(per product)"]
         CREATE_PM["Create additive<br/>TicketPackageMaintainer"]
@@ -556,9 +568,10 @@ flowchart LR
     end
 
     VA_ADD --> SMELT_Q
-    CPE_MATCH --> SMELT_Q
-    SMELT_Q --> CREATE_CS --> CREATE_PR
-    SMELT_Q --> SMELT_M --> CREATE_PM
+    CPE_MATCH -.->|"best-effort handoff"| SMELT_Q
+    SMELT_Q --> SMELT_M --> PACKAGE_UNIT
+    PACKAGE_UNIT --> CREATE_CS --> CREATE_PR
+    PACKAGE_UNIT --> CREATE_PM
     CREATE_CS -.->|"post-commit acceleration"| REQ_CATCHUP
 
     VA_SET --> ELIG

@@ -129,8 +129,10 @@ cross-cutting UTC requirement in `docs/deployment.md`.
 ### Result Handling
 
 `task_ignore_result = True` is a fixed Celery application setting — task
-return values are never stored. Task outcomes are tracked in PostgreSQL
-(`FetcherRun`). See
+return values are never stored. `FetcherRun` tracks executions of
+`BaseFetcher` subclasses. Non-fetcher sub-operations create no `FetcherRun` and
+rely on durable domain state plus the structured logs defined by their owning
+specifications. See
 `docs/features/platform/fetcher-infrastructure.md` (Result handling).
 
 ### Redbeat Scheduler
