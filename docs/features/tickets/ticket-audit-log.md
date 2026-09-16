@@ -121,6 +121,15 @@ event type.
   then description events. These UUIDs are ordering inputs and are not added to
   event `detail`. Inactive-assignee sanitation follows all gate-input events and
   precedes the final gate-derived `status_change`, which is always last.
+- One trusted-external ingestion batch orders its effective assessment events by
+  version `4.0`, `3.1`, `3.0`, `2.0`, then canonical provider ascending by Unicode code
+  point. It then emits at most one `severity_changed`, all changed Product
+  events, and at most one final reconciliation event. If the transaction also
+  creates a Ticket, `ticket_created` and `cve_associated` precede that batch. If
+  it then applies CVE rejection, the exact `New -> Ignored` event follows the
+  complete CVSS batch. Republication's manual-zone-exit events likewise follow
+  the assessment writes and direct CVSS events; an `Ignored` Ticket's deferred
+  Product events occur during that exit from the batch's final assessment set.
 - Automatic Product recalculation creates exactly one event for each occurrence
   whose persisted boolean changes. Override-skipped, unchanged, manual-zone-
   deferred or skipped, rejected, not-found, and rolled-back Product outcomes
@@ -172,7 +181,7 @@ illustrative phrase or pass arbitrary text into a Ticket audit comment.
 | Manual Ticket creation | `Ticket created manually` |
 | CVE-ingestion Ticket creation | `CVE ingested from {source}` |
 | User-facing package addition | `NULL` |
-| CVE-ingestion package resolution | `CVE package resolution` |
+| Post-ingest CVE package resolution | `CVE package resolution` |
 | Product catalog backfill | `Product catalog backfill` |
 | Ticket convergence package resolution | `Ticket convergence` |
 | Assignment, reassignment, assignment promotion, ordinary gate reconciliation, manual-zone entry or exit, and other normal status transitions | `NULL` |
@@ -204,9 +213,9 @@ an intentional no-event contract, not missing audit coverage.
 | Auto-assignment during an effective mutation | One `assignment`; system `New → Analysis` when applicable | Acting user for assignment, system for promotion | Owning mutation service; its already-held Ticket lock |
 | User deactivation, final VA-role loss, or inactive-assignee sanitation | One `assignment` per effectively cleared non-NULL assignee | System | `user_service`: User then Ticket locks; reconciliation sanitation: existing Ticket lock |
 | Ignore, mark duplicate, reopen, or revert duplicate | Direct `status_change`, `duplicate_set`, or `duplicate_removed` as applicable; one `duplicate_target_changed` per repointed dependent; derived Product, sanitation, and final status events retain their normal contracts | Acting user for the direct ignore, duplicate-set, or duplicate-remove decision; reopen's resulting gate status and all other derived consequences use system | `ticket_service`; Ticket, ordered multi-Ticket, or locked dependent roots as specified there |
-| CVE association and rejection/revert | `cve_associated`; applicable derived severity/Product/status events; rejection uses one `status_change` | Acting user for association; system for derived changes and rejection/revert status | `ticket_service`/`cve_service`; CVE then Ticket |
+| CVE association and rejection/revert | `cve_associated`; applicable derived severity/Product/status events; rejection uses one `status_change`. A rejected orphan records creation/association, then CVSS events, then `New -> Ignored` | Acting user for association; system for derived changes and rejection/revert status | `ticket_service`, orchestrated by `cve_service`; CVE then Ticket |
 | Manual severity | One `severity_changed`, plus ordinary assignment/status consequences | Acting user for severity; system for derived status | `ticket_mutations`; Ticket lock |
-| Effective CVSS assessment mutation | One `cvss_assessment_changed`; optional `severity_changed`, Product events, and final status | Direct SUSE event uses acting user; all derived events and external ingestion use system | `ticket_mutations`; CVE then optional Ticket |
+| Effective CVSS assessment mutation or ingestion batch | One `cvss_assessment_changed` per effective assessment; optional single `severity_changed`, Product-event sequence, and final status per chain/batch | Direct SUSE event uses acting user; all derived events and external ingestion use system | `ticket_mutations`; CVE then optional Ticket |
 | Default-version severity/eligibility chain | No assessment event; optional `severity_changed`, Product events, and final status | System | `ticket_mutations`; CVE then optional Ticket |
 | Ticketless CVE, CVSS, or enrichment mutation | None because no Ticket audit target exists | N/A | CVE-domain owner; CVE root where required |
 | Other CVE-owned metadata or enrichment mutation | None by itself; resulting CVSS or rejection effects retain the events above | N/A | `cve_service`; CVE root |
@@ -242,6 +251,16 @@ then follows every gate-input mutation, and the final gate-derived
 `ticket_created` remains the first event in the new Ticket's history. Within one
 package-tree invocation, ascending-`User.id` `package_maintainer_added` events
 precede the invocation-level `package_added` event.
+
+The source-neutral ingestion sequence is creation events when needed, canonical
+CVSS assessment events, at most one severity event, then state-applicable
+Product/final-gate events. An applicable rejection follows that batch; an
+`Ignored` republication performs its deferred Product and final status events in
+the subsequent manual-zone-exit sequence. Source-status and automatic-reference
+writes create no
+Ticket event. Any reference, audit, flush, commit, or other unexpected failure
+rolls back all earlier ingestion events; no post-commit callback is then
+published.
 
 Every action classification, `old_value`, `new_value`, canonical comment, and
 subject snapshot comes from serialized pre/post state under the root and lock
@@ -599,6 +618,10 @@ required event sequence or explicit no-event outcome. For audited mutations:
     Ticket/database view, accessibility is applied before actor/search/date and
     other event filters, and an inaccessible Ticket returns `TICKET_NOT_FOUND`
     rather than an empty page or zero count
+26. Republication ingestion tests combine `REJECTED -> PUBLISHED` with changed
+    external assessments and prove direct CVSS events precede manual-zone-exit
+    Product/final-status events whose values derive from the current payload's
+    final assessment set, not stale pre-ingest state
 
 See Guardrail 6 (Mandatory testing) and Guardrail 11 (Ticket event logging)
 in `AGENTS.md` for enforcement.

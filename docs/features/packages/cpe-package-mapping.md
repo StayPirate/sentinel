@@ -4,14 +4,14 @@
 
 Sentinel needs to convert NVD CPE strings (e.g.,
 `cpe:2.3:a:gnu:emacs:*:*:*:*:*:*:*:*`) into SUSE source package names
-(e.g., `emacs`) to automatically add affected packages to tickets during
-CVE ingestion. This spec defines:
+(e.g., `emacs`) so the post-ingest package-resolution workflow can add affected
+packages to Tickets after CVE ingestion. This spec defines:
 
 1. A static JSON mapping file shipped with the application at
    `backend/app/data/cpe-package-mapping.json`
 2. A resolution function (`resolve_cpe_packages`) that performs an
-   in-memory lookup against the mapping, consumed by the CVE ingestion
-   pipeline
+   in-memory lookup against the mapping, consumed by the owning post-ingest
+   package-resolution workflow
 
 ## Context
 
@@ -446,17 +446,16 @@ unexpected loader exceptions unchanged.
 
 | Consumer | Where | How |
 |----------|-------|-----|
-| CVE ingestion pipeline — NVD CPE (Phase 2) | `cve_service` | For each CPE entry selected as a package candidate by the NVD ingestion contract, call `resolve_cpe_packages(cpe_criteria)` and collect all returned package names into a single set |
-| CVE ingestion pipeline — affected[] CPE (Phase 2) | `cve_service` | For each `AffectedVersionEntry` with a non-null `cpe` field in a `replace` operation from `CVEIngestPayload.affected_version_operations`, call `resolve_cpe_packages(cpe)` and add results to the same package set. Empty replacements and removals contribute no candidates |
-| CVE ingestion pipeline — affected[] vendor:product (Phase 2) | `cve_service` | For each `AffectedVersionEntry` with non-null `vendor` and `product` in a `replace` operation from `CVEIngestPayload.affected_version_operations`, call `resolve_vendor_product(vendor, product)` and add results to the same package set. Empty replacements and removals contribute no candidates |
-| CVE ingestion pipeline — resolved_packages (Phase 2) | `cve_service` | Pre-resolved package names from the payload (`CVEIngestPayload.resolved_packages`) are added directly to the package set without mapping resolution |
-| `fetch_single_cve` (on-demand) | `cve_service` | Same as above (all applicable sources from the payload), triggered by on-demand CVE fetch |
+| Post-ingest CVE package resolution — NVD CPE | Owning package-resolution workflow | For each CPE entry already selected as a package candidate by the NVD ingestion contract and transported through `PostIngestTasks.cpe_matches`, call `resolve_cpe_packages(criteria)`; do not reinterpret NVD applicability |
+| Post-ingest CVE package resolution — affected-entry CPE | Owning package-resolution workflow | For each CPE transported through `PostIngestTasks.affected_cpes`, call `resolve_cpe_packages(cpe)` |
+| Post-ingest CVE package resolution — affected-entry vendor/product | Owning package-resolution workflow | For each pair transported through `PostIngestTasks.vendor_products`, call `resolve_vendor_product(vendor, product)` |
+| Post-ingest CVE package resolution — package-name candidate | Owning package-resolution workflow | Treat each value in `PostIngestTasks.resolved_packages` as requiring downstream validation; the historical field name does not assert an exact SUSE package match |
 
-All sources contribute to a single `set[str]` of package names.
-`add_package_to_ticket()` is called once per unique package name in the
-set. The set-level deduplication avoids redundant SMELT queries when
-multiple sources resolve to overlapping packages (e.g., NVD CPE and
-CNA vendor:product both resolving to `emacs`).
+`cve_service` only builds the deterministic serializable handoff; it does not
+call either resolver or `add_package_to_ticket()`. Deduplication and ordering of
+transported values are owned by `build_post_ingest_tasks()`. The package-
+resolution workflow owns resolver-result combination, package validation, and
+mutation lifecycle; those behaviors are intentionally not specified here.
 
 **Integration notes**:
 
@@ -473,13 +472,9 @@ CNA vendor:product both resolving to `emacs`).
   SUSE backport practices make upstream version information unreliable
   for determining whether a specific track is affected. The VA
   determines affectedness at the track level after packages are added
-- **Mapping changes vs existing CVEs**: when the mapping file is
-  updated (new entries added or existing ones modified), tickets that
-  were previously processed with the old mapping are **not**
-  automatically re-resolved. The new mapping applies only to CVEs
-  processed after the deployment. This is accepted eventual-consistency
-  behavior -- the mapping rarely changes, and VAs can manually add
-  packages to tickets when needed
+- **Mapping changes vs existing CVEs**: recovery and re-resolution after a
+  mapping change belong to the owning post-ingest package-resolution workflow;
+  this resolver contract does not create a separate rescan or progress model
 
 ## Verification
 
@@ -518,11 +513,9 @@ contract tests. Runtime AIMAAS ingestion, database persistence, and a
 
 ## Cross-references
 
-- `docs/features/tickets/cve-service.md` -- Post-Ingestion Side
-  Effects (consumer of `resolve_cpe_packages()` and
-  `resolve_vendor_product()`)
-- `docs/features/tickets/cve-tracking.md` -- Business Rule #4
-  (package resolution from CVE data)
+- `docs/features/tickets/cve-service.md` -- pure PostIngestTasks candidate
+  extraction; not a consumer of either resolver
+- `docs/features/tickets/cve-tracking.md` -- post-ingest candidate handoff
 - `docs/features/packages/package-model.md` -- Adding Packages to a
   Ticket (`add_package_to_ticket()`)
 - `docs/features/packages/package-service.md` --

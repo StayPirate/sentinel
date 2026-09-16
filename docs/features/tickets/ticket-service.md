@@ -90,7 +90,8 @@ revoking explicit access.
 `revert_duplicate()`, `set_confidentiality()`, and direct access-grant
 operations require a non-null authorized acting user. Their API handlers must
 not use system attribution. `create_ticket()` and `reopen_from_ignored()` retain
-their documented system callers.
+their documented system callers. `ignore_new_for_rejected_cve()` is exclusively
+system-only and has no actor parameter.
 
 ### Caller category and Ticket accessibility
 
@@ -168,6 +169,8 @@ Ordinary operations that modify the Ticket row call
 
 Explicit opt-outs (functions that do NOT call `ensure_ticket_operable`):
 
+- `ignore_new_for_rejected_cve` — validates exactly `New` as the automatic
+  rejection source state and leaves every other status unchanged
 - `reopen_from_ignored` and `revert_duplicate` — validate their exact manual-
   zone source state instead because they are its dedicated exits
 - `set_confidentiality`, `grant_access`, and `revoke_access` — visibility-only
@@ -430,6 +433,12 @@ mapping location is an implementation choice.
 7. If CVE associated: create `TicketAuditEvent` (`cve_associated`)
 8. Return the created Ticket
 
+For a manual creation whose locked-current CVE is already `REJECTED`, these
+same steps remain authoritative: initial status still comes only from step 3,
+and the function does not call `ignore_new_for_rejected_cve()` or create the
+automatic `CVE rejected` status event. The authorized user may invoke the
+ordinary manual ignore operation separately.
+
 **Concurrency — CVE uniqueness**: If the INSERT raises an
 `IntegrityError` due to the UNIQUE constraint on `Ticket.cve_id` (race
 between concurrent creation for the same CVE), the service catches the
@@ -510,6 +519,12 @@ omit it; the function then captures one date at entry for its complete chain.
     version) may now fail, causing regression to Analysis. Do not auto-assign a
     second time.
 13. Return the updated Ticket.
+
+If the locked CVE was already `REJECTED` before this deliberate manual
+association, the function still performs only the ordinary association,
+severity-source handover, Product, and gate sequence above. It does not invoke
+`ignore_new_for_rejected_cve()` or create an automatic `CVE rejected` event; the
+authorized user may ignore the Ticket through the ordinary manual operation.
 
 **Locking**: `FOR UPDATE` on CVE, then `FOR UPDATE` on Ticket. CVE Resolution
 Behavior involves only local database operations and may insert a minimal CVE
@@ -674,6 +689,54 @@ Ignored tickets.
 
 **Audit events**: `status_change`. Possibly `assignment` (from
 auto-assign). Both use `comment = NULL`.
+
+### `ignore_new_for_rejected_cve()`
+
+Trusted system-only lifecycle boundary for the automatic consequence of a
+rejected associated CVE. Only `cve_service.upsert_cve()` may call it, while the
+caller owns the CVE lock and already holds the unique associated Ticket lock.
+It is not an API, task, CLI, or general-purpose ignore operation.
+
+```python
+async def ignore_new_for_rejected_cve(
+    db: AsyncSession,
+    *,
+    cve_id: UUID,
+    ticket: Ticket,
+) -> Ticket:
+```
+
+`cve_id` is the internal UUID of the already locked CVE root; `ticket` is its
+already locked unique associated Ticket.
+
+**Preconditions and authority**:
+
+- The caller explicitly uses the trusted internal boundary; actor absence alone
+  never grants authority.
+- The caller holds the associated CVE root lock and the supplied Ticket
+  `FOR UPDATE` lock in that order.
+- Authority and lock ownership are trusted caller preconditions, not conditions
+  rediscovered through session introspection. The function verifies
+  `ticket.cve_id == cve_id`; an association violation raises `ValueError` before
+  a Ticket mutation.
+
+**Behavior**:
+
+1. Read the supplied locked-current Ticket status without reacquiring either
+   root or querying audit history.
+2. If status is `New`, set it to `Ignored` and create exactly one
+   system-attributed `status_change` with `old_value = "New"`,
+   `new_value = "Ignored"`, `comment = "CVE rejected"`, and `detail = NULL`.
+3. For `Ignored`, `Analysis`, `Analyzed`, `Resolved`, or `Duplicated`, return the
+   Ticket unchanged with no event. Do not call `ensure_ticket_operable()`,
+   assign, reconcile, register convergence, or change any other field.
+4. Flush an effective transition and return the Ticket. Do not commit, roll
+   back, or perform external, Redis, or Celery I/O.
+
+The boundary is idempotent from current state: after one effective transition,
+re-invocation observes `Ignored` and is a no-op. Database, audit, flush,
+cancellation, and programming exceptions propagate unchanged and roll back the
+caller's complete per-CVE transaction.
 
 ### mark_as_duplicate
 
@@ -865,6 +928,19 @@ composition.
 through assignment, package convergence, audit, and final reconciliation. It
 flushes but does not commit or roll back. Any escaping error rolls back all of
 these effects in the caller-owned transaction.
+
+**CVE-ingestion composition**: before invoking this function, the trusted
+`cve_service` caller verifies under its existing CVE-then-Ticket locks that the
+Ticket remains the unique association of the locked CVE and that its status is
+`Ignored`. It then calls the existing system form with `ticket_id` and the
+caller-supplied `evaluation_date`. Step 1 reselects the same Ticket `FOR UPDATE`;
+that same-transaction re-lock is a no-op and does not invert the already-held
+CVE-then-Ticket order. The remaining behavior, audit, convergence registration,
+and exception contracts are identical. If locked-current status is not
+`Ignored`, `cve_service` does not invoke this boundary; a direct invalid
+invocation retains the ordinary `InvalidTransitionError`. System authority is
+selected through the existing implementation-chosen service boundary, not by
+`acting_user_id = NULL` alone.
 
 **Return and idempotency**: returns the updated Ticket after flush. A request
 whose locked-current status is no longer `Ignored` is rejected rather than
@@ -1380,6 +1456,7 @@ ticket_mutations (infrastructure)
 | associate_cve          | ✓                      | ✓                      | ✓                     | ✓                     | —                   |
 | assign_ticket          | ✓                      | ✓                      | —                     | —                     | —                   |
 | ignore_ticket          | ✓                      | —                      | —                     | ✓                     | —                   |
+| ignore_new_for_rejected_cve | —                  | —                      | —                     | —                     | —                   |
 | mark_as_duplicate      | ✓                      | —                      | —                     | ✓                     | —                   |
 | reopen_from_ignored    | —                      | ✓                      | —                     | ✓                     | ✓                   |
 | revert_duplicate       | —                      | ✓                      | —                     | ✓                     | ✓                   |
@@ -1499,6 +1576,17 @@ behavior of `ticket_service` operations:
     in the same database operation or view, returns an ordinary empty list only
     for an accessible Ticket with no grants, and cannot return rows selected
     after visibility is lost
+17. **System CVE rejection boundary**: call only with CVE-then-Ticket locks and
+    cover `New -> Ignored` with exact system event/comment, every other status as
+    a no-op, re-invocation, rejected-orphan creation order, association/lock
+    preconditions, runtime association violation, no audit-history query, and
+    complete rollback on audit or flush failure
+18. **CVE republication composition**: under an already-held CVE-then-Ticket
+    lock pair, verify the association and `Ignored` status before invoking the
+    existing system `reopen_from_ignored()` form. Assert its Ticket reselect is a
+    same-transaction re-lock, the caller's `evaluation_date` is preserved,
+    Product and gate convergence use the current ingestion batch's assessment
+    state, and an association/status mismatch causes no lifecycle call
 
 ## Cross-references
 

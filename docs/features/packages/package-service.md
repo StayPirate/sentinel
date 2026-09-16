@@ -1089,18 +1089,19 @@ async def add_package_to_ticket(
    type.
 
 `audit_comment` is closed internal system context for `package_added`. API
-callers always pass `NULL`; CVE ingestion passes `CVE package resolution`;
-Product catalog backfill passes `Product catalog backfill`; and Ticket
-convergence passes `Ticket convergence`. No caller supplies any other value or
-free-form text.
+callers always pass `NULL`; the owning post-ingest CVE package-resolution
+workflow passes `CVE package resolution`; Product catalog backfill passes
+`Product catalog backfill`; and Ticket convergence passes `Ticket convergence`.
+No caller supplies any other value or free-form text.
 
-`active_ticket_only` is false for normal API and automatic callers. Product
-catalog backfill sets it to true so a Ticket that became inactive after
-batch selection is skipped under the Ticket row lock.
+`active_ticket_only` is false for the normal API caller. Product catalog
+backfill sets it to true so a Ticket that became inactive after batch selection
+is skipped under the Ticket row lock. The owning post-ingest CVE package-
+resolution contract selects its mode; source-neutral CVE ingestion does not.
 
-`allow_excluded_reresolution` is false for the public endpoint, CVE ingestion,
-and Product catalog backfill. The latter two already omit existing soft-deleted
-packages during their owning candidate-selection contracts. Ticket convergence
+`allow_excluded_reresolution` is false for the public endpoint and Product
+catalog backfill. The owning post-ingest CVE package-resolution contract selects
+its mode; source-neutral CVE ingestion does not. Ticket convergence
 sets it to true because it intentionally enumerates every persisted package
 marker, including directly excluded ones. Its concrete name or grouping with
 other internal caller context is an implementation choice.
@@ -1110,10 +1111,13 @@ target and maintainership I/O, the locked mutation boundary rejects an existing
 directly excluded package occurrence with `PackageAlreadyExcludedError` rather
 than restoring or completing it. Ticket convergence uses re-resolution
 semantics and may complete missing descendants or maintainers beneath an
-excluded package without clearing any marker. CVE ingestion and Product catalog
-backfill do not select existing soft-deleted package markers. The concrete
-caller-context parameter is an implementation choice; the API handler does not
-perform the package lookup.
+excluded package without clearing any marker. The post-ingest CVE package
+workflow and Product catalog backfill do not share one implied selection rule.
+The owning post-ingest CVE package-resolution contract selects its behavior
+before implementation; source-neutral ingestion does not decide it. Product
+catalog backfill retains its existing exclusion behavior. The concrete caller-
+context parameter is an implementation choice; the API handler does not perform
+the package lookup.
 
 **Idempotency**: every invocation repeats the maintained-package validation
 request. It requests maintainership only after package-target resolution

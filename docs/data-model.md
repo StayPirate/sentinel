@@ -733,7 +733,7 @@ the general affected version model. See
 | version_end | TEXT | nullable | Range end (`lessThan` or `lessThanOrEqual`). TEXT for same reason as `version` |
 | version_end_inclusive | BOOLEAN | nullable | `true` for `lessThanOrEqual`, `false` for `lessThan` |
 | program_files | JSONB | nullable | Array of affected source files (embedded, not a separate table — used primarily for kernel CVEs, display-only) |
-| cpe | VARCHAR(255) | nullable | CNA/ADP-provided CPE from `affected[]` array. Used for best-effort package resolution in Phase 2 (see `docs/features/tickets/cve-service.md`), alongside NVD CPE package candidates selected by the NVD ingestion contract and passed via `cpe_matches`. Both feed the same `resolve_cpe_packages()` function |
+| cpe | VARCHAR(255) | nullable | CNA/ADP-provided CPE from `affected[]` array. A supplied replacement entry may also contribute this value to the pure post-ingest candidate handoff in `docs/features/tickets/cve-service.md`; persistence does not itself resolve a package. The later package-resolution workflow may pass the transported value to `resolve_cpe_packages()`, alongside NVD CPE candidates already selected by the NVD ingestion contract |
 | ecosystem | VARCHAR(50) | nullable | OSV/OSSF canonical ecosystem identifier. Sentinel uses the [OSSF OSV Schema](https://ossf.github.io/osv-schema/) ecosystem enumeration as its internal standard for this field (e.g., `"PyPI"`, `"npm"`, `"Go"`, `"crates.io"`, `"Maven"`, `"NuGet"`, `"RubyGems"`, `"Packagist"`). Fetchers that receive canonical OSSF values (e.g., `sync_osv_advisories`) store them as-is. Fetchers that receive non-canonical names from their upstream source (e.g., `sync_ghsa_advisories` receives GitHub's `"pip"` instead of `"PyPI"`) MUST normalize to OSSF canonical values before storage — see the owning fetcher spec for the specific mapping. NULL for fetchers whose upstream source has no ecosystem concept (NVD, MITRE, Red Hat, Kernel). See `docs/conventions.md` (Ecosystem Naming) for the cross-cutting convention |
 | status | VARCHAR(20) | nullable | Version-level vulnerability status from `versions[].status`. Known values: `"affected"`, `"unaffected"`, `"unknown"`. NULL for entries created without `versions[]` (parser step 4). Stored as-is without validation |
 | default_status | VARCHAR(20) | nullable | Entry-level baseline status from `affected[].defaultStatus`. Same value set as `status`. NULL when absent from source JSON (semantically equivalent to `"unknown"` per CVE 5.x schema). Shared by all version entries from the same parent `affected[]` entry |
@@ -947,8 +947,11 @@ Summary:
   `ticket_service.reopen_from_ignored()`; a VA actor becomes assignee, while a
   non-VA or system caller retains the current assignee)
 
-`REJECTED -> PUBLISHED` reopens every currently `Ignored` associated Ticket;
-the decision uses current CVE/Ticket state and never audit-derived provenance.
+`REJECTED -> PUBLISHED` reopens the unique associated Ticket only when its
+locked-current status is `Ignored`; the decision uses current CVE/Ticket state
+and never audit-derived provenance. A Ticket newly created for an already-
+`REJECTED` orphan CVE transitions from `New` to `Ignored` after current-payload
+CVSS composition in the same transaction.
 Every successful manual-zone exit registers post-commit Ticket convergence,
 including an immediate `Resolved` result. Inactive-assignee sanitation applies
 only when the final result is `Analysis` or `Analyzed`.
