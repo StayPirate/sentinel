@@ -1012,9 +1012,10 @@ service to apply the public excluded-package guard. The service owns the
 state-dependent query and returns `409 PACKAGE_ALREADY_EXCLUDED` when the
 existing package occurrence is directly excluded. Ticket convergence invokes
 the documented internal re-resolution mode, which may complete descendants and
-maintainership without restoring the package. CVE ingestion and Product catalog
-backfill omit existing soft-deleted package markers during their owning
-candidate selection and therefore do not need that bypass. API handlers do not
+maintainership without restoring the package. The owning post-ingest CVE
+package-resolution contract still defines its soft-deleted-marker selection and
+re-resolution mode; Product catalog backfill retains its already-defined
+exclusion behavior. API handlers do not
 query package-tree state or decide this business condition. Track release
 detection never calls this function because it reconciles only tracks that
 already exist.
@@ -1200,20 +1201,23 @@ repeat call can still fail with `PACKAGE_NOT_FOUND_IN_SMELT`,
 
 The following scenarios invoke `add_package_to_ticket`:
 
-1. **Automatic (CVE ingestion)**: when a CVE is ingested, Sentinel
-   resolves package names from the CVE data (NVD CPE package candidates
-   selected by the NVD ingestion contract, CNA/ADP CPE strings, CNA/ADP
-   vendor:product pairs, or pre-resolved packages). For each resolved
-   package name,
-   `add_package_to_ticket` is called. See
-   `docs/features/tickets/cve-service.md` (Phase 2).
+1. **Automatic (post-ingest CVE package resolution)**: successful CVE
+   ingestion may produce the pure package-candidate handoff defined in
+   `docs/features/tickets/cve-service.md` (PostIngestTasks). Candidates include
+   NVD-selected CPEs, affected-entry CPEs, vendor/product pairs, and source-
+   supplied package names; none is proof of an exact SUSE package. The owning
+   post-ingest package-resolution workflow validates and resolves candidates,
+   then invokes `add_package_to_ticket` for each resulting package name. Its
+   task, transaction, applicability, retry, and recovery lifecycle is not
+   defined by CVE ingestion or this trigger summary.
 2. **Manual**: an authorized user manually adds a package by name via the UI.
    `add_package_to_ticket` is called with the entered name.
 3. **Restore from soft-deletion**: restoring a package, track, or
    product clears its `deleted_at` only. New tracks/products that
    appeared on SMELT since the deletion are picked up by subsequent
-   calls to `add_package_to_ticket` (for example CVE ingestion or Product
-   catalog backfill) — no explicit call is needed at restore time.
+   calls to `add_package_to_ticket` (for example the post-ingest CVE package
+   workflow or Product catalog backfill) — no explicit call is needed at restore
+   time.
 4. **Product catalog backfill**: after a successful SMELT Product catalog
    sync makes at least one Product newly current, a system workflow calls
    `add_package_to_ticket` for each active-Ticket package whose package marker

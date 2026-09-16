@@ -333,6 +333,18 @@ derive different canonical vectors, the canonical payload is contradictory and
 select a winner. A source parser may retain an explicitly documented
 source-format rule before constructing that canonical payload.
 
+An individually malformed, unsupported, incomplete, or reserved-provider
+candidate is instead logged safely and skipped before the database phase. The
+warning uses the bounded fields and closed reason vocabulary in
+`cve-service.md`; it never includes provider, vector, exception text, or raw
+payload. Other valid candidates in that canonical payload remain eligible for
+the one atomic batch. This distinction is exhaustive: contradictory canonical
+duplicates fail the complete payload; an invalid standalone candidate does not.
+Validation follows input order and checks provider before vector parsing. A
+candidate invalid on both grounds therefore records `invalid_provider`; the
+candidate ordinal is its zero-based position in the source-submitted
+`cvss_assessments` sequence.
+
 ## Assessment Persistence and Ticket Status
 
 An effective assessment create, update, or delete first maintains CVE-owned
@@ -355,7 +367,7 @@ The following matrix is authoritative:
 
 | CVE/Ticket state | Manual SUSE mutation | External assessment update |
 |---|---|---|
-| No associated Ticket | Persist and recalculate; `not_applicable` | Persist and recalculate; `not_applicable` |
+| No associated Ticket | Persist and recalculate; `not_applicable` | Not reachable: source-neutral ingestion creates or loads the unique Ticket before the external batch |
 | `New` | Persist and recalculate; `immediate` | Persist and recalculate; `immediate` |
 | `Analysis` | Persist and recalculate; `immediate` | Persist and recalculate; `immediate` |
 | `Analyzed` | Persist and recalculate; `immediate` | Persist and recalculate; `immediate` |
@@ -400,6 +412,13 @@ For an effective manual SUSE chain, deterministic insertion order is optional
 optional derived `severity_changed`, changed-Product eligibility events ordered
 by `TicketPackageProduct.id`, and optional final gate `status_change`. Deferred
 external mutations stop after the direct CVSS records.
+
+For the trusted-external ingestion batch, effective assessment events are
+ordered by version `4.0`, `3.1`, `3.0`, `2.0`, then canonical provider ascending
+by Unicode code point. After the last assessment event, the batch appends at most one
+derived `severity_changed`, Product events in occurrence-ID order, optional
+inactive-assignee sanitation, and at most one final gate `status_change`. It
+never emits an aggregate replacement for the per-assessment events.
 
 ### Serialization and Concurrent Outcomes
 
@@ -658,6 +677,14 @@ all ordinary Product mutation ownership and is not imported by
 `ticket_mutations`. Resolution and eligibility algorithms are never copied
 into either mutation boundary.
 
+`ticket_mutations.upsert_external_cvss_batch()` is the dedicated system-only
+composition for multiple valid candidates from one ingestion payload. It reads
+`default_cvss_version` once, persists all effective assessments in canonical
+order, resolves the final complete set once, applies automatic Product
+eligibility once, and reconciles at most once. Any unexpected settings,
+database, audit, eligibility, flush, cancellation, reconciliation, or
+programming failure rolls back the whole caller-owned CVE transaction.
+
 Changing `default_cvss_version` retains the system-settings endpoint, batch,
 and recovery contracts in `system-settings.md`. This specification defines the
 pure results that such workflows consume; it does not redefine settings
@@ -709,11 +736,19 @@ testing strategy.
 - Canonical ingestion duplicates with one conflict key: identical normalized
   vectors collapse, conflicting vectors reject the payload before writes, and
   a source-specific pre-payload deduplication rule remains independently tested.
-- Ticketless CVEs and associated Tickets in each of `New`, `Analysis`,
-  `Analyzed`, `Resolved`, `Ignored`, and `Duplicated`, covering the complete
-  persistence matrix, immediate propagation including both caller categories on
-  `Resolved`, Product deferral only in the manual zone, and manual-SUSE
-  assignment behavior.
+- Multi-assessment ingestion batches with mixed created, updated, unchanged,
+  individually invalid, and reserved-provider candidates; canonical version/
+  provider event order; one default-setting read; at most one severity event,
+  Product pass, and final reconciliation; and complete rollback on every
+  unexpected delegated failure.
+- Empty external batches perform no setting read, severity/Product/status write,
+  reconciliation, or audit; one-element external batches use the same batch
+  boundary and never route through `upsert_cvss_assessment()`.
+- Ticketless CVEs for manual SUSE operations and associated Tickets in each of
+  `New`, `Analysis`, `Analyzed`, `Resolved`, `Ignored`, and `Duplicated`,
+  covering the complete reachable persistence matrix, immediate propagation for
+  both mutation boundaries on `Resolved`, Product deferral only for the external
+  batch in the manual zone, and manual-SUSE assignment behavior.
 - Gate completeness with exactly one canonical SUSE assessment in turn for
   each accepted version; an external-only assessment set; adding the first
   SUSE assessment; deleting the last SUSE assessment; and adding or deleting
@@ -728,16 +763,17 @@ testing strategy.
   eligibility inputs. Manual SUSE and default-version cases separately cover
   false-to-true regression, true-to-false preservation or advancement,
   override skips, and at most one final reconciliation.
-- Immediate `CVE.severity` maintenance for external updates in every Ticket
-  status and for ticketless CVEs; no assessment means `NULL`, while score 0.0
-  means unified `none`.
+- Immediate `CVE.severity` maintenance for external updates in every associated
+  Ticket status; manual and default-version paths separately cover ticketless
+  CVEs. No assessment means `NULL`, while score 0.0 means unified `none`.
 - Exact direct audit count, actor, old/new values, no-op absence, and atomic
   rollback. Manual assessment events use the acting user; external assessment
   and every derived severity event use the system actor; ticketless changes
   create no Ticket event.
 - Two-session lock tests for concurrent equal and differing upserts,
   upsert/delete, delete/delete, Ticket association races, and composition with
-  CVE ingestion. Assert `CVE` then `Ticket` acquisition, truthful winner action,
+  CVE ingestion. Include two external batches from distinct sources racing on
+  the same CVE. Assert `CVE` then `Ticket` acquisition, truthful winner action,
   HTTP status, metric, audit value, and propagation disposition.
 - Manual API concurrency tests change confidentiality, explicit grants,
   included-package maintainership, and CVE-Ticket association between a

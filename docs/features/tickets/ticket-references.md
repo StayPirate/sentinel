@@ -539,6 +539,12 @@ rejection logging and must satisfy the canonical CVE identifier contract in
 `docs/api-spec.md` (CVE Identifier Resolution). `source` must be the calling
 fetcher's stable `BaseFetcher.name`, not `manual`.
 
+In the authoritative ingestion order, this call follows CVE merge, unique
+Ticket creation or selection, the complete trusted-external CVSS batch,
+rejection or republication handling, source-success status, and the service
+flush. It precedes the sole commit. The caller still owns the CVE and Ticket
+locks; this service does not release them or publish an effect.
+
 The function validates the automatic source contract, prepares every candidate
 before database comparison, and applies the deterministic merge rules above.
 An invalid candidate is logged, skipped, and does not prevent later candidates
@@ -555,8 +561,9 @@ collision outcomes as needed before returning so generated state and constraint
 failures are resolved inside its boundary. Unexpected database, transaction,
 audit-independent infrastructure, parser-programming, cancellation, and other
 errors propagate unchanged. The caller then rolls back the complete per-CVE
-transaction, including the CVE mutation and every reference candidate; the
-function never converts such failures into skip-and-continue.
+transaction, including CVE/source status, Ticket creation or lifecycle, CVSS,
+Product eligibility, reconciliation, every audit event, and every reference
+candidate; the function never converts such failures into skip-and-continue.
 
 ### `create_reference()`
 

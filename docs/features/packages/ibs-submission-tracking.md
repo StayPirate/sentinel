@@ -209,9 +209,10 @@ It is used for both SR and RR actions.
 The pair `(ticket_package_track_id, ibs_request_action_id)` is unique. Track is
 the leading column because ticket-scoped APIs, maintainer projections, and
 reconciliation load correlations from the exact track scope.
-One action can correlate to multiple tracks when its diff names multiple Ticket
-CVEs or the same CVE/package/codestream occurs in multiple Tickets. Multiple
-actions can correlate to one track.
+One action can correlate to multiple tracks when its diff names multiple CVEs,
+packages, or codestreams. Because `Ticket.cve_id` is unique, one CVE cannot
+produce occurrences in multiple Tickets. Multiple actions can correlate to one
+track.
 
 ### Retention and Deletion
 

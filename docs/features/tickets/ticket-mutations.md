@@ -110,16 +110,15 @@ the CVE contract.
 
 Trusted external ingestion, default-version recalculation, and other specified
 system operations do not acquire an HTTP user's scope and do not apply consumer
-visibility filtering. Caller category is explicit and is not inferred solely
-from `acting_user_id`; the existing typed CVSS caller category remains
-authoritative for assessment mutations.
+visibility filtering. Caller authority is explicit at the owning boundary and
+is not inferred solely from `acting_user_id`.
 
-CVSS assessment mutations additionally require an explicit typed caller
-category. `CVSSMutationCaller.MANUAL_SUSE` identifies an authorized consumer
-operation on the internal SUSE assessment, and
-`CVSSMutationCaller.TRUSTED_EXTERNAL_INGESTION` identifies a trusted
-source-ingestion operation on a non-SUSE assessment. Caller authority is never
-inferred from whether `acting_user_id` is `NULL`.
+The single-assessment mutation requires
+`CVSSMutationCaller.MANUAL_SUSE`, identifying an authorized consumer operation
+on the internal SUSE assessment. All trusted external ingestion, including a
+single external assessment, uses the dedicated system-only
+`upsert_external_cvss_batch()` boundary. Caller authority is never inferred from
+whether `acting_user_id` is `NULL`.
 
 ### Relationship with other modules
 
@@ -444,6 +443,8 @@ function.
 
 **Opt-out cases**:
 
+- `ticket_service.ignore_new_for_rejected_cve` — owns its explicit all-status
+  system matrix and must treat non-`New` states as no-ops
 - `ticket_service.reopen_from_ignored` — must operate on Ignored tickets; skips
   mutability guard
 - `ticket_service.revert_duplicate` — must operate on Duplicated tickets; skips
@@ -543,7 +544,6 @@ stored internal provider value is the canonical string `SUSE`.
 | Caller category | Provider authority | Delete authority | Actor |
 |---|---|---|---|
 | `MANUAL_SUSE` | May create or update only the reserved SUSE assessment; the stored provider is canonicalized to `SUSE` | May delete only `SUSE` | `acting_user_id` is required and identifies the authorized user |
-| `TRUSTED_EXTERNAL_INGESTION` | May create or update only a non-reserved provider supplied by its owning ingestion contract | None; upstream omission retains the last persisted assessment | System (`acting_user_id` must be `NULL`) |
 
 A caller/provider or caller/actor mismatch is an internal contract violation:
 it raises `ValueError` before persistent state is read and returns no mutation
@@ -600,9 +600,9 @@ Product eligibility, Ticket status, and every audit event.
 
 ### CVSS Status Matrix
 
-| Associated Ticket status | Manual SUSE upsert/delete | Trusted external upsert | Effective Ticket-scoped outcome |
+| Associated Ticket status | Manual SUSE upsert/delete | Trusted external batch | Effective Ticket-scoped outcome |
 |---|---|---|---|
-| No Ticket | Allowed | Allowed | `not_applicable`; CVE-owned state only |
+| No Ticket | Allowed | Not reachable: ingestion creates or loads the unique Ticket before invoking the batch | Manual result is `not_applicable`; CVE-owned state only |
 | `New` | Allowed; effective mutation may auto-assign the VA | Allowed; never assigns | `immediate`; an unassigned `New` remains outside gate reconciliation unless manual auto-assignment first moves it to `Analysis` |
 | `Analysis` | Allowed; effective mutation may auto-assign the VA | Allowed; never assigns | `immediate` eligibility and at most one final reconciliation |
 | `Analyzed` | Allowed; effective mutation may auto-assign the VA | Allowed; never assigns | `immediate` eligibility and at most one final reconciliation |
@@ -634,11 +634,11 @@ final reconciliation effect.
 
 ### `upsert_cvss_assessment()`
 
-Creates or updates a `CVECVSSAssessment` record for a CVE. The function
+Creates or updates the manual SUSE `CVECVSSAssessment` record for a CVE. The function
 accepts a `cve_id` (not a `ticket_id`) and handles both CVEs with and
 without an associated ticket. If an assessment for the same
 `(cve_id, provider, version)` already exists, it is updated; otherwise a
-new one is created.
+new one is created. External-provider assessments never use this boundary.
 
 **Parameters**:
 
@@ -646,10 +646,10 @@ new one is created.
 |-----------|------|----------|-------------|
 | `db` | `AsyncSession` | Yes | Database session |
 | `cve_id` | `UUID` | Yes | CVE that receives the assessment |
-| `provider` | `str` | Yes | Assessment provider (e.g., `"SUSE"`, `"NVD"`) |
+| `provider` | `str` | Yes | Assessment provider; must resolve to canonical `"SUSE"` |
 | `vector_string` | `str` | Yes | CVSS vector string (version, score, and severity derived from it) |
-| `caller` | `CVSSMutationCaller` | Yes | `MANUAL_SUSE` or `TRUSTED_EXTERNAL_INGESTION`; authority is not inferred from actor presence |
-| `acting_user_id` | `UUID \| None` | Yes | Required for `MANUAL_SUSE`; must be `NULL` for trusted external ingestion |
+| `caller` | `CVSSMutationCaller` | Yes | Must be `MANUAL_SUSE`; authority is not inferred from actor presence |
+| `acting_user_id` | `UUID` | Yes | Authorized acting user |
 | `default_cvss_version` | `str \| None` | No | Version used for severity and eligibility resolution. If `None`, read it once from `settings_service.get_default_cvss_version(db)` after root locking |
 | `evaluation_date` | `date \| None` | No | UTC date for the complete immediate Product/reconciliation chain. If omitted, capture once at function entry |
 
@@ -657,8 +657,6 @@ new one is created.
 
 - Vector must be parseable — raises `InvalidCVSSVectorError`
 - CVE must exist for `cve_id`; locked-current absence returns `CVE_NOT_FOUND`
-  for a manual consumer call. For trusted external ingestion it remains an
-  internal caller-contract violation and raises `ValueError`
 - Caller category, actor, and provider must satisfy the authority table
 
 **Return type**: `CVSSAssessmentMutationResult`, as defined above.
@@ -670,17 +668,14 @@ new one is created.
    version-specific assessment severity. Parsing failure raises
    `InvalidCVSSVectorError` before database access.
 2. As the first persistent read, load the CVE with `FOR UPDATE`. If it does not
-   exist, return the CVE-path `CVE_NOT_FOUND` outcome for `MANUAL_SUSE`; for
-   `TRUSTED_EXTERNAL_INGESTION`, raise `ValueError` for the internal
-   caller-contract violation.
+   exist, return the CVE-path `CVE_NOT_FOUND` outcome.
 3. Load the Ticket associated with that locked CVE, if any, with `FOR UPDATE`.
    This makes concurrent association compose in `CVE` then `Ticket` order.
-4. For `MANUAL_SUSE`, revalidate CVE accessibility from the locked CVE and its
+4. Revalidate CVE accessibility from the locked CVE and its
    locked-current associated Ticket before reading assessment state. Denial is
-   the CVE-path `CVE_NOT_FOUND` outcome. `TRUSTED_EXTERNAL_INGESTION` does not
-   acquire consumer scope.
-5. Apply the status matrix. Manual SUSE callers reject a locked manual-zone
-   Ticket before any write; external ingestion remains allowed.
+   the CVE-path `CVE_NOT_FOUND` outcome.
+5. Apply the status matrix and reject a locked manual-zone Ticket before any
+   write.
 6. Resolve `default_cvss_version`: if the parameter is `None`, read it once from
    `settings_service.get_default_cvss_version(db)`. Use this one value for both
    severity and eligibility resolution in this invocation.
@@ -695,9 +690,9 @@ new one is created.
    fields. Re-resolve the complete committed-current assessment set and always
    persist the resulting unified value to `CVE.severity`, including when its
    value is unchanged.
-10. For an effective manual SUSE mutation with an associated Ticket, call
-   `auto_assign_actor()` after the serialized action is known. External
-   ingestion never calls it. If assignment moves `New` to `Analysis`, its
+10. For an effective mutation with an associated Ticket, call
+    `auto_assign_actor()` after the serialized action is known. If assignment
+    moves `New` to `Analysis`, its
    `assignment` and system `status_change` records precede the CVSS records.
 11. If a Ticket exists, create `cvss_assessment_changed`. If unified severity
     changed, create `severity_changed` next. Both are direct consequences and
@@ -729,8 +724,110 @@ The exact canonical assessment value is
 
 **TicketAuditEvent**: `cvss_assessment_changed` for an effective mutation when
 the CVE has an associated Ticket, in every Ticket status. Its actor is the
-manual SUSE user or `NULL` for external ingestion. A changed derived severity
-adds `severity_changed` with `user_id = NULL`.
+manual SUSE user. A changed derived severity adds `severity_changed` with
+`user_id = NULL`.
+
+---
+
+### `upsert_external_cvss_batch()`
+
+System-only Category A boundary for one canonical CVE ingestion payload. It is
+the only boundary through which `cve_service.upsert_cve()` applies one or more
+trusted external assessments. API handlers, fetchers, tasks, and other services
+do not call it directly; `cve_service` is the orchestrator.
+
+```python
+async def upsert_external_cvss_batch(
+    db: AsyncSession,
+    *,
+    cve_id: UUID,
+    assessments: Sequence[ParsedExternalCVSSAssessment],
+    evaluation_date: date,
+) -> ExternalCVSSBatchResult:
+```
+
+`ParsedExternalCVSSAssessment` carries the non-reserved canonical provider and
+the immutable stable parsed result from `cvss.validate_cvss_vector()`. It is an
+internal semantic type, not a Pydantic API schema or persisted entity. The
+caller has already skipped individually invalid candidates and rejected
+contradictory same-key candidates before writes under `cve-service.md`.
+
+`ExternalCVSSBatchResult` is transaction-local and contains the per-candidate
+`created`, `updated`, or `unchanged` actions in canonical order, final severity
+and eligibility resolutions, propagation disposition, Product counts split into
+examined, override-skipped, and changed occurrences, whether severity changed,
+whether one final reconciliation ran, and the supplied `evaluation_date`. Any
+effective assessment action contributes an effective CVSS child change to
+`UpsertResult.action`; skipped candidates do not.
+
+**Guards**:
+
+- `evaluation_date` is required; this boundary never captures a replacement.
+- Every provider must be non-empty, no longer than 100 characters, and not
+  equivalent to reserved `SUSE` after outer trim and Unicode case-folding.
+- Every item must contain a complete canonical parsed result for an accepted
+  version, and the sequence must contain at most one canonical item for each
+  `(provider, version)` key.
+- A missing `evaluation_date`, missing CVE UUID, malformed parsed-result type,
+  empty or over-length provider, reserved provider, or duplicate canonical key
+  raises `ValueError`. These are internal contract failures, not API outcomes.
+
+All guards use input only and complete before persistent writes. An empty
+sequence is valid and returns an unchanged batch without reading settings,
+writing severity, propagating eligibility, reconciling, or creating audit.
+
+**Behavior**:
+
+1. Sort candidates by version `4.0`, `3.1`, `3.0`, `2.0`, then canonical
+   provider ascending by Unicode code point. The order is identical to the
+   bounded CVSS list's version/provider order in `cvss-scoring.md`; it is not the
+   multi-factor Severity Resolution Cascade. Database collation and input order
+   never control mutation or event order.
+2. As the first persistent read, obtain the CVE with `FOR UPDATE`, then obtain
+   its unique associated Ticket with `FOR UPDATE` when one exists. When called
+   by `upsert_cve()`, both are same-transaction locks already held; reacquisition
+   is a no-op and does not change the global CVE-then-Ticket order.
+3. Read `default_cvss_version` exactly once through
+   `settings_service.get_default_cvss_version(db)`. The same value governs the
+   final severity and eligibility resolutions.
+4. For each candidate in canonical order, compare the canonical vector with the
+   serialized current natural-key row. Create, update, or classify unchanged.
+   Persist every effective candidate's complete vector-derived unit. Do not
+   resolve severity, propagate Product eligibility, or reconcile between
+   candidates.
+5. When a Ticket exists, create one system-attributed
+   `cvss_assessment_changed` event for each effective candidate, in the same
+   canonical order. An unchanged candidate creates no event.
+6. After all candidate writes, resolve the complete final assessment set once.
+   If at least one candidate was created or updated, persist the resulting
+   `CVE.severity` once. If the unified value changed and a Ticket exists, append
+   at most one system-attributed `severity_changed`. An all-unchanged batch
+   performs no severity write.
+7. Resolve eligibility once from that same complete set and default version.
+   Apply the status matrix to the post-assessment locked-current Ticket. For
+   `New`, `Analysis`, `Analyzed`, and `Resolved`, evaluate every system-managed
+   Product once, skip overrides, update effective differences, and append
+   `product_eligibility_changed` in ascending `TicketPackageProduct.id` order.
+   For `Ignored` and `Duplicated`, defer Product and gate effects. A ticketless
+   CVE has no Ticket-scoped propagation.
+8. For a gate-zone Ticket, call `reconcile_ticket_status()` at most once, after
+   every assessment, severity, and Product event, and only when final gate input
+   changed. An unassigned `New` remains outside gate reconciliation. Use the
+   supplied `evaluation_date` throughout.
+9. Flush and return the complete batch result. Do not commit, roll back, assign,
+   exit a manual zone, perform network I/O, or publish a post-commit effect.
+
+The batch is atomic. Settings, database, audit, eligibility, flush,
+reconciliation, cancellation, and programming failures propagate unchanged and
+roll back every assessment in the batch plus the caller's complete per-CVE
+transaction. No per-assessment savepoint converts an unexpected failure into a
+skip. Re-invocation with equal canonical candidates returns only unchanged
+actions and performs no severity/Product/status write or event.
+
+**Audit order**: for a Ticket, zero or more canonical
+`cvss_assessment_changed`, at most one `severity_changed`, zero or more Product
+events in occurrence-ID order, optional inactive-assignee sanitation, and at
+most one final gate `status_change`. A ticketless batch creates no Ticket event.
 
 ---
 
@@ -1096,12 +1193,13 @@ and status reconciliation). The test must cover:
   that SUSE-presence, eligibility, and reconciliation consequences still apply
 - **Edge cases**: ticket without CVE (no SUSE CVSS gate), manual
   severity on CVE-less ticket
-- **CVSS status matrix**: manual and trusted-external callers across a
-  ticketless CVE and every Ticket status, including external persistence with
-  `deferred_until_reactivation` package propagation only for `Ignored` and
-  `Duplicated`; verify both caller categories are immediate on `Resolved`,
-  manual rejection in the manual zone, and no Product or reconciliation effect
-  for unchanged, not-found, rejected, deferred, or rolled-back outcomes
+- **CVSS status matrix**: manual SUSE operations for a ticketless CVE and every
+  Ticket status, plus the trusted-external batch for every associated-Ticket
+  status. External persistence uses `deferred_until_reactivation` package
+  propagation only for `Ignored` and `Duplicated`; both mutation boundaries are
+  immediate on `Resolved`. Verify manual rejection in the manual zone and no
+  Product or reconciliation effect for unchanged, not-found, rejected,
+  deferred, empty-batch, or rolled-back outcomes
 - **Eligibility formula and boundaries**: override-first precedence,
   Reactive Support for automatic records only, NULL threshold as `0.0`, NULL
   lifecycle as no lifecycle override, SUSE/default-version score or 10.0
@@ -1110,7 +1208,8 @@ and status reconciliation). The test must cover:
 - **Manual SUSE assignment**: an effective manual create, update, or delete
   assigns an unassigned Ticket only when the actor holds the VA role, after
   no-op/not-found classification; `New` produces assignment then system
-  `New → Analysis`; external and default-version callers never assign
+  `New → Analysis`; the external batch and default-version recalculation never
+  assign
 - **CVE severity ownership**: every effective assessment create, update, and
   delete updates ticketless and inactive-state `CVE.severity`
 - **Serialized outcomes**: canonical-vector no-op, create/update and
@@ -1179,8 +1278,8 @@ them to the corresponding HTTP status code and error code per
 † Shared exception — inherits from `ServiceError`, not from
 `TicketMutationsError`. Handlers must catch it explicitly.
 
-Caller-category/provider mismatches, external delete attempts, and a missing
-CVE UUID supplied by trusted external ingestion raise `ValueError`. These are
+Caller-category/provider mismatches and external delete attempts raise
+`ValueError`. These are
 internal contract violations and do not introduce API error codes. Consumer
 CVE routes may perform delegated preliminary accessibility before invoking this
 service and map a locked-current authoritative accessibility denial to the scoped
@@ -1195,6 +1294,15 @@ the global non-sensitive `500 INTERNAL_ERROR` response.
 Package-specific exceptions (`TrackNotFoundError`, `ProductNotFoundError`,
 `PackageNotFoundError`) are defined in `package_service` — see
 `docs/features/packages/package-service.md`.
+
+The system-only external batch raises `ValueError` for missing
+`evaluation_date`, missing CVE, malformed parsed-result type, empty or
+over-length provider, reserved provider, or duplicate canonical key.
+`RequiredSystemSettingMissingError` and unexpected
+database, transaction, audit, eligibility, flush, reconciliation, cancellation,
+and programming exceptions propagate unchanged. `cve_service` does not convert
+them into per-candidate skips; its caller rolls back the complete per-CVE
+transaction. Individual candidate skips occur only before this boundary.
 
 ## Cross-references
 

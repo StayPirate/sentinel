@@ -881,11 +881,20 @@ above.
     operates in its own transaction boundary. `process_item()` returns
     `PostIngestTasks | None`; after a successful return, the template
     calls `self.commit_and_dispatch(session, post_ingest)` which
-    commits the session and dispatches Phase 2 tasks if `post_ingest`
-    is not `None`. On exception (caught by step 10e), the template
-    calls `session.rollback()` before `record_failed()`. This ensures
-    that a failure in one item does not corrupt the session or affect
+    commits the session, consumes and attempts that transaction's registered
+    Ticket-convergence effects, then publishes the package-candidate handoff if
+    `post_ingest` is not `None`. A consumed registration cannot leak into a
+    later item even though the same session is reused. On exception (caught by
+    step 10e), the template calls `session.rollback()` before `record_failed()`.
+    This ensures that a failure in one item does not corrupt the session or affect
     the processing of subsequent items.
+
+    An ordinary package-handoff publication failure after the commit is not an
+    exception from `commit_and_dispatch()`: the helper emits its sanitized
+    structured ERROR and returns normally. Step 10e therefore never overwrites
+    the committed source `success` status or records a per-item failure for that
+    post-commit outcome. Whole-run signals and cancellation retain their
+    existing propagation behavior.
 
     **Session state on timeout propagation**: when `SoftTimeLimitExceeded`
     propagates via step 10d, the session may contain uncommitted changes
@@ -1027,8 +1036,8 @@ The hook is responsible for:
    processed but no post-ingest tasks are needed (e.g., enrichment-only upsert
    with no package-resolution data). Its metric follows `UpsertResult.action`
    and therefore may be absent for `unchanged`. Both `None` cases result in
-   `commit_and_dispatch(session, None)` — the template commits without
-   dispatching Phase 2 tasks
+   `commit_and_dispatch(session, None)` — the template commits and consumes any
+   registered Ticket convergence without publishing a package handoff
 
 Raises any exception on failure → caught by `execute()`, logged,
 `record_failed()` called.
@@ -1040,12 +1049,15 @@ semantic significance. Implementations MUST be order-independent: the
 result of processing any single item must not depend on whether other
 items in the same delta have already been processed.
 
-**Phase 2 side effects**: hooks that call `cve_service.upsert_cve()`
-return `PostIngestTasks` containing the Phase 2 task arguments. The
-`BaseGitFetcher` template dispatches these tasks via
-`commit_and_dispatch()` after committing the per-item transaction.
-No post-processing batch hook is needed — Phase 2 is per-item and
-self-contained.
+**Post-ingest handoff**: hooks that call `cve_service.upsert_cve()` return
+`PostIngestTasks` containing pure package candidates. After committing each
+per-item transaction, the `BaseGitFetcher` template uses
+`commit_and_dispatch()` to consume that transaction's Ticket-convergence
+registrations before publishing the non-NULL package handoff. No post-processing
+batch hook is needed; package task lifecycle remains owned by the post-ingest
+package-resolution contract. An ordinary package-handoff publication exception
+is logged and consumed inside the helper after commit; it does not reach the
+per-item failure branch or change CVE metrics/source status.
 
 ## `filter_delta_files(file_list: list[str]) -> list[str]`
 

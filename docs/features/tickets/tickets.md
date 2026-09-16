@@ -99,6 +99,14 @@ ticket creation or via explicit association), the following rules apply:
   work.
 - **Normal**: if the CVE exists and is not associated with any ticket,
   the association proceeds directly
+- **Already rejected, manual operation**: when an authorized user deliberately
+  creates a Ticket with, or associates an existing Ticket to, a CVE whose
+  locked-current `cve_state` is already `REJECTED`, the manual operation retains
+  its ordinary initial/current Ticket status and audit sequence. It does not
+  invoke `ignore_new_for_rejected_cve()` or create the automatic `CVE rejected`
+  status event. The user may move the Ticket to `Ignored` through the ordinary
+  manual operation when appropriate. Automatic `New -> Ignored` remains limited
+  to the source-neutral ingestion cases in the status matrix below
 
 ### Associating a CVE Later
 
@@ -259,7 +267,7 @@ highest valid gate-zone status (`Analysis`, `Analyzed`, or `Resolved`).
 |---|---|---|---|---|
 | `New` | `Analysis` | First explicit assignment, or implicit assignment by a qualifying modifying operation | Explicit or implicit user action; status event is system-attributed | `ticket_service.assign_ticket()` or `ticket_mutations.auto_assign_actor()` |
 | `New` | `Ignored` | User invokes Ignore | Manual; acting user | `ticket_service.ignore_ticket()` |
-| `New` | `Ignored` | Associated CVE changes to `REJECTED` | Automatic; system | `cve_service.upsert_cve()` applies the rejection rule |
+| `New` | `Ignored` | Associated CVE changes to `REJECTED`, or ingestion creates the Ticket for an already-`REJECTED` orphan CVE | Automatic; system | `cve_service.upsert_cve()` orchestrates `ticket_service.ignore_new_for_rejected_cve()` |
 | `Analysis` | `Ignored` | User invokes Ignore | Manual; acting user | `ticket_service.ignore_ticket()` |
 | `New`, `Analysis`, `Analyzed`, `Resolved` | `Duplicated` | User marks the Ticket as duplicate | Manual; acting user | `ticket_service.mark_as_duplicate()` |
 | `Ignored` | evaluated `Analysis`, `Analyzed`, or `Resolved` | User invokes Reopen, or associated CVE changes from `REJECTED` to `PUBLISHED` | Manual or automatic; final status event is system-attributed | `ticket_service.reopen_from_ignored()` and `_complete_manual_zone_exit()` |
@@ -274,7 +282,14 @@ Duplicate transition; a non-VA actor cannot be assigned and may record the
 direct `New -> Ignored` or `New -> Duplicated` transition. These are the same
 matrix paths, not additional legal targets.
 
-**Note on CVE Rejections**: When a CVE's `cve_state` changes to `REJECTED` (detectable from any discovery fetcher — NVD, MITRE, or kernel), only tickets in `New` status are automatically transitioned to `Ignored`. Tickets in `Analysis` or later statuses are NOT automatically transitioned — the VA must review the rejection manually. For the complete flow regarding CVE rejections and rejection reverts, see `docs/features/tickets/cve-tracking.md` ("Rejection handling" and "Rejection revert handling").
+**Note on CVE Rejections**: When a CVE's `cve_state` changes to `REJECTED`
+(detectable from any discovery fetcher — NVD, MITRE, or kernel), only its unique
+associated Ticket in `New` is automatically transitioned to `Ignored`. The same
+consequence applies after ingestion creates a Ticket for an already-`REJECTED`
+orphan CVE. Tickets in `Analysis` or later statuses are not automatically
+transitioned — the VA must review the rejection manually. For the complete flow,
+see `docs/features/tickets/cve-tracking.md` (Rejection handling and Rejection
+revert handling).
 
 ### Gate: Analysis → Analyzed
 

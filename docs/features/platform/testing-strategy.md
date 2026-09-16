@@ -1582,8 +1582,8 @@ Ticket gate and convergence changes additionally require:
   Products/lifecycle data, independently excluded descendants, eligibility
   overrides, CVE-less `FIXED`, CVE association after CVE-less resolution, and
   forward/reverse corrections;
-- `REJECTED -> PUBLISHED` reopening every currently `Ignored` associated Ticket
-  without consulting audit history.
+- `REJECTED -> PUBLISHED` reopening the unique associated Ticket only when its
+  locked-current status is `Ignored`, without consulting audit history.
 
 The owning service specifications define detailed Ticket-convergence test
 matrices: see `ticket-service.md` (Architectural Test Requirement, manual-zone
@@ -1639,6 +1639,73 @@ cover this complete matrix:
 Unit tests additionally prove that `BaseCVEFetcher` accepts only
 `CVESourceType` members, rejects raw strings at import time, and converts to
 `.value` only in persistent, registry, API/wire, and Redis-key outputs.
+
+### CVE Ingestion and Ticket Composition
+
+When the complete source-neutral ingestion transaction is implemented or
+changed, integration tests additionally cover:
+
+- one exact phase order from pre-write validation through the sole commit and
+  post-commit effects, with one shared UTC `evaluation_date`;
+- brand-new published, brand-new already-rejected, existing-with-Ticket,
+  published orphan, rejected orphan, unchanged rejected,
+  `PUBLISHED -> REJECTED`, and `REJECTED -> PUBLISHED` paths;
+- brand-new-already-rejected and rejected-orphan event order:
+  `ticket_created`, `cve_associated`, canonical CVSS events, optional one
+  severity/Product/final-gate sequence, then exact system `New -> Ignored` with
+  `comment = "CVE rejected"`;
+- the system-only rejection boundary across every Ticket status, idempotent
+  retry, no audit-history query, and lock/association contract violations;
+- one multi-assessment trusted-external CVSS batch with canonical version then
+  provider order, mixed create/update/unchanged and individually invalid
+  candidates, one setting read, at most one severity event, one Product pass,
+  and one final reconciliation; an empty batch performs no setting read or
+  CVSS-derived write/event, and a one-element external batch still uses the
+  batch boundary rather than the manual single-assessment function;
+- contradictory canonical CVSS duplicates rejecting before every CVE, Ticket,
+  source-status, reference, and audit write, while standalone invalid candidates
+  log safely and do not discard valid siblings;
+- independent-session same-CVE races proving the CVE lock serializes unique
+  Ticket creation/association, one commit winner, waiter-current behavior, and
+  no catch-and-requery in an aborted transaction; race conflicting rejection
+  and republication payloads in both commit orders and prove the waiter derives
+  its lifecycle decision from locked-current state;
+- republication with changed CVSS in the same payload proves the re-opened
+  Ticket's Product and final gate state derive from the newly persisted complete
+  assessment set, and that the Ticket reselect in `reopen_from_ignored()` is a
+  same-transaction re-lock preserving the CVE-then-Ticket order;
+- the accepted `REJECTED -> PUBLISHED -> REJECTED` oscillation sequence: once
+  the intermediate republication moves the Ticket into an active status, the
+  later rejection changes CVE state but creates no Ticket lifecycle event and
+  leaves correction to a VA without consulting audit history;
+- automatic references after all `upsert_cve()` database work but before the
+  sole commit: invalid candidates continue, while an unexpected reference
+  failure rolls back CVE/source status, Ticket, CVSS, Product, lifecycle, audit,
+  and every reference write;
+- rollback, commit failure, and cancellation publish neither registered Ticket
+  convergence nor the package handoff; successful commit releases locks,
+  attempts registered convergence publication first, and only then may publish
+  the package handoff, even when the best-effort convergence publication fails;
+- an ordinary package-handoff publication failure after successful commit logs
+  exactly one sanitized `cve_package_handoff_publication_failed` ERROR, returns
+  normally, preserves `CVESource.success` and the one successful CVE metric,
+  records no failure metric, and never enters API/Git per-item failure handling;
+  the log excludes payload, package names, exception text, and upstream data;
+- repeated `commit_and_dispatch()` calls for different CVEs on one reusable
+  session prove each transaction's convergence registrations are detached and
+  consumed exactly once, attempted failures do not replay, rollback/cancellation
+  clear failed-transaction registrations, and later CVEs inherit none;
+- pure `build_post_ingest_tasks()` extraction with no database, mapping, Redis,
+  Celery, or network call; exact deduplication, deterministic ordering,
+  serializable output, filtered invalid package-name candidates, and `None` for
+  empty input;
+- a structural/spy assertion that no HTTP, Redis, Celery, DNS, package mapping,
+  or other external I/O occurs in Phase 1 or while CVE/Ticket locks are held;
+  and
+- manual creation with an already-`REJECTED` CVE and manual association of an
+  already-`REJECTED` CVE retain their ordinary Ticket status/audit sequence,
+  do not invoke `ignore_new_for_rejected_cve()`, and create no automatic
+  `CVE rejected` event.
 
 ### Ticket Accessibility
 
@@ -2184,6 +2251,14 @@ leaks the actual parent.
   that same transaction must flush and commit successfully. Unexpected failures
   propagate so the caller rolls back the complete per-CVE transaction; they are
   not converted to skip-and-continue outcomes.
+- Preserve upstream candidate order across duplicate automatic URLs. Test that
+  the source candidate remains first, the first duplicate owns non-NULL fill
+  precedence, and intentionally reordered upstream duplicates produce only the
+  documented corresponding winner change.
+- Inject an unexpected automatic-reference failure after Ticket creation,
+  CVSS/severity, Product eligibility, lifecycle, audit, source-success, and an
+  earlier reference write. Assert the complete per-CVE transaction rolls back
+  every listed effect, not only the final reference operation.
 
 ### Application-Owned Redis Operations
 
