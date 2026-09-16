@@ -878,7 +878,8 @@ never `FLUSHALL`.
 Every generic task wrapper that is *repeatedly invoked within the same
 long-lived process* and is therefore subject to the Cross-loop pooled
 connection lifecycle rule (`docs/conventions.md`) — currently
-`run_fetcher` and `cleanup_sessions` — MUST have a regression test that
+`run_fetcher`, `cleanup_sessions`, and `resolve_ticket_packages` — MUST have a
+regression test that
 proves it does not leak a pooled connection across its own event-loop
 boundary. The test invokes the real synchronous wrapper (or its
 extracted async workflow via two separate `asyncio.run()` calls) twice
@@ -905,7 +906,8 @@ reproduction above.** It is a one-shot startup handler: it runs at most
 once per process (Beat startup), and any failure exits the process
 (`sys.exit(1)`) rather than allowing a second invocation to reuse the
 same engine — the "second invocation in the same process" scenario that
-reproduces the cross-loop bug for `run_fetcher`/`cleanup_sessions` never
+reproduces the cross-loop bug for
+`run_fetcher`/`cleanup_sessions`/`resolve_ticket_packages` never
 occurs for this handler in production. Its disposal-ordering contract
 (dispose only after a successful commit, never on failure) is instead
 verified with unit-level mock tests asserting call order — see
@@ -1706,6 +1708,81 @@ changed, integration tests additionally cover:
   already-`REJECTED` CVE retain their ordinary Ticket status/audit sequence,
   do not invoke `ignore_new_for_rejected_cve()`, and create no automatic
   `CVE rejected` event.
+
+### Post-Ingest Package Resolution
+
+When `resolve_ticket_packages` or its package-service async workflow is
+implemented or changed, unit, integration, and synchronous task-wrapper tests
+MUST cover this complete matrix:
+
+- primitive task argument validation rejects malformed Ticket and match-criteria
+  UUIDs, container shapes, CPE-match keys/types, vendor/product pair shapes, and
+  individually overlength or otherwise invalid values before mapping, database,
+  HTTP client creation, or SMELT I/O; the wrapper receives explicit primitives,
+  not a `PostIngestTasks` dataclass;
+- exact CPE and vendor/product deduplication occurs before resolver calls;
+  NVD-selected metadata is not reinterpreted; resolver results and direct names
+  preserve case, exact-deduplicate across sources, apply the package-name grammar
+  before SMELT, and use ascending Unicode code-point processing order;
+- malformed CPE values retain the resolver's per-value empty result, while
+  `CPEMappingLoadError` and unexpected resolver failures terminate before any
+  package session or mutation; invalid final names never reach SMELT;
+- an empty final set succeeds without package session creation, SMELT call,
+  database mutation, audit event, or post-commit effect;
+- every final package receives a fresh independently closed `AsyncSession` and
+  one caller-owned transaction with exact system attribution, audit comment,
+  active-only mode, and excluded-package guard; successful no-op,
+  maintainer-only, and package-tree outcomes commit independently;
+- an isolated outcome rolls back and closes its package session before the next
+  package. A failed session is never reused, and earlier successful commits
+  remain after a later isolated failure, terminal exception, or simulated
+  process loss;
+- the locked-current active-status check has no unlocked authoritative precheck.
+  `active_ticket_only_skipped` terminates normally without requesting remaining
+  packages, mutation, audit, or post-commit effect;
+- the outcome matrix covers `PackageAlreadyExcludedError` skip,
+  `PackageNotFoundInSmeltError` no-match,
+  `PackageTargetsUnresolvedError`, `ProductCatalogNotReadyError`, and
+  `SmeltUnavailableError` isolated continuation, plus no-op, maintainer-only,
+  and package-tree success. Unexpected database, commit, audit, delegated, and
+  programming errors fail the task after current-unit rollback;
+- cancellation, `SoftTimeLimitExceeded`, and `MemoryError` propagate
+  immediately rather than entering package-level isolation or retry;
+- any new-IBS-track catch-up is attempted only after its package commit and
+  lock release, and publication failure cannot roll back or fail that committed
+  package unit;
+- the synchronous wrapper invokes exactly one `asyncio.run()`, configures no
+  automatic task retry, returns `None`, creates no `FetcherRun`, and stores no
+  Celery result or Redis progress/guard state;
+- one HTTP-client lifetime is confined to the invocation's event loop; every
+  HTTP resource and package session closes on success, empty, inactive,
+  expected-error, terminal-error, and cancellation paths; the shared pooled
+  engine is disposed exactly once after cleanup on every outcome before the
+  loop closes. A two-invocation production-pool regression test applies the
+  Cross-Loop Engine Lifecycle contract;
+- structured logs distinguish completed, empty, expected no-match, excluded
+  skip, inactive termination, isolated package failure, partial completion, and
+  terminal failure. Tests prove that `empty`, `inactive`, `completed`,
+  `partial`, and `failed` are mutually exclusive aggregate terminal events;
+  `partial` means normal return after every applicable package was attempted
+  with at least one isolated failure, while expected no-match or excluded
+  outcomes alone still permit `completed`. Cancellation,
+  `SoftTimeLimitExceeded`, and `MemoryError` require no feature-owned terminal
+  event before propagation. Log assertions permit only canonical IDs, bounded
+  counts, bounded reason categories or class names, and task correlation; an
+  invalid `ticket_id` is omitted and correlated only by `celery_task_id`.
+  Assertions reject candidate payloads, raw CPE/vendor-product data, package
+  candidate collections, SMELT response bodies, maintainer identity data,
+  URLs, raw exception text, credentials, and secrets;
+- the workflow itself creates no Ticket audit event for any operational outcome;
+  each committed effective delegated mutation creates only its ordinary atomic
+  `package_added` and `package_maintainer_added` events, while rolled-back,
+  empty, no-match, excluded, inactive, and failure outcomes create none; and
+- duplicate, concurrent, and reordered full invocations converge through
+  locking, uniqueness, and idempotency. Publication failure, a simulated
+  commit-to-enqueue crash, worker loss, and an unprocessed suffix leave no
+  invented durable progress or automatic retry guarantee; a later full
+  invocation may recover without duplicating committed state.
 
 ### Ticket Accessibility
 

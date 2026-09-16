@@ -1917,12 +1917,19 @@ Celery application and is outside this validation boundary. See
 
 **Result handling**: the Celery application is configured with
 `task_ignore_result = True` and **no result backend**. Task return
-values are never stored or read — all fetcher tasks return `None`,
-and execution state (status, item counts, error message, timing) is
-persisted in the `FetcherRun` table, the authoritative source for
-task outcomes. `celery-redbeat` stores its dynamic schedule under the
-broker URL (`redbeat:` key prefix) and has no dependency on a result
-backend.
+values are never stored or read. All `BaseFetcher` task executions return
+`None`, and their execution state (status, item counts, error message, timing)
+is persisted in the `FetcherRun` table. Non-fetcher sub-operations also return
+`None`, but do not create `FetcherRun` records; their owning specifications
+define domain-state and structured-log observability. `celery-redbeat` stores
+its dynamic schedule under the broker URL (`redbeat:` key prefix) and has no
+dependency on a result backend.
+
+The Celery application imports task modules explicitly after constructing the
+singleton app so decorators register against that instance. The
+`resolve_ticket_packages` sub-operation is registered from
+`backend/app/tasks/cve_tasks.py`; it is not added to `FETCHER_REGISTRY`,
+`fetcher_discovery.py`, RedBeat, or `beat_schedule`.
 
 ## Celery Beat Schedule Synchronization
 

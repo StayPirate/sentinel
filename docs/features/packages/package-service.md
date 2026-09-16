@@ -51,6 +51,9 @@ module applies mutations and creates audit events, but the transaction
 boundary is the caller's decision. This enables callers to compose
 multiple operations within a single transaction when needed (e.g.,
 `add_package_to_ticket` creates a complete package-tree delta atomically).
+The post-ingest package-resolution workflow is an orchestration boundary: it
+owns a separate caller transaction and fresh session for each package rather
+than placing its complete candidate set in one transaction.
 
 ### Acting user convention
 
@@ -777,7 +780,7 @@ Called by `add_package_to_ticket` after SMELT resolution completes.
 | `maintainer_emails` | `set[str]` | Yes | Fully validated, lowercase, globally deduplicated individual emails from the maintainership response; empty on a valid no-maintainer result or non-blocking maintainership failure |
 | `acting_user_id` | `UUID \| None` | No | Who is performing the action |
 | `audit_comment` | `Literal["CVE package resolution", "Product catalog backfill", "Ticket convergence"] \| None` | No | Closed system context for `package_added`; `NULL` for user actions |
-| `active_ticket_only` | `bool` | No | When true, skip without mutation if the locked Ticket is not active; used by Product catalog backfill |
+| `active_ticket_only` | `bool` | No | When true, skip without mutation if the locked Ticket is not active; used by post-ingest CVE package resolution and Product catalog backfill |
 | `allow_excluded_reresolution` | `bool` | No | Semantic caller context. `False` for the public add endpoint and internal callers whose candidate selection excludes existing soft-deleted packages; `True` for Ticket convergence, which intentionally re-resolves persisted excluded package markers without restoring them. The concrete parameter name or grouping is an implementation choice |
 
 Consumer-facing invocations additionally supply the authenticated caller's User
@@ -1089,35 +1092,31 @@ async def add_package_to_ticket(
    type.
 
 `audit_comment` is closed internal system context for `package_added`. API
-callers always pass `NULL`; the owning post-ingest CVE package-resolution
-workflow passes `CVE package resolution`; Product catalog backfill passes
+callers always pass `NULL`; the post-ingest CVE package-resolution workflow
+defined below passes `CVE package resolution`; Product catalog backfill passes
 `Product catalog backfill`; and Ticket convergence passes `Ticket convergence`.
 No caller supplies any other value or free-form text.
 
-`active_ticket_only` is false for the normal API caller. Product catalog
-backfill sets it to true so a Ticket that became inactive after batch selection
-is skipped under the Ticket row lock. The owning post-ingest CVE package-
-resolution contract selects its mode; source-neutral CVE ingestion does not.
+`active_ticket_only` is false for the normal API caller. Post-ingest CVE package
+resolution and Product catalog backfill set it to true so a Ticket that became
+inactive after candidate selection is skipped under the Ticket row lock.
 
-`allow_excluded_reresolution` is false for the public endpoint and Product
-catalog backfill. The owning post-ingest CVE package-resolution contract selects
-its mode; source-neutral CVE ingestion does not. Ticket convergence
-sets it to true because it intentionally enumerates every persisted package
-marker, including directly excluded ones. Its concrete name or grouping with
-other internal caller context is an implementation choice.
+`allow_excluded_reresolution` is false for the public endpoint, post-ingest CVE
+package resolution, and Product catalog backfill. Ticket convergence sets it to
+true because it intentionally enumerates every persisted package marker,
+including directly excluded ones. Its concrete name or grouping with other
+internal caller context is an implementation choice.
 
 The public API invocation also declares public-add semantics. After external
 target and maintainership I/O, the locked mutation boundary rejects an existing
 directly excluded package occurrence with `PackageAlreadyExcludedError` rather
-than restoring or completing it. Ticket convergence uses re-resolution
-semantics and may complete missing descendants or maintainers beneath an
-excluded package without clearing any marker. The post-ingest CVE package
-workflow and Product catalog backfill do not share one implied selection rule.
-The owning post-ingest CVE package-resolution contract selects its behavior
-before implementation; source-neutral ingestion does not decide it. Product
-catalog backfill retains its existing exclusion behavior. The concrete caller-
-context parameter is an implementation choice; the API handler does not perform
-the package lookup.
+than restoring or completing it. Post-ingest CVE package resolution uses the
+same excluded-package guard but treats the exception as an expected package
+skip. Ticket convergence uses re-resolution semantics and may complete missing
+descendants or maintainers beneath an excluded package without clearing any
+marker. Product catalog backfill retains its existing exclusion behavior. The
+concrete caller-context parameter is an implementation choice; the API handler
+does not perform the package lookup.
 
 **Idempotency**: every invocation repeats the maintained-package validation
 request. It requests maintainership only after package-target resolution
@@ -1180,6 +1179,224 @@ TICKET_NOT_FOUND` with no local side effect. The complete sequence is in
 **Auto-assignment**: applied by `add_package_records()` only after it confirms
 that at least one package-tree record is missing. Maintainer associations alone
 do not auto-assign. `add_package_to_ticket()` does not apply it.
+
+### Post-ingest CVE package resolution
+
+This section is the complete contract for the internal
+`resolve_ticket_packages` Celery task and its package-domain async workflow.
+The task is a non-`BaseFetcher` sub-operation. Its thin synchronous wrapper is
+located in `backend/app/tasks/cve_tasks.py`; candidate resolution, external I/O,
+session ownership, and outcome handling belong to the async workflow in
+`package_service`. The task introduces no endpoint, capability, setting, model,
+migration, `FetcherRun`, Redis state, or durable progress record.
+
+#### Task boundary and arguments
+
+The conceptual task signature uses five explicit JSON-compatible arguments:
+
+```python
+def resolve_ticket_packages(
+    ticket_id: str,
+    cpe_matches: list[dict[str, object]],
+    affected_cpes: list[str],
+    vendor_products: list[list[str]],
+    resolved_packages: list[str],
+) -> None:
+```
+
+`commit_and_dispatch()` projects a non-null `PostIngestTasks` value into these
+arguments. It MUST NOT pass the dataclass instance through Celery serialization.
+The payload is scoped to one Ticket/CVE ingestion result. Every list may be
+empty; there is no aggregate cardinality or byte threshold, truncation, or
+chunking behavior.
+
+After validation, the wrapper passes typed values to this independently
+testable service workflow:
+
+```python
+async def run_post_ingest_package_resolution(
+    *,
+    ticket_id: UUID,
+    cpe_matches: Sequence[ValidatedCPEMatch],
+    affected_cpes: Sequence[str],
+    vendor_products: Sequence[tuple[str, str]],
+    resolved_packages: Sequence[str],
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+```
+
+`ValidatedCPEMatch` denotes the validated semantic three-field record and does
+not prescribe a dataclass, `TypedDict`, Pydantic model, or private helper. The
+workflow receives no caller-owned session because it owns one fresh session and
+transaction per package.
+
+Before package mapping, database access, HTTP client creation, or SMELT I/O, the
+task boundary validates the complete shape and every identifier/value:
+
+- `ticket_id` is a canonical UUID string;
+- every CPE-match item is an object with exactly `criteria`, `vulnerable`, and
+  `match_criteria_id`; `criteria` is a string of at most 255 code points,
+  `vulnerable` is a JSON boolean, and `match_criteria_id` is either a canonical
+  UUID string or null;
+- every affected CPE is a string of at most 255 code points;
+- every vendor/product item is a two-element string array; vendor retains the
+  producer's 255-code-point bound and product retains its source field's text
+  contract; and
+- every direct package-name candidate is a non-empty string of at most 50 code
+  points containing no slash, colon, or whitespace, matching the pure producer
+  handoff contract.
+
+No value is trimmed, case-normalized, coerced, or silently dropped during task
+argument validation. A malformed container, extra or missing CPE-match field,
+wrong primitive type, invalid UUID representation, or value outside its
+individual producer constraint is a non-retryable caller-contract failure. The
+task performs no resolver, database, or SMELT work in that case.
+
+#### Deterministic candidate resolution
+
+The workflow completes this phase before opening any per-package database
+transaction:
+
+1. Exact-deduplicate all transported CPE criteria across `cpe_matches` and
+   `affected_cpes`, then process them in ascending Unicode code-point order.
+   Call `resolve_cpe_packages()` once per distinct CPE. The
+   `cpe_matches` entries were selected by the NVD ingestion contract; this
+   workflow does not reinterpret `vulnerable`, `negate`, configuration-tree
+   operators, version ranges, or `match_criteria_id`.
+2. Exact-deduplicate the transported vendor/product pairs, order them by vendor
+   then product using ascending Unicode code points, and call
+   `resolve_vendor_product()` once per pair.
+3. Combine every resolver result with `resolved_packages`. Treat all values as
+   candidates, preserve case, and exact-deduplicate across every source.
+4. Retain only names matching the existing public package-name grammar
+   `^[a-zA-Z0-9][a-zA-Z0-9._+\-]{0,253}[a-zA-Z0-9]$`. This accepts 2 through
+   255 ASCII characters. Invalid final names are skipped before any SMELT
+   request. Process the final set in ascending Unicode code-point order.
+
+The resolvers' existing per-value CPE parse-error behavior is unchanged: an
+invalid CPE logs its sanitized warning and contributes an empty result. A
+`CPEMappingLoadError` or any unexpected resolver exception fails the complete
+task before package mutation starts, so resolver traversal order cannot create
+a committed package prefix. If the final set is empty, the workflow succeeds
+without opening a package session, calling SMELT, mutating data, or creating an
+audit event.
+
+#### Per-package workflow and transactions
+
+For each final package name, in deterministic order:
+
+1. Create a fresh `AsyncSession`. Never reuse a session from an earlier package,
+   especially one that rolled back after an error.
+2. Within one caller-owned transaction, call `add_package_to_ticket()` with
+   `ticket_id`, the package name, `acting_user_id = None`, exact
+   `audit_comment = "CVE package resolution"`, `active_ticket_only = True`, and
+   `allow_excluded_reresolution = False`.
+3. Commit a successful no-op, maintainer-only mutation, or package-tree
+   mutation independently, then close that package session. A successful
+   package-tree or maintainer mutation and its delegated audit events are
+   atomic. A later package failure, task failure, or process loss never rolls
+   back an earlier committed package.
+4. Only after that package commit and Ticket-lock release, detach and attempt
+   any new-IBS-track catch-up registered by `add_package_to_ticket()`. Its
+   existing best-effort publication behavior applies; failure cannot roll back
+   or reclassify the committed package unit.
+
+There is no unlocked Ticket-status precheck. `add_package_records()` evaluates
+the locked-current Ticket through `active_ticket_only = True`. If it returns
+`active_ticket_only_skipped` because the Ticket is no longer `New`, `Analysis`,
+or `Analyzed`, the workflow commits no mutation, closes the session, terminates
+normally, and does not call SMELT for any remaining package. External requests
+already completed for the current package are diagnostic work only.
+
+Each isolated exception outcome rolls back and closes the current package
+session before the workflow either continues or raises:
+
+| Outcome | Workflow behavior |
+|---|---|
+| `PackageAlreadyExcludedError` | Expected excluded skip. Do not complete or restore descendants, maintainers, assignments, audit, reconciliation, or post-commit effects; continue. |
+| `PackageNotFoundInSmeltError` | Expected candidate no-match; continue. |
+| `PackageTargetsUnresolvedError` | Isolated package failure after the current catalog lookup; continue. |
+| `ProductCatalogNotReadyError` | Isolated package failure; continue. |
+| `SmeltUnavailableError` | Isolated package failure after shared HTTP transport retries are exhausted; continue. |
+| Complete no-op, maintainer-only mutation, or package-tree mutation | Successful package unit; commit and continue. |
+| Unexpected database, commit, audit, delegated-service, or programming error | Roll back the current unit and fail the complete task immediately. |
+| Cancellation, `SoftTimeLimitExceeded`, or `MemoryError` | Roll back/close the current unit as applicable and propagate immediately. |
+
+The wrapper configures no automatic Celery task retry. Returning normally after
+all applicable package units, including known no-match, excluded, catalog, or
+SMELT failures, returns `None`. An unexpected terminal exception propagates to
+Celery after cleanup. Celery has no result backend, and this sub-operation
+creates no `FetcherRun`; PostgreSQL package state and structured logs are its
+only outcome evidence.
+
+#### Resource lifecycle
+
+The synchronous task wrapper invokes the named async workflow through exactly
+one `asyncio.run()` call. The async workflow creates all HTTP resources on that
+event loop, uses one client lifetime for the invocation, and closes the client
+and every package session on every outcome. Equivalent internal client-sharing
+and dependency-injection mechanisms are allowed as long as no client crosses an
+event loop and all `add_package_to_ticket()` calls preserve the shared
+networking and SMELT contracts.
+
+After all HTTP and session cleanup, the outer async workflow awaits the shared
+pooled `engine.dispose()` exactly once on success, expected termination, and
+exception paths before control returns to `asyncio.run()`. Nested package
+services do not dispose the engine.
+
+#### Idempotency, delivery, and recovery
+
+Duplicate, concurrent, or reordered task deliveries are accepted. Each
+invocation re-resolves its complete payload; Ticket-root locking, uniqueness
+constraints, package insert-if-missing behavior, and additive maintainership
+make database effects converge. A directly soft-deleted package remains an
+expected skip and is never restored or completed by this workflow.
+
+Publication and completion are best effort. A process crash between ingestion
+commit and task publication, broker failure, worker crash, terminal task error,
+or unprocessed suffix can permanently lose or delay that attempt. Sentinel
+introduces no outbox, progress table, persistent queue, Redis guard, generic
+retry, or resume position. A later source re-emission, manual CVE refetch,
+Ticket convergence catch-up, or manual package addition may invoke the
+idempotent resolution paths again, but none guarantees rediscovery of every
+lost candidate. A mapping-file change likewise takes effect only on a later or
+manual trigger.
+
+#### Audit and observability
+
+The task and workflow create no `TicketAuditEvent` of their own. Effective
+delegated mutations create only their existing atomic `package_added` and
+`package_maintainer_added` events. Empty resolution, expected skips, isolated
+failures, publication gaps, task failure, and task completion are operational
+outcomes, not audit events.
+
+Per-package `no_match`, `excluded`, and `package_failed` events may precede one
+aggregate terminal event. `empty`, `inactive`, `completed`, `partial`, and
+`failed` are mutually exclusive for one invocation:
+
+| Event | Level | Meaning |
+|---|---|---|
+| `ticket_package_resolution_empty` | INFO | Valid payload resolved to no final package names. This is the aggregate terminal event; do not also emit `ticket_package_resolution_completed`. |
+| `ticket_package_resolution_no_match` | INFO | A valid package candidate had no SMELT match. |
+| `ticket_package_resolution_excluded` | INFO | Locked package state was directly excluded. |
+| `ticket_package_resolution_inactive` | INFO | Locked-current Ticket was inactive; remaining packages were not attempted. This is the aggregate terminal event even if earlier package units committed or had expected or isolated outcomes; do not also emit `ticket_package_resolution_completed` or `ticket_package_resolution_partial`. Aggregate counts preserve the preceding outcomes. |
+| `ticket_package_resolution_package_failed` | WARNING | A package had an isolated catalog, target, or SMELT failure. |
+| `ticket_package_resolution_partial` | WARNING | Every applicable package was attempted and the workflow returned normally, but at least one package had an isolated catalog, target, or SMELT failure. Expected no-match or excluded outcomes alone do not make the invocation partial. Aggregate counts preserve successful, no-match, excluded, and isolated-failure outcomes. |
+| `ticket_package_resolution_completed` | INFO | Every applicable package was attempted and the workflow returned normally without an isolated package failure. Aggregate counts preserve successful, no-match, and excluded outcomes. |
+| `ticket_package_resolution_failed` | ERROR | Validation, resolver, database, commit, audit, delegated, or programming failure terminated the task. Aggregate counts preserve any earlier committed or expected package outcomes. |
+
+Cancellation, `SoftTimeLimitExceeded`, and `MemoryError` propagate after
+cleanup without requiring a feature-owned terminal event; Celery or worker
+logging is the accepted operational evidence for those control-signal paths.
+When `ticket_id` itself fails validation, the failure log omits `ticket_id` and
+uses the task-bound `celery_task_id` for correlation.
+
+Logs may contain canonical `ticket_id`, bounded counts, a bounded reason
+category or exception class name, and the task-bound `celery_task_id`. They
+MUST NOT contain the complete candidate payload or candidate collections, raw
+CPE or vendor/product values, SMELT response bodies, maintainer emails,
+usernames, group names, URLs, raw exception text, credentials, or secrets. The
+task binds no `fetcher_run_id` because it creates no `FetcherRun`.
 
 ### `run_ticket_convergence()` workflow
 
@@ -1847,6 +2064,16 @@ transitions. The test must cover:
   eligibility threshold comparison
 - `docs/features/packages/package-model.md` — track/Product concepts,
   exclusion and actionability model, API endpoints
+- `docs/features/packages/cpe-package-mapping.md` — package-candidate mapping
+  and resolver behavior
+- `docs/features/tickets/cve-service.md` — `PostIngestTasks` producer and
+  post-commit handoff
+- `docs/features/platform/fetcher-infrastructure.md` — Celery result handling,
+  task registration, and sub-operation classification
+- `docs/features/platform/networking.md` — shared HTTP client, TLS, and
+  transport retry contract
+- `docs/features/platform/logging.md` — structured logging, correlation, and
+  sensitive-data restrictions
 - `docs/features/packages/product-lifecycle-transitions.md` — AIMAAS
   threshold changes triggering eligibility mutations
 - `docs/features/packages/ibs-track-release-detection.md` — IBS

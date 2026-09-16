@@ -995,13 +995,15 @@ descendant set.
 
 ### Interaction with add_package_to_ticket
 
-For internal re-resolution callers, `add_package_to_ticket` proceeds normally
-regardless of whether the `TicketPackage` is soft-deleted. It queries SMELT, and
-creates any missing `TicketPackageTrack` and `TicketPackageProduct`
-records. Existing records (active or soft-deleted) are skipped.
-It also performs the normal additive maintainership acquisition for that
-package occurrence; any new association remains ineffective while the package
-is excluded.
+Internal callers select one of two explicit modes. Ticket convergence sets
+`allow_excluded_reresolution = true`: it queries SMELT and may create missing
+`TicketPackageTrack`, `TicketPackageProduct`, and additive maintainership rows
+beneath a soft-deleted `TicketPackage` without restoring any marker. Post-ingest
+CVE package resolution sets `allow_excluded_reresolution = false`: after its
+normal external resolution, a locked directly excluded package produces the
+expected `PackageAlreadyExcludedError`, creates no descendant or maintainer
+state, and the workflow continues with its next package. Product catalog
+backfill also leaves this flag false and selects only included package markers.
 
 New records are created with `deleted_at = NULL`. If the parent package or
 track is manually excluded, these records are effectively excluded through the
@@ -1012,10 +1014,9 @@ service to apply the public excluded-package guard. The service owns the
 state-dependent query and returns `409 PACKAGE_ALREADY_EXCLUDED` when the
 existing package occurrence is directly excluded. Ticket convergence invokes
 the documented internal re-resolution mode, which may complete descendants and
-maintainership without restoring the package. The owning post-ingest CVE
-package-resolution contract still defines its soft-deleted-marker selection and
-re-resolution mode; Product catalog backfill retains its already-defined
-exclusion behavior. API handlers do not
+maintainership without restoring the package. Post-ingest resolution uses the
+guarded mode and treats the same service exception as an internal skip rather
+than an HTTP outcome. API handlers do not
 query package-tree state or decide this business condition. Track release
 detection never calls this function because it reconciles only tracks that
 already exist.
@@ -1206,10 +1207,13 @@ The following scenarios invoke `add_package_to_ticket`:
    `docs/features/tickets/cve-service.md` (PostIngestTasks). Candidates include
    NVD-selected CPEs, affected-entry CPEs, vendor/product pairs, and source-
    supplied package names; none is proof of an exact SUSE package. The owning
-   post-ingest package-resolution workflow validates and resolves candidates,
-   then invokes `add_package_to_ticket` for each resulting package name. Its
-   task, transaction, applicability, retry, and recovery lifecycle is not
-   defined by CVE ingestion or this trigger summary.
+   `package-service.md` workflow validates and resolves every candidate before
+   package mutation, then invokes `add_package_to_ticket` in deterministic order
+   with active-Ticket-only and excluded-package-guard semantics. Each package
+   has an independent transaction; successful earlier packages survive later
+   failures. The `resolve_ticket_packages` task is a best-effort non-fetcher
+   sub-operation with no task result, `FetcherRun`, progress state, or automatic
+   task retry.
 2. **Manual**: an authorized user manually adds a package by name via the UI.
    `add_package_to_ticket` is called with the entered name.
 3. **Restore from soft-deletion**: restoring a package, track, or

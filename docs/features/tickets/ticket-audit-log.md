@@ -170,6 +170,12 @@ event type.
   retry, partial-failure, and terminal-failure evidence belongs in structured
   logs; audit history is never used as workflow provenance or current-state
   input.
+- Publishing or executing post-ingest package resolution creates no event for
+  the workflow outcome. Empty resolution, candidate no-match, excluded skip,
+  inactive-Ticket termination, isolated package failure, partial completion,
+  and terminal failure are operational log outcomes only. Effective delegated
+  mutations retain their atomic `package_added` and
+  `package_maintainer_added` events per independently committed package.
 
 ### Canonical Automatic Comment Vocabulary
 
@@ -232,6 +238,7 @@ an intentional no-event contract, not missing audit coverage.
 | IBS request/action/correlation observation | None unless it delegates another audited domain mutation | N/A | IBS reconciliation; Ticket lock plus conditional evidence writes |
 | `TrackReleaseCheckpoint` create/advance/no-op | None; an accompanying affectedness mutation retains `track_status_changed` | N/A | Track release workflow; Ticket lock and expected-predecessor validation |
 | EOL entry/exit or derived actionability change | None for the derived change; an actual Ticket status change retains `status_change` | System for resulting status | Product/lifecycle owner; Ticket lock only for reconciliation |
+| Post-ingest package-resolution publication, empty/no-match/excluded/inactive outcome, partial or terminal failure, or task completion | None for the workflow outcome; each independently committed delegated package or maintainer mutation retains its normal events | N/A for workflow outcomes; system for delegated mutations | `package_service`; one Ticket-locked transaction per attempted package after external I/O |
 | Ticket convergence registration, dispatch, execution, retry, partial/terminal failure, or operator rerun | None for the workflow outcome; effective delegated mutations retain their normal events | N/A | Ticket convergence owner; per-domain locks |
 | Product catalog source mutation or workflow-only dispatch/checkpoint outcome | None; later per-Ticket delegated mutations retain their normal events | N/A | Owning catalog/workflow service |
 

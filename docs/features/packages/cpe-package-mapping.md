@@ -10,8 +10,8 @@ packages to Tickets after CVE ingestion. This spec defines:
 1. A static JSON mapping file shipped with the application at
    `backend/app/data/cpe-package-mapping.json`
 2. A resolution function (`resolve_cpe_packages`) that performs an
-   in-memory lookup against the mapping, consumed by the owning post-ingest
-   package-resolution workflow
+   in-memory lookup against the mapping, consumed by `package_service`'s
+   post-ingest package-resolution workflow
 
 ## Context
 
@@ -446,16 +446,17 @@ unexpected loader exceptions unchanged.
 
 | Consumer | Where | How |
 |----------|-------|-----|
-| Post-ingest CVE package resolution — NVD CPE | Owning package-resolution workflow | For each CPE entry already selected as a package candidate by the NVD ingestion contract and transported through `PostIngestTasks.cpe_matches`, call `resolve_cpe_packages(criteria)`; do not reinterpret NVD applicability |
-| Post-ingest CVE package resolution — affected-entry CPE | Owning package-resolution workflow | For each CPE transported through `PostIngestTasks.affected_cpes`, call `resolve_cpe_packages(cpe)` |
-| Post-ingest CVE package resolution — affected-entry vendor/product | Owning package-resolution workflow | For each pair transported through `PostIngestTasks.vendor_products`, call `resolve_vendor_product(vendor, product)` |
-| Post-ingest CVE package resolution — package-name candidate | Owning package-resolution workflow | Treat each value in `PostIngestTasks.resolved_packages` as requiring downstream validation; the historical field name does not assert an exact SUSE package match |
+| Post-ingest CVE package resolution — NVD CPE | `package_service` post-ingest workflow | Exact-deduplicate transported criteria, then call `resolve_cpe_packages(criteria)` for each CPE entry already selected by the NVD ingestion contract; do not reinterpret NVD applicability |
+| Post-ingest CVE package resolution — affected-entry CPE | `package_service` post-ingest workflow | Exact-deduplicate with all other transported CPE criteria, then call `resolve_cpe_packages(cpe)` |
+| Post-ingest CVE package resolution — affected-entry vendor/product | `package_service` post-ingest workflow | Exact-deduplicate pairs, then call `resolve_vendor_product(vendor, product)` |
+| Post-ingest CVE package resolution — package-name candidate | `package_service` post-ingest workflow | Combine each transported value with resolver results before the package-domain grammar, exact-deduplication, and ordering gate; the historical field name does not assert an exact SUSE package match |
 
 `cve_service` only builds the deterministic serializable handoff; it does not
 call either resolver or `add_package_to_ticket()`. Deduplication and ordering of
-transported values are owned by `build_post_ingest_tasks()`. The package-
-resolution workflow owns resolver-result combination, package validation, and
-mutation lifecycle; those behaviors are intentionally not specified here.
+transported values are owned by `build_post_ingest_tasks()`. The complete
+resolver-result combination, package validation, transaction, task, and
+recovery lifecycle is owned by `package-service.md` (Post-ingest CVE package
+resolution) and is not duplicated here.
 
 **Integration notes**:
 
@@ -473,8 +474,9 @@ mutation lifecycle; those behaviors are intentionally not specified here.
   for determining whether a specific track is affected. The VA
   determines affectedness at the track level after packages are added
 - **Mapping changes vs existing CVEs**: recovery and re-resolution after a
-  mapping change belong to the owning post-ingest package-resolution workflow;
-  this resolver contract does not create a separate rescan or progress model
+  mapping change follow the opportunistic recovery paths owned by
+  `package-service.md` (Post-ingest CVE package resolution). This resolver
+  contract creates no separate rescan or progress model
 
 ## Verification
 

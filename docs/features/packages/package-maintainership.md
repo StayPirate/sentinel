@@ -203,6 +203,12 @@ acquisition, including:
 - Product catalog backfill; and
 - Ticket convergence, including persisted soft-deleted package markers.
 
+Post-ingest CVE package resolution therefore uses this same request, response,
+validation, and additive-acquisition contract once for each valid package it
+attempts. The external contract is unchanged: it introduces no alternate SMELT
+field, endpoint, request parameter, response interpretation, identity rule, or
+evidence requirement.
+
 The ordered external phase is:
 
 1. call and fully validate the maintained-package endpoint, resolve supported

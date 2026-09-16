@@ -478,6 +478,8 @@ internal CA.
     created lazily and closed by the task wrapper per call
   - Standalone `run_catch_up` tasks: once per task — same pattern as
     `fetch_single_cve`
+  - Standalone `resolve_ticket_packages` tasks: once per task — the client is
+    created and closed by the task workflow per invocation
   - Long-lived clients (IBSClient, IBSEventConsumer): once per process
     lifetime
 - **If file is corrupt or unparseable**: `build_tls_context()` raises
