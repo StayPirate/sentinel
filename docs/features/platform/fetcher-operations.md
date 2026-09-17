@@ -27,6 +27,12 @@ This specification defines the following fetcher endpoints:
 7. `PATCH /api/v1/fetchers/{fetcher_name}/config` — update config
 8. `GET /api/v1/fetchers/{fetcher_name}/audit-log` — admin audit trail
 
+The run read contract adds `items_succeeded` to the four existing
+`FetcherRun` representations: fetcher-list `last_run`, run-list items, run
+detail, and timeline points. This is an additive v1 response-field change. It
+does not add or change an endpoint, method, query parameter, pagination rule,
+error, authorization requirement, capability, or Permission Map entry.
+
 The `GET /api/v1/ibs-consumer/status` endpoint is defined in
 `docs/features/integrations/ibs-rabbitmq-integration.md`, not here. It
 observes the standalone IBS RabbitMQ consumer and is not a fetcher
@@ -134,6 +140,9 @@ schedule is read to resolve `next_run_at` (see Q3, step 5).
    `started_at` is `NULL` — is still correctly selected and positioned
    chronologically. This includes runs with `status IN ('queued',
    'running')`. If no `FetcherRun` exists, `last_run` is `null`.
+   Every non-null projection includes `items_succeeded` together with
+   `items_failed`, `items_created`, and `items_updated`. These are persisted
+   finalization values, so an active run projects zero for all four counters.
 5. For each registered and enabled fetcher, attempt to read `next_run_at`
    from the RedBeat entry's `due_at` attribute. On any `RedisError`, set
    `next_run_at = null` for all fetchers and log WARNING (single attempt,
@@ -188,6 +197,9 @@ neither in the registry nor in `FetcherConfig`.
 5. Exclude `error_detail` and `error_traceback` from all items.
 6. If `has_manage_fetchers` is `false`, set `triggered_by_user` to
    `null` for all items.
+7. Include `items_succeeded`, `items_failed`, `items_created`, and
+   `items_updated` on every item. Active runs expose zero for all four because
+   the counters are persisted only during finalization.
 
 **Q6 (exceptions)**: `FetcherNotFoundError`.
 
@@ -213,6 +225,10 @@ neither in the registry nor in `FetcherConfig`.
    otherwise these fields are absent from the response.
 4. If `has_manage_fetchers` is `false`, set `triggered_by_user` to
    `null`.
+5. Include all four finalized counters: `items_succeeded`, `items_failed`,
+   `items_created`, and `items_updated`. They are zero for a queued or running
+   row and remain available for diagnostics when a run-level exception wins
+   finalization precedence.
 
 **Q6 (exceptions)**: `FetcherNotFoundError`, `FetcherRunNotFoundError`.
 
@@ -241,6 +257,9 @@ neither in the registry nor in `FetcherConfig`.
    Disabled Period Derivation below.
 4. If `has_manage_fetchers` is `false`, omit `disabled_by` and
    `enabled_by` from each disabled period (set to `null`).
+5. Project `items_succeeded`, `items_failed`, `items_created`, and
+   `items_updated` on every point. Queued and running points contain zero for
+   all four counters.
 
 **Q6 (exceptions)**: `FetcherNotFoundError`.
 
@@ -567,7 +586,8 @@ and transactions.
    - `triggered_by`: `manual`
    - `triggered_by_user_id`: from input (`user_id`)
    - `started_at`: `NULL` (set only when a worker later adopts the run)
-   - All other fields: `null` / zero
+   - All other fields: `null` / zero, including `items_succeeded`,
+     `items_failed`, `items_created`, and `items_updated`
 6. Create `FetcherAuditEvent`:
    - `event_type`: `triggered`
    - `fetcher_name`: from input
@@ -805,6 +825,7 @@ distinction.
         "finished_at": "2025-04-20T12:03:45Z",
         "duration_seconds": 225.0,
         "status": "success",
+        "items_succeeded": 60,
         "items_created": 12,
         "items_updated": 45,
         "items_failed": 0,
@@ -832,6 +853,7 @@ distinction.
         "finished_at": "2026-01-15T08:00:45Z",
         "duration_seconds": 45.0,
         "status": "success",
+        "items_succeeded": 20,
         "items_created": 3,
         "items_updated": 10,
         "items_failed": 0,
@@ -892,6 +914,12 @@ distinction.
     `manual` AND the caller has `manage_fetchers`. Otherwise `null`.
   - `error_message`: sanitized public message (never contains raw
     broker, database, or system details). `null` for successful runs.
+  - `items_succeeded`: selected work units that reached a successful terminal
+    outcome. `items_created` and `items_updated` are separate durable-effect
+    counts and need not sum to this value.
+  - All four counters are finalized-run diagnostics, not live progress. A
+    `queued` or `running` row returns persisted zero values even if a worker has
+    already changed its in-memory counters.
   - `error_detail` and `error_traceback` are NOT included in this
     endpoint.
 
@@ -943,6 +971,7 @@ still appears in its correct chronological position.
       "finished_at": "2025-04-20T12:03:45Z",
       "duration_seconds": 225.0,
       "status": "success",
+      "items_succeeded": 60,
       "items_created": 12,
       "items_updated": 45,
       "items_failed": 0,
@@ -970,6 +999,9 @@ still appears in its correct chronological position.
   `finished_at = null`, `duration_seconds = null`
 - For a run with `status = running`: `finished_at = null`,
   `duration_seconds = null`
+- `items_succeeded`, `items_failed`, `items_created`, and `items_updated` are
+  finalized together. Queued and running list items expose zero for every
+  counter; they do not report live progress
 - `stale`: `true` when the run's elapsed time exceeds the threshold for
   its own status — `now() - created_at > 600` for `queued`,
   `now() - started_at > hard_time_limit_seconds + 60` for `running`
@@ -1006,11 +1038,12 @@ Returns full detail for a single run.
     "finished_at": "2025-04-20T12:03:45Z",
     "duration_seconds": 225.0,
     "status": "failure",
+    "items_succeeded": 57,
     "items_created": 12,
-    "items_updated": 45,
+    "items_updated": 44,
     "items_failed": 3,
-    "error_message": "3 items failed during processing",
-    "error_detail": "TimeoutError: NVD API request timed out after 30s for CVE-2025-1234",
+    "error_message": "External service unreachable",
+    "error_detail": "ReadTimeout: request timed out",
     "error_traceback": "Traceback (most recent call last):\n  ...",
     "triggered_by": "schedule",
     "triggered_by_user": null,
@@ -1025,6 +1058,12 @@ Returns full detail for a single run.
   `manage_fetchers` capability. The field is **absent from the response
   body** for callers without this capability (not `null` — absent).
 - `error_traceback`: same visibility rule as `error_detail`.
+
+This example is a `failure`, rather than `partial`, because a run-level
+exception escaped after the shown units completed. Exception precedence wins
+while preserving all four counters for diagnostics. The 57 successful units
+include 12 creates, 44 updates, and one unchanged result; together with the
+three failed units, the run selected 60 terminal units.
 
 **Failure drill-down**: for CVE fetchers (where `cve_source_type` is
 defined in the fetcher registry response), the run detail view can link
@@ -1086,6 +1125,7 @@ endpoint.
         "run_id": "uuid",
         "timestamp": "2025-04-19T12:00:00Z",
         "duration_seconds": 210.5,
+        "items_succeeded": 50,
         "items_created": 8,
         "items_updated": 32,
         "items_failed": 0,
@@ -1095,8 +1135,9 @@ endpoint.
         "run_id": "uuid",
         "timestamp": "2025-04-20T12:00:00Z",
         "duration_seconds": null,
-        "items_created": 5,
-        "items_updated": 20,
+        "items_succeeded": 0,
+        "items_created": 0,
+        "items_updated": 0,
         "items_failed": 0,
         "status": "running"
       },
@@ -1104,6 +1145,7 @@ endpoint.
         "run_id": "uuid",
         "timestamp": "2025-04-20T12:05:00Z",
         "duration_seconds": null,
+        "items_succeeded": 0,
         "items_created": 0,
         "items_updated": 0,
         "items_failed": 0,
@@ -1135,7 +1177,9 @@ endpoint.
 - `points[].duration_seconds`: actual execution duration. `null` for
   runs with `status IN ('queued', 'running')`, and for any run whose
   `started_at` is `null`
-- `points[].items_created/updated/failed`: actual counts
+- `points[].items_succeeded/failed`: finalized terminal outcome counts;
+  `points[].items_created/updated`: finalized durable-effect counts. All four
+  are zero for queued and running points because counters are not live progress
 - `disabled_periods`: derived from `FetcherAuditEvent` records (see
   Disabled Period Derivation). `disabled_by` / `enabled_by` are `null`
   without `manage_fetchers`, User Reference Objects with it

@@ -582,8 +582,8 @@ what a long-gap run can prove; incomplete scopes preserve prior delivery.
 |---|---|
 | One track has a transport, timeout, rate-limit, HTTP, parse, validation, search-completeness, retention, ambiguity, or local transaction failure | Roll back that scope, increment `record_failed` once, log the track/Ticket/request identities and sanitized category, and continue. Raw response bodies, URLs, credentials, and personal identifiers are not logged. |
 | Scope enumeration or another whole-run database prerequisite fails | Raise so `BaseFetcher` finalizes the run as failure. Public `error_message` uses the infrastructure's sanitized generic category; restricted error fields retain diagnostics. |
-| Every selected scope fails | Return normally after counting failures; the `BaseFetcher` all-items-failed rule records run failure. |
-| Some scopes complete and some fail | Return normally; `BaseFetcher` records a partial run when at least one completed scope created or updated data. If successful scopes were all no-ops, the all-items-failed safety rule still records failure because every counted work item failed. |
+| Every selected scope fails | Return normally after counting failures; `BaseFetcher` records run failure because no selected scope succeeded. |
+| Some scopes complete and some fail | Return normally; `BaseFetcher` records a partial run from the mixed terminal outcomes, including when every successful scope was a no-op. |
 | Soft or hard run time limit | `SoftTimeLimitExceeded` reaches `BaseFetcher`; it records the sanitized timeout failure. The worker enforces the hard limit. No cursor advances. |
 
 The generic `run_fetcher` task has no top-level retry. The next daily execution,
@@ -598,19 +598,27 @@ its next complete run processes all still-discoverable evidence.
 
 ### Metrics
 
-Metrics use one selected track scope as the unit and are mutually exclusive:
+The work unit is one distinct selected track scope with the complete semantic
+identity defined in [Scope Identity](#scope-identity). Shared request evidence
+may be reused, but it does not merge track scopes for outcome or effect
+accounting.
 
-- `record_created`: increment once when a successful scope transaction creates
-  at least one relevant `IBSRequest`, `IBSRequestAction`, or
-  `IBSRequestActionTrack`, even if that transaction also updates existing data
-  or delivery.
-- `record_updated`: increment once when a successful scope transaction creates
-  no domain row but changes existing request state/provenance/correlation or
-  effectively changes delivery.
-- `record_failed`: increment once when a selected scope is incomplete or fails,
-  regardless of the number of failed external calls or validation findings in
-  that scope.
-- A complete no-match and idempotent no-op increment no metric.
+| Mapping | Exact behavior |
+|---|---|
+| Selected | Each distinct IBS track scope belonging to an active Ticket, once. |
+| Succeeded | `record_succeeded()` once for a complete positive or complete no-match scope whose local transaction commits, including an unchanged/idempotent no-op. A scope that becomes stale or inapplicable under the locked revalidation in step 5 is also a successful no-op. |
+| Failed | `record_failed()` once when a selected scope is incomplete or failed, regardless of the number of failed external calls or validation findings in that scope. Its local effects roll back. |
+| Created | `record_created()` once when a succeeded scope transaction creates at least one relevant `IBSRequest`, `IBSRequestAction`, or `IBSRequestActionTrack`, even if the same transaction also updates existing evidence or delivery. |
+| Updated | `record_updated()` once when a succeeded scope transaction creates no domain row but changes existing request state, provenance, or correlation, or effectively changes delivery. |
+| Excluded before selection | Non-IBS tracks and tracks below inactive Tickets do not enter the recurring work scope. Package or track exclusion, actionability, affectedness, eligibility, delivery status, and Product lifecycle do not exclude an otherwise selected IBS track. |
+
+Created and updated remain mutually exclusive effects for one scope. A
+succeeded complete no-match, unchanged scope, or stale/inapplicable no-op has no
+created or updated effect. Each selected terminal scope records exactly one of
+succeeded or failed, so run status derives from outcomes rather than domain
+mutation counts. Mixed succeeded and failed scopes produce `partial`, all
+failed scopes produce `failure`, and no failed scopes produce `success`,
+including an empty run.
 
 The per-ticket `catch_up()` sub-operation creates no `FetcherRun` and reports no
 fetcher metrics, as required by the generic catch-up contract. Its per-item logs
@@ -843,6 +851,9 @@ Implementation coverage must include:
   event;
 - first run, long gap, re-enable, package-add and Ticket-convergence catch-up,
   duplicate/out-of-order event acceleration, and fetcher metric precedence;
+- created, updated, complete-positive no-op, complete no-match,
+  stale/inapplicable, incomplete, failed, mixed, all-failed, and empty-run
+  outcomes with exact succeeded, failed, created, and updated counters;
 - API authentication, confidential-Ticket visibility, action deduplication,
   exact filters, pagination, deterministic sorting, and response schemas,
   including missing/inaccessible 404 equivalence and one visibility-constrained

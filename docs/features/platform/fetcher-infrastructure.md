@@ -34,6 +34,9 @@ periodic tasks declared via Celery's native `beat_schedule` (see
 | **Queued** | The `FetcherRun.status` value for a manually triggered run that has been accepted and durably persisted, but not yet adopted by a worker. Manual-only — a scheduled run is never `queued`. See "Concurrency Control" for the full lifecycle. |
 | **Adoption** | The atomic transition of a `queued` run to `running`, performed by the `run_fetcher` task wrapper under the `FetcherConfig` lock. "Running" means adoption has already happened — it never describes a run that is merely enqueued in the broker. |
 | **Active run** | A `FetcherRun` whose `status` is `queued` or `running` — the two non-terminal statuses. The single-instance invariant (only one active run per fetcher) is evaluated over this combined set, not over `running` alone. |
+| **Selected work unit** | The one concrete unit a fetcher admits into its processing scope for terminal accounting. Each concrete fetcher defines this unit and the values excluded before selection. |
+| **Terminal outcome** | The final result of one selected work unit: exactly one of succeeded or failed. It is independent from whether processing created or updated durable state. |
+| **Durable effect** | A committed create or update represented by `items_created` or `items_updated`. Effect counters describe state change, not successful throughput. |
 
 ## Related Specifications
 
@@ -108,7 +111,7 @@ All fetchers MUST inherit from `BaseFetcher`, an abstract base class in
       `docs/features/platform/logging.md` (Correlation IDs).
 
    2. **Per-run state reset**: reset all per-run instance state to
-      initial values — metric counters (`items_created`,
+      initial values — metric counters (`items_succeeded`, `items_created`,
       `items_updated`, `items_failed`) to zero; `_cursor`,
       `_previous_cursor`, and `_settings_instance` to `None`. This
       ensures correct behavior regardless of instance lifecycle
@@ -164,9 +167,9 @@ All fetchers MUST inherit from `BaseFetcher`, an abstract base class in
       `docs/features/platform/git-fetcher-infrastructure.md`
       (BaseGitFetcher Class, step 10). A fetcher that performs a
       single bulk operation may commit once at the end of `execute()`.
-      A fetcher that returns without committing produces
-      `items_created = N` in the `FetcherRun` but persists nothing —
-      this is a programming error, not a supported pattern.
+      Effect helpers are called only after the mutation they represent is
+      durable. A fetcher that reports a create or update before its commit has
+      succeeded is a programming error, not a supported pattern.
 
    6. **Finalization**: in a separate short-lived session, update the
       `FetcherRun` record with final status, metrics, timing, error
@@ -201,15 +204,21 @@ All fetchers MUST inherit from `BaseFetcher`, an abstract base class in
       The hard time limit (`time_limit`) terminates the process if the
       soft limit fails to stop execution within the grace window (5% of
       `run_timeout`).
-   2. If `execute()` returned normally and all items failed
-      (`items_failed > 0` and `items_created + items_updated == 0`):
+   2. If `execute()` returned normally and all terminal work units failed
+      (`items_failed > 0` and `items_succeeded == 0`):
       `failure`. `error_message` is set to
       `"All {items_failed} items failed"`. `error_detail` and
       `error_traceback` are NULL (no exception). The cursor is NOT
       persisted (same behavior as exception-driven failure).
-   3. If `execute()` returned normally and `items_failed > 0` (with at
-      least one item created or updated): `partial`.
+   3. If `execute()` returned normally and both `items_succeeded > 0`
+      and `items_failed > 0`: `partial`.
    4. Otherwise: `success`.
+
+   Created and updated effects never participate in status determination. A
+   successful unchanged or no-op unit therefore prevents an all-failed result,
+   while a unit whose durable update is followed by a required-step failure may
+   contribute to both `items_updated` and `items_failed` without being counted
+   as succeeded. A normal empty run has all counters at zero and is `success`.
 
    **Cursor persistence**: if `execute()` returned normally, the final
    status is `success` or `partial`, and `self._cursor` is set (a
@@ -217,7 +226,7 @@ All fetchers MUST inherit from `BaseFetcher`, an abstract base class in
    same finalization transaction that sets `status` and `finished_at`.
    Cursor is NOT written when: `self._cursor` is None (not set),
    `execute()` raised an exception (failure path), or the
-   all-items-failed safety check triggers (status set to `failure`
+   all-selected-units-failed outcome check triggers (status set to `failure`
    despite normal return). The cursor value must be a
    JSON-serializable dict. `run()` validates via `json.dumps()` before
    writing; a non-serializable value causes a `TypeError` — the run
@@ -234,7 +243,7 @@ All fetchers MUST inherit from `BaseFetcher`, an abstract base class in
    moment a manual trigger was accepted. Time spent `queued` before
    adoption is never included in `duration_seconds` — it is derivable
    as `started_at - created_at` when needed. `status` (per precedence
-   above), `items_created`, `items_updated`, `items_failed`,
+   above), `items_succeeded`, `items_created`, `items_updated`, `items_failed`,
    `error_message`, `error_detail`, `error_traceback` (per "Error
    Message Sanitization"), and `cursor` (when applicable).
 
@@ -259,7 +268,7 @@ All fetchers MUST inherit from `BaseFetcher`, an abstract base class in
    | Lifecycle outcome | Finalization outcome | Exception propagated |
    |---|---|---|
    | `execute()` succeeded | Finalization succeeded | None — `run()` returns normally |
-   | `execute()` succeeded, all-items-failed | Finalization succeeded | None — `run()` returns normally (failure is recorded in the `FetcherRun`, not as a task exception) |
+   | `execute()` returned normally, all selected units failed | Finalization succeeded | None — `run()` returns normally (failure is recorded in the `FetcherRun`, not as a task exception) |
    | `execute()` raised | Finalization succeeded | Original execution exception re-raised |
    | Settings validation failed | Finalization succeeded | `FetcherConfigError` re-raised |
    | Settings construction raised a non-`ValidationError` | Finalization succeeded | Original settings exception re-raised |
@@ -273,10 +282,54 @@ All fetchers MUST inherit from `BaseFetcher`, an abstract base class in
    next scheduled cycle.
 
 3. **Metric helpers**: methods that concrete fetchers call within their
-   `execute()` to report work done:
+   `execute()` to report terminal outcomes and durable effects:
+   - `self.record_succeeded(count=1)` — increment `items_succeeded`
+   - `self.record_failed(count=1)` — increment `items_failed`
    - `self.record_created(count=1)` — increment `items_created`
    - `self.record_updated(count=1)` — increment `items_updated`
-   - `self.record_failed(count=1)` — increment `items_failed`
+
+   All four helpers have the same count contract. `count` defaults to `1` and
+   must be an `int` greater than or equal to zero. Zero is an explicit no-op.
+   A negative value raises `ValueError`; a non-`int`, including `bool`, raises
+   `TypeError`. Validation occurs before mutation, so a rejected call leaves
+   every counter unchanged. The helpers only mutate in-memory per-run state and
+   create no audit event. Each returns `None`; repeated positive calls are
+   additive and therefore not idempotent.
+
+   ### Outcome and effect accounting
+
+   Every concrete fetcher defines one coherent selected work unit. Each selected
+   unit that reaches a terminal outcome calls exactly one of
+   `record_succeeded()` or `record_failed()`, never both. Values rejected or
+   skipped before entering that fetcher's declared scope call neither helper.
+   Authoritative unchanged, missing, no-match, already-pending, and stale or
+   inapplicable outcomes are successes only where the concrete fetcher's owning
+   specification identifies them as valid terminal outcomes.
+
+   `record_created()` and `record_updated()` describe durable effects and are
+   independent from terminal outcome accounting:
+
+   - Call an effect helper only after the represented database commit or other
+     durability boundary succeeds. A rollback records no effect.
+   - A selected unit records at most one create effect or one update effect.
+     It does not record both unless its owning specification explicitly defines
+     distinct multi-effect semantics. No current fetcher has such an exception.
+   - A committed effect may coexist with `record_failed()` when a later step
+     required for that unit fails. Counter compensation with negative values is
+     forbidden.
+   - A post-commit operation explicitly classified as best effort is logged as
+     required by its owner, but does not change an otherwise successful unit to
+     failed.
+   - Dispatch-only work creates no domain effect and uses terminal outcome
+     metrics rather than overloading `record_updated()`.
+
+   Each concrete fetcher's owning specification is the single source of truth
+   for its work-unit selection and metric mapping. For CVE ingestion, an
+   ordinary best-effort package-handoff publication
+   failure after a successful per-CVE commit leaves that unit succeeded and
+   preserves its create/update effect. The exact typed result and terminal
+   accounting composition inside `BaseCVEFetcher.fetch_single()` remain owned
+   by the CVE fetcher infrastructure contract.
 4. **Shared HTTP client**: a pre-configured `self.http_client` lazy
    property for outgoing HTTP requests. See "BaseFetcher HTTP Client
    Integration" section for the local integration, and `networking.md`
@@ -311,8 +364,9 @@ class SyncExampleData(BaseFetcher):
     async def execute(self, session: AsyncSession) -> None:
         """Fetch data from the external source.
 
-        Use self.record_created(), self.record_updated(), and
-        self.record_failed() to report metrics.
+        Use self.record_succeeded() or self.record_failed() for each
+        terminal work unit. Report durable effects separately with
+        self.record_created() and self.record_updated().
         """
         ...
 ```
@@ -924,7 +978,7 @@ exception type to a safe, generic message:
 | `httpx.NetworkError`, `httpx.TimeoutException` | `"External service unreachable"` |
 | `httpx.HTTPStatusError` (4xx) | `"External service rejected request"` |
 | `httpx.HTTPStatusError` (5xx) | `"External service returned server error"` |
-| `SoftTimeLimitExceeded` | `f"Execution reached the soft time limit (hard limit for this run: {self.config.hard_time_limit_seconds}s; {processed} items processed). Review FetcherConfig.run_timeout for future runs of fetcher '{self.name}'."` (where `processed = self._created + self._updated + self._failed`) |
+| `SoftTimeLimitExceeded` | `f"Execution reached the soft time limit (hard limit for this run: {self.config.hard_time_limit_seconds}s; {processed} items processed). Review FetcherConfig.run_timeout for future runs of fetcher '{self.name}'."` (where `processed = items_succeeded + items_failed`, implemented from the corresponding in-memory counters) |
 | Any other exception | `"Unexpected error"` |
 
 In all cases, `error_detail` receives `str(exception)` and
@@ -969,10 +1023,12 @@ automatically (see the generic fallback table above).
 **Not excluded — `OperationalError` and database connection loss**:
 database errors are caught per-item (not excluded from the per-item
 catch). When a connection is lost, all subsequent items will also fail.
-The all-items-failed safety check in `run()` then triggers, setting
-status to `failure` and preventing cursor advancement. This is
+Terminal failures then drive the all-selected-units-failed outcome check in
+`run()`, setting status to `failure` when no selected unit succeeded and
+preventing cursor advancement. This is
 suboptimal (the loop iterates through doomed items until the timeout
-fires) but not dangerous — the safety check protects cursor integrity.
+fires) but not dangerous — the all-selected-units-failed outcome check protects
+cursor integrity.
 Excluding database errors would add complexity (distinguishing
 transient vs. fatal DB errors is non-trivial) for marginal benefit,
 and the timeout mechanism provides the actual time bound.
@@ -1602,8 +1658,10 @@ MUST include at minimum:
    messages, partial progress). Exempt: fetchers that only interact with
    the local database.
 
-4. **Metrics** (what counts as `record_created`, `record_updated`,
-   `record_failed` — one sentence each)
+4. **Work unit and metrics**: one coherent selected work unit; exact pre-scope
+   exclusions; every successful, failed, unchanged/no-op, missing/no-match,
+   stale/inapplicable, and post-commit outcome; and what counts as
+   `record_succeeded`, `record_failed`, `record_created`, and `record_updated`
 
 5. **Custom settings table** (if applicable — following the format defined
    in the Custom Settings Schema section above)
@@ -1918,8 +1976,9 @@ Celery application and is outside this validation boundary. See
 **Result handling**: the Celery application is configured with
 `task_ignore_result = True` and **no result backend**. Task return
 values are never stored or read. All `BaseFetcher` task executions return
-`None`, and their execution state (status, item counts, error message, timing)
-is persisted in the `FetcherRun` table. Non-fetcher sub-operations also return
+`None`, and their execution state (status, terminal succeeded/failed counts,
+durable created/updated effect counts, error message, and timing) is persisted
+in the `FetcherRun` table only during finalization. Non-fetcher sub-operations also return
 `None`, but do not create `FetcherRun` records; their owning specifications
 define domain-state and structured-log observability. `celery-redbeat` stores
 its dynamic schedule under the broker URL (`redbeat:` key prefix) and has no
@@ -3448,10 +3507,11 @@ the dashboard charts.
 | finished_at | TIMESTAMPTZ | nullable | When the run reached a terminal status. `NULL` while `status` is `queued` or `running` |
 | duration_seconds | FLOAT | nullable | Computed: `finished_at - started_at` — execution time only. `NULL` whenever `started_at` is `NULL` |
 | status | VARCHAR(20) | NOT NULL | `queued`, `running`, `success`, `failure`, `partial` |
+| items_succeeded | INTEGER | NOT NULL, DEFAULT 0 | Number of selected work units that reached a successful terminal outcome |
 | items_created | INTEGER | NOT NULL, DEFAULT 0 | Number of new records created |
 | items_updated | INTEGER | NOT NULL, DEFAULT 0 | Number of existing records updated |
 | items_failed | INTEGER | NOT NULL, DEFAULT 0 | Number of items that failed processing |
-| error_message | TEXT | nullable | Sanitized error description (for all users). Written explicitly by the fetcher (`FetcherError`), by BaseFetcher's generic fallback (see "Error Message Sanitization"), or by the all-items-failed safety check (`"All {N} items failed"` — see "Status determination precedence") |
+| error_message | TEXT | nullable | Sanitized error description (for all users). Written explicitly by the fetcher (`FetcherError`), by BaseFetcher's generic fallback (see "Error Message Sanitization"), or by the all-selected-units-failed outcome check (`"All {N} items failed"` — see "Status determination precedence") |
 | error_detail | TEXT | nullable | Raw exception message — `str(exception)` (`manage_fetchers` capability required for visibility) |
 | error_traceback | TEXT | nullable | Full Python traceback (`manage_fetchers` capability required for visibility) |
 | triggered_by | VARCHAR(20) | NOT NULL | `schedule`, `manual` |
@@ -3490,6 +3550,13 @@ the dashboard charts.
   `cursor` NULL. A `success`/`partial` run always has a non-`NULL`
   `started_at` — only a `running` run can transition to one of those
   statuses, and adoption always sets `started_at`.
+- All four counters are finalized-run diagnostics, not live progress. The
+  in-memory counters are persisted together during finalization. Queued and
+  running rows retain their database defaults of zero, even while a worker has
+  processed units internally.
+- `items_succeeded` has no nullable historical compatibility state or backfill
+  contract. Sentinel has no live instance or production database, so the column
+  is introduced directly as `INTEGER NOT NULL DEFAULT 0`.
 - The cursor value must be a JSON-serializable dict. `BaseFetcher.run()`
   validates via `json.dumps()` before writing; a non-serializable value
   raises `TypeError` and the run fails without persisting a cursor.
@@ -3500,9 +3567,9 @@ the dashboard charts.
 |---|---|
 | `queued` | Manual run accepted and persisted; not yet adopted by a worker. Manual-only — a scheduled run is never `queued` |
 | `running` | A worker has atomically adopted the run and is currently executing it |
-| `success` | Completed without errors |
-| `failure` | Terminated without executing (never adopted — stale, disabled, deregistered, or publication failure — see "Concurrency Control") or execution failed: (a) settings construction, previous-cursor loading, or `execute()` raised an unhandled exception, or (b) `execute()` returned normally but all items failed (`items_failed > 0` and `items_created + items_updated == 0`) — see "Status determination precedence" |
-| `partial` | Completed but some items failed (`items_failed > 0`) and at least one item succeeded (`items_created + items_updated > 0`). Implies `execute()` returned normally (no exception raised) |
+| `success` | `execute()` returned normally with no failed terminal work units, including an empty run |
+| `failure` | Terminated without executing (never adopted — stale, disabled, deregistered, or publication failure — see "Concurrency Control") or execution failed: (a) settings construction, previous-cursor loading, or `execute()` raised an unhandled exception, or (b) `execute()` returned normally but all terminal work units failed (`items_failed > 0` and `items_succeeded == 0`) — see "Status determination precedence" |
+| `partial` | Completed with both successful and failed terminal work units (`items_succeeded > 0` and `items_failed > 0`). Implies `execute()` returned normally (no exception raised) |
 
 ### FetcherRunTriggeredBy Enum
 

@@ -80,8 +80,8 @@ performed at any point.
 
 ## Cursor Persistence
 
-Git-based fetchers persist their checkpoint (the last successfully
-processed commit SHA) in the `FetcherRun.cursor` JSONB column. After
+Git-based fetchers persist their checkpoint (the last terminally examined
+commit SHA) in the `FetcherRun.cursor` JSONB column. After
 a run completes with `success` or `partial` status, the fetcher writes:
 
 ```json
@@ -116,13 +116,13 @@ final status (see "Status determination precedence" in
 the final status is `success` or `partial`, reads `self._cursor` and
 writes it to the `FetcherRun` row in the same transaction that sets
 `status` and `finished_at`. If `self._cursor` is None (not set), or
-the final status is `failure` (including the all-items-failed case),
+the final status is `failure` (including the all-selected-units-failed case),
 no cursor is written.
 
 This avoids giving `execute()` direct access to the `FetcherRun` row
 and keeps cursor persistence as a `run()` responsibility — consistent
-with how `run()` already manages metrics (`items_created`,
-`items_updated`, `items_failed`).
+with how `run()` already manages metrics (`items_succeeded`,
+`items_created`, `items_updated`, `items_failed`).
 
 ## Empty Delta
 
@@ -853,18 +853,24 @@ above.
    b. If `cursor_sha` IS reachable: compute normal delta via
       `diff_names(repo_path, cursor_sha, head_sha)` with
       `delta_path_prefix` as path filter
-8. Apply `filter_delta_files()` hook on the file list
-9. Apply `deduplicate_items()` hook on the filtered list
+8. Apply `filter_delta_files()` hook on the file list. Rejected paths are
+   pre-scope exclusions and produce no outcome or effect metric
+9. Apply `deduplicate_items()` hook on the filtered list. Each losing path is a
+   pre-scope exclusion. Each remaining distinct CVE-ID is one selected work
+   unit, regardless of how many raw paths represented it
 10. **Per-item processing loop** — for each `path` in the deduplicated
     list:
     a. Read file content via `show_file(repo_path, "HEAD", path)`
     b. If content is `None` (file not found at HEAD — file was added
        then deleted/renamed between cursor and HEAD): log WARNING
-       ("File {path} in delta but not at HEAD — skipping"), continue
-       to next item. No metric is recorded
+       ("File {path} in delta but not at HEAD — skipping"), call
+       `record_succeeded()`, and continue. The selected CVE reached the valid
+       stale/inapplicable terminal outcome; it has no created/updated effect
     c. Call `post_ingest = process_item(path, content, session)` →
        returns `PostIngestTasks | None`. On successful return, call
-       `self.commit_and_dispatch(session, post_ingest)`
+       `self.commit_and_dispatch(session, post_ingest)`. Only after the commit,
+       record the retained `UpsertResult.action` effect (`created` or `updated`,
+       with no effect for `unchanged`) and call `record_succeeded()` once
     d. If `SoftTimeLimitExceeded` or `MemoryError` is raised during
        steps 10a, 10c, or `commit_and_dispatch()`: **re-raise
        immediately** (these are whole-run signals, not per-item errors;
@@ -909,11 +915,13 @@ above.
 
 11. Set cursor to `{"sha": head_sha, "committed_at": head_date}`
 
-Note: the all-items-failed safety check (preventing cursor advance when
-every item fails) is handled by `BaseFetcher.run()` after `execute()`
-returns — see "Status determination precedence" in
-`fetcher-infrastructure.md`. Items skipped in step 10b (file not at HEAD) do not increment
-any counter and do not trigger the safety check.
+The cursor follows terminal outcomes. `BaseFetcher.run()` preserves the previous
+cursor when no selected unit succeeded and at least one failed. If at least one
+selected unit succeeded, a mixed run is `partial` and persists HEAD; an
+all-success run also persists HEAD. A selected file missing at HEAD succeeds as
+stale/inapplicable and therefore permits cursor advancement. An empty selected
+set also succeeds and advances. Filtered paths and deduplication losers never
+enter this decision.
 
 **Infrastructure errors**: the template method catches all known
 infrastructure exceptions and wraps them in `FetcherError` with a
@@ -963,9 +971,9 @@ scheduling interval (typically hours). The trade-off is accepted:
 immediate self-healing of corruption outweighs temporary
 `fetch_single()` unavailability for one source.
 
-The **all-items-failed safety check** is handled by
+The **all-selected-units-failed outcome check** is handled by
 `BaseFetcher.run()` (see "Status determination precedence" in
-`fetcher-infrastructure.md`). If all items fail (e.g., local storage
+`fetcher-infrastructure.md`). If all selected units fail (e.g., local storage
 failure making every `show_file()` fail, or database connection loss
 causing every `process_item()` to raise), `run()` sets
 `status = failure` directly after `execute()` returns. Since the cursor
@@ -982,12 +990,12 @@ mechanism — no additional logic is needed:
 |----------|--------|-----------------|
 | First run (no processing) | `success` | Yes (step 3e) |
 | Empty delta (HEAD unchanged) | `success` | Yes (step 11) |
-| All items succeed | `success` | Yes (step 11) |
-| Some items fail, some succeed | `partial` | Yes (step 11) |
-| All items fail | `failure` | No (`BaseFetcher.run()` safety check) |
+| All selected CVE units succeed, including unchanged or missing-at-HEAD units | `success` | Yes (step 11) |
+| Some selected CVE units fail and some succeed | `partial` | Yes (step 11) |
+| Selected units exist and all fail | `failure` | No (`BaseFetcher.run()` outcome check) |
 | Infrastructure error | `failure` | No (propagates) |
 
-**Design note — cursor advancement on `partial` (commit `a7e2632`):**
+**Design note — cursor advancement on `partial`:**
 advancing the cursor on `partial` runs is an intentional trade-off.
 Failed items are not automatically retried — they reappear naturally
 when upstream modifies them (git's change-tracking provides recovery).
@@ -1007,7 +1015,7 @@ These are the extension points for concrete subclasses:
 
 | Method | Required? | Default | Purpose |
 |--------|-----------|---------|---------|
-| `process_item(path, content, session)` | **Yes** (abstract) | — | Process a single file from the delta. For CVE subclasses, maps `UpsertResult.action`: calls `record_created()` for `created`, `record_updated()` for `updated`, and neither for `unchanged` |
+| `process_item(path, content, session)` | **Yes** (abstract) | — | Process a single file from the delta and retain its `UpsertResult.action` for the template's post-commit effect mapping. It does not record FetcherRun metrics before commit |
 | `filter_delta_files(file_list)` | No | Return all | Filter raw delta output to relevant files (e.g., only `.json` in specific dirs) |
 | `deduplicate_items(file_list)` | No | No-op | Deduplicate items before processing (e.g., same CVE-ID in both `published/` and `rejected/`) |
 
@@ -1027,20 +1035,21 @@ The core extension point. Receives:
 
 The hook is responsible for:
 1. Parsing the content and applying business logic (upsert, etc.)
-2. Reporting the outcome. CVE subclasses map `UpsertResult.action` exactly:
-   `created` calls `self.record_created()`, `updated` calls
-   `self.record_updated()`, and `unchanged` calls neither
+2. Making the effective `UpsertResult.action` available to the inherited
+   periodic finalization flow without recording a metric before commit. The
+   exact typed hook/result composition is owned by the CVE base finalization
+   contract and is not changed here
 3. Returning `PostIngestTasks` if post-ingest dispatch is needed, or
-   `None` in two cases: (a) the item was skipped (already up-to-date,
-   no work done — no metric is recorded), or (b) the item was
+   `None` in two cases: (a) the item needs no package handoff, or (b) the item was
    processed but no post-ingest tasks are needed (e.g., enrichment-only upsert
-   with no package-resolution data). Its metric follows `UpsertResult.action`
-   and therefore may be absent for `unchanged`. Both `None` cases result in
+   with no package-resolution data). Both `None` cases result in
    `commit_and_dispatch(session, None)` — the template commits and consumes any
    registered Ticket convergence without publishing a package handoff
 
-Raises any exception on failure → caught by `execute()`, logged,
-`record_failed()` called.
+Raises any exception on failure → caught by `execute()`, rolled back, logged,
+and counted once with `record_failed()`. Successful commit maps `created` or
+`updated` only after durability and always calls `record_succeeded()`;
+`unchanged` calls only `record_succeeded()`.
 
 **Order independence**: the iteration order in which `process_item()`
 is called within a single `execute()` run is undefined — it is

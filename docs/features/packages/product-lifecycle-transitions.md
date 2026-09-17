@@ -132,14 +132,29 @@ to reconcile sooner after an exceptional correction.
 
 ### Metrics
 
-| Metric | Meaning |
-|--------|---------|
-| `record_created` | Not used; lifecycle evaluation creates no domain records |
-| `record_updated` | One for each eligibility task successfully enqueued, plus one for each Ticket whose persisted status changed |
-| `record_failed` | One for each failed Product dispatch or failed Ticket transaction |
+The work unit is one typed reconciliation candidate: either one distinct
+Product selected by the eligibility-mismatch scan or one distinct Ticket
+selected by the lifecycle-aware gate mismatch scan. Product and Ticket
+candidates are independent units even when they are related through the same
+package tree.
 
-Eligibility no-ops and Ticket reconciliation no-ops do not increment either
-metric.
+| Mapping | Exact behavior |
+|---|---|
+| Selected | Each distinct Product from step 2 and each distinct Ticket from step 4, once within its candidate type. |
+| Succeeded | For a Product unit, `record_succeeded()` once when its eligibility task is dispatched successfully. For a Ticket unit, `record_succeeded()` once when its independent transaction commits, including a locked-current reconciliation no-op. |
+| Failed | `record_failed()` once for a failed Product dispatch or failed Ticket transaction. |
+| Created | Never; lifecycle evaluation creates no domain records. |
+| Updated | `record_updated()` once only for a Ticket unit whose committed reconciliation changed persisted Ticket status. A Product task dispatch is not an update, and a committed Ticket no-op has no update effect. |
+| Excluded before selection | Products without an eligibility mismatch and Tickets outside `Analysis`, `Analyzed`, or `Resolved` or without a gate mismatch are outside this run's work scope. Exclusion, EOL, and actionability do not suppress the Product mismatch scan where the algorithm explicitly includes them. |
+
+Thus a successful Product dispatch is succeeded without updated, while a
+Ticket status change is both updated and succeeded. Candidate-enumeration
+failures remain whole-run failures rather than synthetic per-candidate outcomes.
+
+Implementation tests MUST cover Product dispatch success and failure, committed
+Ticket status change, locked-current Ticket no-op, Ticket transaction failure,
+mixed Product/Ticket outcomes, empty candidate sets, and candidate-enumeration
+failure with exact outcome and effect counters.
 
 ## Sub-task: `re_evaluate_product_eligibility`
 

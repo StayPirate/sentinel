@@ -566,9 +566,11 @@ Both mutation functions communicate one transaction-local
 | Ticket summary | Whether auto-assignment occurred and whether one final reconciliation ran |
 
 The result is valid inside the caller-owned transaction. It is not evidence of
-durability until that transaction commits. Callers use `action` for HTTP and
-metric classification: `created` maps to 201 and `record_created()`, `updated`
-maps to 200 and `record_updated()`, and `unchanged` maps to 200 with no metric.
+durability until that transaction commits. Callers use `action` for HTTP
+classification: `created` maps to 201 and `updated` or `unchanged` maps to 200.
+A fetcher may map `created` or `updated` to its corresponding effect metric only
+after the caller-owned transaction commits; `unchanged` has no effect metric,
+and terminal success is recorded independently by the owning fetcher workflow.
 Delete maps `deleted` to 204 and `not_found` to the existing 404
 `CVSS_ASSESSMENT_NOT_FOUND` response. No caller may classify an outcome from an
 unlocked pre-read.

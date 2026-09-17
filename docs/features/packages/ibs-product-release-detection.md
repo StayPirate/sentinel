@@ -548,18 +548,23 @@ upstream data and internal URLs never enter the public `FetcherRun.error_message
 
 ### Metrics and Run Status
 
-- `record_created()` is never called; the detector creates no domain record.
-- `record_updated()` is called once per occurrence effectively changed from
-  `released_at = NULL` to the selected issued time by this invocation.
-- `record_failed()` is called at most once per selected occurrence whose
-  reconciliation did not complete.
-- Successful no-match, already-released race, duplicate evidence, and repeated
-  idempotent outcomes do not increment created or updated.
+The work unit is one distinct existing `TicketPackageProduct` occurrence
+selected by [Scope](#scope). Repository reuse does not combine dependent
+occurrences into one unit.
 
-Fetcher status follows the shared `BaseFetcher` precedence. A normal return
-with failures and no effective updates is `failure` under the all-items-failed
-rule, even when some occurrences completed as successful no-ops. Failures plus
-at least one effective update produce `partial`; no failures produce `success`.
+| Mapping | Exact behavior |
+|---|---|
+| Selected | Each distinct unreleased Product occurrence below an IBS track of an active Ticket with a CVE, once. |
+| Succeeded | `record_succeeded()` once for every terminal `updated` or `no_op` outcome. Successful no-ops include a complete valid no-match, an already-released concurrent race, duplicate evidence that changes no result, repeated idempotent work, and a stale/inapplicable scope race accepted by the local mutation contract. |
+| Failed | `record_failed()` once for every terminal `failed` occurrence whose repository reconciliation or local transaction did not complete. One shared repository failure counts each dependent selected occurrence at most once. |
+| Created | Never; the detector creates no domain record. |
+| Updated | `record_updated()` once only for an occurrence effectively changed from `released_at = NULL` to the selected issued time by this invocation. |
+| Excluded before selection | Already-released occurrences, occurrences below non-IBS tracks, occurrences below inactive Tickets, and occurrences whose Ticket has no CVE do not enter the work scope. VA exclusion, Product lifecycle, EOL, eligibility, track affectedness, delivery, and actionability never exclude an otherwise selected occurrence. |
+
+Each selected occurrence with a terminal outcome records exactly one of
+succeeded or failed. Fetcher status follows the shared `BaseFetcher` precedence
+from those outcomes: mixed outcomes produce `partial`, all failed outcomes
+produce `failure`, and no failures produce `success`, including an empty run.
 
 ## Testing Requirements
 
@@ -595,7 +600,10 @@ Future implementation tests must cover:
 - per-invocation repository reuse without cross-run cache, cursor, Redis, or
   filesystem state;
 - periodic and catch-up partial/all-failed outcomes, exact metrics and inherited
-  run statuses; and
+  run statuses;
+- updated, no-match, concurrent already-released, stale/inapplicable, failed,
+  and empty-run outcomes with exact succeeded, failed, created, and updated
+  counters; and
 - bounded logs, sanitized public errors, exactly one service-owned positive
   audit event, and no event for every non-mutating outcome.
 
