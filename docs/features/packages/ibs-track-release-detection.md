@@ -409,7 +409,8 @@ HTTP status codes, and bounded reason categories may be logged.
 | Malformed or interrupted source-info XML | Fail every dependent track in that request | Same as above |
 | Source diff HTTP or parser failure | Fail every dependent track sharing that diff | Same as above |
 | Persisted history authoritatively unavailable | Warn and use `orev=0`; fail only if fallback fails | Current-state fallback, then ordinary retry |
-| Ticket becomes `Ignored`/`Duplicated`, track disappears, or scope identity changes | Roll back local work and return a successful stale/inapplicable no-op for that track | Later qualifying Ticket convergence or corrected invocation |
+| Ticket becomes `Ignored` or `Duplicated` | Roll back local work and return a successful stale/inapplicable no-op for that track; keep its checkpoint | Later qualifying Ticket convergence |
+| Track disappears, no longer belongs to the expected Ticket/package scope, or loses its Ticket CVE association | Fail the selected track and do not advance its checkpoint | Corrected invocation, catch-up, event, manual run, or scheduled run |
 | Concurrent checkpoint predecessor changed | Already-complete no-op, re-evaluate, or fail without writing stale state | Current or later invocation |
 | Status becomes final during I/O | Leave status unchanged; accept examined checkpoint | None |
 | No matching CVE evidence | Leave status unchanged; accept examined checkpoint | None |
@@ -462,21 +463,23 @@ CVE label text when it is invalid.
 
 ### Metrics and Run Status
 
-- `record_created()` is never called. The detector creates no domain record.
-- `record_updated()` is called once for each track effectively transitioned to
-  `FIXED` by this invocation.
-- `record_failed()` is called at most once for each selected track whose
-  reconciliation did not complete. Shared request failures count every affected
-  track once because the track is the reconciliation unit.
-- Every `no_op` outcome, including unchanged source, valid no-match,
-  final-status race, checkpoint-already-advanced, and repeated idempotent work,
-  leaves created and updated unchanged.
+The work unit is one distinct `TicketPackageTrack` selected by [Scope](#scope).
+Grouping IBS requests never changes that per-track accounting unit.
 
-Fetcher status follows the shared `BaseFetcher` precedence. In particular, a
-normal return with failures and no effective track transitions is `failure`
-under the all-items-failed metric rule, even when other examined tracks were
-successful no-ops. Failures plus at least one effective transition produce
-`partial`; no failures produce `success`.
+| Mapping | Exact behavior |
+|---|---|
+| Selected | Each distinct existing IBS track in `ANALYSIS` or `AFFECTED` under an active Ticket with a CVE, once. |
+| Succeeded | `record_succeeded()` once for every terminal `updated` or `no_op` outcome. Successful no-ops include unchanged source, valid no-match, final-status race, checkpoint already advanced, repeated idempotent work, unavailable-history fallback success, and only the stale race where the Ticket became `Ignored` or `Duplicated`. |
+| Failed | `record_failed()` once for every terminal `failed` outcome. This includes a selected track that disappeared, changed expected Ticket/package scope, or lost its Ticket CVE association; its checkpoint does not advance. A shared request failure counts every dependent selected track once. |
+| Created | Never; checkpoint creation is operational reconciliation state and the detector creates no domain record represented by this effect metric. |
+| Updated | `record_updated()` once only for a selected track effectively transitioned to `FIXED` by this invocation. Checkpoint-only progress and every no-op have no update effect. |
+| Excluded before selection | Non-IBS tracks, tracks already in a final affectedness status, tracks without a Ticket CVE, and tracks below inactive Tickets do not enter the scheduled work scope. VA exclusion, Product lifecycle, EOL, eligibility, delivery, and actionability never exclude an otherwise selected track. |
+
+Each selected track that receives a terminal outcome records exactly one of
+succeeded or failed, independently of created and updated effects. Fetcher
+status follows the shared `BaseFetcher` precedence from these outcome counts:
+mixed succeeded and failed tracks produce `partial`, all failed tracks produce
+`failure`, and no failed tracks produce `success`, including an empty run.
 
 ## Audit and Transaction Guarantees
 
@@ -512,6 +515,9 @@ Future implementation tests must cover:
 - one atomic status/audit/Ticket-reconciliation/checkpoint transaction and
   rollback when any local step fails;
 - independent sibling success, exact metrics, and inherited run statuses;
+- unchanged, no-match, final-status, checkpoint-already-advanced,
+  `Ignored`/`Duplicated`, disappeared-track, changed-scope, and lost-CVE
+  outcomes with exact succeeded, failed, created, and updated counters;
 - concurrent polling, catch-up, event, and retry anti-regression using
   independent database sessions;
 - status and Ticket-state races under the Ticket lock;

@@ -1648,6 +1648,7 @@ summarized below.
 | finished_at          | TIMESTAMPTZ   | nullable                 | When the run reached a terminal status (`success`, `failure`, `partial`). `NULL` while `status` is `queued` or `running` |
 | duration_seconds     | FLOAT       | nullable                 | Execution duration: `finished_at - started_at`. `NULL` whenever `started_at` is `NULL` (queued, or failed before adoption) — never queue wait time |
 | status               | VARCHAR(20) | NOT NULL                 | FetcherRunStatus: `queued`, `running`, `success`, `failure`, `partial` |
+| items_succeeded      | INTEGER     | NOT NULL, DEFAULT 0      | Selected work units that reached a successful terminal outcome |
 | items_created        | INTEGER     | NOT NULL, DEFAULT 0      | New records created                |
 | items_updated        | INTEGER     | NOT NULL, DEFAULT 0      | Existing records updated           |
 | items_failed         | INTEGER     | NOT NULL, DEFAULT 0      | Items that failed processing       |
@@ -1687,6 +1688,16 @@ No transition originates from a terminal status (`success`, `failure`,
 `partial`). `queued` is manual-only — scheduled runs are always created
 directly as `running`.
 
+The four item counters are finalized-run diagnostics. `items_succeeded` and
+`items_failed` are mutually exclusive terminal outcomes for each selected work
+unit; `items_created` and `items_updated` are orthogonal durable effects. The
+database row is not updated with live in-memory counter progress while its
+status is `queued` or `running`, so those states expose the persisted defaults
+of zero. Finalization persists all counters together. `items_succeeded` is
+introduced directly as `INTEGER NOT NULL DEFAULT 0`; Sentinel has no live
+instance or production database requiring a nullable compatibility state or
+historical backfill.
+
 #### FetcherRunStatus Enum
 
 Execution outcome of a fetcher run. Category A — state-machine (VARCHAR
@@ -1697,9 +1708,9 @@ requires an Alembic migration.
 |-------|-------------|
 | `queued` | Manual run accepted and persisted; not yet adopted by a worker |
 | `running` | A worker has atomically adopted the run and is currently executing it |
-| `success` | Fetcher completed with no errors |
-| `failure` | Fetcher failed (unrecoverable error) |
-| `partial` | Fetcher completed but some items failed processing |
+| `success` | Normal return with no failed terminal work units, including an empty run |
+| `failure` | Run-level exception or normal return with `items_failed > 0` and `items_succeeded = 0` |
+| `partial` | Normal return with both `items_succeeded > 0` and `items_failed > 0` |
 
 #### FetcherRunTriggeredBy Enum
 

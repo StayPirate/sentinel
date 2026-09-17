@@ -70,8 +70,10 @@ guidance for choosing a level:
 | `CRITICAL` | Failures that abort a process or a critical subsystem: fail-fast startup validation failures, unrecoverable database connectivity loss. |
 
 For batch operations processing a large number of items (indicatively
->100), per-item success logs SHOULD use DEBUG; aggregate results (total
-created/updated/failed) SHOULD use INFO. This keeps the INFO stream
+>100), per-item success logs SHOULD use DEBUG; aggregate results SHOULD report
+terminal succeeded/failed counts separately from durable created/updated
+effects at INFO. These are finalized-run diagnostics, not a live-progress
+stream. This keeps the INFO stream
 focused on lifecycle events and operator-actionable signals, while
 per-item detail remains available at DEBUG for drill-down diagnostics.
 

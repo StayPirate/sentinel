@@ -336,7 +336,9 @@ fetcher infrastructure.
 Failure to enqueue backfill is best-effort: log a warning and retain the
 successfully committed catalog. It does not roll back publication and no
 durable retry state is introduced. The omitted Products remain recoverable by
-a later `add_package_to_ticket()` invocation or a future backfill trigger.
+a later `add_package_to_ticket()` invocation or a future backfill trigger. It
+also does not change any Product work unit from succeeded to failed or
+increment `record_failed()`.
 
 ### Catalog Readiness and Freshness
 
@@ -666,8 +668,9 @@ eligibility and EOL-derived actionability when applicable.
      changed and mismatch sets, with reason `threshold`. A dispatch failure
      logs a structured warning containing the Product ID and continues with
      other Products; it does not roll back the committed threshold snapshot.
-     A successful dispatch for a mismatch-only Product is counted as updated;
-     a Product in both sets is counted at most once. The next complete
+     A successful dispatch for a mismatch-only Product is a successful outcome
+     but is not a Product update; a Product in both sets is counted at most
+     once. The next complete
      threshold run rediscovers any remaining mismatch and can be triggered
      through the existing fetcher-operations API. No durable dispatch state
      or dedicated recovery endpoint is added.
@@ -887,8 +890,8 @@ response-schema, or snapshot-validation failure aborts the run without
 publication or backfill. A publication failure rolls back the complete
 snapshot. The last committed snapshot remains usable, and recovery is a later
 scheduled or operator-triggered full run. A failure to dispatch the one
-post-commit Product catalog backfill task is logged, increments
-`record_failed`, and does not roll back the committed catalog.
+post-commit Product catalog backfill task is logged and does not roll back the
+committed catalog or change its terminal outcome metrics.
 
 The fetcher raises `FetcherError` with these sanitized messages for failures
 that abort the run:
@@ -907,17 +910,29 @@ response payloads.
 
 #### Metrics
 
-| Metric | Meaning |
-|--------|---------|
-| `record_created` | One for each newly persisted Product CPE. |
-| `record_updated` | One for each already-persisted Product whose logical current-catalog projection changes: a SMELT descriptive field changes, its current repository-association set changes, or it enters or leaves the current snapshot. Multiple changes to the same Product count once. |
-| `record_failed` | One when the post-commit Product catalog backfill task cannot be dispatched. |
+The work unit is one Product CPE in the union of the previously applied
+snapshot and the validated incoming snapshot. Units are selected only after
+complete-response validation; the publication transaction establishes their
+durable effects and terminal outcomes atomically.
+
+| Mapping | Exact behavior |
+|---|---|
+| Selected | Each distinct Product CPE in that union, once. On the first publication, this is each CPE in the incoming snapshot. |
+| Succeeded | `record_succeeded()` once for every selected Product after the complete catalog publication commits, including a Product whose logical projection is unchanged. A best-effort backfill publication failure does not alter this outcome. |
+| Failed | No per-Product failure is recorded. Retrieval, validation, and publication failures escape as whole-run failures before a successful publication establishes terminal Product outcomes. |
+| Created | `record_created()` once for each selected CPE whose Product row was newly persisted by the committed publication. |
+| Updated | `record_updated()` once for each selected, already-persisted Product whose logical current-catalog projection changed: a SMELT descriptive field changed, its current repository-association set changed, or it entered or left the current snapshot. Multiple changes to the same Product count once. |
+| Excluded before selection | Ignored upstream fields and repository ordering are not work units. An invalid or duplicate row rejects the complete snapshot rather than becoming an excluded or failed Product unit. |
 
 Repository order and an advance of only `catalog_last_seen_at` do not count as
-Product updates. A successful backfill dispatch receives no separate metric:
-this fetcher's metric unit is the Product catalog projection, not task
-publication. Retrieval, validation, and publication failures are whole-run
-failures and do not record per-Product metrics.
+Product updates. One unit is never both created and updated. Backfill dispatch
+receives no outcome or effect metric: this fetcher's work unit is the Product
+catalog projection, not task publication.
+
+Implementation tests MUST cover created, updated, unchanged, and
+left-current-snapshot units; a complete empty-diff publication; whole-run
+failure before publication; and best-effort backfill dispatch failure without
+an item failure.
 
 ### Fetcher: `sync_aimaas_lifecycle`
 
@@ -965,16 +980,25 @@ response payloads.
 
 #### Metrics
 
-| Metric | Meaning |
-|--------|---------|
-| `record_created` | Not used; lifecycle synchronization never creates Products. |
-| `record_updated` | One for each matched local Product whose four-column lifecycle-date projection changes, including a source field clearing to NULL. |
-| `record_failed` | Not used for per-Product conditions. |
+The work unit is one AIMAAS Product that has an exact local `Product.cpe`
+match after the complete response has passed validation.
+
+| Mapping | Exact behavior |
+|---|---|
+| Selected | Each distinct matched local Product, once. |
+| Succeeded | `record_succeeded()` once for every selected Product after the complete lifecycle publication commits, whether its four lifecycle dates changed or were already authoritative and unchanged. A syntactically valid incomplete or inconsistent date set also succeeds. |
+| Failed | No per-Product failure is recorded. Retrieval, pagination, response-schema, validation, and database failures escape as whole-run failures. |
+| Created | Never; lifecycle synchronization does not create Products. |
+| Updated | `record_updated()` once for each selected Product whose four-column lifecycle-date projection changed in the committed publication, including a source field clearing to NULL. |
+| Excluded before selection | An AIMAAS Product with no exact local CPE match, and a local Product absent from the complete default AIMAAS list, is outside this fetcher's local Product work scope. It contributes no outcome or effect metric. |
 
 Lifecycle-date inconsistency warnings and AIMAAS Products with no local CPE
-match do not increment `record_failed`. Retrieval, pagination, response-schema,
-and database failures are whole-run failures and do not record per-Product
-metrics.
+match do not increment `record_failed()`. An unchanged matched Product still
+records a successful terminal outcome without an update effect.
+
+Implementation tests MUST cover changed, unchanged, incomplete-date,
+inconsistent-date, and unmatched-CPE cases, plus whole-run publication failure,
+with exact outcome and effect counters.
 
 ### Fetcher: `sync_aimaas_thresholds`
 
@@ -1008,7 +1032,7 @@ validation category within that phase, without retaining full response
 payloads. This includes failures during the product-list
 retrieval phase (required for CPE resolution). Recovery is the next
 scheduled or operator-triggered run. A failed post-commit eligibility-task
-dispatch is logged with the Product ID, increments `record_failed`, and does
+dispatch is logged with the Product ID, increments `record_failed()`, and does
 not roll back the committed threshold snapshot.
 
 The fetcher raises `FetcherError` with these sanitized messages for failures
@@ -1031,16 +1055,36 @@ metric failure.
 
 #### Metrics
 
-| Metric | Meaning |
-|--------|---------|
-| `record_created` | Not used; threshold synchronization never creates Products. |
-| `record_updated` | One for each distinct local Product with a threshold mutation, including clearing to NULL, or a successful mismatch-only eligibility-recalculation dispatch; a Product in both groups counts once. |
-| `record_failed` | One for each Product whose required post-commit eligibility-recalculation task cannot be dispatched. |
+The work unit is one distinct local Product whose threshold projection is
+evaluated from a matched AIMAAS threshold, is evaluated for absence clearing,
+or appears only in the post-commit eligibility-mismatch set. A Product present
+in more than one of these sets is selected once. A required recalculation
+dispatch is the terminal step only for Products in the changed or mismatch
+sets; an evaluated unchanged Product with no mismatch terminates successfully
+after the complete threshold publication commits.
 
-A threshold mutation remains counted as updated when its later task dispatch
-fails because the authoritative threshold snapshot committed successfully.
-Retrieval, pagination, response-schema, and database failures are whole-run
-failures and do not record per-Product metrics.
+| Mapping | Exact behavior |
+|---|---|
+| Selected | Each distinct local Product with a matched threshold entry, each local Product with a non-null threshold evaluated for absence clearing, and each mismatch-only Product, once across those sets. |
+| Succeeded | `record_succeeded()` once for an evaluated unchanged Product with no mismatch after the complete threshold publication commits, or when the Product's required post-commit eligibility-recalculation task is dispatched successfully. The latter includes a mismatch-only Product whose threshold did not change. |
+| Failed | `record_failed()` once when the Product's required recalculation dispatch fails. |
+| Created | Never; threshold synchronization does not create Products. |
+| Updated | `record_updated()` once for each selected Product whose threshold mutation or clearing committed. Dispatch itself is not a Product update. |
+| Excluded before selection | An unresolved AIMAAS Product ID, a resolved CPE with no local Product, and a local Product absent from both the matched-threshold and absence-clearing evaluation sets and from the eligibility-mismatch set contribute no outcome or effect metric. |
+
+An evaluated unchanged Product with no mismatch is succeeded without a task or
+update. A mismatch-only successful dispatch is also succeeded without updated.
+A committed threshold mutation remains updated when its later required task
+dispatch fails, so that unit is updated and failed. Retrieval, pagination,
+response-schema, and pre-commit database failures are whole-run failures; an
+escaping post-commit failure preserves any durable update effects already
+recorded for diagnostics.
+
+Implementation tests MUST cover changed-only, unchanged matched, unchanged
+absence evaluation, mismatch-only, overlapping changed-and-mismatch,
+successful dispatch, failed dispatch after a committed threshold update,
+unresolved upstream Product, unmatched local CPE, and empty selected-set cases
+with exact outcome and effect counters.
 
 ---
 

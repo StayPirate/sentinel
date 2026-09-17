@@ -257,7 +257,8 @@ def is_infrastructure_failure(exc: Exception) -> bool:
 exception types that ARE infrastructure failures, rather than catching
 all `TransportError` and excluding non-infra subclasses. This means
 unknown future httpx exception types default to `False` (conservative
-— does not abort), with the all-items-failed safety check as fallback.
+— does not abort), with `BaseFetcher` terminal outcome accounting as the
+fallback when no selected unit succeeds.
 Using parent classes (`NetworkError`, `TimeoutException`) ensures that
 new subclasses within those families are automatically covered.
 

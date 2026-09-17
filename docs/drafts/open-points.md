@@ -13,7 +13,6 @@ Architectural decisions pending resolution before implementation begins.
 | OP-7 | Platform Status Monitoring | Platform | Open |
 | OP-8 | Simplify Duplicate Handling | Tickets | Resolved |
 | OP-11 | Ecosystem Prefix Mapping | Packages | Open |
-| OP-12 | Fetcher Metrics Granularity | Fetcher Infrastructure | Open |
 | OP-13 | CWE Accumulation | Fetcher Infrastructure | Open |
 | OP-15 | IBSEventConsumer Admin Restart Endpoint | Platform | Open |
 | OP-16 | CPE Mapping Fail-Fast Asymmetry | — | Resolved |
@@ -22,6 +21,7 @@ Architectural decisions pending resolution before implementation begins.
 | OP-5 | Response Header for Silently Ignored Parameters | — | Closed |
 | OP-9 | Remove FetcherRunWeeklyAggregate | — | Resolved |
 | OP-10 | Ecosystem Column on CVEAffectedVersion | — | Resolved |
+| OP-12 | Fetcher Metrics Granularity | — | Resolved |
 | OP-14 | BaseFetcher All-Items-Failed Safety Check | — | Resolved |
 | OP-18 | Cross-Process Startup Ordering | — | Resolved |
 | OP-19 | Beat Reconciliation Wiring Mechanism | — | Resolved |
@@ -213,40 +213,6 @@ ROI.
 
 ## Open — Fetcher Infrastructure
 
-### OP-12. Fetcher Metrics — Granularity and Semantics
-
-**Origin**: OSV fetcher spec (Session 5, 2026-06-19)
-
-**Context**: `record_updated` is incremented for every CVE where
-`upsert_cve()` succeeds, regardless of whether the data actually changed
-compared to the previous run. The metric means "processed" not "updated
-with new data." All CVE fetchers (NVD, MITRE, Red Hat, GHSA, OSV) use
-this same convention. As the system matures and most CVEs are already
-enriched, the metric loses diagnostic value (high counts even when
-nothing changed).
-
-**Proposed approach**: evaluate the feasibility of:
-
-- `record_updated` → only when written data differs from previous state
-  (change-detection pre-write comparison)
-- `record_skipped` → CVE processed but no upsert performed (e.g.,
-  `CVENotInSource`, completeness guard, no-change detection)
-- `record_missed` → CVEs tracked by Sentinel that the fetcher does not
-  cover (delta between active tickets and CVEs present in the source)
-
-**Impact**: cross-cutting on `BaseFetcher`/`BaseCVEFetcher` and the
-fetcher-operations dashboard. Must be evaluated together with the
-dashboard design. Introducing change-detection pre-write would require
-comparing the payload against current database state before
-delete-and-reinsert — potentially doubling read I/O per CVE.
-
-**Decision needed**: is the diagnostic improvement worth the performance
-and complexity cost? Revisit when: (a) the fetcher-operations dashboard
-is implemented and operators report metric ambiguity, or (b) database
-size makes unnecessary writes a performance concern.
-
----
-
 ### OP-13. CWE Accumulation — Stale Records from Additive-Only Upsert
 
 **Origin**: CISA KEV fetcher spec review (Session 4, 2026-06-20)
@@ -425,6 +391,25 @@ to other open points.
 
 ## Archive — Resolved
 
+### OP-12. Fetcher Metrics — Granularity and Semantics — RESOLVED (2026-09-17)
+
+**Resolution**: separated terminal outcomes from durable effects. Every
+selected work unit now terminates exactly once as succeeded or failed through
+`record_succeeded()` or `record_failed()`. `record_created()` and
+`record_updated()` retain their narrower durable-effect meanings and are called
+only after durability; successful unchanged and no-op work no longer needs to
+masquerade as updated. Dispatch-only success likewise uses the outcome metric.
+
+No `record_skipped`, `record_missed`, persisted per-item outcome, or additional
+metric dimension was introduced. Concrete fetchers define pre-scope exclusions
+and which unchanged, missing, no-match, already-pending, or stale/inapplicable
+results are successful terminal outcomes. This supplies truthful throughput
+without change-detection pre-reads or extra database I/O. The public dashboard
+contract adds only `FetcherRun.items_succeeded` alongside the existing effect
+and failure counts.
+
+---
+
 ### OP-16. CPE Mapping Fail-Fast Asymmetry — SUPERSEDED
 
 **Original resolution**: a `celeryd_after_setup` handler validated the
@@ -527,17 +512,22 @@ See:
 
 ---
 
-### OP-14. BaseFetcher All-Items-Failed Safety Check — RESOLVED (2026-06-20)
+### OP-14. BaseFetcher All-Items-Failed Safety Check — RESOLVED (2026-06-20; refined 2026-09-17)
 
-**Resolution**: promoted the all-items-failed safety check from
-`BaseGitFetcher.execute()` (step 11) to `BaseFetcher.run()`. When
-`execute()` returns normally but all items failed (`items_failed > 0`
-and `items_created + items_updated == 0`), `run()` now sets
-`status = failure` directly (no `RuntimeError`). The `partial` status
-is reserved for runs where at least one item succeeded. The redundant
-step 11 in `BaseGitFetcher` was removed and renumbered. See
-`docs/features/platform/fetcher-infrastructure.md` (Status
-determination precedence).
+**Original resolution**: promoted the all-items-failed safety check from
+`BaseGitFetcher.execute()` to `BaseFetcher.run()`. The initial generic test used
+`items_failed > 0 AND items_created + items_updated == 0` as a proxy for every
+item failing and removed the redundant Git-specific check.
+
+**Refinement**: the location and normal-return failure behavior remain correct,
+but create/update effects are not proof of successful processing. The check now
+uses terminal outcomes: `items_failed > 0 AND items_succeeded == 0`. Mixed
+succeeded and failed outcomes are `partial`; no failed outcomes are `success`,
+including an empty run. This correctly handles successful unchanged/no-op work
+and permits a committed update followed by a required-step failure without
+misclassifying the effect as a successful terminal outcome. See
+`docs/features/platform/fetcher-infrastructure.md` (Status determination
+precedence).
 
 ---
 

@@ -1399,6 +1399,7 @@ class:
 | Field | Expected value |
 |-------|----------------|
 | `status` | `success` |
+| `items_succeeded` | `0` |
 | `items_created` | `0` |
 | `items_updated` | `0` |
 | `items_failed` | `0` |
@@ -1549,6 +1550,72 @@ Every new or modified API endpoint MUST be tested for:
   serialization using `db_session_factory` and the two-session pattern
   described in Database Strategy — Concurrency Testing)
 
+### Fetcher Outcome and Effect Accounting
+
+When `BaseFetcher`, `FetcherRun`, a concrete fetcher's metric mapping, or a
+fetcher run response schema is implemented or changed, the following complete
+contract is mandatory:
+
+- **Helper validation**: exercise each of `record_succeeded`, `record_failed`,
+  `record_created`, and `record_updated` with the default count, an integer
+  greater than one, and zero. Zero is a no-op. For every helper, a negative
+  integer raises `ValueError`; each non-integer representative, including
+  `True`, `False`, a float, a numeric string, and `None`, raises `TypeError`.
+  Every rejected call leaves all four counters unchanged.
+- **Per-run reset**: reuse one fetcher instance across runs and prove all four
+  counters reset to zero before the next execution, including after a prior
+  success, per-item failure, and escaping exception. Cursor, settings, and HTTP
+  lifecycle reset assertions remain under their existing contracts.
+- **Finalization precedence**: an escaping settings, previous-cursor, execution,
+  timeout, or other run-level exception produces `failure` regardless of any
+  successful, failed, created, or updated counts and preserves those counts for
+  diagnostics. On normal return, failed greater than zero with succeeded equal
+  to zero produces `failure` and exactly `All {items_failed} items failed`;
+  both succeeded and failed greater than zero produces `partial`; no failed
+  items produces `success`, including an empty run. Created or updated counts
+  never substitute for succeeded in any branch.
+- **Regression combinations**: cover successful unchanged/no-op work plus one
+  failure (`partial`), all selected units failed (`failure`), an empty run
+  (`success`), successful terminal units with durable effects and no failures
+  (`success`), and each of a committed create and a committed update followed
+  by a required post-commit failure (the corresponding effect counter is `1`,
+  `items_failed = 1`, `items_succeeded = 0`, normal-return `failure`). Cover a
+  best-effort post-commit failure separately: it is logged, retains the durable
+  effect, records the unit as succeeded, and records no failure.
+- **Durability and exclusivity**: a create/update effect is absent before commit
+  and after rollback or commit failure, and appears only after durability. No
+  current work unit records both created and updated. Every selected terminal
+  unit contributes exactly once to succeeded or failed, never both; pre-scope
+  exclusions contribute to neither. Tests must fail counter-compensation or
+  dispatch-as-updated implementations.
+- **Diagnostics and persistence**: timeout diagnostics compute processed items
+  as `items_succeeded + items_failed`. Finalization persists all four counters
+  in one finalization transaction on success, partial, normal all-failed, and
+  escaping-exception paths. A finalization database failure retains its existing
+  exception precedence. Queued and running rows remain at database defaults and
+  expose zero counters; tests must prove no live progress writes occur.
+- **Model contract**: `items_succeeded` is `INTEGER NOT NULL DEFAULT 0` in
+  SQLAlchemy metadata and the forward migration. No nullable compatibility
+  state or data backfill is expected because no live or production database
+  exists.
+- **Public read shapes**: e2e and response-schema tests assert
+  `items_succeeded` in fetcher-list `last_run`, run list, run detail, and every
+  timeline point. Include terminal examples where success is not equal to
+  created plus updated and queued/running examples with all counters zero.
+  Existing paths, methods, filters, pagination, errors, optional authentication,
+  field-level visibility, and authorization remain unchanged.
+- **Concrete mappings**: tests cover the selected unit, all successful
+  terminal outcomes, all failed terminal outcomes, pre-scope exclusions, and
+  durable create/update effects documented by the owning specs for all 16
+  registered fetchers: `sync_nvd_cves`, `sync_mitre_cves`,
+  `sync_redhat_cves`, `sync_smelt_products`, `sync_aimaas_lifecycle`,
+  `sync_aimaas_thresholds`, `detect_ibs_track_releases`,
+  `detect_ibs_product_releases`, `evaluate_lifecycle_transitions`,
+  `sync_ibs_requests`, `sync_cisa_kev`, `sync_epss_scores`,
+  `sync_ghsa_advisories`, `sync_kernel_cves`, `sync_osv_advisories`, and
+  `evaluate_failed_cve_sources`. Shared failures affecting several selected
+  units count each unit exactly once, not each retry, parser stage, or log.
+
 ### User Identifier Resolution
 
 Every endpoint that accepts a user identifier MUST be tested with both
@@ -1690,7 +1757,8 @@ changed, integration tests additionally cover:
   the package handoff, even when the best-effort convergence publication fails;
 - an ordinary package-handoff publication failure after successful commit logs
   exactly one sanitized `cve_package_handoff_publication_failed` ERROR, returns
-  normally, preserves `CVESource.success` and the one successful CVE metric,
+  normally, preserves `CVESource.success` and the one terminal
+  `record_succeeded()` outcome plus any committed created/updated effect,
   records no failure metric, and never enters API/Git per-item failure handling;
   the log excludes payload, package names, exception text, and upstream data;
 - repeated `commit_and_dispatch()` calls for different CVEs on one reusable
