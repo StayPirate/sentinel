@@ -1055,8 +1055,10 @@ MAY start in any order. No inter-process startup dependency exists.
 
 This property is guaranteed by the following mechanisms:
 
-- **`bootstrap_fetcher_configs()`** runs in every process (worker, Beat,
-  API server) and uses `INSERT ... ON CONFLICT DO NOTHING` — Beat does
+- **`bootstrap_fetcher_configs()`** runs in every registry-consuming process
+  (general worker, Git worker, Beat, API server) after importing the shared
+  fetcher discovery module, and uses `INSERT ... ON CONFLICT DO NOTHING` — Beat
+  does
   not depend on workers or the API having created `FetcherConfig` records
   first. If Beat starts first, it creates them; if a worker starts first,
   Beat's bootstrap is a no-op (records already exist); if all start
