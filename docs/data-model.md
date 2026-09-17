@@ -537,7 +537,7 @@ See `docs/features/tickets/cve-service.md`.
 | id          | UUID          | PK                                 | Internal identifier                |
 | cve_id      | UUID          | FK(cve.id) ON DELETE CASCADE, NOT NULL | Related CVE                   |
 | source      | VARCHAR(100)  | NOT NULL                           | Provider identifier (e.g., `"nvd"`, `"mitre"`, `"kernel"`, `"redhat"`). Stored as lowercase. The valid values are defined by the `CVESourceType` Python Enum in `app/core/enums.py` (evolving value set — new sources are added as the ingestion pipeline expands). Column is VARCHAR(100) — Category B classification enum. Note: despite the shared column name `source`, each table uses a different value format. `CVESource.source` stores CVESourceType identifiers (lowercase, e.g., `"nvd"`). `CVEExternalIdentifier.source` stores naming authority labels (VARCHAR, Python Enum, e.g., `GHSA`). `CVECWE.source` stores provider names (mixed case, e.g., `"NVD"`, `"Red Hat"`). `TicketReference.source` stores `BaseFetcher.name` (e.g., `"sync_nvd_cves"`) or `"manual"` |
-| status      | VARCHAR(20)   | NOT NULL                           | Fetch outcome: `success` (data written), `failure` (retries exhausted), `missing` (CVE not in source). CVESourceFetchStatus — validated by Python Enum in `app/core/enums.py` (Category B — classification). No default — always written explicitly by the caller |
+| status      | VARCHAR(20)   | NOT NULL                           | Latest completed fetch-attempt outcome: `success` (data written), `failure` (that attempt failed, including an attempt that may be retried), or `missing` (CVE not in source). CVESourceFetchStatus — validated by Python Enum in `app/core/enums.py` (Category B — classification). No default — always written explicitly by the caller |
 | fetched_at  | TIMESTAMPTZ   | NOT NULL                           | Database wall-clock instant of the latest successfully serialized status mutation (success, failure, or missing), not attempt start or transaction start |
 | first_failed_at | TIMESTAMPTZ | nullable                          | Database wall-clock instant when the current failure streak began. Set from the same mutation instant as `fetched_at` when a serialized failure observes NULL, preserved on later failures, and cleared by success or missing. See `docs/features/tickets/cve-service.md` (`record_source_status`) for write semantics and `docs/features/platform/cve-source-failure-retry.md` for the retry mechanism |
 | created_at  | TIMESTAMPTZ   | NOT NULL, DEFAULT                  | Record creation timestamp          |
@@ -565,7 +565,7 @@ constraint). Adding a new status requires only a code change.
 | Value | Description |
 |-------|-------------|
 | `success` | Fetcher ran and wrote data successfully |
-| `failure` | Fetcher ran, exhausted retries, and could not retrieve data |
+| `failure` | One completed attempt failed; the caller may still retry it |
 | `missing` | Fetcher ran, source responded, but CVE does not exist in that source |
 
 #### CVESourceType Python Enum
@@ -1649,8 +1649,8 @@ summarized below.
 | duration_seconds     | FLOAT       | nullable                 | Execution duration: `finished_at - started_at`. `NULL` whenever `started_at` is `NULL` (queued, or failed before adoption) — never queue wait time |
 | status               | VARCHAR(20) | NOT NULL                 | FetcherRunStatus: `queued`, `running`, `success`, `failure`, `partial` |
 | items_succeeded      | INTEGER     | NOT NULL, DEFAULT 0      | Selected work units that reached a successful terminal outcome |
-| items_created        | INTEGER     | NOT NULL, DEFAULT 0      | New records created                |
-| items_updated        | INTEGER     | NOT NULL, DEFAULT 0      | Existing records updated           |
+| items_created        | INTEGER     | NOT NULL, DEFAULT 0      | Selected work units whose committed outcome has a create durable effect |
+| items_updated        | INTEGER     | NOT NULL, DEFAULT 0      | Selected work units whose committed outcome has an update durable effect |
 | items_failed         | INTEGER     | NOT NULL, DEFAULT 0      | Items that failed processing       |
 | error_message        | TEXT        | nullable                 | Sanitized error description (for all users). See `docs/features/platform/fetcher-infrastructure.md`, "Error Message Sanitization" |
 | error_detail         | TEXT        | nullable                 | Raw exception message (admin-only visibility in API) |
@@ -1709,7 +1709,7 @@ requires an Alembic migration.
 | `queued` | Manual run accepted and persisted; not yet adopted by a worker |
 | `running` | A worker has atomically adopted the run and is currently executing it |
 | `success` | Normal return with no failed terminal work units, including an empty run |
-| `failure` | Run-level exception or normal return with `items_failed > 0` and `items_succeeded = 0` |
+| `failure` | Run terminated before adoption because it became stale, disabled, deregistered, or publication failed; or execution had a run-level exception; or execution returned normally with `items_failed > 0` and `items_succeeded = 0` |
 | `partial` | Normal return with both `items_succeeded > 0` and `items_failed > 0` |
 
 #### FetcherRunTriggeredBy Enum

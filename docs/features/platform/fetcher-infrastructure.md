@@ -141,10 +141,15 @@ All fetchers MUST inherit from `BaseFetcher`, an abstract base class in
       failure finalization and re-raised after finalization. The cursor-load
       failure path does not call `execute()`.
 
-   5. **Execution**: open an execution session, call
-      `self.execute(session)`. If `execute()` raises, capture the
-      exception for finalization. `SoftTimeLimitExceeded` propagates
-      normally — it is not caught per-item (see
+   5. **Execution**: open an execution session, establish the automatic
+      periodic context for this `run()` invocation, and call
+      `self.execute(session)`. The context is scoped to this invocation and is
+      always cleared when execution leaves; it is not a caller-controlled flag.
+      CVE per-item finalization uses it to record post-commit outcome/effect
+      metrics, while standalone on-demand and catch-up calls have no context.
+      If `execute()` raises, capture the exception for finalization.
+      `asyncio.CancelledError`, `SoftTimeLimitExceeded`, and `MemoryError`
+      propagate normally — they are not caught per-item (see
       "`SoftTimeLimitExceeded` handling convention" below).
 
       **Execution session transaction contract**: `run()` opens the
@@ -387,7 +392,7 @@ class SyncNvdCves(BaseCVEFetcher):
     default_schedule = "0 */6 * * *"
     source_reference_url_pattern = "https://nvd.nist.gov/vuln/detail/{cve_id}"
 
-    async def fetch_single(self, cve_id: str, session: AsyncSession) -> PostIngestTasks | None:
+    async def fetch_single(self, cve_id: str, session: AsyncSession) -> CVEFetchResult:
         ...
 
     async def execute(self, session: AsyncSession) -> None:
@@ -403,13 +408,15 @@ class SyncRedhatCves(BaseCVEFetcher):
     description = "Sync CVE data from Red Hat Security API"
     default_schedule = "0 3 * * *"
 
-    async def fetch_single(self, cve_id: str, session: AsyncSession) -> PostIngestTasks | None:
+    async def fetch_single(self, cve_id: str, session: AsyncSession) -> CVEFetchResult:
         # Core per-CVE logic: call Red Hat API, upsert CVSS/CWE/refs
-        await upsert_cve(db, cve_id, source=self.cve_source_type, ...)
+        result = await upsert_cve(db, cve_id, source=self.cve_source_type, ...)
+        return CVEFetchResult(result.action, None)
 
     async def execute(self, session: AsyncSession) -> None:
         for cve_id in active_ticket_cve_ids:
-            await self.fetch_single(cve_id, session)
+            result = await self.fetch_single(cve_id, session)
+            await self.commit_and_dispatch(session, result)
 ```
 
 The `name` attribute MUST NOT exceed **100 characters**. This limit is
@@ -614,8 +621,9 @@ def get_catch_up_fetchers() -> dict[str, type[BaseFetcher]]:
 
 **Caching semantics**: computed on each call from the current registry
 state (not cached). No dedicated cache-clearing test helper is needed —
-test suites that dynamically register fetcher classes clean
-`FETCHER_REGISTRY` directly.
+test suites that dynamically register fetcher classes snapshot and restore
+`FETCHER_REGISTRY`; CVE fetcher tests snapshot and restore
+`_CVE_SOURCE_TYPE_MAP` in the same fixture.
 
 ### Celery task wrapper
 
@@ -624,95 +632,46 @@ A single generic Celery task wraps all `catch_up()` invocations:
 ```python
 @celery_app.task(bind=True, max_retries=3)
 def run_catch_up(self, fetcher_name: str, ticket_id: str) -> None:
-    """Generic catch-up task — replaces per-fetcher tasks."""
-    fetcher_cls = FETCHER_REGISTRY.get(fetcher_name)
-    if fetcher_cls is None:
-        logger.error("run_catch_up: unknown fetcher %s — skipping", fetcher_name)
-        return  # non-retryable — fetcher was removed between enqueue and execution
-    # Enabled check: if fetcher is disabled, skip silently
-    config = get_fetcher_config(fetcher_name)
-    if config and not config.enabled:
-        logger.info("Catch-up skipped for %s: fetcher is disabled", fetcher_name)
-        return  # task completes successfully, no error, no retry
-    fetcher = fetcher_cls()
-    async def _run():
-        try:
-            async with get_async_session() as session:
-                try:
-                    await fetcher.catch_up(ticket_id, session)
-                except (NotImplementedError, CVENotInSource, ValueError):
-                    return  # Contract violations and defensive catches — non-retryable, silent return
-                except Exception as e:
-                    if is_retryable_condition(e):
-                        raise  # propagate to outer scope for self.retry()
-                    raise  # non-retryable — task fails permanently
-                finally:
-                    if fetcher._http_client is not None:
-                        try:
-                            await fetcher._http_client.aclose()
-                        except Exception:
-                            logger.warning("Failed to close HTTP client for %s", fetcher_name)
-                        fetcher._http_client = None
-        finally:
-            # Repeated invocations of this task share the same long-lived
-            # worker child (docs/conventions.md, Cross-loop pooled
-            # connection lifecycle) — dispose before this invocation's
-            # asyncio.run() closes its event loop.
-            await engine.dispose()
-    try:
-        asyncio.run(_run())
-    except (NotImplementedError, CVENotInSource, ValueError):
-        return  # already handled inside _run — defensive outer catch
-    except Exception as e:
-        if is_retryable_condition(e) and self.request.retries < self.max_retries:
-            self.retry(exc=e, countdown=5 * 2 ** self.request.retries)
-        logger.error(
-            "ticket_catch_up_failed",
-            ticket_id=ticket_id,
-            fetcher_name=fetcher_name,
-            cause=type(e).__name__,
-            celery_task_id=self.request.id,
-        )
-        raise  # non-retryable or retries exhausted — task fails permanently
+    """Run one fetcher's Ticket catch-up with one async lifecycle."""
+    ...
 ```
 
-`run_catch_up` is a Celery `bind=True` task. `self.retry(exc=e,
-countdown=...)` raises a `Retry` exception internally, re-enqueuing the
-task with the specified backoff delay.
+The pseudocode intentionally leaves private decomposition open. The observable
+contract is:
 
-The `finally` block implements the HTTP client ownership rule (see
-"`fetch_single()` and `catch_up()` Lifecycle" below): the outermost
-wrapper that invokes a sub-operation owns the client lifecycle. If
-`catch_up()` (or any method it delegates to, including `fetch_single()`)
-accessed `self.http_client` during execution, the client is closed here.
-If no HTTP request was made (`_http_client is None`), the teardown is a
-no-op.
+1. Validate `ticket_id` as a UUID before database or fetcher work. A malformed
+   value is a non-retryable caller-contract failure: emit one structured ERROR
+   with `ticket_id`, `fetcher_name`, `cause`, and `celery_task_id`, then fail the
+   task. It is not a silent defensive return.
+2. Resolve `fetcher_name`. An unknown or deregistered fetcher logs ERROR and
+   returns without retry using
+   `run_catch_up: unknown fetcher {fetcher_name} — skipping`. A registered
+   disabled fetcher logs INFO using
+   `Catch-up skipped for {fetcher_name}: fetcher is disabled` and returns
+   without retry. Neither path creates a `FetcherRun`.
+3. Instantiate the class and open the caller-owned `AsyncSession`. Invoke
+   `catch_up()`. The default CVE implementation owns its commit, rollback, and
+   isolated status writes; the wrapper does not duplicate them.
+4. Classify ordinary propagated exceptions with `is_retryable_condition()`.
+   Retry at most three times with 5s, 10s, and 20s delays. After exhaustion, or
+   immediately for a non-retryable exception, emit the structured terminal
+   ERROR and propagate. An unresolved-referenced-CVE integrity error is
+   non-retryable. `NotImplementedError` and a leaked `CVENotInSource` remain
+   defensive non-retryable returns because both indicate an invalid custom
+   catch-up implementation rather than a transient failure.
+5. Cancellation, `SoftTimeLimitExceeded`, and `MemoryError` propagate without
+   retry classification or feature-owned status writes.
+6. In one outer `finally`, close the fetcher's HTTP client when created and
+   await `engine.dispose()` exactly once. This applies to success, no-op,
+   disabled, unknown, malformed UUID, retry, terminal failure, cancellation,
+   and whole-run signals. Cleanup failure does not mask an already propagating
+   primary exception.
 
-**Engine disposal**: `run_catch_up` is repeatedly invoked within the
-same long-lived Celery worker child. Its outer `finally` awaits
-`engine.dispose()` after the session-scoped work completes — on every
-outcome, including a non-retryable return — per `docs/conventions.md`
-(Cross-loop pooled connection lifecycle). This is the single choke
-point through which every participating fetcher's `catch_up()` (and
-any `fetch_single()` it delegates to) runs, so disposal here
-automatically protects all of them; individual fetchers MUST NOT
-dispose the engine themselves.
-
-If `fetcher_name` is not found in the registry (e.g., a deployment
-removed the fetcher between enqueue and execution), the task logs an
-error and returns without retry.
-
-**Non-retryable exceptions**: `NotImplementedError`, `CVENotInSource`,
-and `ValueError` are caught explicitly before the
-`is_retryable_condition()` check because they represent contract
-violations and defensive catches (not HTTP errors).
-`NotImplementedError` indicates a programming error (incorrect invocation
-on a fetcher without a real `catch_up()` implementation). `CVENotInSource`
-is caught internally by the default `BaseCVEFetcher.catch_up()` and should
-never propagate — if it does, it indicates a custom override that forgot
-to catch it. `ValueError` indicates a malformed `ticket_id` parameter
-(not a valid UUID) — a contract violation by the caller, not a transient
-failure.
+The synchronous task calls exactly one `asyncio.run()` per invocation. The
+async workflow owns the session, HTTP teardown, and engine disposal. Each retry
+is a new invocation with a fresh fetcher and HTTP client. The task preserves the
+registered class's queue at publication time, including `queue = "git"`, and
+never creates a `FetcherRun`.
 
 **Retry classification**: after the explicit non-retryable exceptions
 are handled, the remaining exceptions are classified by
@@ -744,9 +703,10 @@ execution. The following additional rules apply:
   creates and manages the `AsyncSession`, following the same pattern
   as `fetch_single_cve`. The session is passed to `catch_up()` as a
   parameter. Transaction boundaries depend on the implementation:
-  - **Default `catch_up()`** (CVE fetchers): reads the ticket, calls
-    `fetch_single()`, then commits via `self.commit_and_dispatch()`
-    internally — not via `run_catch_up` on return
+  - **Default `catch_up()`** (CVE fetchers): reads the Ticket and CVE, calls
+    `fetch_single()`, then commits via `self.commit_and_dispatch()` internally
+    — not via `run_catch_up` on return. No periodic context exists, so the
+    finalizer records no `FetcherRun` metric
   - **Custom `catch_up()` overrides** (non-CVE fetchers): the method
     receives the session for read-only queries (ticket lookup, item
     enumeration). Mutations on each item are delegated to the
@@ -773,17 +733,12 @@ execution. The following additional rules apply:
      and handle it internally without propagating to the wrapper (the
      CVE is not in this source — the fetcher handles this case per its
      own spec). `CVENotInSource` MUST NOT propagate to the
-    `run_catch_up` wrapper. Transient errors (network, HTTP 5xx)
-    propagate to the wrapper for retry
-  - **Post-exhaustion (CVE fetchers)**: when the task fails (whether
-     from retry exhaustion or immediate non-retryable failure), no
-     `CVESource` status write occurs.
-     `run_catch_up` receives only `(fetcher_name, ticket_id)` — it
-     lacks direct `cve_id` access. Re-querying the ticket in an error
-     handler adds complexity disproportionate to the benefit: retry
-     exhaustion indicates infrastructure instability (a rare condition),
-     and the next periodic `execute()` run (within 24h) overwrites the
-     status with the correct value
+    `run_catch_up` wrapper. Before propagating any ordinary pre-commit
+    exception, the default implementation rolls back and attempts an isolated
+    `failure` status write. Each failed retry attempt therefore writes failure;
+    a later success or missing outcome overwrites the latest state. Cancellation,
+    `SoftTimeLimitExceeded`, and `MemoryError` bypass isolated failure handling
+    and propagate
   - **Non-CVE fetchers** (custom `catch_up()` override): MUST use
     per-item error handling — if one item (track, product, package)
     fails, continue with the remaining items rather than aborting the
@@ -826,6 +781,7 @@ execution. The following additional rules apply:
   pass `queue=fetcher_cls.queue` when it is non-`None`, and omit the parameter
   otherwise. This preserves the worker-affinity contract for
   `BaseGitFetcher` catch-up while leaving ordinary fetchers on default routing.
+  Catch-up does not create or inspect `fetch_pending` Redis keys.
 - **Concurrency safety**: no guard on ticket status is required before
   executing `catch_up()`. If a ticket is re-deactivated after catch-up
   tasks are enqueued but before they execute, the tasks run to
@@ -986,28 +942,32 @@ In all cases, `error_detail` receives `str(exception)` and
 
 ### `SoftTimeLimitExceeded` handling convention
 
-`SoftTimeLimitExceeded` is a **whole-run signal**, not a per-item error.
-All fetcher implementations MUST ensure this exception propagates to
-`BaseFetcher.run()` for proper finalization. Specifically:
+`asyncio.CancelledError` and Celery's `SoftTimeLimitExceeded` are
+**whole-run signals**, not per-item errors. `CancelledError` represents
+cancellation of the current asyncio task by its owning runtime or wrapper; it
+is the class imported from `asyncio`, not a feature-specific exception. All
+fetcher implementations MUST ensure both signals propagate to their outer task
+boundary. Specifically:
 
-- Per-item exception handlers (e.g., try/except loops that catch
-  `Exception` to isolate individual item failures) MUST exclude
-  `SoftTimeLimitExceeded` from the catch. Failing to do so silently
-  defeats the timeout mechanism — the exception is consumed, and the
-  task continues indefinitely past the soft time limit until the hard
-  limit terminates the process.
+- Per-item exception handlers (e.g., try/except loops that isolate individual
+  item failures) MUST explicitly re-raise `CancelledError` and
+  `SoftTimeLimitExceeded` before any broad catch. Failing to do so can consume
+  cancellation or defeat the timeout mechanism, allowing item processing to
+  continue after the outer workflow must stop.
 - `MemoryError` SHOULD also be excluded from per-item catches, as
   continuing after memory exhaustion is futile.
 
 The recommended pattern for per-item exception handling:
 
 ```python
+from asyncio import CancelledError
+
 from celery.exceptions import SoftTimeLimitExceeded
 
 for item in items:
     try:
         process(item)
-    except (SoftTimeLimitExceeded, MemoryError):
+    except (CancelledError, SoftTimeLimitExceeded, MemoryError):
         raise  # whole-run signals — never catch per-item
     except Exception as e:
         session.rollback()
@@ -1016,9 +976,10 @@ for item in items:
         continue
 ```
 
-Concrete fetchers do NOT need to catch `SoftTimeLimitExceeded` at the
-`execute()` level — `run()` provides the enriched timeout message
-automatically (see the generic fallback table above).
+Concrete fetchers do NOT need to catch these signals at the `execute()` level.
+`CancelledError` propagates to the task boundary, and `run()` provides the
+enriched timeout message for `SoftTimeLimitExceeded` automatically (see the
+generic fallback table above).
 
 **Not excluded — `OperationalError` and database connection loss**:
 database errors are caught per-item (not excluded from the per-item
@@ -1213,6 +1174,10 @@ the invalid field.
     Settings validation) MUST complete successfully before the class
     is added to `FETCHER_REGISTRY`. If any validation fails, the
     registry is not modified — no partial registration can occur.
+
+`BaseCVEFetcher` extends this validate-before-register guarantee across its
+additional source-type registry; the owning CVE infrastructure specification
+defines the coordinated all-or-none registration contract.
 
 CVE-specific validation (`cve_source_type` uniqueness, Enum member type)
 is handled by `BaseCVEFetcher.__init_subclass__` — see
@@ -1766,14 +1731,15 @@ API server, and Beat processes.
 Every process that consumes either registry MUST import all fetcher
 modules at startup:
 
-- **Celery workers**: instantiate and execute fetchers
+- **General Celery workers**: instantiate and execute non-Git fetchers
+- **Git workers**: instantiate Git fetchers and execute work routed to `git`
 - **FastAPI API server**: list fetchers, serve config, validate
   `Settings` schemas, run on-demand refetch
 - **Celery Beat**: build the redbeat schedule from
   `default_schedule`/`FetcherConfig` (see "Celery Beat Schedule
   Synchronization")
 
-To guarantee all three processes import an identical set of modules with
+To guarantee all four process roles import an identical set of modules with
 a single maintenance point, imports are centralized in a **discovery
 module**:
 
@@ -1793,8 +1759,10 @@ Each entrypoint imports the discovery module once at startup:
 import app.services.fetcher_discovery  # noqa: F401
 ```
 
-Importing `fetcher_discovery` triggers all fetcher module imports as a
-side effect, populating **both** registries.
+Importing `fetcher_discovery` triggers all fetcher module imports as a side
+effect, populating **both** registries. Test-only classes are never imported by
+production discovery and cannot leak into production registries. The CVE
+infrastructure specification owns completeness of the CVE-specific registry.
 
 **Registration is not persistence**: the registries map fetcher names to
 Python class objects, which cannot be serialized to Redis or PostgreSQL.
@@ -3508,8 +3476,8 @@ the dashboard charts.
 | duration_seconds | FLOAT | nullable | Computed: `finished_at - started_at` — execution time only. `NULL` whenever `started_at` is `NULL` |
 | status | VARCHAR(20) | NOT NULL | `queued`, `running`, `success`, `failure`, `partial` |
 | items_succeeded | INTEGER | NOT NULL, DEFAULT 0 | Number of selected work units that reached a successful terminal outcome |
-| items_created | INTEGER | NOT NULL, DEFAULT 0 | Number of new records created |
-| items_updated | INTEGER | NOT NULL, DEFAULT 0 | Number of existing records updated |
+| items_created | INTEGER | NOT NULL, DEFAULT 0 | Selected work units whose committed outcome has a create durable effect |
+| items_updated | INTEGER | NOT NULL, DEFAULT 0 | Selected work units whose committed outcome has an update durable effect |
 | items_failed | INTEGER | NOT NULL, DEFAULT 0 | Number of items that failed processing |
 | error_message | TEXT | nullable | Sanitized error description (for all users). Written explicitly by the fetcher (`FetcherError`), by BaseFetcher's generic fallback (see "Error Message Sanitization"), or by the all-selected-units-failed outcome check (`"All {N} items failed"` — see "Status determination precedence") |
 | error_detail | TEXT | nullable | Raw exception message — `str(exception)` (`manage_fetchers` capability required for visibility) |

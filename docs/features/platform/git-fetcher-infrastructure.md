@@ -441,7 +441,7 @@ class GitFileError(GitError): ...        # Per-file — continue processing
 |-------|-------------------|-----------|----------------|
 | `git clone` / `git fetch` | Any failure (network, auth, timeout) | `GitFetchError` | Do NOT delete clone. Raise `FetcherError`. Next cycle retries |
 | Read after successful fetch (`git diff`, `git rev-parse`, `git ls-tree`, `git cat-file -t`, `git rev-list`, `git log`) | Persistent failure after retry exhaustion (3 retries with exponential backoff) | `GitCorruptionError` | Delete clone directory. Raise `FetcherError`. Next cycle re-clones + applies recovery strategy |
-| `git show` during delta file processing | Any failure (timeout, corrupt/missing blob in local store) | `GitFileError` | `record_failed()` for that item. Continue to next file |
+| `git show` during delta file processing | Any failure (timeout, corrupt/missing blob in local store) | `GitFileError` | Periodic delta path: fail that selected item. Single-item candidate lookup: local candidate bookkeeping only; try the next candidate and never call `record_failed()` because no `FetcherRun` exists |
 | Directory deletion (recovery/cleanup) | Filesystem rejection (permissions, read-only mount, busy handle) | `OSError` | Log ERROR with distinct message: path, errno, and guidance ("Manual intervention required — check filesystem permissions and mount state"). Raise `FetcherError`. Next cycle re-attempts (permanent until operator resolves filesystem issue) |
 
 **Design rationale**: classification is phase-based. A successful
@@ -866,12 +866,13 @@ above.
        ("File {path} in delta but not at HEAD — skipping"), call
        `record_succeeded()`, and continue. The selected CVE reached the valid
        stale/inapplicable terminal outcome; it has no created/updated effect
-    c. Call `post_ingest = process_item(path, content, session)` →
-       returns `PostIngestTasks | None`. On successful return, call
-       `self.commit_and_dispatch(session, post_ingest)`. Only after the commit,
-       record the retained `UpsertResult.action` effect (`created` or `updated`,
-       with no effect for `unchanged`) and call `record_succeeded()` once
-    d. If `SoftTimeLimitExceeded` or `MemoryError` is raised during
+    c. Call `result = process_item(path, content, session)` → returns
+       `CVEFetchResult`. On successful return, call
+       `self.commit_and_dispatch(session, result)`. The shared finalizer commits
+       and, because the template runs in periodic context, records the action
+       effect and terminal success exactly once; the template and hook do not
+       duplicate those metrics
+    d. If cancellation, `SoftTimeLimitExceeded`, or `MemoryError` is raised during
        steps 10a, 10c, or `commit_and_dispatch()`: **re-raise
        immediately** (these are whole-run signals, not per-item errors;
        see "`SoftTimeLimitExceeded` handling convention" in
@@ -879,17 +880,18 @@ above.
     e. If any other exception is raised during steps 10a, 10c, or
        `commit_and_dispatch()`: call `session.rollback()`, extract
        CVE-ID via `cve_id = self._extract_item_id(path)`, call
-       `await self._isolated_status_commit(cve_id, "failure")`, log
+       `await self._isolated_status_commit(cve_id,
+       CVESourceFetchStatus.FAILURE)`, log
        WARNING (`logger.warning("Failed to process item %s: %s",
        cve_id, e)`), call `record_failed()`, continue to next item
 
     **Transaction boundaries**: each iteration of the processing loop
     operates in its own transaction boundary. `process_item()` returns
-    `PostIngestTasks | None`; after a successful return, the template
-    calls `self.commit_and_dispatch(session, post_ingest)` which
+    `CVEFetchResult`; after a successful return, the template calls
+    `self.commit_and_dispatch(session, result)` which
     commits the session, consumes and attempts that transaction's registered
     Ticket-convergence effects, then publishes the package-candidate handoff if
-    `post_ingest` is not `None`. A consumed registration cannot leak into a
+    `result.post_ingest` is not `None`. A consumed registration cannot leak into a
     later item even though the same session is reused. On exception (caught by
     step 10e), the template calls `session.rollback()` before `record_failed()`.
     This ensures that a failure in one item does not corrupt the session or affect
@@ -963,10 +965,10 @@ Infrastructure failures and their outcomes:
 | Delta computation fails (corruption after retries) | `GitCorruptionError` | Delete clone → raise `FetcherError` | `status = failure`, cursor not advanced |
 | Directory deletion fails (filesystem) | `OSError` | Log ERROR → raise `FetcherError` | `status = failure`, cursor not advanced. Requires operator filesystem intervention |
 
-**Clone availability window**: between the corruption-triggered
-deletion and the next scheduled run's re-clone, `fetch_single()` will
-find the clone absent and degrade gracefully (raises `RuntimeError` →
-dispatch system tries the next fetcher). This window lasts at most one
+**Clone availability window**: between the corruption-triggered deletion and
+the next scheduled run's re-clone, this source's `fetch_single()` finds the
+clone absent and raises `RuntimeError`. Its independently dispatched task fails
+without affecting other source tasks. This window lasts at most one
 scheduling interval (typically hours). The trade-off is accepted:
 immediate self-healing of corruption outweighs temporary
 `fetch_single()` unavailability for one source.
@@ -995,17 +997,14 @@ mechanism — no additional logic is needed:
 | Selected units exist and all fail | `failure` | No (`BaseFetcher.run()` outcome check) |
 | Infrastructure error | `failure` | No (propagates) |
 
-**Design note — cursor advancement on `partial`:**
-advancing the cursor on `partial` runs is an intentional trade-off.
-Failed items are not automatically retried — they reappear naturally
-when upstream modifies them (git's change-tracking provides recovery).
-Persistent failures indicate code bugs requiring human intervention,
-not automated retry; the alternative (not advancing the cursor) creates
-an ever-growing reprocessing loop that is operationally worse. Failed
-items are identified in WARNING logs by CVE-ID (step 10e:
-`"Failed to process item %s: %s", cve_id, e`), enabling operators to invoke
-`fetch_single()` for targeted recovery. See also: rejected alternatives
-(threshold-based cursor, per-item retry tracking) were rejected during initial design.
+**Design note — cursor advancement on `partial`:** advancing the cursor on
+`partial` runs is intentional; the ordinary Git delta will not select failed
+items again unless upstream modifies them. Their isolated `CVESource.failure`
+state is eligible for automatic recovery through
+`evaluate_failed_cve_sources` while its owning conditions hold. Manual
+`fetch_single()` remains available, but upstream remodification and manual
+intervention are not the only recovery paths. Holding the cursor would create
+an unbounded reprocessing loop.
 
 ## Hook Methods (Override Points)
 
@@ -1025,7 +1024,7 @@ These are the extension points for concrete subclasses:
 |--------|-----------|---------|---------|
 | `_construct_candidate_paths(item_id)` | **Yes** (abstract) | — | Return ordered list of candidate file paths for local clone lookup |
 
-## `process_item(path: str, content: bytes, session: AsyncSession) -> PostIngestTasks | None`
+## `process_item(path: str, content: bytes, session: AsyncSession) -> CVEFetchResult`
 
 The core extension point. Receives:
 - `path`: relative path within the repository (e.g., `cve/published/2024/CVE-2024-50055.json`)
@@ -1035,21 +1034,16 @@ The core extension point. Receives:
 
 The hook is responsible for:
 1. Parsing the content and applying business logic (upsert, etc.)
-2. Making the effective `UpsertResult.action` available to the inherited
-   periodic finalization flow without recording a metric before commit. The
-   exact typed hook/result composition is owned by the CVE base finalization
-   contract and is not changed here
-3. Returning `PostIngestTasks` if post-ingest dispatch is needed, or
-   `None` in two cases: (a) the item needs no package handoff, or (b) the item was
-   processed but no post-ingest tasks are needed (e.g., enrichment-only upsert
-   with no package-resolution data). Both `None` cases result in
-   `commit_and_dispatch(session, None)` — the template commits and consumes any
-   registered Ticket convergence without publishing a package handoff
+2. Returning `CVEFetchResult(result.action,
+   build_post_ingest_tasks(result, payload))`. A no-handoff item returns the
+   same typed token with `post_ingest = None`; it never returns bare `None`
+3. Recording no `FetcherRun` metric. The inherited template finalizes the token
+   and owns periodic metric mapping
 
 Raises any exception on failure → caught by `execute()`, rolled back, logged,
-and counted once with `record_failed()`. Successful commit maps `created` or
-`updated` only after durability and always calls `record_succeeded()`;
-`unchanged` calls only `record_succeeded()`.
+and counted once with `record_failed()`. Successful finalization maps `created`
+or `updated` only after durability and always records success; `unchanged`
+records only success.
 
 **Order independence**: the iteration order in which `process_item()`
 is called within a single `execute()` run is undefined — it is
@@ -1058,9 +1052,10 @@ semantic significance. Implementations MUST be order-independent: the
 result of processing any single item must not depend on whether other
 items in the same delta have already been processed.
 
-**Post-ingest handoff**: hooks that call `cve_service.upsert_cve()` return
-`PostIngestTasks` containing pure package candidates. After committing each
-per-item transaction, the `BaseGitFetcher` template uses
+**Post-ingest handoff**: hooks that call `cve_service.upsert_cve()` return a
+`CVEFetchResult` whose `post_ingest` field contains the optional pure package
+candidates. After committing each per-item transaction, the `BaseGitFetcher`
+template uses
 `commit_and_dispatch()` to consume that transaction's Ticket-convergence
 registrations before publishing the non-NULL package handoff. No post-processing
 batch hook is needed; package task lifecycle remains owned by the post-ingest
@@ -1112,10 +1107,11 @@ Concrete subclasses inherit it automatically (no override needed).
 4. For each `path` in the candidate list:
    a. Read file content via `show_file(repo_path, "HEAD", path)`
    b. If `show_file` raises `GitFileError`: log WARNING ("File read
-      failed for {path} — skipping candidate"), record the
-      failure, continue to next candidate path
+      failed for {path} — skipping candidate"), retain only local candidate
+      failure state, and continue to the next candidate path. Do not call
+      `record_failed()`; single-item invocation has no `FetcherRun`
    c. If content is not `None` (file found): return the result of
-      `process_item(path, content, session)` (`PostIngestTasks | None`)
+       `process_item(path, content, session)` (`CVEFetchResult`)
 5. After all candidate paths exhausted:
    a. If at least one candidate raised `GitFileError` (and none
       returned content): raise `RuntimeError` ("File read failed for
@@ -1154,8 +1150,9 @@ The two exception types serve different purposes for the caller
 
 - **`RuntimeError`** — "source not queryable right now" (clone missing,
   not yet created by the first periodic run, deleted after corruption
-  detection, or local object store failure). The dispatch
-  system logs a WARNING and tries the next fetcher. The clone will be
+  detection, or local object store failure). The source task fails independently
+  with the standard terminal observability. Other source tasks continue; this
+  source does not sequence or "try" another fetcher. The clone will be
   available after the next scheduled sync re-clones it.
 
   **Degradation window**: after a corruption-triggered deletion (see
@@ -1166,8 +1163,8 @@ The two exception types serve different purposes for the caller
   other CVE sources remain available via the dispatch fan-out, and the
   specific item can be retried after the next sync restores the clone.
 - **`CVENotInSource`** — "item does not exist in this source"
-  (authoritative negative). The dispatch system logs INFO and tries the
-  next fetcher.
+  (authoritative negative). This source task records missing and returns while
+  other independently dispatched source tasks continue.
 
 ## `_construct_candidate_paths(item_id: str) -> list[str]`
 

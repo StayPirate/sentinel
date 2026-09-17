@@ -830,11 +830,11 @@ transaction rollback enforces database isolation; tests must also avoid
 module-level mutable state (global caches, singletons) that could leak
 between tests.
 
-When testing code that uses module-level caches (e.g.,
-`FETCHER_REGISTRY`, `_CVE_SOURCE_TYPE_MAP`), the test must clean up the
-cache in a fixture or teardown. See
-`docs/features/platform/cve-fetcher-infrastructure.md` for the test
-helper extension rule.
+When testing code that uses module-level mutable registries (e.g.,
+`FETCHER_REGISTRY`, `_CVE_SOURCE_TYPE_MAP`), the test must snapshot and restore
+each affected registry in a fixture or teardown. See
+`docs/features/platform/cve-fetcher-infrastructure.md` for the CVE registry
+isolation contract.
 
 ### Sync Entry-Point Tests
 
@@ -1708,6 +1708,66 @@ cover this complete matrix:
 Unit tests additionally prove that `BaseCVEFetcher` accepts only
 `CVESourceType` members, rejects raw strings at import time, and converts to
 `.value` only in persistent, registry, API/wire, and Redis-key outputs.
+
+### CVE Fetcher Infrastructure
+
+When the CVE registry, single-item interface, per-CVE finalization, isolated
+status handling, default catch-up, or a concrete CVE fetcher is implemented or
+changed, focused tests MUST cover this complete contract:
+
+- **Atomic registration and isolation**: duplicate `cve_source_type`, duplicate
+  generic `name`, and every other generic or CVE validation failure leave both
+  `FETCHER_REGISTRY` and `_CVE_SOURCE_TYPE_MAP` unchanged. Tests snapshot and
+  restore both dictionaries. `supports_fetch_single = True` rejects the base
+  safety-net method and accepts a real implementation inherited from
+  `BaseGitFetcher`. `participates_in_catch_up = True` with
+  `supports_fetch_single = False` rejects the default CVE `catch_up()` and
+  accepts a custom override. Both accessors return fresh plain dictionaries.
+- **Discovery completeness**: one production discovery import populates both
+  registries in the API, general-worker, Git-worker, and Beat startup paths;
+  every `CVESourceType` maps to exactly one concrete production class; and no
+  test-only class appears in production discovery.
+- **Typed result**: all successful `fetch_single()` and Git `process_item()`
+  cases return `CVEFetchResult` for `created`, `updated`, and `unchanged`, with
+  both non-NULL and NULL `post_ingest` where applicable. `CVENotInSource`
+  returns no token. The token contains no ORM/session state and is not accepted
+  as a Celery payload or result.
+- **One-shot finalization**: the first finalization attempt consumes the token;
+  a second call raises `RuntimeError` before commit, publication, or metrics.
+  Consumption persists after commit failure. Assert exactly one commit, no
+  pre-commit publication/metric, convergence before optional package handoff,
+  no handoff for `post_ingest = None`, ordinary publication failure consumed,
+  and cancellation/whole-run signals propagated before and after commit with
+  truthful post-durability metrics.
+- **Periodic metrics**: automatic periodic context maps created/updated and
+  always success immediately after commit; unchanged maps only success.
+  On-demand and catch-up map no `FetcherRun` metric. Periodic handlers do not
+  duplicate success/effect metrics. Isolated missing is terminal periodic
+  success; an ordinary failed unit records one failure.
+- **Isolated statuses**: only typed `FAILURE` and `MISSING` are accepted, and the
+  write uses an independent transaction after caller rollback. Ordinary lookup,
+  write, and commit failures are logged and suppressed while preserving the
+  prior latest state and original exception. Cancellation,
+  `SoftTimeLimitExceeded`, and `MemoryError` propagate. No convergence,
+  package publication, or FetcherRun metric/effect occurs.
+- **Default catch-up**: cover missing Ticket, CVE-less Ticket, unresolved
+  referenced CVE, success, missing, every ordinary pre-commit failure on every
+  retry attempt, later success/missing overwrite, disabled and unknown fetcher,
+  malformed UUID structured failure, retry classification, cancellation and
+  whole-run signals, HTTP teardown, one `asyncio.run()`, exactly one engine
+  disposal per invocation, Git queue preservation, and absence of
+  `FetcherRun` records and `fetch_pending` keys.
+- **Git boundaries**: `process_item()` returns `CVEFetchResult`, only the
+  template finalizes and records periodic metrics, `fetch_single()` performs no
+  clone mutation, candidate read failures never call `record_failed()` without
+  a run, `queue = "git"` is preserved, and concrete subclasses do not override
+  `execute()`.
+- **Concrete compliance**: all eight CVE sources comply with typed return,
+  centralized finalization, metric, status, and capability contracts. NVD and
+  GHSA inline paths construct the token; MITRE and Kernel return it from
+  `process_item`; Red Hat, OSV, and EPSS preserve `UpsertResult.action`; KEV
+  remains non-refetchable and preserves its documented isolated-status
+  deviation. `CompletenessGuardError` remains in the OSV module.
 
 ### CVE Ingestion and Ticket Composition
 
@@ -2784,7 +2844,7 @@ comprehensive test coverage:
 - `docs/features/identity/identity-audit-log.md` — IdentityAuditEvent
   contract
 - `docs/features/platform/fetcher-infrastructure.md` — FetcherAuditEvent
-  contract, test helper extension rule, test-only fetcher exception
+  contract, mutable-registry test isolation, test-only fetcher exception
 - `docs/features/platform/fetcher-operations.md` — Public fetcher API
   fields (consumed by the system suite's API assertions)
 - `docs/features/packages/cpe-package-mapping.md` — canonical mapping
