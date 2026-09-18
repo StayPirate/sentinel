@@ -874,6 +874,16 @@ provides immediate per-ticket recovery without waiting for the next
 periodic run.
 
 
+### On-Demand Queue Routing
+
+On-demand single-CVE publication follows the same class-owned queue-routing
+rule as catch-up: publish `fetch_single_cve` with `fetcher_cls.name` as its
+fetcher identity, pass `queue=fetcher_cls.queue` when non-`None`, and omit the
+queue option otherwise. The publication phase receives these primitive values
+from service-owned transactional preparation and performs no database read.
+`BaseGitFetcher.queue = "git"` therefore routes both MITRE and Kernel on-demand
+work to the Git worker.
+
 ## Error Message Sanitization
 
 The `error_message` field in `FetcherRun` is visible to **all users**

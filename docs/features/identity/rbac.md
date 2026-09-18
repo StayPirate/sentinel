@@ -22,7 +22,7 @@ endpoint contract.
 | Capability | Operations Covered |
 |---|---|
 | `create_ticket` | Create ticket manually |
-| `triage_ticket` | Assign/reassign ticket, change ticket status (all transitions: ignore, reopen, duplicate, revert-duplicate), associate CVE with ticket, set/update manual severity, rerun complete Ticket convergence |
+| `triage_ticket` | Assign/reassign ticket, change ticket status (all transitions: ignore, reopen, duplicate, revert-duplicate), associate CVE with ticket, set/update manual severity, refetch an accessible CVE, rerun complete Ticket convergence |
 | `manage_packages` | Add/remove packages from tickets, exclude/restore (package, track, product), change track affectedness to any non-`FIXED` status, set `FIXED` only on a locked-current CVE-less Ticket, override product eligibility |
 | `manage_cvss` | Add/edit/delete SUSE CVSS assessments |
 | `manage_references` | Add/edit/delete ticket references |
@@ -150,6 +150,7 @@ Any logged-in user, regardless of role. Includes all Public access plus:
 | Change ticket status (ignore, reopen, duplicate, revert-duplicate) | `triage_ticket` |
 | Associate CVE with ticket | `triage_ticket` |
 | Set/update manual severity | `triage_ticket` |
+| Refetch an accessible CVE | `triage_ticket` |
 | Add/remove packages from tickets | `manage_packages` |
 | Exclude/restore package, track, or product | `manage_packages` |
 | Change track affectedness to any non-`FIXED` status | `manage_packages` |
@@ -402,6 +403,11 @@ For CVE endpoints, a ticketless CVE is public and an associated CVE consumes
 this exact Ticket predicate. Missing and inaccessible outcomes return
 `CVE_NOT_FOUND`, never a Ticket code. See `docs/api-spec.md` (CVE Accessibility
 Check).
+
+For CVE refetch, `triage_ticket` is checked before CVE lookup. The service then
+locks CVE followed by optional Ticket and applies accessibility before source
+or enabled-state validation. Refetch is dispatch-only and does not apply the
+manual-zone mutability guard.
 
 Non-Ticket, non-CVE endpoints (user management, settings, fetchers) follow their
 declared authentication and capability requirements without a Ticket

@@ -240,6 +240,7 @@ an intentional no-event contract, not missing audit coverage.
 | EOL entry/exit or derived actionability change | None for the derived change; an actual Ticket status change retains `status_change` | System for resulting status | Product/lifecycle owner; Ticket lock only for reconciliation |
 | Post-ingest package-resolution publication, empty/no-match/excluded/inactive outcome, partial or terminal failure, or task completion | None for the workflow outcome; each independently committed delegated package or maintainer mutation retains its normal events | N/A for workflow outcomes; system for delegated mutations | `package_service`; one Ticket-locked transaction per attempted package after external I/O |
 | Ticket convergence registration, dispatch, execution, retry, partial/terminal failure, or operator rerun | None for the workflow outcome; effective delegated mutations retain their normal events | N/A | Ticket convergence owner; per-domain locks |
+| CVE refetch preparation, publication, deduplication, retry, or terminal task outcome | None for dispatch workflow outcomes; effective fetched CVE/CVSS/Ticket mutations retain their existing contracts | N/A | `cve_service` preparation and `fetch_single_cve`; CVE then optional Ticket for preparation |
 | Product catalog source mutation or workflow-only dispatch/checkpoint outcome | None; later per-Ticket delegated mutations retain their normal events | N/A | Owning catalog/workflow service |
 
 For every row, a rejected, not-found, unchanged, stale/inapplicable,

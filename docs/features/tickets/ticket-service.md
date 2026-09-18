@@ -431,7 +431,12 @@ mapping location is an implementation choice.
 6. If `severity_manual` provided: create `TicketAuditEvent`
    (`severity_changed`, `old_value = NULL`, `new_value = <severity>`)
 7. If CVE associated: create `TicketAuditEvent` (`cve_associated`)
-8. Return the created Ticket
+8. For manual create-with-CVE, use the locked-current CVE and new Ticket to
+   prepare an all-source freshness refresh through `cve_service`. Validate
+   registry capability and enabled state and register publication only after all
+   creation and audit work succeeds. This applies to both a newly created
+   placeholder and an existing CVE
+9. Return the created Ticket
 
 For a manual creation whose locked-current CVE is already `REJECTED`, these
 same steps remain authoritative: initial status still comes only from step 3,
@@ -451,6 +456,15 @@ CVSS mutations; the new Ticket row itself has no pre-existing row to lock.
 
 **reconcile_ticket_status**: Not called — initial status is determined by
 fixed rules, and the ticket cannot have packages at creation time.
+
+**Post-commit freshness**: after successful caller commit and lock release, the
+registered database-free effect publishes the refresh. Publication failure is
+best-effort for this mutation: log it and preserve the ordinary `201` response
+and committed audit events. An expected no-eligible-source preparation outcome
+is likewise logged and suppressed, so no publication is registered and the
+Ticket still commits. Unexpected database, bootstrap-invariant, registration,
+or transaction errors escape and roll back normally. Periodic sync or manual
+refetch recovers the accepted crash gap; there is no durable dispatch row.
 
 **Audit events**: Up to 4, in this order: `ticket_created`, optional
 `assignment`, optional `severity_changed`, and optional `cve_associated`.
@@ -518,7 +532,11 @@ omit it; the function then captures one date at entry for its complete chain.
     and gate #4 (at least one canonical SUSE assessment in any accepted
     version) may now fail, causing regression to Analysis. Do not auto-assign a
     second time.
-13. Return the updated Ticket.
+13. Prepare and register an all-source CVE freshness refresh through
+    `cve_service`, regardless of whether the CVE was newly created or already
+    populated. Complete registry and enabled-state validation before
+    registration.
+14. Return the updated Ticket.
 
 If the locked CVE was already `REJECTED` before this deliberate manual
 association, the function still performs only the ordinary association,
@@ -530,8 +548,8 @@ authorized user may ignore the Ticket through the ordinary manual operation.
 Behavior involves only local database operations and may insert a minimal CVE
 before that row can be locked. No synchronous external HTTP call or
 Redis/Celery operation occurs while either lock is held. Re-locking either row
-inside `recalculate_cvss_chain()` is a same-transaction no-op. The API workflow
-registers `trigger_on_demand_fetch()` as a post-commit effect; the shared
+inside `recalculate_cvss_chain()` is a same-transaction no-op. The service
+registers database-free publication as a post-commit effect; the shared
 transaction dependency executes it only after commit and lock release.
 
 This order serializes correctly with CVSS mutation. If the CVSS mutation locks
@@ -577,6 +595,14 @@ per changed automatic occurrence, followed by at most one gate-derived
 Any settings, database, eligibility, audit, flush, or reconciliation error
 escapes and rolls back association, manual-severity clearing, assignment,
 Product values, Ticket status, and every event together.
+
+An expected no-eligible-source freshness outcome is logged and suppressed: it
+registers no publication but does not roll back the association. Unexpected
+database, bootstrap-invariant, registration, or transaction errors still escape
+and roll back normally. After successful commit, Redis or broker publication
+failure is best-effort and preserves the ordinary `200` response. Periodic sync
+or manual refetch recovers the accepted commit-to-publication crash gap without
+durable dispatch state.
 
 ### assign_ticket
 
