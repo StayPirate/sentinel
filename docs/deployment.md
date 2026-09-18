@@ -1421,9 +1421,9 @@ appendonly no
    the sentinel always fires.
 
 4. **Task queue loss is acceptable.** Queued tasks that are lost during
-   a Redis restart are recovered by the next periodic fetcher execution
-   (scheduled intervals range from 6 hours to 24 hours). On-demand
-   fetches can be re-triggered via the API. The `FetcherRun` table in
+   a Redis restart are recovered by the next periodic fetcher execution on that
+   source's schedule (see the Fetcher Registry in `docs/data-sources.md`).
+   On-demand fetches can be re-triggered via the API. The `FetcherRun` table in
    PostgreSQL tracks outcomes — no Celery result backend is used.
 
 The IBS consumer heartbeat is not a task result, delivery checkpoint, or domain

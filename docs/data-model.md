@@ -548,7 +548,9 @@ See `docs/features/tickets/cve-service.md`.
 This row is latest state, not status history. Concurrent periodic, catch-up,
 retry, and on-demand writes to one unique key serialize atomically. The last
 successfully serialized write determines the persisted status and timestamps;
-rollback or a failed write leaves the previous committed row unchanged.
+rollback or a failed write leaves the previous committed row unchanged. `id` is
+an internal primary key and the stable pagination tie-breaker; it is not exposed
+in the global CVE-source listing response.
 
 **Derived predicate — "stalled"**: `status = 'failure' AND
 first_failed_at < now() - 30 days`. Not a stored column, ENUM value, or
@@ -592,7 +594,7 @@ representations) for the complete boundary-conversion contract.
 | `"kev"` | CISA Known Exploited Vulnerabilities catalog |
 | `"epss"` | FIRST EPSS (Exploit Prediction Scoring System) |
 
-**Format constraint**: values MUST match `[a-z][a-z0-9_]*` and not
+**Format constraint**: values MUST match `^[a-z][a-z0-9_]*$` and not
 exceed 100 characters (matching the `CVESource.source` VARCHAR(100)
 column constraint). Enforced by a unit test on the Enum definition.
 
@@ -829,6 +831,13 @@ a no-op. There is no ingestion deletion operation.
 Stores CISA Known Exploited Vulnerabilities catalog data. Although it
 is a 1:1 relationship with CVE, isolating KEV data keeps the CVE table
 lean and gives the `sync_cisa_kev` fetcher a clean upsert target.
+
+`CVEKEVEntry` is the authority for persisted KEV-evidence presence. Both the
+dedicated `sync_cisa_kev` fetcher and the MITRE CISA-ADP container write it.
+The per-CVE source-status projection reports `source = "kev"` as `success` from
+its presence regardless of writer, using `updated_at` as the completed
+`fetched_at`. See `docs/features/tickets/cve-service.md` (KEV status
+derivation).
 
 | Column | Type | Constraints | Description |
 |--------|------|-------------|-------------|
