@@ -4,7 +4,8 @@ description: >
   flows, and inconsistent terminology. Use after cross-feature or
   cross-cutting contract changes. Read-only.
 mode: subagent
-model: google-vertex/claude-sonnet-5@default
+model: helmcode/deepseek-v4-flash
+variant: high
 permission:
   edit: deny
   bash:

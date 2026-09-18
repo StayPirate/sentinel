@@ -4,7 +4,8 @@ description: >
   spec, or in a cross-cutting authority, and detects premature
   generalization. Use after adding potentially shared rules. Read-only.
 mode: subagent
-model: google-vertex/claude-sonnet-5@default
+model: helmcode/deepseek-v4-flash
+variant: high
 permission:
   edit: deny
   bash:

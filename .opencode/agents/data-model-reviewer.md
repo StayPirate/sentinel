@@ -3,7 +3,8 @@ description: >
   Reviews schema simplicity, consistency, and conventions. Use after changing
   SQLAlchemy models, Alembic migrations, or `docs/data-model.md`. Read-only.
 mode: subagent
-model: google-vertex/claude-sonnet-5@default
+model: helmcode/deepseek-v4-flash
+variant: high
 permission:
   edit: deny
   bash:

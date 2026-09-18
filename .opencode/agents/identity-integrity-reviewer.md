@@ -4,7 +4,8 @@ description: >
   and centralized User, UserRole, API-key, and RoleMapping ownership. Use
   after changing identity mutation code or specs. Read-only.
 mode: subagent
-model: google-vertex/claude-sonnet-5@default
+model: helmcode/deepseek-v4-flash
+variant: high
 permission:
   edit: deny
   bash:

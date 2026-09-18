@@ -4,7 +4,8 @@ description: >
   required omissions and unauthorized behavior. Use before opening or
   updating every PR, or on demand with a PR reference. Read-only.
 mode: subagent
-model: google-vertex/claude-sonnet-5@default
+model: helmcode/deepseek-v4-flash
+variant: high
 permission:
   edit: deny
   bash:
