@@ -594,7 +594,7 @@ representations) for the complete boundary-conversion contract.
 | `"kev"` | CISA Known Exploited Vulnerabilities catalog |
 | `"epss"` | FIRST EPSS (Exploit Prediction Scoring System) |
 
-**Format constraint**: values MUST match `[a-z][a-z0-9_]*` and not
+**Format constraint**: values MUST match `^[a-z][a-z0-9_]*$` and not
 exceed 100 characters (matching the `CVESource.source` VARCHAR(100)
 column constraint). Enforced by a unit test on the Enum definition.
 

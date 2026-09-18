@@ -441,6 +441,7 @@ flowchart LR
         ONDEMAND["fetch_single_cve<br/>on-demand sub-operation"]
         CATCHUP["catch_up()<br/>(Ticket convergence)"]
         RETRY["evaluate_failed_cve_sources<br/>(daily, 30-day failure window)"]
+        DIRECT["fetcher.fetch_single()<br/>direct call, no pending marker"]
         REDIS["Redis<br/>fetch_pending marker<br/>dedup + pending overlay (best-effort)"]
     end
 
@@ -456,25 +457,26 @@ flowchart LR
     HANDOFF["Post-commit best-effort<br/>package handoff<br/>resolve_ticket_packages"]
     FRESH["Post-commit freshness<br/>publication (Redis + Celery)"]
 
-    READ_PROT["Protected per-CVE source read<br/>GET /api/v1/cves/:cve_id/sources<br/>CVE accessibility applied"]
-    READ_GLOBAL["Global identifier-only listing<br/>GET /api/v1/cve-sources<br/>no Ticket visibility join"]
+    READ_PROT["Protected per-CVE source read<br/>CVE accessibility applied"]
+    READ_GLOBAL["Global identifier-only listing<br/>no Ticket visibility join"]
 
     SRC --> PERIODIC
     PERIODIC --> UPSERT
     RETRY -.-> ONDEMAND
-    CATCHUP -.-> ONDEMAND
+    CATCHUP -.-> DIRECT
+    DIRECT --> UPSERT
     ONDEMAND --> UPSERT
     ONDEMAND -.-> REDIS
 
     UPSERT --> CVSS --> NEWTKT --> REFS --> SRCLATEST
     SRCLATEST --> COMMIT
-    COMMIT -. "best-effort" .-> HANDOFF
-    COMMIT -. "best-effort" .-> FRESH
+    COMMIT -.->|"best-effort"| HANDOFF
+    COMMIT -.->|"best-effort"| FRESH
     FRESH -.-> REDIS
 
     SRCLATEST --> READ_PROT
     SRCLATEST --> READ_GLOBAL
-    REDIS -. "best-effort pending overlay" .-> READ_PROT
+    REDIS -.->|"best-effort pending overlay"| READ_PROT
 
     style sources fill:#f3e8ff,stroke:#7c3aed
     style dispatch fill:#fce7f3,stroke:#db2777
@@ -483,10 +485,11 @@ flowchart LR
 
 Reading the diagram:
 
-- **Periodic fetchers** run source-specific Beat schedules; **on-demand**
-  `fetch_single_cve`, **catch-up**, and the daily **failure evaluator** reuse
-  the same per-CVE boundary. `evaluate_failed_cve_sources` dispatches through
-  the on-demand publication path rather than calling `upsert_cve()` itself.
+- **Periodic fetchers** run source-specific Beat schedules. **On-demand**
+  `fetch_single_cve` and the daily **failure evaluator** reuse the on-demand
+  publication path and its Redis pending marker; **catch-up** instead calls
+  `fetcher.fetch_single()` directly through Ticket convergence and does not
+  create or inspect the marker. All paths converge on the same per-CVE boundary.
 - `BaseCVEFetcher` and `cve_service.upsert_cve()` form the shared, source-neutral
   boundary. Phase 1 is one database-only PostgreSQL transaction: CVE, CVSS,
   Ticket, references, and `CVESource` latest-state. No external I/O occurs while
@@ -497,11 +500,11 @@ Reading the diagram:
 - Redis holds only the ephemeral `fetch_pending` deduplication marker and the
   best-effort pending overlay; it is never authoritative. When the overlay read
   fails, the per-CVE read falls back to the complete durable status.
-- The **protected per-CVE read** applies CVE accessibility and returns
-  `404 CVE_NOT_FOUND` for missing or inaccessible CVEs. The **global
-  identifier-only listing** is the intentional exception: it applies no Ticket
-  visibility join and exposes only the public CVE ID and operational source
-  metadata.
+- The **protected per-CVE read** (`GET /api/v1/cves/{cve_id}/sources`) applies
+  CVE accessibility and returns `404 CVE_NOT_FOUND` for missing or inaccessible
+  CVEs. The **global identifier-only listing** (`GET /api/v1/cve-sources`) is the
+  intentional exception: it applies no Ticket visibility join and exposes only
+  the public CVE ID and operational source metadata.
 
 ### Package and Release Tracking
 

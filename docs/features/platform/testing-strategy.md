@@ -1850,6 +1850,8 @@ integration tests MUST cover this complete matrix.
   matches.
 - Severity `none` (resolved score `0.0`) and `unresolved` (SQL `NULL`), and a
   supplied severity list whose values are all invalid returning an empty page.
+- A supplied `cve_state` that is not the documented `published`/`rejected`
+  wire value returning an empty page.
 - Inclusive date bounds, an inverted range, and rows whose `published_date` is
   `NULL` excluded when a bound is present.
 - Lexical `cve_id` sort, semantic `severity` sort, NULL-last behavior, and the
@@ -1899,6 +1901,9 @@ integration tests MUST cover this complete matrix.
 
 - Current and historical source identities, and the `source`, `status`,
   `stalled`, and date filters.
+- A malformed or overlength `source` value rejected as `422 VALIDATION_ERROR`
+  and a well-formed absent value returning an empty page; a supplied `status`
+  that is not a persisted status value returning an empty page.
 - The 30-day boundary before, exactly at, and after the threshold, with the
   same observation instant used for the page and `meta.total`; `stalled=false`
   is not treated as retryable.
