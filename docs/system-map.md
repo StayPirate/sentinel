@@ -468,8 +468,8 @@ flowchart LR
     ONDEMAND --> UPSERT
     ONDEMAND -.-> REDIS
 
-    UPSERT --> CVSS --> NEWTKT --> REFS --> SRCLATEST
-    SRCLATEST --> COMMIT
+    UPSERT --> NEWTKT --> CVSS --> SRCLATEST --> REFS
+    REFS --> COMMIT
     COMMIT -.->|"best-effort"| HANDOFF
     COMMIT -.->|"best-effort"| FRESH
     FRESH -.-> REDIS
@@ -491,9 +491,10 @@ Reading the diagram:
   `fetcher.fetch_single()` directly through Ticket convergence and does not
   create or inspect the marker. All paths converge on the same per-CVE boundary.
 - `BaseCVEFetcher` and `cve_service.upsert_cve()` form the shared, source-neutral
-  boundary. Phase 1 is one database-only PostgreSQL transaction: CVE, CVSS,
-  Ticket, references, and `CVESource` latest-state. No external I/O occurs while
-  the CVE or Ticket lock is held.
+  boundary. Phase 1 is one database-only PostgreSQL transaction in the
+  authoritative order: CVE merge, Ticket, CVSS batch and lifecycle,
+  `CVESource` latest-state, then references. No external I/O occurs while the
+  CVE or Ticket lock is held.
 - Commit releases the CVE and Ticket locks **before** any post-commit effect.
   The pure package-candidate handoff and the freshness publication are
   best-effort and never reclassify committed ingestion.

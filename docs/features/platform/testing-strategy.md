@@ -1852,8 +1852,8 @@ integration tests MUST cover this complete matrix.
   supplied severity list whose values are all invalid returning an empty page.
 - A supplied `cve_state` that is not the documented `published`/`rejected`
   wire value returning an empty page.
-- Inclusive date bounds, an inverted range, and rows whose `published_date` is
-  `NULL` excluded when a bound is present.
+- Inclusive date bounds, an inverted range returning `400 DATE_RANGE_INVERTED`,
+  and rows whose `published_date` is `NULL` excluded when a bound is present.
 - Lexical `cve_id` sort, semantic `severity` sort, NULL-last behavior, and the
   same-direction internal tie-breaker across pages; a page beyond the last page
   returns an empty item list with the correct total.
@@ -1875,6 +1875,9 @@ integration tests MUST cover this complete matrix.
   and every durable status combined with an enabled-source pending marker;
   disabled-source overlay suppression; deterministic `source` ordering with
   current and historical identities interleaved.
+- A pending marker preserving the last completed `fetched_at` and
+  `first_failed_at` over a prior `success`/`failure`/`missing` row, and a
+  pending marker with no persisted row yielding null timestamps.
 - Aggregate Redis overlay success and failure, proving the failure path returns
   the complete durable status for every source with `200 OK` and never a mixed
   response assembled from observations taken before and after the failure.
@@ -1900,7 +1903,8 @@ integration tests MUST cover this complete matrix.
 **Global persisted-source listing:**
 
 - Current and historical source identities, and the `source`, `status`,
-  `stalled`, and date filters.
+  `stalled`, and date filters, including an inverted `from_date`/`to_date`
+  range returning `400 DATE_RANGE_INVERTED`.
 - A malformed or overlength `source` value rejected as `422 VALIDATION_ERROR`
   and a well-formed absent value returning an empty page; a supplied `status`
   that is not a persisted status value returning an empty page.
@@ -1909,6 +1913,9 @@ integration tests MUST cover this complete matrix.
   is not treated as retryable.
 - Lexical `source`/`status` sort, nullable timestamp sort, coherent total, and
   the internal `CVESource.id` tie-breaker across pages.
+- An anonymous request returning a source row whose CVE is associated with a
+  confidential Ticket, proving the identifier-only exception is preserved and
+  not over-restricted.
 - `CVESource.id` absent from the response, and no Ticket UUID, protected CVE
   content, user identity, or raw error exposed.
 - A latest-state result that can diverge from `FetcherRun.items_failed` without
