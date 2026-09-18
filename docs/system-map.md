@@ -421,70 +421,87 @@ erDiagram
 
 ### CVE Ingestion
 
-How CVEs flow from external sources into Sentinel, trigger ticket creation, and
-hand package candidates to post-commit resolution. See
+How CVEs flow from all external sources into Sentinel, trigger ticket creation,
+and hand package candidates to post-commit resolution. The eight current CVE
+sources share one source-neutral boundary, so the diagram represents the
+sources as a group rather than duplicating one pipeline per source. See
 [features/tickets/cve-tracking.md](features/tickets/cve-tracking.md),
+[features/tickets/cve-service.md](features/tickets/cve-service.md),
 [features/tickets/cvss-scoring.md](features/tickets/cvss-scoring.md), and
 [features/packages/package-service.md](features/packages/package-service.md).
 
 ```mermaid
 flowchart LR
-    subgraph sources["External Sources"]
-        NVD["NVD"]
-        MITRE["MITRE"]
-        RH["Red Hat"]
+    subgraph sources["External CVE Sources (8)"]
+        SRC["NVD · MITRE cvelistV5 · Linux Kernel<br/>Red Hat · GHSA · OSV · CISA KEV · FIRST EPSS"]
     end
 
-    subgraph celery["Celery Workers"]
-        SYNC_NVD["sync_nvd_cves"]
-        SYNC_MITRE["sync_mitre_cves"]
-        SYNC_RH["sync_redhat_cves"]
+    subgraph dispatch["Scheduling and Dispatch"]
+        PERIODIC["Periodic fetchers<br/>BaseCVEFetcher.execute()<br/>(source-specific Beat schedule)"]
+        ONDEMAND["fetch_single_cve<br/>on-demand sub-operation"]
+        CATCHUP["catch_up()<br/>(Ticket convergence)"]
+        RETRY["evaluate_failed_cve_sources<br/>(daily, 30-day failure window)"]
+        REDIS["Redis<br/>fetch_pending marker<br/>dedup + pending overlay (best-effort)"]
     end
 
-    subgraph store["Database Operations"]
-        CVE_REC["Create/Update CVE<br/>+ CVESource"]
-        CVSS_REC["Create/Update<br/>CVECVSSAssessment"]
-        REF_REC["Create<br/>TicketReference"]
-        SEV["Recalculate<br/>CVE.severity"]
+    subgraph boundary["Shared Boundary: BaseCVEFetcher / cve_service"]
+        UPSERT["upsert_cve()<br/>Phase 1: DB-only transaction"]
+        CVSS["CVSS batch + severity<br/>+ Product eligibility"]
+        NEWTKT["Auto-create Ticket (New)"]
+        REFS["reference_service<br/>automatic references"]
+        SRCLATEST["CVESource latest-state<br/>one row per (cve_id, source)"]
     end
 
-    subgraph ticket_ops["Ticket Operations"]
-        NEW_TKT["Auto-create Ticket<br/>(status: New)"]
-        ELIG_EVAL["Eligibility cascade<br/>(product thresholds)"]
-        EVENT["Create<br/>TicketAuditEvent"]
-    end
+    COMMIT["Commit<br/>release CVE and Ticket locks"]
+    HANDOFF["Post-commit best-effort<br/>package handoff<br/>resolve_ticket_packages"]
+    FRESH["Post-commit freshness<br/>publication (Redis + Celery)"]
 
-    COMMIT["Commit CVE transaction<br/>and release locks"]
-    HANDOFF["Post-commit best-effort<br/>resolve_ticket_packages"]
-    PACKAGE_TX["Package service<br/>one transaction per package"]
+    READ_PROT["Protected per-CVE source read<br/>GET /api/v1/cves/:cve_id/sources<br/>CVE accessibility applied"]
+    READ_GLOBAL["Global identifier-only listing<br/>GET /api/v1/cve-sources<br/>no Ticket visibility join"]
 
-    NVD --> SYNC_NVD
-    MITRE --> SYNC_MITRE
-    RH --> SYNC_RH
+    SRC --> PERIODIC
+    PERIODIC --> UPSERT
+    RETRY -.-> ONDEMAND
+    CATCHUP -.-> ONDEMAND
+    ONDEMAND --> UPSERT
+    ONDEMAND -.-> REDIS
 
-    SYNC_NVD --> CVE_REC
-    SYNC_NVD --> CVSS_REC
-    SYNC_NVD --> REF_REC
-    SYNC_MITRE --> CVE_REC
-    SYNC_MITRE --> REF_REC
-    SYNC_RH --> CVSS_REC
+    UPSERT --> CVSS --> NEWTKT --> REFS --> SRCLATEST
+    SRCLATEST --> COMMIT
+    COMMIT -. "best-effort" .-> HANDOFF
+    COMMIT -. "best-effort" .-> FRESH
+    FRESH -.-> REDIS
 
-    CVE_REC -->|new CVE| NEW_TKT
-    CVSS_REC --> SEV
-    SEV --> ELIG_EVAL
-    NEW_TKT --> EVENT
-    ELIG_EVAL --> EVENT
-    CVE_REC --> COMMIT
-    REF_REC --> COMMIT
-    EVENT --> COMMIT
-    COMMIT -.->|"best-effort publish"| HANDOFF
-    HANDOFF --> PACKAGE_TX
+    SRCLATEST --> READ_PROT
+    SRCLATEST --> READ_GLOBAL
+    REDIS -. "best-effort pending overlay" .-> READ_PROT
 
     style sources fill:#f3e8ff,stroke:#7c3aed
-    style celery fill:#fce7f3,stroke:#db2777
-    style store fill:#d1fae5,stroke:#059669
-    style ticket_ops fill:#fef3c7,stroke:#d97706
+    style dispatch fill:#fce7f3,stroke:#db2777
+    style boundary fill:#d1fae5,stroke:#059669
 ```
+
+Reading the diagram:
+
+- **Periodic fetchers** run source-specific Beat schedules; **on-demand**
+  `fetch_single_cve`, **catch-up**, and the daily **failure evaluator** reuse
+  the same per-CVE boundary. `evaluate_failed_cve_sources` dispatches through
+  the on-demand publication path rather than calling `upsert_cve()` itself.
+- `BaseCVEFetcher` and `cve_service.upsert_cve()` form the shared, source-neutral
+  boundary. Phase 1 is one database-only PostgreSQL transaction: CVE, CVSS,
+  Ticket, references, and `CVESource` latest-state. No external I/O occurs while
+  the CVE or Ticket lock is held.
+- Commit releases the CVE and Ticket locks **before** any post-commit effect.
+  The pure package-candidate handoff and the freshness publication are
+  best-effort and never reclassify committed ingestion.
+- Redis holds only the ephemeral `fetch_pending` deduplication marker and the
+  best-effort pending overlay; it is never authoritative. When the overlay read
+  fails, the per-CVE read falls back to the complete durable status.
+- The **protected per-CVE read** applies CVE accessibility and returns
+  `404 CVE_NOT_FOUND` for missing or inaccessible CVEs. The **global
+  identifier-only listing** is the intentional exception: it applies no Ticket
+  visibility join and exposes only the public CVE ID and operational source
+  metadata.
 
 ### Package and Release Tracking
 

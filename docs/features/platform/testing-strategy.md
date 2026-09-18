@@ -1826,6 +1826,89 @@ task-wrapper, and e2e tests MUST cover:
 - cross-loop lifecycle regression coverage for repeated task attempts using the
   production pooled engine.
 
+### CVE and Source Reads
+
+When the CVE list, the per-CVE source-status read, or the global
+persisted-source listing is implemented or changed, focused service, API, and
+integration tests MUST cover this complete matrix.
+
+**CVE list:**
+
+- Anonymous and authenticated callers, with ticketless CVEs always visible and
+  associated CVEs visible or invisible according to the canonical Ticket
+  predicate; an independent-session race changes confidentiality, revokes the
+  caller's grant, excludes the caller's last qualifying package, or creates the
+  CVE-to-Ticket association so an initially visible CVE becomes inaccessible
+  before the protected selection, and the response never exposes a row selected
+  after access was lost.
+- Single and combined `search`, `cve_state`, repeatable `severity`,
+  `has_ticket`, `from_date`, and `to_date` filters, including AND across
+  distinct filters and OR across valid severity values.
+- Search normalization: outer trim, a whitespace-only value equivalent to
+  omission, and literal percent, underscore, and backslash characters; CVE-ID
+  case-insensitive prefix and title/description case-insensitive substring
+  matches.
+- Severity `none` (resolved score `0.0`) and `unresolved` (SQL `NULL`), and a
+  supplied severity list whose values are all invalid returning an empty page.
+- Inclusive date bounds, an inverted range, and rows whose `published_date` is
+  `NULL` excluded when a bound is present.
+- Lexical `cve_id` sort, semantic `severity` sort, NULL-last behavior, and the
+  same-direction internal tie-breaker across pages; a page beyond the last page
+  returns an empty item list with the correct total.
+- Fan-out from the associated-Ticket join and child joins collapsing to exactly
+  one logical row per CVE, with no duplicate rows and no inflated `meta.total`.
+- Items and `meta.total` deriving from one coherent observation, proven by
+  failing an implementation that counts broadly and removes rows in Python or
+  post-filters after pagination.
+
+**Per-CVE source status:**
+
+- Malformed, missing, and inaccessible CVE paths producing identical
+  `404 CVE_NOT_FOUND` bodies; independent-session acquisition and loss of access
+  before the protected selection.
+- Registered sources with no `CVESource` row, persisted historical
+  (deregistered) sources, `enabled` independent of `refetchable`, and the
+  missing-`FetcherConfig` effective-enabled fallback.
+- Every durable status (`success`, `failure`, `missing`) and `not_attempted`,
+  and every durable status combined with an enabled-source pending marker;
+  disabled-source overlay suppression; deterministic `source` ordering with
+  current and historical identities interleaved.
+- Aggregate Redis overlay success and failure, proving the failure path returns
+  the complete durable status for every source with `200 OK` and never a mixed
+  response assembled from observations taken before and after the failure.
+- The durable observation completing and its transaction closing before any
+  Redis I/O.
+
+**KEV projection:**
+
+- A `CVEKEVEntry` written through the dedicated `sync_cisa_kev` fetcher and a
+  `CVEKEVEntry` written through the MITRE CISA-ADP container both yielding
+  `success` with `fetched_at = CVEKEVEntry.updated_at` and null
+  `first_failed_at`.
+- No entry and no successful `sync_cisa_kev` run yielding `not_attempted`; a
+  fully successful run whose `finished_at` precedes the CVE yielding
+  `not_attempted`; a later fully successful run yielding `missing` with the run
+  `finished_at`.
+- `partial`, `failure`, `queued`, and `running` runs never proving absence, and
+  the `finished_at DESC, id DESC` tie-breaker selecting the latest successful
+  run.
+- A retained historical entry continuing to yield `success` after catalog
+  removal.
+
+**Global persisted-source listing:**
+
+- Current and historical source identities, and the `source`, `status`,
+  `stalled`, and date filters.
+- The 30-day boundary before, exactly at, and after the threshold, with the
+  same observation instant used for the page and `meta.total`; `stalled=false`
+  is not treated as retryable.
+- Lexical `source`/`status` sort, nullable timestamp sort, coherent total, and
+  the internal `CVESource.id` tie-breaker across pages.
+- `CVESource.id` absent from the response, and no Ticket UUID, protected CVE
+  content, user identity, or raw error exposed.
+- A latest-state result that can diverge from `FetcherRun.items_failed` without
+  changing the authoritative run count.
+
 ### CVE Ingestion and Ticket Composition
 
 When the complete source-neutral ingestion transaction is implemented or

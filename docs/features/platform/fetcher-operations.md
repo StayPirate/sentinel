@@ -1067,10 +1067,16 @@ three failed units, the run selected 60 terminal units.
 
 **Failure drill-down**: for CVE fetchers (where `cve_source_type` is
 defined in the fetcher registry response), the run detail view can link
-to `GET /api/v1/cve-sources?source={cve_source_type}&status=failure&from_date={started_at}&to_date={finished_at}`
-to show individual CVEs that failed during the run. For runs still in
-`running` status, omit `to_date` for a live view of accumulated
-failures. If `started_at` is `null` (a `queued` run finalized as
+to `GET /api/v1/cve-sources?source={cve_source_type}&status=failure&from_date={started_at}&to_date={finished_at}`.
+This is a latest-state operational approximation, not an exact
+reconstruction of the run: it shows persisted failure rows whose current
+latest `fetched_at` falls within the supplied window. Because `CVESource`
+stores only one latest-state row per `(cve_id, source)`, later periodic,
+catch-up, retry, or on-demand writes may add, remove, or reclassify rows
+relative to the original run, and the number of rows can differ from the run's
+counter. `FetcherRun.items_failed` remains the authoritative aggregate count.
+For runs still in `running` status, omit `to_date` for a live view of
+accumulated failures. If `started_at` is `null` (a `queued` run finalized as
 `failure` before any worker adopted it, or a run still `queued`), omit
 this drill-down entirely — no execution window exists to query. See
 `docs/features/tickets/cve-service.md` (Global CVE Source
