@@ -4,7 +4,8 @@ description: >
   authorization, user input, secrets, external integrations, and sensitive
   dependencies. Use after security-relevant changes. Read-only.
 mode: subagent
-model: google-vertex/claude-sonnet-5@default
+model: helmcode/deepseek-v4-flash
+variant: high
 permission:
   edit: deny
   bash:
