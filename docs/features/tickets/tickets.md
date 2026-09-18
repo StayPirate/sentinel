@@ -88,15 +88,16 @@ ticket creation or via explicit association), the following rules apply:
   associated with another ticket, the operation fails with 409 Conflict.
   The response body includes `existing_ticket_id` (`SNTL-{n}`) to identify
   the conflicting Ticket
-- **On-demand fetch**: if the CVE does not exist in the Sentinel
-  database, a minimal CVE record (only `cve_id` set) is created via
-  `ensure_cve_exists()` (see `docs/features/tickets/cve-service.md`).
-  The operation proceeds immediately with the minimal record. The API workflow
-  registers `trigger_on_demand_fetch()` as a post-commit effect; the shared
-  transaction dependency commits and releases database locks before dispatch.
-  This dispatch occurs unconditionally (regardless of whether the CVE was newly
-  created or already existed), with Redis deduplication preventing redundant
-  work.
+- **On-demand freshness fetch**: if the CVE does not exist, create a minimal
+  record through `ensure_cve_exists()`; otherwise use the existing locked row.
+  In both cases, the owning Ticket service prepares and registers a broadcast
+  freshness refresh inside the same transaction after association, CVSS
+  handover, Product eligibility, reconciliation, audit, and dispatch validation
+  succeed. The shared transaction dependency commits and releases locks before
+  publication. Redis deduplication prevents redundant queued work. Publication
+  failure preserves the ordinary committed Ticket response. Periodic sync or
+  manual refetch recovers the accepted commit-to-publication crash gap; no
+  durable job state is added.
 - **Normal**: if the CVE exists and is not associated with any ticket,
   the association proceeds directly
 - **Already rejected, manual operation**: when an authorized user deliberately
@@ -850,9 +851,9 @@ def ensure_ticket_operable(ticket: Ticket) -> None:
   (`reopen_from_ignored`, `revert_duplicate`); visibility-only
   `set_confidentiality`, `grant_access`, and `revoke_access`; supplementary
   editorial metadata functions `create_reference`, `update_reference`, and
-  `delete_reference`; asynchronous convergence dispatch; or trusted source
-  ingestion that modifies only source-owned external CVSS assessment and
-  CVE-derived severity
+  `delete_reference`; asynchronous convergence dispatch; CVE on-demand refetch
+  preparation; or trusted source ingestion that modifies only source-owned
+  external CVSS assessment and CVE-derived severity
 
 This source-ingestion boundary does not weaken manual-zone immutability:
 authenticated consumer APIs may mutate only the internal SUSE assessment and
@@ -1401,7 +1402,8 @@ Request body:
   `CVE_INVALID_FORMAT`. Empty strings are rejected like any other
   non-matching value — clients that intend "no CVE" must omit the field
   or send `null`. If the CVE is not in the database, a minimal CVE record
-  is created and on-demand fetch is triggered (see
+  is created and on-demand freshness fetch is prepared regardless of whether
+  the CVE was new or already present (see
   `docs/features/tickets/cve-service.md`, "On-Demand Fetch: fetch_single_cve")
 - `severity` (string, optional): initial manual severity (critical,
   high, medium, low, none). If omitted, severity is `null` (unresolved)
@@ -1434,9 +1436,9 @@ POST /api/v1/tickets/{ticket_id}/associate-cve
 **`Capability: triage_ticket`**
 - **Response schema**: `TicketDetail`
 
-Associates a CVE with a ticket that does not have one. If the CVE is not
-yet in the Sentinel database, a minimal CVE record is created and on-demand
-fetch is triggered automatically (see `docs/features/tickets/cve-service.md`,
+Associates a CVE with a ticket that does not have one. A minimal CVE record is
+created only when needed. The service always prepares on-demand freshness fetch,
+including for an existing CVE (see `docs/features/tickets/cve-service.md`,
 "On-Demand Fetch: fetch_single_cve").
 
 Request body:
@@ -1935,6 +1937,7 @@ table:
 - Creating tickets: `create_ticket` capability
 - Assigning, changing status, associating CVE, setting manual severity:
   `triage_ticket` capability
+- Refetching an accessible CVE: `triage_ticket` capability
 - Rerunning complete Ticket convergence: `triage_ticket` OR
   `manage_fetchers`, plus ordinary Ticket visibility
 - Managing packages: `manage_packages` capability

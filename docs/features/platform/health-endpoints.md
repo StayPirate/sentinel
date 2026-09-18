@@ -64,6 +64,15 @@ host), this results in a single PING. In split deployments (URLs
 pointing to different Redis instances), each unique instance is verified
 independently.
 
+The two URLs have distinct runtime responsibilities even when they resolve to
+one Redis instance. `REDIS_URL` is the application Redis used for on-demand CVE
+deduplication and pending overlays; those dispatcher operations fail open when
+it is unavailable. `CELERY_BROKER_URL` is the broker required to publish tasks;
+publication cannot be confirmed without it. Readiness intentionally retains the
+stricter existing policy of checking both configured dependencies, so a
+fail-open individual dispatcher path does not imply that the API process is
+fully ready for production traffic.
+
 **Response** (200 OK — all checks pass):
 
 ```json
@@ -145,11 +154,11 @@ timeouts:
   tokens. The response bodies do not expose sensitive information (no
   versions, hostnames, connection strings, or internal topology).
 
-- **Redis included in readiness**: without Redis, the API server cannot
-  enqueue background tasks. Operations that trigger tasks (ticket creation
-  triggers CVE fetch, on-demand fetcher runs) appear to succeed but
-  produce no follow-up processing. This constitutes a degraded state that
-  the orchestrator should be aware of. The check discovers Redis instances
+- **Redis included in readiness**: the Celery broker is required for task
+  publication. Application Redis supports caches, CVE fetch deduplication, and
+  pending overlays; the on-demand CVE dispatcher can fail open when that
+  application Redis is unavailable, but the API remains operationally degraded.
+  The check discovers Redis instances
   dynamically from the configured URLs (`REDIS_URL`, `CELERY_BROKER_URL`)
   so that split deployments are automatically covered without spec or code
   changes. The `CELERY_BROKER_URL` instance remains an API readiness

@@ -656,6 +656,29 @@ from `ensure_ticket_operable()` at the service layer. This applies
 only when the CVE has an associated ticket in a manual-zone status
 (see Manual-Zone Mutability Guard below)
 
+`POST /api/v1/cves/{cve_id}/refetch` is an explicit exception. It performs
+dispatch only, never calls `ensure_ticket_operable()`, and therefore does not
+produce `TICKET_NOT_MUTABLE` for an accessible CVE associated with an `Ignored`
+or `Duplicated` Ticket.
+
+**CVE refetch outcome matrix**: after authentication and the `triage_ticket`
+capability check, the service performs locked-current CVE accessibility before
+source capability or enabled-state validation. Missing and inaccessible CVEs
+therefore produce the identical `404 CVE_NOT_FOUND` response. The remaining
+endpoint-specific outcomes are:
+
+| Status | Code or response | Condition |
+|---|---|---|
+| 202 | Full four-list `data` result | At least one source is enqueued or already pending, including partial disabled or unconfirmed-publication outcomes |
+| 409 | `FETCHER_DISABLED` | Explicit registered refetchable source is disabled |
+| 422 | `CVE_INVALID_SOURCE` | Explicit source is unknown, deregistered, or not refetchable |
+| 503 | `CVE_FETCH_FAILED` | Broadcast has no enabled refetchable source, including an empty fetch-single registry |
+| 503 | `CELERY_UNAVAILABLE` | Every attempted publication is unconfirmed and no source is already pending |
+
+A 202 result cannot have both `sources_enqueued` and
+`sources_already_pending` empty. Every error uses the standard error envelope.
+An unconfirmed publication may still have been accepted by the broker.
+
 Anonymous selection never performs grant or maintainer lookup and therefore
 includes an associated CVE only when its Ticket is non-confidential. The CVE
 boundary consumes the canonical Ticket predicate rather than implementing a
@@ -721,7 +744,9 @@ gate state.
 - `create_reference`, `update_reference`, and `delete_reference`, which change
   only supplementary editorial metadata and do not assign, reconcile, change
   status, or exit the manual zone; and
-- `dispatch_ticket_convergence`, which validates its own eligible status set.
+- `dispatch_ticket_convergence`, which validates its own eligible status set;
+- CVE on-demand refetch preparation, which performs dispatch only and is valid
+  in every associated Ticket status.
 
 Read endpoints (GET) are never subject to this guard.
 
@@ -752,7 +777,7 @@ The derivation tables below are the single normative source of truth.
 | `/api/v1/cves/{cve_id}/**` | `404 CVE_NOT_FOUND` |
 | `/api/v1/my/packages/tickets/{ticket_id}` | `404 TICKET_NOT_FOUND` |
 | Mutation (POST/PATCH/DELETE) under `/api/v1/tickets/{ticket_id}/**` | + `409 TICKET_NOT_MUTABLE`, except when the owning endpoint contract declares an opt-out from `ensure_ticket_operable()` |
-| Mutation (POST/PATCH/DELETE) under `/api/v1/cves/{cve_id}/**` | + `409 TICKET_NOT_MUTABLE` (only when CVE has associated ticket) |
+| Mutation (POST/PATCH/DELETE) under `/api/v1/cves/{cve_id}/**` | + `409 TICKET_NOT_MUTABLE` only when the CVE has an associated Ticket and the owning endpoint does not declare an opt-out; refetch is an opt-out |
 | Any other path | None |
 
 #### Query-Shape Response Derivation
@@ -767,7 +792,7 @@ under the same routers receive only the `NOT_FOUND` scoped response.
 The mechanism behind `TICKET_NOT_MUTABLE` is `ensure_ticket_operable()`
 — see Manual-Zone Mutability Guard above. Endpoints excluded from
 `ensure_ticket_operable()` (manual-zone exit, visibility-only, supplementary
-manual-reference, and async dispatch endpoints) are annotated per-endpoint and
+manual-reference, CVE refetch, and async dispatch endpoints) are annotated per-endpoint and
 do not produce `TICKET_NOT_MUTABLE`. In particular, manual reference POST,
 PATCH, and DELETE remain valid for `Ignored` and `Duplicated` Tickets and never
 derive this response.

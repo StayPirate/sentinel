@@ -1373,7 +1373,7 @@ Sentinel uses Redis in two roles, addressed by two configuration URLs
 
 - **Application cache/coordination** (`REDIS_URL`, db 0): session
   liveness cache, login lockout counters, on-demand fetch deduplication
-  locks, CVSS recalculation lock, and the IBS consumer's best-effort
+  markers and pending overlays, CVSS recalculation lock, and the IBS consumer's best-effort
   operational heartbeat.
 - **Celery broker + scheduler** (`CELERY_BROKER_URL`, db 1): task queue
   and `celery-redbeat` schedule entries (including the distributed lock

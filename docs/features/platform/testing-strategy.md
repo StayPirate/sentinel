@@ -1769,6 +1769,63 @@ changed, focused tests MUST cover this complete contract:
   remains non-refetchable and preserves its documented isolated-status
   deviation. `CompletenessGuardError` remains in the OSV module.
 
+### On-Demand CVE Refetch
+
+When on-demand preparation, publication, task execution, source status, or the
+refetch endpoint is implemented or changed, focused integration, synchronous
+task-wrapper, and e2e tests MUST cover:
+
+- capability failure before resource lookup; missing and inaccessible CVEs with
+  identical `CVE_NOT_FOUND` bodies; and an independent-session accessibility
+  race proving CVE-then-Ticket locked-current state wins before source or
+  enabled-state validation;
+- explicit unknown/non-refetchable and disabled sources, broadcast partial
+  disabled results, no enabled refetchable sources, and an empty fetch-single
+  registry, with the exact 422/409/503 matrix and standard error envelopes;
+- service-owned preparation for manual create-with-CVE, associate-CVE, and
+  refetch; placeholder-only-when-needed behavior; refresh preparation for an
+  existing populated CVE; and atomic association, CVSS handover, Product,
+  reconciliation, audit, and registration; automatic create/associate must
+  preserve ordinary `201`/`200` and committed audit events when preparation
+  finds an empty or all-disabled eligible-source roster, while an unexpected
+  database, bootstrap-invariant, registration, or transaction error rolls back
+  the mutation and its audit events;
+- zero Redis/Celery I/O on capability or accessibility denial, validation
+  failure, rollback, and commit failure; commit and CVE/Ticket lock release
+  before publication; automatic create/associate preserving ordinary 201/200
+  on publication failure; and the accepted commit-to-publication crash gap
+  without an outbox, durable job/progress row, or result backend;
+- all four `FetchDispatchResult` lists as disjoint, deterministic canonical
+  source order; 202 only when enqueued or already pending is non-empty; partial
+  failed/disabled 202 results; and every-attempt-unconfirmed 503 without
+  treating an `apply_async()` exception as certain broker rejection;
+- fixed token-valued `SET NX EX 600`, Redis fail-open publication, compare-and-
+  expire at attempt start and before retry, no absent-key recreation, owner-only
+  terminal compare-and-delete, an old task unable to delete a newer marker, and
+  TTL recovery after crash or hard kill;
+- `fetch_single_cve` payload validation and the complete terminal matrix:
+  unknown/deregistered target, source mismatch, missing configuration, disabled
+  meanwhile, missing CVE, successful `CVEFetchResult` finalization,
+  `CVENotInSource`, retryable attempts and exhaustion, non-retryable failure,
+  cancellation, soft time limit, memory exhaustion, and process-loss cleanup;
+- one `asyncio.run()` per task attempt, one fresh session, wrapper-owned HTTP
+  teardown, exactly one engine disposal on every return/exception path, no
+  `FetcherRun`, and no Celery result storage;
+- task identity from `fetcher_cls.name` and queue omission for `None`, plus Git
+  queue preservation for both MITRE and Kernel;
+- source response `enabled` independent from `refetchable`, deregistered values
+  all false, missing-config effective enabled fallback, disabled-source overlay
+  suppression, Redis failure durable fallback, and pending overriding prior
+  success, failure, missing, or no status while retaining completed timestamps;
+- `evaluate_failed_cve_sources` materializing candidates, using non-locking
+  internal source/config revalidation, and closing each read transaction before
+  Redis/Celery; excluding sources disabled at revalidation from success and
+  failure metrics; counting a later accepted publication according to the
+  existing dispatch-only metric while the task performs its disabled no-op;
+  and
+- cross-loop lifecycle regression coverage for repeated task attempts using the
+  production pooled engine.
+
 ### CVE Ingestion and Ticket Composition
 
 When the complete source-neutral ingestion transaction is implemented or

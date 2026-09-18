@@ -458,6 +458,8 @@ function.
   mutations valid in every Ticket status
 - `ticket_service.dispatch_ticket_convergence` — validates its own eligible
   status set and never produces `TICKET_NOT_MUTABLE`
+- `cve_service` on-demand refetch preparation — dispatch-only operation valid
+  for an accessible CVE in every associated Ticket status
 - Trusted external CVSS ingestion — maintains source-owned CVE assessment and
   severity state in every Ticket status and follows the propagation
   disposition defined by the CVSS status matrix

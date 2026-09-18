@@ -208,10 +208,10 @@ volume mounted. This is achieved via a dedicated Celery queue:
 - **Worker configuration**: the worker process with access to the Git
   volume consumes from the `git` queue (in addition to the default
   queue, if desired)
-- **`fetch_single()` routing**: `trigger_on_demand_fetch()` reads
-  `fetcher_cls.queue` when dispatching via `.apply_async(queue=...)`.
-  If `None`, no queue parameter is passed and Celery uses default
-  routing. This ensures on-demand fetches for git-based fetchers
+- **`fetch_single()` routing**: transactional preparation reads
+  `fetcher_cls.queue` into primitive dispatch values. Publication passes
+  `.apply_async(queue=...)` when that value is non-`None` and omits the queue
+  parameter otherwise. This ensures on-demand fetches for git-based fetchers
   reach the worker with the volume mounted
 - **`catch_up()` routing**: Ticket convergence applies the same rule when
   publishing the generic `run_catch_up` task. Git-based catch-ups therefore
