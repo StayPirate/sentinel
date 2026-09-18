@@ -1214,7 +1214,7 @@ validation rules execute for all subclasses in the hierarchy.
 validation flows through `BaseCVEFetcher` naturally via the MRO.
 
 **Format constraint**: `CVESourceType` Enum values MUST match
-`[a-z][a-z0-9_]*` and not exceed 100 characters (matching the
+`^[a-z][a-z0-9_]*$` and not exceed 100 characters (matching the
 `CVESource.source` VARCHAR(100) column constraint). This is enforced by
 a unit test on the `CVESourceType` Enum definition — not at fetcher
 registration time, since `BaseCVEFetcher.__init_subclass__` already
