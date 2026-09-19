@@ -1819,10 +1819,12 @@ task-wrapper, and e2e tests MUST cover:
   success, failure, missing, or no status while retaining completed timestamps;
 - `evaluate_failed_cve_sources` materializing candidates, using non-locking
   internal source/config revalidation, and closing each read transaction before
-  Redis/Celery; excluding sources disabled at revalidation from success and
-  failure metrics; counting a later accepted publication according to the
-  existing dispatch-only metric while the task performs its disabled no-op;
-  and
+  Redis/Celery; excluding sources that revalidation finds unregistered,
+  no longer fetch-single capable, or disabled from success and failure metrics;
+  recording a failure for a selected pair whose required `FetcherConfig`
+  invariant fails or whose publication is unconfirmed; counting a later
+  accepted publication according to the existing dispatch-only metric while the
+  task performs its disabled no-op; and
 - cross-loop lifecycle regression coverage for repeated task attempts using the
   production pooled engine.
 

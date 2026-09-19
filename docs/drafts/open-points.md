@@ -463,9 +463,10 @@ the full convention.
 through `cve_service.upsert_cve()`, which checks for ticket existence
 on every call. Orphaned CVEs (those without a ticket due to data
 inconsistencies) are automatically re-ticketed the next time any fetcher
-processes them (~6 hours). This implements option (A) naturally without a
-dedicated orphan scanner — the check is inherent in the `upsert_cve()`
-contract and serves as a data integrity safeguard.
+processes them, according to that source's own schedule (see the Fetcher
+Registry in `docs/data-sources.md`). This implements option (A) naturally
+without a dedicated orphan scanner — the check is inherent in the
+`upsert_cve()` contract and serves as a data integrity safeguard.
 
 ---
 

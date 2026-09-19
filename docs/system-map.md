@@ -622,7 +622,7 @@ flowchart TD
     DUPLICATED["🔗 Duplicated"]
 
     NEW -->|"assignment or<br/>any modifying operation"| ANALYSIS
-    NEW -->|"manual or<br/>NVD rejection"| IGNORED
+    NEW -->|"manual or<br/>CVE rejection"| IGNORED
 
     ANALYSIS -->|"✓ all gates met:<br/>≥1 included track,<br/>no actionable ANALYSIS tracks,<br/>severity set,<br/>≥1 accepted-version SUSE CVSS (if CVE)"| ANALYZED
     ANALYSIS -->|"manual"| IGNORED
@@ -711,7 +711,7 @@ flowchart TD
     NEW -->|"first assignment<br/>(irreversible)"| ANALYSIS
 
     %% Exit to manual zone
-    NEW -->|"ignore / NVD rejection"| IGNORED
+    NEW -->|"ignore / CVE rejection"| IGNORED
     ANALYSIS -->|"ignore"| IGNORED
     ANALYSIS -->|"mark duplicate"| DUPLICATED
     ANALYZED -->|"mark duplicate"| DUPLICATED

@@ -432,7 +432,7 @@ constraint violation.
 This convention applies exclusively to `BaseFetcher` subclasses — the
 background tasks registered in the fetcher infrastructure and visible in
 the fetcher dashboard. It does NOT apply to sub-operation Celery tasks
-exempt from `BaseFetcher` per Guardrail 14, on-demand service methods,
+outside the `BaseFetcher` lifecycle, on-demand service methods,
 non-fetcher Celery tasks, or continuous consumers.
 
 #### Pattern: `<verb>_<source>_<noun>`
@@ -1458,8 +1458,9 @@ class BaseFetcher:
 
 - Created lazily on first access during `execute()`
 - Connection pooling active for the entire run
-- Destroyed by `BaseFetcher.run()` in the `finally` block (after
-  `record_end()`, suppressing `aclose()` exceptions with a log warning)
+- Destroyed by `BaseFetcher.run()` in lifecycle phase 7 (HTTP client
+  teardown, after finalization in phase 6), suppressing `aclose()`
+  exceptions with a log warning
 - Between runs: no client exists, no idle connections
 - Stale connection handling: httpx closes idle connections after ~5s of
   inactivity within the pool. If a server closes a connection earlier,
@@ -3488,7 +3489,7 @@ the dashboard charts.
 | items_succeeded | INTEGER | NOT NULL, DEFAULT 0 | Number of selected work units that reached a successful terminal outcome |
 | items_created | INTEGER | NOT NULL, DEFAULT 0 | Selected work units whose committed outcome has a create durable effect |
 | items_updated | INTEGER | NOT NULL, DEFAULT 0 | Selected work units whose committed outcome has an update durable effect |
-| items_failed | INTEGER | NOT NULL, DEFAULT 0 | Number of items that failed processing |
+| items_failed | INTEGER | NOT NULL, DEFAULT 0 | Selected work units that reached a failed terminal outcome |
 | error_message | TEXT | nullable | Sanitized error description (for all users). Written explicitly by the fetcher (`FetcherError`), by BaseFetcher's generic fallback (see "Error Message Sanitization"), or by the all-selected-units-failed outcome check (`"All {N} items failed"` — see "Status determination precedence") |
 | error_detail | TEXT | nullable | Raw exception message — `str(exception)` (`manage_fetchers` capability required for visibility) |
 | error_traceback | TEXT | nullable | Full Python traceback (`manage_fetchers` capability required for visibility) |
