@@ -526,11 +526,14 @@ migration. Stable value set defined by the CVE Program.
 
 Tracks the fetch outcome for each CVE data source. One record per source
 per CVE. Most sources write records for all outcomes (success, failure,
-missing). Some sources write only `success` records; their `failure` and
-`missing` statuses are derived at read time from other data (e.g., KEV
-derives status from `CVEKEVEntry` presence — see
-`docs/features/tickets/cve-service.md` for the derivation logic).
-See `docs/features/tickets/cve-service.md`.
+missing). Some sources write only `success` records; their non-success
+statuses are derived at read time from other data. KEV is the
+current example: `success` derives from `CVEKEVEntry` presence, while
+`missing` and `not_attempted` derive from the latest fully successful
+`sync_cisa_kev` `FetcherRun` (`finished_at DESC, id DESC`; only a run whose
+`finished_at >= CVE.created_at` proves `missing`). See
+`docs/features/tickets/cve-service.md` (KEV status derivation) for the
+complete logic.
 
 | Column      | Type          | Constraints                        | Description                        |
 |-------------|---------------|------------------------------------|------------------------------------|
@@ -766,14 +769,16 @@ UNIQUE (cve_id, source_container, vendor, product,
 ```
 
 Note: `ecosystem`, `status`, and `default_status` are intentionally
-excluded from the unique constraint. `ecosystem`: the same package in
-different ecosystems from different sources is valid (e.g., `"jinja2"`
-from OSV with `ecosystem = "PyPI"` and from GHSA with
-`ecosystem = "PyPI"` share a `source_container` and are replaced
-together). `status` and `default_status`: these are informational
-properties of the entry, not identity — two entries differing only in
-status would be semantically contradictory. Different
-`source_container` values independently own their own set of rows.
+excluded from the unique constraint, but they are semantic content rather
+than identity. Within one `(cve_id, source_container)` scope, two entries
+that share the conflict key and differ in any persisted field — including
+these three — are contradictory and invalidate the payload before writes
+(see `docs/features/tickets/cve-service.md`, Canonical Payload Duplicate
+Handling). Different `source_container` values independently own their own
+set of rows: OSV writes `"osv"` and GHSA writes `"ghsa"`, so equivalent
+packages from those sources occupy separate scopes and are never replaced
+together, while MITRE and the kernel fetcher intentionally share `"cna"`
+because they represent the same CNA data.
 
 Within one canonical payload, the safety-net unique columns are the entry
 conflict key. Identical normalized duplicates collapse. Two entries with that
@@ -1660,7 +1665,7 @@ summarized below.
 | items_succeeded      | INTEGER     | NOT NULL, DEFAULT 0      | Selected work units that reached a successful terminal outcome |
 | items_created        | INTEGER     | NOT NULL, DEFAULT 0      | Selected work units whose committed outcome has a create durable effect |
 | items_updated        | INTEGER     | NOT NULL, DEFAULT 0      | Selected work units whose committed outcome has an update durable effect |
-| items_failed         | INTEGER     | NOT NULL, DEFAULT 0      | Items that failed processing       |
+| items_failed         | INTEGER     | NOT NULL, DEFAULT 0      | Selected work units that reached a failed terminal outcome |
 | error_message        | TEXT        | nullable                 | Sanitized error description (for all users). See `docs/features/platform/fetcher-infrastructure.md`, "Error Message Sanitization" |
 | error_detail         | TEXT        | nullable                 | Raw exception message (admin-only visibility in API) |
 | error_traceback      | TEXT        | nullable                 | Full Python traceback (admin-only visibility in API) |

@@ -1145,8 +1145,12 @@ which is idempotent (no-op if data unchanged, update if changed).
   `ValueError`) propagate uncaught — these indicate hook
   implementation bugs, not input format issues
 
-The two exception types serve different purposes for the caller
-(`trigger_on_demand_fetch()`):
+The two exception types serve different purposes for the real callers of
+`fetch_single()` — the `fetch_single_cve` task wrapper
+(`docs/features/tickets/cve-service.md`, On-Demand Fetch: fetch_single_cve)
+and the default `BaseCVEFetcher.catch_up()` implementation
+(`docs/features/platform/cve-fetcher-infrastructure.md`, Default catch_up
+Implementation):
 
 - **`RuntimeError`** — "source not queryable right now" (clone missing,
   not yet created by the first periodic run, deleted after corruption
