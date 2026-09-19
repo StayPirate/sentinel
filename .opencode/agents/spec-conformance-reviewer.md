@@ -149,14 +149,18 @@ You operate in one of two modes.
 Used when invoked without an explicit reference, typically before opening or
 updating a pull request.
 
-1. `git diff origin/master...HEAD` and `git log origin/master..HEAD`
-2. If a pull request already exists for the branch, read its body with
+1. `git diff origin/master...HEAD` and `git log origin/master..HEAD`. The
+   committed diff is the review surface.
+2. `git status --porcelain` to detect working-tree divergence from `HEAD`
+   (this lists untracked, non-ignored files too). It does not change the
+   review surface; record it for the report's `Tree/diff divergence` line.
+3. If a pull request already exists for the branch, read its body with
    `gh pr view --json number,title,body,state,headRefName` and read its comments
    separately with `gh pr view --comments`
-3. Resolve the tracking issue from `Closes #<n>` in the pull request body, or
+4. Resolve the tracking issue from `Closes #<n>` in the pull request body, or
    from the `- Issue linkage:` field, or from the context supplied by the
    invoking agent
-4. Read the tracking issue body with `gh issue view <n>` and its comments
+5. Read the tracking issue body with `gh issue view <n>` and its comments
    separately with `gh issue view <n> --comments`
 
 ### Mode B — explicit pull request reference
@@ -187,6 +191,25 @@ If no tracking issue can be resolved, or the issue has no `Scope` and no
 > indistinguishable from deliberately deferred work.
 
 Do not attempt the review anyway.
+
+### When the committed diff is empty
+
+`git diff origin/master...HEAD` is the review surface. If it is empty, do not
+report `Approved`: an empty surface is not infrastructure-only, and approving
+it validates nothing. Stop and report exactly one finding:
+
+> **No committed change to review** — the committed diff is empty, so there is
+> no change to assess against the tracking issue. Commit the work on the topic
+> branch and re-invoke.
+
+When `git status --porcelain` reports paths, state that the branch's changes
+are uncommitted and that Mode A does not review the working tree: untracked
+files are invisible to the committed diff, so a worktree review would be
+incomplete, not merely unstable.
+
+When the committed diff is non-empty but `git status --porcelain` reports
+paths, proceed on the committed diff and record the divergence, so the report
+states that the verdict covers only `HEAD`.
 
 ## Direction
 
