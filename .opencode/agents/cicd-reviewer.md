@@ -5,7 +5,7 @@ description: >
   Use after changing CI/CD artifacts. Read-only.
 mode: subagent
 model: helmcode/deepseek-v4-flash
-variant: high
+variant: max
 permission:
   edit: deny
   bash:

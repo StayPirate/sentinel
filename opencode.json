@@ -29,8 +29,8 @@
     },
     "code": {
       "description": "Implements features from specifications. Signals unresolved behavioral or contract gaps while choosing compliant internal technical mechanisms.",
-      "model": "google-vertex/claude-sonnet-5@default",
-      "variant": "xhigh",
+      "model": "helmcode/deepseek-v4-flash",
+      "variant": "max",
       "mode": "primary",
       "color": "error",
       "prompt": "{file:./.opencode/prompts/code.md}",

@@ -121,8 +121,8 @@ Trigger Matrix and mirrored in `.opencode/prompts/code.md` and
 
 ### Model Tiering
 
-All reviewer subagents are pinned to
-`helmcode/deepseek-v4-flash` at the `high` reasoning-effort variant. A single
+All reviewer subagents, and the `code` primary agent, are pinned to
+`helmcode/deepseek-v4-flash` at the `max` reasoning-effort variant. A single
 default-model tier keeps review costs predictable while ensuring reviews do
 not inherit the invoking primary agent's model.
 

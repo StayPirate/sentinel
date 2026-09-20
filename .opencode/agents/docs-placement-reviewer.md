@@ -5,7 +5,7 @@ description: >
   generalization. Use after adding potentially shared rules. Read-only.
 mode: subagent
 model: helmcode/deepseek-v4-flash
-variant: high
+variant: max
 permission:
   edit: deny
   bash:

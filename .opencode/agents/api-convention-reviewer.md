@@ -5,7 +5,7 @@ description: >
   feature spec adds or changes endpoints. Read-only.
 mode: subagent
 model: helmcode/deepseek-v4-flash
-variant: high
+variant: max
 permission:
   edit: deny
   bash:
