@@ -5,7 +5,7 @@ description: >
   updating every PR, or on demand with a PR reference. Read-only.
 mode: subagent
 model: helmcode/deepseek-v4-flash
-variant: high
+variant: max
 permission:
   edit: deny
   bash:
