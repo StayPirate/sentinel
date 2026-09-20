@@ -33,6 +33,7 @@
     - [Caller-Owned Service Transactions](#caller-owned-service-transactions)
     - [API Transaction Dependency Scope](#api-transaction-dependency-scope)
     - [Pessimistic Locking Pattern](#pessimistic-locking-pattern)
+    - [Cross-Domain Root Lock Order](#cross-domain-root-lock-order)
     - [Transaction Hygiene Rules](#transaction-hygiene-rules)
   - [Redis](#redis)
     - [Redis Key Conventions](#redis-key-conventions)
@@ -746,6 +747,47 @@ The rule is proportional to the mutation:
 These cases are not permission to split a read-modify-write mutation around a
 lock. Once a function begins reading persisted state that determines a root
 mutation or its audit values, it must acquire the root lock first.
+
+#### Cross-Domain Root Lock Order
+
+When one transaction needs pessimistic locks from more than one of the User,
+CVE, and Ticket domains, it acquires existing roots in this order:
+
+```text
+User rows by UUID -> optional CVE row -> Ticket rows by UUID -> child rows
+```
+
+The order applies to every root that participates in the transaction; it does
+not require an operation to acquire roots it does not use. A transaction that
+has no User root retains the existing CVE-then-Ticket or Ticket-only order. A
+system operation that cannot create or change an assignment likewise needs no
+User lock merely because it mutates a Ticket. Foreign-key validation and
+unlocked User observations are not additional roots in this protocol.
+
+Every user-attributed path that can create or change `Ticket.assignee_id`
+acquires `FOR SHARE` on the prospective assignee User before its CVE or Ticket
+root. It retains that lock through assignment eligibility validation and the
+Ticket mutation. Assignment paths may therefore proceed concurrently toward
+the same User. A User lifecycle or role-origin mutation that can make an
+eligible User ineligible acquires `FOR NO KEY UPDATE` on the User before
+changing `User.active` or the effective `vulnerability_analyst` origins. These
+lock modes conflict with one another, so assignment and eligibility loss have
+one stable serialization point, while ordinary foreign-key `FOR KEY SHARE`
+validation remains compatible. A mutation that can only make a User eligible,
+such as reactivation, may retain its owning specification's same or stronger
+User lock.
+
+The active contract currently applies this role-origin rule to manual role
+mutation. Deferred external-provisioning and `RoleMapping` workflows must
+define how they stabilize their complete affected-User set before those
+workflows become active; this ordering rule does not by itself choose their
+persistence owner or transaction-composition mechanism.
+
+When one workflow affects multiple Users or Tickets, it locks every applicable
+User in ascending UUID order before locking the union of applicable Tickets in
+ascending UUID order. It MUST NOT alternate roots as User A, Ticket A, User B.
+The same rule applies whether the set is processed by one helper call or by a
+batch orchestrator.
 
 #### Transaction Hygiene Rules
 

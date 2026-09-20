@@ -194,12 +194,26 @@ All mutation operations that modify only the Ticket root follow the
 pessimistic locking pattern defined in `docs/conventions.md`
 (Transaction and Locking) and extended by `ticket-mutations.md`
 (Concurrency Control). Every such operation acquires `FOR UPDATE` on the
-Ticket row as its first database operation.
+Ticket row as its first root operation unless it can assign a User.
 
-`associate_cve()` participates in both CVE-owned and Ticket-owned state and
-therefore uses the global root order: lock the CVE first, then the Ticket. This
-is one existing-row exception in this module to the Ticket-first rule; the
-User-then-Ticket access-grant exception is defined next.
+Every user-attributed path that can create or change an assignment first
+acquires `FOR SHARE` on the prospective assignee User and validates eligibility
+from that locked row. It then acquires any CVE and Ticket roots in the global
+`User -> CVE -> Ticket` order. The User lock is retained until transaction
+completion and conflicts with deactivation or a potentially final VA-origin
+removal. System-only paths that do not assign acquire no User lock.
+
+For operations whose existing error precedence requires Ticket accessibility or
+operability before a missing or ineligible assignment target is reported, User
+resolution may preserve an absent result and locking may occur first, but the
+error is raised only after the Ticket checks. This stabilizes target state
+without changing the public error order.
+
+`associate_cve()` participates in User assignment eligibility plus CVE-owned
+and Ticket-owned state and therefore uses the global root order: acting User,
+CVE, then Ticket. A system CVE workflow that cannot assign omits the User root
+and retains CVE then Ticket. The User-then-Ticket access-grant exception is
+defined next.
 
 Access-grant operations that identify a target user participate in User and
 Ticket state without mutating the User. They use the global `User` then `Ticket`
@@ -223,10 +237,12 @@ accessibility. The concrete private helper, optional parameter, or equivalent
 service result used to provide this behavior is an implementation choice, not a
 new consumer operation.
 
-Creating a CVE-less Ticket performs only an INSERT and needs no existing-root
-lock. When `create_ticket()` associates a CVE, it resolves and locks that CVE
-before inserting the Ticket. The Ticket uniqueness constraint remains the
-final defense against concurrent INSERTs for the same CVE.
+Creating a CVE-less Ticket performs only a User eligibility lock, when it has a
+manual actor, followed by the INSERT. When `create_ticket()` associates a CVE,
+it locks the manual actor User before resolving and locking that CVE, then
+inserts the Ticket. A system creation has no User root. The Ticket uniqueness
+constraint remains the final defense against concurrent INSERTs for the same
+CVE.
 
 ## Ticket Query Operations
 
@@ -373,8 +389,8 @@ and its audit events.
 
 ### create_ticket
 
-Creates a new ticket. Optionally associates a CVE and sets initial
-status based on the creating user's role.
+Creates a new ticket. Optionally associates a CVE and sets initial status from
+the creating User's locked-current active VA eligibility.
 
 ```python
 async def create_ticket(
@@ -412,34 +428,38 @@ mapping location is an implementation choice.
 
 **Behavioral steps**:
 
-1. If `cve_id` is provided, resolve CVE via CVE Resolution Behavior and retain
+1. For manual creation, acquire `FOR SHARE` on the acting User and determine
+   active VA eligibility from the locked row. An inactive or non-VA creator is
+   not assigned; creation continues under the existing non-assignment branch.
+   A system creation skips this step
+2. If `cve_id` is provided, resolve CVE via CVE Resolution Behavior and retain
    `FOR UPDATE` on the CVE before reading association state or inserting the
    Ticket. A newly inserted CVE is already owned by the transaction. If no CVE
    is provided, no row lock is required
-2. INSERT new Ticket row with initial fields (all unspecified columns
+3. INSERT new Ticket row with initial fields (all unspecified columns
    use database defaults: `duplicate_of_id = NULL`,
    `updated_at = now(UTC)`, etc.)
-3. Determine initial status:
-   - If `acting_user_id` is not None AND user holds VA role:
+4. Determine initial status:
+   - If the locked acting User is active and holds the VA role:
      `status = Analysis`, `assignee_id = acting_user_id`
    - Otherwise: `status = New`
-4. Create `TicketAuditEvent` (`ticket_created`) with the exact canonical
+5. Create `TicketAuditEvent` (`ticket_created`) with the exact canonical
    comment selected from `source` and `ingestion_source`. This is
    always the first event in the Ticket's history, before every optional
    severity, assignment, or CVE-association event below
-5. If assigned (step 3): create `TicketAuditEvent` (`assignment`)
-6. If `severity_manual` provided: create `TicketAuditEvent`
+6. If assigned (step 4): create `TicketAuditEvent` (`assignment`)
+7. If `severity_manual` provided: create `TicketAuditEvent`
    (`severity_changed`, `old_value = NULL`, `new_value = <severity>`)
-7. If CVE associated: create `TicketAuditEvent` (`cve_associated`)
-8. For manual create-with-CVE, use the locked-current CVE and new Ticket to
+8. If CVE associated: create `TicketAuditEvent` (`cve_associated`)
+9. For manual create-with-CVE, use the locked-current CVE and new Ticket to
    prepare an all-source freshness refresh through `cve_service`. Validate
    registry capability and enabled state and register publication only after all
    creation and audit work succeeds. This applies to both a newly created
    placeholder and an existing CVE
-9. Return the created Ticket
+10. Return the created Ticket
 
 For a manual creation whose locked-current CVE is already `REJECTED`, these
-same steps remain authoritative: initial status still comes only from step 3,
+same steps remain authoritative: initial status still comes only from step 4,
 and the function does not call `ignore_new_for_rejected_cve()` or create the
 automatic `CVE rejected` status event. The authorized user may invoke the
 ordinary manual ignore operation separately.
@@ -450,9 +470,10 @@ between concurrent creation for the same CVE), the service catches the
 exception and raises `TicketCVEConflictError`. The API handler maps this
 to `409 TICKET_CVE_CONFLICT`.
 
-**Locking**: none for CVE-less creation. CVE-associated creation locks the CVE
-before the Ticket INSERT. This serializes association state with concurrent
-CVSS mutations; the new Ticket row itself has no pre-existing row to lock.
+**Locking**: manual creation locks User `FOR SHARE`; CVE-associated creation
+then locks the CVE before the Ticket INSERT. System creation omits the User
+lock. This serializes assignment eligibility and association state; the new
+Ticket row itself has no pre-existing row to lock.
 
 **reconcile_ticket_status**: Not called — initial status is determined by
 fixed rules, and the ticket cannot have packages at creation time.
@@ -497,46 +518,50 @@ omit it; the function then captures one date at entry for its complete chain.
 
 **Behavioral steps**:
 
-1. Resolve or create the local CVE through CVE Resolution Behavior without
+1. Acquire `FOR SHARE` on the acting User and stabilize current active/VA
+   eligibility. If ineligible, the association continues but auto-assignment is
+   skipped
+2. Resolve or create the local CVE through CVE Resolution Behavior without
    holding a Ticket lock. For an existing CVE, the resolution query acquires
    `FOR UPDATE` as its first persistent read; a newly inserted CVE becomes the
    transaction's locked root. No external I/O occurs in this transaction.
-2. Retain the CVE `FOR UPDATE` lock established by step 1.
-3. Acquire `FOR UPDATE` on the Ticket row.
-4. For a consumer call, revalidate Ticket accessibility from the locked-current
+3. Retain the CVE `FOR UPDATE` lock established by step 2.
+4. Acquire `FOR UPDATE` on the Ticket row.
+5. For a consumer call, revalidate Ticket accessibility from the locked-current
    Ticket. Capability has already been checked before CVE or Ticket lookup. An
    inaccessible Ticket returns `TICKET_NOT_FOUND` even though this workflow
    locked the CVE first.
-5. Call `ensure_ticket_operable(ticket)`.
-6. Verify `ticket.cve_id IS NULL` (else `TicketCVEAlreadySetError`) and, under
+6. Call `ensure_ticket_operable(ticket)`.
+7. Verify `ticket.cve_id IS NULL` (else `TicketCVEAlreadySetError`) and, under
    the CVE lock, verify that no other Ticket is associated with the CVE (else
    `TicketCVEConflictError`).
-7. `auto_assign_actor(ticket, acting_user_id)`.
-8. Capture `previous_severity = ticket.severity_manual` (may be `NULL`).
-9. Set `ticket.cve_id` and clear `ticket.severity_manual = NULL` (same
+8. `auto_assign_actor(ticket, acting_user)` using the stabilized User.
+9. Capture `previous_severity = ticket.severity_manual` (may be `NULL`).
+10. Set `ticket.cve_id` and clear `ticket.severity_manual = NULL` (same
     UPDATE — maintains `chk_ticket_severity_manual_cve_exclusive`)
-10. Create `TicketAuditEvent` (`cve_associated`,
+11. Create `TicketAuditEvent` (`cve_associated`,
     `user_id = acting_user_id`).
-11. Resolve `evaluation_date` from the supplied value or capture it once, then
+12. Resolve `evaluation_date` from the supplied value or capture it once, then
     call `recalculate_cvss_chain()` in association mode with `cve.id`,
-    `association_previous_severity = previous_severity`, and that date. The same-transaction
-    re-locks preserve the CVE-then-Ticket order and observe all assessment
+    `association_previous_severity = previous_severity`, and that date. The
+    same-transaction re-locks preserve the already-established
+    User-then-CVE-then-Ticket order and observe all assessment
     mutations committed before this operation acquired the CVE lock. The chain
     confirms CVE-owned severity, creates the optional manual-to-derived
     `severity_changed` handover, then recalculates every system-managed Product
     through the narrow exception. Changed-Product events are system-attributed,
     use `reason = cvss`, and are ordered by `TicketPackageProduct.id` after the
     handover event.
-12. Call `reconcile_ticket_status()` exactly once after the handover and all
+13. Call `reconcile_ticket_status()` exactly once after the handover and all
     Product events, using the same UTC `evaluation_date`. Gate #3 (severity set)
     and gate #4 (at least one canonical SUSE assessment in any accepted
     version) may now fail, causing regression to Analysis. Do not auto-assign a
     second time.
-13. Prepare and register an all-source CVE freshness refresh through
+14. Prepare and register an all-source CVE freshness refresh through
     `cve_service`, regardless of whether the CVE was newly created or already
     populated. Complete registry and enabled-state validation before
     registration.
-14. Return the updated Ticket.
+15. Return the updated Ticket.
 
 If the locked CVE was already `REJECTED` before this deliberate manual
 association, the function still performs only the ordinary association,
@@ -544,7 +569,8 @@ severity-source handover, Product, and gate sequence above. It does not invoke
 `ignore_new_for_rejected_cve()` or create an automatic `CVE rejected` event; the
 authorized user may ignore the Ticket through the ordinary manual operation.
 
-**Locking**: `FOR UPDATE` on CVE, then `FOR UPDATE` on Ticket. CVE Resolution
+**Locking**: `FOR SHARE` on acting User, `FOR UPDATE` on CVE, then `FOR
+UPDATE` on Ticket. CVE Resolution
 Behavior involves only local database operations and may insert a minimal CVE
 before that row can be locked. No synchronous external HTTP call or
 Redis/Celery operation occurs while either lock is held. Re-locking either row
@@ -552,11 +578,12 @@ inside `recalculate_cvss_chain()` is a same-transaction no-op. The service
 registers database-free publication as a post-commit effect; the shared
 transaction dependency executes it only after commit and lock release.
 
-This order serializes correctly with CVSS mutation. If the CVSS mutation locks
-the CVE first, association waits and then consumes its committed severity. If
-association locks first, the CVSS mutation waits, then observes the associated
-Ticket and applies its direct-audit and propagation contract. Neither path can
-use a pre-lock assessment or association snapshot.
+This order serializes correctly with CVSS mutation. Manual CVSS mutation first
+locks its own acting User and then the CVE; system CVSS mutation starts with the
+CVE. If either mutation locks the CVE first, association waits and then consumes
+its committed severity. If association locks first, the CVSS mutation waits,
+then observes the associated Ticket and applies its direct-audit and propagation
+contract. Neither path can use a pre-lock assessment or association snapshot.
 
 **recalculate_cvss_chain**: YES, in association mode. Associating a CVE changes
 the Ticket's severity source. The function confirms CVE-owned severity from the
@@ -631,40 +658,46 @@ function captures one date at entry if reconciliation becomes applicable.
 
 **Behavioral steps**:
 
-1. Acquire `FOR UPDATE` on the Ticket row
-2. Revalidate consumer accessibility from the locked-current Ticket; denial
+1. Resolve the target User through the user-domain boundary and acquire `FOR
+   SHARE` on a match before the Ticket lock. Preserve absence for deferred
+   reporting
+2. Acquire `FOR UPDATE` on the Ticket row
+3. Revalidate consumer accessibility from the locked-current Ticket; denial
    returns `TICKET_NOT_FOUND` before target-user or operability errors
-3. Call `ensure_ticket_operable(ticket)`
-4. Validate target user (active — else `AssigneeInactiveError`;
-    holds VA role — else `AssigneeNotVAError`)
-5. **Idempotency check**: if `ticket.assignee_id == assignee_id`, return
+4. Call `ensure_ticket_operable(ticket)`
+5. If the target was absent, raise `UserNotFoundError`. Validate the locked
+   target user (active — else `AssigneeInactiveError`;
+   holds VA role — else `AssigneeNotVAError`)
+6. **Idempotency check**: if `ticket.assignee_id == assignee_id`, return
     ticket unchanged (no audit event, no status evaluation)
-6. Set `ticket.assignee_id = assignee_id`
-7. Create `TicketAuditEvent` (`assignment`)
-8. If `ticket.status == New`: set `ticket.status = Analysis`, create
+7. Set `ticket.assignee_id = assignee_id`
+8. Create `TicketAuditEvent` (`assignment`)
+9. If `ticket.status == New`: set `ticket.status = Analysis`, create
     `TicketAuditEvent` (`status_change`, `user_id = NULL`,
     `old_value = "New"`, `new_value = "Analysis"`) — this is the explicit
     `New → Analysis` transition (see Architectural Invariant in
     `tickets.md`); the `status_change` event is created here, not by
     `reconcile_ticket_status`
-9. Call `reconcile_ticket_status(ticket, evaluation_date=evaluation_date)` —
+10. Call `reconcile_ticket_status(ticket, evaluation_date=evaluation_date)` —
     using the supplied date or the one captured at entry, evaluates further promotion
     from `Analysis` upward; may produce a second `status_change` event
     if `Analyzed` or `Resolved` gate conditions are already satisfied
-10. Return updated Ticket
+11. Return updated Ticket
 
-**Locking**: FOR UPDATE on Ticket row.
+**Locking**: `FOR SHARE` on target User, then `FOR UPDATE` on Ticket. Target
+absence is reported only after locked-current Ticket accessibility and
+operability, preserving their existing precedence.
 
 **reconcile_ticket_status**: YES — evaluates whether the ticket's
 existing data satisfies gates above `Analysis` (Analyzed or Resolved).
 While `ticket-mutations.md` classifies assignment as "not gate-relevant"
 in the sense that it does not modify CVSS/severity/package data, the
-explicit `New → Analysis` transition in step 8 means the ticket is now
+explicit `New → Analysis` transition in step 9 means the ticket is now
 in the gate zone and `reconcile_ticket_status` can promote it further
 if conditions are met.
 
 **Audit events**: `assignment` (only if assignee actually changes).
-Possibly `status_change` (explicit `New → Analysis` in step 8 and/or
+Possibly `status_change` (explicit `New → Analysis` in step 9 and/or
 further promotion from `reconcile_ticket_status`). Assignment promotion and
 ordinary gate events use `comment = NULL`.
 
@@ -694,20 +727,23 @@ async def ignore_ticket(
 
 **Behavioral steps**:
 
-1. Acquire `FOR UPDATE` on the Ticket row
-2. Revalidate consumer accessibility from the locked-current Ticket; denial
+1. Acquire `FOR SHARE` on the acting User and stabilize current assignment
+   eligibility
+2. Acquire `FOR UPDATE` on the Ticket row
+3. Revalidate consumer accessibility from the locked-current Ticket; denial
    returns `TICKET_NOT_FOUND` before status or operability errors
-3. Call `ensure_ticket_operable(ticket)` — rejects Ignored or Duplicated
+4. Call `ensure_ticket_operable(ticket)` — rejects Ignored or Duplicated
    (`TicketNotMutableError`) tickets
-4. Verify status is New or Analysis (else `InvalidTransitionError` —
+5. Verify status is New or Analysis (else `InvalidTransitionError` —
    this catches Analyzed and Resolved, which pass `ensure_ticket_operable`
    but are not valid source states for ignore)
-5. `auto_assign_actor(ticket, acting_user_id)`
-6. Set `ticket.status = Ignored`
-7. Create `TicketAuditEvent` (`status_change`)
-8. Return updated Ticket
+6. `auto_assign_actor(ticket, acting_user)` using the stabilized User; an
+   inactive or non-VA actor is not assigned
+7. Set `ticket.status = Ignored`
+8. Create `TicketAuditEvent` (`status_change`)
+9. Return updated Ticket
 
-**Locking**: FOR UPDATE on Ticket row.
+**Locking**: `FOR SHARE` on acting User, then `FOR UPDATE` on Ticket.
 
 **reconcile_ticket_status**: NOT called — this is a direct transition
 into the manual zone. `reconcile_ticket_status` never operates on
@@ -794,7 +830,9 @@ async def mark_as_duplicate(
 
 **Behavioral steps**:
 
-1. **Phase 1 — lock and validate roots**:
+1. Acquire `FOR SHARE` on the acting User and stabilize current assignment
+   eligibility.
+2. **Phase 1 — lock and validate roots**:
    a. Determine lock order: `first = min(source_id, target_id)`,
        `second = max(source_id, target_id)`
    b. `SELECT ... WHERE id = first FOR UPDATE` — lock first root
@@ -803,12 +841,13 @@ async def mark_as_duplicate(
    e. Validate both role-specific guards (operable for the source,
       non-Duplicated for the target)
    f. Validate source != target (else `SelfDuplicateError`)
-2. **Phase 2 — lock dependents**:
+3. **Phase 2 — lock dependents**:
    `SELECT ... WHERE duplicate_of_id = source_id ORDER BY id FOR UPDATE NOWAIT`
    On SQLSTATE `55P03`: rollback and raise
    `DuplicateConcurrentModificationError`
-3. **Mutations** (only reached if all locks acquired):
-   a. `auto_assign_actor(source, acting_user_id)`
+4. **Mutations** (only reached if all locks acquired):
+   a. `auto_assign_actor(source, acting_user)` using the stabilized User; an
+      inactive or non-VA actor is not assigned
    b. Set `source.status = Duplicated`,
       `source.duplicate_of_id = target_id`
    c. Create `TicketAuditEvent` (`status_change`,
@@ -827,7 +866,7 @@ async def mark_as_duplicate(
         value is the source ticket's identifier)
       - Dependents are repointed as a system action (`user_id = NULL`);
         no confidentiality access check is applied to dependent tickets
-4. Return updated source ticket
+5. Return updated source ticket
 
 The source and target visibility decisions are both made from the locked-current
 rows and both must pass before Phase 2 or any mutation. Missing and inaccessible
@@ -840,8 +879,8 @@ becomes inaccessible; following that identifier then returns
 
 **Post-operation**: no post-commit work. Everything is atomic.
 
-**Locking**: source + target (blocking, ordered) + dependents (NOWAIT,
-ordered). All within a single transaction.
+**Locking**: acting User `FOR SHARE`, source + target (blocking, ordered), then
+dependents (NOWAIT, ordered). All within a single transaction.
 
 **Constraint**: `mark_as_duplicate` MUST execute in a transaction
 holding no pre-existing Ticket row locks. This ensures Phase 1 is
@@ -903,7 +942,7 @@ For `original_status = Duplicated`, `duplicate_of_id` must already be `NULL`.
 
 Changed automatic Product events use the system actor,
 `reason = reactivation`, and ascending `TicketPackageProduct.id` order. Any
-inactive-assignee sanitation event follows those Product events; the final
+assignment-eligibility sanitation event follows those Product events; the final
 `status_change` remains last. The helper performs no CVE write or CVE lock,
 external I/O, Redis command, task publication, commit, or rollback. Any
 settings, database, eligibility, audit, flush, or reconciliation error escapes
@@ -927,7 +966,9 @@ composition.
 
 **Behavioral steps**:
 
-1. Acquire `FOR UPDATE` on the Ticket as the first database operation and
+1. For a non-null actor, acquire `FOR SHARE` on the acting User and stabilize
+   current assignment eligibility; a system caller has no User root. Then
+   acquire `FOR UPDATE` on the Ticket and
    for a consumer call revalidate locked-current accessibility before validating
    `Ignored`. The documented trusted system reopen does not acquire user scope.
    The caller identifies that trusted invocation explicitly through the
@@ -935,23 +976,25 @@ composition.
    never grants system authority.
 2. Preserve `original_status = Ignored` and resolve `evaluation_date` from the
    supplied value or capture it once.
-3. Call `ticket_mutations.auto_assign_actor(..., force=True)`. A VA actor
-   becomes the assignee; a non-VA actor or system caller leaves the current
-   assignee unchanged. Final reconciliation sanitizes an inactive assignee only
-   when the final status is `Analysis` or `Analyzed`; a final `Resolved` result
-   retains it.
+3. Call `ticket_mutations.auto_assign_actor(..., force=True)` with the
+   stabilized User. An active VA actor becomes the assignee; an inactive or
+   non-VA actor or system caller leaves the current assignee unchanged. Final
+   reconciliation sanitizes an inactive or non-VA assignee only when the final
+   status is `Analysis` or `Analyzed`; a final `Resolved` result retains it.
 4. Set `status = Analysis`, then call `_complete_manual_zone_exit()` with the
    preserved source status and date and return the resulting Ticket. Its final
    status is `Analysis`, `Analyzed`, or `Resolved` from current gate inputs.
 
 **Audit events**: optional actor assignment, zero or more system-attributed
-`product_eligibility_changed` events, optional inactive-assignee sanitation
+`product_eligibility_changed` events, optional assignment-eligibility sanitation
 `assignment`, then one system-attributed
 `status_change` from `Ignored` to the final evaluated status. All comments are
 `NULL` except a sanitation assignment's canonical unassignment comment.
 
-**Locking and transaction**: the function retains its Ticket `FOR UPDATE` lock
-through assignment, package convergence, audit, and final reconciliation. It
+**Locking and transaction**: a consumer invocation retains its acting User `FOR
+SHARE` and Ticket `FOR UPDATE` locks through assignment, package convergence,
+audit, and final reconciliation. A system invocation retains only the existing
+CVE/Ticket roots. It
 flushes but does not commit or roll back. Any escaping error rolls back all of
 these effects in the caller-owned transaction.
 
@@ -991,14 +1034,16 @@ non-retroactive; other Tickets keep their current targets.
 
 **Behavioral steps**:
 
-1. Acquire `FOR UPDATE` on the Ticket as the first database operation and
+1. Acquire `FOR SHARE` on the acting User and stabilize current assignment
+   eligibility, then acquire `FOR UPDATE` on the Ticket and
    revalidate locked-current consumer accessibility before validating
    `Duplicated`.
 2. Preserve `original_status = Duplicated`, capture the current duplicate
    target's `SNTL-{n}` identifier as `original_target_identifier`, and resolve
    `evaluation_date` from the supplied value or capture it once.
-3. Call `ticket_mutations.auto_assign_actor(..., force=True)`. A VA actor
-   becomes the assignee; otherwise the current assignee is retained.
+3. Call `ticket_mutations.auto_assign_actor(..., force=True)` with the
+   stabilized User. An active VA actor becomes the assignee; otherwise the
+   current assignee is retained.
 4. Clear `duplicate_of_id` and set `status = Analysis` consecutively before
    any operation that may flush. Both values are therefore written together,
    preserving
@@ -1011,14 +1056,15 @@ non-retroactive; other Tickets keep their current targets.
 
 **Audit events**: optional actor assignment, `duplicate_removed`, zero or more
 system-attributed `product_eligibility_changed` events, optional
-inactive-assignee sanitation `assignment`, then one
+assignment-eligibility sanitation `assignment`, then one
 system-attributed `status_change` from `Duplicated` to the final evaluated
 status. All comments are `NULL` except a sanitation assignment's canonical
 unassignment comment. Every event and mutation is atomic in the caller-owned
 transaction.
 
-**Locking and transaction**: the function retains its Ticket `FOR UPDATE` lock
-through assignment, duplicate-link removal, audit, package convergence, and
+**Locking and transaction**: the function retains its acting User `FOR SHARE`
+and Ticket `FOR UPDATE` locks through assignment, duplicate-link removal, audit,
+package convergence, and
 final reconciliation. It flushes but does not commit or roll back. Any escaping
 error rolls back the duplicate-link clear and every other effect.
 
@@ -1544,8 +1590,9 @@ behavior of `ticket_service` operations:
    the grant and the other returns idempotent success
 
 9. **CVE association and assessment race**: use independent sessions to race
-   `associate_cve()` with a CVSS assessment mutation. Verify CVE-then-Ticket
-   lock serialization, committed-current severity and applied eligibility,
+   `associate_cve()` with a CVSS assessment mutation. Verify
+   User-then-CVE-then-Ticket locking for manual paths, CVE-then-Ticket locking
+   for system paths, committed-current severity and applied eligibility,
    acting-user `cve_associated` followed by system `severity_changed` when the
    handover changes value, Product events in occurrence-ID order, one shared
    evaluation date, one final reconciliation, and no stale or duplicate event
@@ -1566,8 +1613,8 @@ behavior of `ticket_service` operations:
    as `old_value` and `NULL` as `new_value`
 11. **Manual-zone convergence registration**: both exit workflows register one
     post-commit Ticket convergence workflow for final `Analysis`, `Analyzed`,
-    and `Resolved`; inactive assignees are cleared only for final `Analysis` or
-    `Analyzed` and retained for final `Resolved`; automatic publication failure
+    and `Resolved`; inactive or non-VA assignees are cleared only for final
+    `Analysis` or `Analyzed` and retained for final `Resolved`; automatic publication failure
     is logged and swallowed after commit, preserving the mutation's success
     response and requiring the complete operator rerun
 12. **Operator convergence dispatch**: verify locked-current acceptance for
@@ -1593,8 +1640,9 @@ behavior of `ticket_service` operations:
     last included-package maintainership path between preliminary delegated access and
     root-lock acquisition. Verify the locked-current decision wins, denial maps
     to `TICKET_NOT_FOUND`, and denial leaves zero assignment, write, audit,
-    reconciliation, or post-commit registration. Cover CVE-then-Ticket
-    association, both ordered duplicate roots, manual-zone exits, convergence
+    reconciliation, or post-commit registration. Cover
+    User-then-CVE-then-Ticket association, both ordered duplicate roots,
+    manual-zone exits, convergence
     dispatch, confidentiality, and grants. Separately verify that an authorized
     mutation which itself removes the caller's last visibility path returns its
     normal success response and only later requests are denied

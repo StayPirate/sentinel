@@ -1761,11 +1761,14 @@ canonical `SNTL-{n}`. UUIDs for `TicketPackage`, `TicketPackageTrack`, and
 Every mutation endpoint below whose path contains package, track, or Product
 occurrence identifiers treats the complete path as one semantic locator. The
 package must belong to `{ticket_id}`, the track must belong to that package, and
-the Product occurrence must belong to that track. The package service locks the declared
-Ticket first, evaluates canonical locked-current accessibility for a consumer
-caller, and then revalidates the complete chain under that lock. Operability,
-nested ownership, state guards, no-op decisions, writes, assignment, audit,
-reconciliation, and post-commit registration all follow accessibility. A
+the Product occurrence must belong to that track. An assignment-capable
+user-attributed package mutation first stabilizes the acting User, then the
+package service locks the declared Ticket; system and non-assignment paths begin
+with the Ticket lock. It evaluates canonical locked-current accessibility for a
+consumer caller and then revalidates the complete chain under that lock.
+Operability, nested ownership, state guards, no-op decisions, writes,
+assignment, audit, reconciliation, and post-commit registration all follow
+accessibility. A
 missing or inaccessible Ticket returns `404 TICKET_NOT_FOUND`; a missing ID
 or any ownership mismatch at any level returns the endpoint's existing `404
 RESOURCE_NOT_FOUND`; no endpoint reveals that a supplied child exists under a

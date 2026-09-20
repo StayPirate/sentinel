@@ -228,16 +228,24 @@ is held.
 
 Under the Ticket lock, `add_package_records()`:
 
-1. applies its existing `active_ticket_only` skip before mutation; a skipped
+1. for a user-attributed invocation capable of creating package-tree state, has
+   already acquired `FOR SHARE` on the acting User before the Ticket lock and
+   stabilized active VA eligibility; system invocations have no assignment User
+   root;
+2. applies its existing `active_ticket_only` skip before mutation; a skipped
    inactive Ticket creates neither package records nor maintainer associations;
-2. creates or finds the `TicketPackage` and normal package tree;
-3. queries users whose lowercase `User.email` exactly matches the supplied set
+3. creates or finds the `TicketPackage` and normal package tree;
+4. queries users whose lowercase `User.email` exactly matches the supplied set
    and whose `active` value is true at this mutation time, ordering matches by
    `User.id` ascending;
-4. inserts one missing `TicketPackageMaintainer` per matching user in that
+5. inserts one missing `TicketPackageMaintainer` per matching user in that
    order, relying on the unique constraint as a concurrency backstop; and
-5. creates the required audit event for every inserted association in the same
+6. creates the required audit event for every inserted association in the same
    caller-owned transaction.
+
+The maintainer User query is an unlocked current-state observation for additive
+association, not a pessimistic User root in the cross-domain assignment lock
+protocol. It cannot create or change `Ticket.assignee_id`.
 
 Emails with no user match and inactive-user matches are ignored. Re-running the
 operation after a user is created or reactivated can add that user. Re-running

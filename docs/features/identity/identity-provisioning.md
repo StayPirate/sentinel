@@ -281,15 +281,25 @@ or with `group_name = '_manual'` will retain the role.
 
 ## Concurrency
 
-If an admin creates a role mapping while a provisioning sync is in
-progress, the sync may not process the new mapping in its current
-cycle. This does not cause inconsistency: the Create endpoint applies
-roles immediately to all matching users. The next sync cycle will
-reconcile any users missed (e.g., users provisioned between the Create
-and the next sync).
+This deferred feature must not be activated until its RoleMapping service and
+transaction contract defines concurrency among mapping CRUD and synchronization.
+That contract must stabilize the complete set of Users whose external
+`UserRole` origins can change, acquire the required User locks in ascending UUID
+order before changing any origin or acquiring any Ticket lock, and evaluate
+effective final `vulnerability_analyst` loss for exactly the Users whose origins
+were changed. The corresponding role mutation, derived Ticket unassignment,
+`role_added` or `role_removed` events, and applicable Ticket `assignment` events
+must commit or roll back atomically.
 
-No locking mechanism is needed between role mapping CRUD and the sync
-process.
+A mapping operation must not mutate a User newly discovered after its lock set
+was established. The completed contract may serialize a mapping, stabilize and
+retry the affected set, or choose another bounded mechanism that preserves the
+same postcondition and the global User-before-Ticket order. It must also define
+whether a create or delete concurrent with synchronization takes effect in the
+current cycle or the next one. Provider I/O remains outside every transaction
+that holds row locks. Persisted `RoleMapping` lifecycle ownership and the exact
+serialization mechanism are intentionally unresolved while this specification
+is deferred.
 
 ## Provisioning Mechanism (Placeholder)
 

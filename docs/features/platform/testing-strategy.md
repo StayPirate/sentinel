@@ -704,10 +704,12 @@ the operation and verify that rollback or retry cannot synthesize one.
 Ticket audit coverage includes all rows in the canonical mutation/no-event
 matrix. Multi-record tests assert Product events by
 `TicketPackageProduct.id`, maintainer events by `User.id`, duplicate-dependent
-events by locked Ticket UUID, and reference PATCH events in URL/type/title/
-description order. Independent-session tests prove serialized winner/loser
-behavior without stale old values. Ticket audit API tests include equal
-`created_at` values and prove stable `created_at DESC, id DESC` pagination.
+events by locked Ticket UUID, identity-unassignment events by ascending Ticket
+UUID after every applicable User lock, and reference PATCH events in
+URL/type/title/description order.
+Independent-session tests prove serialized winner/loser behavior without stale
+old values. Ticket audit API tests include equal `created_at` values and prove
+stable `created_at DESC, id DESC` pagination.
 Architecture and service tests also prove that audit history is never queried
 to determine current state, authorization, idempotency, restoration,
 reactivation, provenance, or recovery.
@@ -2813,6 +2815,21 @@ or identity audit validation are affected, tests MUST cover:
 - concurrent removal of the final vulnerability-analyst role sources proves
   that `update_roles` serializes the remaining-role check and performs ticket
   unassignment and audit exactly once
+- every assignment-capable Ticket, CVSS, and package path acquires User `FOR
+  SHARE` before CVE/Ticket locks. Independent sessions cover assignment-first
+  and deactivation/final-role-loss-first commit orders: the former is cleared by
+  the lifecycle batch, explicit assignment in the latter raises the existing
+  target error, and create/auto/embedded assignment skips without an event
+- identity unassignment selects assigned Tickets without a status prefilter,
+  locks them by UUID, clears locked-current `New`, `Analysis`, and `Analyzed`,
+  and preserves `Resolved`, `Ignored`, and `Duplicated`. Cover anomalous assigned
+  `New`, stale candidates, reassignment winners, repeated calls, exact reason
+  payloads, and complete rollback after audit/flush failure
+- reconciliation sanitation covers an inactive assignee, an active assignee
+  with no VA origin, and both conditions with `inactive assignee` precedence for
+  final `Analysis` and `Analyzed`; `Resolved` preserves the assignee. It performs
+  no User lock acquisition after the Ticket lock and creates no event for an
+  eligible, already-cleared, stale, losing, or rolled-back outcome
 - `POST /api/v1/admin/users` returns 201 with no secret fields, enforces
   `manage_users`, covers unauthenticated 401, unauthorized 403, duplicate 409,
   validation/policy 422, initial roles, and atomic audit persistence
