@@ -161,12 +161,13 @@ via `POST /api/v1/tickets` or through the UI.
   created without a CVE (can be associated later)
 - When a CVE-ID is provided:
   - [CVE Resolution Behavior](#cve-resolution-behavior) applies
-- If the creating user holds the `vulnerability_analyst` role:
+- If the locked-current creating user is active and holds the
+  `vulnerability_analyst` role:
   - `status`: `Analysis` (direct, bypasses `New` — the creating user is
     automatically assigned)
   - `assignee_id`: set to the creating user
-- If the creating user does NOT hold the `vulnerability_analyst` role
-  (e.g., `restricted_analyst`):
+- If the locked-current creating user is inactive or does NOT hold the
+  `vulnerability_analyst` role (e.g., `restricted_analyst`):
   - `status`: `New` (auto-assignment is skipped — see
     [Auto-Assignment on Unassigned Tickets](#auto-assignment-on-unassigned-tickets))
   - `assignee_id`: `NULL`
@@ -527,7 +528,7 @@ with `user_id = NULL` (system action), even when the underlying data
 change was initiated by an authorized acting user.
 
 See [ticket-mutations.md](ticket-mutations.md) for the full function
-contract, inactive assignee sanitization, concurrency control rules,
+contract, assignment-eligibility sanitation, concurrency control rules,
 actionability-aware gate evaluation, and architectural test requirements.
 
 #### Architectural Invariant
@@ -551,7 +552,8 @@ actionability-aware gate evaluation, and architectural test requirements.
 >   assigned may validly remain unassigned in the gate zone without an
 >   unassignment event.
 >
-> Tickets created directly by a VA (`create_ticket()` with a VA actor)
+> Tickets created directly by an active VA (`create_ticket()` with a
+> locked-current active VA actor)
 > start at `Analysis` and bypass `New` entirely — no `New → Analysis`
 > transition occurs and no corresponding `status_change` audit event is
 > expected on these tickets.
@@ -581,9 +583,11 @@ to a user without this role fails with 400 Bad Request
 (`TICKET_ASSIGNEE_NOT_VA`). Attempting to assign to an inactive user
 fails with 409 Conflict (`TICKET_ASSIGNEE_INACTIVE`). This applies to
 the explicit assignment endpoint (`PATCH .../assignee`).
-Auto-assignment checks internally whether the acting user holds the
-`vulnerability_analyst` role — if not (e.g., a `restricted_analyst`),
-auto-assignment is skipped and the ticket remains unassigned.
+Every assignment-capable path stabilizes the prospective assignee with a User
+`FOR SHARE` lock before any CVE or Ticket lock and evaluates both conditions
+from that locked state. Auto-assignment and embedded assignment are skipped if
+the acting user is inactive or lacks the role; explicit assignment retains the
+existing errors above.
 
 **System-initiated unassignment**: tickets are automatically unassigned
 in three scenarios:
@@ -596,23 +600,26 @@ in three scenarios:
    `vulnerability_analyst` role entirely — no remaining `UserRole`
    records from any origin (see
    [user-service.md](../identity/user-service.md#private-helpers))
-3. **Inactive assignee sanitization**: individual cleanup by
-   `reconcile_ticket_status` when it encounters an inactive assignee on
-   an active ticket (see
-   [Inactive Assignee Sanitization](ticket-mutations.md#inactive-assignee-sanitization))
+3. **Assignment-eligibility sanitation**: individual cleanup by
+   `reconcile_ticket_status` when it encounters an inactive or non-VA assignee
+   on a Ticket whose final result is `Analysis` or `Analyzed` (see
+   [Assignment Eligibility Sanitization](ticket-mutations.md#assignment-eligibility-sanitization))
 
-Scenarios 1 and 2 are proactive (triggered at the point of mutation).
-Scenario 3 is reactive (catch-up mechanism that runs during gate
-evaluation, ensuring that even if a ticket enters the gate zone after
-the triggering event, the stale assignee is cleared).
+Scenario 1 and active manual-role uses of scenario 2 are proactive and serialize
+with every assignment path on the User lock. Scenario 3 is defensive
+current-state sanitation during gate evaluation, including when a preserved
+inactive-status Ticket returns to `Analysis` or `Analyzed`; it is not the
+primary repair for an assignment race. Deferred external-origin behavior is
+owned by `identity-provisioning.md`.
 
 ### Auto-Assignment on Unassigned Tickets
 
-When a user with the `vulnerability_analyst` role performs any modifying
-operation on a ticket with `assignee_id = NULL`, the ticket is
-automatically assigned to the acting user. A `TicketAuditEvent` with
+When an active user with the `vulnerability_analyst` role performs any
+modifying operation on a ticket with `assignee_id = NULL`, the ticket is
+automatically assigned to the acting user. The User is locked and checked
+before the Ticket lock. A `TicketAuditEvent` with
 `event_type = assignment` is created atomically in the same transaction
-as the modifying operation. If the acting user does not hold the
+as the modifying operation. If the acting user is inactive or does not hold the
 `vulnerability_analyst` role (e.g., a `restricted_analyst`),
 auto-assignment is skipped — the ticket remains unassigned for a
 vulnerability analyst to claim.
@@ -703,7 +710,8 @@ When reverting a ticket from Duplicated status
 (`ticket_service.revert_duplicate()`):
 
 - `duplicate_of_id` is cleared (set to NULL)
-- If the acting user holds the `vulnerability_analyst` role, the ticket
+- If the locked-current acting user is active and holds the
+  `vulnerability_analyst` role, the ticket
   is reassigned to them. If the acting user does not hold the VA role
   (e.g., a `restricted_analyst`), the reassignment step is skipped — the
   ticket retains its current assignee (or remains unassigned)
@@ -758,25 +766,27 @@ operates on Ignored tickets. Two exit transitions are allowed:
 
 1. **VA assigns themselves (manual):** the VA becomes the assignee.
 2. **System reopens (automatic):** the current assignee is retained, including
-   an inactive assignee when the final gate result is `Resolved`. Final
-   reconciliation clears an inactive assignee only for `Analysis` or
+   an inactive or non-VA assignee when the final gate result is `Resolved`.
+   Final reconciliation clears an ineligible assignee only for `Analysis` or
    `Analyzed`. This handles cases like CVE rejection reverts (see
    `docs/features/tickets/cve-tracking.md`, "Rejection revert handling").
 
 Both transitions go through `ticket_service.reopen_from_ignored()`:
-1. Acquires `FOR UPDATE` on the ticket
-2. Verifies current status is Ignored
-3. Sets assignee (if applicable)
-4. Re-enters the gate zone at `Analysis` (the unconditional floor),
+1. For a manual caller, acquires `FOR SHARE` on the acting User; a system caller
+   has no User root
+2. Acquires `FOR UPDATE` on the Ticket
+3. Verifies current status is Ignored
+4. Sets assignee when the locked-current actor is eligible
+5. Re-enters the gate zone at `Analysis` (the unconditional floor),
    synchronously converges existing automatic Product eligibility from current
    PostgreSQL inputs, then calls `reconcile_ticket_status` once; it may promote to
    `Analyzed` or `Resolved` if gate conditions are already satisfied
 
 Every successful manual-zone exit registers the post-commit Ticket convergence
 workflow, including an exit whose immediate gate result is `Resolved`. If the
-final result is `Analysis` or `Analyzed`, reconciliation clears an inactive
-assignee; if it is `Resolved`, the existing assignee is retained even when that
-user is inactive. Failure to publish this automatically registered workflow is
+final result is `Analysis` or `Analyzed`, reconciliation clears an inactive or
+non-VA assignee; if it is `Resolved`, the existing assignee is retained even
+when that user is ineligible. Failure to publish this automatically registered workflow is
 best-effort: it is logged after commit and does not change the successful
 manual-zone-exit response. An operator can recover it through the complete
 rerun action below.
@@ -1382,8 +1392,9 @@ POST /api/v1/tickets
 - **Response schema**: `TicketDetail` (201 Created)
 
 Creates a ticket manually. The creating user is automatically assigned
-(if the user holds the `vulnerability_analyst` role — see
-[Auto-Assignment on Unassigned Tickets](#auto-assignment-on-unassigned-tickets)).
+if the locked-current user is active and holds the `vulnerability_analyst`
+role — see
+[Auto-Assignment on Unassigned Tickets](#auto-assignment-on-unassigned-tickets).
 
 Request body:
 
@@ -1528,7 +1539,7 @@ Request body:
 ```
 
 - `user_id` (string, required): UUID or username of the target user. The
-  target must hold the `vulnerability_analyst` role.
+  target must be active and hold the `vulnerability_analyst` role.
 
 > **No unassignment by design**: the `user_id` field is required and
 > cannot be null. Via the API, a ticket can only be **reassigned** to
@@ -1540,7 +1551,7 @@ Request body:
 > status — the ticket remains in its current gate-zone status and appears
 > in the unassigned ticket queue (`?assignee=none`) awaiting
 > reassignment (see
-> [ticket-mutations.md](ticket-mutations.md#inactive-assignee-sanitization)
+> [ticket-mutations.md](ticket-mutations.md#assignment-eligibility-sanitization)
 > and the [Architectural Invariant](#architectural-invariant)).
 
 Response: `TicketDetail` object in standard `{"data": ...}` envelope
@@ -1659,8 +1670,8 @@ POST /api/v1/tickets/{ticket_id}/revert-duplicate
 **`Capability: triage_ticket`**
 - **Response schema**: `TicketDetail`
 
-Reverts a Duplicated ticket into the gate zone. If the user who
-performed the revert holds the `vulnerability_analyst` role, the ticket
+Reverts a Duplicated ticket into the gate zone. If the locked-current user who
+performed the revert is active and holds the `vulnerability_analyst` role, the ticket
 is reassigned to them; otherwise, the ticket retains its current
 assignee. After clearing the duplicate link, the service enters the
 `Analysis` floor, synchronously converges existing automatic Product

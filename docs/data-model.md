@@ -910,7 +910,7 @@ See `docs/features/tickets/tickets.md` for the full ticket specification.
 | cve_id            | UUID        | FK(cve.id), UNIQUE, nullable | Associated CVE. NULL for tickets created without a CVE. A CVE can be associated later via `POST /api/v1/tickets/{ticket_id}/associate-cve` |
 | status            | VARCHAR(20) | NOT NULL, DEFAULT New        | TicketStatus: New, Analysis, Analyzed, Resolved, Ignored, Duplicated |
 | severity_manual | VARCHAR(20) | nullable                     | Manual severity set by the VA (Critical, High, Medium, Low, None). `NULL` = not set (unresolved). `None` = VA explicitly assessed as informational (equivalent to CVSS score 0.0). Used for severity resolution when `cve_id IS NULL`. Cannot be set when `cve_id IS NOT NULL` (severity is derived from CVSS). Cleared to `NULL` by `associate_cve` when a CVE is linked. Mutually exclusive with `cve_id` (see CHECK below). See `docs/features/tickets/tickets.md` (Severity Resolution) |
-| assignee_id       | UUID        | FK(user.id), nullable        | VA currently assigned to this ticket |
+| assignee_id       | UUID        | FK(user.id), nullable        | Current assignee. Assignment eligibility and lifecycle behavior are defined in `docs/features/tickets/tickets.md` and `docs/features/identity/user-service.md` |
 | duplicate_of_id   | UUID        | FK(ticket.id), nullable      | Self-referencing FK to the target ticket when status is Duplicated. Always references a non-Duplicated ticket (enforced by the transactional locking protocol in `mark_as_duplicate`). See `docs/features/tickets/tickets.md` (Duplicate Handling) |
 | created_at        | TIMESTAMPTZ   | NOT NULL, DEFAULT            | Record creation timestamp            |
 | updated_at        | TIMESTAMPTZ   | NOT NULL, DEFAULT            | Record update timestamp              |
@@ -955,11 +955,12 @@ Summary:
   broken)
 - Any except Ignored and Duplicated -> Duplicated (manual, reversible)
 - Duplicated -> (evaluated status) (manual: revert via
-  `ticket_service.revert_duplicate()`; a VA actor becomes assignee, while a
-  non-VA actor retains the current assignee)
+  `ticket_service.revert_duplicate()`; a locked-current active VA actor becomes
+  assignee, while an inactive or non-VA actor retains the current assignee)
 - Ignored -> (evaluated status) (manual or automatic via
-  `ticket_service.reopen_from_ignored()`; a VA actor becomes assignee, while a
-  non-VA or system caller retains the current assignee)
+  `ticket_service.reopen_from_ignored()`; a locked-current active VA actor
+  becomes assignee, while an inactive, non-VA, or system caller retains the
+  current assignee)
 
 `REJECTED -> PUBLISHED` reopens the unique associated Ticket only when its
 locked-current status is `Ignored`; the decision uses current CVE/Ticket state
@@ -967,8 +968,9 @@ and never audit-derived provenance. A Ticket newly created for an already-
 `REJECTED` orphan CVE transitions from `New` to `Ignored` after current-payload
 CVSS composition in the same transaction.
 Every successful manual-zone exit registers post-commit Ticket convergence,
-including an immediate `Resolved` result. Inactive-assignee sanitation applies
-only when the final result is `Analysis` or `Analyzed`.
+including an immediate `Resolved` result. Assignment-eligibility sanitation
+clears an inactive or non-VA assignee only when the final result is `Analysis`
+or `Analyzed`.
 
 Forward and reverse transitions between Analysis, Analyzed, and Resolved
 are handled automatically by the `ticket_mutations` module — see
@@ -1422,6 +1424,13 @@ process and cannot be removed via the API. See
 | created_at   | TIMESTAMPTZ   | NOT NULL, DEFAULT            | When the role was assigned       |
 
 **Unique constraint**: (user_id, role, group_name)
+
+Assignment eligibility is the current PostgreSQL combination of `User.active`
+and existence of at least one `UserRole` origin with persisted role value
+`Vulnerability Analyst` (`vulnerability_analyst` at API and service
+boundaries). This is a derived invariant, not an additional column, constraint,
+or persisted role summary. See `docs/conventions.md` (Cross-Domain Root Lock
+Order) for its locking protocol.
 
 #### Role Enum
 

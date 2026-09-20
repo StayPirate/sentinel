@@ -189,9 +189,12 @@ Any logged-in user, regardless of role. Includes all Public access plus:
 > **Assignment target constraint**: the `triage_ticket` capability allows
 > performing assignment operations, but the target user MUST hold the
 > `vulnerability_analyst` role **and be active**. Assigning to a user
-> without this role or to an inactive user is rejected with 400 Bad
-> Request. This is a business rule (who can own a ticket), not a
-> capability check (who can invoke the endpoint). See Business Rule 10.
+> without this role is rejected with 400 Bad Request; assigning to an inactive
+> user is rejected with 409 Conflict. This is a business rule (who can own a ticket), not a
+> capability check (who can invoke the endpoint). Assignment paths acquire a
+> shared lock on the target User before any Ticket lock so this eligibility is
+> stable against concurrent deactivation or final VA-origin loss. See Business
+> Rule 10.
 
 ### Authenticated Operations
 
@@ -668,25 +671,35 @@ here with the required authorization level and a link to the owning spec.
     the VA role controls who can *be the target*. This constraint is
     enforced at two levels:
     - **Prospective** (assignment time): attempting to assign a ticket to
-      a user without the VA role, or to an inactive user, is rejected
-      with 400 Bad Request
+       a user without the VA role, or to an inactive user, is rejected
+       with the existing target-specific error. Auto-assignment, creation, and
+       embedded assignment skip the assignment when the locked-current actor is
+       ineligible. Every path locks the prospective assignee User before its
+       CVE/Ticket roots
     - **Retroactive** (role removal): if a user loses the
       `vulnerability_analyst` role entirely (no remaining `UserRole`
       records from any origin), all their active ticket assignments (New,
       Analysis, Analyzed) are automatically unassigned, with one system
       `assignment` `TicketAuditEvent` per effective clear. Ticket status is not
-      changed and reconciliation is not invoked. See
-      `docs/features/identity/user-service.md`,
-      `_unassign_tickets_on_va_role_loss()`
+       changed and reconciliation is not invoked. See
+       `docs/features/identity/user-service.md`,
+       `_unassign_tickets_on_va_role_loss()`
+      Removing only one of multiple VA origins does not trigger unassignment.
+      Adding an origin after final loss does not restore a prior assignment.
+      The active manual-role and deactivation concurrency outcomes are owned by
+      `user-service.md` (Assignment concurrent with deactivation or active
+      manual role loss).
 11. **Auto-assignment**: when a user modifies an unassigned ticket, the
-    ticket is auto-assigned to the acting user **only if** the acting user
-    holds the `vulnerability_analyst` role. If the acting user holds only
+    ticket is auto-assigned to the acting user **only if** the locked-current
+    acting user is active and holds the `vulnerability_analyst` role. If the
+    acting user is inactive or holds only
     `restricted_analyst` (or any other non-VA role), auto-assignment is
     skipped — the operation proceeds but the ticket remains unassigned
     for a vulnerability analyst to claim
 12. **Status transitions with embedded assignment**: the reopen,
     revert-duplicate, and mark-as-duplicate flows embed a reassignment
-    step. When a user without the `vulnerability_analyst` role performs
+    step. When an inactive user or a user without the
+    `vulnerability_analyst` role performs
     these operations (they have `triage_ticket` capability to do so), the
     reassignment step is skipped — the ticket retains its current assignee.
     If the ticket was unassigned, it remains unassigned. Non-VA users can

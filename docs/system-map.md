@@ -507,6 +507,10 @@ Reading the diagram:
   intentional exception: it applies no Ticket visibility join and exposes only
   the public CVE ID and operational source metadata.
 
+User-attributed creation or mutation paths that may assign first stabilize the
+acting User's active VA eligibility. System ingestion does not assign and omits
+that User root; its database order remains CVE then Ticket.
+
 ### Package and Release Tracking
 
 How packages are resolved, tracked across codestreams and products, and how
@@ -665,6 +669,14 @@ manual hierarchical exclusion with derived Product EOL; it is not persisted.
 Delivery status
 (`PENDING`/`IN_PROGRESS`/`RELEASED`) is tracked independently for workflow
 visibility but is not a gate condition.
+
+Assignment is serialized separately from Ticket status. Assignment-capable
+paths lock the prospective User before optional CVE and Ticket roots;
+deactivation and active manual final-VA-origin loss lock the same User
+incompatibly and then clear active-status assignments in Ticket UUID order.
+Reconciliation defensively clears an inactive or non-VA assignee when its final
+gate result is `Analysis` or `Analyzed`, while `Resolved` preserves the current
+assignee.
 
 ### Ticket Status Zones
 
