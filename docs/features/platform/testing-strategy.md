@@ -1642,7 +1642,11 @@ Every new or modified service function MUST be tested for:
   `docs/features/packages/package-service.md`) MUST have at least one
   test verifying lock serialization using `db_session_factory` and the
   two-session pattern described in Database Strategy — Concurrency
-  Testing
+  Testing. An operation that can assign a Ticket is verified to acquire the
+  potential assignee's `User` root lock before the `Ticket` root (global
+  `User` → (`CVE`) → `Ticket` order), so the test must prove a concurrent
+  deactivation or final VA-role loss cannot interleave between eligibility
+  evaluation and assignment
 
 Ticket gate and convergence changes additionally require:
 
@@ -2813,6 +2817,44 @@ or identity audit validation are affected, tests MUST cover:
 - concurrent removal of the final vulnerability-analyst role sources proves
   that `update_roles` serializes the remaining-role check and performs ticket
   unassignment and audit exactly once
+- the identity-owned unassignment helpers preserve inactive-status tickets:
+  after deactivation or final VA-role loss, `New`, `Analysis`, and `Analyzed`
+  assignments are cleared with one system `assignment` event each, while
+  `Resolved`, `Ignored`, and `Duplicated` assignments are retained with no
+  event; the scan locks every assigned Ticket including inactive-status ones
+  and revalidates the locked-current status; re-invocation is a no-op and never
+  restores a cleared assignment
+- an independent-session re-entry race proves the status-agnostic scan: while a
+  deactivation or final VA-role loss runs against a user who holds only an
+  inactive-status assigned Ticket, a concurrent system or consumer path moves
+  that Ticket into `Analysis`/`Analyzed`. The two operations serialize on the
+  Ticket and exactly one effective clear occurs — either the identity helper
+  observes the now-active status and clears it, or the re-entry's sanitation
+  observes the committed ineligible assignee and clears it — leaving no
+  ineligible assignee and exactly one `assignment` event
+- independent-session races prove the assignment/unassignment contract:
+  explicit assignment and auto-assignment each race deactivation and final
+  VA-role loss. When assignment wins the `User` lock it commits and the later
+  user mutation clears the assigned active Ticket; when the user mutation wins,
+  the assignment waits, re-reads committed-current state, and either skips
+  auto-assignment or rejects explicit assignment with the documented error.
+  Neither ordering leaves an inactive or non-VA user assigned to an active
+  Ticket, and each effective clear creates exactly one correctly populated
+  system `assignment` event with no duplicate and no event for a stale, loser,
+  or rolled-back outcome
+- an auto-assignment race proves the acting user is stabilized before the
+  `Ticket`: a `restricted_analyst`, an inactive user, and a user who loses the
+  final VA origin concurrently are never assigned, and the operation proceeds
+  to its ordinary non-assigning result
+- a Ticket-status race proves that a Ticket re-entering `Analysis`/`Analyzed`
+  sanitizes an inactive assignee (`inactive assignee`) or an active non-VA
+  assignee (`vulnerability_analyst role removed`) under the Ticket lock with
+  one system `assignment` event, that a `Resolved` result retains the assignee,
+  and that an already-cleared or `Resolved`-retained assignee creates no event
+- caller rollback after either unassignment helper or after assignment leaves
+  no partial Ticket assignment, no `TicketAuditEvent`, and no associated
+  identity mutation; an injected audit/flush failure rolls back the complete
+  composed workflow
 - `POST /api/v1/admin/users` returns 201 with no secret fields, enforces
   `manage_users`, covers unauthenticated 401, unauthorized 403, duplicate 409,
   validation/policy 422, initial roles, and atomic audit persistence

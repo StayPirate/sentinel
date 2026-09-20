@@ -70,7 +70,7 @@ other service boundaries in one transaction when needed.
 All operations accept an `acting_user_id: UUID | None` parameter:
 
 - `UUID` — action performed by an authenticated user (enables
-  auto-assignment on unassigned tickets if the user holds the
+  auto-assignment on unassigned tickets if the user is active and holds the
   `vulnerability_analyst` role)
 - `None` — system action (release detection, CVSS sync, product
   lifecycle transitions). Auto-assignment does not apply
@@ -190,7 +190,8 @@ current reality (gate conditions + data freshness).
 - May transition ticket status (forward or backward) based on gate
   evaluation
 - May null `assignee_id` and create an `assignment` audit event if the
-  current assignee is inactive (inactive assignee sanitization)
+  current assignee is not an eligible holder — inactive, or active without the
+  effective `vulnerability_analyst` role (Assignee Eligibility Sanitization)
 - May register the package-tree and fetcher catch-up workflow for post-commit
   execution after any manual-zone exit or a `Resolved` gate regression
 
@@ -227,8 +228,8 @@ beyond status changes.
      status is Analyzed
    - Otherwise → status is Analysis (unconditional floor; this function
      never produces `New`)
-3. If the determined status is `Analysis` or `Analyzed`, perform Inactive
-   Assignee Sanitization before any final status audit event. Its system
+3. If the determined status is `Analysis` or `Analyzed`, perform Assignee
+   Eligibility Sanitization before any final status audit event. Its system
    `assignment` event therefore precedes the final `status_change`. A
    `Resolved` result retains the assignee and creates no sanitation event.
 4. If the determined status differs from the current status, or if
@@ -295,32 +296,51 @@ Every query performed by one invocation, including aggregate and existence
 checks, uses the same resolved `evaluation_date`. The function never persists
 the lifecycle phase or actionability result.
 
-### Inactive Assignee Sanitization
+### Assignee Eligibility Sanitization
 
 As behavior step 3, after determining the ticket's natural status via gate
-evaluation and before any final status audit event, if
-the resulting status is `Analysis` or `Analyzed` and
-`assignee_id` points to an inactive user:
+evaluation and before any final status audit event, if the resulting status is
+`Analysis` or `Analyzed` and `assignee_id` is non-NULL and points to a user who
+is **not an eligible holder** — either `active = false`, or active without the
+effective `vulnerability_analyst` role from any origin:
 
 1. Set `assignee_id = NULL`
-2. Create `TicketAuditEvent` with `event_type = assignment`
-   (system-initiated, `user_id = NULL`,
-   `comment = "Unassigned from {username}: inactive assignee"`)
-3. Emit a warning-level log: `"Inactive assignee {user_id} detected on
-   ticket {ticket_id} during reconciliation — this should have been
-   handled by _unassign_active_tickets"`
+2. Create exactly one system `TicketAuditEvent` with `event_type = assignment`
+   (`user_id = NULL`, `old_value` = the assignee's username, `new_value =
+   NULL`, `detail = NULL`). The `comment` selects exactly one closed reason:
+   - `"Unassigned from {username}: inactive assignee"` when `active = false`;
+     or
+   - `"Unassigned from {username}: vulnerability_analyst role removed"` when
+     the user is active but holds no effective `vulnerability_analyst` role
+     from any origin
+3. Emit a warning-level log naming the assignee and Ticket. The inactive case
+   retains the wording `"Inactive assignee {user_id} detected on ticket
+   {ticket_id} during reconciliation — this should have been handled by
+   _unassign_active_tickets"`, extended to cover a non-VA active assignee
+
+The check reads the assignee's `active` flag and effective VA role from
+committed-current state under the already-held Ticket `FOR UPDATE` lock. It
+does not acquire the assignee's `User` root lock, because that acquisition
+after a Ticket lock would invert the global `User` → `Ticket` order. A
+concurrent final VA-role loss or deactivation either commits before this read
+(the sanitization clears the assignee) or holds the `User` root and then locks
+this Ticket — including when it was in an inactive status — in ascending UUID
+order and revalidates it (the identity-owned helper clears an assignment whose
+locked-current status is active, and the sanitation here clears one that
+becomes active after commit). Either way exactly one `assignment` event is
+created for the effective clear; an already-cleared `assignee_id` creates none.
 
 If the resulting status is `Resolved`, no assignee check is performed. This
 includes a manual-zone exit that evaluates directly to `Resolved`: an inactive
-assignee is retained. `reconcile_ticket_status()` is not invoked for a Ticket
-that remains `Ignored` or `Duplicated`.
+or non-VA assignee is retained. `reconcile_ticket_status()` is not invoked for
+a Ticket that remains `Ignored` or `Duplicated`.
 
-This mechanism complements the bulk unassignment performed by
-`deactivate_user` (see
-[user-service.md](../identity/user-service.md#deactivate_user)) by
-catching any tickets that were missed or that entered the gate zone
-after the deactivation event. Unassignment does not change the ticket's
-status — the ticket remains in its current gate-zone status.
+This mechanism complements the proactive bulk unassignment performed by
+`deactivate_user` and `_unassign_tickets_on_va_role_loss()` (see
+[user-service.md](../identity/user-service.md#deactivate_user)). It catches
+Tickets that were inactive when the eligibility was lost, and any Ticket that
+entered the gate zone after the triggering event. Sanitization does not change
+the ticket's status — the ticket remains in its current gate-zone status.
 
 > **Invariant**: ticket status reflects work state, not staffing state.
 > A ticket in `Analysis`, `Analyzed`, or `Resolved` status may have
@@ -354,7 +374,36 @@ mutation chain.
 
 The generic pessimistic locking pattern and transaction hygiene rules
 are defined in `docs/conventions.md` (Transaction and Locking). This
-section documents ticket-specific refinements only.
+section documents ticket-specific refinements, plus the cross-cutting global
+root lock order declared in the subsection below.
+
+### Global root order
+
+This subsection is the single normative owner of the global root lock order.
+Other specifications state how their operations participate in it and link
+here rather than redefining it.
+
+The global root lock order is `User` → (`CVE`) → `Ticket`. An operation that
+can assign a Ticket — explicit assignment to a target user, or auto-assignment
+of the acting user — acquires the potential assignee's `User` root lock before
+any other root and evaluates eligibility from that locked-current row. It then
+acquires the `CVE` root when the operation involves a CVE and finally acquires
+`FOR UPDATE` on the `Ticket` row. A system operation that never assigns
+(`acting_user_id = NULL`, trusted external ingestion) acquires no `User` root
+and keeps its `CVE` → `Ticket` or `Ticket`-only order.
+
+Because the `User` root is always acquired before any `Ticket` root, this order
+serializes assignment against deactivation and final VA-role loss (which lock
+the same `User` root and then process the user's assigned Tickets in ascending
+UUID order) and cannot deadlock against them. No operation may acquire a `User`
+root after a `Ticket` or `CVE` root.
+
+`reconcile_ticket_status()` performs Assignee Eligibility Sanitization under
+the already-held Ticket lock. It reads the assignee's `active` flag and
+effective VA role from committed-current state without acquiring the assignee's
+`User` root — acquiring it there would invert the global order. Serialization
+against a concurrent role change or deactivation is provided by the Ticket
+`FOR UPDATE` lock shared with that transaction's per-Ticket unassignment step.
 
 ### Extension to non-module operations
 
@@ -411,7 +460,8 @@ ticket. This is always the case because every caller — both within
 `ticket_mutations` and in external modules (`package_service`,
 `ticket_service`) — acquires `FOR UPDATE` on the Ticket before calling
 `reconcile_ticket_status()`. A workflow that also owns a CVE lock acquires it
-first under the global `CVE` then `Ticket` order.
+first under the global order: `User` → `CVE` → `Ticket` for a consumer
+operation that can assign, `CVE` → `Ticket` for a system operation that cannot.
 
 ## `ensure_ticket_operable()`
 
@@ -481,16 +531,24 @@ the propagation disposition returned by the mutation.
 Each ticket-mutation function below follows the same pattern unless its own
 contract places semantic no-op or operation-specific guards before assignment:
 
-1. Acquire `FOR UPDATE` on the owning root row
-2. For a consumer operation, revalidate accessibility from the locked-current
+1. For a consumer operation that can auto-assign, acquire the acting User root
+   lock and read the locked-current `active`/VA observation
+2. Acquire `FOR UPDATE` on the owning root row — the `CVE` root when the
+   operation involves a CVE, otherwise the `Ticket` root — preserving the
+   global `User` → (`CVE`) → `Ticket` order
+3. For a consumer operation, revalidate accessibility from the locked-current
    required roots
-3. Call `ensure_ticket_operable(ticket)`
-4. Call `auto_assign_actor()`
-5. Validate additional preconditions
-6. Apply the mutation
-7. Create `TicketAuditEvent`
-8. Call `reconcile_ticket_status()`
-9. Return the updated record
+4. Call `ensure_ticket_operable(ticket)`
+5. Call `auto_assign_actor()`, which reads eligibility from the caller-held
+   User lock acquired in step 1
+6. Validate additional preconditions
+7. Apply the mutation
+8. Create `TicketAuditEvent`
+9. Call `reconcile_ticket_status()`
+10. Return the updated record
+
+A system operation that never assigns (`acting_user_id = NULL`, trusted
+external ingestion) omits step 1 and begins with its state root.
 
 Manual SUSE CVSS mutation is such an operation-specific ordering: caller and
 provider authority, manual-zone mutability, and serialized effective-action
@@ -531,11 +589,14 @@ computation. See
 system-wide ingestion rule that governs how scores and versions are handled.
 
 Parsing and caller/provider validation use request input only and may run before
-the transaction's first database operation. For a CVSS assessment mutation,
-the first persistent read is always `SELECT ... FOR UPDATE` on the owning CVE.
-If that CVE has an associated Ticket, the function then acquires
-`SELECT ... FOR UPDATE` on the Ticket. Every operation that can participate in
-both roots follows this global `CVE` then `Ticket` order.
+the transaction's first database operation. For a manual SUSE CVSS assessment
+mutation — a consumer operation that can auto-assign — the first persistent read
+is `SELECT ... FOR UPDATE` on the acting User row, then `SELECT ... FOR UPDATE`
+on the owning CVE, then `SELECT ... FOR UPDATE` on the associated Ticket when
+one exists, following the global `User` → `CVE` → `Ticket` order. A trusted
+external ingestion or default-version system operation cannot assign and begins
+with `SELECT ... FOR UPDATE` on the owning CVE, then the Ticket: the system
+`CVE` → `Ticket` order.
 
 ### CVSS Mutation Authority and Result
 
@@ -607,10 +668,10 @@ Product eligibility, Ticket status, and every audit event.
 | Associated Ticket status | Manual SUSE upsert/delete | Trusted external batch | Effective Ticket-scoped outcome |
 |---|---|---|---|
 | No Ticket | Allowed | Not reachable: ingestion creates or loads the unique Ticket before invoking the batch | Manual result is `not_applicable`; CVE-owned state only |
-| `New` | Allowed; effective mutation may auto-assign the VA | Allowed; never assigns | `immediate`; an unassigned `New` remains outside gate reconciliation unless manual auto-assignment first moves it to `Analysis` |
-| `Analysis` | Allowed; effective mutation may auto-assign the VA | Allowed; never assigns | `immediate` eligibility and at most one final reconciliation |
-| `Analyzed` | Allowed; effective mutation may auto-assign the VA | Allowed; never assigns | `immediate` eligibility and at most one final reconciliation |
-| `Resolved` | Allowed; effective mutation may auto-assign the VA | Allowed; never assigns | `immediate` eligibility and at most one final reconciliation; ordinary regression to `Analyzed` or `Analysis` is allowed |
+| `New` | Allowed; effective mutation may auto-assign the active VA | Allowed; never assigns | `immediate`; an unassigned `New` remains outside gate reconciliation unless manual auto-assignment first moves it to `Analysis` |
+| `Analysis` | Allowed; effective mutation may auto-assign the active VA | Allowed; never assigns | `immediate` eligibility and at most one final reconciliation |
+| `Analyzed` | Allowed; effective mutation may auto-assign the active VA | Allowed; never assigns | `immediate` eligibility and at most one final reconciliation |
+| `Resolved` | Allowed; effective mutation may auto-assign the active VA | Allowed; never assigns | `immediate` eligibility and at most one final reconciliation; ordinary regression to `Analyzed` or `Analysis` is allowed |
 | `Ignored` | Reject with `TicketNotMutableError`; no result | Allowed; never assigns | External CVE-owned state and direct audit only; Product/gate effects wait for explicit exit |
 | `Duplicated` | Reject with `TicketNotMutableError`; no result | Allowed; never assigns | External CVE-owned state and direct audit only; Product/gate effects wait for explicit exit |
 
@@ -671,8 +732,11 @@ new one is created. External-provider assessments never use this boundary.
    data. Derive the exact version, canonical vector, decimal score, and
    version-specific assessment severity. Parsing failure raises
    `InvalidCVSSVectorError` before database access.
-2. As the first persistent read, load the CVE with `FOR UPDATE`. If it does not
-   exist, return the CVE-path `CVE_NOT_FOUND` outcome.
+2. For the manual SUSE caller, acquire `FOR UPDATE` on the acting User row
+   first (global `User` → `CVE` → `Ticket` order) and read the locked-current
+   `active`/VA observation. Then, as the first CVE read, load the CVE with
+   `FOR UPDATE`. If it does not exist, return the CVE-path `CVE_NOT_FOUND`
+   outcome.
 3. Load the Ticket associated with that locked CVE, if any, with `FOR UPDATE`.
    This makes concurrent association compose in `CVE` then `Ticket` order.
 4. Revalidate CVE accessibility from the locked CVE and its
@@ -695,9 +759,10 @@ new one is created. External-provider assessments never use this boundary.
    persist the resulting unified value to `CVE.severity`, including when its
    value is unchanged.
 10. For an effective mutation with an associated Ticket, call
-    `auto_assign_actor()` after the serialized action is known. If assignment
+    `auto_assign_actor()` after the serialized action is known, which reads
+    eligibility from the caller-held User lock acquired in step 2. If assignment
     moves `New` to `Analysis`, its
-   `assignment` and system `status_change` records precede the CVSS records.
+    `assignment` and system `status_change` records precede the CVSS records.
 11. If a Ticket exists, create `cvss_assessment_changed`. If unified severity
     changed, create `severity_changed` next. Both are direct consequences and
     are created in every Ticket status; they are not deferred with Product
@@ -830,7 +895,7 @@ actions and performs no severity/Product/status write or event.
 
 **Audit order**: for a Ticket, zero or more canonical
 `cvss_assessment_changed`, at most one `severity_changed`, zero or more Product
-events in occurrence-ID order, optional inactive-assignee sanitation, and at
+events in occurrence-ID order, optional assignee-eligibility sanitation, and at
 most one final gate `status_change`. A ticketless batch creates no Ticket event.
 
 ---
@@ -867,7 +932,10 @@ callers to resolve the assessment ID.
 1. Validate caller/provider authority and the accepted version using only input
    data. External caller categories and external providers raise `ValueError`;
    they cannot use this deletion boundary.
-2. As the first persistent read, load the CVE with `FOR UPDATE`; then load its
+2. For the manual SUSE caller, acquire `FOR UPDATE` on the acting User row
+   first (global `User` → `CVE` → `Ticket` order) and read the locked-current
+   `active`/VA observation. Then, as the first CVE read, load the CVE with
+   `FOR UPDATE`; then load its
    associated Ticket, if any, with `FOR UPDATE`. A missing CVE produces the
    consumer CVE-path `CVE_NOT_FOUND` outcome.
 3. Revalidate consumer CVE accessibility from the locked CVE and its
@@ -884,7 +952,9 @@ callers to resolve the assessment ID.
    complete remaining assessment set and always persist the resulting unified
    value, including `NULL`, to `CVE.severity`.
 8. If a Ticket exists, call `auto_assign_actor()` for the effective manual
-   mutation. Its optional assignment and `New → Analysis` events precede the
+   mutation, reading eligibility from the caller-held User lock acquired in
+   step 2. Its optional
+   assignment and `New → Analysis` events precede the
    direct delete events.
 9. Create `cvss_assessment_changed` with the snapshot as `old_value` and `NULL`
    as `new_value`. If unified severity changed, create system-attributed
@@ -927,14 +997,17 @@ Sets or clears the `severity_manual` field on a ticket.
 
 **Behavior**:
 
-1. Acquire `FOR UPDATE` on the Ticket row
+1. Acquire `FOR UPDATE` on the acting User row (global `User` → `Ticket`
+   order) and read the locked-current `active`/VA observation, then acquire
+   `FOR UPDATE` on the Ticket row
 2. Revalidate consumer accessibility from the locked-current Ticket. Missing or
    inaccessible produces `TICKET_NOT_FOUND` before operability, derived-severity,
    or no-op decisions
 3. Call `ensure_ticket_operable(ticket)`
 4. Validate preconditions
 5. If severity unchanged, return (no-op)
-6. Call `auto_assign_actor(ticket, acting_user_id, db)`
+6. Call `auto_assign_actor(ticket, acting_user_id, db)`, which reads
+   eligibility from the caller-held User lock acquired in step 1
 7. Update `ticket.severity_manual`
 8. Create `TicketAuditEvent` (`severity_changed`, `user_id = acting_user_id`)
 9. Call `reconcile_ticket_status()` with the supplied or once-captured
@@ -1041,11 +1114,12 @@ current result is returned.
 
 ## Auto-Assignment Rule
 
-When a user with the `vulnerability_analyst` role performs any modifying
+When an active user with the `vulnerability_analyst` role performs any
+modifying
 operation on a ticket with `assignee_id = NULL`, the ticket is
 automatically assigned to the acting user. A `TicketAuditEvent` with
 `event_type = assignment` is created atomically in the same transaction
-as the modifying operation. If the acting user does not hold the
+as the modifying operation. If the acting user is inactive or does not hold the
 `vulnerability_analyst` role (e.g., a `restricted_analyst`),
 auto-assignment is skipped — the ticket remains unassigned.
 
@@ -1067,10 +1141,15 @@ before choosing to act on it explicitly.
 This rule is enforced via the shared helper `auto_assign_actor()`
 (see below), which is called by all modules that modify tickets under
 a `FOR UPDATE` lock (`ticket_mutations`, `package_service`,
-`ticket_service`).
+`ticket_service`). A consumer operation that can auto-assign stabilizes the
+acting user's `User` root before the Ticket (global `User` → (`CVE`) →
+`Ticket` order), so the helper reads eligibility from that caller-held
+locked-current row and a
+concurrent deactivation or final VA-role loss cannot leave an ineligible
+assignee committed.
 
 This rule does not apply to system operations (`acting_user_id = None`)
-or to users without the `vulnerability_analyst` role.
+or to inactive users or users without the `vulnerability_analyst` role.
 Manual reference create, update, and delete also do not call this helper: they
 change supplementary editorial metadata without assignment, gate
 reconciliation, status change, or manual-zone exit.
@@ -1083,8 +1162,8 @@ normally when the same invocation also changes package-tree state.
 
 A public helper function that implements the auto-assignment check. Mutation
 modules call it under the Ticket `FOR UPDATE` lock when their owning operation
-requires auto-assignment. The association-only maintainership exception above
-does not call it.
+requires auto-assignment, after stabilizing the acting user's `User` root. The
+association-only maintainership exception above does not call it.
 
 **Signature**:
 
@@ -1095,10 +1174,12 @@ async def auto_assign_actor(
     db: AsyncSession,
     force: bool = False,
 ) -> bool:
-    """Assign ticket to acting user if user holds VA role.
+    """Assign ticket to acting user if the locked-current user is an
+    eligible holder.
 
     When force=False (default): assigns only if ticket is currently
-    unassigned. Used by all gate-relevant mutations as step 2.
+    unassigned. Used by all gate-relevant mutations as their assignment
+    step.
 
     When force=True: assigns regardless of current assignee. Used only by
     ticket_service manual-zone exit functions (reopen_from_ignored,
@@ -1109,7 +1190,12 @@ async def auto_assign_actor(
     Returns True if assignment was applied (audit event created),
     False otherwise.
 
-    Precondition: caller MUST hold FOR UPDATE on the ticket row.
+    Preconditions: caller MUST hold FOR UPDATE on the ticket row and, when
+    acting_user_id is not None, the acting User root lock acquired before
+    the ticket. The helper reads the acting user's active flag and effective
+    VA role from the User row whose root lock the caller holds; it does not
+    acquire the User lock itself. An inactive or non-VA acting user is not
+    assigned.
     """
 ```
 
@@ -1118,7 +1204,9 @@ async def auto_assign_actor(
 1. If `acting_user_id is None` → return False (system action)
 2. If not `force` and `ticket.assignee_id is not None` → return False
    (already assigned)
-3. Load the acting user's roles. If not VA → return False
+3. Read the acting user's `active` flag and effective
+   `vulnerability_analyst` role from the User row whose root lock the caller
+   holds. If the user is inactive or not VA → return False
 4. If `ticket.assignee_id == acting_user_id` → return False (assignment
    unchanged, no audit event)
 5. Set `ticket.assignee_id = acting_user_id`
@@ -1133,7 +1221,7 @@ async def auto_assign_actor(
 > `status_change` audit event (`user_id = NULL`). It does not call
 > `reconcile_ticket_status()`. Callers MUST call
 > `reconcile_ticket_status()` after completing all mutations to ensure
-> inactive assignee sanitization and correct gate evaluation.
+> assignee-eligibility sanitation and correct gate evaluation.
 
 ## Related Operations
 
@@ -1210,7 +1298,8 @@ and status reconciliation). The test must cover:
   fallback including CVE-less Tickets, and proof that EOL, exclusion,
   affectedness, delivery, and severity-cascade winners are not inputs
 - **Manual SUSE assignment**: an effective manual create, update, or delete
-  assigns an unassigned Ticket only when the actor holds the VA role, after
+  assigns an unassigned Ticket only when the actor is active and holds the VA
+  role, after
   no-op/not-found classification; `New` produces assignment then system
   `New → Analysis`; the external batch and default-version recalculation never
   assign
@@ -1220,7 +1309,9 @@ and status reconciliation). The test must cover:
   delete/not-found races, concurrent upsert/upsert, upsert/delete, and
   association/CVSS mutation using independent database sessions; each result,
   HTTP/metric classification, audit payload, and propagation result reflects
-  the committed winner after `CVE` then `Ticket` locking
+  the committed winner after root locking in the documented order (`User` →
+  `CVE` → `Ticket` for a consumer operation that can assign, `CVE` → `Ticket`
+  for a system operation that cannot)
 - **Authority and audit**: reserved SUSE variants, caller/actor mismatch,
   external-delete rejection, every-status direct events when a Ticket exists,
   ticketless no-event behavior, system-derived severity attribution, event
@@ -1252,11 +1343,25 @@ and status reconciliation). The test must cover:
 - **Locked-current consumer accessibility**: for manual severity and manual SUSE
   CVSS upsert/delete, race preliminary delegated access with confidentiality, explicit
   grant, and last included-package maintainership changes. Verify
-  accessibility is revalidated only after the required Ticket or CVE-then-Ticket
-  roots are locked; Ticket paths return `TICKET_NOT_FOUND`, CVE paths return
+  accessibility is revalidated only after the required `User` → `CVE` →
+  `Ticket` (or `CVE` → `Ticket` for a system caller) roots are locked; Ticket
+  paths return `TICKET_NOT_FOUND`, CVE paths return
   `CVE_NOT_FOUND`; and denial leaves assessment, severity, assignment, Product,
   Ticket status, audit, reconciliation, and post-commit state unchanged. Trusted
   external ingestion and system recalculation remain unscoped
+- **Assignee-eligibility sanitation**: independent-session races cover an
+  assignment committing concurrently with a final VA-role loss or deactivation
+  and prove that no inactive or non-VA assignee remains on an active Ticket;
+  an independent-session re-entry race moves an inactive-status assigned Ticket
+  into `Analysis`/`Analyzed` while a final VA-role loss or deactivation runs,
+  and proves the two serialize on the Ticket with exactly one effective clear
+  and no ineligible assignee left behind; verification that an inactive or
+  non-VA assignee on a Ticket re-entering `Analysis`/`Analyzed` is cleared with
+  exactly one system `assignment` event
+  and the correct closed reason (`inactive assignee` for an inactive user,
+  `vulnerability_analyst role removed` for an active non-VA user), that a
+  `Resolved` result retains it, and that an already-cleared assignee or a
+  `Resolved` regression creates no sanitation event
 
 Package-centric mutation tests are specified in
 `docs/features/packages/package-service.md` (Architectural Test
@@ -1324,7 +1429,7 @@ transaction. Individual candidate skips occur only before this boundary.
 - `docs/features/packages/product-lifecycle-transitions.md` — AIMAAS
   threshold changes triggering eligibility mutations
 - `docs/features/identity/user-service.md` — `deactivate_user` bulk
-  unassignment (complementary to inactive assignee sanitization)
+  unassignment (complementary to assignee-eligibility sanitation)
 - `docs/conventions.md` — Transaction and Locking (generic pessimistic
   locking pattern)
 - `docs/features/tickets/ticket-service.md` — Ticket lifecycle operations,

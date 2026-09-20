@@ -61,8 +61,8 @@ User-facing mutation operations accept an `acting_user_id: UUID | None`
 parameter where both user and system callers are supported:
 
 - `UUID` — action performed by an authorized acting user (enables
-  auto-assignment on unassigned tickets only when that user holds the
-  `vulnerability_analyst` role)
+  auto-assignment on unassigned tickets only when that user is active and
+  holds the `vulnerability_analyst` role)
 - `None` — system action (release detection, product lifecycle
   transitions). Auto-assignment does not apply
 
@@ -104,10 +104,12 @@ authorize a later unconstrained package-tree query. Counts, pages, and
 aggregates are derived from the same caller-visible candidate set as returned
 items.
 
-For a consumer mutation, the service acquires the Ticket root lock and then
-evaluates locked-current accessibility before operability, nested ownership,
+For a consumer mutation that can auto-assign, the service acquires the acting
+User root lock, then the Ticket root lock, and then evaluates locked-current
+accessibility before operability, nested ownership,
 state-dependent guards, no-op classification, writes, auto-assignment, audit,
-Ticket reconciliation, or post-commit registration. A missing or inaccessible
+Ticket reconciliation, or post-commit registration. A system mutation that
+cannot assign acquires no User root. A missing or inaccessible
 Ticket raises `TicketNotFoundError`, mapped to `404 TICKET_NOT_FOUND`, with no
 local side effect. This locked check is authoritative even when an API
 prerequisite performed an earlier accessibility check. An authorized mutation
@@ -157,6 +159,17 @@ For example, `add_package_to_ticket` does NOT apply auto-assignment — it
 delegates to `add_package_records()`, which calls `auto_assign_actor` after
 acquiring the lock only when package-tree state changes.
 
+**Lock order**: package operations follow the package-relevant subset of the
+global root order `User` → (`CVE`) → `Ticket` owned by `ticket-mutations.md`
+(Concurrency Control → Global root order); no package operation acquires a CVE
+root. A user-attributed
+operation that can auto-assign stabilizes the acting user's `User` root before
+the `Ticket` root, so `auto_assign_actor()` reads eligibility from that
+caller-held locked-current row. A system operation (`acting_user_id = None`)
+cannot assign and acquires no `User` root. This serializes every assignable
+mutation against deactivation and final VA-role loss, which lock the same
+`User` root.
+
 A function determines its semantic result from state reloaded under the Ticket
 lock before calling `auto_assign_actor()`. A true no-op never assigns the actor,
 creates an audit event, reconciles the Ticket, or registers a post-commit
@@ -179,10 +192,11 @@ semantic identity to name its expected Ticket/package/track path. At minimum:
 
 The concrete parameter grouping is an implementation choice; no locator class,
 dataclass, or private lookup helper is required. The public service contract is
-that the function locks the declared Ticket as its first state-dependent
-database operation, applies locked-current accessibility for a consumer caller,
-then reloads and validates the complete nested chain under that lock before
-deciding a mutation, no-op, audit value, or return value. A
+that a user-attributed function that can auto-assign first acquires the acting
+User root lock, and the function then locks the declared Ticket as its first
+package/Ticket state root. It applies locked-current accessibility for a
+consumer caller, then reloads and validates the complete nested chain under
+that lock before deciding a mutation, no-op, audit value, or return value. A
 missing identifier or an identifier that belongs to another declared parent is
 reported through the existing package-, track-, or Product-not-found exception
 for the targeted level. It never mutates the occurrence found under the other
@@ -199,11 +213,15 @@ including a concurrent winner's committed state; they are not assembled from
 pre-lock snapshots.
 
 Each user-facing function below follows the same pattern unless its section
-states a narrower no-op or system-derived-metadata exception. System-only
-operations such as `set_track_delivery_status()`, `set_product_released_at()`, and
+states a narrower no-op or system-derived-metadata exception. A user-attributed
+function that can auto-assign acquires the acting User root lock before the
+Ticket root; its step 1 below then acquires the Ticket as the first package
+root. System-only operations such as `set_track_delivery_status()`,
+`set_product_released_at()`, and
 `recalculate_product_eligibility_for_ticket()` omit auto-assignment as stated
-in their sections. `add_package_records()` also omits assignment and
-reconciliation when maintainership associations are its only mutation.
+in their sections and acquire no `User` root. `add_package_records()` also
+omits assignment and reconciliation when maintainership associations are its
+only mutation.
 Exclusion and restoration operations are user-attributed only. Their shared
 contract below requires a non-null `acting_user_id` and places the direct-marker
 guard before auto-assignment.
@@ -243,8 +261,10 @@ scope.
 
 **Behavior**:
 
-1. Acquire `FOR UPDATE` on `ticket_id` as the first state-dependent database
-   operation.
+1. For a user-attributed call, acquire `FOR UPDATE` on the acting User row
+   (global `User` → `Ticket` order) and read the locked-current `active`/VA
+   observation. Then acquire `FOR UPDATE` on `ticket_id` as the first
+   package/Ticket state root.
 2. For a consumer caller, evaluate canonical Ticket accessibility against the
    locked-current Ticket. Missing and inaccessible both raise
    `TicketNotFoundError`.
@@ -510,8 +530,9 @@ request-resolved effective scope through the module-level caller boundary.
 
 If `eligible` is `bool` (override):
 
-1. Acquire `FOR UPDATE` on the declared Ticket row as the first state-dependent
-   database operation
+1. Acquire `FOR UPDATE` on the acting User row (global `User` → `Ticket`
+   order) and read the locked-current `active`/VA observation, then acquire
+   `FOR UPDATE` on the declared Ticket row
 2. Evaluate canonical locked-current Ticket accessibility for the consumer;
    missing and inaccessible both raise `TicketNotFoundError`
 3. Call `ensure_ticket_operable(ticket)`
@@ -530,8 +551,9 @@ If `eligible` is `bool` (override):
 
 If `eligible` is `None` (reset to automatic):
 
-1. Acquire `FOR UPDATE` on the declared Ticket row as the first state-dependent
-   database operation
+1. Acquire `FOR UPDATE` on the acting User row (global `User` → `Ticket`
+   order) and read the locked-current `active`/VA observation, then acquire
+   `FOR UPDATE` on the declared Ticket row
 2. Evaluate canonical locked-current Ticket accessibility for the consumer;
    missing and inaccessible both raise `TicketNotFoundError`
 3. Call `ensure_ticket_operable(ticket)`
@@ -817,7 +839,9 @@ remain implementation choices as long as they preserve this contract.
 
 **Behavior**:
 
-1. Acquire `FOR UPDATE` on the Ticket row
+1. For a user-attributed call, acquire `FOR UPDATE` on the acting User row
+   (global `User` → `Ticket` order) and read the locked-current `active`/VA
+   observation. Then acquire `FOR UPDATE` on the Ticket row
 2. For a consumer caller, evaluate canonical Ticket accessibility against the
    locked-current state. Missing and inaccessible both raise
    `TicketNotFoundError` before any package or maintainer effect.
@@ -929,8 +953,10 @@ implementation choice.
 
 1. Validate `acting_user_id` before any database operation. `None` raises
    `ValueError`; exclusion and restoration have no system caller.
-2. Resolve one `evaluation_date`, then acquire `FOR UPDATE` on the declared
-   Ticket as the first database operation.
+2. Resolve one `evaluation_date`, then acquire `FOR UPDATE` on the acting User
+   row (global `User` → `Ticket` order) and read the locked-current active/VA
+   observation, then acquire `FOR UPDATE` on the declared Ticket as the first
+   package/Ticket state root.
 3. Evaluate canonical locked-current Ticket accessibility. Missing and
    inaccessible both raise `TicketNotFoundError`.
 4. Call `ensure_ticket_operable(ticket)`.
@@ -1775,12 +1801,15 @@ are defined in `docs/conventions.md` (Transaction and Locking). This
 section documents package-specific refinements only.
 
 Public and independently invoked mutation functions in this module acquire
-`FOR UPDATE` on the parent Ticket row as the first operation. This serializes
-concurrent package mutations on the same ticket at the database level. The
-synchronous manual-zone-exit boundary is the explicit compositional exception:
-it requires the Ticket already locked by `ticket_service` and never reacquires
-that lock. The lock is released automatically when the transaction commits or
-rolls back.
+`FOR UPDATE` on the parent Ticket row as their first package/Ticket state root.
+A user-attributed operation that can auto-assign first acquires the acting
+User root (global `User` → `Ticket` order); a system operation that cannot
+assign acquires no `User` root. This serializes concurrent package mutations on
+the same ticket and assignment against deactivation and final VA-role loss at
+the database level. The synchronous manual-zone-exit boundary is the explicit
+compositional exception: it requires the Ticket already locked by
+`ticket_service` and never reacquires that lock. The lock is released
+automatically when the transaction commits or rolls back.
 
 The I/O-then-Lock invariant (see Architecture section) is an additional
 constraint specific to this module: orchestration functions that perform
@@ -1911,7 +1940,8 @@ transitions. The test must cover:
   excluded ancestor, parents with no actionable descendants, ancestor restore
   with directly excluded descendants, and deterministic reason precedence
 - **Auto-assignment**: mutations on unassigned tickets trigger assignment
-  to the acting VA; every direct-mutation no-op occurs before assignment,
+  to the acting user only when that user is active and holds the VA role; every
+  direct-mutation no-op occurs before assignment,
   audit, Ticket reconciliation, and post-commit effects
 - **Nested ownership validation**: every package, track, and Product occurrence
   mutation validates the complete declared path under the Ticket lock; test a
@@ -1938,6 +1968,13 @@ transitions. The test must cover:
   exclude/exclude, restore/restore, exclude/restore, independent
   ancestor/descendant marker changes, public add racing with exclusion or
   restore, and internal re-resolution racing with exclusion
+- **Assignment and deactivation race**: a user-attributed package mutation
+  holds the acting User root lock before the Ticket. An independent-session
+  race with `deactivate_user()` or a final VA-role loss proves that the
+  assignable mutation either commits first (and the later user mutation clears
+  the assignment) or observes the committed ineligible user and does not
+  assign; no inactive or non-VA user is left assigned to an active Ticket.
+  Verify system-only package operations acquire no User root
 - **Automatic Product eligibility recalculation**: verify manual-override
   records are skipped; an `Ignored` or `Duplicated` Ticket is skipped without
   mutation, audit, or reconciliation; `Resolved` is processed; a fully

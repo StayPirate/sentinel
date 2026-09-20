@@ -955,11 +955,11 @@ Summary:
   broken)
 - Any except Ignored and Duplicated -> Duplicated (manual, reversible)
 - Duplicated -> (evaluated status) (manual: revert via
-  `ticket_service.revert_duplicate()`; a VA actor becomes assignee, while a
-  non-VA actor retains the current assignee)
+  `ticket_service.revert_duplicate()`; an active VA actor becomes assignee, while a
+  non-VA or inactive actor retains the current assignee)
 - Ignored -> (evaluated status) (manual or automatic via
-  `ticket_service.reopen_from_ignored()`; a VA actor becomes assignee, while a
-  non-VA or system caller retains the current assignee)
+  `ticket_service.reopen_from_ignored()`; an active VA actor becomes assignee,
+  while a non-VA, inactive, or system caller retains the current assignee)
 
 `REJECTED -> PUBLISHED` reopens the unique associated Ticket only when its
 locked-current status is `Ignored`; the decision uses current CVE/Ticket state
@@ -967,8 +967,8 @@ and never audit-derived provenance. A Ticket newly created for an already-
 `REJECTED` orphan CVE transitions from `New` to `Ignored` after current-payload
 CVSS composition in the same transaction.
 Every successful manual-zone exit registers post-commit Ticket convergence,
-including an immediate `Resolved` result. Inactive-assignee sanitation applies
-only when the final result is `Analysis` or `Analyzed`.
+including an immediate `Resolved` result. Assignee-eligibility sanitation
+applies only when the final result is `Analysis` or `Analyzed`.
 
 Forward and reverse transitions between Analysis, Analyzed, and Resolved
 are handled automatically by the `ticket_mutations` module — see

@@ -79,7 +79,7 @@ event type.
   user action uses that acting user's UUID. A derived consequence uses `NULL`
   even when a user initiated the containing workflow. Derived system events
   include CVSS-derived severity, automatic Product eligibility, gate-derived
-  status, inactive-assignee sanitation, duplicate-dependent repointing, and
+  status, assignee-eligibility sanitation, duplicate-dependent repointing, and
   package maintainership acquisition. The `vulnerability_analyst` role is named
   only where role membership itself controls assignment eligibility or
   auto-assignment.
@@ -119,7 +119,7 @@ event type.
   by `User.id` ascending; duplicate-dependent events follow the locked dependent
   Ticket UUID order; and a multi-field reference PATCH emits URL, type, title,
   then description events. These UUIDs are ordering inputs and are not added to
-  event `detail`. Inactive-assignee sanitation follows all gate-input events and
+  event `detail`. Assignee-eligibility sanitation follows all gate-input events and
   precedes the final gate-derived `status_change`, which is always last.
 - One trusted-external ingestion batch orders its effective assessment events by
   version `4.0`, `3.1`, `3.0`, `2.0`, then canonical provider ascending by Unicode code
@@ -202,6 +202,13 @@ System unassignment selects `{reason}` from this closed vocabulary:
 - `vulnerability_analyst role removed after role mapping deletion`; or
 - `inactive assignee`.
 
+Identity-driven unassignment uses the first four values. Assignee-eligibility
+sanitation uses `inactive assignee` when the assignee's `active` flag is false,
+or `vulnerability_analyst role removed` when the assignee is active without the
+effective `vulnerability_analyst` role from any origin. The vocabulary, the
+`assignment` event type, and the total event inventory of 29 types are
+unchanged; no new reason or event type is introduced.
+
 The username and source label are event-time snapshots. Audit reads never join
 current operational data to reconstruct them.
 
@@ -214,14 +221,14 @@ an intentional no-event contract, not missing audit coverage.
 
 | Domain outcome | Required Ticket event or explicit no-event contract | Semantic actor | Owner and serialization root |
 |---|---|---|---|
-| Ticket creation | `ticket_created` first, then optional `assignment`, optional `severity_changed`, and optional `cve_associated` | Direct creation events use the acting user; ingestion uses system | `ticket_service`; CVE-less insert has no existing root, CVE-associated creation locks CVE before insert |
-| Direct assignment or reassignment | One `assignment`; optional system `New → Analysis`; optional final gate event | Acting user for assignment, system for derived status | `ticket_service`; Ticket lock |
-| Auto-assignment during an effective mutation | One `assignment`; system `New → Analysis` when applicable | Acting user for assignment, system for promotion | Owning mutation service; its already-held Ticket lock |
-| User deactivation, final VA-role loss, or inactive-assignee sanitation | One `assignment` per effectively cleared non-NULL assignee | System | `user_service`: User then Ticket locks; reconciliation sanitation: existing Ticket lock |
-| Ignore, mark duplicate, reopen, or revert duplicate | Direct `status_change`, `duplicate_set`, or `duplicate_removed` as applicable; one `duplicate_target_changed` per repointed dependent; derived Product, sanitation, and final status events retain their normal contracts | Acting user for the direct ignore, duplicate-set, or duplicate-remove decision; reopen's resulting gate status and all other derived consequences use system | `ticket_service`; Ticket, ordered multi-Ticket, or locked dependent roots as specified there |
+| Ticket creation | `ticket_created` first, then optional `assignment`, optional `severity_changed`, and optional `cve_associated` | Direct creation events use the acting user; ingestion uses system | `ticket_service`; CVE-less insert has no existing root; a user-attributed create locks the acting User first, then CVE (when present) before insert |
+| Direct assignment or reassignment | One `assignment`; optional system `New → Analysis`; optional final gate event | Acting user for assignment, system for derived status | `ticket_service`; target User then Ticket locks |
+| Auto-assignment during an effective mutation | One `assignment`; system `New → Analysis` when applicable | Acting user for assignment, system for promotion | Owning mutation service; acting User then its already-held Ticket lock |
+| User deactivation, final VA-role loss, or assignee-eligibility sanitation | One `assignment` per effectively cleared non-NULL assignee | System | `user_service`: User then ascending Ticket locks; reconciliation sanitation: existing Ticket lock |
+| Ignore, mark duplicate, reopen, or revert duplicate | Direct `status_change`, `duplicate_set`, or `duplicate_removed` as applicable; one `duplicate_target_changed` per repointed dependent; derived Product, sanitation, and final status events retain their normal contracts | Acting user for the direct ignore, duplicate-set, or duplicate-remove decision; reopen's resulting gate status and all other derived consequences use system | `ticket_service`; acting User then Ticket, ordered multi-Ticket, or locked dependent roots as specified there |
 | CVE association and rejection/revert | `cve_associated`; applicable derived severity/Product/status events; rejection uses one `status_change`. A rejected orphan records creation/association, then CVSS events, then `New -> Ignored` | Acting user for association; system for derived changes and rejection/revert status | `ticket_service`, orchestrated by `cve_service`; CVE then Ticket |
-| Manual severity | One `severity_changed`, plus ordinary assignment/status consequences | Acting user for severity; system for derived status | `ticket_mutations`; Ticket lock |
-| Effective CVSS assessment mutation or ingestion batch | One `cvss_assessment_changed` per effective assessment; optional single `severity_changed`, Product-event sequence, and final status per chain/batch | Direct SUSE event uses acting user; all derived events and external ingestion use system | `ticket_mutations`; CVE then optional Ticket |
+| Manual severity | One `severity_changed`, plus ordinary assignment/status consequences | Acting user for severity; system for derived status | `ticket_mutations`; acting User then Ticket lock |
+| Effective CVSS assessment mutation or ingestion batch | One `cvss_assessment_changed` per effective assessment; optional single `severity_changed`, Product-event sequence, and final status per chain/batch | Direct SUSE event uses acting user; all derived events and external ingestion use system | `ticket_mutations`; manual SUSE uses User → CVE → optional Ticket, system ingestion uses CVE → optional Ticket |
 | Default-version severity/eligibility chain | No assessment event; optional `severity_changed`, Product events, and final status | System | `ticket_mutations`; CVE then optional Ticket |
 | Ticketless CVE, CVSS, or enrichment mutation | None because no Ticket audit target exists | N/A | CVE-domain owner; CVE root where required |
 | Other CVE-owned metadata or enrichment mutation | None by itself; resulting CVSS or rejection effects retain the events above | N/A | `cve_service`; CVE root |
@@ -243,6 +250,17 @@ an intentional no-event contract, not missing audit coverage.
 | CVE refetch preparation, publication, deduplication, retry, or terminal task outcome | None for dispatch workflow outcomes; effective fetched CVE/CVSS/Ticket mutations retain their existing contracts | N/A | `cve_service` preparation and `fetch_single_cve`; CVE then optional Ticket for preparation |
 | Product catalog source mutation or workflow-only dispatch/checkpoint outcome | None; later per-Ticket delegated mutations retain their normal events | N/A | Owning catalog/workflow service |
 
+Where a row names a Ticket or CVE lock for a **user-attributed** operation that
+can assign a Ticket, the potential assignee's `User` root lock is acquired first
+— the acting user for auto-assignment, the target user for explicit assignment —
+under the global `User` → (`CVE`) → `Ticket` order owned by
+`ticket-mutations.md` (Concurrency Control → Global root order). A system
+operation that cannot
+assign (`acting_user_id = NULL`, trusted ingestion) acquires no `User` root and
+keeps its `CVE` → `Ticket` or `Ticket`-only order. This root order is what
+serializes assignment against deactivation and final VA-role loss and is not
+repeated per row.
+
 For every row, a rejected, not-found, unchanged, stale/inapplicable,
 concurrent-loser, or rolled-back outcome creates no event unless the owning
 contract explicitly identifies another effective mutation in that outcome.
@@ -253,7 +271,7 @@ restoration, reactivation, provenance, or recovery.
 
 Within one composed workflow, optional assignment and its system
 `New -> Analysis` event precede direct mutation events. Derived severity and
-Product events follow the inputs that caused them. Inactive-assignee sanitation
+Product events follow the inputs that caused them. Assignee-eligibility sanitation
 then follows every gate-input mutation, and the final gate-derived
 `status_change` is last. Ticket creation is the exception only in that
 `ticket_created` remains the first event in the new Ticket's history. Within one
@@ -272,10 +290,13 @@ published.
 
 Every action classification, `old_value`, `new_value`, canonical comment, and
 subject snapshot comes from serialized pre/post state under the root and lock
-order prescribed by the mutation owner. Applicable roots include Ticket,
-CVE then Ticket, deterministically ordered multiple Tickets, and User then
-individual Tickets. The central audit contract does not require every operation
-to route through `ticket_mutations` or acquire a Ticket lock first.
+order prescribed by the mutation owner. Applicable roots follow the global
+`User` → (`CVE`) → `Ticket` order for a user-attributed operation that can
+assign, and the `CVE` → `Ticket` or `Ticket`-only order for a system operation
+that cannot. Multi-Ticket roots use deterministic ordering, and identity-driven
+unassignment processes a user's Tickets in ascending UUID order. The central
+audit contract does not require every operation to route through
+`ticket_mutations` or acquire a Ticket lock first.
 
 Every required event is inserted and flushed with the mutation in the same
 caller-owned transaction. Audit validation, insertion, or flush failure escapes
@@ -597,7 +618,7 @@ required event sequence or explicit no-event outcome. For audited mutations:
 18. Manual-SUSE CVSS chains assert optional assignment and system
     `New → Analysis` precede direct CVSS records, changed automatic Product
     events follow severity in `TicketPackageProduct.id` order, optional
-    inactive-assignee sanitation follows all gate-input mutations, and any
+    assignee-eligibility sanitation follows all gate-input mutations, and any
     final gate status event is last. External and default-version system chains
     never auto-assign an actor, but may create the system sanitation event when
     their final result is `Analysis` or `Analyzed`

@@ -386,7 +386,10 @@ may cause an ordinary gate-driven regression. Only `Ignored` and `Duplicated`
 defer Product and gate effects until their explicit manual-zone exit.
 
 Only an effective manual SUSE mutation may apply ordinary auto-assignment after
-the serialized no-op/not-found classification. Trusted external ingestion and
+the serialized no-op/not-found classification. A manual SUSE operation locks the
+acting user's `User` root first and assigns only from that locked-current
+active/VA observation, so a concurrent deactivation or final VA-role loss
+cannot leave an ineligible assignee committed. Trusted external ingestion and
 default-version recalculation are system actions and never assign.
 
 ### Direct Audit Summary
@@ -417,22 +420,26 @@ For the trusted-external ingestion batch, effective assessment events are
 ordered by version `4.0`, `3.1`, `3.0`, `2.0`, then canonical provider ascending
 by Unicode code point. After the last assessment event, the batch appends at most one
 derived `severity_changed`, Product events in occurrence-ID order, optional
-inactive-assignee sanitation, and at most one final gate `status_change`. It
+assignee-eligibility sanitation, and at most one final gate `status_change`. It
 never emits an aggregate replacement for the per-assessment events.
 
 ### Serialization and Concurrent Outcomes
 
 Assessment mutations serialize on the `CVE` root. When both CVE-owned and
-Ticket-owned state participate, the global root-lock order is `CVE` then
-`Ticket`. Ticketless mutations therefore still have a serialization root, and
-concurrent association of a Ticket cannot invert lock order.
+Ticket-owned state participate, a manual SUSE operation uses the global
+`User` → `CVE` → `Ticket` order owned by
+`ticket-mutations.md` (Concurrency Control → Global root order) and a
+trusted-external or default-version
+system operation uses `CVE` → `Ticket`. Ticketless mutations therefore still
+have a serialization root, and concurrent association of a Ticket cannot invert
+lock order.
 
 For manual SUSE mutation APIs, authentication and the `manage_cvss` capability
-check complete before any CVE lookup. The mutation service then locks the CVE
-root, resolves the association under that lock, locks the currently associated
-Ticket root when one exists, confirms the association from locked-current state,
-and evaluates CVE accessibility as the projection of the canonical Ticket
-visibility predicate in
+check complete before any CVE lookup. The mutation service then locks the acting
+user's `User` root, locks the CVE root, resolves the association under that
+lock, locks the currently associated Ticket root when one exists, confirms the
+association from locked-current state, and evaluates CVE accessibility as the
+projection of the canonical Ticket visibility predicate in
 `docs/features/identity/rbac.md`. A ticketless CVE is accessible. A missing CVE
 and an inaccessible associated CVE both produce `404 CVE_NOT_FOUND`; denial
 occurs before manual-zone/status guards, no-op or not-found classification,

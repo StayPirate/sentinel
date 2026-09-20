@@ -1216,8 +1216,13 @@ handling is required.
    records via `IdentityAuditLog.log_event()` (user creation, role
    changes, password resets, deactivation, reactivation, API key
    lifecycle). Deactivation additionally creates `TicketAuditEvent`
-   records for ticket unassignment. Role changes do not produce
-   `TicketAuditEvent` records. See
+   records for unassigning the user's active tickets. A role change creates
+   `TicketAuditEvent` records only when it removes the user's final
+   `vulnerability_analyst` origin: the user's active tickets (New, Analysis,
+   Analyzed) are unassigned with one system `assignment` event each, while
+   inactive tickets (Resolved, Ignored, Duplicated) retain their assignee.
+   Adding a role or removing a non-final origin produces no `TicketAuditEvent`
+   record. See
    `docs/features/identity/identity-audit-log.md` for the full event
    type contract and `docs/features/identity/user-service.md` for the
    service operations.
