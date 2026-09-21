@@ -2701,8 +2701,9 @@ scenarios are required:
 - A Redis value of `"1"` avoids a session query; a missing key or any other
   value performs PostgreSQL verification; only an active row writes the
   positive value with exactly 60 seconds TTL
-- An inactive or absent row never authorizes and never creates a positive
-  cache entry. A positive entry can survive logout or password reset either
+- A database verification of an inactive or absent row never authorizes and
+  never writes a positive cache entry. A positive entry recorded while the
+  row was active can nonetheless survive logout or password reset either
   through a failed post-commit purge or through an in-flight write that read
   the row as active before the invalidation committed and wrote after the
   purge completed; either way the entry is effective only for its
@@ -3077,9 +3078,10 @@ or identity audit validation are affected, tests MUST cover:
 
 - an invalid username format is rejected before any database access; an
   unknown user reports the not-found error
-- a non-TTY invocation is rejected by the TTY check before any prompt is
-  shown: it prints the documented TTY error to stderr and exits 1 without
-  mutation
+- a non-TTY invocation that reaches the TTY check is rejected before any
+  prompt is shown: it prints the documented TTY error to stderr and exits 1
+  without mutation; the already-inactive no-op and the active-external
+  rejection exit earlier and are not affected by TTY detection
 - an already-inactive user — including an inactive external user — prints
   the no-op message and exits 0 without a prompt and without opening a
   mutating session; an active external user is rejected by the CLI's
@@ -3096,9 +3098,9 @@ or identity audit validation are affected, tests MUST cover:
 - each confirmation outcome is asserted distinctly: a valid affirmative
   answer proceeds; a valid negative answer or Enter accepting the `No`
   default prints `Aborted.` to stdout and exits 0; an unrecognized answer
-  prompts again; EOF/Ctrl+D reaches the shared mapper, prints `Aborted.`,
-  and exits 0; SIGINT exits 130; SIGTERM exits 143; none of the declining
-  paths commits
+  prompts again with the retry feedback remaining on stdout; EOF/Ctrl+D
+  reaches the shared mapper, prints `Aborted.`, and exits 0; SIGINT exits
+  130; SIGTERM exits 143; none of the declining paths commits
 - after confirmation the command opens a fresh session, commits exactly
   once, and rolls back on a pre-commit failure; a stale preview where another
   caller already deactivated the target prints the no-op message from

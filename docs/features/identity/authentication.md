@@ -320,11 +320,12 @@ residual exposure differs by cause:
   at most the entry's remaining TTL (60 seconds maximum).
 
 **Cache value contract**: the Redis key `session_liveness:{session_id}` stores
-the string `"1"` to represent an active session. Inactive sessions are never
-cached. The lookup semantics are:
+the string `"1"` to represent a positive observation: the session was active
+when the database verification wrote it. The check never writes an entry for a
+session it observed as inactive. The lookup semantics are:
 
-- **Cache hit** (key exists with value `"1"`): the session is active — no
-  database query is needed. Proceed to user loading.
+- **Cache hit** (key exists with value `"1"`): the cached observation reports
+  an active session — no database query is needed. Proceed to user loading.
 - **Cache miss** (key does not exist): query the database for the `Session`
   record and check `is_active`:
   - If `is_active = true`: write `"1"` to Redis with key
@@ -341,9 +342,10 @@ cached. The lookup semantics are:
   same database verification and positive-cache rules above. No additional
   cache state or value is defined.
 
-This ensures that only positive (active) state is ever cached, a cache miss
-always triggers a database verification, and a revoked session never pollutes
-the cache.
+This ensures that the write path never caches a negative observation, a cache
+miss always triggers a database verification, and a positive entry recorded
+before an invalidation can outlive it only within the residual-exposure bounds
+described above.
 
 **Redis unavailability**: if Redis is unreachable (any `RedisError` —
 including connection failures and OOM rejections), the session liveness

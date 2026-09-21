@@ -1082,24 +1082,6 @@ Ticket-side contracts.
 The service does not commit; the workflow owner commits exactly once after
 step 6.
 
-#### Audit attribution
-
-No invocation-source parameter is added. Attribution derives from the
-actor and the locked target:
-
-- actor UUID — authenticated API operation; `user_deactivated.detail`
-  carries the `reason` and no `source` key. An active external target is
-  rejected before mutation, so this combination cannot describe external
-  sync.
-- actor `None` and local target — CLI or other system action;
-  `user_deactivated.detail` carries the `reason` and no `source` key.
-- actor `None` and external target — external synchronization;
-  `user_deactivated.detail` carries the `reason` and
-  `source = "external_sync"`.
-
-The caller-provided `reason` is lifecycle context, not a source
-discriminator. It never changes the derived `source` key.
-
 **Rollback**: any failure or interruption before the workflow commit —
 API-key mutation or audit failure, Session invalidation failure,
 `User.active` write failure, Ticket lock/clear/audit failure,
@@ -1181,6 +1163,24 @@ external source when applicable. API key revocations produce individual
 unassigned ticket (see
 `docs/features/tickets/ticket-audit-log.md` for the event type contract). No
 grant event is created because no grant row is changed.
+
+#### Audit attribution
+
+No invocation-source parameter is added. Attribution derives from the
+actor and the locked target:
+
+- actor UUID — authenticated API operation; `user_deactivated.detail`
+  carries the `reason` and no `source` key. An active external target is
+  rejected before mutation, so this combination cannot describe external
+  sync.
+- actor `None` and local target — CLI or other system action;
+  `user_deactivated.detail` carries the `reason` and no `source` key.
+- actor `None` and external target — external synchronization;
+  `user_deactivated.detail` carries the `reason` and
+  `source = "external_sync"`.
+
+The caller-provided `reason` is lifecycle context, not a source
+discriminator. It never changes the derived `source` key.
 
 ### `reactivate_user()`
 

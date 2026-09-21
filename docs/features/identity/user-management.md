@@ -482,9 +482,10 @@ confirmation), 1 on validation or operational error (invalid username,
 unknown user, external user, non-TTY), 2 on system error (database
 unreachable), 130 on SIGINT, 143 on SIGTERM.
 
-**Output channels**: impact summary, prompt, success/no-op messages, and
-`Aborted.` to stdout. `"Error: ..."` messages and `"Warning: ..."` (last
-admin) to stderr.
+**Output channels**: impact summary, prompt and its interactive retry
+feedback (Click's `Error: invalid input` line for an unrecognized answer),
+success/no-op messages, and `Aborted.` to stdout. Command error messages
+(`"Error: ..."`) and the last-admin `"Warning: ..."` to stderr.
 
 ### `sentinel manage-user set-password`
 
