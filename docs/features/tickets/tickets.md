@@ -1724,8 +1724,9 @@ POST /api/v1/tickets/{ticket_id}/rerun-reactivation
 ```
 
 Reruns the complete Ticket convergence workflow from its beginning. This is an
-asynchronous recovery action for a terminal convergence-wrapper failure or an
-individual catch-up failure; it does not directly change Ticket status.
+asynchronous recovery action for a terminal convergence-wrapper failure, an
+individual catch-up failure, or a lost or unconfirmed initial publication; it
+does not directly change Ticket status.
 
 **`Capability: triage_ticket OR manage_fetchers`**
 

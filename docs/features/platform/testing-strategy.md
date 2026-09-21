@@ -1656,13 +1656,14 @@ Ticket gate and convergence changes additionally require:
 - `REJECTED -> PUBLISHED` reopening the unique associated Ticket only when its
   locked-current status is `Ignored`, without consulting audit history.
 
-The owning service specifications define detailed Ticket-convergence test
-matrices: see `ticket-service.md` (Architectural Test Requirement, manual-zone
-registration and operator dispatch) and `package-service.md` (Architectural
-Test Requirement, affectedness authority and Ticket convergence workflow).
-Those tests distinguish best-effort automatic publication failure after a
-successful committed mutation from the explicit rerun endpoint's 503
-publication failure.
+The owning service specifications define the module-level Ticket-convergence
+test summaries (`ticket-service.md`, Architectural Test Requirement, manual-zone
+registration and operator dispatch; `package-service.md`, Architectural Test
+Requirement, affectedness authority and Ticket convergence workflow), while
+the detailed publication-handoff matrix is defined in "Ticket Convergence
+Publication Handoff" below. Those tests distinguish best-effort automatic
+publication failure after a successful committed mutation from the explicit
+rerun endpoint's 503 publication failure.
 
 ### CVE Ingestion Persistence
 
@@ -2380,9 +2381,11 @@ close, and publication boundaries.
 - deduplication: repeated reconciliation for one Ticket in one transaction
   registers one effect, while effects for different Tickets preserve
   first-registration order;
-- commit precedes every publication attempt; the API drain releases the
-  caller-owned session before its first attempt, and every service-owned owner
-  commits, closes, and releases locks before its own attempt;
+- commit and row-lock release precede every publication attempt, and no owner
+  performs database work while publishing; the batch consumer and the explicit
+  rerun complete their own commit and session close before their attempt, while
+  the fetcher follows its reusable-session contract in
+  `cve-fetcher-infrastructure.md`;
 - rollback, a failed commit, and pre-commit cancellation discard the effects
   with zero publication attempts;
 - detach consumes the complete sequence before the first attempt; an attempted
@@ -2402,6 +2405,8 @@ close, and publication boundaries.
   exception text and no exception message is inspected;
 - an unconfirmed acknowledgement remains ambiguous: the task may still execute
   and a later explicit rerun may duplicate work;
+- the boundary performs exactly one submission attempt; it neither adds its own
+  retry loop nor disables Celery's configured publication retry policy;
 - every non-operational exception propagates unchanged and is never classified
   `acceptance_unconfirmed`. Cover at least `asyncio.CancelledError`,
   `WorkerShutdown`, `SoftTimeLimitExceeded`, `MemoryError`, `EncodeError` or
@@ -2411,11 +2416,15 @@ close, and publication boundaries.
 
 **Owner policies**
 
-- automatic API mutation: the committed mutation keeps its ordinary success
-  response after both `submitted` and `acceptance_unconfirmed`; an ordinary
-  failure emits exactly one `ticket_convergence_publication_failed` ERROR with
-  `ticket_id` and the closed `broker_operational_error` cause, and never
-  produces `CELERY_UNAVAILABLE`;
+- automatic best-effort owners: the committed result is preserved after both
+  `submitted` and `acceptance_unconfirmed`; the automatic API mutation path
+  keeps its ordinary success response, and the lifecycle, Product/threshold, and
+  `run_ticket_convergence()` per-package owners keep their committed unit
+  outcomes; an ordinary failure emits exactly one
+  `ticket_convergence_publication_failed` ERROR with `ticket_id` and the closed
+  `broker_operational_error` cause, never produces `CELERY_UNAVAILABLE`, and an
+  unexpected non-operational exception escaping the drain is neither converted
+  nor feature-logged and never changes already-committed data;
 - CVE/fetcher finalization: an ordinary failure is absorbed after exactly one
   Ticket-owned log; later detached effects and the package-candidate handoff
   are still attempted; the committed ingestion classification, durable

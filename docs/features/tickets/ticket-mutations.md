@@ -378,9 +378,11 @@ Its lifecycle is:
 2. **Deduplication and order**: at most one effect exists per Ticket in one
    transaction, and a repeated `reconcile_ticket_status()` invocation for the
    same Ticket does not add a second one. Effects for different Tickets are
-   consumed in first-registration order. The registry is transaction-local
-   even when it is attached to a reusable `AsyncSession`: a new transaction
-   inherits no pending effect from an earlier committed or rolled-back one.
+   consumed in first-registration order. The registry is bound to the
+   transaction and not merely to the session object, even when it is attached
+   to a reusable `AsyncSession`: a new transaction inherits no pending effect
+   from an earlier committed, rolled-back, or failed transaction, whether or
+   not that transaction's owner drained it.
 3. **Discard**: rollback, a failed commit, and pre-commit cancellation discard
    the transaction's effects without publication.
 4. **Detach and consume**: after the caller's commit succeeds, the transaction

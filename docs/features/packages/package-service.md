@@ -1440,8 +1440,9 @@ mutations create their ordinary events.
 repeats external requests and catch-up publication by design, while delegated
 database operations remain insert-if-missing or current-state reconciliations.
 
-The workflow begins only after an initial publication attempt that returned
-without raising (`submitted` in `ticket-service.md`, Ticket Convergence). The
+The workflow can run only as the result of an initial publication attempt
+(`submitted` or `acceptance_unconfirmed` in `ticket-service.md`, Ticket
+Convergence); an unconfirmed attempt may still have delivered the task. The
 workflow does not determine that synchronous outcome: the attempt belongs to
 the registering transaction owner, and the workflow runs later in a worker. A
 terminal wrapper failure or an individual catch-up failure stays distinct from
@@ -1527,11 +1528,12 @@ The wrapper returns `None` and creates no `FetcherRun`.
 
 The post-commit registration and task/callback composition mechanism is an
 implementation choice. The behavioral ordering and per-package transaction
-isolation are required. See `ticket-service.md` (Ticket Convergence) for the
-transaction-local registration lifecycle, the database-free publication
-boundary, and the `submitted`/`acceptance_unconfirmed` outcome vocabulary;
-`package-model.md` (IBS Workflow Applicability and Convergence); and
-`fetcher-infrastructure.md` (Per-Ticket Catch-Up).
+isolation are required. See `ticket-mutations.md` (Transaction-Local Ticket
+Convergence Registration) for the registration lifecycle, `ticket-service.md`
+(Ticket Convergence) for the database-free publication boundary and the
+`submitted`/`acceptance_unconfirmed` outcome vocabulary; `package-model.md`
+(IBS Workflow Applicability and Convergence); and `fetcher-infrastructure.md`
+(Per-Ticket Catch-Up).
 
 ## Query Operations
 

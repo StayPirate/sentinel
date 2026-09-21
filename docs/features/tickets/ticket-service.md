@@ -70,8 +70,9 @@ service-owned orchestration boundary that opens and completes its own short
 session (`docs/conventions.md`, Caller-Owned Service Transactions —
 orchestration boundary). It does not accept a caller-supplied session. The
 automatic convergence effects registered by `reconcile_ticket_status()` keep
-using the caller-owned transaction; the API drain releases that caller-owned
-session immediately before its best-effort publication attempt.
+using the caller-owned transaction; the API drain consumes them in the
+dependency's post-commit phase, after the commit and the release of the row
+locks.
 
 ### Acting user convention
 
@@ -1161,8 +1162,9 @@ implementation choice.
 
 - The boundary receives only detached primitive data: the canonical internal
   Ticket UUID and the allocated task ID. It opens no database session, performs
-  no query, accepts no ORM instance, and performs no Redis, HTTP, or other
-  network I/O.
+  no query, and accepts no ORM instance. Its only external I/O is the configured
+  Celery broker publication call; it performs no HTTP or other network I/O and
+  accesses no Redis key of its own.
 - It returns `submitted` when the publication call returns without raising, and
   `acceptance_unconfirmed` when the call raises the library-normalized broker
   operational error `kombu.exceptions.OperationalError` (the same class as
@@ -1170,6 +1172,9 @@ implementation choice.
   class only and never the exception text.
 - The synchronous call includes Celery's own configured publication retry
   policy. The boundary adds no retry of its own.
+- The draining owner allocates the transient root task ID in memory immediately
+  before each attempt. Registration never allocates one and no task ID is
+  persisted.
 - Every other exception propagates unchanged and is never converted into
   `acceptance_unconfirmed`: `asyncio.CancelledError`, worker cancellation and
   shutdown signals (`WorkerShutdown`, `WorkerTerminate`, `SystemExit`,
@@ -1186,21 +1191,29 @@ implementation choice.
 
 ### Owner outcome policies
 
-Each transaction owner drains the detached effects and applies its own policy.
-Draining never begins before the registering transaction has committed and
-released its row locks, and publication never accesses the database.
+Each transaction owner drains the detached effects it registered and applies
+one of the policies below. Draining begins only after that transaction has
+committed and released its row locks, the complete sequence is detached before
+the first publication attempt, and the publisher never accesses the database.
+An owner that is not separately listed below applies the automatic best-effort
+policy, so no registering path is left undefined.
 
-**Automatic API mutation.** The API transaction dependency consumes the
-detached effects in its post-commit phase, after `commit()` succeeded. In
-registration order it detaches each effect, releases the caller-owned session
-by closing it — so a potentially blocking broker call does not hold a pooled
-database connection — and then performs the initial publication attempt.
-`submitted` preserves the committed mutation's ordinary success response.
-`acceptance_unconfirmed` also preserves that success response, emits exactly one
+**Automatic best-effort owners.** This class covers the automatic API mutation
+paths, the per-Ticket system workflows that can regress a `Resolved` Ticket
+(the `evaluate_lifecycle_transitions` fetcher and the
+`re_evaluate_product_eligibility` sub-task through their package-service
+reconciliation boundaries), and the per-package transactions of
+`run_ticket_convergence()`. Each owner detaches and attempts its effects after
+its own commit and lock release, before the transaction's session is discarded
+and before the next unit starts. `submitted` leaves the committed result
+unchanged. `acceptance_unconfirmed` also leaves it unchanged, emits exactly one
 Ticket-owned ERROR (see below), and is absorbed; it never becomes
-`CELERY_UNAVAILABLE`, and recovery is the explicit complete rerun. Unexpected
-exceptions escaping the drain are not converted into `acceptance_unconfirmed`
-and follow the unchanged generic post-commit callback behavior.
+`CELERY_UNAVAILABLE`, and recovery is the explicit complete rerun. The
+automatic API mutation path preserves its ordinary success response in both
+outcomes; a task owner preserves its committed unit outcome. An unexpected
+exception escaping the drain is not converted into `acceptance_unconfirmed` and
+follows the unchanged generic post-commit callback contract; it never changes
+already-committed data.
 
 **Batch consumers (all-CVE recalculation runner).** A batch consumer that
 processes independent committed units drains each unit's detached effects after
@@ -1240,14 +1253,15 @@ For one ordinary initial-publication failure, exactly one owner-selected
 feature log is emitted. The publisher boundary and the generic post-commit
 callback drain never log that failure themselves.
 
-- The automatic API mutation path and the CVE/fetcher finalization path share
+- The automatic best-effort owners and the CVE/fetcher finalization path share
   one Ticket-owned event: `ticket_convergence_publication_failed` at ERROR,
   with `ticket_id` (the internal Ticket UUID), the closed sanitized `cause`
   category `broker_operational_error`, and the request or task correlation
   already bound to the execution context.
 - A batch consumer owns its own event, as described above.
-- The explicit operator rerun owns its request failure event, with `ticket_id`,
-  the same closed `cause` category, and the bound `request_id`.
+- The explicit operator rerun owns its request failure event
+  `ticket_convergence_dispatch_failed` at ERROR, with `ticket_id`, the same
+  closed `cause` category, and the bound `request_id`.
 
 No Ticket-convergence publication log may contain `exc_info`, raw exception
 text, a traceback, broker URLs, hosts, ports, credentials, payloads, Ticket
@@ -1314,7 +1328,9 @@ boundary's concrete parameter or context shape.
    `acceptance_unconfirmed`, emit exactly one sanitized request-owned ERROR (see
    "Publication failure logging") and raise `TicketConvergenceDispatchError`.
 
-The endpoint maps the returned task ID to `TicketConvergenceDispatchResponse`
+The preparation transaction performs no I/O while the Ticket lock is held, and
+the publication attempt acquires no lock. The endpoint maps the returned task
+ID to `TicketConvergenceDispatchResponse`
 and HTTP 202, and `TicketConvergenceDispatchError` to
 `503 CELERY_UNAVAILABLE` before the response is transmitted.
 
