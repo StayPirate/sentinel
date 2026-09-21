@@ -116,14 +116,17 @@ ticket unassignment) are triggered by the deactivation but never restored
 by the automatic reactivation. Blocking manual deactivation eliminates
 this inconsistency entirely.
 
-**Enforcement**: `deactivate_user()` and `reactivate_user()` check
+**Enforcement**: `deactivate_user()`, `get_deactivation_impact()`, and
+`reactivate_user()` check
 `user.external_id IS NOT NULL AND acting_user_id IS NOT NULL` and raise
 `ExternalUserStatusReadOnlyError` when both conditions are true. Since external
 sync always passes `acting_user_id = None`, its calls are unaffected.
-CLI commands add an additional pre-call guard for defense in depth
-(CLI also uses `acting_user_id = None`).
+CLI commands enforce their own manual-surface guard because their
+`acting_user_id = None` call is indistinguishable from external
+synchronization at this boundary; see
+`docs/features/identity/user-management.md` (`manage-user deactivate`).
 
-**Evaluation point differs by function**: the two functions check this
+**Evaluation point differs by function**: the functions check this
 condition at different points relative to their idempotency (no-op) check,
 and this difference is intentional, not an inconsistency:
 
@@ -131,11 +134,13 @@ and this difference is intentional, not an inconsistency:
   already-active check — a human caller reactivating an external user is
   rejected with `ExternalUserStatusReadOnlyError` regardless of the user's
   current `active` value (see `reactivate_user()` below).
-- `deactivate_user()` evaluates the already-inactive no-op check first, and
-  the guard only for a currently-active user — a human caller deactivating
-  an already-inactive external user gets the same no-op response as for a
-  local user (see `deactivate_user()` below). This ordering keeps
-  `deactivate_user()` consistent with `GET .../deactivation-impact`
+- `deactivate_user()` and `get_deactivation_impact()` evaluate the
+  already-inactive no-op check first, and the guard only for a
+  currently-active user — a human caller deactivating or previewing an
+  already-inactive external user gets the same no-op response as for a
+  local user (see `deactivate_user()` and `get_deactivation_impact()`
+  below). This ordering keeps `deactivate_user()` consistent with
+  `GET .../deactivation-impact`
   (`docs/features/identity/user-management.md`), whose preview must not be
   stricter than the action it previews: both must treat an already-inactive
   external user as a no-op, not a rejection.
@@ -255,30 +260,97 @@ raise `UserNotFoundError`). Ordering is not guaranteed by the service —
 response formatters apply the deterministic ordering rule from `rbac.md`
 (Deterministic ordering).
 
-#### `get_deactivation_impact(session, user_id)`
+#### `get_deactivation_impact(session, user_id, acting_user_id)`
 
-Accepts `session: AsyncSession` and `user_id: UUID`. Return
-`DeactivationImpact(sessions_count: int, tickets_count: int,
-is_last_active_admin: bool)` using one database snapshot. Counts include active
-sessions and active-status tickets currently assigned to the user. The admin
-flag is true only when the target is active, holds an effective Admin role, and
-no other active user holds Admin. Unknown users raise `UserNotFoundError`.
-This read is a point-in-time preview, creates no audit event, and acquires no
-mutation lock; deactivation re-evaluates actual state when it runs. API-key
-counting remains owned by `api_key_service.count_non_revoked_keys()`.
+Accepts `session: AsyncSession`, `user_id: UUID`, and
+`acting_user_id: UUID | None` — the authenticated administrator for API
+callers, `None` for CLI and other system callers. This function is the
+complete preview boundary for administrator deactivation: the API and CLI
+surfaces call it and perform no API-key, Session, Ticket, or UserRole query
+of their own.
+
+**Result**: `DeactivationImpact(already_inactive: bool,
+is_last_active_admin: bool, api_keys_count: int, sessions_count: int,
+tickets_count: int)`.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `already_inactive` | `bool` | `true` when the target is already inactive; all other fields are then zeroed |
+| `is_last_active_admin` | `bool` | `true` when the active target holds an effective Admin role (any origin) and no other active user holds Admin |
+| `api_keys_count` | `int` | Non-revoked API keys that deactivation would revoke, including expired keys |
+| `sessions_count` | `int` | Active Sessions that deactivation would invalidate |
+| `tickets_count` | `int` | Active-status Tickets currently assigned to the target that deactivation would unassign |
+
+**Guard and no-op ordering** — the same target-state ordering used by
+`deactivate_user()`:
+
+1. Unknown target — `UserNotFoundError`.
+2. Already-inactive target — return
+   `DeactivationImpact(already_inactive=true, is_last_active_admin=false,
+   api_keys_count=0, sessions_count=0, tickets_count=0)` without evaluating
+   the guards below and without accessing the resources counted above. This
+   applies equally to local and external targets: an already-inactive
+   external user is a successful zero-impact preview, not a rejection.
+3. Active external target (`external_id IS NOT NULL`) with a non-NULL
+   `acting_user_id` — `ExternalUserStatusReadOnlyError`. With
+   `acting_user_id = None` this service guard is inapplicable, mirroring
+   `deactivate_user()`: actor-NULL callers are CLI/system surfaces, and the
+   CLI applies its own equivalent target guard before prompting (see
+   `docs/features/identity/user-management.md`, `manage-user deactivate`,
+   and External Active Status Ownership above). External synchronization
+   deactivates through `deactivate_user()` under the same actor-NULL
+   contract.
+4. Active self-target (`acting_user_id = user_id`) — `SelfDeactivationError`.
+   `acting_user_id = None` (CLI and other system callers) makes this guard
+   inapplicable.
+5. Active eligible target — compute the observations.
+
+**Query ownership**: the API-key count is delegated to
+`api_key_service.count_non_revoked_keys()`. The Session, Ticket, and
+effective-Admin observations belong to this service boundary; no API handler
+or CLI command reconstructs them. The preview counts no explicit
+`TicketAccessGrant` or `TicketPackageMaintainer` row: deactivation retains
+both, so neither is a mutation whose cardinality belongs in the impact
+response.
+
+**Advisory consistency**: the four observed values are independent
+point-in-time observations produced by this read workflow. They are not
+promised to share one PostgreSQL transaction snapshot or to be mutually
+atomic, and successive queries may observe concurrent changes. The read
+acquires no lock and creates no reservation, preview token, progress state,
+or durable record. It does not constrain the later `deactivate_user()`
+invocation, which independently revalidates locked-current state and affects
+every in-scope resource present when it executes. A preview is therefore
+advisory: it reports what a deactivation would affect if it ran at
+observation time, not a guarantee of the effects the operator will later
+commit.
+
+**Side effects and audit**: none. The preview creates no audit event, no
+database mutation, and no Redis operation.
+
+**Re-invocation**: read-only and repeatable. Every invocation returns
+observations of the state it observes; nothing is cached or remembered
+between invocations.
+
+**Exceptions**: `UserNotFoundError`, `ExternalUserStatusReadOnlyError`, and
+`SelfDeactivationError` per the ordering above; database errors and
+exceptions propagated by `api_key_service.count_non_revoked_keys()`
+propagate unchanged.
+
 This ticket-dependent read belongs only to the deactivation workflow; the
 general user query boundary contains identifier resolution, list, and detail
 reads.
 
-The preview does not count explicit grants or package-maintainer associations:
-deactivation retains both and therefore does not perform a mutation whose
-cardinality belongs in the impact response.
-
 ### Mutation Result Types
 
-- `DeactivationResult` contains the updated `user` and
-  `invalidated_session_ids: list[UUID]` required for the post-commit cache
-  purge.
+- `DeactivationResult` contains the updated `user`, `deactivated: bool`, and
+  `invalidated_session_ids: list[UUID]`. `deactivated` is `true` only when
+  the invocation performed the effective `active → inactive` transition and
+  `false` for an already-inactive or concurrent-loser no-op;
+  `invalidated_session_ids` is empty on a no-op and otherwise carries the
+  identifiers required for the post-commit cache purge. The flag is a
+  service result field only — the HTTP payload returns the current profile
+  and does not expose it.
 - `PasswordResetResult` contains the updated `user`,
   `invalidated_session_ids: list[UUID]`, and normalized `username` required for
   post-commit session-cache and lockout-counter cleanup.
@@ -929,90 +1001,173 @@ Deactivates a user account and triggers all associated side effects.
 | `acting_user_id` | `UUID \| None`            | No       | Who is performing the action         |
 | `reason`       | `str`                       | Yes      | Identity-lifecycle context stored in `user_deactivated.detail`; not copied into Ticket audit comments |
 
-**Preconditions**:
+**Guard and no-op ordering** — the same target-state ordering used by
+`get_deactivation_impact()`:
 
-- User must be currently active. If already inactive, this is a no-op
-  (returns the user unchanged)
-- **External status guard**: if `user.external_id IS NOT NULL` AND
-  `acting_user_id IS NOT NULL`, reject with
-  `ExternalUserStatusReadOnlyError`. Active status of external users is managed
-  exclusively by external sync (see External Active Status Ownership above)
-- **Self-deactivation guard**: if `acting_user_id` is not None AND
-  `acting_user_id == user_id`, reject with `SelfDeactivationError`
+1. Unknown target — `UserNotFoundError`.
+2. Already-inactive target — successful no-op: no mutation and no audit
+   event. Return
+   `DeactivationResult(user, deactivated=false, invalidated_session_ids=[])`
+   without evaluating the guards below and without revoking keys,
+   invalidating Sessions, or unassigning Tickets. This applies equally to
+   local and external targets (see External Active Status Ownership above).
+3. Active external target (`external_id IS NOT NULL`) with a non-NULL
+   `acting_user_id` — `ExternalUserStatusReadOnlyError`. Active status of
+   external users is managed exclusively by external sync.
+4. Active self-target with `acting_user_id = user_id` —
+   `SelfDeactivationError`.
+5. Active eligible target — the side-effect sequence below.
 
 As the first database operation, acquire a `FOR NO KEY UPDATE` lock on the
-target User row. If no row exists, raise `UserNotFoundError`. First check
-whether the user is already inactive; if so, return
-`DeactivationResult(user, [])` without any mutation or audit event.
-Only an active user is then evaluated against the external-status and
-self-deactivation guards, in that order. `FOR NO KEY UPDATE` serializes
-deactivation with API key creation and bulk revocation while remaining
-compatible with the `FOR KEY SHARE` locks those operations trigger during
-foreign-key validation (see `api-key-service.md`).
+target User row and revalidate existence, active status, and every guard
+against the locked-current row. An API or CLI pre-read is never
+authoritative: guards, audit values, and no-op classification all derive
+from the locked state. `FOR NO KEY UPDATE` serializes deactivation with API
+key creation and bulk revocation while remaining compatible with the
+`FOR KEY SHARE` locks those operations trigger during foreign-key
+validation (see `api-key-service.md`).
 
 **Side effects — Database phase** (executed atomically in a single
 database transaction, in this specific order):
 
-1. Revoke all API keys belonging to this user via
-   `api_key_service.revoke_all_user_keys(session, user_id,
-   acting_user_id=acting_user_id)`. Keys are not deleted — preserves audit
-   trail and attributes every revocation to the same API actor, or NULL for
-   CLI/external-sync workflows.
-   See `docs/features/identity/api-key-service.md`.
-2. Invalidate all active sessions for this user (DB only) via
+1. Revoke every non-revoked API key belonging to this user, including
+   expired keys, via `api_key_service.revoke_all_user_keys(session,
+   user_id, acting_user_id=acting_user_id)`. Keys are not deleted — the
+   revocation preserves the audit trail and is attributed to the same
+   actor (or NULL for CLI/external-sync workflows). The delegated service
+   creates exactly one `api_key_revoked` Identity event per effective
+   revocation in its documented deterministic order; an already-revoked
+   key creates none. See `docs/features/identity/api-key-service.md`.
+2. Invalidate all active Sessions for this user (DB only) via
    `session_service.invalidate_user_sessions(db, user_id,
-   reason="deactivation")`. This sets
-   `Session.is_active = false` in the database and returns the list of
-   invalidated `session_id`s (used by the post-commit phase). See
-   `docs/features/identity/authentication.md` (Session invalidation) for the
-   session service contract.
-3. Set `User.active = false`
-4. Unassign active tickets: call
-   `_unassign_active_tickets(db, user, "user deactivated")`. The caller's
-   `reason` remains identity-lifecycle context only. This clears `assignee_id` on all
-   active tickets and creates `TicketAuditEvent` records — all within the
-   same transaction. Ticket status is
-   not changed (see Architectural Invariant in `tickets.md`). See
-   Private Helpers for the full contract.
+   reason="deactivation")`, which returns the invalidated `session_id`s
+   used by the post-commit phase. Session invalidation creates no Identity
+   audit event. See `docs/features/identity/authentication.md` (Session
+   invalidation).
+3. Set `User.active = false`.
+4. Unassign active tickets via
+   `_unassign_active_tickets(db, user, "user deactivated")`. The
+   caller-supplied `reason` is identity-lifecycle context only and is never
+   copied into Ticket audit comments. The helper locks candidate Tickets in
+   ascending UUID order, clears only locked-current `New`, `Analysis`, and
+   `Analyzed` assignments, and creates exactly one `assignment`
+   TicketAuditEvent per effective clear. Ticket status is never changed
+   (see Architectural Invariant in `tickets.md`). See Private Helpers for
+   the full contract; a preserved or already-cleared candidate creates no
+   event.
+5. Create `user_deactivated` after every delegated mutation above. The
+   event uses `user_id = acting_user_id`, `target_user_id = user_id`,
+   `old_value = "active"`, and `new_value = "inactive"`. Its `detail`
+   always contains the supplied `reason`; it also contains
+   `source = "external_sync"` exactly when `acting_user_id` is `None` and
+   the target is external (derived, never passed as a parameter — see
+   Audit attribution below).
+6. Flush every mutation and audit record and return
+   `DeactivationResult(user, deactivated=true, invalidated_session_ids)`.
+   `user` has roles and manager loaded for API serialization.
+
+The composite insertion order is the API-key revocation events, then the
+Ticket `assignment` events, then the single identity `user_deactivated`
+event; all of them flush together and commit or roll back with the
+mutations. The delegated services own their own event payloads — this
+section does not restate them.
 
 The database phase performs no `TicketAccessGrant` or
 `TicketPackageMaintainer` mutation. Existing relationships remain persisted;
-the inactive User cannot authenticate to exercise them. Deactivation creates no
-`access_grant_added` or `access_grant_removed` event.
+the inactive User cannot authenticate to exercise them. Deactivation creates
+no `access_grant_added` or `access_grant_removed` event and no grant or
+maintainer event of any kind. Retained rows remain subject to their ordinary
+Ticket-side contracts.
 
-After the database steps, create `user_deactivated`, flush every mutation and
-audit record, and return. The event uses `user_id = acting_user_id`,
-`target_user_id = user_id`, `old_value = "active"`, and
-`new_value = "inactive"`. Its `detail` always contains the supplied `reason`;
-external synchronization also includes `source = "external_sync"`
-before returning
-`DeactivationResult(user, invalidated_session_ids)`. The service does not
-commit.
+The service does not commit; the workflow owner commits exactly once after
+step 6.
+
+**Audit attribution**: no invocation-source parameter is added. Attribution
+derives from the actor and the locked target:
+
+- actor UUID — authenticated API operation; `user_deactivated.detail`
+  carries the `reason` and no `source` key. An active external target is
+  rejected before mutation, so this combination cannot describe external
+  sync.
+- actor `None` and local target — CLI or other system action;
+  `user_deactivated.detail` carries the `reason` and no `source` key.
+- actor `None` and external target — external synchronization;
+  `user_deactivated.detail` carries the `reason` and
+  `source = "external_sync"`.
+
+The caller-provided `reason` is lifecycle context, not a source
+discriminator. It never changes the derived `source` key.
+
+**Rollback**: any failure or interruption before the workflow commit —
+API-key mutation or audit failure, Session invalidation failure,
+`User.active` write failure, Ticket lock/clear/audit failure,
+`user_deactivated` insertion failure, lock timeout, database error, or
+flush error — rolls back the complete workflow. No partial key revocation,
+Session invalidation, assignment clear, or audit event survives a rollback.
 
 **Workflow-owned post-commit phase** (best-effort, after the caller commits and
 the pessimistic row lock is released):
 
-5. Purge session cache via
+7. Purge the session cache via
    `session_service.purge_session_cache(invalidated_session_ids)`. The helper
-   owns the Redis-error and warning-suppression contract. The database is the
-   authoritative source for session validity; auth middleware verifies
-   against the database on cache miss. See
+   attempts every returned `session_id` and owns the Redis-error and
+   warning-suppression contract. See
    `docs/features/identity/authentication.md` (Session invalidation).
 
-The API, CLI, external synchronization, or task workflow invokes step 5 from
-the returned result. `deactivate_user()` itself performs no Redis I/O.
+The API, CLI, external synchronization, or task workflow invokes step 7 from
+the returned result. `deactivate_user()` itself performs no Redis I/O, and no
+Redis operation executes while the User lock is held. A `RedisError` from the
+purge cannot reclassify or roll back the committed deactivation; the API and
+CLI still report their committed success. Cache entries not deleted expire
+naturally within their existing TTL. The workflow does not persist the
+invalidated identifiers, retry the purge in a task, or expose an independent
+purge invocation: once the transient result is lost, recovery is exclusively
+TTL-based plus the authoritative database check (see
+`docs/features/identity/authentication.md`, Session liveness check).
 
-**Ordering rationale**: API keys and sessions are revoked BEFORE the
-user is marked as inactive (steps 1-2 before step 3). Under the
-single-transaction model, all database steps commit atomically — an
-interruption before commit rolls back everything. The ordering is
-significant for retry safety: if the transaction succeeds but the
-process crashes before the post-commit phase, the admin can verify that
-the user is already inactive and re-invoke the cache purge
-independently. The Redis cache purge (step 5) is post-commit per
-`docs/conventions.md` (Transaction Hygiene Rules) — it cannot be rolled
-back by a transaction failure and must not extend the pessimistic row lock
-hold time.
+**Ordering rationale**: the order of steps 1-4 is fixed and deterministic:
+API keys and Sessions are revoked BEFORE the user is marked inactive
+(steps 1-2 before step 3), and Ticket unassignment follows it (step 4).
+Under the single-transaction model, all database steps commit atomically — an
+interruption before commit rolls back everything, and no caller can observe
+an intermediate step. The fixed order makes the composed contract, the
+composite audit sequence, and the concurrency tests deterministic. The Redis
+cache purge (step 7) is post-commit per `docs/conventions.md` (Transaction
+Hygiene Rules) — it cannot be rolled back by a transaction failure and must
+not extend the pessimistic row lock hold time.
+
+**Re-invocation**: conditionally idempotent. A repeated invocation after a
+successful deactivation observes the committed inactive state and returns a
+`deactivated = false` no-op with an empty `invalidated_session_ids`, creating
+no mutation and no audit event. A concurrent loser behaves identically.
+
+**Concurrency**:
+
+- **deactivation / deactivation**: both callers serialize on the User lock.
+  Exactly one observes the active state, performs the transition, and returns
+  `deactivated = true`; the other observes the committed inactive state and
+  returns `deactivated = false` with no duplicate side effect or event.
+- **deactivation / API-key creation**: both lock the User (`FOR NO KEY
+  UPDATE`). If deactivation commits first, key creation observes the inactive
+  owner and is rejected with `InactiveUserError`; if creation commits first,
+  the new key exists and deactivation revokes it in step 1. Whichever caller
+  acquires the lock second observes the first caller's committed state.
+- **deactivation / session creation**: successful local and SSO session
+  creation revalidates the locked-current active status under the same User
+  lock (see `docs/features/identity/authentication.md`, Session creation). If
+  session creation commits first, deactivation observes and invalidates the
+  new Session in step 2; if deactivation commits first, login observes the
+  inactive User and creates no Session.
+- **deactivation / manual role mutation**: both serialize on the User lock.
+  The first to commit performs any Ticket unassignment; the second finds no
+  assigned tickets or an already-inactive User and creates no duplicate
+  `assignment` event (see Concurrent role removal and deactivation).
+- **deactivation / Ticket assignment**: inherited unchanged from the stable
+  assignment-eligibility contract (see Assignment concurrent with
+  deactivation or active manual role loss).
+- **deactivation / access-grant creation**: inherited unchanged; deactivation
+  retains every grant row (see Access grant concurrent with user lifecycle or
+  rename).
 
 **IdentityAuditEvent**: `user_deactivated` — `user_id` follows the Actor
 Contract, `target_user_id` = deactivated user, and `detail` includes reason and
@@ -1020,7 +1175,8 @@ external source when applicable. API key revocations produce individual
 `api_key_revoked` events via `api_key_service`. See
 `docs/features/identity/identity-audit-log.md`.
 
-**TicketAuditEvent**: yes — one `assignment` event per unassigned ticket (see
+**TicketAuditEvent**: yes — one `assignment` event per effectively
+unassigned ticket (see
 `docs/features/tickets/ticket-audit-log.md` for the event type contract). No
 grant event is created because no grant row is changed.
 
@@ -1274,11 +1430,13 @@ all events in that workflow.
 ### Concurrent deactivation from multiple entry points
 
 If two entry points call `deactivate_user()` for the same user
-concurrently (e.g., external sync and admin API), the `active` precondition
-check and write MUST use row-level locking (`SELECT ... FOR NO KEY UPDATE`) to
+concurrently (e.g., external sync and admin API), the guard classification
+and write MUST use row-level locking (`SELECT ... FOR NO KEY UPDATE`) to
 prevent duplicate side effects. The first caller acquires the lock,
-performs the deactivation, and commits. The second caller acquires the
-lock, finds `active = false`, and returns as a no-op.
+performs the deactivation, and commits with `deactivated = true`. The second
+caller acquires the lock, finds `active = false`, and returns
+`deactivated = false` as a no-op with an empty
+`invalidated_session_ids`, no mutation, and no audit event.
 
 ### Role modification during deactivation
 
@@ -1332,6 +1490,25 @@ locked-current predicate revalidation, and one system `assignment` event per
 effective unassignment. They assert the exact four identity-owned reason values,
 `detail = NULL`, no event for an already-cleared or no-longer-active candidate,
 and complete rollback of identity and Ticket changes after an audit failure.
+
+### Session creation concurrent with deactivation
+
+Successful local and SSO Session creation revalidates the locked-current
+`User.active` value under the same `FOR NO KEY UPDATE` User root lock before
+creating the Session and updating `last_login_at` (see
+`docs/features/identity/authentication.md`, Session creation). Deactivation
+uses the conflicting `FOR NO KEY UPDATE` lock, so the two operations have one
+serialization point:
+
+- if Session creation commits first, the new Session exists and a later
+  deactivation invalidates it together with every other active Session;
+- if deactivation commits first, the login workflow observes the committed
+  inactive User under the lock, creates no Session, and returns its
+  provider-specific authentication failure (`AUTH_INVALID_CREDENTIALS` for
+  local login, `AUTH_SSO_USER_INACTIVE` for SSO — see the provider specs).
+
+No Session can commit for an inactive User, and password hashing or external
+IdP/network I/O never executes while the User lock is held.
 
 ### Assignment concurrent with deactivation or active manual role loss
 

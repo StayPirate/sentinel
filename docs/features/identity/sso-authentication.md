@@ -281,11 +281,20 @@ callback URL with an authorization `code` and `state` parameter.
    `AUTH_SSO_USER_INACTIVE`:
    `"Your account has been deactivated. Contact your administrator."`
 9. In one caller-owned database transaction, call
-   `session_service.create_session(db, user, reason=sso_login)`, then commit
-   the new session and `user.last_login_at` once or roll both back on failure
-   (see `docs/features/identity/authentication.md`, Session creation)
+   `session_service.create_session(db, user, reason=sso_login)`. The service
+   acquires the User root lock and revalidates the locked-current active
+   status before creating anything (see
+   `docs/features/identity/authentication.md`, Session creation). If the
+   locked-current target is inactive — a deactivation that committed after
+   step 8 — the service returns no Session and the endpoint returns the same
+   HTTP 401 `AUTH_SSO_USER_INACTIVE` response as step 8. Otherwise commit the
+   new session and `user.last_login_at` once or roll both back on failure
 10. Return the JWT and its `token_expires_at` from the service result as
     `access_token` and `expires_at`
+
+Steps 1-8 (state validation, token exchange, ID token verification, and user
+resolution) execute before and outside the locked database phase; every
+network operation toward the IdP occurs outside the User lock.
 
 **Success response** (200):
 
@@ -306,7 +315,7 @@ callback URL with an authorization `code` and `state` parameter.
 | 400 | `AUTH_SSO_STATE_INVALID` | Invalid or expired SSO state parameter |
 | 401 | `AUTH_SSO_FAILED` | Token exchange failed or ID token validation failed (transient/infrastructure) |
 | 401 | `AUTH_SSO_USER_NOT_FOUND` | User authenticated by IdP does not exist in the Sentinel User table |
-| 401 | `AUTH_SSO_USER_INACTIVE` | User exists but has been deactivated |
+| 401 | `AUTH_SSO_USER_INACTIVE` | User exists but has been deactivated, including a deactivation that commits between the step-8 pre-check and Session creation |
 | 404 | `AUTH_SSO_DISABLED` | SSO is not configured (all SSO endpoints return this when SSO settings are empty or unset) |
 | 503 | `SSO_UNAVAILABLE` | SSO service temporarily unavailable (IdP discovery unreachable) |
 

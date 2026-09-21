@@ -642,9 +642,11 @@ here with the required authorization level and a link to the owning spec.
    `docs/features/identity/user-service.md`, External Active Status Ownership)
 5. Deactivated users cannot authenticate. On deactivation, all API keys
    are revoked and all active sessions are invalidated (proactively,
-   before marking the user inactive). Additionally, the middleware
-   checks `User.active` on every request as a defense-in-depth measure.
-   See `docs/features/identity/authentication.md` (Deactivation ordering) and
+   before marking the user inactive), and `User.active = false` is enforced
+   on every authenticated request, so a stale session-liveness cache entry
+   cannot extend access while the account remains inactive. See
+   `docs/features/identity/authentication.md` (Deactivation ordering,
+   Session liveness check) and
    `docs/features/identity/user-service.md`
 6. All authentication events are logged (login, logout, failed attempts)
 7. Session duration: JWT expires after 72 hours without a request that

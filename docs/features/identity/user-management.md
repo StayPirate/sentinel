@@ -344,57 +344,113 @@ sentinel manage-user deactivate \
 |--------------|----------|------------------------------------------------|
 | `--username` | Yes      | Username of the user to deactivate              |
 
-**Behavior**:
+**Behavior** (in this order):
 
 1. Normalize the username (trim whitespace, lowercase)
-2. Looks up the user by normalized username — if not found, exits with
-   error: `"Error: User '{username}' not found."`
-3. If the user is an external user (`external_id IS NOT NULL`), exits with
-   error: `"Error: Cannot deactivate external users."` (exit code 1).
-   Active status of external users is managed exclusively by external sync.
-4. If the user is already inactive, prints:
-   `"User '{username}' is already inactive."` and exits with code 0
-5. Queries the impact of deactivation:
-   - Count of non-revoked API keys from
-     `api_key_service.count_non_revoked_keys()` (including expired keys)
-   - Count of active sessions, active assigned tickets, and whether this is the
-     last active Admin from `user_service.get_deactivation_impact()`
-   - Explicit Ticket grants and package-maintainer associations are not counted
-     because deactivation retains them
-6. Displays the impact summary:
+2. Validate the normalized username format (see `docs/conventions.md`,
+   Username Format). If invalid, exit with error:
+   `"Error: Invalid username '{value}'. Username must be 1-64 characters,
+   start with a letter, and contain only lowercase letters, numbers, dots,
+   hyphens, and underscores."` (exit code 1, stderr) — before any database
+   access
+3. Open a read-only session and resolve the user through
+   `user_service.get_user()` using the normalized username. If not found,
+   exit with error: `"Error: User '{username}' not found."` (exit code 1)
+4. Delegate the complete preview to
+   `user_service.get_deactivation_impact(db, user.id, acting_user_id=None)`
+   inside the same read-only session. The command performs no API-key,
+   Session, Ticket, or UserRole query of its own. The CLI passes
+   `acting_user_id = None` (system action), so the service's self-deactivation
+   guard is inapplicable and its actor-dependent external guard does not
+   apply; guard and no-op classification for the service-applicable cases
+   belong to the service:
+   - `already_inactive = true` — print
+     `"User '{username}' is already inactive."` to stdout, close the
+     read-only session, and exit 0 without a prompt and without opening a
+     mutating session. This is the first classification; it precedes the
+     external guard below
+5. If the resolved user is an external user (`external_id IS NOT NULL`),
+   exit with error: `"Error: Cannot deactivate external users."` (exit code
+   1) without mutation. Active status of external users is managed
+   exclusively by external sync. This is the CLI's own manual-surface guard,
+   required because the CLI passes `acting_user_id = None`; the service's
+   equivalent guard covers authenticated API callers (see
+   `docs/features/identity/user-service.md`, External Active Status
+   Ownership). The resolved user's `external_id` is immutable, so this check
+   is not subject to a concurrent change
+6. Display the impact summary to stdout:
    ```
    About to deactivate user '{username}':
      - {n} non-revoked API keys will be revoked
      - {n} active sessions will be invalidated
-      - {n} active tickets will be unassigned
+     - {n} active tickets will be unassigned
    ```
-   If the user is the last active admin, appends a warning to stderr:
+   The counts come exclusively from the preview result. Explicit Ticket
+   grants and package-maintainer associations are not counted because
+   deactivation retains them. If the result reports
+   `is_last_active_admin = true`, append the warning to stderr:
    ```
    Warning: this is the last active user with Admin role.
    After deactivation, assign Admin to another user via:
      sentinel manage-user update --username <user> --add-role admin
    ```
-7. Prompts: `Proceed? [y/N]`
-    - If the user answers anything other than `y` or `Y`, exits with
-      code 0 without deactivating
-    - If no TTY is detected, prints to stderr `Error: This command
-      requires an interactive terminal (confirmation required).` and
-      exits with code 1
-8. Delegates to `user_service.deactivate_user()` with
-   `acting_user_id = None` and
-   `reason = "deactivated via CLI (manage-user deactivate)"`
-   as identity-audit lifecycle context. Any derived Ticket unassignment uses
-   the canonical Ticket comment reason `user deactivated` instead.
-9. After the workflow commits, purges session cache using the returned
-   `DeactivationResult.invalidated_session_ids`. Redis failure is best-effort
-   and does not turn a committed deactivation into a command failure
-10. Prints: `"Deactivated user '{username}'."`
+7. Close the read-only session completely. No terminal input runs while a
+   database session is open, and no pre-prompt read classifies the outcome
+   of a confirmed mutation (the step-4 no-op uses the preview service's own
+   classification)
+8. Verify that stdin is a TTY through the shared TTY detection helper,
+   immediately before the confirmation prompt. If no TTY is detected, print
+   to stderr `Error: This command requires an interactive terminal
+   (confirmation required).` and exit with code 1 without mutation
+9. Prompt `Proceed? [y/N]`:
+   - Explicit decline (any answer other than `y` or `Y`): print `Aborted.`
+     to stdout and exit with code 0 without mutation
+   - EOF/Ctrl+D: Click raises `click.Abort`; the shared exception mapper
+     prints `Aborted.` to stdout and exits with code 0 without mutation (see
+     `docs/features/platform/cli-infrastructure.md`, Database Session
+     Management and Error Handling & Exit Code Mapping)
+   - SIGINT: the shared signal handler exits with code 130 without mutation
+     (see `docs/features/platform/cli-infrastructure.md`, Signal Handling)
+10. After confirmation, open a fresh session and delegate to
+    `user_service.deactivate_user()` with `acting_user_id = None` and
+    `reason = "deactivated via CLI (manage-user deactivate)"`
+    as identity-audit lifecycle context. Any derived Ticket unassignment uses
+    the canonical Ticket comment reason `user deactivated` instead. The
+    service independently revalidates locked-current state. Commit exactly
+    once after the service call succeeds; roll back on any exception or
+    interruption before commit
+11. After the commit, purge the session-liveness cache through
+    `session_service.purge_session_cache(result.invalidated_session_ids)`.
+    Redis failure is best-effort and does not turn a committed deactivation
+    into a command failure. The Redis client is created and closed inside
+    the single `asyncio.run()` boundary
+12. Report exclusively from `DeactivationResult.deactivated`: `true` prints
+    `"Deactivated user '{username}'."`; `false` prints
+    `"User '{username}' is already inactive."`. The outcome of a confirmed
+    invocation is never derived from a pre-prompt read
 
 This command does not permanently remove the user record from the
 database. The User record is preserved to maintain referential integrity
 with TicketAuditEvent, ticket assignments, and UserRole audit data. This is
 consistent with external sync deactivation behavior. For full database
 cleanup in development environments, reset the database directly.
+
+**Stale preview**: the impact summary and the inactive/external
+classification printed before the prompt are advisory reads from the
+read-only session; they may not match the effects of the confirmed mutation:
+
+- resources created, cleared, or revoked after the preview (Sessions, API
+  keys, or Ticket assignments) are still handled by `deactivate_user()` at
+  execution time, which affects locked-current state rather than the
+  previewed state;
+- if another caller deactivates the target between the preview and the
+  action, the service returns `deactivated = false` and the command prints
+  the no-op message with exit code 0;
+- if an applicable guard changes before the action, the service raises its
+  documented exception and the command reports it through its normal error
+  handling;
+- there is no automatic retry, no second confirmation, and no preview
+  token; the preview neither reserves resources nor constrains the action.
 
 **Inactive user management principle**: see
 `docs/features/identity/user-service.md` (Inactive User Management Principle).
@@ -403,11 +459,13 @@ cleanup in development environments, reset the database directly.
 command prints an informational message and exits with code 0.
 
 **Exit codes**: 0 on success (including no-op and user-cancelled
-confirmation), 1 on validation error, 2 on system error (database
-unreachable).
+confirmation), 1 on validation or operational error (invalid username,
+unknown user, external user, non-TTY), 2 on system error (database
+unreachable), 130 on SIGINT.
 
-**Output channels**: impact summary and confirmation to stdout.
-`"Error: ..."` messages and `"Warning: ..."` (last admin) to stderr.
+**Output channels**: impact summary, prompt, success/no-op messages, and
+`Aborted.` to stdout. `"Error: ..."` messages and `"Warning: ..."` (last
+admin) to stderr.
 
 ### `sentinel manage-user set-password`
 
@@ -1086,31 +1144,55 @@ revocation, session invalidation, ticket unassignment). Existing explicit
 Ticket grants and package-maintainer associations are retained but cannot be
 exercised while the user is inactive.
 
-**Request body**: none (empty body or omitted).
+**Request body**: none (empty body or omitted). The endpoint defines no
+application request schema.
 
 **Behavior**:
 
-1. Look up the user by `user_id` — if not found, return HTTP 404 with
-   code `USER_NOT_FOUND`
-2. Delegate to `user_service.deactivate_user()` with
+1. Verify the `manage_users` capability through the endpoint dependency
+2. Resolve `{user}` through `user_service.resolve_user_identifier()`: UUID
+   or exact username. An unresolved identifier returns HTTP 404 with code
+   `USER_NOT_FOUND`. The route performs no ORM lookup directly
+3. Delegate to `user_service.deactivate_user()` with
    `acting_user_id = authenticated_admin.id` and
    `reason = "deactivated by admin via API"`
    as identity-audit lifecycle context. Any derived Ticket unassignment uses
-   the canonical Ticket comment reason `user deactivated` instead.
-3. After the API workflow commits, purge session cache using the
-   `DeactivationResult.invalidated_session_ids` returned by the service
-4. Return HTTP 200 with the updated or unchanged user profile in the standard
-   `{"data": ...}` envelope
+   the canonical Ticket comment reason `user deactivated` instead. The
+   service owns the guard ordering, the locked-current revalidation, and the
+   complete side-effect sequence (see
+   `docs/features/identity/user-service.md`)
+4. The endpoint uses the shared scoped API transaction dependency
+   (`scope="function"`). It commits exactly once after every database
+   mutation and audit event succeeds, before the response is transmitted;
+   any service or database error rolls back the complete workflow and
+   transmits no success response
+5. After the commit and before the response is transmitted, purge the
+   session-liveness cache via
+   `session_service.purge_session_cache(result.invalidated_session_ids)`.
+   The helper's Redis-error contract is best-effort: a Redis failure cannot
+   reclassify or roll back the committed deactivation and does not change
+   the HTTP 200 response
+6. Return HTTP 200 with the current complete user profile from
+   `DeactivationResult.user` in the standard `{"data": ...}` envelope. An
+   already-inactive target is an idempotent no-op that returns HTTP 200 with
+   the unchanged profile; the response never includes the service-internal
+   `deactivated` flag
 
-**Constraints**:
-- Self-deactivation is rejected by the service layer — returns HTTP 409
-  with code `USER_SELF_DEACTIVATION`:
-  `"Cannot deactivate your own account."`
-- External user deactivation is rejected by the service layer for a
-  currently-active user — returns HTTP 409 with code
-  `USER_EXTERNAL_STATUS_READONLY`: `"Cannot deactivate external users."` An
-  already-inactive external user is a no-op (see Reactivate User below for
-  why this ordering differs from reactivation)
+**Guard ordering**: the service classifies the locked-current target in this
+order — unknown user, already-inactive no-op, active external rejection,
+active self-target rejection — so the error table below reflects the same
+precedence.
+
+**Error responses**:
+
+| Status | Code | Condition |
+|--------|------|-----------|
+| 404 | `USER_NOT_FOUND` | Identifier does not resolve to any user |
+| 409 | `USER_EXTERNAL_STATUS_READONLY` | The target is an active external user; manual deactivation is reserved for external sync |
+| 409 | `USER_SELF_DEACTIVATION` | The authenticated administrator targets their own account |
+
+External deactivation renders `"Cannot deactivate external users."`;
+self-deactivation renders `"Cannot deactivate your own account."`.
 
 See `docs/features/identity/user-service.md` for the full side effect contract
 (API key revocation, session invalidation, ticket unassignment on
@@ -1174,38 +1256,27 @@ proceeding with deactivation.
 
 **Behavior**:
 
-1. Look up the user by `user_id` — if not found, return HTTP 404 with
-   code `USER_NOT_FOUND`
-2. If the resolved user is the requesting admin themselves, return
-   HTTP 409 with code `USER_SELF_DEACTIVATION`:
-   `"Cannot preview deactivation impact for your own account."`
-   Rationale: the actual deactivation endpoint rejects self-deactivation
-   with the same code. Rejecting the preview as well keeps the API
-   consistent — if you cannot deactivate yourself, you cannot preview
-   the impact either. This prevents a confusing UX where the preview
-   succeeds but the subsequent action is rejected.
-3. If the user is already inactive, return HTTP 200 with a no-impact response:
-   all counts set to zero and `already_inactive` set to `true`
-4. If the user is an external user (`external_id IS NOT NULL`), return HTTP 409
-   with code `USER_EXTERNAL_STATUS_READONLY`:
-   `"Cannot deactivate external users."`
-   Rationale: same consistency principle as self-deactivation — if the
-   deactivation endpoint rejects external users, the preview should too.
-   This check applies only to active external users
-5. For an inactive user, the no-impact response mirrors the actual
-   `POST .../deactivate` endpoint, which is idempotent and
-   returns HTTP 200 for already-inactive users. The preview must not be
-   stricter than the action it previews — returning 409 here while the
-   action returns 200 creates an asymmetry that forces clients to
-   special-case the preview error path for a condition that the action
-   itself treats as a no-op.
-6. Query and return the impact summary. Obtain `api_keys_count` through
-   `api_key_service.count_non_revoked_keys()`; the endpoint performs no direct
-   `ApiKey` query. Obtain `sessions_count`, `tickets_count`, and the
-   last-active-admin flag through `user_service.get_deactivation_impact()`;
-   neither the endpoint nor the CLI performs direct Session, Ticket, or
-   UserRole queries. The API key count includes expired keys because
-   deactivation revokes every row whose `revoked_at` is NULL.
+1. Verify the `manage_users` capability through the endpoint dependency
+2. Resolve `{user}` through `user_service.resolve_user_identifier()`: UUID
+   or exact username. An unresolved identifier returns HTTP 404 with code
+   `USER_NOT_FOUND`. The route performs no ORM lookup directly
+3. Delegate the complete preview to
+   `user_service.get_deactivation_impact(db, user.id,
+   acting_user_id=authenticated_admin.id)`. The endpoint performs no
+   API-key, Session, Ticket, or UserRole query of its own; the preview
+   boundary owns every count and the last-active-Admin flag
+4. Guard ordering: the service classifies the target in the same order as
+   the action endpoint — unknown user, already-inactive no-op, active
+   external rejection, active self-target rejection
+5. An already-inactive target returns HTTP 200 with the zero-impact response
+   below: all counts set to zero, `already_inactive` set to `true`, and
+   `is_last_active_admin` set to `false`, for local and external targets
+   alike. This mirrors `POST .../deactivate`, which is idempotent and
+   returns HTTP 200 for already-inactive users; the preview must not be
+   stricter than the action it previews, so returning 409 here while the
+   action returns 200 would force clients to special-case a condition the
+   action itself treats as a no-op
+6. An active eligible target returns HTTP 200 with the observations below
 
 **Response** (HTTP 200):
 
@@ -1247,14 +1318,32 @@ Explicit Ticket grants and package-maintainer associations are intentionally
 absent from this schema. Deactivation retains them, so they are not impact
 mutations or counts.
 
-**Semantics**: this endpoint returns a point-in-time snapshot of the
-user's current state. The response is purely informational — the
-subsequent `POST .../deactivate` call does not verify whether the impact has
-changed since the preview was fetched. Between viewing the preview and
-confirming the deactivation, new resources may have been assigned to the
-user (tickets, API keys, sessions). The deactivation proceeds regardless
-and affects all resources at execution time, not only those shown in the
-preview.
+**Error responses**:
+
+| Status | Code | Condition |
+|--------|------|-----------|
+| 404 | `USER_NOT_FOUND` | Identifier does not resolve to any user |
+| 409 | `USER_EXTERNAL_STATUS_READONLY` | The target is an active external user; manual deactivation is reserved for external sync |
+| 409 | `USER_SELF_DEACTIVATION` | The authenticated administrator targets their own account |
+
+The self-target rejection renders
+`"Cannot preview deactivation impact for your own account."` and keeps the
+preview consistent with the action: if the administrator cannot deactivate
+themselves, they cannot preview that deactivation either. The external
+rejection renders `"Cannot deactivate external users."`.
+
+**Advisory semantics**: the response reports independent point-in-time
+observations of the user's current state, not one atomic snapshot. The four
+observed values — `is_last_active_admin` and the three counts — are produced
+by the preview read workflow and are not promised to share a PostgreSQL
+transaction snapshot; concurrent changes may be reflected in some values but
+not others. The preview acquires no lock, creates no reservation or preview
+token, and does not constrain the subsequent `POST .../deactivate`:
+resources created after the preview (sessions, API keys, or Ticket
+assignments) are still affected when the action executes, which
+independently revalidates locked-current state and affects every in-scope
+resource present at that time. If another caller deactivates the target
+first, the action is a successful no-op.
 
 #### Unlock User
 
