@@ -85,8 +85,18 @@ session, and returns a JWT.
     Lockout transition logging) — `user_id` is available from step 5
     when the username resolved to an existing user.
 11. On success, in one caller-owned database transaction, call
-    `session_service.create_session(db, user, reason=local_login)`, then commit
-    the new session and `user.last_login_at` once or roll both back on failure.
+    `session_service.create_session(db, user, reason=local_login)`. The
+    service acquires the User root lock and revalidates the locked-current
+    active status before creating anything (see
+    `docs/features/identity/authentication.md`, Session creation). If the
+    locked-current target is inactive — a deactivation that committed after
+    the step-7 pre-check — the service returns no Session and the endpoint
+    returns the same HTTP 401 `AUTH_INVALID_CREDENTIALS` generic response as
+    every other failure. This outcome is a login failure for lockout
+    purposes: if the counter value returned by step 4 equals exactly
+    `LOGIN_MAX_ATTEMPTS`, emit the lockout transition event exactly as
+    step 10 does. Otherwise commit the new session and `user.last_login_at`
+    once or roll both back on failure.
     After commit, delete the failed-attempt counter as a best-effort
     post-commit effect; Redis failure does not fail the completed login.
     Return the JWT and its `token_expires_at` from the service result as
@@ -94,6 +104,11 @@ session, and returns a JWT.
     `docs/features/identity/authentication.md`, Session creation). A failed
     counter delete may leave a residual counter that locks the account until
     TTL expiry; admin unlock and natural TTL expiry are the recovery paths.
+
+Steps 1-10 (input normalization, Redis lockout handling, user lookup, and
+bcrypt or dummy-bcrypt verification) execute before and outside the locked
+database phase; the User lock covers only the short session-creation
+transaction.
 
 **Success response** (200):
 
@@ -297,7 +312,8 @@ script) — only the observable behavior under concurrency.
 **Lockout transition logging**:
 
 The lockout transition event is emitted on the **failure path** (login
-step 10) when the counter value returned by step 4 equals exactly
+step 10, including the locked-current-inactive failure outcome of step 11)
+when the counter value returned by step 4 equals exactly
 `LOGIN_MAX_ATTEMPTS`. It is NOT emitted on successful logins (which
 delete the counter at step 11). The log message follows the PII
 discipline in `docs/features/platform/logging.md` — it includes

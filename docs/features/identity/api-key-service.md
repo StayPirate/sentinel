@@ -310,10 +310,12 @@ async def count_non_revoked_keys(
 
 Returns the number of keys owned by `user_id` whose `revoked_at` is NULL,
 including expired keys. The caller has already resolved the user; an unknown
-UUID therefore returns zero rather than raising `UserNotFoundError`. The user
-deactivation API and CLI previews in `user-management.md` are the consumers.
-This read does not lock, mutate, or create an audit event. Database exceptions
-propagate.
+UUID therefore returns zero rather than raising `UserNotFoundError`.
+`user_service.get_deactivation_impact()` is the consumer; the administrator
+deactivation API and the `manage-user deactivate` CLI obtain the count
+through that service boundary and never call this function or query `ApiKey`
+directly. This read does not lock, mutate, or create an audit event.
+Database exceptions propagate.
 
 ### `list_user_keys_for_cli()`
 

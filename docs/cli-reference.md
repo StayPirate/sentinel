@@ -96,16 +96,21 @@ only the `_manual` origin. Reactivation is only permitted on local users.
 
 ### `sentinel manage-user deactivate`
 
-Deactivates a user account (soft delete). Shows an impact summary
-(API keys revoked, sessions invalidated, tickets unassigned) and
-prompts for confirmation.
+Deactivates a user account (soft delete). Requires an interactive
+terminal: it shows an advisory impact summary (non-revoked API keys that
+will be revoked, active sessions that will be invalidated, active tickets
+that will be unassigned) and asks for confirmation. The summary is a
+point-in-time observation and does not constrain the action, which affects
+locked-current state when it runs.
 
 ```
 sentinel manage-user deactivate \
   --username <username>
 ```
 
-**Idempotency**: Idempotent (no-op if already inactive).
+**Idempotency**: Idempotent (no-op if already inactive, including an
+already-inactive external user). Active external users cannot be
+deactivated manually.
 
 ### `sentinel manage-user set-password`
 

@@ -128,6 +128,10 @@ Event types not listed here MUST set `detail` to `NULL`.
   `full_name_changed`, and `username_changed`: an external-sync mutation requires
   `source = "external_sync"`; authenticated API and manual CLI mutations omit
   the key. `user_deactivated.reason` remains required for every source
+- For `user_deactivated`, the `source` key is derived from the actor and the
+  locked target, never passed as an invocation-source parameter; see
+  `docs/features/identity/user-service.md` (Audit attribution) for the exact
+  derivation
 - `user_deactivated.detail.reason` is identity-lifecycle context and is
   independent of Ticket unassignment comments. A derived Ticket unassignment
   always uses the canonical Ticket reason `user deactivated`, regardless of

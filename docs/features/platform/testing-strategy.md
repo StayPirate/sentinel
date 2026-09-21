@@ -2649,10 +2649,15 @@ scenarios are required:
   signed `exp` or `session_deadline` is at or before the controlled `now`
 - Session creation uses one controlled login timestamp for `last_login_at`,
   the persisted deadline, and JWT timing claims; creates a new active row on
-  every invocation; preserves existing sessions; flushes without commit or
-  rollback; rolls back the session and `last_login_at` together on failure;
-  and returns `token_expires_at` equal to the JWT `exp`, not the later
-  `Session.expires_at`
+  every eligible invocation; preserves existing sessions; flushes without
+  commit or rollback; rolls back the session and `last_login_at` together on
+  failure; and returns `token_expires_at` equal to the JWT `exp`, not the
+  later `Session.expires_at`
+- Session creation acquires the User root lock and revalidates the
+  locked-current active status before creating anything: an inactive or
+  missing locked target creates no Session, updates no `last_login_at`, and
+  returns `None`; the local login endpoint maps that outcome to the generic
+  401 and the SSO callback maps it to `AUTH_SSO_USER_INACTIVE`
 - Changing `SESSION_MAX_LIFETIME_DAYS` does not invalidate existing
   sessions or alter their persisted `Session.expires_at`
 - A session's `Session.expires_at` (mapped to the JWT `session_deadline`
@@ -2696,9 +2701,26 @@ scenarios are required:
 - A Redis value of `"1"` avoids a session query; a missing key or any other
   value performs PostgreSQL verification; only an active row writes the
   positive value with exactly 60 seconds TTL
-- An inactive or absent row never authorizes and never creates a positive
-  cache entry. A failed post-commit purge may leave an existing positive entry
-  effective only for its documented TTL window
+- A database verification of an inactive or absent row never authorizes and
+  never writes a positive cache entry. A positive entry recorded while the
+  row was active can nonetheless survive logout or password reset either
+  through a failed post-commit purge or through an in-flight write that read
+  the row as active before the invalidation committed and wrote after the
+  purge completed; either way the entry is effective only for its
+  documented TTL window. After deactivation, the shared credential path's
+  `User.active` check rejects the inactive user on the next authenticated
+  request even when a positive liveness entry survives, so no equivalent
+  access window exists while the target remains inactive; if the account is
+  reactivated before a surviving entry's TTL elapses, a
+  deactivation-invalidated Session can be accepted for at most the entry's
+  remaining TTL
+- A deterministic interleaving proves the write-after-purge outcome: a
+  request reads an active row and is held before writing the positive value;
+  a concurrent invalidation commits and purges; the held request then writes
+  its positive value. The stale entry still never authorizes while the
+  target is inactive, and, after a reactivation before the entry's TTL
+  expires, the invalidated Session is accepted for at most the entry's
+  remaining TTL and rejected once the entry expires
 - Deterministic `RedisError` substitution verifies PostgreSQL fallback for
   liveness reads, successful authorization after a failed positive-cache
   write, and best-effort continuation across all remaining IDs during a
@@ -2729,6 +2751,12 @@ scenarios are required:
   or renew the TTL
 - TTL is renewed only on actual failed verification, not on blocked
   attempts
+- A valid-password login whose locked-current target is inactive (a
+  deactivation that committed after the step-7 pre-check) emits the lockout
+  transition event exactly when the step-4 counter value equals
+  `LOGIN_MAX_ATTEMPTS`, retains the counter for the failed attempt (no
+  successful-login delete), creates no Session, and records no
+  `last_login_at` update
 
 **Anti-enumeration:**
 
@@ -2968,6 +2996,145 @@ or identity audit validation are affected, tests MUST cover:
   `asyncio.run()` executes per invocation, and a success commits once while a
   failure commits zero times
 
+**Deactivation preview service (`get_deactivation_impact()`):**
+
+- guard precedence is asserted in this exact order: unknown user raises
+  `UserNotFoundError`; an already-inactive target — local or external —
+  returns the zeroed result with `already_inactive = true` without evaluating
+  the later guards; an active external target with an actor UUID raises
+  `ExternalUserStatusReadOnlyError`; an active self-target with an actor UUID
+  raises `SelfDeactivationError`
+- the same active external target with `acting_user_id = None` proceeds to
+  observation (the actor-NULL/system reachability contract), and the
+  actor-NULL path never triggers the self guard; the CLI's manual-surface
+  external guard rejects an active external target after the inactive no-op
+  and before any prompt
+- an active eligible target reports zero and non-zero counts for non-revoked
+  API keys (including expired keys), active Sessions, and active-status
+  Tickets currently assigned, plus the effective last-active-Admin flag
+- explicit `TicketAccessGrant` and `TicketPackageMaintainer` rows are
+  excluded from every count and no grant or maintainer observation is
+  performed
+- the four values are advisory rather than one aggregate snapshot: the
+  preview holds no lock, creates no reservation, preview token, or durable
+  record, a repeated invocation after a committed change observes the new
+  state, and a resource created after the preview is still handled by the
+  subsequent action whose result never depends on preview values
+- database errors and exceptions propagated by
+  `api_key_service.count_non_revoked_keys()` escape unchanged, and no audit
+  event is created
+
+**Deactivation action (`deactivate_user()`):**
+
+- happy path returns `deactivated = true`, the profile with roles and
+  manager, and exactly the invalidated session IDs; every non-revoked key
+  (including expired keys) is revoked, every active Session invalidated,
+  `User.active` set to `false`, and exactly one `assignment` event created
+  per effectively cleared active-status Ticket with the canonical reason
+  `user deactivated` and unchanged Ticket status
+- the composite audit insertion order is asserted within the one transaction:
+  the API-key `api_key_revoked` events, then the Ticket `assignment` events,
+  then the single identity `user_deactivated` event
+- already-inactive, concurrent-loser, and repeated invocations return
+  `deactivated = false` with an empty `invalidated_session_ids` and create
+  no mutation and no audit event; the guard ordering asserts that the
+  inactive no-op precedes the external and self guards
+- rejected external and self-target invocations perform no mutation and no
+  audit event
+- audit attribution asserts the derived source: actor UUID produces no
+  `detail.source`; actor NULL with a local target produces no
+  `detail.source`; actor NULL with an external target produces
+  `source = "external_sync"`; an actor UUID with an active external target is
+  rejected before mutation
+- retained grants and maintainer associations survive deactivation
+  unchanged, produce no grant or maintainer event, and remain subject to
+  their ordinary Ticket-side contracts; reactivation recreates no revoked
+  key, cleared assignment, or deleted grant
+- a `RedisError` from the post-commit purge leaves the committed success
+  intact, returns normally, and does not reclassify the result or raise; a
+  crash-equivalent omission of the purge leaves the Session rows durably
+  inactive and their positive cache entries bounded by the existing TTL
+
+**Deactivation API (`POST .../deactivate`, `GET .../deactivation-impact`):**
+
+- capability present/absent; JWT and API-key credentials both authenticate
+  these endpoints under the ordinary rules; UUID and username resolution
+  return the same result
+- missing 404, active external 409 `USER_EXTERNAL_STATUS_READONLY`,
+  self-target 409 `USER_SELF_DEACTIVATION`, and already-inactive 200 no-op
+  for both endpoints, with the error precedence asserted and the exact
+  rendered detail messages
+- both endpoints return the standard `{"data": ...}` envelope; the action
+  returns the current complete profile with no `deactivated` field; the
+  preview returns the five documented fields with the documented types
+- the action's commit completes before the response is transmitted, a
+  failure during commit returns no success response and persists nothing,
+  and the post-commit purge callback runs after the commit; a Redis failure
+  in that callback still returns HTTP 200 with the committed profile
+- OpenAPI registration exposes both endpoints under their documented paths
+  and methods
+
+**Deactivation CLI (`manage-user deactivate`):**
+
+- an invalid username format is rejected before any database access; an
+  unknown user reports the not-found error
+- a non-TTY invocation that reaches the TTY check is rejected before any
+  prompt is shown: it prints the documented TTY error to stderr and exits 1
+  without mutation; the already-inactive no-op and the active-external
+  rejection exit earlier and are not affected by TTY detection
+- an already-inactive user — including an inactive external user — prints
+  the no-op message and exits 0 without a prompt and without opening a
+  mutating session; an active external user is rejected by the CLI's
+  manual-surface guard with the external error and exits 1 after the
+  inactive classification and before any impact display
+- a preview that observes an already-inactive target and is followed by a
+  concurrent reactivation before the command exits still prints the observed
+  no-op and exits 0 without mutation; a new invocation observes the
+  reactivated state
+- zero and non-zero impact summaries render exactly the documented lines
+  from the preview result; the last-active-Admin warning goes to stderr; the
+  read-only session is closed before the prompt, and no pre-read classifies
+  the outcome of a confirmed invocation
+- each confirmation outcome is asserted distinctly: a valid affirmative
+  answer proceeds; a valid negative answer or Enter accepting the `No`
+  default prints `Aborted.` to stdout and exits 0; an unrecognized answer
+  prompts again with the retry feedback emitted on stdout; EOF/Ctrl+D
+  reaches the shared mapper, prints `Aborted.`, and exits 0; SIGINT exits
+  130; SIGTERM exits 143; none of the declining paths commits
+- after confirmation the command opens a fresh session, commits exactly
+  once, and rolls back on a pre-commit failure; a stale preview where another
+  caller already deactivated the target prints the no-op message from
+  `result.deactivated = false` and exits 0
+- an interruption after the composed service call but before the commit
+  rolls back every deactivation effect (API-key revocations, Session
+  invalidations, `User.active`, Ticket clears, and all audit events); an
+  interruption after the commit leaves the durable deactivation intact, may
+  omit the success message, and a repeated invocation observes the inactive
+  target and exits 0 as a no-op
+- a Redis failure during the post-commit purge does not change the success
+  message or the exit code
+- stdout/stderr channels match the documented contract; exit codes are
+  0/1/2/130/143; exactly one `asyncio.run()` executes per invocation
+
+**Deactivation concurrency:**
+
+- use independent database sessions and deterministic barriers. Deactivation
+  concurrent with deactivation yields exactly one `deactivated = true` with a
+  complete audit sequence and one loser returning `deactivated = false` with
+  no duplicate event
+- deactivation concurrent with API-key creation: deactivation-first rejects
+  creation with `InactiveUserError`; creation-first produces a key that the
+  deactivation then revokes; each lock order produces exactly one outcome
+- deactivation concurrent with local and SSO Session creation: session-first
+  commits a Session that the deactivation then invalidates;
+  deactivation-first creates no Session and returns the provider-specific
+  login failure
+- deactivation concurrent with manual role mutation follows the documented
+  User-lock serialization and creates no duplicate Ticket event
+- the existing assignment/deactivation, final-VA-loss, and
+  grant-creation/deactivation races keep their coverage and assert no
+  regression
+
 ### API Key Management
 
 When API key persistence, services, authentication, API endpoints, or CLI
@@ -3019,8 +3186,9 @@ commands are affected, tests MUST cover:
   advancing the debounce timestamp, while failed writes roll back, leave the
   debounce state unchanged, and do not reject an otherwise valid credential
 - authentication resolves credentials through `get_key_by_hash()` rather than
-  a direct model query, and the deactivation preview obtains its non-revoked
-  count through `count_non_revoked_keys()`
+  a direct model query; `get_deactivation_impact()` obtains its non-revoked
+  count through `count_non_revoked_keys()`, and the deactivation API and CLI
+  perform no direct `ApiKey` query
 
 **Logging and CLI:**
 

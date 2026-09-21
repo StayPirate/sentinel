@@ -160,8 +160,17 @@ per-command path selection.
   async def deactivate_flow(session_factory, username):
       async with session_factory() as db:
           user = await user_service.get_user(db, username)
-          impact = await user_service.get_deactivation_impact(db, user.id)
-      if not click.confirm("Proceed?"):                # blocking prompt
+          impact = await user_service.get_deactivation_impact(
+              db, user.id, acting_user_id=None
+          )
+          if impact.already_inactive:
+              print(f"User '{username}' is already inactive.")
+              return                                  # exit 0, no prompt
+          if user.external_id is not None:
+              raise click.ClickException(              # command-owned guard for
+                  "Cannot deactivate external users."  # actor-NULL CLI callers
+              )
+      if not click.confirm("Proceed?", default=False):  # blocking prompt
           print("Aborted.")                            # printed to stdout
           return                                        # exit 0, no mutation
       async with session_factory() as db:
@@ -195,11 +204,18 @@ per-command path selection.
   displayed to the human operator to support the confirmation decision
   — they are not authoritative inputs to the mutation itself. The
   service function (`user_service.deactivate_user()`) independently
-  re-validates all preconditions (active state, self-deactivation
-  guard, etc.) inside its own transaction using pessimistic locking
+  re-validates its applicable guards — the locked-current active state
+  for every caller, plus the self-deactivation and external-status
+  guards for an actor-authenticated caller — inside its own transaction
+  using pessimistic locking
   (`SELECT ... FOR NO KEY UPDATE`), per `user-service.md` (Concurrency
   Considerations) and the general pattern in `docs/conventions.md`
-  (Transaction and Locking). As a consequence, staleness between the
+  (Transaction and Locking). Guards that cannot apply to an actor-NULL
+  caller, such as the CLI's manual-surface guard against external users
+  shown above, remain the owning command's responsibility and are not
+  re-checked by the service; see `user-service.md` (External Active
+  Status Ownership) and `user-management.md` (`manage-user deactivate`).
+  As a consequence, staleness between the
   pre-mutation reads (first session) and the actual mutation (second
   session) does not cause incorrect behavior — worst case, the
   mutation becomes a no-op or raises a service exception handled
@@ -415,7 +431,7 @@ these helpers:
 |---|---|---|
 | Hidden password prompt with confirmation | Prompts twice via a hidden (non-echoed) input (Click's `hide_input=True`), compares the two entries. If they differ, the calling command receives a mismatch signal and is responsible for its own error message and exit code (per that command's own spec — this helper does not print the error itself, to preserve each command's exact wording). | `manage-user create`, `manage-user set-password` |
 | TTY detection | Checks `sys.stdin.isatty()` before invoking a prompt (password entry or confirmation). If no TTY is detected, returns a signal the calling command uses to print its own "requires an interactive terminal" error (exact wording owned by the command spec) and exit 1. | `manage-user create`, `manage-user set-password` (before password prompt), `manage-user deactivate` (before confirmation prompt) |
-| Confirmation prompt | A yes/no prompt (Click's `confirm()`) for destructiveish operations. Exact prompt text and default answer are owned by the calling command's own spec. | `manage-user deactivate` |
+| Confirmation prompt | A yes/no prompt (Click's `confirm()`) for destructive operations. Exact prompt text and default answer are owned by the calling command's own spec. | `manage-user deactivate` |
 
 These are implementation-shared utility functions (e.g.,
 `backend/app/cli/_prompts.py`), not new behavioral contracts — the

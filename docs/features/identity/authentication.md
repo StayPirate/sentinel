@@ -213,7 +213,7 @@ create_session(
     db: AsyncSession,
     user: User,
     reason: SessionCreationReason,
-) -> CreatedSession
+) -> CreatedSession | None
 ```
 
 `SessionCreationReason` has exactly two values: `local_login` and
@@ -224,24 +224,51 @@ immutable session deadline. The operation uses one UTC `login_at` snapshot for
 `User.last_login_at`, the JWT `iat`, and calculation of both
 `Session.expires_at` and the JWT `session_deadline`. It behaves as follows:
 
-1. Create a distinct active `Session` for `user.id` without reading,
-   invalidating, or otherwise changing any existing session.
-2. Set `Session.expires_at = login_at + SESSION_MAX_LIFETIME_DAYS` and
+1. As the first database operation, acquire `FOR NO KEY UPDATE` on the
+   target `User` row and reload the locked-current active status. The passed
+   `user` identifies the target only; its pre-lock `active` value is never
+   authoritative. If no row exists or `active = false`, do not create a
+   Session, do not update `last_login_at`, and return `None` without issuing
+   a token. Each provider workflow maps that outcome to its own documented
+   login failure — `AUTH_INVALID_CREDENTIALS` for local login and
+   `AUTH_SSO_USER_INACTIVE` for SSO.
+2. Create a distinct active `Session` for the locked `user.id` without
+   reading, invalidating, or otherwise changing any existing session.
+3. Set `Session.expires_at = login_at + SESSION_MAX_LIFETIME_DAYS` and
    `user.last_login_at = login_at`.
-3. Flush both writes, then issue a JWT whose `sub`, `session_id`,
+4. Flush both writes, then issue a JWT whose `sub`, `session_id`,
    `session_deadline`, and timing claims match the flushed session and the
    same `login_at` snapshot.
-4. Emit `session_created` at INFO with `user_id` and `reason`. The JWT and
+5. Emit `session_created` at INFO with `user_id` and `reason`. The JWT and
    session ID are never logged.
-5. Return the created session, token, and token expiration.
+6. Return the created session, token, and token expiration, or `None` per
+   step 1.
 
 The caller supplies and owns the transaction. The operation flushes but never
 commits or rolls back. It catches no database or token-encoding exception;
 any such exception propagates so the caller rolls back both the new session
-and `last_login_at`. Re-invocation intentionally creates another independent
-session and token. The operation performs no user-eligibility validation;
-provider workflows establish that the user may log in before calling it.
-Session creation produces no `IdentityAuditEvent`.
+and `last_login_at`. `None` is an in-process ineligibility outcome, not an
+API error: the authentication endpoints own their failure vocabulary and
+response codes, so session creation introduces no shared API-facing
+exception for this condition.
+
+**Deactivation serialization**: the User lock is the serialization point
+between successful login and deactivation. If Session creation commits first,
+a later `deactivate_user()` observes and invalidates the new Session; if
+deactivation commits first, Session creation observes the committed inactive
+state and returns `None` without creating anything. No Session can commit for
+an inactive User. Concurrent logins for the same target serialize on the same
+lock; each still creates its own independent Session, and `last_login_at`
+ends at the last committed login. The lock covers only the short database
+phase: password verification, bcrypt/dummy-bcrypt work, Redis lockout
+handling, and every external IdP/network operation occur outside it (see the
+provider specs and `docs/conventions.md`, Transaction Hygiene Rules).
+
+Re-invocation intentionally creates another independent session and token.
+Provider workflows establish every other eligibility condition — credential
+validity, local-versus-external provider match, `external_id` presence, and
+lockout state — before calling it. Session creation produces no
+`IdentityAuditEvent`.
 
 ### Session liveness check
 
@@ -267,19 +294,39 @@ The `session_deadline` claim in the JWT provides the maximum lifetime
 check (verified during JWT validation, before the liveness check).
 
 To avoid a database round-trip on every request, the session liveness
-result is cached in Redis with a TTL of 60 seconds. This means that
-after logout or deactivation, there is a window of up to 60 seconds
-before the token becomes effectively unusable (in practice, the explicit
-cache purge on logout/deactivation makes this near-instantaneous — the
-TTL is only a safety net for edge cases). This tradeoff is acceptable
-for an internal tool.
+result is cached in Redis with a TTL of 60 seconds. The explicit cache
+purge after logout, deactivation, and password reset makes invalidation
+near-instantaneous. A positive entry can nonetheless survive beyond the
+invalidation through either of two interleavings: the post-commit purge is
+lost (process crash or `RedisError`), or an in-flight request read an
+active row before the invalidation committed and writes its positive value
+after the purge completed. The TTL is the safety net in both cases. The
+residual exposure differs by cause:
+
+- **Logout and password reset**: the target User may remain active, so a
+  positive cache entry that survives the purge keeps the invalidated
+  Session passing the liveness check for at most the remaining TTL (60
+  seconds maximum). This tradeoff is acceptable for an internal tool.
+- **Deactivation while the target remains inactive**: deactivation
+  additionally sets `User.active = false`, and Shared Credential Resolution
+  loads the `User` record on every authenticated request and rejects an
+  inactive user regardless of the session-liveness cache. A stale positive
+  entry therefore cannot extend access while the target stays inactive;
+  purging it remains important to remove stale positive state promptly, but
+  Redis is never the authorization authority. If the account is reactivated
+  before a surviving entry's TTL elapses, reactivation restores
+  `User.active` and performs no session-cache operation, so a
+  deactivation-invalidated Session can pass the cached liveness check for
+  at most the entry's remaining TTL (60 seconds maximum).
 
 **Cache value contract**: the Redis key `session_liveness:{session_id}` stores
-the string `"1"` to represent an active session. Inactive sessions are never
-cached. The lookup semantics are:
+the string `"1"` to represent a positive observation: the session was active
+when the database verification that produced the observation ran. The check
+never writes an entry for a session it observed as inactive. The lookup
+semantics are:
 
-- **Cache hit** (key exists with value `"1"`): the session is active — no
-  database query is needed. Proceed to user loading.
+- **Cache hit** (key exists with value `"1"`): the cached observation reports
+  an active session — no database query is needed. Proceed to user loading.
 - **Cache miss** (key does not exist): query the database for the `Session`
   record and check `is_active`:
   - If `is_active = true`: write `"1"` to Redis with key
@@ -296,9 +343,10 @@ cached. The lookup semantics are:
   same database verification and positive-cache rules above. No additional
   cache state or value is defined.
 
-This ensures that only positive (active) state is ever cached, a cache miss
-always triggers a database verification, and a revoked session never pollutes
-the cache.
+This ensures that the write path never caches a negative observation, a cache
+miss always triggers a database verification, and a positive entry recorded
+before an invalidation can outlive it only within the residual-exposure bounds
+described above.
 
 **Redis unavailability**: if Redis is unreachable (any `RedisError` —
 including connection failures and OOM rejections), the session liveness
@@ -430,7 +478,7 @@ regardless of activity.
 When a user is deactivated (via `user_service.deactivate_user()`), the
 database-phase operations execute atomically in this order:
 
-1. Revoke all API keys for the user via
+1. Revoke every non-revoked API key, including expired keys, via
    `api_key_service.revoke_all_user_keys(session, user_id,
    acting_user_id=acting_user_id)`. Authenticated API deactivation preserves
    the admin actor; CLI and external-sync workflows pass NULL. See
@@ -439,11 +487,17 @@ database-phase operations execute atomically in this order:
    `session_service.invalidate_user_sessions()` (DB only — cache purge
    is post-commit; see Session invalidation above)
 3. Mark the user as inactive
+4. Unassign active tickets in deterministic Ticket UUID order (see
+   `docs/features/identity/user-service.md`, Private Helpers, and
+   `docs/features/tickets/ticket-audit-log.md`)
 
 After the transaction commits, the post-commit phase purges the session
-liveness cache entries (best-effort). See
+liveness cache entries (best-effort) and the caller reports the committed
+`deactivated = true` result. See
 `docs/features/identity/user-service.md` (`deactivate_user()`) for the
-full two-phase specification.
+full two-phase specification. An already-inactive or concurrent-loser
+invocation creates no database mutation, performs no cache purge, and
+returns `deactivated = false`.
 
 ### Session cleanup
 
@@ -941,8 +995,14 @@ code `AUTH_LOGOUT_NOT_APPLICABLE` and message:
   denial-of-service vector.
 - **API key lifecycle security** (secret visibility, expiration, and
   revocation) is defined in `api-key-management.md`.
-- **Session liveness check** ensures that logout and deactivation take
-  effect within the cache TTL window (60 seconds maximum).
+- **Session liveness check**: logout and password reset take effect through
+  the liveness check within the cache TTL window (60 seconds maximum when
+  the post-commit purge is lost or an in-flight positive-cache write
+  survives it). Deactivation additionally sets `User.active = false`, which
+  is checked on every authenticated request, so deactivation does not depend
+  on the cache purge for enforcement while the account remains inactive; a
+  reactivation inside a surviving entry's TTL can leave an invalidated
+  Session accepted for at most the entry's remaining TTL.
 - **No single logout (SLO)**: logging out of `id.suse.com` does not
   invalidate the Sentinel session. This is a known limitation,
   acceptable for an internal tool. Users can log out of Sentinel

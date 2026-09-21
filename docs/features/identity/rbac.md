@@ -632,19 +632,32 @@ here with the required authorization level and a link to the owning spec.
 2. Only users with the `manage_users` capability can manage roles. They
    can manage any user's roles, including their own (subject to the
    self-removal guard in Business Rule 1)
-3. Users cannot deactivate their own account (enforced by
-   `user_service.deactivate_user()` — see
-   `docs/features/identity/user-service.md`)
+3. An authenticated user cannot deactivate their own account: the
+   self-deactivation guard rejects a self-target when `acting_user_id`
+   identifies the acting user (enforced by
+   `user_service.deactivate_user()` and
+   `user_service.get_deactivation_impact()` — see
+   `docs/features/identity/user-service.md`). Actor-NULL CLI and system
+   callers do not represent an authenticated self-target and are exempt
 4. External users cannot be manually deactivated or reactivated — their
    active status is controlled exclusively by the external identity
-   provider via sync (enforced by `user_service.deactivate_user()` and
-   `user_service.reactivate_user()` — see
-   `docs/features/identity/user-service.md`, External Active Status Ownership)
+   provider via sync. `user_service.deactivate_user()` and
+   `get_deactivation_impact()` reject an authenticated caller only for an
+   active external target; an already-inactive external target is the same
+   no-op as a local one, while `reactivate_user()` rejects unconditionally.
+   The CLI applies its own equivalent guard because it calls with
+   `acting_user_id = None`, which is indistinguishable from external
+   synchronization at the service boundary. See
+   `docs/features/identity/user-service.md` (External Active Status
+   Ownership) and `docs/features/identity/user-management.md`
+   (`manage-user deactivate`)
 5. Deactivated users cannot authenticate. On deactivation, all API keys
    are revoked and all active sessions are invalidated (proactively,
-   before marking the user inactive). Additionally, the middleware
-   checks `User.active` on every request as a defense-in-depth measure.
-   See `docs/features/identity/authentication.md` (Deactivation ordering) and
+   before marking the user inactive), and `User.active = false` is enforced
+   on every authenticated request, so a stale session-liveness cache entry
+   cannot extend access while the account remains inactive. See
+   `docs/features/identity/authentication.md` (Deactivation ordering,
+   Session liveness check) and
    `docs/features/identity/user-service.md`
 6. All authentication events are logged (login, logout, failed attempts)
 7. Session duration: JWT expires after 72 hours without a request that

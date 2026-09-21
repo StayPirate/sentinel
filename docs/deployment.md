@@ -1314,9 +1314,11 @@ docker run --rm -it --env-file .env sentinel:latest \
 docker exec -it <container> sentinel <group> <command> ...
 ```
 
-Interactive commands (`manage-user create`, `manage-user set-password`)
-prompt for a hidden password and require a TTY — the `-it` flags shown
-above are mandatory for these commands.
+Interactive commands (`manage-user create`, `manage-user set-password`,
+and `manage-user deactivate`) require a TTY — the `-it` flags shown
+above are mandatory for these commands. The password commands prompt for
+hidden password input; `manage-user deactivate` prompts for
+destructive-operation confirmation.
 
 Consumers deploying the OCI image through another compatible runtime may adapt
 these runtime-shell commands to their chosen environment. Sentinel does not
