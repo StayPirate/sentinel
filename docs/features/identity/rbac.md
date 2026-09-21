@@ -34,7 +34,7 @@ endpoint contract.
 |---|---|
 | `manage_users` | Create local users, update user fields, manage user roles, reset password, deactivate/reactivate, unlock, view deactivation impact, view/revoke all API keys, view admin-scoped identity audit log |
 | `manage_role_mappings` | Group-to-role mapping CRUD, preview role mapping |
-| `manage_settings` | View/update system settings, trigger CVSS recalculation, view settings audit log |
+| `manage_settings` | View/update system settings, preview the impact of a default-CVSS version change, trigger CVSS recalculation, view settings audit log |
 | `manage_fetchers` | Trigger manual fetcher run, rerun complete Ticket convergence for an accessible eligible Ticket, enable/disable fetchers, view/modify fetcher config, view fetcher audit log, view error details, view error tracebacks, view triggered_by_user identity, view disabled_by/enabled_by actors |
 | `admin_ticket_ops` | Set track affectedness to `FIXED` from any status |
 
@@ -174,6 +174,7 @@ Any logged-in user, regardless of role. Includes all Public access plus:
 | Group-to-role mapping CRUD | `manage_role_mappings` |
 | Preview role mapping | `manage_role_mappings` |
 | View/update system settings | `manage_settings` |
+| Preview impact of a default-CVSS version change | `manage_settings` |
 | Trigger CVSS recalculation | `manage_settings` |
 | View settings audit log | `manage_settings` |
 | Trigger manual fetcher run | `manage_fetchers` |
@@ -570,6 +571,7 @@ here with the required authorization level and a link to the owning spec.
 | GET | `/api/v1/admin/settings` | `manage_settings` | [system-settings](../platform/system-settings.md#get-system-settings) |
 | PATCH | `/api/v1/admin/settings` | `manage_settings` | [system-settings](../platform/system-settings.md#update-system-settings) |
 | GET | `/api/v1/admin/settings/audit-log` | `manage_settings` | [system-settings](../platform/system-settings.md#list-settings-audit-events) |
+| GET | `/api/v1/admin/settings/default-cvss-version/impact` | `manage_settings` | [system-settings](../platform/system-settings.md#get-default-cvss-impact-preview) |
 | POST | `/api/v1/admin/settings/default-cvss-version/recalculate` | `manage_settings` | [system-settings](../platform/system-settings.md#trigger-cvss-recalculation) |
 | GET | `/api/v1/admin/identity/audit-log` | `manage_users` | [identity-audit-log](identity-audit-log.md#list-identity-audit-events) |
 | GET | `/api/v1/admin/api-keys` | `manage_users` | [api-key-management](api-key-management.md#list-all-api-keys) |

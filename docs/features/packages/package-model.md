@@ -474,6 +474,15 @@ override eligibility on individual Products by setting
 `is_eligible_override = true`. Rule 1 above is authoritative for every
 automatic workflow.
 
+**Read-only projection**: the default-CVSS impact preview in
+`system-settings.md` applies this same ordered evaluator read-only. It passes
+the proposed version to the Eligibility Score Resolution instead of reading
+the setting a second time, evaluates every applicable occurrence regardless
+of exclusion, EOL, or affectedness, and neither persists a projected boolean
+nor changes `eligible` or `is_eligible_override`. Rule 1 remains
+authoritative: an overridden occurrence is preserved and reported as an
+override skip, never as a projected mutation.
+
 ### Axis 3: Delivery and Release Observation
 
 Factual observation of the fix's progress through the SUSE maintenance

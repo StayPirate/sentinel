@@ -1063,6 +1063,28 @@ final `status_change`; association leaves that final event to its caller.
 default version, severity, Product values, and audit are no-ops and the same
 current result is returned.
 
+### Read-Only Impact Projection
+
+The default-CVSS impact preview in `system-settings.md` projects the semantic
+outcomes of default-version mode without invoking any mutation function in
+this module. It does not call `recalculate_cvss_chain()`, does not acquire a
+mutation lock, and does not participate in the batch operation's execution.
+
+- It projects the same outcomes as the default-version recalculation
+  paragraph of the CVSS Status Matrix, substituting projected values for
+  persistence and adding no effect of its own.
+- It creates no audit event, no assignment, no Product mutation, no final
+  `reconcile_ticket_status()` invocation, no manual-zone exit, and no
+  post-commit effect.
+- A currently `Resolved` Ticket whose projected gate result is `Analyzed` or
+  `Analysis` contributes one regression count. Promotions, demotions of
+  `Analysis` or `Analyzed` Tickets, and no-change evaluations are not separate
+  preview categories, and the preview returns no Ticket-scoped detail.
+- Projected Product eligibility uses the current persisted inputs and the
+  shared package-model evaluator. A projected boolean is never persisted, and
+  an occurrence with `is_eligible_override = true` is reported as a skip
+  without changing either field.
+
 ## Utility Functions
 
 ## Auto-Assignment Rule

@@ -3135,6 +3135,113 @@ or identity audit validation are affected, tests MUST cover:
   grant-creation/deactivation races keep their coverage and assert no
   regression
 
+### Default-CVSS Impact Preview
+
+When the default-CVSS impact preview service or endpoint is implemented, tests
+MUST cover:
+
+**Unit tests:**
+
+- severity projection through the Severity Resolution Cascade with the
+  proposed version passed explicitly, including a proposed version different
+  from the observed setting and the complete unfiltered assessment set
+- eligibility projection with a canonical SUSE assessment at the proposed
+  version and with the `10.0` fallback, proving severity and eligibility stay
+  separate
+- Reactive Support forcing `false`, a `NULL` threshold behaving as `0.0`, and
+  a `NULL` lifecycle phase activating no override
+- an applicable occurrence with `is_eligible_override = true` preserved and
+  counted as a skip without changing `eligible` or `is_eligible_override`
+- projected gate results `Resolved → Analyzed` and `Resolved → Analysis`
+  reusing the exact Analyzed and Resolved predicates
+- a projected gate that preserves a manual override: a `Resolved` Ticket
+  whose only applicable occurrence has `is_eligible_override = true` keeps
+  its persisted `eligible` value, the hypothetical automatic result is not
+  substituted, and no regression is counted when the preserved value keeps
+  the gate true
+- overlapping categories from one CVE (severity change, several Product
+  occurrences, several override skips, one `Resolved` regression) and
+  unchanged effects receiving no count
+- an evaluated CVE with no projected effect increments `cves_evaluated` and
+  no impact count, remaining distinct from the no-op proposal where
+  `cves_evaluated` is zero
+- no-op proposal: equal versions produce `no_op = true`, every count
+  including `cves_evaluated` zero, and no population evaluation
+
+**Integration tests:**
+
+- a ticketless-CVE population projects severity only
+- every associated Ticket status, with `New` projecting no gate result,
+  gate-zone statuses projecting severity, eligibility, and the highest valid
+  gate result, and `Ignored`/`Duplicated` projecting severity only
+- multiple Product occurrences per CVE and per Ticket
+- excluded, EOL, and otherwise non-actionable Products still evaluated for the
+  automatic eligibility projection
+- overrides counted only for states in which execution would evaluate Product
+  occurrences
+- no database write, no audit event, no assignment, and no
+  `reconcile_ticket_status()` invocation
+- one UTC `evaluation_date` captured once for the invocation before any CVE
+  is evaluated governs every page and unit: a controlled clock that crosses
+  UTC midnight during the invocation still yields one invocation-consistent
+  date for lifecycle, eligibility, actionability, and gate projection
+- two observations across units with committed changes between reads: each
+  unit's contribution corresponds entirely to one committed database
+  observation, never a synthetic mix of pre-commit and post-commit inputs
+  within one unit, while different units may observe different committed
+  states
+- population boundary: CVEs whose row `id` exceeds the captured high-water
+  mark are excluded; a row within the boundary that becomes visible during
+  the invocation may or may not be observed; the mark is neither returned nor
+  persisted
+- deadline expiry discards every intermediate count and raises
+  `CVSSPreviewTimeoutError`
+- no Redis read, no task-state read, and no Celery publication; the preview
+  remains available and never returns `CVSS_RECALC_ALREADY_IN_PROGRESS` while
+  a recalculation is admitted, queued, or running, and its counts may reflect
+  a mix of converged and not-yet-converged units
+
+**E2E tests:**
+
+- happy path with the standard envelope and the exact eight fields and types
+- no-op proposal: `no_op = true`, all counts zero, and no population scan
+- empty population: `no_op = false`, `cves_evaluated = 0`, all counts zero
+- missing `proposed_version` and values other than `3.1` or `4.0` return the
+  global `422 VALIDATION_ERROR`
+- unauthenticated request returns `401`; an authenticated caller without
+  `manage_settings` returns `403`; an admin with `manage_settings` succeeds
+- the response contains no CVE, Ticket, Product, or occurrence identifier,
+  and confidential Tickets participate only in the aggregate counts
+- timeout returns `503` `CVSS_PREVIEW_TIMEOUT` with no partial `200`
+- no `meta` object, and undeclared query parameters are ignored
+
+**Regression tests:**
+
+- severity and eligibility projections are never substituted for one another
+- the SUSE-assessment presence gate remains version-independent and is not
+  replaced by the proposed version
+- `Resolved` remains in the gate zone and is not treated as a manual-zone
+  state
+- `Ignored` and `Duplicated` project no Product or gate effect
+- the preview is not a prerequisite for `PATCH /api/v1/admin/settings`, which
+  neither receives nor reuses preview counts, the high-water mark, or any
+  preview state
+- the preview no-op remains distinct from the manual recalculation operation
+- preview/execution parity owned by `cvss-scoring.md` (Required Tests) for
+  the shared resolutions, extended here to effective eligibility, override
+  skips, and the highest valid gate result: for the same persisted inputs,
+  the preview's projection equals the outcomes an effective default-version
+  recalculation applies, with no assessment or `CVE.severity` modification
+
+**Pre-release verification:**
+
+- before the preview is declared complete, measure a representative
+  persisted population and confirm the complete projection finishes within
+  the 30-second deadline including query, load, and computation time. If a
+  representative population cannot be projected completely, stop and return
+  to the contract decision instead of shipping a preview whose only outcome
+  is `CVSS_PREVIEW_TIMEOUT`
+
 ### API Key Management
 
 When API key persistence, services, authentication, API endpoints, or CLI
