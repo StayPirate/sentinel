@@ -126,16 +126,27 @@ messages to stderr.
 
 ### `sentinel manage-user update`
 
-Updates an existing user account. Identity field modifications
-(`--email`, `--full-name`) are only permitted on local users — external
-users have their identity fields managed exclusively by external sync
-(see External User Data Ownership in
-`docs/features/identity/user-service.md`). Role changes are permitted on
-both local and external users. Reactivation (`--reactivate`) is permitted on
-local users only — external users have their active status managed
-exclusively by external sync (see External Active Status Ownership in
-`docs/features/identity/user-service.md`). The command works regardless
-of whether the user is currently active or inactive (see Inactive User
+Updates an existing user account. Each invocation operates in exactly one of
+three mutually exclusive modes:
+
+- **Profile mode** (`--email`, `--full-name`, `--clear-full-name`) updates
+  identity fields. It is permitted on local users only — external users have
+  their identity fields managed exclusively by external sync (see External
+  User Data Ownership in `docs/features/identity/user-service.md`).
+- **Role mode** (`--add-role`, `--remove-role`) changes manual (`_manual`)
+  role assignments. It is permitted on both local and external users.
+- **Reactivation mode** (`--reactivate`) reactivates a previously deactivated
+  account. It is permitted on local users only — external users have their
+  active status managed exclusively by external sync (see External Active
+  Status Ownership in `docs/features/identity/user-service.md`).
+
+Each mode corresponds to exactly one existing API operation and owns one
+caller-owned transaction: profile mode maps to
+`PATCH /api/v1/admin/users/{user}`, role mode maps to
+`POST /api/v1/admin/users/{user}/roles`, and reactivation mode maps to
+`POST /api/v1/admin/users/{user}/reactivate`. An operator needing changes of
+different kinds uses one invocation per mode. The command works regardless of
+whether the user is currently active or inactive (see Inactive User
 Management Principle in `docs/features/identity/user-service.md`).
 
 ```
@@ -143,9 +154,16 @@ sentinel manage-user update \
   --username <username> \
   [--email <new_email>] \
   [--full-name <new_name>] \
+  [--clear-full-name]
+
+sentinel manage-user update \
+  --username <username> \
   [--add-role <role>] ... \
-  [--remove-role <role>] ... \
-  [--reactivate]
+  [--remove-role <role>] ...
+
+sentinel manage-user update \
+  --username <username> \
+  --reactivate
 ```
 
 **Parameters**:
@@ -155,84 +173,161 @@ sentinel manage-user update \
 | `--username`     | Yes      | No         | Username of the user to update (identifier) |
 | `--email`        | No       | No         | New email address                           |
 | `--full-name`    | No       | No         | New display name                            |
+| `--clear-full-name` | No    | No         | Clear the display name (`full_name = NULL`); mutually exclusive with `--full-name` |
 | `--add-role`     | No       | Yes        | Role to add: `admin`, `vulnerability_analyst`, `restricted_analyst` |
 | `--remove-role`  | No       | Yes        | Role to remove: `admin`, `vulnerability_analyst`, `restricted_analyst` |
 | `--reactivate`   | No       | No         | Reactivate a previously deactivated user    |
 
+**Mode selection**: the mode is determined by the flags present in one
+invocation. Profile options (`--email`, `--full-name`, `--clear-full-name`)
+MUST NOT be combined with role options (`--add-role`, `--remove-role`), and
+`--reactivate` MUST NOT be combined with any other option. Any combination
+spanning more than one mode is rejected before the mutating session is
+opened, with:
+
+```
+Error: Profile updates, role updates, and --reactivate cannot be combined.
+```
+
+Within profile mode, `--full-name` and `--clear-full-name` are mutually
+exclusive; their combination is rejected before the mutating session is
+opened, with:
+
+```
+Error: --full-name and --clear-full-name cannot be used together.
+```
+
+Both rejections go to stderr, exit with code 1, and start no mutating
+session. The read-only user lookup (Behavior step 3) precedes these checks,
+so an unknown username is reported first.
+
 **Behavior**:
 
 1. Normalize the username (trim whitespace, lowercase)
-2. Looks up the user by normalized username — if not found, exits with
+2. Validate the normalized username format (see `docs/conventions.md`,
+   Username Format). If invalid, exit with error:
+   `"Error: Invalid username '{value}'. Username must be 1-64 characters,
+   start with a letter, and contain only lowercase letters, numbers, dots,
+   hyphens, and underscores."` (exit code 1, stderr) — before any database
+   access
+3. Look up the user by normalized username — if not found, exit with
    error: `"Error: User '{username}' not found."`
-3. If the user is an external user (`external_id IS NOT NULL`) and `--email` or
-   `--full-name` is provided, exits with error:
-   `"Error: User '{username}' is managed by an external identity provider. Identity
-   fields cannot be modified manually."` (exit code 1). Role changes
-   are still permitted on external users.
-4. If the user is an external user (`external_id IS NOT NULL`) and
-   `--reactivate` is provided, exits with error:
-   `"Error: Cannot reactivate external users."` (exit code 1).
-   Active status of external users is managed exclusively by external sync.
-5. If no modification flags are provided (`--email`, `--full-name`,
-   `--add-role`, `--remove-role`, `--reactivate` are all absent), prints:
-   `"No changes specified for user '{username}'."` and exits with code 0
-6. For each role value in `--add-role` and `--remove-role`, validates that
-   it is a recognized role. If not, exits with error:
+4. If no modification flags are provided (`--email`, `--full-name`,
+   `--clear-full-name`, `--add-role`, `--remove-role`, `--reactivate` are
+   all absent), print:
+   `"No changes specified for user '{username}'."` and exit with code 0 —
+   no mode is selected and no mutating session is opened
+5. Determine the single mode from the provided flags. Cross-mode
+   combinations and the `--full-name`/`--clear-full-name` conflict are
+   rejected as described in Mode selection, before the mutating session is
+   opened
+6. Apply the mode-specific guards and behavior defined below
+7. Invoke exactly one mutating service operation for the selected mode, with
+   `acting_user_id = None` (CLI is a system action). No invocation calls
+   more than one mutating service
+8. Print the success or no-op message only after the commit succeeds. Never
+   print a partial-success or per-step report: each invocation is one atomic
+   logical operation, so the `✓`/`✗`/`—` multi-step reporting pattern does
+   not apply (see `docs/conventions.md`, Multi-Step Reporting)
+
+**Profile mode behavior**:
+
+1. If the user is an external user (`external_id IS NOT NULL`), exit with
+   error: `"Error: User '{username}' is managed by an external identity
+   provider. Identity fields cannot be modified manually."` (exit code 1).
+   No other mode is affected by this guard
+2. If `--email` is provided, trim and lowercase it, validate the normalized
+   value's format, and pass the normalized value to the service. If the
+   format is invalid, exit with error:
+   `"Error: Invalid email format '{value}'."`
+3. Delegate once to `user_service.update_user()` with
+   `acting_user_id = None`, passing `--email`, `--full-name`, or
+   `--clear-full-name` (`full_name = None`) together in the same call when
+   more than one is provided. An empty `--full-name ""` carries no special
+   meaning: it is passed through as an ordinary provided value and stored
+   verbatim; clearing the display name requires `--clear-full-name`. If the
+   service raises `UserConflictError` (duplicate email), exit with error:
+   `"Error: A user with email '{email}' already exists."`
+4. Report exclusively from the returned `UserUpdateResult.changed_fields`:
+   an empty sequence prints
+   `"No changes applied to user '{username}'."` and exits with code 0;
+   otherwise print
+   `"Updated user '{username}': {list of changed fields}."` — for example
+   `"Updated user 'jdoe': email, full name."` The CLI renders `email` as
+   `email` and `full_name` as `full name`, in the result's fixed order; the
+   other closed values cannot appear because this mode never sends them.
+   The read-only lookup of Behavior step 3 serves only resolution and the
+   guard above; it never classifies the outcome. The service remains
+   authoritative: it normalizes and compares against locked-current state,
+   persists only effective changes, creates one audit event per changed
+   field, and reports the effective changes in the result
+
+**Role mode behavior**:
+
+1. For each role value in `--add-role` and `--remove-role`, validate that
+   it is a recognized role. If not, exit with error:
    `"Error: Invalid role '{value}'. Valid roles are: {list}."`
    The list of valid roles is derived from the system's role definitions
    at runtime
-7. If `--email` is provided, validates email format — if not
-   syntactically valid, exits with error:
-   `"Error: Invalid email format '{value}'."`
-8. If `--email` or `--full-name` is provided, delegates to
-    `user_service.update_user()` with `acting_user_id = None`. If the
-    service raises `UserConflictError` (duplicate email), exits with
-    error: `"Error: A user with email '{email}' already exists."`
-9. For role changes, passes `--add-role` and `--remove-role` values
-    verbatim to `user_service.update_roles()` with
-    `acting_user_id = None` and roles as `(role, '_manual')` pairs. The
-    CLI does not pre-process or validate conflicts between add and remove
-    lists — the service handles input resolution (deduplication,
-    cancellation of conflicting entries) and validation (externally-derived role
-    protection). The service never rejects input due to add/remove
-    conflicts; it resolves them silently. Since `acting_user_id = None`,
-    the self-removal guard does not apply (CLI is a system action)
-10. If `--reactivate` is provided: delegates to
-    `user_service.reactivate_user()` with `acting_user_id = None`. If
-    the user is already active, this is a no-op. See
-    `docs/features/identity/user-service.md` for reactivation semantics.
-    Reactivation is intentionally the LAST mutation step so that the
-    account is fully configured (correct email, roles, etc.) before
-    becoming active again
-11. Prints summary of changes. The summary lists only changes that were
-    actually applied (not no-ops). If all requested operations resulted
-    in no-ops (e.g., reactivating an already-active user, adding a role
-    the user already has, removing a role the user does not have), prints:
-    `"No changes applied to user '{username}'."` and exits with code 0.
-    Otherwise prints:
-    `"Updated user '{username}': {list of actual changes}."`
-    Role changes are reported in the summary as the net difference
-    (before → after), for example `roles: added 'admin'; removed
-    'vulnerability_analyst'`.
-    If conflicting `--add-role` and `--remove-role` cancel out (no net
-    change), no role line appears in the output (no-op, idempotent)
+2. Deduplicate repeated role options and silently cancel roles that appear in
+   both `--add-role` and `--remove-role`. The CLI passes only `Role` values —
+   not `(role, '_manual')` pairs — to `user_service.update_roles()` with
+   `acting_user_id = None`. Since `acting_user_id = None`, the self-removal
+   guard does not apply (CLI is a system action). The service still applies
+   its own defensive set normalization and never rejects a request due to
+   duplicate or overlapping input
+3. The command can select only the `_manual` origin; it cannot request, and
+   does not report, a change to an external role origin. External origins
+   still participate in effective-role evaluation
+4. Report the effective `RoleUpdateResult.added_roles` and
+   `removed_roles` exactly as returned by the service. A manual addition is
+   reported even when the role was already effective through an external
+   origin, and a manual removal is reported even when the role remains
+   effective through an external origin
+5. If both result lists are empty after the operation, print:
+   `"No changes applied to user '{username}'."` and exit with code 0.
+   Otherwise print: `"Updated user '{username}': {role summary}."` — the
+   role summary uses the form
+   `roles: added 'admin'; removed 'vulnerability_analyst'`, lists added
+   roles before removed roles, orders each side by wire-format role value,
+   and omits a side with no effective change
 
-**Error handling (atomic fail-fast)**: steps 8–10 execute in one
-caller-owned database transaction. Each service flushes but does not commit.
-If any step fails, the workflow stops, rolls back every preceding mutation and
-audit event, and reports the failed operation to stderr; no partial-success
-step report is printed. After all steps succeed, the workflow commits exactly
-once and prints the summary in step 11.
+**Reactivation mode behavior**:
 
-**Idempotency**: Idempotent. If all requested operations result in no-ops
-(state already reached), the command prints an informational message and
-exits with code 0.
+1. If the user is an external user (`external_id IS NOT NULL`), exit with
+   error: `"Error: Cannot reactivate external users."` (exit code 1).
+   Active status of external users is managed exclusively by external sync
+2. Delegate once to `user_service.reactivate_user()` with
+   `acting_user_id = None` and report exclusively from the returned
+   `ReactivationResult.reactivated`: `false` — a local user that is already
+   active — prints
+   `"No changes applied to user '{username}'."` with exit code 0; `true`
+   prints `"Reactivated user '{username}'."`
+3. The read-only lookup of Behavior step 3 serves only resolution and the
+   guard above; it never classifies the outcome
+4. No profile or role update occurs in this mode
+
+Reactivation mode performs one lifecycle transition only. When an account is
+being prepared for a return to service, complete profile and role changes in
+earlier invocations; ordering across invocations is operator-owned.
+
+**Error handling (atomic single operation)**: each mode executes in one
+caller-owned database transaction. The service flushes but does not commit.
+If the service call fails, the workflow rolls back and reports the error to
+stderr; no partial-success output is printed. After the service call
+succeeds, the workflow commits exactly once and then prints the mode's
+success message.
+
+**Idempotency**: Idempotent. If the requested state is already reached —
+`UserUpdateResult.changed_fields` is empty, both `RoleUpdateResult` lists are
+empty, or `ReactivationResult.reactivated` is `false` — the command prints an
+informational no-op message and exits with code 0.
 
 **Exit codes**: 0 on success (including no-op), 1 on validation or
 operational error, 2 on system error (database unreachable).
 
-**Output channels**: success summary to stdout. All `"Error: ..."` messages to
-stderr.
+**Output channels**: success and no-op messages to stdout. All
+`"Error: ..."` messages to stderr.
 
 ### `sentinel manage-user deactivate`
 
@@ -813,8 +908,8 @@ in `docs/features/identity/user-service.md`).
 7. If the service raises `UserConflictError` (duplicate email), return
    HTTP 409 with code `USER_ALREADY_EXISTS`:
    `"A user with this email already exists."`
-8. Return HTTP 200 with the updated user profile in the standard
-   `{"data": ...}` envelope
+8. Return HTTP 200 with `UserUpdateResult.user` — the updated user profile —
+   in the standard `{"data": ...}` envelope
 
 **Error responses**:
 
@@ -836,7 +931,10 @@ POST /api/v1/admin/users/{user}/roles
 
 **`Capability: manage_users`**
 
-Add or remove manual roles for a user.
+Add or remove manual roles for a user. This endpoint manages only the
+`_manual` origin: it never inserts, deletes, or mutates a row whose
+`group_name != '_manual'`. External role origins remain unchanged and
+continue to participate in effective-role evaluation.
 
 **Request body**:
 
@@ -847,36 +945,69 @@ Add or remove manual roles for a user.
 }
 ```
 
+| Field | Type | Required | Null | Semantics |
+|---|---|---|---|---|
+| `add` | array of Role values | No | No | Manual roles to add; omitted means `[]` |
+| `remove` | array of Role values | No | No | Manual roles to remove; omitted means `[]` |
+
+Request validation is strict so client mistakes surface instead of being
+silently normalized:
+
+- an omitted field is equivalent to an empty array;
+- an absent request body is equivalent to `{}` (both fields omitted) and is
+  a valid no-op;
+- an empty array is valid;
+- explicit `null` for either field returns the global HTTP 422
+  `VALIDATION_ERROR`;
+- an unknown role value returns the global HTTP 422 `VALIDATION_ERROR`;
+- a wrong field type or a wrong element type returns the global HTTP 422
+  `VALIDATION_ERROR`;
+- a role repeated within one list returns the global HTTP 422
+  `VALIDATION_ERROR`;
+- a role present in both `add` and `remove` returns the global HTTP 422
+  `VALIDATION_ERROR`.
+
+`user_service.update_roles()` keeps its own defensive set-based normalization
+for non-HTTP callers; the API does not rely on it and rejects duplicate or
+overlapping input first.
+
 **Behavior**:
 
-1. Look up the user by `user_id` — if not found, return HTTP 404 with
-   code `USER_NOT_FOUND`
-2. Delegate to `user_service.update_roles()` with
-   `acting_user_id = authenticated_admin.id` and roles as
-   `(role, '_manual')` pairs
+1. Verify the `manage_users` capability through the endpoint dependency
+2. Resolve `{user}` through `user_service.resolve_user_identifier()`: UUID
+   or username. An unresolved identifier returns HTTP 404 with code
+   `USER_NOT_FOUND`. The route performs no ORM lookup directly
+3. Delegate to `user_service.update_roles()` with only `Role` values — not
+   `(role, '_manual')` pairs — and
+   `acting_user_id = authenticated_admin.id`
+4. `update_roles()` owns locking, the effective-change classification, the
+   self-Admin guard, the `UserRole` mutations, and the Identity audit
+   events, including any derived final-VA-loss Ticket unassignment (see
+   `docs/features/identity/user-service.md`)
+5. The API transaction dependency commits before the response is
+   transmitted. Any error rolls the complete operation back atomically
+6. Return HTTP 200 with the complete user profile — including all role
+   origins — in the standard `{"data": ...}` envelope
 
-**Validation rules**:
-- Cannot remove roles with `group_name != '_manual'` — returns HTTP 409
-  with code `USER_EXTERNAL_ROLE_PROTECTED`:
-  `"Cannot remove externally-derived role '{role}'. This role is managed by the
-  external group '{group_name}'."`
-- Cannot remove your own Admin role — returns HTTP 409 with code
-  `USER_SELF_ROLE_REMOVAL`:
-  `"Cannot remove your own Admin role."` (enforced by
-  `user_service.update_roles()` — see `docs/features/identity/user-service.md`)
-- If both `add` and `remove` are empty arrays (or missing), the
-  operation is a no-op — returns HTTP 200 with the unchanged user
-  profile in the standard `{"data": ...}` envelope
-- Adding a role that the user already has as a manual assignment is a
-   no-op (idempotent)
-- Removing a role the user does not have is a no-op (idempotent)
-- Adding a role that the user already holds via external derivation creates a
-  separate `_manual` record — both origins coexist independently. See
-  `docs/features/identity/rbac.md` (Role Origins and Coexistence) for full
-  semantics
-- Creates a `UserRole` record with `group_name = '_manual'` and
-  `assigned_by` set to the authenticated admin's user ID for each added
-  role
+**Error responses**:
+
+| Status | Code | Condition |
+|---|---|---|
+| 404 | `USER_NOT_FOUND` | Identifier does not resolve to any user |
+| 409 | `USER_SELF_ROLE_REMOVAL` | The effective deletion would remove the authenticated administrator's final Admin role origin |
+
+**Idempotency**:
+
+- adding a role whose `_manual` row is already present is a no-op;
+- removing a role without a `_manual` row is a no-op;
+- adding a role that the user already holds via external derivation creates a
+  separate `_manual` record — both origins coexist independently;
+- removing a `_manual` row while an external origin grants the same role
+  deletes only the manual row and leaves the role effective;
+- the response always contains the complete, deterministically ordered user
+  profile, whether or not any row changed. See
+  `docs/features/identity/rbac.md` (Role Origins and Coexistence) for the
+  independent-origin semantics
 
 **Response**: HTTP 200 with updated user profile including all roles,
 wrapped in the standard `{"data": ...}` envelope (see
@@ -1013,8 +1144,8 @@ Ticket grant event.
    code `USER_NOT_FOUND`
 2. Delegate to `user_service.reactivate_user()` with
    `acting_user_id = authenticated_admin.id`
-3. Return HTTP 200 with the updated or unchanged user profile in the standard
-   `{"data": ...}` envelope
+3. Return HTTP 200 with `ReactivationResult.user` in the standard
+   `{"data": ...}` envelope; the profile is unchanged on a no-op
 
 **Constraints**:
 - External user reactivation is rejected by the service layer
@@ -1173,20 +1304,24 @@ handling is required.
    canonical way to distinguish local users from externally-provisioned users. No
    additional flag or column is needed
 2. **No "last admin" enforcement**: the system does not enforce a
-   minimum admin count. However, via UI/API it is practically impossible
-   for administrators to accidentally eliminate all admins — the
-   self-removal guard (see `docs/features/identity/rbac.md`, Business Rule 1)
-   prevents any admin from removing their own Admin role, so at least
-   the acting admin always retains the role. Via CLI or system
-   operations (`acting_user_id = None`), the self-removal guard does
-   not apply, and it is possible to remove or deactivate even the last
-   admin. This is intentional and non-problematic: the platform
-   continues to function normally without active admin users (all
-   non-admin features remain operational). In these rare cases, a
-   system administrator with shell access can restore admin access by either
+   minimum admin count, and the self-removal guard is not a global
+   minimum. The guard (see `docs/features/identity/rbac.md`, Business Rule 1)
+   prevents an authenticated actor from effectively removing their own
+   final Admin origin in their own operation, so that actor retains at
+   least one Admin origin after their own request. It does not prevent
+   another Admin from removing the first Admin's final origin, and
+   crossing removals — including concurrent removals executed by two
+   Admins on each other's accounts — can leave the platform with zero
+   Admins. Via CLI or system operations (`acting_user_id = None`), the
+   self-removal guard does not apply, and it is possible to remove or
+   deactivate even the last admin. This is intentional and non-problematic:
+   the platform continues to function normally without active admin users
+   (all non-admin features remain operational). In these cases, a system
+   administrator with shell access can restore admin access by either
    creating a new local administrator with `sentinel manage-user create
-   --username <new-user> --email <email> --role admin` or promoting an existing
-   user with `sentinel manage-user update --username <user> --add-role admin`.
+   --username <new-user> --email <email> --role admin` or promoting an
+   existing user with `sentinel manage-user update --username <user>
+   --add-role admin`.
 3. **No duplicate usernames or emails**: enforced at creation and when
    changing the email
 4. **Role origin is `_manual`**: all roles assigned via `manage-user`
@@ -1216,8 +1351,12 @@ handling is required.
    records via `IdentityAuditLog.log_event()` (user creation, role
    changes, password resets, deactivation, reactivation, API key
    lifecycle). Deactivation additionally creates `TicketAuditEvent`
-   records for ticket unassignment. Role changes do not produce
-   `TicketAuditEvent` records. See
+   records for ticket unassignment. Ordinary role changes create no
+   `TicketAuditEvent`; an effective loss of the user's final
+   `vulnerability_analyst` origin creates one `assignment` event per
+   effectively unassigned active ticket, committed atomically with the
+   identity events in the same transaction (see
+   `docs/features/tickets/ticket-audit-log.md`). See
    `docs/features/identity/identity-audit-log.md` for the full event
    type contract and `docs/features/identity/user-service.md` for the
    service operations.

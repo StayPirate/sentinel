@@ -65,20 +65,32 @@ Password is collected interactively (hidden prompt, requires TTY).
 
 ### `sentinel manage-user update`
 
-Updates an existing user account. Identity fields (`--email`,
-`--full-name`) are only permitted on local users. Role changes and
-reactivation are composed atomically in one caller-owned transaction.
-Failure rolls back every change and audit event from the invocation.
+Updates an existing user account. Each invocation uses exactly one of three
+mutually exclusive modes — profile fields, manual roles, or reactivation —
+and maps to one API operation with one caller-owned transaction. Cross-mode
+option combinations are rejected; no partial-success reporting applies.
 
 ```
 sentinel manage-user update \
   --username <username> \
   [--email <new_email>] \
   [--full-name <new_name>] \
+  [--clear-full-name]
+
+sentinel manage-user update \
+  --username <username> \
   [--add-role <role>] ... \
-  [--remove-role <role>] ... \
-  [--reactivate]
+  [--remove-role <role>] ...
+
+sentinel manage-user update \
+  --username <username> \
+  --reactivate
 ```
+
+Profile fields (`--email`, `--full-name`, `--clear-full-name`) are only
+permitted on local users; `--full-name` and `--clear-full-name` are mutually
+exclusive. Role changes are permitted on local and external users and manage
+only the `_manual` origin. Reactivation is only permitted on local users.
 
 **Idempotency**: Idempotent (no-op if state already reached).
 
