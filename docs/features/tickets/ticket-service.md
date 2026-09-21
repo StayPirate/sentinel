@@ -56,13 +56,22 @@ calls within it; they do not create a new event loop for each mutation. See
 
 All operations accept the caller's database session and do not commit or roll
 back. Commit responsibility belongs to the caller. Functions that require an
-external post-commit effect register it with the caller-owned transaction;
-the API transaction dependency commits and releases locks before executing the
+external post-commit effect register it with the caller-owned transaction; the
+API transaction dependency commits and releases locks before executing the
 effect.
 
 This matches the `ticket_mutations`, `package_service`, and `user_service`
 pattern: service functions apply mutations, create audit events, or register
 post-commit work while the caller owns transaction completion.
+
+`dispatch_ticket_convergence()` is the deliberate exception: publication is its
+requested operation and its failure must remain observable, so it is a
+service-owned orchestration boundary that opens and completes its own short
+session (`docs/conventions.md`, Caller-Owned Service Transactions —
+orchestration boundary). It does not accept a caller-supplied session. The
+automatic convergence effects registered by `reconcile_ticket_status()` keep
+using the caller-owned transaction; the API drain releases that caller-owned
+session immediately before its best-effort publication attempt.
 
 ### Acting user convention
 
@@ -1081,7 +1090,7 @@ An explicit `Ignored` or `Duplicated` exit first
 converges existing system-managed Product eligibility synchronously from current
 PostgreSQL inputs before its final gate result. A `Resolved` regression is
 instead produced by an ordinary gate-zone mutation that has already maintained
-current eligibility. The post-commit workflow
+current eligibility. The Ticket convergence workflow
    re-resolves every persisted package marker through SMELT, including
    soft-deleted markers without restoring them, then catches up on external
    data against the resulting tree (e.g., Red Hat CVSS updates — the
@@ -1107,18 +1116,143 @@ callers. Registration applies to:
 - Gate-driven regression — Resolved → active (automatic, via any
   mutation that unsatisfies a gate)
 
-Publication registered by these automatic mutation paths is best-effort. If
-the post-commit callback cannot publish the root convergence task, it logs one
-sanitized structured ERROR with `ticket_id` and the request or task correlation
-already bound to that execution context, then returns normally. The committed
-Ticket/package mutation and its normal success response are retained; the
-failure does not become `CELERY_UNAVAILABLE`. Recovery is a complete explicit
-rerun through `POST /api/v1/tickets/{ticket_id}/rerun-reactivation`.
+Publication registered by these automatic mutation paths is best-effort and
+follows the owner policies below. The committed Ticket/package mutation and its
+normal success response are retained on an ordinary publication failure, and
+recovery is a complete explicit rerun through
+`POST /api/v1/tickets/{ticket_id}/rerun-reactivation`.
 
 This differs intentionally from that explicit rerun endpoint: dispatch is the
 requested operation there, so its initial publication failure returns 503 and
 no Ticket mutation has been committed. Neither path adds a requesting-user log
 field; API request correlation uses the existing `request_id` contract.
+
+### Publication vocabulary
+
+These terms are normative for every specification that describes Ticket
+convergence publication:
+
+| Term | Meaning |
+|------|---------|
+| **registration** | the transaction-local declaration of one future Ticket convergence publication effect, created by `reconcile_ticket_status()` step 5 |
+| **initial publication attempt** | the synchronous broker call that submits the root Ticket convergence task |
+| **submitted** | the initial publication attempt returned without raising; it proves neither worker start nor workflow outcome |
+| **acceptance_unconfirmed** | the initial publication attempt raised a broker operational error; it is not proof that the broker rejected the task |
+| **root workflow outcome** | the later execution, retry, and terminal outcome of `run_ticket_convergence()` |
+| **catch-up publication/outcome** | the later per-fetcher publication and its execution |
+| **explicit complete rerun** | `POST /api/v1/tickets/{ticket_id}/rerun-reactivation` |
+
+### Initial publication boundary and database-free publisher
+
+The publication boundary submits exactly one root Ticket convergence task per
+registered effect:
+
+```python
+async def publish_ticket_convergence(
+    *,
+    ticket_id: UUID,
+    task_id: str,
+) -> TicketConvergencePublicationOutcome:
+```
+
+`TicketConvergencePublicationOutcome` is the semantic returned outcome
+(`submitted` or `acceptance_unconfirmed`); the concrete type is an
+implementation choice.
+
+- The boundary receives only detached primitive data: the canonical internal
+  Ticket UUID and the allocated task ID. It opens no database session, performs
+  no query, accepts no ORM instance, and performs no Redis, HTTP, or other
+  network I/O.
+- It returns `submitted` when the publication call returns without raising, and
+  `acceptance_unconfirmed` when the call raises the library-normalized broker
+  operational error `kombu.exceptions.OperationalError` (the same class as
+  `celery.exceptions.OperationalError`). Classification uses the exception
+  class only and never the exception text.
+- The synchronous call includes Celery's own configured publication retry
+  policy. The boundary adds no retry of its own.
+- Every other exception propagates unchanged and is never converted into
+  `acceptance_unconfirmed`: `asyncio.CancelledError`, worker cancellation and
+  shutdown signals (`WorkerShutdown`, `WorkerTerminate`, `SystemExit`,
+  `KeyboardInterrupt`), `SoftTimeLimitExceeded`, `TimeLimitExceeded`,
+  `Terminated`, `MemoryError`, serialization and content errors
+  (`SerializationError`, `EncodeError`, `SerializerNotInstalled`,
+  `ContentDisallowed`), `QueueNotFound`, `ImproperlyConfigured`,
+  `SecurityError`, and any unexpected programming or contract error.
+- The boundary never waits for worker start or workflow execution and never
+  reads a Celery task result; the deployment has no Celery result backend. It
+  emits no log and selects no owner policy.
+- No database transaction or row lock may be open when the boundary is
+  invoked.
+
+### Owner outcome policies
+
+Each transaction owner drains the detached effects and applies its own policy.
+Draining never begins before the registering transaction has committed and
+released its row locks, and publication never accesses the database.
+
+**Automatic API mutation.** The API transaction dependency consumes the
+detached effects in its post-commit phase, after `commit()` succeeded. In
+registration order it detaches each effect, releases the caller-owned session
+by closing it — so a potentially blocking broker call does not hold a pooled
+database connection — and then performs the initial publication attempt.
+`submitted` preserves the committed mutation's ordinary success response.
+`acceptance_unconfirmed` also preserves that success response, emits exactly one
+Ticket-owned ERROR (see below), and is absorbed; it never becomes
+`CELERY_UNAVAILABLE`, and recovery is the explicit complete rerun. Unexpected
+exceptions escaping the drain are not converted into `acceptance_unconfirmed`
+and follow the unchanged generic post-commit callback behavior.
+
+**Batch consumers (all-CVE recalculation runner).** A batch consumer that
+processes independent committed units drains each unit's detached effects after
+that unit's commit and session close and before starting the next unit. An
+`acceptance_unconfirmed` outcome leaves the committed unit's classification,
+aggregate success, and durable effects unchanged; the consumer counts it in its
+own diagnostic aggregate, never persisted and never a Celery result, and
+continues with later effects and later units. The consumer emits its own
+sanitized CVE/Ticket ERROR; its own specification owns the counter names and
+terminal aggregate vocabulary. A complete recalculation is not guaranteed to
+republish an already-converged unit, so the explicit complete rerun remains the
+authoritative recovery path.
+
+**CVE/fetcher finalization.** `commit_and_dispatch()` commits, records its
+durable metrics, atomically detaches the transaction-local effects, and
+attempts each once in registered order before the optional package-candidate
+handoff. An ordinary publication failure is absorbed after exactly one
+Ticket-owned sanitized ERROR; later effects and the package handoff are still
+attempted, and the committed ingestion classification and metrics do not
+change. The fetcher-owned session lifecycle remains as defined in
+`cve-fetcher-infrastructure.md` (Per-CVE Finalization).
+
+**Explicit operator rerun.** This path does not use the best-effort automatic
+drain: publication is the requested operation. `dispatch_ticket_convergence()`
+opens a short-lived session, locks and validates the Ticket, allocates the
+transient task ID, commits and closes the session, and only then performs the
+initial publication attempt with no lock held. `submitted` returns the task ID
+for the existing `202` response. `acceptance_unconfirmed` emits exactly one
+sanitized request-owned ERROR and raises `TicketConvergenceDispatchError`,
+which the endpoint maps to `503 CELERY_UNAVAILABLE` before the response is
+transmitted. No Ticket mutation, audit event, compensation row, durable run, or
+progress resource is created, and duplicate work remains accepted.
+
+### Publication failure logging
+
+For one ordinary initial-publication failure, exactly one owner-selected
+feature log is emitted. The publisher boundary and the generic post-commit
+callback drain never log that failure themselves.
+
+- The automatic API mutation path and the CVE/fetcher finalization path share
+  one Ticket-owned event: `ticket_convergence_publication_failed` at ERROR,
+  with `ticket_id` (the internal Ticket UUID), the closed sanitized `cause`
+  category `broker_operational_error`, and the request or task correlation
+  already bound to the execution context.
+- A batch consumer owns its own event, as described above.
+- The explicit operator rerun owns its request failure event, with `ticket_id`,
+  the same closed `cause` category, and the bound `request_id`.
+
+No Ticket-convergence publication log may contain `exc_info`, raw exception
+text, a traceback, broker URLs, hosts, ports, credentials, payloads, Ticket
+content, or external data. Log format, levels, and correlation remain owned by
+`docs/features/platform/logging.md`.
 
 ### Convergence behavior
 
@@ -1133,16 +1267,17 @@ behavior — the system converges to the accurate state.
 
 ### `dispatch_ticket_convergence()`
 
-Service boundary used by
-`POST /api/v1/tickets/{ticket_id}/rerun-reactivation`. It validates current
-state under the caller-owned transaction and registers publication as a
-post-commit effect, so no broker I/O occurs while the Ticket lock is held.
+Service-owned orchestration boundary used by
+`POST /api/v1/tickets/{ticket_id}/rerun-reactivation`. Publication is the
+requested operation, so the function owns one short transaction and performs
+the initial publication attempt manually after that transaction has committed
+and closed.
 
 ```python
 async def dispatch_ticket_convergence(
-    db: AsyncSession,
     *,
     ticket_id: UUID,
+    session_factory: async_sessionmaker[AsyncSession],
 ) -> str:
 ```
 
@@ -1157,38 +1292,45 @@ boundary's concrete parameter or context shape.
   `triage_ticket` or `manage_fetchers` before service resource lookup. If a thin
   API boundary also performed preliminary Ticket accessibility, that decision
   is not authoritative after a lock wait.
-- The Ticket must still exist and its locked-current status must be `Analysis`,
-  `Analyzed`, or `Resolved`. Absence raises `TicketNotFoundError`; `New`,
-  `Ignored`, or `Duplicated` raises `InvalidTransitionError`.
+- The Ticket must still exist, be accessible, and its locked-current status must
+  be `Analysis`, `Analyzed`, or `Resolved`. Absence or inaccessible visibility
+  raises `TicketNotFoundError`; `New`, `Ignored`, or `Duplicated` raises
+  `InvalidTransitionError`.
 - The function does not call `ensure_ticket_operable()`.
 
 **Behavior**:
 
-1. Load the Ticket by canonical UUID with `FOR UPDATE` as the first database
-   operation, revalidate consumer accessibility, and only then evaluate status
-   eligibility from locked-current state. Missing or inaccessible returns
-   `TICKET_NOT_FOUND` and registers no callback.
-2. Allocate the transient Celery task ID without performing broker I/O.
-3. Register one post-commit callback that publishes the root Ticket
-   convergence task with the canonical `ticket_id` and allocated task ID.
-   No Ticket field or audit event is changed.
-4. Return the allocated root task ID. The caller maps it to
-   `TicketConvergenceDispatchResponse` and HTTP 202.
+1. Open a short-lived session from `session_factory`. Load the Ticket by
+   canonical UUID with `FOR UPDATE` as the first database operation, revalidate
+   consumer accessibility, and only then evaluate status eligibility from
+   locked-current state. A missing or inaccessible Ticket and an ineligible
+   status raise before publication and register no effect or callback.
+2. Allocate the transient Celery root task ID without performing broker I/O.
+3. Commit and close the session, releasing the Ticket lock.
+4. Perform the initial publication attempt through the database-free publisher
+   defined in "Initial publication boundary and database-free publisher" above,
+   with the canonical Ticket UUID and the allocated task ID and with no lock
+   held. On `submitted`, return the allocated task ID. On
+   `acceptance_unconfirmed`, emit exactly one sanitized request-owned ERROR (see
+   "Publication failure logging") and raise `TicketConvergenceDispatchError`.
 
-The caller-owned transaction commits and releases the lock before the callback
-publishes. If initial publication raises, the callback raises
-`TicketConvergenceDispatchError`; the function-scoped API transaction boundary
-maps it to 503 before transmitting the response. No compensation row exists
-because this workflow deliberately has no durable run resource. A broker
-acknowledgement may be ambiguous, so the task may still execute despite the 503
-response. Re-invocation is intentionally accepted and registers another
-complete workflow. Concurrent calls serialize only the locked status check;
-they do not coalesce publication. The function creates no `TicketAuditEvent`.
+The endpoint maps the returned task ID to `TicketConvergenceDispatchResponse`
+and HTTP 202, and `TicketConvergenceDispatchError` to
+`503 CELERY_UNAVAILABLE` before the response is transmitted.
+
+The function registers no post-commit callback and never depends on an
+exception raised during the API transaction dependency's teardown or callback
+loop. It creates no `TicketAuditEvent`, no durable run or progress resource, and
+no compensation row. A broker acknowledgement may be ambiguous, so the task may
+still execute despite the 503 response. Re-invocation is intentionally accepted
+and publishes another complete workflow. Concurrent calls serialize only the
+locked status check; they do not coalesce publication.
 
 The function propagates `TicketNotFoundError`, `InvalidTransitionError`,
-`TicketConvergenceDispatchError`, and database exceptions. It does not expose
-package-specific or catch-up exceptions synchronously because those occur in
-the dispatched workflow.
+`TicketConvergenceDispatchError`, database exceptions, and every
+non-operational publication exception. It does not expose package-specific or
+catch-up exceptions synchronously because those occur in the dispatched
+workflow.
 
 ### Cross-references
 
@@ -1201,6 +1343,10 @@ the dispatched workflow.
   zone-exit eligibility boundary and complete Ticket convergence workflow
 - [fetcher-infrastructure.md](../platform/fetcher-infrastructure.md) —
   `catch_up()` method contract
+- [cve-fetcher-infrastructure.md](../platform/cve-fetcher-infrastructure.md) —
+  per-CVE finalization drain (`commit_and_dispatch()`)
+- [testing-strategy.md](../platform/testing-strategy.md) — Ticket Convergence
+  Publication Handoff test matrix
 - [tickets.md](tickets.md#rerun-ticket-convergence) — operator rerun API,
   authorization order, response, and errors
 
@@ -1612,17 +1758,22 @@ behavior of `ticket_service` operations:
    `duplicate_removed` event uses the pre-clear target's `SNTL-{n}` identifier
    as `old_value` and `NULL` as `new_value`
 11. **Manual-zone convergence registration**: both exit workflows register one
-    post-commit Ticket convergence workflow for final `Analysis`, `Analyzed`,
-    and `Resolved`; inactive or non-VA assignees are cleared only for final
-    `Analysis` or `Analyzed` and retained for final `Resolved`; automatic publication failure
-    is logged and swallowed after commit, preserving the mutation's success
-    response and requiring the complete operator rerun
+     transaction-local Ticket convergence effect for final `Analysis`,
+     `Analyzed`, and `Resolved`; registration is deduplicated per Ticket in one
+     transaction in first-registration order; rollback, failed commit, and
+     pre-commit cancellation discard it; automatic publication failure is
+     absorbed after commit with exactly one sanitized log, preserving the
+     mutation's success response and requiring the complete operator rerun;
+     inactive or non-VA assignees are cleared only for final `Analysis` or
+     `Analyzed` and retained for final `Resolved`
 12. **Operator convergence dispatch**: verify locked-current acceptance for
-    `Analysis`, `Analyzed`, and `Resolved`; rejection of `New`, `Ignored`, and
-    `Duplicated` with `InvalidTransitionError`; commit and lock release before
-    publication; canonical Ticket UUID and root task UUID return; repeated and
-    concurrent publication without conflict; broker failure mapping; ambiguous
-    acknowledgement tolerance; and no Ticket mutation or audit event
+     `Analysis`, `Analyzed`, and `Resolved`; rejection of `New`, `Ignored`, and
+     `Duplicated` with `InvalidTransitionError`; commit, session close, and lock
+     release before the publication attempt; canonical Ticket UUID and root
+     task UUID return; no post-commit callback registration; repeated and
+     concurrent publication without conflict; `acceptance_unconfirmed` mapping
+     to `TicketConvergenceDispatchError` before response transmission; ambiguous
+     acknowledgement tolerance; and no Ticket mutation or audit event
 13. **Canonical comments and creation order**: manual and every canonical CVE
     source create the exact `ticket_created.comment`; creation keeps
     `ticket_created`, optional assignment, optional manual severity, and

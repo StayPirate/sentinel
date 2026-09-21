@@ -2361,6 +2361,105 @@ visibility predicate.
   declassification remains absent. Deactivation-impact API and CLI tests assert
   no grant or maintainership count is present because those rows are retained.
 
+### Ticket Convergence Publication Handoff
+
+When `reconcile_ticket_status()` convergence registration, the automatic API
+drain, `commit_and_dispatch()`, the explicit convergence dispatch, or the
+all-CVE recalculation runner's post-commit consumption is implemented or
+changed, unit and integration tests MUST cover this complete matrix. The
+publication boundary is unit-testable with a substituted synchronous publisher;
+registration, discard, detach, and owner policies require real PostgreSQL with
+independent sessions and deterministic synchronization at the commit, session
+close, and publication boundaries.
+
+**Transaction-local lifecycle**
+
+- registration during the transaction carries only the Ticket's internal UUID,
+  performs no query, network, Redis, or Celery I/O, allocates no task ID, and
+  creates no audit event;
+- deduplication: repeated reconciliation for one Ticket in one transaction
+  registers one effect, while effects for different Tickets preserve
+  first-registration order;
+- commit precedes every publication attempt; the API drain releases the
+  caller-owned session before its first attempt, and every service-owned owner
+  commits, closes, and releases locks before its own attempt;
+- rollback, a failed commit, and pre-commit cancellation discard the effects
+  with zero publication attempts;
+- detach consumes the complete sequence before the first attempt; an attempted
+  effect never replays after success or failure, and a reused session starts
+  its next transaction with no pending effect;
+- an interrupted commit-to-attempt gap publishes nothing and requires the
+  explicit complete rerun; no outbox, dispatch row, Redis key, or progress
+  resource exists.
+
+**Initial publication boundary**
+
+- a call that returns without raising is classified `submitted`; the boundary
+  does not wait for worker start, workflow execution, or a task result, and
+  reads no Celery result;
+- `kombu.exceptions.OperationalError` (`celery.exceptions.OperationalError`) is
+  classified `acceptance_unconfirmed`; classification is independent of
+  exception text and no exception message is inspected;
+- an unconfirmed acknowledgement remains ambiguous: the task may still execute
+  and a later explicit rerun may duplicate work;
+- every non-operational exception propagates unchanged and is never classified
+  `acceptance_unconfirmed`. Cover at least `asyncio.CancelledError`,
+  `WorkerShutdown`, `SoftTimeLimitExceeded`, `MemoryError`, `EncodeError` or
+  `SerializerNotInstalled`, and a representative programming error;
+- the boundary accepts no ORM instance or session, performs no database query,
+  and publishes only detached primitive values.
+
+**Owner policies**
+
+- automatic API mutation: the committed mutation keeps its ordinary success
+  response after both `submitted` and `acceptance_unconfirmed`; an ordinary
+  failure emits exactly one `ticket_convergence_publication_failed` ERROR with
+  `ticket_id` and the closed `broker_operational_error` cause, and never
+  produces `CELERY_UNAVAILABLE`;
+- CVE/fetcher finalization: an ordinary failure is absorbed after exactly one
+  Ticket-owned log; later detached effects and the package-candidate handoff
+  are still attempted; the committed ingestion classification, durable
+  metrics, and source success are unchanged and no second log is emitted;
+- batch consumer (the all-CVE recalculation runner): each committed unit's
+  effects are drained after that unit's commit and session close and before the
+  next unit; an ordinary failure leaves the unit's committed classification and
+  success unchanged, is counted in the consumer's orthogonal diagnostic
+  aggregate, emits exactly one sanitized CVE/Ticket event, and does not abort
+  the scan; a completed scan with such a failure reflects it in the consumer's
+  terminal aggregate, and recovery remains the explicit Ticket rerun;
+- explicit operator rerun: `submitted` returns the allocated root task ID and
+  202; `acceptance_unconfirmed` raises `TicketConvergenceDispatchError` and
+  returns 503 before the response is transmitted; the locked transaction
+  commits and closes before the attempt; no post-commit callback is registered;
+  and no Ticket mutation, audit event, durable run, or compensation row is
+  created.
+
+**Control signals and security**
+
+- cancellation, worker shutdown, `SoftTimeLimitExceeded`, `MemoryError`,
+  serialization and contract errors, and programming errors propagate through
+  the publisher and are never converted into an ordinary publication failure or
+  counted as `acceptance_unconfirmed`;
+- unexpected exceptions escaping the automatic API drain are not converted into
+  `acceptance_unconfirmed`;
+- exactly one feature-owned log exists per ordinary failed effect on each path;
+  the publisher logs nothing and the generic post-commit callback drain adds no
+  second event for that failure;
+- log assertions reject `exc_info`, raw exception text, tracebacks, broker
+  URLs, hosts, ports, credentials, payloads, Ticket content, and external data;
+  only `ticket_id`, the closed `cause` category, bounded counts, and the bound
+  request or task correlation are permitted.
+
+**Structural absences**
+
+- no new model, migration, table, column, enum, configuration option, endpoint,
+  capability, or exception hierarchy is introduced;
+- no outbox, persisted dispatch record, Celery result backend, Redis key, or
+  progress resource is introduced;
+- the generic post-commit callback mechanism, `get_db()`, and its existing
+  consumers keep their current contract, and the existing callback tests remain
+  valid and unchanged.
+
 ### Maintainer Workbench
 
 When the maintainer workbench service or API is implemented or changed, unit,

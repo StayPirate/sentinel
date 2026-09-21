@@ -79,7 +79,7 @@ eligibility recalculation use their dedicated system boundaries instead.
 
 | Module | Relationship |
 |--------|-------------|
-| `services/ticket_mutations.py` | `package_service` imports `reconcile_ticket_status()`, `auto_assign_actor()`, and `ensure_ticket_operable()` from `ticket_mutations`. The code dependency remains unidirectional: `package_service` depends on `ticket_mutations`, but `ticket_mutations` does NOT import `package_service`. The CVSS chain may update only system-managed Product eligibility inline through the shared pure evaluator; this narrow exception does not transfer any other package mutation ownership. `reconcile_ticket_status()` registers the post-commit package-tree recovery workflow; the caller does not invoke catch-up directly |
+| `services/ticket_mutations.py` | `package_service` imports `reconcile_ticket_status()`, `auto_assign_actor()`, and `ensure_ticket_operable()` from `ticket_mutations`. The code dependency remains unidirectional: `package_service` depends on `ticket_mutations`, but `ticket_mutations` does NOT import `package_service`. The CVSS chain may update only system-managed Product eligibility inline through the shared pure evaluator; this narrow exception does not transfer any other package mutation ownership. `reconcile_ticket_status()` registers the transaction-local Ticket convergence effect that starts the package-tree recovery workflow; the caller does not invoke catch-up directly |
 | `services/ticket_service.py` | `ticket_service` is the higher-level owner of manual-zone exit workflows and invokes this module's synchronous eligibility boundary with an already locked Ticket. `package_service` does not import or call back into `ticket_service` |
 | `services/cvss.py` | `package_service` delegates score selection to `resolve_eligibility_score()` in `cvss.py` (SUSE-only, 2-step cascade — see Eligibility Score Resolution in `docs/features/tickets/cvss-scoring.md`) and applies the one pure complete eligibility evaluator required by `package-model.md`. `ticket_mutations` reuses that evaluator without importing `package_service` |
 | Ticket visibility | Consumer-facing package queries and mutations receive caller context and apply the one canonical Ticket visibility predicate from `docs/features/identity/rbac.md`. Model-aware ORM construction and database evaluation remain in the Service layer; API dependencies and handlers do not build or pass SQLAlchemy expressions |
@@ -1440,6 +1440,13 @@ mutations create their ordinary events.
 repeats external requests and catch-up publication by design, while delegated
 database operations remain insert-if-missing or current-state reconciliations.
 
+The workflow begins only after an initial publication attempt that returned
+without raising (`submitted` in `ticket-service.md`, Ticket Convergence). The
+workflow does not determine that synchronous outcome: the attempt belongs to
+the registering transaction owner, and the workflow runs later in a worker. A
+terminal wrapper failure or an individual catch-up failure stays distinct from
+the initial publication outcome and from the triggering mutation.
+
 After the status-transition transaction commits, the workflow:
 
 1. Reads every persisted package name for the Ticket, including soft-deleted
@@ -1520,8 +1527,11 @@ The wrapper returns `None` and creates no `FetcherRun`.
 
 The post-commit registration and task/callback composition mechanism is an
 implementation choice. The behavioral ordering and per-package transaction
-isolation are required. See `package-model.md` (IBS Workflow Applicability and
-Convergence) and `fetcher-infrastructure.md` (Per-Ticket Catch-Up).
+isolation are required. See `ticket-service.md` (Ticket Convergence) for the
+transaction-local registration lifecycle, the database-free publication
+boundary, and the `submitted`/`acceptance_unconfirmed` outcome vocabulary;
+`package-model.md` (IBS Workflow Applicability and Convergence); and
+`fetcher-infrastructure.md` (Per-Ticket Catch-Up).
 
 ## Query Operations
 
