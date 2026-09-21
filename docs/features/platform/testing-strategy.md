@@ -2461,9 +2461,12 @@ close, and publication boundaries.
   the publisher logs nothing and the API transaction dependency's generic
   post-commit callback loop adds no second event for that failure;
 - log assertions reject `exc_info`, raw exception text, tracebacks, broker
-  URLs, hosts, ports, credentials, payloads, Ticket content, and external data;
-  only `ticket_id`, the closed `cause` category, bounded counts, and the bound
-  request or task correlation are permitted.
+  URLs, hosts, ports, credentials, payloads, Ticket content, and external data.
+  For the shared `ticket_convergence_publication_failed` event, only
+  `ticket_id`, the closed `cause` category, and the bound request or task
+  correlation are permitted. A batch consumer's own event may additionally
+  carry the canonical CVE identifier, bounded counts, and its own closed
+  sanitized reason category, as its owning specification defines.
 
 **Structural absences**
 
