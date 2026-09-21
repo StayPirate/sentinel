@@ -1457,7 +1457,10 @@ After the status-transition transaction commits, the workflow:
    package independently. Existing package, track, Product, and exclusion state
    is preserved; missing descendants and additive maintainer associations may
    be created. A soft-deleted package's association remains ineffective until
-   the package is restored.
+   the package is restored. A package unit's registered Ticket convergence
+   effects are detached and attempted once after that unit's commit and before
+   the next package, because this workflow is itself an automatic best-effort
+   owner (`ticket-service.md`, Owner outcome policies).
 3. Logs each failed package with the sanitized cause, `ticket_id`, package
    name, and `celery_task_id`, then continues. A failed package does not roll
    back successful siblings.
@@ -1512,10 +1515,12 @@ enumeration is empty and catch-up dispatch still follows the registered roster,
 whose methods apply their own silent missing-Ticket guards. Package-specific
 resolution and validation exceptions are caught and logged as described above;
 manual-zone stale/inapplicable no-ops are not logged as package failures.
-Reliable-enumeration or transaction-completion failures and the accumulated
-catch-up-publication failure escape the async workflow to the bound Celery
+Reliable-enumeration or transaction-completion failures, the accumulated
+catch-up-publication failure, and a non-operational exception escaping a
+per-package convergence drain escape the async workflow to the bound Celery
 wrapper, which retries the same `ticket_id`; after retry exhaustion the wrapper
-logs terminal failure and returns no result. These are the only exceptions that
+logs terminal failure and returns no result. A committed package unit is not
+rolled back by an escaping drain exception. These are the only exceptions that
 leave the workflow boundary.
 
 The bound synchronous Celery wrapper receives `ticket_id: str`, validates and

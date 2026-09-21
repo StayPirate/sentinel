@@ -89,6 +89,10 @@ The fetcher is idempotent and maintains no lifecycle cursor or phase cache.
    exception type, increments the failure count, and does not stop later
    Tickets. A concurrent mutation is serialized by the Ticket row lock, and
    the service reevaluates current persisted state after acquiring that lock.
+   The per-Ticket transaction drains any Ticket convergence effect registered
+   by the delegated reconciliation after that Ticket's commit and before the
+   next Ticket; an ordinary publication failure follows the automatic
+   best-effort policy in `ticket-service.md` (Owner outcome policies).
 
 Step 4 deliberately includes `Resolved`: a corrected AIMAAS date can make a
 previously EOL Product actionable again, invalidating resolution. `New` is not
@@ -176,7 +180,10 @@ value raises `ValueError` and performs no work.
 3. Process Ticket IDs sequentially. For each ID, open a fresh session and
    independent transaction, invoke
    `package_service.recalculate_product_eligibility_for_ticket()` with that
-   `evaluation_date`, and commit that Ticket independently.
+   `evaluation_date`, and commit that Ticket independently. Drain any Ticket
+   convergence effect registered by that transaction before starting the next
+   Ticket; an ordinary publication failure follows the automatic best-effort
+   policy in `ticket-service.md` (Owner outcome policies).
 4. If a Ticket operation fails, roll it back, log the Ticket ID, Product ID,
    reason, and exception type, and continue. Earlier successful Ticket
    transactions remain committed.

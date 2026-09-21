@@ -1160,10 +1160,10 @@ async def publish_ticket_convergence(
 (`submitted` or `acceptance_unconfirmed`); the concrete type is an
 implementation choice. The publisher is a Ticket-convergence-specific,
 database-free boundary, not a generic post-commit effect framework. Its
-concrete module placement is an implementation choice, but every registering
-owner (`ticket_mutations`, `ticket_service`, `package_service`, and the
-CVE/fetcher infrastructure) MUST be able to reach it without violating the
-documented module dependency directions.
+concrete module placement is an implementation choice, but every module that
+consumes detached effects (`ticket_mutations`, `ticket_service`,
+`package_service`, and the CVE/fetcher infrastructure) MUST be able to reach it
+without violating the documented module dependency directions.
 
 - The boundary receives only detached primitive data: the canonical internal
   Ticket UUID and the allocated task ID. It opens no database session, performs
@@ -1221,17 +1221,16 @@ exception escaping the automatic API drain is not converted into
 contract and never changes already-committed data. The same exception from a
 task-owner drain propagates unchanged to that owner's existing error handling.
 
-**Batch consumers (all-CVE recalculation runner).** A batch consumer that
-processes independent committed units drains each unit's detached effects after
-that unit's commit and session close and before starting the next unit. An
-`acceptance_unconfirmed` outcome leaves the committed unit's classification,
-aggregate success, and durable effects unchanged; the consumer counts it in its
-own diagnostic aggregate, never persisted and never a Celery result, and
-continues with later effects and later units. The consumer emits its own
-sanitized CVE/Ticket ERROR; its own specification owns the counter names and
-terminal aggregate vocabulary. A complete recalculation is not guaranteed to
-republish an already-converged unit, so the explicit complete rerun remains the
-authoritative recovery path.
+**Batch consumers (all-CVE recalculation runner).** The all-CVE recalculation
+runner drains each committed unit's detached effects after that unit's commit
+and session close and before starting the next unit. An `acceptance_unconfirmed`
+outcome leaves the committed unit's classification, aggregate success, and
+durable effects unchanged; the runner counts it in its own diagnostic aggregate,
+never persisted and never a Celery result, and continues with later effects and
+later units. The runner emits its own sanitized CVE/Ticket ERROR; its own
+specification owns the counter names and terminal aggregate vocabulary. A
+complete recalculation is not guaranteed to republish an already-converged unit,
+so the explicit complete rerun remains the authoritative recovery path.
 
 **CVE/fetcher finalization.** `commit_and_dispatch()` commits, records its
 durable metrics, atomically detaches the transaction-local effects, and

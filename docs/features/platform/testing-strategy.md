@@ -2365,9 +2365,11 @@ visibility predicate.
 ### Ticket Convergence Publication Handoff
 
 When `reconcile_ticket_status()` convergence registration, the automatic API
-drain, `commit_and_dispatch()`, the explicit convergence dispatch, or the
-all-CVE recalculation runner's post-commit consumption is implemented or
-changed, unit and integration tests MUST cover this complete matrix. The
+drain, the automatic task-owner drains (the lifecycle evaluator, Product and
+threshold re-evaluation, and the convergence workflow's per-package units),
+`commit_and_dispatch()`, the explicit convergence dispatch, or the all-CVE
+recalculation runner's post-commit consumption is implemented or changed, unit
+and integration tests MUST cover this complete matrix. The
 publication boundary is unit-testable with a substituted broker-publication
 call;
 registration, discard, detach, and owner policies require real PostgreSQL with
@@ -2424,8 +2426,11 @@ close, and publication boundaries.
   outcomes; an ordinary failure emits exactly one
   `ticket_convergence_publication_failed` ERROR with `ticket_id` and the closed
   `broker_operational_error` cause, never produces `CELERY_UNAVAILABLE`, and an
-  unexpected non-operational exception escaping the drain is neither converted
-  nor feature-logged and never changes already-committed data;
+  unexpected non-operational exception escaping the automatic API drain is
+  neither converted nor feature-logged and never changes already-committed
+  data, while the same exception from a task-owner drain escapes into that
+  owner's existing error handling (whole-run failure or workflow failure path)
+  with no publication-failure event;
 - CVE/fetcher finalization: an ordinary failure is absorbed after exactly one
   Ticket-owned log; later detached effects and the package-candidate handoff
   are still attempted; the committed ingestion classification, durable
