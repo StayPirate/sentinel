@@ -321,8 +321,9 @@ residual exposure differs by cause:
 
 **Cache value contract**: the Redis key `session_liveness:{session_id}` stores
 the string `"1"` to represent a positive observation: the session was active
-when the database verification wrote it. The check never writes an entry for a
-session it observed as inactive. The lookup semantics are:
+when the database verification that produced the observation ran. The check
+never writes an entry for a session it observed as inactive. The lookup
+semantics are:
 
 - **Cache hit** (key exists with value `"1"`): the cached observation reports
   an active session — no database query is needed. Proceed to user loading.

@@ -3098,7 +3098,7 @@ or identity audit validation are affected, tests MUST cover:
 - each confirmation outcome is asserted distinctly: a valid affirmative
   answer proceeds; a valid negative answer or Enter accepting the `No`
   default prints `Aborted.` to stdout and exits 0; an unrecognized answer
-  prompts again with the retry feedback remaining on stdout; EOF/Ctrl+D
+  prompts again with the retry feedback emitted on stdout; EOF/Ctrl+D
   reaches the shared mapper, prints `Aborted.`, and exits 0; SIGINT exits
   130; SIGTERM exits 143; none of the declining paths commits
 - after confirmation the command opens a fresh session, commits exactly
