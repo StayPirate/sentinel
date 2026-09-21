@@ -3181,10 +3181,10 @@ MUST cover:
   occurrences
 - no database write, no audit event, no assignment, and no
   `reconcile_ticket_status()` invocation
-- one UTC `evaluation_date` captured at service entry governs every page and
-  unit: a controlled clock that crosses UTC midnight during the invocation
-  still yields one invocation-consistent date for lifecycle, eligibility,
-  actionability, and gate projection
+- one UTC `evaluation_date` captured once for the invocation before any CVE
+  is evaluated governs every page and unit: a controlled clock that crosses
+  UTC midnight during the invocation still yields one invocation-consistent
+  date for lifecycle, eligibility, actionability, and gate projection
 - two observations across units with committed changes between reads: each
   unit's contribution corresponds entirely to one committed database
   observation, never a synthetic mix of pre-commit and post-commit inputs
@@ -3227,11 +3227,11 @@ MUST cover:
   neither receives nor reuses preview counts, the high-water mark, or any
   preview state
 - the preview no-op remains distinct from the manual recalculation operation
-- preview/execution parity as owned by `cvss-scoring.md` (Required Tests):
-  for the same persisted inputs, projected severity, effective eligibility,
-  override skips, and highest valid gate result equal the outcomes an
-  effective default-version recalculation applies, with no assessment or
-  `CVE.severity` modification
+- preview/execution parity owned by `cvss-scoring.md` (Required Tests) for
+  the shared resolutions, extended here to effective eligibility, override
+  skips, and the highest valid gate result: for the same persisted inputs,
+  the preview's projection equals the outcomes an effective default-version
+  recalculation applies, with no assessment or `CVE.severity` modification
 
 **Pre-release verification:**
 
