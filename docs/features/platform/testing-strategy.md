@@ -3154,9 +3154,17 @@ MUST cover:
   counted as a skip without changing `eligible` or `is_eligible_override`
 - projected gate results `Resolved → Analyzed` and `Resolved → Analysis`
   reusing the exact Analyzed and Resolved predicates
+- a projected gate that preserves a manual override: a `Resolved` Ticket
+  whose only applicable occurrence has `is_eligible_override = true` keeps
+  its persisted `eligible` value, the hypothetical automatic result is not
+  substituted, and no regression is counted when the preserved value keeps
+  the gate true
 - overlapping categories from one CVE (severity change, several Product
-  occurrences, one `Resolved` regression) and unchanged effects receiving no
-  count
+  occurrences, several override skips, one `Resolved` regression) and
+  unchanged effects receiving no count
+- an evaluated CVE with no projected effect increments `cves_evaluated` and
+  no impact count, remaining distinct from the no-op proposal where
+  `cves_evaluated` is zero
 - no-op proposal: equal versions produce `no_op = true`, every count
   including `cves_evaluated` zero, and no population evaluation
 
@@ -3173,17 +3181,25 @@ MUST cover:
   occurrences
 - no database write, no audit event, no assignment, and no
   `reconcile_ticket_status()` invocation
+- one UTC `evaluation_date` captured at service entry governs every page and
+  unit: a controlled clock that crosses UTC midnight during the invocation
+  still yields one invocation-consistent date for lifecycle, eligibility,
+  actionability, and gate projection
 - two observations across units with committed changes between reads: each
-  unit uses coherent inputs while different units may observe different
-  committed states
+  unit's contribution corresponds entirely to one committed database
+  observation, never a synthetic mix of pre-commit and post-commit inputs
+  within one unit, while different units may observe different committed
+  states
 - population boundary: CVEs whose row `id` exceeds the captured high-water
   mark are excluded; a row within the boundary that becomes visible during
   the invocation may or may not be observed; the mark is neither returned nor
   persisted
 - deadline expiry discards every intermediate count and raises
   `CVSSPreviewTimeoutError`
-- no Redis read and no Celery publication, and the result is unchanged by an
-  admitted, queued, or running recalculation
+- no Redis read, no task-state read, and no Celery publication; the preview
+  remains available and never returns `CVSS_RECALC_ALREADY_IN_PROGRESS` while
+  a recalculation is admitted, queued, or running, and its counts may reflect
+  a mix of converged and not-yet-converged units
 
 **E2E tests:**
 
@@ -3211,6 +3227,20 @@ MUST cover:
   neither receives nor reuses preview counts, the high-water mark, or any
   preview state
 - the preview no-op remains distinct from the manual recalculation operation
+- preview/execution parity as owned by `cvss-scoring.md` (Required Tests):
+  for the same persisted inputs, projected severity, effective eligibility,
+  override skips, and highest valid gate result equal the outcomes an
+  effective default-version recalculation applies, with no assessment or
+  `CVE.severity` modification
+
+**Pre-release verification:**
+
+- before the preview is declared complete, measure a representative
+  persisted population and confirm the complete projection finishes within
+  the 30-second deadline including query, load, and computation time. If a
+  representative population cannot be projected completely, stop and return
+  to the contract decision instead of shipping a preview whose only outcome
+  is `CVSS_PREVIEW_TIMEOUT`
 
 ### API Key Management
 

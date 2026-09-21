@@ -208,7 +208,8 @@ package, track, Product, or occurrence identifier and no detail collection.
   automatic Product eligibility (`New`, `Analysis`, `Analyzed`, `Resolved`),
   regardless of exclusion, EOL, or actionability.
 - Categories may overlap. One CVE may contribute to `cve_severity_changes`,
-  several `product_eligibility_changes` occurrences, and one
+  several `product_eligibility_changes` occurrences, several
+  `product_eligibility_override_skips` occurrences, and one
   `resolved_ticket_regressions`.
 - A projected effect that equals the observed persisted value receives no
   count. An evaluated CVE with no projected effect contributes only to
@@ -260,9 +261,12 @@ Projection rules:
   package-model evaluator, including its Reactive Support, `NULL`-threshold,
   and `NULL`-lifecycle rules; this contract defines none of them.
 - Gate projection reuses the exact Analyzed and Resolved predicates of
-  `tickets.md`, including projected automatic eligibility in place of the
-  persisted boolean. It never calls `reconcile_ticket_status()`, never changes
-  a status, and never registers the post-commit Ticket convergence workflow.
+  `tickets.md`, substituting projected effective Product eligibility for the
+  persisted boolean: the projected automatic result where no manual override
+  applies, and the preserved persisted `eligible` value where
+  `is_eligible_override = true`. It never calls `reconcile_ticket_status()`,
+  never changes a status, and never registers the post-commit Ticket
+  convergence workflow.
 - The preview reads the setting once for the observed value. The proposed
   version is passed explicitly to the pure severity and eligibility
   resolutions; the preview does not read the setting again per unit.
@@ -274,7 +278,13 @@ Projection rules:
 - The preview is one advisory bounded scan, not one coherent PostgreSQL
   snapshot of the complete population. Each CVE evaluation unit uses a
   coherent set of authoritative inputs for that unit; different units may
-  observe different committed states.
+  observe different committed states. A unit's contribution must correspond
+  entirely to one committed database observation: the implementation may read
+  a single statement, a bounded page-level snapshot covering several CVEs, or
+  use an equivalent mechanism, but it must not synthesize one unit from
+  inputs observed on opposite sides of a concurrent commit. The observation
+  mechanism, transaction shape, and page size remain internal implementation
+  choices and are not part of the API contract.
 - CVEs whose row `id` exceeds the captured high-water mark are excluded from
   the invocation. A CVE whose `id` does not exceed the mark may or may not be
   observed when it becomes visible during the invocation, and a committed
