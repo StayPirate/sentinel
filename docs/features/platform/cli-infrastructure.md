@@ -170,7 +170,7 @@ per-command path selection.
               raise click.ClickException(              # command-owned guard for
                   "Cannot deactivate external users."  # actor-NULL CLI callers
               )
-      if not click.confirm("Proceed?"):                # blocking prompt
+      if not click.confirm("Proceed?", default=False):  # blocking prompt
           print("Aborted.")                            # printed to stdout
           return                                        # exit 0, no mutation
       async with session_factory() as db:
@@ -431,7 +431,7 @@ these helpers:
 |---|---|---|
 | Hidden password prompt with confirmation | Prompts twice via a hidden (non-echoed) input (Click's `hide_input=True`), compares the two entries. If they differ, the calling command receives a mismatch signal and is responsible for its own error message and exit code (per that command's own spec — this helper does not print the error itself, to preserve each command's exact wording). | `manage-user create`, `manage-user set-password` |
 | TTY detection | Checks `sys.stdin.isatty()` before invoking a prompt (password entry or confirmation). If no TTY is detected, returns a signal the calling command uses to print its own "requires an interactive terminal" error (exact wording owned by the command spec) and exit 1. | `manage-user create`, `manage-user set-password` (before password prompt), `manage-user deactivate` (before confirmation prompt) |
-| Confirmation prompt | A yes/no prompt (Click's `confirm()`) for destructiveish operations. Exact prompt text and default answer are owned by the calling command's own spec. | `manage-user deactivate` |
+| Confirmation prompt | A yes/no prompt (Click's `confirm()`) for destructive operations. Exact prompt text and default answer are owned by the calling command's own spec. | `manage-user deactivate` |
 
 These are implementation-shared utility functions (e.g.,
 `backend/app/cli/_prompts.py`), not new behavioral contracts — the

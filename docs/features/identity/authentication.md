@@ -296,12 +296,15 @@ check (verified during JWT validation, before the liveness check).
 To avoid a database round-trip on every request, the session liveness
 result is cached in Redis with a TTL of 60 seconds. The explicit cache
 purge after logout, deactivation, and password reset makes invalidation
-near-instantaneous; the TTL is the safety net when a post-commit purge is
-lost (process crash or Redis failure). The residual exposure differs by
-cause:
+near-instantaneous. A positive entry can nonetheless survive beyond the
+invalidation through either of two interleavings: the post-commit purge is
+lost (process crash or `RedisError`), or an in-flight request read an
+active row before the invalidation committed and writes its positive value
+after the purge completed. The TTL is the safety net in both cases. The
+residual exposure differs by cause:
 
 - **Logout and password reset**: the target User may remain active, so a
-  positive cache entry that survives a failed purge keeps the invalidated
+  positive cache entry that survives the purge keeps the invalidated
   Session passing the liveness check for at most the remaining TTL (60
   seconds maximum). This tradeoff is acceptable for an internal tool.
 - **Deactivation while the target remains inactive**: deactivation
@@ -311,10 +314,10 @@ cause:
   entry therefore cannot extend access while the target stays inactive;
   purging it remains important to remove stale positive state promptly, but
   Redis is never the authorization authority. If the account is reactivated
-  before a lost purge's TTL elapses, reactivation restores `User.active` and
-  performs no session-cache operation, so a deactivation-invalidated Session
-  can pass the cached liveness check for at most the entry's remaining TTL
-  (60 seconds maximum).
+  before a surviving entry's TTL elapses, reactivation restores
+  `User.active` and performs no session-cache operation, so a
+  deactivation-invalidated Session can pass the cached liveness check for
+  at most the entry's remaining TTL (60 seconds maximum).
 
 **Cache value contract**: the Redis key `session_liveness:{session_id}` stores
 the string `"1"` to represent an active session. Inactive sessions are never
@@ -990,13 +993,13 @@ code `AUTH_LOGOUT_NOT_APPLICABLE` and message:
 - **API key lifecycle security** (secret visibility, expiration, and
   revocation) is defined in `api-key-management.md`.
 - **Session liveness check**: logout and password reset take effect through
-  the liveness check within the cache TTL window (60 seconds maximum when the
-  post-commit purge is lost). Deactivation additionally sets
-  `User.active = false`, which is checked on every authenticated request, so
-  deactivation does not depend on the cache purge for enforcement while the
-  account remains inactive; a reactivation inside a lost purge's TTL can
-  leave an invalidated Session accepted for at most the entry's remaining
-  TTL.
+  the liveness check within the cache TTL window (60 seconds maximum when
+  the post-commit purge is lost or an in-flight positive-cache write
+  survives it). Deactivation additionally sets `User.active = false`, which
+  is checked on every authenticated request, so deactivation does not depend
+  on the cache purge for enforcement while the account remains inactive; a
+  reactivation inside a surviving entry's TTL can leave an invalidated
+  Session accepted for at most the entry's remaining TTL.
 - **No single logout (SLO)**: logging out of `id.suse.com` does not
   invalidate the Sentinel session. This is a known limitation,
   acceptable for an internal tool. Users can log out of Sentinel

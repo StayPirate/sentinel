@@ -402,15 +402,20 @@ sentinel manage-user deactivate \
    immediately before the confirmation prompt. If no TTY is detected, print
    to stderr `Error: This command requires an interactive terminal
    (confirmation required).` and exit with code 1 without mutation
-9. Prompt `Proceed? [y/N]`:
-   - Explicit decline (any answer other than `y` or `Y`): print `Aborted.`
-     to stdout and exit with code 0 without mutation
+9. Prompt through the shared confirmation helper using Click's native
+   semantics — `click.confirm("Proceed?", default=False)`:
+   - A valid affirmative answer proceeds to step 10
+   - A valid negative answer, or Enter accepting the `No` default, prints
+     `Aborted.` to stdout and exits with code 0 without mutation
+   - An unrecognized answer causes Click to repeat the prompt
    - EOF/Ctrl+D: Click raises `click.Abort`; the shared exception mapper
      prints `Aborted.` to stdout and exits with code 0 without mutation (see
      `docs/features/platform/cli-infrastructure.md`, Database Session
      Management and Error Handling & Exit Code Mapping)
    - SIGINT: the shared signal handler exits with code 130 without mutation
      (see `docs/features/platform/cli-infrastructure.md`, Signal Handling)
+   - SIGTERM: the shared signal handler exits with code 143 without
+     mutation
 10. After confirmation, open a fresh session and delegate to
     `user_service.deactivate_user()` with `acting_user_id = None` and
     `reason = "deactivated via CLI (manage-user deactivate)"`
@@ -446,11 +451,25 @@ read-only session; they may not match the effects of the confirmed mutation:
 - if another caller deactivates the target between the preview and the
   action, the service returns `deactivated = false` and the command prints
   the no-op message with exit code 0;
+- if the preview observes an already-inactive target and another caller
+  reactivates it before the command exits, the command still reports the
+  observed no-op and exits 0 without mutation; this is an accepted
+  trade-off of the unlocked advisory preview — the command performs no
+  second authoritative read, and a new invocation observes the updated
+  state;
 - if an applicable guard changes before the action, the service raises its
   documented exception and the command reports it through its normal error
   handling;
 - there is no automatic retry, no second confirmation, and no preview
   token; the preview neither reserves resources nor constrains the action.
+
+**Interruption**: an interruption before the workflow commits (including
+SIGINT or SIGTERM during the mutation) rolls back the complete workflow —
+no mutation and no audit event persists. After the commit, the deactivation
+is durable even when the process is interrupted before the cache purge or
+the success message: the affected cache entries recover through their TTL
+and the authoritative `User.active` check, and a repeated invocation
+observes the committed inactive state and exits as a no-op.
 
 **Inactive user management principle**: see
 `docs/features/identity/user-service.md` (Inactive User Management Principle).
@@ -461,7 +480,7 @@ command prints an informational message and exits with code 0.
 **Exit codes**: 0 on success (including no-op and user-cancelled
 confirmation), 1 on validation or operational error (invalid username,
 unknown user, external user, non-TTY), 2 on system error (database
-unreachable), 130 on SIGINT.
+unreachable), 130 on SIGINT, 143 on SIGTERM.
 
 **Output channels**: impact summary, prompt, success/no-op messages, and
 `Aborted.` to stdout. `"Error: ..."` messages and `"Warning: ..."` (last

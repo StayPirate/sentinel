@@ -1082,8 +1082,10 @@ Ticket-side contracts.
 The service does not commit; the workflow owner commits exactly once after
 step 6.
 
-**Audit attribution**: no invocation-source parameter is added. Attribution
-derives from the actor and the locked target:
+#### Audit attribution
+
+No invocation-source parameter is added. Attribution derives from the
+actor and the locked target:
 
 - actor UUID — authenticated API operation; `user_deactivated.detail`
   carries the `reason` and no `source` key. An active external target is

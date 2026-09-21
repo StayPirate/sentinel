@@ -2702,14 +2702,24 @@ scenarios are required:
   value performs PostgreSQL verification; only an active row writes the
   positive value with exactly 60 seconds TTL
 - An inactive or absent row never authorizes and never creates a positive
-  cache entry. A failed post-commit purge after logout or password reset may
-  leave an existing positive entry effective only for its documented TTL
-  window. After deactivation, the shared credential path's `User.active`
-  check rejects the inactive user on the next authenticated request even
-  when a positive liveness entry survives, so no equivalent access window
-  exists while the target remains inactive; if the account is reactivated
-  before a lost purge's TTL elapses, a deactivation-invalidated Session can
-  be accepted for at most the entry's remaining TTL
+  cache entry. A positive entry can survive logout or password reset either
+  through a failed post-commit purge or through an in-flight write that read
+  the row as active before the invalidation committed and wrote after the
+  purge completed; either way the entry is effective only for its
+  documented TTL window. After deactivation, the shared credential path's
+  `User.active` check rejects the inactive user on the next authenticated
+  request even when a positive liveness entry survives, so no equivalent
+  access window exists while the target remains inactive; if the account is
+  reactivated before a surviving entry's TTL elapses, a
+  deactivation-invalidated Session can be accepted for at most the entry's
+  remaining TTL
+- A deterministic interleaving proves the write-after-purge outcome: a
+  request reads an active row and is held before writing the positive value;
+  a concurrent invalidation commits and purges; the held request then writes
+  its positive value. The stale entry still never authorizes while the
+  target is inactive, and, after a reactivation before the entry's TTL
+  expires, the invalidated Session is accepted for at most the entry's
+  remaining TTL and rejected once the entry expires
 - Deterministic `RedisError` substitution verifies PostgreSQL fallback for
   liveness reads, successful authorization after a failed positive-cache
   write, and best-effort continuation across all remaining IDs during a
@@ -2740,6 +2750,12 @@ scenarios are required:
   or renew the TTL
 - TTL is renewed only on actual failed verification, not on blocked
   attempts
+- A valid-password login whose locked-current target is inactive (a
+  deactivation that committed after the step-7 pre-check) emits the lockout
+  transition event exactly when the step-4 counter value equals
+  `LOGIN_MAX_ATTEMPTS`, retains the counter for the failed attempt (no
+  successful-login delete), creates no Session, and records no
+  `last_login_at` update
 
 **Anti-enumeration:**
 
@@ -3061,28 +3077,42 @@ or identity audit validation are affected, tests MUST cover:
 
 - an invalid username format is rejected before any database access; an
   unknown user reports the not-found error
-- a non-TTY invocation that reaches the prompt prints the documented TTY
-  error to stderr and exits 1 without mutation
+- a non-TTY invocation is rejected by the TTY check before any prompt is
+  shown: it prints the documented TTY error to stderr and exits 1 without
+  mutation
 - an already-inactive user — including an inactive external user — prints
   the no-op message and exits 0 without a prompt and without opening a
   mutating session; an active external user is rejected by the CLI's
   manual-surface guard with the external error and exits 1 after the
   inactive classification and before any impact display
+- a preview that observes an already-inactive target and is followed by a
+  concurrent reactivation before the command exits still prints the observed
+  no-op and exits 0 without mutation; a new invocation observes the
+  reactivated state
 - zero and non-zero impact summaries render exactly the documented lines
   from the preview result; the last-active-Admin warning goes to stderr; the
   read-only session is closed before the prompt, and no pre-read classifies
   the outcome of a confirmed invocation
-- explicit decline prints `Aborted.` to stdout and exits 0; EOF/Ctrl+D
-  reaches the shared mapper, prints `Aborted.`, and exits 0; SIGINT exits
-  130; none of these commits
+- each confirmation outcome is asserted distinctly: a valid affirmative
+  answer proceeds; a valid negative answer or Enter accepting the `No`
+  default prints `Aborted.` to stdout and exits 0; an unrecognized answer
+  prompts again; EOF/Ctrl+D reaches the shared mapper, prints `Aborted.`,
+  and exits 0; SIGINT exits 130; SIGTERM exits 143; none of the declining
+  paths commits
 - after confirmation the command opens a fresh session, commits exactly
   once, and rolls back on a pre-commit failure; a stale preview where another
   caller already deactivated the target prints the no-op message from
   `result.deactivated = false` and exits 0
+- an interruption after the composed service call but before the commit
+  rolls back every deactivation effect (API-key revocations, Session
+  invalidations, `User.active`, Ticket clears, and all audit events); an
+  interruption after the commit leaves the durable deactivation intact, may
+  omit the success message, and a repeated invocation observes the inactive
+  target and exits 0 as a no-op
 - a Redis failure during the post-commit purge does not change the success
   message or the exit code
 - stdout/stderr channels match the documented contract; exit codes are
-  0/1/2/130; exactly one `asyncio.run()` executes per invocation
+  0/1/2/130/143; exactly one `asyncio.run()` executes per invocation
 
 **Deactivation concurrency:**
 
