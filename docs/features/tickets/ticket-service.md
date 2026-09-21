@@ -946,9 +946,9 @@ For `original_status = Duplicated`, `duplicate_of_id` must already be `NULL`.
    reconciles.
 2. Call `ticket_mutations.reconcile_ticket_status()` exactly once with
    `previous_status=original_status` and the same `evaluation_date`.
-3. Ensure the reconciliation result has registered one post-commit Ticket
-   convergence workflow for this successful manual-zone exit, including when
-   the evaluated result is `Resolved`.
+3. Ensure the reconciliation result has registered one transaction-local
+   Ticket convergence effect for this successful manual-zone exit, including
+   when the evaluated result is `Resolved`.
 
 Changed automatic Product events use the system actor,
 `reason = reactivation`, and ascending `TicketPackageProduct.id` order. Any
@@ -1158,7 +1158,12 @@ async def publish_ticket_convergence(
 
 `TicketConvergencePublicationOutcome` is the semantic returned outcome
 (`submitted` or `acceptance_unconfirmed`); the concrete type is an
-implementation choice.
+implementation choice. The publisher is a Ticket-convergence-specific,
+database-free boundary, not a generic post-commit effect framework. Its
+concrete module placement is an implementation choice, but every registering
+owner (`ticket_mutations`, `ticket_service`, `package_service`, and the
+CVE/fetcher infrastructure) MUST be able to reach it without violating the
+documented module dependency directions.
 
 - The boundary receives only detached primitive data: the canonical internal
   Ticket UUID and the allocated task ID. It opens no database session, performs
@@ -1211,9 +1216,10 @@ Ticket-owned ERROR (see below), and is absorbed; it never becomes
 `CELERY_UNAVAILABLE`, and recovery is the explicit complete rerun. The
 automatic API mutation path preserves its ordinary success response in both
 outcomes; a task owner preserves its committed unit outcome. An unexpected
-exception escaping the drain is not converted into `acceptance_unconfirmed` and
-follows the unchanged generic post-commit callback contract; it never changes
-already-committed data.
+exception escaping the automatic API drain is not converted into
+`acceptance_unconfirmed`; it follows the unchanged generic post-commit callback
+contract and never changes already-committed data. The same exception from a
+task-owner drain propagates unchanged to that owner's existing error handling.
 
 **Batch consumers (all-CVE recalculation runner).** A batch consumer that
 processes independent committed units drains each unit's detached effects after
@@ -1250,8 +1256,9 @@ progress resource is created, and duplicate work remains accepted.
 ### Publication failure logging
 
 For one ordinary initial-publication failure, exactly one owner-selected
-feature log is emitted. The publisher boundary and the generic post-commit
-callback drain never log that failure themselves.
+feature log is emitted. The publisher boundary and the API transaction
+dependency's generic post-commit callback loop never log that failure
+themselves.
 
 - The automatic best-effort owners and the CVE/fetcher finalization path share
   one Ticket-owned event: `ticket_convergence_publication_failed` at ERROR,

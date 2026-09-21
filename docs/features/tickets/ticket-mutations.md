@@ -193,8 +193,9 @@ current reality (gate conditions + data freshness).
 - May null `assignee_id` and create an `assignment` audit event if the
   current assignee is inactive or no longer holds any
   `vulnerability_analyst` origin (assignment-eligibility sanitation)
-- May register the package-tree and fetcher catch-up workflow for post-commit
-  execution after any manual-zone exit or a `Resolved` gate regression
+- May register one transaction-local Ticket convergence effect after any
+  manual-zone exit or a `Resolved` gate regression, whose consumption
+  publishes the package-tree and fetcher catch-up workflow
 
 Callers must be aware that invoking this function may produce mutations
 beyond status changes.
@@ -278,7 +279,7 @@ beyond status changes.
       has already set the status
      before invoking reconcile; step 4 sees no change but step 5
      correctly detects the manual-zone exit via `previous_status`.
-     Post-commit workflow registration follows the preserved source status;
+     Registration follows the preserved source status;
      it does not re-check Ticket status after registration.
    - **Registration deduplication**: recursive reconciliation within the same
      caller-owned transaction registers at most one Ticket convergence effect
@@ -1083,12 +1084,12 @@ convergence caller.
      mode once for every persisted CVE. A ticketless CVE receives severity
       only. `New` receives automatic eligibility but no gate reconciliation.
       `Analysis`, `Analyzed`, and `Resolved` receive automatic eligibility and,
-      when a gate input changed, this function performs exactly one final
-       reconciliation after all severity and Product events. A `Resolved`
-       regression registers the normal transaction-local Ticket convergence
-       effect for the package-tree and fetcher catch-up. `Ignored` and
-       `Duplicated` receive only CVE severity and its
-      direct event when changed. No state assigns or exits the manual zone.
+     when a gate input changed, this function performs exactly one final
+     reconciliation after all severity and Product events. A `Resolved`
+     regression registers the normal transaction-local Ticket convergence
+     effect for the package-tree and fetcher catch-up. `Ignored` and
+     `Duplicated` receive only CVE severity and its
+     direct event when changed. No state assigns or exits the manual zone.
 6. For an applicable Product phase, reload current Product thresholds,
    lifecycle dates, overrides, and booleans under the roots; use the shared pure
    evaluator; create `reason = cvss` events in ascending occurrence-ID order;

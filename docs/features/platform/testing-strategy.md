@@ -2368,7 +2368,8 @@ When `reconcile_ticket_status()` convergence registration, the automatic API
 drain, `commit_and_dispatch()`, the explicit convergence dispatch, or the
 all-CVE recalculation runner's post-commit consumption is implemented or
 changed, unit and integration tests MUST cover this complete matrix. The
-publication boundary is unit-testable with a substituted synchronous publisher;
+publication boundary is unit-testable with a substituted broker-publication
+call;
 registration, discard, detach, and owner policies require real PostgreSQL with
 independent sessions and deterministic synchronization at the commit, session
 close, and publication boundaries.
@@ -2452,8 +2453,8 @@ close, and publication boundaries.
 - unexpected exceptions escaping the automatic API drain are not converted into
   `acceptance_unconfirmed`;
 - exactly one feature-owned log exists per ordinary failed effect on each path;
-  the publisher logs nothing and the generic post-commit callback drain adds no
-  second event for that failure;
+  the publisher logs nothing and the API transaction dependency's generic
+  post-commit callback loop adds no second event for that failure;
 - log assertions reject `exc_info`, raw exception text, tracebacks, broker
   URLs, hosts, ports, credentials, payloads, Ticket content, and external data;
   only `ticket_id`, the closed `cause` category, bounded counts, and the bound
