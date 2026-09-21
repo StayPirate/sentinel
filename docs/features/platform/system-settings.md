@@ -45,9 +45,9 @@ executes the following sequence:
    cross-cutting rule for idempotent no-ops)
 3. **Acquire recalculation slot**: `SET cvss_recalc_active <timestamp>
    NX EX 900` on Redis. This step serves as both a Redis liveness probe
-   and an admission guard. The complete batch execution contract must replace
-   or renew this admission state before the all-CVE operation is implemented so
-   mutual exclusion lasts for the complete run:
+   and the endpoint's immediate admission guard. It is not the complete-run
+   mutual exclusion mechanism; see "All-CVE Recalculation Runner" for the
+   runner contract and its coordination boundary:
    - If slot acquisition raises any `RedisError` → return 503
      `REDIS_UNAVAILABLE` (nothing committed)
    - If the key already exists (a recalculation is in progress) → return
@@ -68,38 +68,188 @@ durable record. No ticket mutation can occur without the setting change
 being audited. This prevents phantom mutations (ticket audit events
 without a recorded cause).
 
-The batch operation (`recalculate_cvss_derived_state`) visits every persisted
-CVE and calls `ticket_mutations.recalculate_cvss_chain()` in default-version
-mode for each CVE in an independent database transaction. Failures on
-individual CVEs before finalization, including flush failure, are logged and
-skipped. After the unit is flushed, a commit exception or ambiguous commit
-outcome terminates the complete run without classifying that CVE as failed; a
-non-operational exception after successful commit also terminates the run
-without changing the committed unit's outcome. On normal completion it logs
-total, succeeded, and failed counts. Task publication, mutual exclusion for the
-complete run, timeout,
-completion cleanup, and crash recovery must form one execution contract whose
-guard cannot expire while a run can still mutate data. The fixed 900-second
-slot described by the current endpoint sequence does not by itself satisfy that
-contract for the all-CVE semantic target and is not a guarantee that the
-operation completes in that interval.
+The all-CVE recalculation runner (`recalculate_cvss_derived_state`) visits
+every persisted CVE and calls `ticket_mutations.recalculate_cvss_chain()` in
+default-version mode for each CVE in an independent database transaction. Its
+complete execution contract, including the semantic effect matrix, is defined
+in "All-CVE Recalculation Runner" below. The CVSS resolution functions return pure
+resolved results; changing the setting does not alter any assessment. The
+read-only projection of the runner's effects is specified in "Default-CVSS
+Impact Preview" below, and `docs/features/tickets/cvss-scoring.md`
+(Persistence and Propagation Boundary) defines the pure results the runner
+consumes.
 
-The CVSS resolution functions return pure resolved results; changing the
-setting does not alter any assessment. The batch applies those results to
-persisted derived state with this exhaustive side-effect matrix:
+## All-CVE Recalculation Runner
 
-| Associated Ticket state | Batch effect |
+The all-CVE recalculation runner applies the current `default_cvss_version`
+policy to every persisted CVE. `PATCH /api/v1/admin/settings` and
+`POST /api/v1/admin/settings/default-cvss-version/recalculate` enqueue it. It is
+not a fetcher, sub-operation, or scheduled integration. It creates no
+`FetcherRun`, no Celery result-backend entry, and no run, progress, or cursor
+record.
+
+### Task Identity and Workflow
+
+The Celery task is `recalculate_cvss_derived_state(target_version)`. Its only
+semantic input is the primitive `target_version`, exactly `"3.1"` or `"4.0"`.
+No task argument carries a session, ORM object, collection, or per-CVE payload.
+
+The synchronous task wrapper:
+
+1. Validates the received `target_version` using input only. Any other value is
+   a non-retryable caller-contract failure before any database read, before
+   enumeration, and before any CVE mutation. It emits no run counters and no
+   feature run event.
+2. Invokes exactly one `asyncio.run()` around the service-owned asynchronous
+   workflow. It delegates all logic to the service layer and performs no
+   business query, settings read, transaction, or engine disposal of its own.
+3. Returns `None` and stores no task result.
+4. Lets cancellation, worker shutdown, `SoftTimeLimitExceeded`, `MemoryError`,
+   and every other control signal propagate unchanged. It converts no control
+   signal into an ordinary task outcome.
+
+The service-owned asynchronous workflow
+`run_cvss_derived_state_recalculation(target_version, session_factory)` opens
+one independent session per unit, owns their commits and rollbacks, and returns
+one fixed-size aggregate result used only for the run's structured logs. The
+aggregate result contains `target_version`, the captured watermark (absent for
+a stale delivery), `changed`, `unchanged`, `skipped`, `failed`, the derived
+`succeeded` and `processed`, and the terminal outcome token. It contains no CVE,
+Ticket, package, Product, or
+occurrence identifier and no per-CVE detail collection. The workflow emits the
+run's events from that aggregate and discards it; the wrapper receives no
+result. The aggregate is never persisted and never published to a result
+backend.
+
+The same workflow awaits the shared pooled engine's disposal exactly once at
+the outer asynchronous boundary, on both the success and the exception path,
+after every unit session is closed and before control returns to
+`asyncio.run()`.
+
+### Input Validation and Stale Delivery
+
+The wrapper validates `target_version` before entering the asynchronous
+workflow. The workflow then:
+
+1. reads the persisted `default_cvss_version` exactly once through
+   `get_default_cvss_version()`, before capturing the watermark and before
+   enumerating any CVE. A missing required setting is a whole-run failure that
+   propagates;
+2. compares the observed value with `target_version`; and
+3. when they differ, terminates the delivery as `stale` before any CVE is read,
+   locked, mutated, audited, or published for.
+
+A `stale` delivery captures no watermark, creates no unit session and no
+post-commit effect, leaves every counter zero, and emits only the
+`cvss_recalculation_stale` terminal event. A delayed delivery must never move
+derived state back to a superseded policy. A repeated valid delivery is safe
+because already converged units classify `unchanged`.
+
+Complete-run admission, ownership, lease renewal, execution fencing, and crash
+cleanup are not defined by this contract. Any such coordination must preserve
+the validation, paging, unit, drain, and outcome semantics defined in this
+section; an ownership-loss termination is a whole-run condition and never an
+ordinary failed unit.
+
+### Watermark and Keyset Pagination
+
+- The workflow captures one internal high-water mark equal to the maximum
+  existing `CVE.id` before enumerating any CVE. The mark is not persisted, is
+  not returned to the caller, and is exposed only in the run's own logs. An
+  empty `cve` table has no watermark and no candidates: the delivery terminates
+  `completed` with every counter zero and creates no unit session.
+- It enumerates `CVE.id` in ascending order with the keyset predicate
+  `last_id < CVE.id <= watermark`, where `last_id` is an in-memory cursor
+  advanced only from the last identity of the page just processed. There is no
+  offset arithmetic.
+- One page carries at most 500 candidate identities. The bound is a
+  feature-specific internal constant, not a database setting, environment
+  variable, API parameter, or fetcher configuration, and it never limits the
+  total population.
+- A page carries only the candidate identity needed to address and log a unit:
+  the CVE row identifier and its canonical CVE identifier. It never carries
+  association, Ticket, assessment, threshold, lifecycle, override, Product, or
+  gate data, and no value read in a page decides a domain effect.
+- The runner never materializes the complete population in memory, and no read
+  transaction is held open across pages or units. Each page read completes
+  before the locked transaction of its units begins.
+- Processing continues until the watermark is reached or a whole-run condition
+  terminates the delivery.
+
+### Concurrent-Change Semantics
+
+- CVE rows whose `id` exceeds the captured watermark are excluded from the
+  current invocation and belong to a later explicit invocation.
+- A row whose `id` is within the watermark but becomes visible only after the
+  cursor has passed its key may be observed by a later invocation. The runner
+  promises one bounded observation, not a long-lived population snapshot.
+- A candidate that no longer exists when its locked-current unit begins is
+  `skipped`, not a failed mutation.
+- Concurrent association, disassociation, Ticket status change, assessment
+  write, threshold change, lifecycle transition, and override change are
+  resolved from locked-current state under the unit's CVE-then-Ticket lock
+  order. The unit applies the committed winner's state; no page-level or
+  pre-lock observation decides an effect.
+
+### Per-CVE Transactional Unit
+
+Each candidate identity is one independent unit:
+
+1. create a fresh `AsyncSession`;
+2. open one transaction;
+3. capture exactly one UTC `evaluation_date` for the unit;
+4. call `ticket_mutations.recalculate_cvss_chain()` in default-version mode,
+   passing `target_version` explicitly as its `default_cvss_version` argument
+   and the captured date; the call acquires the CVE, then its optional Ticket,
+   under the existing CVE-then-Ticket order;
+5. flush every mutation and audit record before finalization;
+6. commit exactly once when the unit succeeds;
+7. roll back exactly once when an isolable pre-finalizer unit error occurs;
+8. close the session;
+9. ensure the unit's locks are released before any external effect;
+10. detach and drain the unit's registered transaction-local Ticket convergence
+    effects after commit and
+   session close;
+11. proceed to the next candidate only after the previous unit completes.
+
+The run does not freeze one global date: each CVE unit uses its own UTC
+`evaluation_date` consistently across its lifecycle, eligibility, actionability,
+reconciliation, and result.
+
+A `missing` result is a successful unit with no pending mutation: its
+transaction commits, its session closes, no post-commit effect is registered,
+and the runner counts it `skipped`. A rolled-back unit's drain is skipped and no
+registered effect is published.
+
+### Semantic Effect Matrix
+
+The runner applies exactly the default-version mode of
+`ticket_mutations.recalculate_cvss_chain()`. The formulas remain owned by their
+authorities and are never duplicated here:
+
+- severity uses the Severity Resolution Cascade in
+  `docs/features/tickets/cvss-scoring.md`;
+- the eligibility score uses Eligibility Score Resolution in the same
+  specification;
+- automatic Product eligibility uses the package-model-owned evaluator in
+  `docs/features/packages/package-model.md`;
+- gate results use the Analyzed and Resolved predicates in
+  `docs/features/tickets/tickets.md`;
+- audit events follow `docs/features/tickets/ticket-audit-log.md`.
+
+| Locked-current associated Ticket state | Runner effect |
 |---|---|
 | No Ticket | Recalculate `CVE.severity`; there is no Ticket audit target |
-| `New` | Recalculate severity and every automatic Product occurrence; remain `New` and perform no gate reconciliation because system work never assigns |
-| `Analysis`, `Analyzed`, `Resolved` | Recalculate severity and every automatic Product occurrence, then perform at most one final Ticket reconciliation. `Resolved` may regress normally to `Analyzed` or `Analysis` |
+| `New` | Recalculate severity and every automatic Product occurrence; remain `New` and perform no gate reconciliation; system work never assigns |
+| `Analysis`, `Analyzed`, `Resolved` | Recalculate severity and every automatic Product occurrence, then perform at most one final Ticket reconciliation. `Resolved` may regress normally to `Analyzed` or `Analysis`; a regression registers the ordinary post-commit Ticket convergence |
 | `Ignored`, `Duplicated` | Recalculate `CVE.severity` only at the operational-state level; if it changed and a Ticket exists, create the direct system-attributed `severity_changed` event. Do not mutate Product eligibility, assignment, Ticket status, manual-zone state, or gates |
 
 Every applicable gate-zone or `New` Product update uses current persisted
 assessments, Product threshold and lifecycle inputs, and override markers;
-manual overrides are skipped. Changed automatic occurrences create system-attributed
-`product_eligibility_changed` events with `reason = cvss`, ordered by
-`TicketPackageProduct.id`. An unchanged value creates no Product event.
+manual overrides are preserved. The runner never changes a CVSS assessment,
+never assigns a Ticket, never exits a manual zone, and never applies a
+remediation action. Re-invoking it on already converged inputs creates no
+mutation and no audit event.
 
 `recalculate_cvss_chain()` creates a system-attributed `severity_changed`
 record whenever an associated Ticket's old and new unified severity differ,
@@ -123,32 +273,159 @@ scan. Visiting an
 work; Product eligibility and gates for those Tickets converge only through the
 owning manual-zone-exit workflow.
 
-This section defines the semantic target and the existing task identity and
-manual-recovery operation. It does not prescribe the all-CVE execution's
-keyset pagination, persistent progress, or leases. The operational execution
-contract must be reassessed separately for the all-CVE population; in
-particular, this semantic target does not assert that one sequential pass can
-complete within the current fixed slot and task lifetime. The read-only
-projection of these same effects is specified in "Default-CVSS Impact
-Preview" below.
+### Outcome Classification
 
-The currently documented endpoint slot has a fixed TTL of 900 seconds (internal
-constant). It remains the immediate admission guard for the endpoint sequence,
-but the complete operation must not rely on expiry as permission for another
-run while a prior run may still be active. The all-CVE execution contract owns
-the corresponding completion release and crash-recovery behavior.
+The runner maintains four in-memory counters for the current delivery:
 
-See `docs/features/tickets/cvss-scoring.md` (Persistence and Propagation
-Boundary) for
-additional details on the batch task behavior.
+| Counter | Meaning |
+|---|---|
+| `changed` | The committed unit was classified `changed` by `recalculate_cvss_chain()`: it produced at least one durable semantic mutation or its required audit event. A reconciliation that changes nothing does not by itself make a unit `changed` |
+| `unchanged` | The committed unit was classified `unchanged` by `recalculate_cvss_chain()`: it was already converged and created no mutation and no audit event |
+| `skipped` | The enumerated candidate no longer existed when locked-current processing began. Ticketless, `New`, gate-zone, and manual-zone units are normal successful outcomes, never `skipped` |
+| `failed` | The unit rolled back for an isolated per-CVE error |
+
+The derived aggregate values are exactly
+`succeeded = changed + unchanged` and
+`processed = changed + unchanged + skipped + failed`.
+
+The terminal outcome of a delivery is exactly one of:
+
+| Terminal outcome | Condition |
+|---|---|
+| `completed` | The watermark was reached with `failed = 0` |
+| `partial` | The watermark was reached with at least one isolated pre-finalizer failure |
+| `stale` | The persisted default version differed from `target_version` before the scan |
+| `cancelled` | An interceptable cancellation or worker shutdown terminated the delivery |
+| `ownership_lost` | The complete-run coordination signalled that this delivery no longer owns the run |
+| `failed` | A whole-run condition terminated the delivery |
+
+A safe checkpoint is a point between units where the runner reports only work
+already committed; a terminal event never claims a unit beyond its committed
+classification. A hard kill or an OOM kill may produce no feature-owned terminal
+event. Counters and logs are diagnostic only; they are never authoritative
+progress, completion, or recovery state.
+
+**Interruption window.** A whole-run signal can arrive after a unit commits and
+before its drain completes. Such a signal terminates the delivery and is never
+converted into a unit outcome. The committed unit remains durable and keeps its
+classification; a detached effect whose publication attempt was not reached is
+lost and is recovered by the explicit Ticket convergence rerun. The runner
+performs no publication after a rollback, a failed or ambiguous commit, or an
+interrupted pre-commit unit.
+
+### Error Taxonomy
+
+**Isolable per-CVE errors.** The runner continues with the next candidate only
+when every one of the following holds for the failure:
+
+- the error belongs to the single CVE unit;
+- the unit's commit did not occur;
+- the rollback succeeded;
+- the session closed cleanly;
+- the connection is not invalidated;
+- the runner can reliably start and process the next candidate.
+
+An isolable failure increments `failed`, emits one
+`cvss_recalculation_cve_failed` warning, and never rolls back a committed
+sibling.
+
+**Whole-run errors.** These terminate the delivery and propagate. They are never
+converted into the ordinary per-unit `failed` counter:
+
+- enumeration failure;
+- inability to create a unit session;
+- commit failure or an ambiguous commit outcome;
+- rollback failure;
+- session cleanup failure;
+- a globally unavailable database or an invalidated connection;
+- a missing required system setting;
+- an invalid task payload;
+- a contract violation or programming error;
+- cancellation;
+- worker shutdown;
+- `SoftTimeLimitExceeded`;
+- `MemoryError`;
+- ownership loss.
+
+A broad per-item `except Exception` that maps these into `failed` is forbidden.
+The per-unit handler catches only the isolable failure class it can prove
+satisfies every isolation condition above. These whole-run conditions remain
+whole-run when they are raised during enumeration, a unit transaction, or a
+detached publication. Only `kombu.exceptions.OperationalError` from automatic
+Ticket convergence publication is logged once by the shared Ticket-owned
+adapter and absorbed without changing any runner counter or aggregate outcome.
+Cancellation and worker shutdown terminate as the
+`cancelled` outcome, an ownership-loss signal terminates as `ownership_lost`,
+and every remaining whole-run condition terminates as the `failed` outcome.
+
+**Retry.** The runner configures no Celery automatic retry and never calls
+`self.retry()`. Recovery is an explicit complete rerun from the beginning: there
+is no resume cursor and no partial-progress state. Already converged units
+classify `unchanged` and create no duplicate mutation or audit event. A CVSS
+rerun is not guaranteed recovery for a publication failure that already
+committed, because the converged chain may be a no-op on the next invocation;
+recovery for that failure is the explicit Ticket convergence rerun.
+
+### Logging
+
+The runner consumes the shared structured logging contract in
+`docs/features/platform/logging.md` without modifying it. It emits these events:
+
+| Event | Level | When |
+|---|---|---|
+| `cvss_recalculation_started` | INFO | Once, after the target is validated as current and the watermark is captured, before enumeration |
+| `cvss_recalculation_cve_failed` | WARNING | Once per isolated failed unit |
+| `cvss_recalculation_completed` | INFO | Terminal, `completed` |
+| `cvss_recalculation_partial` | WARNING | Terminal, `partial` |
+| `cvss_recalculation_stale` | INFO | Terminal, `stale` |
+| `cvss_recalculation_cancelled` | WARNING | Terminal, `cancelled` |
+| `cvss_recalculation_ownership_lost` | WARNING | Terminal, `ownership_lost` |
+| `cvss_recalculation_failed` | ERROR | Terminal, `failed` |
+
+The `cvss_recalculation_cve_failed` warning carries only the canonical CVE
+identifier, `target_version`, a bounded failure phase, a closed sanitized cause
+category, and the task-bound `celery_task_id`. Failure phases are a closed
+vocabulary: `setting_read`, `enumeration`, `unit`, `publication`, and `control`. Cause
+categories are a closed sanitized vocabulary: `database`, `domain`,
+`programming`, `infrastructure`, `interrupted`, and `unexpected`.
+
+Failure logs never contain CVSS vectors or assessments, full payloads, Ticket
+descriptions, Product collections, SQL, raw exception text, URLs or external
+data, credentials or secrets, or unbounded aggregate lists. Per-CVE successful
+units emit no INFO log. The workflow emits exactly one terminal event for every
+outcome it reaches and emits the applicable terminal event at a safe checkpoint
+before a whole-run condition propagates. Terminal events from the table above
+carry `target_version`, the captured watermark when one exists (it is omitted
+for a stale delivery or a failure before capture), `changed`, `unchanged`,
+`skipped`, `failed`, `succeeded`, `processed`, the task-bound `celery_task_id`, and the
+failure phase and sanitized category when applicable. The terminal event never
+carries an array of failed CVE identifiers; every failure already has its own
+individual event.
+
+### Absence of Persistent Run State
+
+The runner introduces:
+
+- no `FetcherRun` record;
+- no Celery result-backend entry and no persisted task result;
+- no run, progress, resume, or cursor table, column, or resource;
+- no persisted high-water mark, offset, or continuation token;
+- no metric or log used as authoritative state;
+- no generic batch, backfill, or reusable runner framework;
+- no new audit event type — the unit's ordinary domain audit events remain the
+  only durable audit records;
+- no new configuration variable or setting.
+
+Crash recovery is a complete explicit rerun from the beginning, safe because
+each committed unit is independently durable and idempotent.
 
 ## Default-CVSS Impact Preview
 
 The read-only impact preview lets an administrator understand the expected
 consequences of a proposed `default_cvss_version` change before mutating the
 setting. It projects the same authoritative severity, eligibility, override,
-lifecycle, and Ticket-gate outcomes that the batch operation applies, without
-performing any mutation.
+lifecycle, and Ticket-gate outcomes that the all-CVE recalculation runner
+applies, without performing any mutation.
 
 The preview is advisory. It creates no approval, reservation, snapshot token,
 or prerequisite for `PATCH /api/v1/admin/settings`, and that endpoint neither
@@ -248,8 +525,9 @@ the no-op result without scanning the population:
 
 ### Projected Impact Matrix
 
-The preview projects the same exhaustive side-effect matrix as the batch
-operation above, substituting projected values for persistence:
+The preview projects the same exhaustive side-effect matrix as the
+"Semantic Effect Matrix" of the all-CVE recalculation runner above,
+substituting projected values for persistence:
 
 | Associated Ticket state | Projected effect |
 |---|---|
@@ -516,7 +794,7 @@ the response. This is a documented deviation from the
 
 | Status | Code | Condition |
 |--------|------|-----------|
-| 409 | `CVSS_RECALC_ALREADY_IN_PROGRESS` | A recalculation batch is already running (setting change blocked until current batch completes) |
+| 409 | `CVSS_RECALC_ALREADY_IN_PROGRESS` | The recalculation admission slot is already held (setting change blocked while the slot is occupied) |
 | 503 | `REDIS_UNAVAILABLE` | Redis rejected or could not complete slot acquisition (setting change requires Redis availability) |
 
 Response (200 OK): the settings object in the standard
@@ -631,10 +909,9 @@ The endpoint uses the same shared logic as the PATCH side-effect:
 
 1. Read the current `default_cvss_version` from the database
 2. Acquire the recalculation slot (`SET cvss_recalc_active <timestamp>
-   NX EX 900`) as the current admission guard. This guard does not by itself
-   provide complete-run mutual exclusion for the `all_cves` scope; the same
-   future execution-contract requirement as the PATCH path applies
-3. Enqueue `recalculate_cvss_derived_state(version)`. On failure: release slot
+   NX EX 900`) as the endpoint's immediate admission guard, with the same
+   complete-run coordination boundary as the PATCH path
+3. Enqueue `recalculate_cvss_derived_state(target_version)`. On failure: release slot
    and return 503
 4. Return 202 Accepted
 
@@ -821,10 +1098,17 @@ Indefinite. SettingAuditEvent records are never automatically deleted.
   pagination, shared 422 responses)
 - `docs/features/identity/rbac.md` — Endpoint Permission Map
 - `docs/features/tickets/cvss-scoring.md` — pure severity and eligibility
-  resolutions consumed by the impact preview
-- `docs/features/tickets/ticket-mutations.md` — default-version state matrix
-  projected read-only by the impact preview
+  resolutions consumed by the runner and the impact preview
+- `docs/features/tickets/ticket-mutations.md` — default-version chain,
+  runner-facing classification, and post-commit handoff consumed by the runner;
+  default-version state matrix projected read-only by the impact preview
 - `docs/features/tickets/tickets.md` — Analyzed and Resolved gate predicates
-  reused by the read-only gate projection
+  reused by the runner and the read-only gate projection
+- `docs/features/tickets/ticket-audit-log.md` — event types created by the
+  runner's units
 - `docs/features/packages/package-model.md` — automatic eligibility evaluator
   and manual override precedence
+- `docs/features/platform/logging.md` — structured log record, levels, and
+  sanitization contract consumed by the runner's events
+- `docs/conventions.md` — Sync-to-Async Bridging, Cross-Loop Pooled Connection
+  Lifecycle, and Transaction and Locking conventions applied by the runner

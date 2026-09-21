@@ -1039,8 +1039,8 @@ Product eligibility exception. It does not create, update, or delete a
 
 **Callers**: `associate_cve()` and the batch recalculation Celery task triggered
 by a default CVSS version change (see
-`docs/features/platform/system-settings.md`). This contract defines no Ticket
-convergence caller.
+`docs/features/platform/default-cvss-version-operations.md`). This contract
+defines no Ticket convergence caller.
 
 **Parameters**:
 
@@ -1057,7 +1057,11 @@ convergence caller.
 
 1. Acquire `FOR UPDATE` on the CVE as the first persistent read, then load and
    lock its associated Ticket, if any. A CVE without an associated Ticket uses
-   `not_applicable`. This function does not call `ensure_ticket_operable()`:
+   `not_applicable`. In default-version mode, a lock lookup that returns no CVE
+   row is the `missing` result defined under Runner-facing classification
+   below; association mode retains its existing precondition that
+   `associate_cve()` has already resolved and locked the CVE. This function
+   does not call `ensure_ticket_operable()`:
    association mode has already passed that caller-owned guard, while default-
    version mode must maintain CVE-owned severity for every Ticket status and
    applies only the state-specific Product/gate effects below. Association mode
@@ -1102,7 +1106,28 @@ convergence caller.
    and never alter overrides. Use the one `evaluation_date` throughout.
 7. Flush and return severity resolution, eligibility resolution, changed and
    skipped Product counts, whether severity changed, propagation, whether one
-   reconciliation ran, and `evaluation_date`.
+   reconciliation ran, `evaluation_date`, and the runner-facing classification
+   below.
+
+**Runner-facing classification**: the returned result classifies the unit
+transaction-locally as exactly one of:
+
+- `changed` — the unit contains at least one durable semantic mutation or its
+  required audit event: a changed `CVE.severity`, an automatic Product
+  eligibility change, assignment-eligibility sanitation, a Ticket status
+  change, or an audit event required by one of those effects. A reconciliation
+  call that changes nothing does not by itself make a unit `changed`.
+- `unchanged` — the unit succeeded already converged and contains no mutation
+  and no audit event.
+- `missing` — default-version mode found no CVE row after the lock lookup. A
+  `missing` result creates no audit event, no Product mutation, no
+  reconciliation, and no per-unit error; the all-CVE runner reports it as
+  `skipped`. Association mode keeps its own precondition and never uses
+  `missing` as a normal consumer outcome.
+
+The classification describes the unit transaction; the transaction owner applies
+it to the committed unit. The concrete result type is an implementation choice;
+the three-way classification and its meaning are not.
 
 **TicketAuditEvent**: this function creates the required system-attributed
 `severity_changed` event when effective severity changes. Association mode uses
@@ -1118,10 +1143,11 @@ current result is returned.
 
 ### Read-Only Impact Projection
 
-The default-CVSS impact preview in `system-settings.md` projects the semantic
-outcomes of default-version mode without invoking any mutation function in
-this module. It does not call `recalculate_cvss_chain()`, does not acquire a
-mutation lock, and does not participate in the batch operation's execution.
+The default-CVSS impact preview in
+`docs/features/platform/default-cvss-version-operations.md` projects the
+semantic outcomes of default-version mode without invoking any mutation
+function in this module. It does not call `recalculate_cvss_chain()`, does not
+acquire a mutation lock, and does not participate in the runner's execution.
 
 - It projects the same outcomes as the default-version recalculation
   paragraph of the CVSS Status Matrix, substituting projected values for

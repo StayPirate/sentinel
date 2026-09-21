@@ -880,8 +880,8 @@ never `FLUSHALL`.
 Every generic task wrapper that is *repeatedly invoked within the same
 long-lived process* and is therefore subject to the Cross-loop pooled
 connection lifecycle rule (`docs/conventions.md`) — currently
-`run_fetcher`, `cleanup_sessions`, and `resolve_ticket_packages` — MUST have a
-regression test that
+`run_fetcher`, `cleanup_sessions`, `resolve_ticket_packages`, and
+`recalculate_cvss_derived_state` — MUST have a regression test that
 proves it does not leak a pooled connection across its own event-loop
 boundary. The test invokes the real synchronous wrapper (or its
 extracted async workflow via two separate `asyncio.run()` calls) twice
@@ -3404,6 +3404,127 @@ MUST cover:
   representative population cannot be projected completely, stop and return
   to the contract decision instead of shipping a preview whose only outcome
   is `CVSS_PREVIEW_TIMEOUT`
+
+### All-CVE Recalculation Runner
+
+When the `recalculate_cvss_derived_state` task, its service workflow, or its
+per-CVE contract is implemented or changed, tests MUST cover:
+
+**Pagination and population:**
+
+- an empty CVE table terminates `completed` with every counter zero and creates
+  no unit session, audit event, or post-commit effect
+- a single CVE, and 499, 500, and 501 CVEs proving the 500-identity bound is a
+  per-page maximum and never a population limit
+- several complete pages plus a trailing partial page, ascending `CVE.id`
+  ordering, and no offset or skip/limit arithmetic
+- the watermark is neither persisted nor returned; a CVE whose `id` exceeds the
+  captured watermark is excluded from the current invocation and processed by a
+  later one
+- a row within the watermark that becomes visible only after the cursor passed
+  its key may be deferred to a later invocation and is not required to be
+  observed
+- the complete population is never materialized in memory and no read
+  transaction spans pages or units (structural or spy assertion)
+
+**Concurrency and races:**
+
+- a CVE deleted between enumeration and locked-current processing becomes
+  `skipped` with no audit event and no failure
+- concurrent association and disassociation resolved from locked-current state
+- a Ticket status change between page and unit
+- a concurrent CVSS assessment write
+- a concurrent override change
+- a concurrent threshold or lifecycle change
+- every derived outcome equals the committed winner under the CVE-then-Ticket
+  lock order and never the page-observed state
+
+**Transactions:**
+
+- one fresh session and exactly one transaction per CVE
+- a committed sibling remains committed after a later unit fails
+- an isolated pre-finalizer failure, including flush failure, rolls back the
+  complete unit: severity, Product, assignment, Ticket status, and every audit
+  event
+- no post-commit effect follows a rollback or a failed commit
+- a committed unit's registered convergence effect is detached and attempted
+  once after commit and session close and before the next unit; a rolled-back
+  unit's registration is never attempted
+- a broker operational publication failure emits the shared sanitized
+  `ticket_convergence_publication_failed` event, is absorbed, and leaves the
+  committed unit and runner accounting unchanged; a control signal,
+  serialization/configuration error, or programming error raised during the
+  drain propagates as a whole-run condition instead of being absorbed or
+  reclassified
+- locks are released before publication (structural or spy assertion)
+- no enumeration or page query executes while a CVE lock is held
+
+**Domain matrix:**
+
+- ticketless, `New`, `Analysis`, `Analyzed`, `Resolved` including a regression
+  to `Analyzed` and to `Analysis`, `Ignored`, and `Duplicated`
+- preserved manual eligibility overrides, no CVSS assessment mutation, no
+  automatic assignment, no manual-zone exit, and no remediation action
+- idempotent re-invocation of an already converged unit
+
+**Idempotency and recovery:**
+
+- a second complete invocation over the committed population
+- already converged units classify `unchanged` and create no duplicate mutation
+  or audit event
+- sequential duplicate delivery of the same target version
+- no automatic Celery retry is configured
+- a delivery delayed past a setting change terminates `stale` with every counter
+  zero and no mutation
+
+**Errors and control signals:**
+
+- an isolable failure increments `failed` exactly once, emits one sanitized
+  `cvss_recalculation_cve_failed` warning, and continues with the next CVE
+- database invalidation, commit failure or ambiguity, rollback failure, session
+  cleanup failure, enumeration failure, and programming errors terminate the
+  whole run and never increment `failed`
+- cancellation, worker shutdown, `SoftTimeLimitExceeded`, `MemoryError`, and a
+  simulated ownership-loss signal propagate unchanged; the test supplies the
+  ownership-loss signal at the documented boundary without prescribing its
+  mechanism
+- an adversarial or structural test proves a broad per-item catch cannot
+  convert a whole-run signal into `failed`
+
+**Counters and logging:**
+
+- `succeeded = changed + unchanged` and
+  `processed = changed + unchanged + skipped + failed` hold in every terminal
+  outcome
+- `skipped` is produced only by a candidate missing at locked-current
+  processing; ticketless, `New`, gate-zone, and manual-zone units are not skips
+- a broker operational publication failure changes no runner counter, dedicated
+  runner event, aggregate outcome, or unit classification; a `partial` terminal
+  outcome is caused only by one or more isolated pre-finalizer unit failures
+- exactly one warning per isolated failed unit and no per-CVE INFO log for
+  successful units
+- every failure log uses only the allowed bounded fields and the closed sanitized
+  phase and cause vocabularies; vectors, assessments, SQL, raw exception text,
+  Ticket content, Product collections, and secret values are absent
+- the shared Ticket publication-failure event follows the field allowlist in
+  Ticket Convergence Publication Handoff and carries no canonical CVE identifier,
+  dedicated runner phase/cause data, or raw publication error text
+- the terminal event carries the exact counters, target version, and task
+  correlation, the watermark when one exists, and no failed-CVE array
+
+**Process lifecycle:**
+
+- the wrapper is exercised by a synchronous (`def`) pytest function
+- exactly one `asyncio.run()` per invocation
+- two invocations in the same process against the shared pooled engine both
+  succeed
+- `engine.dispose()` is awaited exactly once per invocation on the success and
+  exception paths
+- the wrapper's `None` return and any propagated exception are unchanged by
+  disposal
+- recovery after an unterminated process is exercised as a fresh complete
+  invocation over the already-committed population; no test relies on an
+  artificial post-kill terminal event or cleanup
 
 ### API Key Management
 
