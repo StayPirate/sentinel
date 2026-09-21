@@ -129,10 +129,10 @@ messages to stderr.
 Updates an existing user account. Each invocation operates in exactly one of
 three mutually exclusive modes:
 
-- **Profile mode** (`--email`, `--full-name`) updates identity fields. It is
-  permitted on local users only — external users have their identity fields
-  managed exclusively by external sync (see External User Data Ownership in
-  `docs/features/identity/user-service.md`).
+- **Profile mode** (`--email`, `--full-name`, `--clear-full-name`) updates
+  identity fields. It is permitted on local users only — external users have
+  their identity fields managed exclusively by external sync (see External
+  User Data Ownership in `docs/features/identity/user-service.md`).
 - **Role mode** (`--add-role`, `--remove-role`) changes manual (`_manual`)
   role assignments. It is permitted on both local and external users.
 - **Reactivation mode** (`--reactivate`) reactivates a previously deactivated
@@ -153,7 +153,8 @@ Management Principle in `docs/features/identity/user-service.md`).
 sentinel manage-user update \
   --username <username> \
   [--email <new_email>] \
-  [--full-name <new_name>]
+  [--full-name <new_name>] \
+  [--clear-full-name]
 
 sentinel manage-user update \
   --username <username> \
@@ -172,41 +173,59 @@ sentinel manage-user update \
 | `--username`     | Yes      | No         | Username of the user to update (identifier) |
 | `--email`        | No       | No         | New email address                           |
 | `--full-name`    | No       | No         | New display name                            |
+| `--clear-full-name` | No    | No         | Clear the display name (`full_name = NULL`); mutually exclusive with `--full-name` |
 | `--add-role`     | No       | Yes        | Role to add: `admin`, `vulnerability_analyst`, `restricted_analyst` |
 | `--remove-role`  | No       | Yes        | Role to remove: `admin`, `vulnerability_analyst`, `restricted_analyst` |
 | `--reactivate`   | No       | No         | Reactivate a previously deactivated user    |
 
 **Mode selection**: the mode is determined by the flags present in one
-invocation. Profile options (`--email`, `--full-name`) MUST NOT be combined
-with role options (`--add-role`, `--remove-role`), and `--reactivate` MUST NOT
-be combined with any other option. Any combination spanning more than one
-mode is rejected before the mutating session is opened, with:
+invocation. Profile options (`--email`, `--full-name`, `--clear-full-name`)
+MUST NOT be combined with role options (`--add-role`, `--remove-role`), and
+`--reactivate` MUST NOT be combined with any other option. Any combination
+spanning more than one mode is rejected before the mutating session is
+opened, with:
 
 ```
 Error: Profile updates, role updates, and --reactivate cannot be combined.
 ```
 
-The rejection goes to stderr, exits with code 1, and starts no mutating
-session. The read-only user lookup (Behavior step 2) precedes this check, so
-an unknown username is reported first.
+Within profile mode, `--full-name` and `--clear-full-name` are mutually
+exclusive; their combination is rejected before the mutating session is
+opened, with:
+
+```
+Error: --full-name and --clear-full-name cannot be used together.
+```
+
+Both rejections go to stderr, exit with code 1, and start no mutating
+session. The read-only user lookup (Behavior step 3) precedes these checks,
+so an unknown username is reported first.
 
 **Behavior**:
 
 1. Normalize the username (trim whitespace, lowercase)
-2. Look up the user by normalized username — if not found, exit with
+2. Validate the normalized username format (see `docs/conventions.md`,
+   Username Format). If invalid, exit with error:
+   `"Error: Invalid username '{value}'. Username must be 1-64 characters,
+   start with a letter, and contain only lowercase letters, numbers, dots,
+   hyphens, and underscores."` (exit code 1, stderr) — before any database
+   access
+3. Look up the user by normalized username — if not found, exit with
    error: `"Error: User '{username}' not found."`
-3. If no modification flags are provided (`--email`, `--full-name`,
-   `--add-role`, `--remove-role`, `--reactivate` are all absent), print:
+4. If no modification flags are provided (`--email`, `--full-name`,
+   `--clear-full-name`, `--add-role`, `--remove-role`, `--reactivate` are
+   all absent), print:
    `"No changes specified for user '{username}'."` and exit with code 0 —
    no mode is selected and no mutating session is opened
-4. Determine the single mode from the provided flags. Cross-mode
-   combinations are rejected as described in Mode selection, before the
-   mutating session is opened
-5. Apply the mode-specific guards and behavior defined below
-6. Invoke exactly one mutating service operation for the selected mode, with
+5. Determine the single mode from the provided flags. Cross-mode
+   combinations and the `--full-name`/`--clear-full-name` conflict are
+   rejected as described in Mode selection, before the mutating session is
+   opened
+6. Apply the mode-specific guards and behavior defined below
+7. Invoke exactly one mutating service operation for the selected mode, with
    `acting_user_id = None` (CLI is a system action). No invocation calls
    more than one mutating service
-7. Print the success or no-op message only after the commit succeeds. Never
+8. Print the success or no-op message only after the commit succeeds. Never
    print a partial-success or per-step report: each invocation is one atomic
    logical operation, so the `✓`/`✗`/`—` multi-step reporting pattern does
    not apply (see `docs/conventions.md`, Multi-Step Reporting)
@@ -222,20 +241,26 @@ an unknown username is reported first.
    format is invalid, exit with error:
    `"Error: Invalid email format '{value}'."`
 3. Delegate once to `user_service.update_user()` with
-   `acting_user_id = None`, passing `--email` and `--full-name` together in
-   the same call when both are provided. If the service raises
-   `UserConflictError` (duplicate email), exit with error:
+   `acting_user_id = None`, passing `--email`, `--full-name`, or
+   `--clear-full-name` (`full_name = None`) together in the same call when
+   more than one is provided. An empty `--full-name ""` carries no special
+   meaning: it is passed through as an ordinary provided value and stored
+   verbatim; clearing the display name requires `--clear-full-name`. If the
+   service raises `UserConflictError` (duplicate email), exit with error:
    `"Error: A user with email '{email}' already exists."`
-4. Report only the fields that effectively changed, comparing the value
-   returned by the service with the value observed in the step-2 user for
-   each provided field. If no provided field differs after that comparison,
-   print: `"No changes applied to user '{username}'."` and exit with code 0.
-   Otherwise print:
+4. Report exclusively from the returned `UserUpdateResult.changed_fields`:
+   an empty sequence prints
+   `"No changes applied to user '{username}'."` and exits with code 0;
+   otherwise print
    `"Updated user '{username}': {list of changed fields}."` — for example
-   `"Updated user 'jdoe': email, full name."` The service remains
+   `"Updated user 'jdoe': email, full name."` The CLI renders `email` as
+   `email` and `full_name` as `full name`, in the result's fixed order; the
+   other closed values cannot appear because this mode never sends them.
+   The read-only lookup of Behavior step 3 serves only resolution and the
+   guard above; it never classifies the outcome. The service remains
    authoritative: it normalizes and compares against locked-current state,
-   persists only effective changes, and creates one audit event per changed
-   field
+   persists only effective changes, creates one audit event per changed
+   field, and reports the effective changes in the result
 
 **Role mode behavior**:
 
@@ -273,10 +298,13 @@ an unknown username is reported first.
    error: `"Error: Cannot reactivate external users."` (exit code 1).
    Active status of external users is managed exclusively by external sync
 2. Delegate once to `user_service.reactivate_user()` with
-   `acting_user_id = None`. If the user is already active, this is a no-op
-   and the command prints:
-   `"No changes applied to user '{username}'."` with exit code 0
-3. Otherwise print: `"Reactivated user '{username}'."`
+   `acting_user_id = None` and report exclusively from the returned
+   `ReactivationResult.reactivated`: `false` — a local user that is already
+   active — prints
+   `"No changes applied to user '{username}'."` with exit code 0; `true`
+   prints `"Reactivated user '{username}'."`
+3. The read-only lookup of Behavior step 3 serves only resolution and the
+   guard above; it never classifies the outcome
 4. No profile or role update occurs in this mode
 
 Reactivation mode performs one lifecycle transition only. When an account is
@@ -290,10 +318,10 @@ stderr; no partial-success output is printed. After the service call
 succeeds, the workflow commits exactly once and then prints the mode's
 success message.
 
-**Idempotency**: Idempotent. If the requested state is already reached — the
-profile values already match, the manual role rows already match, or the user
-is already active — the command prints an informational no-op message and
-exits with code 0.
+**Idempotency**: Idempotent. If the requested state is already reached —
+`UserUpdateResult.changed_fields` is empty, both `RoleUpdateResult` lists are
+empty, or `ReactivationResult.reactivated` is `false` — the command prints an
+informational no-op message and exits with code 0.
 
 **Exit codes**: 0 on success (including no-op), 1 on validation or
 operational error, 2 on system error (database unreachable).
@@ -880,8 +908,8 @@ in `docs/features/identity/user-service.md`).
 7. If the service raises `UserConflictError` (duplicate email), return
    HTTP 409 with code `USER_ALREADY_EXISTS`:
    `"A user with this email already exists."`
-8. Return HTTP 200 with the updated user profile in the standard
-   `{"data": ...}` envelope
+8. Return HTTP 200 with `UserUpdateResult.user` — the updated user profile —
+   in the standard `{"data": ...}` envelope
 
 **Error responses**:
 
@@ -1116,8 +1144,8 @@ Ticket grant event.
    code `USER_NOT_FOUND`
 2. Delegate to `user_service.reactivate_user()` with
    `acting_user_id = authenticated_admin.id`
-3. Return HTTP 200 with the updated or unchanged user profile in the standard
-   `{"data": ...}` envelope
+3. Return HTTP 200 with `ReactivationResult.user` in the standard
+   `{"data": ...}` envelope; the profile is unchanged on a no-op
 
 **Constraints**:
 - External user reactivation is rejected by the service layer
@@ -1276,20 +1304,24 @@ handling is required.
    canonical way to distinguish local users from externally-provisioned users. No
    additional flag or column is needed
 2. **No "last admin" enforcement**: the system does not enforce a
-   minimum admin count. However, via UI/API it is practically impossible
-   for administrators to accidentally eliminate all admins — the
-   self-removal guard (see `docs/features/identity/rbac.md`, Business Rule 1)
-   prevents any admin from removing their own final Admin role origin, so
-   the acting admin always retains at least one Admin origin. Via CLI or system
-   operations (`acting_user_id = None`), the self-removal guard does
-   not apply, and it is possible to remove or deactivate even the last
-   admin. This is intentional and non-problematic: the platform
-   continues to function normally without active admin users (all
-   non-admin features remain operational). In these rare cases, a
-   system administrator with shell access can restore admin access by either
+   minimum admin count, and the self-removal guard is not a global
+   minimum. The guard (see `docs/features/identity/rbac.md`, Business Rule 1)
+   prevents an authenticated actor from effectively removing their own
+   final Admin origin in their own operation, so that actor retains at
+   least one Admin origin after their own request. It does not prevent
+   another Admin from removing the first Admin's final origin, and
+   crossing removals — including concurrent removals executed by two
+   Admins on each other's accounts — can leave the platform with zero
+   Admins. Via CLI or system operations (`acting_user_id = None`), the
+   self-removal guard does not apply, and it is possible to remove or
+   deactivate even the last admin. This is intentional and non-problematic:
+   the platform continues to function normally without active admin users
+   (all non-admin features remain operational). In these cases, a system
+   administrator with shell access can restore admin access by either
    creating a new local administrator with `sentinel manage-user create
-   --username <new-user> --email <email> --role admin` or promoting an existing
-   user with `sentinel manage-user update --username <user> --add-role admin`.
+   --username <new-user> --email <email> --role admin` or promoting an
+   existing user with `sentinel manage-user update --username <user>
+   --add-role admin`.
 3. **No duplicate usernames or emails**: enforced at creation and when
    changing the email
 4. **Role origin is `_manual`**: all roles assigned via `manage-user`

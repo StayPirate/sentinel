@@ -2804,6 +2804,24 @@ or identity audit validation are affected, tests MUST cover:
 - any audit validation or flush failure rolls back the owning lifecycle
   mutation
 
+**Profile update and reactivation results:**
+
+- `update_user()` returns `UserUpdateResult.changed_fields` in the fixed order
+  `username`, `email`, `full_name`, `manager_id`, `synced_at`, containing only
+  fields whose requested value differs from locked-current state; a fully
+  idempotent re-invocation returns an empty sequence and creates no audit
+  event
+- `synced_at` appearing in `changed_fields` creates no audit event, while each
+  other reported field creates exactly its matching lifecycle event
+- `reactivate_user()` returns `ReactivationResult.reactivated = true` only for
+  the actual `inactive → active` transition and `false` for an already-active
+  local user, with no mutation or audit event in the latter case
+- concurrent update serializes classification: a waiting caller whose
+  requested values were already applied by the first caller observes an empty
+  `changed_fields`, and a caller whose read-only pre-read differs from the
+  locked-current row reports its own effective changes rather than the
+  pre-read difference
+
 **Concurrency and endpoint behavior:**
 
 - concurrent creation for the same normalized username or email produces one
@@ -2852,6 +2870,9 @@ or identity audit validation are affected, tests MUST cover:
   role inserts the manual row and reports it in `added_roles`; removing that
   manual row while the external origin remains deletes only the manual row
   and reports it in `removed_roles`
+- removing one of multiple `vulnerability_analyst` origins, including a manual
+  row whose role remains effective through an external origin, creates zero
+  Ticket mutation and zero `TicketAuditEvent`
 - self-removal with a missing manual Admin row is a no-op; self-removal with
   another Admin origin present succeeds; self-removal of the final Admin
   origin raises `SelfRoleRemovalError` before any row, event, or Ticket
@@ -2869,14 +2890,23 @@ or identity audit validation are affected, tests MUST cover:
 
 - independent sessions cover duplicate additions and duplicate removals:
   exactly one winner performs the mutation and creates one event, and each
-  loser observes the requested state and is a no-op
+  loser acquires the User lock after the winner commits, observes the
+  requested state, and is an idempotent no-op before any INSERT or DELETE
 - a concurrent add and remove of the same role follows lock order: each
   transaction classifies its own effective effect from locked-current state,
   producing one effective mutation and event or two in sequence when the add
   commits first, with a final state that matches the last committed
   transaction
+- the UNIQUE `(user_id, role, group_name)` constraint is an integrity
+  backstop, not an expected concurrency path: a violation arising from a
+  non-conforming writer propagates as a database error and rolls back the
+  complete transaction instead of being converted into a no-op
 - two concurrent requests touching different roles of the same User serialize
   on the User lock and both produce their documented rows and events
+- two Admins removing each other's final Admin origin both succeed — the
+  self-Admin guard applies only when actor and target are the same User — and
+  can leave zero Admins; no global minimum is enforced and CLI recovery
+  remains available
 - a final manual `vulnerability_analyst` removal concurrent with a manual VA
   addition produces a stable outcome from lock order, with no duplicate
   unassignment or audit event
@@ -2907,10 +2937,30 @@ or identity audit validation are affected, tests MUST cover:
 - cross-mode combinations are rejected with the documented message, exit 1,
   stderr output, and no mutating session; no-modification invocations print
   the no-changes message and exit 0
+- an invalid username is rejected before any database access with the
+  documented message, exit 1, and stderr output
+- an unknown username is reported before cross-mode or
+  `--full-name`/`--clear-full-name` rejection, matching the documented
+  lookup-first order
+- `--clear-full-name` sends `full_name = NULL`, reports `full name` only when
+  the value effectively changes, prints the no-op message when the value was
+  already NULL, and its combination with `--full-name` is rejected with the
+  documented message, exit 1, stderr, and no mutating session
+- `--full-name ''` is stored and reported as an ordinary `full_name` change,
+  not as a clear
 - role mode deduplicates repeated options and silently cancels overlap,
   reporting only the effective `added_roles` and `removed_roles`; a manual
   addition or removal is reported even when an external origin keeps the role
   effective
+- profile output derives exclusively from `UserUpdateResult.changed_fields`:
+  a stale pre-read suggesting a change while the operation is a no-op prints
+  the no-op message, and a stale pre-read suggesting no change while the
+  operation modifies fields prints the update message with exactly the
+  returned fields in the documented order
+- reactivation output derives exclusively from
+  `ReactivationResult.reactivated`: `false` prints the no-op message and
+  `true` prints the reactivated message, including a concurrent loser whose
+  pre-read showed an inactive user
 - external users: profile and reactivation modes fail with the documented
   error, role mode is permitted
 - stdout carries success and no-op messages, stderr carries errors, exit

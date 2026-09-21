@@ -287,12 +287,24 @@ cardinality belongs in the impact response.
   lists describe effective `_manual` `UserRole` insertions and deletions
   from one `update_roles()` invocation — not the difference of aggregated
   effective roles across all origins.
+- `UserUpdateResult` contains the updated `user` and `changed_fields`: the
+  deterministic sequence of field names effectively changed by one
+  `update_user()` invocation relative to the locked-current row. The closed
+  value set, in fixed order, is `username`, `email`, `full_name`,
+  `manager_id`, `synced_at`. An empty sequence is a no-op: no field was
+  persisted and no audit event was created.
+- `ReactivationResult` contains the updated `user` and `reactivated: bool`,
+  which is `true` only when this invocation performed the
+  `inactive → active` transition and `false` when the target was already
+  active.
 
-When `create_user()`, `update_user()`, `reactivate_user()`, or
-`deactivate_user()` returns a User for API profile serialization — or when
-`update_roles()` returns its `RoleUpdateResult.user` — the returned object
-has roles and manager loaded. Callers do not execute follow-up ORM queries
-to construct the Get User response shape.
+The User returned by a profile-mutating operation — directly by
+`create_user()`, or as the result's `user` for `update_user()`,
+`reactivate_user()`, `deactivate_user()`, and `update_roles()` — has roles
+and manager loaded for API profile serialization. Callers do not execute
+follow-up ORM queries to construct the Get User response shape. API and
+external synchronization callers serialize the result's `user`; they do not
+infer the outcome from a read taken before the mutation.
 
 ### Password handling
 
@@ -549,32 +561,48 @@ their own business rules.
    pattern follows Python's standard sentinel convention
    (`dataclasses.MISSING`).
 
-    If all optional parameters are `_MISSING`, this is a no-op: no UPDATE
-   is issued. The User record returned is the one loaded in step 1.
-7. For each changed field, create an `IdentityAuditEvent` via
-   `IdentityAuditLog.log_event()`: `username_changed`, `email_changed`,
-   `full_name_changed`, or `manager_changed` with `old_value` and
-   `new_value`. For an external user updated by synchronization, email and full
-   name events include `detail = {"source": "external_sync"}`; manual local
-   updates use `detail = NULL`. One event per changed field, all in the same
-   transaction.
-8. Return updated User
+    A provided field is effectively changed only when its requested value
+    differs from the locked-current value. `_MISSING` is never a change, and
+    the comparison uses the normalized requested value for `username` and
+    `email`. If no provided field differs, this is a no-op: no UPDATE is
+    issued, no audit event is created, `changed_fields` is empty, and the
+    result's `user` is the locked row loaded in step 1.
+7. For each changed field other than `synced_at`, create an
+   `IdentityAuditEvent` via `IdentityAuditLog.log_event()`:
+   `username_changed`, `email_changed`, `full_name_changed`, or
+   `manager_changed` with `old_value` and `new_value`. `synced_at` is
+   operational metadata and never produces an audit event (see Operational
+   metadata exclusions above). For an external user updated by
+   synchronization, email and full name events include
+   `detail = {"source": "external_sync"}`; manual local updates use
+   `detail = NULL`. One event per changed field, all in the same transaction.
+8. Flush and return `UserUpdateResult(user, changed_fields)`. The
+   `changed_fields` sequence lists every effective change in the fixed order
+   `username`, `email`, `full_name`, `manager_id`, `synced_at`, and `user`
+   is the current User with profile, roles, and manager loaded for API
+   serialization — updated when fields changed, otherwise the locked row
+   from step 1
 
 **Concurrency**: mutations for one user serialize on its row lock. A second
-caller evaluates guards and old/new audit values only after the first caller
-commits or rolls back. Locks are not acquired on unrelated users. Normalized
-email UNIQUE constraints remain authoritative for concurrent updates of two
-different users; a loser receives `UserConflictError` and rolls back its
-mutation and audit events.
+caller evaluates guards, old/new audit values, and `changed_fields`
+classification only after the first caller commits or rolls back, so a
+waiting caller observes the committed values and its result describes only
+its own effective changes. Locks are not acquired on unrelated users.
+Normalized email UNIQUE constraints remain authoritative for concurrent
+updates of two different users; a loser receives `UserConflictError` and
+rolls back its mutation and audit events.
 
 **Re-invocation**: conditionally idempotent. Fields whose normalized requested
 value already equals stored state are no-ops and create no audit event; only
-effective field changes are persisted and audited.
+effective field changes are persisted and audited, and `changed_fields`
+reports exactly those effective changes. A fully no-op re-invocation returns
+an empty `changed_fields`.
 
 **TicketAuditEvent**: none
 
-**IdentityAuditEvent**: one per changed field (`username_changed`,
-`email_changed`, `full_name_changed`, `manager_changed`). See
+**IdentityAuditEvent**: one per changed field other than `synced_at`
+(`username_changed`, `email_changed`, `full_name_changed`,
+`manager_changed`). See
 `docs/features/identity/identity-audit-log.md` for the event type
 contract.
 
@@ -595,8 +623,8 @@ Callers pass role values rather than `(role, group_name)` pairs; the
 | Parameter      | Type                        | Required | Description                          |
 |----------------|-----------------------------|----------|--------------------------------------|
 | `user_id`      | `UUID`                      | Yes      | User whose manual roles change       |
-| `add`          | `list[Role]`                | No       | Manual roles to add                  |
-| `remove`       | `list[Role]`                | No       | Manual roles to remove               |
+| `add`          | `list[Role] \| None`        | No       | Manual roles to add; default `None`, equivalent to an empty collection |
+| `remove`       | `list[Role] \| None`        | No       | Manual roles to remove; default `None`, equivalent to an empty collection |
 | `acting_user_id` | `UUID \| None`            | No       | Who is performing the action         |
 
 **Business rules**:
@@ -636,9 +664,10 @@ Callers pass role values rather than `(role, group_name)` pairs; the
 
 **Behavior**:
 
-1. Resolve inputs in memory, before the first persistent read: treat `add`
-   and `remove` as sets of Role values, deduplicate each list, and cancel
-   the intersection — `resolved_add = add − remove`,
+1. Resolve inputs in memory, before the first persistent read: treat an
+   omitted or `None` `add`/`remove` as an empty collection, treat `add` and
+   `remove` as sets of Role values, deduplicate each list, and cancel the
+   intersection — `resolved_add = add − remove`,
    `resolved_remove = remove − add`. If both resolved sets are empty, verify
    the User exists and load the profile, manager, and role assignments
    required for serialization, then return
@@ -721,9 +750,14 @@ mutations for one User serialize deterministically:
 - requests touching different roles of the same User serialize on the same
   User lock, so both effects and their event order are deterministic;
 - the UNIQUE constraint on `(user_id, role, group_name)` remains the
-  database backstop; a race that still reaches it is treated as the same
-  idempotent no-op rather than an operation failure, producing no duplicate
-  row or audit event.
+  database integrity backstop; it is not a user-visible no-op path. Every
+  documented manual writer locks the User before classifying, so a duplicate
+  add whose transaction waits on the lock observes the committed `_manual`
+  row and is an idempotent no-op before reaching the INSERT. A violation
+  that still reaches the constraint indicates a writer that did not honor
+  this contract or a database anomaly; the database error propagates and the
+  complete caller-owned transaction rolls back instead of being converted
+  into a no-op.
 
 **Re-invocation**: conditionally idempotent. Repeating a successful
 invocation observes the already-reached state and returns a
@@ -736,10 +770,10 @@ assignment to clear.
 `SelfRoleRemovalError` (effective final Admin origin loss), database and
 lock-timeout errors, cancellation, `IdentityAuditLog` validation or insertion
 failures, and flush failures propagate to the caller unchanged. Database
-constraint violations that reach the UNIQUE backstop are handled as the
-idempotent no-op described under Concurrency instead of escaping. Any other
-escaping exception rolls back the complete caller-owned transaction,
-including `UserRole` rows, Identity events, Ticket clears, and Ticket events.
+constraint violations — including a violation of the UNIQUE backstop —
+propagate as database errors; the complete caller-owned transaction rolls
+back, including `UserRole` rows, Identity events, Ticket clears, and Ticket
+events.
 
 **TicketAuditEvent**: if the effective deletions remove the user's final
 `vulnerability_analyst` origin — no remaining `UserRole` row for that role
@@ -816,9 +850,11 @@ has no callers.
 **Idempotency**: calling this function twice with the same
 `current_member_user_ids` produces the same result — the second call
 finds nothing to add or remove. The UNIQUE constraint on
-`(user_id, role, group_name)` prevents duplicate records.
-Concurrent duplicate additions have the same no-op outcome and create no
-duplicate audit event.
+`(user_id, role, group_name)` prevents duplicate records and remains the
+database integrity backstop. Concurrent duplicate additions must resolve to
+the same no-op outcome through the affected-set stabilization and locking
+that this function's deferred activation contract requires (see
+`identity-provisioning.md`) and create no duplicate audit event.
 
 **TicketAuditEvent**: if `role` is `vulnerability_analyst` and removing
 it causes any user to lose the role entirely (no remaining `UserRole`
@@ -1010,8 +1046,9 @@ Reactivates a previously deactivated user account.
   guard is evaluated first, before the idempotency check below, so it is
   never bypassed by an already-active external user
 - User must be currently inactive. If already active — and the guard
-  above did not already reject the call — this is a no-op (returns the
-  user unchanged)
+  above did not already reject the call — this is a no-op: no mutation and
+  no audit event are created, and the result is
+  `ReactivationResult(user, false)`
 
 **Behavior**:
 
@@ -1025,19 +1062,21 @@ Reactivates a previously deactivated user account.
    via `IdentityAuditLog.log_event()`. External synchronization uses
    `detail = {"source": "external_sync"}`; authenticated API and manual CLI
    calls use `detail = NULL`
-5. Flush and return the updated User
+5. Flush and return `ReactivationResult(user, true)`; `user` is the updated
+   User with profile, roles, and manager loaded for API serialization
 
 **Concurrency**: concurrent calls serialize on the User row. The first caller
-that observes an inactive user creates the mutation and event; later callers
-observe the committed active state and return as no-ops. Reactivation also
+that observes an inactive user creates the mutation and event and returns
+`reactivated = true`; later callers observe the committed active state and
+return `ReactivationResult(user, false)` as no-ops. Reactivation also
 serializes with password reset, field updates, role operations that lock the
 same root, and deactivation.
 
 **Re-invocation**: idempotent for local users. Once active, another call
-returns the unchanged user and creates no audit event. For an external
-user, every human-caller invocation raises `ExternalUserStatusReadOnlyError`
-regardless of the current `active` value — there is no no-op path for a
-human caller on an external user.
+returns `ReactivationResult(user, false)` and creates no audit event. For an
+external user, every human-caller invocation raises
+`ExternalUserStatusReadOnlyError` regardless of the current `active` value —
+there is no no-op path for a human caller on an external user.
 
 **Explicitly NOT restored**:
 
@@ -1264,8 +1303,11 @@ requests on the same User. Manual mutations never touch a row whose
    removing a `_manual` role not present is a no-op. Two concurrent identical
    operations produce the same final state as one
 3. **UNIQUE constraint** `(user_id, role, group_name)` — the database
-   backstop; a race that still reaches it is treated as the same idempotent
-   no-op, producing no duplicate row or audit event
+   integrity backstop, not an expected concurrency path. Every documented
+   manual writer locks the User before classifying, so duplicates resolve as
+   locked-current no-ops; a violation that still reaches the constraint
+   propagates as a database error and rolls back the complete caller-owned
+   transaction
 
 The User lock is additionally authoritative for effective VA eligibility and
 for effective Admin status in active manual role mutation. It serializes

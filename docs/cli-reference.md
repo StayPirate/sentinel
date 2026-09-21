@@ -74,7 +74,8 @@ option combinations are rejected; no partial-success reporting applies.
 sentinel manage-user update \
   --username <username> \
   [--email <new_email>] \
-  [--full-name <new_name>]
+  [--full-name <new_name>] \
+  [--clear-full-name]
 
 sentinel manage-user update \
   --username <username> \
@@ -86,9 +87,10 @@ sentinel manage-user update \
   --reactivate
 ```
 
-Profile fields (`--email`, `--full-name`) are only permitted on local users.
-Role changes are permitted on local and external users and manage only the
-`_manual` origin. Reactivation is only permitted on local users.
+Profile fields (`--email`, `--full-name`, `--clear-full-name`) are only
+permitted on local users; `--full-name` and `--clear-full-name` are mutually
+exclusive. Role changes are permitted on local and external users and manage
+only the `_manual` origin. Reactivation is only permitted on local users.
 
 **Idempotency**: Idempotent (no-op if state already reached).
 
