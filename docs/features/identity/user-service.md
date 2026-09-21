@@ -87,10 +87,12 @@ Fields managed by dedicated operations have their own ownership rules:
   external users, this field is managed exclusively by external sync — manual
   deactivation/reactivation by admins is blocked (see External Active Status
   Ownership below)
-- Roles — managed by `update_roles()` for per-user assignment,
-    `sync_role_mapping()` and `delete_role_mapping_roles()` for
-    external group mapping operations. Available to admins for manual roles
-    (`group_name = '_manual'`)
+- Roles — `update_roles()` owns manual per-user assignments only
+    (`group_name = '_manual'`). External role origins are managed exclusively
+    by `sync_role_mapping()` and `delete_role_mapping_roles()`. Manual
+    operations never insert, delete, or mutate an external-origin row, while
+    external origins still participate in effective-role evaluation (see
+    `docs/features/identity/rbac.md`, Role Origins and Coexistence)
 - `password_hash` — managed by `reset_password()`, which independently
   blocks external users via `ExternalUserPasswordError`
 
@@ -280,11 +282,17 @@ cardinality belongs in the impact response.
 - `PasswordResetResult` contains the updated `user`,
   `invalidated_session_ids: list[UUID]`, and normalized `username` required for
   post-commit session-cache and lockout-counter cleanup.
+- `RoleUpdateResult` contains the updated `user` and the effective manual
+  changes: `added_roles: list[Role]` and `removed_roles: list[Role]`. Both
+  lists describe effective `_manual` `UserRole` insertions and deletions
+  from one `update_roles()` invocation — not the difference of aggregated
+  effective roles across all origins.
 
-When `create_user()`, `update_user()`, `update_roles()`, `reactivate_user()`,
-or `deactivate_user()` returns a User for API profile serialization, the
-returned object has roles and manager loaded. Callers do not execute follow-up
-ORM queries to construct the Get User response shape.
+When `create_user()`, `update_user()`, `reactivate_user()`, or
+`deactivate_user()` returns a User for API profile serialization — or when
+`update_roles()` returns its `RoleUpdateResult.user` — the returned object
+has roles and manager loaded. Callers do not execute follow-up ORM queries
+to construct the Get User response shape.
 
 ### Password handling
 
@@ -572,82 +580,179 @@ contract.
 
 ### `update_roles()`
 
-Adds or removes roles for a user.
+Adds or removes manual (`group_name = '_manual'`) role assignments for a
+user. The operation never inserts, deletes, or mutates a row with any other
+`group_name`: external role origins are owned by `sync_role_mapping()` and
+`delete_role_mapping_roles()` and remain unchanged. External origins still
+participate in effective-role evaluation, the self-Admin guard, and final VA
+origin loss.
+
+Callers pass role values rather than `(role, group_name)` pairs; the
+`_manual` origin is implicit.
 
 **Parameters**:
 
 | Parameter      | Type                        | Required | Description                          |
 |----------------|-----------------------------|----------|--------------------------------------|
-| `user_id`      | `UUID`                      | Yes      | User to update                       |
-| `add`          | `list[tuple[Role, str]]`    | No       | Roles to add as (role, group_name)  |
-| `remove`       | `list[tuple[Role, str]]`    | No       | Roles to remove as (role, group_name) |
+| `user_id`      | `UUID`                      | Yes      | User whose manual roles change       |
+| `add`          | `list[Role]`                | No       | Manual roles to add                  |
+| `remove`       | `list[Role]`                | No       | Manual roles to remove               |
 | `acting_user_id` | `UUID \| None`            | No       | Who is performing the action         |
 
 **Business rules**:
 
-1. **Self-removal guard**: if `acting_user_id` is not None AND
-   `acting_user_id == user_id` AND `Admin` is in the effective `remove`
-   list (after input resolution), reject the operation with
-   `SelfRoleRemovalError`. This prevents any authenticated user from
-   removing their own Admin role, regardless of the entry point. System
-   actions (`acting_user_id = None`) are exempt.
-   For the implications of this guard on the "zero admins" scenario and
-   the CLI recovery procedure, see `docs/features/identity/user-management.md`,
+1. **Manual ownership**: every insertion creates a `UserRole` row with
+   `group_name = '_manual'` and `assigned_by = acting_user_id`; every
+   deletion removes only the matching `_manual` row. A role held through an
+   external origin is neither removed nor modified. Adding a manual role
+   while an external origin already grants the same role creates a separate
+   `_manual` row, and removing that manual row leaves the external origin
+   effective (see `docs/features/identity/rbac.md`, Role Origins and
+   Coexistence)
+2. **Self-removal guard (effective final origin)**: if `acting_user_id` is
+   not None AND `acting_user_id == user_id`, the operation is rejected with
+   `SelfRoleRemovalError` only when it would effectively delete the acting
+   user's `_manual` Admin row and no other Admin origin remains in the
+   locked-current origin set. Removing a missing manual Admin row is an
+   idempotent no-op and is permitted; deleting the manual Admin row is
+   permitted when another Admin origin — a row with a different
+   `group_name` — remains. The rejection happens before any `UserRole`
+   write, audit event, or Ticket mutation, so it has no partial effect.
+   System actions (`acting_user_id = None`, including CLI) are exempt. For
+   the implications of this guard on the "zero admins" scenario and the CLI
+   recovery procedure, see `docs/features/identity/user-management.md`,
    Business Rule 2
-2. **Externally-derived role protection**: when `acting_user_id` is set (user
-   action), cannot remove roles with `group_name != '_manual'`. Raise
-   `ExternalDerivedRoleError`. System actions are exempt (external sync must be
-   able to remove externally-derived roles when group membership changes)
-3. **Idempotency**: adding a role already present for the same
-   (user_id, role, group_name) combination is a no-op. Removing a role
-   not present is a no-op
-
-A concurrent duplicate addition that reaches the UNIQUE constraint is treated
-as the same idempotent no-op rather than an operation failure. No duplicate
-role or audit event is created.
+3. **Idempotency**: adding a role whose `_manual` row is already present is
+   a no-op; removing a role without a `_manual` row is a no-op. A request
+   whose normalized effective change sets are both empty is a no-op
+4. **Set semantics within one request**: the caller-supplied lists are
+   treated as sets. Entries repeated within one list are deduplicated, and
+   roles present in both `add` and `remove` are cancelled before any
+   persistent access. The service resolves these permissively for every
+   caller and never rejects a request because of duplicate or overlapping
+   input. The API layer applies a stricter request validation before calling
+   this service (see `docs/features/identity/user-management.md`, Set User
+   Roles)
 
 **Behavior**:
 
-1. Resolve inputs (set-based) before database access: deduplicate entries within
-   each list
-   (treat as sets — each unique `(role, group_name)` tuple appears at
-   most once). Then cancel entries that appear in both lists:
-   `effective_add = add − remove`, `effective_remove = remove − add`.
-   If both effective lists are empty after resolution, this is a no-op:
-   load and return the user unchanged or raise `UserNotFoundError`
-2. If either effective list contains `vulnerability_analyst`, acquire `FOR NO
-   KEY UPDATE` on the User by ID as the first persistent read. Otherwise load
-   the User without introducing the assignment-eligibility lock. If not found,
-   raise `UserNotFoundError`. The lock makes VA origin acquisition and loss
-   linearizable with assignment and deactivation without extending this
-   contract to unrelated roles
-3. Validate business rules (self-removal guard, externally-derived protection)
-   against the resolved effective lists
-4. For each entry in `effective_add`, create UserRole if not already
-   present, with `assigned_by = acting_user_id`
-5. For each entry in `effective_remove`, delete matching UserRole record
-6. VA role loss check: if `vulnerability_analyst` appears in
-   `effective_remove`, call
+1. Resolve inputs in memory, before the first persistent read: treat `add`
+   and `remove` as sets of Role values, deduplicate each list, and cancel
+   the intersection — `resolved_add = add − remove`,
+   `resolved_remove = remove − add`. If both resolved sets are empty, verify
+   the User exists and load the profile, manager, and role assignments
+   required for serialization, then return
+   `RoleUpdateResult(user, [], [])`. No row lock is needed because no state
+   is classified or mutated. A missing User raises `UserNotFoundError` and
+   creates no audit event
+2. As the first persistent access of a non-empty request, acquire
+   `FOR NO KEY UPDATE` on the target User by ID. If not found, raise
+   `UserNotFoundError`. The lock serializes every manual role mutation for
+   one User — not only Admin and `vulnerability_analyst` changes — and keeps
+   classification, the self-Admin guard, result lists, and audit events
+   deterministic
+3. Classify under the lock against the locked-current `UserRole` rows:
+   - effective insertions: each role in `resolved_add` without a current
+     `_manual` row for the User;
+   - effective deletions: each role in `resolved_remove` with a current
+     `_manual` row for the User.
+
+   Rows with `group_name != '_manual'` are never candidates for change. They
+   are observed only to evaluate effective role membership, effective
+   self-Admin status, and final VA-origin loss
+4. Apply the self-removal guard against the classified effective deletions
+   (Business Rule 2). A rejection raises before any mutation, audit event, or
+   Ticket change
+5. Insert the effective insertions in ascending role wire-format order,
+   each as a `UserRole` row with `group_name = '_manual'` and
+   `assigned_by = acting_user_id`
+6. Delete the matching `_manual` rows for the effective deletions in
+   ascending role wire-format order
+7. If `vulnerability_analyst` is among the effective deletions, call
    `_unassign_tickets_on_va_role_loss(db, user,
    "vulnerability_analyst role removed")`.
-   **Ordering invariant**: this step MUST execute after step 5's
-   deletion, because `_unassign_tickets_on_va_role_loss()` checks for
-   *remaining* VA roles — if the role being removed has not yet been
-   deleted, the check would always find it and never trigger
-   unassignment
-7. For each role added, create `IdentityAuditEvent` with `event_type =
-   role_added`; for each role removed, `event_type = role_removed`. All
-   events created via `IdentityAuditLog.log_event()` in the same
-   transaction.
-8. Return updated User with current roles
+   **Ordering invariant**: this step MUST execute after step 6's deletion,
+   because `_unassign_tickets_on_va_role_loss()` checks for *remaining* VA
+   origins — if the deleted row were still visible, the check would always
+   find it and never trigger unassignment. A manual deletion whose role
+   remains effective through an external origin changes no Ticket
+8. Create Identity audit events for every effective `_manual` insertion and
+   deletion via `IdentityAuditLog.log_event()`, in this order:
+   - one `role_added` per effective insertion, in ascending wire-format
+     order: `user_id = acting_user_id`, `target_user_id = user_id`,
+     `old_value = NULL`, `new_value` = role, `detail = NULL`;
+   - then one `role_removed` per effective deletion, in ascending
+     wire-format order: `user_id = acting_user_id`,
+     `target_user_id = user_id`, `old_value` = role, `new_value = NULL`,
+     `detail = NULL`.
 
-**TicketAuditEvent**: if removing the `vulnerability_analyst` role causes
-the user to lose it entirely (no remaining `UserRole` records for that
-role from any origin), one `assignment` event per unassigned active
-ticket. See `_unassign_tickets_on_va_role_loss()`. Otherwise, none.
+   No event is created for a cancelled input, an already-present `_manual`
+   row, a missing `_manual` row, or a concurrent loser that observes the
+   requested state
+9. Flush every `UserRole` mutation and Identity event.
+   `_unassign_tickets_on_va_role_loss()` flushes its own Ticket clears and
+   TicketAuditEvents in the same caller-owned transaction
+10. Return `RoleUpdateResult(user, added_roles, removed_roles)`:
+    - `user` is the updated User with profile, manager, and role assignments
+      loaded for API serialization;
+    - `added_roles` contains exactly the `_manual` rows inserted by this
+      invocation, ordered by wire-format role value;
+    - `removed_roles` contains exactly the `_manual` rows deleted by this
+      invocation, ordered by wire-format role value.
 
-**IdentityAuditEvent**: `role_added` / `role_removed` per effective
-change. See `docs/features/identity/identity-audit-log.md`.
+    Both lists report effective `_manual` row changes, not the difference of
+    aggregated effective roles across all origins. A manual addition is
+    therefore reported even when the role was already effective through an
+    external origin, and a manual removal is reported even when the role
+    remains effective through an external origin
+
+**Concurrency**: every non-empty manual mutation acquires the User
+`FOR NO KEY UPDATE` before classifying its effect, so concurrent manual role
+mutations for one User serialize deterministically:
+
+- duplicate additions: the first transaction inserts one row and one
+  `role_added`; the second observes the committed `_manual` row as an
+  idempotent no-op and creates no row or event;
+- duplicate removals: the first transaction deletes one row and one
+  `role_removed`; the second observes a missing `_manual` row and is a no-op;
+- a concurrent add and remove of the same role: lock order decides the final
+  state, and each transaction classifies its own effective effect from
+  locked-current state; a loser that observes the requested state is a no-op;
+- requests touching different roles of the same User serialize on the same
+  User lock, so both effects and their event order are deterministic;
+- the UNIQUE constraint on `(user_id, role, group_name)` remains the
+  database backstop; a race that still reaches it is treated as the same
+  idempotent no-op rather than an operation failure, producing no duplicate
+  row or audit event.
+
+**Re-invocation**: conditionally idempotent. Repeating a successful
+invocation observes the already-reached state and returns a
+`RoleUpdateResult` with empty `added_roles` and `removed_roles`; it creates
+no `UserRole` row, no Identity event, and no Ticket mutation. Re-invoking
+after an effective final VA-origin loss delegates safely and finds no active
+assignment to clear.
+
+**Exceptions**: `UserNotFoundError` (unknown target User),
+`SelfRoleRemovalError` (effective final Admin origin loss), database and
+lock-timeout errors, cancellation, `IdentityAuditLog` validation or insertion
+failures, and flush failures propagate to the caller unchanged. Database
+constraint violations that reach the UNIQUE backstop are handled as the
+idempotent no-op described under Concurrency instead of escaping. Any other
+escaping exception rolls back the complete caller-owned transaction,
+including `UserRole` rows, Identity events, Ticket clears, and Ticket events.
+
+**TicketAuditEvent**: if the effective deletions remove the user's final
+`vulnerability_analyst` origin — no remaining `UserRole` row for that role
+from any `group_name` — one `assignment` event per unassigned active ticket,
+with reason `vulnerability_analyst role removed`. Removing one of multiple VA
+origins, or a manual row whose role remains effective through an external
+origin, creates none. See `_unassign_tickets_on_va_role_loss()` and
+`docs/features/tickets/ticket-audit-log.md`.
+
+**IdentityAuditEvent**: one `role_added` per effective `_manual` insertion
+and one `role_removed` per effective `_manual` deletion, in the order and
+with the fields defined in step 8. See
+`docs/features/identity/identity-audit-log.md`.
 
 ### `sync_role_mapping()`
 
@@ -1105,14 +1210,15 @@ Rules) ensures that:
 3. Redis failures or latency cannot extend lock hold time or block
    concurrent mutations on the same entity
 
-Operations that conditionally produce side effects (`update_roles`,
-`sync_role_mapping`, `delete_role_mapping_roles`) MUST also execute within
-a single database transaction when removing the `vulnerability_analyst`
-role, ensuring atomicity between role removal, ticket unassignment, and
-TicketAuditEvent creation. When no VA role is being removed, these operations
-perform a single logical write and atomicity is less critical. The deferred
-mapping operations additionally inherit the activation gate in
-`identity-provisioning.md`.
+`update_roles()` always executes within the caller-owned transaction. Every
+effective `_manual` `UserRole` insertion or deletion, its Identity event, and
+— when the final `vulnerability_analyst` origin is lost — the derived Ticket
+unassignment and TicketAuditEvents commit or roll back as one unit. A
+validation, insertion, or flush failure in either audit trail rolls back the
+complete role and Ticket workflow. `sync_role_mapping()` and
+`delete_role_mapping_roles()` keep the same all-or-nothing requirement when
+removing the `vulnerability_analyst` role and additionally inherit the
+activation gate in `identity-provisioning.md`.
 
 `create_user`, `update_user`, and `reactivate_user` use the same contract:
 their identity audit events are mandatory side effects and therefore must be
@@ -1144,25 +1250,29 @@ want to adjust a user's roles before reactivating them.
 
 ### Concurrent role modification from multiple entry points
 
-Every active manual mutation that adds or removes a `vulnerability_analyst`
-origin acquires `FOR NO KEY UPDATE` on the User before changing `UserRole`.
-Other role tuples retain their existing atomic INSERT/DELETE behavior.
-Individual tuples remain protected by:
+Every non-empty `update_roles()` request acquires `FOR NO KEY UPDATE` on the
+User before reading or changing `UserRole` rows. The lock covers every manual
+role, not only `vulnerability_analyst`, so classification, the self-Admin
+guard, result lists, and audit order stay deterministic for concurrent
+requests on the same User. Manual mutations never touch a row whose
+`group_name != '_manual'`; external origins remain protected by:
 
-1. **UNIQUE constraint** `(user_id, role, group_name)` — prevents
-   duplicate records regardless of timing
-2. **Disjoint key spaces** — manual actions use `group_name = '_manual'`
+1. **Disjoint key spaces** — manual actions use `group_name = '_manual'`
    while external sync uses the actual group name. These never operate on
    the same row
-3. **Idempotency** — adding a role already present is a no-op; removing
-   a role not present is a no-op. Two concurrent identical operations
-   produce the same final state as one
+2. **Idempotency** — adding a `_manual` role already present is a no-op;
+   removing a `_manual` role not present is a no-op. Two concurrent identical
+   operations produce the same final state as one
+3. **UNIQUE constraint** `(user_id, role, group_name)` — the database
+   backstop; a race that still reaches it is treated as the same idempotent
+   no-op, producing no duplicate row or audit event
 
-The User lock is additionally authoritative for effective VA eligibility in
-active manual role mutation. It serializes manual origin changes with
-assignment and deactivation, so final loss is evaluated from the locked-current
-origin set. Deferred external-origin mutations are governed by the activation
-gate in `identity-provisioning.md`.
+The User lock is additionally authoritative for effective VA eligibility and
+for effective Admin status in active manual role mutation. It serializes
+manual origin changes with assignment and deactivation, so final VA-origin
+loss and the self-Admin guard are evaluated from the locked-current origin
+set. Deferred external-origin mutations are governed by the activation gate
+in `identity-provisioning.md`.
 
 ### Concurrent role removal and deactivation
 
@@ -1244,10 +1354,9 @@ to the corresponding HTTP status code and error code per `api-spec.md`.
 |-----------|------|------|-------------|
 | `UserNotFoundError` † | 404 | `USER_NOT_FOUND` | User identifier does not resolve to any user |
 | `UserConflictError` | 409 | `USER_ALREADY_EXISTS` | Username, email, or external ID already in use |
-| `SelfRoleRemovalError` | 409 | `USER_SELF_ROLE_REMOVAL` | Admin attempting to remove their own admin role |
+| `SelfRoleRemovalError` | 409 | `USER_SELF_ROLE_REMOVAL` | Effective removal of the acting user's final Admin origin (manual or mapping-derived) |
 | `SelfDeactivationError` | 409 | `USER_SELF_DEACTIVATION` | Admin attempting to deactivate themselves |
 | `ExternalUserStatusReadOnlyError` | 409 | `USER_EXTERNAL_STATUS_READONLY` | Cannot manually activate/deactivate an external user |
-| `ExternalDerivedRoleError` | 409 | `USER_EXTERNAL_ROLE_PROTECTED` | Cannot manually modify externally-derived roles |
 | `ExternalUserFieldReadOnlyError` | 409 | `USER_EXTERNAL_FIELD_READONLY` | Cannot modify synced fields on an external user |
 | `ExternalUserPasswordError` | 409 | `USER_EXTERNAL_PASSWORD_FORBIDDEN` | Cannot set password for an external user |
 | `PasswordValidationError` † | 422 | `USER_PASSWORD_POLICY_VIOLATION` | Password does not meet policy requirements |

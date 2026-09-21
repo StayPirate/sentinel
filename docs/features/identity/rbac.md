@@ -614,15 +614,21 @@ here with the required authorization level and a link to the owning spec.
 
 ## Business Rules
 
-1. An admin cannot remove their own Admin role. This is enforced by
-   `user_service.update_roles()` for any entry point where
-   `acting_user_id` is set. System actions (external sync, CLI) pass
-   `acting_user_id = None` and are exempt. See
+1. An admin cannot remove their own final Admin role origin. This is
+   enforced by `user_service.update_roles()` for any entry point where
+   `acting_user_id` is set: the guard rejects the operation only when an
+   effective deletion of the acting user's `_manual` Admin row would leave
+   no other Admin origin (any `group_name`). A request to remove a missing
+   manual Admin row is an idempotent no-op, and deleting the manual Admin
+   row is allowed while another Admin origin remains. System actions
+   (external sync, CLI) pass `acting_user_id = None` and are exempt. See
    `docs/features/identity/user-service.md`. This guard ensures that via
-   UI/API, admins cannot accidentally eliminate all admin users — the
-   acting admin always retains the role. For the full "zero admins"
-   scenario (possible only via CLI/system operations) and recovery
-   procedure, see `docs/features/identity/user-management.md`, Business Rule 2
+   UI/API, an authenticated actor cannot accidentally remove their own final
+   Admin origin, so the acting admin always retains at least one Admin origin
+   after their own operation. The system intentionally enforces no minimum
+   admin count, and a concurrent removal performed by another admin is not
+   prevented; see `docs/features/identity/user-management.md`, Business
+   Rule 2, for the full "zero admins" scenario and recovery procedure
 2. Only users with the `manage_users` capability can manage roles. They
    can manage any user's roles, including their own (subject to the
    self-removal guard in Business Rule 1)
@@ -815,10 +821,15 @@ order or database physical order.
 A user can acquire a role from two independent sources (origins):
 
 - **Manual** (`group_name = '_manual'`): assigned by an admin via CLI
-  or API. Can be removed by an admin at any time.
+  or API through `user_service.update_roles()`. Removable by an admin
+  through the same operation, subject to the self-Admin guard in Business
+  Rule 1.
 - **Externally-derived** (`group_name = <group name>`): derived from external group
   membership during external sync. Managed exclusively by the sync process
-  — cannot be removed **per-user** via UI or API (only via role mapping deletion or external sync reconciliation). See `docs/features/identity/identity-provisioning.md`.
+  — cannot be removed **per-user** via UI or API (only via role mapping deletion or external sync reconciliation). Manual role operations
+  never insert, delete, or mutate these rows; the rows are only observed for
+  effective-role evaluation, the self-Admin guard, and final VA-origin loss.
+  See `docs/features/identity/identity-provisioning.md`.
 
 External groups can be mapped to `restricted_analyst` via `RoleMapping`. This
 is a valid use case — for example, users who should perform ticket

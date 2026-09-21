@@ -2837,6 +2837,87 @@ or identity audit validation are affected, tests MUST cover:
   route handlers delegate user reads to `user_service` rather than executing
   ORM queries directly
 
+**Manual role mutation service:**
+
+- an effective manual addition and an effective manual removal each create
+  exactly one `_manual` `UserRole` row and one matching `role_added` /
+  `role_removed` event with the documented actor, target, old/new value, and
+  `detail = NULL`
+- duplicate entries within one list and roles present in both lists are
+  normalized before any persistent access; no duplicate row, event, or
+  rejection results
+- adding a role whose `_manual` row already exists and removing a role
+  without a `_manual` row are no-ops that create no event
+- adding a `_manual` role while an external origin already grants the same
+  role inserts the manual row and reports it in `added_roles`; removing that
+  manual row while the external origin remains deletes only the manual row
+  and reports it in `removed_roles`
+- self-removal with a missing manual Admin row is a no-op; self-removal with
+  another Admin origin present succeeds; self-removal of the final Admin
+  origin raises `SelfRoleRemovalError` before any row, event, or Ticket
+  mutation
+- authenticated API actors populate the event actor; CLI/system callers use
+  NULL
+- `role_added` events precede `role_removed` events, each group ordered by
+  wire-format role value
+- an Identity audit failure rolls back every `UserRole` row and event, and a
+  Ticket audit failure rolls back role rows, Identity events, Ticket clears,
+  and Ticket events together
+- effective operations on inactive users behave identically to active users
+
+**Manual role mutation concurrency:**
+
+- independent sessions cover duplicate additions and duplicate removals:
+  exactly one winner performs the mutation and creates one event, and each
+  loser observes the requested state and is a no-op
+- a concurrent add and remove of the same role follows lock order: each
+  transaction classifies its own effective effect from locked-current state,
+  producing one effective mutation and event or two in sequence when the add
+  commits first, with a final state that matches the last committed
+  transaction
+- two concurrent requests touching different roles of the same User serialize
+  on the User lock and both produce their documented rows and events
+- a final manual `vulnerability_analyst` removal concurrent with a manual VA
+  addition produces a stable outcome from lock order, with no duplicate
+  unassignment or audit event
+- final VA-origin removal concurrent with assignment retains the documented
+  outcomes: an assignment that commits first is cleared by the lifecycle
+  batch, while an explicit assignment that commits after the removal observes
+  the ineligible User and raises its existing target error; create,
+  auto-assignment, and embedded assignment skip without an event
+- a manual role addition after a final VA-origin loss does not restore any
+  previously cleared assignment
+
+**Manual role mutation API (`POST /api/v1/admin/users/{user}/roles`):**
+
+- UUID and username resolution return the same result
+- unauthenticated 401, capability 403, missing-user 404, and self-removal 409
+- omitted fields and empty arrays are no-ops; explicit `null`, unknown role
+  values, wrong field/element types, duplicates within one list, and overlap
+  between `add` and `remove` each return 422 `VALIDATION_ERROR`
+- effective and no-op requests both return the complete, deterministically
+  ordered profile with all role origins
+- the commit completes before the response is transmitted; a failure returns
+  no success response and persists nothing
+
+**Manual role mutation CLI (`manage-user update`):**
+
+- each mode (profile, roles, reactivation) succeeds through its single mapped
+  API-equivalent operation
+- cross-mode combinations are rejected with the documented message, exit 1,
+  stderr output, and no mutating session; no-modification invocations print
+  the no-changes message and exit 0
+- role mode deduplicates repeated options and silently cancels overlap,
+  reporting only the effective `added_roles` and `removed_roles`; a manual
+  addition or removal is reported even when an external origin keeps the role
+  effective
+- external users: profile and reactivation modes fail with the documented
+  error, role mode is permitted
+- stdout carries success and no-op messages, stderr carries errors, exit
+  codes are 0/1/2, no partial-success lines are printed, exactly one
+  `asyncio.run()` executes per invocation, and a success commits once while a
+  failure commits zero times
+
 ### API Key Management
 
 When API key persistence, services, authentication, API endpoints, or CLI

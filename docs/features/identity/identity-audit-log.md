@@ -112,9 +112,12 @@ Event types not listed here MUST set `detail` to `NULL`.
 **Notes**:
 
 - `role_added` and `role_removed`: `detail` is `NULL` for a direct manual role
-  assignment by API or CLI. Group-derived assignments always include both
-  keys, whether the mapping is applied by external synchronization or by an
-  authenticated role-mapping create/delete operation. `source` equals
+  assignment or removal by API or CLI, and such an event is created only for
+  an effective `_manual` `UserRole` insertion or deletion (see Service
+  Contract, Manual role mutation events). Group-derived assignments always
+  include both keys, whether the mapping is applied by external
+  synchronization or by an authenticated role-mapping create/delete
+  operation. `source` equals
   `"external_sync"` to identify the external origin of the role, while
   `mapping` identifies the external group/role mapping that caused it.
   As a validation rule, `source` and `mapping` are required together: either
@@ -373,6 +376,22 @@ Session invalidation during deactivation does NOT produce audit events
 produces one audit event per changed field. If a single `update_user()`
 call modifies both `email` and `full_name`, two events are created
 (`email_changed` + `full_name_changed`) in the same transaction.
+
+**Manual role mutation events**: `user_service.update_roles()` creates one
+`role_added` event per effective `_manual` `UserRole` insertion and one
+`role_removed` event per effective `_manual` `UserRole` deletion — never one
+event per normalized request entry. Cancelled, duplicate, already-present,
+missing-row, and concurrent-loser inputs create no event. Events use
+`user_id = acting_user_id` (the authenticated administrator for the API,
+NULL for the CLI), `target_user_id` = the affected user, `old_value` /
+`new_value` carrying only the role name, and `detail = NULL`. Within one
+invocation, all `role_added` events precede all `role_removed` events, and
+each group is ordered by wire-format role value. When the effective deletion
+removes the final `vulnerability_analyst` origin, the derived Ticket
+`assignment` events are created in the same caller-owned transaction; an
+Identity or Ticket audit failure rolls back both domains together (see
+`docs/features/tickets/ticket-audit-log.md`, Cross-Event Ordering, Locking,
+and Rollback).
 
 **External sync coverage**: the `user_created` event type applies to ALL user
 creation regardless of source (manual admin creation AND external sync). On
