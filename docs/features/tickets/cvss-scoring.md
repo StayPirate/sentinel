@@ -697,6 +697,24 @@ and recovery contracts in `system-settings.md`. This specification defines the
 pure results that such workflows consume; it does not redefine settings
 mutation, Redis coordination, task scope, or recovery.
 
+### Read-Only Impact Projection
+
+The default-CVSS impact preview in `system-settings.md` consumes the pure
+resolutions in this specification without becoming a second formula owner:
+
+- It passes the proposed version explicitly as the default-version argument
+  to `resolve_severity_score()` and `resolve_eligibility_score()`. The preview
+  reads the setting once only to report the observed value; it does not read
+  it again per CVE.
+- It passes the complete, unfiltered assessment set for each evaluated CVE.
+  Pre-filtering candidates by provider or version is the same caller bug the
+  resolution contracts forbid.
+- It keeps severity and eligibility separate: the Severity Resolution Cascade
+  winner never feeds eligibility, and the eligibility fallback never
+  populates a severity.
+- It does not create, update, or delete an assessment and does not persist a
+  resolved severity or eligibility result.
+
 ## Required Tests
 
 Implementation must provide the following coverage in addition to the shared
@@ -806,6 +824,12 @@ testing strategy.
   selection, missing/inaccessible anti-enumeration, global Pydantic validation
   responses, and the domain `CVSS_INVALID_VECTOR` response without changing
   external HTTP mappings.
+- Default-CVSS impact-projection parity: with the same persisted assessment
+  set and inputs, the preview's projected severity and eligibility results for
+  one CVE equal the outcomes an effective default-version recalculation
+  applies for that CVE; the projection uses the proposed version for both pure
+  resolutions, reads the observed setting once, evaluates the complete
+  unfiltered set, and leaves assessments and `CVE.severity` unmodified.
 
 ## Data Model
 

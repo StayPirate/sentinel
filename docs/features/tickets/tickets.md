@@ -464,6 +464,26 @@ Analysis, if the "Analyzed" gates are also no longer met).
   changes are evaluated from current state and may move the Ticket in either
   direction. No prior gate result is sticky.
 
+### Read-Only Gate Projection
+
+The default-CVSS impact preview in `system-settings.md` evaluates the
+Analyzed and Resolved predicates above read-only for a hypothetical proposed
+default version. It reuses the exact same predicates, sets, and clause
+semantics, substituting projected automatic Product eligibility for the
+persisted boolean without writing it.
+
+- The projection invokes no mutation function. It does not call
+  `reconcile_ticket_status()`, acquire the Ticket lock, change a status,
+  create a `status_change` event, or register the post-commit Ticket
+  convergence workflow.
+- Only a currently `Resolved` Ticket whose projected highest valid gate
+  result is `Analysis` or `Analyzed` contributes a regression count.
+  Promotions, demotions of `Analysis` or `Analyzed` Tickets, and no-change
+  evaluations are not separate response categories.
+- `Ignored` and `Duplicated` Tickets remain outside gate projection, exactly
+  as they remain outside `reconcile_ticket_status()` and ordinary gate
+  evaluation.
+
 ### Automatic Status Evaluation
 
 Forward and reverse transitions between Analysis, Analyzed, and
@@ -513,6 +533,9 @@ final reconciliation boundary:
 No gate derives its own affectedness, eligibility, delivery, release, exclusion,
 or lifecycle value. A true no-op does not reconcile unless an owning
 date-driven lifecycle workflow explicitly evaluates derived actionability.
+The read-only impact preview is not a reconciliation owner: it consumes the
+same predicates without calling `reconcile_ticket_status()` and without
+acquiring the Ticket lock.
 
 An owning composed workflow establishes all of its current gate inputs before
 the one final call to `reconcile_ticket_status()`. In particular, immediate
