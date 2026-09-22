@@ -467,7 +467,9 @@ I/O and raises no domain exception for valid typed inputs.
 **Important**: the CVSS version used for threshold comparison MUST always
 be resolved from the system-wide default CVSS version configuration —
 never hardcoded. See `docs/features/tickets/cvss-scoring.md` and
-`docs/features/platform/system-settings.md`.
+`docs/features/platform/system-settings.md`. The preview and all-CVE
+recalculation operations that apply a proposed or changed version are defined in
+`docs/features/platform/default-cvss-version-operations.md`.
 
 **Override model**: an authorized acting user with `manage_packages` can
 override eligibility on individual Products by setting
@@ -475,13 +477,13 @@ override eligibility on individual Products by setting
 automatic workflow.
 
 **Read-only projection**: the default-CVSS impact preview in
-`system-settings.md` applies this same ordered evaluator read-only. It passes
-the proposed version to the Eligibility Score Resolution instead of reading
-the setting a second time, evaluates every applicable occurrence regardless
-of exclusion, EOL, or affectedness, and neither persists a projected boolean
-nor changes `eligible` or `is_eligible_override`. Rule 1 remains
-authoritative: an overridden occurrence is preserved and reported as an
-override skip, never as a projected mutation.
+`default-cvss-version-operations.md` applies this same ordered evaluator
+read-only. It passes the proposed version to the Eligibility Score Resolution
+instead of reading the setting a second time, evaluates every applicable
+occurrence regardless of exclusion, EOL, or affectedness, and neither persists
+a projected boolean nor changes `eligible` or `is_eligible_override`. Rule 1
+remains authoritative: an overridden occurrence is preserved and reported as
+an override skip, never as a projected mutation.
 
 ### Axis 3: Delivery and Release Observation
 
@@ -2569,5 +2571,8 @@ Product sync tasks (`sync_smelt_products`, `sync_aimaas_lifecycle`,
   acquisition, persistence, privacy, and authorization
 - `docs/features/packages/maintainer.md` — workflow-agnostic maintainer
   workbench presentation gate
-- `docs/features/platform/system-settings.md` — default CVSS version configuration
+- `docs/features/platform/system-settings.md` — default CVSS version setting
+  declaration, persistence, and mutation
+- `docs/features/platform/default-cvss-version-operations.md` — impact preview
+  and all-CVE recalculation operations
 - `docs/data-model.md` — full database schema

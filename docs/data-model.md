@@ -507,9 +507,10 @@ Represents a Common Vulnerability and Exposure entry.
 `CVE.severity` uses the same unified five-label scale regardless of the
 winning assessment's CVSS version. Assessment persistence recalculates it for
 ticketless CVEs and for CVEs associated with any Ticket status. The
-default-version batch recalculates it for every persisted CVE; Ticket-scoped
+default-version runner recalculates it for every persisted CVE under
+`docs/features/platform/default-cvss-version-operations.md`; Ticket-scoped
 Product and gate effects follow the state matrix in
-`docs/features/platform/system-settings.md`. API wire values are lowercase.
+`docs/features/tickets/ticket-mutations.md`. API wire values are lowercase.
 
 #### CveState Enum
 

@@ -12,7 +12,8 @@ networking.md                   HTTP client (httpx), TLS configuration, SUSE CA
 fetcher-operations.md           Monitoring, API, and CLI diagnostics for fetchers
 audit-trail-infrastructure.md   BaseAuditLog base class, AuditEventMixin
 cli-infrastructure.md           Shared CLI mechanism: entry point, session management, error handling
-system-settings.md              System settings (default CVSS version, etc.)
+system-settings.md              System-setting persistence, bootstrap, API, audit
+default-cvss-version-operations.md  Default-CVSS preview and recalculation operations
 health-endpoints.md             Liveness (/health) and readiness (/ready) probes
 logging.md                       Operational/diagnostic logging model, correlation IDs
 cve-record-parser.md            Shared CVE record parser for all CVE fetchers
@@ -41,8 +42,11 @@ testing-strategy.md             Testing methodology, fixtures, coverage policy
   consume it. It implements the contract declared in `docs/conventions.md`
   (CLI Conventions) and consumes the CLI bootstrap requirement declared in
   `logging.md` (Scope of this pipeline).
-- `system-settings.md` defines the system settings API; settings like
-  `default_cvss_version` are consumed by `tickets/cvss-scoring.md`.
+- `system-settings.md` defines the system-setting mechanism, general API, and
+  setting audit. `default-cvss-version-operations.md` defines the impact
+  preview, all-CVE recalculation runner, manual trigger, observability, and
+  recovery for the `default_cvss_version` setting. Both consume the pure
+  resolutions in `tickets/cvss-scoring.md` without redefining them.
 - `testing-strategy.md` defines the testing methodology, database setup,
   and coverage policy. Its audit trail testing section references
   `audit-trail-infrastructure.md` for the Audit Trail Index.

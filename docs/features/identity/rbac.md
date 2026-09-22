@@ -571,8 +571,8 @@ here with the required authorization level and a link to the owning spec.
 | GET | `/api/v1/admin/settings` | `manage_settings` | [system-settings](../platform/system-settings.md#get-system-settings) |
 | PATCH | `/api/v1/admin/settings` | `manage_settings` | [system-settings](../platform/system-settings.md#update-system-settings) |
 | GET | `/api/v1/admin/settings/audit-log` | `manage_settings` | [system-settings](../platform/system-settings.md#list-settings-audit-events) |
-| GET | `/api/v1/admin/settings/default-cvss-version/impact` | `manage_settings` | [system-settings](../platform/system-settings.md#get-default-cvss-impact-preview) |
-| POST | `/api/v1/admin/settings/default-cvss-version/recalculate` | `manage_settings` | [system-settings](../platform/system-settings.md#trigger-cvss-recalculation) |
+| GET | `/api/v1/admin/settings/default-cvss-version/impact` | `manage_settings` | [default-cvss-version-operations](../platform/default-cvss-version-operations.md#get-default-cvss-impact-preview) |
+| POST | `/api/v1/admin/settings/default-cvss-version/recalculate` | `manage_settings` | [default-cvss-version-operations](../platform/default-cvss-version-operations.md#trigger-cvss-recalculation) |
 | GET | `/api/v1/admin/identity/audit-log` | `manage_users` | [identity-audit-log](identity-audit-log.md#list-identity-audit-events) |
 | GET | `/api/v1/admin/api-keys` | `manage_users` | [api-key-management](api-key-management.md#list-all-api-keys) |
 | POST | `/api/v1/admin/api-keys/{key_id}/revoke` | `manage_users` | [api-key-management](api-key-management.md#revoke-api-key) |

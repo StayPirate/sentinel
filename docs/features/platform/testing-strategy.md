@@ -3301,7 +3301,8 @@ or identity audit validation are affected, tests MUST cover:
 ### Default-CVSS Impact Preview
 
 When the default-CVSS impact preview service or endpoint is implemented, tests
-MUST cover:
+MUST cover the contract in
+`docs/features/platform/default-cvss-version-operations.md`:
 
 **Unit tests:**
 
@@ -3408,7 +3409,8 @@ MUST cover:
 ### All-CVE Recalculation Runner
 
 When the `recalculate_cvss_derived_state` task, its service workflow, or its
-per-CVE contract is implemented or changed, tests MUST cover:
+per-CVE contract is implemented or changed, tests MUST cover the contract in
+`docs/features/platform/default-cvss-version-operations.md`:
 
 **Pagination and population:**
 
@@ -3481,9 +3483,14 @@ per-CVE contract is implemented or changed, tests MUST cover:
 
 - an isolable failure increments `failed` exactly once, emits one sanitized
   `cvss_recalculation_cve_failed` warning, and continues with the next CVE
-- database invalidation, commit failure or ambiguity, rollback failure, session
-  cleanup failure, enumeration failure, and programming errors terminate the
-  whole run and never increment `failed`
+- database invalidation, commit failure or ambiguity, rollback failure,
+  pre-commit session cleanup failure, enumeration failure, and pre-commit
+  programming errors terminate the whole run and never increment `failed`,
+  `changed`, or `unchanged` for the affected unit; derived success and processed
+  counters remain at their pre-unit values
+- a session cleanup or drain failure after successful commit terminates the
+  whole run while preserving the committed unit's classification and its
+  corresponding success and processed accounting
 - cancellation, worker shutdown, `SoftTimeLimitExceeded`, `MemoryError`, and a
   simulated ownership-loss signal propagate unchanged; the test supplies the
   ownership-loss signal at the documented boundary without prescribing its
@@ -3712,4 +3719,6 @@ comprehensive test coverage:
   file, parser, loader, cache, and resolver test contract
 - `docs/features/platform/system-settings.md` — SettingAuditEvent
   contract
+- `docs/features/platform/default-cvss-version-operations.md` — default-CVSS
+  impact preview and all-CVE recalculation contracts
 - `AGENTS.md` — Guardrail 6 (Mandatory testing)

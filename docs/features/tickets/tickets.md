@@ -466,7 +466,8 @@ Analysis, if the "Analyzed" gates are also no longer met).
 
 ### Read-Only Gate Projection
 
-The default-CVSS impact preview in `system-settings.md` evaluates the
+The default-CVSS impact preview in
+`docs/features/platform/default-cvss-version-operations.md` evaluates the
 Analyzed and Resolved predicates above read-only for a hypothetical proposed
 default version. It reuses the exact same predicates, sets, and clause
 semantics, substituting projected effective Product eligibility for the

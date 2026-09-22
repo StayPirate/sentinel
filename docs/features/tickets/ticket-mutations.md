@@ -405,9 +405,8 @@ Its lifecycle is:
 Publication uses the detached primitive values only and performs no database
 read. The database-free publisher boundary, the `submitted` and
 `acceptance_unconfirmed` vocabulary, the automatic and explicit publication
-policies,
-and the allowed logs are defined in `ticket-service.md` (Ticket Convergence).
-The required registration and consumption tests are defined in
+policies, and the allowed logs are defined in `ticket-service.md` (Ticket
+Convergence). The required registration and consumption tests are defined in
 `docs/features/platform/testing-strategy.md` (Ticket Convergence Publication
 Handoff).
 
@@ -1467,8 +1466,10 @@ transaction. Individual candidate skips occur only before this boundary.
   manual-zone exit composition, and Ticket convergence hooks (imports
   `reconcile_ticket_status()`, `recalculate_cvss_chain()`,
   `auto_assign_actor()`, `ensure_ticket_operable()`)
-- `docs/features/platform/system-settings.md` — default CVSS version
-  change triggering batch `recalculate_cvss_chain()` via Celery task
+- `docs/features/platform/system-settings.md` — default CVSS version setting
+  declaration, persistence, and mutation
+- `docs/features/platform/default-cvss-version-operations.md` — default-version
+  preview and all-CVE runner invoking `recalculate_cvss_chain()`
 - `docs/features/platform/fetcher-infrastructure.md` — `catch_up()`
   per-ticket catch-up method contract
 - `docs/features/identity/rbac.md` — canonical Ticket visibility predicate and
