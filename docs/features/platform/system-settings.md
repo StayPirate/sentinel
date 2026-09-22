@@ -50,11 +50,13 @@ publication contract in
    cross-cutting rule for idempotent no-ops)
 3. **Acquire the execution fence**: acquire the feature-specific
    PostgreSQL session-level advisory fence with non-blocking semantics.
-   If the fence is not acquired, nothing is committed, no lease is
-   acquired, no task is published, and the request returns 409
-   `CVSS_RECALC_ALREADY_IN_PROGRESS`. A runner holds this fence for its
-   complete mutating workflow, so a PATCH cannot overtake it even when
-   the Redis lease is absent.
+   Only a definitive lock-not-acquired result means the fence is held:
+   nothing is committed, no lease is acquired, no task is published, and
+   the request returns 409 `CVSS_RECALC_ALREADY_IN_PROGRESS`. A database
+   or session error during acquisition is a whole-run failure and is
+   never reported as `409`. A runner holds this fence for its complete
+   mutating workflow, so a PATCH cannot overtake it even when the Redis
+   lease is absent.
 4. **Acquire the admission lease** while holding the fence: preallocate
    the run's Celery task ID and acquire the Redis lease
    `cvss_recalc_active` with `SET ... NX EX 900`, as defined by the
@@ -62,9 +64,14 @@ publication contract in
    `CVSS_RECALC_ALREADY_IN_PROGRESS`. A `RedisError` or uncertain
    acquisition releases the fence and returns 503 `REDIS_UNAVAILABLE`.
    Nothing is committed in either case.
-5. **Commit** the new setting value and a `SettingAuditEvent` record to
-   the database while still holding the fence. If the commit fails,
-   release the fence, owner-safely release the lease, and return 500.
+5. **Commit** the new setting value and a `SettingAuditEvent` record in
+   the request's caller-owned transaction, while the fence is held. The
+   fence is held across that transaction's completion and released only
+   after it commits; the fence release and the broker publication are its
+   post-commit work. The composition follows `docs/conventions.md`
+   (Caller-Owned Service Transactions, API Transaction Dependency Scope).
+   If the transaction does not commit, release the fence, owner-safely
+   release the lease, and return 500.
 6. **Release the fence** before any broker call.
 7. **Enqueue** the batch recalculation Celery task
    (`recalculate_cvss_derived_state`) with the new version as an explicit
@@ -72,11 +79,14 @@ publication contract in
    outcome under the coordination contract: `submitted` reports a
    scheduled task; an `acceptance_unconfirmed` broker operational error
    retains the lease and must not report that no task can exist; a
-   failure proven before the broker call releases the lease owner-safely.
+   failure proven before the broker call releases the lease owner-safely
+   and reports that no task was scheduled.
 8. Return the PATCH outcome: a `submitted` publication returns 200 OK
-   with the committed setting; an `acceptance_unconfirmed` publication
-   returns 503 `CELERY_UNAVAILABLE` with the setting change and its audit
-   event committed and the admission lease retained (see Error responses).
+   with the committed setting and a scheduled task; a failure proven
+   before the broker call returns 200 OK with the committed setting and no
+   scheduled task; an `acceptance_unconfirmed` publication returns 503
+   `CELERY_UNAVAILABLE` with the setting change and its audit event
+   committed and the admission lease retained (see Error responses).
 
 **Commit-first rationale**: the `SettingAuditEvent` is always the first
 durable record. No ticket mutation can occur without the setting change
@@ -84,10 +94,11 @@ being audited. This prevents phantom mutations (ticket audit events
 without a recorded cause).
 
 The PATCH outcome follows the coordination contract. A `submitted` publication
-returns 200 OK reporting a scheduled task; a no-op change returns 200 OK
-reporting that no batch is needed. An `acceptance_unconfirmed` publication
-returns `503 CELERY_UNAVAILABLE`; the setting change and its `SettingAuditEvent`
-remain committed and the admission lease is retained. The response never reports
+returns 200 OK reporting a scheduled task; a no-op change and a publication
+failure proven before the broker call return 200 OK reporting that no task was
+scheduled. An `acceptance_unconfirmed` publication returns
+`503 CELERY_UNAVAILABLE`; the setting change and its `SettingAuditEvent` remain
+committed and the admission lease is retained. The response never reports
 `recalculation_scheduled = false` meaning that no task can exist while the
 acceptance is unconfirmed or the lease is retained, and it never releases the
 retained lease.
@@ -269,14 +280,17 @@ the response. This is a documented deviation from the
 |--------|------|-----------|
 | 409 | `CVSS_RECALC_ALREADY_IN_PROGRESS` | The execution fence or the admission lease is already held, so the setting change is blocked; nothing is committed |
 | 503 | `REDIS_UNAVAILABLE` | Redis rejected or could not complete lease acquisition; nothing is committed |
-| 503 | `CELERY_UNAVAILABLE` | The broker acceptance of the recalculation task is unconfirmed (setting change and audit event remain committed and the admission lease is retained), or publication was proven to fail before the broker call (the admission lease is released) |
+| 503 | `CELERY_UNAVAILABLE` | The broker acceptance of the recalculation task is unconfirmed; the setting change and audit event remain committed and the admission lease is retained |
 
-A proven pre-publication failure is immediately retryable; an unconfirmed
-acceptance is retryable only after the task is delivered or the retained lease
-expires by its TTL. Both share the `CELERY_UNAVAILABLE` code by design and use
-fixed sanitized detail that never contains broker exception text. A no-op change
-observes only the persisted setting value and reads no coordination state; when
-a lease is retained, the no-op response must not imply that no run can exist.
+A publication failure proven before the broker call is not an error response: it
+returns 200 OK with `recalculation_scheduled: false` and releases the lease
+owner-safely, so it is immediately retryable. An unconfirmed acceptance returns
+`503 CELERY_UNAVAILABLE` with the fixed sanitized detail
+`"Recalculation task publication could not be confirmed"` and is retryable only
+after the task is delivered or the retained lease expires by its TTL. A no-op
+change observes only the persisted setting value and reads no coordination
+state; when a lease is retained, the no-op response must not imply that no run
+can exist.
 
 Response (200 OK): the settings object in the standard
 `{"data": ...}` envelope. The `recalculation_scheduled` boolean field

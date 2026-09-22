@@ -664,9 +664,11 @@ The endpoint uses the same admission and publication coordination as the
 
 1. Read the current `default_cvss_version` through the required-row read
    service.
-2. Acquire the PostgreSQL execution fence with non-blocking semantics. A fence
-   that is not acquired returns `409 CVSS_RECALC_ALREADY_IN_PROGRESS` and
-   performs no lease acquisition and no publication.
+2. Acquire the PostgreSQL execution fence with non-blocking semantics. A
+   definitive lock-not-acquired result returns `409
+   CVSS_RECALC_ALREADY_IN_PROGRESS` and performs no lease acquisition and no
+   publication. A database or session error during acquisition is a whole-run
+   failure and is never reported as `409`.
 3. While holding the fence, preallocate the run's Celery task ID and acquire the
    Redis lease `cvss_recalc_active` with `SET ... NX EX 900`. A held lease
    releases the fence and returns `409 CVSS_RECALC_ALREADY_IN_PROGRESS`; a
@@ -679,7 +681,8 @@ The endpoint uses the same admission and publication coordination as the
    outcome returns `503 CELERY_UNAVAILABLE` with the fixed sanitized detail
    `"Recalculation task publication could not be confirmed"` and retains the
    lease; a failure proven before the publisher is invoked releases the lease
-   owner-safely and returns `503 CELERY_UNAVAILABLE`.
+   owner-safely and returns `503 CELERY_UNAVAILABLE` with the fixed sanitized
+   detail `"Recalculation task could not be submitted"`.
 
 No setting change is made and no `SettingAuditEvent` is created. The endpoint
 never asserts that the broker rejected an unconfirmed task, and it never treats
@@ -707,8 +710,10 @@ the absence of a terminal event as completion.
 | 503 | `REDIS_UNAVAILABLE` | Redis rejected or could not complete lease acquisition; no publication occurred and nothing was committed |
 | 503 | `CELERY_UNAVAILABLE` | Publication was proven to fail before the broker call (lease released), or the broker acceptance is unconfirmed (lease retained) |
 
-The `503 CELERY_UNAVAILABLE` detail is fixed and sanitized for both publication
-conditions; it never contains the broker exception text. An unconfirmed
+The `503 CELERY_UNAVAILABLE` detail is fixed and sanitized and never contains
+the broker exception text. A proven pre-publication failure uses
+`"Recalculation task could not be submitted"`; an unconfirmed acceptance uses
+`"Recalculation task publication could not be confirmed"`. An unconfirmed
 acceptance is not proof of rejection: the task may still be delivered and adopt
 the retained lease, or the lease may expire by its TTL if the task was never
 accepted.
@@ -778,11 +783,11 @@ Complete-Run Coordination below.
 This section owns complete-run admission, run identity, ownership, lease
 renewal, execution fencing, task adoption, ownership loss, Redis-loss behavior,
 publication uncertainty, prevention of a setting change or another owner
-overtaking an admitted run, cleanup, and operator recovery. It preserves every
-validation, stale-delivery, bounded paging, independent-unit, post-commit,
-outcome, restart, and no-persistent-state contract defined above. An
-ownership-loss termination is a whole-run condition and is never an ordinary
-failed unit.
+overtaking an admitted run, cleanup, and the coordination conditions that
+require operator recovery. It preserves every validation, stale-delivery, bounded
+paging, independent-unit, post-commit, outcome, restart, and no-persistent-state
+contract defined above. An ownership-loss termination is a whole-run condition
+and is never an ordinary failed unit.
 
 Coordination introduces no persistent run row, progress resource, resume cursor,
 outbox, result-backend entry, audit event, capability, configuration variable,
@@ -831,8 +836,9 @@ Lease value rules:
   that the runner stopped, and a missing key never proves completion.
 - A stored value that does not parse as `v1:<canonical-uuid>:<target_version>`
   matches no owner: a fresh acquire returns `not_acquired`, and
-  compare-and-renew and compare-and-delete return `mismatch`, until the key
-  expires or an operator removes it owner-safely.
+  compare-and-renew and compare-and-delete return `mismatch`. Because there is
+  no complete expected value to compare against, only TTL expiry recovers a
+  malformed value; an operator cannot remove it owner-safely.
 - The complete token is never written to a log beyond the normal bound
   `celery_task_id` correlation field, is never persisted, and is never returned
   by the API.
@@ -973,11 +979,13 @@ unchanged.
 Steps 3 through 5 are coordination ordering requirements. How the API composes
 them with the framework-owned API transaction dependency, which commits after
 the handler returns, is defined by the Settings API contract in
-`docs/features/platform/system-settings.md`. That composition must keep the
-fence held through the setting and audit commit and release it before any broker
-publication. A fence that cannot be acquired because of a database or session
-error is a whole-run failure, not the `fence_busy` rejection: only a definitive
-"lock not acquired" result produces `409 CVSS_RECALC_ALREADY_IN_PROGRESS`.
+`docs/features/platform/system-settings.md` together with `docs/conventions.md`
+(Caller-Owned Service Transactions, API Transaction Dependency Scope). That
+composition must keep the fence held through the setting and audit commit and
+release it before any broker publication. A fence that cannot be acquired
+because of a database or session error is a whole-run failure, not the
+`fence_busy` rejection: only a definitive "lock not acquired" result produces
+`409 CVSS_RECALC_ALREADY_IN_PROGRESS`.
 
 ### Task Adoption
 
@@ -1083,7 +1091,7 @@ only, never the exception text, matching the publication boundary in
 
 | Outcome | Cause | Coordination state | Manual trigger response |
 |---|---|---|---|
-| proven pre-publication failure | the failure is certain before the publisher is invoked, for example task-ID allocation failure | owner-safe lease release is permitted | `503 CELERY_UNAVAILABLE` |
+| proven pre-publication failure | the failure is proven by its type or phase to occur after lease acquisition and before the publisher is invoked | owner-safe lease release is permitted | `503 CELERY_UNAVAILABLE` |
 | `submitted` | the publication call returned without raising | lease retained; the task adopts on delivery | `202 Accepted` |
 | `acceptance_unconfirmed` | the publication call raised `kombu.exceptions.OperationalError` | lease retained; acceptance is neither confirmed nor denied | `503 CELERY_UNAVAILABLE` with fixed sanitized detail |
 | other publisher exception | the publication call raised any other exception, including serialization, configuration, security, control signals, and programming errors | the exception propagates unchanged and is never `acceptance_unconfirmed`; the lease is retained unless the failure was proven before the publisher was invoked | the API failure mapping for the propagated exception, which is the global `500 INTERNAL_ERROR` unless a more specific mapping is defined |
@@ -1109,7 +1117,11 @@ For the `PATCH` side effect:
 - a no-op change reports that no batch is needed;
 - an `acceptance_unconfirmed` publication returns `503 CELERY_UNAVAILABLE`,
   retains the setting change and its audit event as committed, and retains the
-  admission lease; and
+  admission lease;
+- a publisher exception that is not a broker operational error propagates
+  unchanged; because the setting and its audit event already committed, they
+  remain durable while the response is the API failure mapping for that
+  exception; and
 - the PATCH response must never report `recalculation_scheduled = false` meaning
   that no task can exist while the acceptance is unconfirmed or the lease is
   retained, and it must never release the retained lease or enable unsafe
