@@ -79,7 +79,7 @@ eligibility recalculation use their dedicated system boundaries instead.
 
 | Module | Relationship |
 |--------|-------------|
-| `services/ticket_mutations.py` | `package_service` imports `reconcile_ticket_status()`, `auto_assign_actor()`, and `ensure_ticket_operable()` from `ticket_mutations`. The code dependency remains unidirectional: `package_service` depends on `ticket_mutations`, but `ticket_mutations` does NOT import `package_service`. The CVSS chain may update only system-managed Product eligibility inline through the shared pure evaluator; this narrow exception does not transfer any other package mutation ownership. `reconcile_ticket_status()` registers the post-commit package-tree recovery workflow; the caller does not invoke catch-up directly |
+| `services/ticket_mutations.py` | `package_service` imports `reconcile_ticket_status()`, `auto_assign_actor()`, and `ensure_ticket_operable()` from `ticket_mutations`. The code dependency remains unidirectional: `package_service` depends on `ticket_mutations`, but `ticket_mutations` does NOT import `package_service`. The CVSS chain may update only system-managed Product eligibility inline through the shared pure evaluator; this narrow exception does not transfer any other package mutation ownership. `reconcile_ticket_status()` registers the transaction-local Ticket convergence effect that starts the package-tree recovery workflow; the caller does not invoke catch-up directly |
 | `services/ticket_service.py` | `ticket_service` is the higher-level owner of manual-zone exit workflows and invokes this module's synchronous eligibility boundary with an already locked Ticket. `package_service` does not import or call back into `ticket_service` |
 | `services/cvss.py` | `package_service` delegates score selection to `resolve_eligibility_score()` in `cvss.py` (SUSE-only, 2-step cascade — see Eligibility Score Resolution in `docs/features/tickets/cvss-scoring.md`) and applies the one pure complete eligibility evaluator required by `package-model.md`. `ticket_mutations` reuses that evaluator without importing `package_service` |
 | Ticket visibility | Consumer-facing package queries and mutations receive caller context and apply the one canonical Ticket visibility predicate from `docs/features/identity/rbac.md`. Model-aware ORM construction and database evaluation remain in the Service layer; API dependencies and handlers do not build or pass SQLAlchemy expressions |
@@ -330,7 +330,10 @@ effective status mutation, this function's audit event, and Ticket
 reconciliation. This function remains the sole owner of affectedness mutation
 and `track_status_changed`; the detector does not duplicate the audit event.
 Checkpoint-only outcomes create no Ticket audit event and do not update
-`TicketPackageTrack.updated_at`.
+`TicketPackageTrack.updated_at`. After the caller flushes and commits that
+complete per-track unit and closes its session, the release-detection owner
+drains any Ticket convergence effect under `ticket-service.md` (Publication
+policies); this service never publishes while holding the Ticket lock.
 
 ---
 
@@ -478,7 +481,11 @@ function acquires the Ticket lock. Each `TicketPackageProduct` occurrence uses
 one caller-owned transaction. If concurrent work already set `released_at`, the
 later call is an idempotent no-op and does not replace the value, reconcile the
 Ticket, or create another event. Only an effective NULL-to-timestamp change
-creates `product_released` and invokes Ticket reconciliation.
+creates `product_released` and invokes Ticket reconciliation. After the caller
+flushes and commits that complete occurrence and closes its session, the
+release-detection owner drains any Ticket convergence effect under
+`ticket-service.md` (Publication policies); this service never publishes while
+holding the Ticket lock.
 
 **Exceptions**: declared-path lookup raises `TicketNotFoundError`,
 `PackageNotFoundError`, `TrackNotFoundError`, or `ProductNotFoundError`;
@@ -1311,8 +1318,11 @@ For each final package name, in deterministic order:
    back an earlier committed package.
 4. Only after that package commit and Ticket-lock release, detach and attempt
    any new-IBS-track catch-up registered by `add_package_to_ticket()`. Its
-   existing best-effort publication behavior applies; failure cannot roll back
-   or reclassify the committed package unit.
+   distinct step-9 catch-up contract applies: a catch-up publication failure is
+   logged with sanitized Ticket and operation identity and does not roll back
+   the committed package unit. This is not the Ticket-convergence publisher's
+   exception policy. The daily complete fetcher remains the permanent recovery
+   owner.
 
 There is no unlocked Ticket-status precheck. `add_package_records()` evaluates
 the locked-current Ticket through `active_ticket_only = True`. If it returns
@@ -1440,6 +1450,14 @@ mutations create their ordinary events.
 repeats external requests and catch-up publication by design, while delegated
 database operations remain insert-if-missing or current-state reconciliations.
 
+The workflow can run only as the result of an initial publication attempt
+(`submitted` or `acceptance_unconfirmed` in `ticket-service.md`, Ticket
+Convergence); an unconfirmed attempt may still have delivered the task. The
+workflow does not determine that synchronous outcome: the attempt belongs to
+the registering transaction owner, and the workflow runs later in a worker. A
+terminal wrapper failure or an individual catch-up failure stays distinct from
+the initial publication outcome and from the triggering mutation.
+
 After the status-transition transaction commits, the workflow:
 
 1. Reads every persisted package name for the Ticket, including soft-deleted
@@ -1449,7 +1467,11 @@ After the status-transition transaction commits, the workflow:
    package independently. Existing package, track, Product, and exclusion state
    is preserved; missing descendants and additive maintainer associations may
    be created. A soft-deleted package's association remains ineffective until
-   the package is restored.
+   the package is restored. The owner flushes every package-unit write before
+   commit. A package unit's registered Ticket convergence effects are detached
+   and attempted once after that unit's commit and session close and before the
+   next package, because this workflow is itself an automatic best-effort owner
+   (`ticket-service.md`, Publication policies).
 3. Logs each failed package with the sanitized cause, `ticket_id`, package
    name, and `celery_task_id`, then continues. A failed package does not roll
    back successful siblings.
@@ -1504,10 +1526,12 @@ enumeration is empty and catch-up dispatch still follows the registered roster,
 whose methods apply their own silent missing-Ticket guards. Package-specific
 resolution and validation exceptions are caught and logged as described above;
 manual-zone stale/inapplicable no-ops are not logged as package failures.
-Reliable-enumeration or transaction-completion failures and the accumulated
-catch-up-publication failure escape the async workflow to the bound Celery
+Reliable-enumeration or transaction-completion failures, the accumulated
+catch-up-publication failure, and a non-operational exception escaping a
+per-package convergence drain escape the async workflow to the bound Celery
 wrapper, which retries the same `ticket_id`; after retry exhaustion the wrapper
-logs terminal failure and returns no result. These are the only exceptions that
+logs terminal failure and returns no result. A committed package unit is not
+rolled back by an escaping drain exception. These are the only exceptions that
 leave the workflow boundary.
 
 The bound synchronous Celery wrapper receives `ticket_id: str`, validates and
@@ -1518,10 +1542,14 @@ Every other escaping workflow failure retries the complete workflow three times
 with countdowns of 5, 10, and 20 seconds; exhaustion emits the terminal log.
 The wrapper returns `None` and creates no `FetcherRun`.
 
-The post-commit registration and task/callback composition mechanism is an
-implementation choice. The behavioral ordering and per-package transaction
-isolation are required. See `package-model.md` (IBS Workflow Applicability and
-Convergence) and `fetcher-infrastructure.md` (Per-Ticket Catch-Up).
+The registration container and task/callback composition mechanism are
+implementation choices. The behavioral ordering and per-package transaction
+isolation are required. See `ticket-mutations.md` (Transaction-Local Ticket
+Convergence Registration) for the registration lifecycle, `ticket-service.md`
+(Ticket Convergence) for the database-free publication boundary and the
+`submitted`/`acceptance_unconfirmed` outcome vocabulary; `package-model.md`
+(IBS Workflow Applicability and Convergence); and `fetcher-infrastructure.md`
+(Per-Ticket Catch-Up).
 
 ## Query Operations
 
@@ -2046,7 +2074,10 @@ transitions. The test must cover:
   rollback; no dedicated submission task is used
 - **Ticket convergence workflow**: enumerate included and soft-deleted package
   markers; run SMELT target and maintainership resolution for every package;
-  commit successful packages independently; isolate every package failure;
+  commit successful packages independently; isolate every pre-commit package
+  failure; drain each package unit after commit; absorb only the broker
+  operational publication error; propagate every other drain exception without
+  reclassifying the committed package;
   attempt all registered catch-up publications and aggregate dispatch failures;
   retry the complete workflow at 5/10/20 seconds; log terminal outcomes; accept
   concurrent duplicate workflows; and create no progress row, `FetcherRun`,

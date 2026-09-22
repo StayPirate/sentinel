@@ -360,7 +360,8 @@ propagation dispositions:
 - `immediate`: the current locked CVSS chain applies automatic Product
   eligibility and any required final Ticket reconciliation before returning;
 - `deferred_until_reactivation`: Ticket-owned propagation waits for the
-  Ticket convergence workflow registered by manual-zone exit; or
+  transaction-local Ticket convergence effect registered by manual-zone exit
+  to publish the later workflow; or
 - `none`: the serialized operation made no effective mutation.
 
 The following matrix is authoritative:

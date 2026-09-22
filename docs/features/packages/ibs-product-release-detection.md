@@ -395,7 +395,7 @@ occurrence:
 |---|---|
 | `updated` | This invocation changed `released_at` from NULL to the selected issued time |
 | `no_op` | The occurrence completed without mutation: no match, or concurrent work had already set it |
-| `failed` | Repository reconciliation or the local transaction did not complete |
+| `failed` | Repository reconciliation or a pre-finalization local operation did not complete. Commit exception/ambiguity is a whole-invocation failure, not this outcome |
 
 The result ordering is not significant and is not persisted or exposed by an
 API. Repository results and parsed updateinfo documents are deduplicated by
@@ -410,10 +410,12 @@ track occurrence for each Product occurrence. Together these values form the
 semantic locator passed to the package mutation boundary after I/O. Its concrete
 in-memory representation is an implementation choice.
 
-Known repository, advisory, scope-race, and per-occurrence database failures are
-converted to per-occurrence outcomes so siblings continue. `SoftTimeLimitExceeded`,
-`MemoryError`, failure to enumerate a trustworthy candidate set, and unexpected
-failures that prevent trustworthy outcomes propagate to the workflow owner.
+Known repository, advisory, scope-race, and pre-finalization per-occurrence
+database failures are converted to per-occurrence outcomes so siblings
+continue. Commit exception/ambiguity is excluded from this conversion.
+`SoftTimeLimitExceeded`, `MemoryError`, failure to enumerate a trustworthy
+candidate set, and unexpected failures that prevent trustworthy outcomes
+propagate to the workflow owner.
 
 ### Local mutation and concurrency
 
@@ -427,21 +429,38 @@ caller-owned transaction:
 3. if `released_at` is already non-NULL, return a concurrent/idempotent no-op;
 4. otherwise call `package_service.set_product_released_at()` with the complete
    semantic locator, selected UTC issued time, and advisory ID; and
-5. commit once.
+5. flush the complete occurrence, commit once, and close the session.
 
 `package_service` is the only owner of the mutation, Ticket reconciliation, and
-the atomic `product_released` event. A database, audit, or reconciliation
-failure rolls back the complete occurrence transaction. If the Ticket moved to
-`Ignored` or `Duplicated`, or the occurrence/CVE/workflow identity changed, the
-occurrence returns a successful stale/inapplicable no-op without mutation. An in-flight occurrence selected while
-active may complete after the Ticket becomes `Resolved`, consistent with the
-operable-Ticket factual-update contract.
+the atomic `product_released` event. A pre-finalization database, audit, or
+reconciliation failure rolls back the complete occurrence transaction. If the
+Ticket moved to `Ignored` or `Duplicated`, or the occurrence/CVE/workflow
+identity changed, the occurrence returns a successful stale/inapplicable no-op
+without mutation. An in-flight occurrence selected while active may complete
+after the Ticket becomes `Resolved`, consistent with the operable-Ticket
+factual-update contract.
 
 Concurrent periodic, catch-up, or retry invocations serialize on the Ticket
 lock. Only the first effective NULL-to-timestamp change mutates or emits an
 event; later invocations receive the package service's `no_op` result and
 preserve the first committed timestamp. Irreversibility means that contemporaneous
 snapshots cannot replace the committed value.
+
+After a successful commit, periodic execution records the occurrence's terminal
+and update metrics immediately, before any awaitable post-commit action;
+catch-up has no `FetcherRun` metric. The detector then closes the session,
+detaches, and attempts any Ticket convergence effect registered by
+`set_product_released_at()` before it begins the next occurrence. A
+`kombu.exceptions.OperationalError` follows the shared automatic best-effort
+policy in `ticket-service.md`: it is logged once and absorbed without changing
+the committed occurrence outcome or metrics.
+Every other post-commit publication exception propagates without rollback or
+reclassification. Any commit exception or ambiguous commit outcome publishes
+nothing, records no terminal or update metric for that occurrence, and
+terminates the complete invocation rather than becoming a per-occurrence
+failure. After the database outcome is established, use the explicit complete
+Ticket rerun when the commit succeeded and publication was lost; a detector
+retry cannot republish an occurrence whose `released_at` is already committed.
 
 ## Irreversibility, Audit, and Observability
 
@@ -502,10 +521,14 @@ validation.
    source-match, and per-occurrence transaction contracts above, reusing each
    validated repository result within the invocation.
 4. Commit or roll back each matching occurrence independently. Continue after
-   known per-occurrence failures; never mutate from a partial repository parse.
-5. Record the metrics below from terminal occurrence outcomes and return
-   normally after mixed outcomes. A whole-run failure that prevents trustworthy
-   candidate enumeration or outcomes escapes to `BaseFetcher`.
+   known pre-finalization per-occurrence failures; never mutate from a partial
+   repository parse. A commit exception/ambiguity or non-operational
+   post-commit publication exception terminates the invocation under the local
+   mutation contract above.
+5. Return normally after mixed outcomes. Periodic metrics were recorded per
+   unit immediately after each successful commit or pre-finalization terminal
+   failure. A whole-run failure that prevents trustworthy candidate enumeration
+   or outcomes escapes to `BaseFetcher`.
 
 This state-based complete scan is also first-run, re-enable, and long-gap
 recovery. It has no distinct backfill mode, cursor, temporal window, or
@@ -523,10 +546,12 @@ Catch-up applies the same current/historical repository tiers, complete
 validation, timestamp selection, per-invocation deduplication, and independent
 per-occurrence transactions as periodic execution. Advisories that predate the
 Ticket or Ticket convergence remain discoverable and retain their original issued
-time. Per-occurrence failures are logged and siblings continue. Partial success
-returns normally; when every selected occurrence fails, catch-up propagates
-according to the shared non-CVE `run_catch_up` contract. Concurrent catch-up and
-periodic execution are idempotent under the local mutation rules.
+time. Pre-finalization per-occurrence failures are logged and siblings continue.
+Partial success returns normally; when every selected occurrence fails,
+catch-up propagates according to the shared non-CVE `run_catch_up` contract.
+Commit exception/ambiguity and non-operational post-commit publication failure
+instead terminate the invocation under the local mutation contract. Concurrent
+catch-up and periodic execution are idempotent under the local mutation rules.
 
 The daily fetcher retries every still-unreleased failed occurrence. An
 administrator can accelerate a complete retry with the existing generic manual
@@ -556,7 +581,7 @@ occurrences into one unit.
 |---|---|
 | Selected | Each distinct unreleased Product occurrence below an IBS track of an active Ticket with a CVE, once. |
 | Succeeded | `record_succeeded()` once for every terminal `updated` or `no_op` outcome. Successful no-ops include a complete valid no-match, an already-released concurrent race, duplicate evidence that changes no result, repeated idempotent work, and a stale/inapplicable scope race accepted by the local mutation contract. |
-| Failed | `record_failed()` once for every terminal `failed` occurrence whose repository reconciliation or local transaction did not complete. One shared repository failure counts each dependent selected occurrence at most once. |
+| Failed | `record_failed()` once for every terminal `failed` occurrence whose repository reconciliation or pre-finalization local operation did not complete. One shared repository failure counts each dependent selected occurrence at most once. Commit exception/ambiguity produces no terminal metric. |
 | Created | Never; the detector creates no domain record. |
 | Updated | `record_updated()` once only for an occurrence effectively changed from `released_at = NULL` to the selected issued time by this invocation. |
 | Excluded before selection | Already-released occurrences, occurrences below non-IBS tracks, occurrences below inactive Tickets, and occurrences whose Ticket has no CVE do not enter the work scope. VA exclusion, Product lifecycle, EOL, eligibility, track affectedness, delivery, and actionability never exclude an otherwise selected occurrence. |
@@ -595,8 +620,12 @@ Future implementation tests must cover:
   binary-entry exclusion, malformed attributes, path traversal, and exact
   case-sensitive package matching;
 - one independent transaction per occurrence, mutation/audit/reconciliation
-  atomicity, rollback, active-to-inactive races, and concurrent first-write
-  idempotency;
+  atomicity, rollback for pre-finalization failures, active-to-inactive races,
+  and concurrent first-write idempotency;
+- flush before commit; commit exception/ambiguity as a whole-invocation failure
+  with no terminal/effect metric for that occurrence; and post-commit
+  convergence publication with broker-operational absorption and
+  non-operational propagation without reclassification;
 - per-invocation repository reuse without cross-run cache, cursor, Redis, or
   filesystem state;
 - periodic and catch-up partial/all-failed outcomes, exact metrics and inherited

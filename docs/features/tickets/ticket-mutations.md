@@ -171,8 +171,9 @@ authoritative common finalization. Each public exit workflow prepares the
 calls this module's `reconcile_ticket_status()` exactly once as its final
 database mutation, with the original manual-zone status as `previous_status`
 and the same UTC `evaluation_date`. The primitive records the real transition
-and registers the post-commit Ticket convergence workflow for every successful
-manual-zone exit, including when the final evaluated status is `Resolved`.
+and registers one transaction-local Ticket convergence effect for every
+successful manual-zone exit, including when the final evaluated status is
+`Resolved`.
 
 ## `reconcile_ticket_status()`
 
@@ -192,8 +193,9 @@ current reality (gate conditions + data freshness).
 - May null `assignee_id` and create an `assignment` audit event if the
   current assignee is inactive or no longer holds any
   `vulnerability_analyst` origin (assignment-eligibility sanitation)
-- May register the package-tree and fetcher catch-up workflow for post-commit
-  execution after any manual-zone exit or a `Resolved` gate regression
+- May register one transaction-local Ticket convergence effect after any
+  manual-zone exit or a `Resolved` gate regression, whose consumption
+  publishes the package-tree and fetcher catch-up workflow
 
 Callers must be aware that invoking this function may produce mutations
 beyond status changes.
@@ -246,11 +248,11 @@ beyond status changes.
      variable at the start of the function (regression cases)
     - Resolve `new_status`: the status determined by step 2 (regardless of
       whether step 4 produced a change — see note below)
-   - If `effective_previous ∈ {Ignored, Duplicated}`, register one post-commit
-     Ticket convergence workflow for every successful exit, whether
-     `new_status` is `Analysis`, `Analyzed`, or `Resolved`.
+   - If `effective_previous ∈ {Ignored, Duplicated}`, register one
+     transaction-local Ticket convergence effect for every successful exit,
+     whether `new_status` is `Analysis`, `Analyzed`, or `Resolved`.
    - If `effective_previous = Resolved` and `new_status ∈ {Analysis,
-     Analyzed}`, register the same workflow. A no-change `Resolved` evaluation
+     Analyzed}`, register the same effect. A no-change `Resolved` evaluation
      does not register it.
    - For `Ignored` or `Duplicated`, the owning manual-zone exit MUST already
      have synchronously converged automatic Product eligibility before this
@@ -261,25 +263,31 @@ beyond status changes.
      `package_service`; after those per-package transactions finish, it
      attempts to enqueue `catch_up()` for every registered fetcher via
      `get_catch_up_fetchers()`. Registration does not introduce a
-     `ticket_mutations` → `package_service` import: the post-commit workflow
-     owner performs that orchestration. The workflow and failure isolation
-     contract are defined in `package-service.md` (`run_ticket_convergence()`
-     workflow) and `package-model.md` (Ticket Convergence).
-   - Publication by this automatically registered post-commit effect is
-     best-effort. A publication failure logs one sanitized structured ERROR and
-     does not replace the already-committed mutation's success response with
-     `CELERY_UNAVAILABLE`. Recovery uses the complete explicit rerun endpoint.
+     `ticket_mutations` → `package_service` import: the Ticket convergence
+     workflow owner performs that orchestration. The workflow and failure
+     isolation contract are defined in `package-service.md`
+     (`run_ticket_convergence()` workflow) and `package-model.md` (Ticket
+     Convergence).
+   - The automatic API mutation path treats only a broker operational initial-
+     publication failure as best effort: it retains the committed mutation's
+     success response, emits exactly one sanitized Ticket-scoped ERROR, and
+     never returns `CELERY_UNAVAILABLE`. Other publication exceptions propagate
+     unchanged without reclassifying committed work. Recovery uses the complete
+     explicit rerun endpoint. See the registration lifecycle below and
+     `ticket-service.md` (Ticket Convergence) for the publisher boundary and
+     publication policies.
    - **Note**: step 5 is independent of step 4. In the
       `ticket_service._complete_manual_zone_exit()` case, the public workflow
       has already set the status
      before invoking reconcile; step 4 sees no change but step 5
      correctly detects the manual-zone exit via `previous_status`.
-     Post-commit workflow registration follows the preserved source status;
+     Registration follows the preserved source status;
      it does not re-check Ticket status after registration.
    - **Registration deduplication**: recursive reconciliation within the same
-     caller-owned transaction registers at most one Ticket convergence
-     workflow for the Ticket. Duplicate workflows across separate transactions
-     remain safe because package resolution and all catch-ups are idempotent.
+     caller-owned transaction registers at most one Ticket convergence effect
+     for the Ticket (see the registration lifecycle below). Duplicate
+     workflows across separate transactions remain safe because package
+     resolution and all catch-ups are idempotent.
    - `reconcile_ticket_status()` never acquires or re-acquires a CVE lock and
      never starts another eligibility chain. CVSS assessment mutations already
      maintain `CVE.severity`; package-domain manual-zone exit owns the special
@@ -358,6 +366,50 @@ workflow. Package exclusion and restore operations call it once after their
 single direct mutation and reuse that supplied date for result and response
 projection; derived actionability never creates an intermediate package-tree
 mutation chain.
+
+### Transaction-Local Ticket Convergence Registration
+
+Step 5 declares one future publication effect in the caller-owned transaction.
+Its lifecycle is:
+
+1. **Registration**: append one immutable semantic effect to a registry
+   attached to the caller-owned session and transaction. The effect carries
+   only the Ticket's internal UUID — the primitive identity the publication
+   boundary needs. Registration performs no database query, no network, Redis,
+   or Celery I/O, allocates no task ID, creates no `TicketAuditEvent`, and
+   publishes nothing.
+2. **Deduplication and order**: at most one effect exists per Ticket in one
+   transaction, and a repeated `reconcile_ticket_status()` invocation for the
+   same Ticket does not add a second one. Effects for different Tickets are
+   consumed in first-registration order. The registry is bound to the
+   transaction and not merely to the session object, even when it is attached
+   to a reusable `AsyncSession`: a new transaction inherits no pending effect
+   from an earlier committed, rolled-back, or failed transaction, whether or
+   not that transaction's owner drained it.
+3. **Discard**: rollback, a definitely failed commit, and pre-commit
+   cancellation discard the transaction's effects without publication. A commit
+   exception with an ambiguous database outcome also performs no publication
+   and terminates the owner workflow; it is never treated as a committed unit
+   eligible for a later attempt from that session.
+4. **Detach and consume**: after the caller's commit succeeds, the transaction
+   owner atomically detaches the complete effect sequence before the first
+   publication attempt. A detached effect is consumed exactly once even when
+   its attempt fails, so a reused session cannot replay it.
+5. **Interruption gap**: a process interruption between commit and the first
+   attempt can lose that publication. The gap is accepted; recovery is the
+   explicit complete rerun in
+   `tickets.md` ([Rerun Ticket Convergence](tickets.md#rerun-ticket-convergence)).
+   No outbox, persisted dispatch record, Celery result backend, Redis key,
+   audit event, or progress resource is introduced.
+
+Publication uses the detached primitive values only and performs no database
+read. The database-free publisher boundary, the `submitted` and
+`acceptance_unconfirmed` vocabulary, the automatic and explicit publication
+policies,
+and the allowed logs are defined in `ticket-service.md` (Ticket Convergence).
+The required registration and consumption tests are defined in
+`docs/features/platform/testing-strategy.md` (Ticket Convergence Publication
+Handoff).
 
 ## Concurrency Control
 
@@ -1038,11 +1090,12 @@ convergence caller.
      mode once for every persisted CVE. A ticketless CVE receives severity
       only. `New` receives automatic eligibility but no gate reconciliation.
       `Analysis`, `Analyzed`, and `Resolved` receive automatic eligibility and,
-      when a gate input changed, this function performs exactly one final
-      reconciliation after all severity and Product events. A `Resolved`
-      regression registers the normal post-commit package-tree and fetcher
-      catch-up. `Ignored` and `Duplicated` receive only CVE severity and its
-      direct event when changed. No state assigns or exits the manual zone.
+     when a gate input changed, this function performs exactly one final
+     reconciliation after all severity and Product events. A `Resolved`
+     regression registers the normal transaction-local Ticket convergence
+     effect for the package-tree and fetcher catch-up. `Ignored` and
+     `Duplicated` receive only CVE severity and its
+     direct event when changed. No state assigns or exits the manual zone.
 6. For an applicable Product phase, reload current Product thresholds,
    lifecycle dates, overrides, and booleans under the roots; use the shared pure
    evaluator; create `reason = cvss` events in ascending occurrence-ID order;

@@ -476,8 +476,8 @@ manual override applies, and the preserved persisted `eligible` value where
 
 - The projection invokes no mutation function. It does not call
   `reconcile_ticket_status()`, acquire the Ticket lock, change a status,
-  create a `status_change` event, or register the post-commit Ticket
-  convergence workflow.
+  create a `status_change` event, or register a transaction-local Ticket
+  convergence effect.
 - Only a currently `Resolved` Ticket whose projected highest valid gate
   result is `Analysis` or `Analyzed` contributes a regression count.
   Promotions, demotions of `Analysis` or `Analyzed` Tickets, and no-change
@@ -807,14 +807,16 @@ Both transitions go through `ticket_service.reopen_from_ignored()`:
    PostgreSQL inputs, then calls `reconcile_ticket_status` once; it may promote to
    `Analyzed` or `Resolved` if gate conditions are already satisfied
 
-Every successful manual-zone exit registers the post-commit Ticket convergence
-workflow, including an exit whose immediate gate result is `Resolved`. If the
-final result is `Analysis` or `Analyzed`, reconciliation clears an inactive or
-non-VA assignee; if it is `Resolved`, the existing assignee is retained even
-when that user is ineligible. Failure to publish this automatically registered workflow is
-best-effort: it is logged after commit and does not change the successful
-manual-zone-exit response. An operator can recover it through the complete
-rerun action below.
+Every successful manual-zone exit registers one transaction-local Ticket
+convergence effect, including an exit whose immediate gate result is `Resolved`.
+If the final result is `Analysis` or `Analyzed`, reconciliation clears an
+inactive or non-VA assignee; if it is `Resolved`, the existing assignee is
+retained even when that user is ineligible. A broker operational error while
+publishing this automatically registered effect is best-effort: it is logged
+after commit with exactly one sanitized event and does not change the successful
+manual-zone-exit response. Other publication exceptions follow the automatic
+owner's failure boundary. An operator can recover an unconfirmed publication
+through the complete rerun action below.
 
 See [ticket-service.md](ticket-service.md#reopen_from_ignored) for
 the full function contract.
@@ -1724,8 +1726,9 @@ POST /api/v1/tickets/{ticket_id}/rerun-reactivation
 ```
 
 Reruns the complete Ticket convergence workflow from its beginning. This is an
-asynchronous recovery action for a terminal convergence-wrapper failure or an
-individual catch-up failure; it does not directly change Ticket status.
+asynchronous recovery action for a terminal convergence-wrapper failure, an
+individual catch-up failure, or a lost or unconfirmed initial publication; it
+does not directly change Ticket status.
 
 **`Capability: triage_ticket OR manage_fetchers`**
 
@@ -1755,18 +1758,29 @@ The response uses `TicketConvergenceDispatchResponse`; see
 2. Require at least one of `triage_ticket` or `manage_fetchers`, without loading
    the Ticket. A caller lacking both receives the generic 403 before Ticket
    accessibility, regardless of Ticket existence.
-3. Under `FOR UPDATE`, resolve the locked-current Ticket and its accessibility.
+3. Under `FOR UPDATE` in one short service-owned transaction, resolve the
+   locked-current Ticket and its accessibility.
    A missing or invisible Ticket returns `404 TICKET_NOT_FOUND`; either
    capability alone never grants visibility.
 4. From that same locked state, require status
    `Analysis`, `Analyzed`, or `Resolved`. `New`, `Ignored`, and `Duplicated`
    raise `InvalidTransitionError` and return
-   `409 TICKET_INVALID_TRANSITION`. Release the transaction and lock before
-   broker I/O.
-5. Publish one root Ticket convergence workflow task and return its ID with
-   202. If initial publication raises, return `503 CELERY_UNAVAILABLE` with no
-   durable run or progress record. An ambiguous broker acknowledgement may
-   still have accepted the task; a later request may therefore duplicate work.
+   `409 TICKET_INVALID_TRANSITION`. The operation commits and closes that
+   transaction, releasing the lock, before any broker I/O.
+5. Perform one initial publication attempt for the root Ticket convergence task
+   and return its ID with 202. A publication attempt that raises the broker
+   operational error returns `503 CELERY_UNAVAILABLE` before the response is
+   transmitted, with fixed detail
+   `"Ticket convergence could not be dispatched to the task broker"` and no
+   durable run or progress record. The response never includes broker exception
+   text, host, port, URL, credentials, or traceback. An ambiguous broker
+   acknowledgement may still have accepted the task; a later request may
+   therefore duplicate work.
+
+The operation registers no post-commit callback and does not depend on an
+exception raised during the API transaction dependency's teardown or callback
+loop; its failure mapping comes from the requested dispatch itself. Publication
+terms follow `ticket-service.md` (Ticket Convergence, Publication vocabulary).
 
 This endpoint does not call `ensure_ticket_operable()` and never returns
 `TICKET_NOT_MUTABLE`. Repeated and concurrent accepted requests are allowed;
@@ -1790,7 +1804,7 @@ defined.
 | Status | Code | Condition |
 |---|---|---|
 | 409 | `TICKET_INVALID_TRANSITION` | Locked-current status is `New`, `Ignored`, or `Duplicated` |
-| 503 | `CELERY_UNAVAILABLE` | Initial publication of the root Ticket convergence task failed |
+| 503 | `CELERY_UNAVAILABLE` | Initial publication raised the broker operational error; the response uses fixed sanitized detail |
 
 ### Set Confidentiality
 

@@ -145,7 +145,7 @@ one result:
 |---|---|
 | `updated` | This invocation transitioned the track to `FIXED` and committed its checkpoint |
 | `no_op` | No domain update was required: current source was already examined, a valid examination produced no transition, the track had become final, or concurrent work had already accepted the same state |
-| `failed` | External validation or the per-track local transaction did not complete; the prior checkpoint was retained |
+| `failed` | External validation or a pre-finalization per-track local operation did not complete; the prior checkpoint was retained. Commit exception/ambiguity is a whole-invocation failure, not this outcome |
 
 The result sequence preserves no input ordering guarantee. Callers use it only
 to determine per-track metrics and whether all event-selected outcomes
@@ -153,8 +153,9 @@ completed; it is not persisted or exposed through an API.
 
 This is a system-only idempotent operation. It creates no audit event directly;
 an effective status transition delegates its one event to `package_service`.
-Known source, parser, history, scope-race, concurrency, and local-transaction
-failures are converted to per-track outcomes so siblings continue.
+Known source, parser, history, scope-race, concurrency, and pre-finalization
+local-transaction failures are converted to per-track outcomes so siblings
+continue. Commit exception/ambiguity is excluded from this conversion.
 `SoftTimeLimitExceeded`, `MemoryError`, a database failure that prevents
 reliable candidate/scope enumeration, and an unexpected failure that prevents
 the boundary from assigning trustworthy per-track outcomes propagate to the
@@ -201,7 +202,9 @@ validation or outcome semantics.
    Other HTTP 4xx responses are failures and do not trigger fallback.
 8. Apply [Per-Track Local Outcome](#per-track-local-outcome) independently to
    every dependent track. Commit or roll back each track as its own transaction
-   unit. A failed track does not roll back a successful sibling.
+   unit. After each successful commit, record its periodic terminal and update
+   metrics before the post-commit convergence drain. A failed track does not
+   roll back a successful sibling.
 9. Return normally after mixed success and failure so `BaseFetcher` finalizes
    the run from the recorded metrics. An exception that prevents reliable
    candidate enumeration or all further processing escapes and produces the
@@ -253,7 +256,8 @@ For one track, the local transaction then:
 5. when no qualifying evidence exists, or the current track status is already
    final, leaves affectedness unchanged; and
 6. creates or advances the checkpoint to the examined current expanded
-   `srcmd5`, then commits once.
+   `srcmd5`, flushes the complete local unit, then commits once and closes the
+   session.
 
 The status mutation, its service-owned `track_status_changed` event, Ticket
 status reconciliation, and checkpoint advancement are atomic. If any one of
@@ -276,6 +280,18 @@ reconciling, or creating an audit event. This prevents old evidence from
 overriding a later VA decision if the track subsequently returns to a non-final
 status. A `rejected` result is a local workflow failure and does not advance the
 checkpoint; this is defensive, because this detector always requests `FIXED`.
+
+After a successful commit, periodic execution records the track's terminal and
+update metrics immediately, before any awaitable post-commit action; catch-up
+has no `FetcherRun` metric. The detector then closes the session, detaches, and
+attempts any Ticket convergence effect registered by `set_track_status()`
+before it begins the next track. A `kombu.exceptions.OperationalError` follows
+the shared automatic best-effort policy in `ticket-service.md`: it is logged
+once and absorbed without changing the committed track outcome or metrics.
+Every other post-commit publication exception propagates without rollback or
+reclassification. Any commit exception or ambiguous commit outcome publishes
+nothing, records no terminal or update metric for that track, and terminates the
+complete invocation rather than entering the per-track failure path.
 
 ### Checkpoint Concurrency
 
@@ -378,10 +394,13 @@ and invokes the same per-track checkpoint algorithm:
   and
 - each track is an independent transaction unit.
 
-Per-item failures are logged and processing continues. Partial success returns
-normally; when every selected track fails, `catch_up()` propagates according to
-the shared `run_catch_up` contract. Duplicate catch-up and concurrent periodic
-or event processing are safe under the checkpoint concurrency rules.
+Pre-finalization per-item failures are logged and processing continues. Partial
+success returns normally; when every selected track fails, `catch_up()`
+propagates according to the shared `run_catch_up` contract. Commit
+exception/ambiguity and non-operational post-commit publication failure instead
+terminate the invocation under the per-track local outcome contract. Duplicate
+catch-up and concurrent periodic or event processing are safe under the
+checkpoint concurrency rules.
 
 The next scheduled fetcher run retries failed eligible tracks. An administrator
 can accelerate a full retry through the existing generic manual fetcher trigger.
@@ -414,6 +433,9 @@ HTTP status codes, and bounded reason categories may be logged.
 | Concurrent checkpoint predecessor changed | Already-complete no-op, re-evaluate, or fail without writing stale state | Current or later invocation |
 | Status becomes final during I/O | Leave status unchanged; accept examined checkpoint | None |
 | No matching CVE evidence | Leave status unchanged; accept examined checkpoint | None |
+| Commit exception or ambiguous commit outcome | Abort the invocation; do not classify the track as failed or attempt convergence publication | Establish the database outcome; use the explicit complete Ticket rerun if the commit succeeded and publication was lost |
+| Broker operational convergence-publication failure after commit | Preserve the committed outcome and metrics; log once and continue | Explicit complete Ticket rerun if needed |
+| Other convergence-publication exception after commit | Preserve the committed outcome and metrics; propagate without rollback or reclassification | Explicit complete Ticket rerun for the lost publication |
 
 One external failure shared by multiple tracks is logged at the request level
 and counts each affected track once, not once per parsing stage or retry attempt.
@@ -470,7 +492,7 @@ Grouping IBS requests never changes that per-track accounting unit.
 |---|---|
 | Selected | Each distinct existing IBS track in `ANALYSIS` or `AFFECTED` under an active Ticket with a CVE, once. |
 | Succeeded | `record_succeeded()` once for every terminal `updated` or `no_op` outcome. Successful no-ops include unchanged source, valid no-match, final-status race, checkpoint already advanced, repeated idempotent work, unavailable-history fallback success, and only the stale race where the Ticket became `Ignored` or `Duplicated`. |
-| Failed | `record_failed()` once for every terminal `failed` outcome. This includes a selected track that disappeared, changed expected Ticket/package scope, or lost its Ticket CVE association; its checkpoint does not advance. A shared request failure counts every dependent selected track once. |
+| Failed | `record_failed()` once for every terminal `failed` outcome before finalization. This includes a selected track that disappeared, changed expected Ticket/package scope, or lost its Ticket CVE association; its checkpoint does not advance. A shared request failure counts every dependent selected track once. Commit exception/ambiguity produces no terminal metric. |
 | Created | Never; checkpoint creation is operational reconciliation state and the detector creates no domain record represented by this effect metric. |
 | Updated | `record_updated()` once only for a selected track effectively transitioned to `FIXED` by this invocation. Checkpoint-only progress and every no-op have no update effect. |
 | Excluded before selection | Non-IBS tracks, tracks already in a final affectedness status, tracks without a Ticket CVE, and tracks below inactive Tickets do not enter the scheduled work scope. VA exclusion, Product lifecycle, EOL, eligibility, delivery, and actionability never exclude an otherwise selected track. |
@@ -513,7 +535,11 @@ Future implementation tests must cover:
 - preservation of a VA `FIXED` to `AFFECTED`/`ANALYSIS` correction until new
   source evidence;
 - one atomic status/audit/Ticket-reconciliation/checkpoint transaction and
-  rollback when any local step fails;
+  rollback when any pre-finalization local step fails;
+- flush before commit; commit exception/ambiguity as a whole-invocation failure
+  with no terminal/effect metric for that track; and post-commit convergence
+  publication with broker-operational absorption and non-operational
+  propagation without reclassification;
 - independent sibling success, exact metrics, and inherited run statuses;
 - unchanged, no-match, final-status, checkpoint-already-advanced,
   `Ignored`/`Duplicated`, disappeared-track, changed-scope, and lost-CVE
