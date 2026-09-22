@@ -3472,8 +3472,9 @@ per-CVE contract is implemented or changed, tests MUST cover the contract in
 - lease expiry between two units blocks the next unit and terminates
   `ownership_lost`
 - a Redis restart during an active unit terminates the delivery safely
-- loss of the fenced connection terminates without reconnect or further
-  mutation
+- loss of the fenced connection is detected before the next mutation and
+  terminates as a whole-run `failed` outcome without reconnect, without opening
+  a unit session on a different connection, and without further mutation
 - no Redis or broker I/O executes under a CVE or Ticket row lock
 - a setting `PATCH` is blocked by an active runner protected by the fence even
   when Redis is empty

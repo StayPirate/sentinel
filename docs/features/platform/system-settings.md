@@ -13,8 +13,10 @@ capability.
 
 ## Service Module
 
-System-setting persistence, bootstrap, reads, audit logging, and mutations are
-implemented in `backend/app/services/settings.py`.
+System-setting persistence, bootstrap, reads, and audit logging are implemented
+in `backend/app/services/settings.py`. Setting mutation and recalculation
+publication are specified here and in
+`docs/features/platform/default-cvss-version-operations.md`.
 
 ## Settings
 
@@ -71,18 +73,24 @@ publication contract in
    scheduled task; an `acceptance_unconfirmed` broker operational error
    retains the lease and must not report that no task can exist; a
    failure proven before the broker call releases the lease owner-safely.
-8. Return 200 OK.
+8. Return the PATCH outcome: a `submitted` publication returns 200 OK
+   with the committed setting; an `acceptance_unconfirmed` publication
+   returns 503 `CELERY_UNAVAILABLE` with the setting change and its audit
+   event committed and the admission lease retained (see Error responses).
 
 **Commit-first rationale**: the `SettingAuditEvent` is always the first
 durable record. No ticket mutation can occur without the setting change
 being audited. This prevents phantom mutations (ticket audit events
 without a recorded cause).
 
-The final PATCH response schema and the final classification of
-`recalculation_scheduled` are owned by work item #569. #568 constrains them:
-an unconfirmed publication is never reported as `recalculation_scheduled =
-false` meaning that no task can exist, and the retained lease is never
-released on an unconfirmed publication.
+The PATCH outcome follows the coordination contract. A `submitted` publication
+returns 200 OK reporting a scheduled task; a no-op change returns 200 OK
+reporting that no batch is needed. An `acceptance_unconfirmed` publication
+returns `503 CELERY_UNAVAILABLE`; the setting change and its `SettingAuditEvent`
+remain committed and the admission lease is retained. The response never reports
+`recalculation_scheduled = false` meaning that no task can exist while the
+acceptance is unconfirmed or the lease is retained, and it never releases the
+retained lease.
 
 The runner, manual recalculation endpoint, impact-preview service and endpoint,
 observability, restart and recovery behavior, absence of persistent run state,
@@ -261,7 +269,14 @@ the response. This is a documented deviation from the
 |--------|------|-----------|
 | 409 | `CVSS_RECALC_ALREADY_IN_PROGRESS` | The execution fence or the admission lease is already held, so the setting change is blocked; nothing is committed |
 | 503 | `REDIS_UNAVAILABLE` | Redis rejected or could not complete lease acquisition; nothing is committed |
-| 503 | `CELERY_UNAVAILABLE` | The broker acceptance of the recalculation task is unconfirmed; the setting change and its audit event remain committed and the admission lease is retained |
+| 503 | `CELERY_UNAVAILABLE` | The broker acceptance of the recalculation task is unconfirmed (setting change and audit event remain committed and the admission lease is retained), or publication was proven to fail before the broker call (the admission lease is released) |
+
+A proven pre-publication failure is immediately retryable; an unconfirmed
+acceptance is retryable only after the task is delivered or the retained lease
+expires by its TTL. Both share the `CELERY_UNAVAILABLE` code by design and use
+fixed sanitized detail that never contains broker exception text. A no-op change
+observes only the persisted setting value and reads no coordination state; when
+a lease is retained, the no-op response must not imply that no run can exist.
 
 Response (200 OK): the settings object in the standard
 `{"data": ...}` envelope. The `recalculation_scheduled` boolean field
@@ -276,12 +291,12 @@ is **always present** in the response:
 }
 ```
 
-The final classification of `recalculation_scheduled` and the complete response
-schema are owned by work item #569. #568 fixes only these constraints: a no-op
-change reports `false` because no batch is needed; an unconfirmed publication is
-never reported as `false` meaning that no task can exist, because an accepted
-task may still run and adopt the retained lease; and the retained lease is never
-released on an unconfirmed publication. The admin recovery surface remains
+It is `true` only when
+the value changed and the publication returned `submitted`. It is `false` for a
+no-op change and for a publication failure proven before the broker call. It is
+never used to mean that no task can exist while the acceptance is unconfirmed;
+that outcome is the `503 CELERY_UNAVAILABLE` response above. The admin recovery
+surface remains
 `POST /api/v1/admin/settings/default-cvss-version/recalculate`.
 
 **`Capability: manage_settings`**

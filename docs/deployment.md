@@ -1574,9 +1574,11 @@ Operator procedure:
    closes its connection and releases the fence automatically.
 3. **Wait for the lease to expire, or remove it owner-safely only.** The lease
    has a 900-second TTL; waiting for TTL expiry is always sufficient. If an
-   operator removes it earlier, they MUST do so owner-safely — never with an
-   unconditional `DEL cvss_recalc_active`, which could remove a newer owner's
-   record.
+   operator removes it earlier, they MUST do so owner-safely by comparing the
+   complete expected value — never with an unconditional
+   `DEL cvss_recalc_active`, which could remove a newer owner's record. When
+   the stored value is unknown or malformed, there is no owner to compare
+   against, so the only supported recovery is TTL expiry.
 4. **Repeat the trigger.** Once the fence is released and the lease is absent or
    expired, the manual trigger admits a new run.
 5. **The run restarts from the beginning.** Committed units reclassify

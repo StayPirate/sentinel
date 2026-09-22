@@ -24,8 +24,8 @@ This specification owns:
 - the manual all-CVE recalculation endpoint;
 - complete-run coordination: run identity, admission, the Redis ownership
   lease, task adoption, the PostgreSQL execution fence, ownership loss,
-  publication uncertainty, lease renewal, owner-safe cleanup, and operator
-  recovery;
+  publication uncertainty, lease renewal, owner-safe cleanup, and the
+  coordination conditions that require operator recovery;
 - runner logging, retry, rerun, restart, and recovery behavior; and
 - the absence of persistent run and progress state.
 
@@ -676,9 +676,10 @@ The endpoint uses the same admission and publication coordination as the
 5. Enqueue `recalculate_cvss_derived_state(target_version)` with the preallocated
    task ID, then classify the publication outcome under Publication Uncertainty.
    A `submitted` outcome returns `202 Accepted`; an `acceptance_unconfirmed`
-   outcome returns `503 CELERY_UNAVAILABLE` with fixed sanitized detail and
-   retains the lease; a failure proven before the publisher is invoked releases
-   the lease owner-safely and returns `503 CELERY_UNAVAILABLE`.
+   outcome returns `503 CELERY_UNAVAILABLE` with the fixed sanitized detail
+   `"Recalculation task publication could not be confirmed"` and retains the
+   lease; a failure proven before the publisher is invoked releases the lease
+   owner-safely and returns `503 CELERY_UNAVAILABLE`.
 
 No setting change is made and no `SettingAuditEvent` is created. The endpoint
 never asserts that the broker rejected an unconfirmed task, and it never treats
@@ -762,7 +763,8 @@ The preview and runner introduce:
 - no generic batch, backfill, or reusable runner framework;
 - no new audit event type; the unit's ordinary domain audit events remain the
   only durable audit records;
-- no persistent coordination record: the completion lease is a TTL-bounded
+- no persistent coordination record: the admission and ownership lease is a
+  TTL-bounded
   Redis key and the execution fence is a session-scoped PostgreSQL advisory
   lock, neither of which is persisted, returned, or used as state; and
 - no new configuration variable or setting.
@@ -791,9 +793,9 @@ Redis loss.
 ### Run Identity
 
 One recalculation attempt is identified by one preallocated Celery task ID
-(`celery_task_id`): a canonical lowercase hyphenated UUID that the admitting API
-request allocates before it acquires any coordination resource. The same value
-is:
+(`celery_task_id`): a canonical lowercase hyphenated, cryptographically random
+UUID (version 4) that the admitting API request allocates while it holds the
+execution fence and before it acquires the lease. The same value is:
 
 - the run identity;
 - the Celery task ID supplied to the publication call, so that in the worker it
@@ -803,8 +805,7 @@ is:
 `target_version` remains the only semantic task input. The task ID is
 operational metadata: it is not passed as a separate semantic task argument, is
 never persisted in PostgreSQL, is not returned by the coordination contract, and
-is not derived from `request_id`, `target_version`, or any other value. Work
-item #569 owns any client-visible response field that might expose it.
+is not derived from `request_id`, `target_version`, or any other value.
 
 ### Coordination Resources
 
@@ -822,8 +823,9 @@ Lease value rules:
   field-selective, or timestamp-only comparison is never ownership.
 - The TTL is exactly 900 seconds from each successful acquisition or renewal.
   The renewal interval is at least 60 seconds since the last successful
-  renewal; a check made earlier than that performs no command. Both values are
-  feature constants, not configuration.
+  renewal; a checkpoint check made earlier than that performs no command. The
+  adoption confirm-and-renew is exempt from this minimum and always executes.
+  Both values are feature constants, not configuration.
 - A timestamp is not part of the value and is never ownership.
 - TTL expiry proves only that the bounded interval elapsed. It never proves
   that the runner stopped, and a missing key never proves completion.
@@ -865,10 +867,10 @@ whose behavior is specified below.
 returning `acquired` when the key was absent and the complete value was written,
 or `not_acquired` when a key already exists. A `not_acquired` result mutates
 nothing and changes no ownership. On `RedisError`, the API returns `503
-REDIS_UNAVAILABLE` and the task terminates without mutation. When completion is
-uncertain, the caller MUST NOT proceed to publish: the write may have occurred,
-so the safe outcome is temporary unavailability until any written key expires.
-Re-issuing acquire while a key exists is a safe `not_acquired` no-op.
+REDIS_UNAVAILABLE`. When completion is uncertain, the caller MUST NOT proceed to
+publish: the write may have occurred, so the safe outcome is temporary
+unavailability until any written key expires. Re-issuing acquire while a key
+exists is a safe `not_acquired` no-op.
 
 **Compare-and-renew.** Atomically set the TTL of `cvss_recalc_active` to 900
 seconds if and only if its complete current value equals
@@ -904,12 +906,19 @@ trigger, and the task; no path uses a different fence.
   scope as defined above.
 - The fence is acquired and released on one dedicated connection that is not
   returned to the connection pool while the fence is held.
+- Every unit's fresh session and independent transaction execute on that same
+  fenced connection. The runner opens no unit session on a different connection
+  while it holds the fence, so the fence cannot be silently released while the
+  runner keeps mutating.
+- A fenced connection that closes, is lost, or is invalidated is therefore
+  observed when the next unit's session on it fails, or by a fence-ownership
+  check performed on it before resuming. The runner MUST NOT reconnect, obtain
+  another connection, or continue mutating after that loss; it terminates as a
+  whole-run `failed` outcome.
 - Every interceptable path releases the fence explicitly: success, every
   terminal outcome, an exception, cancellation, and worker shutdown.
-- If the fenced connection closes, is lost, or is invalidated, PostgreSQL
-  releases the fence automatically. The runner MUST NOT reconnect, obtain
-  another connection, or continue mutating after loss of the fenced connection;
-  it terminates.
+- If the fenced connection closes without an explicit release, PostgreSQL
+  releases the fence automatically.
 - The fence carries no value and is never used as progress, a result, or durable
   state.
 
@@ -953,6 +962,22 @@ Releasing the fence before publication is required so that a very fast task does
 not mistake the API's short fence hold for a genuine collision. It does not
 weaken exclusion: the lease is acquired while the fence is held and is released
 only at terminal cleanup.
+
+A different admission's brief fence hold during its own lease attempt can still
+make a legitimate delivery's non-blocking adoption acquire fail. That delivery
+terminates as an adoption rejection, and recovery is the documented TTL-based
+path. This is an accepted, safe availability cost: no overlapping mutation is
+possible, because the rejected delivery mutates nothing and the lease owner is
+unchanged.
+
+Steps 3 through 5 are coordination ordering requirements. How the API composes
+them with the framework-owned API transaction dependency, which commits after
+the handler returns, is defined by the Settings API contract in
+`docs/features/platform/system-settings.md`. That composition must keep the
+fence held through the setting and audit commit and release it before any broker
+publication. A fence that cannot be acquired because of a database or session
+error is a whole-run failure, not the `fence_busy` rejection: only a definitive
+"lock not acquired" result produces `409 CVSS_RECALC_ALREADY_IN_PROGRESS`.
 
 ### Task Adoption
 
@@ -1052,32 +1077,43 @@ A terminal `cvss_recalculation_ownership_lost` event uses failure phase
 
 ### Publication Uncertainty
 
-Publication outcomes are distinct:
+Publication outcomes are distinct. Classification uses the exception class
+only, never the exception text, matching the publication boundary in
+`docs/features/tickets/ticket-service.md` (Ticket Convergence):
 
 | Outcome | Cause | Coordination state | Manual trigger response |
 |---|---|---|---|
-| proven pre-publication failure | the failure is certain before the publisher is invoked, for example task-ID allocation or serialization failure | owner-safe lease release is permitted | `503 CELERY_UNAVAILABLE` |
+| proven pre-publication failure | the failure is certain before the publisher is invoked, for example task-ID allocation failure | owner-safe lease release is permitted | `503 CELERY_UNAVAILABLE` |
 | `submitted` | the publication call returned without raising | lease retained; the task adopts on delivery | `202 Accepted` |
-| `acceptance_unconfirmed` | the publication call raised a broker operational error | lease retained; acceptance is neither confirmed nor denied | `503 CELERY_UNAVAILABLE` with fixed sanitized detail |
+| `acceptance_unconfirmed` | the publication call raised `kombu.exceptions.OperationalError` | lease retained; acceptance is neither confirmed nor denied | `503 CELERY_UNAVAILABLE` with fixed sanitized detail |
+| other publisher exception | the publication call raised any other exception, including serialization, configuration, security, control signals, and programming errors | the exception propagates unchanged and is never `acceptance_unconfirmed`; the lease is retained unless the failure was proven before the publisher was invoked | the API failure mapping for the propagated exception, which is the global `500 INTERNAL_ERROR` unless a more specific mapping is defined |
+| crash after admission and before the publisher is invoked | the API process died after releasing the fence but before any publication call | lease retained; no task exists | not observed by the API |
 | crash after publish and before response | the API process died after invoking the publisher | lease retained; the task may still be delivered and adopt it | not observed by the API |
 
 For the manual trigger:
 
 - `submitted` returns `202 Accepted`;
-- `acceptance_unconfirmed` returns `503 CELERY_UNAVAILABLE` with fixed
-  sanitized detail, and the lease is retained rather than released;
+- `acceptance_unconfirmed` returns `503 CELERY_UNAVAILABLE` with the fixed
+  sanitized detail `"Recalculation task publication could not be confirmed"`,
+  and the lease is retained rather than released;
 - the response never asserts that the broker rejected the task; a task that was
   actually accepted may still run and adopt the lease; and
 - if the task was not accepted, the lease expires by its TTL, and the operation
-  becomes retryable without any manual key deletion.
+  becomes retryable without any manual key deletion. A proven pre-publication
+  failure releases the lease and is immediately retryable; only an unconfirmed
+  acceptance waits for delivery or TTL.
 
-For the `PATCH` side effect, this contract consumes only two constraints, and
-work item #569 owns the final response schema and the final classification of
-`recalculation_scheduled`:
+For the `PATCH` side effect:
 
-- an `acceptance_unconfirmed` PATCH outcome must not report
-  `recalculation_scheduled = false` as if no task could exist; and
-- it must not release the retained lease or enable unsafe replacement work.
+- a `submitted` publication reports a scheduled task;
+- a no-op change reports that no batch is needed;
+- an `acceptance_unconfirmed` publication returns `503 CELERY_UNAVAILABLE`,
+  retains the setting change and its audit event as committed, and retains the
+  admission lease; and
+- the PATCH response must never report `recalculation_scheduled = false` meaning
+  that no task can exist while the acceptance is unconfirmed or the lease is
+  retained, and it must never release the retained lease or enable unsafe
+  replacement work.
 
 No coordination outcome creates a `SettingAuditEvent` or `TicketAuditEvent`.
 
@@ -1103,7 +1139,7 @@ restarts from the beginning.
 | hard kill | no | automatic on connection closure | none | yes | confirm the process is dead | yes, after TTL |
 | OOM kill | no | automatic on connection closure | none | yes | confirm the process is dead | yes, after TTL |
 | worker disappearance | no | automatic on connection closure | none | yes | confirm the worker is gone | yes, after TTL |
-| fenced connection loss | attempted on the Redis client | automatic on connection closure | `cvss_recalculation_ownership_lost` or `failed` | yes | none required | yes, from the beginning |
+| fenced connection loss | attempted on the Redis client | automatic on connection closure | `cvss_recalculation_failed` | yes | none required | yes, from the beginning |
 
 A cleanup failure never changes committed state, a unit classification, or a
 terminal outcome. The operator recovery procedure is authoritative in
@@ -1119,7 +1155,7 @@ no audit event and are never authoritative state.
 | Event | Level | When |
 |---|---|---|
 | `cvss_recalculation_admitted` | INFO | API admitted a run: fence acquired, task ID preallocated, lease acquired |
-| `cvss_recalculation_admission_rejected` | WARNING | API could not acquire the fence or the lease; carries the closed `reason` category `fence_busy` or `lease_held` |
+| `cvss_recalculation_admission_rejected` | WARNING | API could not acquire the fence or the lease, or Redis failed during acquisition; carries the closed `reason` category `fence_busy`, `lease_held`, or `redis_error` |
 | `cvss_recalculation_submitted` | INFO | The publication call returned without raising |
 | `cvss_recalculation_publication_unconfirmed` | ERROR | The publication call raised a broker operational error; the lease is retained |
 | `cvss_recalculation_adopted` | INFO | A task acquired the fence and confirmed exact owner/target before its first unit |
