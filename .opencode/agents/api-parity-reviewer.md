@@ -5,7 +5,7 @@ description: >
   after changing consumer-facing operations or endpoints. Read-only.
 mode: subagent
 model: helmcode/deepseek-v4-flash
-variant: max
+variant: high
 permission:
   edit: deny
   bash:

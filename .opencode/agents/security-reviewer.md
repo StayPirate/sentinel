@@ -5,7 +5,7 @@ description: >
   dependencies. Use after security-relevant changes. Read-only.
 mode: subagent
 model: helmcode/deepseek-v4-flash
-variant: max
+variant: high
 permission:
   edit: deny
   bash:

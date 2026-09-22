@@ -4,7 +4,7 @@ description: >
   SQLAlchemy models, Alembic migrations, or `docs/data-model.md`. Read-only.
 mode: subagent
 model: helmcode/deepseek-v4-flash
-variant: max
+variant: high
 permission:
   edit: deny
   bash:

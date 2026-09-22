@@ -5,7 +5,7 @@ description: >
   fetchers, HTTP clients, or parsers. Read-only.
 mode: subagent
 model: helmcode/deepseek-v4-flash
-variant: max
+variant: high
 permission:
   edit: deny
   bash:
