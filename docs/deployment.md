@@ -1375,7 +1375,8 @@ Sentinel uses Redis in two roles, addressed by two configuration URLs
 
 - **Application cache/coordination** (`REDIS_URL`, db 0): session
   liveness cache, login lockout counters, on-demand fetch deduplication
-  markers and pending overlays, CVSS recalculation lock, and the IBS consumer's best-effort
+  markers and pending overlays, the CVSS recalculation admission and
+  ownership lease, and the IBS consumer's best-effort
   operational heartbeat.
 - **Celery broker + scheduler** (`CELERY_BROKER_URL`, db 1): task queue
   and `celery-redbeat` schedule entries (including the distributed lock
@@ -1434,6 +1435,31 @@ value atomically through `REDIS_URL` every 30 seconds and on status changes,
 with a 60-second TTL. Redis loss or write rejection makes consumer liveness
 temporarily unobservable but does not pause event processing. PostgreSQL and
 the owning periodic fetchers remain the recovery authorities.
+
+#### CVSS Recalculation Coordination and Redis Loss
+
+The all-CVE recalculation uses `REDIS_URL` for one admission and ownership
+lease, `cvss_recalc_active`. The lease is not an authoritative lock and is not
+proof that the run is alive or complete:
+
+- the complete-run coordination contract is defined in
+  `docs/features/platform/default-cvss-version-operations.md`
+  (Complete-Run Coordination);
+- the lease is a TTL-bounded key. Redis restart, flush, eviction, or expiry
+  removes it, but removal never authorizes overlapping mutation: the task also
+  holds a non-persistent PostgreSQL session-level advisory execution fence for
+  its complete mutating workflow, and only the exact lease owner may adopt the
+  run;
+- Redis persistence remains disabled by design (Persistence is Disabled by
+  Design above). Reconstructing the lease is unnecessary and unsupported; a
+  missing lease is not treated as completion; and
+- `noeviction` remains the only conforming memory policy. The lease is tiny and
+  is not a reason to change memory configuration.
+
+A worker that is alive but wedged can retain the PostgreSQL fence
+indefinitely. This deliberately favors safety over availability: until the
+fence is released or its connection closes, no new admission succeeds. The
+operator procedure below terminates that worker before retrying.
 
 #### Memory Configuration
 
@@ -1526,6 +1552,39 @@ responsibility, not the API server's.
 fetchers, the schedule is empty by design. The monitoring signal above
 correctly handles this: with no enabled fetchers, the condition "at
 least one enabled fetcher with stale last_run" is false → no alert.
+
+### CVSS Recalculation Recovery
+
+An interrupted, crashed, or uncertain all-CVE recalculation is recovered by a
+complete explicit rerun through
+`POST /api/v1/admin/settings/default-cvss-version/recalculate`. There is no
+resume cursor and no persistent progress state; the run always restarts from
+the beginning and converges idempotently. The behavioral contract is
+`docs/features/platform/default-cvss-version-operations.md` (Complete-Run
+Coordination).
+
+Operator procedure:
+
+1. **Identify the worker or pod** that may hold the PostgreSQL execution fence,
+   using the coordination log events and platform metadata. A repeated `409
+   CVSS_RECALC_ALREADY_IN_PROGRESS` from the manual trigger, without an active
+   runner renewing its lease, is the recovery-required signal.
+2. **Terminate the worker or pod if it is alive and wedged.** A live process
+   that cannot make progress can retain the session-level fence; terminating it
+   closes its connection and releases the fence automatically.
+3. **Wait for the lease to expire, or remove it owner-safely only.** The lease
+   has a 900-second TTL; waiting for TTL expiry is always sufficient. If an
+   operator removes it earlier, they MUST do so owner-safely — never with an
+   unconditional `DEL cvss_recalc_active`, which could remove a newer owner's
+   record.
+4. **Repeat the trigger.** Once the fence is released and the lease is absent or
+   expired, the manual trigger admits a new run.
+5. **The run restarts from the beginning.** Committed units reclassify
+   `unchanged`; no persistent progress is restored.
+
+No recovery procedure may treat logs, the absence of a terminal event, or a
+missing Redis key as proof that the previous run completed or that its process
+is gone. PostgreSQL is the source of truth for completed derived state.
 
 ### Log Aggregation
 

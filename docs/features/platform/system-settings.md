@@ -13,8 +13,8 @@ capability.
 
 ## Service Module
 
-System-setting persistence, bootstrap, reads, audit logging, and future
-mutations are implemented in `backend/app/services/settings.py`.
+System-setting persistence, bootstrap, reads, audit logging, and mutations are
+implemented in `backend/app/services/settings.py`.
 
 ## Settings
 
@@ -35,43 +35,58 @@ version-independent SUSE-assessment presence gate.
 
 **Impact of changing the default version**:
 
-When the Admin changes the default CVSS version, the PATCH endpoint
-executes the following sequence:
+When the Admin changes the default CVSS version, the PATCH endpoint composes
+the setting mutation with the complete-run admission, ownership, and
+publication contract in
+`docs/features/platform/default-cvss-version-operations.md`
+(Complete-Run Coordination). It executes the following sequence:
 
 1. **Validate** the new value against allowed values (`"3.1"`, `"4.0"`)
 2. **No-op check**: if the current value equals the new value, return
    200 immediately with `recalculation_scheduled: false` (no audit
    event, no batch — consistent with the audit-trail-infrastructure
    cross-cutting rule for idempotent no-ops)
-3. **Acquire recalculation slot**: `SET cvss_recalc_active <timestamp>
-   NX EX 900` on Redis. This step serves as both a Redis liveness probe
-   and the endpoint's immediate admission guard. It is not the complete-run
-   mutual exclusion mechanism; see
-   `docs/features/platform/default-cvss-version-operations.md` for the runner
-   contract and its coordination boundary:
-   - If slot acquisition raises any `RedisError` → return 503
-     `REDIS_UNAVAILABLE` (nothing committed)
-   - If the key already exists (the admission slot is occupied) → return
-     409 `CVSS_RECALC_ALREADY_IN_PROGRESS` (nothing committed)
-4. **Commit** the new setting value and a `SettingAuditEvent` record to
-   the database. If the commit fails: release the slot (`DEL
-   cvss_recalc_active`) and return 500
-5. **Enqueue** the batch recalculation Celery task
+3. **Acquire the execution fence**: acquire the feature-specific
+   PostgreSQL session-level advisory fence with non-blocking semantics.
+   If the fence is not acquired, nothing is committed, no lease is
+   acquired, no task is published, and the request returns 409
+   `CVSS_RECALC_ALREADY_IN_PROGRESS`. A runner holds this fence for its
+   complete mutating workflow, so a PATCH cannot overtake it even when
+   the Redis lease is absent.
+4. **Acquire the admission lease** while holding the fence: preallocate
+   the run's Celery task ID and acquire the Redis lease
+   `cvss_recalc_active` with `SET ... NX EX 900`, as defined by the
+   coordination contract. A held lease releases the fence and returns 409
+   `CVSS_RECALC_ALREADY_IN_PROGRESS`. A `RedisError` or uncertain
+   acquisition releases the fence and returns 503 `REDIS_UNAVAILABLE`.
+   Nothing is committed in either case.
+5. **Commit** the new setting value and a `SettingAuditEvent` record to
+   the database while still holding the fence. If the commit fails,
+   release the fence, owner-safely release the lease, and return 500.
+6. **Release the fence** before any broker call.
+7. **Enqueue** the batch recalculation Celery task
    (`recalculate_cvss_derived_state`) with the new version as an explicit
-   argument. If the enqueue fails: release the slot and return 200 with
-   `recalculation_scheduled: false` (the primary operation — the setting
-   change — succeeded; the admin can use the manual re-run endpoint to
-   trigger the batch)
-6. Return 200 OK with `recalculation_scheduled: true`
+   argument and the preallocated task ID, then classify the publication
+   outcome under the coordination contract: `submitted` reports a
+   scheduled task; an `acceptance_unconfirmed` broker operational error
+   retains the lease and must not report that no task can exist; a
+   failure proven before the broker call releases the lease owner-safely.
+8. Return 200 OK.
 
 **Commit-first rationale**: the `SettingAuditEvent` is always the first
 durable record. No ticket mutation can occur without the setting change
 being audited. This prevents phantom mutations (ticket audit events
 without a recorded cause).
 
+The final PATCH response schema and the final classification of
+`recalculation_scheduled` are owned by work item #569. #568 constrains them:
+an unconfirmed publication is never reported as `recalculation_scheduled =
+false` meaning that no task can exist, and the retained lease is never
+released on an unconfirmed publication.
+
 The runner, manual recalculation endpoint, impact-preview service and endpoint,
 observability, restart and recovery behavior, absence of persistent run state,
-and future complete-run coordination boundary are authoritative in
+and complete-run coordination are authoritative in
 `docs/features/platform/default-cvss-version-operations.md`. The PATCH endpoint
 only composes the setting mutation with an immediate publication attempt; it
 does not redefine those operation contracts.
@@ -227,11 +242,10 @@ Request body:
 }
 ```
 
-Validates the value against allowed values. On a value change, acquires
-the recalculation slot, commits the setting and audit event, and
-enqueues a batch recalculation task. See "Impact of changing the default
-version" above for the full sequence. Changing the setting neither requires
-nor consumes a prior impact preview; see
+Validates the value against allowed values. On a value change, composes the
+setting mutation with complete-run admission, lease acquisition, commit, and
+publication as described in "Impact of changing the default version" above.
+Changing the setting neither requires nor consumes a prior impact preview; see
 `docs/features/platform/default-cvss-version-operations.md`.
 
 **Note on PATCH with side effects**: this endpoint uses PATCH because
@@ -245,8 +259,9 @@ the response. This is a documented deviation from the
 
 | Status | Code | Condition |
 |--------|------|-----------|
-| 409 | `CVSS_RECALC_ALREADY_IN_PROGRESS` | The recalculation admission slot is already held (setting change blocked while the slot is occupied) |
-| 503 | `REDIS_UNAVAILABLE` | Redis rejected or could not complete slot acquisition (setting change requires Redis availability) |
+| 409 | `CVSS_RECALC_ALREADY_IN_PROGRESS` | The execution fence or the admission lease is already held, so the setting change is blocked; nothing is committed |
+| 503 | `REDIS_UNAVAILABLE` | Redis rejected or could not complete lease acquisition; nothing is committed |
+| 503 | `CELERY_UNAVAILABLE` | The broker acceptance of the recalculation task is unconfirmed; the setting change and its audit event remain committed and the admission lease is retained |
 
 Response (200 OK): the settings object in the standard
 `{"data": ...}` envelope. The `recalculation_scheduled` boolean field
@@ -261,14 +276,13 @@ is **always present** in the response:
 }
 ```
 
-Values of `recalculation_scheduled`:
-
-- `true` — value changed and batch task successfully enqueued
-- `false` — either (a) no-op (value unchanged, no batch needed), or
-  (b) value changed but enqueue failed (transient broker failure after
-  slot acquisition — admin should use
-  `POST /api/v1/admin/settings/default-cvss-version/recalculate` to
-  trigger the batch manually)
+The final classification of `recalculation_scheduled` and the complete response
+schema are owned by work item #569. #568 fixes only these constraints: a no-op
+change reports `false` because no batch is needed; an unconfirmed publication is
+never reported as `false` meaning that no task can exist, because an accepted
+task may still run and adopt the retained lease; and the retained lease is never
+released on an unconfirmed publication. The admin recovery surface remains
+`POST /api/v1/admin/settings/default-cvss-version/recalculate`.
 
 **`Capability: manage_settings`**
 

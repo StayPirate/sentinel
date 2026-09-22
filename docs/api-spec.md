@@ -531,7 +531,7 @@ Examples:
 | `PROVISIONING_UNAVAILABLE` | External identity provider |
 | `SMELT_UNAVAILABLE` | SMELT API |
 | `SSO_UNAVAILABLE` | SSO identity provider (OIDC discovery) |
-| `CELERY_UNAVAILABLE` | Celery task broker (task dispatch failed) |
+| `CELERY_UNAVAILABLE` | Celery task broker: task publication is unconfirmed or the broker dependency is unavailable |
 
 ### Global Responses
 

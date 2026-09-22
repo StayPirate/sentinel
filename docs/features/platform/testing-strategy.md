@@ -3441,6 +3441,70 @@ per-CVE contract is implemented or changed, tests MUST cover the contract in
 - every derived outcome equals the committed winner under the CVE-then-Ticket
   lock order and never the page-observed state
 
+**Complete-run coordination:**
+
+- lease value parsing and exact comparison of `v1:<task_id>:<target_version>`,
+  including malformed, owner-mismatched, and target-mismatched values
+- acquire, compare-and-renew, and compare-and-delete each produce their
+  `acquired`/`not_acquired`, `renewed`/`absent`/`mismatch`, and
+  `deleted`/`absent`/`mismatch` outcomes
+- compare-and-delete by an old owner against a newer lease is a `mismatch`
+  no-op: the newer record survives
+- renewal occurs at the 60-second boundary and performs no command before it
+- `RedisError` and uncertain completion on acquire, renew, and delete each
+  follow the specified conservative outcome; an uncertain acquire never
+  proceeds to publication
+- publication classification distinguishes a proven pre-publication failure,
+  `submitted`, and `acceptance_unconfirmed`
+- coordination events use only the allowed bounded fields and the closed
+  `reason` categories, and never the full lease token or raw exception text
+
+**Coordination integration tests** use independent sessions and connections:
+
+- a race between two admissions admits exactly one owner
+- a second admission is rejected by the fence held by an active runner even
+  when the lease is absent
+- a free lease with a held fence after simulated Redis loss still admits no
+  second run
+- two deliveries of the same token: only one adopts, the other is rejected at
+  adoption
+- an old token against a newer owner is rejected and mutates nothing
+- lease expiry between two units blocks the next unit and terminates
+  `ownership_lost`
+- a Redis restart during an active unit terminates the delivery safely
+- loss of the fenced connection terminates without reconnect or further
+  mutation
+- no Redis or broker I/O executes under a CVE or Ticket row lock
+- a setting `PATCH` is blocked by an active runner protected by the fence even
+  when Redis is empty
+- a simulated crash releases the fence
+- a complete rerun is idempotent
+
+**Coordination server-global Redis tests** use a dedicated Redis container:
+
+- restart, flush/data loss, unavailability, key expiry, and command timeout or
+  uncertain completion
+
+**Coordination task and process tests:**
+
+- duplicate delivery, redelivery, and late delivery begin no mutation
+- cancellation between units, before a unit commit, and after a unit commit
+- worker shutdown
+- hard process loss
+- engine disposal on the interceptable paths
+- no test presumes cleanup after a hard kill
+
+**Coordination API tests:**
+
+- the manual trigger returns `202` on `submitted`
+- the manual trigger returns `409` on a held owner or fence
+- the manual trigger returns `503 REDIS_UNAVAILABLE`
+- the manual trigger returns `503 CELERY_UNAVAILABLE` on unconfirmed acceptance
+- the lease is retained after the `503` broker outcome
+- a task actually accepted despite the `503` can still run and adopt
+- a task actually not accepted leaves the lease to expire by its TTL
+- no coordination audit event is created
+
 **Transactions:**
 
 - one fresh session and exactly one transaction per CVE
@@ -3492,9 +3556,9 @@ per-CVE contract is implemented or changed, tests MUST cover the contract in
   whole run while preserving the committed unit's classification and its
   corresponding success and processed accounting
 - cancellation, worker shutdown, `SoftTimeLimitExceeded`, `MemoryError`, and a
-  simulated ownership-loss signal propagate unchanged; the test supplies the
-  ownership-loss signal at the documented boundary without prescribing its
-  mechanism
+  simulated ownership-loss condition (a compare-and-renew `mismatch` or
+  `absent`) propagate unchanged; the test induces the documented condition
+  without prescribing a private mechanism
 - an adversarial or structural test proves a broad per-item catch cannot
   convert a whole-run signal into `failed`
 
