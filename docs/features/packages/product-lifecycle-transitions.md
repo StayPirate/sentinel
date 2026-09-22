@@ -84,15 +84,21 @@ The fetcher is idempotent and maintains no lifecycle cursor or phase cache.
    sequentially. For each Ticket, open a fresh session and independent
    transaction and call
    `package_service.reconcile_lifecycle_actionability_for_ticket()` with the
-   run's `evaluation_date`.
-5. A Ticket failure rolls back only that Ticket, logs the Ticket ID and
-   exception type, increments the failure count, and does not stop later
+   run's `evaluation_date`, then flush the complete Ticket unit.
+5. A pre-commit Ticket failure rolls back only that Ticket, logs the Ticket ID
+   and exception type, increments the failure count, and does not stop later
    Tickets. A concurrent mutation is serialized by the Ticket row lock, and
    the service reevaluates current persisted state after acquiring that lock.
-   The per-Ticket transaction drains any Ticket convergence effect registered
-   by the delegated reconciliation after that Ticket's commit and before the
-   next Ticket; an ordinary publication failure follows the automatic
-   best-effort policy in `ticket-service.md` (Owner outcome policies).
+   Any commit exception or ambiguous commit outcome terminates the complete run,
+   publishes no effect for that unit, and does not enter the per-Ticket rollback
+   or failure-count path.
+   The owner commits and closes the per-Ticket session, then drains any Ticket
+   convergence effect registered by the delegated reconciliation before the
+   next Ticket; a broker operational publication failure follows the automatic
+   best-effort policy in `ticket-service.md` (Publication policies). A
+   non-operational drain exception propagates as a whole-run failure after the
+   committed Ticket remains succeeded; it does not enter this per-Ticket
+   rollback or failure-count path.
 
 Step 4 deliberately includes `Resolved`: a corrected AIMAAS date can make a
 previously EOL Product actionable again, invalidating resolution. `New` is not
@@ -125,8 +131,12 @@ to reconcile sooner after an exceptional correction.
 
 - A Product task publication failure is logged with the Product ID and later
   Products continue. The next complete run rediscovers the mismatch.
-- A Ticket transaction failure is logged with the Ticket ID and later Tickets
-  continue. The next complete run retries the current-state reconciliation.
+- A Ticket transaction failure before commit is logged with the Ticket ID and
+  later Tickets continue. The next complete run retries the current-state
+  reconciliation.
+- A commit exception or ambiguous commit outcome terminates the run without
+  classifying the affected Ticket as failed or attempting its registered
+  convergence effect.
 - `SoftTimeLimitExceeded` and `MemoryError` are excluded from both per-item
   catches and propagate to `BaseFetcher.run()` as whole-run failures.
 - Whole-run database failures that prevent candidate enumeration propagate to
@@ -146,7 +156,7 @@ package tree.
 |---|---|
 | Selected | Each distinct Product from step 2 and each distinct Ticket from step 4, once within its candidate type. |
 | Succeeded | For a Product unit, `record_succeeded()` once when its eligibility task is dispatched successfully. For a Ticket unit, `record_succeeded()` once when its independent transaction commits, including a locked-current reconciliation no-op. |
-| Failed | `record_failed()` once for a failed Product dispatch or failed Ticket transaction. |
+| Failed | `record_failed()` once for a failed Product dispatch or a Ticket failure before finalization. A commit exception or ambiguous commit outcome has no terminal metric for that Ticket and terminates the run. |
 | Created | Never; lifecycle evaluation creates no domain records. |
 | Updated | `record_updated()` once only for a Ticket unit whose committed reconciliation changed persisted Ticket status. A Product task dispatch is not an update, and a committed Ticket no-op has no update effect. |
 | Excluded before selection | Products without an eligibility mismatch and Tickets outside `Analysis`, `Analyzed`, or `Resolved` or without a gate mismatch are outside this run's work scope. Exclusion, EOL, and actionability do not suppress the Product mismatch scan where the algorithm explicitly includes them. |
@@ -180,13 +190,19 @@ value raises `ValueError` and performs no work.
 3. Process Ticket IDs sequentially. For each ID, open a fresh session and
    independent transaction, invoke
    `package_service.recalculate_product_eligibility_for_ticket()` with that
-   `evaluation_date`, and commit that Ticket independently. Drain any Ticket
-   convergence effect registered by that transaction before starting the next
-   Ticket; an ordinary publication failure follows the automatic best-effort
-   policy in `ticket-service.md` (Owner outcome policies).
-4. If a Ticket operation fails, roll it back, log the Ticket ID, Product ID,
-   reason, and exception type, and continue. Earlier successful Ticket
-   transactions remain committed.
+   `evaluation_date`, flush its complete writes, and commit that Ticket
+   independently. Close the session, then drain any Ticket convergence effect
+   registered by that transaction before starting the next Ticket; a broker
+   operational publication failure follows the automatic best-effort policy in
+   `ticket-service.md` (Publication policies).
+4. If a Ticket operation fails before commit, roll it back, log the Ticket ID,
+   Product ID, reason, and exception type, and continue. Earlier successful Ticket
+   transactions remain committed. A non-operational exception from the
+   post-commit drain propagates as a task failure without reclassifying the
+   committed Ticket or entering this rollback path.
+   Any commit exception or ambiguous commit outcome likewise propagates as a
+   task failure, produces no publication attempt, and is not classified as an
+   isolated Ticket failure.
 5. Log candidate, successful, skipped, no-op, changed-record, and failed-Ticket
    counts. No candidate Tickets is a successful no-op.
 
@@ -231,9 +247,17 @@ use its ordinary eligibility owner. No exclusion restoration is needed: EOL
 participation is always derived from current Product dates.
 
 The delegated reconciliation is the sole item in this custom catch-up
-invocation. If it fails, the exception propagates to `run_catch_up` for the
-shared retry classification; there is no partial-success case to return or
-later sibling item to continue.
+invocation. The override performs that mutation in one independent session and
+transaction, flushes its complete writes, commits and closes it, then detaches
+and attempts any registered Ticket convergence effect before returning. A
+broker operational error follows the automatic best-effort policy in
+`ticket-service.md` (Publication policies). If reconciliation fails before
+commit, the exception propagates to `run_catch_up` for the shared retry
+classification. A commit exception or ambiguous commit outcome performs no
+publication and propagates without isolated-item classification. A
+non-operational drain exception escapes after commit without rollback or
+failure reclassification of the committed reconciliation. There is no
+partial-success case or later sibling item to continue.
 
 ## TicketAuditEvent Records
 

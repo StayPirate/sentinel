@@ -811,10 +811,12 @@ Every successful manual-zone exit registers one transaction-local Ticket
 convergence effect, including an exit whose immediate gate result is `Resolved`.
 If the final result is `Analysis` or `Analyzed`, reconciliation clears an
 inactive or non-VA assignee; if it is `Resolved`, the existing assignee is
-retained even when that user is ineligible. Failure to publish this
-automatically registered effect is best-effort: it is logged after commit with
-exactly one sanitized event and does not change the successful manual-zone-exit
-response. An operator can recover it through the complete rerun action below.
+retained even when that user is ineligible. A broker operational error while
+publishing this automatically registered effect is best-effort: it is logged
+after commit with exactly one sanitized event and does not change the successful
+manual-zone-exit response. Other publication exceptions follow the automatic
+owner's failure boundary. An operator can recover an unconfirmed publication
+through the complete rerun action below.
 
 See [ticket-service.md](ticket-service.md#reopen_from_ignored) for
 the full function contract.
@@ -1768,7 +1770,10 @@ The response uses `TicketConvergenceDispatchResponse`; see
 5. Perform one initial publication attempt for the root Ticket convergence task
    and return its ID with 202. A publication attempt that raises the broker
    operational error returns `503 CELERY_UNAVAILABLE` before the response is
-   transmitted, with no durable run or progress record. An ambiguous broker
+   transmitted, with fixed detail
+   `"Ticket convergence could not be dispatched to the task broker"` and no
+   durable run or progress record. The response never includes broker exception
+   text, host, port, URL, credentials, or traceback. An ambiguous broker
    acknowledgement may still have accepted the task; a later request may
    therefore duplicate work.
 
@@ -1799,7 +1804,7 @@ defined.
 | Status | Code | Condition |
 |---|---|---|
 | 409 | `TICKET_INVALID_TRANSITION` | Locked-current status is `New`, `Ignored`, or `Duplicated` |
-| 503 | `CELERY_UNAVAILABLE` | Initial publication of the root Ticket convergence task failed |
+| 503 | `CELERY_UNAVAILABLE` | Initial publication raised the broker operational error; the response uses fixed sanitized detail |
 
 ### Set Confidentiality
 

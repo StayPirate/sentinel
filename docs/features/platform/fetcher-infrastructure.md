@@ -329,12 +329,13 @@ All fetchers MUST inherit from `BaseFetcher`, an abstract base class in
      metrics rather than overloading `record_updated()`.
 
    Each concrete fetcher's owning specification is the single source of truth
-   for its work-unit selection and metric mapping. For CVE ingestion, an
-   ordinary best-effort package-handoff publication
-   failure after a successful per-CVE commit leaves that unit succeeded and
-   preserves its create/update effect. The exact typed result and terminal
-   accounting composition inside `BaseCVEFetcher.fetch_single()` remain owned
-   by the CVE fetcher infrastructure contract.
+   for its work-unit selection and metric mapping. For CVE ingestion, a broker
+   operational package-handoff publication failure after a successful per-CVE
+   commit is best effort: it leaves that unit succeeded and preserves its
+   create/update effect. Other finalization exceptions propagate without
+   reclassifying committed work. The exact typed result and terminal accounting
+   composition inside `BaseCVEFetcher.fetch_single()` remain owned by the CVE
+   fetcher infrastructure contract.
 4. **Shared HTTP client**: a pre-configured `self.http_client` lazy
    property for outgoing HTTP requests. See "BaseFetcher HTTP Client
    Integration" section for the local integration, and `networking.md`
@@ -415,8 +416,16 @@ class SyncRedhatCves(BaseCVEFetcher):
 
     async def execute(self, session: AsyncSession) -> None:
         for cve_id in active_ticket_cve_ids:
-            result = await self.fetch_single(cve_id, session)
-            await self.commit_and_dispatch(session, result)
+            try:
+                result = await self.fetch_single(cve_id, session)
+                await session.flush()
+            except (CancelledError, SoftTimeLimitExceeded, MemoryError):
+                raise
+            except Exception:
+                ...  # source-owned pre-finalization isolation
+            else:
+                # Commit/finalization exceptions terminate the run.
+                await self.commit_and_dispatch(session, result)
 ```
 
 The `name` attribute MUST NOT exceed **100 characters**. This limit is
@@ -740,17 +749,23 @@ execution. The following additional rules apply:
     `SoftTimeLimitExceeded`, and `MemoryError` bypass isolated failure handling
     and propagate
   - **Non-CVE fetchers** (custom `catch_up()` override): MUST use
-    per-item error handling — if one item (track, product, package)
-    fails, continue with the remaining items rather than aborting the
-    entire catch-up. Detailed error categorization is defined in each
-    fetcher's own specification
+    per-item error handling for failures raised before an item's commit — if one
+    item (track, product, package) fails, continue with the remaining items
+    rather than aborting the entire catch-up. Detailed error categorization is
+    defined in each fetcher's own specification. A post-commit Ticket-
+    convergence drain follows `ticket-service.md`: only the broker operational
+    error is logged and absorbed; every other drain exception propagates without
+    rolling back or reclassifying committed work
   - **Raise/return contract for non-CVE overrides**: custom
-    `catch_up()` overrides MUST catch per-item exceptions internally.
-    The method MUST only propagate an exception when all items have
-    failed, indicating infrastructure failure. Partial failure (some
-    items succeed, some fail) MUST result in a normal return — the
-    failed items are logged at WARNING with `ticket_id`, fetcher name, affected
-    item identity, sanitized cause, and the task-bound `celery_task_id`.
+    `catch_up()` overrides MUST catch pre-commit per-item exceptions internally.
+    For those pre-commit failures, the method MUST only propagate an exception
+    when all items have failed, indicating infrastructure failure. Partial
+    pre-commit failure (some items succeed, some fail) MUST result in a normal
+    return — the failed items are logged at WARNING with `ticket_id`, fetcher
+    name, affected item identity, sanitized cause, and the task-bound
+    `celery_task_id`. This rule does not absorb a non-operational post-commit
+    Ticket-convergence drain exception, which propagates under the preceding
+    rule.
     Recovery then follows the owning feature's contract. When periodic
     `execute()` cannot rediscover the same historical work, the owner MUST
     document the accepted limitation and an explicit idempotent operator rerun
@@ -772,11 +787,11 @@ execution. The following additional rules apply:
   post-commit enqueue pattern used by `trigger_on_demand_fetch()`.
   Enqueuing before commit risks catch-up tasks running against
   uncommitted data.
-  `reconcile_ticket_status()` registers, but does not publish, the Ticket
-  convergence workflow during its caller-owned transaction. After commit,
-  that workflow completes package-tree re-resolution before it enqueues the
-  registered `run_catch_up` tasks. See `package-model.md` (Ticket
-  Convergence).
+  `reconcile_ticket_status()` registers, but does not publish, one transaction-
+  local Ticket convergence effect during its caller-owned transaction. After
+  commit, the owner publishes the root task; the later worker execution
+  completes package-tree re-resolution before it enqueues the `run_catch_up`
+  tasks. See `package-model.md` (Ticket Convergence).
   Each publication uses the participating fetcher class's `queue` attribute:
   pass `queue=fetcher_cls.queue` when it is non-`None`, and omit the parameter
   otherwise. This preserves the worker-affinity contract for

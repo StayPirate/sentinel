@@ -275,10 +275,12 @@ CVSS assessment events, at most one severity event, then state-applicable
 Product/final-gate events. An applicable rejection follows that batch; an
 `Ignored` republication performs its deferred Product and final status events in
 the subsequent manual-zone-exit sequence. Source-status and automatic-reference
-writes create no
-Ticket event. Any reference, audit, flush, commit, or other unexpected failure
-rolls back all earlier ingestion events; no post-commit callback is then
-published.
+writes create no Ticket event. Any reference, audit, flush, or other
+pre-finalization failure rolls back all earlier ingestion events. A definitely
+failed commit likewise publishes no post-commit effect; an ambiguous commit
+terminates the owner without claiming rollback or publication. An exception
+after successful commit leaves all committed events intact and follows its
+post-commit owner contract.
 
 Every action classification, `old_value`, `new_value`, canonical comment, and
 subject snapshot comes from serialized pre/post state under the root and lock

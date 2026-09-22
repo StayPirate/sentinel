@@ -867,23 +867,26 @@ above.
        `record_succeeded()`, and continue. The selected CVE reached the valid
        stale/inapplicable terminal outcome; it has no created/updated effect
     c. Call `result = process_item(path, content, session)` → returns
-       `CVEFetchResult`. On successful return, call
-       `self.commit_and_dispatch(session, result)`. The shared finalizer commits
-       and, because the template runs in periodic context, records the action
-       effect and terminal success exactly once; the template and hook do not
-       duplicate those metrics
+       `CVEFetchResult`, then `await session.flush()` for every per-CVE write
+       while still inside the pre-finalization per-item error boundary.
     d. If cancellation, `SoftTimeLimitExceeded`, or `MemoryError` is raised during
-       steps 10a, 10c, or `commit_and_dispatch()`: **re-raise
+       steps 10a or 10c: **re-raise
        immediately** (these are whole-run signals, not per-item errors;
        see "`SoftTimeLimitExceeded` handling convention" in
        `fetcher-infrastructure.md`).
-    e. If any other exception is raised during steps 10a, 10c, or
-       `commit_and_dispatch()`: call `session.rollback()`, extract
+    e. If any other exception is raised during steps 10a or 10c before
+       finalization: call `session.rollback()`, extract
        CVE-ID via `cve_id = self._extract_item_id(path)`, call
        `await self._isolated_status_commit(cve_id,
        CVESourceFetchStatus.FAILURE)`, log
        WARNING (`logger.warning("Failed to process item %s: %s",
        cve_id, e)`), call `record_failed()`, continue to next item
+    f. When steps 10a-10c and the flush return normally, call
+       `self.commit_and_dispatch(session, result)` outside the per-item
+       exception catch. The shared finalizer commits and, because the template
+       runs in periodic context, records the action effect and terminal success
+       exactly once. A commit exception or later escaping finalization exception
+       propagates to the outer workflow and never enters step 10e.
 
     **Transaction boundaries**: each iteration of the processing loop
     operates in its own transaction boundary. `process_item()` returns
@@ -892,17 +895,22 @@ above.
     commits the session, consumes and attempts that transaction's registered
     Ticket-convergence effects, then publishes the package-candidate handoff if
     `result.post_ingest` is not `None`. A consumed registration cannot leak into a
-    later item even though the same session is reused. On exception (caught by
-    step 10e), the template calls `session.rollback()` before `record_failed()`.
+    later item even though the same session is reused. On a pre-finalization
+    exception caught by step 10e, the template calls `session.rollback()` before
+    `record_failed()`.
     This ensures that a failure in one item does not corrupt the session or affect
     the processing of subsequent items.
 
-    An ordinary package-handoff publication failure after the commit is not an
+    A broker operational package-handoff publication failure after the commit is not an
     exception from `commit_and_dispatch()`: the helper emits its sanitized
     structured ERROR and returns normally. Step 10e therefore never overwrites
     the committed source `success` status or records a per-item failure for that
-    post-commit outcome. Whole-run signals and cancellation retain their
-    existing propagation behavior.
+    post-commit outcome. A commit exception also bypasses step 10e and records
+    no terminal or effect metric because durability is failed or ambiguous. A
+    non-operational exception after a successful commit preserves committed
+    source status and the already-recorded terminal success while failing the
+    outer run. Whole-run signals and cancellation retain their existing
+    propagation behavior.
 
     **Session state on timeout propagation**: when `SoftTimeLimitExceeded`
     propagates via step 10d, the session may contain uncommitted changes
@@ -1059,7 +1067,7 @@ template uses
 `commit_and_dispatch()` to consume that transaction's Ticket-convergence
 registrations before publishing the non-NULL package handoff. No post-processing
 batch hook is needed; package task lifecycle remains owned by the post-ingest
-package-resolution contract. An ordinary package-handoff publication exception
+package-resolution contract. A `kombu.exceptions.OperationalError` from package-handoff publication
 is logged and consumed inside the helper after commit; it does not reach the
 per-item failure branch or change CVE metrics/source status.
 

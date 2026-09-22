@@ -268,12 +268,14 @@ beyond status changes.
      isolation contract are defined in `package-service.md`
      (`run_ticket_convergence()` workflow) and `package-model.md` (Ticket
      Convergence).
-   - The automatic API mutation path treats an ordinary initial-publication
-     failure as best-effort: it retains the committed mutation's success
-     response, emits exactly one sanitized Ticket-scoped ERROR, and never
-     returns `CELERY_UNAVAILABLE`. Recovery uses the complete explicit rerun
-     endpoint. See the registration lifecycle below and `ticket-service.md`
-     (Ticket Convergence) for the publisher boundary and owner policies.
+   - The automatic API mutation path treats only a broker operational initial-
+     publication failure as best effort: it retains the committed mutation's
+     success response, emits exactly one sanitized Ticket-scoped ERROR, and
+     never returns `CELERY_UNAVAILABLE`. Other publication exceptions propagate
+     unchanged without reclassifying committed work. Recovery uses the complete
+     explicit rerun endpoint. See the registration lifecycle below and
+     `ticket-service.md` (Ticket Convergence) for the publisher boundary and
+     publication policies.
    - **Note**: step 5 is independent of step 4. In the
       `ticket_service._complete_manual_zone_exit()` case, the public workflow
       has already set the status
@@ -384,8 +386,11 @@ Its lifecycle is:
    to a reusable `AsyncSession`: a new transaction inherits no pending effect
    from an earlier committed, rolled-back, or failed transaction, whether or
    not that transaction's owner drained it.
-3. **Discard**: rollback, a failed commit, and pre-commit cancellation discard
-   the transaction's effects without publication.
+3. **Discard**: rollback, a definitely failed commit, and pre-commit
+   cancellation discard the transaction's effects without publication. A commit
+   exception with an ambiguous database outcome also performs no publication
+   and terminates the owner workflow; it is never treated as a committed unit
+   eligible for a later attempt from that session.
 4. **Detach and consume**: after the caller's commit succeeds, the transaction
    owner atomically detaches the complete effect sequence before the first
    publication attempt. A detached effect is consumed exactly once even when
@@ -399,7 +404,8 @@ Its lifecycle is:
 
 Publication uses the detached primitive values only and performs no database
 read. The database-free publisher boundary, the `submitted` and
-`acceptance_unconfirmed` outcome vocabulary, the per-owner outcome policies,
+`acceptance_unconfirmed` vocabulary, the automatic and explicit publication
+policies,
 and the allowed logs are defined in `ticket-service.md` (Ticket Convergence).
 The required registration and consumption tests are defined in
 `docs/features/platform/testing-strategy.md` (Ticket Convergence Publication

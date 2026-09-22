@@ -967,7 +967,8 @@ locked-current status is `Ignored`; the decision uses current CVE/Ticket state
 and never audit-derived provenance. A Ticket newly created for an already-
 `REJECTED` orphan CVE transitions from `New` to `Ignored` after current-payload
 CVSS composition in the same transaction.
-Every successful manual-zone exit registers post-commit Ticket convergence,
+Every successful manual-zone exit registers one transaction-local Ticket
+convergence effect,
 including an immediate `Resolved` result. Assignment-eligibility sanitation
 clears an inactive or non-VA assignee only when the final result is `Analysis`
 or `Analyzed`.

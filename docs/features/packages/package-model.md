@@ -1713,12 +1713,14 @@ broker acknowledgement may still have delivered the task, so duplicate workflow
 execution is possible and remains safe because package resolution and every
 catch-up are idempotent.
 
-Initial publication by an automatically registered effect is best-effort.
-Failure is logged after the triggering mutation commits and does not replace
-that mutation's normal success response with an infrastructure error. The
-explicit operator rerun remains the recovery path. Its own initial publication
-failure returns `503 CELERY_UNAVAILABLE` because dispatch is the requested
-operation and no domain mutation precedes it.
+Initial publication by an automatically registered effect treats only the
+broker operational error as best-effort. That error is logged after the
+triggering mutation commits and does not replace that mutation's normal success
+response with an infrastructure error. Other publication exceptions propagate
+through the automatic owner's failure boundary without reclassifying committed
+state. The explicit operator rerun remains the recovery path. Its own broker
+operational error returns `503 CELERY_UNAVAILABLE` because dispatch is the
+requested operation and no domain mutation precedes it.
 
 ### Checkpoint safety
 

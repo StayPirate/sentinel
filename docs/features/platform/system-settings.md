@@ -71,8 +71,13 @@ without a recorded cause).
 The batch operation (`recalculate_cvss_derived_state`) visits every persisted
 CVE and calls `ticket_mutations.recalculate_cvss_chain()` in default-version
 mode for each CVE in an independent database transaction. Failures on
-individual CVEs are logged and skipped. It logs total, succeeded, and failed
-counts. Task publication, mutual exclusion for the complete run, timeout,
+individual CVEs before finalization, including flush failure, are logged and
+skipped. After the unit is flushed, a commit exception or ambiguous commit
+outcome terminates the complete run without classifying that CVE as failed; a
+non-operational exception after successful commit also terminates the run
+without changing the committed unit's outcome. On normal completion it logs
+total, succeeded, and failed counts. Task publication, mutual exclusion for the
+complete run, timeout,
 completion cleanup, and crash recovery must form one execution contract whose
 guard cannot expire while a run can still mutate data. The fixed 900-second
 slot described by the current endpoint sequence does not by itself satisfy that
@@ -101,11 +106,19 @@ record whenever an associated Ticket's old and new unified severity differ,
 before any Product event. It never creates `cvss_assessment_changed`, because
 the setting change does not alter an assessment. One CVE transaction uses one
 UTC `evaluation_date`; any local settings, database, eligibility, audit, flush,
-or reconciliation error rolls back that complete CVE unit and the batch
-continues with the next CVE.
+or reconciliation error raised before finalization rolls back that complete CVE
+unit and the batch continues with the next CVE. A commit exception or ambiguous
+commit outcome terminates the run without classifying that CVE as failed; a
+non-operational exception after successful commit likewise terminates without
+reclassifying the committed unit.
 
 Visiting a `Resolved` Ticket may regress it through ordinary gate evaluation and
-register the normal post-commit package-tree and fetcher catch-up. Visiting an
+register one transaction-local Ticket convergence effect. After that CVE unit
+is flushed, committed, and its session closed, the runner drains the effect
+before the next unit. A broker operational error follows the automatic
+best-effort policy in `ticket-service.md`: it emits the shared sanitized Ticket
+event, changes no runner counter or aggregate outcome, and does not stop the
+scan. Visiting an
 `Ignored` or `Duplicated` Ticket cannot exit its manual zone or register that
 work; Product eligibility and gates for those Tickets converge only through the
 owning manual-zone-exit workflow.
@@ -265,8 +278,8 @@ Projection rules:
   persisted boolean: the projected automatic result where no manual override
   applies, and the preserved persisted `eligible` value where
   `is_eligible_override = true`. It never calls `reconcile_ticket_status()`,
-  never changes a status, and never registers the post-commit Ticket
-  convergence workflow.
+  never changes a status, and never registers a transaction-local Ticket
+  convergence effect.
 - The preview reads the setting once for the observed value. The proposed
   version is passed explicitly to the pure severity and eligibility
   resolutions; the preview does not read the setting again per unit.

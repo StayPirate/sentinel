@@ -1580,12 +1580,20 @@ contract is mandatory:
   failure (`partial`), all selected units failed (`failure`), an empty run
   (`success`), successful terminal units with durable effects and no failures
   (`success`), and each of a committed create and a committed update followed
-  by a required post-commit failure (the corresponding effect counter is `1`,
-  `items_failed = 1`, `items_succeeded = 0`, normal-return `failure`). Cover a
+  by a required post-commit failure when the owning unit defines that later
+  step as part of its terminal outcome (the corresponding effect counter is
+  `1`, `items_failed = 1`, `items_succeeded = 0`, normal-return `failure`). CVE,
+  lifecycle, and IBS release-detector per-unit finalizers are explicit
+  exceptions: commit failure terminates the run before any terminal/effect
+  metric, while a non-operational failure after a successful commit terminates
+  the run with that committed unit's success and effect metrics preserved and
+  `items_failed` unchanged. Cover a
   best-effort post-commit failure separately: it is logged, retains the durable
   effect, records the unit as succeeded, and records no failure.
 - **Durability and exclusivity**: a create/update effect is absent before commit
-  and after rollback or commit failure, and appears only after durability. No
+  and after rollback or a definitely failed commit, and appears only after
+  durability. An ambiguous commit records no in-memory effect because
+  durability is unknown and terminates the run. No
   current work unit records both created and updated. Every selected terminal
   unit contributes exactly once to succeeded or failed, never both; pre-scope
   exclusions contribute to neither. Tests must fail counter-compensation or
@@ -1737,16 +1745,25 @@ changed, focused tests MUST cover this complete contract:
   as a Celery payload or result.
 - **One-shot finalization**: the first finalization attempt consumes the token;
   a second call raises `RuntimeError` before commit, publication, or metrics.
-  Consumption persists after commit failure. Assert exactly one commit, no
-  pre-commit publication/metric, convergence before optional package handoff,
-  no handoff for `post_ingest = None`, ordinary publication failure consumed,
-  and cancellation/whole-run signals propagated before and after commit with
-  truthful post-durability metrics.
+  Consumption persists after commit failure. Assert all per-CVE database
+  writes, delegated audit events, source status, and references are flushed
+  before finalization, while registered Ticket effects remain in the in-memory
+  transaction-local registry; a flush failure remains an isolated CVE failure.
+  Assert exactly one commit, no pre-commit publication/metric,
+  convergence before optional package handoff, no handoff for
+  `post_ingest = None`, and broker operational publication failure consumed. Commit
+  exception and ambiguity terminate the complete run with no isolated source
+  `failure`, no per-item warning, and no success/failure/effect metric for that
+  CVE. Cancellation and other finalization errors propagate; after successful
+  commit they preserve truthful post-durability metrics and never call
+  `record_failed()`.
 - **Periodic metrics**: automatic periodic context maps created/updated and
   always success immediately after commit; unchanged maps only success.
   On-demand and catch-up map no `FetcherRun` metric. Periodic handlers do not
   duplicate success/effect metrics. Isolated missing is terminal periodic
-  success; an ordinary failed unit records one failure.
+  success; an ordinary pre-finalization failed unit records one failure. Commit
+  failure records neither terminal outcome, and a post-commit escaping error
+  retains success without adding failure.
 - **Isolated statuses**: only typed `FAILURE` and `MISSING` are accepted, and the
   write uses an independent transaction after caller rollback. Ordinary lookup,
   write, and commit failures are logged and suppressed while preserving the
@@ -1754,19 +1771,22 @@ changed, focused tests MUST cover this complete contract:
   `SoftTimeLimitExceeded`, and `MemoryError` propagate. No convergence,
   package publication, or FetcherRun metric/effect occurs.
 - **Default catch-up**: cover missing Ticket, CVE-less Ticket, unresolved
-  referenced CVE, success, missing, every ordinary pre-commit failure on every
+  referenced CVE, success, missing, every ordinary pre-finalization failure on every
   retry attempt, later success/missing overwrite, disabled and unknown fetcher,
-  malformed UUID structured failure, retry classification, cancellation and
-  whole-run signals, HTTP teardown, one `asyncio.run()`, exactly one engine
-  disposal per invocation, Git queue preservation, and absence of
-  `FetcherRun` records and `fetch_pending` keys.
+  malformed UUID structured failure, flush before finalization, commit failure
+  without isolated status, retry classification, cancellation and whole-run
+  signals, HTTP teardown, one `asyncio.run()`, exactly one engine disposal per
+  invocation, Git queue preservation, and absence of `FetcherRun` records and
+  `fetch_pending` keys.
 - **Git boundaries**: `process_item()` returns `CVEFetchResult`, only the
-  template finalizes and records periodic metrics, `fetch_single()` performs no
+  template flushes and finalizes outside its per-item catch and records periodic
+  metrics, `fetch_single()` performs no
   clone mutation, candidate read failures never call `record_failed()` without
   a run, `queue = "git"` is preserved, and concrete subclasses do not override
   `execute()`.
 - **Concrete compliance**: all eight CVE sources comply with typed return,
-  centralized finalization, metric, status, and capability contracts. NVD and
+  pre-finalization flush, centralized finalization, hard commit-failure,
+  metric, status, and capability contracts. NVD and
   GHSA inline paths construct the token; MITRE and Kernel return it from
   `process_item`; Red Hat, OSV, and EPSS preserve `UpsertResult.action`; KEV
   remains non-refetchable and preserves its documented isolated-status
@@ -1968,16 +1988,23 @@ changed, integration tests additionally cover:
   sole commit: invalid candidates continue, while an unexpected reference
   failure rolls back CVE/source status, Ticket, CVSS, Product, lifecycle, audit,
   and every reference write;
-- rollback, commit failure, and cancellation publish neither registered Ticket
-  convergence nor the package handoff; successful commit releases locks,
+- rollback, a definitely failed commit, and pre-commit cancellation publish neither
+  registered Ticket convergence nor the package handoff; an ambiguous commit
+  also publishes neither and terminates the run without an isolated source
+  status or metric. Successful commit releases locks,
   attempts registered convergence publication first, and only then may publish
   the package handoff, even when the best-effort convergence publication fails;
-- an ordinary package-handoff publication failure after successful commit logs
+  cancellation after successful commit propagates without rollback or metric
+  reclassification and may interrupt an already-started publication attempt;
+- a `kombu.exceptions.OperationalError` from package-handoff publication after
+  successful commit logs
   exactly one sanitized `cve_package_handoff_publication_failed` ERROR, returns
   normally, preserves `CVESource.success` and the one terminal
   `record_succeeded()` outcome plus any committed created/updated effect,
   records no failure metric, and never enters API/Git per-item failure handling;
   the log excludes payload, package names, exception text, and upstream data;
+  serialization, contract, programming, cancellation, and whole-run exceptions
+  instead propagate without reclassifying the committed CVE;
 - repeated `commit_and_dispatch()` calls for different CVEs on one reusable
   session prove each transaction's convergence registrations are detached and
   consumed exactly once, attempted failures do not replay, rollback/cancellation
@@ -2366,15 +2393,16 @@ visibility predicate.
 
 When `reconcile_ticket_status()` convergence registration, the automatic API
 drain, the automatic task-owner drains (the lifecycle evaluator, Product and
-threshold re-evaluation, and the convergence workflow's per-package units),
-`commit_and_dispatch()`, the explicit convergence dispatch, or the all-CVE
-recalculation runner's post-commit consumption is implemented or changed, unit
-and integration tests MUST cover this complete matrix. The
+threshold re-evaluation, IBS track/Product release-detection units, and the
+convergence workflow's per-package units),
+`commit_and_dispatch()`, lifecycle catch-up, the explicit convergence dispatch,
+or the all-CVE recalculation runner's post-commit consumption is implemented or
+changed, unit and integration tests MUST cover this complete matrix. The
 publication boundary is unit-testable with a substituted broker-publication
 call;
-registration, discard, detach, and owner policies require real PostgreSQL with
-independent sessions and deterministic synchronization at the commit, session
-close, and publication boundaries.
+registration, discard, detach, and publication policies require real PostgreSQL
+with independent sessions and deterministic synchronization at the commit,
+session close, and publication boundaries.
 
 **Transaction-local lifecycle**
 
@@ -2385,12 +2413,14 @@ close, and publication boundaries.
   registers one effect, while effects for different Tickets preserve
   first-registration order;
 - commit and row-lock release precede every publication attempt, and no owner
-  performs database work while publishing; the batch consumer and the explicit
-  rerun complete their own commit and session close before their attempt, while
-  the fetcher follows its reusable-session contract in
-  `cve-fetcher-infrastructure.md`;
-- rollback, a failed commit, and pre-commit cancellation discard the effects
-  with zero publication attempts;
+  performs database work while publishing; the all-CVE runner, lifecycle
+  catch-up, and explicit rerun complete their own commit and session close
+  before their attempt, while the fetcher follows its reusable-session contract
+  in `cve-fetcher-infrastructure.md`;
+- rollback, a definitely failed commit, pre-commit cancellation, and an
+  exception with ambiguous commit outcome produce zero publication attempts;
+  the ambiguous path terminates its owner workflow rather than entering another
+  transaction or isolated-unit outcome;
 - detach consumes the complete sequence before the first attempt; an attempted
   effect never replays after success or failure, and a reused session starts
   its next transaction with no pending effect;
@@ -2400,7 +2430,7 @@ close, and publication boundaries.
 
 **Initial publication boundary**
 
-- a call that returns without raising is classified `submitted`; the boundary
+- a call that returns `None` without raising is `submitted`; the boundary
   does not wait for worker start, workflow execution, or a task result, and
   reads no Celery result;
 - `kombu.exceptions.OperationalError` (`celery.exceptions.OperationalError`) is
@@ -2412,61 +2442,77 @@ close, and publication boundaries.
   retry loop nor disables Celery's configured publication retry policy;
 - every non-operational exception propagates unchanged and is never classified
   `acceptance_unconfirmed`. Cover at least `asyncio.CancelledError`,
-  `WorkerShutdown`, `SoftTimeLimitExceeded`, `MemoryError`, `EncodeError` or
-  `SerializerNotInstalled`, and a representative programming error;
+  `WorkerShutdown`, `SoftTimeLimitExceeded`, `MemoryError`,
+  `kombu.exceptions.EncodeError` or
+  `kombu.exceptions.SerializerNotInstalled`, and a representative programming
+  error;
 - the boundary accepts no ORM instance or session, performs no database query,
   and publishes only detached primitive values.
 
-**Owner policies**
+**Publication policies**
 
-- automatic best-effort owners: the committed result is preserved after both
-  `submitted` and `acceptance_unconfirmed`; the automatic API mutation path
-  keeps its ordinary success response, and the lifecycle, Product/threshold, and
-  `run_ticket_convergence()` per-package owners keep their committed unit
-  outcomes; an ordinary failure emits exactly one
-  `ticket_convergence_publication_failed` ERROR with `ticket_id` and the closed
-  `broker_operational_error` cause, never produces `CELERY_UNAVAILABLE`, and an
-  unexpected non-operational exception escaping the automatic API drain is
-  neither converted nor feature-logged and never changes already-committed
-  data, while the same exception from a task-owner drain escapes into that
-  owner's existing error handling (whole-run failure or workflow failure path)
-  with no publication-failure event;
-- CVE/fetcher finalization: an ordinary failure is absorbed after exactly one
-  Ticket-owned log; later detached effects and the package-candidate handoff
-  are still attempted; the committed ingestion classification, durable
-  metrics, and source success are unchanged and no second log is emitted;
-- batch consumer (the all-CVE recalculation runner): each committed unit's
-  effects are drained after that unit's commit and session close and before the
-  next unit; an ordinary failure leaves the unit's committed classification and
-  success unchanged, is counted in the consumer's orthogonal diagnostic
-  aggregate, emits exactly one sanitized CVE/Ticket event, and does not abort
-  the scan; a completed scan with such a failure reflects it in the consumer's
-  terminal aggregate, and recovery remains the explicit Ticket rerun;
+- automatic best-effort publication: API, CVE/fetcher, lifecycle,
+  Product/threshold, lifecycle catch-up, convergence per-package, and all-CVE
+  runner owners preserve their committed unit and existing accounting after
+  both `submitted` and `acceptance_unconfirmed`. A broker operational error
+  emits exactly one `ticket_convergence_publication_failed` ERROR with
+  `ticket_id` and the closed `broker_operational_error` cause, is absorbed,
+  never produces `CELERY_UNAVAILABLE`, and adds no publication counter,
+  dedicated owner event, or aggregate-outcome change. Later effects and the
+  owner's subsequent best-effort work continue;
+- post-commit exception phase: cancellation, worker signals and every
+  non-operational exception escape the automatic adapter without an ordinary
+  publication-failure event. For CVE/fetcher and per-item task owners, inject
+  them after commit and assert they bypass rollback, isolated source failure,
+  `record_failed()`, per-item raw-exception logs, and any second terminal
+  outcome; committed status and success/effect metrics remain intact while the
+  outer workflow fails or retries. The automatic API path follows the unchanged
+  generic callback contract;
+- all-CVE runner: flush each CVE unit before finalization, commit and close its
+  session before draining, and drain before the next unit. A broker operational
+  error follows the same automatic policy and changes no runner counter, event,
+  or aggregate outcome; a commit exception/ambiguity or non-operational drain
+  exception terminates the run without classifying the affected unit as failed;
+- lifecycle catch-up: use the wrapper-provided session only for its read phase,
+  perform the delegated reconciliation in one independent mutation session,
+  flush, commit and close that session, then detach and drain before returning;
+  cover broker operational absorption and non-operational propagation without
+  rollback or reclassification of the committed reconciliation;
+- IBS track and Product release detection: flush the complete per-unit
+  mutation, audit, checkpoint or release write, and reconciliation before
+  commit; close the session before detaching and draining; cover broker
+  operational absorption, non-operational propagation without reclassification,
+  and commit exception/ambiguity terminating the invocation without a terminal
+  or update metric for that unit;
 - explicit operator rerun: `submitted` returns the allocated root task ID and
   202; `acceptance_unconfirmed` raises `TicketConvergenceDispatchError` and
   returns 503 before the response is transmitted; the locked transaction
   commits and closes before the attempt; no post-commit callback is registered;
   and no Ticket mutation, audit event, durable run, or compensation row is
-  created.
+  created. The 503 detail is exactly
+  `"Ticket convergence could not be dispatched to the task broker"` and contains
+  no exception text, host, port, URL, credentials, or traceback;
 
 **Control signals and security**
 
 - cancellation, worker shutdown, `SoftTimeLimitExceeded`, `MemoryError`,
   serialization and contract errors, and programming errors propagate through
-  the publisher and are never converted into an ordinary publication failure or
-  counted as `acceptance_unconfirmed`;
+  the publisher and are never converted into a broker-operational publication
+  failure or counted as `acceptance_unconfirmed`;
 - unexpected exceptions escaping the automatic API drain are not converted into
   `acceptance_unconfirmed`;
-- exactly one feature-owned log exists per ordinary failed effect on each path;
+- exactly one feature-owned log exists per broker-operational failed effect on
+  each path;
   the publisher logs nothing and the API transaction dependency's generic
   post-commit callback loop adds no second event for that failure;
-- log assertions reject `exc_info`, raw exception text, tracebacks, broker
-  URLs, hosts, ports, credentials, payloads, Ticket content, and external data.
+- feature-owned publication-failure log assertions reject `exc_info`, raw
+  exception text, tracebacks, broker URLs, hosts, ports, credentials, payloads,
+  Ticket content, and external data.
   For the shared `ticket_convergence_publication_failed` event, only
   `ticket_id`, the closed `cause` category, and the bound request or task
-  correlation are permitted. A batch consumer's own event may additionally
-  carry the canonical CVE identifier, bounded counts, and its own closed
-  sanitized reason category, as its owning specification defines.
+  correlation are permitted. The unchanged generic callback log for an
+  unexpected non-operational API-drain exception remains outside this
+  feature-event assertion.
 
 **Structural absences**
 

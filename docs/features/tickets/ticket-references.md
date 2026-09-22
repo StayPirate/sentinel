@@ -478,7 +478,10 @@ All functions accept a caller-supplied `AsyncSession`. They flush when needed
 to expose generated IDs, persisted projections, audit rows, or constraint
 failures, but never commit or roll back. The API transaction dependency or
 fetcher's complete per-CVE workflow owns commit on success and rollback on any
-escaping exception. No function performs network I/O.
+escaping pre-finalization exception. A definitely failed commit publishes
+nothing; an ambiguous commit terminates the owner without claiming rollback.
+Post-commit finalization exceptions cannot roll back reference rows that already
+committed. No function performs network I/O.
 
 Request-resolved `CallerContext` below means the authenticated user ID and
 effective scope for an authenticated caller, or the explicit anonymous caller.
