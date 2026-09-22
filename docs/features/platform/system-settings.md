@@ -72,8 +72,13 @@ publication contract in
    change the already-selected response. This explicit-dispatch
    composition follows the pattern in
    `docs/features/tickets/ticket-service.md` (Ticket Convergence,
-   Explicit operator rerun) and `docs/conventions.md` (Caller-Owned
-   Service Transactions, API Transaction Dependency Scope). If the
+   Explicit operator rerun). The dispatch function opens its own
+   short-lived session; the setting update and
+   `SettingAuditLog.log_event()` receive that session and flush without
+   committing, and the dispatch function owns the transaction's single
+   commit, following the orchestrator carve-out in `docs/conventions.md`
+   (Caller-Owned Service Transactions). The API transaction dependency
+   governs the endpoint's request session, not this commit. If the
    transaction does not commit, release the fence, owner-safely release
    the lease, and return 500.
 6. **Release the fence** before any broker call.
@@ -291,7 +296,10 @@ returns 200 OK with `recalculation_scheduled: false` and releases the lease
 owner-safely, so it is immediately retryable. An unconfirmed acceptance returns
 `503 CELERY_UNAVAILABLE` with the fixed sanitized detail
 `"Recalculation task publication could not be confirmed"` and is retryable only
-after the task is delivered or the retained lease expires by its TTL. A no-op
+after the task is delivered or the retained lease expires by its TTL. A
+publisher exception that is not a broker operational error also retains the
+lease and propagates as a server error; the endpoint must not release the
+retained lease on that path. A no-op
 change observes only the persisted setting value and reads no coordination
 state; when a lease is retained, the no-op response must not imply that no run
 can exist.

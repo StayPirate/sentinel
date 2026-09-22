@@ -3504,6 +3504,11 @@ per-CVE contract is implemented or changed, tests MUST cover the contract in
 - the lease is retained after the `503` broker outcome
 - a task actually accepted despite the `503` can still run and adopt
 - a task actually not accepted leaves the lease to expire by its TTL
+- the PATCH explicit-dispatch composition: the setting and audit commit completes
+  during request processing, the fence is released before publication, the
+  response reflects the publication outcome (`200` scheduled, `200` not
+  scheduled on a proven pre-publication failure, `503` unconfirmed), and no
+  best-effort post-commit callback is registered for the publication
 - no coordination audit event is created
 
 **Transactions:**
