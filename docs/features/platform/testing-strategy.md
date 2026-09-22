@@ -3441,6 +3441,114 @@ per-CVE contract is implemented or changed, tests MUST cover the contract in
 - every derived outcome equals the committed winner under the CVE-then-Ticket
   lock order and never the page-observed state
 
+**Complete-run coordination:**
+
+- lease value parsing and exact comparison of `v1:<task_id>:<target_version>`,
+  including malformed, owner-mismatched, and target-mismatched values
+- acquire, compare-and-renew, and compare-and-delete each produce their
+  `acquired`/`not_acquired`, `renewed`/`absent`/`mismatch`, and
+  `deleted`/`absent`/`mismatch` outcomes
+- compare-and-delete by an old owner against a newer lease is a `mismatch`
+  no-op: the newer record survives
+- renewal occurs at the 60-second boundary and performs no command before it
+- `RedisError` and uncertain completion on acquire, renew, and delete each
+  follow the specified conservative outcome; an uncertain acquire never
+  proceeds to publication
+- an initial compare-and-renew `RedisError` or uncertain result produces only
+  `cvss_recalculation_adoption_rejected`, with no counters or terminal event;
+  the same failure at a post-adoption checkpoint produces terminal
+  `ownership_lost` with sanitized category `infrastructure`
+- publication classification distinguishes `submitted`,
+  `acceptance_unconfirmed` from `kombu.exceptions.OperationalError`, and every
+  other publisher exception; setting, transaction, commit, and fence failures
+  before publisher invocation retain their original classification
+- coordination events use only the allowed bounded fields and the closed
+  `reason` categories, and never the full lease token or raw exception text
+
+**Coordination integration tests** use independent sessions and connections:
+
+- a race between two admissions admits exactly one owner
+- the manual trigger reads `default_cvss_version` only after acquiring the
+  fence; a concurrent PATCH/manual-trigger race publishes the current committed
+  version selected under that fence, never an earlier pre-fence observation
+- a second admission is rejected by the fence held by an active runner even
+  when the lease is absent
+- a free lease with a held fence after simulated Redis loss still admits no
+  second run
+- two deliveries of the same token: only one adopts, the other is rejected at
+  adoption
+- an old token against a newer owner is rejected and mutates nothing
+- a delayed old delivery whose lease has been replaced emits only adoption
+  rejection and begins no run workflow
+- lease expiry between two units blocks the next unit and terminates
+  `ownership_lost`
+- an active checkpoint `mismatch` or `absent` emits terminal
+  `cvss_recalculation_ownership_lost` with sanitized category `interrupted`
+- a Redis restart during an active unit terminates the delivery safely
+- loss of the fenced connection is detected before the next mutation and
+  terminates as a whole-run `failed` outcome without reconnect, without opening
+  a unit session on a different connection, and without further mutation
+- no Redis or broker I/O executes under a CVE or Ticket row lock
+- a setting `PATCH` is blocked by an active runner protected by the fence even
+  when Redis is empty
+- an unconfirmed or failed API fence release prevents publisher invocation;
+  connection invalidation or closure supplies the release backstop and the
+  original server error propagates; a definitive `false` unlock result follows
+  the same path
+- every interceptable terminal path closes the current unit session, attempts
+  compare-and-delete while still holding the fence, then releases the fence and
+  emits the terminal event
+- when terminal compare-and-delete raises `RedisError`, cleanup still releases
+  the fence and leaves the lease to expire by its TTL
+- a simulated crash releases the fence
+- a complete rerun is idempotent
+
+**Coordination server-global Redis tests** use a dedicated Redis container:
+
+- restart, flush/data loss, unavailability, key expiry, and command timeout or
+  uncertain completion
+
+**Coordination task and process tests:**
+
+- the wrapper accepts only a canonical lowercase hyphenated UUID version 4
+  from `task.request.id`, passes it explicitly to the service workflow, and a
+  malformed or absent ID produces only
+  `cvss_recalculation_adoption_rejected` before the fence or any mutation, and
+  the feature event omits `celery_task_id` and the raw invalid value
+- the service workflow does not read `celery.current_task`, task request state,
+  or logging context to discover the task ID
+- duplicate delivery, redelivery, and late delivery begin no mutation
+- cancellation between units, before a unit commit, and after a unit commit
+- worker shutdown
+- hard process loss
+- engine disposal on the interceptable paths
+- no test presumes cleanup after a hard kill
+
+**Coordination API tests:**
+
+- the manual trigger returns `202` on `submitted`
+- the manual trigger returns `409` on a held owner or fence
+- the manual trigger returns `503 REDIS_UNAVAILABLE`
+- the manual trigger returns `503 CELERY_UNAVAILABLE` on unconfirmed acceptance
+- a setting-read, database, commit, or fence-release failure before publisher
+  invocation uses the ordinary server-error mapping, including global `500
+  INTERNAL_ERROR` where applicable, and never `CELERY_UNAVAILABLE`
+- only `kombu.exceptions.OperationalError` from the publisher produces `503
+  CELERY_UNAVAILABLE`; a non-operational publisher exception propagates and
+  retains the lease conservatively
+- the lease is retained after the `503` broker outcome
+- a task actually accepted despite the `503` can still run and adopt
+- a task actually not accepted leaves the lease to expire by its TTL
+- the PATCH coordination composition: the setting and audit commit completes
+  during request processing while the fence is held, confirmed fence release
+  precedes publication, and the response reflects the publication outcome
+  (`200` scheduled or `503` unconfirmed); the complete Settings mutation
+  contract owns the transaction/session mechanism
+- `recalculation_scheduled = false` means only that this request published no
+  new task and never asserts the absence of an earlier admitted or
+  acceptance-unconfirmed run; the no-op path does not query Redis
+- no coordination audit event is created
+
 **Transactions:**
 
 - one fresh session and exactly one transaction per CVE
@@ -3477,7 +3585,9 @@ per-CVE contract is implemented or changed, tests MUST cover the contract in
 - sequential duplicate delivery of the same target version
 - no automatic Celery retry is configured
 - a delivery delayed past a setting change terminates `stale` with every counter
-  zero and no mutation
+  zero and no mutation; this test is a defensive case for a persistent setting
+  change made outside the normal fence-coordinated PATCH path, not the expected
+  outcome of an ordinary PATCH/task race
 
 **Errors and control signals:**
 
@@ -3492,9 +3602,9 @@ per-CVE contract is implemented or changed, tests MUST cover the contract in
   whole run while preserving the committed unit's classification and its
   corresponding success and processed accounting
 - cancellation, worker shutdown, `SoftTimeLimitExceeded`, `MemoryError`, and a
-  simulated ownership-loss signal propagate unchanged; the test supplies the
-  ownership-loss signal at the documented boundary without prescribing its
-  mechanism
+  simulated ownership-loss condition (a compare-and-renew `mismatch` or
+  `absent`) propagate unchanged; the test induces the documented condition
+  without prescribing a private mechanism
 - an adversarial or structural test proves a broad per-item catch cannot
   convert a whole-run signal into `failed`
 

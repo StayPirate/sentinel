@@ -13,8 +13,10 @@ capability.
 
 ## Service Module
 
-System-setting persistence, bootstrap, reads, audit logging, and future
-mutations are implemented in `backend/app/services/settings.py`.
+System-setting persistence, bootstrap, reads, and audit logging are implemented
+in `backend/app/services/settings.py`. Setting mutation and recalculation
+publication are specified here and in
+`docs/features/platform/default-cvss-version-operations.md`.
 
 ## Settings
 
@@ -35,43 +37,92 @@ version-independent SUSE-assessment presence gate.
 
 **Impact of changing the default version**:
 
-When the Admin changes the default CVSS version, the PATCH endpoint
-executes the following sequence:
+When the Admin changes the default CVSS version, the PATCH endpoint composes
+the setting mutation with the complete-run admission, ownership, and
+publication contract in
+`docs/features/platform/default-cvss-version-operations.md`
+(Complete-Run Coordination). This section owns only the invariants needed at
+that coordination boundary; the Settings mutation service owns its final
+signature, transaction composition, concurrent changed/no-op classification,
+and result type.
+
+For a request that the complete Settings mutation contract classifies as a
+value change, the required coordination sequence is:
 
 1. **Validate** the new value against allowed values (`"3.1"`, `"4.0"`)
-2. **No-op check**: if the current value equals the new value, return
-   200 immediately with `recalculation_scheduled: false` (no audit
-   event, no batch — consistent with the audit-trail-infrastructure
-   cross-cutting rule for idempotent no-ops)
-3. **Acquire recalculation slot**: `SET cvss_recalc_active <timestamp>
-   NX EX 900` on Redis. This step serves as both a Redis liveness probe
-   and the endpoint's immediate admission guard. It is not the complete-run
-   mutual exclusion mechanism; see
-   `docs/features/platform/default-cvss-version-operations.md` for the runner
-   contract and its coordination boundary:
-   - If slot acquisition raises any `RedisError` → return 503
-     `REDIS_UNAVAILABLE` (nothing committed)
-   - If the key already exists (the admission slot is occupied) → return
-     409 `CVSS_RECALC_ALREADY_IN_PROGRESS` (nothing committed)
-4. **Commit** the new setting value and a `SettingAuditEvent` record to
-   the database. If the commit fails: release the slot (`DEL
-   cvss_recalc_active`) and return 500
-5. **Enqueue** the batch recalculation Celery task
+2. **Acquire the execution fence**: acquire the feature-specific
+   PostgreSQL session-level advisory fence with non-blocking semantics.
+   Only a definitive lock-not-acquired result means the fence is held:
+   nothing is committed, no lease is acquired, no task is published, and
+   the request returns 409 `CVSS_RECALC_ALREADY_IN_PROGRESS`. A database
+   or session error during acquisition propagates as a server error and is
+   never reported as `409`. A runner holds this fence for its complete
+   mutating workflow, so a PATCH cannot overtake it even when the Redis
+   lease is absent.
+3. **Acquire the admission lease** while holding the fence: preallocate
+   the run's Celery task ID and acquire the Redis lease
+   `cvss_recalc_active` with `SET ... NX EX 900`, as defined by the
+   coordination contract. A held lease releases the fence and returns 409
+   `CVSS_RECALC_ALREADY_IN_PROGRESS`. A `RedisError` or uncertain
+   acquisition releases the fence and returns 503 `REDIS_UNAVAILABLE`.
+   Nothing is committed in either case.
+4. **Commit** the new setting value and a `SettingAuditEvent` atomically while
+   the fence is held. No Redis or broker I/O occurs inside that transaction or
+   while a setting row lock is held. When commit is definitely unsuccessful,
+   roll back and close the transaction owner before Redis cleanup. When commit
+   completion is uncertain, invalidate or close the transaction connection
+   before Redis cleanup; the persisted outcome remains unknown, but no setting
+   row lock may survive. Then attempt owner-safe lease removal while the fence
+   remains held, release the fence, and propagate the original transaction
+   failure through the normal server error mapping. This coordination contract
+   does not select a separate dispatch-session mechanism or override the shared
+   API transaction conventions; the complete Settings mutation contract must
+   define that composition before implementation.
+5. **Release the fence and confirm release** before any broker call. If explicit
+   unlock fails or is uncertain, invoke no publisher, invalidate or close the
+   dedicated connection, attempt owner-safe lease removal, emit the applicable
+   cleanup event, and propagate the original server error. Connection closure
+   remains the automatic lock-release backstop. A definitive `false` return
+   from `pg_advisory_unlock` also means release was not confirmed; it is treated
+   as an internal fence-release failure and follows this same global `500
+   INTERNAL_ERROR` path.
+6. **Enqueue** the batch recalculation Celery task
    (`recalculate_cvss_derived_state`) with the new version as an explicit
-   argument. If the enqueue fails: release the slot and return 200 with
-   `recalculation_scheduled: false` (the primary operation — the setting
-   change — succeeded; the admin can use the manual re-run endpoint to
-   trigger the batch)
-6. Return 200 OK with `recalculation_scheduled: true`
+   argument and the preallocated task ID, then classify the publication
+   outcome under the coordination contract: `submitted` reports a
+   scheduled task; an `acceptance_unconfirmed` broker operational error
+   retains the lease and must not report that no task can exist; a
+   non-operational publisher exception propagates unchanged and also retains
+   the lease conservatively.
+7. Return the PATCH outcome: a `submitted` publication returns 200 OK
+   with the committed setting and a scheduled task; an
+   `acceptance_unconfirmed` publication returns 503
+   `CELERY_UNAVAILABLE` with the setting change and its audit event
+   committed and the admission lease retained (see Error responses). A
+   pre-publisher setting, transaction, or fence error and any non-operational
+   publisher exception propagate through their ordinary error mapping.
 
 **Commit-first rationale**: the `SettingAuditEvent` is always the first
 durable record. No ticket mutation can occur without the setting change
 being audited. This prevents phantom mutations (ticket audit events
 without a recorded cause).
 
+The PATCH outcome follows the coordination contract. A `submitted` publication
+returns 200 OK reporting a scheduled task; a no-op change returns 200 OK
+reporting that this request published no new task. An `acceptance_unconfirmed`
+publication returns
+`503 CELERY_UNAVAILABLE`; the setting change and its `SettingAuditEvent` remain
+committed and the admission lease is retained. The response never reports
+`recalculation_scheduled = false` as evidence that no earlier admitted or
+acceptance-unconfirmed run can exist, and it never releases the retained lease.
+The no-op path reads no Redis coordination state merely to strengthen that
+boolean. Its locked-current classification and concurrent relationship to the
+changed path belong to the complete Settings mutation contract rather than to
+this coordination sequence.
+
 The runner, manual recalculation endpoint, impact-preview service and endpoint,
 observability, restart and recovery behavior, absence of persistent run state,
-and future complete-run coordination boundary are authoritative in
+and complete-run coordination are authoritative in
 `docs/features/platform/default-cvss-version-operations.md`. The PATCH endpoint
 only composes the setting mutation with an immediate publication attempt; it
 does not redefine those operation contracts.
@@ -227,30 +278,43 @@ Request body:
 }
 ```
 
-Validates the value against allowed values. On a value change, acquires
-the recalculation slot, commits the setting and audit event, and
-enqueues a batch recalculation task. See "Impact of changing the default
-version" above for the full sequence. Changing the setting neither requires
-nor consumes a prior impact preview; see
+Validates the value against allowed values. On a value change, composes the
+setting mutation with complete-run admission, lease acquisition, commit, and
+publication as described in "Impact of changing the default version" above.
+Changing the setting neither requires nor consumes a prior impact preview; see
 `docs/features/platform/default-cvss-version-operations.md`.
 
 **Note on PATCH with side effects**: this endpoint uses PATCH because
 semantically it is a configuration field update — the setting changes
-value and the response is returned immediately. The recalculation is an
-asynchronous side effect (Celery background task) that does not block
-the response. This is a documented deviation from the
+value. Admission, the setting-and-audit commit, confirmed fence release, and the
+initial publication attempt complete during the request. Only task execution is
+asynchronous: the response does not wait for a worker to start or complete the
+recalculation. This is a documented deviation from the
 `POST /resource/{id}/verb` convention for operations with side effects.
 
 **Error responses**:
 
 | Status | Code | Condition |
 |--------|------|-----------|
-| 409 | `CVSS_RECALC_ALREADY_IN_PROGRESS` | The recalculation admission slot is already held (setting change blocked while the slot is occupied) |
-| 503 | `REDIS_UNAVAILABLE` | Redis rejected or could not complete slot acquisition (setting change requires Redis availability) |
+| 409 | `CVSS_RECALC_ALREADY_IN_PROGRESS` | The execution fence or the admission lease is already held, so the setting change is blocked; nothing is committed |
+| 503 | `REDIS_UNAVAILABLE` | Redis rejected or could not complete lease acquisition; nothing is committed |
+| 503 | `CELERY_UNAVAILABLE` | The publisher raised `kombu.exceptions.OperationalError`, so broker acceptance is unconfirmed; the setting change and audit event remain committed and the admission lease is retained |
+
+A setting, transaction, commit, or fence-release failure before publisher
+invocation propagates its ordinary error after owner-safe cleanup is attempted;
+it is not `CELERY_UNAVAILABLE` and is not a successful PATCH outcome. An
+unconfirmed acceptance returns `503 CELERY_UNAVAILABLE` with the fixed
+sanitized detail `"Recalculation task publication could not be confirmed"` and
+is retryable only after the task is delivered or the retained lease expires by
+its TTL. A publisher exception that is not a broker operational error also
+retains the lease and propagates as a server error; the endpoint must not
+release the retained lease on that path. A no-op change observes only the
+persisted setting value and reads no coordination state; when a lease is
+retained, the no-op response must not imply that no run can exist.
 
 Response (200 OK): the settings object in the standard
 `{"data": ...}` envelope. The `recalculation_scheduled` boolean field
-is **always present** in the response:
+is present in the current response shape:
 
 ```json
 {
@@ -261,14 +325,19 @@ is **always present** in the response:
 }
 ```
 
-Values of `recalculation_scheduled`:
+While the current response retains this boolean, it is `true` only when the
+value changed and this request's publication returned `submitted`. Under the
+current response contract it is `false` for a no-op change, where this request
+published no new task. It does not assert that no earlier admitted or
+acceptance-unconfirmed run can exist, and the no-op path performs no Redis query
+to make such a claim. An unconfirmed publication instead uses the `503
+CELERY_UNAVAILABLE` response above. No run-status endpoint or additional
+response field is introduced. The admin recovery surface remains
+`POST /api/v1/admin/settings/default-cvss-version/recalculate`.
 
-- `true` — value changed and batch task successfully enqueued
-- `false` — either (a) no-op (value unchanged, no batch needed), or
-  (b) value changed but enqueue failed (transient broker failure after
-  slot acquisition — admin should use
-  `POST /api/v1/admin/settings/default-cvss-version/recalculate` to
-  trigger the batch manually)
+This coordination change retains the existing boolean response shape. The
+complete Settings mutation contract may preserve it or replace it with a more
+explicit outcome, but any replacement must preserve the non-assertion above.
 
 **`Capability: manage_settings`**
 

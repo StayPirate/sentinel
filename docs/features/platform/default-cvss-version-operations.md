@@ -22,9 +22,12 @@ This specification owns:
 - `recalculate_cvss_derived_state(target_version)` and its complete bounded
   runner;
 - the manual all-CVE recalculation endpoint;
-- runner logging, retry, rerun, restart, and recovery behavior;
-- the absence of persistent run and progress state; and
-- the boundary within which complete-run coordination may be added.
+- complete-run coordination: run identity, admission, the Redis ownership
+  lease, task adoption, the PostgreSQL execution fence, ownership loss,
+  publication uncertainty, lease renewal, owner-safe cleanup, and the
+  coordination conditions that require operator recovery;
+- runner logging, retry, rerun, restart, and recovery behavior; and
+- the absence of persistent run and progress state.
 
 Domain behavior remains with its existing authorities:
 
@@ -58,7 +61,9 @@ not a fetcher, sub-operation, or scheduled integration.
 
 The Celery task is `recalculate_cvss_derived_state(target_version)`. Its only
 semantic input is the primitive `target_version`, exactly `"3.1"` or `"4.0"`.
-No task argument carries a session, ORM object, collection, or per-CVE payload.
+Its Celery request ID is operational metadata rather than a second semantic
+input. No task argument carries a session, ORM object, collection, or per-CVE
+payload.
 
 The synchronous task wrapper:
 
@@ -66,27 +71,36 @@ The synchronous task wrapper:
    a non-retryable caller-contract failure before any database read, before
    enumeration, and before any CVE mutation. It emits no run counters and no
    feature run event.
-2. Invokes exactly one `asyncio.run()` around the service-owned asynchronous
+2. Reads `task.request.id`, validates that it is the canonical lowercase
+   hyphenated representation of a UUID version 4, and passes it explicitly to
+   the service-owned workflow as `celery_task_id`. A malformed or absent task ID
+   is a non-retryable contract failure before `asyncio.run()`, fence
+   acquisition, Redis access, or any database mutation. It emits only
+   `cvss_recalculation_adoption_rejected` with reason `task_id_invalid`, creates
+   no run counters, and emits no terminal run event.
+3. Invokes exactly one `asyncio.run()` around the service-owned asynchronous
    workflow. It delegates all logic to the service layer and performs no
    business query, settings read, transaction, or engine disposal of its own.
-3. Returns `None` and stores no task result.
-4. Lets cancellation, worker shutdown, `SoftTimeLimitExceeded`, `MemoryError`,
+4. Returns `None` and stores no task result.
+5. Lets cancellation, worker shutdown, `SoftTimeLimitExceeded`, `MemoryError`,
    and every other control signal propagate unchanged. It converts no control
    signal into an ordinary task outcome.
 
 The service-owned asynchronous workflow
-`run_cvss_derived_state_recalculation(target_version, session_factory)` opens
-one independent session per unit, owns their commits and rollbacks, and
-maintains one fixed-size in-memory aggregate used only for the run's structured
-logs. Its
-run metadata is `target_version`, the captured watermark (absent for a stale
-delivery), and the terminal outcome token. Its counters are exactly `changed`,
-`unchanged`, `skipped`, `failed`, and the derived `succeeded` and `processed`.
-It contains no other counter, no publication result, no CVE, Ticket, package,
-Product, or occurrence identifier, and no per-CVE detail collection. The
-workflow emits the run's events from that aggregate, discards it, and returns
-`None`; the wrapper therefore receives no task result. The aggregate is never
-persisted and never published to a result backend.
+`run_cvss_derived_state_recalculation(target_version, celery_task_id,
+session_factory)` receives the validated task ID explicitly; service code does
+not read `celery.current_task`, `task.request`, or logging context to recover
+it. The workflow opens one independent session per unit, owns their commits and
+rollbacks, and maintains one fixed-size in-memory aggregate used only for the
+run's structured logs. Its run metadata is `target_version`,
+`celery_task_id`, the captured watermark (absent for a stale delivery), and the
+terminal outcome token. Its counters are exactly `changed`, `unchanged`,
+`skipped`, `failed`, and the derived `succeeded` and `processed`. It contains no
+other counter, no publication result, no CVE, Ticket, package, Product, or
+occurrence identifier, and no per-CVE detail collection. The workflow emits
+the run's events from that aggregate, discards it, and returns `None`; the
+wrapper therefore receives no task result. The aggregate is never persisted
+and never published to a result backend.
 
 The same workflow awaits the shared pooled engine's disposal exactly once at
 the outer asynchronous boundary, on both the success and the exception path,
@@ -112,13 +126,13 @@ post-commit effect, leaves every counter zero, and emits only the
 derived state back to a superseded policy. A repeated valid delivery is safe
 because already converged units classify `unchanged`.
 
-Complete-run admission, ownership, lease renewal, execution fencing, prevention
-of a setting change or another owner overtaking an admitted run, and crash
-cleanup are not defined by this contract. Any such coordination must preserve
-the validation, paging, unit, drain, and outcome semantics defined here; an
-ownership-loss termination is a whole-run condition and never an ordinary
-failed unit. The coordination contract owns the ownership-loss signal's type
-and detection point.
+Complete-run admission, ownership, lease renewal, execution fencing,
+prevention of a setting change or another owner overtaking an admitted run, and
+crash cleanup are owned by Complete-Run Coordination below. That contract
+preserves the validation, paging, unit, drain, and outcome semantics defined
+here; an ownership-loss termination is a whole-run condition and never an
+ordinary failed unit. A delivered task confirms exact ownership before it begins
+its first unit, so a non-owner delivery mutates nothing.
 
 ### Watermark and Keyset Pagination
 
@@ -286,7 +300,6 @@ converted into the ordinary per-unit `failed` counter:
 - session cleanup failure;
 - a globally unavailable database or an invalidated connection;
 - a missing required system setting;
-- an invalid task payload;
 - a contract violation or programming error;
 - a non-operational post-commit exception;
 - cancellation;
@@ -309,6 +322,11 @@ any runner counter or aggregate outcome. Cancellation and worker shutdown
 terminate as the `cancelled` outcome, an ownership-loss signal terminates as
 `ownership_lost`, and every remaining whole-run condition terminates as the
 `failed` outcome.
+
+Wrapper-rejected task inputs do not enter this taxonomy: an invalid
+`target_version` emits no run or coordination event, and an invalid
+`celery_task_id` emits only `cvss_recalculation_adoption_rejected`, as defined
+under Task Identity and Workflow.
 
 Counter treatment follows the commit boundary. A condition raised before
 successful commit, or a failed or ambiguous commit, leaves every unit counter at
@@ -656,19 +674,43 @@ Manually triggers the all-CVE recalculation runner using the current persisted
 an interrupted or partial run and may also be used as a general refresh
 operation.
 
-The endpoint uses the same immediate admission and publication logic as the
+The endpoint uses the same admission and publication coordination as the
 `PATCH /api/v1/admin/settings` side effect:
 
-1. Read the current `default_cvss_version` through the required-row read
-   service.
-2. Acquire the recalculation slot (`SET cvss_recalc_active <timestamp> NX EX
-   900`) as the endpoint's immediate admission guard. The slot is not the
-   complete-run coordination mechanism described below.
-3. Enqueue `recalculate_cvss_derived_state(target_version)`. On publication
-   failure, release the slot and return `503 CELERY_UNAVAILABLE`.
-4. Return `202 Accepted` after the publication call returns without raising.
+1. Acquire the PostgreSQL execution fence with non-blocking semantics. A
+   definitive lock-not-acquired result returns `409
+   CVSS_RECALC_ALREADY_IN_PROGRESS` and performs no lease acquisition and no
+   publication. A database or session error during acquisition propagates as a
+   server error and is never reported as `409`.
+2. While holding the fence, read the current `default_cvss_version` through the
+   required-row read service. A setting-read or database failure releases the
+   fence, acquires no lease, invokes no publisher, and propagates the original
+   error.
+3. Still while holding the fence, preallocate the run's Celery task ID and
+   acquire the Redis lease `cvss_recalc_active` with `SET ... NX EX 900`. A
+   held lease releases the fence and returns `409
+   CVSS_RECALC_ALREADY_IN_PROGRESS`; a `RedisError` or uncertain acquisition
+   releases the fence and returns `503 REDIS_UNAVAILABLE`.
+4. Release the fence and confirm that release before any broker call. If
+   `pg_advisory_unlock` fails or its result is uncertain, do not invoke the
+   publisher, invalidate or close the dedicated connection so connection
+   closure remains the release backstop, attempt owner-safe compare-and-delete
+   of the lease, emit the applicable cleanup event, and propagate the original
+   server error. This path is not `CELERY_UNAVAILABLE` because the publisher was
+   never invoked. A definitive `false` return also means release was not
+   confirmed; it is treated as an internal fence-release failure and follows
+   this same global `500 INTERNAL_ERROR` path.
+5. Enqueue `recalculate_cvss_derived_state(target_version)` with the preallocated
+   task ID, then classify the publication outcome under Publication Uncertainty.
+   A `submitted` outcome returns `202 Accepted`; an `acceptance_unconfirmed`
+   outcome returns `503 CELERY_UNAVAILABLE` with the fixed sanitized detail
+   `"Recalculation task publication could not be confirmed"` and retains the
+   lease. Any other publisher exception propagates unchanged and retains the
+   lease conservatively.
 
-No setting change is made and no `SettingAuditEvent` is created.
+No setting change is made and no `SettingAuditEvent` is created. The endpoint
+never asserts that the broker rejected an unconfirmed task, and it never treats
+the absence of a terminal event as completion.
 
 **Request body**: none.
 
@@ -688,9 +730,18 @@ No setting change is made and no `SettingAuditEvent` is created.
 
 | Status | Code | Condition |
 |---|---|---|
-| 409 | `CVSS_RECALC_ALREADY_IN_PROGRESS` | The recalculation admission slot is already held |
-| 503 | `REDIS_UNAVAILABLE` | Redis rejected or could not complete slot acquisition |
-| 503 | `CELERY_UNAVAILABLE` | The task could not be enqueued; the slot is released |
+| 409 | `CVSS_RECALC_ALREADY_IN_PROGRESS` | The execution fence or the admission lease is already held |
+| 503 | `REDIS_UNAVAILABLE` | Redis rejected or could not complete lease acquisition; no publication occurred and nothing was committed |
+| 503 | `CELERY_UNAVAILABLE` | The publisher raised `kombu.exceptions.OperationalError`, so broker acceptance is unconfirmed and the lease is retained |
+
+The `503 CELERY_UNAVAILABLE` detail is fixed and sanitized and never contains
+the broker exception text:
+`"Recalculation task publication could not be confirmed"`. An unconfirmed
+acceptance is not proof of rejection: the task may still be delivered and adopt
+the retained lease, or the lease may expire by its TTL if the task was never
+accepted. Setting-read, database, commit, and fence-release failures that occur
+before publisher invocation propagate through their ordinary server-error
+mapping and are never reported as `CELERY_UNAVAILABLE`.
 
 **Idempotency and recovery**: the operation is intentionally repeatable. See
 All-CVE Recalculation Runner above for execution semantics and Retry, Rerun, and
@@ -714,6 +765,22 @@ Recovery for that committed Ticket effect is the explicit complete Ticket
 convergence rerun in `docs/features/tickets/tickets.md`; a CVSS rerun is not
 guaranteed to republish an already-converged unit.
 
+Complete-run coordination recovery is deterministic:
+
+- a completed, partial, stale, cancelled, or ownership-lost delivery attempts
+  owner-safe lease removal and releases the fence, so the next manual trigger
+  admits immediately;
+- a hard kill, OOM kill, or worker disappearance performs no explicit cleanup:
+  the PostgreSQL connection closure releases the fence and the lease expires by
+  its TTL, so the trigger is retryable after the TTL at the latest;
+- a `503 CELERY_UNAVAILABLE` from an unconfirmed acceptance retains the lease:
+  wait for the task to be delivered and adopt it, or wait for the lease TTL,
+  then retry;
+- a wedged process can retain the fence; the operator MUST terminate that worker
+  or pod before retrying; and
+- recovery never deletes a lease unconditionally. The complete operator
+  procedure is in `docs/deployment.md` (CVSS Recalculation Recovery).
+
 ## Absence of Persistent Run State
 
 The preview and runner introduce:
@@ -725,24 +792,484 @@ The preview and runner introduce:
 - no metric or log used as authoritative state;
 - no generic batch, backfill, or reusable runner framework;
 - no new audit event type; the unit's ordinary domain audit events remain the
-  only durable audit records; and
+  only durable audit records;
+- no persistent coordination record: the admission and ownership lease is a
+  TTL-bounded
+  Redis key and the execution fence is a session-scoped PostgreSQL advisory
+  lock, neither of which is persisted, returned, or used as state; and
 - no new configuration variable or setting.
 
 The normative restart and recovery behavior is defined in Retry, Rerun, and
-Recovery above.
+Recovery above, and the coordination resource lifecycle is defined in
+Complete-Run Coordination below.
 
-## Complete-Run Coordination Boundary
+## Complete-Run Coordination
 
-The fixed 900-second endpoint slot is only an immediate Redis liveness probe and
-admission guard. This specification does not yet define complete-run admission,
-ownership, lease renewal, execution fencing, Redis-loss behavior, prevention of
-a setting change or another owner overtaking an admitted run, or crash cleanup.
+This section owns complete-run admission, run identity, ownership, lease
+renewal, execution fencing, task adoption, ownership loss, Redis-loss behavior,
+publication uncertainty, prevention of a setting change or another owner
+overtaking an admitted run, cleanup, and the coordination conditions that
+require operator recovery. It preserves every validation, stale-delivery, bounded
+paging, independent-unit, post-commit, outcome, restart, and no-persistent-state
+contract defined above. An ownership-loss termination is a whole-run condition
+and is never an ordinary failed unit.
 
-Any complete-run coordination added at this boundary must preserve the existing
-validation, stale-delivery, bounded paging, independent-unit, post-commit,
-outcome, restart, and no-persistent-state contracts. It must not turn an
-ownership-loss signal into an isolated per-CVE failure or make Redis an
-authoritative source of progress or completion.
+Coordination introduces no persistent run row, progress resource, resume cursor,
+outbox, result-backend entry, audit event, capability, configuration variable,
+or generic lease framework. Redis owns admission and cooperative ownership;
+PostgreSQL owns the execution fence that prevents overlapping mutation after
+Redis loss.
+
+### Run Identity
+
+One recalculation attempt is identified by one preallocated Celery task ID
+(`celery_task_id`): a canonical lowercase hyphenated, cryptographically random
+UUID (version 4) that the admitting API request allocates while it holds the
+execution fence and before it acquires the lease. The same value is:
+
+- the run identity;
+- the Celery task ID supplied to the publication call, so that in the worker it
+  equals `task.request.id`; and
+- the Redis owner token.
+
+`target_version` remains the only semantic task input. The task ID is
+operational metadata: it is not passed as a separate semantic task argument, is
+never persisted in PostgreSQL, is not returned by the coordination contract, and
+is not derived from `request_id`, `target_version`, or any other value.
+
+### Coordination Resources
+
+| Resource | Name | Value | Lifetime |
+|---|---|---|---|
+| Admission and ownership lease | Redis key `cvss_recalc_active` | `v1:<celery_task_id>:<target_version>` | Set with `SET ... NX EX 900`; renewed at safe checkpoints; removed by owner-safe compare-and-delete |
+| Execution fence | One stable feature-specific PostgreSQL session-level advisory lock | Carries no value | Held by one connection from non-blocking acquisition until explicit release or connection/process closure |
+
+Lease value rules:
+
+- `v1` is the value-schema version.
+- `<celery_task_id>` is the canonical lowercase hyphenated UUID string.
+- `<target_version>` is exactly `"3.1"` or `"4.0"`.
+- Renewal and release compare the complete value atomically. A prefix,
+  field-selective, or timestamp-only comparison is never ownership.
+- The TTL is exactly 900 seconds from each successful acquisition or renewal.
+  The renewal interval is at least 60 seconds since the last successful
+  renewal; a checkpoint check made earlier than that performs no command. The
+  adoption confirm-and-renew is exempt from this minimum and always executes.
+  Both values are feature constants, not configuration.
+- A timestamp is not part of the value and is never ownership.
+- TTL expiry proves only that the bounded interval elapsed. It never proves
+  that the runner stopped, and a missing key never proves completion.
+- A stored value that does not parse as `v1:<canonical-uuid>:<target_version>`
+  matches no owner: a fresh acquire returns `not_acquired`, and
+  compare-and-renew and compare-and-delete return `mismatch`. Because there is
+  no complete expected value to compare against, only TTL expiry recovers a
+  malformed value; an operator cannot remove it owner-safely.
+- The complete token is never written to a log beyond the normal bound
+  `celery_task_id` correlation field, is never persisted, and is never returned
+  by the API.
+- PostgreSQL, not Redis, remains the source of truth for completed derived
+  state.
+
+The fence and the lease are independent. The lease admits at most one owner; the
+fence prevents overlapping mutation after the lease is lost, expired, or
+replaced. Neither resource is authoritative progress, completion, or recovery
+state.
+
+### Atomic Lease Operations
+
+Complete-run coordination defines exactly three feature-specific Redis
+operations. They are not a shared or generic lease framework. All three:
+
+- are one atomic Redis command or server-side script;
+- receive only the expected canonical task ID and target version;
+- create no `SettingAuditEvent`, `TicketAuditEvent`, or other audit record;
+- perform no database read, mutation, transaction, or row lock; and
+- execute only outside every per-CVE database transaction and CVE/Ticket row
+  lock.
+
+All three are idempotent for ownership purposes: repeating one changes no
+ownership and, except for an acquire that finds an existing key, converges to
+the same resource state. When the client cannot determine whether a command
+completed, the owner applies the conservative outcome that cannot authorize
+mutation, as specified per operation. `RedisError` propagates to the caller,
+whose behavior is specified below.
+
+**Acquire.** `SET cvss_recalc_active v1:<task_id>:<target_version> NX EX 900`,
+returning `acquired` when the key was absent and the complete value was written,
+or `not_acquired` when a key already exists. A `not_acquired` result mutates
+nothing and changes no ownership. On `RedisError`, the API returns `503
+REDIS_UNAVAILABLE`. When completion is uncertain, the caller MUST NOT proceed to
+publish: the write may have occurred, so the safe outcome is temporary
+unavailability until any written key expires. Re-issuing acquire while a key
+exists is a safe `not_acquired` no-op.
+
+**Compare-and-renew.** Atomically set the TTL of `cvss_recalc_active` to 900
+seconds if and only if its complete current value equals
+`v1:<task_id>:<target_version>`, returning `renewed`, `absent` (the key does not
+exist), or `mismatch` (the key exists with a different value). It performs no
+removal and no value replacement. On `mismatch`, `absent`, `RedisError`, or
+uncertain completion, the delivery does not hold confirmed ownership. The
+calling phase owns the outcome: the initial adoption check produces only
+`adoption_rejected`, while a checkpoint after successful adoption blocks the
+next unit and terminates the active run as `ownership_lost`.
+
+**Compare-and-delete.** Atomically delete `cvss_recalc_active` if and only if
+its complete current value equals `v1:<task_id>:<target_version>`, returning
+`deleted`, `absent`, or `mismatch`. `absent` and `mismatch` perform no deletion,
+so an old owner can never remove a newer owner's record. On `RedisError` or
+uncertain completion, the operation is recorded as a cleanup failure that
+changes no committed state and no terminal classification; the key expires by
+its TTL. Repeating a release after deletion is an idempotent `absent` no-op.
+
+### Execution Fence
+
+Complete-run coordination uses one stable, feature-specific PostgreSQL
+session-level advisory-lock identifier. Its concrete numeric value is an
+implementation constant, but it MUST be stable across releases, reserved for
+this feature, and neither shared nor colliding with any other advisory-lock
+consumer. The same identifier is used by the PATCH side effect, the manual
+trigger, and the task; no path uses a different fence.
+
+- Acquisition is non-blocking (`pg_try_advisory_lock` semantics). A caller that
+  does not acquire the fence waits for nothing and mutates nothing.
+- The fence is session-scoped, not transaction-scoped, so it necessarily spans
+  the independent per-CVE transactions.
+- The fence is not a transaction. No single database transaction and no
+  CVE/Ticket row lock spans units; each unit keeps its own transaction and lock
+  scope as defined above.
+- The fence is acquired and released on one dedicated connection that is not
+  returned to the connection pool while the fence is held.
+- Every unit's fresh session and independent transaction execute on that same
+  fenced connection. The runner opens no unit session on a different connection
+  while it holds the fence, so the fence cannot be silently released while the
+  runner keeps mutating.
+- A fenced connection that closes, is lost, or is invalidated is therefore
+  observed when the next unit's session on it fails, or by a fence-ownership
+  check performed on it before resuming. The runner MUST NOT reconnect, obtain
+  another connection, or continue mutating after that loss; it terminates as a
+  whole-run `failed` outcome.
+- Every interceptable path releases the fence explicitly: success, every
+  terminal outcome, an exception, cancellation, and worker shutdown.
+- If the fenced connection closes without an explicit release, PostgreSQL
+  releases the fence automatically.
+- The fence carries no value and is never used as progress, a result, or durable
+  state.
+
+Because the fence is exclusive, two deliveries of the same token, or a delivery
+and an API admission, cannot hold it at the same time. The fence therefore also
+prevents concurrent same-token execution.
+
+### Admission Ordering
+
+The API admission path is normative and ordered:
+
+1. Acquire the fence with non-blocking semantics.
+2. If the fence is not acquired, the request performs no lease acquisition, no
+   setting mutation, and no publication. It receives `409
+   CVSS_RECALC_ALREADY_IN_PROGRESS`, and the run remains with its current owner.
+   A fence that stays held while no runner is renewing its lease is the
+   recovery-required condition described under Operator Recovery.
+3. For the manual trigger, read `default_cvss_version` through the required-row
+   service while the fence is held. A read failure releases the fence, acquires
+   no lease, invokes no publisher, and propagates the original error. The PATCH
+   path instead uses the setting value selected by its own coordinated mutation
+   contract in `system-settings.md`.
+4. While holding the fence, preallocate the run's task ID and acquire the lease
+   with atomic `SET ... NX EX 900`. A `not_acquired` result means another owner
+   is admitted: release the fence and return `409
+   CVSS_RECALC_ALREADY_IN_PROGRESS`; no setting mutation and no publication
+   occur. A `RedisError` or uncertain acquisition releases the fence and returns
+   `503 REDIS_UNAVAILABLE`.
+5. For the `PATCH` side effect, commit the setting mutation and its
+   `SettingAuditEvent` while the fence is still held. When commit is definitely
+   unsuccessful or completion is uncertain, the transaction owner must be
+   definitively terminated before Redis cleanup so no setting row lock survives.
+   The Settings mutation contract owns the rollback, invalidation, closure, and
+   session-composition mechanism. Then attempt owner-safe lease removal while
+   the fence is held, release the fence, and propagate the original transaction
+   failure through the normal server-error mapping.
+6. Release the fence and confirm successful release before invoking the broker
+   publication call. The lease, not the fence, covers the interval between the
+   release and the task's adoption. If explicit unlock fails or is uncertain,
+   invoke no publisher, invalidate or close the dedicated connection, attempt
+   owner-safe lease removal, emit the applicable cleanup event, and propagate
+   the original server error. Connection closure is the automatic release
+   backstop.
+7. Invoke the publication call and classify its outcome under Publication
+   Uncertainty.
+
+Two API admissions cannot overlap: the second admission either finds the fence
+held by the first, or finds the lease held by the first admission's task ID. A
+`PATCH` can therefore never overtake a runner protected by the fence, even when
+the lease is absent, because the running task holds the fence for its complete
+mutating workflow.
+
+Releasing the fence before publication is required so that a very fast task does
+not mistake the API's short fence hold for a genuine collision. It does not
+weaken exclusion: the lease is acquired while the fence is held and is released
+only at terminal cleanup.
+
+A different admission's brief fence hold during its own lease attempt can still
+make a legitimate delivery's non-blocking adoption acquire fail. That delivery
+terminates as an adoption rejection, and recovery is the documented TTL-based
+path. This is an accepted, safe availability cost: no overlapping mutation is
+possible, because the rejected delivery mutates nothing and the lease owner is
+unchanged.
+
+Steps 4 through 6 are coordination ordering requirements. The Settings API
+contract in `docs/features/platform/system-settings.md` realizes them with the
+required composition: the setting and audit commit completes during request
+processing while the fence is held, and confirmed fence release precedes the
+broker publication in the same request so that the response reflects the
+publication outcome. This coordination specification does not prescribe the
+Settings mutation service's final signature, session orchestration, concurrent
+no-op classification, or response-result type; `system-settings.md` owns those
+contracts. A fence that cannot be acquired because of a database or session
+error is a server error, not the `fence_busy` rejection: only a definitive
+"lock not acquired" result produces `409
+CVSS_RECALC_ALREADY_IN_PROGRESS`.
+
+### Task Adoption
+
+A delivered task begins no CVE transaction until it has proven ownership. The
+task:
+
+1. arrives with a wrapper-validated canonical `celery_task_id`; an absent or
+   malformed ID has already produced only the `task_id_invalid` adoption
+   rejection and has not entered this workflow;
+2. validates the received `target_version`; an invalid target remains the
+   non-retryable caller-contract failure under Input Validation and Stale
+   Delivery, with no coordination event or run event;
+3. acquires the fence with non-blocking semantics; if it does not acquire the
+   fence, it starts no CVE transaction, mutates nothing, releases nothing,
+   emits the adoption-rejected event, and terminates;
+4. confirms exact ownership with one atomic compare-and-renew of
+   `cvss_recalc_active` against `v1:<task_id>:<target_version>`; on `mismatch`,
+   `absent`, `RedisError`, or uncertain completion it releases the fence, starts
+   no CVE transaction, mutates nothing, emits only
+   `cvss_recalculation_adoption_rejected`, and terminates; and
+5. only after steps 3 and 4 succeed, emits `cvss_recalculation_adopted`, starts
+   the run workflow, performs the existing stale-delivery check, and begins
+   enumeration.
+
+Only a delivery that holds both the fence and a confirmed exact owner/target
+lease may begin the first unit. Malformed, mismatched, absent, expired,
+replaced, duplicate, redelivered, and delayed old deliveries therefore begin no
+CVE read, lock, mutation, audit, or publication. A delivery whose token was
+replaced by a newer owner fails step 4 against the newer value and mutates
+nothing, even when it arrives after the newer owner has completed.
+
+A delivery rejected during adoption terminates before the run workflow begins.
+Fence occupancy, an absent or different lease, an invalid task ID, and
+`RedisError` or uncertain completion during the initial compare-and-renew all
+emit only `cvss_recalculation_adoption_rejected`, create no counters, begin no
+CVE, and emit no terminal run event because they reach no run outcome. Invalid
+`target_version` remains the input-contract failure defined above and emits no
+coordination event.
+
+### Lifecycle Phases
+
+The phases below are narrative coordination stages, not a new enum or persisted
+state. Every phase is derivable from the resources and events already defined.
+
+| Phase | Lease holder | Fence holder | Allowed work | A second admission | A duplicate or late delivery |
+|---|---|---|---|---|---|
+| candidate | none | none | input validation only | may admit | nothing |
+| admitted | the new task ID | the API request | task-ID preallocation, lease acquisition, PATCH setting/audit commit | rejected (fence or lease held) | not delivered yet |
+| publication attempted | the admitted task ID | none (released) | broker publication only | rejected (lease held) | not delivered yet |
+| submitted | the admitted task ID | none | waiting for delivery | rejected (lease held) | one delivery adopts; a duplicate is rejected at adoption |
+| acceptance_unconfirmed | the admitted task ID | none | nothing until delivery or TTL | rejected (lease held) | if delivered, one delivery adopts; otherwise the lease expires |
+| delivered | the admitted task ID | none until adoption | task-ID and target validation only | rejected (lease held) | rejected at adoption if a newer owner replaced it |
+| fenced and adopted | the exact task ID | the task workflow | begin the first unit after the stale check | rejected (fence or lease held) | rejected at adoption |
+| active | the exact task ID, renewed | the task workflow | per-CVE units, checkpoints, cleanup | rejected | no second unit starts |
+| terminal cleanup | owner-safe removal pending | the task workflow until explicit release | close the current unit session, compare-and-delete, release fence, terminal event | rejected until fence release and lease removal complete | mutates nothing |
+
+### Renewal Checkpoints
+
+The runner integrates renewal with its safe checkpoints:
+
+- It performs one confirm-and-renew as part of adoption before the watermark.
+- Before a new unit, when at least 60 seconds have elapsed since the last
+  successful renewal, it performs one compare-and-renew.
+- It performs no Redis or broker command during a per-CVE transaction or while
+  a CVE/Ticket row lock is held.
+- A unit already started runs to its commit or rollback regardless of renewal
+  state; renewal is evaluated only between units.
+- A renewal that fails or is uncertain blocks the next unit. The delivery then
+  closes the current unit session, attempts owner-safe lease removal while the
+  fence is still held, releases the fence, emits the terminal
+  `ownership_lost` event, and terminates. It never reclassifies a committed
+  unit, and the failed renewal is not a per-CVE failure.
+- Counters and the terminal event include only units already classified at the
+  commit boundary.
+
+### Ownership Loss
+
+Ownership can be lost only after successful adoption has started the run
+workflow. It occurs when a later checkpoint can no longer prove that the exact
+token owns the lease: compare-and-renew returns `mismatch` or `absent`, raises
+`RedisError`, or has uncertain completion. It terminates the whole run as
+`ownership_lost`. The initial confirm-and-renew cannot produce ownership loss;
+its failures are adoption rejections. Ownership loss is never an isolated
+per-CVE failure and never rolls back or reclassifies a committed unit. After
+the current unit session is closed, the delivery attempts owner-safe
+compare-and-delete while still holding the fence, then releases the fence; if a
+newer owner already replaced the lease, compare-and-delete is a `mismatch`
+no-op.
+
+A terminal `cvss_recalculation_ownership_lost` event uses failure phase
+`control`; its sanitized category is `infrastructure` for a Redis failure and
+for uncertain Redis-command completion, and `interrupted` for an ownership
+mismatch or absence.
+
+### Timeout and Cancellation
+
+- The task configures no Celery `soft_time_limit`, no `time_limit`, and no
+  automatic retry, and it never calls `self.retry()`. The 900-second lease TTL
+  is a coordination backstop, not a task-execution limit.
+- Cancellation and worker shutdown propagate unchanged. When observed between
+  units, they prevent the next unit; when observed before a unit's commit, that
+  unit rolls back; when observed after a unit's commit, the committed unit keeps
+  its classification and is not reclassified.
+- A hard kill, an OOM kill, or process disappearance may produce no terminal
+  event, no lease removal, and no fence release beyond the automatic release
+  from connection closure.
+- A process that is alive but wedged can retain the fence indefinitely. This
+  deliberately favors safety over availability. The operator MUST terminate the
+  worker or pod before attempting a rerun.
+
+### Publication Uncertainty
+
+The publisher boundary begins only after confirmed fence release. Publication
+classification uses the exception class only, never the exception text,
+matching `docs/features/tickets/ticket-service.md` (Ticket Convergence):
+
+| Observable phase and outcome | Cause | Coordination state | API response |
+|---|---|---|---|
+| pre-publisher setting, database, commit, or fence failure | the publisher was not invoked | attempt owner-safe lease removal where this request acquired it, then propagate the original error | ordinary error mapping; normally global `500 INTERNAL_ERROR` |
+| `submitted` | the publication call returned without raising | lease retained; the task adopts on delivery | manual trigger: `202 Accepted`; PATCH: `200 OK` |
+| `acceptance_unconfirmed` | the publication call raised `kombu.exceptions.OperationalError` | lease retained; acceptance is neither confirmed nor denied | both paths: `503 CELERY_UNAVAILABLE` with fixed sanitized detail |
+| other publisher exception | the publication call raised any other exception, including serialization, configuration, security, control signals, and programming errors | the exception propagates unchanged and is never `acceptance_unconfirmed`; the lease is retained conservatively | propagated exception mapping; normally global `500 INTERNAL_ERROR` |
+| crash before publisher invocation | the API process died after lease acquisition | lease retained because completion and cleanup cannot be observed safely; the publisher was not invoked | not observed by the API |
+| crash after publisher invocation and before response | the API process died after invoking the publisher | lease retained; acceptance is unknown and the task may still be delivered and adopt it | not observed by the API |
+
+For the manual trigger:
+
+- `submitted` returns `202 Accepted`;
+- `acceptance_unconfirmed` returns `503 CELERY_UNAVAILABLE` with the fixed
+  sanitized detail `"Recalculation task publication could not be confirmed"`,
+  and the lease is retained rather than released;
+- the response never asserts that the broker rejected the task; a task that was
+  actually accepted may still run and adopt the lease; and
+- if the task was not accepted, the lease expires by its TTL, and the operation
+  becomes retryable without any manual key deletion. An error before publisher
+  invocation propagates as that original error after owner-safe cleanup is
+  attempted; it is never mapped to `CELERY_UNAVAILABLE`.
+
+For the `PATCH` side effect:
+
+- a `submitted` publication reports a scheduled task;
+- a no-op change reports that no batch is needed;
+- a setting, commit, or fence failure before the broker call propagates its
+  original error after owner-safe cleanup is attempted; it is not a successful
+  PATCH publication result;
+- an `acceptance_unconfirmed` publication returns `503 CELERY_UNAVAILABLE`,
+  retains the setting change and its audit event as committed, and retains the
+  admission lease;
+- a publisher exception that is not a broker operational error propagates
+  unchanged; because the setting and its audit event already committed, they
+  remain durable while the response is the API failure mapping for that
+  exception; and
+- while the current Settings response retains `recalculation_scheduled`, a
+  false value means only that this request did not publish a new task;
+  it never asserts that no previously admitted or acceptance-unconfirmed run
+  can exist; and
+- the PATCH path never releases a lease retained after publisher invocation or
+  enables unsafe replacement work.
+
+No coordination outcome creates a `SettingAuditEvent` or `TicketAuditEvent`.
+
+### Cleanup and Recovery Matrix
+
+**Compare-and-delete** below means the owner-safe compare-and-delete of this
+delivery's exact token. "Release fence" is explicit unless the connection is
+already gone, in which case closure releases it automatically. A rerun always
+restarts from the beginning.
+
+Every interceptable terminal run path uses one cleanup order: close the current
+per-CVE session and transaction; attempt compare-and-delete while the fence is
+still held; release the fence; then emit the terminal event. A Redis cleanup
+failure does not prevent fence release. This ordering prevents a delivery from
+adopting the same token between fence release and lease deletion and ensures a
+new admission first observes either the held fence or the already-removed
+lease.
+
+| Scenario | Compare-and-delete | Release fence | Terminal event | TTL wait | Operator intervention | Rerun |
+|---|---|---|---|---|---|---|
+| completed | yes | yes | `cvss_recalculation_completed` | no | none | optional; idempotent |
+| partial | yes | yes | `cvss_recalculation_partial` | no | none | optional; idempotent |
+| stale | yes | yes | `cvss_recalculation_stale` | no | none | optional |
+| cancelled | yes, when interceptable | yes | `cvss_recalculation_cancelled` | no | none | yes, from the beginning |
+| ownership lost | yes; `mismatch` is a no-op | yes | `cvss_recalculation_ownership_lost` | no | only if a foreign fence is wedged | yes, from the beginning |
+| renewal failure | yes; classified as ownership loss | yes | `cvss_recalculation_ownership_lost` | no | only if a foreign fence is wedged | yes, from the beginning |
+| whole-run failure | yes | yes | `cvss_recalculation_failed` | no | none | yes, from the beginning |
+| adoption rejected | no; no ownership was confirmed | yes if this delivery acquired it | only `cvss_recalculation_adoption_rejected`, not a terminal run event | yes when the admitted lease remains | none required; wait or inspect | yes, after TTL or owner-safe removal |
+| cleanup Redis failure | attempted; failure changes nothing | yes | unchanged terminal outcome | yes, up to 900 seconds | none required; wait or inspect | yes, after TTL |
+| publication uncertainty | no | already released | none from the runner | yes, up to 900 seconds if not delivered | wait for delivery or TTL | yes, after resolution |
+| Redis restart | attempted after restart; may fail | yes | `cvss_recalculation_ownership_lost` when active | yes | none required | yes, from the beginning |
+| hard kill | no | automatic on connection closure | none | yes | confirm the process is dead | yes, after TTL |
+| OOM kill | no | automatic on connection closure | none | yes | confirm the process is dead | yes, after TTL |
+| worker disappearance | no | automatic on connection closure | none | yes | confirm the worker is gone | yes, after TTL |
+| fenced connection loss | attempted on the Redis client | automatic on connection closure | `cvss_recalculation_failed` | yes | none required | yes, from the beginning |
+
+A cleanup failure never changes committed state, a unit classification, or a
+terminal outcome. The operator recovery procedure is authoritative in
+`docs/deployment.md` (CVSS Recalculation Recovery).
+
+### Coordination Logging
+
+Coordination emits bounded feature-owned events through the shared logging
+contract in `docs/features/platform/logging.md`. They correlate through the
+existing `request_id` (API paths) and `celery_task_id` (task paths). They create
+no audit event and are never authoritative state. The
+`task_id_invalid` adoption-rejection event omits `celery_task_id` when no
+canonical ID is available and never includes the raw malformed value in the
+feature event.
+
+| Event | Level | When |
+|---|---|---|
+| `cvss_recalculation_admitted` | INFO | API admitted a run: fence acquired, task ID preallocated, lease acquired |
+| `cvss_recalculation_admission_rejected` | WARNING | API could not acquire the fence or the lease, or Redis failed during acquisition; carries the closed `reason` category `fence_busy`, `lease_held`, or `redis_error` |
+| `cvss_recalculation_submitted` | INFO | The publication call returned without raising |
+| `cvss_recalculation_publication_unconfirmed` | ERROR | The publication call raised a broker operational error; the lease is retained |
+| `cvss_recalculation_adopted` | INFO | A task acquired the fence and confirmed exact owner/target before its first unit |
+| `cvss_recalculation_adoption_rejected` | WARNING | Before the run workflow starts, the wrapper or task could not validate the task ID, acquire the fence, or confirm exact owner/target; carries the closed `reason` category `task_id_invalid`, `fence_busy`, `lease_absent`, `lease_mismatch`, or `redis_error` |
+| `cvss_recalculation_renewal_failed` | WARNING | A checkpoint compare-and-renew returned `mismatch` or `absent`, raised `RedisError`, or was uncertain; the next unit is blocked |
+| `cvss_recalculation_cleanup_failed` | WARNING | Owner-safe compare-and-delete or explicit fence release failed or was uncertain |
+
+The terminal event table above owns `cvss_recalculation_ownership_lost` and the
+other terminal outcomes. A `cvss_recalculation_admission_rejected` that repeats
+while no active runner updates its lease is the recovery-required signal
+described under Operator Recovery. No coordination event carries the full lease
+token, a Redis command text, raw exception text, a database payload, or an
+unbounded list.
+
+### Operator Recovery
+
+Operator recovery for a stuck, crashed, or uncertain run is a complete rerun
+through the manual endpoint. The normative procedure is defined in
+`docs/deployment.md` (CVSS Recalculation Recovery): identify the worker or pod,
+terminate it if it is alive and wedged, wait for or owner-safely remove the
+lease without unconditional deletion, retry the trigger, and let the run restart
+from the beginning. No recovery procedure may treat logs, a missing Redis key,
+or the absence of a terminal event as proof of completion.
+
+The same manual endpoint is the recovery surface after a Settings PATCH returns
+an error for which the setting commit or publication outcome may already be
+durable or uncertain. After any retained lease expires or is resolved, the
+operator reads the current setting and triggers a complete rerun. Repeating the
+same PATCH may classify as a no-op and is not a substitute for this recovery
+run.
 
 ## Cross-references
 
@@ -768,5 +1295,7 @@ authoritative source of progress or completion.
   convergence publication tests
 - `docs/features/identity/rbac.md` - capability definitions and endpoint map
 - `docs/api-spec.md` - envelopes, error codes, validation, and API conventions
+- `docs/deployment.md` - Redis durability and `noeviction`, and the
+  complete-run operator recovery procedure
 - `docs/conventions.md` - sync-to-async bridging, pooled-engine lifecycle,
   transactions, locking, Redis, and specification conventions
