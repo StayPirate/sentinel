@@ -52,6 +52,7 @@ For architectural decisions and design constraints, see
   - [CLI Operational Access](#cli-operational-access)
   - [Health Checks](#health-checks)
   - [Redis Durability, Memory, and Persistence](#redis-durability-memory-and-persistence)
+  - [CVSS Recalculation Recovery](#cvss-recalculation-recovery)
   - [Log Aggregation](#log-aggregation)
   - [Image Vulnerability Monitoring](#image-vulnerability-monitoring)
   - [Python Forward-Compatibility Check](#python-forward-compatibility-check)
@@ -1584,9 +1585,30 @@ Operator procedure:
 5. **The run restarts from the beginning.** Committed units reclassify
    `unchanged`; no persistent progress is restored.
 
+For every interceptable runner outcome, a failed Redis cleanup delays
+readmission only until the lease TTL; it never permits the task to retain the
+PostgreSQL fence merely to wait for Redis. The owning coordination specification
+defines the exact cleanup ordering.
+
+A delivery can also be rejected during adoption before any worker becomes an
+active runner, for example because its initial ownership confirmation failed or
+was uncertain. That outcome creates no overlap and no terminal run event. If
+the delivery's known admitted token remains exactly in the lease, wait for its
+TTL or remove that exact token with owner-safe comparison, then repeat the
+manual trigger. An absent or mismatched lease is never removed by the rejected
+delivery; wait for the current owner or TTL. Do not restart or retry the
+rejected Celery delivery automatically.
+
+After a Settings PATCH returns an error where the setting commit or publication
+may already be durable or uncertain, read the current setting and use the same
+manual trigger after any retained lease or fence is resolved. Repeating the
+same PATCH may be a no-op and does not replace the recovery run.
+
 No recovery procedure may treat logs, the absence of a terminal event, or a
 missing Redis key as proof that the previous run completed or that its process
-is gone. PostgreSQL is the source of truth for completed derived state.
+is gone. PostgreSQL is the source of truth for completed derived state. The
+runner configures no automatic Celery retry; recovery is always the complete
+manual rerun above.
 
 ### Log Aggregation
 

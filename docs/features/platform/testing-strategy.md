@@ -3454,14 +3454,23 @@ per-CVE contract is implemented or changed, tests MUST cover the contract in
 - `RedisError` and uncertain completion on acquire, renew, and delete each
   follow the specified conservative outcome; an uncertain acquire never
   proceeds to publication
-- publication classification distinguishes a proven pre-publication failure,
-  `submitted`, and `acceptance_unconfirmed`
+- an initial compare-and-renew `RedisError` or uncertain result produces only
+  `cvss_recalculation_adoption_rejected`, with no counters or terminal event;
+  the same failure at a post-adoption checkpoint produces terminal
+  `ownership_lost` with sanitized category `infrastructure`
+- publication classification distinguishes `submitted`,
+  `acceptance_unconfirmed` from `kombu.exceptions.OperationalError`, and every
+  other publisher exception; setting, transaction, commit, and fence failures
+  before publisher invocation retain their original classification
 - coordination events use only the allowed bounded fields and the closed
   `reason` categories, and never the full lease token or raw exception text
 
 **Coordination integration tests** use independent sessions and connections:
 
 - a race between two admissions admits exactly one owner
+- the manual trigger reads `default_cvss_version` only after acquiring the
+  fence; a concurrent PATCH/manual-trigger race publishes the current committed
+  version selected under that fence, never an earlier pre-fence observation
 - a second admission is rejected by the fence held by an active runner even
   when the lease is absent
 - a free lease with a held fence after simulated Redis loss still admits no
@@ -3469,8 +3478,12 @@ per-CVE contract is implemented or changed, tests MUST cover the contract in
 - two deliveries of the same token: only one adopts, the other is rejected at
   adoption
 - an old token against a newer owner is rejected and mutates nothing
+- a delayed old delivery whose lease has been replaced emits only adoption
+  rejection and begins no run workflow
 - lease expiry between two units blocks the next unit and terminates
   `ownership_lost`
+- an active checkpoint `mismatch` or `absent` emits terminal
+  `cvss_recalculation_ownership_lost` with sanitized category `interrupted`
 - a Redis restart during an active unit terminates the delivery safely
 - loss of the fenced connection is detected before the next mutation and
   terminates as a whole-run `failed` outcome without reconnect, without opening
@@ -3478,6 +3491,15 @@ per-CVE contract is implemented or changed, tests MUST cover the contract in
 - no Redis or broker I/O executes under a CVE or Ticket row lock
 - a setting `PATCH` is blocked by an active runner protected by the fence even
   when Redis is empty
+- an unconfirmed or failed API fence release prevents publisher invocation;
+  connection invalidation or closure supplies the release backstop and the
+  original server error propagates; a definitive `false` unlock result follows
+  the same path
+- every interceptable terminal path closes the current unit session, attempts
+  compare-and-delete while still holding the fence, then releases the fence and
+  emits the terminal event
+- when terminal compare-and-delete raises `RedisError`, cleanup still releases
+  the fence and leaves the lease to expire by its TTL
 - a simulated crash releases the fence
 - a complete rerun is idempotent
 
@@ -3488,6 +3510,13 @@ per-CVE contract is implemented or changed, tests MUST cover the contract in
 
 **Coordination task and process tests:**
 
+- the wrapper accepts only a canonical lowercase hyphenated UUID version 4
+  from `task.request.id`, passes it explicitly to the service workflow, and a
+  malformed or absent ID produces only
+  `cvss_recalculation_adoption_rejected` before the fence or any mutation, and
+  the feature event omits `celery_task_id` and the raw invalid value
+- the service workflow does not read `celery.current_task`, task request state,
+  or logging context to discover the task ID
 - duplicate delivery, redelivery, and late delivery begin no mutation
 - cancellation between units, before a unit commit, and after a unit commit
 - worker shutdown
@@ -3501,14 +3530,23 @@ per-CVE contract is implemented or changed, tests MUST cover the contract in
 - the manual trigger returns `409` on a held owner or fence
 - the manual trigger returns `503 REDIS_UNAVAILABLE`
 - the manual trigger returns `503 CELERY_UNAVAILABLE` on unconfirmed acceptance
+- a setting-read, database, commit, or fence-release failure before publisher
+  invocation uses the ordinary server-error mapping, including global `500
+  INTERNAL_ERROR` where applicable, and never `CELERY_UNAVAILABLE`
+- only `kombu.exceptions.OperationalError` from the publisher produces `503
+  CELERY_UNAVAILABLE`; a non-operational publisher exception propagates and
+  retains the lease conservatively
 - the lease is retained after the `503` broker outcome
 - a task actually accepted despite the `503` can still run and adopt
 - a task actually not accepted leaves the lease to expire by its TTL
-- the PATCH explicit-dispatch composition: the setting and audit commit completes
-  during request processing, the fence is released before publication, the
-  response reflects the publication outcome (`200` scheduled, `200` not
-  scheduled on a proven pre-publication failure, `503` unconfirmed), and no
-  best-effort post-commit callback is registered for the publication
+- the PATCH coordination composition: the setting and audit commit completes
+  during request processing while the fence is held, confirmed fence release
+  precedes publication, and the response reflects the publication outcome
+  (`200` scheduled or `503` unconfirmed); the complete Settings mutation
+  contract owns the transaction/session mechanism
+- `recalculation_scheduled = false` means only that this request published no
+  new task and never asserts the absence of an earlier admitted or
+  acceptance-unconfirmed run; the no-op path does not query Redis
 - no coordination audit event is created
 
 **Transactions:**
@@ -3547,7 +3585,9 @@ per-CVE contract is implemented or changed, tests MUST cover the contract in
 - sequential duplicate delivery of the same target version
 - no automatic Celery retry is configured
 - a delivery delayed past a setting change terminates `stale` with every counter
-  zero and no mutation
+  zero and no mutation; this test is a defensive case for a persistent setting
+  change made outside the normal fence-coordinated PATCH path, not the expected
+  outcome of an ordinary PATCH/task race
 
 **Errors and control signals:**
 
