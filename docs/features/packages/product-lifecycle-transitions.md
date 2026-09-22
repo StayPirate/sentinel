@@ -220,7 +220,7 @@ additional distributed lock, or exactly-once mechanism is introduced.
 CVSS assessment changes and the platform-wide `default_cvss_version` batch do
 not use this task; their CVE-owned behavior remains specified in
 `docs/features/tickets/cvss-scoring.md` and
-`docs/features/platform/system-settings.md`.
+`docs/features/platform/default-cvss-version-operations.md`.
 
 ## Catch-Up
 

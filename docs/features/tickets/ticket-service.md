@@ -1351,8 +1351,9 @@ workflow.
 
 ### Cross-references
 
-- [cvss-scoring.md](cvss-scoring.md) — CVSS resolution cascade,
-  recalculation trigger rationale
+- [cvss-scoring.md](cvss-scoring.md) — CVSS resolution cascade
+- [default-cvss-version-operations.md](../platform/default-cvss-version-operations.md)
+  — all-CVE runner consumption of the automatic publication policy
 - [ticket-mutations.md](ticket-mutations.md) —
   `reconcile_ticket_status()` step 5, `recalculate_cvss_chain()`
   contract, assignment and operability primitives

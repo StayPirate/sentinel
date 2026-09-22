@@ -693,15 +693,17 @@ eligibility once, and reconciles at most once. Any unexpected settings,
 database, audit, eligibility, flush, cancellation, reconciliation, or
 programming failure rolls back the whole caller-owned CVE transaction.
 
-Changing `default_cvss_version` retains the system-settings endpoint, batch,
-and recovery contracts in `system-settings.md`. This specification defines the
-pure results that such workflows consume; it does not redefine settings
-mutation, Redis coordination, task scope, or recovery.
+Changing `default_cvss_version` retains its setting-mutation contract in
+`system-settings.md` and its preview, batch, and recovery contracts in
+`default-cvss-version-operations.md`. This specification defines the pure
+results that those workflows consume; it does not redefine settings mutation,
+Redis coordination, task scope, or recovery.
 
 ### Read-Only Impact Projection
 
-The default-CVSS impact preview in `system-settings.md` consumes the pure
-resolutions in this specification without becoming a second formula owner:
+The default-CVSS impact preview in `default-cvss-version-operations.md`
+consumes the pure resolutions in this specification without becoming a second
+formula owner:
 
 - It passes the proposed version explicitly as the default-version argument
   to `resolve_severity_score()` and `resolve_eligibility_score()`. The preview
@@ -847,7 +849,10 @@ new table, column, enum, constraint, or migration.
 - `docs/features/platform/cve-record-parser.md` - CVE Record extraction
 - `docs/features/packages/package-model.md` - Orthogonal eligibility rules
 - `docs/features/packages/package-service.md` - Ordinary Product mutation and Ticket convergence ownership
-- `docs/features/platform/system-settings.md` - Default-version operations
+- `docs/features/platform/system-settings.md` - Default-version setting
+  declaration, persistence, bootstrap, mutation, and audit
+- `docs/features/platform/default-cvss-version-operations.md` - Default-version
+  impact preview, all-CVE runner, manual trigger, and recovery
 - `docs/features/platform/testing-strategy.md` - Test tiers and requirements
 - `docs/features/identity/rbac.md` - Capabilities and endpoint permission map
 - `docs/api-spec.md` - API envelopes, validation, and scoped responses

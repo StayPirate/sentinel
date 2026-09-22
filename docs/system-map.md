@@ -804,6 +804,7 @@ flowchart TD
 
     subgraph platform["Platform"]
         SETTINGS["system-settings"]
+        CVSS_OPS["default-cvss-version-operations"]
         FETCHER_INFRA["fetcher-infrastructure"]
         CVE_FETCHER_INFRA["cve-fetcher-infrastructure"]
         GIT_FETCHER_INFRA["git-fetcher-infrastructure"]
@@ -845,8 +846,10 @@ flowchart TD
     RBAC --> TICKETS
 
     %% Platform → everything
+    SETTINGS --> CVSS_OPS
+    CVSS_OPS --> CVSS
+    CVSS_OPS --> TICKETS
     SETTINGS --> CVSS
-    SETTINGS --> TICKETS
     FETCHER --> CVE
     FETCHER --> RABBIT
 
@@ -892,6 +895,7 @@ other feature:
 | [identity-provisioning](features/identity/identity-provisioning.md) | Identity | External identity provisioning (not yet active) |
 | [rbac](features/identity/rbac.md) | Identity | Role-based access control and permissions |
 | [system-settings](features/platform/system-settings.md) | Platform | System settings (default CVSS version) |
+| [default-cvss-version-operations](features/platform/default-cvss-version-operations.md) | Platform | Default-CVSS impact preview, all-CVE recalculation, observability, and recovery |
 | [fetcher-infrastructure](features/platform/fetcher-infrastructure.md) | Platform | BaseFetcher base class, registry, data model |
 | [cve-fetcher-infrastructure](features/platform/cve-fetcher-infrastructure.md) | Platform | BaseCVEFetcher base class, CVE fetcher conventions |
 | [git-fetcher-infrastructure](features/platform/git-fetcher-infrastructure.md) | Platform | BaseGitFetcher base class, git_operations, delta flow |
