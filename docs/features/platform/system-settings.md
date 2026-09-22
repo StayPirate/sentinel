@@ -53,7 +53,7 @@ publication contract in
    Only a definitive lock-not-acquired result means the fence is held:
    nothing is committed, no lease is acquired, no task is published, and
    the request returns 409 `CVSS_RECALC_ALREADY_IN_PROGRESS`. A database
-   or session error during acquisition is a whole-run failure and is
+   or session error during acquisition propagates as a server error and is
    never reported as `409`. A runner holds this fence for its complete
    mutating workflow, so a PATCH cannot overtake it even when the Redis
    lease is absent.
@@ -64,14 +64,18 @@ publication contract in
    `CVSS_RECALC_ALREADY_IN_PROGRESS`. A `RedisError` or uncertain
    acquisition releases the fence and returns 503 `REDIS_UNAVAILABLE`.
    Nothing is committed in either case.
-5. **Commit** the new setting value and a `SettingAuditEvent` record in
-   the request's caller-owned transaction, while the fence is held. The
-   fence is held across that transaction's completion and released only
-   after it commits; the fence release and the broker publication are its
-   post-commit work. The composition follows `docs/conventions.md`
-   (Caller-Owned Service Transactions, API Transaction Dependency Scope).
-   If the transaction does not commit, release the fence, owner-safely
-   release the lease, and return 500.
+5. **Commit and close** the new setting value and a `SettingAuditEvent`
+   record while the fence is held. Because the response depends on the
+   publication outcome, the setting commit, the fence release, and the
+   broker publication all complete during request processing; the
+   publication is not a best-effort post-commit callback that cannot
+   change the already-selected response. This explicit-dispatch
+   composition follows the pattern in
+   `docs/features/tickets/ticket-service.md` (Ticket Convergence,
+   Explicit operator rerun) and `docs/conventions.md` (Caller-Owned
+   Service Transactions, API Transaction Dependency Scope). If the
+   transaction does not commit, release the fence, owner-safely release
+   the lease, and return 500.
 6. **Release the fence** before any broker call.
 7. **Enqueue** the batch recalculation Celery task
    (`recalculate_cvss_derived_state`) with the new version as an explicit

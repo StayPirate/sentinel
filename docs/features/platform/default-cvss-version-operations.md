@@ -667,8 +667,8 @@ The endpoint uses the same admission and publication coordination as the
 2. Acquire the PostgreSQL execution fence with non-blocking semantics. A
    definitive lock-not-acquired result returns `409
    CVSS_RECALC_ALREADY_IN_PROGRESS` and performs no lease acquisition and no
-   publication. A database or session error during acquisition is a whole-run
-   failure and is never reported as `409`.
+   publication. A database or session error during acquisition propagates as a
+   server error and is never reported as `409`.
 3. While holding the fence, preallocate the run's Celery task ID and acquire the
    Redis lease `cvss_recalc_active` with `SET ... NX EX 900`. A held lease
    releases the fence and returns `409 CVSS_RECALC_ALREADY_IN_PROGRESS`; a
@@ -976,16 +976,16 @@ path. This is an accepted, safe availability cost: no overlapping mutation is
 possible, because the rejected delivery mutates nothing and the lease owner is
 unchanged.
 
-Steps 3 through 5 are coordination ordering requirements. How the API composes
-them with the framework-owned API transaction dependency, which commits after
-the handler returns, is defined by the Settings API contract in
-`docs/features/platform/system-settings.md` together with `docs/conventions.md`
-(Caller-Owned Service Transactions, API Transaction Dependency Scope). That
-composition must keep the fence held through the setting and audit commit and
-release it before any broker publication. A fence that cannot be acquired
-because of a database or session error is a whole-run failure, not the
-`fence_busy` rejection: only a definitive "lock not acquired" result produces
-`409 CVSS_RECALC_ALREADY_IN_PROGRESS`.
+Steps 3 through 5 are coordination ordering requirements. The Settings API
+contract in `docs/features/platform/system-settings.md` realizes them with the
+explicit-dispatch composition: the setting and audit commit completes during
+request processing while the fence is held, and the fence release and the broker
+publication follow in the same request so that the response reflects the
+publication outcome. The composition must keep the fence held through the
+setting and audit commit and release it before any broker publication. A fence
+that cannot be acquired because of a database or session error is a server
+error, not the `fence_busy` rejection: only a definitive "lock not acquired"
+result produces `409 CVSS_RECALC_ALREADY_IN_PROGRESS`.
 
 ### Task Adoption
 
@@ -1094,7 +1094,7 @@ only, never the exception text, matching the publication boundary in
 | proven pre-publication failure | the failure is proven by its type or phase to occur after lease acquisition and before the publisher is invoked | owner-safe lease release is permitted | `503 CELERY_UNAVAILABLE` |
 | `submitted` | the publication call returned without raising | lease retained; the task adopts on delivery | `202 Accepted` |
 | `acceptance_unconfirmed` | the publication call raised `kombu.exceptions.OperationalError` | lease retained; acceptance is neither confirmed nor denied | `503 CELERY_UNAVAILABLE` with fixed sanitized detail |
-| other publisher exception | the publication call raised any other exception, including serialization, configuration, security, control signals, and programming errors | the exception propagates unchanged and is never `acceptance_unconfirmed`; the lease is retained unless the failure was proven before the publisher was invoked | the API failure mapping for the propagated exception, which is the global `500 INTERNAL_ERROR` unless a more specific mapping is defined |
+| other publisher exception | the publication call raised any other exception, including serialization, configuration, security, control signals, and programming errors | the exception propagates unchanged and is never `acceptance_unconfirmed`; the lease is retained | the API failure mapping for the propagated exception, which is the global `500 INTERNAL_ERROR` unless a more specific mapping is defined |
 | crash after admission and before the publisher is invoked | the API process died after releasing the fence but before any publication call | lease retained; no task exists | not observed by the API |
 | crash after publish and before response | the API process died after invoking the publisher | lease retained; the task may still be delivered and adopt it | not observed by the API |
 
@@ -1115,6 +1115,8 @@ For the `PATCH` side effect:
 
 - a `submitted` publication reports a scheduled task;
 - a no-op change reports that no batch is needed;
+- a failure proven before the broker call returns 200 OK reporting that no task
+  was scheduled and releases the lease owner-safely;
 - an `acceptance_unconfirmed` publication returns `503 CELERY_UNAVAILABLE`,
   retains the setting change and its audit event as committed, and retains the
   admission lease;
