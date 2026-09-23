@@ -1060,9 +1060,14 @@ resume resource, and no compensation record. It is repeatable: every admission
 that reaches publication allocates a new run identity and publishes a new
 complete run; a blocked admission publishes nothing.
 
-All exceptions raised by the settings feature's service functions — setting
-mutation, preview, runner, and manual admission — inherit from
-`SettingsServiceError`, which inherits from the shared `ServiceError` root.
+All exceptions defined by the settings feature — setting mutation, preview, and
+manual admission — inherit from `SettingsServiceError`, which inherits from the
+shared `ServiceError` root; the runner defines no exception of its own. Not
+every exception that crosses a service boundary belongs to this hierarchy:
+`ValueError`, database and session errors, `MemoryError`,
+`SoftTimeLimitExceeded`, control signals, and programming errors are not
+settings-owned, are never mapped to a settings-specific HTTP status or error
+code, and propagate unchanged.
 `CVSSRecalculationAlreadyInProgressError` is owned by
 `docs/features/platform/system-settings.md`;
 `CVSSRecalculationRedisUnavailableError` and

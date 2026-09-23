@@ -13,11 +13,13 @@ capability.
 
 ## Service Module
 
-System-setting persistence, bootstrap, reads, mutation, and audit logging are
-implemented in `backend/app/services/settings.py`. The setting mutation contract
-is specified here; the impact preview, all-CVE recalculation runner, manual
-admission, and publication contracts are specified in
-`docs/features/platform/default-cvss-version-operations.md`.
+System-setting persistence, bootstrap, reads, and audit logging are implemented
+in `backend/app/services/settings.py`. The setting mutation contract
+(`update_default_cvss_version()` and its PATCH endpoint) is specified in this
+document but not yet implemented. The impact preview, all-CVE recalculation
+runner, manual admission, and publication contracts are specified in
+`docs/features/platform/default-cvss-version-operations.md` and are not yet
+implemented.
 
 ## Settings
 
@@ -228,16 +230,27 @@ uses the shared `DatabaseSession` dependency, which commits exactly once after
 the handler succeeds and rolls back exactly once when an exception escapes.
 
 **Concurrent requests**: concurrent requests serialize on the setting row
-lock. The first committed request determines the state every later request
-classifies against:
+lock, and each request classifies against the value it observes while holding
+that lock, never against an observation made before acquiring it. The outcome
+depends on the persisted value before the race and on the order in which the
+requests acquire the row lock:
 
-- two requests with the same value produce exactly one effective change and
-  one `SettingAuditEvent`; the later request is a no-op, because it observes
-  the committed value as locked-current;
-- two requests with different values each apply their own value; the loser's
-  audit event records the winner's committed value as `old_value` and its own
-  value as `new_value`, so audit history is always consistent with the
-  committed row state.
+- two requests carrying the same value, when that value differs from the
+  persisted value: exactly one effective change and exactly one
+  `SettingAuditEvent`, whichever request acquires the lock first — the first
+  commits the change, and the second observes the committed value as
+  locked-current and is a no-op;
+- two requests carrying the same value, when that value already equals the
+  persisted value: two no-ops, with no setting update, no advisory-lock
+  request, and no `SettingAuditEvent`;
+- two requests carrying different values, when the request for the persisted
+  value acquires the row lock first: a no-op followed by one effective change
+  and one `SettingAuditEvent` whose `old_value` is the persisted value;
+- two requests carrying different values, when the request for the other value
+  acquires the row lock first: two serialized effective changes and two
+  `SettingAuditEvent`s; the second event's `old_value` equals the value
+  committed by the first request, so audit history is always consistent with
+  the committed row state.
 
 An effective change concurrent with a recalculation run holding the
 session-level fence cannot acquire the transaction-level lock and is rejected
@@ -256,9 +269,13 @@ and database, flush, or other session errors propagate to the caller unchanged.
 ### Service Exceptions
 
 All exceptions defined by the settings service inherit from
-`SettingsServiceError`, which inherits from the shared `ServiceError` root. The
-preview, runner, and manual-admission operations define the remaining
-API-facing exceptions of this hierarchy in
+`SettingsServiceError`, which inherits from the shared `ServiceError` root.
+Not every exception that crosses the service boundary belongs to this
+hierarchy: `ValueError`, database and session errors, `MemoryError`,
+`SoftTimeLimitExceeded`, control signals, and programming errors are not
+settings-owned, are never mapped to a settings-specific HTTP status or error
+code, and propagate unchanged. The preview and manual-admission operations
+define the remaining API-facing exceptions of this hierarchy in
 `docs/features/platform/default-cvss-version-operations.md`. API endpoint
 handlers catch each documented API-facing exception and map it to the HTTP
 status and error code stated in its owning specification and

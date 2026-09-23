@@ -3332,13 +3332,27 @@ setting audit path is implemented or changed, tests MUST cover the contract in
 - re-invocation of an effective change is a no-op with no additional audit
   event
 
-**Concurrency tests** (independent sessions and connections):
+**Concurrency tests** (independent sessions, independent connections, and
+deterministic barriers that force each row-lock order):
 
-- two concurrent requests with the same value produce exactly one effective
-  change and exactly one audit event; the later request is a no-op
-- two concurrent requests with different values each commit their own value and
-  each create exactly one event; the loser's `old_value` equals the winner's
-  committed value, never the pre-race observation
+- two concurrent requests with the same value, when that value differs from
+  the persisted value, produce exactly one effective change and exactly one
+  audit event; the other request is a no-op that creates no additional event
+- two concurrent requests with the same value, when that value already equals
+  the persisted value, are both no-ops: the persisted value is unchanged and
+  no audit event exists
+- two concurrent requests with different values, ordered so that the request
+  for the persisted value acquires the row lock first, produce a no-op
+  followed by exactly one effective change and exactly one audit event whose
+  `old_value` is the persisted value
+- two concurrent requests with different values, ordered so that the request
+  for the other value acquires the row lock first, produce two serialized
+  effective changes and exactly two audit events; the second event's
+  `old_value` equals the value committed by the first request
+- each concurrency case asserts its final persisted value, its exact audit
+  event count, and its exact `old_value` → `new_value` sequence; no case
+  creates an audit event on a no-op branch, and no request is classified
+  against a setting observation made before it acquired the row lock
 - an effective change against a held session-level execution fence is rejected
   with `409 CVSS_RECALC_ALREADY_IN_PROGRESS` and commits nothing, including when
   the fence is held by an independent connection representing another process
