@@ -791,6 +791,29 @@ class TestAuthenticateLocalUser:
         assert "login_lockout_triggered" not in _service_log_text(caplog)
         assert await redis_client.get(f"login_attempts:{user.username}") == "1"
 
+    async def test_superseded_credential_below_threshold_logs_no_transition(
+        self,
+        db_session: AsyncSession,
+        redis_client: redis_asyncio.Redis,
+        local_user_factory: Callable[..., Awaitable[tuple[User, str]]],
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """The superseded-credential failure emits no lockout transition
+        while the admitted counter is below `LOGIN_MAX_ATTEMPTS`, and the
+        counter is retained (see local-authentication.md, Lockout
+        transition logging)."""
+        monkeypatch.setattr(settings, "login_max_attempts", 5)
+        user, password = await local_user_factory()
+        self._reset_password_as_create_session_side_effect(monkeypatch)
+
+        with caplog.at_level("INFO"):
+            result = await authenticate_local_user(db_session, user.username, password)
+
+        assert isinstance(result, LoginInvalidCredentials)
+        assert "login_lockout_triggered" not in _service_log_text(caplog)
+        assert await redis_client.get(f"login_attempts:{user.username}") == "1"
+
 
 # ---------------------------------------------------------------------------
 # Log PII discipline (docs/features/platform/testing-strategy.md,

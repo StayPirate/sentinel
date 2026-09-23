@@ -496,8 +496,8 @@ class TestCreateSession:
         result = await create_session(
             db_session,
             user,
-            SessionCreationReason.LOCAL_LOGIN,
-            expected_password_hash=user.password_hash,
+            SessionCreationReason.SSO_LOGIN,
+            expected_password_hash=None,
         )
 
         assert result is not None
@@ -952,7 +952,14 @@ class TestCreateSessionPasswordResetSerialization:
                 select(Session).where(Session.user_id == user_id)
             )
             assert rows.scalars().all() == []
+            assert target.last_login_at is None
             await login.rollback()
+
+            verify = await db_session_factory()
+            refreshed = await verify.get(User, user_id)
+            assert refreshed is not None
+            assert refreshed.last_login_at is None
+            await verify.rollback()
         finally:
             cleanup = await db_session_factory()
             await cleanup.execute(

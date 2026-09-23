@@ -129,7 +129,7 @@ transaction.
 
 | Status | Code | Condition |
 |--------|------|-----------|
-| 401 | `AUTH_INVALID_CREDENTIALS` | Invalid username or password (also covers: user not found, inactive user, external user, no password set) |
+| 401 | `AUTH_INVALID_CREDENTIALS` | Invalid username or password (also covers: user not found, inactive user, external user, no password set, superseded password) |
 | 429 | `AUTH_ACCOUNT_LOCKED` | Account temporarily locked due to too many failed attempts. Includes `Retry-After` header |
 
 Error response format:
@@ -142,8 +142,8 @@ Error response format:
 ```
 
 The 401 error message is intentionally generic and identical for all failure
-cases (user not found, wrong password, inactive user, external user) to
-prevent username enumeration.
+cases (user not found, wrong password, inactive user, external user,
+superseded password) to prevent username enumeration.
 
 ## Password Management
 
