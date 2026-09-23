@@ -29,7 +29,7 @@ This specification owns:
 - `get_default_cvss_version_impact()` and its API endpoint;
 - `recalculate_cvss_derived_state(target_version)` and its complete bounded
   runner;
-- the manual all-CVE recalculation endpoint;
+- `admit_cvss_recalculation()` and the manual all-CVE recalculation endpoint;
 - complete-run coordination: run identity, admission, the Redis ownership
   lease, task adoption, the PostgreSQL execution fence, ownership loss,
   publication uncertainty, lease renewal, owner-safe cleanup, and the
@@ -1070,7 +1070,7 @@ owned by `docs/features/platform/system-settings.md`;
 | Exception | HTTP | Code | Raised when |
 |---|---|---|---|
 | `CVSSRecalculationAlreadyInProgressError` | 409 | `CVSS_RECALC_ALREADY_IN_PROGRESS` | The execution fence or the admission lease is already held; no run is admitted and nothing is published |
-| `CVSSRecalculationRedisUnavailableError` | 503 | `REDIS_UNAVAILABLE` | Lease acquisition raised `RedisError` or its completion was uncertain; the fence is released and nothing is published |
+| `CVSSRecalculationRedisUnavailableError` | 503 | `REDIS_UNAVAILABLE` | Lease acquisition raised `RedisError` or its completion was uncertain; the fence is released, nothing is published, and the exception carries a fixed sanitized detail that never contains the Redis exception text |
 | `CVSSRecalculationBrokerUnavailableError` | 503 | `CELERY_UNAVAILABLE` | The publication call raised `kombu.exceptions.OperationalError`; the exception carries the fixed sanitized detail and never the broker exception text |
 
 `CVSSRecalculationAlreadyInProgressError`'s HTTP/code mapping and the

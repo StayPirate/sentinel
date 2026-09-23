@@ -3322,8 +3322,11 @@ setting audit path is implemented or changed, tests MUST cover the contract in
 - a missing required setting row raises `RequiredSystemSettingMissingError`
   without substituting a fallback value
 - an audit validation or insertion failure, a flush failure, a database
-  failure, and a failed or ambiguous commit each roll back the complete
+  failure, and a definitely failed commit each roll back the complete
   mutation: the setting keeps its prior value and no audit event persists
+- an ambiguous commit outcome performs no post-commit or publisher effect and
+  is reconciled by re-reading the setting; the test does not assert the prior
+  value, because durability is unknown
 - the function performs no Redis command, acquires no lease, publishes no task,
   and registers no post-commit callback
 - re-invocation of an effective change is a no-op with no additional audit
@@ -3644,10 +3647,11 @@ per-CVE contract is implemented or changed, tests MUST cover the contract in
 - sequential duplicate delivery of the same target version
 - no automatic Celery retry is configured
 - a delivery whose target version no longer matches the persisted setting when
-  it is adopted terminates `stale` with every counter zero and no mutation;
-  this covers a setting change committed after admission but before the
-  delivery adopted the run, which is the expected outcome when a PATCH commits
-  while the task is still queued
+  it is adopted terminates `stale` with every counter zero, no mutation, and no
+  `TicketAuditEvent`, `SettingAuditEvent`, or other audit record; this covers a
+  setting change committed after admission but before the delivery adopted the
+  run, which is the expected outcome when a PATCH commits while the task is
+  still queued
 
 **Errors and control signals:**
 

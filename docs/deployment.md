@@ -1599,15 +1599,17 @@ manual trigger. An absent or mismatched lease is never removed by the rejected
 delivery; wait for the current owner or TTL. Do not restart or retry the
 rejected Celery delivery automatically.
 
-A Settings PATCH never publishes a run. A failed or unconfirmed PATCH response
-means the setting change may or may not have persisted; read the current setting
-with `GET /api/v1/admin/settings` before deciding. A successful response means
-the setting and its audit event are durable. A successful setting change
-converges existing derived state only after a manual trigger; if the manual
-trigger fails or its publication outcome is uncertain, follow the lease, task,
-and fence recovery above. Repeating the same PATCH starts no work and never
-repairs a run; the recalculation is recovered exclusively through the manual
-trigger.
+A Settings PATCH never publishes a run. A `409` or `422` rejection
+deterministically commits nothing. Any other failed or unconfirmed PATCH
+response means the setting change may or may not have persisted; read the
+current setting with `GET /api/v1/admin/settings` before deciding. A
+successful effective change persists the value and its audit event, while a
+successful no-op returns the persisted value and changes nothing. A successful
+setting change converges existing derived state only after a manual trigger; if
+the manual trigger fails or its publication outcome is uncertain, follow the
+lease, task, and fence recovery above. Repeating the same PATCH starts no work
+and never repairs a run; the recalculation is recovered exclusively through the
+manual trigger.
 
 No recovery procedure may treat logs, the absence of a terminal event, or a
 missing Redis key as proof that the previous run completed or that its process

@@ -259,7 +259,10 @@ All exceptions defined by the settings service inherit from
 `SettingsServiceError`, which inherits from the shared `ServiceError` root. The
 preview, runner, and manual-admission operations define the remaining
 API-facing exceptions of this hierarchy in
-`docs/features/platform/default-cvss-version-operations.md`.
+`docs/features/platform/default-cvss-version-operations.md`. API endpoint
+handlers catch each documented API-facing exception and map it to the HTTP
+status and error code stated in its owning specification and
+`docs/api-spec.md`.
 
 API-facing exceptions (this specification):
 
