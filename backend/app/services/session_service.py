@@ -9,14 +9,18 @@ Module-level defaults (`docs/conventions.md`, Function Specification
 Completeness): every function in this module propagates only
 `RedisError` (caught and handled per-function as documented) and
 whatever `SQLAlchemyError`/generic exception the database driver
-raises — no function defines its own exception hierarchy. No function
-in this module acquires a `FOR UPDATE` lock: `invalidate_session()` and
+raises — no function defines its own exception hierarchy. Only
+`create_session()` acquires an explicit row lock: as its first database
+operation it takes `FOR NO KEY UPDATE` on the target `User` row (the
+User root lock that serializes successful login with deactivation — see
+`docs/features/identity/authentication.md`, Session creation, and
+`docs/features/identity/user-service.md`, Session creation concurrent
+with deactivation). `invalidate_session()` and
 `invalidate_user_sessions()` are single, atomically-guarded conditional
 `UPDATE` statements (the row lock is inherent to the `UPDATE` itself,
 matching the "operational metadata touch" exemption in
 `docs/conventions.md`, Pessimistic Locking Pattern); `is_session_active()`
-is read-only; `create_session()` inserts a new row; `cleanup_sessions()`
-is an unconditional bulk delete.
+is read-only; `cleanup_sessions()` is an unconditional bulk delete.
 """
 
 from __future__ import annotations
@@ -30,7 +34,7 @@ from typing import Any, cast
 import redis.asyncio as redis_asyncio
 import structlog
 from redis.exceptions import RedisError
-from sqlalchemy import delete, or_, update
+from sqlalchemy import delete, or_, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -113,50 +117,70 @@ class CreatedSession:
 
 async def create_session(
     db: AsyncSession, user: User, reason: SessionCreationReason
-) -> CreatedSession:
+) -> CreatedSession | None:
     """Create a new active `Session` for `user` and issue its JWT.
 
-    Q1: `db` is the caller's transaction; `user` is the already
-    eligibility-checked `User` row; `reason` is `local_login` or
-    `sso_login` (used only for the operational log).
+    Q1: `db` is the caller's transaction; `user` identifies the target
+    row only (its pre-lock `active` value is never authoritative, and
+    `user.id` is the only field read from it); `reason` is `local_login`
+    or `sso_login` (used only for the operational log).
 
-    Q2: no guard conditions — this function performs no eligibility
-    validation (the caller's login workflow establishes that the user
-    may log in before calling it).
+    Q2: as its first database operation, takes `FOR NO KEY UPDATE` on the
+    target `User` row and reloads the locked-current state. No pre-lock
+    eligibility value on the passed object is trusted. Returns `None`
+    when the locked-current row is missing or `active = false` — no
+    `Session`, no `last_login_at` update, no token, no log. This is an
+    in-process ineligibility outcome, not an API error (the provider
+    workflow maps it to its own documented login failure).
 
-    Q3: uses one UTC `login_at` snapshot for `user.last_login_at`, the
-    persisted `Session.expires_at`, and the JWT `iat`/`session_deadline`
-    claims. Creates a distinct active `Session` without reading,
-    invalidating, or otherwise touching any existing session for the
-    user. Flushes both writes, then issues the JWT from the flushed
-    `session.id`. Emits `session_created` at INFO with `user_id` and
-    `reason` — the JWT and session ID are never logged.
+    Q3: for an eligible locked-current User, uses one UTC `login_at`
+    snapshot for `user.last_login_at`, the persisted
+    `Session.expires_at`, and the JWT `iat`/`session_deadline` claims.
+    Creates a distinct active `Session` without reading, invalidating, or
+    otherwise touching any existing session for the user. Flushes both
+    writes, then issues the JWT from the flushed `session.id`. Emits
+    `session_created` at INFO with `user_id` and `reason` — the JWT and
+    session ID are never logged.
 
     Q4: creates no `IdentityAuditEvent` (session creation is outside
     the identity audit trail scope).
 
-    Q5: not idempotent — every invocation creates another independent
-    `Session` row and JWT.
+    Q5: not idempotent — every eligible invocation creates another
+    independent `Session` row and JWT.
 
-    Q6: propagates any exception from the flush (e.g. a database
-    constraint violation) or from JWT encoding; neither is caught here.
+    Q6: propagates any exception from the lock/select, the flush (e.g. a
+    database constraint violation), or JWT encoding; none is caught here.
+    The caller rolls back both the new session and `last_login_at`
+    together. Performs no Redis, bcrypt, network, or other forbidden
+    work while the lock is held (`docs/conventions.md`, Transaction
+    Hygiene Rules).
     """
+    locked_result = await db.execute(
+        select(User)
+        .where(User.id == user.id)
+        .with_for_update(key_share=True)
+        .execution_options(populate_existing=True)
+    )
+    locked_user = locked_result.scalar_one_or_none()
+    if locked_user is None or not locked_user.active:
+        return None
+
     login_at = datetime.now(UTC)
     session_deadline = login_at + timedelta(days=settings.session_max_lifetime_days)
-    session = Session(user_id=user.id, expires_at=session_deadline)
+    session = Session(user_id=locked_user.id, expires_at=session_deadline)
     db.add(session)
-    user.last_login_at = login_at
+    locked_user.last_login_at = login_at
     await db.flush()
 
     issued = issue_token(
-        user_id=user.id,
+        user_id=locked_user.id,
         session_id=session.id,
         issued_at=login_at,
         session_deadline=session_deadline,
         jwt_expiry_hours=settings.jwt_expiry_hours,
         secret_key=settings.jwt_secret_key.get_secret_value(),
     )
-    logger.info("session_created", user_id=str(user.id), reason=reason.value)
+    logger.info("session_created", user_id=str(locked_user.id), reason=reason.value)
     return CreatedSession(
         session=session, token=issued.token, token_expires_at=issued.token_expires_at
     )

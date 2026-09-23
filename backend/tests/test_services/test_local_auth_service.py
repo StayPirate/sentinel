@@ -19,12 +19,13 @@ from unittest.mock import patch
 import pytest
 import redis.asyncio as redis_asyncio
 from redis.exceptions import RedisError
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.models.session import Session
 from app.models.user import User
-from app.services import local_auth_service
+from app.services import local_auth_service, session_service
 from app.services.local_auth_service import (
     LockoutAdmitted,
     LockoutBlocked,
@@ -615,6 +616,93 @@ class TestAuthenticateLocalUser:
             db_session, user.username, "definitely-the-wrong-password"
         )
         assert isinstance(result, LoginInvalidCredentials)
+
+    @staticmethod
+    def _deactivate_as_create_session_side_effect(
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Simulate a deactivation that commits after the step-7 pre-check
+        but before the locked revalidation: the module's
+        `create_session` reference is wrapped so the conflicting
+        active-status update happens, then the real locked revalidation
+        runs. No `deactivate_user()` workflow is implemented (it is out of
+        scope), so a controlled database operation stands in for it."""
+        real_create = session_service.create_session
+
+        async def _create_after_deactivation(
+            db: AsyncSession, target: User, reason: Any
+        ) -> Any:
+            await db.execute(
+                update(User).where(User.id == target.id).values(active=False)
+            )
+            await db.flush()
+            return await real_create(db, target, reason)
+
+        monkeypatch.setattr(
+            local_auth_service, "create_session", _create_after_deactivation
+        )
+
+    async def test_locked_current_inactive_returns_invalid_credentials(
+        self,
+        db_session: AsyncSession,
+        redis_client: redis_asyncio.Redis,
+        local_user_factory: Callable[..., Awaitable[tuple[User, str]]],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A valid password followed by a committed deactivation yields
+        the generic failure, no Session, no `last_login_at`, and a
+        retained counter (see local-authentication.md, step 11)."""
+        user, password = await local_user_factory()
+        username = user.username
+        self._deactivate_as_create_session_side_effect(monkeypatch)
+
+        result = await authenticate_local_user(db_session, username, password)
+
+        assert isinstance(result, LoginInvalidCredentials)
+        assert user.last_login_at is None
+        rows = await db_session.execute(
+            select(Session).where(Session.user_id == user.id)
+        )
+        assert rows.scalars().all() == []
+        assert await redis_client.get(f"login_attempts:{username}") == "1"
+
+    async def test_locked_current_inactive_at_threshold_logs_transition_once(
+        self,
+        db_session: AsyncSession,
+        redis_client: redis_asyncio.Redis,
+        local_user_factory: Callable[..., Awaitable[tuple[User, str]]],
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        monkeypatch.setattr(settings, "login_max_attempts", 1)
+        user, password = await local_user_factory()
+        self._deactivate_as_create_session_side_effect(monkeypatch)
+
+        with caplog.at_level("INFO"):
+            result = await authenticate_local_user(db_session, user.username, password)
+
+        assert isinstance(result, LoginInvalidCredentials)
+        assert _service_log_text(caplog).count("login_lockout_triggered") == 1
+        assert str(user.id) in _service_log_text(caplog)
+
+    async def test_locked_current_inactive_below_threshold_logs_no_transition(
+        self,
+        db_session: AsyncSession,
+        redis_client: redis_asyncio.Redis,
+        local_user_factory: Callable[..., Awaitable[tuple[User, str]]],
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        monkeypatch.setattr(settings, "login_max_attempts", 5)
+        user, password = await local_user_factory()
+        self._deactivate_as_create_session_side_effect(monkeypatch)
+
+        with caplog.at_level("INFO"):
+            result = await authenticate_local_user(db_session, user.username, password)
+
+        assert isinstance(result, LoginInvalidCredentials)
+        assert "login_lockout_triggered" not in _service_log_text(caplog)
+        assert await redis_client.get(f"login_attempts:{user.username}") == "1"
 
 
 # ---------------------------------------------------------------------------

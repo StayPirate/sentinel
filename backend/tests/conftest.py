@@ -975,6 +975,7 @@ async def _authenticated_user_and_client(
     """
     user = await user_factory()
     created = await create_session(db_session, user, SessionCreationReason.LOCAL_LOGIN)
+    assert created is not None
     client.cookies.set(SESSION_COOKIE_NAME, created.token)
     return user, client
 

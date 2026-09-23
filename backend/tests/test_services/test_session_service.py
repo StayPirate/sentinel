@@ -20,7 +20,7 @@ from unittest.mock import AsyncMock
 import pytest
 import redis.asyncio as redis_asyncio
 from redis.exceptions import RedisError
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -149,6 +149,7 @@ class TestCreateSession:
         result = await create_session(
             db_session, user, SessionCreationReason.LOCAL_LOGIN
         )
+        assert result is not None
         assert result.session.user_id == user.id
         assert result.session.is_active is True
         assert result.token
@@ -161,6 +162,7 @@ class TestCreateSession:
         result = await create_session(
             db_session, user, SessionCreationReason.LOCAL_LOGIN
         )
+        assert result is not None
         assert user.last_login_at is not None
 
         claims = decode_and_validate(
@@ -184,6 +186,7 @@ class TestCreateSession:
         result = await create_session(
             db_session, user, SessionCreationReason.LOCAL_LOGIN
         )
+        assert result is not None
         assert user.last_login_at is not None
         # Session.expires_at derives from the same login_at snapshot as
         # last_login_at, offset by SESSION_MAX_LIFETIME_DAYS.
@@ -201,6 +204,7 @@ class TestCreateSession:
         result = await create_session(
             db_session, user, SessionCreationReason.LOCAL_LOGIN
         )
+        assert result is not None
         assert result.token_expires_at < result.session.expires_at
 
     async def test_does_not_invalidate_existing_sessions(
@@ -226,12 +230,14 @@ class TestCreateSession:
         first = await create_session(
             db_session, user, SessionCreationReason.LOCAL_LOGIN
         )
+        assert first is not None
         first_deadline = first.session.expires_at
 
         monkeypatch.setattr(settings, "session_max_lifetime_days", 2)
         second = await create_session(
             db_session, user, SessionCreationReason.LOCAL_LOGIN
         )
+        assert second is not None
 
         assert first.session.expires_at == first_deadline
         assert first.session.is_active is True
@@ -244,9 +250,11 @@ class TestCreateSession:
         first = await create_session(
             db_session, user, SessionCreationReason.LOCAL_LOGIN
         )
+        assert first is not None
         second = await create_session(
             db_session, user, SessionCreationReason.LOCAL_LOGIN
         )
+        assert second is not None
         assert first.session.id != second.session.id
         assert first.token != second.token
 
@@ -346,11 +354,255 @@ class TestCreateSession:
             result = await create_session(
                 db_session, user, SessionCreationReason.LOCAL_LOGIN
             )
+        assert result is not None
         assert "session_created" in _service_log_text(caplog)
         assert str(user.id) in _service_log_text(caplog)
         assert "local_login" in _service_log_text(caplog)
         assert result.token not in _service_log_text(caplog)
         assert str(result.session.id) not in _service_log_text(caplog)
+
+    async def test_locked_current_inactive_returns_none_without_writes(
+        self,
+        db_session: AsyncSession,
+        user_factory: Callable[..., Awaitable[User]],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """The pre-lock `active` value on the passed object is never
+        authoritative: a deactivation already visible in the database
+        makes `create_session()` return `None` with no Session, no
+        `last_login_at` update, no token, and no `session_created` log
+        (see authentication.md, Session creation, step 1)."""
+        user = await user_factory()
+        # Bypass the ORM so the in-memory `user` instance stays stale
+        # (active=True) while the persisted, locked-current row is
+        # inactive — exactly the deactivation-committed-first race.
+        await db_session.execute(
+            update(User).where(User.id == user.id).values(active=False)
+        )
+        await db_session.flush()
+
+        with caplog.at_level("INFO"):
+            result = await create_session(
+                db_session, user, SessionCreationReason.LOCAL_LOGIN
+            )
+
+        assert result is None
+        assert user.last_login_at is None
+        assert "session_created" not in _service_log_text(caplog)
+        rows = await db_session.execute(
+            select(Session).where(Session.user_id == user.id)
+        )
+        assert rows.scalars().all() == []
+
+    async def test_missing_locked_target_returns_none(
+        self, db_session: AsyncSession, user_factory: Callable[..., Awaitable[User]]
+    ) -> None:
+        """A target removed between the caller's pre-read and the lock
+        acquisition yields no Session and no write (see authentication.md,
+        Session creation, step 1)."""
+        user = await user_factory()
+        user_id = user.id
+        await db_session.delete(user)
+        await db_session.flush()
+
+        result = await create_session(
+            db_session, User(id=user_id), SessionCreationReason.LOCAL_LOGIN
+        )
+
+        assert result is None
+        rows = await db_session.execute(
+            select(Session).where(Session.user_id == user_id)
+        )
+        assert rows.scalars().all() == []
+
+    async def test_performs_no_redis_io_while_lock_is_held(
+        self,
+        db_session: AsyncSession,
+        user_factory: Callable[..., Awaitable[User]],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The User lock covers only the short database phase: no Redis
+        command executes while it is held (see conventions.md,
+        Transaction Hygiene Rules, and authentication.md, Session
+        creation)."""
+        user = await user_factory()
+        monkeypatch.setattr(
+            session_service,
+            "_new_redis_client",
+            lambda: (_ for _ in ()).throw(
+                AssertionError("must not use Redis while the User lock is held")
+            ),
+        )
+
+        result = await create_session(
+            db_session, user, SessionCreationReason.LOCAL_LOGIN
+        )
+
+        assert result is not None
+
+
+# ---------------------------------------------------------------------------
+# create_session() lock serialization with User state
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+class TestCreateSessionLockSerialization:
+    """Deterministic two-session proofs of the User-root lock protocol
+    that serializes Session creation with deactivation (see
+    authentication.md, Session creation; user-service.md, Session
+    creation concurrent with deactivation). The absent `deactivate_user()`
+    workflow is intentionally not implemented; a controlled conflicting
+    database operation stands in for it."""
+
+    async def test_deactivation_committed_first_returns_none(
+        self,
+        db_session_factory: Callable[[], Awaitable[AsyncSession]],
+    ) -> None:
+        session = await db_session_factory()
+        user = User(
+            username="serializedeactivated",
+            email="serializedeactivated@example.com",
+            password_hash=_FICTIONAL_PASSWORD_HASH,
+        )
+        session.add(user)
+        await session.commit()
+        user_id = user.id
+
+        try:
+            # The conflicting active-status update commits first.
+            await session.execute(
+                update(User).where(User.id == user_id).values(active=False)
+            )
+            await session.commit()
+
+            waiting = await db_session_factory()
+            locked_target = await waiting.get(User, user_id)
+            assert locked_target is not None
+
+            result = await create_session(
+                waiting, locked_target, SessionCreationReason.LOCAL_LOGIN
+            )
+
+            assert result is None
+            rows = await waiting.execute(
+                select(Session).where(Session.user_id == user_id)
+            )
+            assert rows.scalars().all() == []
+            assert locked_target.last_login_at is None
+            await waiting.rollback()
+
+            verify = await db_session_factory()
+            refreshed = await verify.get(User, user_id)
+            assert refreshed is not None
+            assert refreshed.last_login_at is None
+            await verify.rollback()
+        finally:
+            cleanup = await db_session_factory()
+            await cleanup.execute(delete(Session).where(Session.user_id == user_id))
+            await cleanup.execute(delete(User).where(User.id == user_id))
+            await cleanup.commit()
+
+    async def test_session_creation_holds_lock_until_commit(
+        self,
+        db_session_factory: Callable[[], Awaitable[AsyncSession]],
+    ) -> None:
+        session_a = await db_session_factory()
+        user = User(
+            username="serializelockfirst",
+            email="serializelockfirst@example.com",
+            password_hash=_FICTIONAL_PASSWORD_HASH,
+        )
+        session_a.add(user)
+        await session_a.commit()
+        user_id = user.id
+
+        try:
+            created = await create_session(
+                session_a, user, SessionCreationReason.LOCAL_LOGIN
+            )
+            assert created is not None
+
+            # A conflicting active-status update in an independent session
+            # must block until Session creation's transaction completes.
+            session_b = await db_session_factory()
+
+            async def _conflicting_status_update() -> None:
+                await session_b.execute(
+                    update(User).where(User.id == user_id).values(active=False)
+                )
+                await session_b.commit()
+
+            task_b = asyncio.create_task(_conflicting_status_update())
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(asyncio.shield(task_b), timeout=0.5)
+
+            # Session creation commits first; only then does the blocked
+            # conflicting mutation proceed.
+            await session_a.commit()
+            await asyncio.wait_for(task_b, timeout=5)
+
+            verify = await db_session_factory()
+            committed_session = await verify.get(Session, created.session.id)
+            assert committed_session is not None
+            assert committed_session.is_active is True
+            updated_user = await verify.get(User, user_id)
+            assert updated_user is not None
+            assert updated_user.active is False
+            await verify.rollback()
+        finally:
+            cleanup = await db_session_factory()
+            await cleanup.execute(delete(Session).where(Session.user_id == user_id))
+            await cleanup.execute(delete(User).where(User.id == user_id))
+            await cleanup.commit()
+
+    async def test_concurrent_logins_serialize_and_each_create_a_session(
+        self,
+        db_session_factory: Callable[[], Awaitable[AsyncSession]],
+    ) -> None:
+        setup = await db_session_factory()
+        user = User(
+            username="serializeconcurrent",
+            email="serializeconcurrent@example.com",
+            password_hash=_FICTIONAL_PASSWORD_HASH,
+        )
+        setup.add(user)
+        await setup.commit()
+        user_id = user.id
+
+        async def _login() -> uuid.UUID:
+            session = await db_session_factory()
+            try:
+                target = await session.get(User, user_id)
+                assert target is not None
+                created = await create_session(
+                    session, target, SessionCreationReason.LOCAL_LOGIN
+                )
+                assert created is not None
+                await session.commit()
+                return created.session.id
+            finally:
+                await session.close()
+
+        try:
+            first_id, second_id = await asyncio.gather(_login(), _login())
+            assert first_id != second_id
+
+            verify = await db_session_factory()
+            rows = await verify.execute(
+                select(Session).where(Session.user_id == user_id)
+            )
+            sessions = rows.scalars().all()
+            assert len(sessions) == 2
+            refreshed = await verify.get(User, user_id)
+            assert refreshed is not None
+            assert refreshed.last_login_at is not None
+            await verify.rollback()
+        finally:
+            cleanup = await db_session_factory()
+            await cleanup.execute(delete(Session).where(Session.user_id == user_id))
+            await cleanup.execute(delete(User).where(User.id == user_id))
+            await cleanup.commit()
 
 
 # ---------------------------------------------------------------------------

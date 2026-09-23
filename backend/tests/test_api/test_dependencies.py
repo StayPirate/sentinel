@@ -540,6 +540,7 @@ class TestGetCurrentUserJwt:
         created = await create_session(
             db_session, user, SessionCreationReason.LOCAL_LOGIN
         )
+        assert created is not None
         dep_client.cookies.set(SESSION_COOKIE_NAME, created.token)
 
         response = await dep_client.get("/whoami")
@@ -560,10 +561,12 @@ class TestGetCurrentUserJwt:
         bearer_created = await create_session(
             db_session, bearer_user, SessionCreationReason.LOCAL_LOGIN
         )
+        assert bearer_created is not None
         cookie_user = await user_factory()
         cookie_created = await create_session(
             db_session, cookie_user, SessionCreationReason.LOCAL_LOGIN
         )
+        assert cookie_created is not None
         dep_client.cookies.set(SESSION_COOKIE_NAME, cookie_created.token)
 
         response = await dep_client.get(
@@ -608,6 +611,7 @@ class TestGetCurrentUserJwt:
         created = await create_session(
             db_session, user, SessionCreationReason.LOCAL_LOGIN
         )
+        assert created is not None
         created.session.is_active = False
         await db_session.flush()
 
@@ -624,10 +628,16 @@ class TestGetCurrentUserJwt:
         user_factory: Callable[..., Awaitable[User]],
         redis_client: redis_asyncio.Redis,
     ) -> None:
-        user = await user_factory(active=False)
+        user = await user_factory()
         created = await create_session(
             db_session, user, SessionCreationReason.LOCAL_LOGIN
         )
+        assert created is not None
+        # The session must be created while the user is active; deactivate
+        # afterwards so the dependency loads an inactive user with a still
+        # active Session and must reject it.
+        user.active = False
+        await db_session.flush()
 
         response = await dep_client.get(
             "/whoami", headers={"Authorization": f"Bearer {created.token}"}
@@ -646,6 +656,7 @@ class TestGetCurrentUserJwt:
         created = await create_session(
             db_session, user, SessionCreationReason.LOCAL_LOGIN
         )
+        assert created is not None
         issued = issue_token(
             user_id=uuid.uuid4(),
             session_id=created.session.id,
@@ -1105,6 +1116,7 @@ class TestGetOptionalCurrentUserValidCredential:
         created = await create_session(
             db_session, user, SessionCreationReason.LOCAL_LOGIN
         )
+        assert created is not None
         dep_client.cookies.set(SESSION_COOKIE_NAME, created.token)
 
         response = await dep_client.get("/optional-whoami")
@@ -1125,10 +1137,12 @@ class TestGetOptionalCurrentUserValidCredential:
         bearer_created = await create_session(
             db_session, bearer_user, SessionCreationReason.LOCAL_LOGIN
         )
+        assert bearer_created is not None
         cookie_user = await user_factory()
         cookie_created = await create_session(
             db_session, cookie_user, SessionCreationReason.LOCAL_LOGIN
         )
+        assert cookie_created is not None
         dep_client.cookies.set(SESSION_COOKIE_NAME, cookie_created.token)
 
         response = await dep_client.get(
@@ -1149,6 +1163,7 @@ class TestGetOptionalCurrentUserValidCredential:
         created = await create_session(
             db_session, user, SessionCreationReason.LOCAL_LOGIN
         )
+        assert created is not None
         dep_client.cookies.set(SESSION_COOKIE_NAME, created.token)
 
         response = await dep_client.get(
@@ -1241,6 +1256,7 @@ class TestGetOptionalCurrentUserRejection:
         created = await create_session(
             db_session, user, SessionCreationReason.LOCAL_LOGIN
         )
+        assert created is not None
         dep_client.cookies.set(SESSION_COOKIE_NAME, created.token)
 
         response = await dep_client.get(
@@ -1261,6 +1277,7 @@ class TestGetOptionalCurrentUserRejection:
         created = await create_session(
             db_session, user, SessionCreationReason.LOCAL_LOGIN
         )
+        assert created is not None
         created.session.is_active = False
         await db_session.flush()
 
@@ -1277,10 +1294,16 @@ class TestGetOptionalCurrentUserRejection:
         user_factory: Callable[..., Awaitable[User]],
         redis_client: redis_asyncio.Redis,
     ) -> None:
-        user = await user_factory(active=False)
+        user = await user_factory()
         created = await create_session(
             db_session, user, SessionCreationReason.LOCAL_LOGIN
         )
+        assert created is not None
+        # The session must be created while the user is active; deactivate
+        # afterwards so the dependency loads an inactive user with a still
+        # active Session and must reject it.
+        user.active = False
+        await db_session.flush()
 
         response = await dep_client.get(
             "/optional-whoami", headers={"Authorization": f"Bearer {created.token}"}
@@ -1299,6 +1322,7 @@ class TestGetOptionalCurrentUserRejection:
         created = await create_session(
             db_session, user, SessionCreationReason.LOCAL_LOGIN
         )
+        assert created is not None
         issued = issue_token(
             user_id=uuid.uuid4(),
             session_id=created.session.id,
@@ -1416,6 +1440,7 @@ class TestGetOptionalCurrentUserRejection:
         created = await create_session(
             db_session, user, SessionCreationReason.LOCAL_LOGIN
         )
+        assert created is not None
 
         async def _fail_get_user_by_id(*args: Any, **kwargs: Any) -> User:
             raise RuntimeError("simulated database failure")
@@ -1447,6 +1472,7 @@ class TestRequireCapability:
         created = await create_session(
             db_session, user, SessionCreationReason.LOCAL_LOGIN
         )
+        assert created is not None
 
         response = await dep_client.get(
             "/capability-protected",
@@ -1472,6 +1498,7 @@ class TestRequireCapability:
         created = await create_session(
             db_session, user, SessionCreationReason.LOCAL_LOGIN
         )
+        assert created is not None
 
         response = await dep_client.get(
             "/capability-protected",
@@ -1493,6 +1520,7 @@ class TestRequireCapability:
         created = await create_session(
             db_session, user, SessionCreationReason.LOCAL_LOGIN
         )
+        assert created is not None
 
         response = await dep_client.get(
             "/capability-protected",
@@ -1513,6 +1541,7 @@ class TestRequireCapability:
         created = await create_session(
             db_session, user, SessionCreationReason.LOCAL_LOGIN
         )
+        assert created is not None
         headers = {"Authorization": f"Bearer {created.token}"}
         # Capture the UUID before the failing request below: a rollback
         # (even a partial ROLLBACK TO SAVEPOINT) expires all tracked ORM
@@ -1546,6 +1575,7 @@ class TestRequireCapability:
         created = await create_session(
             db_session, user, SessionCreationReason.LOCAL_LOGIN
         )
+        assert created is not None
         headers = {"Authorization": f"Bearer {created.token}"}
 
         first = await dep_client.get("/capability-protected", headers=headers)
@@ -1569,6 +1599,7 @@ class TestRequireCapability:
         created = await create_session(
             db_session, user, SessionCreationReason.LOCAL_LOGIN
         )
+        assert created is not None
 
         with caplog.at_level(logging.WARNING, logger="app.api.dependencies"):
             response = await dep_client.get(
@@ -1598,6 +1629,7 @@ class TestRequireSessionAuthentication:
         created = await create_session(
             db_session, user, SessionCreationReason.LOCAL_LOGIN
         )
+        assert created is not None
 
         response = await dep_client.get(
             "/session-only", headers={"Authorization": f"Bearer {created.token}"}
