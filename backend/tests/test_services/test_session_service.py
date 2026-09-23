@@ -496,8 +496,8 @@ class TestCreateSession:
         result = await create_session(
             db_session,
             user,
-            SessionCreationReason.SSO_LOGIN,
-            expected_password_hash=None,
+            SessionCreationReason.LOCAL_LOGIN,
+            expected_password_hash=user.password_hash,
         )
 
         assert result is not None
@@ -547,7 +547,7 @@ class TestCreateSession:
         result = await create_session(
             db_session,
             user,
-            SessionCreationReason.LOCAL_LOGIN,
+            SessionCreationReason.SSO_LOGIN,
             expected_password_hash=None,
         )
 
