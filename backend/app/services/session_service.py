@@ -12,10 +12,11 @@ whatever `SQLAlchemyError`/generic exception the database driver
 raises — no function defines its own exception hierarchy. Only
 `create_session()` acquires an explicit row lock: as its first database
 operation it takes `FOR NO KEY UPDATE` on the target `User` row (the
-User root lock that serializes successful login with deactivation — see
-`docs/features/identity/authentication.md`, Session creation, and
-`docs/features/identity/user-service.md`, Session creation concurrent
-with deactivation). `invalidate_session()` and
+User root lock that serializes successful login with deactivation and with
+password reset — see `docs/features/identity/authentication.md`, Session
+creation, and `docs/features/identity/user-service.md`, Session creation
+concurrent with deactivation and with password reset).
+`invalidate_session()` and
 `invalidate_user_sessions()` are single, atomically-guarded conditional
 `UPDATE` statements (the row lock is inherent to the `UPDATE` itself,
 matching the "operational metadata touch" exemption in
@@ -116,22 +117,33 @@ class CreatedSession:
 
 
 async def create_session(
-    db: AsyncSession, user: User, reason: SessionCreationReason
+    db: AsyncSession,
+    user: User,
+    reason: SessionCreationReason,
+    *,
+    expected_password_hash: str | None,
 ) -> CreatedSession | None:
     """Create a new active `Session` for `user` and issue its JWT.
 
     Q1: `db` is the caller's transaction; `user` identifies the target
-    row only (its pre-lock `active` value is never authoritative, and
-    `user.id` is the only field read from it); `reason` is `local_login`
-    or `sso_login` (used only for the operational log).
+    row only (neither its pre-lock `active` value nor its pre-lock
+    `password_hash` is authoritative, and `user.id` is the only field
+    read from it); `reason` is `local_login` or `sso_login` (used only
+    for the operational log); `expected_password_hash` is the verified
+    credential snapshot — the stored `password_hash` the caller checked
+    against the supplied password — or `None` to request no password
+    check (SSO).
 
     Q2: as its first database operation, takes `FOR NO KEY UPDATE` on the
     target `User` row and reloads the locked-current state. No pre-lock
     eligibility value on the passed object is trusted. Returns `None`
-    when the locked-current row is missing or `active = false` — no
-    `Session`, no `last_login_at` update, no token, no log. This is an
-    in-process ineligibility outcome, not an API error (the provider
-    workflow maps it to its own documented login failure).
+    when the locked-current row is missing, `active = false`, or
+    `expected_password_hash` is not `None` and differs from the
+    locked-current `password_hash` (a password reset that committed after
+    the caller's verification) — no `Session`, no `last_login_at` update,
+    no token, no log. This is an in-process ineligibility outcome, not an
+    API error (the provider workflow maps it to its own documented login
+    failure).
 
     Q3: for an eligible locked-current User, uses one UTC `login_at`
     snapshot for `user.last_login_at`, the persisted
@@ -162,7 +174,14 @@ async def create_session(
         .execution_options(populate_existing=True)
     )
     locked_user = locked_result.scalar_one_or_none()
-    if locked_user is None or not locked_user.active:
+    if (
+        locked_user is None
+        or not locked_user.active
+        or (
+            expected_password_hash is not None
+            and locked_user.password_hash != expected_password_hash
+        )
+    ):
         return None
 
     login_at = datetime.now(UTC)

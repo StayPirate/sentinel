@@ -213,6 +213,8 @@ create_session(
     db: AsyncSession,
     user: User,
     reason: SessionCreationReason,
+    *,
+    expected_password_hash: str | None,
 ) -> CreatedSession | None
 ```
 
@@ -220,18 +222,24 @@ create_session(
 `sso_login`. `CreatedSession` contains the persisted `Session`, its signed JWT
 string, and `token_expires_at`, the UTC datetime represented by the JWT `exp`
 claim. This is distinct from `Session.expires_at`, which represents the later
-immutable session deadline. The operation uses one UTC `login_at` snapshot for
-`User.last_login_at`, the JWT `iat`, and calculation of both
-`Session.expires_at` and the JWT `session_deadline`. It behaves as follows:
+immutable session deadline. `expected_password_hash` is the credential
+snapshot the provider verified — the stored `password_hash` it checked
+against the supplied password — or `None` when the provider does not
+authenticate a local password (SSO), which requests no credential check. The
+operation uses one UTC `login_at` snapshot for `User.last_login_at`, the JWT
+`iat`, and calculation of both `Session.expires_at` and the JWT
+`session_deadline`. It behaves as follows:
 
 1. As the first database operation, acquire `FOR NO KEY UPDATE` on the
-   target `User` row and reload the locked-current active status. The passed
-   `user` identifies the target only; its pre-lock `active` value is never
-   authoritative. If no row exists or `active = false`, do not create a
-   Session, do not update `last_login_at`, and return `None` without issuing
-   a token. Each provider workflow maps that outcome to its own documented
-   login failure — `AUTH_INVALID_CREDENTIALS` for local login and
-   `AUTH_SSO_USER_INACTIVE` for SSO.
+   target `User` row and reload the locked-current state. The passed `user`
+   identifies the target only; neither its pre-lock `active` value nor its
+   pre-lock `password_hash` is authoritative. If no row exists, `active =
+   false`, or `expected_password_hash` is not `None` and the locked-current
+   `password_hash` differs from it, do not create a Session, do not update
+   `last_login_at`, and return `None` without issuing a token. Each provider
+   workflow maps that outcome to its own documented login failure —
+   `AUTH_INVALID_CREDENTIALS` for local login and `AUTH_SSO_USER_INACTIVE`
+   for SSO.
 2. Create a distinct active `Session` for the locked `user.id` without
    reading, invalidating, or otherwise changing any existing session.
 3. Set `Session.expires_at = login_at + SESSION_MAX_LIFETIME_DAYS` and
@@ -264,10 +272,27 @@ phase: password verification, bcrypt/dummy-bcrypt work, Redis lockout
 handling, and every external IdP/network operation occur outside it (see the
 provider specs and `docs/conventions.md`, Transaction Hygiene Rules).
 
+**Password-reset serialization**: the User lock is also the serialization
+point between successful login and `reset_password()`, which takes the
+conflicting `FOR UPDATE` on the same row, replaces `password_hash`, and
+invalidates every active Session in one transaction. Because session creation
+revalidates the locked-current `password_hash` against
+`expected_password_hash`, the same conflict serializes the two operations. If
+session creation commits first, the new Session exists and a later
+`reset_password()` invalidates it together with every other active Session.
+If `reset_password()` commits first, session creation observes the replaced
+hash under the lock, creates no Session, updates no `last_login_at`, and
+returns `None`; the provider maps that to its documented login failure. No
+Session can commit for a credential that a committed password reset has
+superseded. A `None` expectation performs no password check and is the
+contract for providers that do not authenticate a local password (SSO).
+
 Re-invocation intentionally creates another independent session and token.
-Provider workflows establish every other eligibility condition — credential
-validity, local-versus-external provider match, `external_id` presence, and
-lockout state — before calling it. Session creation produces no
+Provider workflows establish every other eligibility condition — the
+local-versus-external provider match, `external_id` presence, and lockout
+state — before calling it; a provider that authenticates a local password
+additionally passes the verified `password_hash` as `expected_password_hash`
+for the locked revalidation above. Session creation produces no
 `IdentityAuditEvent`.
 
 ### Session liveness check

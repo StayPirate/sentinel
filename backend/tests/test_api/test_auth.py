@@ -79,7 +79,12 @@ async def _created_session(
     user_factory: Callable[..., Awaitable[User]],
 ) -> tuple[Session, str]:
     user = await user_factory()
-    created = await create_session(db_session, user, SessionCreationReason.LOCAL_LOGIN)
+    created = await create_session(
+        db_session,
+        user,
+        SessionCreationReason.LOCAL_LOGIN,
+        expected_password_hash=None,
+    )
     assert created is not None
     return created.session, created.token
 
@@ -405,17 +410,82 @@ class TestLogin:
         real_create = session_service.create_session
 
         async def _create_after_deactivation(
-            db: AsyncSession, target: User, reason: SessionCreationReason
+            db: AsyncSession,
+            target: User,
+            reason: SessionCreationReason,
+            *,
+            expected_password_hash: str | None,
         ) -> object:
             await db.execute(
                 update(User).where(User.id == target.id).values(active=False)
             )
             await db.flush()
-            return await real_create(db, target, reason)
+            return await real_create(
+                db,
+                target,
+                reason,
+                expected_password_hash=expected_password_hash,
+            )
 
         monkeypatch.setattr(
             local_auth_service, "create_session", _create_after_deactivation
         )
+
+        response = await auth_client.post(
+            "/api/v1/auth/login",
+            json={"username": username, "password": password},
+        )
+
+        assert response.status_code == 401
+        assert response.json() == {
+            "code": "AUTH_INVALID_CREDENTIALS",
+            "detail": "Invalid username or password.",
+        }
+        # A failed login sets no session cookie and is not the lockout
+        # (429) response, so neither header is present.
+        assert "set-cookie" not in response.headers
+        assert "retry-after" not in response.headers
+        assert await redis_client.get(f"login_attempts:{username}") == "1"
+
+    async def test_locked_current_superseded_credential_maps_to_generic_401(
+        self,
+        auth_client: AsyncClient,
+        redis_client: redis_asyncio.Redis,
+        local_user_factory: Callable[..., Awaitable[tuple[User, str]]],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A valid password whose Session creation observes a password
+        reset committed after the step-8 verification (the locked-current
+        `password_hash` no longer matches) returns the same generic 401
+        body as every other failure and leaves the lockout counter in
+        place — no successful-login clear is registered (see
+        local-authentication.md, step 11, and authentication.md,
+        Password-reset serialization)."""
+        user, password = await local_user_factory()
+        username = user.username
+        real_create = session_service.create_session
+
+        async def _create_after_reset(
+            db: AsyncSession,
+            target: User,
+            reason: SessionCreationReason,
+            *,
+            expected_password_hash: str | None,
+        ) -> object:
+            await db.execute(
+                update(User)
+                .where(User.id == target.id)
+                .values(password_hash="$2b$12$" + "b" * 53)
+            )
+            await db.flush()
+            return await real_create(
+                db,
+                target,
+                reason,
+                expected_password_hash=expected_password_hash,
+            )
+
+        monkeypatch.setattr(local_auth_service, "create_session", _create_after_reset)
 
         response = await auth_client.post(
             "/api/v1/auth/login",

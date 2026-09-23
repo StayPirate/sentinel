@@ -630,17 +630,60 @@ class TestAuthenticateLocalUser:
         real_create = session_service.create_session
 
         async def _create_after_deactivation(
-            db: AsyncSession, target: User, reason: Any
+            db: AsyncSession,
+            target: User,
+            reason: Any,
+            *,
+            expected_password_hash: str | None,
         ) -> Any:
             await db.execute(
                 update(User).where(User.id == target.id).values(active=False)
             )
             await db.flush()
-            return await real_create(db, target, reason)
+            return await real_create(
+                db,
+                target,
+                reason,
+                expected_password_hash=expected_password_hash,
+            )
 
         monkeypatch.setattr(
             local_auth_service, "create_session", _create_after_deactivation
         )
+
+    @staticmethod
+    def _reset_password_as_create_session_side_effect(
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Simulate a password reset that commits after the step-8
+        verification but before the locked revalidation: the module's
+        `create_session` reference is wrapped so the conflicting
+        `password_hash` replacement happens, then the real locked
+        revalidation runs. The conflicting write stands in for the
+        committed `reset_password()` transaction."""
+        real_create = session_service.create_session
+
+        async def _create_after_reset(
+            db: AsyncSession,
+            target: User,
+            reason: Any,
+            *,
+            expected_password_hash: str | None,
+        ) -> Any:
+            await db.execute(
+                update(User)
+                .where(User.id == target.id)
+                .values(password_hash="$2b$12$" + "b" * 53)
+            )
+            await db.flush()
+            return await real_create(
+                db,
+                target,
+                reason,
+                expected_password_hash=expected_password_hash,
+            )
+
+        monkeypatch.setattr(local_auth_service, "create_session", _create_after_reset)
 
     async def test_locked_current_inactive_returns_invalid_credentials(
         self,
@@ -665,6 +708,50 @@ class TestAuthenticateLocalUser:
         )
         assert rows.scalars().all() == []
         assert await redis_client.get(f"login_attempts:{username}") == "1"
+
+    async def test_locked_current_superseded_credential_returns_invalid_credentials(
+        self,
+        db_session: AsyncSession,
+        redis_client: redis_asyncio.Redis,
+        local_user_factory: Callable[..., Awaitable[tuple[User, str]]],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A valid password followed by a committed password reset yields
+        the generic failure, no Session, no `last_login_at`, and a
+        retained counter (see local-authentication.md, step 11, and
+        authentication.md, Password-reset serialization)."""
+        user, password = await local_user_factory()
+        username = user.username
+        self._reset_password_as_create_session_side_effect(monkeypatch)
+
+        result = await authenticate_local_user(db_session, username, password)
+
+        assert isinstance(result, LoginInvalidCredentials)
+        assert user.last_login_at is None
+        rows = await db_session.execute(
+            select(Session).where(Session.user_id == user.id)
+        )
+        assert rows.scalars().all() == []
+        assert await redis_client.get(f"login_attempts:{username}") == "1"
+
+    async def test_superseded_credential_at_threshold_logs_transition_once(
+        self,
+        db_session: AsyncSession,
+        redis_client: redis_asyncio.Redis,
+        local_user_factory: Callable[..., Awaitable[tuple[User, str]]],
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        monkeypatch.setattr(settings, "login_max_attempts", 1)
+        user, password = await local_user_factory()
+        self._reset_password_as_create_session_side_effect(monkeypatch)
+
+        with caplog.at_level("INFO"):
+            result = await authenticate_local_user(db_session, user.username, password)
+
+        assert isinstance(result, LoginInvalidCredentials)
+        assert _service_log_text(caplog).count("login_lockout_triggered") == 1
+        assert str(user.id) in _service_log_text(caplog)
 
     async def test_locked_current_inactive_at_threshold_logs_transition_once(
         self,
@@ -696,6 +783,29 @@ class TestAuthenticateLocalUser:
         monkeypatch.setattr(settings, "login_max_attempts", 5)
         user, password = await local_user_factory()
         self._deactivate_as_create_session_side_effect(monkeypatch)
+
+        with caplog.at_level("INFO"):
+            result = await authenticate_local_user(db_session, user.username, password)
+
+        assert isinstance(result, LoginInvalidCredentials)
+        assert "login_lockout_triggered" not in _service_log_text(caplog)
+        assert await redis_client.get(f"login_attempts:{user.username}") == "1"
+
+    async def test_superseded_credential_below_threshold_logs_no_transition(
+        self,
+        db_session: AsyncSession,
+        redis_client: redis_asyncio.Redis,
+        local_user_factory: Callable[..., Awaitable[tuple[User, str]]],
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """The superseded-credential failure emits no lockout transition
+        while the admitted counter is below `LOGIN_MAX_ATTEMPTS`, and the
+        counter is retained (see local-authentication.md, Lockout
+        transition logging)."""
+        monkeypatch.setattr(settings, "login_max_attempts", 5)
+        user, password = await local_user_factory()
+        self._reset_password_as_create_session_side_effect(monkeypatch)
 
         with caplog.at_level("INFO"):
             result = await authenticate_local_user(db_session, user.username, password)

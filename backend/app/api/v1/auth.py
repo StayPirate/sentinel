@@ -51,7 +51,8 @@ def _invalid_credentials_error() -> AppError:
 
     Identical status/code/detail for every login failure cause (unknown
     username, wrong password, inactive user, external user, no password
-    set) — see `docs/features/identity/local-authentication.md`
+    set, superseded password) — see
+    `docs/features/identity/local-authentication.md`
     (Security Considerations). A fresh instance per call for the same
     reason as `_unauthenticated_error()`.
     """
@@ -76,8 +77,8 @@ def _clear_session_cookie(response: Response) -> None:
         "Authenticates a local user, creates a session, and returns a "
         "JWT. Public endpoint. Returns a generic 401 for every credential "
         "failure (unknown username, wrong password, inactive user, "
-        "external user, or no password set) to prevent username "
-        "enumeration."
+        "external user, no password set, or a superseded password) to "
+        "prevent username enumeration."
     ),
     responses={
         401: {
