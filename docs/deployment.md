@@ -356,7 +356,7 @@ they feed in [Environments](#environments).
 | `release-please.yml` | `workflow_run` after a successful CI run on `master` | Creates and updates the Release PR; on merge creates the version tag and GitHub Release | Yes (release path) |
 | `build-images.yml` | `workflow_run` after a successful CI run on `master`; push of a `v*` tag | Builds the backend image once, runs the image smoke and SBOM gates, and publishes the same digest to `ghcr.io`; version-tag runs also publish release SBOM and provenance attestations | Yes (publish gate) |
 | `deploy-api-docs.yml` | Push of a `v*` tag | Publishes the OpenAPI contract and API documentation site to GitHub Pages | Yes (release path) |
-| `image-scan.yml` | Weekly schedule, manual | Scans the published image for OS-level vulnerabilities and opens or updates a tracking issue | No |
+| `image-scan.yml` | Weekly schedule, manual | Scans the published image for OS-level vulnerabilities and opens, updates, or closes a tracking issue | No |
 | `python-forward-compat.yml` | Weekly schedule, manual | Runs the test suite on the next Python minor version and reports the result through its Actions status and logs | No |
 | `renovate-validation.yml` | Pull request opened, synchronized, or reopened; manual | Validates `renovate.jsonc` and performs a read-only Renovate dependency lookup in a pinned container | No |
 | `cleanup-images.yml` | Weekly schedule, manual | Bounds the pool of untagged image versions in the registry | No |
@@ -1704,15 +1704,20 @@ pipeline without a corresponding way to resolve it.
 **Fixable/unfixable split.** Each run produces two Trivy outputs:
 
 - A **fixable HIGH/CRITICAL** result — vulnerabilities with a known
-  upstream fix available. This result drives issue creation/update
-  (see below).
+  upstream fix available. This result drives issue creation, update,
+  and closure (see below).
 - A **complete report** — every finding regardless of fix
   availability, uploaded as a workflow artifact for awareness only.
 
 **Delivery.** A fixable finding opens a new GitHub issue labeled
 `security` (the label already exists in the repository), or updates
 the existing open one if a prior run already opened it — the workflow
-never creates a duplicate issue for the same ongoing condition.
+never creates a duplicate issue for the same ongoing condition. A scan
+that finds no fixable HIGH/CRITICAL OS-level findings closes the open
+tracking issue (with a comment linking the run), so a condition that has
+been remediated does not leave a stale issue behind. A failure of the
+scan step itself never closes the issue: only an exit status reporting
+zero fixable findings does.
 
 **Remediation path.** A fixable finding is usually resolved by merging
 the latest open Renovate PR that refreshes `PYTHON_BASE_DIGEST` in

@@ -14,8 +14,9 @@ name: Image Vulnerability Scan
 #
 # This workflow never fails the run because of scan findings and never
 # touches build-images.yml or the publish path. Fixable HIGH/CRITICAL
-# findings open or update a single tracking issue; the complete report
-# (all severities, informational) is uploaded as an artifact.
+# findings open or update a single tracking issue, and a scan that finds
+# none closes that issue again; the complete report (all severities,
+# informational) is uploaded as an artifact.
 
 on:
   schedule:
@@ -54,10 +55,11 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Fixable-only scan: drives issue creation/update. Restricted to
-      # vuln-type "os" — Python dependency vulnerabilities are already
-      # gated by pip-audit on every merge (see ci.yml, backend-security);
-      # this workflow exists specifically for the unmonitored OS layer.
+      # Fixable-only scan: drives issue creation, update, and closure.
+      # Restricted to vuln-type "os" — Python dependency vulnerabilities
+      # are already gated by pip-audit on every merge (see ci.yml,
+      # backend-security); this workflow exists specifically for the
+      # unmonitored OS layer.
       # scanners is restricted to "vuln": Trivy's secret scanner is
       # deliberately not enabled here — no CI job or Action performs
       # secret scanning (see docs/features/platform/testing-strategy.md,
@@ -147,4 +149,27 @@ jobs:
               gh issue create --repo "${{ github.repository }}" \
                   --title "${ISSUE_TITLE}" --label "${SECURITY_LABEL}" \
                   --body-file "${body_file}"
+          fi
+
+      # Reached only when the fixable-only scan (above) found nothing
+      # (exit code 0 → `outcome: success`). If a tracking issue from an
+      # earlier run is still open, the condition it tracked no longer
+      # exists — close it so a remediated finding (typically a merged
+      # Renovate base-image digest bump) does not leave a stale issue
+      # behind. An infrastructure failure of the scan step is
+      # `outcome: failure`, so an error never closes the issue.
+      - name: Close tracking issue when the scan is clean
+        if: steps.trivy-fixable.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          existing=$(gh issue list --repo "${{ github.repository }}" \
+              --state open --label "${SECURITY_LABEL}" \
+              --json number,title \
+              --jq ".[] | select(.title == \"${ISSUE_TITLE}\") | .number" | head -n1)
+
+          if [[ -n "${existing}" ]]; then
+              gh issue close "${existing}" --repo "${{ github.repository }}" \
+                  --comment "The latest image scan found no fixable HIGH/CRITICAL OS-level vulnerabilities in \`${{ steps.image.outputs.ref }}\`, so the tracked condition is resolved. See the [clean workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})."
           fi
