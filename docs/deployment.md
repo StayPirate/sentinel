@@ -1599,10 +1599,14 @@ manual trigger. An absent or mismatched lease is never removed by the rejected
 delivery; wait for the current owner or TTL. Do not restart or retry the
 rejected Celery delivery automatically.
 
-After a Settings PATCH returns an error where the setting commit or publication
-may already be durable or uncertain, read the current setting and use the same
-manual trigger after any retained lease or fence is resolved. Repeating the
-same PATCH may be a no-op and does not replace the recovery run.
+A Settings PATCH never publishes a run: a failed PATCH response means the
+transaction was not confirmed and the setting change did not persist, while a
+successful response means the setting and its audit event are durable. A
+successful setting change converges derived state only after a manual trigger.
+If the manual trigger fails or its publication outcome is uncertain, follow the
+lease, task, and fence recovery above. Repeating the same PATCH starts no work
+and never repairs a run; the recalculation is recovered exclusively through the
+manual trigger.
 
 No recovery procedure may treat logs, the absence of a terminal event, or a
 missing Redis key as proof that the previous run completed or that its process
