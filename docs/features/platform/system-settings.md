@@ -183,10 +183,10 @@ it changed the row, or the locked-current value when the request was a no-op.
 
 1. The requested value is restricted to the closed set `"3.1"` and `"4.0"`.
    The API request schema rejects any other value with the global `422
-   VALIDATION_ERROR` before the service is invoked. Because the persisted
-   column has no CHECK constraint, the service also validates its input before
-   any database access and raises `ValueError` for an out-of-set value; that
-   path is unreachable through the API.
+   VALIDATION_ERROR` before the service is invoked. Because the type annotation
+   is not runtime enforcement, the service also validates its input before any
+   database access and raises `ValueError` for an out-of-set value; that path
+   is unreachable through the API.
 2. The function loads the required `default_cvss_version` row with a `FOR
    UPDATE` row lock as its first database operation. An absent row raises
    `RequiredSystemSettingMissingError`.

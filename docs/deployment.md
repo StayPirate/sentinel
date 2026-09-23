@@ -1599,8 +1599,8 @@ manual trigger. An absent or mismatched lease is never removed by the rejected
 delivery; wait for the current owner or TTL. Do not restart or retry the
 rejected Celery delivery automatically.
 
-A Settings PATCH never publishes a run. A `409` or `422` rejection
-deterministically commits nothing. Any other failed or unconfirmed PATCH
+A Settings PATCH never publishes a run. A deterministic rejection (`401`,
+`403`, `409`, or `422`) commits nothing. Any other failed or unconfirmed PATCH
 response means the setting change may or may not have persisted; read the
 current setting with `GET /api/v1/admin/settings` before deciding. A
 successful effective change persists the value and its audit event, while a

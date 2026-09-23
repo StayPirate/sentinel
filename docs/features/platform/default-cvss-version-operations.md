@@ -18,9 +18,9 @@ The preview, the setting mutation, and the manual trigger compose one advisory,
 non-atomic administrative sequence: the optional impact preview, the setting
 `PATCH /api/v1/admin/settings` mutation, and the manual trigger that admits the
 run. Its step order and non-atomicity rules are defined in
-`docs/features/platform/system-settings.md` (Impact of changing the default
-version); no step is a prerequisite or reservation for another, and no client
-carries a version from one request to the next.
+`docs/features/platform/system-settings.md` (Default CVSS Version); no step is
+a prerequisite or reservation for another, and no client carries a version from
+one request to the next.
 
 ## Scope and Ownership
 
@@ -819,14 +819,13 @@ Complete-Run Coordination below.
 ## Complete-Run Coordination
 
 This section owns complete-run admission, run identity, ownership, lease
-renewal, execution fencing, task adoption, ownership loss, Redis-loss behavior,
-publication uncertainty, exclusion of an effective setting change while a run
-executes, protection of an admitted run from another owner, cleanup, and the
-coordination conditions that require operator recovery. It preserves every
-validation, stale-delivery, bounded
-paging, independent-unit, post-commit, outcome, restart, and no-persistent-state
-contract defined above. An ownership-loss termination is a whole-run condition
-and is never an ordinary failed unit.
+renewal, the execution fence and its stable identifier, task adoption,
+ownership loss, Redis-loss behavior, publication uncertainty, protection of an
+admitted run from another owner, cleanup, and the coordination conditions that
+require operator recovery. It preserves every validation, stale-delivery,
+bounded paging, independent-unit, post-commit, outcome, restart, and
+no-persistent-state contract defined above. An ownership-loss termination is a
+whole-run condition and is never an ordinary failed unit.
 
 Coordination introduces no persistent run row, progress resource, resume cursor,
 outbox, result-backend entry, audit event, capability, configuration variable,
@@ -1061,9 +1060,11 @@ resume resource, and no compensation record. It is repeatable: every admission
 that reaches publication allocates a new run identity and publishes a new
 complete run; a blocked admission publishes nothing.
 
-All three exceptions inherit from `SettingsServiceError`, which inherits from
-the shared `ServiceError` root. `CVSSRecalculationAlreadyInProgressError` is
-owned by `docs/features/platform/system-settings.md`;
+All exceptions raised by the settings feature's service functions — setting
+mutation, preview, runner, and manual admission — inherit from
+`SettingsServiceError`, which inherits from the shared `ServiceError` root.
+`CVSSRecalculationAlreadyInProgressError` is owned by
+`docs/features/platform/system-settings.md`;
 `CVSSRecalculationRedisUnavailableError` and
 `CVSSRecalculationBrokerUnavailableError` are owned by this specification.
 
