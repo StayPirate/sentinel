@@ -135,6 +135,7 @@ async def test_scheduled_fetcher_pipeline_end_to_end(
         f"expected a successful run, got {run.status!r}: "
         f"error_message={run.error_message!r} error_detail={run.error_detail!r}"
     )
+    assert run.items_succeeded == 0
     assert run.items_created == 0
     assert run.items_updated == 0
     assert run.items_failed == 0
@@ -194,6 +195,7 @@ async def test_scheduled_fetcher_pipeline_end_to_end(
     # — not merely a run with a matching status/fetcher_name.
     assert item["last_run"]["id"] == str(run.id)
     assert item["last_run"]["status"] == "success"
+    assert item["last_run"]["items_succeeded"] == 0
     assert item["last_run"]["items_created"] == 0
     assert item["last_run"]["triggered_by"] == "schedule"
 

@@ -1027,6 +1027,14 @@ class TestGetCatchUpFetchers:
 # ---------------------------------------------------------------------------
 
 
+_METRIC_HELPERS: tuple[str, ...] = (
+    "record_succeeded",
+    "record_failed",
+    "record_created",
+    "record_updated",
+)
+
+
 @pytest.mark.unit
 class TestMetrics:
     def _fetcher(self) -> BaseFetcher:
@@ -1039,6 +1047,32 @@ class TestMetrics:
                 pass
 
         return MetricsFetcher()
+
+    def _counters(self, fetcher: BaseFetcher) -> tuple[int, int, int, int]:
+        return (
+            fetcher._succeeded,
+            fetcher._created,
+            fetcher._updated,
+            fetcher._failed,
+        )
+
+    def _populated(self) -> tuple[BaseFetcher, tuple[int, int, int, int]]:
+        fetcher = self._fetcher()
+        fetcher.record_succeeded(count=2)
+        fetcher.record_created(count=3)
+        fetcher.record_updated(count=4)
+        fetcher.record_failed(count=5)
+        return fetcher, self._counters(fetcher)
+
+    def test_record_succeeded_default_increments_by_one(self) -> None:
+        fetcher = self._fetcher()
+        fetcher.record_succeeded()
+        assert fetcher._succeeded == 1
+
+    def test_record_succeeded_with_count(self) -> None:
+        fetcher = self._fetcher()
+        fetcher.record_succeeded(count=5)
+        assert fetcher._succeeded == 5
 
     def test_record_created_default_increments_by_one(self) -> None:
         fetcher = self._fetcher()
@@ -1055,10 +1089,51 @@ class TestMetrics:
         fetcher.record_updated(count=3)
         assert fetcher._updated == 3
 
+    def test_record_updated_default_increments_by_one(self) -> None:
+        fetcher = self._fetcher()
+        fetcher.record_updated()
+        assert fetcher._updated == 1
+
     def test_record_failed_increments(self) -> None:
         fetcher = self._fetcher()
         fetcher.record_failed(count=2)
         assert fetcher._failed == 2
+
+    def test_record_failed_default_increments_by_one(self) -> None:
+        fetcher = self._fetcher()
+        fetcher.record_failed()
+        assert fetcher._failed == 1
+
+    @pytest.mark.parametrize("method_name", _METRIC_HELPERS)
+    def test_zero_count_is_a_noop(self, method_name: str) -> None:
+        fetcher = self._fetcher()
+        getattr(fetcher, method_name)(count=0)
+        assert self._counters(fetcher) == (0, 0, 0, 0)
+
+    @pytest.mark.parametrize("method_name", _METRIC_HELPERS)
+    def test_negative_count_raises_value_error_without_mutating(
+        self, method_name: str
+    ) -> None:
+        fetcher, before = self._populated()
+        with pytest.raises(ValueError, match="must be >= 0"):
+            getattr(fetcher, method_name)(count=-1)
+        assert self._counters(fetcher) == before
+
+    @pytest.mark.parametrize("method_name", _METRIC_HELPERS)
+    @pytest.mark.parametrize("bad_count", [True, False, 1.0, 1.5, "1", None])
+    def test_non_integer_count_raises_type_error_without_mutating(
+        self, method_name: str, bad_count: Any
+    ) -> None:
+        fetcher, before = self._populated()
+        with pytest.raises(TypeError):
+            getattr(fetcher, method_name)(count=bad_count)
+        assert self._counters(fetcher) == before
+
+    def test_repeated_positive_calls_are_additive(self) -> None:
+        fetcher = self._fetcher()
+        fetcher.record_succeeded(count=2)
+        fetcher.record_succeeded(count=3)
+        assert fetcher._succeeded == 5
 
 
 # ---------------------------------------------------------------------------
@@ -1232,19 +1307,25 @@ class TestRunLifecycleStatus:
 
         run = await _get_run(real_session_factory, run_id)
         assert run.status == "success"
+        assert run.items_succeeded == 0
         assert run.items_created == 0
         assert run.items_updated == 0
         assert run.items_failed == 0
         assert run.error_message is None
 
-    async def test_success_with_created_and_updated_metrics(
+    async def test_success_with_terminal_units_and_durable_effects(
         self,
         fetcher_lifecycle: Callable[..., Awaitable[tuple[str, UUID]]],
         real_session_factory: async_sessionmaker[AsyncSession],
     ) -> None:
+        """Successful terminal units plus create/update effects and no
+        failure are `success`; `items_succeeded` is independent of the
+        durable-effect counters (docs/features/platform/
+        fetcher-infrastructure.md, Outcome and effect accounting)."""
         fetcher_name, run_id = await fetcher_lifecycle()
 
         async def _execute(self: BaseFetcher, session: AsyncSession) -> None:
+            self.record_succeeded(count=5)
             self.record_created(count=3)
             self.record_updated(count=2)
 
@@ -1253,14 +1334,45 @@ class TestRunLifecycleStatus:
 
         run = await _get_run(real_session_factory, run_id)
         assert run.status == "success"
+        assert run.items_succeeded == 5
         assert run.items_created == 3
         assert run.items_updated == 2
+        assert run.items_failed == 0
 
-    async def test_partial_when_some_items_fail_and_some_succeed(
+    async def test_partial_when_some_units_succeed_and_some_fail(
         self,
         fetcher_lifecycle: Callable[..., Awaitable[tuple[str, UUID]]],
         real_session_factory: async_sessionmaker[AsyncSession],
     ) -> None:
+        """`partial` is derived exclusively from terminal outcomes; a
+        successful unchanged unit (no create/update effect) still counts
+        as a success (fetcher-infrastructure.md, Status determination
+        precedence, rule 3)."""
+        fetcher_name, run_id = await fetcher_lifecycle()
+
+        async def _execute(self: BaseFetcher, session: AsyncSession) -> None:
+            self.record_succeeded(count=2)
+            self.record_failed(count=1)
+
+        fetcher_cls = _fetcher_class(fetcher_name, _execute)
+        await fetcher_cls().run(run_id=run_id, config=_make_config())
+
+        run = await _get_run(real_session_factory, run_id)
+        assert run.status == "partial"
+        assert run.items_succeeded == 2
+        assert run.items_created == 0
+        assert run.items_failed == 1
+
+    async def test_committed_effect_with_failed_unit_and_no_success_is_failure(
+        self,
+        fetcher_lifecycle: Callable[..., Awaitable[tuple[str, UUID]]],
+        real_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """A committed create/update effect never substitutes for a
+        successful terminal outcome: with zero successes the run is
+        `failure` even though `items_created` is positive
+        (fetcher-infrastructure.md, Status determination precedence,
+        rule 2, and `testing-strategy.md`, Regression combinations)."""
         fetcher_name, run_id = await fetcher_lifecycle()
 
         async def _execute(self: BaseFetcher, session: AsyncSession) -> None:
@@ -1271,7 +1383,9 @@ class TestRunLifecycleStatus:
         await fetcher_cls().run(run_id=run_id, config=_make_config())
 
         run = await _get_run(real_session_factory, run_id)
-        assert run.status == "partial"
+        assert run.status == "failure"
+        assert run.error_message == "All 1 items failed"
+        assert run.items_succeeded == 0
         assert run.items_created == 1
         assert run.items_failed == 1
 
@@ -1293,8 +1407,37 @@ class TestRunLifecycleStatus:
         run = await _get_run(real_session_factory, run_id)
         assert run.status == "failure"
         assert run.error_message == "All 4 items failed"
+        assert run.items_succeeded == 0
         assert run.error_detail is None
         assert run.error_traceback is None
+
+    async def test_run_level_exception_preserves_all_four_counters(
+        self,
+        fetcher_lifecycle: Callable[..., Awaitable[tuple[str, UUID]]],
+        real_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """An escaping run-level exception forces `failure` regardless of
+        counters, while preserving them for diagnostics
+        (fetcher-infrastructure.md, Finalization, rule 1)."""
+        fetcher_name, run_id = await fetcher_lifecycle()
+
+        async def _execute(self: BaseFetcher, session: AsyncSession) -> None:
+            self.record_succeeded(count=3)
+            self.record_created(count=2)
+            self.record_updated(count=1)
+            self.record_failed(count=4)
+            raise FetcherError("upstream failed")
+
+        fetcher_cls = _fetcher_class(fetcher_name, _execute)
+        with pytest.raises(FetcherError):
+            await fetcher_cls().run(run_id=run_id, config=_make_config())
+
+        run = await _get_run(real_session_factory, run_id)
+        assert run.status == "failure"
+        assert run.items_succeeded == 3
+        assert run.items_created == 2
+        assert run.items_updated == 1
+        assert run.items_failed == 4
 
     async def test_execute_exception_propagates_and_records_failure(
         self,
@@ -1319,22 +1462,26 @@ class TestRunLifecycleStatus:
         fetcher_lifecycle: Callable[..., Awaitable[tuple[str, UUID]]],
         real_session_factory: async_sessionmaker[AsyncSession],
     ) -> None:
+        """Every counter resets before each run, including reuse after a
+        prior success, a per-item failure, and an escaping exception
+        (testing-strategy.md, Per-run reset)."""
         fetcher_name, run_id_1 = await fetcher_lifecycle()
 
-        # A second run for the SAME fetcher — mirrors the real
-        # invariant that `self.name` always matches the fetcher_name of
-        # the run being executed (the task wrapper always selects the
-        # class registered under the run's own fetcher_name).
-        async with real_session_factory() as session:
-            run_2 = FetcherRun(
-                fetcher_name=fetcher_name,
-                started_at=datetime.now(UTC),
-                status="running",
-                triggered_by="schedule",
-            )
-            session.add(run_2)
-            await session.commit()
-            run_id_2 = run_2.id
+        async def _seed_run() -> UUID:
+            async with real_session_factory() as session:
+                run = FetcherRun(
+                    fetcher_name=fetcher_name,
+                    started_at=datetime.now(UTC),
+                    status="running",
+                    triggered_by="schedule",
+                )
+                session.add(run)
+                await session.commit()
+                return run.id
+
+        run_id_2 = await _seed_run()
+        run_id_3 = await _seed_run()
+        run_id_4 = await _seed_run()
 
         call_count = 0
 
@@ -1342,16 +1489,87 @@ class TestRunLifecycleStatus:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
-                self.record_created(count=5)
+                self.record_succeeded(count=5)
+                self.record_created(count=4)
+                self.record_updated(count=3)
+                self.record_failed(count=2)
+            elif call_count == 2:
+                self.record_succeeded(count=1)
+                self.record_failed(count=1)
+            elif call_count == 3:
+                self.record_succeeded(count=1)
+                self.record_created(count=1)
+                raise FetcherError("boom")
 
-        # Same underlying instance reused for both runs.
+        # Same underlying instance reused for every run.
         fetcher_cls = _fetcher_class(fetcher_name, _execute)
         instance = fetcher_cls()
         await instance.run(run_id=run_id_1, config=_make_config())
         await instance.run(run_id=run_id_2, config=_make_config())
+        with pytest.raises(FetcherError):
+            await instance.run(run_id=run_id_3, config=_make_config())
+        await instance.run(run_id=run_id_4, config=_make_config())
 
+        run_1 = await _get_run(real_session_factory, run_id_1)
+        assert (
+            run_1.items_succeeded,
+            run_1.items_created,
+            run_1.items_updated,
+            run_1.items_failed,
+        ) == (5, 4, 3, 2)
         run_2 = await _get_run(real_session_factory, run_id_2)
-        assert run_2.items_created == 0
+        assert (run_2.items_succeeded, run_2.items_failed) == (1, 1)
+        run_3 = await _get_run(real_session_factory, run_id_3)
+        assert (run_3.items_succeeded, run_3.items_created) == (1, 1)
+        run_4 = await _get_run(real_session_factory, run_id_4)
+        assert (
+            run_4.items_succeeded,
+            run_4.items_created,
+            run_4.items_updated,
+            run_4.items_failed,
+        ) == (0, 0, 0, 0)
+
+    async def test_active_run_row_exposes_zero_counters_during_execution(
+        self,
+        fetcher_lifecycle: Callable[..., Awaitable[tuple[str, UUID]]],
+        real_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """Counters are never written before finalization: an independent
+        session observing the adopted row during `execute()` still reads
+        `running` with all four counters at their zero defaults
+        (testing-strategy.md, Diagnostics and persistence: "tests must
+        prove no live progress writes occur")."""
+        fetcher_name, run_id = await fetcher_lifecycle()
+        observed: dict[str, Any] = {}
+
+        async def _execute(self: BaseFetcher, session: AsyncSession) -> None:
+            self.record_succeeded(count=3)
+            self.record_created(count=2)
+            self.record_updated(count=1)
+            self.record_failed(count=1)
+            async with real_session_factory() as independent:
+                row = await independent.get(FetcherRun, run_id)
+                assert row is not None
+                observed["status"] = row.status
+                observed["items"] = (
+                    row.items_succeeded,
+                    row.items_created,
+                    row.items_updated,
+                    row.items_failed,
+                )
+
+        fetcher_cls = _fetcher_class(fetcher_name, _execute)
+        await fetcher_cls().run(run_id=run_id, config=_make_config())
+
+        assert observed["status"] == "running"
+        assert observed["items"] == (0, 0, 0, 0)
+
+        run = await _get_run(real_session_factory, run_id)
+        assert run.status == "partial"
+        assert run.items_succeeded == 3
+        assert run.items_created == 2
+        assert run.items_updated == 1
+        assert run.items_failed == 1
 
 
 @pytest.mark.integration
@@ -1484,7 +1702,7 @@ class TestRunLifecycleCursor:
         fetcher_name, run_id = await fetcher_lifecycle()
 
         async def _execute(self: BaseFetcher, session: AsyncSession) -> None:
-            self.record_created(count=1)
+            self.record_succeeded(count=1)
             self.record_failed(count=1)
             self._cursor = {"page": 7}
 
@@ -1493,6 +1711,7 @@ class TestRunLifecycleCursor:
 
         run = await _get_run(real_session_factory, run_id)
         assert run.status == "partial"
+        assert run.items_succeeded == 1
         assert run.cursor == {"page": 7}
 
     async def test_no_cursor_persisted_when_execute_raises(
@@ -1529,6 +1748,31 @@ class TestRunLifecycleCursor:
 
         run = await _get_run(real_session_factory, run_id)
         assert run.status == "failure"
+        assert run.cursor is None
+
+    async def test_no_cursor_persisted_for_effect_only_failure(
+        self,
+        fetcher_lifecycle: Callable[..., Awaitable[tuple[str, UUID]]],
+        real_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """A committed effect with zero successes and one failure is
+        `failure`, so the cursor is not advanced even though a durable
+        create effect exists (fetcher-infrastructure.md, Cursor
+        persistence)."""
+        fetcher_name, run_id = await fetcher_lifecycle()
+
+        async def _execute(self: BaseFetcher, session: AsyncSession) -> None:
+            self._cursor = {"page": 9}
+            self.record_created(count=1)
+            self.record_failed(count=1)
+
+        fetcher_cls = _fetcher_class(fetcher_name, _execute)
+        await fetcher_cls().run(run_id=run_id, config=_make_config())
+
+        run = await _get_run(real_session_factory, run_id)
+        assert run.status == "failure"
+        assert run.items_succeeded == 0
+        assert run.items_created == 1
         assert run.cursor is None
 
     async def test_non_serializable_cursor_absorbs_into_failure_without_raising(
@@ -2059,7 +2303,7 @@ class TestErrorSanitization:
         fetcher_name, run_id = await fetcher_lifecycle(run_timeout=1800)
 
         async def _execute(self: BaseFetcher, session: AsyncSession) -> None:
-            self.record_created(2)
+            self.record_succeeded(2)
             self.record_failed(1)
             raise SoftTimeLimitExceeded()
 
@@ -2076,7 +2320,7 @@ class TestErrorSanitization:
             "run: 2400s; 3 items processed). Review FetcherConfig.run_timeout "
             f"for future runs of fetcher '{fetcher_name}'."
         )
-        assert run.items_created == 2
+        assert run.items_succeeded == 2
         assert run.items_failed == 1
 
     async def test_unknown_exception_maps_to_unexpected_error(

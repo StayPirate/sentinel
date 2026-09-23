@@ -1072,6 +1072,7 @@ class TestGetFetcherRun:
         run = await fetcher_run_factory(
             fetcher_name=config.fetcher_name,
             status="failure",
+            items_succeeded=4,
             items_created=3,
             items_updated=5,
             items_failed=2,
@@ -1093,6 +1094,7 @@ class TestGetFetcherRun:
         assert result.finished_at == run.finished_at
         assert result.duration_seconds == run.duration_seconds
         assert result.status == "failure"
+        assert result.items_succeeded == 4
         assert result.items_created == 3
         assert result.items_updated == 5
         assert result.items_failed == 2

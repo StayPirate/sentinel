@@ -242,6 +242,7 @@ def _run_summary(
         finished_at=None,
         duration_seconds=duration_seconds,
         status=status,
+        items_succeeded=0,
         items_created=0,
         items_updated=0,
         items_failed=0,

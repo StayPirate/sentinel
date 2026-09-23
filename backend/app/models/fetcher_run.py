@@ -87,9 +87,18 @@ class FetcherRun(Base):
     )
     duration_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
     status: Mapped[str] = mapped_column(String(20), nullable=False)
-    items_created: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    items_updated: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    items_failed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    items_succeeded: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    items_created: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    items_updated: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    items_failed: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     error_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
     error_traceback: Mapped[str | None] = mapped_column(Text, nullable=True)

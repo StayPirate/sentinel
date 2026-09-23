@@ -322,6 +322,23 @@ def _sanitize_error(
     return "Unexpected error", str(exc)
 
 
+def _validate_metric_count(count: int) -> None:
+    """Enforce the shared metric-helper `count` contract.
+
+    `count` must be an `int` greater than or equal to zero. `bool` is
+    rejected even though it is an `int` subclass. Validation happens
+    before any counter mutation, so a rejected call leaves every counter
+    unchanged. See `docs/features/platform/fetcher-infrastructure.md`
+    (Metric helpers).
+    """
+    if isinstance(count, bool) or not isinstance(count, int):
+        raise TypeError(
+            f"metric helper count must be an int, got {type(count).__name__}"
+        )
+    if count < 0:
+        raise ValueError(f"metric helper count must be >= 0, got {count}")
+
+
 # ---------------------------------------------------------------------------
 # BaseFetcher
 # ---------------------------------------------------------------------------
@@ -346,6 +363,7 @@ class BaseFetcher:
 
     def __init__(self) -> None:
         self._http_client: httpx.AsyncClient | None = None
+        self._succeeded = 0
         self._created = 0
         self._updated = 0
         self._failed = 0
@@ -378,8 +396,9 @@ class BaseFetcher:
     async def execute(self, session: AsyncSession) -> None:
         """Fetch data from the external source. MUST be overridden.
 
-        Use `self.record_created()`, `self.record_updated()`, and
-        `self.record_failed()` to report metrics.
+        Use `self.record_succeeded()` or `self.record_failed()` for each
+        selected work unit's terminal outcome, and `self.record_created()` /
+        `self.record_updated()` for durable effects.
         """
         raise NotImplementedError(f"{type(self).__name__} must implement execute()")
 
@@ -397,14 +416,21 @@ class BaseFetcher:
 
     # -- Metrics ---------------------------------------------------------
 
+    def record_succeeded(self, count: int = 1) -> None:
+        _validate_metric_count(count)
+        self._succeeded += count
+
+    def record_failed(self, count: int = 1) -> None:
+        _validate_metric_count(count)
+        self._failed += count
+
     def record_created(self, count: int = 1) -> None:
+        _validate_metric_count(count)
         self._created += count
 
     def record_updated(self, count: int = 1) -> None:
+        _validate_metric_count(count)
         self._updated += count
-
-    def record_failed(self, count: int = 1) -> None:
-        self._failed += count
 
     # -- Cursor ------------------------------------------------------------
 
@@ -476,6 +502,7 @@ class BaseFetcher:
         propagation matrix.
         """
         self.config = config
+        self._succeeded = 0
         self._created = 0
         self._updated = 0
         self._failed = 0
@@ -552,7 +579,7 @@ class BaseFetcher:
 
         if execution_exc is not None:
             status = FetcherRunStatus.FAILURE.value
-            processed = self._created + self._updated + self._failed
+            processed = self._succeeded + self._failed
             error_message, error_detail = _sanitize_error(
                 execution_exc, config.hard_time_limit_seconds, self.name, processed
             )
@@ -561,7 +588,7 @@ class BaseFetcher:
                     type(execution_exc), execution_exc, execution_exc.__traceback__
                 )
             )
-        elif self._failed > 0 and (self._created + self._updated) == 0:
+        elif self._failed > 0 and self._succeeded == 0:
             status = FetcherRunStatus.FAILURE.value
             error_message = f"All {self._failed} items failed"
         elif self._failed > 0:
@@ -607,6 +634,7 @@ class BaseFetcher:
                 run.finished_at = finished_at
                 run.duration_seconds = (finished_at - run.started_at).total_seconds()
                 run.status = status
+                run.items_succeeded = self._succeeded
                 run.items_created = self._created
                 run.items_updated = self._updated
                 run.items_failed = self._failed

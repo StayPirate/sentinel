@@ -404,6 +404,44 @@ class TestListFetchersEndpoint:
         assert item["last_run"]["finished_at"] is None
         assert item["last_run"]["duration_seconds"] is None
         assert item["last_run"]["created_at"] is not None
+        # Active run: all four counters expose the persisted zero defaults.
+        assert item["last_run"]["items_succeeded"] == 0
+        assert item["last_run"]["items_created"] == 0
+        assert item["last_run"]["items_updated"] == 0
+        assert item["last_run"]["items_failed"] == 0
+
+    async def test_terminal_last_run_exposes_items_succeeded(
+        self,
+        client: AsyncClient,
+        fetcher_config_factory: FetcherConfigFactory,
+        fetcher_run_factory: FetcherRunFactory,
+    ) -> None:
+        """A terminal `last_run` exposes `items_succeeded`, which need
+        not equal created plus updated (docs/features/platform/
+        fetcher-operations.md, List Fetchers, Fields)."""
+        _register(_StubFetcher)
+        config = await fetcher_config_factory(fetcher_name=_StubFetcher.name)
+        await fetcher_run_factory(
+            fetcher_name=config.fetcher_name,
+            status="success",
+            finished_at=datetime.now(UTC),
+            duration_seconds=10.0,
+            items_succeeded=8,
+            items_created=3,
+            items_updated=0,
+            items_failed=0,
+        )
+
+        response = await client.get("/api/v1/fetchers")
+
+        assert response.status_code == 200
+        item = next(
+            i for i in response.json()["data"] if i["fetcher_name"] == _StubFetcher.name
+        )
+        assert item["last_run"]["items_succeeded"] == 8
+        assert item["last_run"]["items_created"] == 3
+        assert item["last_run"]["items_updated"] == 0
+        assert item["last_run"]["items_failed"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -434,6 +472,41 @@ class TestListFetcherRunsEndpoint:
         assert "data" in body
         assert "meta" in body
         assert body["meta"] == {"total": 1, "page": 1, "per_page": 20}
+        assert body["data"][0]["items_succeeded"] == 0
+        assert body["data"][0]["items_created"] == 0
+        assert body["data"][0]["items_updated"] == 0
+        assert body["data"][0]["items_failed"] == 0
+
+    async def test_items_succeeded_need_not_equal_created_plus_updated(
+        self,
+        client: AsyncClient,
+        fetcher_config_factory: FetcherConfigFactory,
+        fetcher_run_factory: FetcherRunFactory,
+    ) -> None:
+        """`items_succeeded` is a terminal-outcome count, independent of
+        the durable-effect `items_created`/`items_updated` counts
+        (docs/features/platform/fetcher-operations.md, List Fetcher
+        Runs, Notes)."""
+        config = await fetcher_config_factory()
+        await fetcher_run_factory(
+            fetcher_name=config.fetcher_name,
+            status="success",
+            finished_at=datetime.now(UTC),
+            duration_seconds=12.0,
+            items_succeeded=5,
+            items_created=1,
+            items_updated=1,
+            items_failed=0,
+        )
+
+        response = await client.get(f"/api/v1/fetchers/{config.fetcher_name}/runs")
+
+        assert response.status_code == 200
+        item = response.json()["data"][0]
+        assert item["items_succeeded"] == 5
+        assert item["items_created"] == 1
+        assert item["items_updated"] == 1
+        assert item["items_failed"] == 0
 
     async def test_raw_diagnostics_never_present_in_list_items(
         self,
@@ -727,6 +800,40 @@ class TestGetFetcherRunEndpoint:
         data = response.json()["data"]
         assert data["finished_at"] is None
         assert data["duration_seconds"] is None
+        # Running run: all four counters expose the persisted zero defaults.
+        assert data["items_succeeded"] == 0
+        assert data["items_created"] == 0
+        assert data["items_updated"] == 0
+        assert data["items_failed"] == 0
+
+    async def test_run_detail_exposes_items_succeeded(
+        self,
+        client: AsyncClient,
+        fetcher_config_factory: FetcherConfigFactory,
+        fetcher_run_factory: FetcherRunFactory,
+    ) -> None:
+        config = await fetcher_config_factory()
+        run = await fetcher_run_factory(
+            fetcher_name=config.fetcher_name,
+            status="partial",
+            finished_at=datetime.now(UTC),
+            duration_seconds=30.0,
+            items_succeeded=6,
+            items_created=2,
+            items_updated=3,
+            items_failed=1,
+        )
+
+        response = await client.get(
+            f"/api/v1/fetchers/{config.fetcher_name}/runs/{run.id}"
+        )
+
+        assert response.status_code == 200
+        data = response.json()["data"]
+        assert data["items_succeeded"] == 6
+        assert data["items_created"] == 2
+        assert data["items_updated"] == 3
+        assert data["items_failed"] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -775,6 +882,42 @@ class TestGetFetcherTimelineEndpoint:
         assert points[0]["status"] == "queued"
         assert points[0]["duration_seconds"] is None
         assert points[0]["timestamp"] is not None
+        # Queued point: all four counters expose the persisted zero defaults.
+        assert points[0]["items_succeeded"] == 0
+        assert points[0]["items_created"] == 0
+        assert points[0]["items_updated"] == 0
+        assert points[0]["items_failed"] == 0
+
+    async def test_timeline_point_exposes_items_succeeded(
+        self,
+        client: AsyncClient,
+        fetcher_config_factory: FetcherConfigFactory,
+        fetcher_run_factory: FetcherRunFactory,
+    ) -> None:
+        """Every timeline point carries `items_succeeded`, which need not
+        equal created plus updated (docs/features/platform/
+        fetcher-operations.md, Get Fetcher Run Timeline Data)."""
+        config = await fetcher_config_factory()
+        await fetcher_run_factory(
+            fetcher_name=config.fetcher_name,
+            status="success",
+            finished_at=datetime.now(UTC),
+            duration_seconds=45.0,
+            items_succeeded=9,
+            items_created=4,
+            items_updated=0,
+            items_failed=0,
+        )
+
+        response = await client.get(f"/api/v1/fetchers/{config.fetcher_name}/timeline")
+
+        assert response.status_code == 200
+        points = response.json()["data"]["points"]
+        assert len(points) == 1
+        assert points[0]["items_succeeded"] == 9
+        assert points[0]["items_created"] == 4
+        assert points[0]["items_updated"] == 0
+        assert points[0]["items_failed"] == 0
 
     async def test_date_range_too_wide_returns_400(
         self, client: AsyncClient, fetcher_config_factory: FetcherConfigFactory
