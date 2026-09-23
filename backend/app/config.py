@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from typing import Annotated, Any
+from urllib.parse import urlsplit
 
 from pydantic import (
     BeforeValidator,
@@ -161,6 +162,76 @@ class Settings(BaseSettings):
             )
             raise ValueError(msg)
         return self
+
+    @field_validator("ibs_download_base_url")
+    @classmethod
+    def _validate_ibs_download_base_url(cls, value: str) -> str:
+        """Validate and canonicalize IBS_DOWNLOAD_BASE_URL at startup.
+
+        See docs/features/packages/ibs-product-release-detection.md
+        (Download Origin and Repository Paths).
+        """
+        prefix = "Invalid IBS_DOWNLOAD_BASE_URL"
+
+        if any(ord(character) < 0x20 or ord(character) == 0x7F for character in value):
+            msg = f"{prefix}: control characters are not permitted."
+            raise ValueError(msg)
+        if any(character.isspace() for character in value):
+            msg = f"{prefix}: whitespace is not permitted."
+            raise ValueError(msg)
+        if "\\" in value:
+            msg = f"{prefix}: backslashes are not permitted."
+            raise ValueError(msg)
+        if "%" in value:
+            msg = f"{prefix}: percent-encoded values are not permitted."
+            raise ValueError(msg)
+        if "?" in value or "#" in value:
+            msg = f"{prefix}: query or fragment components are not permitted."
+            raise ValueError(msg)
+
+        try:
+            parsed = urlsplit(value)
+            hostname = parsed.hostname
+            username = parsed.username
+            password = parsed.password
+        except ValueError:
+            msg = f"{prefix}: malformed URL."
+            raise ValueError(msg) from None
+
+        if parsed.scheme.lower() != "https":
+            msg = f"{prefix}: the scheme must be HTTPS."
+            raise ValueError(msg)
+        if not parsed.netloc or not hostname:
+            msg = f"{prefix}: a non-empty hostname is required."
+            raise ValueError(msg)
+        if username is not None or password is not None:
+            msg = f"{prefix}: user information is not permitted."
+            raise ValueError(msg)
+
+        try:
+            port = parsed.port
+        except ValueError:
+            msg = f"{prefix}: the port is invalid."
+            raise ValueError(msg) from None
+        if port is None and parsed.netloc.endswith(":"):
+            msg = f"{prefix}: the port is invalid."
+            raise ValueError(msg)
+
+        path = parsed.path
+        if not path.startswith("/"):
+            msg = f"{prefix}: the path must be absolute."
+            raise ValueError(msg)
+        if path == "/":
+            return value[:-1]
+
+        remainder = path[1:]
+        if remainder.endswith("/"):
+            remainder = remainder[:-1]
+        if any(segment in ("", ".", "..") for segment in remainder.split("/")):
+            msg = f"{prefix}: the path is not safe."
+            raise ValueError(msg)
+
+        return value[:-1] if path.endswith("/") else value
 
     @model_validator(mode="after")
     def _validate_ibs_settings(self) -> Settings:

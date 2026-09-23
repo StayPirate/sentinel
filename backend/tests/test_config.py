@@ -379,6 +379,218 @@ class TestIbsCredentialWarning:
 
 
 @pytest.mark.unit
+class TestIbsDownloadBaseUrlValidation:
+    """`IBS_DOWNLOAD_BASE_URL` startup validation and canonicalization
+    (`docs/features/packages/ibs-product-release-detection.md`,
+    Download Origin and Repository Paths -> `IBS_DOWNLOAD_BASE_URL`).
+
+    Every case builds the real `Settings` object so the Pydantic validator
+    runs on the application's actual startup path. A valid `JWT_SECRET_KEY`
+    is supplied so only the IBS field is under test. Values are provided
+    through the environment where possible; the NUL character cannot be
+    represented in `os.environ`, so the control-character cases are passed
+    directly to the constructor, which exercises the identical validator.
+    """
+
+    def test_default_when_unset(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("JWT_SECRET_KEY", "a" * 32)
+        monkeypatch.delenv("IBS_DOWNLOAD_BASE_URL", raising=False)
+        s = Settings(_env_file=None)
+        assert s.ibs_download_base_url == "https://download.suse.de/ibs"
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            (
+                "https://mirror.example.test/ibs/products",
+                "https://mirror.example.test/ibs/products",
+            ),
+            (
+                "https://mirror.example.test/ibs/products/",
+                "https://mirror.example.test/ibs/products",
+            ),
+            ("https://mirror.example.test/", "https://mirror.example.test"),
+            (
+                "https://mirror.example.test:8443/ibs",
+                "https://mirror.example.test:8443/ibs",
+            ),
+            (
+                "https://mirror.example.test:8443/ibs/products",
+                "https://mirror.example.test:8443/ibs/products",
+            ),
+            (
+                "https://mirror.example.test:8443/ibs/products/",
+                "https://mirror.example.test:8443/ibs/products",
+            ),
+            (
+                "https://mirror.example.test:8443/",
+                "https://mirror.example.test:8443",
+            ),
+            ("HTTPS://mirror.example.test/ibs", "HTTPS://mirror.example.test/ibs"),
+        ],
+    )
+    def test_accepted_values_are_canonicalized(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        value: str,
+        expected: str,
+    ) -> None:
+        monkeypatch.setenv("JWT_SECRET_KEY", "a" * 32)
+        monkeypatch.setenv("IBS_DOWNLOAD_BASE_URL", value)
+        s = Settings(_env_file=None)
+        assert s.ibs_download_base_url == expected
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "http://mirror.example.test/ibs",
+            "ftp://mirror.example.test/ibs",
+            "mirror.example.test/ibs",
+            "//mirror.example.test/ibs",
+            "/var/lib/mirror/ibs",
+            "https://mirror.example.test",
+            "https://mirror.example.test:8443",
+            "https:///ibs",
+            "https://",
+            "https://:8443/ibs",
+        ],
+    )
+    def test_rejected_scheme_authority_or_path_names_setting(
+        self, monkeypatch: pytest.MonkeyPatch, value: str
+    ) -> None:
+        monkeypatch.setenv("JWT_SECRET_KEY", "a" * 32)
+        monkeypatch.setenv("IBS_DOWNLOAD_BASE_URL", value)
+        with pytest.raises(ValidationError, match="IBS_DOWNLOAD_BASE_URL"):
+            Settings(_env_file=None)
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "https://[::1/ibs",
+            "https://]mirror[.example.test/ibs",
+        ],
+    )
+    def test_rejected_malformed_authority_names_setting(
+        self, monkeypatch: pytest.MonkeyPatch, value: str
+    ) -> None:
+        monkeypatch.setenv("JWT_SECRET_KEY", "a" * 32)
+        monkeypatch.setenv("IBS_DOWNLOAD_BASE_URL", value)
+        with pytest.raises(ValidationError, match="IBS_DOWNLOAD_BASE_URL"):
+            Settings(_env_file=None)
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "https://user@mirror.example.test/ibs",
+            "https://user:password@mirror.example.test/ibs",
+            "https://:password@mirror.example.test/ibs",
+            "https://@mirror.example.test/ibs",
+        ],
+    )
+    def test_rejected_user_information_names_setting(
+        self, monkeypatch: pytest.MonkeyPatch, value: str
+    ) -> None:
+        monkeypatch.setenv("JWT_SECRET_KEY", "a" * 32)
+        monkeypatch.setenv("IBS_DOWNLOAD_BASE_URL", value)
+        with pytest.raises(ValidationError, match="IBS_DOWNLOAD_BASE_URL"):
+            Settings(_env_file=None)
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "https://mirror.example.test/ibs?view=full",
+            "https://mirror.example.test/ibs?",
+            "https://mirror.example.test/ibs#section",
+            "https://mirror.example.test/ibs#",
+            "https://mirror.example.test/ibs?view=full#section",
+        ],
+    )
+    def test_rejected_query_or_fragment_names_setting(
+        self, monkeypatch: pytest.MonkeyPatch, value: str
+    ) -> None:
+        monkeypatch.setenv("JWT_SECRET_KEY", "a" * 32)
+        monkeypatch.setenv("IBS_DOWNLOAD_BASE_URL", value)
+        with pytest.raises(ValidationError, match="IBS_DOWNLOAD_BASE_URL"):
+            Settings(_env_file=None)
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "https://mirror.example.test//ibs",
+            "https://mirror.example.test/ibs//products",
+            "https://mirror.example.test/./ibs",
+            "https://mirror.example.test/../ibs",
+            "https://mirror.example.test/ibs/./products",
+            "https://mirror.example.test/ibs/../products",
+            "https://mirror.example.test/ibs/.",
+            "https://mirror.example.test/ibs/..",
+            "https://mirror.example.test/ibs//",
+            "https://mirror.example.test/ibs//products/",
+            "https://mirror.example.test//",
+            "https://mirror.example.test/%2e%2e/ibs",
+            "https://mirror.example.test/ibs%2Fproducts",
+            "https://mirror.example.test/ibs%",
+            "https://mirror.example.test/ibs\\products",
+        ],
+    )
+    def test_rejected_unsafe_path_names_setting(
+        self, monkeypatch: pytest.MonkeyPatch, value: str
+    ) -> None:
+        monkeypatch.setenv("JWT_SECRET_KEY", "a" * 32)
+        monkeypatch.setenv("IBS_DOWNLOAD_BASE_URL", value)
+        with pytest.raises(ValidationError, match="IBS_DOWNLOAD_BASE_URL"):
+            Settings(_env_file=None)
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            " https://mirror.example.test/ibs",
+            "https://mirror.example.test/ibs ",
+            "https://mirror.example.test /ibs",
+            "https://mirror.example.test/ib s",
+            "https://mirror.example.test/ibs\u00a0",
+        ],
+    )
+    def test_rejected_whitespace_names_setting(
+        self, monkeypatch: pytest.MonkeyPatch, value: str
+    ) -> None:
+        monkeypatch.setenv("JWT_SECRET_KEY", "a" * 32)
+        monkeypatch.setenv("IBS_DOWNLOAD_BASE_URL", value)
+        with pytest.raises(ValidationError, match="IBS_DOWNLOAD_BASE_URL"):
+            Settings(_env_file=None)
+
+    @pytest.mark.parametrize(
+        "character",
+        [chr(code) for code in range(0x20)] + [chr(0x7F)],
+        ids=[f"U+{code:04X}" for code in range(0x20)] + ["U+007F"],
+    )
+    def test_rejected_control_characters_name_setting(
+        self, monkeypatch: pytest.MonkeyPatch, character: str
+    ) -> None:
+        monkeypatch.setenv("JWT_SECRET_KEY", "a" * 32)
+        value = f"https://mirror.example.test/ibs{character}/products"
+        with pytest.raises(ValidationError, match="IBS_DOWNLOAD_BASE_URL"):
+            Settings(_env_file=None, ibs_download_base_url=value)
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "https://mirror.example.test:not-a-port/ibs",
+            "https://mirror.example.test:65536/ibs",
+            "https://mirror.example.test:-1/ibs",
+            "https://mirror.example.test:/ibs",
+        ],
+    )
+    def test_rejected_ports_name_setting(
+        self, monkeypatch: pytest.MonkeyPatch, value: str
+    ) -> None:
+        monkeypatch.setenv("JWT_SECRET_KEY", "a" * 32)
+        monkeypatch.setenv("IBS_DOWNLOAD_BASE_URL", value)
+        with pytest.raises(ValidationError, match="IBS_DOWNLOAD_BASE_URL"):
+            Settings(_env_file=None)
+
+
+@pytest.mark.unit
 class TestSecretFieldRedaction:
     """Secret field redaction, covering two distinct mechanisms:
 
