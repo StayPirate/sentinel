@@ -84,6 +84,7 @@ class FetcherLastRunData(BaseModel):
     finished_at: datetime | None
     duration_seconds: float | None
     status: str
+    items_succeeded: int
     items_created: int
     items_updated: int
     items_failed: int
@@ -175,6 +176,7 @@ class FetcherTimelinePointData(BaseModel):
     run_id: UUID
     timestamp: datetime
     duration_seconds: float | None
+    items_succeeded: int
     items_created: int
     items_updated: int
     items_failed: int

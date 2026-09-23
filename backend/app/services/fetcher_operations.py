@@ -184,6 +184,7 @@ class FetcherRunSummary:
     finished_at: datetime | None
     duration_seconds: float | None
     status: str
+    items_succeeded: int
     items_created: int
     items_updated: int
     items_failed: int
@@ -250,6 +251,7 @@ class TimelinePoint:
     run_id: UUID
     timestamp: datetime
     duration_seconds: float | None
+    items_succeeded: int
     items_created: int
     items_updated: int
     items_failed: int
@@ -479,6 +481,7 @@ def _build_run_summary(
         finished_at=run.finished_at,
         duration_seconds=run.duration_seconds,
         status=run.status,
+        items_succeeded=run.items_succeeded,
         items_created=run.items_created,
         items_updated=run.items_updated,
         items_failed=run.items_failed,
@@ -891,6 +894,7 @@ async def get_fetcher_run(
         finished_at=run.finished_at,
         duration_seconds=run.duration_seconds,
         status=run.status,
+        items_succeeded=run.items_succeeded,
         items_created=run.items_created,
         items_updated=run.items_updated,
         items_failed=run.items_failed,
@@ -947,6 +951,7 @@ async def get_fetcher_timeline(
             run_id=run.id,
             timestamp=run.created_at,
             duration_seconds=run.duration_seconds,
+            items_succeeded=run.items_succeeded,
             items_created=run.items_created,
             items_updated=run.items_updated,
             items_failed=run.items_failed,

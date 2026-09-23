@@ -37,6 +37,7 @@ class TestFetcherRunCreation:
         assert run.finished_at is None
         assert run.duration_seconds is None
         assert run.status == "running"
+        assert run.items_succeeded == 0
         assert run.items_created == 0
         assert run.items_updated == 0
         assert run.items_failed == 0
@@ -143,6 +144,22 @@ class TestFetcherRunMetadata:
     def test_status_column_is_not_nullable(self) -> None:
         column = FetcherRun.__table__.columns["status"]
         assert column.nullable is False
+
+    @pytest.mark.parametrize(
+        "column_name",
+        ["items_succeeded", "items_created", "items_updated", "items_failed"],
+    )
+    def test_item_counter_columns_are_not_nullable_with_server_default(
+        self, column_name: str
+    ) -> None:
+        """All four item counters are `INTEGER NOT NULL DEFAULT 0`
+        (docs/data-model.md, FetcherRun, and
+        docs/features/platform/fetcher-infrastructure.md, Data Model —
+        FetcherRun)."""
+        column = FetcherRun.__table__.columns[column_name]
+        assert column.nullable is False
+        assert column.server_default is not None
+        assert str(column.server_default.arg) == "0"
 
     def test_triggered_by_user_id_column_is_nullable(self) -> None:
         column = FetcherRun.__table__.columns["triggered_by_user_id"]
