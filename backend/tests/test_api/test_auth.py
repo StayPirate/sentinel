@@ -427,6 +427,10 @@ class TestLogin:
             "code": "AUTH_INVALID_CREDENTIALS",
             "detail": "Invalid username or password.",
         }
+        # A failed login sets no session cookie and is not the lockout
+        # (429) response, so neither header is present.
+        assert "set-cookie" not in response.headers
+        assert "retry-after" not in response.headers
         assert await redis_client.get(f"login_attempts:{username}") == "1"
 
     @pytest.mark.parametrize(

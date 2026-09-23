@@ -266,9 +266,12 @@ class TestCreateSession:
     ) -> None:
         user = await user_factory()
         commit_spy = AsyncMock(side_effect=AssertionError("must not commit"))
+        rollback_spy = AsyncMock(side_effect=AssertionError("must not roll back"))
         monkeypatch.setattr(db_session, "commit", commit_spy)
+        monkeypatch.setattr(db_session, "rollback", rollback_spy)
         await create_session(db_session, user, SessionCreationReason.LOCAL_LOGIN)
         commit_spy.assert_not_called()
+        rollback_spy.assert_not_called()
 
     async def test_failure_propagates_and_caller_rollback_undoes_both_writes(
         self,
@@ -373,13 +376,21 @@ class TestCreateSession:
         `last_login_at` update, no token, and no `session_created` log
         (see authentication.md, Session creation, step 1)."""
         user = await user_factory()
-        # Bypass the ORM so the in-memory `user` instance stays stale
-        # (active=True) while the persisted, locked-current row is
-        # inactive — exactly the deactivation-committed-first race.
+        # Bypass the ORM identity-map synchronization so the in-memory
+        # `user` instance genuinely stays stale (active=True) while the
+        # persisted, locked-current row is inactive — exactly the
+        # deactivation-committed-first race. Without
+        # `synchronize_session=False`, SQLAlchemy's ORM-enabled UPDATE
+        # would refresh the instance and the test could not tell whether
+        # `create_session()` trusted the passed object or the reloaded row.
         await db_session.execute(
-            update(User).where(User.id == user.id).values(active=False)
+            update(User)
+            .where(User.id == user.id)
+            .values(active=False)
+            .execution_options(synchronize_session=False)
         )
         await db_session.flush()
+        assert user.active is True
 
         with caplog.at_level("INFO"):
             result = await create_session(
@@ -405,8 +416,14 @@ class TestCreateSession:
         await db_session.delete(user)
         await db_session.flush()
 
+        # The transient stand-in claims `active=True`, so a regressed
+        # implementation that trusted the passed object instead of the
+        # locked-current row would attempt a Session insert and fail on
+        # the foreign key rather than return `None`.
         result = await create_session(
-            db_session, User(id=user_id), SessionCreationReason.LOCAL_LOGIN
+            db_session,
+            User(id=user_id, active=True),
+            SessionCreationReason.LOCAL_LOGIN,
         )
 
         assert result is None
@@ -422,17 +439,18 @@ class TestCreateSession:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """The User lock covers only the short database phase: no Redis
-        command executes while it is held (see conventions.md,
+        client is constructed anywhere during session creation, so no
+        Redis command executes while the lock is held (see conventions.md,
         Transaction Hygiene Rules, and authentication.md, Session
         creation)."""
         user = await user_factory()
-        monkeypatch.setattr(
-            session_service,
-            "_new_redis_client",
-            lambda: (_ for _ in ()).throw(
-                AssertionError("must not use Redis while the User lock is held")
-            ),
-        )
+
+        def _forbid_redis(*args: Any, **kwargs: Any) -> Any:
+            raise AssertionError(
+                "must not construct a Redis client while the User lock is held"
+            )
+
+        monkeypatch.setattr(redis_asyncio.Redis, "from_url", _forbid_redis)
 
         result = await create_session(
             db_session, user, SessionCreationReason.LOCAL_LOGIN
@@ -570,7 +588,7 @@ class TestCreateSessionLockSerialization:
         await setup.commit()
         user_id = user.id
 
-        async def _login() -> uuid.UUID:
+        async def _login() -> tuple[uuid.UUID, datetime]:
             session = await db_session_factory()
             try:
                 target = await session.get(User, user_id)
@@ -580,12 +598,20 @@ class TestCreateSessionLockSerialization:
                 )
                 assert created is not None
                 await session.commit()
-                return created.session.id
+                # `Session.expires_at` is `login_at + SESSION_MAX_LIFETIME_DAYS`,
+                # so the login instant is recoverable from it.
+                login_at = created.session.expires_at - timedelta(
+                    days=settings.session_max_lifetime_days
+                )
+                return created.session.id, login_at
             finally:
                 await session.close()
 
         try:
-            first_id, second_id = await asyncio.gather(_login(), _login())
+            (
+                (first_id, first_login_at),
+                (second_id, second_login_at),
+            ) = await asyncio.gather(_login(), _login())
             assert first_id != second_id
 
             verify = await db_session_factory()
@@ -596,7 +622,9 @@ class TestCreateSessionLockSerialization:
             assert len(sessions) == 2
             refreshed = await verify.get(User, user_id)
             assert refreshed is not None
-            assert refreshed.last_login_at is not None
+            # Concurrent logins serialize on the same User lock;
+            # `last_login_at` ends at the last committed login.
+            assert refreshed.last_login_at == max(first_login_at, second_login_at)
             await verify.rollback()
         finally:
             cleanup = await db_session_factory()
