@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.5.1](https://github.com/StayPirate/sentinel/compare/v0.5.0...v0.5.1) (2026-09-23)
+
+
+### Bug Fixes
+
+* align fetcher terminal outcome accounting ([#583](https://github.com/StayPirate/sentinel/issues/583)) ([db81836](https://github.com/StayPirate/sentinel/commit/db81836c240b526adf353ea1642bc7f28e5af38a))
+* reject login sessions for superseded passwords ([#587](https://github.com/StayPirate/sentinel/issues/587)) ([62e7850](https://github.com/StayPirate/sentinel/commit/62e7850bd8e10aa3fd64d5eac57d590fb2c54f5a))
+* return result contracts from existing User mutations ([#584](https://github.com/StayPirate/sentinel/issues/584)) ([ab4e7f6](https://github.com/StayPirate/sentinel/commit/ab4e7f670304946bfe5aa46bcafe1a397cb05da6))
+* serialize session creation with User state ([#585](https://github.com/StayPirate/sentinel/issues/585)) ([0fb2829](https://github.com/StayPirate/sentinel/commit/0fb282992367b89ea493634ceb3bc5a1bfeb0114))
+* validate IBS download base URL ([#582](https://github.com/StayPirate/sentinel/issues/582)) ([f65b698](https://github.com/StayPirate/sentinel/commit/f65b698c712e771026d8750e363390f6aa890a51))
+
 ## [0.5.0](https://github.com/StayPirate/sentinel/compare/v0.4.0...v0.5.0) (2026-08-24)
 
 
