@@ -1037,7 +1037,7 @@ Product eligibility exception. It does not create, update, or delete a
 `CVECVSSAssessment` and never changes an override.
 
 **Callers**: `associate_cve()` and the batch recalculation Celery task triggered
-by a default CVSS version change (see
+by the manual recalculation endpoint (see
 `docs/features/platform/default-cvss-version-operations.md`). This contract
 defines no Ticket convergence caller.
 

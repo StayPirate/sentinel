@@ -10,9 +10,17 @@ behavior.
 
 `docs/features/platform/system-settings.md` remains authoritative for the
 setting declaration, persistence, bootstrap, required-row reads, setting audit,
-and the immediate `GET` and `PATCH /api/v1/admin/settings` composition. The
-specialized operations here consume that setting contract without becoming a
-second owner of it.
+and the `GET` and `PATCH /api/v1/admin/settings` read and mutation contracts.
+The specialized operations here consume that setting contract without becoming
+a second owner of it.
+
+The preview, the setting mutation, and the manual trigger compose one advisory,
+non-atomic administrative sequence: the optional impact preview, the setting
+`PATCH /api/v1/admin/settings` mutation, and the manual trigger that admits the
+run. Its step order and non-atomicity rules are defined in
+`docs/features/platform/system-settings.md` (Default CVSS Version); no step is
+a prerequisite or reservation for another, and no client carries a version from
+one request to the next.
 
 ## Scope and Ownership
 
@@ -21,7 +29,7 @@ This specification owns:
 - `get_default_cvss_version_impact()` and its API endpoint;
 - `recalculate_cvss_derived_state(target_version)` and its complete bounded
   runner;
-- the manual all-CVE recalculation endpoint;
+- `admit_cvss_recalculation()` and the manual all-CVE recalculation endpoint;
 - complete-run coordination: run identity, admission, the Redis ownership
   lease, task adoption, the PostgreSQL execution fence, ownership loss,
   publication uncertainty, lease renewal, owner-safe cleanup, and the
@@ -53,9 +61,10 @@ capability.
 ## All-CVE Recalculation Runner
 
 The all-CVE recalculation runner applies the current `default_cvss_version`
-policy to every persisted CVE. `PATCH /api/v1/admin/settings` and
-`POST /api/v1/admin/settings/default-cvss-version/recalculate` enqueue it. It is
-not a fetcher, sub-operation, or scheduled integration.
+policy to every persisted CVE.
+`POST /api/v1/admin/settings/default-cvss-version/recalculate` enqueues it; the
+setting `PATCH /api/v1/admin/settings` never enqueues, admits, or publishes a
+run. It is not a fetcher, sub-operation, or scheduled integration.
 
 ### Task Identity and Workflow
 
@@ -126,8 +135,8 @@ post-commit effect, leaves every counter zero, and emits only the
 derived state back to a superseded policy. A repeated valid delivery is safe
 because already converged units classify `unchanged`.
 
-Complete-run admission, ownership, lease renewal, execution fencing,
-prevention of a setting change or another owner overtaking an admitted run, and
+Complete-run admission, ownership, lease renewal, the execution fence that
+prevents a setting change or another owner from overtaking an admitted run, and
 crash cleanup are owned by Complete-Run Coordination below. That contract
 preserves the validation, paging, unit, drain, and outcome semantics defined
 here; an ownership-loss termination is a whole-run condition and never an
@@ -672,10 +681,14 @@ POST /api/v1/admin/settings/default-cvss-version/recalculate
 Manually triggers the all-CVE recalculation runner using the current persisted
 `default_cvss_version`. It is the explicit restart-from-beginning surface after
 an interrupted or partial run and may also be used as a general refresh
-operation.
+operation. It is the only operation that admits or publishes the runner; the
+setting `PATCH /api/v1/admin/settings` changes the value without starting,
+resuming, or scheduling any run. A successful PATCH therefore converges
+existing derived state only after a manual trigger. A setting change committed
+after an admission but before the task's adoption does not retarget that
+delivery; the delivery terminates `stale` instead.
 
-The endpoint uses the same admission and publication coordination as the
-`PATCH /api/v1/admin/settings` side effect:
+The endpoint uses the complete admission and publication coordination:
 
 1. Acquire the PostgreSQL execution fence with non-blocking semantics. A
    definitive lock-not-acquired result returns `409
@@ -806,13 +819,13 @@ Complete-Run Coordination below.
 ## Complete-Run Coordination
 
 This section owns complete-run admission, run identity, ownership, lease
-renewal, execution fencing, task adoption, ownership loss, Redis-loss behavior,
-publication uncertainty, prevention of a setting change or another owner
-overtaking an admitted run, cleanup, and the coordination conditions that
-require operator recovery. It preserves every validation, stale-delivery, bounded
-paging, independent-unit, post-commit, outcome, restart, and no-persistent-state
-contract defined above. An ownership-loss termination is a whole-run condition
-and is never an ordinary failed unit.
+renewal, the execution fence and its stable identifier, task adoption,
+ownership loss, Redis-loss behavior, publication uncertainty, protection of an
+admitted run from another owner, cleanup, and the coordination conditions that
+require operator recovery. It preserves every validation, stale-delivery,
+bounded paging, independent-unit, post-commit, outcome, restart, and
+no-persistent-state contract defined above. An ownership-loss termination is a
+whole-run condition and is never an ordinary failed unit.
 
 Coordination introduces no persistent run row, progress resource, resume cursor,
 outbox, result-backend entry, audit event, capability, configuration variable,
@@ -927,8 +940,11 @@ Complete-run coordination uses one stable, feature-specific PostgreSQL
 session-level advisory-lock identifier. Its concrete numeric value is an
 implementation constant, but it MUST be stable across releases, reserved for
 this feature, and neither shared nor colliding with any other advisory-lock
-consumer. The same identifier is used by the PATCH side effect, the manual
-trigger, and the task; no path uses a different fence.
+consumer. The same identifier is used by the manual trigger, the task, and the
+effective setting mutation defined in
+`docs/features/platform/system-settings.md`: the manual trigger and the task
+hold it at session level, while an effective setting change requests it in
+transaction-level, non-blocking form. No path uses a different identifier.
 
 - Acquisition is non-blocking (`pg_try_advisory_lock` semantics). A caller that
   does not acquire the fence waits for nothing and mutates nothing.
@@ -961,48 +977,42 @@ prevents concurrent same-token execution.
 
 ### Admission Ordering
 
-The API admission path is normative and ordered:
+The manual trigger's admission path is normative and ordered:
 
 1. Acquire the fence with non-blocking semantics.
-2. If the fence is not acquired, the request performs no lease acquisition, no
-   setting mutation, and no publication. It receives `409
-   CVSS_RECALC_ALREADY_IN_PROGRESS`, and the run remains with its current owner.
-   A fence that stays held while no runner is renewing its lease is the
-   recovery-required condition described under Operator Recovery.
-3. For the manual trigger, read `default_cvss_version` through the required-row
-   service while the fence is held. A read failure releases the fence, acquires
-   no lease, invokes no publisher, and propagates the original error. The PATCH
-   path instead uses the setting value selected by its own coordinated mutation
-   contract in `system-settings.md`.
+2. If the fence is not acquired, the request performs no lease acquisition and
+   no publication. It receives `409 CVSS_RECALC_ALREADY_IN_PROGRESS`, and the
+   run remains with its current owner. A fence that stays held while no runner
+   is renewing its lease is the recovery-required condition described under
+   Operator Recovery.
+3. Read `default_cvss_version` through the required-row service while the fence
+   is held. A read failure releases the fence, acquires no lease, invokes no
+   publisher, and propagates the original error. This read is the only source
+   of the run's `target_version`; no client-supplied version is accepted, and a
+   setting change committed before this read is the version the admission
+   publishes.
 4. While holding the fence, preallocate the run's task ID and acquire the lease
    with atomic `SET ... NX EX 900`. A `not_acquired` result means another owner
    is admitted: release the fence and return `409
-   CVSS_RECALC_ALREADY_IN_PROGRESS`; no setting mutation and no publication
-   occur. A `RedisError` or uncertain acquisition releases the fence and returns
-   `503 REDIS_UNAVAILABLE`.
-5. For the `PATCH` side effect, commit the setting mutation and its
-   `SettingAuditEvent` while the fence is still held. When commit is definitely
-   unsuccessful or completion is uncertain, the transaction owner must be
-   definitively terminated before Redis cleanup so no setting row lock survives.
-   The Settings mutation contract owns the rollback, invalidation, closure, and
-   session-composition mechanism. Then attempt owner-safe lease removal while
-   the fence is held, release the fence, and propagate the original transaction
-   failure through the normal server-error mapping.
-6. Release the fence and confirm successful release before invoking the broker
+   CVSS_RECALC_ALREADY_IN_PROGRESS`; no publication occurs. A `RedisError` or
+   uncertain acquisition releases the fence and returns `503
+   REDIS_UNAVAILABLE`.
+5. Release the fence and confirm successful release before invoking the broker
    publication call. The lease, not the fence, covers the interval between the
    release and the task's adoption. If explicit unlock fails or is uncertain,
    invoke no publisher, invalidate or close the dedicated connection, attempt
    owner-safe lease removal, emit the applicable cleanup event, and propagate
    the original server error. Connection closure is the automatic release
    backstop.
-7. Invoke the publication call and classify its outcome under Publication
+6. Invoke the publication call and classify its outcome under Publication
    Uncertainty.
 
-Two API admissions cannot overlap: the second admission either finds the fence
-held by the first, or finds the lease held by the first admission's task ID. A
-`PATCH` can therefore never overtake a runner protected by the fence, even when
-the lease is absent, because the running task holds the fence for its complete
-mutating workflow.
+Two manual admissions cannot overlap: the second admission either finds the
+fence held by the first, or finds the lease held by the first admission's task
+ID. An effective setting change likewise cannot overtake a runner protected by
+the fence, even when the lease is absent, because the running task holds the
+session-level fence for its complete mutating workflow and the setting
+mutation's transaction-level request conflicts with it.
 
 Releasing the fence before publication is required so that a very fast task does
 not mistake the API's short fence hold for a genuine collision. It does not
@@ -1016,18 +1026,65 @@ path. This is an accepted, safe availability cost: no overlapping mutation is
 possible, because the rejected delivery mutates nothing and the lease owner is
 unchanged.
 
-Steps 4 through 6 are coordination ordering requirements. The Settings API
-contract in `docs/features/platform/system-settings.md` realizes them with the
-required composition: the setting and audit commit completes during request
-processing while the fence is held, and confirmed fence release precedes the
-broker publication in the same request so that the response reflects the
-publication outcome. This coordination specification does not prescribe the
-Settings mutation service's final signature, session orchestration, concurrent
-no-op classification, or response-result type; `system-settings.md` owns those
-contracts. A fence that cannot be acquired because of a database or session
-error is a server error, not the `fence_busy` rejection: only a definitive
-"lock not acquired" result produces `409
-CVSS_RECALC_ALREADY_IN_PROGRESS`.
+The setting mutation contract in `docs/features/platform/system-settings.md`
+shares the same fence identifier but performs no lease acquisition, no task-ID
+allocation, and no publication; it owns its own row-lock, mutation, and audit
+composition. A setting change committed after an admission but before the
+task's adoption makes that delivery `stale` under Input Validation and Stale
+Delivery, and recovery is always a new manual admission. A fence that cannot be
+acquired because of a database or session error is a server error, not the
+`fence_busy` rejection: only a definitive "lock not acquired" result produces
+`409 CVSS_RECALC_ALREADY_IN_PROGRESS`.
+
+### Manual Admission Service
+
+The manual trigger delegates admission and publication to the service-owned
+admission boundary:
+
+```python
+async def admit_cvss_recalculation() -> CVSSRecalculationAdmission:
+    ...
+```
+
+The boundary accepts no caller-supplied input: no session, target version, or
+task ID is passed in. It owns its dedicated fenced connection for the complete
+admission sequence, including the post-release publication attempt, and
+therefore accepts no caller-supplied session. The run's `target_version` is the
+persisted setting read while the fence is held. `CVSSRecalculationAdmission` is
+the successful result: it carries the `submitted` outcome and the target
+version that was published, which the endpoint uses for the `202 Accepted`
+response body.
+
+The boundary creates no `SettingAuditEvent`, no durable run row, no progress or
+resume resource, and no compensation record. It is repeatable: every admission
+that reaches publication allocates a new run identity and publishes a new
+complete run; a blocked admission publishes nothing.
+
+All exceptions defined by the settings feature — setting mutation, preview, and
+manual admission — inherit from `SettingsServiceError`, which inherits from the
+shared `ServiceError` root; the runner defines no exception of its own. Not
+every exception that crosses a service boundary belongs to this hierarchy:
+`ValueError`, database and session errors, `MemoryError`,
+`SoftTimeLimitExceeded`, control signals, and programming errors are not
+settings-owned, are never mapped to a settings-specific HTTP status or error
+code, and propagate unchanged.
+`CVSSRecalculationAlreadyInProgressError` is owned by
+`docs/features/platform/system-settings.md`;
+`CVSSRecalculationRedisUnavailableError` and
+`CVSSRecalculationBrokerUnavailableError` are owned by this specification.
+
+| Exception | HTTP | Code | Raised when |
+|---|---|---|---|
+| `CVSSRecalculationAlreadyInProgressError` | 409 | `CVSS_RECALC_ALREADY_IN_PROGRESS` | The execution fence or the admission lease is already held; no run is admitted and nothing is published |
+| `CVSSRecalculationRedisUnavailableError` | 503 | `REDIS_UNAVAILABLE` | Lease acquisition raised `RedisError` or its completion was uncertain; the fence is released, nothing is published, and the exception carries a fixed sanitized detail that never contains the Redis exception text |
+| `CVSSRecalculationBrokerUnavailableError` | 503 | `CELERY_UNAVAILABLE` | The publication call raised `kombu.exceptions.OperationalError`; the exception carries the fixed sanitized detail and never the broker exception text |
+
+`CVSSRecalculationAlreadyInProgressError`'s HTTP/code mapping and the
+transaction-level setting-change form are defined in
+`docs/features/platform/system-settings.md`. Setting-read, database, commit, and
+fence-release failures that occur before publisher invocation are not mapped to
+`CELERY_UNAVAILABLE`; they propagate through their ordinary server-error
+mapping.
 
 ### Task Adoption
 
@@ -1075,7 +1132,7 @@ state. Every phase is derivable from the resources and events already defined.
 | Phase | Lease holder | Fence holder | Allowed work | A second admission | A duplicate or late delivery |
 |---|---|---|---|---|---|
 | candidate | none | none | input validation only | may admit | nothing |
-| admitted | the new task ID | the API request | task-ID preallocation, lease acquisition, PATCH setting/audit commit | rejected (fence or lease held) | not delivered yet |
+| admitted | the new task ID | the API request | task-ID preallocation, lease acquisition | rejected (fence or lease held) | not delivered yet |
 | publication attempted | the admitted task ID | none (released) | broker publication only | rejected (lease held) | not delivered yet |
 | submitted | the admitted task ID | none | waiting for delivery | rejected (lease held) | one delivery adopts; a duplicate is rejected at adoption |
 | acceptance_unconfirmed | the admitted task ID | none | nothing until delivery or TTL | rejected (lease held) | if delivered, one delivery adopts; otherwise the lease expires |
@@ -1147,8 +1204,8 @@ matching `docs/features/tickets/ticket-service.md` (Ticket Convergence):
 | Observable phase and outcome | Cause | Coordination state | API response |
 |---|---|---|---|
 | pre-publisher setting, database, commit, or fence failure | the publisher was not invoked | attempt owner-safe lease removal where this request acquired it, then propagate the original error | ordinary error mapping; normally global `500 INTERNAL_ERROR` |
-| `submitted` | the publication call returned without raising | lease retained; the task adopts on delivery | manual trigger: `202 Accepted`; PATCH: `200 OK` |
-| `acceptance_unconfirmed` | the publication call raised `kombu.exceptions.OperationalError` | lease retained; acceptance is neither confirmed nor denied | both paths: `503 CELERY_UNAVAILABLE` with fixed sanitized detail |
+| `submitted` | the publication call returned without raising | lease retained; the task adopts on delivery | `202 Accepted` |
+| `acceptance_unconfirmed` | the publication call raised `kombu.exceptions.OperationalError` | lease retained; acceptance is neither confirmed nor denied | `503 CELERY_UNAVAILABLE` with fixed sanitized detail |
 | other publisher exception | the publication call raised any other exception, including serialization, configuration, security, control signals, and programming errors | the exception propagates unchanged and is never `acceptance_unconfirmed`; the lease is retained conservatively | propagated exception mapping; normally global `500 INTERNAL_ERROR` |
 | crash before publisher invocation | the API process died after lease acquisition | lease retained because completion and cleanup cannot be observed safely; the publisher was not invoked | not observed by the API |
 | crash after publisher invocation and before response | the API process died after invoking the publisher | lease retained; acceptance is unknown and the task may still be delivered and adopt it | not observed by the API |
@@ -1166,26 +1223,9 @@ For the manual trigger:
   invocation propagates as that original error after owner-safe cleanup is
   attempted; it is never mapped to `CELERY_UNAVAILABLE`.
 
-For the `PATCH` side effect:
-
-- a `submitted` publication reports a scheduled task;
-- a no-op change reports that no batch is needed;
-- a setting, commit, or fence failure before the broker call propagates its
-  original error after owner-safe cleanup is attempted; it is not a successful
-  PATCH publication result;
-- an `acceptance_unconfirmed` publication returns `503 CELERY_UNAVAILABLE`,
-  retains the setting change and its audit event as committed, and retains the
-  admission lease;
-- a publisher exception that is not a broker operational error propagates
-  unchanged; because the setting and its audit event already committed, they
-  remain durable while the response is the API failure mapping for that
-  exception; and
-- while the current Settings response retains `recalculation_scheduled`, a
-  false value means only that this request did not publish a new task;
-  it never asserts that no previously admitted or acceptance-unconfirmed run
-  can exist; and
-- the PATCH path never releases a lease retained after publisher invocation or
-  enables unsafe replacement work.
+The setting mutation in `docs/features/platform/system-settings.md` never
+reaches this publisher boundary: it acquires no lease, invokes no publisher,
+and its response never reports a publication or scheduling outcome.
 
 No coordination outcome creates a `SettingAuditEvent` or `TicketAuditEvent`.
 
@@ -1238,8 +1278,8 @@ feature event.
 
 | Event | Level | When |
 |---|---|---|
-| `cvss_recalculation_admitted` | INFO | API admitted a run: fence acquired, task ID preallocated, lease acquired |
-| `cvss_recalculation_admission_rejected` | WARNING | API could not acquire the fence or the lease, or Redis failed during acquisition; carries the closed `reason` category `fence_busy`, `lease_held`, or `redis_error` |
+| `cvss_recalculation_admitted` | INFO | The manual trigger admitted a run: fence acquired, task ID preallocated, lease acquired |
+| `cvss_recalculation_admission_rejected` | WARNING | The manual trigger could not acquire the fence or the lease, or Redis failed during acquisition; carries the closed `reason` category `fence_busy`, `lease_held`, or `redis_error` |
 | `cvss_recalculation_submitted` | INFO | The publication call returned without raising |
 | `cvss_recalculation_publication_unconfirmed` | ERROR | The publication call raised a broker operational error; the lease is retained |
 | `cvss_recalculation_adopted` | INFO | A task acquired the fence and confirmed exact owner/target before its first unit |
@@ -1264,18 +1304,17 @@ lease without unconditional deletion, retry the trigger, and let the run restart
 from the beginning. No recovery procedure may treat logs, a missing Redis key,
 or the absence of a terminal event as proof of completion.
 
-The same manual endpoint is the recovery surface after a Settings PATCH returns
-an error for which the setting commit or publication outcome may already be
-durable or uncertain. After any retained lease expires or is resolved, the
-operator reads the current setting and triggers a complete rerun. Repeating the
-same PATCH may classify as a no-op and is not a substitute for this recovery
-run.
+The manual endpoint is also the only recovery surface for a setting change that
+has not yet converged derived state: a successful PATCH records the new policy
+but starts no work, so after any superseded delivery terminates `stale` or any
+retained lease is resolved, the operator triggers a complete rerun. Repeating
+the same PATCH never starts, resumes, or repairs a run.
 
 ## Cross-references
 
 - `docs/features/platform/system-settings.md` - setting declaration,
-  persistence, bootstrap, required-row read, setting audit, and immediate
-  Settings PATCH composition
+  persistence, bootstrap, required-row read, setting mutation and audit, and
+  the transaction-level exclusion boundary
 - `docs/features/tickets/cvss-scoring.md` - pure severity and eligibility
   resolutions
 - `docs/features/tickets/ticket-mutations.md` - authoritative default-version

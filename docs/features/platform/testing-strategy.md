@@ -3298,6 +3298,84 @@ or identity audit validation are affected, tests MUST cover:
   grant-creation/deactivation races keep their coverage and assert no
   regression
 
+### System Settings Mutation
+
+When `update_default_cvss_version()`, the settings PATCH endpoint, or the
+setting audit path is implemented or changed, tests MUST cover the contract in
+`docs/features/platform/system-settings.md`:
+
+**Service tests:**
+
+- an effective change in both directions — `3.1` → `4.0` and `4.0` → `3.1` —
+  each committing the setting row and its audit event through the caller's
+  transaction
+- exactly one `SettingAuditEvent` per effective change, with
+  `event_type = setting_changed`, `setting_key = default_cvss_version`,
+  `user_id` equal to the acting administrator, `old_value` equal to the
+  locked-current value, and `new_value` equal to the requested value
+- a no-op request whose value equals the locked-current persisted value returns
+  that value and creates no audit event, no advisory-lock request, no setting
+  update, and no external side effect
+- an unsupported value is rejected before any database access: the endpoint
+  returns the global `422 VALIDATION_ERROR`, and a direct service call with an
+  out-of-set value raises `ValueError`
+- a missing required setting row raises `RequiredSystemSettingMissingError`
+  without substituting a fallback value
+- an audit validation or insertion failure, a flush failure, a database
+  failure, and a definitely failed commit each roll back the complete
+  mutation: the setting keeps its prior value and no audit event persists
+- an ambiguous commit outcome performs no post-commit or publisher effect and
+  is reconciled by re-reading the setting; the test does not assert the prior
+  value, because durability is unknown
+- the function performs no Redis command, acquires no lease, publishes no task,
+  and registers no post-commit callback
+- re-invocation of an effective change is a no-op with no additional audit
+  event
+
+**Concurrency tests** (independent sessions, independent connections, and
+deterministic barriers that force each row-lock order):
+
+- two concurrent requests with the same value, when that value differs from
+  the persisted value, produce exactly one effective change and exactly one
+  audit event; the other request is a no-op that creates no additional event
+- two concurrent requests with the same value, when that value already equals
+  the persisted value, are both no-ops: the persisted value is unchanged and
+  no audit event exists
+- two concurrent requests with different values, ordered so that the request
+  for the persisted value acquires the row lock first, produce a no-op
+  followed by exactly one effective change and exactly one audit event whose
+  `old_value` is the persisted value
+- two concurrent requests with different values, ordered so that the request
+  for the other value acquires the row lock first, produce two serialized
+  effective changes and exactly two audit events; the second event's
+  `old_value` equals the value committed by the first request
+- each concurrency case asserts its final persisted value, its exact audit
+  event count, and its exact `old_value` → `new_value` sequence; no case
+  creates an audit event on a no-op branch, and no request is classified
+  against a setting observation made before it acquired the row lock
+- an effective change against a held session-level execution fence is rejected
+  with `409 CVSS_RECALC_ALREADY_IN_PROGRESS` and commits nothing, including when
+  the fence is held by an independent connection representing another process
+  or Celery worker
+- a no-op request against a held execution fence succeeds and performs no
+  coordination check
+
+**API tests:**
+
+- an effective change returns `200 OK` with the standard envelope containing
+  only `default_cvss_version` and the new value
+- a no-op returns `200 OK` with the same minimal shape and the persisted value
+- the PATCH response contains no `recalculation_scheduled`, no `changed` field,
+  and no run, progress, or scheduling field
+- unauthenticated requests return `401`; an authenticated caller without
+  `manage_settings` returns `403`
+- an effective change blocked by an active execution fence returns
+  `409 CVSS_RECALC_ALREADY_IN_PROGRESS`
+- the endpoint performs no Redis access and no Celery publication on both the
+  changed and the no-op path (structural or spy assertion)
+- the manual trigger creates no setting audit event and leaves the persisted
+  setting unchanged
+
 ### Default-CVSS Impact Preview
 
 When the default-CVSS impact preview service or endpoint is implemented, tests
@@ -3469,8 +3547,8 @@ per-CVE contract is implemented or changed, tests MUST cover the contract in
 
 - a race between two admissions admits exactly one owner
 - the manual trigger reads `default_cvss_version` only after acquiring the
-  fence; a concurrent PATCH/manual-trigger race publishes the current committed
-  version selected under that fence, never an earlier pre-fence observation
+  fence; a setting change committed before that read is the version the
+  admission publishes, never an earlier pre-fence observation
 - a second admission is rejected by the fence held by an active runner even
   when the lease is absent
 - a free lease with a held fence after simulated Redis loss still admits no
@@ -3539,14 +3617,12 @@ per-CVE contract is implemented or changed, tests MUST cover the contract in
 - the lease is retained after the `503` broker outcome
 - a task actually accepted despite the `503` can still run and adopt
 - a task actually not accepted leaves the lease to expire by its TTL
-- the PATCH coordination composition: the setting and audit commit completes
-  during request processing while the fence is held, confirmed fence release
-  precedes publication, and the response reflects the publication outcome
-  (`200` scheduled or `503` unconfirmed); the complete Settings mutation
-  contract owns the transaction/session mechanism
-- `recalculation_scheduled = false` means only that this request published no
-  new task and never asserts the absence of an earlier admitted or
-  acceptance-unconfirmed run; the no-op path does not query Redis
+- only the manual trigger admits and publishes: a setting PATCH performs no
+  Redis access, no lease acquisition, no broker call, and no post-commit
+  callback (structural or spy assertion)
+- the manual trigger's response reflects only its own publication outcome and
+  never asserts that an earlier admitted or acceptance-unconfirmed run cannot
+  exist
 - no coordination audit event is created
 
 **Transactions:**
@@ -3584,10 +3660,12 @@ per-CVE contract is implemented or changed, tests MUST cover the contract in
   or audit event
 - sequential duplicate delivery of the same target version
 - no automatic Celery retry is configured
-- a delivery delayed past a setting change terminates `stale` with every counter
-  zero and no mutation; this test is a defensive case for a persistent setting
-  change made outside the normal fence-coordinated PATCH path, not the expected
-  outcome of an ordinary PATCH/task race
+- a delivery whose target version no longer matches the persisted setting when
+  it is adopted terminates `stale` with every counter zero, no mutation, and no
+  `TicketAuditEvent`, `SettingAuditEvent`, or other audit record; this covers a
+  setting change committed after admission but before the delivery adopted the
+  run, which is the expected outcome when a PATCH commits while the task is
+  still queued
 
 **Errors and control signals:**
 
