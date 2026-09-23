@@ -410,6 +410,39 @@ class TestListFetchersEndpoint:
         assert item["last_run"]["items_updated"] == 0
         assert item["last_run"]["items_failed"] == 0
 
+    async def test_terminal_last_run_exposes_items_succeeded(
+        self,
+        client: AsyncClient,
+        fetcher_config_factory: FetcherConfigFactory,
+        fetcher_run_factory: FetcherRunFactory,
+    ) -> None:
+        """A terminal `last_run` exposes `items_succeeded`, which need
+        not equal created plus updated (docs/features/platform/
+        fetcher-operations.md, List Fetchers, Fields)."""
+        _register(_StubFetcher)
+        config = await fetcher_config_factory(fetcher_name=_StubFetcher.name)
+        await fetcher_run_factory(
+            fetcher_name=config.fetcher_name,
+            status="success",
+            finished_at=datetime.now(UTC),
+            duration_seconds=10.0,
+            items_succeeded=8,
+            items_created=3,
+            items_updated=0,
+            items_failed=0,
+        )
+
+        response = await client.get("/api/v1/fetchers")
+
+        assert response.status_code == 200
+        item = next(
+            i for i in response.json()["data"] if i["fetcher_name"] == _StubFetcher.name
+        )
+        assert item["last_run"]["items_succeeded"] == 8
+        assert item["last_run"]["items_created"] == 3
+        assert item["last_run"]["items_updated"] == 0
+        assert item["last_run"]["items_failed"] == 0
+
 
 # ---------------------------------------------------------------------------
 # GET /api/v1/fetchers/{fetcher_name}/runs

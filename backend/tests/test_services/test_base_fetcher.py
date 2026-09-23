@@ -1089,10 +1089,20 @@ class TestMetrics:
         fetcher.record_updated(count=3)
         assert fetcher._updated == 3
 
+    def test_record_updated_default_increments_by_one(self) -> None:
+        fetcher = self._fetcher()
+        fetcher.record_updated()
+        assert fetcher._updated == 1
+
     def test_record_failed_increments(self) -> None:
         fetcher = self._fetcher()
         fetcher.record_failed(count=2)
         assert fetcher._failed == 2
+
+    def test_record_failed_default_increments_by_one(self) -> None:
+        fetcher = self._fetcher()
+        fetcher.record_failed()
+        assert fetcher._failed == 1
 
     @pytest.mark.parametrize("method_name", _METRIC_HELPERS)
     def test_zero_count_is_a_noop(self, method_name: str) -> None:
@@ -1342,7 +1352,6 @@ class TestRunLifecycleStatus:
 
         async def _execute(self: BaseFetcher, session: AsyncSession) -> None:
             self.record_succeeded(count=2)
-            self.record_created(count=1)
             self.record_failed(count=1)
 
         fetcher_cls = _fetcher_class(fetcher_name, _execute)
@@ -1351,7 +1360,7 @@ class TestRunLifecycleStatus:
         run = await _get_run(real_session_factory, run_id)
         assert run.status == "partial"
         assert run.items_succeeded == 2
-        assert run.items_created == 1
+        assert run.items_created == 0
         assert run.items_failed == 1
 
     async def test_committed_effect_with_failed_unit_and_no_success_is_failure(
@@ -1519,6 +1528,48 @@ class TestRunLifecycleStatus:
             run_4.items_updated,
             run_4.items_failed,
         ) == (0, 0, 0, 0)
+
+    async def test_active_run_row_exposes_zero_counters_during_execution(
+        self,
+        fetcher_lifecycle: Callable[..., Awaitable[tuple[str, UUID]]],
+        real_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """Counters are never written before finalization: an independent
+        session observing the adopted row during `execute()` still reads
+        `running` with all four counters at their zero defaults
+        (testing-strategy.md, Diagnostics and persistence: "tests must
+        prove no live progress writes occur")."""
+        fetcher_name, run_id = await fetcher_lifecycle()
+        observed: dict[str, Any] = {}
+
+        async def _execute(self: BaseFetcher, session: AsyncSession) -> None:
+            self.record_succeeded(count=3)
+            self.record_created(count=2)
+            self.record_updated(count=1)
+            self.record_failed(count=1)
+            async with real_session_factory() as independent:
+                row = await independent.get(FetcherRun, run_id)
+                assert row is not None
+                observed["status"] = row.status
+                observed["items"] = (
+                    row.items_succeeded,
+                    row.items_created,
+                    row.items_updated,
+                    row.items_failed,
+                )
+
+        fetcher_cls = _fetcher_class(fetcher_name, _execute)
+        await fetcher_cls().run(run_id=run_id, config=_make_config())
+
+        assert observed["status"] == "running"
+        assert observed["items"] == (0, 0, 0, 0)
+
+        run = await _get_run(real_session_factory, run_id)
+        assert run.status == "partial"
+        assert run.items_succeeded == 3
+        assert run.items_created == 2
+        assert run.items_updated == 1
+        assert run.items_failed == 1
 
 
 @pytest.mark.integration
