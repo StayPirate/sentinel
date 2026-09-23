@@ -135,8 +135,8 @@ post-commit effect, leaves every counter zero, and emits only the
 derived state back to a superseded policy. A repeated valid delivery is safe
 because already converged units classify `unchanged`.
 
-Complete-run admission, ownership, lease renewal, execution fencing,
-prevention of a setting change or another owner overtaking an admitted run, and
+Complete-run admission, ownership, lease renewal, the execution fence that
+prevents a setting change or another owner from overtaking an admitted run, and
 crash cleanup are owned by Complete-Run Coordination below. That contract
 preserves the validation, paging, unit, drain, and outcome semantics defined
 here; an ownership-loss termination is a whole-run condition and never an
