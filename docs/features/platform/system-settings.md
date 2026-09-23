@@ -182,10 +182,11 @@ it changed the row, or the locked-current value when the request was a no-op.
 **Inputs and guards**:
 
 1. The requested value is restricted to the closed set `"3.1"` and `"4.0"`.
-   The API request schema enforces that set before the service is invoked, so
-   validation completes before any database access and an out-of-set value
-   reaching the service is a caller contract violation rather than a supported
-   execution path.
+   The API request schema rejects any other value with the global `422
+   VALIDATION_ERROR` before the service is invoked. Because the persisted
+   column has no CHECK constraint, the service also validates its input before
+   any database access and raises `ValueError` for an out-of-set value; that
+   path is unreachable through the API.
 2. The function loads the required `default_cvss_version` row with a `FOR
    UPDATE` row lock as its first database operation. An absent row raises
    `RequiredSystemSettingMissingError`.
@@ -248,16 +249,19 @@ same request after a successful change, or repeating a no-op request, returns
 the persisted value and creates no additional audit event. Each effective
 change creates exactly one new event.
 
-**Exceptions propagated**: `RequiredSystemSettingMissingError`,
-`CVSSRecalculationAlreadyInProgressError`, and database, flush, or other
-session errors propagate to the caller unchanged.
+**Exceptions propagated**: `ValueError` for an out-of-set value,
+`RequiredSystemSettingMissingError`, `CVSSRecalculationAlreadyInProgressError`,
+and database, flush, or other session errors propagate to the caller unchanged.
 
 ### Service Exceptions
 
 All exceptions defined by the settings service inherit from
-`SettingsServiceError`, which inherits from the shared `ServiceError` root.
+`SettingsServiceError`, which inherits from the shared `ServiceError` root. The
+preview, runner, and manual-admission operations define the remaining
+API-facing exceptions of this hierarchy in
+`docs/features/platform/default-cvss-version-operations.md`.
 
-API-facing exceptions:
+API-facing exceptions (this specification):
 
 | Exception | HTTP | Code | Raised when |
 |---|---|---|---|

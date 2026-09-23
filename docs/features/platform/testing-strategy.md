@@ -3316,8 +3316,9 @@ setting audit path is implemented or changed, tests MUST cover the contract in
 - a no-op request whose value equals the locked-current persisted value returns
   that value and creates no audit event, no advisory-lock request, no setting
   update, and no external side effect
-- an unsupported value is rejected before any database access; the endpoint
-  returns the global `422 VALIDATION_ERROR`
+- an unsupported value is rejected before any database access: the endpoint
+  returns the global `422 VALIDATION_ERROR`, and a direct service call with an
+  out-of-set value raises `ValueError`
 - a missing required setting row raises `RequiredSystemSettingMissingError`
   without substituting a fallback value
 - an audit validation or insertion failure, a flush failure, a database
@@ -3341,10 +3342,6 @@ setting audit path is implemented or changed, tests MUST cover the contract in
   or Celery worker
 - a no-op request against a held execution fence succeeds and performs no
   coordination check
-- a change committed between a PATCH and a subsequent manual trigger is the
-  version the trigger reads and publishes; a further change committed between
-  the trigger and the task's adoption makes the delivered task terminate
-  `stale` before any mutation
 
 **API tests:**
 
@@ -3359,8 +3356,8 @@ setting audit path is implemented or changed, tests MUST cover the contract in
   `409 CVSS_RECALC_ALREADY_IN_PROGRESS`
 - the endpoint performs no Redis access and no Celery publication on both the
   changed and the no-op path (structural or spy assertion)
-- the manual trigger retains its `202`, `409`, `503 REDIS_UNAVAILABLE`, and
-  `503 CELERY_UNAVAILABLE` outcomes and creates zero setting audit events
+- the manual trigger creates no setting audit event and leaves the persisted
+  setting unchanged
 
 ### Default-CVSS Impact Preview
 

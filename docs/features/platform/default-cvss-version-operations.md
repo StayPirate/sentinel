@@ -1040,20 +1040,32 @@ acquired because of a database or session error is a server error, not the
 ### Manual Admission Service
 
 The manual trigger delegates admission and publication to the service-owned
-admission boundary. That boundary owns its dedicated fenced connection for the
-complete admission sequence, including the post-release publication attempt; it
-therefore accepts no caller-supplied session. Its inputs are none: the run's
-`target_version` is the persisted setting read while the fence is held. A
-successful admission returns the `submitted` outcome and the target version it
-published, which the endpoint uses for the `202 Accepted` response body.
+admission boundary:
+
+```python
+async def admit_cvss_recalculation() -> CVSSRecalculationAdmission:
+    ...
+```
+
+The boundary accepts no caller-supplied input: no session, target version, or
+task ID is passed in. It owns its dedicated fenced connection for the complete
+admission sequence, including the post-release publication attempt, and
+therefore accepts no caller-supplied session. The run's `target_version` is the
+persisted setting read while the fence is held. `CVSSRecalculationAdmission` is
+the successful result: it carries the `submitted` outcome and the target
+version that was published, which the endpoint uses for the `202 Accepted`
+response body.
 
 The boundary creates no `SettingAuditEvent`, no durable run row, no progress or
 resume resource, and no compensation record. It is repeatable: every admission
 that reaches publication allocates a new run identity and publishes a new
 complete run; a blocked admission publishes nothing.
 
-All three admission exceptions inherit from `SettingsServiceError`, which
-inherits from the shared `ServiceError` root.
+All three exceptions inherit from `SettingsServiceError`, which inherits from
+the shared `ServiceError` root. `CVSSRecalculationAlreadyInProgressError` is
+owned by `docs/features/platform/system-settings.md`;
+`CVSSRecalculationRedisUnavailableError` and
+`CVSSRecalculationBrokerUnavailableError` are owned by this specification.
 
 | Exception | HTTP | Code | Raised when |
 |---|---|---|---|
@@ -1061,12 +1073,12 @@ inherits from the shared `ServiceError` root.
 | `CVSSRecalculationRedisUnavailableError` | 503 | `REDIS_UNAVAILABLE` | Lease acquisition raised `RedisError` or its completion was uncertain; the fence is released and nothing is published |
 | `CVSSRecalculationBrokerUnavailableError` | 503 | `CELERY_UNAVAILABLE` | The publication call raised `kombu.exceptions.OperationalError`; the exception carries the fixed sanitized detail and never the broker exception text |
 
-`CVSSRecalculationAlreadyInProgressError` is owned by
-`docs/features/platform/system-settings.md`, where its mapping and the
-transaction-level setting-change form are defined. Setting-read, database,
-commit, and fence-release failures that occur before publisher invocation are
-not mapped to `CELERY_UNAVAILABLE`; they propagate through their ordinary
-server-error mapping.
+`CVSSRecalculationAlreadyInProgressError`'s HTTP/code mapping and the
+transaction-level setting-change form are defined in
+`docs/features/platform/system-settings.md`. Setting-read, database, commit, and
+fence-release failures that occur before publisher invocation are not mapped to
+`CELERY_UNAVAILABLE`; they propagate through their ordinary server-error
+mapping.
 
 ### Task Adoption
 
