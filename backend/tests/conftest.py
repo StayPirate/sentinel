@@ -974,7 +974,12 @@ async def _authenticated_user_and_client(
     NOT need to request redis_client separately."
     """
     user = await user_factory()
-    created = await create_session(db_session, user, SessionCreationReason.LOCAL_LOGIN)
+    created = await create_session(
+        db_session,
+        user,
+        SessionCreationReason.LOCAL_LOGIN,
+        expected_password_hash=None,
+    )
     assert created is not None
     client.cookies.set(SESSION_COOKIE_NAME, created.token)
     return user, client

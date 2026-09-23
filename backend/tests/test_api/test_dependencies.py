@@ -538,7 +538,10 @@ class TestGetCurrentUserJwt:
     ) -> None:
         user = await user_factory()
         created = await create_session(
-            db_session, user, SessionCreationReason.LOCAL_LOGIN
+            db_session,
+            user,
+            SessionCreationReason.LOCAL_LOGIN,
+            expected_password_hash=None,
         )
         assert created is not None
         dep_client.cookies.set(SESSION_COOKIE_NAME, created.token)
@@ -559,12 +562,18 @@ class TestGetCurrentUserJwt:
     ) -> None:
         bearer_user = await user_factory()
         bearer_created = await create_session(
-            db_session, bearer_user, SessionCreationReason.LOCAL_LOGIN
+            db_session,
+            bearer_user,
+            SessionCreationReason.LOCAL_LOGIN,
+            expected_password_hash=None,
         )
         assert bearer_created is not None
         cookie_user = await user_factory()
         cookie_created = await create_session(
-            db_session, cookie_user, SessionCreationReason.LOCAL_LOGIN
+            db_session,
+            cookie_user,
+            SessionCreationReason.LOCAL_LOGIN,
+            expected_password_hash=None,
         )
         assert cookie_created is not None
         dep_client.cookies.set(SESSION_COOKIE_NAME, cookie_created.token)
@@ -609,7 +618,10 @@ class TestGetCurrentUserJwt:
     ) -> None:
         user = await user_factory()
         created = await create_session(
-            db_session, user, SessionCreationReason.LOCAL_LOGIN
+            db_session,
+            user,
+            SessionCreationReason.LOCAL_LOGIN,
+            expected_password_hash=None,
         )
         assert created is not None
         created.session.is_active = False
@@ -630,7 +642,10 @@ class TestGetCurrentUserJwt:
     ) -> None:
         user = await user_factory()
         created = await create_session(
-            db_session, user, SessionCreationReason.LOCAL_LOGIN
+            db_session,
+            user,
+            SessionCreationReason.LOCAL_LOGIN,
+            expected_password_hash=None,
         )
         assert created is not None
         # The session must be created while the user is active; deactivate
@@ -654,7 +669,10 @@ class TestGetCurrentUserJwt:
     ) -> None:
         user = await user_factory()
         created = await create_session(
-            db_session, user, SessionCreationReason.LOCAL_LOGIN
+            db_session,
+            user,
+            SessionCreationReason.LOCAL_LOGIN,
+            expected_password_hash=None,
         )
         assert created is not None
         issued = issue_token(
@@ -1114,7 +1132,10 @@ class TestGetOptionalCurrentUserValidCredential:
     ) -> None:
         user = await user_factory()
         created = await create_session(
-            db_session, user, SessionCreationReason.LOCAL_LOGIN
+            db_session,
+            user,
+            SessionCreationReason.LOCAL_LOGIN,
+            expected_password_hash=None,
         )
         assert created is not None
         dep_client.cookies.set(SESSION_COOKIE_NAME, created.token)
@@ -1135,12 +1156,18 @@ class TestGetOptionalCurrentUserValidCredential:
     ) -> None:
         bearer_user = await user_factory()
         bearer_created = await create_session(
-            db_session, bearer_user, SessionCreationReason.LOCAL_LOGIN
+            db_session,
+            bearer_user,
+            SessionCreationReason.LOCAL_LOGIN,
+            expected_password_hash=None,
         )
         assert bearer_created is not None
         cookie_user = await user_factory()
         cookie_created = await create_session(
-            db_session, cookie_user, SessionCreationReason.LOCAL_LOGIN
+            db_session,
+            cookie_user,
+            SessionCreationReason.LOCAL_LOGIN,
+            expected_password_hash=None,
         )
         assert cookie_created is not None
         dep_client.cookies.set(SESSION_COOKIE_NAME, cookie_created.token)
@@ -1161,7 +1188,10 @@ class TestGetOptionalCurrentUserValidCredential:
     ) -> None:
         user = await user_factory()
         created = await create_session(
-            db_session, user, SessionCreationReason.LOCAL_LOGIN
+            db_session,
+            user,
+            SessionCreationReason.LOCAL_LOGIN,
+            expected_password_hash=None,
         )
         assert created is not None
         dep_client.cookies.set(SESSION_COOKIE_NAME, created.token)
@@ -1254,7 +1284,10 @@ class TestGetOptionalCurrentUserRejection:
     ) -> None:
         user = await user_factory()
         created = await create_session(
-            db_session, user, SessionCreationReason.LOCAL_LOGIN
+            db_session,
+            user,
+            SessionCreationReason.LOCAL_LOGIN,
+            expected_password_hash=None,
         )
         assert created is not None
         dep_client.cookies.set(SESSION_COOKIE_NAME, created.token)
@@ -1275,7 +1308,10 @@ class TestGetOptionalCurrentUserRejection:
     ) -> None:
         user = await user_factory()
         created = await create_session(
-            db_session, user, SessionCreationReason.LOCAL_LOGIN
+            db_session,
+            user,
+            SessionCreationReason.LOCAL_LOGIN,
+            expected_password_hash=None,
         )
         assert created is not None
         created.session.is_active = False
@@ -1296,7 +1332,10 @@ class TestGetOptionalCurrentUserRejection:
     ) -> None:
         user = await user_factory()
         created = await create_session(
-            db_session, user, SessionCreationReason.LOCAL_LOGIN
+            db_session,
+            user,
+            SessionCreationReason.LOCAL_LOGIN,
+            expected_password_hash=None,
         )
         assert created is not None
         # The session must be created while the user is active; deactivate
@@ -1320,7 +1359,10 @@ class TestGetOptionalCurrentUserRejection:
     ) -> None:
         user = await user_factory()
         created = await create_session(
-            db_session, user, SessionCreationReason.LOCAL_LOGIN
+            db_session,
+            user,
+            SessionCreationReason.LOCAL_LOGIN,
+            expected_password_hash=None,
         )
         assert created is not None
         issued = issue_token(
@@ -1438,7 +1480,10 @@ class TestGetOptionalCurrentUserRejection:
         converts them to anonymous access"."""
         user = await user_factory()
         created = await create_session(
-            db_session, user, SessionCreationReason.LOCAL_LOGIN
+            db_session,
+            user,
+            SessionCreationReason.LOCAL_LOGIN,
+            expected_password_hash=None,
         )
         assert created is not None
 
@@ -1470,7 +1515,10 @@ class TestRequireCapability:
     ) -> None:
         user = await user_factory()
         created = await create_session(
-            db_session, user, SessionCreationReason.LOCAL_LOGIN
+            db_session,
+            user,
+            SessionCreationReason.LOCAL_LOGIN,
+            expected_password_hash=None,
         )
         assert created is not None
 
@@ -1496,7 +1544,10 @@ class TestRequireCapability:
         user = await user_factory()
         await user_role_factory(user_id=user.id, role=Role.ADMIN.value)
         created = await create_session(
-            db_session, user, SessionCreationReason.LOCAL_LOGIN
+            db_session,
+            user,
+            SessionCreationReason.LOCAL_LOGIN,
+            expected_password_hash=None,
         )
         assert created is not None
 
@@ -1518,7 +1569,10 @@ class TestRequireCapability:
         user = await user_factory()
         await user_role_factory(user_id=user.id, role=Role.VULNERABILITY_ANALYST.value)
         created = await create_session(
-            db_session, user, SessionCreationReason.LOCAL_LOGIN
+            db_session,
+            user,
+            SessionCreationReason.LOCAL_LOGIN,
+            expected_password_hash=None,
         )
         assert created is not None
 
@@ -1539,7 +1593,10 @@ class TestRequireCapability:
     ) -> None:
         user = await user_factory()
         created = await create_session(
-            db_session, user, SessionCreationReason.LOCAL_LOGIN
+            db_session,
+            user,
+            SessionCreationReason.LOCAL_LOGIN,
+            expected_password_hash=None,
         )
         assert created is not None
         headers = {"Authorization": f"Bearer {created.token}"}
@@ -1573,7 +1630,10 @@ class TestRequireCapability:
         user = await user_factory()
         role = await user_role_factory(user_id=user.id, role=Role.ADMIN.value)
         created = await create_session(
-            db_session, user, SessionCreationReason.LOCAL_LOGIN
+            db_session,
+            user,
+            SessionCreationReason.LOCAL_LOGIN,
+            expected_password_hash=None,
         )
         assert created is not None
         headers = {"Authorization": f"Bearer {created.token}"}
@@ -1597,7 +1657,10 @@ class TestRequireCapability:
     ) -> None:
         user = await user_factory()
         created = await create_session(
-            db_session, user, SessionCreationReason.LOCAL_LOGIN
+            db_session,
+            user,
+            SessionCreationReason.LOCAL_LOGIN,
+            expected_password_hash=None,
         )
         assert created is not None
 
@@ -1627,7 +1690,10 @@ class TestRequireSessionAuthentication:
     ) -> None:
         user = await user_factory()
         created = await create_session(
-            db_session, user, SessionCreationReason.LOCAL_LOGIN
+            db_session,
+            user,
+            SessionCreationReason.LOCAL_LOGIN,
+            expected_password_hash=None,
         )
         assert created is not None
 

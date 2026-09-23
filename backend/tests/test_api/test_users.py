@@ -122,7 +122,12 @@ async def admin_commit_client(
     """
     admin = await user_factory()
     await user_role_factory(user_id=admin.id, role=Role.ADMIN.value)
-    created = await create_session(db_session, admin, SessionCreationReason.LOCAL_LOGIN)
+    created = await create_session(
+        db_session,
+        admin,
+        SessionCreationReason.LOCAL_LOGIN,
+        expected_password_hash=None,
+    )
     assert created is not None
 
     async def _override_get_db() -> AsyncGenerator[AsyncSession]:
@@ -1657,7 +1662,10 @@ class TestResetUserPasswordAdmin:
         _admin, client = admin_commit_client
         target = await user_factory(username="resetcallbacktarget")
         created = await create_session(
-            db_session, target, SessionCreationReason.LOCAL_LOGIN
+            db_session,
+            target,
+            SessionCreationReason.LOCAL_LOGIN,
+            expected_password_hash=None,
         )
         assert created is not None
         await db_session.commit()

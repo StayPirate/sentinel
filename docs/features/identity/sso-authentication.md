@@ -281,7 +281,10 @@ callback URL with an authorization `code` and `state` parameter.
    `AUTH_SSO_USER_INACTIVE`:
    `"Your account has been deactivated. Contact your administrator."`
 9. In one caller-owned database transaction, call
-   `session_service.create_session(db, user, reason=sso_login)`. The service
+   `session_service.create_session(db, user, reason=sso_login,
+   expected_password_hash=None)`. SSO authenticates through the IdP, not a
+   local password, so no credential snapshot is supplied and session creation
+   performs no password check. The service
    acquires the User root lock and revalidates the locked-current active
    status before creating anything (see
    `docs/features/identity/authentication.md`, Session creation). If the

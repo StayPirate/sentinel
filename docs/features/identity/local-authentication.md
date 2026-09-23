@@ -85,18 +85,21 @@ session, and returns a JWT.
     Lockout transition logging) — `user_id` is available from step 5
     when the username resolved to an existing user.
 11. On success, in one caller-owned database transaction, call
-    `session_service.create_session(db, user, reason=local_login)`. The
-    service acquires the User root lock and revalidates the locked-current
-    active status before creating anything (see
+    `session_service.create_session(db, user, reason=local_login,
+    expected_password_hash=<the hash verified at step 8>)`. The service
+    acquires the User root lock and revalidates, before creating anything,
+    both the locked-current active status and the locked-current credential
+    state against the verified hash (see
     `docs/features/identity/authentication.md`, Session creation). If the
     locked-current target is inactive — a deactivation that committed after
-    the step-7 pre-check — the service returns no Session and the endpoint
-    returns the same HTTP 401 `AUTH_INVALID_CREDENTIALS` generic response as
-    every other failure. This outcome is a login failure for lockout
-    purposes: if the counter value returned by step 4 equals exactly
-    `LOGIN_MAX_ATTEMPTS`, emit the lockout transition event exactly as
-    step 10 does. Otherwise commit the new session and `user.last_login_at`
-    once or roll both back on failure.
+    the step-7 pre-check — or its `password_hash` has been replaced by a
+    password reset that committed after the step-8 verification, the service
+    returns no Session and the endpoint returns the same HTTP 401
+    `AUTH_INVALID_CREDENTIALS` generic response as every other failure. This
+    outcome is a login failure for lockout purposes: if the counter value
+    returned by step 4 equals exactly `LOGIN_MAX_ATTEMPTS`, emit the lockout
+    transition event exactly as step 10 does. Otherwise commit the new
+    session and `user.last_login_at` once or roll both back on failure.
     After commit, delete the failed-attempt counter as a best-effort
     post-commit effect; Redis failure does not fail the completed login.
     Return the JWT and its `token_expires_at` from the service result as
@@ -312,8 +315,9 @@ script) — only the observable behavior under concurrency.
 **Lockout transition logging**:
 
 The lockout transition event is emitted on the **failure path** (login
-step 10, including the locked-current-inactive failure outcome of step 11)
-when the counter value returned by step 4 equals exactly
+step 10, including the locked-current-ineligible failure outcomes of step 11
+— an inactive target or a credential superseded by a password reset) when
+the counter value returned by step 4 equals exactly
 `LOGIN_MAX_ATTEMPTS`. It is NOT emitted on successful logins (which
 delete the counter at step 11). The log message follows the PII
 discipline in `docs/features/platform/logging.md` — it includes
@@ -416,8 +420,12 @@ session behavior.
   provides adequate entropy.
 - **Session invalidation on password change**: prevents continued access
   through sessions authenticated with old credentials after a password reset.
-  All sessions are
-  invalidated, including the caller's own session — no exception for
+  A login that verified the old password before the reset but has not yet
+  created its Session is also rejected: session creation revalidates the
+  locked-current `password_hash` against the verified credential under the
+  User lock, so no Session is created for a superseded credential (see
+  `docs/features/identity/authentication.md`, Session creation). All sessions
+  are invalidated, including the caller's own session — no exception for
   admin self-password-reset. The admin receives the success response,
   then the next API call returns 401. The frontend handles this via its
   standard session expiration behavior (see

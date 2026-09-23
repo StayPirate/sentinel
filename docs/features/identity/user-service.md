@@ -1319,8 +1319,11 @@ workflow owns the commit and invokes both post-commit effects.
 caller writes the hash computed for that invocation and creates one audit
 event; the last committed reset determines the accepted password. Concurrent
 deactivation cannot interleave its database mutations with a reset because it
-uses the same root lock. No bcrypt work or Redis I/O occurs while the lock is
-held.
+uses the same root lock, and a concurrent Session creation cannot commit a
+Session for the superseded credential because it revalidates the
+locked-current `password_hash` under the conflicting lock (see Session
+creation concurrent with password reset). No bcrypt work or Redis I/O occurs
+while the lock is held.
 
 **Re-invocation**: not idempotent. Each successful invocation hashes and stores
 the supplied password anew, invalidates sessions present at that invocation,
@@ -1511,6 +1514,27 @@ serialization point:
 
 No Session can commit for an inactive User, and password hashing or external
 IdP/network I/O never executes while the User lock is held.
+
+### Session creation concurrent with password reset
+
+Successful local Session creation revalidates the locked-current
+`password_hash` under the same `FOR NO KEY UPDATE` User root lock it uses for
+the active-status check (see `docs/features/identity/authentication.md`,
+Session creation). `reset_password()` takes the conflicting `FOR UPDATE` on
+the same row, replaces `password_hash`, and invalidates the active sessions in
+one transaction. The two operations therefore have one serialization point:
+
+- if Session creation commits first, the new Session exists and the later
+  `reset_password()` invalidates it together with every other active Session;
+- if `reset_password()` commits first, Session creation observes the replaced
+  hash under the lock, creates no Session, updates no `last_login_at`, and
+  returns `None`; the provider maps that to its documented login failure
+  (`AUTH_INVALID_CREDENTIALS` for local login).
+
+No Session can commit for a credential that a committed password reset has
+superseded. Password hashing, bcrypt verification, and Redis I/O remain
+outside the User lock, and the local login workflow is the only caller that
+supplies a credential snapshot.
 
 ### Assignment concurrent with deactivation or active manual role loss
 

@@ -26,9 +26,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.core.enums import SessionCreationReason, SessionInvalidationReason
 from app.core.jwt import decode_and_validate
+from app.models.identity_audit_event import IdentityAuditEvent
 from app.models.session import Session
 from app.models.user import User
-from app.services import session_service
+from app.services import session_service, user_service
 from app.services.session_service import (
     cleanup_sessions,
     create_session,
@@ -147,7 +148,10 @@ class TestCreateSession:
     ) -> None:
         user = await user_factory()
         result = await create_session(
-            db_session, user, SessionCreationReason.LOCAL_LOGIN
+            db_session,
+            user,
+            SessionCreationReason.LOCAL_LOGIN,
+            expected_password_hash=None,
         )
         assert result is not None
         assert result.session.user_id == user.id
@@ -160,7 +164,10 @@ class TestCreateSession:
     ) -> None:
         user = await user_factory()
         result = await create_session(
-            db_session, user, SessionCreationReason.LOCAL_LOGIN
+            db_session,
+            user,
+            SessionCreationReason.LOCAL_LOGIN,
+            expected_password_hash=None,
         )
         assert result is not None
         assert user.last_login_at is not None
@@ -184,7 +191,10 @@ class TestCreateSession:
         user = await user_factory()
         assert user.last_login_at is None
         result = await create_session(
-            db_session, user, SessionCreationReason.LOCAL_LOGIN
+            db_session,
+            user,
+            SessionCreationReason.LOCAL_LOGIN,
+            expected_password_hash=None,
         )
         assert result is not None
         assert user.last_login_at is not None
@@ -202,7 +212,10 @@ class TestCreateSession:
     ) -> None:
         user = await user_factory()
         result = await create_session(
-            db_session, user, SessionCreationReason.LOCAL_LOGIN
+            db_session,
+            user,
+            SessionCreationReason.LOCAL_LOGIN,
+            expected_password_hash=None,
         )
         assert result is not None
         assert result.token_expires_at < result.session.expires_at
@@ -215,7 +228,12 @@ class TestCreateSession:
     ) -> None:
         user = await user_factory()
         existing = await session_factory(user_id=user.id)
-        await create_session(db_session, user, SessionCreationReason.LOCAL_LOGIN)
+        await create_session(
+            db_session,
+            user,
+            SessionCreationReason.LOCAL_LOGIN,
+            expected_password_hash=None,
+        )
         await db_session.refresh(existing)
         assert existing.is_active is True
 
@@ -228,14 +246,20 @@ class TestCreateSession:
         user = await user_factory()
         monkeypatch.setattr(settings, "session_max_lifetime_days", 1)
         first = await create_session(
-            db_session, user, SessionCreationReason.LOCAL_LOGIN
+            db_session,
+            user,
+            SessionCreationReason.LOCAL_LOGIN,
+            expected_password_hash=None,
         )
         assert first is not None
         first_deadline = first.session.expires_at
 
         monkeypatch.setattr(settings, "session_max_lifetime_days", 2)
         second = await create_session(
-            db_session, user, SessionCreationReason.LOCAL_LOGIN
+            db_session,
+            user,
+            SessionCreationReason.LOCAL_LOGIN,
+            expected_password_hash=None,
         )
         assert second is not None
 
@@ -248,11 +272,17 @@ class TestCreateSession:
     ) -> None:
         user = await user_factory()
         first = await create_session(
-            db_session, user, SessionCreationReason.LOCAL_LOGIN
+            db_session,
+            user,
+            SessionCreationReason.LOCAL_LOGIN,
+            expected_password_hash=None,
         )
         assert first is not None
         second = await create_session(
-            db_session, user, SessionCreationReason.LOCAL_LOGIN
+            db_session,
+            user,
+            SessionCreationReason.LOCAL_LOGIN,
+            expected_password_hash=None,
         )
         assert second is not None
         assert first.session.id != second.session.id
@@ -269,7 +299,12 @@ class TestCreateSession:
         rollback_spy = AsyncMock(side_effect=AssertionError("must not roll back"))
         monkeypatch.setattr(db_session, "commit", commit_spy)
         monkeypatch.setattr(db_session, "rollback", rollback_spy)
-        await create_session(db_session, user, SessionCreationReason.LOCAL_LOGIN)
+        await create_session(
+            db_session,
+            user,
+            SessionCreationReason.LOCAL_LOGIN,
+            expected_password_hash=None,
+        )
         commit_spy.assert_not_called()
         rollback_spy.assert_not_called()
 
@@ -311,7 +346,12 @@ class TestCreateSession:
             monkeypatch.setattr(session_service, "issue_token", _boom)
 
             with pytest.raises(RuntimeError):
-                await create_session(session, user, SessionCreationReason.LOCAL_LOGIN)
+                await create_session(
+                    session,
+                    user,
+                    SessionCreationReason.LOCAL_LOGIN,
+                    expected_password_hash=None,
+                )
 
             await session.rollback()
 
@@ -338,7 +378,12 @@ class TestCreateSession:
         from app.models.identity_audit_event import IdentityAuditEvent
 
         user = await user_factory()
-        await create_session(db_session, user, SessionCreationReason.LOCAL_LOGIN)
+        await create_session(
+            db_session,
+            user,
+            SessionCreationReason.LOCAL_LOGIN,
+            expected_password_hash=None,
+        )
         rows = await db_session.execute(
             select(IdentityAuditEvent).where(
                 IdentityAuditEvent.target_user_id == user.id
@@ -355,7 +400,10 @@ class TestCreateSession:
         user = await user_factory()
         with caplog.at_level("INFO"):
             result = await create_session(
-                db_session, user, SessionCreationReason.LOCAL_LOGIN
+                db_session,
+                user,
+                SessionCreationReason.LOCAL_LOGIN,
+                expected_password_hash=None,
             )
         assert result is not None
         assert "session_created" in _service_log_text(caplog)
@@ -394,7 +442,10 @@ class TestCreateSession:
 
         with caplog.at_level("INFO"):
             result = await create_session(
-                db_session, user, SessionCreationReason.LOCAL_LOGIN
+                db_session,
+                user,
+                SessionCreationReason.LOCAL_LOGIN,
+                expected_password_hash=None,
             )
 
         assert result is None
@@ -424,6 +475,7 @@ class TestCreateSession:
             db_session,
             User(id=user_id, active=True),
             SessionCreationReason.LOCAL_LOGIN,
+            expected_password_hash=None,
         )
 
         assert result is None
@@ -431,6 +483,75 @@ class TestCreateSession:
             select(Session).where(Session.user_id == user_id)
         )
         assert rows.scalars().all() == []
+
+    async def test_matching_expected_password_hash_creates_session(
+        self, db_session: AsyncSession, user_factory: Callable[..., Awaitable[User]]
+    ) -> None:
+        """The local-login happy path: the verified credential matches the
+        locked-current `password_hash`, so the Session is created (see
+        authentication.md, Session creation, step 1)."""
+        user = await user_factory()
+        assert user.password_hash is not None
+
+        result = await create_session(
+            db_session,
+            user,
+            SessionCreationReason.LOCAL_LOGIN,
+            expected_password_hash=user.password_hash,
+        )
+
+        assert result is not None
+        assert result.session.user_id == user.id
+        assert user.last_login_at is not None
+
+    async def test_superseded_password_hash_returns_none_without_writes(
+        self,
+        db_session: AsyncSession,
+        user_factory: Callable[..., Awaitable[User]],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A password reset that committed after the caller verified the
+        credential: the locked-current `password_hash` differs, so no
+        Session is created, `last_login_at` is not updated, and no
+        `session_created` log is emitted (see authentication.md, Session
+        creation, step 1, and Password-reset serialization)."""
+        user = await user_factory()
+        superseded = "$2b$12$" + "b" * 53
+
+        with caplog.at_level("INFO"):
+            result = await create_session(
+                db_session,
+                user,
+                SessionCreationReason.LOCAL_LOGIN,
+                expected_password_hash=superseded,
+            )
+
+        assert result is None
+        assert user.last_login_at is None
+        assert "session_created" not in _service_log_text(caplog)
+        rows = await db_session.execute(
+            select(Session).where(Session.user_id == user.id)
+        )
+        assert rows.scalars().all() == []
+
+    async def test_none_expected_password_hash_skips_password_check(
+        self, db_session: AsyncSession, user_factory: Callable[..., Awaitable[User]]
+    ) -> None:
+        """`None` requests no credential check (the SSO contract): a
+        stored `password_hash` does not block creation because no
+        comparison is performed (see authentication.md, Session creation,
+        step 1)."""
+        user = await user_factory()
+        assert user.password_hash is not None
+
+        result = await create_session(
+            db_session,
+            user,
+            SessionCreationReason.LOCAL_LOGIN,
+            expected_password_hash=None,
+        )
+
+        assert result is not None
 
     async def test_performs_no_redis_io_while_lock_is_held(
         self,
@@ -453,7 +574,10 @@ class TestCreateSession:
         monkeypatch.setattr(redis_asyncio.Redis, "from_url", _forbid_redis)
 
         result = await create_session(
-            db_session, user, SessionCreationReason.LOCAL_LOGIN
+            db_session,
+            user,
+            SessionCreationReason.LOCAL_LOGIN,
+            expected_password_hash=None,
         )
 
         assert result is not None
@@ -499,7 +623,10 @@ class TestCreateSessionLockSerialization:
             assert locked_target is not None
 
             result = await create_session(
-                waiting, locked_target, SessionCreationReason.LOCAL_LOGIN
+                waiting,
+                locked_target,
+                SessionCreationReason.LOCAL_LOGIN,
+                expected_password_hash=None,
             )
 
             assert result is None
@@ -537,7 +664,10 @@ class TestCreateSessionLockSerialization:
 
         try:
             created = await create_session(
-                session_a, user, SessionCreationReason.LOCAL_LOGIN
+                session_a,
+                user,
+                SessionCreationReason.LOCAL_LOGIN,
+                expected_password_hash=None,
             )
             assert created is not None
 
@@ -594,7 +724,10 @@ class TestCreateSessionLockSerialization:
                 target = await session.get(User, user_id)
                 assert target is not None
                 created = await create_session(
-                    session, target, SessionCreationReason.LOCAL_LOGIN
+                    session,
+                    target,
+                    SessionCreationReason.LOCAL_LOGIN,
+                    expected_password_hash=None,
                 )
                 assert created is not None
                 await session.commit()
@@ -628,6 +761,205 @@ class TestCreateSessionLockSerialization:
             await verify.rollback()
         finally:
             cleanup = await db_session_factory()
+            await cleanup.execute(delete(Session).where(Session.user_id == user_id))
+            await cleanup.execute(delete(User).where(User.id == user_id))
+            await cleanup.commit()
+
+
+# ---------------------------------------------------------------------------
+# create_session() lock serialization with password reset
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+class TestCreateSessionPasswordResetSerialization:
+    """Deterministic two-session proofs that the User-root lock serializes
+    Session creation with a committed password reset (see
+    authentication.md, Session creation, Password-reset serialization, and
+    user-service.md, Session creation concurrent with password reset). The
+    real `user_service.reset_password()` supplies the conflicting
+    `FOR UPDATE` and session invalidation."""
+
+    async def test_password_reset_committed_first_returns_none(
+        self,
+        db_session_factory: Callable[[], Awaitable[AsyncSession]],
+    ) -> None:
+        setup = await db_session_factory()
+        user = User(
+            username="serializeresetfirst",
+            email="serializeresetfirst@example.com",
+            password_hash=_FICTIONAL_PASSWORD_HASH,
+        )
+        setup.add(user)
+        await setup.commit()
+        user_id = user.id
+
+        try:
+            # The conflicting password reset commits first, replacing the
+            # hash the login workflow verified.
+            reset = await db_session_factory()
+            await user_service.reset_password(
+                reset,
+                user_id,
+                "new-correct-horse-battery",
+                acting_user_id=None,
+            )
+            await reset.commit()
+
+            waiting = await db_session_factory()
+            locked_target = await waiting.get(User, user_id)
+            assert locked_target is not None
+
+            result = await create_session(
+                waiting,
+                locked_target,
+                SessionCreationReason.LOCAL_LOGIN,
+                expected_password_hash=_FICTIONAL_PASSWORD_HASH,
+            )
+
+            assert result is None
+            rows = await waiting.execute(
+                select(Session).where(Session.user_id == user_id)
+            )
+            assert rows.scalars().all() == []
+            assert locked_target.last_login_at is None
+            await waiting.rollback()
+
+            verify = await db_session_factory()
+            refreshed = await verify.get(User, user_id)
+            assert refreshed is not None
+            assert refreshed.last_login_at is None
+            await verify.rollback()
+        finally:
+            cleanup = await db_session_factory()
+            await cleanup.execute(
+                delete(IdentityAuditEvent).where(
+                    IdentityAuditEvent.target_user_id == user_id
+                )
+            )
+            await cleanup.execute(delete(Session).where(Session.user_id == user_id))
+            await cleanup.execute(delete(User).where(User.id == user_id))
+            await cleanup.commit()
+
+    async def test_session_creation_commits_first_then_reset_invalidates_it(
+        self,
+        db_session_factory: Callable[[], Awaitable[AsyncSession]],
+    ) -> None:
+        session_a = await db_session_factory()
+        user = User(
+            username="serializeresetsecond",
+            email="serializeresetsecond@example.com",
+            password_hash=_FICTIONAL_PASSWORD_HASH,
+        )
+        session_a.add(user)
+        await session_a.commit()
+        user_id = user.id
+
+        try:
+            created = await create_session(
+                session_a,
+                user,
+                SessionCreationReason.LOCAL_LOGIN,
+                expected_password_hash=_FICTIONAL_PASSWORD_HASH,
+            )
+            assert created is not None
+
+            # A conflicting reset in an independent session must block
+            # until Session creation's transaction completes.
+            session_b = await db_session_factory()
+
+            async def _conflicting_reset() -> None:
+                await user_service.reset_password(
+                    session_b,
+                    user_id,
+                    "new-correct-horse-battery",
+                    acting_user_id=None,
+                )
+                await session_b.commit()
+
+            task_b = asyncio.create_task(_conflicting_reset())
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(asyncio.shield(task_b), timeout=0.5)
+
+            # Session creation commits first; only then does the blocked
+            # reset proceed and invalidate the new Session.
+            await session_a.commit()
+            await asyncio.wait_for(task_b, timeout=5)
+
+            verify = await db_session_factory()
+            committed_session = await verify.get(Session, created.session.id)
+            assert committed_session is not None
+            assert committed_session.is_active is False
+            await verify.rollback()
+        finally:
+            cleanup = await db_session_factory()
+            await cleanup.execute(
+                delete(IdentityAuditEvent).where(
+                    IdentityAuditEvent.target_user_id == user_id
+                )
+            )
+            await cleanup.execute(delete(Session).where(Session.user_id == user_id))
+            await cleanup.execute(delete(User).where(User.id == user_id))
+            await cleanup.commit()
+
+    async def test_creation_waits_for_reset_and_observes_superseded_hash(
+        self,
+        db_session_factory: Callable[[], Awaitable[AsyncSession]],
+    ) -> None:
+        setup = await db_session_factory()
+        user = User(
+            username="serializeresetthird",
+            email="serializeresetthird@example.com",
+            password_hash=_FICTIONAL_PASSWORD_HASH,
+        )
+        setup.add(user)
+        await setup.commit()
+        user_id = user.id
+
+        try:
+            # The reset acquires the User lock first and stays open.
+            reset = await db_session_factory()
+            await user_service.reset_password(
+                reset,
+                user_id,
+                "new-correct-horse-battery",
+                acting_user_id=None,
+            )
+
+            login = await db_session_factory()
+            target = await login.get(User, user_id)
+            assert target is not None
+
+            async def _create() -> Any:
+                return await create_session(
+                    login,
+                    target,
+                    SessionCreationReason.LOCAL_LOGIN,
+                    expected_password_hash=_FICTIONAL_PASSWORD_HASH,
+                )
+
+            task = asyncio.create_task(_create())
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(asyncio.shield(task), timeout=0.5)
+
+            # The reset commits first; Session creation then observes the
+            # replaced hash and creates nothing.
+            await reset.commit()
+            result = await asyncio.wait_for(task, timeout=5)
+
+            assert result is None
+            rows = await login.execute(
+                select(Session).where(Session.user_id == user_id)
+            )
+            assert rows.scalars().all() == []
+            await login.rollback()
+        finally:
+            cleanup = await db_session_factory()
+            await cleanup.execute(
+                delete(IdentityAuditEvent).where(
+                    IdentityAuditEvent.target_user_id == user_id
+                )
+            )
             await cleanup.execute(delete(Session).where(Session.user_id == user_id))
             await cleanup.execute(delete(User).where(User.id == user_id))
             await cleanup.commit()

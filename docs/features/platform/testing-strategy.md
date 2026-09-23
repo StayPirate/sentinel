@@ -2817,9 +2817,11 @@ scenarios are required:
   failure; and returns `token_expires_at` equal to the JWT `exp`, not the
   later `Session.expires_at`
 - Session creation acquires the User root lock and revalidates the
-  locked-current active status before creating anything: an inactive or
-  missing locked target creates no Session, updates no `last_login_at`, and
-  returns `None`; the local login endpoint maps that outcome to the generic
+  locked-current state before creating anything: an inactive or missing
+  locked target, or a locked-current `password_hash` that differs from the
+  supplied `expected_password_hash`, creates no Session, updates no
+  `last_login_at`, and returns `None`; a `None` expectation performs no
+  password check; the local login endpoint maps that outcome to the generic
   401 and the SSO callback maps it to `AUTH_SSO_USER_INACTIVE`
 - Changing `SESSION_MAX_LIFETIME_DAYS` does not invalidate existing
   sessions or alter their persisted `Session.expires_at`
@@ -2920,6 +2922,12 @@ scenarios are required:
   `LOGIN_MAX_ATTEMPTS`, retains the counter for the failed attempt (no
   successful-login delete), creates no Session, and records no
   `last_login_at` update
+- A valid-password login whose locked-current credential was superseded by a
+  password reset that committed after the step-8 verification returns the
+  generic 401, emits the lockout transition event exactly when the step-4
+  counter value equals `LOGIN_MAX_ATTEMPTS`, retains the counter for the
+  failed attempt (no successful-login delete), creates no Session, and
+  records no `last_login_at` update
 
 **Anti-enumeration:**
 
@@ -3019,8 +3027,10 @@ or identity audit validation are affected, tests MUST cover:
   user and one complete set of audit events; every loser receives the
   documented conflict and persists no dependent records
 - concurrent update serializes old/new audit values; concurrent reactivation
-  produces one mutation/event; password reset serializes with another reset
-  and with deactivation, and performs no bcrypt or Redis work while locked
+  produces one mutation/event; password reset serializes with another reset,
+  with deactivation, and with login Session creation, and performs no bcrypt
+  or Redis work while locked. A Session creation that loses to a committed
+  reset creates no Session and records no `last_login_at`
 - concurrent removal of the final vulnerability-analyst role sources proves
   that `update_roles` serializes the remaining-role check and performs ticket
   unassignment and audit exactly once

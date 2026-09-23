@@ -16,10 +16,11 @@ acquire no `FOR UPDATE` lock (Redis-only operations).
 `authenticate_local_user()` performs no eligibility re-validation of
 its own beyond the single lookup, but on success delegates to
 `session_service.create_session()`, which acquires the User root lock
-and revalidates the locked-current active status before creating
-anything (see `docs/features/identity/authentication.md`, Session
-creation). A locked-current inactive outcome is mapped to the generic
-invalid-credentials failure. `docs/features/identity/authentication.md`
+and revalidates, before creating anything, the locked-current active
+status and credential against the hash this module verified (see
+`docs/features/identity/authentication.md`, Session creation). A
+locked-current inactive or superseded-credential outcome is mapped to
+the generic invalid-credentials failure. `docs/features/identity/authentication.md`
 (`get_current_user`, Credential resolution, step 5) independently
 re-checks `User.active` on every subsequent authenticated request.
 """
@@ -297,14 +298,16 @@ async def authenticate_local_user(
     the `login_lockout_triggered` INFO event (with `user_id` when the
     username resolved to an existing user, omitted otherwise) exactly
     once for that failure. On success, delegates to
-    `session_service.create_session()`, which acquires the User root
-    lock and revalidates the locked-current active state, flushes the
-    new `Session` and `User.last_login_at` update, and returns
+    `session_service.create_session()` with the verified hash as
+    `expected_password_hash`, which acquires the User root lock and
+    revalidates the locked-current active state and credential, flushes
+    the new `Session` and `User.last_login_at` update, and returns
     `LoginSuccess`. If `create_session()` returns `None` (a deactivation
-    committed after the step-7 pre-check), the outcome is the same
-    generic `LoginInvalidCredentials` failure as step 10 — including the
-    lockout transition rule — with no Session, no `last_login_at`
-    update, and no successful-login counter clear.
+    or a password reset committed after the step-7 pre-check or the
+    step-8 verification respectively), the outcome is the same generic
+    `LoginInvalidCredentials` failure as step 10 — including the lockout
+    transition rule — with no Session, no `last_login_at` update, and no
+    successful-login counter clear.
 
     Q4: creates no `IdentityAuditEvent` — local login is outside the
     identity audit trail scope (see authentication.md, Session
@@ -360,16 +363,24 @@ async def authenticate_local_user(
     if not verified:
         return _invalid_credentials_failure(user, admitted_count)
 
-    # `verified` is only ever True when `eligible_user` was set above.
+    # `verified` is only ever True when `eligible_user` and `stored_hash`
+    # were set above.
     assert eligible_user is not None
-    created = await create_session(db, eligible_user, SessionCreationReason.LOCAL_LOGIN)
+    assert stored_hash is not None
+    created = await create_session(
+        db,
+        eligible_user,
+        SessionCreationReason.LOCAL_LOGIN,
+        expected_password_hash=stored_hash,
+    )
     if created is None:
-        # A deactivation committed after the step-7 pre-check: the locked
-        # revalidation inside `create_session()` observed the inactive
-        # current state and created no Session. This is the same generic
-        # login failure as step 10 — the lockout transition is emitted
-        # when this admitted attempt reached the threshold, and no
-        # successful-login counter clear is registered.
+        # A deactivation or a password reset committed after the step-7
+        # pre-check or the step-8 verification: the locked revalidation
+        # inside `create_session()` observed the inactive current state or
+        # a replaced `password_hash` and created no Session. This is the
+        # same generic login failure as step 10 — the lockout transition
+        # is emitted when this admitted attempt reached the threshold, and
+        # no successful-login counter clear is registered.
         return _invalid_credentials_failure(user, admitted_count)
     return LoginSuccess(
         created_session=created, normalized_username=normalized_username
