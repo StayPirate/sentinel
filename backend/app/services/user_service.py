@@ -192,6 +192,34 @@ class PasswordResetResult:
 
 
 @dataclass(frozen=True)
+class UserUpdateResult:
+    """Data returned by `update_user()`.
+
+    See `docs/features/identity/user-service.md` (Mutation Result Types).
+    `changed_fields` is the deterministic sequence of field names effectively
+    changed by one invocation relative to the locked-current row, in the fixed
+    order `username`, `email`, `full_name`, `manager_id`, `synced_at`. An empty
+    sequence is a no-op: no field was persisted and no audit event was created.
+    """
+
+    user: User
+    changed_fields: list[str]
+
+
+@dataclass(frozen=True)
+class ReactivationResult:
+    """Data returned by `reactivate_user()`.
+
+    See `docs/features/identity/user-service.md` (Mutation Result Types).
+    `reactivated` is `true` only when the invocation performed the effective
+    `inactive → active` transition and `false` for an already-active no-op.
+    """
+
+    user: User
+    reactivated: bool
+
+
+@dataclass(frozen=True)
 class UserPage:
     """A page of `User` rows returned by `list_users()`, with `roles` and
     `manager` eagerly loaded for direct profile serialization."""
@@ -682,7 +710,7 @@ async def update_user(
     full_name: str | _MissingType | None = _MISSING,
     manager_id: UUID | _MissingType | None = _MISSING,
     synced_at: datetime | _MissingType | None = _MISSING,
-) -> User:
+) -> UserUpdateResult:
     """Update mutable identity fields of an existing `User`.
 
     Q1: `user_id` identifies the target; `acting_user_id` is the audit actor
@@ -711,19 +739,20 @@ async def update_user(
     database operation (`populate_existing=True` refreshes any stale
     identity-map state after waiting for the lock). Evaluates the guards
     above against the locked row. For each of `username`/`email`/
-    `full_name`/`manager_id` whose normalized requested value differs from
-    the current stored value, stages the change and its audit event; a
-    requested value equal to the current one is a no-op for that field (no
-    write, no audit event). `synced_at`, when provided, is applied
-    unconditionally with no audit event (operational metadata exclusion —
-    see Inactive User Management Principle). If nothing was staged and
-    `synced_at` was not provided, this is a total no-op: returns the
-    unchanged user (with `roles`/`manager` eagerly loaded) without issuing
-    an UPDATE. Otherwise flushes every staged field inside a `SAVEPOINT`, so
-    a concurrent same-value winner's `IntegrityError` on the username or
-    email UNIQUE constraint is translated to `UserConflictError`. Then
-    creates one `username_changed`/`email_changed`/`full_name_changed` event
-    per changed field (`detail = {"source": "external_sync"}` when
+    `full_name`/`manager_id`/`synced_at` whose requested value differs from
+    the current stored value (using the normalized value for `username` and
+    `email`), stages the change; a requested value equal to the current one is
+    a no-op for that field (no write). Each
+    changed field except `synced_at` also stages its audit event;
+    `synced_at` is operational metadata and never produces an audit event
+    (see Inactive User Management Principle). If no field was staged, this is
+    a total no-op: returns `UserUpdateResult` with an empty `changed_fields`
+    and the unchanged locked row (with `roles`/`manager` eagerly loaded)
+    without issuing an UPDATE. Otherwise flushes every staged field inside a
+    `SAVEPOINT`, so a concurrent same-value winner's `IntegrityError` on the
+    username or email UNIQUE constraint is translated to `UserConflictError`.
+    Then creates one `username_changed`/`email_changed`/`full_name_changed`
+    event per changed field (`detail = {"source": "external_sync"}` when
     `external_id IS NOT NULL` — every mutation reaching this point for an
     external user is by construction performed by external sync, since
     guard 2 already blocks every human caller — otherwise `detail = None`),
@@ -731,8 +760,8 @@ async def update_user(
     None` always, per the intrinsically system-only contract in
     `docs/features/identity/identity-audit-log.md`; `old_value`/`new_value`
     are the previous/new manager's username, resolved via `_resolve_username()`,
-    or `None`). Returns the updated `User` with `roles` and `manager`
-    eagerly loaded.
+    or `None`). Returns `UserUpdateResult` whose `user` carries `roles` and
+    `manager` eagerly loaded.
 
     Q4: creates one event per effectively changed field among
     `username_changed`, `email_changed`, `full_name_changed`,
@@ -747,6 +776,11 @@ async def update_user(
     Q6: propagates `UserNotFoundError`, `ExternalUserFieldReadOnlyError`,
     `UsernameFormatError`, `EmailFormatError`, `UserConflictError`, and any
     underlying database or audit-service exception not translated above.
+
+    Q7: returns `UserUpdateResult(user, changed_fields)`, where
+    `changed_fields` lists every effective change in the fixed order
+    `username`, `email`, `full_name`, `manager_id`, `synced_at`, and is empty
+    for a no-op.
     """
     result = await session.execute(
         select(User)
@@ -802,22 +836,30 @@ async def update_user(
     if not isinstance(manager_id, _MissingType) and manager_id != user.manager_id:
         pending_manager_id = manager_id
 
+    pending_synced_at: datetime | _MissingType | None = _MISSING
+    if not isinstance(synced_at, _MissingType) and synced_at != user.synced_at:
+        pending_synced_at = synced_at
+
     if (
         pending_username is None
         and pending_email is None
         and isinstance(pending_full_name, _MissingType)
         and isinstance(pending_manager_id, _MissingType)
-        and synced_at is _MISSING
+        and isinstance(pending_synced_at, _MissingType)
     ):
-        return await _load_user_profile(session, user.id)
+        return UserUpdateResult(
+            user=await _load_user_profile(session, user.id),
+            changed_fields=[],
+        )
 
     # Phase 2 — apply every staged mutation and build the audit payload
     # together, inside the SAVEPOINT-protected block, so a concurrent
     # same-value winner's `IntegrityError` is translated to
     # `UserConflictError` without leaving the caller's transaction aborted.
-    changed_fields: list[
+    audit_events: list[
         tuple[IdentityAuditEventType, str | None, str | None, dict[str, str] | None]
     ] = []
+    changed_fields: list[str] = []
     manager_changed = False
     old_manager_id: UUID | None = None
     new_manager_id: UUID | None = None
@@ -827,7 +869,7 @@ async def update_user(
             if pending_username is not None:
                 old_username = user.username
                 user.username = pending_username
-                changed_fields.append(
+                audit_events.append(
                     (
                         IdentityAuditEventType.USERNAME_CHANGED,
                         old_username,
@@ -835,11 +877,12 @@ async def update_user(
                         sync_detail,
                     )
                 )
+                changed_fields.append("username")
 
             if pending_email is not None:
                 old_email = user.email
                 user.email = pending_email
-                changed_fields.append(
+                audit_events.append(
                     (
                         IdentityAuditEventType.EMAIL_CHANGED,
                         old_email,
@@ -847,11 +890,12 @@ async def update_user(
                         sync_detail,
                     )
                 )
+                changed_fields.append("email")
 
             if not isinstance(pending_full_name, _MissingType):
                 old_full_name = user.full_name
                 user.full_name = pending_full_name
-                changed_fields.append(
+                audit_events.append(
                     (
                         IdentityAuditEventType.FULL_NAME_CHANGED,
                         old_full_name,
@@ -859,15 +903,18 @@ async def update_user(
                         sync_detail,
                     )
                 )
+                changed_fields.append("full_name")
 
             if not isinstance(pending_manager_id, _MissingType):
                 old_manager_id = user.manager_id
                 new_manager_id = pending_manager_id
                 user.manager_id = pending_manager_id
                 manager_changed = True
+                changed_fields.append("manager_id")
 
-            if not isinstance(synced_at, _MissingType):
-                user.synced_at = synced_at
+            if not isinstance(pending_synced_at, _MissingType):
+                user.synced_at = pending_synced_at
+                changed_fields.append("synced_at")
 
             await session.flush()
     except IntegrityError as exc:
@@ -876,7 +923,7 @@ async def update_user(
             raise
         raise UserConflictError(field) from exc
 
-    for event_type, old_value, new_value, detail in changed_fields:
+    for event_type, old_value, new_value, detail in audit_events:
         await IdentityAuditLog.log_event(
             session,
             event_type=event_type,
@@ -900,7 +947,10 @@ async def update_user(
             detail=None,
         )
 
-    return await _load_user_profile(session, user.id)
+    return UserUpdateResult(
+        user=await _load_user_profile(session, user.id),
+        changed_fields=changed_fields,
+    )
 
 
 async def reactivate_user(
@@ -908,7 +958,7 @@ async def reactivate_user(
     user_id: UUID,
     *,
     acting_user_id: UUID | None,
-) -> User:
+) -> ReactivationResult:
     """Reactivate a previously deactivated `User`.
 
     Q1: `user_id` identifies the target; `acting_user_id` is the audit actor
@@ -926,24 +976,25 @@ async def reactivate_user(
     Q3: acquires `SELECT ... FOR UPDATE` on the target `User` as the first
     database operation. Evaluates the external-status guard first —
     unconditional on `active` for a human caller. Only then does an
-    already-active user return unchanged (with `roles`/`manager` eagerly
-    loaded) without creating an audit event. Otherwise sets
-    `User.active = True`, flushes, creates one `user_reactivated` event
-    (`detail = {"source": "external_sync"}` when `external_id IS NOT
-    NULL` — reaching the mutation for an external user is by construction
-    performed by external sync, since the guard above already blocks every
-    human caller — otherwise `detail = None`), and returns the updated
-    `User` with `roles` and `manager` eagerly loaded. Roles, tickets,
-    sessions, and API keys are left untouched.
+    already-active user return `ReactivationResult(user, false)` (with
+    `roles`/`manager` eagerly loaded) without creating an audit event.
+    Otherwise sets `User.active = True`, flushes, creates one
+    `user_reactivated` event (`detail = {"source": "external_sync"}` when
+    `external_id IS NOT NULL` — reaching the mutation for an external user is
+    by construction performed by external sync, since the guard above already
+    blocks every human caller — otherwise `detail = None`), and returns
+    `ReactivationResult(user, true)` whose `user` carries `roles` and
+    `manager` eagerly loaded. Roles, tickets, sessions, and API keys are left
+    untouched.
 
     Q4: creates exactly one `user_reactivated` event on the first effective
     reactivation; the idempotent no-op path creates none.
 
-    Q5: idempotent for local users. Once active, another call returns the
-    unchanged user and creates no audit event. For an external user, every
-    human-caller invocation raises `ExternalUserStatusReadOnlyError`
-    regardless of the current `active` value — there is no no-op path for a
-    human caller on an external user.
+    Q5: idempotent for local users. Once active, another call returns
+    `ReactivationResult(user, false)` and creates no audit event. For an
+    external user, every human-caller invocation raises
+    `ExternalUserStatusReadOnlyError` regardless of the current `active`
+    value — there is no no-op path for a human caller on an external user.
 
     Q6: propagates `UserNotFoundError`, `ExternalUserStatusReadOnlyError`,
     and any underlying database or audit-service exception.
@@ -962,7 +1013,10 @@ async def reactivate_user(
         raise ExternalUserStatusReadOnlyError()
 
     if user.active:
-        return await _load_user_profile(session, user.id)
+        return ReactivationResult(
+            user=await _load_user_profile(session, user.id),
+            reactivated=False,
+        )
 
     user.active = True
     await session.flush()
@@ -977,7 +1031,10 @@ async def reactivate_user(
         detail={"source": "external_sync"} if user.external_id is not None else None,
     )
 
-    return await _load_user_profile(session, user.id)
+    return ReactivationResult(
+        user=await _load_user_profile(session, user.id),
+        reactivated=True,
+    )
 
 
 async def reset_password(

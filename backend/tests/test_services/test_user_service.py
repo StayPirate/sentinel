@@ -1074,11 +1074,12 @@ class TestUpdateUser:
     ) -> None:
         target = await user_factory(username="old-name")
 
-        updated = await update_user(
+        result = await update_user(
             db_session, target.id, acting_user_id=None, username="new-name"
         )
 
-        assert updated.username == "new-name"
+        assert result.changed_fields == ["username"]
+        assert result.user.username == "new-name"
         events = await _audit_events_for(db_session, target.id)
         assert len(events) == 1
         assert events[0].event_type == IdentityAuditEventType.USERNAME_CHANGED.value
@@ -1110,11 +1111,12 @@ class TestUpdateUser:
     ) -> None:
         target = await user_factory(username="already-set")
 
-        updated = await update_user(
+        result = await update_user(
             db_session, target.id, acting_user_id=None, username="  Already-Set  "
         )
 
-        assert updated.username == "already-set"
+        assert result.changed_fields == []
+        assert result.user.username == "already-set"
         assert await _audit_events_for(db_session, target.id) == []
 
     async def test_invalid_username_format_raises(
@@ -1143,25 +1145,27 @@ class TestUpdateUser:
     ) -> None:
         target = await user_factory()
 
-        updated = await update_user(
+        result = await update_user(
             db_session,
             target.id,
             acting_user_id=None,
             email="  New.EMAIL@Example.COM  ",
         )
 
-        assert updated.email == "new.email@example.com"
+        assert result.changed_fields == ["email"]
+        assert result.user.email == "new.email@example.com"
 
     async def test_updates_email_and_creates_audit_event(
         self, db_session: AsyncSession, user_factory: Callable[..., Awaitable[User]]
     ) -> None:
         target = await user_factory(email="old@example.com")
 
-        updated = await update_user(
+        result = await update_user(
             db_session, target.id, acting_user_id=None, email="new@example.com"
         )
 
-        assert updated.email == "new@example.com"
+        assert result.changed_fields == ["email"]
+        assert result.user.email == "new@example.com"
         events = await _audit_events_for(db_session, target.id)
         assert len(events) == 1
         assert events[0].event_type == IdentityAuditEventType.EMAIL_CHANGED.value
@@ -1207,10 +1211,12 @@ class TestUpdateUser:
     ) -> None:
         target = await user_factory(email="already@example.com")
 
-        await update_user(
+        result = await update_user(
             db_session, target.id, acting_user_id=None, email="Already@Example.com"
         )
 
+        assert result.changed_fields == []
+        assert result.user.email == "already@example.com"
         assert await _audit_events_for(db_session, target.id) == []
 
     async def test_invalid_email_format_raises(
@@ -1244,11 +1250,12 @@ class TestUpdateUser:
     ) -> None:
         target = await user_factory(full_name="Original Name")
 
-        updated = await update_user(
+        result = await update_user(
             db_session, target.id, acting_user_id=None, full_name=None
         )
 
-        assert updated.full_name is None
+        assert result.changed_fields == ["full_name"]
+        assert result.user.full_name is None
         events = await _audit_events_for(db_session, target.id)
         assert len(events) == 1
         assert events[0].event_type == IdentityAuditEventType.FULL_NAME_CHANGED.value
@@ -1260,21 +1267,24 @@ class TestUpdateUser:
     ) -> None:
         target = await user_factory(full_name="Keep Me")
 
-        updated = await update_user(
+        result = await update_user(
             db_session, target.id, acting_user_id=None, email="x@example.com"
         )
 
-        assert updated.full_name == "Keep Me"
+        assert result.changed_fields == ["email"]
+        assert result.user.full_name == "Keep Me"
 
     async def test_full_name_same_value_is_a_no_op(
         self, db_session: AsyncSession, user_factory: Callable[..., Awaitable[User]]
     ) -> None:
         target = await user_factory(full_name="Same Name")
 
-        await update_user(
+        result = await update_user(
             db_session, target.id, acting_user_id=None, full_name="Same Name"
         )
 
+        assert result.changed_fields == []
+        assert result.user.full_name == "Same Name"
         assert await _audit_events_for(db_session, target.id) == []
 
     async def test_manager_id_change_audits_manager_usernames(
@@ -1303,11 +1313,12 @@ class TestUpdateUser:
         manager = await user_factory(username="the-manager")
         target = await user_factory(external_id=uuid.uuid4(), manager_id=manager.id)
 
-        updated = await update_user(
+        result = await update_user(
             db_session, target.id, acting_user_id=None, manager_id=None
         )
 
-        assert updated.manager_id is None
+        assert result.changed_fields == ["manager_id"]
+        assert result.user.manager_id is None
         events = await _audit_events_for(db_session, target.id)
         assert events[0].old_value == "the-manager"
         assert events[0].new_value is None
@@ -1318,11 +1329,12 @@ class TestUpdateUser:
         target = await user_factory(external_id=uuid.uuid4())
         new_synced_at = datetime.now(UTC)
 
-        updated = await update_user(
+        result = await update_user(
             db_session, target.id, acting_user_id=None, synced_at=new_synced_at
         )
 
-        assert updated.synced_at == new_synced_at
+        assert result.changed_fields == ["synced_at"]
+        assert result.user.synced_at == new_synced_at
         assert await _audit_events_for(db_session, target.id) == []
 
     async def test_username_changed_detail_includes_source_for_external_user(
@@ -1342,9 +1354,10 @@ class TestUpdateUser:
     ) -> None:
         target = await user_factory(full_name="Untouched")
 
-        updated = await update_user(db_session, target.id, acting_user_id=None)
+        result = await update_user(db_session, target.id, acting_user_id=None)
 
-        assert updated.full_name == "Untouched"
+        assert result.changed_fields == []
+        assert result.user.full_name == "Untouched"
         assert await _audit_events_for(db_session, target.id) == []
 
     async def test_multi_field_update_creates_one_event_per_field(
@@ -1370,6 +1383,168 @@ class TestUpdateUser:
         }
         assert len(events) == 3
 
+    async def test_changed_fields_report_all_effective_changes_in_fixed_order(
+        self, db_session: AsyncSession, user_factory: Callable[..., Awaitable[User]]
+    ) -> None:
+        manager_one = await user_factory(username="order-manager-one")
+        manager_two = await user_factory(username="order-manager-two")
+        old_synced_at = datetime(2020, 1, 1, tzinfo=UTC)
+        new_synced_at = datetime(2021, 1, 1, tzinfo=UTC)
+        target = await user_factory(
+            external_id=uuid.uuid4(),
+            username="order-old",
+            email="order-old@example.com",
+            full_name="Old Name",
+            manager_id=manager_one.id,
+            synced_at=old_synced_at,
+        )
+
+        result = await update_user(
+            db_session,
+            target.id,
+            acting_user_id=None,
+            full_name="New Name",
+            synced_at=new_synced_at,
+            manager_id=manager_two.id,
+            username="order-new",
+            email="order-new@example.com",
+        )
+
+        assert result.changed_fields == [
+            "username",
+            "email",
+            "full_name",
+            "manager_id",
+            "synced_at",
+        ]
+        assert result.user.username == "order-new"
+        assert result.user.email == "order-new@example.com"
+        assert result.user.full_name == "New Name"
+        assert result.user.manager_id == manager_two.id
+        assert result.user.synced_at == new_synced_at
+
+        events = await _audit_events_for(db_session, target.id)
+        event_types = {event.event_type for event in events}
+        assert event_types == {
+            IdentityAuditEventType.USERNAME_CHANGED.value,
+            IdentityAuditEventType.EMAIL_CHANGED.value,
+            IdentityAuditEventType.FULL_NAME_CHANGED.value,
+            IdentityAuditEventType.MANAGER_CHANGED.value,
+        }
+        assert len(events) == 4
+
+    async def test_synced_at_same_value_is_a_no_op(
+        self, db_session: AsyncSession, user_factory: Callable[..., Awaitable[User]]
+    ) -> None:
+        stored_synced_at = datetime(2022, 5, 5, tzinfo=UTC)
+        target = await user_factory(
+            external_id=uuid.uuid4(), synced_at=stored_synced_at
+        )
+
+        result = await update_user(
+            db_session, target.id, acting_user_id=None, synced_at=stored_synced_at
+        )
+
+        assert result.changed_fields == []
+        assert result.user.synced_at == stored_synced_at
+        assert await _audit_events_for(db_session, target.id) == []
+
+    async def test_reinvocation_after_a_successful_update_is_a_no_op(
+        self, db_session: AsyncSession, user_factory: Callable[..., Awaitable[User]]
+    ) -> None:
+        target = await user_factory(username="reinvoke-old")
+
+        first = await update_user(
+            db_session, target.id, acting_user_id=None, username="reinvoke-new"
+        )
+        second = await update_user(
+            db_session, target.id, acting_user_id=None, username="reinvoke-new"
+        )
+
+        assert first.changed_fields == ["username"]
+        assert second.changed_fields == []
+        events = await _audit_events_for(db_session, target.id)
+        assert len(events) == 1
+
+    async def test_explicit_clear_classified_only_when_it_changes_state(
+        self, db_session: AsyncSession, user_factory: Callable[..., Awaitable[User]]
+    ) -> None:
+        target = await user_factory(full_name="Clear Me")
+
+        cleared = await update_user(
+            db_session, target.id, acting_user_id=None, full_name=None
+        )
+        already_clear = await update_user(
+            db_session, target.id, acting_user_id=None, full_name=None
+        )
+
+        assert cleared.changed_fields == ["full_name"]
+        assert cleared.user.full_name is None
+        assert already_clear.changed_fields == []
+        events = await _audit_events_for(db_session, target.id)
+        assert len(events) == 1
+        assert events[0].event_type == IdentityAuditEventType.FULL_NAME_CHANGED.value
+
+    async def test_two_concurrent_same_value_updates_second_reports_no_change(
+        self,
+        db_session_factory: Callable[[], Awaitable[AsyncSession]],
+    ) -> None:
+        session_a = await db_session_factory()
+        session_b = await db_session_factory()
+        user_ids: list[uuid.UUID] = []
+        task_b: asyncio.Task[Any] | None = None
+
+        try:
+            user = User(
+                username="conc-same-value",
+                email="conc-same-value@example.com",
+                password_hash=_FICTIONAL_PASSWORD_HASH,
+            )
+            session_a.add(user)
+            await session_a.commit()
+            user_id = user.id
+            user_ids.append(user_id)
+
+            result_a = await update_user(
+                session_a,
+                user_id,
+                acting_user_id=None,
+                email="conc-same-value-new@example.com",
+            )
+
+            task_b = asyncio.create_task(
+                update_user(
+                    session_b,
+                    user_id,
+                    acting_user_id=None,
+                    email="conc-same-value-new@example.com",
+                )
+            )
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(asyncio.shield(task_b), timeout=0.3)
+
+            await session_a.commit()
+
+            result_b = await asyncio.wait_for(task_b, timeout=5)
+            await session_b.commit()
+
+            assert result_a.changed_fields == ["email"]
+            assert result_b.changed_fields == []
+            assert result_a.user.email == "conc-same-value-new@example.com"
+            assert result_b.user.email == "conc-same-value-new@example.com"
+
+            events = await _audit_events_for(session_a, user_id)
+            email_events = [
+                e
+                for e in events
+                if e.event_type == IdentityAuditEventType.EMAIL_CHANGED.value
+            ]
+            assert len(email_events) == 1
+        finally:
+            await _concurrency_teardown(
+                task_b, session_a, session_b, session_a, user_ids
+            )
+
     async def test_returns_user_with_roles_and_manager_eagerly_loaded(
         self,
         db_session: AsyncSession,
@@ -1380,13 +1555,13 @@ class TestUpdateUser:
         target = await user_factory(external_id=uuid.uuid4(), manager_id=manager.id)
         await user_role_factory(user_id=target.id, role=Role.ADMIN.value)
 
-        updated = await update_user(
+        result = await update_user(
             db_session, target.id, acting_user_id=None, synced_at=datetime.now(UTC)
         )
 
-        assert len(updated.roles) == 1
-        assert updated.manager is not None
-        assert updated.manager.id == manager.id
+        assert len(result.user.roles) == 1
+        assert result.user.manager is not None
+        assert result.user.manager.id == manager.id
 
     async def test_flushes_without_commit(
         self,
@@ -1532,7 +1707,7 @@ class TestUpdateUser:
             user_id = user.id
             user_ids.append(user_id)
 
-            updated_a = await update_user(
+            result_a = await update_user(
                 session_a,
                 user_id,
                 acting_user_id=None,
@@ -1552,11 +1727,13 @@ class TestUpdateUser:
 
             await session_a.commit()
 
-            updated_b = await asyncio.wait_for(task_b, timeout=5)
+            result_b = await asyncio.wait_for(task_b, timeout=5)
             await session_b.commit()
 
-            assert updated_a.email == "first-update@example.com"
-            assert updated_b.email == "second-update@example.com"
+            assert result_a.changed_fields == ["email"]
+            assert result_b.changed_fields == ["email"]
+            assert result_a.user.email == "first-update@example.com"
+            assert result_b.user.email == "second-update@example.com"
 
             # session_b must have refreshed post-commit state: its own
             # email_changed old_value reflects session_a's committed
@@ -1599,7 +1776,7 @@ class TestUpdateUser:
             await session_a.commit()
             user_ids.extend([user_a.id, user_b.id])
 
-            updated_a = await update_user(
+            result_a = await update_user(
                 session_a,
                 user_a.id,
                 acting_user_id=None,
@@ -1624,7 +1801,8 @@ class TestUpdateUser:
             assert exc_info.value.conflict_field == "email"
             await session_b.rollback()
 
-            assert updated_a.email == "conc-cross-target@example.com"
+            assert result_a.changed_fields == ["email"]
+            assert result_a.user.email == "conc-cross-target@example.com"
         finally:
             await _concurrency_teardown(
                 task_b, session_a, session_b, session_a, user_ids
@@ -1649,9 +1827,10 @@ class TestReactivateUser:
     ) -> None:
         target = await user_factory(active=True)
 
-        updated = await reactivate_user(db_session, target.id, acting_user_id=None)
+        result = await reactivate_user(db_session, target.id, acting_user_id=None)
 
-        assert updated.active is True
+        assert result.reactivated is False
+        assert result.user.active is True
         assert await _audit_events_for(db_session, target.id) == []
 
     async def test_already_active_external_user_with_human_caller_raises(
@@ -1676,9 +1855,10 @@ class TestReactivateUser:
     ) -> None:
         target = await user_factory(active=False)
 
-        updated = await reactivate_user(db_session, target.id, acting_user_id=None)
+        result = await reactivate_user(db_session, target.id, acting_user_id=None)
 
-        assert updated.active is True
+        assert result.reactivated is True
+        assert result.user.active is True
         events = await _audit_events_for(db_session, target.id)
         assert len(events) == 1
         assert events[0].event_type == IdentityAuditEventType.USER_REACTIVATED.value
@@ -1710,9 +1890,10 @@ class TestReactivateUser:
     ) -> None:
         target = await user_factory(external_id=uuid.uuid4(), active=False)
 
-        updated = await reactivate_user(db_session, target.id, acting_user_id=None)
+        result = await reactivate_user(db_session, target.id, acting_user_id=None)
 
-        assert updated.active is True
+        assert result.reactivated is True
+        assert result.user.active is True
         events = await _audit_events_for(db_session, target.id)
         assert events[0].detail == {"source": "external_sync"}
         assert events[0].old_value == "inactive"
@@ -1748,11 +1929,11 @@ class TestReactivateUser:
         )
         await user_role_factory(user_id=target.id, role=Role.ADMIN.value)
 
-        updated = await reactivate_user(db_session, target.id, acting_user_id=None)
+        result = await reactivate_user(db_session, target.id, acting_user_id=None)
 
-        assert len(updated.roles) == 1
-        assert updated.manager is not None
-        assert updated.manager.id == manager.id
+        assert len(result.user.roles) == 1
+        assert result.user.manager is not None
+        assert result.user.manager.id == manager.id
 
     async def test_flushes_without_commit(
         self,
@@ -1824,7 +2005,7 @@ class TestReactivateUser:
             user_id = user.id
             user_ids.append(user_id)
 
-            updated_a = await reactivate_user(session_a, user_id, acting_user_id=None)
+            result_a = await reactivate_user(session_a, user_id, acting_user_id=None)
 
             task_b = asyncio.create_task(
                 reactivate_user(session_b, user_id, acting_user_id=None)
@@ -1834,10 +2015,12 @@ class TestReactivateUser:
 
             await session_a.commit()
 
-            updated_b = await asyncio.wait_for(task_b, timeout=5)
+            result_b = await asyncio.wait_for(task_b, timeout=5)
 
-            assert updated_a.active is True
-            assert updated_b.active is True
+            assert result_a.reactivated is True
+            assert result_b.reactivated is False
+            assert result_a.user.active is True
+            assert result_b.user.active is True
 
             events = await _audit_events_for(session_a, user_id)
             reactivated_events = [
@@ -2367,10 +2550,11 @@ class TestResetPassword:
 
             await session_a.commit()
 
-            updated_b = await asyncio.wait_for(task_b, timeout=5)
+            result_b = await asyncio.wait_for(task_b, timeout=5)
             await session_b.commit()
 
-            assert updated_b.full_name == "Concurrent Update"
+            assert result_b.changed_fields == ["full_name"]
+            assert result_b.user.full_name == "Concurrent Update"
         finally:
             await _concurrency_teardown(
                 task_b, session_a, session_b, session_a, user_ids

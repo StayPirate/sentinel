@@ -478,7 +478,7 @@ async def update_user_admin(
             # `AdminUserUpdateRequest._validate_email` rejects an explicit
             # `null`, so a present `email` is always a validated string.
             assert body.email is not None
-            updated = await user_service.update_user(
+            result = await user_service.update_user(
                 db,
                 target_user.id,
                 acting_user_id=principal.user.id,
@@ -487,7 +487,7 @@ async def update_user_admin(
             )
         elif email_set:
             assert body.email is not None
-            updated = await user_service.update_user(
+            result = await user_service.update_user(
                 db,
                 target_user.id,
                 acting_user_id=principal.user.id,
@@ -499,7 +499,7 @@ async def update_user_admin(
             # here — this branch also covers `full_name_set` explicitly
             # for mypy's exhaustiveness, since both booleans cannot be
             # False at the same time.
-            updated = await user_service.update_user(
+            result = await user_service.update_user(
                 db,
                 target_user.id,
                 acting_user_id=principal.user.id,
@@ -523,7 +523,7 @@ async def update_user_admin(
     except UserNotFoundError:
         raise user_not_found_error() from None
 
-    return UserResponse(data=_serialize_user(updated))
+    return UserResponse(data=_serialize_user(result.user))
 
 
 @router.post(
@@ -562,7 +562,7 @@ async def reactivate_user_admin(
         raise user_not_found_error() from None
 
     try:
-        updated = await user_service.reactivate_user(
+        result = await user_service.reactivate_user(
             db, target_user.id, acting_user_id=principal.user.id
         )
     except ExternalUserStatusReadOnlyError:
@@ -574,7 +574,7 @@ async def reactivate_user_admin(
     except UserNotFoundError:
         raise user_not_found_error() from None
 
-    return UserResponse(data=_serialize_user(updated))
+    return UserResponse(data=_serialize_user(result.user))
 
 
 @router.post(
