@@ -123,6 +123,7 @@ async def admin_commit_client(
     admin = await user_factory()
     await user_role_factory(user_id=admin.id, role=Role.ADMIN.value)
     created = await create_session(db_session, admin, SessionCreationReason.LOCAL_LOGIN)
+    assert created is not None
 
     async def _override_get_db() -> AsyncGenerator[AsyncSession]:
         try:
@@ -1658,6 +1659,7 @@ class TestResetUserPasswordAdmin:
         created = await create_session(
             db_session, target, SessionCreationReason.LOCAL_LOGIN
         )
+        assert created is not None
         await db_session.commit()
         await redis_client.set("session_liveness:" + str(created.session.id), "1")
         await redis_client.set("login_attempts:resetcallbacktarget", "3")

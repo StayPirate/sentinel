@@ -13,12 +13,15 @@ whatever `SQLAlchemyError`/generic exception the database driver
 raises for the username lookup — no function defines its own exception
 hierarchy. `guard_and_increment()` and `clear_login_attempts()`
 acquire no `FOR UPDATE` lock (Redis-only operations).
-`authenticate_local_user()` performs no eligibility re-validation
-beyond the single lookup: `docs/features/identity/authentication.md`
+`authenticate_local_user()` performs no eligibility re-validation of
+its own beyond the single lookup, but on success delegates to
+`session_service.create_session()`, which acquires the User root lock
+and revalidates the locked-current active status before creating
+anything (see `docs/features/identity/authentication.md`, Session
+creation). A locked-current inactive outcome is mapped to the generic
+invalid-credentials failure. `docs/features/identity/authentication.md`
 (`get_current_user`, Credential resolution, step 5) independently
-re-checks `User.active` on every subsequent authenticated request,
-which already neutralizes the narrow race between this lookup and a
-concurrent deactivation.
+re-checks `User.active` on every subsequent authenticated request.
 """
 
 from __future__ import annotations
@@ -241,6 +244,28 @@ class LoginLocked:
 LocalLoginResult = LoginSuccess | LoginInvalidCredentials | LoginLocked
 
 
+def _invalid_credentials_failure(
+    user: User | None, admitted_count: int | None
+) -> LoginInvalidCredentials:
+    """Build the generic credential failure and emit the lockout
+    transition log when this admitted attempt is the one that reached
+    `LOGIN_MAX_ATTEMPTS` (see local-authentication.md, Lockout transition
+    logging).
+
+    Shared by the ordinary step-10 failure path and the
+    locked-current-inactive outcome of step 11: both are lockout-accounted
+    identically, and neither clears the counter. `user` is the step-5
+    lookup result, so `user_id` is included only when the username
+    resolved to an existing user.
+    """
+    if admitted_count == settings.login_max_attempts:
+        log_kwargs: dict[str, str | int] = {"attempt_count": admitted_count}
+        if user is not None:
+            log_kwargs["user_id"] = str(user.id)
+        logger.info("login_lockout_triggered", **log_kwargs)
+    return LoginInvalidCredentials()
+
+
 async def authenticate_local_user(
     db: AsyncSession, username: str, password: str
 ) -> LocalLoginResult:
@@ -272,9 +297,14 @@ async def authenticate_local_user(
     the `login_lockout_triggered` INFO event (with `user_id` when the
     username resolved to an existing user, omitted otherwise) exactly
     once for that failure. On success, delegates to
-    `session_service.create_session()` (which flushes the new
-    `Session` and `User.last_login_at` update) and returns
-    `LoginSuccess`.
+    `session_service.create_session()`, which acquires the User root
+    lock and revalidates the locked-current active state, flushes the
+    new `Session` and `User.last_login_at` update, and returns
+    `LoginSuccess`. If `create_session()` returns `None` (a deactivation
+    committed after the step-7 pre-check), the outcome is the same
+    generic `LoginInvalidCredentials` failure as step 10 — including the
+    lockout transition rule — with no Session, no `last_login_at`
+    update, and no successful-login counter clear.
 
     Q4: creates no `IdentityAuditEvent` — local login is outside the
     identity audit trail scope (see authentication.md, Session
@@ -328,16 +358,19 @@ async def authenticate_local_user(
         verified = False
 
     if not verified:
-        if admitted_count == settings.login_max_attempts:
-            log_kwargs: dict[str, str | int] = {"attempt_count": admitted_count}
-            if user is not None:
-                log_kwargs["user_id"] = str(user.id)
-            logger.info("login_lockout_triggered", **log_kwargs)
-        return LoginInvalidCredentials()
+        return _invalid_credentials_failure(user, admitted_count)
 
     # `verified` is only ever True when `eligible_user` was set above.
     assert eligible_user is not None
     created = await create_session(db, eligible_user, SessionCreationReason.LOCAL_LOGIN)
+    if created is None:
+        # A deactivation committed after the step-7 pre-check: the locked
+        # revalidation inside `create_session()` observed the inactive
+        # current state and created no Session. This is the same generic
+        # login failure as step 10 — the lockout transition is emitted
+        # when this admitted attempt reached the threshold, and no
+        # successful-login counter clear is registered.
+        return _invalid_credentials_failure(user, admitted_count)
     return LoginSuccess(
         created_session=created, normalized_username=normalized_username
     )
