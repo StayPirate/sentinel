@@ -4,7 +4,7 @@ description: >
   required omissions and unauthorized behavior. Use before opening or
   updating every PR, or on demand with a PR reference. Read-only.
 mode: subagent
-model: helmcode/deepseek-v4-flash
+model: openrouter/deepseek/deepseek-v4.1-flash
 variant: high
 permission:
   edit: deny

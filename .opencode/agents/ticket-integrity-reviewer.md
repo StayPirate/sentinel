@@ -4,7 +4,7 @@ description: >
   centralized service ownership, locking, and transaction hygiene. Use after
   changing Ticket mutation code or specs. Read-only.
 mode: subagent
-model: helmcode/deepseek-v4-flash
+model: openrouter/deepseek/deepseek-v4.1-flash
 variant: high
 permission:
   edit: deny

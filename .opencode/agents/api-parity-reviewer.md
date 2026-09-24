@@ -4,7 +4,7 @@ description: >
   required by feature specs, including CLI- or task-driven operations. Use
   after changing consumer-facing operations or endpoints. Read-only.
 mode: subagent
-model: helmcode/deepseek-v4-flash
+model: openrouter/deepseek/deepseek-v4.1-flash
 variant: high
 permission:
   edit: deny

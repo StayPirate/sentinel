@@ -4,7 +4,7 @@ description: >
   unjustified complexity and proposing smaller alternatives. Use after
   creating or substantially changing a feature spec. Read-only.
 mode: subagent
-model: helmcode/deepseek-v4-flash
+model: openrouter/deepseek/deepseek-v4.1-flash
 variant: high
 permission:
   edit: deny
