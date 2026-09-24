@@ -47,9 +47,8 @@ here.
    deployment platform's responsibility — see `docs/deployment.md`
    (Log Aggregation) for how each supported deployment context
    (container runtime, Kubernetes) surfaces and retains this stream. This
-   directly answers the question raised in `docs/drafts/ideas.md`
-   ("where are logs saved / rotated / backed up"): **nowhere, by the
-   application; the platform owns it.**
+   directly answers the operational question ("where are logs saved /
+   rotated / backed up"): **nowhere, by the application; the platform owns it.**
 3. **Two independent output formats, selectable via `LOG_FORMAT`**: a
    structured JSON renderer (`json`, intended for production/staging,
    machine-parseable) and a human-readable colorized console renderer
