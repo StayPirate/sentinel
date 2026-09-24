@@ -4,7 +4,8 @@
 
 Centralize Ticket reads, lifecycle operations, and cross-domain Ticket
 compositions — listing, detail assembly, creation, CVE association, assignment,
-manual-zone entry and exit, and confidentiality management — in a single
+priority override, manual-zone entry and exit, and confidentiality management —
+in a single
 service module
 (`ticket_service`). This ensures that:
 
@@ -148,7 +149,7 @@ committed post-state.
 
 | Module | Relationship |
 |--------|-------------|
-| `services/ticket_mutations.py` | `ticket_service` imports `reconcile_ticket_status()`, `recalculate_cvss_chain()`, `auto_assign_actor()`, and `ensure_ticket_operable()` from `ticket_mutations`. The dependency is unidirectional: `ticket_service` → `ticket_mutations`. Neither module imports from the other in the reverse direction |
+| `services/ticket_mutations.py` | `ticket_service` imports `reconcile_ticket_status()`, `recalculate_cvss_chain()`, `auto_assign_actor()`, `ensure_ticket_operable()`, and `refresh_priority_auto()` from `ticket_mutations`. The dependency is unidirectional: `ticket_service` → `ticket_mutations`. Neither module imports from the other in the reverse direction |
 | `services/package_service.py` | `ticket_service` invokes package-owned projection behavior for Ticket detail and the synchronous eligibility boundary during manual-zone exits. `package_service` does not import `ticket_service`; both modules depend on `ticket_mutations` for status evaluation |
 | `services/cvss.py` | No direct dependency. CVSS resolution is delegated through `ticket_mutations.recalculate_cvss_chain()` where this service requires it |
 
@@ -297,8 +298,9 @@ Conceptual semantic inputs are:
 | `status` | supplied-state plus collection of valid `TicketStatus` | omitted | Repeatable OR filter, preserving omitted versus supplied-but-empty after validation |
 | `assignee` | `str \| None` | `None` | User UUID, exact username, or literal `none` |
 | `severity` | supplied-state plus collection of valid resolved-severity filters | omitted | Repeatable OR filter including `none` and `unresolved`, preserving omitted versus supplied-but-empty after validation |
+| `priority` | supplied-state plus collection of valid effective-priority filters | omitted | Repeatable OR filter over `p1`–`p4` and `unresolved`, preserving omitted versus supplied-but-empty after validation |
 | `maintainer` | `str \| None` | `None` | User UUID or exact username |
-| `sort_by` | `created_at`, `updated_at`, `severity`, `status`, or `ticket_id` | `created_at` | Primary sort |
+| `sort_by` | `created_at`, `updated_at`, `severity`, `priority`, `status`, or `ticket_id` | `created_at` | Primary sort |
 | `sort_order` | `asc` or `desc` | `desc` | Sort direction |
 | `page` | positive integer | `1` | One-indexed page |
 | `per_page` | integer 1–100 | `20` | Page size |
@@ -314,7 +316,8 @@ The result contains a collection of Ticket summary projections plus `total`,
    rules in `tickets.md` only to directly included package occurrences and
    current CVE/external-identifier state.
 3. Apply simultaneously supplied client filters with AND semantics. Values
-   inside one repeatable status or severity filter use OR semantics. The API
+   inside one repeatable status, severity, or priority filter use OR semantics.
+   The API
    passes whether the filter was supplied together with its valid members in an
    implementation-chosen typed form, so an all-invalid supplied filter yields
    an empty page while omission applies no filter. Handle literal
@@ -325,6 +328,9 @@ The result contains a collection of Ticket summary projections plus `total`,
 4. Resolve severity exactly once per Ticket using the canonical Ticket severity
    cascade. Severity filtering, semantic sorting, and projection all use that
    same value, including the distinction between resolved `None` and SQL NULL.
+   Likewise derive the effective priority once per Ticket as
+   `COALESCE(priority_override, priority_auto)`; priority filtering (`unresolved`
+   matching SQL NULL), sorting, and projection all use that value.
 5. Collapse all one-to-many joins to one logical Ticket. Package, maintainer,
    and external-identifier fan-out must not duplicate rows or inflate `total`.
 6. Project `package_names` from directly included package occurrences only,
@@ -332,8 +338,8 @@ The result contains a collection of Ticket summary projections plus `total`,
    code-point order. Database or deployment collation is not the API order.
 7. Apply the requested primary order and an internal `Ticket.id` UUID
    tie-breaker in the same direction. `ticket_id` sorting uses numeric
-   `sequence_id`; status and severity use the semantic ranks and nullable rules
-   in `docs/api-spec.md`.
+   `sequence_id`; status, severity, and priority use the semantic ranks and
+   nullable rules in `docs/api-spec.md`.
 8. Compute `total` after visibility and every filter but before page slicing,
    then return the requested page. A page beyond the last is an empty
    collection with the correct total.
@@ -359,9 +365,11 @@ The result is the semantic projection represented by `TicketDetail` in
 1. Resolves a public locator through the SNTL-only contract and selects the root
    through the canonical visibility predicate. Missing, malformed, UUID, and
    inaccessible locators raise `TicketNotFoundError`.
-2. Projects the root fields, resolved severity, complete current assignee
-   reference, and expanded current CVE fields. CVSS assessments are not inline;
-   they remain in their dedicated sub-resource.
+2. Projects the root fields, resolved severity, effective, automatic, and
+   override priority, complete current assignee reference, and expanded current
+   CVE fields, including the KEV, EPSS, SSVC, and grouped CWE evidence and their
+   ordering defined by `CVEDetail` in `tickets.md`. CVSS assessments are not
+   inline; they remain in their dedicated sub-resource.
 3. Orders CVE external identifiers by ascending Unicode code point of source,
    then identifier, with `CVEExternalIdentifier.id` as the final tie-breaker.
 4. If `duplicate_of_id` is non-null, selects only the target's immutable
@@ -461,12 +469,18 @@ mapping location is an implementation choice.
 7. If `severity_manual` provided: create `TicketAuditEvent`
    (`severity_changed`, `old_value = NULL`, `new_value = <severity>`)
 8. If CVE associated: create `TicketAuditEvent` (`cve_associated`)
-9. For manual create-with-CVE, use the locked-current CVE and new Ticket to
+9. For `source = manual`, call `ticket_mutations.refresh_priority_auto()` for
+   the new Ticket under the held locks. A resulting `priority_changed` (system,
+   `NULL -> Px`) follows every creation event above. For
+   `source = cve_ingestion`, do not refresh: the calling `upsert_cve()` owns the
+   single refresh after its CVSS batch (see
+   [ticket-priority.md](ticket-priority.md#refresh-points))
+10. For manual create-with-CVE, use the locked-current CVE and new Ticket to
    prepare an all-source freshness refresh through `cve_service`. Validate
    registry capability and enabled state and register publication only after all
    creation and audit work succeeds. This applies to both a newly created
    placeholder and an existing CVE
-10. Return the created Ticket
+11. Return the created Ticket
 
 For a manual creation whose locked-current CVE is already `REJECTED`, these
 same steps remain authoritative: initial status still comes only from step 4,
@@ -497,9 +511,10 @@ Ticket still commits. Unexpected database, bootstrap-invariant, registration,
 or transaction errors escape and roll back normally. Periodic sync or manual
 refetch recovers the accepted crash gap; there is no durable dispatch row.
 
-**Audit events**: Up to 4, in this order: `ticket_created`, optional
-`assignment`, optional `severity_changed`, and optional `cve_associated`.
-Every event except `ticket_created` uses `comment = NULL`.
+**Audit events**: Up to 5, in this order: `ticket_created`, optional
+`assignment`, optional `severity_changed`, optional `cve_associated`, and, for
+manual creation only, optional system `priority_changed`. Every event except
+`ticket_created` uses `comment = NULL`.
 
 ### associate_cve
 
@@ -561,7 +576,9 @@ omit it; the function then captures one date at entry for its complete chain.
     `severity_changed` handover, then recalculates every system-managed Product
     through the narrow exception. Changed-Product events are system-attributed,
     use `reason = cvss`, and are ordered by `TicketPackageProduct.id` after the
-    handover event.
+    handover event. The chain then refreshes the automatic priority from the
+    associated CVE's severity and exploitation evidence, creating an optional
+    system `priority_changed` after the Product events.
 13. Call `reconcile_ticket_status()` exactly once after the handover and all
     Product events, using the same UTC `evaluation_date`. Gate #3 (severity set)
     and gate #4 (at least one canonical SUSE assessment in any accepted
@@ -625,13 +642,14 @@ by `associate_cve`, with `user_id = NULL`, not attributed to the associating
 user). `cve_associated` retains `user_id = acting_user_id`.
 Possibly `assignment` and `status_change` (from auto-assign), and possibly
 `status_change` from reconciliation. It creates one Product eligibility event
-per changed automatic occurrence, followed by at most one gate-derived
-`status_change`. Optional assignment and its `New → Analysis` event precede
-`cve_associated`; Product events follow the handover event.
+per changed automatic occurrence and an optional system `priority_changed`,
+followed by at most one gate-derived `status_change`. Optional assignment and
+its `New → Analysis` event precede `cve_associated`; Product events follow the
+handover event, and `priority_changed` follows the Product events.
 
 Any settings, database, eligibility, audit, flush, or reconciliation error
 escapes and rolls back association, manual-severity clearing, assignment,
-Product values, Ticket status, and every event together.
+Product values, automatic priority, Ticket status, and every event together.
 
 An expected no-eligible-source freshness outcome is logged and suppressed: it
 registers no publication but does not roll back the association. Unexpected
@@ -714,6 +732,23 @@ ordinary gate events use `comment = NULL`.
 **auto_assign_actor**: Not called — this operation performs an explicit
 assignment to a specified user, which supersedes implicit
 auto-assignment of the acting user.
+
+### set_priority_override
+
+Sets, changes, or clears `Ticket.priority_override`. The complete Category A
+contract is owned by
+[ticket-priority.md](ticket-priority.md#set_priority_override); this is a
+cross-reference overview.
+
+- **Locking**: `FOR SHARE` on the acting User, then `FOR UPDATE` on the Ticket.
+- **Guards**: locked-current accessibility (`TicketNotFoundError`), then
+  `ensure_ticket_operable()` (`TicketNotMutableError`); an unchanged override is
+  a no-op before assignment.
+- **Effects**: `auto_assign_actor()`, the override write, one acting-user
+  `priority_changed` with `override_action` `set`, `changed`, or `cleared`, then
+  exactly one `reconcile_ticket_status()`. `priority_auto` is not modified.
+- **Audit order**: optional `assignment` and system `New → Analysis`,
+  `priority_changed`, then at most one final gate-derived `status_change`.
 
 ### ignore_ticket
 
@@ -1691,6 +1726,7 @@ ticket_mutations (infrastructure)
 | create_ticket          | —                      | —                      | —                     | —                     | —                   |
 | associate_cve          | ✓                      | ✓                      | ✓                     | ✓                     | —                   |
 | assign_ticket          | ✓                      | ✓                      | —                     | —                     | —                   |
+| set_priority_override  | ✓                      | ✓                      | —                     | ✓                     | —                   |
 | ignore_ticket          | ✓                      | —                      | —                     | ✓                     | —                   |
 | ignore_new_for_rejected_cve | —                  | —                      | —                     | —                     | —                   |
 | mark_as_duplicate      | ✓                      | —                      | —                     | ✓                     | —                   |
@@ -1831,6 +1867,11 @@ behavior of `ticket_service` operations:
     same-transaction re-lock, the caller's `evaluation_date` is preserved,
     Product and gate convergence use the current ingestion batch's assessment
     state, and an association/status mismatch causes no lifecycle call
+19. **Priority composition**: manual creation refreshes the automatic priority
+    after every creation event while ingestion creation does not; association
+    refreshes it inside the chain after Product events and before the one final
+    reconciliation; and `set_priority_override()` satisfies the override tests
+    in [ticket-priority.md](ticket-priority.md#testing-requirements)
 
 ## Cross-references
 
@@ -1847,4 +1888,6 @@ behavior of `ticket_service` operations:
   (`triage_ticket`, `manage_confidentiality`, `create_ticket`) and the canonical
   Ticket visibility predicate
 - `docs/conventions.md` — Transaction and Locking pattern
+- `docs/features/tickets/ticket-priority.md` — priority override and automatic
+  refresh contracts
 - `docs/api-spec.md` — general API conventions, error code categories
