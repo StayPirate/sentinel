@@ -447,7 +447,7 @@ flowchart LR
 
     subgraph boundary["Shared Boundary: BaseCVEFetcher / cve_service"]
         UPSERT["upsert_cve()<br/>Phase 1: DB-only transaction"]
-        CVSS["CVSS batch + severity<br/>+ Product eligibility"]
+        CVSS["CVSS batch + severity<br/>+ Product eligibility<br/>+ Ticket priority refresh"]
         NEWTKT["Auto-create Ticket (New)"]
         REFS["reference_service<br/>automatic references"]
         SRCLATEST["CVESource latest-state<br/>one row per (cve_id, source)"]
@@ -881,6 +881,7 @@ other feature:
 |------|--------|---------|
 | [tickets](features/tickets/tickets.md) | Core | Ticket entity, lifecycle, gates, severity resolution |
 | [ticket-audit-log](features/tickets/ticket-audit-log.md) | Core | Audit trail via TicketAuditEvent records |
+| [ticket-priority](features/tickets/ticket-priority.md) | Core | Informational Ticket priority from severity and exploitation evidence, with manual override |
 | [package-model](features/packages/package-model.md) | Core | Track affectedness, product eligibility, and release detection |
 | [cve-tracking](features/tickets/cve-tracking.md) | Ingestion | CVE sync from NVD, MITRE, and other sources |
 | [cvss-scoring](features/tickets/cvss-scoring.md) | Ingestion | Multi-provider CVSS assessment and severity derivation |

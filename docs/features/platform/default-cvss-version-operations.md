@@ -48,8 +48,11 @@ Domain behavior remains with its existing authorities:
 - `docs/features/packages/package-model.md` owns automatic Product eligibility;
 - `docs/features/tickets/tickets.md` owns the Analyzed and Resolved predicates;
 - `docs/features/tickets/ticket-service.md` owns Ticket convergence publication
-  vocabulary, owner policies, and recovery; and
-- `docs/features/tickets/ticket-audit-log.md` owns the resulting audit events.
+  vocabulary, owner policies, and recovery;
+- `docs/features/tickets/ticket-audit-log.md` owns the resulting audit events;
+  and
+- `docs/features/tickets/ticket-priority.md` owns the automatic Ticket priority
+  refresh that the default-version chain performs.
 
 Neither operation changes a CVSS assessment or applies a remediation action.
 
@@ -217,7 +220,9 @@ registered effect is published.
 The default-version mode, its exhaustive Ticket-state effects, and its
 `changed`, `unchanged`, and `missing` classifications are authoritative in
 `docs/features/tickets/ticket-mutations.md` (`recalculate_cvss_chain()`). The
-runner neither copies nor extends that matrix. The function in turn delegates
+runner neither copies nor extends that matrix. That chain also refreshes the
+associated Ticket's automatic priority in every Ticket status, and a unit whose
+only mutation is a changed `priority_auto` classifies `changed`. The function in turn delegates
 severity, eligibility, Product, gate, and audit semantics to their owning
 specifications listed under Scope and Ownership.
 
@@ -528,6 +533,9 @@ Projection rules:
   resolutions; the preview does not read the setting again per unit.
 - One UTC `evaluation_date` governs lifecycle, eligibility, actionability, and
   gate projection for the complete invocation.
+- Ticket priority is not projected. The result has no priority field, and a
+  projected severity change that would change a Ticket's automatic priority
+  contributes only to the counts defined above.
 
 ### Consistency and Staleness
 

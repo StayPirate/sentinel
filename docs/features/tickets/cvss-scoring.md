@@ -415,15 +415,18 @@ transaction.
 For an effective manual SUSE chain, deterministic insertion order is optional
 `assignment`, optional system `New → Analysis`, `cvss_assessment_changed`,
 optional derived `severity_changed`, changed-Product eligibility events ordered
-by `TicketPackageProduct.id`, and optional final gate `status_change`. Deferred
-external mutations stop after the direct CVSS records.
+by `TicketPackageProduct.id`, optional system `priority_changed`, and optional
+final gate `status_change`. Deferred external mutations stop after the direct
+CVSS records and the automatic priority refresh.
 
 For the trusted-external ingestion batch, effective assessment events are
 ordered by version `4.0`, `3.1`, `3.0`, `2.0`, then canonical provider ascending
 by Unicode code point. After the last assessment event, the batch appends at most one
-derived `severity_changed`, Product events in occurrence-ID order, optional
-assignment-eligibility sanitation, and at most one final gate `status_change`. It
-never emits an aggregate replacement for the per-assessment events.
+derived `severity_changed`, Product events in occurrence-ID order, at most one
+system `priority_changed`, optional assignment-eligibility sanitation, and at
+most one final gate `status_change`. It never emits an aggregate replacement for
+the per-assessment events. The automatic priority contract is owned by
+[ticket-priority.md](ticket-priority.md).
 
 ### Serialization and Concurrent Outcomes
 

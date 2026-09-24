@@ -372,7 +372,7 @@ When adding a new audit trail, update this index.
 
 | Audit Trail | Table | Event Types | Retention | Owning Spec |
 |---|---|---|---|---|
-| Ticket | `ticket_audit_event` | 29 | Indefinite | `docs/features/tickets/ticket-audit-log.md` |
+| Ticket | `ticket_audit_event` | 30 | Indefinite | `docs/features/tickets/ticket-audit-log.md` |
 | Fetcher | `fetcher_audit_event` | 4 | Indefinite | `docs/features/platform/fetcher-infrastructure.md` |
 | Identity | `identity_audit_event` | 14 | Indefinite | `docs/features/identity/identity-audit-log.md` |
 | Setting | `setting_audit_event` | 1 | Indefinite | `docs/features/platform/system-settings.md` |

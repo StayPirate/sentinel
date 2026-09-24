@@ -310,11 +310,14 @@ When `sort_by` references a field with domain-defined ordinal semantics
 | Field | Ascending order (semantic rank) |
 |-------|--------------------------------|
 | `severity` | None (0) < Low (1) < Medium (2) < High (3) < Critical (4) |
+| `priority` | P4 (0) < P3 (1) < P2 (2) < P1 (3) |
 | `status` | New (0) < Analysis (1) < Analyzed (2) < Resolved (3) < Ignored (4) < Duplicated (5) |
 
 `None` is the resolved severity label for CVSS score 0.0 (rank 0 in the
 semantic ordering). `NULL` (severity not yet resolved) is not part of the
 ranking — NULL values sort last (see Nullable Sort Field Ordering below).
+Likewise, an effective Ticket priority of `NULL` (not yet prioritizable) is not
+ranked and sorts last; the default `desc` order lists `P1` first.
 
 Endpoints that support sorting by semantic fields MUST note this in
 their query parameter specification: "semantic ordering (see Sorting)".
@@ -779,6 +782,9 @@ The derivation tables below are the single normative source of truth.
 | Mutation (POST/PATCH/DELETE) under `/api/v1/tickets/{ticket_id}/**` | + `409 TICKET_NOT_MUTABLE`, except when the owning endpoint contract declares an opt-out from `ensure_ticket_operable()` |
 | Mutation (POST/PATCH/DELETE) under `/api/v1/cves/{cve_id}/**` | + `409 TICKET_NOT_MUTABLE` only when the CVE has an associated Ticket and the owning endpoint does not declare an opt-out; refetch is an opt-out |
 | Any other path | None |
+
+A path pattern ending in `/**` includes the identified resource path itself,
+for example `GET /api/v1/tickets/{ticket_id}` and `GET /api/v1/cves/{cve_id}`.
 
 #### Query-Shape Response Derivation
 

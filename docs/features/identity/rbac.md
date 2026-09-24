@@ -22,7 +22,7 @@ endpoint contract.
 | Capability | Operations Covered |
 |---|---|
 | `create_ticket` | Create ticket manually |
-| `triage_ticket` | Assign/reassign ticket, change ticket status (all transitions: ignore, reopen, duplicate, revert-duplicate), associate CVE with ticket, set/update manual severity, refetch an accessible CVE, rerun complete Ticket convergence |
+| `triage_ticket` | Assign/reassign ticket, change ticket status (all transitions: ignore, reopen, duplicate, revert-duplicate), associate CVE with ticket, set/update manual severity, set/change/clear the priority override, refetch an accessible CVE, rerun complete Ticket convergence |
 | `manage_packages` | Add/remove packages from tickets, exclude/restore (package, track, product), change track affectedness to any non-`FIXED` status, set `FIXED` only on a locked-current CVE-less Ticket, override product eligibility |
 | `manage_cvss` | Add/edit/delete SUSE CVSS assessments |
 | `manage_references` | Add/edit/delete ticket references |
@@ -150,6 +150,7 @@ Any logged-in user, regardless of role. Includes all Public access plus:
 | Change ticket status (ignore, reopen, duplicate, revert-duplicate) | `triage_ticket` |
 | Associate CVE with ticket | `triage_ticket` |
 | Set/update manual severity | `triage_ticket` |
+| Set/change/clear priority override | `triage_ticket` |
 | Refetch an accessible CVE | `triage_ticket` |
 | Add/remove packages from tickets | `manage_packages` |
 | Exclude/restore package, track, or product | `manage_packages` |
@@ -469,6 +470,7 @@ here with the required authorization level and a link to the owning spec.
 | POST | `/api/v1/tickets` | `create_ticket` †manage_confidentiality | [tickets](../tickets/tickets.md#create-ticket) |
 | POST | `/api/v1/tickets/{ticket_id}/associate-cve` | `triage_ticket` | [tickets](../tickets/tickets.md#associate-cve) |
 | PATCH | `/api/v1/tickets/{ticket_id}/severity` | `triage_ticket` | [tickets](../tickets/tickets.md#set-severity-manual) |
+| PATCH | `/api/v1/tickets/{ticket_id}/priority` | `triage_ticket` | [tickets](../tickets/tickets.md#set-priority-override) |
 | PATCH | `/api/v1/tickets/{ticket_id}/assignee` | `triage_ticket` | [tickets](../tickets/tickets.md#assign-ticket) |
 | POST | `/api/v1/tickets/{ticket_id}/ignore` | `triage_ticket` | [tickets](../tickets/tickets.md#ignore-ticket) |
 | POST | `/api/v1/tickets/{ticket_id}/reopen` | `triage_ticket` | [tickets](../tickets/tickets.md#reopen-ticket) |
@@ -516,6 +518,7 @@ here with the required authorization level and a link to the owning spec.
 | Method | Endpoint | Authorization | Owning Spec |
 |--------|----------|---------------|-------------|
 | GET | `/api/v1/cves` | Public (optional auth) | [cve-tracking](../tickets/cve-tracking.md#list-cves) |
+| GET | `/api/v1/cves/{cve_id}` | Public (optional auth) | [cve-tracking](../tickets/cve-tracking.md#get-cve) |
 | GET | `/api/v1/cves/{cve_id}/cvss` | Public (optional auth) | [cvss-scoring](../tickets/cvss-scoring.md#get-cvss-assessments-for-a-cve) |
 | GET | `/api/v1/cves/{cve_id}/sources` | Public (optional auth) | [cve-service](../tickets/cve-service.md#cve-source-status) |
 | POST | `/api/v1/cves/{cve_id}/cvss/suse` | `manage_cvss` | [cvss-scoring](../tickets/cvss-scoring.md#set-or-update-suse-cvss-assessment) |

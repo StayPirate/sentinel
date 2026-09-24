@@ -26,7 +26,7 @@ each event type must be populated.
 ### Event Type Contract
 
 When the canonical mutation matrix requires an event, the owning service
-populates it according to this table. The enum remains a closed inventory of 29
+populates it according to this table. The enum remains a closed inventory of 30
 event types; an explicit no-event boundary is not represented by an additional
 event type.
 
@@ -46,6 +46,7 @@ event type.
 | `ticket_created` | Ticket created (CVE ingestion or manual creation) | `NULL` for automatic creation, creating user for manual creation | `NULL` | `NULL` | Exactly `Ticket created manually`, or `CVE ingested from {source}` using the canonical source label in `cve-service.md` | `NULL` |
 | `cve_associated` | CVE associated with a ticket that previously had no CVE | Acting user for explicit association; creating user or `NULL` when included in Ticket creation | `NULL` | CVE-ID string (e.g., `"CVE-2024-1234"`) | `NULL` | `NULL` |
 | `severity_changed` | CVSS resolution changes `CVE.severity`, an authorized user sets/clears manual severity, or CVE association hands over from manual to CVSS-derived severity | `NULL` for every CVSS-derived value, including association handover; acting user only for direct `set_severity_manual()` | Old severity (e.g., `High`) or `NULL` | New severity (e.g., `Critical`) or `NULL` | `NULL` | `NULL` |
+| `priority_changed` | An automatic refresh changes the Ticket's effective priority, or an authorized user sets, changes, or clears the priority override (see `ticket-priority.md`) | `NULL` for automatic changes; acting user for override changes | Previous effective priority (`P1`–`P4`) or `NULL` | New effective priority (`P1`–`P4`) or `NULL`; may equal the old value for an override change | `NULL` | `NULL` for automatic changes; `{"override_action": "..."}` for override changes (see detail contract) |
 | `cvss_assessment_changed` | CVSS assessment added, modified, or removed | Acting user for manual SUSE changes, `NULL` for trusted external ingestion | Previous canonical `"provider_name vX.Y vector_string (score)"` or `NULL` if new | Current canonical `"provider_name vX.Y vector_string (score)"` or `NULL` if removed | `NULL` | `NULL` |
 | `product_eligibility_changed` | Product eligibility or its manual-override ownership changed due to CVSS/default-version recalculation, reactivation, lifecycle phase transition (Reactive Support), threshold change, or authorized-user override | Authorized acting user for direct overrides, `NULL` for system-triggered changes | Old eligibility (`true` or `false`) | New eligibility (`true` or `false`); may equal old value for a metadata-only override set/clear | `NULL` | Product subject plus `reason` and conditional `override_action` (see detail contract) |
 | `track_excluded` | Track directly soft-deleted by an authorized acting user. Child Products are not modified and do not generate events; they become effectively excluded through the hierarchy | Acting user | Track name | `NULL` | `NULL` | `{"track": "...", "package": "..."}` (see detail contract) |
@@ -108,12 +109,18 @@ event type.
   back assessment outcomes likewise create none.
 - Event insertion order is deterministic. Ticket creation records
   `ticket_created` first, then optional assignment, optional manual severity,
-  and optional CVE association events. CVE association
+  optional CVE association, and, for manual creation, optional automatic
+  `priority_changed` events. CVE association
   records `cve_associated` before its derived severity handover. An effective
   manual SUSE chain records optional `assignment`, optional system
   `New → Analysis`, `cvss_assessment_changed`, optional derived
-  `severity_changed`, automatic Product eligibility events, and optional final
-  gate `status_change`, in that order. An external chain begins with
+  `severity_changed`, automatic Product eligibility events, optional automatic
+  `priority_changed`, and optional final gate `status_change`, in that order.
+  Every automatic `priority_changed` follows the severity and Product events of
+  its workflow and precedes assignment-eligibility sanitation and the final
+  gate event. A direct override records optional `assignment` and system
+  `New → Analysis`, then `priority_changed`, then the optional final gate
+  event. An external chain begins with
   `cvss_assessment_changed` because it never assigns. Product events are ordered
   by `TicketPackageProduct.id` ascending; multiple maintainer events are ordered
   by `User.id` ascending; duplicate-dependent events follow the locked dependent
@@ -124,10 +131,13 @@ event type.
 - One trusted-external ingestion batch orders its effective assessment events by
   version `4.0`, `3.1`, `3.0`, `2.0`, then canonical provider ascending by Unicode code
   point. It then emits at most one `severity_changed`, all changed Product
-  events, and at most one final reconciliation event. If the transaction also
-  creates a Ticket, `ticket_created` and `cve_associated` precede that batch. If
+  events, at most one automatic `priority_changed`, and at most one final
+  reconciliation event. If the transaction also
+  creates a Ticket, `ticket_created` and `cve_associated` precede that batch.
+  When the batch is empty or all-unchanged, the ingestion's own priority refresh
+  emits the optional `priority_changed` after the batch. If
   it then applies CVE rejection, the exact `New -> Ignored` event follows the
-  complete CVSS batch. Republication's manual-zone-exit events likewise follow
+  complete CVSS batch and priority refresh. Republication's manual-zone-exit events likewise follow
   the assessment writes and direct CVSS events; an `Ignored` Ticket's deferred
   Product events occur during that exit from the batch's final assessment set.
 - Automatic Product recalculation creates exactly one event for each occurrence
@@ -138,6 +148,12 @@ event type.
   `is_eligible_override` changes even if the boolean does not; that one event
   truthfully carries equal old/new booleans and the applicable
   `override_action`.
+- `priority_changed` records the effective priority
+  (`COALESCE(priority_override, priority_auto)`). An automatic refresh creates
+  it only when the effective value changes; a `priority_auto` change masked by
+  an override is an effective mutation with an explicit no-event contract. A
+  direct override set, change, or clear always creates one event, even when the
+  effective value is unchanged, carrying the applicable `override_action`.
 - `comment` is system-generated human-readable text and is never user input or
   structured machine-readable data. Event types use `comment = NULL` unless the
   event table or the canonical vocabulary below specifies an exact value. A
@@ -232,9 +248,11 @@ an intentional no-event contract, not missing audit coverage.
 | CVE association and rejection/revert | `cve_associated`; applicable derived severity/Product/status events; rejection uses one `status_change`. A rejected orphan records creation/association, then CVSS events, then `New -> Ignored` | Acting user for association; system for derived changes and rejection/revert status | manual `ticket_service`: User then CVE then Ticket; system `cve_service`: CVE then Ticket |
 | Manual severity | One `severity_changed`, plus ordinary assignment/status consequences | Acting user for severity; system for derived status | `ticket_mutations`; acting User then Ticket |
 | Effective CVSS assessment mutation or ingestion batch | One `cvss_assessment_changed` per effective assessment; optional single `severity_changed`, Product-event sequence, and final status per chain/batch | Direct SUSE event uses acting user; all derived events and external ingestion use system | `ticket_mutations`; manual path User then CVE then optional Ticket; system path CVE then optional Ticket |
-| Default-version severity/eligibility chain | No assessment event; optional `severity_changed`, Product events, and final status | System | `ticket_mutations`; CVE then optional Ticket |
+| Default-version severity/eligibility chain | No assessment event; optional `severity_changed`, Product events, `priority_changed`, and final status | System | `ticket_mutations`; CVE then optional Ticket |
+| Automatic priority refresh within any workflow listed in `ticket-priority.md` (Refresh Points) | One `priority_changed` when the effective priority changes; none when `priority_auto` changes behind an override or does not change | System | `ticket_mutations.refresh_priority_auto()` under the calling workflow's existing CVE-then-Ticket or Ticket roots |
+| Priority override set, change, or clear | One `priority_changed` with `override_action`; ordinary assignment/final status events when applicable | Acting user for the override; system for derived status | `ticket_service`; acting User then Ticket |
 | Ticketless CVE, CVSS, or enrichment mutation | None because no Ticket audit target exists | N/A | CVE-domain owner; CVE root where required |
-| Other CVE-owned metadata or enrichment mutation | None by itself; resulting CVSS or rejection effects retain the events above | N/A | `cve_service`; CVE root |
+| Other CVE-owned metadata or enrichment mutation | None by itself; resulting CVSS, automatic priority, or rejection effects retain the events above | N/A | `cve_service`; CVE root |
 | Package-tree creation or completion | One invocation-level `package_added`; one `package_maintainer_added` per inserted association | Acting user for direct addition; system for automatic additions and maintainership | `package_service`; User then Ticket after external I/O for direct addition; Ticket only for system work |
 | Track affectedness change | One `track_status_changed`; ordinary assignment/final status events when applicable | Acting user for direct change; system for release detection | `package_service`; User then Ticket for direct change, Ticket for system work |
 | Product release confirmation | One `product_released`; optional final status | System | `package_service`; Ticket lock after external I/O |
@@ -262,8 +280,9 @@ restoration, reactivation, provenance, or recovery.
 ### Cross-Event Ordering, Locking, and Rollback
 
 Within one composed workflow, optional assignment and its system
-`New -> Analysis` event precede direct mutation events. Derived severity and
-Product events follow the inputs that caused them. Assignment-eligibility
+`New -> Analysis` event precede direct mutation events. Derived severity,
+Product, and automatic priority events follow the inputs that caused them, with
+automatic `priority_changed` after the severity and Product events. Assignment-eligibility
 sanitation then follows every gate-input mutation, and the final gate-derived
 `status_change` is last. Ticket creation is the exception only in that
 `ticket_created` remains the first event in the new Ticket's history. Within one
@@ -271,8 +290,9 @@ package-tree invocation, ascending-`User.id` `package_maintainer_added` events
 precede the invocation-level `package_added` event.
 
 The source-neutral ingestion sequence is creation events when needed, canonical
-CVSS assessment events, at most one severity event, then state-applicable
-Product/final-gate events. An applicable rejection follows that batch; an
+CVSS assessment events, at most one severity event, state-applicable Product
+events, at most one automatic priority event, then the state-applicable final
+gate event. An applicable rejection follows that batch; an
 `Ignored` republication performs its deferred Product and final status events in
 the subsequent manual-zone-exit sequence. Source-status and automatic-reference
 writes create no Ticket event. Any reference, audit, flush, or other
@@ -318,6 +338,7 @@ types not listed here MUST set `detail` to `NULL`.
 | `reference_description_changed` | `url` (string) | — | `{"url": "https://bugzilla.suse.com/show_bug.cgi?id=12345"}` |
 | `duplicate_target_changed` | `triggered_by_ticket` (string) | — | `{"triggered_by_ticket": "SNTL-42"}` |
 | `package_maintainer_added` | `package` (string) | — | `{"package": "fictional-package"}` |
+| `priority_changed` | `override_action` (string; conditionally required) | — | `{"override_action": "set"}` |
 
 **Notes**:
 
@@ -349,6 +370,13 @@ types not listed here MUST set `detail` to `NULL`.
   with the base `log_event()` contract in
   `docs/features/platform/audit-trail-infrastructure.md` for other kwarg
   validation failures.
+- `priority_changed`: a direct override event (non-NULL `user_id`) requires
+  `detail = {"override_action": ...}` with exactly `set` (no override to a
+  value), `changed` (one override value to another), or `cleared` (a value to
+  no override). An automatic event (`user_id = NULL`) requires `detail = NULL`.
+  `TicketAuditLog.log_event()` MUST reject a missing or non-NULL `detail` in
+  the respective case, any other key, and any other `override_action` value,
+  raising `ValueError`.
 - Product event details intentionally omit both `TicketPackageProduct.id` and
   internal `Product.id`. Within the ticket-scoped audit log, the event-time
   `package`, `track`, and canonical `product_cpe` identify the occurrence, and
@@ -652,6 +680,12 @@ required event sequence or explicit no-event outcome. For audited mutations:
     external assessments and prove direct CVSS events precede manual-zone-exit
     Product/final-status events whose values derive from the current payload's
     final assessment set, not stale pre-ingest state
+28. `priority_changed` tests assert effective old/new values, system attribution
+    and `detail = NULL` for automatic changes, the documented position before
+    sanitation and the final gate event, no event for a masked or unchanged
+    automatic value, and acting-user override events with exact
+    `override_action` (`set`, `changed`, `cleared`), including equal old/new
+    values; `log_event()` rejects mismatched `detail` for either actor case
 
 See Guardrail 6 (Mandatory testing) and Guardrail 11 (Ticket event logging)
 in `AGENTS.md` for enforcement.
@@ -672,3 +706,5 @@ Indefinite. TicketAuditEvent records are never automatically deleted.
 - `docs/features/identity/rbac.md` — canonical Ticket visibility predicate
 - `docs/features/platform/testing-strategy.md` — shared Ticket accessibility
   matrix
+- `docs/features/tickets/ticket-priority.md` — `priority_changed` triggers,
+  refresh points, and override
