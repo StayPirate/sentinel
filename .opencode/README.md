@@ -130,10 +130,7 @@ agent's model.
 ## Commands
 
 Commands are defined in `.opencode/commands/` and invoked with `/command-name`.
-
-| Command | Purpose |
-|---------|---------|
-| `/idea` | Add a new idea to the brainstorming list in `docs/drafts/ideas.md` |
+No custom slash commands are currently registered.
 
 ## Skills
 
