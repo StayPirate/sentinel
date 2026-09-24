@@ -135,9 +135,9 @@ event type.
   reconciliation event. If the transaction also
   creates a Ticket, `ticket_created` and `cve_associated` precede that batch.
   When the batch is empty or all-unchanged, the ingestion's own priority refresh
-  emits the optional `priority_changed` after the batch. If
-  it then applies CVE rejection, the exact `New -> Ignored` event follows the
-  complete CVSS batch and priority refresh. Republication's manual-zone-exit events likewise follow
+  emits the optional `priority_changed` after the batch. If it then applies CVE
+  rejection, the exact `New -> Ignored` event follows the complete CVSS batch
+  and priority refresh. Republication's manual-zone-exit events likewise follow
   the assessment writes and direct CVSS events; an `Ignored` Ticket's deferred
   Product events occur during that exit from the batch's final assessment set.
 - Automatic Product recalculation creates exactly one event for each occurrence
@@ -240,14 +240,14 @@ an intentional no-event contract, not missing audit coverage.
 
 | Domain outcome | Required Ticket event or explicit no-event contract | Semantic actor | Owner and serialization root |
 |---|---|---|---|
-| Ticket creation | `ticket_created` first, then optional `assignment`, optional `severity_changed`, and optional `cve_associated` | Direct creation events use the acting user; ingestion uses system | `ticket_service`; manual path locks User, then optional CVE before insert; system path locks optional CVE before insert |
+| Ticket creation | `ticket_created` first, then optional `assignment`, optional `severity_changed`, optional `cve_associated`, and, for manual creation, optional system `priority_changed` | Direct creation events use the acting user; ingestion uses system | `ticket_service`; manual path locks User, then optional CVE before insert; system path locks optional CVE before insert |
 | Direct assignment or reassignment | One `assignment`; optional system `New → Analysis`; optional final gate event | Acting user for assignment, system for derived status | `ticket_service`; target User then Ticket |
 | Auto-assignment during an effective mutation | One `assignment`; system `New → Analysis` when applicable | Acting user for assignment, system for promotion | Owning mutation service; stabilized acting User then optional CVE then Ticket |
 | User deactivation, final VA-role loss, or assignment-eligibility sanitation | One `assignment` per effectively cleared non-NULL assignee | System | `user_service`: User `FOR NO KEY UPDATE` then ordered Ticket locks; reconciliation sanitation: existing Ticket lock plus a fresh unlocked User/role observation |
 | Ignore, mark duplicate, reopen, or revert duplicate | Direct `status_change`, `duplicate_set`, or `duplicate_removed` as applicable; one `duplicate_target_changed` per repointed dependent; derived Product, sanitation, and final status events retain their normal contracts | Acting user for the direct ignore, duplicate-set, or duplicate-remove decision; reopen's resulting gate status and all other derived consequences use system | `ticket_service`; Ticket, ordered multi-Ticket, or locked dependent roots as specified there |
 | CVE association and rejection/revert | `cve_associated`; applicable derived severity/Product/status events; rejection uses one `status_change`. A rejected orphan records creation/association, then CVSS events, then `New -> Ignored` | Acting user for association; system for derived changes and rejection/revert status | manual `ticket_service`: User then CVE then Ticket; system `cve_service`: CVE then Ticket |
-| Manual severity | One `severity_changed`, plus ordinary assignment/status consequences | Acting user for severity; system for derived status | `ticket_mutations`; acting User then Ticket |
-| Effective CVSS assessment mutation or ingestion batch | One `cvss_assessment_changed` per effective assessment; optional single `severity_changed`, Product-event sequence, and final status per chain/batch | Direct SUSE event uses acting user; all derived events and external ingestion use system | `ticket_mutations`; manual path User then CVE then optional Ticket; system path CVE then optional Ticket |
+| Manual severity | One `severity_changed`, optional system `priority_changed`, plus ordinary assignment/status consequences | Acting user for severity; system for derived status | `ticket_mutations`; acting User then Ticket |
+| Effective CVSS assessment mutation or ingestion batch | One `cvss_assessment_changed` per effective assessment; optional single `severity_changed`, Product-event sequence, optional system `priority_changed`, and final status per chain/batch | Direct SUSE event uses acting user; all derived events and external ingestion use system | `ticket_mutations`; manual path User then CVE then optional Ticket; system path CVE then optional Ticket |
 | Default-version severity/eligibility chain | No assessment event; optional `severity_changed`, Product events, `priority_changed`, and final status | System | `ticket_mutations`; CVE then optional Ticket |
 | Automatic priority refresh within any workflow listed in `ticket-priority.md` (Refresh Points) | One `priority_changed` when the effective priority changes; none when `priority_auto` changes behind an override or does not change | System | `ticket_mutations.refresh_priority_auto()` under the calling workflow's existing CVE-then-Ticket or Ticket roots |
 | Priority override set, change, or clear | One `priority_changed` with `override_action`; ordinary assignment/final status events when applicable | Acting user for the override; system for derived status | `ticket_service`; acting User then Ticket |

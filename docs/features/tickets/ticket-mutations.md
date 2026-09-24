@@ -540,7 +540,7 @@ function.
 | Module | Functions that call `ensure_ticket_operable` |
 |--------|----------------------------------------------|
 | `ticket_mutations` | Manual-SUSE `upsert_cvss_assessment`, `delete_cvss_assessment`, `set_severity_manual` |
-| `ticket_service` | `associate_cve`, `assign_ticket`, `ignore_ticket`, `mark_as_duplicate` |
+| `ticket_service` | `associate_cve`, `assign_ticket`, `ignore_ticket`, `mark_as_duplicate`, `set_priority_override` |
 | `package_service` | Gate-relevant mutations call the guard; `set_track_delivery_status` also calls it for operability but remains outside assignment, audit, and Ticket reconciliation |
 
 Trusted external ingestion does not call this guard. It may maintain
@@ -787,10 +787,10 @@ new one is created. External-provider assessments never use this boundary.
     skip overrides, and update changed booleans only. Create one system-
     attributed `product_eligibility_changed` event per change with
     `reason = cvss`, ordered by `TicketPackageProduct.id`. Then, for an
-    effective mutation with an associated Ticket, call
-    `refresh_priority_auto()`; an optional system `priority_changed` follows the
-    Product events. Priority is not a gate input and does not by itself trigger
-    step 13.
+    effective mutation with an associated Ticket and whatever the propagation
+    disposition, call `refresh_priority_auto()`; an optional system
+    `priority_changed` follows any Product events. Priority is not a gate input
+    and does not by itself trigger step 13.
 13. If the Ticket is now in the gate zone and this effective chain changed a
     gate input or moved `New` into `Analysis`, call
     `reconcile_ticket_status()` exactly once with the same `evaluation_date`.
@@ -984,7 +984,8 @@ callers to resolve the assessment ID.
 10. Resolve the Eligibility Score result and derive propagation from the status
     matrix. For `immediate`, apply the same locked-current automatic Product
     procedure, event ordering, and override skip as upsert step 12. Then, when a
-    Ticket exists, call `refresh_priority_auto()`.
+    Ticket exists and whatever the propagation disposition, call
+    `refresh_priority_auto()`.
 11. Perform at most one final reconciliation under the same trigger and
     `evaluation_date` rule as upsert step 13, then flush and return `deleted`.
     Perform no network, Redis, Celery, or other post-commit effect under locks.
@@ -992,8 +993,9 @@ callers to resolve the assessment ID.
 **TicketAuditEvent**: optional assignment and `New → Analysis`, then
 `cvss_assessment_changed` for `deleted`, optional `severity_changed`, Product
 eligibility events in occurrence-ID order, optional system `priority_changed`,
-and optional final gate `status_change`. Direct CVSS records use `detail = NULL`. `not_found`,
-rejection, and rollback leave no event or other side effect.
+and optional final gate `status_change`. Direct CVSS records use
+`detail = NULL`. `not_found`, rejection, and rollback leave no event or other
+side effect.
 
 ---
 

@@ -633,10 +633,11 @@ apply it to locked-current state as specified by their flow.
 
 #### CVE Accessibility Check
 
-All endpoints under `/api/v1/cves/{cve_id}/` use the CVE accessibility boundary
-role conventionally named `require_accessible_cve`. As with the Ticket role,
-this is observable behavior delegated to a model-aware service, not a Core ORM
-implementation or a required router-level preliminary query.
+`GET /api/v1/cves/{cve_id}` and all endpoints under `/api/v1/cves/{cve_id}/`
+use the CVE accessibility boundary role conventionally named
+`require_accessible_cve`. As with the Ticket role, this is observable behavior
+delegated to a model-aware service, not a Core ORM implementation or a required
+router-level preliminary query.
 
 The service parses CVE-ID syntax through the pure Core parser, then resolves the
 database resource and applies these semantics in the selected result:

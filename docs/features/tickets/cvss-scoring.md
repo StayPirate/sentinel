@@ -848,6 +848,8 @@ new table, column, enum, constraint, or migration.
 - `docs/features/tickets/tickets.md` - Ticket severity and workflow gates
 - `docs/features/tickets/ticket-mutations.md` - CVSS mutation service
 - `docs/features/tickets/ticket-audit-log.md` - Direct Ticket audit fields
+- `docs/features/tickets/ticket-priority.md` - Automatic priority refresh after
+  severity changes
 - `docs/features/tickets/cve-service.md` - Source-neutral CVE ingestion
 - `docs/features/platform/cve-record-parser.md` - CVE Record extraction
 - `docs/features/packages/package-model.md` - Orthogonal eligibility rules

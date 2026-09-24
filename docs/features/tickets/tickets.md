@@ -543,9 +543,11 @@ final reconciliation boundary:
 | Lifecycle-derived actionability or passage of the UTC date | `package_service.reconcile_lifecycle_actionability_for_ticket()` | One reconciliation for the selected gate-zone Ticket |
 | Manual-zone exit | `ticket_service._complete_manual_zone_exit()` | Exactly one reconciliation after synchronous automatic-eligibility convergence |
 
-Ticket priority is not a gate input. Its automatic refresh and manual override
-follow [ticket-priority.md](ticket-priority.md) and never make an otherwise
-unchanged workflow reconcile.
+Ticket priority is not a gate input and follows
+[ticket-priority.md](ticket-priority.md). Its automatic refresh never makes an
+otherwise unchanged workflow reconcile. An effective manual override reconciles
+once only because it is a modifying operation subject to the
+[auto-assignment rule](ticket-mutations.md#auto-assignment-rule).
 
 No gate derives its own affectedness, eligibility, delivery, release, exclusion,
 or lifecycle value. A true no-op does not reconcile unless an owning
@@ -1055,8 +1057,8 @@ maintainer ownership, or package data is projected. An accessible Ticket with
 no qualifying caller work returns the normal three empty collections.
 
 **CVE Detail (`GET /api/v1/cves/{cve_id}/...`)**:
-All endpoints under `/api/v1/cves/{cve_id}/` use the service-delegated CVE
-accessibility role in `docs/api-spec.md`. Ticketless CVEs are public. An
+`GET /api/v1/cves/{cve_id}` and all endpoints under `/api/v1/cves/{cve_id}/`
+use the service-delegated CVE accessibility role in `docs/api-spec.md`. Ticketless CVEs are public. An
 associated CVE is selected only when its Ticket satisfies the canonical
 predicate. Missing and inaccessible outcomes both return `404 CVE_NOT_FOUND`,
 never a Ticket code.
@@ -1652,9 +1654,7 @@ To clear the override and return to the automatic priority:
 
 An unchanged request is an idempotent success with no audit event. An effective
 change may auto-assign the acting user and creates one `priority_changed`
-event. The endpoint has no endpoint-specific errors; `TICKET_NOT_FOUND` and
-`TICKET_NOT_MUTABLE` (Ignored or Duplicated) derive from the scoped responses
-in `docs/api-spec.md`.
+event. The endpoint has no endpoint-specific errors.
 
 Response: `TicketDetail` object in standard `{"data": ...}` envelope
 (200 OK).

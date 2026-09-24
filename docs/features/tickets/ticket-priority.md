@@ -161,7 +161,7 @@ async def refresh_priority_auto(
 exactly when this call changed the persisted `priority_auto`.
 
 **Preconditions (trusted, not rediscovered)**: the caller holds the Ticket
-`FOR UPDATE` and, when the Ticket has an associated CVE, holds that CVE root
+`FOR UPDATE` or inserted it in the current transaction and, when the Ticket has an associated CVE, holds that CVE root
 lock acquired before the Ticket under the cross-domain root order. The function
 acquires no lock, performs no consumer accessibility check, and does not call
 `ensure_ticket_operable()`: automatic priority is maintained in every Ticket
@@ -197,7 +197,7 @@ introduces a new root or lock order.
 
 | Priority input change | Workflow and refresh position |
 |---|---|
-| External CVSS assessments change `CVE.severity` | `upsert_external_cvss_batch()`, after at least one effective candidate and its severity and Product steps, before its optional final reconciliation, in every Ticket status ([ticket-mutations.md](ticket-mutations.md#upsert_external_cvss_batch)) |
+| External CVSS assessments change `CVE.severity` | `upsert_external_cvss_batch()`, after at least one created or updated candidate and its severity and Product steps, before its optional final reconciliation, in every Ticket status ([ticket-mutations.md](ticket-mutations.md#upsert_external_cvss_batch)) |
 | KEV, SSVC, or EPSS evidence changes, including enrichment-only payloads and Ticket creation during ingestion | `cve_service.upsert_cve()`, once after the CVSS batch and before the lifecycle decision ([cve-service.md](cve-service.md#complete-upsert_cve-composition)) |
 | Manual SUSE assessment create, update, or delete | `upsert_cvss_assessment()` and `delete_cvss_assessment()`, after an effective mutation's severity and Product steps and before the optional final reconciliation, when a Ticket exists |
 | Manual severity | `set_severity_manual()`, after its `severity_changed` event and before reconciliation |
@@ -254,9 +254,10 @@ function captures one UTC date at entry.
 5. Call `auto_assign_actor()` with the stabilized User.
 6. Classify the action from the locked pre-state: `set` (no override to a
    value), `changed` (one value to another), or `cleared` (a value to none).
-   Capture the old effective priority and persist `priority_override`.
-7. Create one `priority_changed` event attributed to the acting user with the
-   action in `detail`, even when the effective priority is unchanged (for
+   Capture the old effective priority, persist `priority_override`, and compute
+   the new effective priority.
+7. Create one `priority_changed` event attributed to the acting user, with the
+   old and new effective priorities and the action in `detail`, even when the effective priority is unchanged (for
    example, an override equal to `priority_auto`).
 8. Call `reconcile_ticket_status()` exactly once with the one
    `evaluation_date`. Priority is not a gate input; reconciliation is required
@@ -324,8 +325,10 @@ Tests MUST cover:
    auto-assignment with `New -> Analysis` followed by one reconciliation,
    `TICKET_NOT_FOUND` for missing and inaccessible Tickets, `TICKET_NOT_MUTABLE`
    in `Ignored` and `Duplicated`, `403` without `triage_ticket`, and rollback.
-6. Proof that priority changes never alter status, gates, Product eligibility,
-   assignment, or accessibility, and that no refresh consults audit history.
+6. Proof that the automatic refresh never alters status, gates, Product
+   eligibility, assignment, or accessibility, that the override's assignment
+   and status consequences arise only from the auto-assignment rule (item 5),
+   and that no refresh consults audit history.
 7. Independent-session races between the override and an automatic refresh on
    the same Ticket, proving serialized pre-state and no stale event values.
 8. The default-version runner classifying a unit `changed` when only

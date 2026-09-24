@@ -1711,6 +1711,7 @@ ticket_mutations (infrastructure)
     ├── reconcile_ticket_status()
     ├── recalculate_cvss_chain()
     ├── auto_assign_actor()
+    ├── refresh_priority_auto()
     └── ensure_ticket_operable()
          ▲                ▲
          │                │
@@ -1831,8 +1832,8 @@ behavior of `ticket_service` operations:
      acknowledgement tolerance; and no Ticket mutation or audit event
 13. **Canonical comments and creation order**: manual and every canonical CVE
     source create the exact `ticket_created.comment`; creation keeps
-    `ticket_created`, optional assignment, optional manual severity, and
-    optional CVE association order. Normal status transitions use NULL comments,
+    `ticket_created`, optional assignment, optional manual severity, optional
+    CVE association, and optional manual-creation `priority_changed` order. Normal status transitions use NULL comments,
     while rejection uses exactly `CVE rejected`
 14. **Confidentiality and grants**: direct changes assert exact acting-user
     events and no-op absence; `true` to `false` atomically deletes every grant
