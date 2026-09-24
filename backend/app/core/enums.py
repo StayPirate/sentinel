@@ -270,3 +270,168 @@ class UserSortField(StrEnum):
     FULL_NAME = "full_name"
     EMAIL = "email"
     CREATED_AT = "created_at"
+
+
+class CVSSVersion(StrEnum):
+    """Accepted CVSS Base-vector versions, always derived from the vector.
+
+    Category B — classification (Python Enum only; stored in
+    `CVECVSSAssessment.cvss_version`, a closed vector-derived set). See
+    `docs/features/tickets/cvss-scoring.md` (Accepted Base Vectors) and
+    `docs/data-model.md` (CVECVSSAssessment).
+    """
+
+    V2_0 = "2.0"
+    V3_0 = "3.0"
+    V3_1 = "3.1"
+    V4_0 = "4.0"
+
+
+class CVSSAssessmentSeverity(StrEnum):
+    """Version-specific severity of one CVSS assessment.
+
+    Category B — classification (Python Enum only; stored lowercase in
+    `CVECVSSAssessment.severity`). CVSS v2.0 produces only `low`,
+    `medium`, or `high`; v3.0, v3.1, and v4.0 use the full FIRST scale.
+    Distinct from the unified `Severity`. See
+    `docs/features/tickets/cvss-scoring.md` (Version-Specific Assessment
+    Severity).
+    """
+
+    NONE = "none"
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    CRITICAL = "critical"
+
+
+class Severity(StrEnum):
+    """Unified five-label severity scale.
+
+    Category B — classification (Python Enum only; stored in PascalCase
+    in `CVE.severity` and `Ticket.severity_manual`, while the API wire
+    format is lowercase). The `NONE` member is the resolved label for a
+    score of exactly 0.0 and is distinct from SQL `NULL` (unresolved).
+    See `docs/features/tickets/cvss-scoring.md` (Unified CVE Severity)
+    and `docs/data-model.md` (CVE, Ticket).
+    """
+
+    CRITICAL = "Critical"
+    HIGH = "High"
+    MEDIUM = "Medium"
+    LOW = "Low"
+    NONE = "None"
+
+
+class EligibilitySource(StrEnum):
+    """Source of an Eligibility Score Resolution result.
+
+    Category B — classification (Python Enum only; never stored in the
+    database). See `docs/features/tickets/cvss-scoring.md` (Eligibility
+    Score Resolution).
+    """
+
+    SUSE = "suse"
+    FALLBACK = "fallback"
+
+
+# CVSS Base-metric API wire values. All are Category B classifications
+# (Python Enum only; never stored in the database — expanded metrics are
+# always derived from the canonical vector). See
+# `docs/features/tickets/cvss-scoring.md` (Accepted Base Vectors) for the
+# official vector values each wire value corresponds to. Value sets that
+# the specification defines identically for CVSS v3.x and v4.0 share one
+# enum.
+
+
+class CVSS2AccessVector(StrEnum):
+    """CVSS v2.0 Access Vector (`AV`) wire values."""
+
+    LOCAL = "local"
+    ADJACENT_NETWORK = "adjacent_network"
+    NETWORK = "network"
+
+
+class CVSS2AccessComplexity(StrEnum):
+    """CVSS v2.0 Access Complexity (`AC`) wire values."""
+
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+
+
+class CVSS2Authentication(StrEnum):
+    """CVSS v2.0 Authentication (`Au`) wire values."""
+
+    MULTIPLE = "multiple"
+    SINGLE = "single"
+    NONE = "none"
+
+
+class CVSS2Impact(StrEnum):
+    """CVSS v2.0 Confidentiality/Integrity/Availability Impact wire values."""
+
+    NONE = "none"
+    PARTIAL = "partial"
+    COMPLETE = "complete"
+
+
+class CVSSAttackVector(StrEnum):
+    """CVSS v3.x and v4.0 Attack Vector (`AV`) wire values."""
+
+    NETWORK = "network"
+    ADJACENT = "adjacent"
+    LOCAL = "local"
+    PHYSICAL = "physical"
+
+
+class CVSSAttackComplexity(StrEnum):
+    """CVSS v3.x and v4.0 Attack Complexity (`AC`) wire values."""
+
+    LOW = "low"
+    HIGH = "high"
+
+
+class CVSSPrivilegesRequired(StrEnum):
+    """CVSS v3.x and v4.0 Privileges Required (`PR`) wire values."""
+
+    NONE = "none"
+    LOW = "low"
+    HIGH = "high"
+
+
+class CVSSImpact(StrEnum):
+    """CVSS v3.x Impact and v4.0 Vulnerable/Subsequent System wire values."""
+
+    NONE = "none"
+    LOW = "low"
+    HIGH = "high"
+
+
+class CVSS3UserInteraction(StrEnum):
+    """CVSS v3.x User Interaction (`UI`) wire values."""
+
+    NONE = "none"
+    REQUIRED = "required"
+
+
+class CVSS3Scope(StrEnum):
+    """CVSS v3.x Scope (`S`) wire values."""
+
+    UNCHANGED = "unchanged"
+    CHANGED = "changed"
+
+
+class CVSS4AttackRequirements(StrEnum):
+    """CVSS v4.0 Attack Requirements (`AT`) wire values."""
+
+    NONE = "none"
+    PRESENT = "present"
+
+
+class CVSS4UserInteraction(StrEnum):
+    """CVSS v4.0 User Interaction (`UI`) wire values."""
+
+    NONE = "none"
+    PASSIVE = "passive"
+    ACTIVE = "active"
