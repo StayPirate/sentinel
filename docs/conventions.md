@@ -1943,9 +1943,10 @@ behavior, or whether a given planning artifact still exists.
 
 **Where this information belongs instead**:
 
-- A living execution roadmap, if one is in use (see `docs/drafts/` for
-  current planning material) — owns phase/piece sequencing, dependency
-  rationale, and stable work-item IDs
+- The GitHub issues and milestones that track an execution roadmap, when
+  one is in use — they own macro-area and work-item sequencing, dependency
+  rationale, and deferrals between work items; no repository planning file
+  duplicates them
 - The GitHub issue tracking a specific work item — its description and
   comments are the right place to record phase-specific notes,
   implementation decisions, and notes on how reviewer findings were

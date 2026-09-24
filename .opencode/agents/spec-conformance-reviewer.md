@@ -308,10 +308,12 @@ that the obligation belongs to different work. The first source that matches
 closes the question and suppresses the finding.
 
 Do not assume any particular GitHub structure exists. Milestones, parent
-issues, and sub-issues are optional; sources 1-4 work without them.
+issues, and sub-issues are optional; sources 1-3 work without them. Do not
+rely on any repository planning file: roadmap sequencing is tracked only in
+GitHub issues and milestones.
 
 1. **Issue `Scope`** — an explicit deferral statement (for example,
-   "Celery signal binding is deferred to P1-06").
+   "Celery signal binding is deferred to the follow-up worker work item").
 2. **Issue `Acceptance criteria`** — an explicit scope boundary or deferral
    says that the obligation belongs to different work. Mere absence from the
    criteria is not a deferral basis; acceptance criteria need not repeat every
@@ -320,20 +322,20 @@ issues, and sub-issues are optional; sources 1-4 work without them.
    boundary expressed without roadmap phase, work-item, or
    implementation-status coupling, such as a statement that another named
    specification owns the operation.
-4. **`docs/drafts/implementation-plan.md`** — the piece tables (which pieces
-   declare this specification as owning), the *Partially implementable
-   specifications* section, and the *Specification and WIP Boundary* section.
-   This is the primary source: it works regardless of how issues are
-   organized.
-5. **Other issues in the repository**, best effort with whatever structure
-   exists, in this order:
-   - `gh issue view <n>` on the tracking issue — its `parent`, `blocked-by`,
-     and `blocking` relationship fields are the cheapest and most reliable
-     probe. Check them first, and read any issue they name
-   - sub-issues of a parent, if a parent exists
-     (`gh issue view <n> --json subIssues`)
-   - issues in the same milestone, if the issue has one
+4. **The tracking issue's GitHub hierarchy** — the primary roadmap source
+   when the tracking issue has relationships. Walk it with
+   `gh issue view <n> --json parent,subIssues,blockedBy,blocking,milestone`,
+   reading each named issue's body and comments:
+   - the parent chain, upward from the tracking issue until an issue has no
+     parent — the Scope, decomposition, and recorded deferrals or carried-over
+     obligations of each ancestor
+   - sibling sub-issues of each ancestor
+     (`gh issue view <parent> --json subIssues`) — the work item that declares
+     ownership of the obligation
+   - issues the tracking issue is blocked by, and the issues it blocks
+   - the milestone description and its issues, if the issue has one
      (`gh issue list --milestone "<title>" --state all`)
+5. **Other issues in the repository**, best effort:
    - `gh issue list --state all --search "<keywords from the obligation>"`.
      Note that GitHub's issue search does not usefully tokenize code
      identifiers such as `hide_parameters` — an empty result here is weak
