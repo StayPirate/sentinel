@@ -32,7 +32,13 @@ the following exhaustive boundaries:
   delivery together only for its classification presentation gate in
   `maintainer.md`;
 - the affectedness/delivery anomaly matrix classifies combinations for
-  analyst attention without changing either value; and
+  analyst attention without changing either value;
+- the read-only SLA milestone projection in
+  `docs/features/tickets/ticket-deadlines.md` may combine affectedness,
+  delivery (track `delivery_status`, correlated release-request state, and
+  Product `released_at`), persisted Product eligibility, and actionability to
+  report per-track milestone statuses and the `overdue` list filter, without
+  writing or suppressing any dimension; and
 - post-mutation Ticket reconciliation may observe the gate-relevant
   values after an owning mutation has completed.
 
@@ -951,6 +957,9 @@ complete workflow. The direct mutation, Ticket gate reconciliation,
 locked-current result projection, and API response reuse that date; a response
 serializer MUST NOT recapture the date after the mutation.
 Read-only requests independently capture one date for their complete response.
+A read-only response that also projects remediation milestones derives that
+date from the one evaluation instant defined in
+`docs/features/tickets/ticket-deadlines.md` (Evaluation Instant).
 Consequently, crossing midnight UTC cannot make one mutation reconcile against
 one date and return actionability computed against another.
 

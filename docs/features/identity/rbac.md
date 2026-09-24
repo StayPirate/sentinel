@@ -26,7 +26,7 @@ endpoint contract.
 | `manage_packages` | Add/remove packages from tickets, exclude/restore (package, track, product), change track affectedness to any non-`FIXED` status, set `FIXED` only on a locked-current CVE-less Ticket, override product eligibility |
 | `manage_cvss` | Add/edit/delete SUSE CVSS assessments |
 | `manage_references` | Add/edit/delete ticket references |
-| `manage_confidentiality` | Set ticket confidentiality flag, list/grant/revoke access grants |
+| `manage_confidentiality` | Set ticket confidentiality flag, list/grant/revoke access grants, set/change/clear the Coordinated Release Date of a confidential ticket |
 
 #### Admin Capabilities
 
@@ -161,6 +161,7 @@ Any logged-in user, regardless of role. Includes all Public access plus:
 | Add/edit/delete ticket references | `manage_references` |
 | Set ticket confidentiality | `manage_confidentiality` |
 | Manage access grants on confidential tickets | `manage_confidentiality` |
+| Set/change/clear the Coordinated Release Date of a confidential ticket | `manage_confidentiality` |
 | Set track affectedness to `FIXED` from any status | `admin_ticket_ops` |
 | Rerun complete Ticket convergence | `triage_ticket` OR `manage_fetchers` |
 | Create local user | `manage_users` |
@@ -478,6 +479,7 @@ here with the required authorization level and a link to the owning spec.
 | POST | `/api/v1/tickets/{ticket_id}/revert-duplicate` | `triage_ticket` | [tickets](../tickets/tickets.md#revert-duplicate-status) |
 | POST | `/api/v1/tickets/{ticket_id}/rerun-reactivation` | `triage_ticket` OR `manage_fetchers` | [tickets](../tickets/tickets.md#rerun-ticket-convergence) |
 | PATCH | `/api/v1/tickets/{ticket_id}/confidentiality` | `manage_confidentiality` | [tickets](../tickets/tickets.md#set-confidentiality) |
+| PATCH | `/api/v1/tickets/{ticket_id}/coordinated-release-date` | `manage_confidentiality` | [tickets](../tickets/tickets.md#set-coordinated-release-date) |
 | GET | `/api/v1/tickets/{ticket_id}/access` | `manage_confidentiality` | [tickets](../tickets/tickets.md#list-access-grants) |
 | POST | `/api/v1/tickets/{ticket_id}/access` | `manage_confidentiality` | [tickets](../tickets/tickets.md#grant-access) |
 | DELETE | `/api/v1/tickets/{ticket_id}/access/{user}` | `manage_confidentiality` | [tickets](../tickets/tickets.md#revoke-access) |

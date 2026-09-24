@@ -26,7 +26,7 @@ each event type must be populated.
 ### Event Type Contract
 
 When the canonical mutation matrix requires an event, the owning service
-populates it according to this table. The enum remains a closed inventory of 30
+populates it according to this table. The enum remains a closed inventory of 31
 event types; an explicit no-event boundary is not represented by an additional
 event type.
 
@@ -54,6 +54,7 @@ event type.
 | `product_excluded` | Product directly soft-deleted by an authorized acting user | Acting user | Product display name | `NULL` | `NULL` | Product subject (see detail contract) |
 | `product_restored` | Directly excluded product restored to ticket | Acting user | `NULL` | Product display name | `NULL` | Product subject (see detail contract) |
 | `confidentiality_changed` | Ticket `is_confidential` flag toggled; when changing `true` to `false`, all explicit grants are deleted in the same transaction | Acting user | `"true"` or `"false"` | `"true"` or `"false"` | `NULL` | `NULL` |
+| `coordinated_release_changed` | Coordinated Release Date set, changed, or cleared on a confidential Ticket, including when supplied at manual creation (see `tickets.md`, Coordinated Release Date) | Acting user (creating user at creation) | Previous CRD in UTC ISO 8601 format (e.g., `2026-10-06T14:00:00Z`) or `NULL` | New CRD in UTC ISO 8601 format or `NULL` | `NULL` | `NULL` |
 | `access_grant_added` | User manually granted explicit access to a confidential ticket | Acting user | `NULL` | Target username | `NULL` | `NULL` |
 | `access_grant_removed` | User manually revoked explicit access to a confidential ticket | Acting user | Target username | `NULL` | `NULL` | `NULL` |
 | `reference_added` | Manual reference added to ticket | Acting user | `NULL` | Reference URL | `NULL` | `NULL` |
@@ -109,8 +110,8 @@ event type.
   back assessment outcomes likewise create none.
 - Event insertion order is deterministic. Ticket creation records
   `ticket_created` first, then optional assignment, optional manual severity,
-  optional CVE association, and, for manual creation, optional automatic
-  `priority_changed` events. CVE association
+  optional Coordinated Release Date, optional CVE association, and, for manual
+  creation, optional automatic `priority_changed` events. CVE association
   records `cve_associated` before its derived severity handover. An effective
   manual SUSE chain records optional `assignment`, optional system
   `New → Analysis`, `cvss_assessment_changed`, optional derived
@@ -177,7 +178,12 @@ event type.
   reserved for an effective manual revoke. User deactivation and reactivation
   retain grants and create no grant event. A later `false` to `true` transition
   does not recreate deleted grants and creates only its own
-  `confidentiality_changed` event.
+  `confidentiality_changed` event. Neither direction modifies the Coordinated
+  Release Date or creates a `coordinated_release_changed` event.
+- `coordinated_release_changed` is created only when the stored CRD changes. An
+  unchanged value, including the same instant supplied with a different UTC
+  offset, and a rejected or rolled-back request create no event. Values use the
+  same UTC ISO 8601 serialization as API responses.
 - All events include an implicit `created_at` timestamp set by the database
   default.
 - Dispatching or executing the Ticket convergence workflow, including an
@@ -240,7 +246,7 @@ an intentional no-event contract, not missing audit coverage.
 
 | Domain outcome | Required Ticket event or explicit no-event contract | Semantic actor | Owner and serialization root |
 |---|---|---|---|
-| Ticket creation | `ticket_created` first, then optional `assignment`, optional `severity_changed`, optional `cve_associated`, and, for manual creation, optional system `priority_changed` | Direct creation events use the acting user; ingestion uses system | `ticket_service`; manual path locks User, then optional CVE before insert; system path locks optional CVE before insert |
+| Ticket creation | `ticket_created` first, then optional `assignment`, optional `severity_changed`, optional `coordinated_release_changed`, optional `cve_associated`, and, for manual creation, optional system `priority_changed` | Direct creation events use the acting user; ingestion uses system | `ticket_service`; manual path locks User, then optional CVE before insert; system path locks optional CVE before insert |
 | Direct assignment or reassignment | One `assignment`; optional system `New → Analysis`; optional final gate event | Acting user for assignment, system for derived status | `ticket_service`; target User then Ticket |
 | Auto-assignment during an effective mutation | One `assignment`; system `New → Analysis` when applicable | Acting user for assignment, system for promotion | Owning mutation service; stabilized acting User then optional CVE then Ticket |
 | User deactivation, final VA-role loss, or assignment-eligibility sanitation | One `assignment` per effectively cleared non-NULL assignee | System | `user_service`: User `FOR NO KEY UPDATE` then ordered Ticket locks; reconciliation sanitation: existing Ticket lock plus a fresh unlocked User/role observation |
@@ -259,6 +265,7 @@ an intentional no-event contract, not missing audit coverage.
 | Product eligibility or override ownership change | One `product_eligibility_changed` per changed occurrence; optional final status | Acting user for direct override; system for automatic changes | direct override uses acting User then Ticket; system `package_service` uses Ticket; the narrow CVSS-chain exception uses User then CVE then Ticket for manual work or CVE then Ticket for system work |
 | Direct package, track, or Product exclusion/restoration | Exactly one corresponding direct event; ordinary assignment/status events remain separate | Acting user | `package_service`; acting User then Ticket |
 | Confidentiality toggle or manual access grant/revoke | One `confidentiality_changed`, `access_grant_added`, or `access_grant_removed`. Effective `true` to `false` deletes all grants atomically but produces only `confidentiality_changed` | Acting user | `ticket_service`; target User then Ticket for grant/revoke, Ticket for confidentiality |
+| Coordinated Release Date set, change, or clear | One `coordinated_release_changed`; no assignment, reconciliation, or status event | Acting user | `ticket_service`; Ticket |
 | User deactivation or reactivation with retained Ticket grants | None for grants; ordinary identity and Ticket-unassignment events remain unchanged | N/A for grant state | `user_service`; User root and its documented side effects |
 | Manual reference create/update/delete | One direct event, or one event per changed PATCH field | Acting user | `reference_service`; parent Ticket lock |
 | Automatic reference upsert | None; fetcher execution and current rows are the evidence | N/A | `reference_service`; owning ingestion transaction |
@@ -619,7 +626,8 @@ required event sequence or explicit no-event outcome. For audited mutations:
     effective and no-op outcomes where applicable, including delivery, IBS
     evidence, checkpoints, derived actionability, automatic references,
     convergence outcomes, ticketless CVE/CVSS changes, automatic
-    declassification deletion, and deactivation/reactivation grant retention
+    declassification deletion and CRD retention, and deactivation/reactivation
+    grant retention
 13. Each package, track, and Product exclusion/restore persists exactly one
     direct event with the authenticated acting user and exact payload; adding a
     marker beneath an excluded ancestor and restoring beneath an ancestor or
@@ -686,6 +694,10 @@ required event sequence or explicit no-event outcome. For audited mutations:
     automatic value, and acting-user override events with exact
     `override_action` (`set`, `changed`, `cleared`), including equal old/new
     values; `log_event()` rejects mismatched `detail` for either actor case
+29. `coordinated_release_changed` tests assert acting-user attribution, UTC ISO
+    8601 old/new values with `NULL` for the absent side, `comment` and `detail`
+    `NULL`, the creation-order position, no event for an unchanged instant or a
+    rejected request, and no event when declassification retains the CRD
 
 See Guardrail 6 (Mandatory testing) and Guardrail 11 (Ticket event logging)
 in `AGENTS.md` for enforcement.

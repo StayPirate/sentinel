@@ -1560,7 +1560,8 @@ records (with `deleted_at` visible on each level).
 
 The standalone consumer operation accepts `db: AsyncSession`, a public
 `ticket_id: str` containing canonical `SNTL-{n}`, one `evaluation_date: date`,
-and request-resolved caller information through the module-level
+one `evaluation_instant: datetime` (the instant from which the read request
+derived that date), and request-resolved caller information through the module-level
 implementation-chosen boundary. When `ticket_service.get_ticket_detail()`
 composes the same package-owned projection, it supplies the already selected
 internal Ticket UUID and the coherent observation/date context owned by that
@@ -1588,7 +1589,16 @@ implementation choice.
    database view.
 4. Compute `delivery_relevant`, `actionable`, and
    `non_actionable_reason` for every level using the supplied UTC
-   `evaluation_date` and the canonical predicates from `package-model.md`
+   `evaluation_date` and the canonical predicates from `package-model.md`.
+   For every track, project the five due dates, `milestones`, and
+   `current_phase` through the pure functions in
+   `docs/features/tickets/ticket-deadlines.md`, using the Ticket's
+   `created_at`, resolved severity, status, and CVE presence, the track's
+   persisted affectedness, delivery, actionability, actionable eligible
+   Products and their `released_at`, correlated release-request evidence, and
+   the supplied evaluation instant (composed Ticket-detail use passes the
+   instant captured by `get_ticket_detail()`). All inputs come from the same coherent observation, and evidence is
+   loaded without per-track or per-Product N+1 queries
 5. Do not load or project maintainer identities.
 6. Return the assembled tree. Sort packages by `package_name`, tracks by
    `reference`, and Products by `product_cpe`, all in ascending Unicode
@@ -1684,8 +1694,9 @@ async def list_maintainer_<classification>_work(
     caller_user_id: UUID,
     effective_scope: Literal["all", "non_confidential"],
     evaluation_date: date,
+    evaluation_instant: datetime,
     package: str | None,
-    sort_by: Literal["severity", "package"],
+    sort_by: Literal["severity", "package", "submission_due_at"],
     sort_order: Literal["asc", "desc"],
     page: int,
     per_page: int,
@@ -1720,12 +1731,16 @@ Each global operation:
    `TicketPackageTrack` into multiple rows;
 4. applies optional `package` as a case-sensitive exact package-name match and
    composes it with all mandatory predicates using AND;
-5. applies `severity` semantic ordering or Unicode code-point `package` ordering
-   in the requested direction, with `TicketPackageTrack.id` as the final
+5. applies `severity` semantic ordering, Unicode code-point `package`
+   ordering, or `submission_due_at` timestamp ordering with `NULL` last, in the
+   requested direction, with `TicketPackageTrack.id` as the final
    same-direction internal tie-breaker;
 6. computes `total`, applies page slicing, and projects exactly one semantic
    workbench item per qualifying track from that same candidate set and
-   coherent PostgreSQL observation; and
+   coherent PostgreSQL observation, including `submission_due_at` and
+   `submission_milestone` computed under
+   `docs/features/tickets/ticket-deadlines.md` with the supplied
+   `evaluation_instant`; and
 7. returns an empty page with `total = 0` when no candidate qualifies, or an
    empty page with the correct nonzero total when `page` is beyond the last.
 
@@ -1745,6 +1760,7 @@ async def get_maintainer_ticket_work(
     caller_user_id: UUID,
     effective_scope: Literal["all", "non_confidential"],
     evaluation_date: date,
+    evaluation_instant: datetime,
 ) -> MaintainerTicketWork:
 ```
 
@@ -1762,7 +1778,8 @@ it is not a Pydantic response schema.
 2. within that view, constructs the caller-owned exact-track set and applies all
    three classifications from `maintainer.md` with one `evaluation_date`;
 3. uses database existence semantics for Product eligibility and returns at
-   most one item per exact track in exactly one collection;
+   most one item per exact track in exactly one collection, projecting the same
+   submission deadline fields as the global lists;
 4. orders each collection by ascending Unicode code point of `package_name`,
    then `reference`, then internal `TicketPackageTrack.id`; and
 5. returns all three collections empty when the accessible Ticket has no
