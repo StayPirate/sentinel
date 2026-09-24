@@ -7,7 +7,9 @@ ticket status gates — CVSS assessment management, manual severity, and status
 reconciliation — in a single service module (`ticket_mutations`).
 This module also provides the shared `reconcile_ticket_status()` function
 and the `auto_assign_actor()` helper, which are called by both this
-module and `package_service`.
+module and `package_service`, and the `refresh_priority_auto()` primitive that
+maintains the informational automatic Ticket priority defined in
+[ticket-priority.md](ticket-priority.md).
 
 Package-centric mutations (track status, delivery status, product eligibility,
 soft-deletion/restore, record creation, and additive maintainer association) are
@@ -125,6 +127,7 @@ whether `acting_user_id` is `NULL`.
 | Module | Relationship |
 |--------|-------------|
 | `services/cvss.py` | `ticket_mutations` delegates CVSS resolution and severity calculation to pure functions in `cvss.py`. The resolution cascade logic is never reimplemented inside `ticket_mutations` |
+| `services/ticket_priority.py` | `refresh_priority_auto()` delegates exploitation classification and priority resolution to the pure functions defined in [ticket-priority.md](ticket-priority.md); the decision table is never reimplemented inside `ticket_mutations` |
 | `services/package_service.py` | Handles ordinary package-centric mutations (track status, delivery status, standalone eligibility overrides, Product-originated recalculation, synchronous manual-zone-exit convergence, soft-delete/restore, record creation) and package queries. `package_service` imports `reconcile_ticket_status()`, `auto_assign_actor()`, and `ensure_ticket_operable()` from `ticket_mutations`; `ticket_mutations` does not import `package_service`. The atomic CVSS chain is the sole exception allowed to update system-managed Product eligibility inline, using the package-model-owned pure evaluator without copying the formula |
 | `services/ticket_service.py` | Handles Ticket lifecycle operations and cross-domain Ticket compositions, including manual-zone exits. It may import both `package_service` and the primitives in this module; neither lower service imports `ticket_service`. See [ticket-service.md](ticket-service.md) for the full contract |
 
@@ -537,7 +540,7 @@ function.
 | Module | Functions that call `ensure_ticket_operable` |
 |--------|----------------------------------------------|
 | `ticket_mutations` | Manual-SUSE `upsert_cvss_assessment`, `delete_cvss_assessment`, `set_severity_manual` |
-| `ticket_service` | `associate_cve`, `assign_ticket`, `ignore_ticket`, `mark_as_duplicate` |
+| `ticket_service` | `associate_cve`, `assign_ticket`, `ignore_ticket`, `mark_as_duplicate`, `set_priority_override` |
 | `package_service` | Gate-relevant mutations call the guard; `set_track_delivery_status` also calls it for operability but remains outside assignment, audit, and Ticket reconciliation |
 
 Trusted external ingestion does not call this guard. It may maintain
@@ -666,11 +669,12 @@ current resolution values with `propagation = none`.
 An authority rejection, manual-zone rejection, unchanged result, not-found
 result, waiting concurrent no-op, deferred Product outcome, or caller rollback
 creates no assignment, Product eligibility event, Product mutation, or final
-Ticket reconciliation. Direct assessment and derived-severity records remain
-immediate for effective deferred assessment mutations. Any settings, database,
-eligibility, audit, flush, or reconciliation failure propagates and rolls back
-the complete caller-owned chain: assessment, `CVE.severity`, assignment,
-Product eligibility, Ticket status, and every audit event.
+Ticket reconciliation. Direct assessment and derived-severity records and the
+automatic priority refresh remain immediate for effective deferred assessment
+mutations. Any settings, database, eligibility, audit, flush, or reconciliation
+failure propagates and rolls back the complete caller-owned chain: assessment,
+`CVE.severity`, assignment, Product eligibility, automatic priority, Ticket
+status, and every audit event.
 
 ### CVSS Status Matrix
 
@@ -704,7 +708,9 @@ gate reconciliation; `Analysis`, `Analyzed`, and `Resolved` receive severity
 plus automatic eligibility and at most one reconciliation; `Ignored` and
 `Duplicated` receive severity and a direct `severity_changed` event when that
 value changes, but no eligibility, assignment, status, manual-zone exit, or
-final reconciliation effect.
+final reconciliation effect. Every associated Ticket, in every status, also
+receives the automatic priority refresh defined in
+[ticket-priority.md](ticket-priority.md).
 
 ### `upsert_cvss_assessment()`
 
@@ -780,7 +786,11 @@ new one is created. External-provider assessments never use this boundary.
     and eligibility under the held roots. Apply the canonical pure evaluator,
     skip overrides, and update changed booleans only. Create one system-
     attributed `product_eligibility_changed` event per change with
-    `reason = cvss`, ordered by `TicketPackageProduct.id`.
+    `reason = cvss`, ordered by `TicketPackageProduct.id`. Then, for an
+    effective mutation with an associated Ticket and whatever the propagation
+    disposition, call `refresh_priority_auto()`; an optional system
+    `priority_changed` follows any Product events. Priority is not a gate input
+    and does not by itself trigger step 13.
 13. If the Ticket is now in the gate zone and this effective chain changed a
     gate input or moved `New` into `Analysis`, call
     `reconcile_ticket_status()` exactly once with the same `evaluation_date`.
@@ -802,7 +812,8 @@ The exact canonical assessment value is
 **TicketAuditEvent**: `cvss_assessment_changed` for an effective mutation when
 the CVE has an associated Ticket, in every Ticket status. Its actor is the
 manual SUSE user. A changed derived severity adds `severity_changed` with
-`user_id = NULL`.
+`user_id = NULL`. A changed effective priority adds system `priority_changed`
+after the Product events and before the optional final gate `status_change`.
 
 ---
 
@@ -886,10 +897,13 @@ writing severity, propagating eligibility, reconciling, or creating audit.
    Product once, skip overrides, update effective differences, and append
    `product_eligibility_changed` in ascending `TicketPackageProduct.id` order.
    For `Ignored` and `Duplicated`, defer Product and gate effects. A ticketless
-   CVE has no Ticket-scoped propagation.
+   CVE has no Ticket-scoped propagation. When at least one candidate was
+   created or updated and a Ticket exists, then call `refresh_priority_auto()`
+   in every Ticket status, including `Ignored` and `Duplicated`; the refresh is
+   not deferred.
 8. For a gate-zone Ticket, call `reconcile_ticket_status()` at most once, after
-   every assessment, severity, and Product event, and only when final gate input
-   changed. An unassigned `New` remains outside gate reconciliation. Use the
+   every assessment, severity, Product, and priority event, and only when final
+   gate input changed. An unassigned `New` remains outside gate reconciliation. Use the
    supplied `evaluation_date` throughout.
 9. Flush and return the complete batch result. Do not commit, roll back, assign,
    exit a manual zone, perform network I/O, or publish a post-commit effect.
@@ -903,8 +917,11 @@ actions and performs no severity/Product/status write or event.
 
 **Audit order**: for a Ticket, zero or more canonical
 `cvss_assessment_changed`, at most one `severity_changed`, zero or more Product
-events in occurrence-ID order, optional assignment-eligibility sanitation, and at
-most one final gate `status_change`. A ticketless batch creates no Ticket event.
+events in occurrence-ID order, at most one system `priority_changed`, optional
+assignment-eligibility sanitation, and at most one final gate `status_change`.
+A ticketless batch creates no Ticket event. An empty or all-unchanged batch does
+not refresh priority; `cve_service.upsert_cve()` performs its own refresh after
+the batch.
 
 ---
 
@@ -966,16 +983,19 @@ callers to resolve the assessment ID.
    `severity_changed` next.
 10. Resolve the Eligibility Score result and derive propagation from the status
     matrix. For `immediate`, apply the same locked-current automatic Product
-    procedure, event ordering, and override skip as upsert step 12.
+    procedure, event ordering, and override skip as upsert step 12. Then, when a
+    Ticket exists and whatever the propagation disposition, call
+    `refresh_priority_auto()`.
 11. Perform at most one final reconciliation under the same trigger and
     `evaluation_date` rule as upsert step 13, then flush and return `deleted`.
     Perform no network, Redis, Celery, or other post-commit effect under locks.
 
 **TicketAuditEvent**: optional assignment and `New → Analysis`, then
 `cvss_assessment_changed` for `deleted`, optional `severity_changed`, Product
-eligibility events in occurrence-ID order, and optional final gate
-`status_change`. Direct CVSS records use `detail = NULL`. `not_found`,
-rejection, and rollback leave no event or other side effect.
+eligibility events in occurrence-ID order, optional system `priority_changed`,
+and optional final gate `status_change`. Direct CVSS records use
+`detail = NULL`. `not_found`, rejection, and rollback leave no event or other
+side effect.
 
 ---
 
@@ -1012,7 +1032,9 @@ Sets or clears the `severity_manual` field on a ticket.
 6. Call `auto_assign_actor(ticket, acting_user, db)` with the User stabilized by
    step 1
 7. Update `ticket.severity_manual`
-8. Create `TicketAuditEvent` (`severity_changed`, `user_id = acting_user_id`)
+8. Create `TicketAuditEvent` (`severity_changed`, `user_id = acting_user_id`),
+   then call `refresh_priority_auto()`; a changed effective priority adds a
+   system `priority_changed`
 9. Call `reconcile_ticket_status()` with the supplied or once-captured
    `evaluation_date`
 10. Return updated ticket
@@ -1023,7 +1045,8 @@ severity). This operation is only valid when `cve_id IS NULL` — when a
 CVE is associated, severity is derived from CVSS scores via the
 resolution cascade and `severity_manual` is not applicable.
 
-**TicketAuditEvent**: `severity_changed`
+**TicketAuditEvent**: `severity_changed`, then optional system
+`priority_changed`, before any final gate `status_change`
 
 **Idempotency**: no-op if severity is unchanged.
 
@@ -1102,7 +1125,12 @@ defines no Ticket convergence caller.
 6. For an applicable Product phase, reload current Product thresholds,
    lifecycle dates, overrides, and booleans under the roots; use the shared pure
    evaluator; create `reason = cvss` events in ascending occurrence-ID order;
-   and never alter overrides. Use the one `evaluation_date` throughout.
+   and never alter overrides. Use the one `evaluation_date` throughout. When a
+   Ticket exists, in both modes and every Ticket status, then call
+   `refresh_priority_auto()` after the severity and Product steps and before
+   the default-version mode's optional final reconciliation; association mode
+   thereby refreshes priority from the newly associated CVE before
+   `associate_cve()` reconciles.
 7. Flush and return severity resolution, eligibility resolution, changed and
    skipped Product counts, whether severity changed, propagation, whether one
    reconciliation ran, `evaluation_date`, and the runner-facing classification
@@ -1113,8 +1141,10 @@ transaction-locally as exactly one of:
 
 - `changed` — the unit contains at least one durable semantic mutation or its
   required audit event: a changed `CVE.severity`, an automatic Product
-  eligibility change, assignment-eligibility sanitation, a Ticket status
-  change, or an audit event required by one of those effects. A reconciliation
+  eligibility change, a changed `Ticket.priority_auto` (including one masked by
+  an override and therefore without an event), assignment-eligibility
+  sanitation, a Ticket status change, or an audit event required by one of those
+  effects. A reconciliation
   call that changes nothing does not by itself make a unit `changed`.
 - `unchanged` — the unit succeeded already converged and contains no mutation
   and no audit event.
@@ -1133,8 +1163,10 @@ the three-way classification and its meaning are not.
 the caller-supplied pre-association manual value so exactly one event records the
 manual-to-derived handover. The function then creates one system-attributed
 `product_eligibility_changed` event per changed automatic occurrence when its
-mode applies Product propagation. Default-version reconciliation may append one
-final `status_change`; association leaves that final event to its caller.
+mode applies Product propagation, followed by an optional system
+`priority_changed` when the effective priority changes. Default-version
+reconciliation may append one final `status_change`; association leaves that
+final event to its caller.
 
 **Idempotency**: safe to call multiple times. With unchanged assessments and
 default version, severity, Product values, and audit are no-ops and the same
@@ -1154,6 +1186,8 @@ acquire a mutation lock, and does not participate in the runner's execution.
 - It creates no audit event, no assignment, no Product mutation, no final
   `reconcile_ticket_status()` invocation, no manual-zone exit, and no
   post-commit effect.
+- It does not project Ticket priority; no preview count reflects a priority
+  change.
 - A currently `Resolved` Ticket whose projected gate result is `Analyzed` or
   `Analysis` contributes one regression count. Promotions, demotions of
   `Analysis` or `Analyzed` Tickets, and no-change evaluations are not separate
@@ -1164,6 +1198,19 @@ acquire a mutation lock, and does not participate in the runner's execution.
   without changing either field.
 
 ## Utility Functions
+
+### `refresh_priority_auto()`
+
+Recomputes `Ticket.priority_auto` from the locked-current resolved severity and
+exploitation evidence, persists a changed value, and creates a system
+`priority_changed` event only when the effective priority changes. It requires
+the caller's Ticket lock and, for a CVE-associated Ticket, the preceding CVE
+lock; it acquires no lock, performs no accessibility or operability check, and
+never assigns or reconciles. The complete contract and every caller position
+are owned by [ticket-priority.md](ticket-priority.md#refresh_priority_auto);
+this is a cross-reference overview. Callers are the CVSS chains and
+`set_severity_manual()` in this module, `ticket_service.create_ticket()` for
+manual creation, and `cve_service.upsert_cve()`.
 
 ## Auto-Assignment Rule
 
@@ -1297,6 +1344,10 @@ gates MUST go through the appropriate centralized module:
 - **Ticket status evaluation**: `ticket_mutations` (the shared
   service-internal primitive is called after an effective gate-relevant
   mutation; delivery-status mutation is explicitly not gate-relevant)
+- **Automatic Ticket priority**: `ticket_mutations.refresh_priority_auto()` is
+  the only writer of `Ticket.priority_auto`; `ticket_service` owns the manual
+  `priority_override`. Priority is not gate-relevant (see
+  [ticket-priority.md](ticket-priority.md))
 
 Direct modification of gate-relevant records outside the owning module is a
 bug. `package_service` owns every standalone, creation, threshold, lifecycle,
@@ -1392,6 +1443,12 @@ and status reconciliation). The test must cover:
   `CVE_NOT_FOUND`; and denial leaves assessment, severity, assignment, Product,
   Ticket status, audit, reconciliation, and post-commit state unchanged. Trusted
   external ingestion and system recalculation remain unscoped
+- **Automatic priority**: every CVSS chain, the external batch, and manual
+  severity refresh `priority_auto` in the documented position; priority changes
+  alone never trigger reconciliation, assignment, or a status change; deferred
+  manual-zone batches still refresh priority; and default-version units whose
+  only mutation is `priority_auto` classify `changed`. The complete matrix is in
+  [ticket-priority.md](ticket-priority.md#testing-requirements)
 
 Package-centric mutation tests are specified in
 `docs/features/packages/package-service.md` (Architectural Test
@@ -1474,4 +1531,6 @@ transaction. Individual candidate skips occur only before this boundary.
   per-ticket catch-up method contract
 - `docs/features/identity/rbac.md` — canonical Ticket visibility predicate and
   capability/visibility orthogonality
+- `docs/features/tickets/ticket-priority.md` — Ticket priority resolution,
+  `refresh_priority_auto()`, and refresh points
 - `docs/api-spec.md` — general API conventions and scoped accessibility

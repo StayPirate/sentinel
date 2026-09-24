@@ -1853,9 +1853,25 @@ task-wrapper, and e2e tests MUST cover:
 
 ### CVE and Source Reads
 
-When the CVE list, the per-CVE source-status read, or the global
-persisted-source listing is implemented or changed, focused service, API, and
-integration tests MUST cover this complete matrix.
+When the CVE list, the CVE detail read, the per-CVE source-status read, or the
+global persisted-source listing is implemented or changed, focused service,
+API, and integration tests MUST cover this complete matrix.
+
+**CVE detail:**
+
+- Malformed, missing, and inaccessible CVE paths producing identical
+  `404 CVE_NOT_FOUND` bodies for anonymous and authenticated callers, including
+  independent-session loss of access before the protected selection; ticketless
+  CVEs always visible.
+- `severity`, `kev`, `epss`, `ssvc`, and `cwes` projected from persisted rows,
+  `null`/empty when absent; CWE grouping by `cwe_id` with exact-deduplicated
+  providers in code-point order; external-identifier ordering; and the
+  associated Ticket's `SNTL-{n}` or `null`.
+- No internal UUID, Ticket priority, protected Ticket content, or CVSS
+  assessment in the response, and the same `CVEDetail` evidence fields inside
+  `TicketDetail.cve`.
+- Accessibility and every projected component deriving from one coherent
+  observation.
 
 **CVE list:**
 
@@ -2019,7 +2035,22 @@ changed, integration tests additionally cover:
 - manual creation with an already-`REJECTED` CVE and manual association of an
   already-`REJECTED` CVE retain their ordinary Ticket status/audit sequence,
   do not invoke `ignore_new_for_rejected_cve()`, and create no automatic
-  `CVE rejected` event.
+  `CVE rejected` event; and
+- the automatic Ticket priority refresh: KEV-, SSVC-, and EPSS-only payloads
+  refresh priority after the batch in every Ticket status, an effective batch
+  refreshes before its final reconciliation and leaves the later refresh a
+  no-op, an ingestion-created Ticket receives exactly one refresh, and a
+  priority change never alters `UpsertResult.action`.
+
+### Ticket Priority
+
+When Ticket priority resolution, its refresh points, the override, or the
+priority API surface is implemented or changed, tests MUST cover the complete
+matrix in `docs/features/tickets/ticket-priority.md` (Testing Requirements),
+together with the `priority_changed` audit assertions in
+`docs/features/tickets/ticket-audit-log.md` and the API endpoint scenarios
+above for `PATCH /api/v1/tickets/{ticket_id}/priority` and the
+`GET /api/v1/tickets` `priority` filter and sort.
 
 ### Post-Ingest Package Resolution
 

@@ -175,6 +175,8 @@ erDiagram
         UUID cve_id FK "UNIQUE, nullable"
         VARCHAR_20 status "NOT NULL"
         VARCHAR_20 severity_manual "nullable"
+        VARCHAR_10 priority_auto "nullable"
+        VARCHAR_10 priority_override "nullable"
         BOOLEAN is_confidential "NOT NULL, DEFAULT FALSE"
         UUID assignee_id FK "nullable"
          UUID duplicate_of_id FK "self-ref, nullable"
@@ -881,10 +883,13 @@ delete the row.
 `DECIMAL(3,1)` used by `CVECVSSAssessment.score`. CVSS scores are
 used for threshold comparisons that gate eligibility decisions, where
 floating-point imprecision could cause incorrect results (e.g.,
-6.999... vs 7.0). EPSS scores are informational — displayed to VAs
-but not used for automated threshold decisions. Additionally, EPSS
-values have variable precision (e.g., 0.00043, 0.97565) that would
-require a wide DECIMAL scale.
+6.999... vs 7.0). EPSS values never gate eligibility, status, or any other
+operational decision. The EPSS `percentile` is compared with the `0.95`
+threshold only to derive the informational Ticket priority
+(`docs/features/tickets/ticket-priority.md`); floating-point imprecision at
+that boundary is accepted because priority has no gate or eligibility effect.
+Additionally, EPSS values have variable precision (e.g., 0.00043, 0.97565)
+that would require a wide DECIMAL scale.
 
 **Lifecycle**: the `sync_epss_scores` fetcher refreshes EPSS data only for
 CVEs with **active tickets** (New, Analysis, Analyzed). When a ticket
@@ -911,6 +916,8 @@ See `docs/features/tickets/tickets.md` for the full ticket specification.
 | cve_id            | UUID        | FK(cve.id), UNIQUE, nullable | Associated CVE. NULL for tickets created without a CVE. A CVE can be associated later via `POST /api/v1/tickets/{ticket_id}/associate-cve` |
 | status            | VARCHAR(20) | NOT NULL, DEFAULT New        | TicketStatus: New, Analysis, Analyzed, Resolved, Ignored, Duplicated |
 | severity_manual | VARCHAR(20) | nullable                     | Manual severity set by the VA (Critical, High, Medium, Low, None). `NULL` = not set (unresolved). `None` = VA explicitly assessed as informational (equivalent to CVSS score 0.0). Used for severity resolution when `cve_id IS NULL`. Cannot be set when `cve_id IS NOT NULL` (severity is derived from CVSS). Cleared to `NULL` by `associate_cve` when a CVE is linked. Mutually exclusive with `cve_id` (see CHECK below). See `docs/features/tickets/tickets.md` (Severity Resolution) |
+| priority_auto     | VARCHAR(10) | nullable                     | TicketPriority derived automatically from the resolved severity and the associated CVE's exploitation evidence. `NULL` = not yet prioritizable. Written only by `ticket_mutations.refresh_priority_auto()`. See `docs/features/tickets/ticket-priority.md` |
+| priority_override | VARCHAR(10) | nullable                     | Sticky manual TicketPriority override set by an authorized user. `NULL` = no override. Never modified by automatic processing. The effective priority is `COALESCE(priority_override, priority_auto)` and is not stored. See `docs/features/tickets/ticket-priority.md` |
 | assignee_id       | UUID        | FK(user.id), nullable        | Current assignee. Assignment eligibility and lifecycle behavior are defined in `docs/features/tickets/tickets.md` and `docs/features/identity/user-service.md` |
 | duplicate_of_id   | UUID        | FK(ticket.id), nullable      | Self-referencing FK to the target ticket when status is Duplicated. Always references a non-Duplicated ticket (enforced by the transactional locking protocol in `mark_as_duplicate`). See `docs/features/tickets/tickets.md` (Duplicate Handling) |
 | created_at        | TIMESTAMPTZ   | NOT NULL, DEFAULT            | Record creation timestamp            |
@@ -1012,6 +1019,25 @@ Alembic migration.
 See `docs/features/tickets/tickets.md` (Ticket Lifecycle) for the full
 transition diagram, gates, and rules.
 
+#### TicketPriority Enum
+
+Remediation urgency used by `Ticket.priority_auto` and
+`Ticket.priority_override`. Category B — classification (Python Enum only): it
+is not a state machine and has no security implication. Adding a value requires
+only a code change. API wire values are lowercase (`p1`–`p4`).
+
+| Value | Description |
+|-------|-------------|
+| `P1` | Remediate immediately |
+| `P2` | Remediate with high urgency |
+| `P3` | Remediate in the normal flow |
+| `P4` | Remediate when convenient |
+
+`NULL` in either column is not a level: `priority_auto IS NULL` means not yet
+prioritizable, and `priority_override IS NULL` means no override. Neither column
+is indexed; priority filtering and sorting use the same unindexed approach as
+resolved severity. See `docs/features/tickets/ticket-priority.md`.
+
 #### TicketReference
 
 Stores external links associated with a ticket. References are created
@@ -1111,6 +1137,7 @@ contract is in `docs/features/tickets/ticket-audit-log.md`.
 | ticket_created             | Ticket created. Always the first event in a ticket's history. `user_id` is NULL for automatic creation or set to the creating user for manual creation. `comment` is exactly `Ticket created manually` or `CVE ingested from {source}` using the canonical CVESourceType label in `docs/features/tickets/cve-service.md`. |
 | cve_associated             | A CVE was associated with a ticket that previously had no CVE. `user_id` is the acting user for explicit association, the creating user when included in user-driven Ticket creation, or NULL for automatic Ticket creation. `old_value` is NULL. `new_value` is the CVE-ID string (e.g., `"CVE-2024-1234"`). |
 | severity_changed           | `user_id` is NULL for automatic CVSS recalculation and for the derived severity handover during `associate_cve()`; it is the acting user's UUID only for direct manual severity changes through `set_severity_manual()`. |
+| priority_changed           | The Ticket's effective priority changed through an automatic refresh (`user_id` NULL, `detail` NULL), or an authorized user set, changed, or cleared the priority override (`user_id` set, `detail` carries `override_action = set`, `changed`, or `cleared`). `old_value` and `new_value` contain the effective priority (`P1`–`P4`) or NULL and may be equal for an override change. `comment` is NULL. |
 | cvss_assessment_changed    | A CVSS assessment was added, modified, or removed. `old_value` and `new_value` use the canonical `"provider_name vX.Y vector_string (score)"` representation, with NULL for the absent side. `comment` and `detail` are NULL. `user_id` is set for manual SUSE changes and NULL for external ingestion. |
 | product_eligibility_changed | Product eligibility or its override ownership changed through an ordinary package boundary or the narrow atomic CVSS-chain exception. Causes are lifecycle phase transition (Reactive Support), synchronous manual-zone exit, threshold change, authorized-user override, assessment propagation, or default-version propagation. `old_value` and `new_value` contain eligibility (`true`/`false`) and may be equal for a metadata-only override set/clear. `user_id` is set for a direct authorized-user override and NULL for system-triggered changes. `detail` carries event-time Product name/CPE plus track, package, and `reason`: `reactive_ltss`, `threshold`, `reactivation`, `cvss`, or `va_override`. Direct override events additionally carry `override_action = set`, `changed`, or `cleared`. |
 | confidentiality_changed     | Ticket `is_confidential` flag was toggled by an authorized acting user. `old_value` and `new_value` contain `"true"` or `"false"`. `detail` is NULL. See `docs/features/tickets/tickets.md` (Confidential Tickets). |
@@ -1123,7 +1150,7 @@ contract is in `docs/features/tickets/ticket-audit-log.md`.
 | reference_title_changed     | Manual reference title changed. `user_id` is the acting user. `old_value` is the previous title (or NULL). `new_value` is the new title (or NULL). `detail` carries `{"url": "..."}` locator. |
 | reference_description_changed | Manual reference description changed. `user_id` is the acting user. `old_value` is the previous description (or NULL). `new_value` is the new description (or NULL). `detail` carries `{"url": "..."}` locator. |
 
-The enum remains exactly 29 values. No Ticket event exists for track delivery,
+The enum remains exactly 30 values. No Ticket event exists for track delivery,
 IBS request/action/correlation evidence, track-release checkpoints, derived
 actionability, automatic reference upserts, Ticket convergence workflow
 outcomes, ticketless CVE state, user deactivation/reactivation grant retention,

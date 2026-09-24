@@ -71,5 +71,6 @@ Index of all feature specification domains.
 - [cve-sync-kev.md](tickets/cve-sync-kev.md) — CISA KEV fetcher (planned)
 - [cve-sync-epss.md](tickets/cve-sync-epss.md) — EPSS fetcher (planned)
 - [cvss-scoring.md](tickets/cvss-scoring.md) — Multi-provider CVSS assessments, severity resolution
+- [ticket-priority.md](tickets/ticket-priority.md) — Ticket priority (P1–P4) from severity and exploitation evidence, manual override
 - [ticket-audit-log.md](tickets/ticket-audit-log.md) — TicketAuditEvent audit trail, event type contract
 - [ticket-references.md](tickets/ticket-references.md) — External links on tickets (auto-classified by type, manual with manage_references capability)

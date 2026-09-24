@@ -9,7 +9,8 @@ maintained products. Tickets may or may not be associated with a CVE.
 This specification is the authoritative source for ticket identification,
 creation pathways, lifecycle, severity resolution, and status transition
 rules. Other feature specifications reference this document for
-ticket-related behavior.
+ticket-related behavior. Ticket priority is owned by
+[ticket-priority.md](ticket-priority.md).
 
 ## Ticket Identification
 
@@ -220,6 +221,15 @@ layer.
   cleared to `NULL` in the same transaction. The automatic severity from
   CVSS takes over. The acting user's previous manual assessment is preserved in
   the audit trail (`severity_changed` events)
+
+## Priority
+
+Every Ticket exposes an effective `priority` (`P1`–`P4`, or `null` when not yet
+prioritizable). It is derived automatically from the resolved severity above
+and the exploitation evidence of the associated CVE, and an authorized acting
+user may override it. Priority is informational only: it is not a gate input
+and never affects status, Product eligibility, or assignment. The complete
+contract is in [ticket-priority.md](ticket-priority.md).
 
 ## Ticket Lifecycle
 
@@ -532,6 +542,12 @@ final reconciliation boundary:
 | Package-tree creation | `package_service.add_package_records()` | The same function when at least one package-tree record is created |
 | Lifecycle-derived actionability or passage of the UTC date | `package_service.reconcile_lifecycle_actionability_for_ticket()` | One reconciliation for the selected gate-zone Ticket |
 | Manual-zone exit | `ticket_service._complete_manual_zone_exit()` | Exactly one reconciliation after synchronous automatic-eligibility convergence |
+
+Ticket priority is not a gate input and follows
+[ticket-priority.md](ticket-priority.md). Its automatic refresh never makes an
+otherwise unchanged workflow reconcile. An effective manual override reconciles
+once only because it is a modifying operation subject to the
+[auto-assignment rule](ticket-mutations.md#auto-assignment-rule).
 
 No gate derives its own affectedness, eligibility, delivery, release, exclusion,
 or lifecycle value. A true no-op does not reconcile unless an owning
@@ -863,7 +879,8 @@ they do not poll an inactive Ticket's external package scope.
   metadata. These reference operations do not assign, reconcile, change status,
   or exit the manual zone. Trusted source ingestion is not a consumer mutation
   endpoint: it may
-  persist non-SUSE external CVSS assessments and refresh `CVE.severity`, while
+  persist non-SUSE external CVSS assessments and exploitation evidence and
+  refresh `CVE.severity` and the Ticket's automatic priority, while
   Product eligibility, assignment, gates, and status propagation remain
   deferred until Ticket convergence after manual-zone exit. See
   [Mutability Guard](#mutability-guard) for the consumer enforcement mechanism.
@@ -890,8 +907,10 @@ def ensure_ticket_operable(ticket: Ticket) -> None:
   `set_confidentiality`, `grant_access`, and `revoke_access`; supplementary
   editorial metadata functions `create_reference`, `update_reference`, and
   `delete_reference`; asynchronous convergence dispatch; CVE on-demand refetch
-  preparation; or trusted source ingestion that modifies only source-owned
-  external CVSS assessment and CVE-derived severity
+  preparation; trusted source ingestion that modifies only source-owned
+  external CVSS assessment and exploitation evidence, CVE-derived severity, and
+  the derived automatic priority; or any other system refresh of the automatic
+  priority defined in [ticket-priority.md](ticket-priority.md)
 
 This source-ingestion boundary does not weaken manual-zone immutability:
 authenticated consumer APIs may mutate only the internal SUSE assessment and
@@ -921,6 +940,7 @@ features behave differently:
 | Product eligibility | Automatic calculation still applies using the conservative 10.0 eligibility fallback; this does not make CVSS itself applicable |
 | CVSS sync (NVD, Red Hat) | Not applicable — ticket is skipped |
 | Severity | Manual via `severity_manual` (editable by an authorized acting user) |
+| Priority | Automatic value uses `severity_manual` with no exploitation evidence (`NULL` while `severity_manual` is unset); the manual override applies normally |
 | Release tracking (track) | Not applicable — track-level detection relies on CVE-ID in IBS diffs |
 | Release tracking (product) | Not applicable — product-level detection relies on CVE-ID in `updateinfo.xml` |
 | CVE rejection handling | Not applicable — no CVE means no `cve_state` changes |
@@ -1037,8 +1057,8 @@ maintainer ownership, or package data is projected. An accessible Ticket with
 no qualifying caller work returns the normal three empty collections.
 
 **CVE Detail (`GET /api/v1/cves/{cve_id}/...`)**:
-All endpoints under `/api/v1/cves/{cve_id}/` use the service-delegated CVE
-accessibility role in `docs/api-spec.md`. Ticketless CVEs are public. An
+`GET /api/v1/cves/{cve_id}` and all endpoints under `/api/v1/cves/{cve_id}/`
+use the service-delegated CVE accessibility role in `docs/api-spec.md`. Ticketless CVEs are public. An
 associated CVE is selected only when its Ticket satisfies the canonical
 predicate. Missing and inaccessible outcomes both return `404 CVE_NOT_FOUND`,
 never a Ticket code.
@@ -1150,7 +1170,7 @@ endpoints that return a ticket use one of two representations depending
 on the context: a compact summary for list views, or a full detail
 object for single-ticket views and mutation responses.
 
-**Enum serialization**: all enum values (`status`, `severity`,
+**Enum serialization**: all enum values (`status`, `severity`, `priority`,
 `workflow_type`, `delivery_status`, `PackageStatus`, and `cve_state`)
 are serialized as **lowercase** strings in API responses (e.g., `"new"`, `"critical"`,
 `"affected"`). Request bodies and query parameters also use lowercase.
@@ -1158,8 +1178,8 @@ The PascalCase forms used elsewhere in this spec (e.g., `New`,
 `Analysis`, `Critical`) refer to the logical values; the wire format is
 always lowercase.
 
-**Nullable enum fields**: nullable enum fields (e.g., `severity`)
-serialize as JSON `null` when unset. The enum value `"none"` is a
+**Nullable enum fields**: nullable enum fields (e.g., `severity`,
+`priority`) serialize as JSON `null` when unset. The enum value `"none"` is a
 distinct valid value (CVSS score 0.0), not equivalent to JSON `null`.
 
 **Exclusion and actionability visibility**: package, track, and Product
@@ -1215,10 +1235,52 @@ or remove grant provenance.
 | `modified_date` | datetime \| null | Date last modified (UTC) |
 | `cve_state` | string | CVE record state (`"published"` or `"rejected"`) |
 | `date_rejected` | datetime \| null | When the CVE was rejected (UTC). `null` if `cve_state` is `"published"` |
+| `severity` | string \| null | Unified CVE severity (`CVE.severity`): `critical`, `high`, `medium`, `low`, `none`, or `null` when unresolved |
 | `external_identifiers` | CVEExternalIdentifierResponse[] | External identifiers from other naming authorities |
+| `kev` | CVEKEVResponse \| null | CISA KEV catalog entry, or `null` when the CVE has no `CVEKEVEntry` |
+| `epss` | CVEEPSSResponse \| null | Latest persisted FIRST EPSS snapshot, or `null` when none exists |
+| `ssvc` | CVESSVCResponse \| null | Persisted CISA SSVC decision points, or `null` when none exist |
+| `cwes` | CVEWeaknessResponse[] | CWE classifications grouped by CWE identifier; empty when none exist |
+
+`CVEDetail` exposes persisted evidence only. It never contains a CVE priority;
+Ticket priority and the exploitation classification that consumes this evidence
+are defined in [ticket-priority.md](ticket-priority.md).
 
 Source status is available via `GET /api/v1/cves/{cve_id}/sources` — see
 `docs/features/tickets/cve-service.md`.
+
+**CVEKEVResponse**:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `date_added` | date | Date the CVE was added to the KEV catalog |
+| `reference_url` | string \| null | KEV catalog entry URL |
+
+**CVEEPSSResponse**:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `score` | number | EPSS probability (0.0–1.0) |
+| `percentile` | number | EPSS percentile rank (0.0–1.0) |
+| `assessed_at` | date | EPSS assessment date. EPSS refreshes only for active Tickets, so consumers use this date to indicate staleness (see [cve-sync-epss.md](cve-sync-epss.md)) |
+
+**CVESSVCResponse**:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `exploitation` | string | `none`, `poc`, or `active` |
+| `automatable` | string | `no` or `yes` |
+| `technical_impact` | string | `partial` or `total` |
+| `version` | string | SSVC version (e.g., `2.0.3`) |
+| `assessed_at` | datetime \| null | When the assessment was performed (UTC) |
+
+**CVEWeaknessResponse** — one element per distinct `CVECWE.cwe_id`, ordered by
+ascending Unicode code point of `cwe_id`:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `cwe_id` | string | CWE identifier (e.g., `CWE-79`) |
+| `sources` | string[] | Every persisted provider that assigned this CWE, exact-deduplicated and ordered by ascending Unicode code point |
 
 **CVEExternalIdentifierResponse** — external vulnerability identifier:
 
@@ -1279,6 +1341,7 @@ views without the full package tree.
 | `ticket_id` | string | Canonical Ticket identity (`SNTL-{n}`) |
 | `status` | string | TicketStatus enum: `new`, `analysis`, `analyzed`, `resolved`, `ignored`, `duplicated` |
 | `severity` | string \| null | Resolved severity (CVSS-derived → manual fallback). Values: `critical`, `high`, `medium`, `low`, `none`, or `null` if unresolved. `null` = no CVSS data and no manual severity set. `"none"` = CVSS score 0.0 (informational) |
+| `priority` | string \| null | Effective priority (manual override, otherwise automatic): `p1`, `p2`, `p3`, `p4`, or `null` when not yet prioritizable. See [ticket-priority.md](ticket-priority.md) |
 | `assignee` | UserSummary \| null | Assigned VA, or `null` if unassigned |
 | `cve` | CVESummary \| null | Associated CVE summary, or `null` if no CVE |
 | `duplicate_of_ticket_id` | string \| null | Duplicate target Ticket identity (`SNTL-{n}`), or `null` |
@@ -1298,6 +1361,9 @@ projection with the full package tree, and uses expanded CVE data.
 | `ticket_id` | string | Canonical Ticket identity (`SNTL-{n}`) |
 | `status` | string | TicketStatus enum: `new`, `analysis`, `analyzed`, `resolved`, `ignored`, `duplicated` |
 | `severity` | string \| null | Resolved severity (CVSS-derived → manual fallback). Values: `critical`, `high`, `medium`, `low`, `none`, or `null` if unresolved. `null` = no CVSS data and no manual severity set. `"none"` = CVSS score 0.0 (informational) |
+| `priority` | string \| null | Effective priority: `priority_override` when set, otherwise `priority_automatic`. Values `p1`–`p4` or `null` |
+| `priority_automatic` | string \| null | System-derived priority (`Ticket.priority_auto`): `p1`–`p4`, or `null` when not yet prioritizable |
+| `priority_override` | string \| null | Manual override (`Ticket.priority_override`): `p1`–`p4`, or `null` when no override is set |
 | `assignee` | UserSummary \| null | Assigned VA, or `null` if unassigned |
 | `cve` | CVEDetail \| null | Expanded CVE data with dates, or `null` if no CVE |
 | `duplicate_of_ticket_id` | string \| null | Duplicate target Ticket identity (`SNTL-{n}`), or `null` |
@@ -1332,6 +1398,7 @@ no status or progress endpoint, and is not a `FetcherRun` identifier.
 | `POST /api/v1/tickets` | `TicketDetail` (201 Created) |
 | `POST .../associate-cve` | `TicketDetail` |
 | `PATCH .../severity` | `TicketDetail` |
+| `PATCH .../priority` | `TicketDetail` |
 | `PATCH .../assignee` | `TicketDetail` |
 | `POST .../ignore` | `TicketDetail` |
 | `POST .../duplicate` | `TicketDetail` |
@@ -1374,6 +1441,11 @@ Query parameters:
   `none`, `unresolved`. `none` matches tickets with severity `None`
   (CVSS score 0.0). `unresolved` matches tickets with `NULL` severity
    (no CVSS data and no manual severity set).
+- `priority` (string, repeatable, optional): filter by effective priority.
+  Accepts one or more values from: `p1`, `p2`, `p3`, `p4`, `unresolved`.
+  `unresolved` matches Tickets whose effective priority is `NULL` (no override
+  and no automatic value). Multiple values use OR semantics; invalid values
+  follow Enum Filter Validation in `docs/api-spec.md`.
 - `maintainer` (string, optional): User UUID or exact username per User
   Identifier Resolution. Matches Tickets with at least one included
   `TicketPackage` associated to that User through
@@ -1383,6 +1455,7 @@ Query parameters:
 - `per_page` (integer, optional): items per page (default: 20).
 - `sort_by` (string, optional): field to sort by (default: `created_at`).
   Valid values: `created_at`, `updated_at`, `severity` (semantic ordering, see Sorting),
+  `priority` (effective priority, semantic ordering, see Sorting; `NULL` sorts last),
   `status` (semantic ordering, see Sorting), `ticket_id` (sorts by numeric `sequence_id`).
 - `sort_order` (string, optional): `asc` or `desc` (default: `desc`).
 
@@ -1543,6 +1616,48 @@ Response: `TicketDetail` object in standard `{"data": ...}` envelope
 | Status | Code | Condition |
 |--------|------|-----------|
 | 409 | `TICKET_SEVERITY_DERIVED` | Ticket has an associated CVE (severity is derived from CVSS) |
+
+### Set Priority Override
+
+```
+PATCH /api/v1/tickets/{ticket_id}/priority
+```
+
+**`Capability: triage_ticket`**
+- **Response schema**: `TicketDetail`
+
+Sets, changes, or clears the manual priority override through
+`ticket_service.set_priority_override()` (see
+[ticket-priority.md](ticket-priority.md#set_priority_override)). The override
+is sticky: automatic priority refresh never changes or clears it. The automatic
+value remains visible as `priority_automatic`.
+
+Request body:
+
+```json
+{
+  "priority": "p2"
+}
+```
+
+To clear the override and return to the automatic priority:
+
+```json
+{
+  "priority": null
+}
+```
+
+- `priority` (string | null, required): `p1`, `p2`, `p3`, or `p4` sets the
+  override; JSON `null` clears it. Any other value, or an omitted field,
+  produces the global `422 VALIDATION_ERROR`
+
+An unchanged request is an idempotent success with no audit event. An effective
+change may auto-assign the acting user and creates one `priority_changed`
+event. The endpoint has no endpoint-specific errors.
+
+Response: `TicketDetail` object in standard `{"data": ...}` envelope
+(200 OK).
 
 ### Assign Ticket
 
@@ -1971,6 +2086,8 @@ table:
 | assignee_id       | UUID        | FK(user.id), nullable        | Assigned VA |
 | severity_manual | VARCHAR(20) | nullable                     | Manual severity (Critical, High, Medium, Low, None). NULL = not set (unresolved). `None` = an authorized acting user explicitly set informational severity (CVSS score 0.0). Used when `cve_id IS NULL`. Cleared to NULL by `associate_cve` when a CVE is linked. Mutually exclusive with `cve_id` (`chk_ticket_severity_manual_cve_exclusive`) |
 | duplicate_of_id   | UUID        | FK(ticket.id), nullable      | Original ticket when Duplicated |
+| priority_auto     | VARCHAR(10) | nullable                     | System-derived priority. See [ticket-priority.md](ticket-priority.md) |
+| priority_override | VARCHAR(10) | nullable                     | Sticky manual priority override. See [ticket-priority.md](ticket-priority.md) |
 | created_at        | TIMESTAMPTZ   | NOT NULL, DEFAULT            | Record creation timestamp |
 | updated_at        | TIMESTAMPTZ   | NOT NULL, DEFAULT            | Record update timestamp |
 | is_confidential   | BOOLEAN       | NOT NULL, DEFAULT FALSE      | Confidentiality flag. See [Confidential Tickets](#confidential-tickets) |
@@ -2011,6 +2128,8 @@ table:
 - `docs/features/tickets/ticket-audit-log.md` — audit event contract, detail
   JSONB schema
 - `docs/features/identity/rbac.md` — Endpoint Permission Map
+- `docs/features/tickets/ticket-priority.md` — Ticket priority, exploitation
+  classification, automatic refresh, and manual override
 - `docs/features/packages/package-maintainership.md` — package-wide maintainer
   acquisition and dynamic visibility
 - `docs/features/packages/maintainer.md` — authoritative maintainer workbench
