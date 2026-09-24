@@ -4,8 +4,8 @@
 
 Centralize Ticket reads, lifecycle operations, and cross-domain Ticket
 compositions — listing, detail assembly, creation, CVE association, assignment,
-priority override, manual-zone entry and exit, and confidentiality management —
-in a single
+priority override, manual-zone entry and exit, and confidentiality management,
+including the Coordinated Release Date — in a single
 service module
 (`ticket_service`). This ensures that:
 
@@ -16,7 +16,8 @@ service module
   on gate conditions (severity changes, status reconciliation)
 - `auto_assign_actor()` is applied uniformly for unassigned tickets
 - `ensure_ticket_operable()` enforces mutability except for the explicit
-  lifecycle, dispatch, and visibility-only opt-outs documented below
+  lifecycle, dispatch, visibility-only, and embargo-metadata opt-outs
+  documented below
 - Business rules (idempotency) are enforced regardless of entry point
 
 Gate primitives and CVSS/severity mutations are handled by
@@ -98,8 +99,9 @@ inherently user-initiated — there is no system scenario for granting or
 revoking explicit access.
 
 `assign_ticket()`, `ignore_ticket()`, `mark_as_duplicate()`,
-`revert_duplicate()`, `set_confidentiality()`, and direct access-grant
-operations require a non-null authorized acting user. Their API handlers must
+`revert_duplicate()`, `set_confidentiality()`,
+`set_coordinated_release_date()`, and direct access-grant operations require a
+non-null authorized acting user. Their API handlers must
 not use system attribution. `create_ticket()` and `reopen_from_ignored()` retain
 their documented system callers. `ignore_new_for_rejected_cve()` is exclusively
 system-only and has no actor parameter.
@@ -187,6 +189,9 @@ Explicit opt-outs (functions that do NOT call `ensure_ticket_operable`):
 - `set_confidentiality`, `grant_access`, and `revoke_access` — visibility-only
   operations valid in every Ticket status; they neither assign, reconcile, nor
   exit the manual zone
+- `set_coordinated_release_date` — embargo-metadata operation valid in every
+  Ticket status while the Ticket is confidential; it neither assigns,
+  reconciles, nor exits the manual zone
 - `dispatch_ticket_convergence` — validates its own eligible status set
 
 `ignore_ticket` calls `ensure_ticket_operable` (which catches
@@ -299,8 +304,9 @@ Conceptual semantic inputs are:
 | `assignee` | `str \| None` | `None` | User UUID, exact username, or literal `none` |
 | `severity` | supplied-state plus collection of valid resolved-severity filters | omitted | Repeatable OR filter including `none` and `unresolved`, preserving omitted versus supplied-but-empty after validation |
 | `priority` | supplied-state plus collection of valid effective-priority filters | omitted | Repeatable OR filter over `p1`–`p4` and `unresolved`, preserving omitted versus supplied-but-empty after validation |
+| `overdue` | supplied-state plus collection of valid milestone phases | omitted | Repeatable OR filter over `triage`, `submission`, `um`, and `qa`, preserving omitted versus supplied-but-empty after validation |
 | `maintainer` | `str \| None` | `None` | User UUID or exact username |
-| `sort_by` | `created_at`, `updated_at`, `severity`, `priority`, `status`, or `ticket_id` | `created_at` | Primary sort |
+| `sort_by` | `created_at`, `updated_at`, `severity`, `priority`, `status`, `ticket_id`, `triage_due_at`, `submission_due_at`, `um_due_at`, `qa_due_at`, or `release_due_at` | `created_at` | Primary sort |
 | `sort_order` | `asc` or `desc` | `desc` | Sort direction |
 | `page` | positive integer | `1` | One-indexed page |
 | `per_page` | integer 1–100 | `20` | Page size |
@@ -308,15 +314,19 @@ Conceptual semantic inputs are:
 The result contains a collection of Ticket summary projections plus `total`,
 `page`, and `per_page`. Its behavior is:
 
-1. Build one candidate set of Tickets satisfying the canonical visibility
-   predicate. Anonymous calls evaluate no grant or maintainership branch.
+1. Capture one UTC evaluation instant and derive the response's
+   `evaluation_date` from it
+   ([ticket-deadlines.md](ticket-deadlines.md#evaluation-instant)). Build one
+   candidate set of Tickets satisfying the canonical visibility predicate.
+   Anonymous calls evaluate no grant or maintainership branch.
 2. Normalize `search` by trimming outer whitespace once. An empty result means
    no search filter. Percent, underscore, and backslash remain literal input;
    they do not become SQL pattern syntax. Apply the field-specific OR matching
    rules in `tickets.md` only to directly included package occurrences and
    current CVE/external-identifier state.
 3. Apply simultaneously supplied client filters with AND semantics. Values
-   inside one repeatable status, severity, or priority filter use OR semantics.
+   inside one repeatable status, severity, priority, or overdue filter use OR
+   semantics.
    The API
    passes whether the filter was supplied together with its valid members in an
    implementation-chosen typed form, so an all-invalid supplied filter yields
@@ -330,7 +340,13 @@ The result contains a collection of Ticket summary projections plus `total`,
    same value, including the distinction between resolved `None` and SQL NULL.
    Likewise derive the effective priority once per Ticket as
    `COALESCE(priority_override, priority_auto)`; priority filtering (`unresolved`
-   matching SQL NULL), sorting, and projection all use that value.
+   matching SQL NULL), sorting, and projection all use that value. Derive the
+   five Ticket-level due dates from that resolved severity, the status, and
+   `created_at` through the service-owned SQL expressions in
+   [ticket-deadlines.md](ticket-deadlines.md#read-ownership-and-query-integration);
+   due-date sorting and projection use those values, and the `overdue` filter
+   applies the Ticket-level rules there with the one evaluation instant, using
+   existence semantics over tracks and Products.
 5. Collapse all one-to-many joins to one logical Ticket. Package, maintainer,
    and external-identifier fan-out must not duplicate rows or inflate `total`.
 6. Project `package_names` from directly included package occurrences only,
@@ -339,7 +355,8 @@ The result contains a collection of Ticket summary projections plus `total`,
 7. Apply the requested primary order and an internal `Ticket.id` UUID
    tie-breaker in the same direction. `ticket_id` sorting uses numeric
    `sequence_id`; status, severity, and priority use the semantic ranks and
-   nullable rules in `docs/api-spec.md`.
+   nullable rules in `docs/api-spec.md`; due dates use timestamp order with
+   `NULL` last.
 8. Compute `total` after visibility and every filter but before page slicing,
    then return the requested page. A page beyond the last is an empty
    collection with the correct total.
@@ -353,8 +370,10 @@ assembled from incompatible views.
 
 The consumer operation accepts `db: AsyncSession`, a public `ticket_id: str`,
 caller information, and optionally an already selected UTC `evaluation_date`.
-When the date is absent, it captures the current UTC calendar date exactly once
-at entry. Mutation workflows that return `TicketDetail` instead supply their
+It always captures one UTC evaluation instant exactly once at entry for
+milestone comparisons
+([ticket-deadlines.md](ticket-deadlines.md#evaluation-instant)). When the date
+is absent, it uses the UTC calendar date of that instant. Mutation workflows that return `TicketDetail` instead supply their
 existing workflow date and the internal UUID of the locked post-mutation
 Ticket. The concrete overload/helper arrangement is an implementation choice;
 no Pydantic type enters the Service layer.
@@ -365,8 +384,11 @@ The result is the semantic projection represented by `TicketDetail` in
 1. Resolves a public locator through the SNTL-only contract and selects the root
    through the canonical visibility predicate. Missing, malformed, UUID, and
    inaccessible locators raise `TicketNotFoundError`.
-2. Projects the root fields, resolved severity, effective, automatic, and
-   override priority, complete current assignee reference, and expanded current
+2. Projects the root fields (including `coordinated_release_at`), resolved
+   severity, effective, automatic, and override priority, the five Ticket-level
+   due dates from
+   [ticket-deadlines.md](ticket-deadlines.md#due-dates), complete current
+   assignee reference, and expanded current
    CVE fields, including the KEV, EPSS, SSVC, and grouped CWE evidence and their
    ordering defined by `CVEDetail` in `tickets.md`. CVSS assessments are not
    inline; they remain in their dedicated sub-resource.
@@ -377,7 +399,8 @@ The result is the semantic projection represented by `TicketDetail` in
    duplicate chain, expose target content, or apply a second protected-content
    lookup. This is the bounded identifier-only disclosure contract.
 5. Composes the package-owned complete tree projection with the same
-   `evaluation_date`. Package names, track references, and Product CPEs use
+   `evaluation_date` and the same evaluation instant, which projects the per-track due
+   dates, `milestones`, and `current_phase`. Package names, track references, and Product CPEs use
    ascending Unicode code-point order with the corresponding occurrence UUID
    as final tie-breaker. Maintainer identities are not loaded or projected.
 
@@ -418,6 +441,7 @@ async def create_ticket(
     cve_id: str | None = None,
     severity_manual: Severity | None = None,
     is_confidential: bool = False,
+    coordinated_release_at: datetime | None = None,
     source: TicketCreationSource,
     ingestion_source: CVESourceType | None = None,
 ) -> Ticket:
@@ -438,6 +462,11 @@ mapping location is an implementation choice.
   ticket)
 - If `is_confidential` is True: the acting user must hold
   `manage_confidentiality` capability (enforced at the API layer)
+- `coordinated_release_at` is a timezone-aware UTC instant and is permitted
+  only with `is_confidential = True` and `source = manual`. The API rejects a
+  non-null value without confidential creation through schema validation; a
+  service caller that violates either condition receives `ValueError` before
+  database access, like the `ingestion_source` mismatch above
 - If both `cve_id` and `severity_manual` are provided: the service
   raises `SeverityDerivedError`. When a CVE is associated, severity is
   derived exclusively from CVSS assessments — manual severity is not
@@ -454,7 +483,8 @@ mapping location is an implementation choice.
    `FOR UPDATE` on the CVE before reading association state or inserting the
    Ticket. A newly inserted CVE is already owned by the transaction. If no CVE
    is provided, no row lock is required
-3. INSERT new Ticket row with initial fields (all unspecified columns
+3. INSERT new Ticket row with initial fields, including
+   `coordinated_release_at` when supplied (all unspecified columns
    use database defaults: `duplicate_of_id = NULL`,
    `updated_at = now(UTC)`, etc.)
 4. Determine initial status:
@@ -464,23 +494,26 @@ mapping location is an implementation choice.
 5. Create `TicketAuditEvent` (`ticket_created`) with the exact canonical
    comment selected from `source` and `ingestion_source`. This is
    always the first event in the Ticket's history, before every optional
-   severity, assignment, or CVE-association event below
+   severity, CRD, assignment, or CVE-association event below
 6. If assigned (step 4): create `TicketAuditEvent` (`assignment`)
 7. If `severity_manual` provided: create `TicketAuditEvent`
    (`severity_changed`, `old_value = NULL`, `new_value = <severity>`)
-8. If CVE associated: create `TicketAuditEvent` (`cve_associated`)
-9. For `source = manual`, call `ticket_mutations.refresh_priority_auto()` for
+8. If `coordinated_release_at` provided: create `TicketAuditEvent`
+   (`coordinated_release_changed`, creating user, `old_value = NULL`,
+   `new_value` = the stored instant in UTC ISO 8601 format)
+9. If CVE associated: create `TicketAuditEvent` (`cve_associated`)
+10. For `source = manual`, call `ticket_mutations.refresh_priority_auto()` for
    the new Ticket under the held locks. A resulting `priority_changed` (system,
    `NULL -> Px`) follows every creation event above. For
    `source = cve_ingestion`, do not refresh: the calling `upsert_cve()` owns the
    single refresh after its CVSS batch (see
    [ticket-priority.md](ticket-priority.md#refresh-points))
-10. For manual create-with-CVE, use the locked-current CVE and new Ticket to
+11. For manual create-with-CVE, use the locked-current CVE and new Ticket to
    prepare an all-source freshness refresh through `cve_service`. Validate
    registry capability and enabled state and register publication only after all
    creation and audit work succeeds. This applies to both a newly created
    placeholder and an existing CVE
-11. Return the created Ticket
+12. Return the created Ticket
 
 For a manual creation whose locked-current CVE is already `REJECTED`, these
 same steps remain authoritative: initial status still comes only from step 4,
@@ -511,9 +544,10 @@ Ticket still commits. Unexpected database, bootstrap-invariant, registration,
 or transaction errors escape and roll back normally. Periodic sync or manual
 refetch recovers the accepted crash gap; there is no durable dispatch row.
 
-**Audit events**: Up to 5, in this order: `ticket_created`, optional
-`assignment`, optional `severity_changed`, optional `cve_associated`, and, for
-manual creation only, optional system `priority_changed`. Every event except
+**Audit events**: Up to 6, in this order: `ticket_created`, optional
+`assignment`, optional `severity_changed`, optional
+`coordinated_release_changed`, optional `cve_associated`, and, for manual
+creation only, optional system `priority_changed`. Every event except
 `ticket_created` uses `comment = NULL`.
 
 ### associate_cve
@@ -1441,6 +1475,10 @@ async def set_confidentiality(
 7. Flush the flag, grant deletions, and event, then return the locked-current
    updated Ticket.
 
+`Ticket.coordinated_release_at` is never modified by this operation. After an
+effective `true` to `false` transition, a retained CRD stays read-only until
+the Ticket becomes confidential again (see `set_coordinated_release_date`).
+
 `TicketPackageMaintainer` rows are not grants and are never modified by this
 operation. When confidentiality becomes true, existing associations qualify
 through the canonical visibility predicate while their package is included and
@@ -1472,6 +1510,69 @@ gate-relevant.
 **Audit events**: `confidentiality_changed` only when the flag actually
 changes, with `comment = NULL`. Automatic grant deletion creates no additional
 event.
+
+### set_coordinated_release_date
+
+Sets, changes, or clears `Ticket.coordinated_release_at` on a confidential
+Ticket. Semantics are owned by
+[tickets.md](tickets.md#coordinated-release-date).
+
+```python
+async def set_coordinated_release_date(
+    db: AsyncSession,
+    *,
+    ticket_id: UUID,
+    coordinated_release_at: datetime | None,
+    acting_user_id: UUID,
+) -> Ticket:
+```
+
+`coordinated_release_at` is a timezone-aware instant, already normalized to UTC
+by the API boundary; `None` clears the CRD. `acting_user_id` is the authorized
+user; no system caller exists. The API requires `manage_confidentiality` before
+calling.
+
+**Behavioral steps**:
+
+1. Acquire `FOR UPDATE` on the Ticket row. No User lock is acquired because
+   the operation never assigns.
+2. Revalidate consumer accessibility from the locked-current Ticket. Missing or
+   inaccessible raises `TicketNotFoundError` before every other decision.
+3. Verify the locked-current Ticket is confidential; otherwise raise
+   `TicketNotConfidentialError`. This function does not call
+   `ensure_ticket_operable()`; it is valid in every Ticket status, including
+   `Ignored` and `Duplicated`.
+4. **Idempotency check**: if the requested instant equals the stored value
+   (both `NULL`, or the same UTC instant), return the Ticket unchanged with no
+   write or event.
+5. Preserve the stored value, persist the requested value, and create one
+   `coordinated_release_changed` event attributed to `acting_user_id` whose
+   `old_value` and `new_value` are the preserved and requested instants in UTC
+   ISO 8601 format, or `NULL` for an absent side.
+6. Flush the column and event, then return the locked-current updated Ticket.
+
+**Concurrency**: the operation serializes with `set_confidentiality()`, access
+grants, and every other Ticket mutation on the Ticket lock and classifies its
+result from the state observed after waiting. If declassification wins, the
+waiter is rejected with `TicketNotConfidentialError`; if the CRD change wins, a
+later declassification retains the new value. Two concurrent CRD changes each
+create one event in serialization order with true locked old values; a waiter
+that observes its requested value is a no-op.
+
+**reconcile_ticket_status**: NOT called — the CRD is not gate-relevant.
+
+**auto_assign_actor**: Not called. The CRD is embargo metadata, not Ticket
+work.
+
+**Transaction and exceptions**: the function flushes but neither commits nor
+rolls back. It propagates `TicketNotFoundError`, `TicketNotConfidentialError`,
+and database, audit, and flush failures. Any failure or caller rollback leaves
+neither the new value nor the event. The API returns the `TicketDetail`
+projection of the post-mutation Ticket under
+[`get_ticket_detail()`](#get_ticket_detail).
+
+**Audit events**: `coordinated_release_changed` only when the stored value
+actually changes.
 
 ### grant_access
 
@@ -1735,6 +1836,7 @@ ticket_mutations (infrastructure)
 | revert_duplicate       | —                      | ✓                      | —                     | ✓                     | ✓                   |
 | dispatch_ticket_convergence | —                  | —                      | —                     | —                     | —                   |
 | set_confidentiality    | —                      | —                      | —                     | —                     | —                   |
+| set_coordinated_release_date | —                | —                      | —                     | —                     | —                   |
 | grant_access           | —                      | —                      | —                     | —                     | —                   |
 | revoke_access          | —                      | —                      | —                     | —                     | —                   |
 | list_access_grants     | —                      | —                      | —                     | —                     | —                   |
@@ -1833,7 +1935,8 @@ behavior of `ticket_service` operations:
 13. **Canonical comments and creation order**: manual and every canonical CVE
     source create the exact `ticket_created.comment`; creation keeps
     `ticket_created`, optional assignment, optional manual severity, optional
-    CVE association, and optional manual-creation `priority_changed` order. Normal status transitions use NULL comments,
+    Coordinated Release Date, optional CVE association, and optional
+    manual-creation `priority_changed` order. Normal status transitions use NULL comments,
     while rejection uses exactly `CVE rejected`
 14. **Confidentiality and grants**: direct changes assert exact acting-user
     events and no-op absence; `true` to `false` atomically deletes every grant
@@ -1841,7 +1944,9 @@ behavior of `ticket_service` operations:
     flush failure, retained maintainer associations, and no manual-grant
     recreation on `false` to `true`. Grant responses distinguish `created` from
     `already_exists`, preserve original provenance, project inactive users, and
-    order lists by grant time then target UUID
+    order lists by grant time then target UUID. Declassification leaves
+    `coordinated_release_at` unchanged and creates no
+    `coordinated_release_changed` event
 15. **Locked-current accessibility**: for every consumer mutation above, use
     independent sessions to change confidentiality, the caller's grant, or the
     last included-package maintainership path between preliminary delegated access and
@@ -1850,7 +1955,8 @@ behavior of `ticket_service` operations:
     reconciliation, or post-commit registration. Cover
     User-then-CVE-then-Ticket association, both ordered duplicate roots,
     manual-zone exits, convergence
-    dispatch, confidentiality, and grants. Separately verify that an authorized
+    dispatch, confidentiality, the Coordinated Release Date, and grants.
+    Separately verify that an authorized
     mutation which itself removes the caller's last visibility path returns its
     normal success response and only later requests are denied
 16. **Accessible reads**: grant listing selects through the accessible parent
@@ -1873,6 +1979,21 @@ behavior of `ticket_service` operations:
     refreshes it inside the chain after Product events and before the one final
     reconciliation; and `set_priority_override()` satisfies the override tests
     in [ticket-priority.md](ticket-priority.md#testing-requirements)
+20. **Coordinated Release Date**: `set_coordinated_release_date()` sets,
+    changes, and clears the value with one exact acting-user
+    `coordinated_release_changed` event (UTC ISO 8601 old/new values, `NULL`
+    for the absent side, `comment` and `detail` `NULL`); an unchanged request,
+    including an equal instant supplied with a different offset, is a no-op
+    with no event; a non-confidential Ticket, including one declassified with a
+    retained CRD, raises `TicketNotConfidentialError` with no effect; the
+    operation succeeds in every Ticket status including `Ignored` and
+    `Duplicated` without assignment, reconciliation, or status change; past
+    instants are accepted; independent-session races with declassification and
+    with another CRD change serialize as specified; and audit or flush failure
+    rolls back value and event together. Manual creation with a CRD records the
+    event after optional `severity_changed` and before optional
+    `cve_associated`; creation with a CRD without confidential creation, or
+    through the ingestion source, raises `ValueError` before database access
 
 ## Cross-references
 
@@ -1891,4 +2012,6 @@ behavior of `ticket_service` operations:
 - `docs/conventions.md` — Transaction and Locking pattern
 - `docs/features/tickets/ticket-priority.md` — priority override and automatic
   refresh contracts
+- `docs/features/tickets/ticket-deadlines.md` — due dates, milestones, overdue
+  filter, and evaluation instant
 - `docs/api-spec.md` — general API conventions, error code categories

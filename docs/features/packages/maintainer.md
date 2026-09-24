@@ -58,6 +58,8 @@ All workbench sections use this item schema:
 | `reference` | string | Persisted IBS codestream project or Git branch reference |
 | `status` | string | Persisted affectedness: `analysis`, `affected`, `not_affected`, `fixed`, or `wont_fix` |
 | `delivery_status` | string | Persisted delivery: `pending`, `in_progress`, or `released` |
+| `submission_due_at` | string (datetime) or null | Due date of the maintainer submission milestone for this track; null when no SLA applies. See `docs/features/tickets/ticket-deadlines.md` |
+| `submission_milestone` | string or null | The track's `submission` milestone status: `done`, `pending`, `overdue`, `not_applicable`, or null. Unrelated to `delivery_status = pending` |
 
 Example:
 
@@ -70,7 +72,9 @@ Example:
   "workflow_type": "ibs",
   "reference": "SUSE:SLE-15-SP6:Update",
   "status": "affected",
-  "delivery_status": "pending"
+  "delivery_status": "pending",
+  "submission_due_at": "2026-10-12T09:15:00Z",
+  "submission_milestone": "pending"
 }
 ```
 
@@ -79,6 +83,15 @@ association count, source payload, or SMELT provenance. It also does not expose
 or derive a submission chain, an effective SR, a proving RR, `analyzed_at`,
 `first_sr_created_at`, an authoritative completion timestamp, waiting duration,
 or any chronology synthesized from generic row timestamps or audit history.
+The submission deadline fields are not such a chronology: they are the
+remediation SLA projection defined by
+`docs/features/tickets/ticket-deadlines.md`, derived from the Ticket's
+immutable `created_at` and resolved severity, and they record no completion
+time. The deadline is projected only on rows that satisfy a workbench
+classification; a submission milestone that is overdue on a track outside every
+classification (for example `FIXED` with delivery `pending`, or a track still in
+`ANALYSIS`) remains visible through the track's `milestones` in the Ticket
+package tree and the `overdue` filter of `GET /api/v1/tickets`.
 Correlated IBS request actions and their exact current states remain available
 through the Ticket
 [submission-request](ibs-submission-tracking.md#list-submission-requests) and
@@ -88,8 +101,10 @@ reconstructible historical chain for this projection.
 
 ## Classification
 
-All classifications use one UTC `evaluation_date` for the complete result and
-apply the canonical actionability predicates in `package-model.md`. Combining
+All classifications use one UTC `evaluation_date` for the complete result,
+derived from one evaluation instant that also evaluates the submission
+milestone, and apply the canonical actionability predicates in
+`package-model.md`. Combining
 affectedness, eligibility, actionability, and delivery here is an allowed
 presentation gate only. It does not derive or mutate one package dimension from
 another.
@@ -156,7 +171,7 @@ The pending, in-progress, and completed endpoints share these query parameters:
 | `package` | string | — | Case-sensitive exact match against `TicketPackage.package_name`; no trimming, aliasing, substring matching, or case normalization; max 500 characters |
 | `page` | integer | 1 | Standard page number, minimum 1 |
 | `per_page` | integer | 20 | Standard page size, minimum 1 and maximum 100 |
-| `sort_by` | string | `severity` | `severity` (semantic ordering; see `docs/api-spec.md`, Sorting) or `package` |
+| `sort_by` | string | `severity` | `severity` (semantic ordering; see `docs/api-spec.md`, Sorting), `package`, or `submission_due_at` (`NULL` last) |
 | `sort_order` | string | `desc` | `asc` or `desc` |
 
 Different supplied filters compose with AND semantics. Invalid pagination or
@@ -167,8 +182,10 @@ returns an empty `data` array with the correct `meta.total`.
 Field Ordering). `package` orders `package_name` by Unicode code point,
 independent of database collation. The internal deterministic pagination
 tie-breaker required by `docs/api-spec.md` (Deterministic Pagination Ordering)
-is `TicketPackageTrack.id`. The lists expose no temporal filter or sort: `days`,
-`waiting`, `since`, and `released` are not declared query parameters.
+is `TicketPackageTrack.id`. `submission_due_at` uses timestamp order with
+`NULL` last under Nullable Sort Field Ordering. Apart from that SLA deadline,
+the lists expose no temporal filter or sort: `days`, `waiting`, `since`, and
+`released` are not declared query parameters.
 
 Each global list returns the standard paginated envelope:
 
@@ -191,7 +208,8 @@ and pagination; no Python post-filter may remove rows from a broad page.
 ## API Endpoints
 
 All four endpoints use mandatory authentication, receive the authenticated User
-ID and request-resolved effective scope, capture one UTC `evaluation_date`, and
+ID and request-resolved effective scope, capture one UTC evaluation instant and
+its `evaluation_date`, and
 delegate model-aware query construction to `package_service`. Handlers do not
 construct ORM predicates or perform response fan-out queries.
 
@@ -318,6 +336,8 @@ queries.
   authenticated endpoint map
 - `docs/features/packages/ibs-submission-tracking.md` — separate correlated IBS
   request-action read surfaces
+- `docs/features/tickets/ticket-deadlines.md` — submission deadline and
+  milestone status
 
 ## Cross-References
 

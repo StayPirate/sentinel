@@ -2052,6 +2052,15 @@ together with the `priority_changed` audit assertions in
 above for `PATCH /api/v1/tickets/{ticket_id}/priority` and the
 `GET /api/v1/tickets` `priority` filter and sort.
 
+### Ticket Deadlines
+
+When the remediation SLA, due-date computation, track milestones,
+`current_phase`, the `overdue` filter, or due-date sorting is implemented or
+changed, tests MUST cover the complete matrix in
+`docs/features/tickets/ticket-deadlines.md` (Testing Requirements), including
+the SQL/pure-function equivalence and the proof that deadlines create no audit
+event and never affect gates, eligibility, or assignment.
+
 ### Post-Ingest Package Resolution
 
 When `resolve_ticket_packages` or its package-service async workflow is
@@ -2371,6 +2380,18 @@ visibility predicate.
   existing and absent grants, and the confidential-state guard. An effective
   revoke returns 204 and creates one exact `access_grant_removed`; an absent
   grant returns 204 with no event.
+- The Coordinated Release Date endpoint exercises set, change, clear, an
+  unchanged instant (including the same instant with a different offset),
+  naive input interpreted as UTC, a past instant, every Ticket status including
+  `Ignored` and `Duplicated`, a never-confidential Ticket, and a declassified
+  Ticket with a retained CRD (both `409 TICKET_NOT_CONFIDENTIAL`), `403`
+  without `manage_confidentiality`, and missing or inaccessible Tickets
+  (`404 TICKET_NOT_FOUND` before the confidentiality guard). `POST
+  /api/v1/tickets` with a CRD and `is_confidential` omitted or `false` returns
+  the global `422 VALIDATION_ERROR`. Declassification and reclassification
+  leave the CRD unchanged, and a CRD/declassification race follows
+  `set_coordinated_release_date()`'s serialized contract. The CRD never alters
+  status, gates, eligibility, assignment, deadlines, or accessibility.
 - Every grant mutation proves Ticket accessibility is authoritative before a
   deferred target-not-found, inactive, confidentiality, or no-op result. Missing
   and inaccessible Tickets remain indistinguishable and disclose no target
@@ -2621,9 +2642,16 @@ requirements without defining another visibility rule.
 - `package` is a case-sensitive exact match. Cover exact success, case variant,
   prefix, substring, alias-like, leading/trailing whitespace, and another
   declared filter composing with AND semantics.
-- Exercise both `severity` and `package` sorting in both directions. Severity
-  follows the semantic rank, unresolved null severity remains last, and package
-  names use Unicode code-point ordering independent of database collation.
+- Exercise `severity`, `package`, and `submission_due_at` sorting in both
+  directions. Severity follows the semantic rank, unresolved null severity
+  remains last, package names use Unicode code-point ordering independent of
+  database collation, and a null submission due date (severity `none`) remains
+  last.
+- Every item projects `submission_due_at` and `submission_milestone` equal to
+  the track's values under `docs/features/tickets/ticket-deadlines.md`,
+  including `pending` and `overdue` pending rows and `done` in-progress and
+  completed rows, evaluated from the one evaluation instant shared by rows and
+  totals.
 - Create equal primary sort keys and prove the internal
   `TicketPackageTrack.id` same-direction tie-breaker yields stable pages with no
   duplicate or omitted row. Cover minimum and maximum `per_page`, invalid
@@ -2661,13 +2689,15 @@ requirements without defining another visibility rule.
 
 - Global and per-Ticket items contain exactly `package_name`, canonical
   `ticket_id`, nullable `cve_id`, nullable resolved `severity`,
-  `workflow_type`, `reference`, affectedness `status`, and `delivery_status`,
-  all using lowercase API enum values.
+  `workflow_type`, `reference`, affectedness `status`, `delivery_status`,
+  nullable `submission_due_at`, and nullable `submission_milestone`, all using
+  lowercase API enum values.
 - Generated OpenAPI and response tests prove absence of Ticket UUIDs,
   maintainer IDs, usernames, emails, groups, association counts, SMELT payload
   or provenance, `submission_chain`, effective SR/proving RR fields,
   `analyzed_at`, `first_sr_created_at`, completion timestamps, waiting
-  durations, and temporal lookback or sort parameters.
+  durations, and temporal lookback or sort parameters other than the documented
+  `submission_due_at` SLA sort.
 - Service tests prove all four functions acquire no mutation lock, write no
   database row, create no `TicketAuditEvent`, perform no commit or rollback,
   enqueue no task, and perform no external or Redis I/O. Database exceptions

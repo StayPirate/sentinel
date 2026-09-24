@@ -923,6 +923,7 @@ See `docs/features/tickets/tickets.md` for the full ticket specification.
 | created_at        | TIMESTAMPTZ   | NOT NULL, DEFAULT            | Record creation timestamp            |
 | updated_at        | TIMESTAMPTZ   | NOT NULL, DEFAULT            | Record update timestamp              |
 | is_confidential   | BOOLEAN       | NOT NULL, DEFAULT FALSE      | When TRUE, access is restricted to authorized users only. See `docs/features/tickets/tickets.md` (Confidential Tickets) |
+| coordinated_release_at | TIMESTAMPTZ | nullable                | Coordinated Release Date: the embargo publication instant agreed with external parties. `NULL` = no CRD known. Writable only while `is_confidential = TRUE` (service-enforced); retained unchanged, read-only, and inert after declassification. Never an input to gates, eligibility, deadlines, or status. Not indexed. See `docs/features/tickets/tickets.md` (Coordinated Release Date) |
 
 **CHECK constraints**:
 
@@ -1141,6 +1142,7 @@ contract is in `docs/features/tickets/ticket-audit-log.md`.
 | cvss_assessment_changed    | A CVSS assessment was added, modified, or removed. `old_value` and `new_value` use the canonical `"provider_name vX.Y vector_string (score)"` representation, with NULL for the absent side. `comment` and `detail` are NULL. `user_id` is set for manual SUSE changes and NULL for external ingestion. |
 | product_eligibility_changed | Product eligibility or its override ownership changed through an ordinary package boundary or the narrow atomic CVSS-chain exception. Causes are lifecycle phase transition (Reactive Support), synchronous manual-zone exit, threshold change, authorized-user override, assessment propagation, or default-version propagation. `old_value` and `new_value` contain eligibility (`true`/`false`) and may be equal for a metadata-only override set/clear. `user_id` is set for a direct authorized-user override and NULL for system-triggered changes. `detail` carries event-time Product name/CPE plus track, package, and `reason`: `reactive_ltss`, `threshold`, `reactivation`, `cvss`, or `va_override`. Direct override events additionally carry `override_action = set`, `changed`, or `cleared`. |
 | confidentiality_changed     | Ticket `is_confidential` flag was toggled by an authorized acting user. `old_value` and `new_value` contain `"true"` or `"false"`. `detail` is NULL. See `docs/features/tickets/tickets.md` (Confidential Tickets). |
+| coordinated_release_changed | The Coordinated Release Date of a confidential Ticket was set, changed, or cleared by an authorized acting user, including at manual creation. `old_value` and `new_value` contain the CRD in UTC ISO 8601 format or NULL. `comment` and `detail` are NULL. Declassification retains the CRD and creates no event. See `docs/features/tickets/tickets.md` (Coordinated Release Date). |
 | access_grant_added          | Authorized acting user manually granted a user explicit access to a confidential ticket. `old_value` is NULL. `new_value` is the target username. `detail` is NULL. |
 | access_grant_removed        | Authorized acting user manually revoked a user's explicit access to a confidential ticket. `old_value` is the target username. `new_value` is NULL. Automatic grant deletion during declassification creates no event. `detail` is NULL. |
 | reference_added             | Manual reference added to ticket. `user_id` is the acting user. `old_value` is NULL. `new_value` is the reference URL. `detail` is NULL. |
@@ -1150,11 +1152,12 @@ contract is in `docs/features/tickets/ticket-audit-log.md`.
 | reference_title_changed     | Manual reference title changed. `user_id` is the acting user. `old_value` is the previous title (or NULL). `new_value` is the new title (or NULL). `detail` carries `{"url": "..."}` locator. |
 | reference_description_changed | Manual reference description changed. `user_id` is the acting user. `old_value` is the previous description (or NULL). `new_value` is the new description (or NULL). `detail` carries `{"url": "..."}` locator. |
 
-The enum remains exactly 30 values. No Ticket event exists for track delivery,
+The enum contains exactly 31 values. No Ticket event exists for track delivery,
 IBS request/action/correlation evidence, track-release checkpoints, derived
 actionability, automatic reference upserts, Ticket convergence workflow
 outcomes, ticketless CVE state, user deactivation/reactivation grant retention,
-or automatic grant deletion during declassification.
+automatic grant deletion during declassification, or Coordinated Release Date
+retention during declassification.
 Effective delegated domain mutations retain their ordinary event types. See the
 canonical matrix in `docs/features/tickets/ticket-audit-log.md`.
 
