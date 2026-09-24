@@ -4,7 +4,7 @@ description: >
   flows, and inconsistent terminology. Use after cross-feature or
   cross-cutting contract changes. Read-only.
 mode: subagent
-model: helmcode/deepseek-v4-flash
+model: openrouter/deepseek/deepseek-v4.1-flash
 variant: high
 permission:
   edit: deny

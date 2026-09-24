@@ -4,7 +4,7 @@ description: >
   Use after significant API, feature-spec, model, service-contract,
   architecture, integration, or multi-document changes. Read-only.
 mode: subagent
-model: helmcode/deepseek-v4-flash
+model: openrouter/deepseek/deepseek-v4.1-flash
 variant: high
 permission:
   edit: deny

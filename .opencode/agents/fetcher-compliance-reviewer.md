@@ -4,7 +4,7 @@ description: >
   BaseGitFetcher lifecycle, metrics, registry, and task integration. Use after
   creating or changing a fetcher. Read-only.
 mode: subagent
-model: helmcode/deepseek-v4-flash
+model: openrouter/deepseek/deepseek-v4.1-flash
 variant: high
 permission:
   edit: deny

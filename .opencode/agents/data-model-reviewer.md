@@ -3,7 +3,7 @@ description: >
   Reviews schema simplicity, consistency, and conventions. Use after changing
   SQLAlchemy models, Alembic migrations, or `docs/data-model.md`. Read-only.
 mode: subagent
-model: helmcode/deepseek-v4-flash
+model: openrouter/deepseek/deepseek-v4.1-flash
 variant: high
 permission:
   edit: deny

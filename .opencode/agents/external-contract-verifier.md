@@ -4,7 +4,7 @@ description: >
   contracts against recorded or read-only live evidence. Use after changing
   fetchers, HTTP clients, or parsers. Read-only.
 mode: subagent
-model: helmcode/deepseek-v4-flash
+model: openrouter/deepseek/deepseek-v4.1-flash
 variant: high
 permission:
   edit: deny
