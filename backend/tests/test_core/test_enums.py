@@ -1,7 +1,9 @@
 """Tests for static enumerations (backend/app/core/enums.py).
 
-See docs/features/identity/rbac.md (Authorization Model) and
-docs/data-model.md (Role Enum) for the contract these enums implement.
+Each test class cites the specification section that owns its enum,
+for example docs/features/identity/rbac.md (Authorization Model),
+docs/data-model.md (Role Enum), and docs/features/tickets/cvss-scoring.md
+(Accepted Base Vectors, Severity, Eligibility Score Resolution).
 """
 
 from __future__ import annotations

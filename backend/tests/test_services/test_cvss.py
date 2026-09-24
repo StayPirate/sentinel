@@ -1239,13 +1239,27 @@ class TestIsReservedProviderName:
 
 
 def _imported_modules(path: Path) -> set[str]:
+    """Absolute module names imported by a module under `app/services/`.
+
+    Relative imports are resolved against the `app.services` package so a
+    `from ..models import X` cannot bypass the boundary assertions.
+    """
     tree = ast.parse(path.read_text(encoding="utf-8"))
+    package_parts = ["app", "services"]
     modules: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             modules.update(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
-            modules.add(node.module)
+        elif isinstance(node, ast.ImportFrom):
+            if node.level == 0:
+                base = node.module or ""
+            else:
+                parent = package_parts[: len(package_parts) - (node.level - 1)]
+                base = ".".join([*parent, node.module] if node.module else parent)
+            if node.module:
+                modules.add(base)
+            else:
+                modules.update(f"{base}.{alias.name}" for alias in node.names)
     return modules
 
 
@@ -1296,6 +1310,19 @@ class TestExceptionsAndBoundaries:
             if any(m == p or m.startswith(f"{p}.") for p in forbidden_prefixes)
         }
         assert offending == set()
+
+    def test_import_collector_resolves_relative_imports(self, tmp_path: Path) -> None:
+        source = tmp_path / "probe.py"
+        source.write_text(
+            "from ..models import cve\nfrom . import cvss\nfrom .x import y\n",
+            encoding="utf-8",
+        )
+
+        assert _imported_modules(source) == {
+            "app.models",
+            "app.services.cvss",
+            "app.services.x",
+        }
 
     def test_cvss_imports_only_core_and_errors_leaf_from_app(self) -> None:
         modules = _imported_modules(APP_ROOT / "services" / "cvss.py")
