@@ -15,8 +15,8 @@ import uuid
 from collections.abc import Awaitable, Callable
 
 import pytest
-from sqlalchemy import insert, inspect, select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import insert, inspect, select, text
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.enums import TicketAuditEventType
@@ -100,23 +100,24 @@ class TestTicketAuditEventCreation:
         assert reloaded is not None
         assert reloaded.detail == detail
 
-    async def test_database_assigns_id_and_created_at(
+    async def test_raw_insert_applies_server_defaults(
         self, db_session: AsyncSession, ticket_factory: TicketFactory
     ) -> None:
-        """A Core INSERT bypasses the ORM-side `uuid.uuid7` default, so the
-        `uuidv7()` and `now()` server defaults supply both columns."""
+        """A raw SQL INSERT bypasses every Python-side default (a Core
+        `insert()` would still apply `uuid.uuid7`), so the `uuidv7()` and
+        `now()` server defaults must supply both columns."""
         ticket = await ticket_factory()
         result = await db_session.execute(
-            insert(TicketAuditEvent)
-            .values(ticket_id=ticket.id, event_type="ticket_created")
-            .returning(
-                TicketAuditEvent.id,
-                TicketAuditEvent.created_at,
-            )
+            text(
+                "INSERT INTO ticket_audit_event (ticket_id, event_type) "
+                "VALUES (:ticket_id, 'ticket_created') RETURNING id, created_at"
+            ),
+            {"ticket_id": ticket.id},
         )
-        event_id, created_at = result.one()
-        assert event_id.version == 7
-        assert created_at.tzinfo is not None
+        row = result.one()
+        assert isinstance(row.id, uuid.UUID)
+        assert row.id.version == 7
+        assert row.created_at.tzinfo is not None
 
     @pytest.mark.parametrize("event_type", list(TicketAuditEventType))
     async def test_every_event_type_accepted(
@@ -133,6 +134,15 @@ class TestTicketAuditEventCreation:
         """Category B: no CHECK constraint; `TicketAuditLog` validates."""
         event = await ticket_audit_event_factory(event_type="not_a_ticket_event")
         assert event.event_type == "not_a_ticket_event"
+
+    async def test_event_type_over_column_length_rejected(
+        self, ticket_audit_event_factory: TicketAuditEventFactory
+    ) -> None:
+        """`event_type` is VARCHAR(50) (docs/data-model.md)."""
+        await ticket_audit_event_factory(event_type="a" * 50)
+        # asyncpg surfaces the truncation as a generic DBAPIError.
+        with pytest.raises(DBAPIError, match="value too long"):
+            await ticket_audit_event_factory(event_type="a" * 51)
 
     async def test_multiple_events_per_ticket_accepted(
         self,

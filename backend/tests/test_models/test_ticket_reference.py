@@ -14,7 +14,7 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import delete, func, insert, select
+from sqlalchemy import delete, func, insert, select, text
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -88,29 +88,26 @@ class TestTicketReferenceCreation:
         assert reloaded.type == "patch"
         assert reloaded.source == "sync_nvd_cves"
 
-    async def test_database_assigns_id_and_timestamps(
+    async def test_raw_insert_applies_server_defaults(
         self, db_session: AsyncSession, ticket_factory: TicketFactory
     ) -> None:
-        """A Core INSERT bypasses the ORM-side `uuid.uuid7` default, so the
-        `uuidv7()` and `now()` server defaults supply the columns."""
+        """A raw SQL INSERT bypasses every Python-side default (a Core
+        `insert()` would still apply `uuid.uuid7`), so the `uuidv7()` and
+        `now()` server defaults must supply the columns."""
         ticket = await ticket_factory()
         result = await db_session.execute(
-            insert(TicketReference)
-            .values(
-                ticket_id=ticket.id,
-                url="https://advisories.example.com/raw",
-                source="manual",
-            )
-            .returning(
-                TicketReference.id,
-                TicketReference.created_at,
-                TicketReference.updated_at,
-            )
+            text(
+                "INSERT INTO ticket_reference (ticket_id, url, source) "
+                "VALUES (:ticket_id, 'https://advisories.example.com/raw', "
+                "'manual') RETURNING id, created_at, updated_at"
+            ),
+            {"ticket_id": ticket.id},
         )
-        reference_id, created_at, updated_at = result.one()
-        assert reference_id.version == 7
-        assert created_at.tzinfo is not None
-        assert updated_at == created_at
+        row = result.one()
+        assert isinstance(row.id, uuid.UUID)
+        assert row.id.version == 7
+        assert row.created_at.tzinfo is not None
+        assert row.updated_at == row.created_at
 
     @pytest.mark.parametrize("reference_type", list(ReferenceType))
     async def test_every_reference_type_accepted(
