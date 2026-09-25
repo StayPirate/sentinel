@@ -76,6 +76,23 @@ _EXPECTED_CHECKS = {
     "chk_ticket_severity_manual_cve_exclusive",
 }
 
+# PostgreSQL's canonical rendering (pretty-printed `pg_get_constraintdef`,
+# as reflected) of the three documented structural CHECKs in
+# docs/data-model.md (Ticket). `alembic check` does not compare CHECK
+# expressions and the model tests run against `Base.metadata.create_all()`,
+# so this is the only guard that the migrated expressions match the
+# documented invariants.
+_EXPECTED_STRUCTURAL_CHECK_SQL = {
+    "chk_ticket_duplicate_status_coherence": (
+        "status::text = 'Duplicated'::text AND duplicate_of_id IS NOT NULL"
+        " OR status::text <> 'Duplicated'::text AND duplicate_of_id IS NULL"
+    ),
+    "chk_ticket_no_self_duplicate": "duplicate_of_id <> id",
+    "chk_ticket_severity_manual_cve_exclusive": (
+        "severity_manual IS NULL OR cve_id IS NULL"
+    ),
+}
+
 
 class _TicketFacts(TypedDict):
     columns: list[tuple[str, str, bool, str | None]]
@@ -188,6 +205,8 @@ def _assert_ticket_schema(facts: _SchemaFacts) -> None:
 
     checks = {check["name"]: check["sqltext"] for check in ticket["checks"]}
     assert set(checks) == _EXPECTED_CHECKS
+    for name, expected_sql in _EXPECTED_STRUCTURAL_CHECK_SQL.items():
+        assert checks[name] == expected_sql, name
 
     # The migration hardcodes its own literal list, independently of the
     # model expression, and `alembic check` does not compare CHECK
