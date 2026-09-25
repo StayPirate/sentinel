@@ -22,6 +22,7 @@ infrastructure (dedicated database fixture, isolated config helper).
 
 from __future__ import annotations
 
+import re
 from typing import Any, TypedDict
 
 import pytest
@@ -31,6 +32,7 @@ from sqlalchemy.types import DateTime, TypeEngine
 
 from alembic import command
 from app.config import settings
+from app.core.enums import CveState
 from tests.test_migrations.conftest import isolated_alembic_config, run_sync
 
 _PREVIOUS_HEAD = "ace650c9f7a8"
@@ -202,9 +204,12 @@ def _assert_cve_schema(facts: _SchemaFacts) -> None:
     for table, expected_checks in _EXPECTED_CHECKS.items():
         assert {c["name"] for c in tables[table]["checks"]} == expected_checks, table
 
+    # The migration hardcodes its own literal list, independently of the
+    # model expression, and `alembic check` does not compare CHECK
+    # expressions: assert the accepted value set is exactly `CveState`.
     (state_check,) = tables["cve"]["checks"]
-    assert "PUBLISHED" in state_check["sqltext"]
-    assert "REJECTED" in state_check["sqltext"]
+    accepted_values = set(re.findall(r"'([^']*)'", state_check["sqltext"]))
+    assert accepted_values == {state.value for state in CveState}
 
     assert tables["cve"]["foreign_keys"] == []
     for table in _CHILD_TABLES:
