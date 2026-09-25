@@ -1275,9 +1275,10 @@ username, group, codestream, freshness, or source-response data. See
 
 **Indexes**:
 
-- `ix_ticket_package_maintainer_user_id`: index on `user_id`. It supports
-  caller-first confidential visibility and maintainer workbench queries.
-  Package-first acquisition is covered by the unique constraint.
+- `ix_ticket_package_maintainer_user_id`: non-unique B-tree index on
+  `user_id`. It supports caller-first confidential visibility and maintainer
+  workbench queries. Package-first acquisition is covered by the unique
+  constraint.
 
 `TicketPackage.maintainers` and `User.maintained_packages` are explicit ORM
 relationships using `back_populates`. Both foreign keys use `ON DELETE
