@@ -2,8 +2,10 @@
 
 Each test class cites the specification section that owns its enum,
 for example docs/features/identity/rbac.md (Authorization Model),
-docs/data-model.md (Role Enum), and docs/features/tickets/cvss-scoring.md
-(Accepted Base Vectors, Severity, Eligibility Score Resolution).
+docs/data-model.md (Role Enum), docs/features/tickets/cvss-scoring.md
+(Accepted Base Vectors, Severity, Eligibility Score Resolution), and
+docs/features/tickets/ticket-deadlines.md (Actors and Phases, Track
+Milestones).
 """
 
 from __future__ import annotations
@@ -15,6 +17,7 @@ import pytest
 from app.core.enums import (
     Capability,
     CredentialKind,
+    CurrentPhase,
     CVSS2AccessComplexity,
     CVSS2AccessVector,
     CVSS2Authentication,
@@ -29,18 +32,25 @@ from app.core.enums import (
     CVSSImpact,
     CVSSPrivilegesRequired,
     CVSSVersion,
+    DeliveryStatus,
     EligibilitySource,
     FetcherAuditEventType,
     FetcherRunStatus,
     FetcherRunTriggeredBy,
     HealthCheckStatus,
     IdentityAuditEventType,
+    MilestonePhase,
+    MilestoneStatus,
+    PackageStatus,
     Role,
     Scope,
     SettingAuditEventType,
     Severity,
+    TicketPriority,
+    TicketStatus,
     UserSortField,
     UserType,
+    WorkflowType,
 )
 
 
@@ -312,3 +322,96 @@ class TestCVSSMetricWireValueEnums:
         self, enum_type: type[StrEnum], expected: set[str]
     ) -> None:
         assert {member.value for member in enum_type} == expected
+
+
+@pytest.mark.unit
+class TestTicketStatusEnum:
+    """TicketStatus stored values per data-model.md (TicketStatus Enum)."""
+
+    def test_exact_values(self) -> None:
+        assert [member.value for member in TicketStatus] == [
+            "New",
+            "Analysis",
+            "Analyzed",
+            "Resolved",
+            "Ignored",
+            "Duplicated",
+        ]
+
+
+@pytest.mark.unit
+class TestTicketPriorityEnum:
+    """TicketPriority stored values per data-model.md (TicketPriority Enum);
+    SQL NULL is not a level."""
+
+    def test_exact_values(self) -> None:
+        assert [member.value for member in TicketPriority] == ["P1", "P2", "P3", "P4"]
+
+
+@pytest.mark.unit
+class TestPackageStatusEnum:
+    """PackageStatus stored values per data-model.md (PackageStatus Enum)."""
+
+    def test_exact_values(self) -> None:
+        assert [member.value for member in PackageStatus] == [
+            "ANALYSIS",
+            "AFFECTED",
+            "NOT_AFFECTED",
+            "FIXED",
+            "WONT_FIX",
+        ]
+
+
+@pytest.mark.unit
+class TestDeliveryStatusEnum:
+    """DeliveryStatus stored values per data-model.md (DeliveryStatus Enum)."""
+
+    def test_exact_values(self) -> None:
+        assert [member.value for member in DeliveryStatus] == [
+            "PENDING",
+            "IN_PROGRESS",
+            "RELEASED",
+        ]
+
+
+@pytest.mark.unit
+class TestWorkflowTypeEnum:
+    """WorkflowType stored values per data-model.md (WorkflowType Enum)."""
+
+    def test_exact_values(self) -> None:
+        assert {member.value for member in WorkflowType} == {"ibs", "git"}
+
+
+@pytest.mark.unit
+class TestMilestoneEnums:
+    """Milestone phase, status, and current phase per ticket-deadlines.md
+    (Actors and Phases, Track Milestones, Current Phase). The `null` status
+    and current phase are Python `None`, never a member."""
+
+    def test_phase_values_in_order(self) -> None:
+        assert [member.value for member in MilestonePhase] == [
+            "triage",
+            "submission",
+            "um",
+            "qa",
+        ]
+
+    def test_status_values(self) -> None:
+        assert {member.value for member in MilestoneStatus} == {
+            "done",
+            "pending",
+            "overdue",
+            "not_applicable",
+        }
+
+    def test_current_phase_values(self) -> None:
+        assert [member.value for member in CurrentPhase] == [
+            "triage",
+            "submission",
+            "um",
+            "qa",
+            "done",
+        ]
+
+    def test_overdue_and_pending_are_never_phases(self) -> None:
+        assert {"overdue", "pending"}.isdisjoint(m.value for m in CurrentPhase)
