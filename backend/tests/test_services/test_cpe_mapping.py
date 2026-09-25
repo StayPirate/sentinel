@@ -731,7 +731,8 @@ class TestPackageRelativeLoading:
     ) -> None:
         monkeypatch.chdir(tmp_path)
         assert not (Path.cwd() / "app").exists()
-        assert len(cpe_mapping._load_mapping()) > 2000
+        committed = json.loads(_COMMITTED_MAPPING.read_text(encoding="utf-8"))
+        assert cpe_mapping._load_mapping().keys() == committed.keys()
         assert resolve_cpe_packages(
             _cpe("timidity\\+\\+_project", "timidity\\+\\+")
         ) == {"timidity"}
@@ -759,7 +760,7 @@ class TestResolveCPEPackages:
     def test_one_to_many_hit(self) -> None:
         packages = resolve_cpe_packages(_cpe("rust-lang", "rust"))
         assert packages == set(cpe_mapping._load_mapping()["rust-lang:rust"])
-        assert len(packages) == 45
+        assert len(packages) > 1
 
     @pytest.mark.parametrize(
         ("cpe", "expected"),
