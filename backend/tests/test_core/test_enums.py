@@ -5,7 +5,8 @@ for example docs/features/identity/rbac.md (Authorization Model),
 docs/data-model.md (Role Enum), docs/features/tickets/cvss-scoring.md
 (Accepted Base Vectors, Severity, Eligibility Score Resolution), and
 docs/features/tickets/ticket-deadlines.md (Actors and Phases, Track
-Milestones).
+Milestones), and docs/features/packages/product-catalog.md (Product
+Lifecycle Phases).
 """
 
 from __future__ import annotations
@@ -39,6 +40,7 @@ from app.core.enums import (
     FetcherRunTriggeredBy,
     HealthCheckStatus,
     IdentityAuditEventType,
+    LifecyclePhase,
     MilestonePhase,
     MilestoneStatus,
     PackageStatus,
@@ -415,3 +417,22 @@ class TestMilestoneEnums:
 
     def test_overdue_and_pending_are_never_phases(self) -> None:
         assert {"overdue", "pending"}.isdisjoint(m.value for m in CurrentPhase)
+
+
+@pytest.mark.unit
+class TestLifecyclePhaseEnum:
+    """LifecyclePhase per product-catalog.md (Product Lifecycle Phases). The
+    unavailable phase is Python `None`; the filter-only `unavailable`
+    pseudo-value is never a phase."""
+
+    def test_exact_values_in_chronological_order(self) -> None:
+        assert [member.value for member in LifecyclePhase] == [
+            "pre_release",
+            "general_support",
+            "extended_support",
+            "reactive_support",
+            "eol",
+        ]
+
+    def test_unavailable_is_not_a_phase(self) -> None:
+        assert "unavailable" not in {member.value for member in LifecyclePhase}

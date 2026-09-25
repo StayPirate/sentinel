@@ -557,3 +557,22 @@ class CurrentPhase(StrEnum):
     UM = "um"
     QA = "qa"
     DONE = "done"
+
+
+class LifecyclePhase(StrEnum):
+    """Derived Product lifecycle phase, in chronological order.
+
+    Category B — classification (Python Enum only; never stored in the
+    database — the phase is derived from the four AIMAAS date projections
+    and one UTC evaluation date at read time). An unavailable phase
+    (absent, incomplete, or inconsistent dates) is Python `None`, exposed
+    as `NULL`, and is never a member. See
+    `docs/features/packages/product-catalog.md` (Product Lifecycle Phases,
+    Lifecycle Evaluator).
+    """
+
+    PRE_RELEASE = "pre_release"
+    GENERAL_SUPPORT = "general_support"
+    EXTENDED_SUPPORT = "extended_support"
+    REACTIVE_SUPPORT = "reactive_support"
+    EOL = "eol"
