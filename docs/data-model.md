@@ -963,6 +963,12 @@ See `docs/features/tickets/tickets.md` for the full ticket specification.
 - `ix_ticket_duplicate_of_id`: partial index on `duplicate_of_id` WHERE
   `duplicate_of_id IS NOT NULL` — supports `mark_as_duplicate` finding
   dependents of the source ticket.
+- `ix_ticket_assignee_id`: non-unique B-tree index on `assignee_id`. It serves
+  the Ticket selection by assignee in `_unassign_active_tickets()`, which runs
+  while the target User is locked (see
+  `docs/features/identity/user-service.md`), the deactivation-preview
+  `tickets_count`, and the Ticket-list `assignee` filter. It is not partial, so
+  it also serves `assignee=none`.
 
 **Deletion policy**: Tickets MUST NOT be deleted from the database. There is no soft-delete mechanism at the ticket level. Tickets that are no longer relevant are transitioned to Ignored or Duplicated status.
 
@@ -2072,3 +2078,23 @@ retained provenance.
   clause) are documented in the `**Indexes**:` block rather than as
   standalone unique constraints, because their filtering logic is part
   of the index definition
+- PostgreSQL does not index foreign-key columns automatically. Each of the
+  following access paths must be covered by an index whose leading columns
+  are its key columns, in any order; a primary key or unique constraint with
+  that prefix counts as coverage:
+  - the column or column combination used as the lookup or join key of a
+    documented query or mutation, especially one that runs while a
+    pessimistic row lock is held (see `docs/conventions.md`, Transaction
+    Hygiene Rules);
+  - a foreign key whose referenced rows can be deleted, whatever its
+    `ON DELETE` action, because every parent delete searches the child
+    table.
+
+  The child side of an `ON DELETE CASCADE` foreign key is always covered by a
+  primary key, a unique constraint, or a non-partial index. A foreign key to
+  rows that are never deleted, and that no documented operation queries by,
+  needs no index. Each index added under this criterion is documented in its
+  table's `**Indexes**:` block together with the access paths it serves; a
+  justified absence needs no entry. Audit event tables apply the
+  specialization in `docs/features/platform/audit-trail-infrastructure.md`
+  (Indexing)
