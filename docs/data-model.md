@@ -685,6 +685,14 @@ CVE remains the sole canonical identifier in Sentinel.
 **Unique constraint**: (source, identifier) — each external ID is
 globally unique within its naming system.
 
+**Indexes**:
+
+- `ix_cve_external_identifier_cve_id`: non-unique B-tree index on `cve_id`.
+  The `(source, identifier)` unique constraint does not lead with `cve_id`, so
+  this index serves the per-CVE reads of CVE Detail and Ticket Detail, the
+  Ticket-list search correlation on current external-identifier state, and the
+  `ON DELETE CASCADE` lookup.
+
 **Notes**:
 - A CVE can have multiple external identifiers from different sources
   (e.g., one GHSA-ID and one RUSTSEC-ID)
@@ -757,6 +765,18 @@ limits, where any apply, are enforced before any write by
 (CVEIngestPayload Schema); each such limit equals the `maxLength` of the
 corresponding CVE JSON 5.x field, so a schema-valid upstream value is never
 rejected for length. None of these columns is indexed.
+
+**Indexes**:
+
+- `ix_cve_affected_version_cve_id_source_container`: non-unique B-tree index on
+  `(cve_id, source_container)`. It serves the scoped semantic-equality read,
+  `replace`, and `remove` of Affected-Version Snapshot Operations, which run
+  inside the CVE-locked Phase 1 transaction (see `docs/conventions.md`,
+  Transaction Hygiene Rules). Its `cve_id` prefix also serves per-CVE reads and
+  the `ON DELETE CASCADE` lookup. It is not an entry-uniqueness mechanism (see
+  No database entry uniqueness below), and both key columns are bounded, so
+  the index-entry size limit that rules out indexing the TEXT entry columns
+  does not apply.
 
 Rows for a scope are replaced only by an explicit `replace` operation or
 deleted by an explicit `remove` operation for `(cve_id, source_container)`.
