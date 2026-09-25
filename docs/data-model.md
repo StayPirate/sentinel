@@ -762,31 +762,27 @@ Semantic equality is determined from the complete normalized row set before
 physical replacement, so an equal replacement is a no-op for
 `UpsertResult.action` even if an implementation uses delete-and-reinsert.
 
-**Safety-net unique constraint** (for data integrity, not used for
-`ON CONFLICT`):
+**No database entry uniqueness**: `CVEAffectedVersion` intentionally has no
+unique constraint or unique index over its entry columns. The sole authority
+for entry uniqueness is the entry conflict key and duplicate validation in
+`docs/features/tickets/cve-service.md` (Canonical Payload Duplicate Handling),
+applied to the complete payload before any write. A database backstop is not
+needed because `cve_service` is the only writer, each explicit operation
+replaces or removes a complete validated `(cve_id, source_container)` set
+rather than writing individual rows, and all operations for one CVE serialize
+on its row lock (CVE Upsert Serialization). A unique index over the TEXT entry
+columns could also reject valid long upstream values that exceed the
+PostgreSQL B-tree index entry size limit.
 
-```sql
-UNIQUE (cve_id, source_container, vendor, product,
-        COALESCE(version_type, ''), COALESCE(version, ''),
-        COALESCE(version_end, ''), COALESCE(package_name, ''))
-```
-
-Note: `ecosystem`, `status`, and `default_status` are intentionally
-excluded from the unique constraint, but they are semantic content rather
-than identity. Within one `(cve_id, source_container)` scope, two entries
-that share the conflict key and differ in any persisted field — including
-these three — are contradictory and invalidate the payload before writes
-(see `docs/features/tickets/cve-service.md`, Canonical Payload Duplicate
-Handling). Different `source_container` values independently own their own
-set of rows: OSV writes `"osv"` and GHSA writes `"ghsa"`, so equivalent
-packages from those sources occupy separate scopes and are never replaced
-together, while MITRE and the kernel fetcher intentionally share `"cna"`
-because they represent the same CNA data.
-
-Within one canonical payload, the safety-net unique columns are the entry
-conflict key. Identical normalized duplicates collapse. Two entries with that
-key but differing in any other persisted field are contradictory and invalidate
-the payload before writes.
+Within one `(cve_id, source_container)` scope, identical normalized entries
+collapse, and two entries that share the entry conflict key but differ in any
+other persisted field — including `ecosystem`, `status`, and `default_status`,
+which are semantic content rather than identity — are contradictory and
+invalidate the payload before writes. Different `source_container` values
+independently own their own set of rows: OSV writes `"osv"` and GHSA writes
+`"ghsa"`, so equivalent packages from those sources occupy separate scopes and
+are never replaced together, while MITRE and the kernel fetcher intentionally
+share `"cna"` because they represent the same CNA data.
 
 These persistence semantics require no new table, column, persisted enum,
 constraint, or migration. Empty and removed scopes are represented by row

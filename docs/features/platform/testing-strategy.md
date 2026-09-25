@@ -1694,7 +1694,8 @@ cover this complete matrix:
   them.
 - For each child conflict key, identical normalized duplicates collapse and
   conflicting same-key content rejects the complete payload before writes.
-  Include the affected-version safety-net key and fields outside that key.
+  Include the affected-version entry conflict key, its absent-value
+  equivalences, and fields outside that key.
 - Affected-version scopes cover unobserved, non-empty replacement, observed
   empty replacement, explicit removal, equal replacement, repeated empty/remove
   no-op, and multiple scopes where one operation cannot change another. Empty
