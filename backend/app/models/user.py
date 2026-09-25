@@ -29,6 +29,7 @@ from app.database import Base
 if TYPE_CHECKING:
     from app.models.api_key import ApiKey
     from app.models.session import Session
+    from app.models.ticket import Ticket
     from app.models.user_role import UserRole
 
 
@@ -111,4 +112,13 @@ class User(Base):
     sessions: Mapped[list[Session]] = relationship("Session", back_populates="user")
     api_keys: Mapped[list[ApiKey]] = relationship(
         "ApiKey", back_populates="user", foreign_keys="ApiKey.user_id"
+    )
+    # passive_deletes="all": without it SQLAlchemy would null the assignee
+    # of every assigned Ticket before deleting the user. User deletion is
+    # not supported, so the `ticket.assignee_id` FK must reject it loudly.
+    assigned_tickets: Mapped[list[Ticket]] = relationship(
+        "Ticket",
+        back_populates="assignee",
+        foreign_keys="Ticket.assignee_id",
+        passive_deletes="all",
     )

@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from app.models.cve_cvss_assessment import CVECVSSAssessment
     from app.models.cve_external_identifier import CVEExternalIdentifier
     from app.models.cve_source import CVESource
+    from app.models.ticket import Ticket
 
 
 class CVE(Base):
@@ -104,4 +105,16 @@ class CVE(Base):
         back_populates="cve",
         cascade="all, delete",
         passive_deletes=True,
+    )
+    # One-to-one: `ticket.cve_id` is UNIQUE. No cascade and
+    # passive_deletes="all": Tickets are never deleted and must not be
+    # silently detached (docs/data-model.md, Ticket, Deletion policy), so
+    # deleting a CVE with a Ticket fails on the `ticket.cve_id` FK instead
+    # of nulling it.
+    ticket: Mapped[Ticket | None] = relationship(
+        "Ticket",
+        back_populates="cve",
+        uselist=False,
+        foreign_keys="Ticket.cve_id",
+        passive_deletes="all",
     )
