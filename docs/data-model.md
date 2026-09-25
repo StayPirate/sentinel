@@ -39,6 +39,7 @@ implicit relationships (joined by convention, no FK constraint).
 flowchart TB
     subgraph cve_tickets["CVE & Tickets"]
         CVE
+        CVESource
         CVEExternalIdentifier
         Ticket
         TicketAuditEvent
@@ -82,6 +83,7 @@ flowchart TB
         IBSRequestActionTrack
     end
 
+    CVE --> CVESource
     CVE --> CVEExternalIdentifier
     CVE --> CVECVSSAssessment
     CVE --> CVEAffectedVersion

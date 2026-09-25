@@ -12,6 +12,7 @@ import os
 import warnings
 from collections.abc import AsyncGenerator, Awaitable, Callable, Iterator
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit, urlunsplit
 
@@ -54,7 +55,11 @@ from app.main import app
 # refs, like UserRole — are registered on Base.metadata before
 # _engine's create_all runs.
 from app.models import (
+    CVE,
     ApiKey,
+    CVECVSSAssessment,
+    CVEExternalIdentifier,
+    CVESource,
     FetcherAuditEvent,
     FetcherConfig,
     FetcherRun,
@@ -949,6 +954,163 @@ def fetcher_audit_event_factory(
         defaults: dict[str, Any] = {"event_type": "disabled"}
         defaults.update(overrides)
         instance = FetcherAuditEvent(**defaults)
+        db_session.add(instance)
+        await db_session.flush()
+        return instance
+
+    return _create
+
+
+@pytest.fixture
+def cve_factory(db_session: AsyncSession) -> Callable[..., Awaitable[CVE]]:
+    """Factory fixture for `CVE` model instances.
+
+    See docs/features/platform/testing-strategy.md (Model Factory
+    Fixtures) for the canonical shape this fixture follows.
+
+    Defaults:
+    - `cve_id`: a per-fixture-counter-derived fictional identifier
+      (`CVE-2099-1000<n>`, five or more digits), so multiple calls within
+      one test don't collide on the UNIQUE constraint.
+    - Every other column uses its model default: `cve_state` is
+      `PUBLISHED`, and `severity`, `title`, `description`, and the dates
+      are `NULL`.
+    """
+
+    counter = itertools.count(1)
+
+    async def _create(**overrides: Any) -> CVE:
+        n = next(counter)
+        defaults: dict[str, Any] = {"cve_id": f"CVE-2099-{10000 + n}"}
+        defaults.update(overrides)
+        instance = CVE(**defaults)
+        db_session.add(instance)
+        await db_session.flush()
+        return instance
+
+    return _create
+
+
+@pytest.fixture
+def cve_source_factory(
+    db_session: AsyncSession,
+    cve_factory: Callable[..., Awaitable[CVE]],
+) -> Callable[..., Awaitable[CVESource]]:
+    """Factory fixture for `CVESource` model instances.
+
+    See docs/features/platform/testing-strategy.md (Model Factory
+    Fixtures) for the canonical shape this fixture follows.
+
+    Bypasses `record_source_status()` on purpose: model-layer tests
+    exercise the raw persistence contract independently of the service
+    write semantics.
+
+    Defaults:
+    - `cve_id`: a freshly created CVE, when not overridden.
+    - `source`: a per-fixture-counter-derived label (`test_source_<n>`,
+      matching the `CVESourceType` value format but not validated at this
+      layer), so repeated calls for one CVE don't collide on the
+      `(cve_id, source)` UNIQUE constraint.
+    - `status`: `"success"` (not validated against `CVESourceFetchStatus`
+      at this layer).
+    - `fetched_at`: the current UTC time. `first_failed_at` is `NULL`.
+    """
+
+    counter = itertools.count(1)
+
+    async def _create(**overrides: Any) -> CVESource:
+        n = next(counter)
+        if "cve_id" not in overrides:
+            overrides["cve_id"] = (await cve_factory()).id
+        defaults: dict[str, Any] = {
+            "source": f"test_source_{n}",
+            "status": "success",
+            "fetched_at": datetime.now(UTC),
+        }
+        defaults.update(overrides)
+        instance = CVESource(**defaults)
+        db_session.add(instance)
+        await db_session.flush()
+        return instance
+
+    return _create
+
+
+@pytest.fixture
+def cve_cvss_assessment_factory(
+    db_session: AsyncSession,
+    cve_factory: Callable[..., Awaitable[CVE]],
+) -> Callable[..., Awaitable[CVECVSSAssessment]]:
+    """Factory fixture for `CVECVSSAssessment` model instances.
+
+    See docs/features/platform/testing-strategy.md (Model Factory
+    Fixtures) for the canonical shape this fixture follows.
+
+    Defaults form one consistent vector-derived CVSS v3.1 unit (the
+    database does not validate it):
+    - `cve_id`: a freshly created CVE, when not overridden.
+    - `provider_name`: a per-fixture-counter-derived fictional name
+      (`Provider <n>`), so repeated calls for one CVE don't collide on the
+      `(cve_id, provider_name, cvss_version)` UNIQUE constraint.
+    - `cvss_version`: `"3.1"`; `score`: `Decimal("9.8")`; `severity`:
+      `"critical"`; `vector_string`:
+      `"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"`.
+    """
+
+    counter = itertools.count(1)
+
+    async def _create(**overrides: Any) -> CVECVSSAssessment:
+        n = next(counter)
+        if "cve_id" not in overrides:
+            overrides["cve_id"] = (await cve_factory()).id
+        defaults: dict[str, Any] = {
+            "provider_name": f"Provider {n}",
+            "cvss_version": "3.1",
+            "score": Decimal("9.8"),
+            "severity": "critical",
+            "vector_string": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+        }
+        defaults.update(overrides)
+        instance = CVECVSSAssessment(**defaults)
+        db_session.add(instance)
+        await db_session.flush()
+        return instance
+
+    return _create
+
+
+@pytest.fixture
+def cve_external_identifier_factory(
+    db_session: AsyncSession,
+    cve_factory: Callable[..., Awaitable[CVE]],
+) -> Callable[..., Awaitable[CVEExternalIdentifier]]:
+    """Factory fixture for `CVEExternalIdentifier` model instances.
+
+    See docs/features/platform/testing-strategy.md (Model Factory
+    Fixtures) for the canonical shape this fixture follows.
+
+    Defaults:
+    - `cve_id`: a freshly created CVE, when not overridden.
+    - `source`: `"GHSA"` (not validated against
+      `CVEExternalIdentifierSource` at this layer).
+    - `identifier`: a per-fixture-counter-derived fictional GHSA-shaped ID
+      (`GHSA-test-<nnnn>-xxxx`), so repeated calls don't collide on the
+      global `(source, identifier)` UNIQUE constraint.
+    - `url`: `NULL`.
+    """
+
+    counter = itertools.count(1)
+
+    async def _create(**overrides: Any) -> CVEExternalIdentifier:
+        n = next(counter)
+        if "cve_id" not in overrides:
+            overrides["cve_id"] = (await cve_factory()).id
+        defaults: dict[str, Any] = {
+            "source": "GHSA",
+            "identifier": f"GHSA-test-{n:04d}-xxxx",
+        }
+        defaults.update(overrides)
+        instance = CVEExternalIdentifier(**defaults)
         db_session.add(instance)
         await db_session.flush()
         return instance

@@ -272,6 +272,69 @@ class UserSortField(StrEnum):
     CREATED_AT = "created_at"
 
 
+class CveState(StrEnum):
+    """CVE record state, defined by the CVE Program.
+
+    Category A — state-machine (`CVE.cve_state`, VARCHAR + CHECK
+    constraint `chk_cve_cve_state_valid`). Adding a value requires an
+    Alembic migration. See `docs/data-model.md` (CVE, CveState Enum).
+    """
+
+    PUBLISHED = "PUBLISHED"
+    REJECTED = "REJECTED"
+
+
+class CVESourceFetchStatus(StrEnum):
+    """Latest completed fetch-attempt outcome for one CVE source.
+
+    Category B — classification (Python Enum only; stored in
+    `CVESource.status`; adding a value requires only a code change). See
+    `docs/data-model.md` (CVESource, CVESourceFetchStatus Enum) and
+    `docs/features/tickets/cve-service.md` (CVESource Management).
+    """
+
+    SUCCESS = "success"
+    FAILURE = "failure"
+    MISSING = "missing"
+
+
+class CVESourceType(StrEnum):
+    """Short lowercase provider label of a CVE data source.
+
+    Category B — classification (Python Enum only; the lowercase value is
+    stored in `CVESource.source`, VARCHAR(100); adding a value requires
+    only a code change). Values match `^[a-z][a-z0-9_]*$` and are at most
+    100 characters. Distinct from `BaseFetcher.name`. See
+    `docs/data-model.md` (CVESourceType Python Enum) and
+    `docs/features/platform/cve-fetcher-infrastructure.md` (CVE Source
+    Type Identity).
+    """
+
+    NVD = "nvd"
+    MITRE = "mitre"
+    KERNEL = "kernel"
+    REDHAT = "redhat"
+    GHSA = "ghsa"
+    OSV = "osv"
+    KEV = "kev"
+    EPSS = "epss"
+
+
+class CVEExternalIdentifierSource(StrEnum):
+    """Naming authority that assigned an external vulnerability identifier.
+
+    Category B — classification (Python Enum only; stored in
+    `CVEExternalIdentifier.source`, VARCHAR(20); adding a value requires
+    only a code change). Values match `[A-Z][A-Z0-9_]*` and are at most 20
+    characters. See `docs/data-model.md` (CVEExternalIdentifier,
+    CVEExternalIdentifierSource Python Enum).
+    """
+
+    GHSA = "GHSA"
+    PYSEC = "PYSEC"
+    RUSTSEC = "RUSTSEC"
+
+
 class CVSSVersion(StrEnum):
     """Accepted CVSS Base-vector versions, always derived from the vector.
 
