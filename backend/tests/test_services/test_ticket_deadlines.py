@@ -446,6 +446,16 @@ class TestResolveTrackMilestonesMatrix:
         assert statuses == {*MilestoneStatus, None}
         assert phases == {*CurrentPhase, None}
 
+    def test_matrix_expectations_are_independent_of_the_module(self) -> None:
+        """The shared matrix must never compute expectations with the code
+        under test, or the later SQL/pure equivalence test becomes circular."""
+        modules = imported_modules(
+            APP_ROOT.parent / "tests" / "support" / "deadline_matrix.py",
+            "tests.support",
+        )
+
+        assert {m for m in modules if m.startswith("app.")} == {"app.core.enums"}
+
     def test_matrix_case_ids_are_unique(self) -> None:
         ids = [case.id for case in DEADLINE_CASES]
 

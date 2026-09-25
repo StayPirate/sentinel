@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import pytest
 
-from app.core import identifiers
 from app.core.identifiers import (
     CVE_ID_MAX_LENGTH,
     CVE_ID_PATTERN,
@@ -177,7 +176,3 @@ class TestIdentifiersModuleBoundary:
         modules = imported_modules(APP_ROOT / "core" / "identifiers.py", "app.core")
 
         assert {m for m in modules if m == "app" or m.startswith("app.")} == set()
-
-    def test_module_defines_the_specified_public_names(self) -> None:
-        for name in ("CVE_ID_PATTERN", "CVE_ID_MAX_LENGTH", "is_valid_cve_id"):
-            assert hasattr(identifiers, name)
