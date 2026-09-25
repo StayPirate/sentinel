@@ -14,7 +14,7 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import inspect, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -174,6 +174,24 @@ class TestCVEExternalIdentifierUniqueConstraint:
             cve_id=cve.id, source="RUSTSEC", identifier="RUSTSEC-2099-0001"
         )
         assert await _count_identifiers(db_session, cve.id) == 3
+
+
+@pytest.mark.integration
+class TestCVEExternalIdentifierIndexes:
+    """docs/data-model.md (CVEExternalIdentifier, Indexes): the
+    `(source, identifier)` unique key does not lead with `cve_id`, so exactly
+    one non-unique `cve_id` index serves per-CVE reads (#611 decision A3)."""
+
+    async def test_exact_standalone_index_set(self, db_session: AsyncSession) -> None:
+        conn = await db_session.connection()
+        indexes = await conn.run_sync(
+            lambda sync_conn: inspect(sync_conn).get_indexes("cve_external_identifier")
+        )
+        standalone = [idx for idx in indexes if not idx.get("duplicates_constraint")]
+        assert {(idx["name"], tuple(idx["column_names"])) for idx in standalone} == {
+            ("ix_cve_external_identifier_cve_id", ("cve_id",)),
+        }
+        assert all(not idx["unique"] for idx in standalone)
 
 
 @pytest.mark.integration

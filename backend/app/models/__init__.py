@@ -2,9 +2,14 @@
 
 from app.models.api_key import ApiKey
 from app.models.cve import CVE
+from app.models.cve_affected_version import CVEAffectedVersion
 from app.models.cve_cvss_assessment import CVECVSSAssessment
+from app.models.cve_cwe import CVECWE
+from app.models.cve_epss_score import CVEEPSSScore
 from app.models.cve_external_identifier import CVEExternalIdentifier
+from app.models.cve_kev_entry import CVEKEVEntry
 from app.models.cve_source import CVESource
+from app.models.cve_ssvc_assessment import CVESSVCAssessment
 from app.models.fetcher_audit_event import FetcherAuditEvent
 from app.models.fetcher_config import FetcherConfig
 from app.models.fetcher_run import FetcherRun
@@ -22,10 +27,15 @@ from app.models.user_role import UserRole
 
 __all__ = [
     "CVE",
+    "CVECWE",
     "ApiKey",
     "AuditEventMixin",
+    "CVEAffectedVersion",
     "CVECVSSAssessment",
+    "CVEEPSSScore",
     "CVEExternalIdentifier",
+    "CVEKEVEntry",
+    "CVESSVCAssessment",
     "CVESource",
     "FetcherAuditEvent",
     "FetcherConfig",

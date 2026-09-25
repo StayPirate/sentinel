@@ -11,7 +11,7 @@ import itertools
 import os
 import warnings
 from collections.abc import AsyncGenerator, Awaitable, Callable, Iterator
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit, urlunsplit
@@ -56,10 +56,15 @@ from app.main import app
 # _engine's create_all runs.
 from app.models import (
     CVE,
+    CVECWE,
     ApiKey,
+    CVEAffectedVersion,
     CVECVSSAssessment,
+    CVEEPSSScore,
     CVEExternalIdentifier,
+    CVEKEVEntry,
     CVESource,
+    CVESSVCAssessment,
     FetcherAuditEvent,
     FetcherConfig,
     FetcherRun,
@@ -1115,6 +1120,175 @@ def cve_external_identifier_factory(
         }
         defaults.update(overrides)
         instance = CVEExternalIdentifier(**defaults)
+        db_session.add(instance)
+        await db_session.flush()
+        return instance
+
+    return _create
+
+
+@pytest.fixture
+def cve_affected_version_factory(
+    db_session: AsyncSession,
+    cve_factory: Callable[..., Awaitable[CVE]],
+) -> Callable[..., Awaitable[CVEAffectedVersion]]:
+    """Factory fixture for `CVEAffectedVersion` model instances.
+
+    See docs/features/platform/testing-strategy.md (Model Factory
+    Fixtures) for the canonical shape this fixture follows.
+
+    Bypasses the CVE service on purpose: model-layer tests exercise the raw
+    persistence contract, so no entry conflict key or duplicate validation
+    applies at this layer.
+
+    Defaults:
+    - `cve_id`: a freshly created CVE, when not overridden.
+    - `source_container`: `"cna"`. The table has no unique key, so no
+      counter is needed.
+    - Every entry column (`vendor` through `default_status`) is `NULL`.
+    """
+
+    async def _create(**overrides: Any) -> CVEAffectedVersion:
+        if "cve_id" not in overrides:
+            overrides["cve_id"] = (await cve_factory()).id
+        defaults: dict[str, Any] = {"source_container": "cna"}
+        defaults.update(overrides)
+        instance = CVEAffectedVersion(**defaults)
+        db_session.add(instance)
+        await db_session.flush()
+        return instance
+
+    return _create
+
+
+@pytest.fixture
+def cve_cwe_factory(
+    db_session: AsyncSession,
+    cve_factory: Callable[..., Awaitable[CVE]],
+) -> Callable[..., Awaitable[CVECWE]]:
+    """Factory fixture for `CVECWE` model instances.
+
+    See docs/features/platform/testing-strategy.md (Model Factory
+    Fixtures) for the canonical shape this fixture follows.
+
+    Defaults:
+    - `cve_id`: a freshly created CVE, when not overridden.
+    - `cwe_id`: a per-fixture-counter-derived identifier (`CWE-<n>`), so
+      repeated calls for one CVE don't collide on the
+      `(cve_id, cwe_id, source)` UNIQUE constraint.
+    - `source`: `"NVD"`.
+    """
+
+    counter = itertools.count(1)
+
+    async def _create(**overrides: Any) -> CVECWE:
+        n = next(counter)
+        if "cve_id" not in overrides:
+            overrides["cve_id"] = (await cve_factory()).id
+        defaults: dict[str, Any] = {"cwe_id": f"CWE-{n}", "source": "NVD"}
+        defaults.update(overrides)
+        instance = CVECWE(**defaults)
+        db_session.add(instance)
+        await db_session.flush()
+        return instance
+
+    return _create
+
+
+@pytest.fixture
+def cve_ssvc_assessment_factory(
+    db_session: AsyncSession,
+    cve_factory: Callable[..., Awaitable[CVE]],
+) -> Callable[..., Awaitable[CVESSVCAssessment]]:
+    """Factory fixture for `CVESSVCAssessment` model instances.
+
+    See docs/features/platform/testing-strategy.md (Model Factory
+    Fixtures) for the canonical shape this fixture follows.
+
+    Defaults:
+    - `cve_id`: a freshly created CVE, when not overridden, so repeated
+      calls don't collide on the `cve_id` UNIQUE constraint.
+    - `exploitation`: `"none"`; `automatable`: `"no"`; `technical_impact`:
+      `"partial"`; `version`: `"2.0.3"` (not validated at this layer).
+    - `assessed_at`: `NULL`.
+    """
+
+    async def _create(**overrides: Any) -> CVESSVCAssessment:
+        if "cve_id" not in overrides:
+            overrides["cve_id"] = (await cve_factory()).id
+        defaults: dict[str, Any] = {
+            "exploitation": "none",
+            "automatable": "no",
+            "technical_impact": "partial",
+            "version": "2.0.3",
+        }
+        defaults.update(overrides)
+        instance = CVESSVCAssessment(**defaults)
+        db_session.add(instance)
+        await db_session.flush()
+        return instance
+
+    return _create
+
+
+@pytest.fixture
+def cve_kev_entry_factory(
+    db_session: AsyncSession,
+    cve_factory: Callable[..., Awaitable[CVE]],
+) -> Callable[..., Awaitable[CVEKEVEntry]]:
+    """Factory fixture for `CVEKEVEntry` model instances.
+
+    See docs/features/platform/testing-strategy.md (Model Factory
+    Fixtures) for the canonical shape this fixture follows.
+
+    Defaults:
+    - `cve_id`: a freshly created CVE, when not overridden, so repeated
+      calls don't collide on the `cve_id` UNIQUE constraint.
+    - `date_added`: `2099-01-15` (a fictional date).
+    - `reference_url`: `NULL`.
+    """
+
+    async def _create(**overrides: Any) -> CVEKEVEntry:
+        if "cve_id" not in overrides:
+            overrides["cve_id"] = (await cve_factory()).id
+        defaults: dict[str, Any] = {"date_added": date(2099, 1, 15)}
+        defaults.update(overrides)
+        instance = CVEKEVEntry(**defaults)
+        db_session.add(instance)
+        await db_session.flush()
+        return instance
+
+    return _create
+
+
+@pytest.fixture
+def cve_epss_score_factory(
+    db_session: AsyncSession,
+    cve_factory: Callable[..., Awaitable[CVE]],
+) -> Callable[..., Awaitable[CVEEPSSScore]]:
+    """Factory fixture for `CVEEPSSScore` model instances.
+
+    See docs/features/platform/testing-strategy.md (Model Factory
+    Fixtures) for the canonical shape this fixture follows.
+
+    Defaults:
+    - `cve_id`: a freshly created CVE, when not overridden, so repeated
+      calls don't collide on the `cve_id` UNIQUE constraint.
+    - `score`: `0.00043`; `percentile`: `0.12345` (not range-validated at
+      this layer).
+    - `assessed_at`: `2099-01-15` (a fictional date).
+    """
+
+    async def _create(**overrides: Any) -> CVEEPSSScore:
+        if "cve_id" not in overrides:
+            overrides["cve_id"] = (await cve_factory()).id
+        defaults: dict[str, Any] = {
+            "score": 0.00043,
+            "percentile": 0.12345,
+            "assessed_at": date(2099, 1, 15),
+        }
+        defaults.update(overrides)
+        instance = CVEEPSSScore(**defaults)
         db_session.add(instance)
         await db_session.flush()
         return instance
