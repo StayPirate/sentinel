@@ -45,7 +45,7 @@ from app.api.dependencies import SESSION_COOKIE_NAME
 from app.api.health import get_readiness_redis_urls
 from app.celery_app import create_celery_app
 from app.config import Settings
-from app.core.enums import Role, SessionCreationReason
+from app.core.enums import Role, SessionCreationReason, TicketStatus
 from app.core.passwords import hash_password
 from app.database import Base, get_db
 from app.main import app
@@ -67,6 +67,7 @@ from app.models import (
     Session,
     SettingAuditEvent,
     SystemSetting,
+    Ticket,
     User,
     UserRole,
 )
@@ -1111,6 +1112,46 @@ def cve_external_identifier_factory(
         }
         defaults.update(overrides)
         instance = CVEExternalIdentifier(**defaults)
+        db_session.add(instance)
+        await db_session.flush()
+        return instance
+
+    return _create
+
+
+@pytest.fixture
+def ticket_factory(db_session: AsyncSession) -> Callable[..., Awaitable[Ticket]]:
+    """Factory fixture for `Ticket` model instances.
+
+    See docs/features/platform/testing-strategy.md (Model Factory
+    Fixtures) for the canonical shape this fixture follows.
+
+    Bypasses the ticket services on purpose: model-layer tests exercise
+    the raw persistence contract.
+
+    Defaults:
+    - `sequence_id`: assigned by the database identity, when not
+      overridden.
+    - Every other column uses its model default: `status` is `New`,
+      `is_confidential` is `False`, and `cve_id`, `severity_manual`,
+      `priority_auto`, `priority_override`, `assignee_id`,
+      `duplicate_of_id`, and `coordinated_release_at` are `NULL`. With
+      `cve_id` and `severity_manual` both `NULL` by default, overriding
+      either one alone satisfies `chk_ticket_severity_manual_cve_exclusive`.
+    - `chk_ticket_duplicate_status_coherence`: overriding `duplicate_of_id`
+      alone defaults `status` to `Duplicated`; overriding
+      `status="Duplicated"` alone links to a freshly created target Ticket.
+    """
+
+    async def _create(**overrides: Any) -> Ticket:
+        if overrides.get("duplicate_of_id") is not None:
+            overrides.setdefault("status", TicketStatus.DUPLICATED.value)
+        elif (
+            overrides.get("status") == TicketStatus.DUPLICATED
+            and "duplicate_of_id" not in overrides
+        ):
+            overrides["duplicate_of_id"] = (await _create()).id
+        instance = Ticket(**overrides)
         db_session.add(instance)
         await db_session.flush()
         return instance

@@ -13,6 +13,7 @@ from app.models.mixins import AuditEventMixin
 from app.models.session import Session
 from app.models.setting_audit_event import SettingAuditEvent
 from app.models.system_setting import SystemSetting
+from app.models.ticket import Ticket
 from app.models.user import User
 from app.models.user_role import UserRole
 
@@ -30,6 +31,7 @@ __all__ = [
     "Session",
     "SettingAuditEvent",
     "SystemSetting",
+    "Ticket",
     "User",
     "UserRole",
 ]
