@@ -37,6 +37,9 @@ from app.database import Base
 
 if TYPE_CHECKING:
     from app.models.cve import CVE
+    from app.models.ticket_access_grant import TicketAccessGrant
+    from app.models.ticket_audit_event import TicketAuditEvent
+    from app.models.ticket_reference import TicketReference
     from app.models.user import User
 
 
@@ -146,4 +149,28 @@ class Ticket(Base):
         back_populates="duplicate_of",
         foreign_keys=[duplicate_of_id],
         passive_deletes="all",
+    )
+    # passive_deletes="all": Tickets are never deleted. Without it SQLAlchemy
+    # would try to null the NOT NULL `ticket_id` of loaded audit events and
+    # grants before deleting the Ticket; the database FKs (`NO ACTION` for
+    # audit events, `RESTRICT` for grants) must reject the delete instead.
+    audit_events: Mapped[list[TicketAuditEvent]] = relationship(
+        "TicketAuditEvent",
+        back_populates="ticket",
+        passive_deletes="all",
+    )
+    access_grants: Mapped[list[TicketAccessGrant]] = relationship(
+        "TicketAccessGrant",
+        back_populates="ticket",
+        passive_deletes="all",
+    )
+    # References are owned children (`FK(ticket.id) ON DELETE CASCADE`).
+    # `passive_deletes=True` leaves unloaded children to that database
+    # cascade; the ORM cascade deletes children already loaded in the
+    # session, so it never attempts to null their NOT NULL foreign key.
+    references: Mapped[list[TicketReference]] = relationship(
+        "TicketReference",
+        back_populates="ticket",
+        cascade="all, delete",
+        passive_deletes=True,
     )

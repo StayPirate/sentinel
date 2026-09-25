@@ -534,6 +534,67 @@ class TicketPriority(StrEnum):
     P4 = "P4"
 
 
+class TicketAuditEventType(StrEnum):
+    """Semantic Ticket event recorded in `TicketAuditEvent.event_type`.
+
+    Category B — classification (Python Enum only; stored in
+    `TicketAuditEvent.event_type`, VARCHAR(50); adding a value requires
+    only a code change). A closed inventory of exactly 31 values; an
+    explicit no-event boundary is never represented by an additional
+    value. See `docs/data-model.md` (TicketAuditEventType Enum) and
+    `docs/features/tickets/ticket-audit-log.md` (Event Type Contract).
+    """
+
+    STATUS_CHANGE = "status_change"
+    ASSIGNMENT = "assignment"
+    DUPLICATE_SET = "duplicate_set"
+    DUPLICATE_REMOVED = "duplicate_removed"
+    DUPLICATE_TARGET_CHANGED = "duplicate_target_changed"
+    PACKAGE_ADDED = "package_added"
+    PACKAGE_MAINTAINER_ADDED = "package_maintainer_added"
+    PACKAGE_EXCLUDED = "package_excluded"
+    PACKAGE_RESTORED = "package_restored"
+    TRACK_STATUS_CHANGED = "track_status_changed"
+    TRACK_EXCLUDED = "track_excluded"
+    TRACK_RESTORED = "track_restored"
+    PRODUCT_RELEASED = "product_released"
+    PRODUCT_EXCLUDED = "product_excluded"
+    PRODUCT_RESTORED = "product_restored"
+    TICKET_CREATED = "ticket_created"
+    CVE_ASSOCIATED = "cve_associated"
+    SEVERITY_CHANGED = "severity_changed"
+    PRIORITY_CHANGED = "priority_changed"
+    CVSS_ASSESSMENT_CHANGED = "cvss_assessment_changed"
+    PRODUCT_ELIGIBILITY_CHANGED = "product_eligibility_changed"
+    CONFIDENTIALITY_CHANGED = "confidentiality_changed"
+    COORDINATED_RELEASE_CHANGED = "coordinated_release_changed"
+    ACCESS_GRANT_ADDED = "access_grant_added"
+    ACCESS_GRANT_REMOVED = "access_grant_removed"
+    REFERENCE_ADDED = "reference_added"
+    REFERENCE_DELETED = "reference_deleted"
+    REFERENCE_URL_CHANGED = "reference_url_changed"
+    REFERENCE_TYPE_CHANGED = "reference_type_changed"
+    REFERENCE_TITLE_CHANGED = "reference_title_changed"
+    REFERENCE_DESCRIPTION_CHANGED = "reference_description_changed"
+
+
+class ReferenceType(StrEnum):
+    """Content classification of a Ticket reference URL.
+
+    Category B — classification (Python Enum only; stored in the nullable
+    `TicketReference.type`, VARCHAR(20); adding a value requires only a
+    code change). SQL `NULL` means uncategorized and is a valid persisted
+    and API value, not a member. See `docs/data-model.md` (ReferenceType
+    Enum) and `docs/features/tickets/ticket-references.md` (ReferenceType,
+    Type Auto-Classification).
+    """
+
+    ADVISORY = "advisory"
+    PATCH = "patch"
+    ISSUE = "issue"
+    ARTICLE = "article"
+
+
 class PackageStatus(StrEnum):
     """Affectedness status of a `TicketPackageTrack`.
 

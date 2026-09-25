@@ -8,7 +8,8 @@ docs/features/tickets/ticket-deadlines.md (Actors and Phases, Track
 Milestones), docs/features/packages/product-catalog.md (Product
 Lifecycle Phases), and docs/data-model.md (CveState Enum,
 CVESourceFetchStatus Enum, CVESourceType Python Enum,
-CVEExternalIdentifierSource Python Enum).
+CVEExternalIdentifierSource Python Enum, TicketAuditEventType Enum,
+ReferenceType Enum).
 """
 
 from __future__ import annotations
@@ -51,10 +52,12 @@ from app.core.enums import (
     MilestonePhase,
     MilestoneStatus,
     PackageStatus,
+    ReferenceType,
     Role,
     Scope,
     SettingAuditEventType,
     Severity,
+    TicketAuditEventType,
     TicketPriority,
     TicketStatus,
     UserSortField,
@@ -443,6 +446,80 @@ class TestTicketPriorityEnum:
 
     def test_exact_values(self) -> None:
         assert [member.value for member in TicketPriority] == ["P1", "P2", "P3", "P4"]
+
+
+@pytest.mark.unit
+class TestTicketAuditEventTypeEnum:
+    """TicketAuditEventType stored values per data-model.md
+    (TicketAuditEventType Enum) and ticket-audit-log.md (Event Type
+    Contract): a closed inventory of exactly 31 values."""
+
+    def test_exact_values(self) -> None:
+        assert [member.value for member in TicketAuditEventType] == [
+            "status_change",
+            "assignment",
+            "duplicate_set",
+            "duplicate_removed",
+            "duplicate_target_changed",
+            "package_added",
+            "package_maintainer_added",
+            "package_excluded",
+            "package_restored",
+            "track_status_changed",
+            "track_excluded",
+            "track_restored",
+            "product_released",
+            "product_excluded",
+            "product_restored",
+            "ticket_created",
+            "cve_associated",
+            "severity_changed",
+            "priority_changed",
+            "cvss_assessment_changed",
+            "product_eligibility_changed",
+            "confidentiality_changed",
+            "coordinated_release_changed",
+            "access_grant_added",
+            "access_grant_removed",
+            "reference_added",
+            "reference_deleted",
+            "reference_url_changed",
+            "reference_type_changed",
+            "reference_title_changed",
+            "reference_description_changed",
+        ]
+
+    def test_count(self) -> None:
+        assert len(TicketAuditEventType) == 31
+
+    def test_values_fit_event_type_column(self) -> None:
+        # TicketAuditEvent.event_type is VARCHAR(50).
+        assert all(len(member.value) <= 50 for member in TicketAuditEventType)
+
+
+@pytest.mark.unit
+class TestReferenceTypeEnum:
+    """ReferenceType stored values per data-model.md (ReferenceType Enum)
+    and ticket-references.md (ReferenceType); NULL means uncategorized and
+    is not a member."""
+
+    def test_exact_values(self) -> None:
+        assert [member.value for member in ReferenceType] == [
+            "advisory",
+            "patch",
+            "issue",
+            "article",
+        ]
+
+    def test_uncategorized_is_not_a_member(self) -> None:
+        with pytest.raises(ValueError, match="is not a valid ReferenceType"):
+            ReferenceType(None)  # type: ignore[arg-type]
+        with pytest.raises(ValueError, match="is not a valid ReferenceType"):
+            ReferenceType("uncategorized")
+
+    def test_values_fit_type_column(self) -> None:
+        # TicketReference.type is VARCHAR(20).
+        assert all(len(member.value) <= 20 for member in ReferenceType)
 
 
 @pytest.mark.unit

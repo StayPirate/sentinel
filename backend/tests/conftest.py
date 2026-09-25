@@ -68,6 +68,9 @@ from app.models import (
     SettingAuditEvent,
     SystemSetting,
     Ticket,
+    TicketAccessGrant,
+    TicketAuditEvent,
+    TicketReference,
     User,
     UserRole,
 )
@@ -1152,6 +1155,121 @@ def ticket_factory(db_session: AsyncSession) -> Callable[..., Awaitable[Ticket]]
         ):
             overrides["duplicate_of_id"] = (await _create()).id
         instance = Ticket(**overrides)
+        db_session.add(instance)
+        await db_session.flush()
+        return instance
+
+    return _create
+
+
+@pytest.fixture
+def ticket_audit_event_factory(
+    db_session: AsyncSession,
+    ticket_factory: Callable[..., Awaitable[Ticket]],
+) -> Callable[..., Awaitable[TicketAuditEvent]]:
+    """Factory fixture for `TicketAuditEvent` model instances.
+
+    See docs/features/platform/testing-strategy.md (Model Factory
+    Fixtures) for the canonical shape this fixture follows.
+
+    Bypasses the Ticket audit service on purpose: model-layer tests
+    exercise the raw persistence contract (columns, constraints, indexes)
+    independently of the typed `log_event()` validation rules.
+
+    Defaults:
+    - `ticket_id`: a freshly created Ticket, when not overridden.
+    - `event_type`: `"ticket_created"` (a valid string value; not
+      validated against `TicketAuditEventType` at this layer).
+    - `user_id`, `old_value`, `new_value`, `comment`, and `detail`: `NULL`.
+    """
+
+    async def _create(**overrides: Any) -> TicketAuditEvent:
+        if "ticket_id" not in overrides:
+            overrides["ticket_id"] = (await ticket_factory()).id
+        defaults: dict[str, Any] = {"event_type": "ticket_created"}
+        defaults.update(overrides)
+        instance = TicketAuditEvent(**defaults)
+        db_session.add(instance)
+        await db_session.flush()
+        return instance
+
+    return _create
+
+
+@pytest.fixture
+def ticket_access_grant_factory(
+    db_session: AsyncSession,
+    ticket_factory: Callable[..., Awaitable[Ticket]],
+    user_factory: Callable[..., Awaitable[User]],
+) -> Callable[..., Awaitable[TicketAccessGrant]]:
+    """Factory fixture for `TicketAccessGrant` model instances.
+
+    See docs/features/platform/testing-strategy.md (Model Factory
+    Fixtures) for the canonical shape this fixture follows.
+
+    Bypasses the ticket services on purpose: model-layer tests exercise
+    the raw persistence contract. The Ticket is not required to be
+    confidential at this layer.
+
+    Defaults:
+    - `ticket_id`: a freshly created confidential Ticket, when not
+      overridden.
+    - `user_id` and `granted_by_id`: two distinct freshly created users,
+      when not overridden, so repeated calls never collide on the
+      composite primary key.
+    - `granted_at`: assigned by the database default.
+    """
+
+    async def _create(**overrides: Any) -> TicketAccessGrant:
+        if "ticket_id" not in overrides:
+            overrides["ticket_id"] = (await ticket_factory(is_confidential=True)).id
+        if "user_id" not in overrides:
+            overrides["user_id"] = (await user_factory()).id
+        if "granted_by_id" not in overrides:
+            overrides["granted_by_id"] = (await user_factory()).id
+        instance = TicketAccessGrant(**overrides)
+        db_session.add(instance)
+        await db_session.flush()
+        return instance
+
+    return _create
+
+
+@pytest.fixture
+def ticket_reference_factory(
+    db_session: AsyncSession,
+    ticket_factory: Callable[..., Awaitable[Ticket]],
+) -> Callable[..., Awaitable[TicketReference]]:
+    """Factory fixture for `TicketReference` model instances.
+
+    See docs/features/platform/testing-strategy.md (Model Factory
+    Fixtures) for the canonical shape this fixture follows.
+
+    Bypasses the reference services on purpose: model-layer tests
+    exercise the raw persistence contract, so `url` is not normalized and
+    `type` is not validated against `ReferenceType` at this layer.
+
+    Defaults:
+    - `ticket_id`: a freshly created Ticket, when not overridden.
+    - `url`: a per-fixture-counter-derived fictional URL
+      (`https://advisories.example.com/ref-<nnnn>`), so repeated calls on
+      one Ticket don't collide on the `(ticket_id, url)` UNIQUE constraint.
+    - `source`: `"manual"`.
+    - `title`, `description`, and `type`: `NULL`.
+    """
+
+    counter = itertools.count(1)
+
+    async def _create(**overrides: Any) -> TicketReference:
+        n = next(counter)
+        if "ticket_id" not in overrides:
+            overrides["ticket_id"] = (await ticket_factory()).id
+        defaults: dict[str, Any] = {
+            "url": f"https://advisories.example.com/ref-{n:04d}",
+            "source": "manual",
+        }
+        defaults.update(overrides)
+        instance = TicketReference(**defaults)
         db_session.add(instance)
         await db_session.flush()
         return instance
