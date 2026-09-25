@@ -1255,12 +1255,12 @@ task boundary validates the complete shape and every identifier/value:
 
 - `ticket_id` is a canonical UUID string;
 - every CPE-match item is an object with exactly `criteria`, `vulnerable`, and
-  `match_criteria_id`; `criteria` is a string of at most 255 code points,
+  `match_criteria_id`; `criteria` is a string of at most 2048 code points,
   `vulnerable` is a JSON boolean, and `match_criteria_id` is either a canonical
   UUID string or null;
-- every affected CPE is a string of at most 255 code points;
+- every affected CPE is a string of at most 2048 code points;
 - every vendor/product item is a two-element string array; vendor retains the
-  producer's 255-code-point bound and product retains its source field's text
+  producer's 512-code-point bound and product retains its source field's text
   contract; and
 - every direct package-name candidate is a non-empty string of at most 50 code
   points containing no slash, colon, or whitespace, matching the pure producer
