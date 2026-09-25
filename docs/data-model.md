@@ -61,6 +61,7 @@ flowchart TB
         TicketPackageTrack
         TicketPackageProduct
         Product
+        ProductRepository
     end
 
     subgraph identity["Identity"]
@@ -103,6 +104,7 @@ flowchart TB
     TicketPackageTrack --> TicketPackageProduct
     TicketPackageTrack --> TrackReleaseCheckpoint
     Product --> TicketPackageProduct
+    Product --> ProductRepository
     User --> UserRole
     User --> Session
     User --> ApiKey
@@ -1239,6 +1241,20 @@ entity for tracks and products. See
 
 **Unique constraint**: (ticket_id, package_name)
 
+**Indexes**:
+
+- `ix_ticket_package_package_name`: non-unique B-tree index on
+  `package_name`. The `(ticket_id, package_name)` unique constraint does not
+  lead with `package_name`, so this index serves the cross-Ticket package
+  lookups: the exact `package_name` and track `reference` selection of RabbitMQ
+  package-commit acceleration
+  (`docs/features/packages/ibs-track-release-detection.md`), the selection by
+  action logical package and codestream in RabbitMQ request wake-ups
+  (`docs/features/packages/ibs-submission-tracking.md`), and the exact `name`
+  filter of `search_packages()` (`docs/features/packages/package-service.md`).
+  The track side of the first two lookups is covered by the
+  `(ticket_package_id, reference)` unique constraint of `TicketPackageTrack`.
+
 #### TicketPackageMaintainer
 
 Immutable, additive maintainership association for one `TicketPackage`
@@ -1259,7 +1275,8 @@ username, group, codestream, freshness, or source-response data. See
 
 **Indexes**:
 
-- `user_id` - supports caller-first confidential visibility and maintainer
+- `ix_ticket_package_maintainer_user_id`: non-unique B-tree index on
+  `user_id`. It supports caller-first confidential visibility and maintainer
   workbench queries. Package-first acquisition is covered by the unique
   constraint.
 
@@ -1320,6 +1337,18 @@ override model.
 | updated_at               | TIMESTAMPTZ | NOT NULL, DEFAULT                           | Record update timestamp            |
 
 **Unique constraint**: (ticket_package_track_id, product_id)
+
+**Indexes**:
+
+- `ix_ticket_package_product_product_id`: non-unique B-tree index on
+  `product_id`. The `(ticket_package_track_id, product_id)` unique constraint
+  does not lead with `product_id`, so this index serves the Product-keyed
+  occurrence selections: the selection of operable Tickets containing a Product
+  in `re_evaluate_product_eligibility` and the eligibility-mismatch Product
+  discovery of the lifecycle-transition algorithm
+  (`docs/features/packages/product-lifecycle-transitions.md`), and the
+  post-commit mismatch discovery of CVSS Threshold Sync
+  (`docs/features/packages/product-catalog.md`).
 
 When `is_eligible_override = true`, automatic workflows do not modify
 `eligible`. See `docs/features/packages/package-model.md` (Override Model) for
@@ -1969,12 +1998,18 @@ table; RabbitMQ action IDs and array positions are not durable identities.
 - `uq_ibs_request_action_maintenance_release_identity`: unique partial index
   on `(ibs_request_id, target_project, target_package)` WHERE
   `action_type = 'maintenance_release'`.
+- `ix_ibs_request_action_ibs_request_id`: non-unique B-tree index on
+  `ibs_request_id`. A request-to-all-actions lookup does not imply either
+  partial-index predicate, so PostgreSQL cannot use the identity indexes for
+  it. This index serves the retained exact roots of a request in RabbitMQ
+  request wake-ups (`docs/features/packages/ibs-submission-tracking.md`) and
+  loading of the request-to-action relationship.
 
-These indexes encode the request-scoped, type-specific durable semantic
-identities. The partial-index predicate fixes the action type, so that redundant
-column is omitted from each key. Submission action target project and package
-fields are deliberately outside its identity
-because acceptance can add or change them. A different semantic identity is a
+The two unique partial indexes encode the request-scoped, type-specific durable
+semantic identities. The partial-index predicate fixes the action type, so that
+redundant column is omitted from each key. Submission action target project and
+package fields are deliberately outside its identity because acceptance can add
+or change them. A different semantic identity is a
 distinct retained action, not an in-place identity rewrite. Later complete
 observations can fill omitted nullable provenance, but omission never clears
 retained provenance.
@@ -2008,6 +2043,16 @@ used for both submission and release actions.
 **Unique constraint**: `(ticket_package_track_id, ibs_request_action_id)`.
 The track-leading order supports the dominant ticket-scoped and reconciliation
 lookup while preserving the same pair uniqueness.
+
+**Indexes**:
+
+- `ix_ibs_request_action_track_ibs_request_action_id`: non-unique B-tree index
+  on `ibs_request_action_id`. The unique constraint deliberately leads with the
+  track, so this index serves the action-to-track lookup that selects every
+  track represented by a request's current actions and retained exact roots in
+  RabbitMQ request wake-ups
+  (`docs/features/packages/ibs-submission-tracking.md`) and loading of the
+  action-to-track relationship.
 
 One action can correlate to multiple tracks, and multiple actions can correlate
 to one track. The request-to-action and action-to-track relationships are
