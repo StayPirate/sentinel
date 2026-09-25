@@ -97,7 +97,7 @@ summaries brief while preserving scope, limitations, evidence, and verdicts.
 | `@api-convention-reviewer` | Reviewer | Guardrail 20 | Verifies API endpoint definitions in specs conform to project conventions |
 | `@api-parity-reviewer` | Reviewer | Guardrail 12 | Verifies the REST API exposes all operations defined in feature specifications |
 | `@cicd-reviewer` | Reviewer | Guardrail 5 | Reviews CI/CD artifacts (workflows, Dockerfile, compose, git hooks, release-please config) for convention conformity and pipeline coherence |
-| `@data-model-reviewer` | Reviewer | Guardrail 8 | Reviews data model changes for simplicity, consistency, and conventions |
+| `@data-model-reviewer` | Reviewer | Guardrail 8 | Reviews data model changes for simplicity, consistency, conventions, and access-path index coverage |
 | `@design-reviewer` | Reviewer | Guardrail 26 | Applies a simplicity-first review to new or substantially modified feature specs |
 | `@docs-placement-reviewer` | Reviewer | Guardrail 21 | Verifies rules and patterns are placed in the most appropriate location (not misplaced or duplicated) |
 | `@docs-reviewer` | Reviewer | Guardrail 9 | Reviews documentation completeness and coherence with implementation |

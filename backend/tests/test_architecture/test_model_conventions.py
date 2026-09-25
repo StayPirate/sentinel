@@ -15,20 +15,35 @@ parse `data-model.md`. CHECK constraint naming has only two instances
 project-wide, one of which (`chk_user_auth_exclusive`) is a legitimate
 exception to the enum-check pattern — a case better served by human
 review in each rare PR that adds one than by a hard-coded rule (see
-issue #58 for the full rationale). The three invariants below apply
+issue #58 for the full rationale). The invariants below apply
 universally, with small, explicit per-table exception lists for the
 primary key type invariant (see `_NON_UUID_PRIMARY_KEY_TABLES`) and the
 UUIDv7 generation invariant (see `_NON_UUIDV7_PRIMARY_KEY_TABLES`), which
 is what makes them good structural-test candidates.
+
+Only the mechanical part of the foreign-key access-path indexing criterion
+in `docs/data-model.md` (Notes) is verified here: every `ON DELETE CASCADE`
+foreign key is covered by a leading key. Whether another foreign key's
+parent rows can be deleted, or whether a documented query needs an index,
+requires judgement and is checked by `@data-model-reviewer`.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 
 import pytest
+from sqlalchemy import (
+    Column,
+    ForeignKey,
+    ForeignKeyConstraint,
+    Index,
+    MetaData,
+    Table,
+    UniqueConstraint,
+    text,
+)
 from sqlalchemy import Enum as SAEnum
-from sqlalchemy import Table
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.sql.schema import CallableColumnDefault, DefaultClause
 from sqlalchemy.types import DateTime
@@ -237,3 +252,216 @@ class TestNoPostgresEnumTypes:
                         "per the Enum Storage Strategy)"
                     )
         assert not violations, "\n".join(violations)
+
+
+def _leading_key_column_lists(table: Table) -> list[list[str]]:
+    """Ordered column-name lists of every key that can serve a lookup on
+    its leading columns: the primary key, each unique constraint (including
+    `unique=True` columns), and each non-partial index. An index stops at
+    its first non-column expression, since a functional expression cannot
+    serve a plain column lookup."""
+    keys: list[list[str]] = [[column.name for column in table.primary_key.columns]]
+    keys.extend(
+        [column.name for column in constraint.columns]
+        for constraint in table.constraints
+        if isinstance(constraint, UniqueConstraint)
+    )
+    for index in table.indexes:
+        if index.dialect_options["postgresql"]["where"] is not None:
+            continue
+        leading: list[str] = []
+        for expression in index.expressions:
+            if not isinstance(expression, Column):
+                break
+            leading.append(expression.name)
+        keys.append(leading)
+    return keys
+
+
+def _is_covered(fk_columns: Sequence[str], keys: Iterable[list[str]]) -> bool:
+    """True when some key's leading columns are exactly the FK columns,
+    in any order."""
+    width = len(fk_columns)
+    return any(
+        len(key) >= width and set(key[:width]) == set(fk_columns) for key in keys
+    )
+
+
+def _cascade_foreign_key_coverage_violations(tables: Iterable[Table]) -> list[str]:
+    violations: list[str] = []
+    for table in tables:
+        keys = _leading_key_column_lists(table)
+        for constraint in table.foreign_key_constraints:
+            if (constraint.ondelete or "").upper() != "CASCADE":
+                continue
+            fk_columns = [column.name for column in constraint.columns]
+            if not _is_covered(fk_columns, keys):
+                violations.append(
+                    f"Table '{table.name}' ON DELETE CASCADE foreign key "
+                    f"{fk_columns} is not the leading column set of its "
+                    "primary key, a unique constraint, or a non-partial index"
+                )
+    return violations
+
+
+@pytest.mark.unit
+class TestCascadeForeignKeysAreIndexed:
+    """Every `ON DELETE CASCADE` foreign key leads the primary key, a unique
+    constraint, or a non-partial index, so a parent delete does not scan
+    the child table.
+
+    See `docs/data-model.md` (Notes): "The child side of an `ON DELETE
+    CASCADE` foreign key is always covered by a primary key, a unique
+    constraint, or a non-partial index." There is deliberately no exception
+    list.
+    """
+
+    def test_every_cascade_foreign_key_is_covered(self) -> None:
+        violations = _cascade_foreign_key_coverage_violations(_mapped_tables())
+        assert not violations, "\n".join(violations)
+
+
+def _synthetic_child(*extra: Index | UniqueConstraint) -> Table:
+    """A child table with a CASCADE FK `parent_id` on fresh metadata;
+    `extra` adds the indexes or constraints under test."""
+    metadata = MetaData()
+    Table("parent", metadata, Column("id", UUID, primary_key=True))
+    return Table(
+        "child",
+        metadata,
+        Column("id", UUID, primary_key=True),
+        Column("parent_id", UUID, ForeignKey("parent.id", ondelete="CASCADE")),
+        Column("other", UUID),
+        *extra,
+    )
+
+
+@pytest.mark.unit
+class TestCascadeForeignKeyCoverageDetection:
+    """The coverage check itself: it accepts every documented kind of
+    covering key and rejects keys that cannot serve the FK lookup."""
+
+    def test_uncovered_foreign_key_is_reported(self) -> None:
+        violations = _cascade_foreign_key_coverage_violations([_synthetic_child()])
+        assert len(violations) == 1
+        assert "'child'" in violations[0]
+        assert "['parent_id']" in violations[0]
+
+    def test_non_leading_index_column_is_reported(self) -> None:
+        table = _synthetic_child(Index("ix_child_other_parent", "other", "parent_id"))
+        assert _cascade_foreign_key_coverage_violations([table])
+
+    def test_non_leading_unique_constraint_column_is_reported(self) -> None:
+        table = _synthetic_child(UniqueConstraint("other", "parent_id"))
+        assert _cascade_foreign_key_coverage_violations([table])
+
+    def test_partial_index_is_not_coverage(self) -> None:
+        table = _synthetic_child(
+            Index(
+                "ix_child_parent_partial",
+                "parent_id",
+                postgresql_where=text("other IS NOT NULL"),
+            )
+        )
+        assert _cascade_foreign_key_coverage_violations([table])
+
+    def test_functional_index_expression_is_not_coverage(self) -> None:
+        table = _synthetic_child(
+            Index("ix_child_parent_text", text("(parent_id::text)"))
+        )
+        assert _cascade_foreign_key_coverage_violations([table])
+
+    @pytest.mark.parametrize(
+        "covering_key",
+        [
+            Index("ix_child_parent_id", "parent_id"),
+            Index("ix_child_parent_other", "parent_id", "other"),
+            UniqueConstraint("parent_id", "other"),
+        ],
+        ids=["single_column_index", "composite_index", "unique_constraint"],
+    )
+    def test_leading_key_is_coverage(
+        self, covering_key: Index | UniqueConstraint
+    ) -> None:
+        table = _synthetic_child(covering_key)
+        assert _cascade_foreign_key_coverage_violations([table]) == []
+
+    def test_leading_primary_key_column_is_coverage(self) -> None:
+        metadata = MetaData()
+        Table("parent", metadata, Column("id", UUID, primary_key=True))
+        table = Table(
+            "child",
+            metadata,
+            Column(
+                "parent_id",
+                UUID,
+                ForeignKey("parent.id", ondelete="CASCADE"),
+                primary_key=True,
+            ),
+            Column("other", UUID, primary_key=True),
+        )
+        assert _cascade_foreign_key_coverage_violations([table]) == []
+
+    def test_unique_column_is_coverage(self) -> None:
+        metadata = MetaData()
+        Table("parent", metadata, Column("id", UUID, primary_key=True))
+        table = Table(
+            "child",
+            metadata,
+            Column("id", UUID, primary_key=True),
+            Column(
+                "parent_id",
+                UUID,
+                ForeignKey("parent.id", ondelete="CASCADE"),
+                unique=True,
+            ),
+        )
+        assert _cascade_foreign_key_coverage_violations([table]) == []
+
+    def test_composite_foreign_key_is_covered_in_any_leading_order(self) -> None:
+        metadata = MetaData()
+        Table(
+            "parent",
+            metadata,
+            Column("a", UUID, primary_key=True),
+            Column("b", UUID, primary_key=True),
+        )
+        covered = Table(
+            "child",
+            metadata,
+            Column("id", UUID, primary_key=True),
+            Column("a", UUID),
+            Column("b", UUID),
+            Column("other", UUID),
+            ForeignKeyConstraint(
+                ["a", "b"], ["parent.a", "parent.b"], ondelete="CASCADE"
+            ),
+            Index("ix_child_b_a_other", "b", "a", "other"),
+        )
+        assert _cascade_foreign_key_coverage_violations([covered]) == []
+
+        uncovered = Table(
+            "child_partial_prefix",
+            metadata,
+            Column("id", UUID, primary_key=True),
+            Column("a", UUID),
+            Column("b", UUID),
+            Column("other", UUID),
+            ForeignKeyConstraint(
+                ["a", "b"], ["parent.a", "parent.b"], ondelete="CASCADE"
+            ),
+            Index("ix_child_partial_prefix_a_other_b", "a", "other", "b"),
+        )
+        assert _cascade_foreign_key_coverage_violations([uncovered])
+
+    @pytest.mark.parametrize("ondelete", [None, "RESTRICT", "SET NULL", "NO ACTION"])
+    def test_non_cascade_foreign_key_is_ignored(self, ondelete: str | None) -> None:
+        metadata = MetaData()
+        Table("parent", metadata, Column("id", UUID, primary_key=True))
+        table = Table(
+            "child",
+            metadata,
+            Column("id", UUID, primary_key=True),
+            Column("parent_id", UUID, ForeignKey("parent.id", ondelete=ondelete)),
+        )
+        assert _cascade_foreign_key_coverage_violations([table]) == []

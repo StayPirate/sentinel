@@ -1,7 +1,8 @@
 ---
 description: >
-  Reviews schema simplicity, consistency, and conventions. Use after changing
-  SQLAlchemy models, Alembic migrations, or `docs/data-model.md`. Read-only.
+  Reviews schema simplicity, consistency, conventions, and access-path index
+  coverage. Use after changing SQLAlchemy models, Alembic migrations, or
+  `docs/data-model.md`. Read-only.
 mode: subagent
 model: openrouter/deepseek/deepseek-v4.1-flash
 variant: high
@@ -146,6 +147,12 @@ structural complexity without presenting it to the user for a decision.
 5. If the change relates to a feature, read the corresponding owning spec in
    `docs/features/**/`. Expand to all models or the complete data-model document
    only for a repository-wide audit or impact that cannot be bounded
+6. For access paths, read the foreign-key access-path indexing criterion in
+   `docs/data-model.md` (Notes) and, for each changed table, use targeted
+   searches of the owning service and feature specs for the documented
+   queries, mutations, and row locks that select or join by the changed
+   columns. For audit event tables, read
+   `docs/features/platform/audit-trail-infrastructure.md` (Indexing)
 
 ## What to check
 
@@ -178,6 +185,35 @@ structural complexity without presenting it to the user for a decision.
   documented and constrained?
 - Are circular dependencies between tables avoided?
 - Is `back_populates` used consistently on both sides of relationships?
+
+### Access paths
+
+Apply the foreign-key access-path indexing criterion in `docs/data-model.md`
+(Notes). The structural test in
+`backend/tests/test_architecture/test_model_conventions.py` already enforces
+coverage of every `ON DELETE CASCADE` foreign key; do not repeat that check.
+Review only what requires judgement:
+
+- For each new or changed foreign key, can the referenced rows be deleted, or
+  does a documented operation query or join by it? If so, is it covered by an
+  index whose leading columns are its columns (a primary key or unique
+  constraint with that prefix counts)? If not, is the absence justified by the
+  criterion (referenced rows are never deleted and no documented operation
+  queries by it)?
+- For each documented query, mutation, or row lock that the change introduces
+  or whose lookup or join key it changes, is that key covered by a leading
+  index? Treat a lookup that runs while a pessimistic row lock is held as the
+  highest priority (`docs/conventions.md`, Transaction Hygiene Rules)
+- Is every index added under the criterion documented in its table's
+  `**Indexes**:` block with the access paths it serves? Is any documented or
+  implemented index redundant with an existing key that already has the same
+  leading columns?
+- Audit event tables follow `docs/features/platform/audit-trail-infrastructure.md`
+  (Indexing) instead
+
+Report a missing index only when you can name the documented access path it
+would serve. Do not recommend indexes for hypothetical or undocumented
+queries.
 
 ### Naming consistency
 
@@ -250,11 +286,13 @@ Provide a structured summary with these sections:
    specific suggestions for simplification
 3. **Redundancy**: any duplicated or derivable data found
 4. **Convention issues**: naming, style, or structural convention violations
-5. **Spec coherence**: whether code and `docs/data-model.md` are in sync
-6. **Diagram coherence**: whether the ER diagram and table definitions in
+5. **Access paths**: each missing, undocumented, or redundant index, with the
+   documented access path and owning section it affects
+6. **Spec coherence**: whether code and `docs/data-model.md` are in sync
+7. **Diagram coherence**: whether the ER diagram and table definitions in
    `docs/data-model.md` are aligned, and whether the diagram is lean and
    readable
-7. **Verdict**: one of:
+8. **Verdict**: one of:
    - **Clean** — no issues found, the change maintains schema simplicity
    - **Minor issues** — small problems that should be fixed but don't block
    - **Needs revision** — significant complexity or consistency problems that
