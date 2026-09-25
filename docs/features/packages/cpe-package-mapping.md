@@ -318,7 +318,7 @@ contents or package values.
 A zero-byte or whitespace-only file is treated as absent. After parsing,
 any root object with zero entries (including `{}`, `{ }`, or a
 pretty-printed equivalent) is the `cpe_mapping_empty` case. Validation
-rules 4–7 apply only when the parsed object contains at least one entry.
+rules 4–6 apply only when the parsed object contains at least one entry.
 
 **Validation rules** (applied only when file exists and is non-empty;
 checked in order, first failure raises `CPEMappingLoadError`):
@@ -333,9 +333,15 @@ checked in order, first failure raises `CPEMappingLoadError`):
    one unescaped `:`. Both decoded components are lowercase and equal
    their whitespace-trimmed forms. Re-serializing them with Canonical
    Mapping-Key Serialization must reproduce the original key exactly.
-6. No two keys decode to the same semantic vendor/product pair.
-7. Every value is a non-empty array of strings. Every string is
+6. Every value is a non-empty array of strings. Every string is
    non-empty after trimming and must equal its trimmed form.
+
+Semantic key uniqueness needs no separate rule. Rule 5 makes every key
+the canonical serialization of its decoded pair, and canonical
+serialization is injective, so two keys decoding to the same pair would be
+textually identical and rejected by rule 4. A non-canonical spelling of an
+existing pair (for example, `apache:xerces-c\+\+` beside
+`apache:xerces-c++`) fails rule 5.
 
 **Not enforced at runtime** (CI-only): alphabetical key ordering.
 Unsorted but otherwise valid JSON loads successfully.
