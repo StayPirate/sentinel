@@ -435,3 +435,125 @@ class CVSS4UserInteraction(StrEnum):
     NONE = "none"
     PASSIVE = "passive"
     ACTIVE = "active"
+
+
+class TicketStatus(StrEnum):
+    """Ticket lifecycle status.
+
+    Category A — state-machine (`Ticket.status`, VARCHAR + CHECK
+    constraint `chk_ticket_status_valid`, added with the Ticket model).
+    Adding a value requires an Alembic migration. See
+    `docs/data-model.md` (TicketStatus Enum) and
+    `docs/features/tickets/tickets.md` (Ticket Lifecycle).
+    """
+
+    NEW = "New"
+    ANALYSIS = "Analysis"
+    ANALYZED = "Analyzed"
+    RESOLVED = "Resolved"
+    IGNORED = "Ignored"
+    DUPLICATED = "Duplicated"
+
+
+class TicketPriority(StrEnum):
+    """Remediation urgency of a Ticket.
+
+    Category B — classification (Python Enum only; stored in
+    `Ticket.priority_auto` and `Ticket.priority_override`, while the API
+    wire format is lowercase `p1`-`p4`). SQL `NULL` is not a level. See
+    `docs/data-model.md` (TicketPriority Enum) and
+    `docs/features/tickets/ticket-priority.md` (Priority Levels).
+    """
+
+    P1 = "P1"
+    P2 = "P2"
+    P3 = "P3"
+    P4 = "P4"
+
+
+class PackageStatus(StrEnum):
+    """Affectedness status of a `TicketPackageTrack`.
+
+    Category A — state-machine (VARCHAR + CHECK constraint
+    `chk_ticket_package_track_status_valid`, added with the model).
+    Adding a value requires an Alembic migration. See
+    `docs/data-model.md` (PackageStatus Enum) and
+    `docs/features/packages/package-model.md` (Axis 1: Affectedness).
+    """
+
+    ANALYSIS = "ANALYSIS"
+    AFFECTED = "AFFECTED"
+    NOT_AFFECTED = "NOT_AFFECTED"
+    FIXED = "FIXED"
+    WONT_FIX = "WONT_FIX"
+
+
+class DeliveryStatus(StrEnum):
+    """Delivery pipeline status of a `TicketPackageTrack`.
+
+    Category A — state-machine (VARCHAR + CHECK constraint
+    `chk_ticket_package_track_delivery_status_valid`, added with the
+    model). Adding a value requires an Alembic migration. See
+    `docs/data-model.md` (DeliveryStatus Enum).
+    """
+
+    PENDING = "PENDING"
+    IN_PROGRESS = "IN_PROGRESS"
+    RELEASED = "RELEASED"
+
+
+class WorkflowType(StrEnum):
+    """Workflow type assigned at `TicketPackageTrack` creation.
+
+    Category B — classification (Python Enum only). See
+    `docs/data-model.md` (WorkflowType Enum).
+    """
+
+    IBS = "ibs"
+    GIT = "git"
+
+
+class MilestonePhase(StrEnum):
+    """Actor phase of the remediation SLA window, in execution order.
+
+    Category B — classification (Python Enum only; never stored in the
+    database — milestones are computed at read time). See
+    `docs/features/tickets/ticket-deadlines.md` (Actors and Phases).
+    """
+
+    TRIAGE = "triage"
+    SUBMISSION = "submission"
+    UM = "um"
+    QA = "qa"
+
+
+class MilestoneStatus(StrEnum):
+    """Status of one track milestone.
+
+    Category B — classification (Python Enum only; never stored in the
+    database). The additional `null` status (no SLA, or the phase is not
+    observable) is represented by Python `None`. `PENDING` is unrelated
+    to `DeliveryStatus.PENDING`. See
+    `docs/features/tickets/ticket-deadlines.md` (Track Milestones).
+    """
+
+    DONE = "done"
+    PENDING = "pending"
+    OVERDUE = "overdue"
+    NOT_APPLICABLE = "not_applicable"
+
+
+class CurrentPhase(StrEnum):
+    """First not-yet-completed phase of a track, or `done`.
+
+    Category B — classification (Python Enum only; never stored in the
+    database). The additional `null` value is represented by Python
+    `None`. See `docs/features/tickets/ticket-deadlines.md` (Current
+    Phase).
+    """
+
+    TRIAGE = "triage"
+    SUBMISSION = "submission"
+    UM = "um"
+    QA = "qa"
+    DONE = "done"
