@@ -14,6 +14,9 @@ from app.models.session import Session
 from app.models.setting_audit_event import SettingAuditEvent
 from app.models.system_setting import SystemSetting
 from app.models.ticket import Ticket
+from app.models.ticket_access_grant import TicketAccessGrant
+from app.models.ticket_audit_event import TicketAuditEvent
+from app.models.ticket_reference import TicketReference
 from app.models.user import User
 from app.models.user_role import UserRole
 
@@ -32,6 +35,9 @@ __all__ = [
     "SettingAuditEvent",
     "SystemSetting",
     "Ticket",
+    "TicketAccessGrant",
+    "TicketAuditEvent",
+    "TicketReference",
     "User",
     "UserRole",
 ]

@@ -16,8 +16,9 @@ project-wide, one of which (`chk_user_auth_exclusive`) is a legitimate
 exception to the enum-check pattern — a case better served by human
 review in each rare PR that adds one than by a hard-coded rule (see
 issue #58 for the full rationale). The three invariants below apply
-universally, with a small, explicit per-table exception list for the
-primary key type invariant (see `_NON_UUID_PRIMARY_KEY_TABLES`), which
+universally, with small, explicit per-table exception lists for the
+primary key type invariant (see `_NON_UUID_PRIMARY_KEY_TABLES`) and the
+UUIDv7 generation invariant (see `_NON_UUIDV7_PRIMARY_KEY_TABLES`), which
 is what makes them good structural-test candidates.
 """
 
@@ -52,6 +53,53 @@ _NON_UUID_PRIMARY_KEY_TABLES: dict[str, frozenset[str]] = {
     "system_setting": frozenset({"key"}),
     "fetcher_config": frozenset({"fetcher_name"}),
 }
+
+# Explicit, per-table exception list for the UUIDv7 generation invariant
+# only. `docs/data-model.md` (Notes) documents `TicketAccessGrant` as a
+# composite primary key `(ticket_id, user_id)`: both columns are UUID
+# foreign keys to existing rows, so they must never generate a UUID of
+# their own. They remain subject to the UUID type invariant above. Maps
+# table name -> the set of UUID primary key column names exempt from the
+# `uuid.uuid7`/`uuidv7()` default requirement.
+_NON_UUIDV7_PRIMARY_KEY_TABLES: dict[str, frozenset[str]] = {
+    "ticket_access_grant": frozenset({"ticket_id", "user_id"}),
+}
+
+
+@pytest.mark.unit
+class TestPrimaryKeyExceptionListsAreCurrent:
+    """Every exception entry names an existing primary key column, so a
+    renamed or removed table cannot leave a stale exemption behind."""
+
+    @pytest.mark.parametrize(
+        "exceptions",
+        [_NON_UUID_PRIMARY_KEY_TABLES, _NON_UUIDV7_PRIMARY_KEY_TABLES],
+        ids=["non_uuid", "non_uuidv7"],
+    )
+    def test_every_entry_matches_a_primary_key_column(
+        self, exceptions: dict[str, frozenset[str]]
+    ) -> None:
+        tables = Base.metadata.tables
+        for table_name, column_names in exceptions.items():
+            assert table_name in tables, f"Unknown table '{table_name}'"
+            pk_names = {column.name for column in tables[table_name].primary_key}
+            assert column_names <= pk_names, (
+                f"Table '{table_name}': {sorted(column_names - pk_names)} "
+                "are not primary key columns"
+            )
+
+    def test_composite_foreign_key_exception_columns_are_uuid(self) -> None:
+        # The UUIDv7 exemption must not hide a non-UUID key: the type
+        # invariant still applies to these columns.
+        tables = Base.metadata.tables
+        for table_name, column_names in _NON_UUIDV7_PRIMARY_KEY_TABLES.items():
+            for column_name in column_names:
+                column = tables[table_name].columns[column_name]
+                assert isinstance(column.type, UUID)
+                assert column.foreign_keys, (
+                    f"'{table_name}.{column_name}' is exempt from UUIDv7 "
+                    "generation but is not a foreign key"
+                )
 
 
 @pytest.mark.unit
@@ -93,7 +141,9 @@ class TestUuidPrimaryKeyIsUuidV7:
     primary keys... Never use `uuid.uuid4` for primary keys." Applies
     to the same tables covered by `TestPrimaryKeyType` (natural-key
     tables in `_NON_UUID_PRIMARY_KEY_TABLES` are skipped — they have no
-    UUID column to check).
+    UUID column to check — and so are the composite foreign-key primary
+    key columns in `_NON_UUIDV7_PRIMARY_KEY_TABLES`, which reference
+    existing rows instead of generating an identifier).
     """
 
     def test_every_uuid_primary_key_has_uuid7_default_and_server_default(
@@ -102,8 +152,13 @@ class TestUuidPrimaryKeyIsUuidV7:
         violations: list[str] = []
         for table in _mapped_tables():
             allowed_non_uuid = _NON_UUID_PRIMARY_KEY_TABLES.get(table.name, frozenset())
+            allowed_non_uuidv7 = _NON_UUIDV7_PRIMARY_KEY_TABLES.get(
+                table.name, frozenset()
+            )
             for column in table.primary_key.columns:
                 if column.name in allowed_non_uuid or not isinstance(column.type, UUID):
+                    continue
+                if column.name in allowed_non_uuidv7:
                     continue
 
                 default = column.default
