@@ -144,7 +144,7 @@ erDiagram
         UUID id PK
         UUID cve_id FK "NOT NULL"
         VARCHAR_100 source_container "NOT NULL"
-        VARCHAR_255 vendor "nullable"
+        TEXT vendor "nullable"
         TEXT product "nullable"
     }
     CVECWE {
@@ -730,22 +730,31 @@ the general affected version model. See
 | id | UUID | PK | Internal identifier |
 | cve_id | UUID | FK(cve.id) ON DELETE CASCADE, NOT NULL | Parent CVE |
 | source_container | VARCHAR(100) | NOT NULL | Provenance: `"cna"`, `"adp:CISA-ADP"`, etc. Scope key for explicit replacement/removal — see `docs/features/tickets/cve-service.md` (Affected-Version Snapshot Operations). Both MITRE and kernel fetchers write `"cna"` (same CNA data) |
-| vendor | VARCHAR(255) | nullable | Vendor name (e.g., "Linux", "Siemens") |
+| vendor | TEXT | nullable | Vendor name (e.g., "Linux", "Siemens") |
 | product | TEXT | nullable | Product name (e.g., "Linux", "SCALANCE XC-300"). TEXT because some CNAs list entire product families in this field |
 | package_url | TEXT | nullable | PURL identifier (CVE 5.2.0+). Useful for identifying vendored dependencies (npm, PyPI, Go) inside SUSE RPMs |
 | collection_url | TEXT | nullable | Package registry URL (npm, PyPI, etc.). Pre-PURL mechanism, still used by many CNAs |
-| package_name | VARCHAR(255) | nullable | Source package name. From CNA `packageName` field — may be an RPM source package name (Red Hat, SUSE, Fedora CNAs), a registry package name paired with `collection_url`, or a vendor-specific identifier |
+| package_name | TEXT | nullable | Source package name. From CNA `packageName` field — may be an RPM source package name (Red Hat, SUSE, Fedora CNAs), a registry package name paired with `collection_url`, or a vendor-specific identifier |
 | repo | TEXT | nullable | Source code repository URL |
 | version | TEXT | nullable | Single version or range start. TEXT because some CNAs list model numbers or multi-range values |
-| version_type | VARCHAR(50) | nullable | `"semver"` / `"git"` / `"custom"` / `"original_commit_for_fix"` / `"rpm"` / ... |
+| version_type | TEXT | nullable | `"semver"` / `"git"` / `"custom"` / `"original_commit_for_fix"` / `"rpm"` / ... |
 | version_end | TEXT | nullable | Range end (`lessThan` or `lessThanOrEqual`). TEXT for same reason as `version` |
 | version_end_inclusive | BOOLEAN | nullable | `true` for `lessThanOrEqual`, `false` for `lessThan` |
 | program_files | JSONB | nullable | Array of affected source files (embedded, not a separate table — used primarily for kernel CVEs, display-only) |
-| cpe | VARCHAR(255) | nullable | CNA/ADP-provided CPE from `affected[]` array. A supplied replacement entry may also contribute this value to the pure post-ingest candidate handoff in `docs/features/tickets/cve-service.md`; persistence does not itself resolve a package. The later package-resolution workflow may pass the transported value to `resolve_cpe_packages()`, alongside NVD CPE candidates already selected by the NVD ingestion contract |
+| cpe | TEXT | nullable | CNA/ADP-provided CPE from `affected[]` array. A supplied replacement entry may also contribute this value to the pure post-ingest candidate handoff in `docs/features/tickets/cve-service.md`; persistence does not itself resolve a package. The later package-resolution workflow may pass the transported value to `resolve_cpe_packages()`, alongside NVD CPE candidates already selected by the NVD ingestion contract |
 | ecosystem | VARCHAR(50) | nullable | OSV/OSSF canonical ecosystem identifier. Sentinel uses the [OSSF OSV Schema](https://ossf.github.io/osv-schema/) ecosystem enumeration as its internal standard for this field (e.g., `"PyPI"`, `"npm"`, `"Go"`, `"crates.io"`, `"Maven"`, `"NuGet"`, `"RubyGems"`, `"Packagist"`). Fetchers that receive canonical OSSF values (e.g., `sync_osv_advisories`) store them as-is. Fetchers that receive non-canonical names from their upstream source (e.g., `sync_ghsa_advisories` receives GitHub's `"pip"` instead of `"PyPI"`) MUST normalize to OSSF canonical values before storage — see the owning fetcher spec for the specific mapping. NULL for fetchers whose upstream source has no ecosystem concept (NVD, MITRE, Red Hat, Kernel). See `docs/conventions.md` (Ecosystem Naming) for the cross-cutting convention |
 | status | VARCHAR(20) | nullable | Version-level vulnerability status from `versions[].status`. Known values: `"affected"`, `"unaffected"`, `"unknown"`. NULL for entries created without `versions[]` (parser step 4). Stored as-is without validation |
 | default_status | VARCHAR(20) | nullable | Entry-level baseline status from `affected[].defaultStatus`. Same value set as `status`. NULL when absent from source JSON (semantically equivalent to `"unknown"` per CVE 5.x schema). Shared by all version entries from the same parent `affected[]` entry |
 | created_at | TIMESTAMPTZ | NOT NULL, DEFAULT | Record creation timestamp |
+
+**Upstream-derived text widths**: `vendor`, `product`, `package_url`,
+`collection_url`, `package_name`, `repo`, `version`, `version_type`,
+`version_end`, and `cpe` are `TEXT` without a database length bound. Length
+limits, where any apply, are enforced before any write by
+`AffectedVersionEntry` in `docs/features/tickets/cve-service.md`
+(CVEIngestPayload Schema); each such limit equals the `maxLength` of the
+corresponding CVE JSON 5.x field, so a schema-valid upstream value is never
+rejected for length. None of these columns is indexed.
 
 Rows for a scope are replaced only by an explicit `replace` operation or
 deleted by an explicit `remove` operation for `(cve_id, source_container)`.
