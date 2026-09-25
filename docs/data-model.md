@@ -912,7 +912,7 @@ See `docs/features/tickets/cve-sync-epss.md` for display guidance.
 #### Ticket
 
 Represents the internal workflow unit for a security issue. A ticket may
-optionally be associated with a CVE (0..1:1 relationship). Tickets track
+optionally be associated with a CVE (0..1:0..1 relationship). Tickets track
 the triage and resolution lifecycle managed by vulnerability analysts (VAs).
 See `docs/features/tickets/tickets.md` for the full ticket specification.
 
