@@ -487,6 +487,42 @@ class TestTicketConfidentiality:
 
 @pytest.mark.integration
 class TestTicketIndexes:
+    """docs/data-model.md (Ticket, Indexes): exactly the partial
+    `duplicate_of_id` index and the non-partial `assignee_id` index, beyond
+    the primary key and unique keys (#611 decision A3)."""
+
+    async def test_exact_standalone_index_set(self, db_session: AsyncSession) -> None:
+        result = await db_session.execute(
+            text(
+                "SELECT i.relname AS name, ix.indisunique AS is_unique "
+                "FROM pg_index ix "
+                "JOIN pg_class i ON i.oid = ix.indexrelid "
+                "JOIN pg_class t ON t.oid = ix.indrelid "
+                "LEFT JOIN pg_constraint c ON c.conindid = ix.indexrelid "
+                "WHERE t.relname = 'ticket' AND c.oid IS NULL"
+            )
+        )
+        rows = result.all()
+        assert {row.name for row in rows} == {
+            "ix_ticket_duplicate_of_id",
+            "ix_ticket_assignee_id",
+        }
+        assert all(not row.is_unique for row in rows)
+
+    async def test_assignee_index_is_non_partial_btree(
+        self, db_session: AsyncSession
+    ) -> None:
+        result = await db_session.execute(
+            text(
+                "SELECT indexdef FROM pg_indexes "
+                "WHERE tablename = 'ticket' AND indexname = 'ix_ticket_assignee_id'"
+            )
+        )
+        (row,) = result.all()
+        assert "USING btree (assignee_id)" in row.indexdef
+        assert "UNIQUE" not in row.indexdef
+        assert "WHERE" not in row.indexdef
+
     async def test_partial_duplicate_of_index_present(
         self, db_session: AsyncSession
     ) -> None:

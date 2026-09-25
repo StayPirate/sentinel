@@ -82,6 +82,9 @@ class Ticket(Base):
             "duplicate_of_id",
             postgresql_where=text("duplicate_of_id IS NOT NULL"),
         ),
+        # Non-partial, so it also serves `assignee=none` (docs/data-model.md,
+        # Ticket, Indexes).
+        Index("ix_ticket_assignee_id", "assignee_id"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
