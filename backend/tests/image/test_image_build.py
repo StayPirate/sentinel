@@ -11,11 +11,23 @@ import pytest
 _RUNTIME_MANIFEST_SCRIPT = """
 import shutil
 import ssl
+from importlib.metadata import files as distribution_files
 from importlib.metadata import version
+from importlib.resources import files as package_files
 from pathlib import Path
 
 import app
 from app.services.http_client import build_tls_context
+
+cpe_resource = "app/data/cpe-package-mapping.json"
+assert package_files("app").joinpath("data", "cpe-package-mapping.json").is_file()
+installed = [
+    record
+    for record in distribution_files("sentinel") or ()
+    if record.as_posix() == cpe_resource
+]
+assert installed, f"{cpe_resource} is not in the installed distribution"
+assert Path(installed[0].locate()).is_file(), installed[0].locate()
 
 assert Path("/app/alembic.ini").is_file()
 assert Path("/app/alembic/versions").is_dir()
