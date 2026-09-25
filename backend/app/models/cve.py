@@ -21,9 +21,14 @@ from app.core.enums import CveState
 from app.database import Base
 
 if TYPE_CHECKING:
+    from app.models.cve_affected_version import CVEAffectedVersion
     from app.models.cve_cvss_assessment import CVECVSSAssessment
+    from app.models.cve_cwe import CVECWE
+    from app.models.cve_epss_score import CVEEPSSScore
     from app.models.cve_external_identifier import CVEExternalIdentifier
+    from app.models.cve_kev_entry import CVEKEVEntry
     from app.models.cve_source import CVESource
+    from app.models.cve_ssvc_assessment import CVESSVCAssessment
     from app.models.ticket import Ticket
 
 
@@ -103,6 +108,40 @@ class CVE(Base):
     external_identifiers: Mapped[list[CVEExternalIdentifier]] = relationship(
         "CVEExternalIdentifier",
         back_populates="cve",
+        cascade="all, delete",
+        passive_deletes=True,
+    )
+    affected_versions: Mapped[list[CVEAffectedVersion]] = relationship(
+        "CVEAffectedVersion",
+        back_populates="cve",
+        cascade="all, delete",
+        passive_deletes=True,
+    )
+    cwes: Mapped[list[CVECWE]] = relationship(
+        "CVECWE",
+        back_populates="cve",
+        cascade="all, delete",
+        passive_deletes=True,
+    )
+    # One-to-one enrichment children: each child table's `cve_id` is UNIQUE.
+    ssvc_assessment: Mapped[CVESSVCAssessment | None] = relationship(
+        "CVESSVCAssessment",
+        back_populates="cve",
+        uselist=False,
+        cascade="all, delete",
+        passive_deletes=True,
+    )
+    kev_entry: Mapped[CVEKEVEntry | None] = relationship(
+        "CVEKEVEntry",
+        back_populates="cve",
+        uselist=False,
+        cascade="all, delete",
+        passive_deletes=True,
+    )
+    epss_score: Mapped[CVEEPSSScore | None] = relationship(
+        "CVEEPSSScore",
+        back_populates="cve",
+        uselist=False,
         cascade="all, delete",
         passive_deletes=True,
     )

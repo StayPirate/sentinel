@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 from sqlalchemy import (
     DateTime,
     ForeignKey,
+    Index,
     String,
     Text,
     UniqueConstraint,
@@ -36,7 +37,10 @@ class CVEExternalIdentifier(Base):
     `source` stores a `CVEExternalIdentifierSource` value (Category B, no
     CHECK constraint). `(source, identifier)` is globally unique, because
     each external ID is unique within its naming system; one CVE may have
-    several identifiers, including several from the same source.
+    several identifiers, including several from the same source. The
+    unique key does not lead with `cve_id`, so the separate non-unique
+    `ix_cve_external_identifier_cve_id` index serves per-CVE reads and the
+    `ON DELETE CASCADE` lookup.
     """
 
     __tablename__ = "cve_external_identifier"
@@ -46,6 +50,7 @@ class CVEExternalIdentifier(Base):
             "identifier",
             name="uq_cve_external_identifier_source_identifier",
         ),
+        Index("ix_cve_external_identifier_cve_id", "cve_id"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
