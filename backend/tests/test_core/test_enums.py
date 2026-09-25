@@ -5,12 +5,15 @@ for example docs/features/identity/rbac.md (Authorization Model),
 docs/data-model.md (Role Enum), docs/features/tickets/cvss-scoring.md
 (Accepted Base Vectors, Severity, Eligibility Score Resolution), and
 docs/features/tickets/ticket-deadlines.md (Actors and Phases, Track
-Milestones), and docs/features/packages/product-catalog.md (Product
-Lifecycle Phases).
+Milestones), docs/features/packages/product-catalog.md (Product
+Lifecycle Phases), and docs/data-model.md (CveState Enum,
+CVESourceFetchStatus Enum, CVESourceType Python Enum,
+CVEExternalIdentifierSource Python Enum).
 """
 
 from __future__ import annotations
 
+import re
 from enum import StrEnum
 
 import pytest
@@ -19,6 +22,10 @@ from app.core.enums import (
     Capability,
     CredentialKind,
     CurrentPhase,
+    CVEExternalIdentifierSource,
+    CVESourceFetchStatus,
+    CVESourceType,
+    CveState,
     CVSS2AccessComplexity,
     CVSS2AccessVector,
     CVSS2Authentication,
@@ -243,6 +250,94 @@ class TestUserSortFieldEnum:
             "email",
             "created_at",
         }
+
+
+@pytest.mark.unit
+class TestCveStateEnum:
+    """CveState stored values per data-model.md (CveState Enum)."""
+
+    def test_exact_members(self) -> None:
+        assert {member.name: member.value for member in CveState} == {
+            "PUBLISHED": "PUBLISHED",
+            "REJECTED": "REJECTED",
+        }
+
+
+@pytest.mark.unit
+class TestCVESourceFetchStatusEnum:
+    """CVESourceFetchStatus stored values per data-model.md
+    (CVESourceFetchStatus Enum)."""
+
+    def test_exact_members(self) -> None:
+        assert {member.name: member.value for member in CVESourceFetchStatus} == {
+            "SUCCESS": "success",
+            "FAILURE": "failure",
+            "MISSING": "missing",
+        }
+
+
+# Format constraints declared in data-model.md (CVESourceType Python Enum,
+# CVEExternalIdentifierSource Python Enum). Each bound equals the VARCHAR
+# width of the column that stores the value.
+_CVE_SOURCE_TYPE_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
+_CVE_SOURCE_TYPE_MAX_LENGTH = 100
+_EXTERNAL_IDENTIFIER_SOURCE_PATTERN = re.compile(r"[A-Z][A-Z0-9_]*")
+_EXTERNAL_IDENTIFIER_SOURCE_MAX_LENGTH = 20
+
+
+@pytest.mark.unit
+class TestCVESourceTypeEnum:
+    """CVESourceType covers all eight CVE sources in data-model.md
+    (CVESourceType Python Enum) and satisfies its format constraint."""
+
+    def test_exact_members(self) -> None:
+        assert {member.name: member.value for member in CVESourceType} == {
+            "NVD": "nvd",
+            "MITRE": "mitre",
+            "KERNEL": "kernel",
+            "REDHAT": "redhat",
+            "GHSA": "ghsa",
+            "OSV": "osv",
+            "KEV": "kev",
+            "EPSS": "epss",
+        }
+
+    @pytest.mark.parametrize("member", list(CVESourceType), ids=lambda m: m.name)
+    def test_value_matches_format_pattern(self, member: CVESourceType) -> None:
+        assert _CVE_SOURCE_TYPE_PATTERN.fullmatch(member.value) is not None
+
+    @pytest.mark.parametrize("member", list(CVESourceType), ids=lambda m: m.name)
+    def test_value_fits_column_width(self, member: CVESourceType) -> None:
+        assert len(member.value) <= _CVE_SOURCE_TYPE_MAX_LENGTH
+
+
+@pytest.mark.unit
+class TestCVEExternalIdentifierSourceEnum:
+    """CVEExternalIdentifierSource members per data-model.md
+    (CVEExternalIdentifierSource Python Enum) and its format constraint."""
+
+    def test_exact_members(self) -> None:
+        assert {
+            member.name: member.value for member in CVEExternalIdentifierSource
+        } == {
+            "GHSA": "GHSA",
+            "PYSEC": "PYSEC",
+            "RUSTSEC": "RUSTSEC",
+        }
+
+    @pytest.mark.parametrize(
+        "member", list(CVEExternalIdentifierSource), ids=lambda m: m.name
+    )
+    def test_value_matches_format_pattern(
+        self, member: CVEExternalIdentifierSource
+    ) -> None:
+        assert _EXTERNAL_IDENTIFIER_SOURCE_PATTERN.fullmatch(member.value) is not None
+
+    @pytest.mark.parametrize(
+        "member", list(CVEExternalIdentifierSource), ids=lambda m: m.name
+    )
+    def test_value_fits_column_width(self, member: CVEExternalIdentifierSource) -> None:
+        assert len(member.value) <= _EXTERNAL_IDENTIFIER_SOURCE_MAX_LENGTH
 
 
 @pytest.mark.unit
