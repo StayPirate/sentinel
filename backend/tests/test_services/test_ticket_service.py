@@ -628,7 +628,14 @@ class TestDetailProjection:
         assert detail.status is status
         assert detail.due_dates is None
         assert detail.packages[0].tracks[0].due_dates is None
-        assert detail.packages[0].tracks[0].milestones.current_phase is None
+        milestones = detail.packages[0].tracks[0].milestones
+        assert (
+            milestones.triage,
+            milestones.submission,
+            milestones.um,
+            milestones.qa,
+            milestones.current_phase,
+        ) == (None, None, None, None, None)
 
     async def test_ticket_and_track_due_dates_are_equal(
         self,
@@ -1335,6 +1342,17 @@ class _CommittedWorld:
         await self.session.commit()
         return ticket, package, track, cve
 
+    async def cve(self, *, severity: Severity) -> CVE:
+        cve = CVE(
+            cve_id=f"CVE-2099-{uuid.uuid4().int % 10**7:07d}", severity=severity.value
+        )
+        self.session.add(cve)
+        await self.session.flush()
+        self.cve_ids.append(cve.id)
+        self.session.add(CVEKEVEntry(cve_id=cve.id, date_added=date(2026, 3, 8)))
+        await self.session.commit()
+        return cve
+
     async def grant(self, ticket: Ticket, user: User, granter: User) -> None:
         self.session.add(
             TicketAccessGrant(
@@ -1567,6 +1585,46 @@ class TestDetailReadRaces:
         assert before.due_dates is not None
         assert after.due_dates.release - after.due_dates.triage == timedelta(days=27)
         assert before.due_dates.release - before.due_dates.triage == timedelta(days=162)
+
+    async def test_cve_reassociation_is_observed_with_its_own_evidence(
+        self,
+        committed_world: _CommittedWorld,
+        db_session_factory: Callable[[], Awaitable[AsyncSession]],
+    ) -> None:
+        """Repointing `Ticket.cve_id` between two reads yields the new CVE's
+        identity, severity, and evidence together, never a mix of both."""
+        ticket, _, _, original = await committed_world.ticket(
+            is_confidential=False, cve_severity=Severity.LOW
+        )
+        replacement = await committed_world.cve(severity=Severity.CRITICAL)
+        reader = await db_session_factory()
+        writer = await db_session_factory()
+
+        before = await _detail(reader, ticket, ANONYMOUS_CALLER)
+        await _commit(
+            writer,
+            update(Ticket).where(Ticket.id == ticket.id).values(cve_id=replacement.id),
+        )
+        after = await _detail(reader, ticket, ANONYMOUS_CALLER)
+
+        assert before.cve is not None
+        assert after.cve is not None
+        assert (before.cve.cve_id, before.severity, before.cve.kev) == (
+            original.cve_id,
+            Severity.LOW,
+            None,
+        )
+        assert (
+            after.cve.cve_id,
+            after.severity,
+            after.cve.severity,
+            after.cve.kev,
+        ) == (
+            replacement.cve_id,
+            Severity.CRITICAL,
+            Severity.CRITICAL,
+            CVEKEVProjection(date_added=date(2026, 3, 8), reference_url=None),
+        )
 
     async def test_role_removed_after_caller_resolution_does_not_change_the_read(
         self,
