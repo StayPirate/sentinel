@@ -15,6 +15,7 @@ from app.models.fetcher_config import FetcherConfig
 from app.models.fetcher_run import FetcherRun
 from app.models.ibs_request import IBSRequest
 from app.models.ibs_request_action import IBSRequestAction
+from app.models.ibs_request_action_track import IBSRequestActionTrack
 from app.models.identity_audit_event import IdentityAuditEvent
 from app.models.mixins import AuditEventMixin
 from app.models.product import Product
@@ -30,6 +31,7 @@ from app.models.ticket_package_maintainer import TicketPackageMaintainer
 from app.models.ticket_package_product import TicketPackageProduct
 from app.models.ticket_package_track import TicketPackageTrack
 from app.models.ticket_reference import TicketReference
+from app.models.track_release_checkpoint import TrackReleaseCheckpoint
 from app.models.user import User
 from app.models.user_role import UserRole
 
@@ -50,6 +52,7 @@ __all__ = [
     "FetcherRun",
     "IBSRequest",
     "IBSRequestAction",
+    "IBSRequestActionTrack",
     "IdentityAuditEvent",
     "Product",
     "ProductRepository",
@@ -64,6 +67,7 @@ __all__ = [
     "TicketPackageProduct",
     "TicketPackageTrack",
     "TicketReference",
+    "TrackReleaseCheckpoint",
     "User",
     "UserRole",
 ]
