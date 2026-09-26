@@ -37,23 +37,30 @@ from app.api import dependencies
 from app.api.dependencies import (
     SESSION_COOKIE_NAME,
     AuthenticatedPrincipal,
+    AuthenticatedTicketCaller,
     CurrentUser,
     LastUsedDebouncer,
     OptionalCurrentUser,
+    OptionalTicketCaller,
     UnknownKeyWarningLimiter,
+    require_accessible_ticket,
     require_capability,
     require_session_authentication,
 )
 from app.config import settings
 from app.core.enums import Capability, CredentialKind, Role, SessionCreationReason
 from app.core.errors import AppError, ErrorCode
+from app.core.identifiers import format_ticket_id
 from app.core.jwt import issue_token
 from app.database import get_db
 from app.models.api_key import ApiKey
 from app.models.session import Session
+from app.models.ticket import Ticket
 from app.models.user import User
-from app.services import api_key_service, user_service
+from app.services import api_key_service, ticket_service, user_service
 from app.services.session_service import create_session
+from app.services.ticket_service import ResolvedTicket
+from app.services.ticket_visibility import TicketCaller
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -129,6 +136,29 @@ def _build_test_app() -> FastAPI:
         ],
     ) -> dict[str, str]:
         return {"user_id": str(principal.user.id)}
+
+    def _caller_body(caller: TicketCaller) -> dict[str, str | None]:
+        return {
+            "user_id": None if caller.user_id is None else str(caller.user_id),
+            "scope": None if caller.scope is None else caller.scope.value,
+        }
+
+    @test_app.get("/ticket-caller")
+    async def ticket_caller(caller: AuthenticatedTicketCaller) -> dict[str, str | None]:
+        return _caller_body(caller)
+
+    @test_app.get("/optional-ticket-caller")
+    async def optional_ticket_caller(
+        caller: OptionalTicketCaller,
+    ) -> dict[str, str | None]:
+        return _caller_body(caller)
+
+    @test_app.get("/tickets/{ticket_id}/accessible")
+    async def accessible_ticket(
+        caller: AuthenticatedTicketCaller,
+        ticket: Annotated[ResolvedTicket, Depends(require_accessible_ticket)],
+    ) -> dict[str, int | str | None]:
+        return {"sequence_id": ticket.sequence_id, **_caller_body(caller)}
 
     @test_app.get("/session-only")
     async def session_only(
@@ -218,6 +248,13 @@ class TestErrorFactories:
         assert error.status_code == 404
         assert error.code == ErrorCode.USER_NOT_FOUND
         assert error.detail == "User not found."
+
+    def test_ticket_not_found_error_shape(self) -> None:
+        error = dependencies.ticket_not_found_error()
+        assert error.status_code == 404
+        assert error.code == ErrorCode.TICKET_NOT_FOUND
+        assert error.detail == "Ticket not found."
+        assert error.headers is None
 
 
 # ---------------------------------------------------------------------------
@@ -1726,3 +1763,194 @@ class TestRequireSessionAuthentication:
             "code": "AUTH_SESSION_REQUIRED",
             "detail": "This operation requires session authentication.",
         }
+
+
+# ---------------------------------------------------------------------------
+# Ticket caller information and require_accessible_ticket (e2e)
+# ---------------------------------------------------------------------------
+
+
+async def _bearer(db_session: AsyncSession, user: User) -> dict[str, str]:
+    created = await create_session(
+        db_session,
+        user,
+        SessionCreationReason.LOCAL_LOGIN,
+        expected_password_hash=None,
+    )
+    assert created is not None
+    return {"Authorization": f"Bearer {created.token}"}
+
+
+def _count_role_lookups(monkeypatch: pytest.MonkeyPatch) -> list[uuid.UUID]:
+    """Record every `user_service.get_user_roles()` call made by the
+    dependencies while still delegating to the real implementation."""
+    calls: list[uuid.UUID] = []
+    original = user_service.get_user_roles
+
+    async def _spy(session: AsyncSession, user_id: uuid.UUID) -> list[Role]:
+        calls.append(user_id)
+        return await original(session, user_id)
+
+    monkeypatch.setattr(user_service, "get_user_roles", _spy)
+    return calls
+
+
+@pytest.mark.e2e
+class TestTicketCallerDependencies:
+    async def test_optional_caller_without_credential_is_anonymous(
+        self, dep_client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls = _count_role_lookups(monkeypatch)
+
+        response = await dep_client.get("/optional-ticket-caller")
+
+        assert response.status_code == 200
+        assert response.json() == {"user_id": None, "scope": None}
+        assert calls == []
+
+    async def test_optional_caller_with_invalid_credential_returns_401(
+        self, dep_client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls = _count_role_lookups(monkeypatch)
+
+        response = await dep_client.get(
+            "/optional-ticket-caller", headers={"Authorization": "Bearer invalid"}
+        )
+
+        assert response.status_code == 401
+        assert response.json()["code"] == "AUTH_NOT_AUTHENTICATED"
+        assert calls == []
+
+    @pytest.mark.parametrize(
+        ("roles", "scope"),
+        [
+            ([], "non_confidential"),
+            ([Role.RESTRICTED_ANALYST], "non_confidential"),
+            ([Role.VULNERABILITY_ANALYST], "all"),
+            ([Role.RESTRICTED_ANALYST, Role.ADMIN], "all"),
+        ],
+    )
+    @pytest.mark.parametrize("path", ["/ticket-caller", "/optional-ticket-caller"])
+    async def test_authenticated_caller_carries_the_effective_scope(
+        self,
+        path: str,
+        roles: list[Role],
+        scope: str,
+        dep_client: AsyncClient,
+        db_session: AsyncSession,
+        user_factory: Callable[..., Awaitable[User]],
+        user_role_factory: Callable[..., Awaitable[Any]],
+        redis_client: redis_asyncio.Redis,
+    ) -> None:
+        user = await user_factory()
+        for role in roles:
+            await user_role_factory(user_id=user.id, role=role.value)
+        headers = await _bearer(db_session, user)
+
+        response = await dep_client.get(path, headers=headers)
+
+        assert response.status_code == 200
+        assert response.json() == {"user_id": str(user.id), "scope": scope}
+
+    async def test_authenticated_caller_requires_a_credential(
+        self, dep_client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls = _count_role_lookups(monkeypatch)
+
+        response = await dep_client.get("/ticket-caller")
+
+        assert response.status_code == 401
+        assert calls == []
+
+    async def test_caller_is_resolved_once_per_request(
+        self,
+        dep_client: AsyncClient,
+        db_session: AsyncSession,
+        user_factory: Callable[..., Awaitable[User]],
+        ticket_factory: Callable[..., Awaitable[Ticket]],
+        redis_client: redis_asyncio.Redis,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        user = await user_factory()
+        ticket = await ticket_factory()
+        headers = await _bearer(db_session, user)
+        calls = _count_role_lookups(monkeypatch)
+
+        response = await dep_client.get(
+            f"/tickets/{format_ticket_id(ticket.sequence_id)}/accessible",
+            headers=headers,
+        )
+
+        assert response.status_code == 200
+        assert calls == [user.id]
+
+
+@pytest.mark.e2e
+class TestRequireAccessibleTicket:
+    async def test_accessible_ticket_resolves(
+        self,
+        dep_client: AsyncClient,
+        db_session: AsyncSession,
+        user_factory: Callable[..., Awaitable[User]],
+        ticket_factory: Callable[..., Awaitable[Ticket]],
+        ticket_access_grant_factory: Callable[..., Awaitable[Any]],
+        redis_client: redis_asyncio.Redis,
+    ) -> None:
+        user = await user_factory()
+        ticket = await ticket_factory(is_confidential=True)
+        await ticket_access_grant_factory(ticket_id=ticket.id, user_id=user.id)
+        headers = await _bearer(db_session, user)
+
+        response = await dep_client.get(
+            f"/tickets/{format_ticket_id(ticket.sequence_id)}/accessible",
+            headers=headers,
+        )
+
+        assert response.status_code == 200
+        assert response.json()["sequence_id"] == ticket.sequence_id
+
+    async def test_every_denial_cause_returns_the_identical_404(
+        self,
+        dep_client: AsyncClient,
+        db_session: AsyncSession,
+        user_factory: Callable[..., Awaitable[User]],
+        ticket_factory: Callable[..., Awaitable[Ticket]],
+        redis_client: redis_asyncio.Redis,
+    ) -> None:
+        user = await user_factory()
+        visible = await ticket_factory()
+        hidden = await ticket_factory(is_confidential=True)
+        headers = await _bearer(db_session, user)
+        locators = [
+            format_ticket_id(visible.sequence_id).lower(),
+            f"SNTL-0{visible.sequence_id}",
+            "SNTL-2147483648",
+            str(visible.id),
+            "SNTL-2147483647",
+            format_ticket_id(hidden.sequence_id),
+        ]
+        # Checkpoint the fixtures: each 404 rolls back the request's work.
+        await db_session.commit()
+
+        bodies = []
+        for locator in locators:
+            response = await dep_client.get(
+                f"/tickets/{locator}/accessible", headers=headers
+            )
+            assert response.status_code == 404, locator
+            bodies.append(response.content)
+
+        assert set(bodies) == {
+            b'{"code":"TICKET_NOT_FOUND","detail":"Ticket not found."}'
+        }
+
+    async def test_missing_credential_returns_401_before_lookup(
+        self, dep_client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        resolver = AsyncMock()
+        monkeypatch.setattr(ticket_service, "resolve_ticket_locator", resolver)
+
+        response = await dep_client.get("/tickets/SNTL-1/accessible")
+
+        assert response.status_code == 401
+        resolver.assert_not_awaited()
