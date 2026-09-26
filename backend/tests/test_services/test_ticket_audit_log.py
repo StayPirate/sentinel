@@ -1249,6 +1249,10 @@ class TestListTicketEventsProjection:
             event.remove(sync_engine, "before_cursor_execute", _record)
 
         assert len(statements) == 1
+        (statement,) = statements
+        for cte in ("parent AS", "filtered AS", "total AS", "page AS"):
+            assert cte in statement
+        assert '"user" AS actor_user' in statement
 
     async def test_parent_scope_can_use_the_ticket_id_index(
         self,
@@ -1953,8 +1957,10 @@ class TestListTicketEventsRaces:
         committed_world: _CommittedWorld,
         db_session_factory: Callable[[], Awaitable[AsyncSession]],
     ) -> None:
-        """Events committed after the preliminary resolution appear in
-        both the page and the total, never in only one of them."""
+        """Events committed after a preliminary resolution are observed by
+        the later protected read, in its page and total alike. Page/total
+        coherence itself follows from the single statement proven by
+        `test_read_is_one_statement`."""
         ticket = await committed_world.ticket(is_confidential=False, events=2)
         reader = await db_session_factory()
         writer = await db_session_factory()

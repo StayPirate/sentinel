@@ -16,6 +16,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 from httpx import AsyncClient
@@ -30,7 +31,7 @@ from app.models.ticket import Ticket
 from app.models.ticket_access_grant import TicketAccessGrant
 from app.models.user import User
 from app.models.user_role import UserRole
-from app.services import ticket_audit_log
+from app.services import ticket_audit_log, ticket_service
 
 Factory = Callable[..., Awaitable[Any]]
 
@@ -57,6 +58,14 @@ def authenticated_user(
     return _authenticated_user_and_client[0]
 
 
+def _spy_lookups(monkeypatch: pytest.MonkeyPatch) -> tuple[AsyncMock, AsyncMock]:
+    """Replace both Ticket lookups reachable from the route with spies."""
+    resolver, lister = AsyncMock(), AsyncMock()
+    monkeypatch.setattr(ticket_service, "resolve_ticket_locator", resolver)
+    monkeypatch.setattr(ticket_audit_log, "list_ticket_events", lister)
+    return resolver, lister
+
+
 @pytest.mark.unit
 class TestParseEventTypes:
     def test_omitted_filter_is_none(self) -> None:
@@ -74,20 +83,31 @@ class TestParseEventTypes:
 @pytest.mark.e2e
 class TestAuthentication:
     async def test_anonymous_request_returns_401_before_lookup(
-        self, client: AsyncClient
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        resolver, lister = _spy_lookups(monkeypatch)
+
         for locator in ("SNTL-1", "not-a-ticket"):
             response = await client.get(_url(locator))
             assert response.status_code == 401
             assert response.json() == _UNAUTHENTICATED
 
-    async def test_invalid_credential_returns_401(self, client: AsyncClient) -> None:
+        resolver.assert_not_awaited()
+        lister.assert_not_awaited()
+
+    async def test_invalid_credential_returns_401_before_lookup(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        resolver, lister = _spy_lookups(monkeypatch)
+
         response = await client.get(
             _url("SNTL-1"), headers={"Authorization": "Bearer invalid-token"}
         )
 
         assert response.status_code == 401
         assert response.json() == _UNAUTHENTICATED
+        resolver.assert_not_awaited()
+        lister.assert_not_awaited()
 
 
 @pytest.mark.e2e
