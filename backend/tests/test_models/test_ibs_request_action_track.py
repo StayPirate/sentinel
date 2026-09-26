@@ -100,7 +100,8 @@ class TestIBSRequestActionTrackCreation:
             text(
                 "INSERT INTO ibs_request_action_track "
                 "(ibs_request_action_id, ticket_package_track_id) "
-                "VALUES (:action_id, :track_id) RETURNING id, created_at"
+                "VALUES (:action_id, :track_id) "
+                "RETURNING id, created_at, now() AS transaction_time"
             ),
             {"action_id": action.id, "track_id": track.id},
         )
@@ -108,6 +109,7 @@ class TestIBSRequestActionTrackCreation:
         assert isinstance(row.id, uuid.UUID)
         assert row.id.version == 7
         assert row.created_at.tzinfo is not None
+        assert row.created_at == row.transaction_time
 
 
 @pytest.mark.unit
