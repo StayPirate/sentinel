@@ -217,6 +217,32 @@ class TestTicketPackageTrackUniqueness:
         ):
             await db_session.flush()
 
+    async def test_directly_excluded_track_still_occupies_the_reference(
+        self,
+        db_session: AsyncSession,
+        ticket_package_factory: TicketPackageFactory,
+        ticket_package_track_factory: TicketPackageTrackFactory,
+    ) -> None:
+        """The UNIQUE constraint is not partial: a soft-deleted track still
+        owns its reference within the package."""
+        package = await ticket_package_factory()
+        await ticket_package_track_factory(
+            ticket_package_id=package.id,
+            reference="Example:Dup:Update",
+            deleted_at=datetime.now(UTC),
+        )
+        db_session.add(
+            TicketPackageTrack(
+                ticket_package_id=package.id,
+                workflow_type="ibs",
+                reference="Example:Dup:Update",
+            )
+        )
+        with pytest.raises(
+            IntegrityError, match="uq_ticket_package_track_ticket_package_id_reference"
+        ):
+            await db_session.flush()
+
     async def test_same_reference_with_other_workflow_type_rejected(
         self,
         db_session: AsyncSession,

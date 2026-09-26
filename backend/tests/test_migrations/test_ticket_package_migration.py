@@ -57,7 +57,8 @@ class _Expected(TypedDict):
     columns: list[Column]
     foreign_keys: set[ForeignKey]
     unique_constraints: set[tuple[str, tuple[str, ...]]]
-    checks: dict[str, set[str]]
+    # CHECK name -> (constrained column, accepted value set)
+    checks: dict[str, tuple[str, set[str]]]
     standalone_indexes: set[Index]
 
 
@@ -109,12 +110,17 @@ _EXPECTED: dict[str, _Expected] = {
         },
         # The migration hardcodes its own literal lists, independently of
         # the model expressions, and `alembic check` does not compare CHECK
-        # expressions: assert each accepted value set is exactly the enum.
+        # expressions: assert each CHECK constrains its own column and that
+        # its accepted value set is exactly the enum.
         "checks": {
-            "chk_ticket_package_track_status_valid": {s.value for s in PackageStatus},
-            "chk_ticket_package_track_delivery_status_valid": {
-                s.value for s in DeliveryStatus
-            },
+            "chk_ticket_package_track_status_valid": (
+                "status",
+                {s.value for s in PackageStatus},
+            ),
+            "chk_ticket_package_track_delivery_status_valid": (
+                "delivery_status",
+                {s.value for s in DeliveryStatus},
+            ),
         },
         "standalone_indexes": set(),
     },
@@ -219,7 +225,11 @@ def _assert_package_tree_schema(facts: _SchemaFacts) -> None:
 
         checks = {check["name"]: check["sqltext"] for check in table["checks"]}
         assert set(checks) == set(expected["checks"]), name
-        for check_name, accepted in expected["checks"].items():
+        for check_name, (column, accepted) in expected["checks"].items():
+            # Reflected as `<column>::text = ANY (ARRAY[...]::text[])`.
+            assert re.match(rf"\(*{column}\)*::text = ANY ", checks[check_name]), (
+                check_name
+            )
             assert set(re.findall(r"'([^']*)'", checks[check_name])) == accepted, (
                 check_name
             )
