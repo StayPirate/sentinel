@@ -599,8 +599,9 @@ class PackageStatus(StrEnum):
     """Affectedness status of a `TicketPackageTrack`.
 
     Category A — state-machine (VARCHAR + CHECK constraint
-    `chk_ticket_package_track_status_valid`, added with the model).
-    Adding a value requires an Alembic migration. See
+    `chk_ticket_package_track_status_valid` on
+    `ticket_package_track.status`). Adding a value requires an Alembic
+    migration. See
     `docs/data-model.md` (PackageStatus Enum) and
     `docs/features/packages/package-model.md` (Axis 1: Affectedness).
     """
@@ -616,8 +617,9 @@ class DeliveryStatus(StrEnum):
     """Delivery pipeline status of a `TicketPackageTrack`.
 
     Category A — state-machine (VARCHAR + CHECK constraint
-    `chk_ticket_package_track_delivery_status_valid`, added with the
-    model). Adding a value requires an Alembic migration. See
+    `chk_ticket_package_track_delivery_status_valid` on
+    `ticket_package_track.delivery_status`). Adding a value requires an
+    Alembic migration. See
     `docs/data-model.md` (DeliveryStatus Enum).
     """
 

@@ -39,6 +39,7 @@ if TYPE_CHECKING:
     from app.models.cve import CVE
     from app.models.ticket_access_grant import TicketAccessGrant
     from app.models.ticket_audit_event import TicketAuditEvent
+    from app.models.ticket_package import TicketPackage
     from app.models.ticket_reference import TicketReference
     from app.models.user import User
 
@@ -164,6 +165,15 @@ class Ticket(Base):
     )
     access_grants: Mapped[list[TicketAccessGrant]] = relationship(
         "TicketAccessGrant",
+        back_populates="ticket",
+        passive_deletes="all",
+    )
+    # passive_deletes="all": Tickets are never deleted and the package tree
+    # is soft-deleted. Without it SQLAlchemy would try to null the NOT NULL
+    # `ticket_id` of loaded packages before deleting the Ticket; the database
+    # FK (default NO ACTION) must reject the delete instead.
+    packages: Mapped[list[TicketPackage]] = relationship(
+        "TicketPackage",
         back_populates="ticket",
         passive_deletes="all",
     )

@@ -23,6 +23,8 @@ from app.models.system_setting import SystemSetting
 from app.models.ticket import Ticket
 from app.models.ticket_access_grant import TicketAccessGrant
 from app.models.ticket_audit_event import TicketAuditEvent
+from app.models.ticket_package import TicketPackage
+from app.models.ticket_package_track import TicketPackageTrack
 from app.models.ticket_reference import TicketReference
 from app.models.user import User
 from app.models.user_role import UserRole
@@ -51,6 +53,8 @@ __all__ = [
     "Ticket",
     "TicketAccessGrant",
     "TicketAuditEvent",
+    "TicketPackage",
+    "TicketPackageTrack",
     "TicketReference",
     "User",
     "UserRole",
