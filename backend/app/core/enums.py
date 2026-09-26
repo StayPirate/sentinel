@@ -685,6 +685,25 @@ class CurrentPhase(StrEnum):
     DONE = "done"
 
 
+class NonActionableReason(StrEnum):
+    """Why a package-tree record does not currently participate in
+    operational work.
+
+    Category B — classification (Python Enum only; never stored in the
+    database — actionability is derived at read or workflow time). Each
+    level uses an ordered subset and reports its first applicable value;
+    an actionable record has no reason (Python `None`). See
+    `docs/features/packages/package-model.md` (Derived Actionability).
+    """
+
+    PACKAGE_EXCLUDED = "package_excluded"
+    TRACK_EXCLUDED = "track_excluded"
+    PRODUCT_EXCLUDED = "product_excluded"
+    EOL = "eol"
+    NO_ACTIONABLE_TRACKS = "no_actionable_tracks"
+    NO_ACTIONABLE_PRODUCTS = "no_actionable_products"
+
+
 class LifecyclePhase(StrEnum):
     """Derived Product lifecycle phase, in chronological order.
 
