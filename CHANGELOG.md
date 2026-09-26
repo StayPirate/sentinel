@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.6.0](https://github.com/StayPirate/sentinel/compare/v0.5.1...v0.6.0) (2026-09-26)
+
+
+### Features
+
+* add CPE-to-package mapping loader and resolvers ([#610](https://github.com/StayPirate/sentinel/issues/610)) ([4022f30](https://github.com/StayPirate/sentinel/commit/4022f302bf5a73d1eaa969176093debedf49a2a3))
+* add CVE enrichment child tables and CVE child indexes ([#625](https://github.com/StayPirate/sentinel/issues/625)) ([c6574be](https://github.com/StayPirate/sentinel/commit/c6574be84f6636e8451daf25438df856559f01e7))
+* add CVE root, source, CVSS assessment, and identifier tables ([#620](https://github.com/StayPirate/sentinel/issues/620)) ([2bd7508](https://github.com/StayPirate/sentinel/commit/2bd7508c6303e064ca14537ddf7ec746dd92a80e)), closes [#613](https://github.com/StayPirate/sentinel/issues/613)
+* add derived actionability and the Ticket package-tree read ([#655](https://github.com/StayPirate/sentinel/issues/655)) ([b78b3a9](https://github.com/StayPirate/sentinel/commit/b78b3a9c3a44cc2eaffb9391fc7091313167624a))
+* add FK access-path indexing criterion and ticket assignee index ([#626](https://github.com/StayPirate/sentinel/issues/626)) ([c6ccef5](https://github.com/StayPirate/sentinel/commit/c6ccef57f9af983e3350538abdb262c23601fd2d))
+* add IBS request and request action persistence ([#644](https://github.com/StayPirate/sentinel/issues/644)) ([0f96d0b](https://github.com/StayPirate/sentinel/commit/0f96d0b2a4227d45020fc731be99430a6c9ab02e)), closes [#638](https://github.com/StayPirate/sentinel/issues/638)
+* add IBS track release checkpoint and action track persistence ([#645](https://github.com/StayPirate/sentinel/issues/645)) ([96ac841](https://github.com/StayPirate/sentinel/commit/96ac841f958ce655cbb55e8e4a3189913caa82ed))
+* add identifier syntax and pure ticket priority and deadline rules ([#608](https://github.com/StayPirate/sentinel/issues/608)) ([43b8919](https://github.com/StayPirate/sentinel/commit/43b8919fbfb4b381b60fb109062e48e552d43d0d))
+* add Product catalog tables and lifecycle SQL expression ([#641](https://github.com/StayPirate/sentinel/issues/641)) ([0bcc039](https://github.com/StayPirate/sentinel/commit/0bcc0392ff112cb1b9e7b705fd9bdaed18a25fb5)), closes [#635](https://github.com/StayPirate/sentinel/issues/635)
+* add pure CVSS vector parsing and score resolution ([#606](https://github.com/StayPirate/sentinel/issues/606)) ([1bdf1e0](https://github.com/StayPirate/sentinel/commit/1bdf1e0e16e4cf4cb16f37ba54ae9fed770fa876)), closes [#602](https://github.com/StayPirate/sentinel/issues/602)
+* add pure product lifecycle and eligibility evaluators ([#609](https://github.com/StayPirate/sentinel/issues/609)) ([555ae7e](https://github.com/StayPirate/sentinel/commit/555ae7e0890acaedef6759f6771d2ba81e5b95b3))
+* add Ticket audit event, access grant, and reference tables ([#623](https://github.com/StayPirate/sentinel/issues/623)) ([5d793a4](https://github.com/StayPirate/sentinel/commit/5d793a479e65b9ecd1de001bb941ce4222e9ba43)), closes [#615](https://github.com/StayPirate/sentinel/issues/615)
+* add Ticket audit trail service with typed event validation ([#653](https://github.com/StayPirate/sentinel/issues/653)) ([4f3b156](https://github.com/StayPirate/sentinel/commit/4f3b15691cac33e5f0007bfc02e5ffb2ae28a803)), closes [#647](https://github.com/StayPirate/sentinel/issues/647)
+* add Ticket core table ([#621](https://github.com/StayPirate/sentinel/issues/621)) ([bc4be0e](https://github.com/StayPirate/sentinel/commit/bc4be0e20be3408459ebd5cb1558c24c30b8961b)), closes [#614](https://github.com/StayPirate/sentinel/issues/614)
+* add Ticket package and track persistence ([#642](https://github.com/StayPirate/sentinel/issues/642)) ([4a9d8d8](https://github.com/StayPirate/sentinel/commit/4a9d8d8b0f7e48bb14827ea0d4696fce4921a815))
+* add Ticket package Product occurrence and maintainer persistence ([#643](https://github.com/StayPirate/sentinel/issues/643)) ([9123fc5](https://github.com/StayPirate/sentinel/commit/9123fc5b6c1708991fe7af34abf59ecd1e3b1238))
+* add Ticket visibility, SNTL resolution, and audit-log API ([#654](https://github.com/StayPirate/sentinel/issues/654)) ([072beae](https://github.com/StayPirate/sentinel/commit/072beae18a363051910e094649a1fc48a5d19818))
+
 ## [0.5.1](https://github.com/StayPirate/sentinel/compare/v0.5.0...v0.5.1) (2026-09-23)
 
 
