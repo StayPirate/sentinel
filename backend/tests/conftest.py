@@ -45,7 +45,7 @@ from app.api.dependencies import SESSION_COOKIE_NAME
 from app.api.health import get_readiness_redis_urls
 from app.celery_app import create_celery_app
 from app.config import Settings
-from app.core.enums import Role, SessionCreationReason, TicketStatus
+from app.core.enums import Role, SessionCreationReason, TicketStatus, WorkflowType
 from app.core.passwords import hash_password
 from app.database import Base, get_db
 from app.main import app
@@ -77,6 +77,8 @@ from app.models import (
     Ticket,
     TicketAccessGrant,
     TicketAuditEvent,
+    TicketPackage,
+    TicketPackageTrack,
     TicketReference,
     User,
     UserRole,
@@ -1526,6 +1528,87 @@ def product_repository_factory(
         }
         defaults.update(overrides)
         instance = ProductRepository(**defaults)
+        db_session.add(instance)
+        await db_session.flush()
+        return instance
+
+    return _create
+
+
+@pytest.fixture
+def ticket_package_factory(
+    db_session: AsyncSession,
+    ticket_factory: Callable[..., Awaitable[Ticket]],
+) -> Callable[..., Awaitable[TicketPackage]]:
+    """Factory fixture for `TicketPackage` model instances.
+
+    See docs/features/platform/testing-strategy.md (Model Factory
+    Fixtures) for the canonical shape this fixture follows.
+
+    Bypasses `package_service` on purpose: model-layer tests exercise the
+    raw persistence contract.
+
+    Defaults:
+    - `ticket_id`: a freshly created Ticket, when not overridden.
+    - `package_name`: a per-fixture-counter-derived fictional source
+      package name (`example-package-<n>`), so repeated calls on one Ticket
+      don't collide on the `(ticket_id, package_name)` UNIQUE constraint.
+    - `deleted_at`: `NULL` (not directly excluded).
+    """
+
+    counter = itertools.count(1)
+
+    async def _create(**overrides: Any) -> TicketPackage:
+        n = next(counter)
+        if "ticket_id" not in overrides:
+            overrides["ticket_id"] = (await ticket_factory()).id
+        defaults: dict[str, Any] = {"package_name": f"example-package-{n}"}
+        defaults.update(overrides)
+        instance = TicketPackage(**defaults)
+        db_session.add(instance)
+        await db_session.flush()
+        return instance
+
+    return _create
+
+
+@pytest.fixture
+def ticket_package_track_factory(
+    db_session: AsyncSession,
+    ticket_package_factory: Callable[..., Awaitable[TicketPackage]],
+) -> Callable[..., Awaitable[TicketPackageTrack]]:
+    """Factory fixture for `TicketPackageTrack` model instances.
+
+    See docs/features/platform/testing-strategy.md (Model Factory
+    Fixtures) for the canonical shape this fixture follows.
+
+    Bypasses `package_service` on purpose: model-layer tests exercise the
+    raw persistence contract, so `workflow_type` is not validated against
+    `WorkflowType` at this layer.
+
+    Defaults:
+    - `ticket_package_id`: a freshly created package, when not overridden.
+    - `workflow_type`: `"ibs"`.
+    - `reference`: a per-fixture-counter-derived fictional IBS codestream
+      project name (`Example:Codestream:<n>:Update`), so repeated calls on
+      one package don't collide on the `(ticket_package_id, reference)`
+      UNIQUE constraint.
+    - `status` (`ANALYSIS`), `delivery_status` (`PENDING`), and
+      `deleted_at` (`NULL`): the model defaults.
+    """
+
+    counter = itertools.count(1)
+
+    async def _create(**overrides: Any) -> TicketPackageTrack:
+        n = next(counter)
+        if "ticket_package_id" not in overrides:
+            overrides["ticket_package_id"] = (await ticket_package_factory()).id
+        defaults: dict[str, Any] = {
+            "workflow_type": WorkflowType.IBS.value,
+            "reference": f"Example:Codestream:{n}:Update",
+        }
+        defaults.update(overrides)
+        instance = TicketPackageTrack(**defaults)
         db_session.add(instance)
         await db_session.flush()
         return instance
