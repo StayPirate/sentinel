@@ -45,7 +45,14 @@ from app.api.dependencies import SESSION_COOKIE_NAME
 from app.api.health import get_readiness_redis_urls
 from app.celery_app import create_celery_app
 from app.config import Settings
-from app.core.enums import Role, SessionCreationReason, TicketStatus, WorkflowType
+from app.core.enums import (
+    IBSRequestActionType,
+    IBSRequestState,
+    Role,
+    SessionCreationReason,
+    TicketStatus,
+    WorkflowType,
+)
 from app.core.passwords import hash_password
 from app.database import Base, get_db
 from app.main import app
@@ -68,6 +75,8 @@ from app.models import (
     FetcherAuditEvent,
     FetcherConfig,
     FetcherRun,
+    IBSRequest,
+    IBSRequestAction,
     IdentityAuditEvent,
     Product,
     ProductRepository,
@@ -1686,6 +1695,138 @@ def ticket_package_maintainer_factory(
         if "user_id" not in overrides:
             overrides["user_id"] = (await user_factory()).id
         instance = TicketPackageMaintainer(**overrides)
+        db_session.add(instance)
+        await db_session.flush()
+        return instance
+
+    return _create
+
+
+# Fixed fictional upstream IBS chronology for request factory defaults.
+_IBS_UPSTREAM_CREATED_AT = datetime(2026, 9, 1, 8, 0, tzinfo=UTC)
+_IBS_UPSTREAM_UPDATED_AT = datetime(2026, 9, 2, 9, 30, tzinfo=UTC)
+
+
+@pytest.fixture
+def ibs_request_factory(
+    db_session: AsyncSession,
+) -> Callable[..., Awaitable[IBSRequest]]:
+    """Factory fixture for `IBSRequest` model instances.
+
+    See docs/features/platform/testing-strategy.md (Model Factory
+    Fixtures) for the canonical shape this fixture follows.
+
+    Bypasses IBS submission tracking on purpose: model-layer tests exercise
+    the raw persistence contract, so no request detail is fetched or
+    normalized at this layer.
+
+    Defaults:
+    - `request_number`: a per-fixture-counter-derived positive number
+      (`700000 + n`), so repeated calls don't collide on the UNIQUE
+      constraint or on small numbers chosen explicitly by a test.
+    - `state`: `"new"`.
+    - `superseded_by_request_number`: `NULL`, except that when `state` is
+      overridden to `"superseded"` without a successor it defaults to
+      `request_number + 1`, satisfying
+      `chk_ibs_request_supersession_coherence`.
+    - `upstream_created_at` / `upstream_updated_at`: fixed fictional UTC
+      instants.
+    """
+
+    counter = itertools.count(1)
+
+    async def _create(**overrides: Any) -> IBSRequest:
+        n = next(counter)
+        defaults: dict[str, Any] = {
+            "request_number": 700000 + n,
+            "state": IBSRequestState.NEW.value,
+            "upstream_created_at": _IBS_UPSTREAM_CREATED_AT,
+            "upstream_updated_at": _IBS_UPSTREAM_UPDATED_AT,
+        }
+        defaults.update(overrides)
+        if (
+            defaults["state"] == IBSRequestState.SUPERSEDED.value
+            and "superseded_by_request_number" not in overrides
+        ):
+            defaults["superseded_by_request_number"] = defaults["request_number"] + 1
+        instance = IBSRequest(**defaults)
+        db_session.add(instance)
+        await db_session.flush()
+        return instance
+
+    return _create
+
+
+@pytest.fixture
+def ibs_request_action_factory(
+    db_session: AsyncSession,
+    ibs_request_factory: Callable[..., Awaitable[IBSRequest]],
+) -> Callable[..., Awaitable[IBSRequestAction]]:
+    """Factory fixture for `IBSRequestAction` model instances.
+
+    See docs/features/platform/testing-strategy.md (Model Factory
+    Fixtures) for the canonical shape this fixture follows.
+
+    Bypasses IBS submission tracking on purpose: model-layer tests exercise
+    the raw persistence contract, so no upstream action is normalized at
+    this layer. All project and package names are fictional.
+
+    Defaults (per-fixture counter `n`, so repeated calls on one request never
+    collide on a semantic-identity index):
+    - `ibs_request_id`: a freshly created request, when not overridden.
+    - `action_type`: `"maintenance_incident"`.
+    - For `maintenance_incident` (and any unknown `action_type` a test
+      supplies): `source_project` (`Example:Devel:<n>`), `source_package`
+      (`example-pkg`), and `target_release_project`
+      (`Example:Codestream:<n>:Update`); the target fields and
+      `incident_number` stay `NULL`.
+    - For `maintenance_release`: `source_project`
+      (`Example:Maintenance:<incident>`), `source_package`
+      (`example-pkg.Example_Codestream_<n>`), `target_project`
+      (`Example:Codestream:<n>:Update`), `target_package` (`example-pkg`),
+      and `incident_number` (`1000 + n`).
+    - `logical_package`: `example-pkg`.
+    - `codestream_name`: the effective `target_release_project` (incident)
+      or `target_project` (release) after overrides, satisfying
+      `chk_ibs_request_action_type_coherence`; when that anchor is
+      overridden to `NULL`, a fictional codestream name so the row fails
+      only on the coherence CHECK rather than on NOT NULL.
+    - Revision and checksum fields: `NULL`.
+    """
+
+    counter = itertools.count(1)
+
+    async def _create(**overrides: Any) -> IBSRequestAction:
+        n = next(counter)
+        if "ibs_request_id" not in overrides:
+            overrides["ibs_request_id"] = (await ibs_request_factory()).id
+        action_type = overrides.get(
+            "action_type", IBSRequestActionType.MAINTENANCE_INCIDENT.value
+        )
+        codestream = f"Example:Codestream:{n}:Update"
+        defaults: dict[str, Any]
+        if action_type == IBSRequestActionType.MAINTENANCE_RELEASE.value:
+            incident_number = 1000 + n
+            defaults = {
+                "source_project": f"Example:Maintenance:{incident_number}",
+                "source_package": f"example-pkg.Example_Codestream_{n}",
+                "target_project": codestream,
+                "target_package": "example-pkg",
+                "incident_number": incident_number,
+            }
+            anchor = "target_project"
+        else:
+            defaults = {
+                "source_project": f"Example:Devel:{n}",
+                "source_package": "example-pkg",
+                "target_release_project": codestream,
+            }
+            anchor = "target_release_project"
+        defaults["action_type"] = action_type
+        defaults["logical_package"] = "example-pkg"
+        defaults.update(overrides)
+        defaults.setdefault("codestream_name", defaults.get(anchor) or codestream)
+        instance = IBSRequestAction(**defaults)
         db_session.add(instance)
         await db_session.flush()
         return instance

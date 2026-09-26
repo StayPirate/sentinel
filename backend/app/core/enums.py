@@ -702,3 +702,38 @@ class LifecyclePhase(StrEnum):
     EXTENDED_SUPPORT = "extended_support"
     REACTIVE_SUPPORT = "reactive_support"
     EOL = "eol"
+
+
+class IBSRequestState(StrEnum):
+    """Exact current IBS request lifecycle state of an `IBSRequest`.
+
+    Category A — state-machine (VARCHAR + CHECK constraint
+    `chk_ibs_request_state_valid` on `ibs_request.state`). Adding a value
+    requires an Alembic migration. Sentinel persists the exact upstream state
+    with no collapsed local state and no narrower local transition allowlist.
+    See `docs/data-model.md` (IBSRequestState Enum) and
+    `docs/features/packages/ibs-submission-tracking.md` (Request States).
+    """
+
+    NEW = "new"
+    REVIEW = "review"
+    ACCEPTED = "accepted"
+    DECLINED = "declined"
+    REVOKED = "revoked"
+    SUPERSEDED = "superseded"
+    DELETED = "deleted"
+
+
+class IBSRequestActionType(StrEnum):
+    """Relevant IBS request action discriminator of an `IBSRequestAction`.
+
+    Category B — classification (VARCHAR + Python Enum). There is no
+    single-column enum CHECK; the type-specific structural CHECK
+    `chk_ibs_request_action_type_coherence` has one branch per value, so an
+    unknown value cannot satisfy row coherence. Adding a value requires a code
+    change and a corresponding structural-coherence and identity migration.
+    See `docs/data-model.md` (IBSRequestActionType Enum).
+    """
+
+    MAINTENANCE_INCIDENT = "maintenance_incident"
+    MAINTENANCE_RELEASE = "maintenance_release"

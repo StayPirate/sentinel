@@ -13,6 +13,8 @@ from app.models.cve_ssvc_assessment import CVESSVCAssessment
 from app.models.fetcher_audit_event import FetcherAuditEvent
 from app.models.fetcher_config import FetcherConfig
 from app.models.fetcher_run import FetcherRun
+from app.models.ibs_request import IBSRequest
+from app.models.ibs_request_action import IBSRequestAction
 from app.models.identity_audit_event import IdentityAuditEvent
 from app.models.mixins import AuditEventMixin
 from app.models.product import Product
@@ -46,6 +48,8 @@ __all__ = [
     "FetcherAuditEvent",
     "FetcherConfig",
     "FetcherRun",
+    "IBSRequest",
+    "IBSRequestAction",
     "IdentityAuditEvent",
     "Product",
     "ProductRepository",

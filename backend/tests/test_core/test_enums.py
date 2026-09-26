@@ -9,7 +9,7 @@ Milestones), docs/features/packages/product-catalog.md (Product
 Lifecycle Phases), and docs/data-model.md (CveState Enum,
 CVESourceFetchStatus Enum, CVESourceType Python Enum,
 CVEExternalIdentifierSource Python Enum, TicketAuditEventType Enum,
-ReferenceType Enum).
+ReferenceType Enum, IBSRequestState Enum, IBSRequestActionType Enum).
 """
 
 from __future__ import annotations
@@ -47,6 +47,8 @@ from app.core.enums import (
     FetcherRunStatus,
     FetcherRunTriggeredBy,
     HealthCheckStatus,
+    IBSRequestActionType,
+    IBSRequestState,
     IdentityAuditEventType,
     LifecyclePhase,
     MilestonePhase,
@@ -608,3 +610,40 @@ class TestLifecyclePhaseEnum:
 
     def test_unavailable_is_not_a_phase(self) -> None:
         assert "unavailable" not in {member.value for member in LifecyclePhase}
+
+
+@pytest.mark.unit
+class TestIBSRequestStateEnum:
+    """IBSRequestState stored values per data-model.md (IBSRequestState Enum)
+    and ibs-submission-tracking.md (Request States)."""
+
+    def test_exact_values(self) -> None:
+        assert [member.value for member in IBSRequestState] == [
+            "new",
+            "review",
+            "accepted",
+            "declined",
+            "revoked",
+            "superseded",
+            "deleted",
+        ]
+
+    def test_values_fit_state_column(self) -> None:
+        # IBSRequest.state is VARCHAR(20).
+        assert all(len(member.value) <= 20 for member in IBSRequestState)
+
+
+@pytest.mark.unit
+class TestIBSRequestActionTypeEnum:
+    """IBSRequestActionType stored values per data-model.md
+    (IBSRequestActionType Enum)."""
+
+    def test_exact_values(self) -> None:
+        assert [member.value for member in IBSRequestActionType] == [
+            "maintenance_incident",
+            "maintenance_release",
+        ]
+
+    def test_values_fit_action_type_column(self) -> None:
+        # IBSRequestAction.action_type is VARCHAR(32).
+        assert all(len(member.value) <= 32 for member in IBSRequestActionType)
