@@ -21,6 +21,7 @@ from app.api.v1 import (
     identity_audit,
     ticket_audit,
     ticket_packages,
+    tickets,
     users,
 )
 from app.api.v1 import settings as settings_api
@@ -153,4 +154,5 @@ app.include_router(identity_audit.router)
 app.include_router(settings_api.router)
 app.include_router(fetchers.router)
 app.include_router(ticket_audit.router)
+app.include_router(tickets.router)
 app.include_router(ticket_packages.router)

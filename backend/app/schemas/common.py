@@ -6,9 +6,18 @@ for the authoritative contracts these schemas implement.
 
 from __future__ import annotations
 
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
+
+type SeverityValue = Literal["critical", "high", "medium", "low", "none"]
+"""Lowercase wire values of the unified five-label `Severity` scale.
+
+A nullable severity field serializes JSON `null` when unresolved; the
+`"none"` label (score exactly 0.0) is a distinct value
+(`docs/features/tickets/tickets.md`, Response Schemas).
+"""
 
 
 class PaginationMeta(BaseModel):

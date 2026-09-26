@@ -369,13 +369,15 @@ assembled from incompatible views.
 ### `get_ticket_detail()`
 
 The consumer operation accepts `db: AsyncSession`, a public `ticket_id: str`,
-caller information, and optionally an already selected UTC `evaluation_date`.
-It always captures one UTC evaluation instant exactly once at entry for
-milestone comparisons
-([ticket-deadlines.md](ticket-deadlines.md#evaluation-instant)). When the date
-is absent, it uses the UTC calendar date of that instant. Mutation workflows that return `TicketDetail` instead supply their
-existing workflow date and the internal UUID of the locked post-mutation
-Ticket. The concrete overload/helper arrangement is an implementation choice;
+and caller information. It captures one UTC evaluation instant exactly once at
+entry for milestone comparisons
+([ticket-deadlines.md](ticket-deadlines.md#evaluation-instant)) and uses that
+instant's UTC calendar date as the response's `evaluation_date`; as a
+read-only request it accepts no separately selected date. Mutation workflows
+that return `TicketDetail` instead supply their existing workflow date and the
+internal UUID of the locked post-mutation Ticket; only this mutation-assembly
+mode receives a workflow date, and it captures its instant at projection
+entry. The concrete overload/helper arrangement is an implementation choice;
 no Pydantic type enters the Service layer.
 
 The result is the semantic projection represented by `TicketDetail` in
