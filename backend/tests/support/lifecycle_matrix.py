@@ -5,9 +5,9 @@
 the pure evaluator and the Product query service's SQL lifecycle
 expression to agree for every valid, incomplete, inconsistent, and
 boundary-date combination. This module is the shared input for both: the
-pure tests (`tests/test_services/test_product_lifecycle.py`) consume it
-now, and the Python/SQL parity test consumes the same inputs once the SQL
-expression exists.
+pure tests (`tests/test_services/test_product_lifecycle.py`) and the
+Python/SQL parity test (`tests/test_services/test_product_service.py`)
+consume the same inputs.
 
 Two parts:
 

@@ -167,7 +167,7 @@ class TestLifecycleMatrix:
 
     def test_matrix_expectations_are_independent_of_the_module(self) -> None:
         """The shared matrix must never compute expectations with the code
-        under test, or the later Python/SQL parity test becomes circular."""
+        under test, or the Python/SQL parity test becomes circular."""
         modules = imported_modules(
             APP_ROOT.parent / "tests" / "support" / "lifecycle_matrix.py",
             "tests.support",

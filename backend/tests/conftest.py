@@ -69,6 +69,8 @@ from app.models import (
     FetcherConfig,
     FetcherRun,
     IdentityAuditEvent,
+    Product,
+    ProductRepository,
     Session,
     SettingAuditEvent,
     SystemSetting,
@@ -1444,6 +1446,86 @@ def ticket_reference_factory(
         }
         defaults.update(overrides)
         instance = TicketReference(**defaults)
+        db_session.add(instance)
+        await db_session.flush()
+        return instance
+
+    return _create
+
+
+@pytest.fixture
+def product_factory(db_session: AsyncSession) -> Callable[..., Awaitable[Product]]:
+    """Factory fixture for `Product` model instances.
+
+    See docs/features/platform/testing-strategy.md (Model Factory
+    Fixtures) for the canonical shape this fixture follows.
+
+    Bypasses the Product catalog synchronization on purpose: model-layer
+    tests exercise the raw persistence contract.
+
+    Defaults:
+    - `cpe`: a per-fixture-counter-derived fictional CPE
+      (`cpe:/o:example:product:<n>`), so repeated calls don't collide on
+      the UNIQUE `cpe` constraint.
+    - `name`, `version`, `display_name`: fictional counter-derived
+      descriptive values (`Example Product <n>`, `<n>`, `EP <n>`).
+    - `catalog_last_seen_at`: `datetime.now(UTC)` (the column has no
+      default).
+    - `cvss_threshold` and the four lifecycle dates: `NULL`.
+    """
+
+    counter = itertools.count(1)
+
+    async def _create(**overrides: Any) -> Product:
+        n = next(counter)
+        defaults: dict[str, Any] = {
+            "name": f"Example Product {n}",
+            "version": str(n),
+            "display_name": f"EP {n}",
+            "cpe": f"cpe:/o:example:product:{n}",
+            "catalog_last_seen_at": datetime.now(UTC),
+        }
+        defaults.update(overrides)
+        instance = Product(**defaults)
+        db_session.add(instance)
+        await db_session.flush()
+        return instance
+
+    return _create
+
+
+@pytest.fixture
+def product_repository_factory(
+    db_session: AsyncSession,
+    product_factory: Callable[..., Awaitable[Product]],
+) -> Callable[..., Awaitable[ProductRepository]]:
+    """Factory fixture for `ProductRepository` model instances.
+
+    See docs/features/platform/testing-strategy.md (Model Factory
+    Fixtures) for the canonical shape this fixture follows.
+
+    Defaults:
+    - `product_id`: a freshly created Product, when not overridden.
+    - `repo_name`: a per-fixture-counter-derived fictional repository
+      project name (`Example:Updates:<n>`), so repeated calls on one
+      Product don't collide on the `(product_id, repo_name)` UNIQUE
+      constraint.
+    - `catalog_last_seen_at`: `datetime.now(UTC)` (the column has no
+      default).
+    """
+
+    counter = itertools.count(1)
+
+    async def _create(**overrides: Any) -> ProductRepository:
+        n = next(counter)
+        if "product_id" not in overrides:
+            overrides["product_id"] = (await product_factory()).id
+        defaults: dict[str, Any] = {
+            "repo_name": f"Example:Updates:{n}",
+            "catalog_last_seen_at": datetime.now(UTC),
+        }
+        defaults.update(overrides)
+        instance = ProductRepository(**defaults)
         db_session.add(instance)
         await db_session.flush()
         return instance
