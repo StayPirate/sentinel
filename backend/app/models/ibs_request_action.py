@@ -33,6 +33,7 @@ from app.database import Base
 
 if TYPE_CHECKING:
     from app.models.ibs_request import IBSRequest
+    from app.models.ibs_request_action_track import IBSRequestActionTrack
 
 _INCIDENT = IBSRequestActionType.MAINTENANCE_INCIDENT.value
 _RELEASE = IBSRequestActionType.MAINTENANCE_RELEASE.value
@@ -51,7 +52,8 @@ class IBSRequestAction(Base):
     never stored. `ix_ibs_request_action_ibs_request_id` serves the
     request-to-all-actions lookup, which neither partial index can serve.
     Actions are retained indefinitely; the parent FK uses
-    `ON DELETE RESTRICT`.
+    `ON DELETE RESTRICT`. `track_links` loads the action's
+    `IBSRequestActionTrack` correlations.
     """
 
     __tablename__ = "ibs_request_action"
@@ -147,4 +149,14 @@ class IBSRequestAction(Base):
 
     ibs_request: Mapped[IBSRequest] = relationship(
         "IBSRequest", back_populates="actions"
+    )
+    # passive_deletes="all": correlations are retained indefinitely and never
+    # physically deleted. Without it SQLAlchemy would try to null the NOT
+    # NULL `ibs_request_action_id` of loaded correlations before deleting the
+    # action; the database FK (ON DELETE RESTRICT) must reject the delete
+    # instead.
+    track_links: Mapped[list[IBSRequestActionTrack]] = relationship(
+        "IBSRequestActionTrack",
+        back_populates="ibs_request_action",
+        passive_deletes="all",
     )

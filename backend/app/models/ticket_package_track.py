@@ -33,6 +33,7 @@ from app.database import Base
 if TYPE_CHECKING:
     from app.models.ticket_package import TicketPackage
     from app.models.ticket_package_product import TicketPackageProduct
+    from app.models.track_release_checkpoint import TrackReleaseCheckpoint
 
 
 class TicketPackageTrack(Base):
@@ -48,7 +49,8 @@ class TicketPackageTrack(Base):
     validated by the writing service. `deleted_at` is the direct
     manual-exclusion marker; current actionability is derived at read time
     and never persisted. The FK uses the PostgreSQL default `NO ACTION`
-    (#633 decision A3).
+    (#633 decision A3). An IBS track may have one operational
+    `release_checkpoint`, which is not Ticket domain history.
     """
 
     __tablename__ = "ticket_package_track"
@@ -115,5 +117,16 @@ class TicketPackageTrack(Base):
     products: Mapped[list[TicketPackageProduct]] = relationship(
         "TicketPackageProduct",
         back_populates="ticket_package_track",
+        passive_deletes="all",
+    )
+    # Optional one-to-one operational release-detection state. Assigning or
+    # advancing it writes only the checkpoint row, never this row's
+    # `updated_at`. passive_deletes="all" for the same reason as `products`:
+    # the database FK (ON DELETE RESTRICT) must reject a track delete instead
+    # of SQLAlchemy nulling the checkpoint's NOT NULL FK.
+    release_checkpoint: Mapped[TrackReleaseCheckpoint | None] = relationship(
+        "TrackReleaseCheckpoint",
+        back_populates="ticket_package_track",
+        uselist=False,
         passive_deletes="all",
     )

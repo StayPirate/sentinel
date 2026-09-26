@@ -77,6 +77,7 @@ from app.models import (
     FetcherRun,
     IBSRequest,
     IBSRequestAction,
+    IBSRequestActionTrack,
     IdentityAuditEvent,
     Product,
     ProductRepository,
@@ -91,6 +92,7 @@ from app.models import (
     TicketPackageProduct,
     TicketPackageTrack,
     TicketReference,
+    TrackReleaseCheckpoint,
     User,
     UserRole,
 )
@@ -1827,6 +1829,85 @@ def ibs_request_action_factory(
         defaults.update(overrides)
         defaults.setdefault("codestream_name", defaults.get(anchor) or codestream)
         instance = IBSRequestAction(**defaults)
+        db_session.add(instance)
+        await db_session.flush()
+        return instance
+
+    return _create
+
+
+@pytest.fixture
+def track_release_checkpoint_factory(
+    db_session: AsyncSession,
+    ticket_package_track_factory: Callable[..., Awaitable[TicketPackageTrack]],
+) -> Callable[..., Awaitable[TrackReleaseCheckpoint]]:
+    """Factory fixture for `TrackReleaseCheckpoint` model instances.
+
+    See docs/features/platform/testing-strategy.md (Model Factory
+    Fixtures) for the canonical shape this fixture follows.
+
+    Bypasses IBS track release detection on purpose: model-layer tests
+    exercise the raw persistence contract, so no predecessor is validated
+    and no source state is examined at this layer.
+
+    Defaults:
+    - `ticket_package_track_id`: a freshly created IBS track, when not
+      overridden; each call therefore uses a distinct track and never
+      collides on the UNIQUE `ticket_package_track_id`.
+    - `srcmd5`: a fictional per-fixture-counter-derived 32-character
+      lowercase hexadecimal value.
+    - `last_seen_at`: the database default (`now()`).
+    """
+
+    counter = itertools.count(1)
+
+    async def _create(**overrides: Any) -> TrackReleaseCheckpoint:
+        n = next(counter)
+        if "ticket_package_track_id" not in overrides:
+            overrides["ticket_package_track_id"] = (
+                await ticket_package_track_factory()
+            ).id
+        defaults: dict[str, Any] = {"srcmd5": f"{n:032x}"}
+        defaults.update(overrides)
+        instance = TrackReleaseCheckpoint(**defaults)
+        db_session.add(instance)
+        await db_session.flush()
+        return instance
+
+    return _create
+
+
+@pytest.fixture
+def ibs_request_action_track_factory(
+    db_session: AsyncSession,
+    ibs_request_action_factory: Callable[..., Awaitable[IBSRequestAction]],
+    ticket_package_track_factory: Callable[..., Awaitable[TicketPackageTrack]],
+) -> Callable[..., Awaitable[IBSRequestActionTrack]]:
+    """Factory fixture for `IBSRequestActionTrack` model instances.
+
+    See docs/features/platform/testing-strategy.md (Model Factory
+    Fixtures) for the canonical shape this fixture follows.
+
+    Bypasses IBS submission tracking on purpose: model-layer tests exercise
+    the raw persistence contract, so the action's codestream and package are
+    not matched against the track at this layer.
+
+    Defaults:
+    - `ibs_request_action_id`: a freshly created action, when not overridden.
+    - `ticket_package_track_id`: a freshly created IBS track, when not
+      overridden. A call therefore never collides on the
+      `(ticket_package_track_id, ibs_request_action_id)` UNIQUE constraint
+      unless both references are overridden.
+    """
+
+    async def _create(**overrides: Any) -> IBSRequestActionTrack:
+        if "ibs_request_action_id" not in overrides:
+            overrides["ibs_request_action_id"] = (await ibs_request_action_factory()).id
+        if "ticket_package_track_id" not in overrides:
+            overrides["ticket_package_track_id"] = (
+                await ticket_package_track_factory()
+            ).id
+        instance = IBSRequestActionTrack(**overrides)
         db_session.add(instance)
         await db_session.flush()
         return instance
