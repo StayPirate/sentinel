@@ -15,6 +15,8 @@ from app.models.fetcher_config import FetcherConfig
 from app.models.fetcher_run import FetcherRun
 from app.models.identity_audit_event import IdentityAuditEvent
 from app.models.mixins import AuditEventMixin
+from app.models.product import Product
+from app.models.product_repository import ProductRepository
 from app.models.session import Session
 from app.models.setting_audit_event import SettingAuditEvent
 from app.models.system_setting import SystemSetting
@@ -41,6 +43,8 @@ __all__ = [
     "FetcherConfig",
     "FetcherRun",
     "IdentityAuditEvent",
+    "Product",
+    "ProductRepository",
     "Session",
     "SettingAuditEvent",
     "SystemSetting",
