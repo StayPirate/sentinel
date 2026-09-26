@@ -23,6 +23,7 @@ from app.database import Base
 
 if TYPE_CHECKING:
     from app.models.product_repository import ProductRepository
+    from app.models.ticket_package_product import TicketPackageProduct
 
 
 class Product(Base):
@@ -77,6 +78,15 @@ class Product(Base):
     # (default NO ACTION) must reject the delete instead.
     repositories: Mapped[list[ProductRepository]] = relationship(
         "ProductRepository",
+        back_populates="product",
+        passive_deletes="all",
+    )
+    # passive_deletes="all": Products are retained. Without it SQLAlchemy
+    # would try to null the NOT NULL `product_id` of loaded Ticket package
+    # occurrences before deleting the Product; the database FK (default
+    # NO ACTION) must reject the delete instead.
+    ticket_package_products: Mapped[list[TicketPackageProduct]] = relationship(
+        "TicketPackageProduct",
         back_populates="product",
         passive_deletes="all",
     )

@@ -78,6 +78,8 @@ from app.models import (
     TicketAccessGrant,
     TicketAuditEvent,
     TicketPackage,
+    TicketPackageMaintainer,
+    TicketPackageProduct,
     TicketPackageTrack,
     TicketReference,
     User,
@@ -1609,6 +1611,81 @@ def ticket_package_track_factory(
         }
         defaults.update(overrides)
         instance = TicketPackageTrack(**defaults)
+        db_session.add(instance)
+        await db_session.flush()
+        return instance
+
+    return _create
+
+
+@pytest.fixture
+def ticket_package_product_factory(
+    db_session: AsyncSession,
+    ticket_package_track_factory: Callable[..., Awaitable[TicketPackageTrack]],
+    product_factory: Callable[..., Awaitable[Product]],
+) -> Callable[..., Awaitable[TicketPackageProduct]]:
+    """Factory fixture for `TicketPackageProduct` model instances.
+
+    See docs/features/platform/testing-strategy.md (Model Factory
+    Fixtures) for the canonical shape this fixture follows.
+
+    Bypasses `package_service` on purpose: model-layer tests exercise the
+    raw persistence contract, so `eligible` is not computed from the CVSS
+    threshold and lifecycle phase at this layer.
+
+    Defaults:
+    - `ticket_package_track_id`: a freshly created track, when not
+      overridden.
+    - `product_id`: a freshly created Product, when not overridden; each
+      call therefore uses a distinct Product and never collides on the
+      `(ticket_package_track_id, product_id)` UNIQUE constraint.
+    - `eligible` (`true`), `is_eligible_override` (`false`), `released_at`
+      (`NULL`), and `deleted_at` (`NULL`): the model defaults.
+    """
+
+    async def _create(**overrides: Any) -> TicketPackageProduct:
+        if "ticket_package_track_id" not in overrides:
+            overrides["ticket_package_track_id"] = (
+                await ticket_package_track_factory()
+            ).id
+        if "product_id" not in overrides:
+            overrides["product_id"] = (await product_factory()).id
+        instance = TicketPackageProduct(**overrides)
+        db_session.add(instance)
+        await db_session.flush()
+        return instance
+
+    return _create
+
+
+@pytest.fixture
+def ticket_package_maintainer_factory(
+    db_session: AsyncSession,
+    ticket_package_factory: Callable[..., Awaitable[TicketPackage]],
+    user_factory: Callable[..., Awaitable[User]],
+) -> Callable[..., Awaitable[TicketPackageMaintainer]]:
+    """Factory fixture for `TicketPackageMaintainer` model instances.
+
+    See docs/features/platform/testing-strategy.md (Model Factory
+    Fixtures) for the canonical shape this fixture follows.
+
+    Bypasses SMELT maintainership acquisition on purpose: model-layer tests
+    exercise the raw persistence contract, so the user's active state and
+    email are not matched at this layer.
+
+    Defaults:
+    - `ticket_package_id`: a freshly created package, when not overridden.
+    - `user_id`: a freshly created user, when not overridden; each call
+      therefore uses a distinct user and never collides on the
+      `(ticket_package_id, user_id)` UNIQUE constraint.
+    """
+
+    async def _create(**overrides: Any) -> TicketPackageMaintainer:
+        if "ticket_package_id" not in overrides:
+            overrides["ticket_package_id"] = (await ticket_package_factory()).id
+        if "user_id" not in overrides:
+            overrides["user_id"] = (await user_factory()).id
+        instance = TicketPackageMaintainer(**overrides)
         db_session.add(instance)
         await db_session.flush()
         return instance
