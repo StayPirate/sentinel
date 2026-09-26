@@ -84,7 +84,7 @@ class TestProductRepositoryCreation:
         assert row.updated_at == row.created_at
 
 
-@pytest.mark.integration
+@pytest.mark.unit
 class TestProductRepositorySchemaShape:
     """No undocumented CHECK constraint or standalone index (#633 decision
     A2); the `(product_id, repo_name)` UNIQUE constraint covers the

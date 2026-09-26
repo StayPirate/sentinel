@@ -132,7 +132,7 @@ class TestProductCreation:
         assert row.updated_at == row.created_at
 
 
-@pytest.mark.integration
+@pytest.mark.unit
 class TestProductSchemaShape:
     """Exactly the documented columns and constraints (#633 decisions A2):
     no lifecycle-phase or catalog-presence column, no CHECK constraint, and
