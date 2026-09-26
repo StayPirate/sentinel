@@ -48,6 +48,25 @@ class UserNotFoundError(ServiceError):
         super().__init__("User not found.")
 
 
+class TicketNotFoundError(ServiceError):
+    """A consumer Ticket locator does not resolve to an accessible Ticket.
+
+    Shared across service modules (`ticket_service`, `ticket_mutations`,
+    `package_service`, and the Ticket audit read) per
+    `docs/conventions.md` (Service Exception Conventions, Shared
+    exceptions) — inherits from `ServiceError` directly. A malformed
+    locator, a Ticket UUID supplied as a locator, a missing Ticket, and
+    a Ticket inaccessible to the caller all raise this same exception,
+    so the API maps every cause to one identical `404 TICKET_NOT_FOUND`
+    response (`docs/api-spec.md`, Ticket Accessibility Check). The
+    message is static and never includes the locator value or the
+    denial cause.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("Ticket not found.")
+
+
 class InactiveUserError(ServiceError):
     """A user identified by a required owner/target parameter is inactive.
 

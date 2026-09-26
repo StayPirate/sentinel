@@ -9,6 +9,12 @@ and Implementation Guidelines 3, 5, and 6. The flush / no-commit /
 exception-propagation guarantees come from
 docs/features/platform/audit-trail-infrastructure.md (Atomicity).
 
+It also covers the consumer read `list_ticket_events()`
+(ticket-audit-log.md, Service Contract > `list_ticket_events()`;
+Testing Requirements 22 and 26) against the Ticket Accessibility matrix
+in docs/features/platform/testing-strategy.md, including the
+independent-session races.
+
 Per-mutation event sequences, actors, and no-event assertions belong
 to the owning mutation services and are not tested here.
 """
@@ -17,27 +23,40 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, replace
+from datetime import UTC, date, datetime, timedelta
 from types import MappingProxyType
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from sqlalchemy import func, select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import delete, event, func, select, update
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.enums import CVESourceType, TicketAuditEventType
+from app.core.enums import CVESourceType, Role, Scope, TicketAuditEventType
+from app.core.exceptions import TicketNotFoundError
+from app.core.identifiers import format_ticket_id
+from app.core.permissions import get_effective_scope
 from app.models.ticket import Ticket
+from app.models.ticket_access_grant import TicketAccessGrant
 from app.models.ticket_audit_event import TicketAuditEvent
+from app.models.ticket_package import TicketPackage
+from app.models.ticket_package_maintainer import TicketPackageMaintainer
 from app.models.user import User
-from app.services import base_audit_log
+from app.models.user_role import UserRole
+from app.services import base_audit_log, user_service
 from app.services.ticket_audit_log import (
     CVE_SOURCE_AUDIT_LABELS,
     TicketAuditLog,
+    TicketEventActor,
+    _literal_substring_pattern,
     _serialized_detail_size,
+    list_ticket_events,
 )
+from app.services.ticket_service import resolve_ticket_locator
+from app.services.ticket_visibility import ANONYMOUS_CALLER, TicketCaller
 from tests.support.database import rollback_test_scope
 
 # No module-level `pytestmark`: pytest marks accumulate rather than
@@ -1005,4 +1024,1019 @@ class TestTransactionContract:
             await TicketAuditLog.log_event(
                 db_session,
                 **_CANONICAL[_T.TICKET_CREATED].kwargs(ticket.id, uuid.uuid4()),
+            )
+
+
+# ---------------------------------------------------------------------------
+# list_ticket_events() — consumer read
+# ---------------------------------------------------------------------------
+
+_Factory = Callable[..., Awaitable[Any]]
+_BASE_TIME = datetime(2026, 3, 15, 10, 30, tzinfo=UTC)
+
+
+def _sntl(ticket: Ticket) -> str:
+    return format_ticket_id(ticket.sequence_id)
+
+
+def _restricted(user: User) -> TicketCaller:
+    return TicketCaller.authenticated(user.id, Scope.NON_CONFIDENTIAL)
+
+
+async def _page_ids(db: AsyncSession, ticket: Ticket, **kwargs: Any) -> list[uuid.UUID]:
+    result = await list_ticket_events(
+        db, ticket_id=_sntl(ticket), caller=ANONYMOUS_CALLER, **kwargs
+    )
+    return [item.id for item in result.items]
+
+
+@pytest.mark.unit
+class TestLiteralSubstringPattern:
+    @pytest.mark.parametrize(
+        ("term", "pattern"),
+        [
+            ("plain", "%plain%"),
+            ("100%", "%100\\%%"),
+            ("a_b", "%a\\_b%"),
+            ("C:\\x", "%C:\\\\x%"),
+            ("\\%", "%\\\\\\%%"),
+        ],
+    )
+    def test_escapes_like_metacharacters(self, term: str, pattern: str) -> None:
+        assert _literal_substring_pattern(term) == pattern
+
+
+@pytest.mark.unit
+class TestListTicketEventsInputGuards:
+    @pytest.mark.parametrize(
+        ("page", "per_page"),
+        [(0, 20), (-1, 20), (1, 0), (1, 101)],
+    )
+    async def test_out_of_range_pagination_raises_before_query(
+        self, page: int, per_page: int
+    ) -> None:
+        db = AsyncMock(spec=AsyncSession)
+
+        with pytest.raises(ValueError, match="page"):
+            await list_ticket_events(
+                db,
+                ticket_id="SNTL-1",
+                caller=ANONYMOUS_CALLER,
+                page=page,
+                per_page=per_page,
+            )
+
+        db.execute.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        "locator",
+        ["sntl-1", " SNTL-1", "SNTL-01", "SNTL-2147483648", str(uuid.uuid4())],
+    )
+    async def test_malformed_locator_raises_before_query(self, locator: str) -> None:
+        db = AsyncMock(spec=AsyncSession)
+
+        with pytest.raises(TicketNotFoundError):
+            await list_ticket_events(db, ticket_id=locator, caller=ANONYMOUS_CALLER)
+
+        db.execute.assert_not_awaited()
+
+    async def test_database_error_propagates(self) -> None:
+        db = AsyncMock(spec=AsyncSession)
+        failure = OperationalError("SELECT 1", {}, Exception("connection lost"))
+        db.execute.side_effect = failure
+
+        with pytest.raises(OperationalError) as excinfo:
+            await list_ticket_events(db, ticket_id="SNTL-1", caller=ANONYMOUS_CALLER)
+
+        assert excinfo.value is failure
+
+
+@pytest.mark.integration
+class TestListTicketEventsProjection:
+    async def test_returns_events_newest_first_with_public_ticket_id(
+        self,
+        db_session: AsyncSession,
+        ticket_factory: _Factory,
+        user_factory: _Factory,
+        ticket_audit_event_factory: _Factory,
+    ) -> None:
+        ticket: Ticket = await ticket_factory()
+        actor: User = await user_factory(full_name="Fictional Analyst")
+        older = await ticket_audit_event_factory(
+            ticket_id=ticket.id,
+            event_type="status_change",
+            old_value="New",
+            new_value="Analysis",
+            created_at=_BASE_TIME,
+        )
+        newer = await ticket_audit_event_factory(
+            ticket_id=ticket.id,
+            event_type="priority_changed",
+            user_id=actor.id,
+            old_value="P3",
+            new_value="P1",
+            detail={"override_action": "set"},
+            created_at=_BASE_TIME + timedelta(minutes=5),
+        )
+
+        result = await list_ticket_events(
+            db_session, ticket_id=_sntl(ticket), caller=ANONYMOUS_CALLER
+        )
+
+        assert (result.total, result.page, result.per_page) == (2, 1, 20)
+        first, second = result.items
+        assert first.id == newer.id
+        assert first.ticket_id == _sntl(ticket)
+        assert first.event_type == "priority_changed"
+        assert (first.old_value, first.new_value) == ("P3", "P1")
+        assert first.detail == {"override_action": "set"}
+        assert first.created_at == _BASE_TIME + timedelta(minutes=5)
+        assert first.actor == TicketEventActor(
+            id=actor.id,
+            username=actor.username,
+            full_name="Fictional Analyst",
+            active=True,
+        )
+        assert second.id == older.id
+        assert second.actor is None
+        assert second.comment is None
+        assert str(ticket.id) not in {first.ticket_id, second.ticket_id}
+
+    async def test_actor_is_the_current_user_profile(
+        self,
+        db_session: AsyncSession,
+        ticket_factory: _Factory,
+        user_factory: _Factory,
+        ticket_audit_event_factory: _Factory,
+    ) -> None:
+        ticket: Ticket = await ticket_factory()
+        actor: User = await user_factory(username="fictional.before")
+        await ticket_audit_event_factory(ticket_id=ticket.id, user_id=actor.id)
+        actor.username = "fictional.after"
+        actor.full_name = None
+        actor.active = False
+        await db_session.flush()
+
+        result = await list_ticket_events(
+            db_session, ticket_id=_sntl(ticket), caller=ANONYMOUS_CALLER
+        )
+
+        assert result.items[0].actor == TicketEventActor(
+            id=actor.id, username="fictional.after", full_name=None, active=False
+        )
+
+    async def test_accessible_ticket_without_events_returns_empty_page(
+        self, db_session: AsyncSession, ticket_factory: _Factory
+    ) -> None:
+        ticket: Ticket = await ticket_factory()
+
+        result = await list_ticket_events(
+            db_session, ticket_id=_sntl(ticket), caller=ANONYMOUS_CALLER
+        )
+
+        assert result.items == ()
+        assert result.total == 0
+
+    async def test_read_creates_no_event_and_adds_nothing_to_the_session(
+        self,
+        db_session: AsyncSession,
+        ticket_factory: _Factory,
+        ticket_audit_event_factory: _Factory,
+    ) -> None:
+        ticket: Ticket = await ticket_factory()
+        await ticket_audit_event_factory(ticket_id=ticket.id)
+
+        await list_ticket_events(
+            db_session, ticket_id=_sntl(ticket), caller=ANONYMOUS_CALLER
+        )
+
+        assert not db_session.new
+        assert not db_session.dirty
+        assert await _event_count(db_session, ticket.id) == 1
+
+    async def test_read_is_one_statement(
+        self,
+        db_session: AsyncSession,
+        ticket_factory: _Factory,
+        user_factory: _Factory,
+        ticket_audit_event_factory: _Factory,
+    ) -> None:
+        """Parent accessibility, events, actors, total, and page come
+        from one statement, hence one PostgreSQL snapshot (umbrella #646
+        decision B4). Also bounds the work independently of page size."""
+        ticket: Ticket = await ticket_factory()
+        for _ in range(3):
+            actor = await user_factory()
+            await ticket_audit_event_factory(ticket_id=ticket.id, user_id=actor.id)
+        caller = _restricted(await user_factory())
+        statements: list[str] = []
+
+        def _record(*args: Any) -> None:
+            statements.append(args[2])
+
+        sync_engine = db_session.bind.engine.sync_engine
+        event.listen(sync_engine, "before_cursor_execute", _record)
+        try:
+            await list_ticket_events(
+                db_session,
+                ticket_id=_sntl(ticket),
+                caller=caller,
+                actor="system",
+                search="x",
+                from_date=date(2020, 1, 1),
+            )
+        finally:
+            event.remove(sync_engine, "before_cursor_execute", _record)
+
+        assert len(statements) == 1
+        (statement,) = statements
+        for cte in ("parent AS", "filtered AS", "total AS", "page AS"):
+            assert cte in statement
+        assert '"user" AS actor_user' in statement
+
+    async def test_parent_scope_can_use_the_ticket_id_index(
+        self,
+        db_session: AsyncSession,
+        ticket_factory: _Factory,
+        ticket_audit_event_factory: _Factory,
+    ) -> None:
+        ticket: Ticket = await ticket_factory()
+        await ticket_audit_event_factory(ticket_id=ticket.id)
+        captured: list[tuple[str, Any]] = []
+
+        def _record(*args: Any) -> None:
+            captured.append((args[2], args[3]))
+
+        sync_engine = db_session.bind.engine.sync_engine
+        event.listen(sync_engine, "before_cursor_execute", _record)
+        try:
+            await list_ticket_events(
+                db_session, ticket_id=_sntl(ticket), caller=ANONYMOUS_CALLER
+            )
+        finally:
+            event.remove(sync_engine, "before_cursor_execute", _record)
+        statement, parameters = captured[0]
+
+        connection = await db_session.connection()
+        await connection.exec_driver_sql("SET LOCAL enable_seqscan = off")
+        plan = await connection.exec_driver_sql(f"EXPLAIN {statement}", parameters)
+
+        assert "ix_ticket_audit_event_ticket_id" in "\n".join(
+            row[0] for row in plan.all()
+        )
+
+
+@pytest.mark.integration
+class TestListTicketEventsPagination:
+    async def test_equal_timestamps_are_ordered_by_id_desc_across_pages(
+        self,
+        db_session: AsyncSession,
+        ticket_factory: _Factory,
+        ticket_audit_event_factory: _Factory,
+    ) -> None:
+        ticket: Ticket = await ticket_factory()
+        events = [
+            await ticket_audit_event_factory(ticket_id=ticket.id, created_at=_BASE_TIME)
+            for _ in range(5)
+        ]
+        expected = sorted((e.id for e in events), reverse=True)
+
+        pages = [
+            await _page_ids(db_session, ticket, page=page, per_page=2)
+            for page in (1, 2, 3)
+        ]
+
+        assert [len(page) for page in pages] == [2, 2, 1]
+        assert [event_id for page in pages for event_id in page] == expected
+
+    async def test_created_at_orders_before_id(
+        self,
+        db_session: AsyncSession,
+        ticket_factory: _Factory,
+        ticket_audit_event_factory: _Factory,
+    ) -> None:
+        ticket: Ticket = await ticket_factory()
+        # The later-created (higher UUIDv7) event carries the older timestamp.
+        newest = await ticket_audit_event_factory(
+            ticket_id=ticket.id, created_at=_BASE_TIME + timedelta(hours=1)
+        )
+        oldest = await ticket_audit_event_factory(
+            ticket_id=ticket.id, created_at=_BASE_TIME
+        )
+
+        assert await _page_ids(db_session, ticket) == [newest.id, oldest.id]
+
+    async def test_page_beyond_the_last_is_empty_with_the_total(
+        self,
+        db_session: AsyncSession,
+        ticket_factory: _Factory,
+        ticket_audit_event_factory: _Factory,
+    ) -> None:
+        ticket: Ticket = await ticket_factory()
+        for _ in range(3):
+            await ticket_audit_event_factory(ticket_id=ticket.id)
+
+        result = await list_ticket_events(
+            db_session,
+            ticket_id=_sntl(ticket),
+            caller=ANONYMOUS_CALLER,
+            page=3,
+            per_page=2,
+        )
+
+        assert result.items == ()
+        assert (result.total, result.page, result.per_page) == (3, 3, 2)
+
+    async def test_maximum_page_is_accepted(
+        self,
+        db_session: AsyncSession,
+        ticket_factory: _Factory,
+        ticket_audit_event_factory: _Factory,
+    ) -> None:
+        ticket: Ticket = await ticket_factory()
+        await ticket_audit_event_factory(ticket_id=ticket.id)
+
+        result = await list_ticket_events(
+            db_session,
+            ticket_id=_sntl(ticket),
+            caller=ANONYMOUS_CALLER,
+            page=2_147_483_647,
+            per_page=100,
+        )
+
+        assert result.items == ()
+        assert result.total == 1
+
+
+@pytest.mark.integration
+class TestListTicketEventsFilters:
+    async def test_event_type_filter_uses_or_semantics(
+        self,
+        db_session: AsyncSession,
+        ticket_factory: _Factory,
+        ticket_audit_event_factory: _Factory,
+    ) -> None:
+        ticket: Ticket = await ticket_factory()
+        status = await ticket_audit_event_factory(
+            ticket_id=ticket.id, event_type="status_change"
+        )
+        assignment = await ticket_audit_event_factory(
+            ticket_id=ticket.id, event_type="assignment"
+        )
+        await ticket_audit_event_factory(
+            ticket_id=ticket.id, event_type="ticket_created"
+        )
+
+        ids = await _page_ids(
+            db_session,
+            ticket,
+            event_types=[
+                TicketAuditEventType.STATUS_CHANGE,
+                TicketAuditEventType.ASSIGNMENT,
+            ],
+        )
+
+        assert set(ids) == {status.id, assignment.id}
+
+    async def test_omitted_event_type_filter_returns_every_event(
+        self,
+        db_session: AsyncSession,
+        ticket_factory: _Factory,
+        ticket_audit_event_factory: _Factory,
+    ) -> None:
+        ticket: Ticket = await ticket_factory()
+        for event_type in ("status_change", "assignment"):
+            await ticket_audit_event_factory(ticket_id=ticket.id, event_type=event_type)
+
+        assert len(await _page_ids(db_session, ticket, event_types=None)) == 2
+
+    async def test_supplied_but_empty_event_type_filter_returns_empty_page(
+        self,
+        db_session: AsyncSession,
+        ticket_factory: _Factory,
+        ticket_audit_event_factory: _Factory,
+    ) -> None:
+        ticket: Ticket = await ticket_factory()
+        await ticket_audit_event_factory(ticket_id=ticket.id)
+
+        result = await list_ticket_events(
+            db_session, ticket_id=_sntl(ticket), caller=ANONYMOUS_CALLER, event_types=[]
+        )
+
+        assert result.items == ()
+        assert result.total == 0
+
+    async def test_actor_filter_forms(
+        self,
+        db_session: AsyncSession,
+        ticket_factory: _Factory,
+        user_factory: _Factory,
+        ticket_audit_event_factory: _Factory,
+    ) -> None:
+        ticket: Ticket = await ticket_factory()
+        alice: User = await user_factory(username="fictional.alice")
+        bob: User = await user_factory(username="fictional.bob")
+        system_event = await ticket_audit_event_factory(ticket_id=ticket.id)
+        alice_event = await ticket_audit_event_factory(
+            ticket_id=ticket.id, user_id=alice.id
+        )
+        await ticket_audit_event_factory(ticket_id=ticket.id, user_id=bob.id)
+
+        assert await _page_ids(db_session, ticket, actor="system") == [system_event.id]
+        assert await _page_ids(db_session, ticket, actor=str(alice.id)) == [
+            alice_event.id
+        ]
+        assert await _page_ids(db_session, ticket, actor="fictional.alice") == [
+            alice_event.id
+        ]
+        assert await _page_ids(db_session, ticket, actor="Fictional.Alice") == []
+
+    @pytest.mark.parametrize("actor", ["fictional.nobody", str(uuid.uuid4())])
+    async def test_unknown_actor_returns_empty_page_for_accessible_ticket(
+        self,
+        actor: str,
+        db_session: AsyncSession,
+        ticket_factory: _Factory,
+        ticket_audit_event_factory: _Factory,
+    ) -> None:
+        ticket: Ticket = await ticket_factory()
+        await ticket_audit_event_factory(ticket_id=ticket.id)
+
+        result = await list_ticket_events(
+            db_session, ticket_id=_sntl(ticket), caller=ANONYMOUS_CALLER, actor=actor
+        )
+
+        assert (result.items, result.total) == ((), 0)
+
+    @pytest.mark.parametrize("field", ["comment", "old_value", "new_value", "detail"])
+    async def test_search_matches_each_declared_field_case_insensitively(
+        self,
+        field: str,
+        db_session: AsyncSession,
+        ticket_factory: _Factory,
+        ticket_audit_event_factory: _Factory,
+    ) -> None:
+        ticket: Ticket = await ticket_factory()
+        value: Any = (
+            {"product_name": "Fictional Linux"}
+            if field == "detail"
+            else ("Fictional Linux")
+        )
+        match = await ticket_audit_event_factory(ticket_id=ticket.id, **{field: value})
+        await ticket_audit_event_factory(ticket_id=ticket.id, **{field: None})
+
+        assert await _page_ids(db_session, ticket, search="  fictional LINUX ") == [
+            match.id
+        ]
+
+    @pytest.mark.parametrize("search", [None, "", "   \t "])
+    async def test_absent_or_blank_search_applies_no_filter(
+        self,
+        search: str | None,
+        db_session: AsyncSession,
+        ticket_factory: _Factory,
+        ticket_audit_event_factory: _Factory,
+    ) -> None:
+        ticket: Ticket = await ticket_factory()
+        await ticket_audit_event_factory(ticket_id=ticket.id, new_value="a")
+        await ticket_audit_event_factory(ticket_id=ticket.id)
+
+        assert len(await _page_ids(db_session, ticket, search=search)) == 2
+
+    @pytest.mark.parametrize(
+        ("literal", "decoy"),
+        [("100%", "1000"), ("a_b", "axb"), ("C:\\tmp", "C:tmp")],
+    )
+    async def test_search_metacharacters_are_literal(
+        self,
+        literal: str,
+        decoy: str,
+        db_session: AsyncSession,
+        ticket_factory: _Factory,
+        ticket_audit_event_factory: _Factory,
+    ) -> None:
+        ticket: Ticket = await ticket_factory()
+        match = await ticket_audit_event_factory(ticket_id=ticket.id, new_value=literal)
+        await ticket_audit_event_factory(ticket_id=ticket.id, new_value=decoy)
+
+        assert await _page_ids(db_session, ticket, search=literal) == [match.id]
+
+    async def test_date_bounds_are_inclusive_utc(
+        self,
+        db_session: AsyncSession,
+        ticket_factory: _Factory,
+        ticket_audit_event_factory: _Factory,
+    ) -> None:
+        ticket: Ticket = await ticket_factory()
+        before = await ticket_audit_event_factory(
+            ticket_id=ticket.id,
+            created_at=datetime(2026, 3, 14, 23, 59, 59, tzinfo=UTC),
+        )
+        start = await ticket_audit_event_factory(
+            ticket_id=ticket.id, created_at=datetime(2026, 3, 15, 0, 0, tzinfo=UTC)
+        )
+        end = await ticket_audit_event_factory(
+            ticket_id=ticket.id,
+            created_at=datetime(2026, 3, 16, 23, 59, 59, 999999, tzinfo=UTC),
+        )
+        after = await ticket_audit_event_factory(
+            ticket_id=ticket.id, created_at=datetime(2026, 3, 17, 0, 0, tzinfo=UTC)
+        )
+
+        assert await _page_ids(
+            db_session, ticket, from_date=date(2026, 3, 15), to_date=date(2026, 3, 16)
+        ) == [end.id, start.id]
+        assert await _page_ids(db_session, ticket, to_date=date(2026, 3, 14)) == [
+            before.id
+        ]
+        assert (
+            await _page_ids(
+                db_session,
+                ticket,
+                from_date=datetime.fromisoformat("2026-03-17T02:00:00"),  # naive = UTC
+            )
+            == []
+        )
+        assert await _page_ids(
+            db_session,
+            ticket,
+            from_date=datetime.fromisoformat("2026-03-17T02:00:00+02:00"),
+        ) == [after.id]
+
+    async def test_different_filters_compose_with_and(
+        self,
+        db_session: AsyncSession,
+        ticket_factory: _Factory,
+        user_factory: _Factory,
+        ticket_audit_event_factory: _Factory,
+    ) -> None:
+        ticket: Ticket = await ticket_factory()
+        actor: User = await user_factory()
+        target = await ticket_audit_event_factory(
+            ticket_id=ticket.id,
+            event_type="status_change",
+            user_id=actor.id,
+            new_value="Analysis",
+            created_at=_BASE_TIME,
+        )
+        for overrides in (
+            {"event_type": "assignment"},
+            {"user_id": None},
+            {"new_value": "Resolved"},
+            {"created_at": _BASE_TIME - timedelta(days=30)},
+        ):
+            values: dict[str, Any] = {
+                "event_type": "status_change",
+                "user_id": actor.id,
+                "new_value": "Analysis",
+                "created_at": _BASE_TIME,
+                **overrides,
+            }
+            await ticket_audit_event_factory(ticket_id=ticket.id, **values)
+
+        result = await list_ticket_events(
+            db_session,
+            ticket_id=_sntl(ticket),
+            caller=ANONYMOUS_CALLER,
+            event_types=[TicketAuditEventType.STATUS_CHANGE],
+            actor=str(actor.id),
+            search="analysis",
+            from_date=date(2026, 3, 1),
+        )
+
+        assert [item.id for item in result.items] == [target.id]
+        assert result.total == 1
+
+
+@pytest.mark.integration
+class TestListTicketEventsAccessibility:
+    async def test_mixed_visibility_returns_only_the_requested_ticket_events(
+        self,
+        db_session: AsyncSession,
+        ticket_factory: _Factory,
+        user_factory: _Factory,
+        ticket_access_grant_factory: _Factory,
+        ticket_audit_event_factory: _Factory,
+    ) -> None:
+        user: User = await user_factory()
+        granted: Ticket = await ticket_factory(is_confidential=True)
+        hidden: Ticket = await ticket_factory(is_confidential=True)
+        public: Ticket = await ticket_factory()
+        await ticket_access_grant_factory(ticket_id=granted.id, user_id=user.id)
+        own = await ticket_audit_event_factory(ticket_id=granted.id)
+        await ticket_audit_event_factory(ticket_id=hidden.id)
+        await ticket_audit_event_factory(ticket_id=public.id)
+
+        result = await list_ticket_events(
+            db_session, ticket_id=_sntl(granted), caller=_restricted(user)
+        )
+
+        assert [item.id for item in result.items] == [own.id]
+        assert result.total == 1
+        with pytest.raises(TicketNotFoundError):
+            await list_ticket_events(
+                db_session, ticket_id=_sntl(hidden), caller=_restricted(user)
+            )
+
+    @pytest.mark.parametrize("branch", ["scope_all", "grant", "maintainer"])
+    async def test_each_visibility_branch_exposes_the_audit_list(
+        self,
+        branch: str,
+        db_session: AsyncSession,
+        ticket_factory: _Factory,
+        user_factory: _Factory,
+        ticket_access_grant_factory: _Factory,
+        ticket_package_factory: _Factory,
+        ticket_package_maintainer_factory: _Factory,
+        ticket_audit_event_factory: _Factory,
+    ) -> None:
+        ticket: Ticket = await ticket_factory(is_confidential=True)
+        user: User = await user_factory()
+        caller = _restricted(user)
+        if branch == "scope_all":
+            caller = TicketCaller.authenticated(user.id, Scope.ALL)
+        elif branch == "grant":
+            await ticket_access_grant_factory(ticket_id=ticket.id, user_id=user.id)
+        else:
+            package = await ticket_package_factory(ticket_id=ticket.id)
+            await ticket_package_maintainer_factory(
+                ticket_package_id=package.id, user_id=user.id
+            )
+        await ticket_audit_event_factory(ticket_id=ticket.id)
+
+        result = await list_ticket_events(
+            db_session, ticket_id=_sntl(ticket), caller=caller
+        )
+
+        assert result.total == 1
+
+    async def test_losing_the_final_visibility_path_denies_the_list(
+        self,
+        db_session: AsyncSession,
+        ticket_factory: _Factory,
+        user_factory: _Factory,
+        ticket_package_factory: _Factory,
+        ticket_package_maintainer_factory: _Factory,
+        ticket_audit_event_factory: _Factory,
+    ) -> None:
+        ticket: Ticket = await ticket_factory(is_confidential=True)
+        user: User = await user_factory()
+        package: TicketPackage = await ticket_package_factory(ticket_id=ticket.id)
+        await ticket_package_maintainer_factory(
+            ticket_package_id=package.id, user_id=user.id
+        )
+        await ticket_audit_event_factory(ticket_id=ticket.id)
+        package.deleted_at = datetime.now(UTC)
+        await db_session.flush()
+
+        with pytest.raises(TicketNotFoundError):
+            await list_ticket_events(
+                db_session, ticket_id=_sntl(ticket), caller=_restricted(user)
+            )
+
+    @pytest.mark.parametrize(
+        "filters",
+        [
+            {},
+            {"event_types": []},
+            {"event_types": [TicketAuditEventType.ASSIGNMENT]},
+            {"actor": "fictional.nobody"},
+            {"actor": "system"},
+            {"search": "no-such-text"},
+            {"from_date": date(2099, 1, 1)},
+            {"page": 99},
+        ],
+        ids=[
+            "no-filter",
+            "all-invalid-event-type",
+            "event-type",
+            "unknown-actor",
+            "system-actor",
+            "search",
+            "date",
+            "beyond-last-page",
+        ],
+    )
+    async def test_inaccessible_ticket_is_not_found_before_any_filter(
+        self,
+        filters: dict[str, Any],
+        db_session: AsyncSession,
+        ticket_factory: _Factory,
+        user_factory: _Factory,
+        ticket_audit_event_factory: _Factory,
+    ) -> None:
+        ticket: Ticket = await ticket_factory(is_confidential=True)
+        await ticket_audit_event_factory(ticket_id=ticket.id)
+        caller = _restricted(await user_factory())
+
+        with pytest.raises(TicketNotFoundError):
+            await list_ticket_events(
+                db_session, ticket_id=_sntl(ticket), caller=caller, **filters
+            )
+
+    @pytest.mark.parametrize("kind", ["missing", "uuid"])
+    async def test_missing_ticket_and_uuid_locator_are_not_found(
+        self, kind: str, db_session: AsyncSession, ticket_factory: _Factory
+    ) -> None:
+        ticket: Ticket = await ticket_factory()
+        locator = "SNTL-2147483647" if kind == "missing" else str(ticket.id)
+
+        with pytest.raises(TicketNotFoundError):
+            await list_ticket_events(
+                db_session, ticket_id=locator, caller=ANONYMOUS_CALLER
+            )
+
+    async def test_fan_out_does_not_duplicate_events_or_inflate_total(
+        self,
+        db_session: AsyncSession,
+        ticket_factory: _Factory,
+        user_factory: _Factory,
+        ticket_access_grant_factory: _Factory,
+        ticket_package_factory: _Factory,
+        ticket_package_maintainer_factory: _Factory,
+        ticket_audit_event_factory: _Factory,
+    ) -> None:
+        """Several qualifying visibility paths and repeated actors never
+        multiply event rows."""
+        ticket: Ticket = await ticket_factory(is_confidential=True)
+        user: User = await user_factory(username="fictional.fanout")
+        await ticket_access_grant_factory(ticket_id=ticket.id, user_id=user.id)
+        for _ in range(3):
+            package = await ticket_package_factory(ticket_id=ticket.id)
+            await ticket_package_maintainer_factory(
+                ticket_package_id=package.id, user_id=user.id
+            )
+            await ticket_package_maintainer_factory(ticket_package_id=package.id)
+        for _ in range(4):
+            await ticket_audit_event_factory(ticket_id=ticket.id, user_id=user.id)
+
+        for actor in (None, "fictional.fanout"):
+            result = await list_ticket_events(
+                db_session,
+                ticket_id=_sntl(ticket),
+                caller=_restricted(user),
+                actor=actor,
+            )
+            assert result.total == 4
+            assert len({item.id for item in result.items}) == 4
+
+
+# ---------------------------------------------------------------------------
+# list_ticket_events() — independent-session races
+# ---------------------------------------------------------------------------
+
+
+class _CommittedWorld:
+    """Commits fixture rows through an independent session and deletes
+    them at teardown in FK-safe order (testing-strategy.md, Concurrency
+    Testing: committed data is not rolled back by the fixture)."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self.session = session
+        self.ticket_ids: list[uuid.UUID] = []
+        self.user_ids: list[uuid.UUID] = []
+
+    async def user(self, *, role: Role | None = None) -> User:
+        n = len(self.user_ids) + 1
+        user = User(
+            username=f"fictional.race{n}.{uuid.uuid4().hex[:8]}",
+            email=f"race{n}.{uuid.uuid4().hex[:8]}@example.com",
+            password_hash="$2b$12$" + "a" * 53,
+        )
+        self.session.add(user)
+        await self.session.flush()
+        self.user_ids.append(user.id)
+        if role is not None:
+            self.session.add(UserRole(user_id=user.id, role=role.value))
+        await self.session.commit()
+        return user
+
+    async def ticket(self, *, is_confidential: bool, events: int = 2) -> Ticket:
+        ticket = Ticket(is_confidential=is_confidential)
+        self.session.add(ticket)
+        await self.session.flush()
+        self.ticket_ids.append(ticket.id)
+        for _ in range(events):
+            self.session.add(
+                TicketAuditEvent(ticket_id=ticket.id, event_type="status_change")
+            )
+        await self.session.commit()
+        return ticket
+
+    async def cleanup(self) -> None:
+        await self.session.rollback()
+        packages = select(TicketPackage.id).where(
+            TicketPackage.ticket_id.in_(self.ticket_ids)
+        )
+        for statement in (
+            delete(TicketAuditEvent).where(
+                TicketAuditEvent.ticket_id.in_(self.ticket_ids)
+            ),
+            delete(TicketAccessGrant).where(
+                TicketAccessGrant.ticket_id.in_(self.ticket_ids)
+            ),
+            delete(TicketPackageMaintainer).where(
+                TicketPackageMaintainer.ticket_package_id.in_(packages)
+            ),
+            delete(TicketPackage).where(TicketPackage.ticket_id.in_(self.ticket_ids)),
+            delete(Ticket).where(Ticket.id.in_(self.ticket_ids)),
+            delete(UserRole).where(UserRole.user_id.in_(self.user_ids)),
+            delete(User).where(User.id.in_(self.user_ids)),
+        ):
+            await self.session.execute(statement)
+        await self.session.commit()
+
+
+@pytest.fixture
+async def committed_world(
+    db_session_factory: Callable[[], Awaitable[AsyncSession]],
+) -> AsyncIterator[_CommittedWorld]:
+    world = _CommittedWorld(await db_session_factory())
+    try:
+        yield world
+    finally:
+        await world.cleanup()
+
+
+async def _commit(session: AsyncSession, *statements: Any) -> None:
+    for statement in statements:
+        await session.execute(statement)
+    await session.commit()
+
+
+@pytest.mark.integration
+class TestListTicketEventsRaces:
+    """Session R performs the preliminary SNTL resolution, session W then
+    commits a visibility change, and R performs the protected selection.
+    The steps run in a fixed order on independent connections, so the
+    interleaving is deterministic. An implementation that listed events
+    without re-applying visibility after the preliminary decision would
+    return rows and fail these tests."""
+
+    async def test_confidentiality_set_after_preliminary_resolution(
+        self,
+        committed_world: _CommittedWorld,
+        db_session_factory: Callable[[], Awaitable[AsyncSession]],
+    ) -> None:
+        user = await committed_world.user()
+        ticket = await committed_world.ticket(is_confidential=False)
+        reader = await db_session_factory()
+        writer = await db_session_factory()
+        caller = _restricted(user)
+
+        await resolve_ticket_locator(reader, _sntl(ticket), caller)
+        await _commit(
+            writer,
+            update(Ticket).where(Ticket.id == ticket.id).values(is_confidential=True),
+        )
+
+        with pytest.raises(TicketNotFoundError):
+            await list_ticket_events(reader, ticket_id=_sntl(ticket), caller=caller)
+
+    async def test_grant_revoked_after_preliminary_resolution(
+        self,
+        committed_world: _CommittedWorld,
+        db_session_factory: Callable[[], Awaitable[AsyncSession]],
+    ) -> None:
+        user = await committed_world.user()
+        granter = await committed_world.user()
+        ticket = await committed_world.ticket(is_confidential=True)
+        committed_world.session.add(
+            TicketAccessGrant(
+                ticket_id=ticket.id, user_id=user.id, granted_by_id=granter.id
+            )
+        )
+        await committed_world.session.commit()
+        reader = await db_session_factory()
+        writer = await db_session_factory()
+        caller = _restricted(user)
+
+        await resolve_ticket_locator(reader, _sntl(ticket), caller)
+        await _commit(
+            writer,
+            delete(TicketAccessGrant).where(
+                TicketAccessGrant.ticket_id == ticket.id,
+                TicketAccessGrant.user_id == user.id,
+            ),
+        )
+
+        with pytest.raises(TicketNotFoundError):
+            await list_ticket_events(reader, ticket_id=_sntl(ticket), caller=caller)
+
+    async def test_last_maintained_package_excluded_after_preliminary_resolution(
+        self,
+        committed_world: _CommittedWorld,
+        db_session_factory: Callable[[], Awaitable[AsyncSession]],
+    ) -> None:
+        user = await committed_world.user()
+        ticket = await committed_world.ticket(is_confidential=True)
+        package = TicketPackage(ticket_id=ticket.id, package_name="fictional-race-pkg")
+        committed_world.session.add(package)
+        await committed_world.session.flush()
+        committed_world.session.add(
+            TicketPackageMaintainer(ticket_package_id=package.id, user_id=user.id)
+        )
+        await committed_world.session.commit()
+        reader = await db_session_factory()
+        writer = await db_session_factory()
+        caller = _restricted(user)
+
+        await resolve_ticket_locator(reader, _sntl(ticket), caller)
+        await _commit(
+            writer,
+            update(TicketPackage)
+            .where(TicketPackage.id == package.id)
+            .values(deleted_at=datetime.now(UTC)),
+        )
+
+        with pytest.raises(TicketNotFoundError):
+            await list_ticket_events(reader, ticket_id=_sntl(ticket), caller=caller)
+
+    async def test_count_and_page_come_from_one_view(
+        self,
+        committed_world: _CommittedWorld,
+        db_session_factory: Callable[[], Awaitable[AsyncSession]],
+    ) -> None:
+        """Events committed after a preliminary resolution are observed by
+        the later protected read, in its page and total alike. Page/total
+        coherence itself follows from the single statement proven by
+        `test_read_is_one_statement`."""
+        ticket = await committed_world.ticket(is_confidential=False, events=2)
+        reader = await db_session_factory()
+        writer = await db_session_factory()
+
+        before = await list_ticket_events(
+            reader, ticket_id=_sntl(ticket), caller=ANONYMOUS_CALLER, per_page=100
+        )
+        await resolve_ticket_locator(reader, _sntl(ticket), ANONYMOUS_CALLER)
+        writer.add_all(
+            TicketAuditEvent(ticket_id=ticket.id, event_type="assignment")
+            for _ in range(3)
+        )
+        await writer.commit()
+        after = await list_ticket_events(
+            reader, ticket_id=_sntl(ticket), caller=ANONYMOUS_CALLER, per_page=100
+        )
+
+        assert (before.total, len(before.items)) == (2, 2)
+        assert (after.total, len(after.items)) == (5, 5)
+
+    async def test_visibility_acquired_after_a_denial_is_observed_whole(
+        self,
+        committed_world: _CommittedWorld,
+        db_session_factory: Callable[[], Awaitable[AsyncSession]],
+    ) -> None:
+        user = await committed_world.user()
+        granter = await committed_world.user()
+        ticket = await committed_world.ticket(is_confidential=True, events=3)
+        reader = await db_session_factory()
+        writer = await db_session_factory()
+        caller = _restricted(user)
+
+        with pytest.raises(TicketNotFoundError):
+            await resolve_ticket_locator(reader, _sntl(ticket), caller)
+        writer.add(
+            TicketAccessGrant(
+                ticket_id=ticket.id, user_id=user.id, granted_by_id=granter.id
+            )
+        )
+        await writer.commit()
+        result = await list_ticket_events(
+            reader, ticket_id=_sntl(ticket), caller=caller
+        )
+
+        assert (result.total, len(result.items)) == (3, 3)
+
+    async def test_concurrent_role_change_does_not_alter_the_resolved_caller(
+        self,
+        committed_world: _CommittedWorld,
+        db_session_factory: Callable[[], Awaitable[AsyncSession]],
+    ) -> None:
+        """The caller's scope is resolved once per request; a committed
+        role removal applies to the next resolution, not to the in-flight
+        request (rbac.md, Optional Principal to Caller Context)."""
+        user = await committed_world.user(role=Role.VULNERABILITY_ANALYST)
+        ticket = await committed_world.ticket(is_confidential=True)
+        reader = await db_session_factory()
+        writer = await db_session_factory()
+        in_flight = TicketCaller.authenticated(
+            user.id,
+            get_effective_scope(await user_service.get_user_roles(reader, user.id)),
+        )
+
+        await _commit(writer, delete(UserRole).where(UserRole.user_id == user.id))
+        result = await list_ticket_events(
+            reader, ticket_id=_sntl(ticket), caller=in_flight
+        )
+        next_request = TicketCaller.authenticated(
+            user.id,
+            get_effective_scope(await user_service.get_user_roles(reader, user.id)),
+        )
+
+        assert in_flight.scope is Scope.ALL
+        assert result.total == 2
+        assert next_request.scope is Scope.NON_CONFIDENTIAL
+        with pytest.raises(TicketNotFoundError):
+            await list_ticket_events(
+                reader, ticket_id=_sntl(ticket), caller=next_request
             )

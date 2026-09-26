@@ -20,19 +20,22 @@ from typing import Annotated
 from uuid import UUID
 
 import structlog
-from fastapi import Depends, Request, Response, status
+from fastapi import Depends, Path, Request, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import settings
 from app.core.credentials import API_KEY_PREFIX, extract_credential
 from app.core.enums import Capability, CredentialKind
 from app.core.errors import AppError, ErrorCode
+from app.core.exceptions import TicketNotFoundError
 from app.core.jwt import InvalidTokenError, decode_and_validate, refresh_token
-from app.core.permissions import get_capabilities
+from app.core.permissions import get_capabilities, get_effective_scope
 from app.database import DatabaseSession, async_session_factory
 from app.models.user import User
-from app.services import api_key_service, user_service
+from app.services import api_key_service, ticket_service, user_service
 from app.services.session_service import is_session_active
+from app.services.ticket_service import ResolvedTicket
+from app.services.ticket_visibility import ANONYMOUS_CALLER, TicketCaller
 
 logger = structlog.get_logger(__name__)
 
@@ -76,6 +79,21 @@ def user_not_found_error() -> AppError:
         status_code=status.HTTP_404_NOT_FOUND,
         code=ErrorCode.USER_NOT_FOUND,
         detail="User not found.",
+    )
+
+
+def ticket_not_found_error() -> AppError:
+    """Create the scoped 404 for an unresolved or inaccessible Ticket.
+
+    See `docs/api-spec.md` (Ticket Accessibility Check): a malformed
+    locator, a Ticket UUID, a missing Ticket, and an inaccessible Ticket
+    all return this one identical response, so every endpoint that
+    catches the shared `TicketNotFoundError` raises this.
+    """
+    return AppError(
+        status_code=status.HTTP_404_NOT_FOUND,
+        code=ErrorCode.TICKET_NOT_FOUND,
+        detail="Ticket not found.",
     )
 
 
@@ -525,3 +543,94 @@ async def require_session_authentication(
             detail="This operation requires session authentication.",
         )
     return principal
+
+
+# ---------------------------------------------------------------------------
+# Ticket caller information and the `{ticket_id}` accessibility boundary
+# ---------------------------------------------------------------------------
+
+
+async def _ticket_caller_for(
+    db: AsyncSession, principal: AuthenticatedPrincipal | None
+) -> TicketCaller:
+    """Map a validated principal (or `None`) to the Ticket caller value.
+
+    See `docs/features/identity/rbac.md` (Optional Principal to Caller
+    Context): `None` is the anonymous caller and loads no roles; an
+    authenticated principal's current roles are loaded once and reduced
+    to the effective scope with `get_effective_scope()`. The result is a
+    plain service-layer value, so services never import API types.
+    """
+    if principal is None:
+        return ANONYMOUS_CALLER
+    roles = await user_service.get_user_roles(db, principal.user.id)
+    return TicketCaller.authenticated(principal.user.id, get_effective_scope(roles))
+
+
+async def get_ticket_caller(
+    db: DatabaseSession, principal: CurrentUser
+) -> TicketCaller:
+    """Resolve the authenticated caller of a Ticket-derived operation.
+
+    For `Access: Authenticated` and capability-protected endpoints: runs
+    after `get_current_user`, so an absent or invalid credential returns
+    the global 401 before any role or Ticket lookup. FastAPI caches the
+    result per request, so the caller is resolved once and never
+    reconstructed later in the same request.
+    """
+    return await _ticket_caller_for(db, principal)
+
+
+async def get_optional_ticket_caller(
+    db: DatabaseSession, principal: OptionalCurrentUser
+) -> TicketCaller:
+    """Resolve the caller of a Public (`Authentication: Optional`) Ticket read.
+
+    No selected credential yields `ANONYMOUS_CALLER` without any role
+    lookup; a selected invalid credential has already returned the
+    global 401 in `get_optional_current_user`. Cached per request like
+    `get_ticket_caller`.
+    """
+    return await _ticket_caller_for(db, principal)
+
+
+AuthenticatedTicketCaller = Annotated[TicketCaller, Depends(get_ticket_caller)]
+OptionalTicketCaller = Annotated[TicketCaller, Depends(get_optional_ticket_caller)]
+
+TicketIdPath = Annotated[
+    str,
+    Path(
+        description="Canonical Ticket identity (`SNTL-{n}`).",
+        examples=["SNTL-42"],
+    ),
+]
+"""The `{ticket_id}` path parameter.
+
+Deliberately an unconstrained string: a malformed value must reach the
+service and produce `404 TICKET_NOT_FOUND`, not the `422` a schema
+pattern would return (`docs/api-spec.md`, Ticket Identifier Resolution).
+"""
+
+
+async def require_accessible_ticket(
+    ticket_id: TicketIdPath,
+    db: DatabaseSession,
+    caller: AuthenticatedTicketCaller,
+) -> ResolvedTicket:
+    """The `require_accessible_ticket` boundary role for authenticated paths.
+
+    See `docs/api-spec.md` (Ticket Accessibility Check) and
+    `docs/features/identity/rbac.md` (Permission Checking): delegates the
+    locator resolution and visibility decision to
+    `ticket_service.resolve_ticket_locator()` and maps its
+    `TicketNotFoundError` to the one identical `404 TICKET_NOT_FOUND`.
+    It performs no ORM query itself. The result is a preliminary
+    decision for shared HTTP handling only: the protected read or
+    locked mutation that follows re-applies visibility in its own
+    selection and never relies on this result to authorize an
+    unconstrained query.
+    """
+    try:
+        return await ticket_service.resolve_ticket_locator(db, ticket_id, caller)
+    except TicketNotFoundError:
+        raise ticket_not_found_error() from None
