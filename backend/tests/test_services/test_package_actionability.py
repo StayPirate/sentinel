@@ -795,6 +795,14 @@ class TestActionabilityInputs:
                 value,
             )
 
+        # `Duplicated` requires a duplicate target
+        # (chk_ticket_duplicate_status_coherence).
+        target = await ticket_factory()
+        ticket.duplicate_of_id = target.id
+        ticket.status = TicketStatus.DUPLICATED.value
+        await db_session.flush()
+        assert await self._levels(db_session, occurrence) == baseline
+
     def test_no_actionability_or_lifecycle_column_is_persisted(self) -> None:
         forbidden = {"actionable", "lifecycle_phase", "non_actionable_reason"}
         columns = {

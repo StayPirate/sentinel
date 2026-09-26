@@ -1009,6 +1009,52 @@ class TestTrackMilestones:
         assert covered == set(IBSRequestState)
         assert set(_ACTIVE_STATES) == ACTIVE_RELEASE_REQUEST_STATES
 
+    async def test_release_request_evidence_is_scoped_to_its_own_track(
+        self,
+        db_session: AsyncSession,
+        milestone_world: _MilestoneWorld,
+    ) -> None:
+        """An active RR correlated to one track of a package is not `um`
+        evidence for a sibling track of the same package."""
+        world = milestone_world
+        cve = await world.cve_factory(severity=Severity.HIGH.value)
+        ticket: Ticket = await world.ticket_factory(
+            cve_id=cve.id, created_at=CREATED_AT
+        )
+        package = await world.ticket_package_factory(ticket_id=ticket.id)
+        with_rr = await world.ticket_package_track_factory(
+            ticket_package_id=package.id,
+            reference="Example:A",
+            status=PackageStatus.AFFECTED.value,
+        )
+        without_rr = await world.ticket_package_track_factory(
+            ticket_package_id=package.id,
+            reference="Example:B",
+            status=PackageStatus.AFFECTED.value,
+        )
+        for track in (with_rr, without_rr):
+            await world.ticket_package_product_factory(ticket_package_track_id=track.id)
+        request = await world.ibs_request_factory(state=IBSRequestState.NEW.value)
+        action = await world.ibs_request_action_factory(
+            ibs_request_id=request.id, action_type=_RELEASE.value
+        )
+        await world.ibs_request_action_track_factory(
+            ibs_request_action_id=action.id, ticket_package_track_id=with_rr.id
+        )
+
+        (projected,) = await _read(db_session, ticket)
+        first, second = projected.tracks
+
+        assert first.id == with_rr.id
+        assert (first.milestones.um, first.milestones.current_phase) == (
+            D,
+            CurrentPhase.QA,
+        )
+        assert (second.milestones.um, second.milestones.current_phase) == (
+            P,
+            CurrentPhase.SUBMISSION,
+        )
+
     async def test_track_due_dates_equal_for_every_track_including_non_actionable(
         self,
         db_session: AsyncSession,
