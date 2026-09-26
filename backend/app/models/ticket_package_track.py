@@ -32,6 +32,7 @@ from app.database import Base
 
 if TYPE_CHECKING:
     from app.models.ticket_package import TicketPackage
+    from app.models.ticket_package_product import TicketPackageProduct
 
 
 class TicketPackageTrack(Base):
@@ -105,4 +106,14 @@ class TicketPackageTrack(Base):
 
     ticket_package: Mapped[TicketPackage] = relationship(
         "TicketPackage", back_populates="tracks"
+    )
+    # passive_deletes="all": the package tree is soft-deleted, never
+    # hard-deleted. Without it SQLAlchemy would try to null the NOT NULL
+    # `ticket_package_track_id` of loaded Product occurrences before deleting
+    # the track; the database FK (default NO ACTION) must reject the delete
+    # instead.
+    products: Mapped[list[TicketPackageProduct]] = relationship(
+        "TicketPackageProduct",
+        back_populates="ticket_package_track",
+        passive_deletes="all",
     )

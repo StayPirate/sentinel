@@ -24,6 +24,8 @@ from app.models.ticket import Ticket
 from app.models.ticket_access_grant import TicketAccessGrant
 from app.models.ticket_audit_event import TicketAuditEvent
 from app.models.ticket_package import TicketPackage
+from app.models.ticket_package_maintainer import TicketPackageMaintainer
+from app.models.ticket_package_product import TicketPackageProduct
 from app.models.ticket_package_track import TicketPackageTrack
 from app.models.ticket_reference import TicketReference
 from app.models.user import User
@@ -54,6 +56,8 @@ __all__ = [
     "TicketAccessGrant",
     "TicketAuditEvent",
     "TicketPackage",
+    "TicketPackageMaintainer",
+    "TicketPackageProduct",
     "TicketPackageTrack",
     "TicketReference",
     "User",

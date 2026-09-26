@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     from app.models.api_key import ApiKey
     from app.models.session import Session
     from app.models.ticket import Ticket
+    from app.models.ticket_package import TicketPackage
     from app.models.user_role import UserRole
 
 
@@ -121,4 +122,14 @@ class User(Base):
         back_populates="assignee",
         foreign_keys="Ticket.assignee_id",
         passive_deletes="all",
+    )
+    # View-only many-to-many through `ticket_package_maintainer`
+    # (docs/data-model.md, TicketPackageMaintainer). Associations are
+    # created only by inserting `TicketPackageMaintainer` rows and survive
+    # deactivation; a user delete is rejected by the `ON DELETE RESTRICT` FK.
+    maintained_packages: Mapped[list[TicketPackage]] = relationship(
+        "TicketPackage",
+        secondary="ticket_package_maintainer",
+        back_populates="maintainers",
+        viewonly=True,
     )

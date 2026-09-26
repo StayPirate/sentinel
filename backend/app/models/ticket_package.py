@@ -31,6 +31,7 @@ from app.database import Base
 if TYPE_CHECKING:
     from app.models.ticket import Ticket
     from app.models.ticket_package_track import TicketPackageTrack
+    from app.models.user import User
 
 
 class TicketPackage(Base):
@@ -89,4 +90,15 @@ class TicketPackage(Base):
         "TicketPackageTrack",
         back_populates="ticket_package",
         passive_deletes="all",
+    )
+    # View-only many-to-many through `ticket_package_maintainer`
+    # (docs/data-model.md, TicketPackageMaintainer). Associations are
+    # immutable and additive: they are created only by inserting
+    # `TicketPackageMaintainer` rows, never through this collection, and a
+    # package delete is rejected by the `ON DELETE RESTRICT` FK.
+    maintainers: Mapped[list[User]] = relationship(
+        "User",
+        secondary="ticket_package_maintainer",
+        back_populates="maintained_packages",
+        viewonly=True,
     )
