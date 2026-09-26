@@ -562,9 +562,12 @@ requiring a fix. `FIXED` with delivery activity (`IN_PROGRESS` or
 See [Anomaly Detection](#anomaly-detection-future-review-queue).
 
 **Important**: `delivery_relevant` is a **computed API field only** — it
-is not a database column. It is derived from `status` and
-`delivery_status` at serialization time in the Pydantic response schema.
-The database schema is not affected.
+is not a database column. It is derived at read time from `status` and
+`delivery_status` by the package-owned tree projection
+(`package_service.get_ticket_packages()` in
+`docs/features/packages/package-service.md`), and the Pydantic response
+schema serializes the projected value. It is never persisted; the
+database schema is not affected.
 
 **OpenAPI documentation**: since external consumers will discover
 `delivery_relevant` and `delivery_status` through the generated OpenAPI

@@ -14,7 +14,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.api import health
-from app.api.v1 import api_keys, auth, fetchers, identity_audit, ticket_audit, users
+from app.api.v1 import (
+    api_keys,
+    auth,
+    fetchers,
+    identity_audit,
+    ticket_audit,
+    ticket_packages,
+    users,
+)
 from app.api.v1 import settings as settings_api
 from app.config import settings
 from app.core.errors import AppError, ErrorCode
@@ -145,3 +153,4 @@ app.include_router(identity_audit.router)
 app.include_router(settings_api.router)
 app.include_router(fetchers.router)
 app.include_router(ticket_audit.router)
+app.include_router(ticket_packages.router)
