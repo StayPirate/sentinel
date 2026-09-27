@@ -456,13 +456,15 @@ async def grid_chains(db_session: AsyncSession, matrix_ticket: Ticket) -> list[C
     """Persist the grid and analyze its tables in the test transaction.
 
     Earlier tests insert rows into these tables and roll them back; an
-    autoanalyze that runs between tests can record `reltuples = 0` over
-    non-empty pages. The planner then estimates one row per table,
-    evaluates the correlated `EXISTS` levels as full-scan nested loops,
-    and a single grid query runs for minutes. `ANALYZE` inside
-    the transaction samples the uncommitted grid rows, and its lock,
-    held until rollback, keeps autoanalyze from replacing those
-    statistics while the test runs.
+    autoanalyze that runs between tests can record `reltuples = 0` on
+    tables whose heap pages remain from those rolled-back rows. The
+    planner then estimates one row per table, evaluates the correlated
+    `EXISTS` levels as full-scan nested loops, and a single grid query
+    runs for minutes. `ANALYZE` inside the transaction samples the
+    uncommitted grid rows, and its lock, held until rollback, keeps
+    autoanalyze from replacing those statistics while the test runs.
+    Its `pg_class` row estimate is updated in place and survives the
+    rollback; it only raises later row estimates, which no test asserts.
     """
     chains = await _persist_chains(db_session, matrix_ticket.id, _grid_date_sets())
     for table in _GRID_TABLES:
