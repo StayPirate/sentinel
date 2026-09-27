@@ -8,17 +8,17 @@ convention.
 
 from __future__ import annotations
 
-import uuid
 from datetime import date, datetime
 from typing import Any, ClassVar
 
-from sqlalchemy import Select
+from sqlalchemy import Select, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import class_mapper
 
 from app.core.dates import normalize_date_bound
 from app.models.mixins import AuditEventMixin
 from app.models.user import User
+from app.services.user_identifier import user_identifier_condition
 
 # Global registry of all BaseAuditLog subclasses, keyed by `name`.
 # Populated exclusively by __init_subclass__ — never written to
@@ -133,13 +133,18 @@ class BaseAuditLog:
 
         - `actor` is `None`: no filter applied
         - `actor == "system"`: `WHERE user_id IS NULL`
-        - `actor` is a valid UUID string: `WHERE user_id = <uuid>`
-        - Otherwise: joined lookup by exact, case-sensitive
-          `User.username`
+        - Otherwise: `WHERE user_id IN (<matching User.id>)`, where the
+          matching user is selected by the single user-domain matching
+          condition (`user_identifier_condition()`, see
+          `docs/features/identity/user-service.md`); this method does no
+          identifier parsing of its own
 
-        If the provided UUID or username does not match any user, the
-        query yields an empty result set — this method never raises for
-        an unknown actor. Operates exclusively on the `user_id` column;
+        The matching subquery is uncorrelated, so it never binds to a
+        `User` entity already present in the caller's statement, and it
+        adds no join, so it never multiplies rows or inflates a count.
+        If the provided value does not match any user, the query yields
+        an empty result set — this method never raises for an unknown
+        actor. Operates exclusively on the `user_id` column;
         domain-specific filters on other user FK columns are the
         responsibility of the endpoint implementation.
         """
@@ -147,12 +152,7 @@ class BaseAuditLog:
             return query
         if actor == "system":
             return query.where(cls.model_class.user_id.is_(None))
-        try:
-            actor_uuid = uuid.UUID(actor)
-        except ValueError:
-            pass
-        else:
-            return query.where(cls.model_class.user_id == actor_uuid)
-        return query.join(User, User.id == cls.model_class.user_id).where(
-            User.username == actor
+        matching_user_ids = (
+            select(User.id).where(user_identifier_condition(actor)).correlate(None)
         )
+        return query.where(cls.model_class.user_id.in_(matching_user_ids))

@@ -54,6 +54,15 @@ from app.services.identity_audit_log import IdentityAuditLog
 from app.services.local_auth_service import clear_login_attempts
 from app.services.session_service import invalidate_user_sessions
 
+# Re-exported as this service's composable matching form (see
+# `docs/features/identity/user-service.md`, `resolve_user_identifier()`).
+# The builder lives in the leaf module so `BaseAuditLog` can reuse it
+# without the `user_service` -> `identity_audit_log` -> `base_audit_log`
+# import cycle.
+from app.services.user_identifier import (
+    user_identifier_condition as user_identifier_condition,
+)
+
 logger = structlog.get_logger(__name__)
 
 # Username Format (docs/conventions.md): 1-64 characters, starts with a
@@ -242,34 +251,6 @@ async def get_user_by_id(session: AsyncSession, user_id: UUID) -> User | None:
     `UserNotFoundError` — the caller decides how to react to ``None``.
     """
     return await session.get(User, user_id)
-
-
-def user_identifier_condition(identifier: str) -> ColumnElement[bool]:
-    """Build the UUID-or-username matching condition on `User`.
-
-    Category B query builder: the single owner of the identifier
-    matching rules of `docs/api-spec.md` (User Identifier Resolution)
-    and `docs/features/identity/user-service.md`
-    (`resolve_user_identifier()`), in the composable form a consumer
-    embeds in its own statement (for example
-    `Ticket.assignee_id.in_(select(User.id).where(...))`) so that rows,
-    totals, and resolved users derive from one PostgreSQL observation.
-
-    Q1: `identifier` is the raw value supplied by a caller.
-
-    Q3: if `identifier` parses as a UUID, the condition is
-    `User.id = <uuid>`; otherwise it is the exact, case-sensitive
-    `User.username = identifier`. At most one User matches. Builds an
-    expression only: performs no I/O.
-
-    Q6: infallible. Absence is not an error: the consumer's selection
-    simply matches no row.
-    """
-    try:
-        user_id = UUID(identifier)
-    except ValueError:
-        return User.username == identifier
-    return User.id == user_id
 
 
 async def resolve_user_identifier(session: AsyncSession, identifier: str) -> User:

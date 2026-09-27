@@ -535,9 +535,11 @@ Behavior:
    removed. The latter returns an empty page only after the accessible parent
    has been established.
 3. Apply `actor` through `BaseAuditLog.filter_by_actor()`. Literal `system`
-   matches `user_id IS NULL`; a UUID matches User ID; all other values match
-   exact username. An unknown optional actor yields an empty page rather than
-   `UserNotFoundError`, but only for an accessible Ticket.
+   matches `user_id IS NULL`; every other value uses the single user-domain
+   matching policy that the method reuses (see
+   `docs/features/platform/audit-trail-infrastructure.md`). An unknown optional
+   actor yields an empty page rather than `UserNotFoundError`, but only for an
+   accessible Ticket.
 4. Normalize `search` by trimming outer whitespace once. Empty means absent;
    percent, underscore, and backslash remain literal. Match case-insensitive
    substrings across the four declared fields with OR semantics.
