@@ -1,7 +1,7 @@
-"""Response schemas for expanded CVE data.
+"""Response schemas for compact and expanded CVE data.
 
 See `docs/features/tickets/tickets.md` (Response Schemas > Shared
-Sub-Schemas: CVEDetail, CVEKEVResponse, CVEEPSSResponse,
+Sub-Schemas: CVESummary, CVEDetail, CVEKEVResponse, CVEEPSSResponse,
 CVESSVCResponse, CVEWeaknessResponse, CVEExternalIdentifierResponse) for
 the authoritative contracts. `CVEDetail` exposes persisted evidence only:
 it never contains a CVE priority (`docs/features/tickets/ticket-priority.md`)
@@ -80,6 +80,19 @@ class CVEExternalIdentifierResponse(BaseModel):
     )
     identifier: str = Field(description="External identifier (e.g. a GHSA-ID).")
     url: str | None = Field(description="Direct link to the advisory page.")
+
+
+class CVESummary(BaseModel):
+    """Compact CVE representation for list views."""
+
+    cve_id: str = Field(description="CVE identifier (e.g. `CVE-2024-1234`).")
+    title: str | None = Field(
+        description=(
+            "Brief summary from the CNA (at most 256 characters); `null` if "
+            "not provided by the CNA."
+        )
+    )
+    description: str | None = Field(description="Vulnerability description.")
 
 
 class CVEDetail(BaseModel):

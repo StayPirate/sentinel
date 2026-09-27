@@ -235,6 +235,14 @@ optional parameter, or equivalent result shape is an implementation choice; it
 does not create a second identifier-resolution policy or permit another service
 to duplicate the matching rules.
 
+The same matching rules are also available from this service as a composable,
+read-only query form for consumers that must resolve an optional User filter
+inside their own database statement, such as a list whose rows, total, and
+resolved users derive from one PostgreSQL observation. That form selects the
+matching `User.id` (at most one row) and never raises for absence; the consumer
+treats no match as an empty result. `resolve_user_identifier()` uses the same
+form, so there remains one matching policy.
+
 #### `list_users(session, filters, pagination, sorting)`
 
 Accepts the typed filters, pagination values, and sorting selection defined by

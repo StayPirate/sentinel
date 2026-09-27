@@ -66,6 +66,7 @@ from app.services.user_service import (
     resolve_user_identifier,
     unlock_user,
     update_user,
+    user_identifier_condition,
 )
 from tests.support.database import rollback_test_scope
 
@@ -2920,6 +2921,50 @@ class TestResolveUserIdentifier:
 
         with pytest.raises(UserNotFoundError):
             await resolve_user_identifier(db_session, str(unknown_id))
+
+
+@pytest.mark.integration
+class TestUserIdentifierCondition:
+    """The composable form of the one matching policy
+    (`docs/features/identity/user-service.md`, `resolve_user_identifier()`):
+    consumers embed it in their own statement; absence matches no row."""
+
+    async def _matching_ids(self, db: AsyncSession, identifier: str) -> list[uuid.UUID]:
+        return list(
+            (
+                await db.scalars(
+                    select(User.id).where(user_identifier_condition(identifier))
+                )
+            ).all()
+        )
+
+    async def test_uuid_matches_only_by_primary_key(
+        self,
+        db_session: AsyncSession,
+        user_factory: Callable[..., Awaitable[User]],
+    ) -> None:
+        user = await user_factory()
+        shadow = await user_factory(username=str(user.id))
+
+        assert await self._matching_ids(db_session, str(user.id)) == [user.id]
+        assert shadow.id not in await self._matching_ids(db_session, str(user.id))
+
+    async def test_other_input_matches_the_exact_username(
+        self,
+        db_session: AsyncSession,
+        user_factory: Callable[..., Awaitable[User]],
+    ) -> None:
+        user = await user_factory(username="jdoe")
+
+        assert await self._matching_ids(db_session, "jdoe") == [user.id]
+        assert await self._matching_ids(db_session, "JDoe") == []
+        assert await self._matching_ids(db_session, " jdoe") == []
+
+    async def test_absence_matches_nothing_without_raising(
+        self, db_session: AsyncSession
+    ) -> None:
+        assert await self._matching_ids(db_session, str(uuid.uuid4())) == []
+        assert await self._matching_ids(db_session, "nonexistent-user") == []
 
 
 @pytest.mark.integration

@@ -61,6 +61,7 @@ from app.core.enums import (
     Severity,
     TicketAuditEventType,
     TicketPriority,
+    TicketSortField,
     TicketStatus,
     UserSortField,
     UserType,
@@ -254,6 +255,27 @@ class TestUserSortFieldEnum:
             "full_name",
             "email",
             "created_at",
+        }
+
+
+@pytest.mark.unit
+class TestTicketSortFieldEnum:
+    """TicketSortField must have exactly the eleven `sort_by` values of
+    tickets.md (List Tickets)."""
+
+    def test_exact_members(self) -> None:
+        assert {member.value for member in TicketSortField} == {
+            "created_at",
+            "updated_at",
+            "severity",
+            "priority",
+            "status",
+            "ticket_id",
+            "triage_due_at",
+            "submission_due_at",
+            "um_due_at",
+            "qa_due_at",
+            "release_due_at",
         }
 
 

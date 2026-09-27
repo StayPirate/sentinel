@@ -272,6 +272,31 @@ class UserSortField(StrEnum):
     CREATED_AT = "created_at"
 
 
+class TicketSortField(StrEnum):
+    """Sortable fields for the Ticket list query.
+
+    Category B — classification (Python Enum only; never stored in the
+    database). See `docs/features/tickets/tickets.md` (List Tickets) and
+    `docs/features/tickets/ticket-service.md` (`list_tickets()`):
+    `severity`, `priority`, and `status` use semantic ranks, `ticket_id`
+    sorts by the numeric `sequence_id`, and the five due dates sort by
+    the Ticket-level date with `NULL` last
+    (`docs/features/tickets/ticket-deadlines.md`, Sorting).
+    """
+
+    CREATED_AT = "created_at"
+    UPDATED_AT = "updated_at"
+    SEVERITY = "severity"
+    PRIORITY = "priority"
+    STATUS = "status"
+    TICKET_ID = "ticket_id"
+    TRIAGE_DUE_AT = "triage_due_at"
+    SUBMISSION_DUE_AT = "submission_due_at"
+    UM_DUE_AT = "um_due_at"
+    QA_DUE_AT = "qa_due_at"
+    RELEASE_DUE_AT = "release_due_at"
+
+
 class CveState(StrEnum):
     """CVE record state, defined by the CVE Program.
 

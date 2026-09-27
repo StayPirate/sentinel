@@ -244,6 +244,34 @@ async def get_user_by_id(session: AsyncSession, user_id: UUID) -> User | None:
     return await session.get(User, user_id)
 
 
+def user_identifier_condition(identifier: str) -> ColumnElement[bool]:
+    """Build the UUID-or-username matching condition on `User`.
+
+    Category B query builder: the single owner of the identifier
+    matching rules of `docs/api-spec.md` (User Identifier Resolution)
+    and `docs/features/identity/user-service.md`
+    (`resolve_user_identifier()`), in the composable form a consumer
+    embeds in its own statement (for example
+    `Ticket.assignee_id.in_(select(User.id).where(...))`) so that rows,
+    totals, and resolved users derive from one PostgreSQL observation.
+
+    Q1: `identifier` is the raw value supplied by a caller.
+
+    Q3: if `identifier` parses as a UUID, the condition is
+    `User.id = <uuid>`; otherwise it is the exact, case-sensitive
+    `User.username = identifier`. At most one User matches. Builds an
+    expression only: performs no I/O.
+
+    Q6: infallible. Absence is not an error: the consumer's selection
+    simply matches no row.
+    """
+    try:
+        user_id = UUID(identifier)
+    except ValueError:
+        return User.username == identifier
+    return User.id == user_id
+
+
 async def resolve_user_identifier(session: AsyncSession, identifier: str) -> User:
     """Resolve a UUID-or-username identifier to its `User` row.
 
@@ -251,20 +279,18 @@ async def resolve_user_identifier(session: AsyncSession, identifier: str) -> Use
     caller — see `docs/api-spec.md` (User Identifier Resolution).
 
     Q3: if `identifier` parses as a UUID, look up `User.id`; otherwise
-    look up the exact stored `username` (case-sensitive). Returns the
-    matching row without loading response-specific relationships
-    (roles, manager) — callers needing those load them explicitly.
-    Deterministic for a fixed database snapshot.
+    look up the exact stored `username` (case-sensitive), through
+    `user_identifier_condition()`. Returns the matching row without
+    loading response-specific relationships (roles, manager) — callers
+    needing those load them explicitly. Deterministic for a fixed
+    database snapshot.
 
     Q6: raises `UserNotFoundError` when no row matches either lookup.
     Propagates any underlying database exception.
     """
-    try:
-        user_id = UUID(identifier)
-    except ValueError:
-        result = await session.execute(select(User).where(User.username == identifier))
-    else:
-        result = await session.execute(select(User).where(User.id == user_id))
+    result = await session.execute(
+        select(User).where(user_identifier_condition(identifier))
+    )
     user = result.scalar_one_or_none()
     if user is None:
         raise UserNotFoundError()
