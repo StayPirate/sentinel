@@ -662,24 +662,42 @@ class TestUserFilters:
 
     @pytest.mark.parametrize(
         "identifier",
-        ["unknown.user", str(uuid.UUID(int=7)), "Fictional.VA", "NONE", ""],
+        [
+            "unknown.user",
+            str(uuid.UUID(int=7)),
+            "Fictional.VA",
+            "NONE",
+            "",
+            # Email input is not accepted (tickets.md, List Tickets).
+            "fictional.va@example.com",
+        ],
     )
-    async def test_unknown_or_non_exact_assignee_yields_an_empty_page(
+    async def test_unknown_or_non_exact_user_filter_yields_an_empty_page(
         self,
         db_session: AsyncSession,
         clock: Clock,
         ticket_factory: Factory,
         user_factory: Factory,
+        ticket_package_factory: Factory,
+        ticket_package_maintainer_factory: Factory,
         identifier: str,
     ) -> None:
-        analyst: User = await user_factory(username="fictional.va")
-        await ticket_factory(assignee_id=analyst.id)
+        analyst: User = await user_factory(
+            username="fictional.va", email="fictional.va@example.com"
+        )
+        ticket = await ticket_factory(assignee_id=analyst.id)
+        package = await ticket_package_factory(ticket_id=ticket.id)
+        await ticket_package_maintainer_factory(
+            ticket_package_id=package.id, user_id=analyst.id
+        )
         await ticket_factory()
 
-        page = await _list(db_session, assignee=identifier)
-
-        assert page.items == ()
-        assert page.total == 0
+        for page in (
+            await _list(db_session, assignee=identifier),
+            await _list(db_session, maintainer=identifier),
+        ):
+            assert page.items == ()
+            assert page.total == 0
 
     async def test_maintainer_matches_included_packages_without_fan_out(
         self,
@@ -1148,35 +1166,54 @@ class TestSorting:
         assert await _order(db_session, sort_by, SortOrder.DESC) == ascending[::-1]
 
     @pytest.mark.parametrize(
-        "sort_by",
+        ("sort_by", "ascending_names"),
         [
-            TicketSortField.TRIAGE_DUE_AT,
-            TicketSortField.SUBMISSION_DUE_AT,
-            TicketSortField.UM_DUE_AT,
-            TicketSortField.QA_DUE_AT,
-            TicketSortField.RELEASE_DUE_AT,
+            # Expected orders transcribed from the ticket-deadlines.md
+            # Formula table (30-day tier 3/18/21/30/30, 90-day 9/54/63/90/90,
+            # 180-day 18/108/126/180/180 days) for: `medium` created at
+            # +0 d, `critical40` at +40 d, `low` at +0 d, `critical120` at
+            # +120 d. Triage 9/43/18/123, submission 54/58/108/138, um
+            # 63/61/126/141, qa and release 90/70/180/150 days: each phase
+            # has its own order, so a field-to-date mix-up fails.
+            (
+                TicketSortField.TRIAGE_DUE_AT,
+                ["medium", "low", "critical40", "critical120"],
+            ),
+            (
+                TicketSortField.SUBMISSION_DUE_AT,
+                ["medium", "critical40", "low", "critical120"],
+            ),
+            (TicketSortField.UM_DUE_AT, ["critical40", "medium", "low", "critical120"]),
+            (TicketSortField.QA_DUE_AT, ["critical40", "medium", "critical120", "low"]),
+            (
+                TicketSortField.RELEASE_DUE_AT,
+                ["critical40", "medium", "critical120", "low"],
+            ),
         ],
     )
-    async def test_due_dates_sort_with_null_last_in_both_directions(
+    async def test_due_dates_sort_by_their_own_date_with_null_last(
         self,
         db_session: AsyncSession,
         clock: Clock,
         ticket_factory: Factory,
         sort_by: TicketSortField,
+        ascending_names: list[str],
     ) -> None:
-        """Critical (30 days) is due before Medium (90) before Low (180),
-        although created later; Ignored and severity `None` have no date."""
-        low = await ticket_factory(
-            severity_manual=Severity.LOW.value, created_at=CREATED_AT
-        )
-        medium = await ticket_factory(
-            severity_manual=Severity.MEDIUM.value,
-            created_at=CREATED_AT + timedelta(days=1),
-        )
-        critical = await ticket_factory(
-            severity_manual=Severity.CRITICAL.value,
-            created_at=CREATED_AT + timedelta(days=2),
-        )
+        """Each due-date field sorts by its own Ticket-level date; Ignored
+        and severity `None` Tickets have no date and sort last in both
+        directions, tie-broken by `Ticket.id` in the requested direction."""
+        tickets = {
+            name: await ticket_factory(
+                severity_manual=severity.value,
+                created_at=CREATED_AT + timedelta(days=offset),
+            )
+            for name, severity, offset in (
+                ("medium", Severity.MEDIUM, 0),
+                ("critical40", Severity.CRITICAL, 40),
+                ("low", Severity.LOW, 0),
+                ("critical120", Severity.CRITICAL, 120),
+            )
+        }
         ignored = await ticket_factory(
             severity_manual=Severity.CRITICAL.value,
             status=TicketStatus.IGNORED.value,
@@ -1185,18 +1222,13 @@ class TestSorting:
         no_sla = await ticket_factory(
             severity_manual=Severity.NONE.value, created_at=CREATED_AT
         )
-        nulls = sorted(
-            [ignored, no_sla], key=lambda ticket: ticket.id
-        )  # tie-broken by id in the requested direction
-        ascending = [_sntl(t) for t in (critical, medium, low)]
+        nulls = [_sntl(t) for t in sorted([ignored, no_sla], key=lambda t: t.id)]
+        ascending = [_sntl(tickets[name]) for name in ascending_names]
 
-        assert await _order(db_session, sort_by, SortOrder.ASC) == [
-            *ascending,
-            *(_sntl(t) for t in nulls),
-        ]
+        assert await _order(db_session, sort_by, SortOrder.ASC) == [*ascending, *nulls]
         assert await _order(db_session, sort_by, SortOrder.DESC) == [
             *reversed(ascending),
-            *(_sntl(t) for t in reversed(nulls)),
+            *reversed(nulls),
         ]
 
     @pytest.mark.parametrize("sort_order", list(SortOrder))
@@ -1364,14 +1396,18 @@ class TestVisibility:
         ticket_factory: Factory,
         ticket_package_factory: Factory,
     ) -> None:
+        clock.instant = AFTER_TRIAGE_DUE
         hidden = await ticket_factory(
-            is_confidential=True, severity_manual=Severity.CRITICAL.value
+            is_confidential=True,
+            severity_manual=Severity.CRITICAL.value,
+            created_at=CREATED_AT,
         )
         await ticket_package_factory(ticket_id=hidden.id, package_name="secret-pkg")
 
         for filters in (
             {"search": "secret"},
             {"severity": [Severity.CRITICAL]},
+            {"overdue": [MilestonePhase.TRIAGE]},
             {"sort_by": TicketSortField.SEVERITY},
         ):
             page = await _list(db_session, ANONYMOUS_CALLER, **filters)
