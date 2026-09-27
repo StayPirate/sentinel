@@ -1107,25 +1107,12 @@ async def list_tickets(
             ).correlate(Ticket)
         )
 
+    # Only the identity and sort key are materialized for every candidate;
+    # the display projections (resolved severity, priority, due dates) are
+    # evaluated for the page rows alone, in the same statement.
     filtered = (
         select(
             Ticket.id.label("id"),
-            Ticket.sequence_id.label("sequence_id"),
-            Ticket.status.label("status"),
-            Ticket.cve_id.label("cve_pk"),
-            Ticket.assignee_id.label("assignee_pk"),
-            Ticket.duplicate_of_id.label("duplicate_of_pk"),
-            Ticket.is_confidential.label("is_confidential"),
-            Ticket.coordinated_release_at.label("coordinated_release_at"),
-            Ticket.created_at.label("created_at"),
-            Ticket.updated_at.label("updated_at"),
-            resolved_severity.label("severity"),
-            effective_priority.label("priority"),
-            due.triage.label("triage_due_at"),
-            due.submission.label("submission_due_at"),
-            due.um.label("um_due_at"),
-            due.qa.label("qa_due_at"),
-            due.release.label("release_due_at"),
             _sort_key(
                 sort_by,
                 severity=resolved_severity,
@@ -1154,7 +1141,7 @@ async def list_tickets(
             )
         )
         .where(
-            TicketPackage.ticket_id == page_rows.c.id,
+            TicketPackage.ticket_id == Ticket.id,
             TicketPackage.deleted_at.is_(None),
         )
         .scalar_subquery()
@@ -1162,20 +1149,20 @@ async def list_tickets(
     statement = (
         select(
             total.c.total,
-            page_rows.c.id.label("ticket_pk"),
-            page_rows.c.sequence_id,
-            page_rows.c.status,
-            page_rows.c.severity,
-            page_rows.c.priority,
-            page_rows.c.is_confidential,
-            page_rows.c.coordinated_release_at,
-            page_rows.c.created_at,
-            page_rows.c.updated_at,
-            page_rows.c.triage_due_at,
-            page_rows.c.submission_due_at,
-            page_rows.c.um_due_at,
-            page_rows.c.qa_due_at,
-            page_rows.c.release_due_at,
+            Ticket.id.label("ticket_pk"),
+            Ticket.sequence_id,
+            Ticket.status,
+            resolved_severity.label("severity"),
+            effective_priority.label("priority"),
+            Ticket.is_confidential,
+            Ticket.coordinated_release_at,
+            Ticket.created_at,
+            Ticket.updated_at,
+            due.triage.label("triage_due_at"),
+            due.submission.label("submission_due_at"),
+            due.um.label("um_due_at"),
+            due.qa.label("qa_due_at"),
+            due.release.label("release_due_at"),
             _LIST_ASSIGNEE.id.label("assignee_id"),
             _LIST_ASSIGNEE.username.label("assignee_username"),
             _LIST_ASSIGNEE.full_name.label("assignee_full_name"),
@@ -1188,12 +1175,13 @@ async def list_tickets(
         )
         .select_from(total)
         .outerjoin(page_rows, true())
-        .outerjoin(_LIST_ASSIGNEE, _LIST_ASSIGNEE.id == page_rows.c.assignee_pk)
+        .outerjoin(Ticket, Ticket.id == page_rows.c.id)
+        .outerjoin(_LIST_ASSIGNEE, _LIST_ASSIGNEE.id == Ticket.assignee_id)
         .outerjoin(
             _LIST_DUPLICATE_TARGET,
-            _LIST_DUPLICATE_TARGET.id == page_rows.c.duplicate_of_pk,
+            _LIST_DUPLICATE_TARGET.id == Ticket.duplicate_of_id,
         )
-        .outerjoin(CVE, CVE.id == page_rows.c.cve_pk)
+        .outerjoin(CVE, CVE.id == Ticket.cve_id)
         .order_by(*_ordered(page_rows.c.sort_key, page_rows.c.id, sort_order))
     )
     rows = (await db.execute(statement)).all()
