@@ -213,7 +213,10 @@ class TestSharedMatrixStructure:
         for consumer in consumers:
             assert _parametrized_cases(consumer) is DEADLINE_CASES
 
-    def test_persistence_builder_consumes_every_input_field(self) -> None:
+    def test_persisted_field_declaration_covers_every_input_field(self) -> None:
+        """Adding an input field to `DeadlineCase` forces a decision in the
+        persistence builder's declared field set; the parity cases then
+        exercise the builder behaviorally."""
         inputs = {f.name for f in dataclasses.fields(DeadlineCase)} - EXPECTATION_FIELDS
 
         assert inputs == PERSISTED_INPUT_FIELDS | {"evaluation_instant"}
@@ -471,14 +474,13 @@ class TestMilestoneFilteringAndCounting:
         assert ids == [first.ticket.id]
         assert track_count == 3
 
-    async def test_actionability_uses_the_supplied_date_and_comparison_the_instant(
+    async def test_actionability_uses_the_supplied_evaluation_date(
         self,
         db_session: AsyncSession,
         deadline_world: DeadlineWorld,
     ) -> None:
         """A Product whose General Support ends on the evaluation date is
-        actionable that day and `eol` the next; the instant alone drives
-        the past-due comparison."""
+        actionable that day and `eol` the next, at one unchanged instant."""
         persisted = await deadline_world.build(
             DeadlineCase(
                 id="lifecycle",

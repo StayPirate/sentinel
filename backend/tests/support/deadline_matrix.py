@@ -712,6 +712,22 @@ DEADLINE_CASES: tuple[DeadlineCase, ...] = (
         expected_statuses=(D, O, P, P),
         expected_current_phase=CurrentPhase.SUBMISSION,
     ),
+    DeadlineCase(
+        id="um_due_at_equal_to_instant_is_pending",
+        delivery_status=DeliveryStatus.IN_PROGRESS,
+        evaluation_instant=CREATED_AT + timedelta(days=21),
+        expected_offsets_days=_T30,
+        expected_statuses=(D, D, P, P),
+        expected_current_phase=CurrentPhase.UM,
+    ),
+    DeadlineCase(
+        id="qa_due_at_equal_to_instant_is_pending",
+        requests=(_ACTIVE_RR,),
+        evaluation_instant=CREATED_AT + timedelta(days=30),
+        expected_offsets_days=_T30,
+        expected_statuses=(D, D, D, P),
+        expected_current_phase=CurrentPhase.QA,
+    ),
     # --- Current phase ---------------------------------------------------------
     DeadlineCase(
         id="current_phase_first_pending_after_done",
