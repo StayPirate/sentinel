@@ -222,6 +222,10 @@ beyond status changes.
    `"Ticket {ticket_id} in New status with assignee {assignee_id} —
    assignment code path bug: assignee was set without transitioning
    status to Analysis"`.
+   If `ticket.status ∈ {Ignored, Duplicated}`, raise `ValueError` before any
+   query or effect: invoking the function on a Ticket that remains in the
+   manual zone is an internal contract violation (manual-zone exits first
+   prepare the `Analysis` floor and pass `previous_status`).
 2. Resolve one `evaluation_date` and evaluate gate conditions from highest to
    lowest using the canonical actionability expressions from
    `package-model.md` (two active tiers;
@@ -1301,11 +1305,17 @@ async def auto_assign_actor(
    A pre-lock in-memory role collection is not authoritative; the caller loads
    or refreshes membership while holding the User lock and before acquiring the
    Ticket lock. The helper performs no User query or lock while holding the
-   Ticket lock
+   Ticket lock, except the unlocked previous-assignee username observation in
+   step 6
 4. If `ticket.assignee_id == acting_user.id` → return False (assignment
    unchanged, no audit event)
 5. Set `ticket.assignee_id = acting_user.id`
-6. Create `TicketAuditEvent` with `event_type = assignment`
+6. Create `TicketAuditEvent` with `event_type = assignment`,
+   `user_id = acting_user.id`, `old_value` = the previous assignee's
+   event-time username or `NULL` when unassigned, and `new_value` =
+   `acting_user.username`. When `force = True` replaces a different assignee,
+   that username comes from one unlocked PostgreSQL observation of the previous
+   assignee; it is not an eligibility decision and locks no User
 7. If `ticket.status == New`: set `ticket.status = Analysis`, create
    `TicketAuditEvent` with `event_type = status_change`,
    `user_id = NULL`, `old_value = "New"`, `new_value = "Analysis"`
