@@ -18,11 +18,14 @@ from app.services import user_identifier, user_service
 
 
 def _imported_modules(path: Path) -> set[str]:
+    """Absolute module names imported by `path`; relative imports are
+    reported with their leading dots so a sibling import cannot evade the
+    check."""
     tree = ast.parse(path.read_text(encoding="utf-8"))
     modules: set[str] = set()
     for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module is not None:
-            modules.add(node.module)
+        if isinstance(node, ast.ImportFrom):
+            modules.add("." * node.level + (node.module or ""))
         elif isinstance(node, ast.Import):
             modules.update(alias.name for alias in node.names)
     return modules
@@ -33,7 +36,8 @@ class TestUserIdentifierLeafModule:
     def test_imports_no_other_service(self) -> None:
         assert user_identifier.__file__ is not None
         imported = _imported_modules(Path(user_identifier.__file__))
-        assert sorted(m for m in imported if m.startswith("app.services")) == []
+        forbidden = sorted(m for m in imported if m.startswith(("app.services", ".")))
+        assert forbidden == []
 
     def test_user_service_re_exports_the_single_builder(self) -> None:
         assert (

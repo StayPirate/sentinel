@@ -400,7 +400,7 @@ class TestFilterByActor:
         )
         assert await _event_types(db_session, query) == set()
 
-    async def test_username_matches_by_exact_join(
+    async def test_username_matches_by_exact_username(
         self, db_session: AsyncSession
     ) -> None:
         query = SampleAuditLog.filter_by_actor(
@@ -435,20 +435,24 @@ class TestFilterByActor:
 
 
 @pytest.mark.unit
-class TestConcreteTrailsInheritActorFilter:
-    """Every production audit trail uses the base `filter_by_actor()`,
-    so the base-level actor matrix above covers all of them."""
+class TestRegisteredTrailsInheritActorFilter:
+    """Every registered audit trail uses the base `filter_by_actor()`, so
+    the base-level actor matrix above covers all of them. Discovered from
+    `AUDIT_LOG_REGISTRY`, so a future trail is enforced automatically."""
 
-    @pytest.mark.parametrize(
-        "trail_class",
-        [TicketAuditLog, IdentityAuditLog, SettingAuditLog, FetcherAuditLog],
-        ids=["ticket", "identity", "setting", "fetcher"],
-    )
-    def test_trail_does_not_override_filter_by_actor(
-        self, trail_class: type[BaseAuditLog]
-    ) -> None:
+    def test_production_trails_are_registered(self) -> None:
+        # The imports above register the four production trails; this
+        # keeps the registry-driven check below from passing vacuously.
+        registry = base_audit_log.AUDIT_LOG_REGISTRY
+        assert registry["ticket"] is TicketAuditLog
+        assert registry["identity"] is IdentityAuditLog
+        assert registry["setting"] is SettingAuditLog
+        assert registry["fetcher"] is FetcherAuditLog
+
+    def test_no_registered_trail_overrides_filter_by_actor(self) -> None:
         overriding = [
-            klass.__name__
+            klass.__qualname__
+            for trail_class in base_audit_log.AUDIT_LOG_REGISTRY.values()
             for klass in trail_class.__mro__[: trail_class.__mro__.index(BaseAuditLog)]
             if "filter_by_actor" in vars(klass)
         ]
