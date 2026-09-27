@@ -49,14 +49,19 @@ The `search` query parameter on `GET /api/v1/tickets` searches across
 the following fields. A ticket matches if any field matches.
 
 - **SNTL-{n} identifier**: prefix-match on the numeric part of the
-  sequence number. The `SNTL-` prefix is optional in the query — a
-  purely numeric term is treated as a sequence number search (e.g.,
-  `42` matches SNTL-42 and SNTL-420 but not SNTL-1042). A query of
-  just `SNTL-` with no digits is ignored for this field.
-- **CVE ID** (if the ticket has an associated CVE): prefix-match on
-  the full CVE-ID string (e.g., `CVE-2024-12` matches `CVE-2024-1234`
-  and `CVE-2024-1200`). The `CVE-` prefix is optional if the format is
-  recognizable as year-number (e.g., `2024-1234`).
+  sequence number. The `SNTL-` prefix is optional in the query and is
+  recognized case-insensitively — a purely numeric term is treated as a
+  sequence number search (e.g., `42` and `sntl-42` match SNTL-42 and
+  SNTL-420 but not SNTL-1042). This field applies only when the term,
+  after removing an optional `SNTL-` prefix, consists of one or more ASCII
+  digits; a query of just `SNTL-` with no digits, or with any other
+  remainder, is ignored for this field.
+- **CVE ID** (if the ticket has an associated CVE): case-insensitive
+  prefix-match on the full CVE-ID string (e.g., `CVE-2024-12` and
+  `cve-2024-12` match `CVE-2024-1234` and `CVE-2024-1200`). The `CVE-`
+  prefix is optional if the term is recognizable as year-number: four
+  ASCII digits, a hyphen, and one or more ASCII digits (e.g., `2024-1234`
+  or `2024-12`), which is matched as if prefixed by `CVE-`.
 - **Package names**: case-insensitive substring match (ILIKE). Matches
   any directly included package (`TicketPackage.deleted_at IS NULL`) whose
   name contains the search term.
@@ -1510,7 +1515,8 @@ Lists tickets with filtering, search, pagination, and sorting.
 Query parameters:
 
 - `search` (string, optional): free-text search across `SNTL-{n}`
-  identifier (prefix-match on numeric part), CVE ID (prefix-match),
+  identifier (prefix-match on numeric part), CVE ID (case-insensitive
+  prefix-match),
   package names (case-insensitive substring), and external identifiers
   such as GHSA-IDs (prefix-match, case-insensitive). See
   [Search](#search) for detailed matching behavior per field.

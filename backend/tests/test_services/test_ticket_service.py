@@ -1704,6 +1704,7 @@ class TestTicketServiceQueryBoundary:
 
         assert coroutines == {
             "resolve_ticket_locator",
+            "list_tickets",
             "get_ticket_detail",
             "assemble_ticket_detail",
         }

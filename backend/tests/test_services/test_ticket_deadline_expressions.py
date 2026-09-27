@@ -32,6 +32,7 @@ from sqlalchemy.orm import aliased
 
 import tests.test_services.test_package_service as tree_tests
 import tests.test_services.test_ticket_deadlines as pure_tests
+import tests.test_services.test_ticket_list as list_tests
 from app.core.enums import (
     DeliveryStatus,
     IBSRequestActionType,
@@ -202,12 +203,14 @@ class TestSqlPureParity:
 class TestSharedMatrixStructure:
     def test_every_matrix_consumer_iterates_the_same_case_tuple(self) -> None:
         """A case added to the shared matrix is exercised by the pure
-        functions, the package-tree projection, and the SQL expressions."""
+        functions, the package-tree projection, the SQL expressions, and
+        the Ticket list's `overdue` filter and due-date projection."""
         consumers = (
             pure_tests.TestComputeDueDatesMatrix.test_matrix_due_dates,
             pure_tests.TestResolveTrackMilestonesMatrix.test_matrix_milestones,
             tree_tests.TestTrackMilestones.test_milestones_current_phase_and_due_dates,
             TestSqlPureParity.test_sql_equals_expectation_and_pure_functions,
+            list_tests.TestOverdueMatrix.test_overdue_filter_and_due_dates_match_the_shared_matrix,
         )
 
         for consumer in consumers:

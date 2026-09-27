@@ -3,10 +3,10 @@
 See `docs/features/tickets/ticket-service.md` for the full
 specification. This module currently implements the consumer-facing
 Ticket locator resolution (Ticket Query Operations > Ticket locator
-resolution) and the Ticket detail read in its consumer and
-mutation-assembly modes (Ticket Query Operations > `get_ticket_detail()`);
-the remaining query and lifecycle operations are added by their owning
-work items.
+resolution), the Ticket list (`list_tickets()`), and the Ticket detail
+read in its consumer and mutation-assembly modes (Ticket Query
+Operations > `get_ticket_detail()`); the lifecycle operations are added
+by their owning work items.
 
 Every operation accepts the caller's `AsyncSession` and never commits or
 rolls back; database exceptions propagate unchanged (Transaction
@@ -24,23 +24,44 @@ visibility predicate; the mutation-assembly mode
 locked Ticket by internal UUID and applies no second visibility decision.
 Both return the same semantic projection; no Pydantic type enters this
 layer.
+
+Ticket list. `list_tickets()` also runs one SQL statement (a CTE chain:
+visible and filtered Tickets, their total, the requested page, then the
+page's one-to-one assignee, CVE, and duplicate target plus the included
+package names), so rows, total, resolved users, severity, sorting, and
+pagination derive from one PostgreSQL observation. Due dates, milestone
+statuses, and resolved severity come from the shared SQL expressions of
+`ticket_deadline_expressions` and `ticket_severity`; User filters use the
+user-domain matching condition of `user_service`.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+import re
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
+from enum import StrEnum
 from typing import Any, Final
 from uuid import UUID
 
 from sqlalchemy import (
     ColumnElement,
+    DateTime,
     Select,
     SQLColumnExpression,
+    String,
+    and_,
+    case,
+    cast,
+    exists,
+    false,
     func,
+    literal,
     literal_column,
+    or_,
     select,
+    true,
     type_coerce,
 )
 from sqlalchemy.dialects.postgresql import JSON, aggregate_order_by
@@ -48,7 +69,16 @@ from sqlalchemy.engine import Row
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
-from app.core.enums import CveState, Severity, TicketPriority, TicketStatus
+from app.core.enums import (
+    CveState,
+    MilestonePhase,
+    MilestoneStatus,
+    Severity,
+    SortOrder,
+    TicketPriority,
+    TicketSortField,
+    TicketStatus,
+)
 from app.core.exceptions import TicketNotFoundError
 from app.core.identifiers import format_ticket_id, parse_ticket_id
 from app.models.cve import CVE
@@ -58,11 +88,21 @@ from app.models.cve_external_identifier import CVEExternalIdentifier
 from app.models.cve_kev_entry import CVEKEVEntry
 from app.models.cve_ssvc_assessment import CVESSVCAssessment
 from app.models.ticket import Ticket
+from app.models.ticket_package import TicketPackage
+from app.models.ticket_package_maintainer import TicketPackageMaintainer
+from app.models.ticket_package_track import TicketPackageTrack
 from app.models.user import User
 from app.services import package_service
 from app.services.package_service import PackageProjection
+from app.services.ticket_deadline_expressions import (
+    TicketDueDateExpressions,
+    ticket_due_date_expressions,
+    track_milestone_status_expression,
+)
 from app.services.ticket_deadlines import DueDates, compute_due_dates
+from app.services.ticket_severity import resolved_severity_expression
 from app.services.ticket_visibility import TicketCaller, ticket_visibility_condition
+from app.services.user_service import user_identifier_condition
 
 _EMPTY_JSON_ARRAY: Final[ColumnElement[Any]] = literal_column("'[]'::json")
 _CODE_POINT_COLLATION: Final = "C"
@@ -206,6 +246,58 @@ class TicketDetailProjection:
     packages: tuple[PackageProjection, ...]
     created_at: datetime
     updated_at: datetime
+
+
+# ---------------------------------------------------------------------------
+# Ticket list semantic projection
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class CVESummaryProjection:
+    """The compact current CVE of a Ticket (`CVESummary`)."""
+
+    cve_id: str
+    title: str | None
+    description: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class TicketSummaryProjection:
+    """The semantic projection represented by `TicketSummary`.
+
+    `ticket_id` is the public `SNTL-{n}` identity; the internal Ticket
+    UUID is deliberately absent. `severity` is the resolved severity and
+    `priority` the effective priority, the same values the list filtered
+    and sorted by. `due_dates` is `None` when no SLA applies.
+    `package_names` are the directly included package names in ascending
+    Unicode code-point order.
+    """
+
+    ticket_id: str
+    status: TicketStatus
+    severity: Severity | None
+    priority: TicketPriority | None
+    assignee: TicketUserProjection | None
+    cve: CVESummaryProjection | None
+    duplicate_of_ticket_id: str | None
+    is_confidential: bool
+    coordinated_release_at: datetime | None
+    due_dates: DueDates | None
+    package_names: tuple[str, ...]
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class TicketPage:
+    """One page of Ticket summaries and the total of visible, filtered
+    Tickets (computed before page slicing)."""
+
+    items: tuple[TicketSummaryProjection, ...]
+    total: int
+    page: int
+    per_page: int
 
 
 # ---------------------------------------------------------------------------
@@ -607,3 +699,507 @@ async def assemble_ticket_detail(
     statement = _detail_statement(evaluation_date).where(Ticket.id == ticket_id)
     row = (await db.execute(statement)).one()
     return _project(row, evaluation_instant=evaluation_instant)
+
+
+# ---------------------------------------------------------------------------
+# Ticket list
+# ---------------------------------------------------------------------------
+
+MAX_PER_PAGE: Final = 100
+ASSIGNEE_NONE: Final = "none"
+"""The literal `assignee` filter value selecting unassigned Tickets; it is
+handled before User resolution (docs/api-spec.md, User Identifier
+Resolution)."""
+
+_LIKE_ESCAPE: Final = "\\"
+_SNTL_PREFIX: Final = "sntl-"
+_CVE_PREFIX: Final = "CVE-"
+_DIGITS: Final = re.compile(r"[0-9]+")
+_YEAR_NUMBER: Final = re.compile(r"[0-9]{4}-[0-9]+")
+
+_TRIAGE_OPEN_STATUSES: Final = (TicketStatus.NEW.value, TicketStatus.ANALYSIS.value)
+
+# Semantic ranks (docs/api-spec.md, Semantic Sort Fields). SQL `NULL` is
+# not ranked, so it sorts last under Nullable Sort Field Ordering.
+_SEVERITY_RANK: Final[dict[str, int]] = {
+    Severity.NONE.value: 0,
+    Severity.LOW.value: 1,
+    Severity.MEDIUM.value: 2,
+    Severity.HIGH.value: 3,
+    Severity.CRITICAL.value: 4,
+}
+_PRIORITY_RANK: Final[dict[str, int]] = {
+    TicketPriority.P4.value: 0,
+    TicketPriority.P3.value: 1,
+    TicketPriority.P2.value: 2,
+    TicketPriority.P1.value: 3,
+}
+_STATUS_RANK: Final[dict[str, int]] = {
+    TicketStatus.NEW.value: 0,
+    TicketStatus.ANALYSIS.value: 1,
+    TicketStatus.ANALYZED.value: 2,
+    TicketStatus.RESOLVED.value: 3,
+    TicketStatus.IGNORED.value: 4,
+    TicketStatus.DUPLICATED.value: 5,
+}
+
+_LIST_ASSIGNEE = aliased(User, name="list_assignee")
+_LIST_DUPLICATE_TARGET = aliased(Ticket, name="list_duplicate_target")
+
+
+def _escape_like(term: str) -> str:
+    """Escape `term` so `%`, `_`, and backslash match literally under
+    `ESCAPE '\\'` (backslash first, so added escapes are not doubled)."""
+    return (
+        term.replace(_LIKE_ESCAPE, _LIKE_ESCAPE * 2)
+        .replace("%", f"{_LIKE_ESCAPE}%")
+        .replace("_", f"{_LIKE_ESCAPE}_")
+    )
+
+
+def _sequence_prefix(term: str) -> str | None:
+    """The digits searched in the SNTL identifier field, or `None` when
+    the field does not apply (tickets.md, Search): an optional
+    case-insensitive `SNTL-` prefix followed by one or more ASCII
+    digits."""
+    head = term[: len(_SNTL_PREFIX)]
+    remainder = (
+        term[len(_SNTL_PREFIX) :]
+        if head.isascii() and head.lower() == _SNTL_PREFIX
+        else term
+    )
+    return remainder if _DIGITS.fullmatch(remainder) else None
+
+
+def _cve_prefix(term: str) -> str:
+    """The CVE-ID prefix searched for `term`: a year-number term (four
+    ASCII digits, a hyphen, one or more ASCII digits) is searched as if
+    prefixed by `CVE-`; any other term as given (tickets.md, Search)."""
+    return f"{_CVE_PREFIX}{term}" if _YEAR_NUMBER.fullmatch(term) else term
+
+
+def _search_condition(term: str) -> ColumnElement[bool]:
+    """The multi-field OR search condition on `Ticket` for a normalized,
+    non-empty term. Every one-to-many field uses existence semantics, so
+    the condition never multiplies Ticket rows."""
+    escaped = _escape_like(term)
+    branches: list[ColumnElement[bool]] = []
+    digits = _sequence_prefix(term)
+    if digits is not None:
+        branches.append(cast(Ticket.sequence_id, String).like(f"{digits}%"))
+    branches.append(
+        exists(
+            select(CVE.id).where(
+                CVE.id == Ticket.cve_id,
+                CVE.cve_id.ilike(f"{_escape_like(_cve_prefix(term))}%", escape="\\"),
+            )
+        ).correlate(Ticket)
+    )
+    branches.append(
+        exists(
+            select(TicketPackage.id).where(
+                TicketPackage.ticket_id == Ticket.id,
+                TicketPackage.deleted_at.is_(None),
+                TicketPackage.package_name.ilike(f"%{escaped}%", escape="\\"),
+            )
+        ).correlate(Ticket)
+    )
+    branches.append(
+        exists(
+            select(CVEExternalIdentifier.id).where(
+                CVEExternalIdentifier.cve_id == Ticket.cve_id,
+                CVEExternalIdentifier.identifier.ilike(f"{escaped}%", escape="\\"),
+            )
+        ).correlate(Ticket)
+    )
+    return or_(*branches)
+
+
+def _nullable_member_condition(
+    expression: ColumnElement[str | None], members: Collection[StrEnum | None]
+) -> ColumnElement[bool]:
+    """OR over enum members of a nullable expression; a `None` member
+    matches SQL `NULL` (the `unresolved` filter value). A supplied but
+    empty collection matches nothing."""
+    values = sorted({member.value for member in members if member is not None})
+    branches: list[ColumnElement[bool]] = []
+    if values:
+        branches.append(expression.in_(values))
+    if None in members:
+        branches.append(expression.is_(None))
+    return or_(*branches) if branches else false()
+
+
+def _overdue_condition(
+    phases: Collection[MilestonePhase],
+    *,
+    due: TicketDueDateExpressions,
+    evaluation_date: date,
+    evaluation_instant: datetime,
+) -> ColumnElement[bool]:
+    """The Ticket-level `overdue` filter (ticket-deadlines.md,
+    Ticket-Level Overdue Filter), OR over `phases`: `triage` is past due
+    for a `New` or `Analysis` Ticket; a later phase matches when at least
+    one track of the Ticket has that milestone `overdue` (existence
+    semantics over aliased package and track)."""
+    instant = literal(evaluation_instant, DateTime(timezone=True))
+    branches: list[ColumnElement[bool]] = []
+    for phase in MilestonePhase:
+        if phase not in phases:
+            continue
+        if phase is MilestonePhase.TRIAGE:
+            branches.append(
+                and_(Ticket.status.in_(_TRIAGE_OPEN_STATUSES), due.triage < instant)
+            )
+            continue
+        package = aliased(TicketPackage)
+        track = aliased(TicketPackageTrack)
+        milestone = track_milestone_status_expression(
+            phase,
+            evaluation_date=evaluation_date,
+            evaluation_instant=evaluation_instant,
+            ticket=Ticket,
+            package=package,
+            track=track,
+            due_dates=due,
+        )
+        branches.append(
+            exists(
+                select(track.id)
+                .join(package, package.id == track.ticket_package_id)
+                .where(
+                    package.ticket_id == Ticket.id,
+                    milestone == MilestoneStatus.OVERDUE.value,
+                )
+            ).correlate(Ticket)
+        )
+    return or_(*branches) if branches else false()
+
+
+def _user_filter_ids(identifier: str) -> Select[tuple[UUID]]:
+    """The `User.id` matching a UUID-or-username filter value (at most
+    one), resolved inside the list statement through the user-domain
+    matching rules."""
+    return select(User.id).where(user_identifier_condition(identifier))
+
+
+def _sort_key(
+    sort_by: TicketSortField,
+    *,
+    severity: ColumnElement[str | None],
+    priority: ColumnElement[str | None],
+    due: TicketDueDateExpressions,
+) -> ColumnElement[Any]:
+    """The primary sort expression for `sort_by` on `Ticket`."""
+    match sort_by:
+        case TicketSortField.CREATED_AT:
+            return Ticket.created_at.expression
+        case TicketSortField.UPDATED_AT:
+            return Ticket.updated_at.expression
+        case TicketSortField.TICKET_ID:
+            return Ticket.sequence_id.expression
+        case TicketSortField.SEVERITY:
+            return case(_SEVERITY_RANK, value=severity)
+        case TicketSortField.PRIORITY:
+            return case(_PRIORITY_RANK, value=priority)
+        case TicketSortField.STATUS:
+            return case(_STATUS_RANK, value=Ticket.status)
+        case TicketSortField.TRIAGE_DUE_AT:
+            return due.triage
+        case TicketSortField.SUBMISSION_DUE_AT:
+            return due.submission
+        case TicketSortField.UM_DUE_AT:
+            return due.um
+        case TicketSortField.QA_DUE_AT:
+            return due.qa
+        case TicketSortField.RELEASE_DUE_AT:
+            return due.release
+
+
+def _ordered(
+    sort_key: ColumnElement[Any], ticket_id: ColumnElement[Any], sort_order: SortOrder
+) -> tuple[ColumnElement[Any], ColumnElement[Any]]:
+    """Primary order with `NULL` last in both directions, then the internal
+    `Ticket.id` tie-breaker in the same direction."""
+    if sort_order is SortOrder.ASC:
+        return sort_key.asc().nulls_last(), ticket_id.asc()
+    return sort_key.desc().nulls_last(), ticket_id.desc()
+
+
+def _summary(row: Row[Any]) -> TicketSummaryProjection:
+    """Assemble one summary from a list-statement row. Pure."""
+    status = TicketStatus(row.status)
+    severity = Severity(row.severity) if row.severity is not None else None
+    duplicate_sequence_id: int | None = row.duplicate_sequence_id
+    return TicketSummaryProjection(
+        ticket_id=format_ticket_id(row.sequence_id),
+        status=status,
+        severity=severity,
+        priority=_priority(row.priority),
+        assignee=(
+            TicketUserProjection(
+                id=row.assignee_id,
+                username=row.assignee_username,
+                full_name=row.assignee_full_name,
+                active=row.assignee_active,
+            )
+            if row.assignee_id is not None
+            else None
+        ),
+        cve=(
+            CVESummaryProjection(
+                cve_id=row.cve_id,
+                title=row.cve_title,
+                description=row.cve_description,
+            )
+            if row.cve_id is not None
+            else None
+        ),
+        duplicate_of_ticket_id=(
+            format_ticket_id(duplicate_sequence_id)
+            if duplicate_sequence_id is not None
+            else None
+        ),
+        is_confidential=row.is_confidential,
+        coordinated_release_at=row.coordinated_release_at,
+        due_dates=_due_dates(row),
+        package_names=tuple(row.package_names or ()),
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+def _due_dates(row: Row[Any]) -> DueDates | None:
+    """The row's SQL-derived Ticket-level due dates; all five are `NULL`
+    together exactly when no SLA applies."""
+    if row.triage_due_at is None:
+        return None
+    return DueDates(
+        triage=row.triage_due_at,
+        submission=row.submission_due_at,
+        um=row.um_due_at,
+        qa=row.qa_due_at,
+        release=row.release_due_at,
+    )
+
+
+async def list_tickets(
+    db: AsyncSession,
+    *,
+    caller: TicketCaller,
+    search: str | None = None,
+    status: Collection[TicketStatus] | None = None,
+    assignee: str | None = None,
+    severity: Collection[Severity | None] | None = None,
+    priority: Collection[TicketPriority | None] | None = None,
+    overdue: Collection[MilestonePhase] | None = None,
+    maintainer: str | None = None,
+    sort_by: TicketSortField = TicketSortField.CREATED_AT,
+    sort_order: SortOrder = SortOrder.DESC,
+    page: int = 1,
+    per_page: int = 20,
+) -> TicketPage:
+    """List the visible Tickets matching the filters, one page at a time.
+
+    Category B read (ticket-service.md, Ticket Query Operations >
+    `list_tickets()`; tickets.md, Search, TicketSummary, List Tickets).
+
+    Q1: `caller` is the request-resolved caller information. `search` is
+    the raw multi-field search. For each repeatable filter (`status`,
+    `severity`, `priority`, `overdue`), `None` means omitted (no filter)
+    and a collection holds the valid supplied members, so an empty
+    collection (every supplied value was invalid) matches nothing. A
+    `None` member of `severity` or `priority` is the `unresolved` value
+    (SQL `NULL`). `assignee` is a User UUID, exact username, or the
+    literal `none`; `maintainer` a User UUID or exact username. `page`
+    is positive and `per_page` is 1-100.
+
+    Q3: captures one UTC evaluation instant and derives the read
+    `evaluation_date` from its UTC date. Then, in one SQL statement and
+    therefore one PostgreSQL snapshot:
+    1. selects the Tickets satisfying the canonical visibility predicate
+       (anonymous callers evaluate no grant or maintainer branch);
+    2. trims `search` once and, when non-empty, matches it by the
+       field-specific OR rules of tickets.md (Search) with `%`, `_`, and
+       backslash literal: SNTL numeric prefix, case-insensitive CVE-ID
+       prefix, included package-name substring, and case-insensitive
+       external-identifier prefix;
+    3. applies the supplied filters with AND semantics and OR within a
+       repeatable filter; `assignee=none` selects unassigned Tickets
+       before any User resolution; an unknown assignee or maintainer
+       matches nothing; maintainer matching uses an included package;
+    4. resolves severity once per Ticket through the canonical cascade,
+       the effective priority as `COALESCE(priority_override,
+       priority_auto)`, and the five due dates through
+       `ticket_due_date_expressions()`; filters, the sort key, and the
+       projection use these same expressions; `overdue` applies the
+       Ticket-level rules at the one instant with existence semantics;
+    5. never multiplies a Ticket row: every one-to-many relation is an
+       existence check or a correlated aggregate;
+    6. projects `package_names` from directly included packages in
+       ascending Unicode code-point order (unique per Ticket by
+       `(ticket_id, package_name)`);
+    7. orders by the requested key with `NULL` last in both directions
+       (semantic ranks for status, severity, and priority; numeric
+       `sequence_id` for `ticket_id`), then by `Ticket.id` in the same
+       direction;
+    8. counts after visibility and every filter, before page slicing.
+    Creates no event, acquires no lock, and never commits or rolls back.
+
+    Q4: returns the page items, the total, and the echoed `page` and
+    `per_page`. A page beyond the last is empty with the correct total.
+
+    Q6: raises `ValueError` before any query for `page < 1` or
+    `per_page` outside 1-100. Database exceptions propagate unchanged.
+    """
+    if page < 1:
+        raise ValueError("page must be at least 1")
+    if not 1 <= per_page <= MAX_PER_PAGE:
+        raise ValueError(f"per_page must be between 1 and {MAX_PER_PAGE}")
+    evaluation_instant = _utc_now()
+    evaluation_date = evaluation_instant.astimezone(UTC).date()
+
+    resolved_severity = resolved_severity_expression()
+    effective_priority: ColumnElement[str | None] = func.coalesce(
+        Ticket.priority_override, Ticket.priority_auto
+    )
+    due = ticket_due_date_expressions(severity=resolved_severity)
+
+    conditions: list[ColumnElement[bool]] = [ticket_visibility_condition(caller)]
+    normalized_search = search.strip() if search is not None else ""
+    if normalized_search:
+        conditions.append(_search_condition(normalized_search))
+    if status is not None:
+        values = sorted({member.value for member in status})
+        conditions.append(Ticket.status.in_(values) if values else false())
+    if severity is not None:
+        conditions.append(_nullable_member_condition(resolved_severity, severity))
+    if priority is not None:
+        conditions.append(_nullable_member_condition(effective_priority, priority))
+    if overdue is not None:
+        conditions.append(
+            _overdue_condition(
+                overdue,
+                due=due,
+                evaluation_date=evaluation_date,
+                evaluation_instant=evaluation_instant,
+            )
+        )
+    if assignee is not None:
+        conditions.append(
+            Ticket.assignee_id.is_(None)
+            if assignee == ASSIGNEE_NONE
+            else Ticket.assignee_id.in_(_user_filter_ids(assignee))
+        )
+    if maintainer is not None:
+        conditions.append(
+            exists(
+                select(TicketPackageMaintainer.id)
+                .join(
+                    TicketPackage,
+                    TicketPackage.id == TicketPackageMaintainer.ticket_package_id,
+                )
+                .where(
+                    TicketPackage.ticket_id == Ticket.id,
+                    TicketPackage.deleted_at.is_(None),
+                    TicketPackageMaintainer.user_id.in_(_user_filter_ids(maintainer)),
+                )
+            ).correlate(Ticket)
+        )
+
+    filtered = (
+        select(
+            Ticket.id.label("id"),
+            Ticket.sequence_id.label("sequence_id"),
+            Ticket.status.label("status"),
+            Ticket.cve_id.label("cve_pk"),
+            Ticket.assignee_id.label("assignee_pk"),
+            Ticket.duplicate_of_id.label("duplicate_of_pk"),
+            Ticket.is_confidential.label("is_confidential"),
+            Ticket.coordinated_release_at.label("coordinated_release_at"),
+            Ticket.created_at.label("created_at"),
+            Ticket.updated_at.label("updated_at"),
+            resolved_severity.label("severity"),
+            effective_priority.label("priority"),
+            due.triage.label("triage_due_at"),
+            due.submission.label("submission_due_at"),
+            due.um.label("um_due_at"),
+            due.qa.label("qa_due_at"),
+            due.release.label("release_due_at"),
+            _sort_key(
+                sort_by,
+                severity=resolved_severity,
+                priority=effective_priority,
+                due=due,
+            ).label("sort_key"),
+        )
+        .where(*conditions)
+        .cte("filtered")
+    )
+    total = select(func.count().label("total")).select_from(filtered).cte("total")
+    page_rows = (
+        select(filtered)
+        .order_by(*_ordered(filtered.c.sort_key, filtered.c.id, sort_order))
+        .limit(per_page)
+        .offset((page - 1) * per_page)
+        .cte("page")
+    )
+    package_names = (
+        select(
+            func.array_agg(
+                aggregate_order_by(
+                    TicketPackage.package_name,
+                    TicketPackage.package_name.collate(_CODE_POINT_COLLATION),
+                )
+            )
+        )
+        .where(
+            TicketPackage.ticket_id == page_rows.c.id,
+            TicketPackage.deleted_at.is_(None),
+        )
+        .scalar_subquery()
+    )
+    statement = (
+        select(
+            total.c.total,
+            page_rows.c.id.label("ticket_pk"),
+            page_rows.c.sequence_id,
+            page_rows.c.status,
+            page_rows.c.severity,
+            page_rows.c.priority,
+            page_rows.c.is_confidential,
+            page_rows.c.coordinated_release_at,
+            page_rows.c.created_at,
+            page_rows.c.updated_at,
+            page_rows.c.triage_due_at,
+            page_rows.c.submission_due_at,
+            page_rows.c.um_due_at,
+            page_rows.c.qa_due_at,
+            page_rows.c.release_due_at,
+            _LIST_ASSIGNEE.id.label("assignee_id"),
+            _LIST_ASSIGNEE.username.label("assignee_username"),
+            _LIST_ASSIGNEE.full_name.label("assignee_full_name"),
+            _LIST_ASSIGNEE.active.label("assignee_active"),
+            _LIST_DUPLICATE_TARGET.sequence_id.label("duplicate_sequence_id"),
+            CVE.cve_id.label("cve_id"),
+            CVE.title.label("cve_title"),
+            CVE.description.label("cve_description"),
+            package_names.label("package_names"),
+        )
+        .select_from(total)
+        .outerjoin(page_rows, true())
+        .outerjoin(_LIST_ASSIGNEE, _LIST_ASSIGNEE.id == page_rows.c.assignee_pk)
+        .outerjoin(
+            _LIST_DUPLICATE_TARGET,
+            _LIST_DUPLICATE_TARGET.id == page_rows.c.duplicate_of_pk,
+        )
+        .outerjoin(CVE, CVE.id == page_rows.c.cve_pk)
+        .order_by(*_ordered(page_rows.c.sort_key, page_rows.c.id, sort_order))
+    )
+    rows = (await db.execute(statement)).all()
+    return TicketPage(
+        items=tuple(_summary(row) for row in rows if row.ticket_pk is not None),
+        total=rows[0].total,
+        page=page,
+        per_page=per_page,
+    )
