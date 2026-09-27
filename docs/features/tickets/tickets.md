@@ -916,7 +916,7 @@ the Ticket row unless their owning contract declares an explicit opt-out.
 ```python
 def ensure_ticket_operable(ticket: Ticket) -> None:
     if ticket.status in (TicketStatus.Ignored, TicketStatus.Duplicated):
-        raise TicketNotMutableError(ticket.id)
+        raise TicketNotMutableError()
 ```
 
 **Scope**:

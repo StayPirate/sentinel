@@ -67,6 +67,24 @@ class TicketNotFoundError(ServiceError):
         super().__init__("Ticket not found.")
 
 
+class TicketNotMutableError(ServiceError):
+    """A Ticket in the manual zone (`Ignored` or `Duplicated`) rejects a mutation.
+
+    Raised by `ticket_mutations.ensure_ticket_operable()` for every
+    gate-relevant or ordinary Ticket mutation that does not declare an
+    explicit opt-out (`docs/features/tickets/ticket-mutations.md`,
+    `ensure_ticket_operable()`; `docs/features/tickets/tickets.md`,
+    Mutability Guard). Shared across service modules (`ticket_mutations`,
+    `ticket_service`, `package_service`) per `docs/conventions.md`
+    (Service Exception Conventions, Shared exceptions) — inherits from
+    `ServiceError` directly. Maps to `409 TICKET_NOT_MUTABLE`. The
+    message is static and never includes the Ticket identifier or status.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("Ticket is not mutable.")
+
+
 class InactiveUserError(ServiceError):
     """A user identified by a required owner/target parameter is inactive.
 
