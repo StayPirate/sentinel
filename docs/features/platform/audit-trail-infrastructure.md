@@ -56,9 +56,12 @@ defines:
   endpoint MUST use this method for uniform date filtering behavior
 - **Actor filtering**: `filter_by_actor()` class method filters by
   `user_id` column (inherited from `AuditEventMixin`). Accepts `"system"`
-  for NULL actor, a UUID string for direct match, or a username for
-  lookup via JOIN. Every audit trail API endpoint with an `actor` filter
-  MUST use this method. **Note**: this method operates exclusively on the
+  for NULL actor; any other value selects the matching user through the
+  single user-domain matching policy
+  (`docs/features/identity/user-service.md`, `resolve_user_identifier()`,
+  composable form) without duplicating its matching rules. Every audit
+  trail API endpoint with an `actor` filter MUST use this method.
+  **Note**: this method operates exclusively on the
   `user_id` column (the actor). Domain-specific filters on other user FK
   columns (e.g., `target_user_id` in `IdentityAuditEvent`) are the
   responsibility of the endpoint implementation, not the base class
@@ -121,18 +124,20 @@ class BaseAuditLog:
 
         - actor is None:     no filter applied
         - actor == "system": WHERE user_id IS NULL
-        - actor is a UUID:   WHERE user_id = <uuid>
-        - actor is a string: JOIN User, WHERE username = <actor>
+        - any other value:   WHERE user_id matches the User selected by
+                             the user_service composable matching form
 
-        The `actor` parameter follows the User Identifier Resolution
-        convention defined in `docs/api-spec.md`: if the value is a
-        valid UUID, lookup is by `user.id`; otherwise, lookup is by
-        `user.username` (exact match). If the provided username or UUID
-        does not match any user in the system, the method returns an
-        empty result set (no 404 error). See `docs/api-spec.md`, User
-        Identifier Resolution — the 404 convention applies only to
-        single-resource target parameters, not to optional filter
-        parameters on list endpoints.
+        The `actor` parameter follows User Identifier Resolution
+        (`docs/api-spec.md`). The matching rules are owned solely by
+        `user_service` (`docs/features/identity/user-service.md`,
+        `resolve_user_identifier()`); this method reuses its composable,
+        non-raising form and performs no identifier parsing of its own.
+        The match neither multiplies the caller's rows nor depends on
+        other entities already present in the caller's statement. If
+        the value does not match any user in the system, the method
+        returns an empty result set (no 404 error) — the 404 convention
+        applies only to single-resource target parameters, not to
+        optional filter parameters on list endpoints.
 
         Relies on the uniform user_id column provided by
         AuditEventMixin across all audit event models.
