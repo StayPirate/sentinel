@@ -438,8 +438,10 @@ exception to Ticket-first acquisition. Before any CVE or Ticket lock, it
 acquires `FOR SHARE` on the prospective assignee User and retains that lock
 through the assignment decision and Ticket mutation. It then follows the
 ordinary CVE-then-Ticket or Ticket-only order. `auto_assign_actor()` receives
-that stabilized User and performs no User query after the Ticket lock. System
-paths and paths that cannot assign acquire no User lock.
+that stabilized User and performs no query or lock on it after the Ticket lock;
+its only User read is the unlocked previous-assignee username observation of a
+`force = True` replacement (see `auto_assign_actor()` step 6). System paths and
+paths that cannot assign acquire no User lock.
 
 ### Single-ticket scope
 

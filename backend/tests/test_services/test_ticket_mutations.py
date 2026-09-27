@@ -590,9 +590,18 @@ class TestAutoAssignActor:
     ) -> None:
         previous = await va_user(active=False)
         actor = await stabilize_acting_user(db_session, (await va_user()).id)
-        ticket = await _cveless(ticket_factory, assignee_id=previous.id)
+        ticket = await _lock_ticket(
+            db_session, await _cveless(ticket_factory, assignee_id=previous.id)
+        )
 
-        assert await auto_assign_actor(ticket, actor, db_session, force=True) is True
+        with _StatementRecorder(db_session) as recorder:
+            assert (
+                await auto_assign_actor(ticket, actor, db_session, force=True) is True
+            )
+
+        # One unlocked previous-assignee username observation, no lock.
+        assert len(recorder.selects_from('"user"')) == 1
+        assert recorder.row_locks() == []
 
         assert ticket.assignee_id == actor.id
         assert await _events(db_session, ticket) == [
@@ -726,6 +735,9 @@ class TestReconcileGuards:
         assert records[0]["assignee_id"] == str(assignee.id)
         assert records[0]["level"] == "warning"
         assert ticket.assignee_id == assignee.id
+        assert ticket.status == TicketStatus.NEW
+        assert await _events(db_session, ticket) == []
+        assert pending_ticket_convergence_effects(db_session) == ()
 
     async def test_unassigned_new_ticket_logs_nothing(
         self,
@@ -1562,37 +1574,34 @@ class TestConvergenceRegistration:
             TicketConvergenceEffect(first.id),
         )
 
-    async def test_registration_creates_no_event_and_no_extra_statement(
+    async def test_registration_adds_no_statement_or_event(
         self,
         db_session: AsyncSession,
         ticket_factory: TicketFactory,
         tree: Callable[..., Awaitable[TicketPackageTrack]],
     ) -> None:
-        # Registration is in-memory: an exit issues the same statements as an
-        # identical non-registering evaluation plus its status-change INSERT.
-        registering = await _cveless(ticket_factory)
-        plain = await _cveless(ticket_factory)
-        await _tree_for(TicketStatus.ANALYSIS, registering, tree)
-        await _tree_for(TicketStatus.ANALYSIS, plain, tree)
+        # Registration is in-memory: beyond the gate evaluation, an exit issues
+        # only its status-change audit INSERT.
+        ticket = await _cveless(ticket_factory)
+        await _tree_for(TicketStatus.ANALYSIS, ticket, tree)
 
-        with _StatementRecorder(db_session) as plain_recorder:
-            await _reconcile(db_session, plain)
-        with _StatementRecorder(db_session) as registering_recorder:
-            await _reconcile(
-                db_session, registering, previous_status=TicketStatus.IGNORED
-            )
+        with _StatementRecorder(db_session) as recorder:
+            await _reconcile(db_session, ticket, previous_status=TicketStatus.IGNORED)
 
-        extra = [
+        writes = [
             s
-            for s in registering_recorder.statements
+            for s in recorder.statements
             if not s.lstrip().upper().startswith("SELECT")
         ]
-        assert len(registering_recorder.statements) == (
-            len(plain_recorder.statements) + len(extra)
+        assert len(writes) == 1
+        assert writes[0].lstrip().upper().startswith("INSERT INTO TICKET_AUDIT_EVENT")
+        assert len(recorder.statements) == 2
+        assert [e.event_type for e in await _events(db_session, ticket)] == [
+            "status_change"
+        ]
+        assert pending_ticket_convergence_effects(db_session) == (
+            TicketConvergenceEffect(ticket.id),
         )
-        assert all("ticket_audit_event" in s for s in extra)
-        events = await _events(db_session, registering)
-        assert [e.event_type for e in events] == ["status_change"]
 
     async def test_audit_failure_rolls_back_status_assignee_and_events(
         self,
