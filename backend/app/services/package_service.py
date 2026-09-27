@@ -32,7 +32,6 @@ from typing import Any, Final
 from sqlalchemy import (
     ColumnElement,
     SQLColumnExpression,
-    exists,
     func,
     literal_column,
     select,
@@ -45,8 +44,6 @@ from sqlalchemy.orm.util import AliasedClass
 
 from app.core.enums import (
     DeliveryStatus,
-    IBSRequestActionType,
-    IBSRequestState,
     LifecyclePhase,
     NonActionableReason,
     PackageStatus,
@@ -56,9 +53,6 @@ from app.core.enums import (
 )
 from app.core.exceptions import TicketNotFoundError
 from app.core.identifiers import parse_ticket_id
-from app.models.ibs_request import IBSRequest
-from app.models.ibs_request_action import IBSRequestAction
-from app.models.ibs_request_action_track import IBSRequestActionTrack
 from app.models.product import Product
 from app.models.ticket import Ticket
 from app.models.ticket_package import TicketPackage
@@ -74,6 +68,7 @@ from app.services.package_actionability import (
     track_non_actionable_reason,
 )
 from app.services.product_service import lifecycle_phase_expression
+from app.services.ticket_deadline_expressions import active_release_request_exists
 from app.services.ticket_deadlines import (
     DueDates,
     TrackMilestones,
@@ -82,12 +77,6 @@ from app.services.ticket_deadlines import (
 )
 from app.services.ticket_severity import resolved_severity_expression
 from app.services.ticket_visibility import TicketCaller, ticket_visibility_condition
-
-ACTIVE_RELEASE_REQUEST_STATES: Final = frozenset(
-    {IBSRequestState.NEW, IBSRequestState.REVIEW, IBSRequestState.ACCEPTED}
-)
-"""`IBSRequest.state` values whose correlated `maintenance_release` action
-is `um` completion evidence (ticket-deadlines.md, Completion Evidence)."""
 
 _EMPTY_JSON_ARRAY: Final[ColumnElement[Any]] = literal_column("'[]'::json")
 _CODE_POINT_COLLATION: Final = "C"
@@ -188,27 +177,6 @@ def _json_array(
     )
 
 
-def _has_active_release_request() -> ColumnElement[bool]:
-    """Correlated `um` RR evidence of the enclosing `TicketPackageTrack`."""
-    return exists(
-        select(IBSRequestActionTrack.id)
-        .join(
-            IBSRequestAction,
-            IBSRequestAction.id == IBSRequestActionTrack.ibs_request_action_id,
-        )
-        .join(IBSRequest, IBSRequest.id == IBSRequestAction.ibs_request_id)
-        .where(
-            IBSRequestActionTrack.ticket_package_track_id == TicketPackageTrack.id,
-            IBSRequestAction.action_type
-            == IBSRequestActionType.MAINTENANCE_RELEASE.value,
-            IBSRequest.state.in_(
-                sorted(state.value for state in ACTIVE_RELEASE_REQUEST_STATES)
-            ),
-        )
-        .correlate_except(IBSRequestActionTrack, IBSRequestAction, IBSRequest)
-    )
-
-
 def _products_json(evaluation_date: date) -> ColumnElement[Any]:
     """Products of the enclosing track, ordered by CPE code point then id."""
     product = func.json_build_object(
@@ -265,7 +233,7 @@ def _tracks_json(evaluation_date: date) -> ColumnElement[Any]:
         _key("actionable"),
         track_actionable_expression(evaluation_date),
         _key("has_active_release_request"),
-        _has_active_release_request(),
+        active_release_request_exists(),
         _key("products"),
         _products_json(evaluation_date),
     )

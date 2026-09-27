@@ -1,36 +1,46 @@
 """Shared input matrix for Ticket deadline and track milestone rules.
 
-`docs/features/tickets/ticket-deadlines.md` (Testing Requirements 10)
+`docs/features/tickets/ticket-deadlines.md` (Testing Requirement 10)
 requires the pure functions and the service-layer SQL expressions to be
 driven from one shared input matrix, so that a new evidence case exercises
-both. This module is that matrix: the pure-function tests
-(`tests/test_services/test_ticket_deadlines.py`) consume it now, and the
-SQL/pure equivalence test consumes the same cases once the SQL expressions
-exist.
+both. This module is that matrix. Its consumers are:
 
-Each `DeadlineCase` holds the complete inputs of `compute_due_dates()` and
-`resolve_track_milestones()` plus the expected results transcribed
-independently from the specification (never computed by the module under
-test). A persistence-backed consumer builds rows whose derived values equal
-the case inputs; `DeadlineCase.expected_due_dates()` gives the expected
-absolute UTC due dates.
+- the pure-function tests (`tests/test_services/test_ticket_deadlines.py`);
+- the package-tree projection over persisted rows
+  (`tests/test_services/test_package_service.py`);
+- the SQL/pure parity test over persisted rows
+  (`tests/test_services/test_ticket_deadline_expressions.py`).
 
-Inputs that the pure function receives as already-derived booleans
-(`track_actionable`, `has_actionable_eligible_product`,
-`all_actionable_eligible_released`, `has_active_release_request`) are the
-seams where a persistence consumer supplies the corresponding data (for
-example, every `IBSRequest.state` maps to `has_active_release_request`).
+Each `DeadlineCase` describes one Ticket with one package and one track in
+terms of **persisted evidence**: Ticket severity, status, and CVE presence;
+the package and track exclusion markers; the track's workflow type,
+affectedness, and delivery status; its Product occurrences
+(`ProductEvidence`); and the IBS request actions linked to it or to another
+track (`RequestEvidence`). `tests/support/deadline_persistence.py` builds
+exactly these rows. The already-derived inputs of
+`resolve_track_milestones()` (`track_actionable`,
+`has_actionable_eligible_product`, `all_actionable_eligible_released`,
+`has_active_release_request`) are derived here from the same evidence by an
+oracle transcribed from the specifications (package-model.md, Derived
+Actionability; ticket-deadlines.md, Completion Evidence), never computed by
+the modules under test.
+
+Expected results are transcribed independently from the specification.
+`DeadlineCase.expected_due_dates()` gives the expected absolute UTC due
+dates.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Final
 
 from app.core.enums import (
     CurrentPhase,
     DeliveryStatus,
+    IBSRequestActionType,
+    IBSRequestState,
     MilestoneStatus,
     PackageStatus,
     Severity,
@@ -62,6 +72,23 @@ O = MilestoneStatus.OVERDUE  # noqa: E741 - mirrors the specification value
 NA = MilestoneStatus.NOT_APPLICABLE
 N = None  # the `null` milestone status
 
+RELEASE = IBSRequestActionType.MAINTENANCE_RELEASE
+INCIDENT = IBSRequestActionType.MAINTENANCE_INCIDENT
+
+ACTIVE_RELEASE_REQUEST_STATES: Final = frozenset(
+    {IBSRequestState.NEW, IBSRequestState.REVIEW, IBSRequestState.ACCEPTED}
+)
+"""Transcribed from ticket-deadlines.md (Completion Evidence, `um`)."""
+
+INACTIVE_RELEASE_REQUEST_STATES: Final = frozenset(
+    {
+        IBSRequestState.DECLINED,
+        IBSRequestState.REVOKED,
+        IBSRequestState.SUPERSEDED,
+        IBSRequestState.DELETED,
+    }
+)
+
 Statuses = tuple[
     MilestoneStatus | None,
     MilestoneStatus | None,
@@ -71,8 +98,33 @@ Statuses = tuple[
 
 
 @dataclass(frozen=True, slots=True)
+class ProductEvidence:
+    """One Product occurrence under the case's track.
+
+    `eol`: the catalog Product's lifecycle phase is `eol` on the evaluation
+    date (otherwise it is in General Support). `excluded`: the occurrence's
+    own `deleted_at` is set. `released`: `released_at` is set.
+    """
+
+    eligible: bool = True
+    released: bool = False
+    excluded: bool = False
+    eol: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class RequestEvidence:
+    """One IBS request action linked to the case's track, or to another
+    track when `correlated` is false."""
+
+    action_type: IBSRequestActionType = RELEASE
+    state: IBSRequestState = IBSRequestState.NEW
+    correlated: bool = True
+
+
+@dataclass(frozen=True, slots=True)
 class DeadlineCase:
-    """One matrix row: inputs and expected results.
+    """One matrix row: persisted evidence and expected results.
 
     `expected_offsets_days` is `None` when no due dates exist; otherwise
     the (triage, submission, um, qa, release) offsets from `created_at`.
@@ -89,13 +141,56 @@ class DeadlineCase:
     ticket_has_cve: bool = True
     workflow_type: WorkflowType = WorkflowType.IBS
     track_status: PackageStatus = PackageStatus.AFFECTED
-    track_actionable: bool = True
-    has_actionable_eligible_product: bool = True
-    all_actionable_eligible_released: bool = False
     delivery_status: DeliveryStatus = DeliveryStatus.PENDING
-    has_active_release_request: bool = False
+    package_excluded: bool = False
+    track_excluded: bool = False
+    products: tuple[ProductEvidence, ...] = (ProductEvidence(),)
+    requests: tuple[RequestEvidence, ...] = ()
     evaluation_instant: datetime = BEFORE_ANY_DUE
     created_at: datetime = field(default=CREATED_AT)
+
+    # --- Oracle: derived inputs of `resolve_track_milestones()` -----------
+
+    def _product_actionable(self, product: ProductEvidence) -> bool:
+        # package-model.md (Derived Actionability): all three direct markers
+        # clear and the lifecycle phase is not `eol`.
+        return not (
+            self.package_excluded
+            or self.track_excluded
+            or product.excluded
+            or product.eol
+        )
+
+    def _actionable_eligible(self) -> list[ProductEvidence]:
+        return [p for p in self.products if self._product_actionable(p) and p.eligible]
+
+    @property
+    def track_actionable(self) -> bool:
+        """Both direct markers clear and at least one actionable Product."""
+        return (
+            not self.package_excluded
+            and not self.track_excluded
+            and any(self._product_actionable(p) for p in self.products)
+        )
+
+    @property
+    def has_actionable_eligible_product(self) -> bool:
+        return bool(self._actionable_eligible())
+
+    @property
+    def all_actionable_eligible_released(self) -> bool:
+        return all(p.released for p in self._actionable_eligible())
+
+    @property
+    def has_active_release_request(self) -> bool:
+        return any(
+            r.correlated
+            and r.action_type is RELEASE
+            and r.state in ACTIVE_RELEASE_REQUEST_STATES
+            for r in self.requests
+        )
+
+    # --- Function arguments -------------------------------------------------
 
     def due_dates_kwargs(self) -> dict[str, Any]:
         """Keyword arguments of `compute_due_dates()`."""
@@ -129,7 +224,18 @@ class DeadlineCase:
         )
 
 
+EXPECTATION_FIELDS: Final = frozenset(
+    {"id", "expected_offsets_days", "expected_statuses", "expected_current_phase"}
+)
+"""`DeadlineCase` fields that are not inputs."""
+
 _T30 = TIER_30_OFFSETS_DAYS
+_UNRELEASED = ProductEvidence()
+_RELEASED = ProductEvidence(released=True)
+_NOT_ELIGIBLE = ProductEvidence(eligible=False)
+_EOL = ProductEvidence(eol=True)
+_EXCLUDED = ProductEvidence(excluded=True)
+_ACTIVE_RR = RequestEvidence()
 
 DEADLINE_CASES: tuple[DeadlineCase, ...] = (
     # --- Rule 1: no SLA ----------------------------------------------------
@@ -160,9 +266,27 @@ DEADLINE_CASES: tuple[DeadlineCase, ...] = (
         expected_current_phase=None,
     ),
     DeadlineCase(
+        id="no_sla_cve_less_severity_manual_none_label",
+        ticket_has_cve=False,
+        severity=Severity.NONE,
+        track_status=PackageStatus.ANALYSIS,
+        evaluation_instant=AFTER_ALL_DUE,
+        expected_offsets_days=None,
+        expected_statuses=(N, N, N, N),
+        expected_current_phase=None,
+    ),
+    DeadlineCase(
         id="no_sla_severity_none_label_non_actionable",
         severity=Severity.NONE,
-        track_actionable=False,
+        track_excluded=True,
+        expected_offsets_days=None,
+        expected_statuses=(N, N, N, N),
+        expected_current_phase=None,
+    ),
+    DeadlineCase(
+        id="no_sla_manual_zone_precedes_non_actionable",
+        ticket_status=TicketStatus.IGNORED,
+        track_excluded=True,
         expected_offsets_days=None,
         expected_statuses=(N, N, N, N),
         expected_current_phase=None,
@@ -214,7 +338,7 @@ DEADLINE_CASES: tuple[DeadlineCase, ...] = (
         id="dates_exist_for_resolved_ticket",
         ticket_status=TicketStatus.RESOLVED,
         track_status=PackageStatus.FIXED,
-        all_actionable_eligible_released=True,
+        products=(_RELEASED,),
         delivery_status=DeliveryStatus.RELEASED,
         evaluation_instant=AFTER_ALL_DUE,
         expected_offsets_days=_T30,
@@ -223,8 +347,8 @@ DEADLINE_CASES: tuple[DeadlineCase, ...] = (
     ),
     # --- Rule 2: non-actionable track ---------------------------------------
     DeadlineCase(
-        id="non_actionable_track_all_not_applicable",
-        track_actionable=False,
+        id="non_actionable_track_excluded",
+        track_excluded=True,
         track_status=PackageStatus.ANALYSIS,
         evaluation_instant=AFTER_ALL_DUE,
         expected_offsets_days=_T30,
@@ -232,8 +356,31 @@ DEADLINE_CASES: tuple[DeadlineCase, ...] = (
         expected_current_phase=CurrentPhase.DONE,
     ),
     DeadlineCase(
+        id="non_actionable_package_excluded",
+        package_excluded=True,
+        requests=(_ACTIVE_RR,),
+        expected_offsets_days=_T30,
+        expected_statuses=(NA, NA, NA, NA),
+        expected_current_phase=CurrentPhase.DONE,
+    ),
+    DeadlineCase(
+        id="non_actionable_all_products_eol",
+        products=(_EOL, ProductEvidence(eol=True, eligible=False)),
+        evaluation_instant=AFTER_ALL_DUE,
+        expected_offsets_days=_T30,
+        expected_statuses=(NA, NA, NA, NA),
+        expected_current_phase=CurrentPhase.DONE,
+    ),
+    DeadlineCase(
+        id="non_actionable_all_products_excluded",
+        products=(_EXCLUDED,),
+        expected_offsets_days=_T30,
+        expected_statuses=(NA, NA, NA, NA),
+        expected_current_phase=CurrentPhase.DONE,
+    ),
+    DeadlineCase(
         id="non_actionable_git_track_cve_less",
-        track_actionable=False,
+        products=(_EOL,),
         ticket_has_cve=False,
         workflow_type=WorkflowType.GIT,
         expected_offsets_days=_T30,
@@ -264,8 +411,8 @@ DEADLINE_CASES: tuple[DeadlineCase, ...] = (
         workflow_type=WorkflowType.GIT,
         track_status=PackageStatus.ANALYSIS,
         delivery_status=DeliveryStatus.RELEASED,
-        has_active_release_request=True,
-        all_actionable_eligible_released=True,
+        requests=(_ACTIVE_RR,),
+        products=(_RELEASED,),
         evaluation_instant=AFTER_TRIAGE_DUE,
         expected_offsets_days=_T30,
         expected_statuses=(O, N, N, N),
@@ -285,6 +432,9 @@ DEADLINE_CASES: tuple[DeadlineCase, ...] = (
         ticket_has_cve=False,
         severity=None,
         track_status=PackageStatus.FIXED,
+        delivery_status=DeliveryStatus.RELEASED,
+        requests=(_ACTIVE_RR,),
+        products=(_RELEASED,),
         expected_offsets_days=_T30,
         expected_statuses=(D, N, N, N),
         expected_current_phase=None,
@@ -301,7 +451,7 @@ DEADLINE_CASES: tuple[DeadlineCase, ...] = (
     DeadlineCase(
         id="analysis_without_actionable_eligible_product",
         track_status=PackageStatus.ANALYSIS,
-        has_actionable_eligible_product=False,
+        products=(_NOT_ELIGIBLE,),
         evaluation_instant=AFTER_ALL_DUE,
         expected_offsets_days=_T30,
         expected_statuses=(O, NA, NA, NA),
@@ -318,7 +468,7 @@ DEADLINE_CASES: tuple[DeadlineCase, ...] = (
     DeadlineCase(
         id="affected_without_actionable_eligible_product",
         track_status=PackageStatus.AFFECTED,
-        has_actionable_eligible_product=False,
+        products=(_NOT_ELIGIBLE,),
         evaluation_instant=AFTER_ALL_DUE,
         expected_offsets_days=_T30,
         expected_statuses=(D, NA, NA, NA),
@@ -335,7 +485,23 @@ DEADLINE_CASES: tuple[DeadlineCase, ...] = (
     DeadlineCase(
         id="fixed_without_actionable_eligible_product",
         track_status=PackageStatus.FIXED,
-        has_actionable_eligible_product=False,
+        products=(_NOT_ELIGIBLE,),
+        evaluation_instant=AFTER_ALL_DUE,
+        expected_offsets_days=_T30,
+        expected_statuses=(D, NA, NA, NA),
+        expected_current_phase=CurrentPhase.DONE,
+    ),
+    DeadlineCase(
+        id="only_eligible_product_is_eol",
+        products=(_EOL, _NOT_ELIGIBLE),
+        evaluation_instant=AFTER_ALL_DUE,
+        expected_offsets_days=_T30,
+        expected_statuses=(D, NA, NA, NA),
+        expected_current_phase=CurrentPhase.DONE,
+    ),
+    DeadlineCase(
+        id="only_eligible_product_is_excluded",
+        products=(_EXCLUDED, _NOT_ELIGIBLE),
         evaluation_instant=AFTER_ALL_DUE,
         expected_offsets_days=_T30,
         expected_statuses=(D, NA, NA, NA),
@@ -360,9 +526,9 @@ DEADLINE_CASES: tuple[DeadlineCase, ...] = (
     DeadlineCase(
         id="not_applicable_phase_evidence_does_not_complete_triage",
         track_status=PackageStatus.ANALYSIS,
-        has_actionable_eligible_product=False,
+        products=(_NOT_ELIGIBLE,),
         delivery_status=DeliveryStatus.RELEASED,
-        has_active_release_request=True,
+        requests=(_ACTIVE_RR,),
         evaluation_instant=AFTER_TRIAGE_DUE,
         expected_offsets_days=_T30,
         expected_statuses=(O, NA, NA, NA),
@@ -378,10 +544,11 @@ DEADLINE_CASES: tuple[DeadlineCase, ...] = (
         expected_current_phase=CurrentPhase.SUBMISSION,
     ),
     DeadlineCase(
-        # An uncorrelated RR or one in `declined`/`revoked`/`superseded`/
-        # `deleted` state is represented by has_active_release_request=False.
-        id="submission_evidence_in_progress_only",
+        # SR-only evidence: a correlated `maintenance_incident` action is not
+        # `um` evidence; submission is completed by the delivery status.
+        id="submission_evidence_in_progress_with_sr_only",
         delivery_status=DeliveryStatus.IN_PROGRESS,
+        requests=(RequestEvidence(action_type=INCIDENT, state=IBSRequestState.NEW),),
         evaluation_instant=AFTER_UM_DUE,
         expected_offsets_days=_T30,
         expected_statuses=(D, D, O, P),
@@ -396,10 +563,9 @@ DEADLINE_CASES: tuple[DeadlineCase, ...] = (
         expected_current_phase=CurrentPhase.QA,
     ),
     DeadlineCase(
-        # An RR in `new`, `review`, or `accepted` state correlated to the track.
         id="um_evidence_active_release_request",
         delivery_status=DeliveryStatus.IN_PROGRESS,
-        has_active_release_request=True,
+        requests=(_ACTIVE_RR,),
         evaluation_instant=AFTER_ALL_DUE,
         expected_offsets_days=_T30,
         expected_statuses=(D, D, D, O),
@@ -413,12 +579,75 @@ DEADLINE_CASES: tuple[DeadlineCase, ...] = (
         expected_statuses=(D, D, D, O),
         expected_current_phase=CurrentPhase.QA,
     ),
+    # One correlated `maintenance_release` action per request state.
+    *(
+        DeadlineCase(
+            id=f"correlated_rr_{state.value}_is_um_evidence",
+            requests=(RequestEvidence(state=state),),
+            expected_offsets_days=_T30,
+            expected_statuses=(D, D, D, P),
+            expected_current_phase=CurrentPhase.QA,
+        )
+        for state in sorted(ACTIVE_RELEASE_REQUEST_STATES)
+    ),
+    *(
+        DeadlineCase(
+            id=f"correlated_rr_{state.value}_is_not_um_evidence",
+            requests=(RequestEvidence(state=state),),
+            expected_offsets_days=_T30,
+            expected_statuses=(D, P, P, P),
+            expected_current_phase=CurrentPhase.SUBMISSION,
+        )
+        for state in sorted(INACTIVE_RELEASE_REQUEST_STATES)
+    ),
+    DeadlineCase(
+        id="uncorrelated_active_rr_is_not_um_evidence",
+        requests=(RequestEvidence(correlated=False),),
+        evaluation_instant=AFTER_ALL_DUE,
+        expected_offsets_days=_T30,
+        expected_statuses=(D, O, O, O),
+        expected_current_phase=CurrentPhase.SUBMISSION,
+    ),
+    DeadlineCase(
+        id="correlated_accepted_sr_only_is_not_um_evidence",
+        requests=(
+            RequestEvidence(action_type=INCIDENT, state=IBSRequestState.ACCEPTED),
+        ),
+        expected_offsets_days=_T30,
+        expected_statuses=(D, P, P, P),
+        expected_current_phase=CurrentPhase.SUBMISSION,
+    ),
+    DeadlineCase(
+        id="inactive_and_active_rr_is_um_evidence",
+        requests=(
+            RequestEvidence(state=IBSRequestState.DECLINED),
+            RequestEvidence(state=IBSRequestState.REVIEW),
+        ),
+        expected_offsets_days=_T30,
+        expected_statuses=(D, D, D, P),
+        expected_current_phase=CurrentPhase.QA,
+    ),
     DeadlineCase(
         id="qa_evidence_all_actionable_eligible_released",
         track_status=PackageStatus.FIXED,
         delivery_status=DeliveryStatus.RELEASED,
-        all_actionable_eligible_released=True,
+        products=(_RELEASED,),
         evaluation_instant=AFTER_ALL_DUE,
+        expected_offsets_days=_T30,
+        expected_statuses=(D, D, D, D),
+        expected_current_phase=CurrentPhase.DONE,
+    ),
+    DeadlineCase(
+        id="qa_one_actionable_eligible_product_unreleased",
+        products=(_RELEASED, _UNRELEASED),
+        evaluation_instant=AFTER_ALL_DUE,
+        expected_offsets_days=_T30,
+        expected_statuses=(D, O, O, O),
+        expected_current_phase=CurrentPhase.SUBMISSION,
+    ),
+    DeadlineCase(
+        id="qa_unreleased_excluded_and_eol_products_are_ignored",
+        products=(_RELEASED, _EXCLUDED, _EOL),
         expected_offsets_days=_T30,
         expected_statuses=(D, D, D, D),
         expected_current_phase=CurrentPhase.DONE,
@@ -428,7 +657,7 @@ DEADLINE_CASES: tuple[DeadlineCase, ...] = (
         id="monotonic_release_completes_every_earlier_phase",
         track_status=PackageStatus.ANALYSIS,
         delivery_status=DeliveryStatus.PENDING,
-        all_actionable_eligible_released=True,
+        products=(_RELEASED, _NOT_ELIGIBLE),
         evaluation_instant=AFTER_ALL_DUE,
         expected_offsets_days=_T30,
         expected_statuses=(D, D, D, D),
@@ -437,7 +666,7 @@ DEADLINE_CASES: tuple[DeadlineCase, ...] = (
     DeadlineCase(
         id="monotonic_rr_completes_submission_and_triage",
         track_status=PackageStatus.ANALYSIS,
-        has_active_release_request=True,
+        requests=(_ACTIVE_RR,),
         evaluation_instant=AFTER_UM_DUE,
         expected_offsets_days=_T30,
         expected_statuses=(D, D, D, P),
@@ -468,6 +697,20 @@ DEADLINE_CASES: tuple[DeadlineCase, ...] = (
         expected_offsets_days=_T30,
         expected_statuses=(O, P, P, P),
         expected_current_phase=CurrentPhase.TRIAGE,
+    ),
+    DeadlineCase(
+        id="later_due_at_equal_to_instant_is_pending",
+        evaluation_instant=CREATED_AT + timedelta(days=18),
+        expected_offsets_days=_T30,
+        expected_statuses=(D, P, P, P),
+        expected_current_phase=CurrentPhase.SUBMISSION,
+    ),
+    DeadlineCase(
+        id="later_due_at_one_microsecond_before_instant_is_overdue",
+        evaluation_instant=CREATED_AT + timedelta(days=18, microseconds=1),
+        expected_offsets_days=_T30,
+        expected_statuses=(D, O, P, P),
+        expected_current_phase=CurrentPhase.SUBMISSION,
     ),
     # --- Current phase ---------------------------------------------------------
     DeadlineCase(
