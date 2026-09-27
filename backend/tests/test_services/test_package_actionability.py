@@ -30,7 +30,7 @@ from datetime import UTC, date, datetime
 from typing import Any
 
 import pytest
-from sqlalchemy import insert, select
+from sqlalchemy import insert, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -445,9 +445,29 @@ def _grid_date_sets() -> list[DateSet]:
     )
 
 
+_GRID_TABLES = tuple(
+    model.__tablename__
+    for model in (Product, TicketPackage, TicketPackageTrack, TicketPackageProduct)
+)
+
+
 @pytest.fixture
 async def grid_chains(db_session: AsyncSession, matrix_ticket: Ticket) -> list[Chain]:
-    return await _persist_chains(db_session, matrix_ticket.id, _grid_date_sets())
+    """Persist the grid and analyze its tables in the test transaction.
+
+    Earlier tests insert rows into these tables and roll them back; an
+    autoanalyze that runs between tests can record `reltuples = 0` over
+    non-empty pages. The planner then estimates one row per table,
+    evaluates the correlated `EXISTS` levels as full-scan nested loops,
+    and a single grid query runs for minutes. `ANALYZE` inside
+    the transaction samples the uncommitted grid rows, and its lock,
+    held until rollback, keeps autoanalyze from replacing those
+    statistics while the test runs.
+    """
+    chains = await _persist_chains(db_session, matrix_ticket.id, _grid_date_sets())
+    for table in _GRID_TABLES:
+        await db_session.execute(text(f"ANALYZE {table}"))
+    return chains
 
 
 @pytest.mark.integration
