@@ -8,7 +8,9 @@ for the complete contract.
 Every function is Category B: no database access, write, audit, lock, or
 external call. Deadlines are informational only and are never persisted.
 This module imports no other service module, so `ticket_service` and
-`package_service` may both use it without a dependency cycle.
+`package_service` may both use it without a dependency cycle. Its SQL
+twin, `app.services.ticket_deadline_expressions`, builds the equivalent
+PostgreSQL expressions from the same public specification constants.
 
 Time handling follows `docs/conventions.md` (Timestamps & Timezones):
 naive datetimes are rejected with `ValueError`, and aware inputs are
@@ -29,6 +31,7 @@ from typing import Final
 from app.core.enums import (
     CurrentPhase,
     DeliveryStatus,
+    IBSRequestState,
     MilestonePhase,
     MilestoneStatus,
     PackageStatus,
@@ -64,15 +67,28 @@ Invariants: every share is an integer of at least 1 and the shares sum to
 exactly 100, so the QA milestone always equals the final release deadline.
 """
 
-_SECONDS_PER_DAY_PERCENT: Final = 864  # 86 400 seconds per day / 100 percent
+SECONDS_PER_DAY_PERCENT: Final = 864
+"""Seconds in one percent of a day (86 400 / 100): the Formula's unit."""
 
-_MANUAL_ZONE: Final = frozenset({TicketStatus.IGNORED, TicketStatus.DUPLICATED})
-_LATER_PHASE_APPLICABLE_STATUSES: Final = frozenset(
+MANUAL_ZONE_STATUSES: Final = frozenset({TicketStatus.IGNORED, TicketStatus.DUPLICATED})
+"""Ticket statuses with no due dates and no milestones (Null Due Dates)."""
+
+LATER_PHASE_APPLICABLE_STATUSES: Final = frozenset(
     {PackageStatus.ANALYSIS, PackageStatus.AFFECTED, PackageStatus.FIXED}
 )
-_SUBMITTED_DELIVERY_STATUSES: Final = frozenset(
+"""Track statuses under which `submission`, `um`, and `qa` can apply."""
+
+SUBMITTED_DELIVERY_STATUSES: Final = frozenset(
     {DeliveryStatus.IN_PROGRESS, DeliveryStatus.RELEASED}
 )
+"""Track delivery statuses that are `submission` completion evidence."""
+
+ACTIVE_RELEASE_REQUEST_STATES: Final = frozenset(
+    {IBSRequestState.NEW, IBSRequestState.REVIEW, IBSRequestState.ACCEPTED}
+)
+"""`IBSRequest.state` values whose correlated `maintenance_release` action
+is `um` completion evidence (Completion Evidence)."""
+
 _PHASES: Final = tuple(MilestonePhase)
 
 
@@ -159,7 +175,7 @@ def compute_due_dates(
     """
     _require_aware(created_at, "created_at")
     sla_days = resolve_sla_days(severity)
-    if ticket_status in _MANUAL_ZONE or sla_days is None:
+    if ticket_status in MANUAL_ZONE_STATUSES or sla_days is None:
         return None
 
     start = created_at.astimezone(UTC)
@@ -168,7 +184,7 @@ def compute_due_dates(
     for phase in _PHASES:
         cumulative += PHASE_SHARES[phase]
         due[phase] = start + timedelta(
-            seconds=sla_days * _SECONDS_PER_DAY_PERCENT * cumulative
+            seconds=sla_days * SECONDS_PER_DAY_PERCENT * cumulative
         )
     return DueDates(
         triage=due[MilestonePhase.TRIAGE],
@@ -234,12 +250,12 @@ def resolve_track_milestones(
 
     later_observable = ticket_has_cve and workflow_type != WorkflowType.GIT
     later_applicable = (
-        track_status in _LATER_PHASE_APPLICABLE_STATUSES
+        track_status in LATER_PHASE_APPLICABLE_STATUSES
         and has_actionable_eligible_product
     )
     evidence: dict[MilestonePhase, bool] = {
         MilestonePhase.TRIAGE: track_status != PackageStatus.ANALYSIS,
-        MilestonePhase.SUBMISSION: delivery_status in _SUBMITTED_DELIVERY_STATUSES,
+        MilestonePhase.SUBMISSION: delivery_status in SUBMITTED_DELIVERY_STATUSES,
         MilestonePhase.UM: (
             has_active_release_request or delivery_status == DeliveryStatus.RELEASED
         ),

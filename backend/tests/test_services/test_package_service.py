@@ -13,7 +13,9 @@ Owning specifications:
 - `docs/features/tickets/ticket-deadlines.md` (Due Dates, Evaluation
   Instant, Track Milestones, Testing Requirements 4-7, 11, 12 track
   parts): per-track due dates, milestones, and `current_phase` over
-  persisted Ticket, track, Product, and IBS request evidence rows.
+  persisted Ticket, track, Product, and IBS request evidence rows, driven
+  by the shared matrix `tests/support/deadline_matrix.py` (also consumed
+  by the pure-function and SQL parity tests).
 - `docs/features/platform/testing-strategy.md` (Ticket Accessibility >
   Single, nested, and assembled reads; Ticket identifier and read-contract
   coverage; package query N+1 checks).
@@ -27,7 +29,6 @@ from __future__ import annotations
 import inspect
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
-from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock
@@ -66,7 +67,6 @@ from app.models.user import User
 from app.models.user_role import UserRole
 from app.services import package_service
 from app.services.package_service import (
-    ACTIVE_RELEASE_REQUEST_STATES,
     PackageProjection,
     ProductProjection,
     TicketTreeContext,
@@ -77,25 +77,39 @@ from app.services.package_service import (
     ticket_tree_context_columns,
     ticket_tree_context_from_row,
 )
-from app.services.ticket_deadlines import DueDates, TrackMilestones
+from app.services.ticket_deadlines import (
+    ACTIVE_RELEASE_REQUEST_STATES,
+    DueDates,
+    TrackMilestones,
+)
 from app.services.ticket_visibility import ANONYMOUS_CALLER, TicketCaller
+from tests.support.deadline_matrix import (
+    ACTIVE_RELEASE_REQUEST_STATES as MATRIX_ACTIVE_STATES,
+)
 from tests.support.deadline_matrix import (
     AFTER_ALL_DUE,
     AT_TRIAGE_DUE,
     BEFORE_ANY_DUE,
     CREATED_AT,
-    JUST_AFTER_TRIAGE_DUE,
+    DEADLINE_CASES,
+    RELEASE,
     TIER_30_OFFSETS_DAYS,
+    DeadlineCase,
+    ProductEvidence,
+    RequestEvidence,
+)
+from tests.support.deadline_persistence import (
+    EXCLUDED_AT,
+    GS_FUTURE,
+    GS_PAST,
+    RELEASED_AT,
+    DeadlineWorld,
 )
 from tests.support.module_imports import APP_ROOT, imported_modules
 
 Factory = Callable[..., Awaitable[Any]]
 
 ALL_SCOPE = TicketCaller.authenticated(uuid.uuid4(), Scope.ALL)
-EXCLUDED_AT = datetime(2026, 3, 11, 9, 0, tzinfo=UTC)
-RELEASED_AT = datetime(2026, 3, 12, 16, 45, 30, 250000, tzinfo=UTC)
-GS_PAST = date(2020, 1, 1)
-GS_FUTURE = date(2030, 1, 1)
 
 D = MilestoneStatus.DONE
 P = MilestoneStatus.PENDING
@@ -612,381 +626,27 @@ class TestResolutionAndAccessibility:
 # ---------------------------------------------------------------------------
 
 
-@dataclass(frozen=True, slots=True)
-class ProductSpec:
-    eol: bool = False
-    eligible: bool = True
-    released: bool = False
-    excluded: bool = False
-
-
-@dataclass(frozen=True, slots=True)
-class EvidenceSpec:
-    """One IBS request action correlated (or not) to the track."""
-
-    action_type: IBSRequestActionType = IBSRequestActionType.MAINTENANCE_RELEASE
-    state: IBSRequestState = IBSRequestState.NEW
-    correlated: bool = True
-
-
-@dataclass(frozen=True, slots=True)
-class MilestoneCase:
-    id: str
-    expected: tuple[
-        MilestoneStatus | None,
-        MilestoneStatus | None,
-        MilestoneStatus | None,
-        MilestoneStatus | None,
-    ]
-    expected_phase: CurrentPhase | None
-    expect_due_dates: bool = True
-    ticket_status: TicketStatus = TicketStatus.ANALYSIS
-    has_cve: bool = True
-    severity: Severity | None = Severity.HIGH
-    workflow_type: WorkflowType = WorkflowType.IBS
-    track_status: PackageStatus = PackageStatus.AFFECTED
-    delivery_status: DeliveryStatus = DeliveryStatus.PENDING
-    package_excluded: bool = False
-    track_excluded: bool = False
-    products: tuple[ProductSpec, ...] = (ProductSpec(),)
-    evidence: tuple[EvidenceSpec, ...] = ()
-    instant: datetime = BEFORE_ANY_DUE
-
-
-_RELEASE = IBSRequestActionType.MAINTENANCE_RELEASE
-_INCIDENT = IBSRequestActionType.MAINTENANCE_INCIDENT
-_ACTIVE_STATES = (IBSRequestState.NEW, IBSRequestState.REVIEW, IBSRequestState.ACCEPTED)
-_INACTIVE_STATES = (
-    IBSRequestState.DECLINED,
-    IBSRequestState.REVOKED,
-    IBSRequestState.SUPERSEDED,
-    IBSRequestState.DELETED,
-)
-
-MILESTONE_CASES: tuple[MilestoneCase, ...] = (
-    MilestoneCase("affected_no_evidence", (D, P, P, P), CurrentPhase.SUBMISSION),
-    MilestoneCase(
-        "analysis_no_evidence",
-        (P, P, P, P),
-        CurrentPhase.TRIAGE,
-        track_status=PackageStatus.ANALYSIS,
-    ),
-    MilestoneCase(
-        "fixed_no_evidence",
-        (D, P, P, P),
-        CurrentPhase.SUBMISSION,
-        track_status=PackageStatus.FIXED,
-    ),
-    # Rule 2: non-actionable tracks.
-    MilestoneCase(
-        "track_excluded", (NA, NA, NA, NA), CurrentPhase.DONE, track_excluded=True
-    ),
-    MilestoneCase(
-        "package_excluded", (NA, NA, NA, NA), CurrentPhase.DONE, package_excluded=True
-    ),
-    MilestoneCase(
-        "all_products_eol",
-        (NA, NA, NA, NA),
-        CurrentPhase.DONE,
-        products=(ProductSpec(eol=True), ProductSpec(eol=True)),
-    ),
-    MilestoneCase(
-        "all_products_excluded",
-        (NA, NA, NA, NA),
-        CurrentPhase.DONE,
-        products=(ProductSpec(excluded=True),),
-    ),
-    # Observability.
-    MilestoneCase(
-        "git_track",
-        (D, N, N, N),
-        None,
-        workflow_type=WorkflowType.GIT,
-        delivery_status=DeliveryStatus.RELEASED,
-    ),
-    MilestoneCase(
-        "git_track_analysis",
-        (P, N, N, N),
-        CurrentPhase.TRIAGE,
-        workflow_type=WorkflowType.GIT,
-        track_status=PackageStatus.ANALYSIS,
-    ),
-    MilestoneCase("cve_less_ticket", (D, N, N, N), None, has_cve=False),
-    # Applicability.
-    MilestoneCase(
-        "not_affected",
-        (D, NA, NA, NA),
-        CurrentPhase.DONE,
-        track_status=PackageStatus.NOT_AFFECTED,
-    ),
-    MilestoneCase(
-        "wont_fix",
-        (D, NA, NA, NA),
-        CurrentPhase.DONE,
-        track_status=PackageStatus.WONT_FIX,
-    ),
-    MilestoneCase(
-        "no_eligible_product",
-        (D, NA, NA, NA),
-        CurrentPhase.DONE,
-        products=(ProductSpec(eligible=False),),
-    ),
-    MilestoneCase(
-        "only_eligible_product_is_eol",
-        (D, NA, NA, NA),
-        CurrentPhase.DONE,
-        products=(ProductSpec(eol=True), ProductSpec(eligible=False)),
-    ),
-    MilestoneCase(
-        "only_eligible_product_is_excluded",
-        (D, NA, NA, NA),
-        CurrentPhase.DONE,
-        products=(ProductSpec(excluded=True), ProductSpec(eligible=False)),
-    ),
-    # um RR evidence by request state.
-    *(
-        MilestoneCase(
-            f"correlated_rr_{state.value}",
-            (D, D, D, P),
-            CurrentPhase.QA,
-            evidence=(EvidenceSpec(state=state),),
-        )
-        for state in _ACTIVE_STATES
-    ),
-    *(
-        MilestoneCase(
-            f"correlated_rr_{state.value}",
-            (D, P, P, P),
-            CurrentPhase.SUBMISSION,
-            evidence=(EvidenceSpec(state=state),),
-        )
-        for state in _INACTIVE_STATES
-    ),
-    MilestoneCase(
-        "uncorrelated_active_rr",
-        (D, P, P, P),
-        CurrentPhase.SUBMISSION,
-        evidence=(EvidenceSpec(correlated=False),),
-    ),
-    MilestoneCase(
-        "correlated_accepted_sr_only",
-        (D, P, P, P),
-        CurrentPhase.SUBMISSION,
-        evidence=(EvidenceSpec(action_type=_INCIDENT, state=IBSRequestState.ACCEPTED),),
-    ),
-    MilestoneCase(
-        "sr_evidence_in_progress",
-        (D, D, P, P),
-        CurrentPhase.UM,
-        delivery_status=DeliveryStatus.IN_PROGRESS,
-        evidence=(EvidenceSpec(action_type=_INCIDENT, state=IBSRequestState.NEW),),
-    ),
-    MilestoneCase(
-        "inactive_and_active_rr",
-        (D, D, D, P),
-        CurrentPhase.QA,
-        evidence=(
-            EvidenceSpec(state=IBSRequestState.DECLINED),
-            EvidenceSpec(state=IBSRequestState.REVIEW),
-        ),
-    ),
-    MilestoneCase(
-        "active_rr_on_analysis_track_completes_triage",
-        (D, D, D, P),
-        CurrentPhase.QA,
-        track_status=PackageStatus.ANALYSIS,
-        evidence=(EvidenceSpec(state=IBSRequestState.NEW),),
-    ),
-    MilestoneCase(
-        "released_delivery",
-        (D, D, D, P),
-        CurrentPhase.QA,
-        delivery_status=DeliveryStatus.RELEASED,
-    ),
-    # qa evidence and monotonicity.
-    MilestoneCase(
-        "all_actionable_eligible_released_on_analysis_track",
-        (D, D, D, D),
-        CurrentPhase.DONE,
-        track_status=PackageStatus.ANALYSIS,
-        products=(ProductSpec(released=True), ProductSpec(eligible=False)),
-    ),
-    MilestoneCase(
-        "excluded_and_eol_unreleased_products_are_ignored",
-        (D, D, D, D),
-        CurrentPhase.DONE,
-        products=(
-            ProductSpec(released=True),
-            ProductSpec(excluded=True),
-            ProductSpec(eol=True),
-        ),
-    ),
-    MilestoneCase(
-        "one_actionable_eligible_product_unreleased",
-        (D, P, P, P),
-        CurrentPhase.SUBMISSION,
-        products=(ProductSpec(released=True), ProductSpec()),
-    ),
-    # Due-date boundary.
-    MilestoneCase(
-        "triage_due_equal_to_instant_is_pending",
-        (P, P, P, P),
-        CurrentPhase.TRIAGE,
-        track_status=PackageStatus.ANALYSIS,
-        instant=AT_TRIAGE_DUE,
-    ),
-    MilestoneCase(
-        "triage_due_before_instant_is_overdue",
-        (O, P, P, P),
-        CurrentPhase.TRIAGE,
-        track_status=PackageStatus.ANALYSIS,
-        instant=JUST_AFTER_TRIAGE_DUE,
-    ),
-    MilestoneCase(
-        "every_later_due_past",
-        (D, O, O, O),
-        CurrentPhase.SUBMISSION,
-        instant=AFTER_ALL_DUE,
-    ),
-    MilestoneCase(
-        "unresolved_severity_uses_30_day_tier",
-        (D, O, O, O),
-        CurrentPhase.SUBMISSION,
-        severity=None,
-        instant=AFTER_ALL_DUE,
-    ),
-    # Rule 1: no SLA.
-    MilestoneCase(
-        "ignored",
-        (N, N, N, N),
-        None,
-        expect_due_dates=False,
-        ticket_status=TicketStatus.IGNORED,
-        instant=AFTER_ALL_DUE,
-    ),
-    MilestoneCase(
-        "duplicated",
-        (N, N, N, N),
-        None,
-        expect_due_dates=False,
-        ticket_status=TicketStatus.DUPLICATED,
-        instant=AFTER_ALL_DUE,
-    ),
-    MilestoneCase(
-        "severity_none_label",
-        (N, N, N, N),
-        None,
-        expect_due_dates=False,
-        severity=Severity.NONE,
-        instant=AFTER_ALL_DUE,
-    ),
-    MilestoneCase(
-        "no_sla_precedes_non_actionable",
-        (N, N, N, N),
-        None,
-        expect_due_dates=False,
-        ticket_status=TicketStatus.IGNORED,
-        track_excluded=True,
-    ),
-)
-
-
-@dataclass
-class _MilestoneWorld:
-    ticket_factory: Factory
-    cve_factory: Factory
-    product_factory: Factory
-    ticket_package_factory: Factory
-    ticket_package_track_factory: Factory
-    ticket_package_product_factory: Factory
-    ibs_request_factory: Factory
-    ibs_request_action_factory: Factory
-    ibs_request_action_track_factory: Factory
-
-    async def build(self, case: MilestoneCase) -> Ticket:
-        severity = case.severity.value if case.severity is not None else None
-        if case.has_cve:
-            cve = await self.cve_factory(severity=severity)
-            ticket: Ticket = await self.ticket_factory(
-                cve_id=cve.id, status=case.ticket_status.value, created_at=CREATED_AT
-            )
-        else:
-            ticket = await self.ticket_factory(
-                severity_manual=severity,
-                status=case.ticket_status.value,
-                created_at=CREATED_AT,
-            )
-        package = await self.ticket_package_factory(
-            ticket_id=ticket.id,
-            deleted_at=EXCLUDED_AT if case.package_excluded else None,
-        )
-        track = await self.ticket_package_track_factory(
-            ticket_package_id=package.id,
-            workflow_type=case.workflow_type.value,
-            status=case.track_status.value,
-            delivery_status=case.delivery_status.value,
-            deleted_at=EXCLUDED_AT if case.track_excluded else None,
-        )
-        for spec in case.products:
-            product = await self.product_factory(
-                general_support_end_date=GS_PAST if spec.eol else GS_FUTURE
-            )
-            await self.ticket_package_product_factory(
-                ticket_package_track_id=track.id,
-                product_id=product.id,
-                eligible=spec.eligible,
-                released_at=RELEASED_AT if spec.released else None,
-                deleted_at=EXCLUDED_AT if spec.excluded else None,
-            )
-        for evidence in case.evidence:
-            request = await self.ibs_request_factory(state=evidence.state.value)
-            action = await self.ibs_request_action_factory(
-                ibs_request_id=request.id, action_type=evidence.action_type.value
-            )
-            link: dict[str, Any] = {"ibs_request_action_id": action.id}
-            if evidence.correlated:
-                link["ticket_package_track_id"] = track.id
-            await self.ibs_request_action_track_factory(**link)
-        return ticket
-
-
 @pytest.fixture
-def milestone_world(
-    ticket_factory: Factory,
-    cve_factory: Factory,
-    product_factory: Factory,
-    ticket_package_factory: Factory,
-    ticket_package_track_factory: Factory,
-    ticket_package_product_factory: Factory,
-    ibs_request_factory: Factory,
-    ibs_request_action_factory: Factory,
-    ibs_request_action_track_factory: Factory,
-) -> _MilestoneWorld:
-    return _MilestoneWorld(
-        ticket_factory,
-        cve_factory,
-        product_factory,
-        ticket_package_factory,
-        ticket_package_track_factory,
-        ticket_package_product_factory,
-        ibs_request_factory,
-        ibs_request_action_factory,
-        ibs_request_action_track_factory,
-    )
+def deadline_world(request: pytest.FixtureRequest) -> DeadlineWorld:
+    return DeadlineWorld.from_request(request)
 
 
 @pytest.mark.integration
 class TestTrackMilestones:
-    @pytest.mark.parametrize("case", MILESTONE_CASES, ids=lambda case: case.id)
+    @pytest.mark.parametrize("case", DEADLINE_CASES, ids=lambda case: case.id)
     async def test_milestones_current_phase_and_due_dates(
         self,
         db_session: AsyncSession,
-        milestone_world: _MilestoneWorld,
-        case: MilestoneCase,
+        deadline_world: DeadlineWorld,
+        case: DeadlineCase,
     ) -> None:
-        ticket = await milestone_world.build(case)
+        """Shared matrix over persisted rows: the tree derives actionability,
+        actionable eligible Products, and RR evidence from the rows."""
+        persisted = await deadline_world.build(case)
 
-        (package,) = await _read(db_session, ticket, instant=case.instant)
+        (package,) = await _read(
+            db_session, persisted.ticket, instant=case.evaluation_instant
+        )
         (track,) = package.tracks
 
         assert (
@@ -994,51 +654,56 @@ class TestTrackMilestones:
             track.milestones.submission,
             track.milestones.um,
             track.milestones.qa,
-        ) == case.expected
-        assert track.milestones.current_phase == case.expected_phase
-        assert track.due_dates == (_due_dates() if case.expect_due_dates else None)
+        ) == case.expected_statuses
+        assert track.milestones.current_phase == case.expected_current_phase
+        assert track.actionable is case.track_actionable
+        due = track.due_dates
+        assert (
+            None
+            if due is None
+            else (due.triage, due.submission, due.um, due.qa, due.release)
+        ) == case.expected_due_dates()
 
     def test_every_request_state_is_covered(self) -> None:
         covered = {
             evidence.state
-            for case in MILESTONE_CASES
-            for evidence in case.evidence
-            if evidence.action_type is _RELEASE and evidence.correlated
+            for case in DEADLINE_CASES
+            for evidence in case.requests
+            if evidence.action_type is IBSRequestActionType.MAINTENANCE_RELEASE
+            and evidence.correlated
         }
 
         assert covered == set(IBSRequestState)
-        assert set(_ACTIVE_STATES) == ACTIVE_RELEASE_REQUEST_STATES
+        assert MATRIX_ACTIVE_STATES == ACTIVE_RELEASE_REQUEST_STATES
 
     async def test_release_request_evidence_is_scoped_to_its_own_track(
         self,
         db_session: AsyncSession,
-        milestone_world: _MilestoneWorld,
+        deadline_world: DeadlineWorld,
     ) -> None:
         """An active RR correlated to one track of a package is not `um`
         evidence for a sibling track of the same package."""
-        world = milestone_world
-        cve = await world.cve_factory(severity=Severity.HIGH.value)
-        ticket: Ticket = await world.ticket_factory(
-            cve_id=cve.id, created_at=CREATED_AT
-        )
-        package = await world.ticket_package_factory(ticket_id=ticket.id)
-        with_rr = await world.ticket_package_track_factory(
+        f = deadline_world.factory
+        cve = await f("cve_factory")(severity=Severity.HIGH.value)
+        ticket: Ticket = await f("ticket_factory")(cve_id=cve.id, created_at=CREATED_AT)
+        package = await f("ticket_package_factory")(ticket_id=ticket.id)
+        with_rr = await f("ticket_package_track_factory")(
             ticket_package_id=package.id,
             reference="Example:A",
             status=PackageStatus.AFFECTED.value,
         )
-        without_rr = await world.ticket_package_track_factory(
+        without_rr = await f("ticket_package_track_factory")(
             ticket_package_id=package.id,
             reference="Example:B",
             status=PackageStatus.AFFECTED.value,
         )
         for track in (with_rr, without_rr):
-            await world.ticket_package_product_factory(ticket_package_track_id=track.id)
-        request = await world.ibs_request_factory(state=IBSRequestState.NEW.value)
-        action = await world.ibs_request_action_factory(
-            ibs_request_id=request.id, action_type=_RELEASE.value
+            await f("ticket_package_product_factory")(ticket_package_track_id=track.id)
+        request = await f("ibs_request_factory")(state=IBSRequestState.NEW.value)
+        action = await f("ibs_request_action_factory")(
+            ibs_request_id=request.id, action_type=RELEASE.value
         )
-        await world.ibs_request_action_track_factory(
+        await f("ibs_request_action_track_factory")(
             ibs_request_action_id=action.id, ticket_package_track_id=with_rr.id
         )
 
@@ -1242,40 +907,41 @@ class TestCanonicalOrdering:
 class TestBoundedQueries:
     async def _tree(
         self,
-        world: _MilestoneWorld,
+        world: DeadlineWorld,
         *,
         packages: int,
         tracks: int,
         products: int,
     ) -> Ticket:
-        cve = await world.cve_factory(severity=Severity.HIGH.value)
-        ticket: Ticket = await world.ticket_factory(cve_id=cve.id)
+        f = world.factory
+        cve = await f("cve_factory")(severity=Severity.HIGH.value)
+        ticket: Ticket = await f("ticket_factory")(cve_id=cve.id)
         for p in range(packages):
-            package = await world.ticket_package_factory(
+            package = await f("ticket_package_factory")(
                 ticket_id=ticket.id, package_name=f"pkg-{p}"
             )
             for _ in range(tracks):
-                track = await world.ticket_package_track_factory(
+                track = await f("ticket_package_track_factory")(
                     ticket_package_id=package.id
                 )
-                request = await world.ibs_request_factory()
-                action = await world.ibs_request_action_factory(
-                    ibs_request_id=request.id, action_type=_RELEASE.value
+                request = await f("ibs_request_factory")()
+                action = await f("ibs_request_action_factory")(
+                    ibs_request_id=request.id, action_type=RELEASE.value
                 )
-                await world.ibs_request_action_track_factory(
+                await f("ibs_request_action_track_factory")(
                     ibs_request_action_id=action.id, ticket_package_track_id=track.id
                 )
                 for _ in range(products):
-                    await world.ticket_package_product_factory(
+                    await f("ticket_package_product_factory")(
                         ticket_package_track_id=track.id
                     )
         return ticket
 
     async def test_query_count_is_independent_of_tree_cardinality(
-        self, db_session: AsyncSession, milestone_world: _MilestoneWorld
+        self, db_session: AsyncSession, deadline_world: DeadlineWorld
     ) -> None:
-        small = await self._tree(milestone_world, packages=1, tracks=1, products=1)
-        large = await self._tree(milestone_world, packages=4, tracks=3, products=3)
+        small = await self._tree(deadline_world, packages=1, tracks=1, products=1)
+        large = await self._tree(deadline_world, packages=4, tracks=3, products=3)
 
         with _StatementRecorder(db_session) as small_recorder:
             small_tree = await _read(db_session, small)
@@ -1403,18 +1069,20 @@ class TestReadIsSideEffectFree:
     async def test_read_writes_no_row_and_creates_no_event(
         self,
         db_session: AsyncSession,
-        milestone_world: _MilestoneWorld,
+        deadline_world: DeadlineWorld,
     ) -> None:
-        ticket = await milestone_world.build(
-            MilestoneCase(
-                "side_effects",
-                (D, D, D, P),
-                CurrentPhase.QA,
-                products=(ProductSpec(eol=True), ProductSpec()),
-                evidence=(EvidenceSpec(),),
-                instant=AFTER_ALL_DUE,
+        persisted = await deadline_world.build(
+            DeadlineCase(
+                id="side_effects",
+                expected_offsets_days=TIER_30_OFFSETS_DAYS,
+                expected_statuses=(D, D, D, O),
+                expected_current_phase=CurrentPhase.QA,
+                products=(ProductEvidence(eol=True), ProductEvidence()),
+                requests=(RequestEvidence(),),
+                evaluation_instant=AFTER_ALL_DUE,
             )
         )
+        ticket = persisted.ticket
         snapshot = select(
             Ticket.status, Ticket.updated_at, Ticket.priority_auto, Ticket.assignee_id
         ).where(Ticket.id == ticket.id)

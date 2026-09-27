@@ -3,12 +3,13 @@
 
 Covers `docs/features/tickets/ticket-deadlines.md` (Testing Requirements 1-6)
 at the pure-function level, driven by the shared matrix in
-`tests/support/deadline_matrix.py` that the later SQL/pure equivalence test
-(Requirement 10) reuses. Workflow-level parts of Requirements 3-5 (start
-immutability across real mutations, RR state derivation, excluded/all-EOL
-actionability derivation, manual-zone exit workflows) and Requirements 7-12
-are owned by the service and API work items; their pure analogues are
-asserted here.
+`tests/support/deadline_matrix.py` that the SQL/pure parity test
+(`test_ticket_deadline_expressions.py`, Requirement 10) and the package-tree
+projection test also consume. The matrix describes persisted evidence; its
+oracle derives the boolean inputs of `resolve_track_milestones()`.
+Workflow-level parts of Requirements 3-4 (start immutability across real
+mutations, manual-zone exit workflows) and Requirements 7-9, 12 are owned by
+the service and API work items; their pure analogues are asserted here.
 """
 
 from __future__ import annotations
