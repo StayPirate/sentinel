@@ -6,7 +6,11 @@ Consumers:
 - `tests/test_services/test_ticket_priority_refresh.py`
   (`refresh_priority_auto()`);
 - `tests/test_services/test_set_severity_manual.py`
-  (`set_severity_manual()`).
+  (`set_severity_manual()`);
+- `tests/test_services/test_recalculate_cvss_chain.py` and
+  `tests/test_services/test_recalculate_cvss_chain_atomicity.py`
+  (`recalculate_cvss_chain()`, with the chain-specific helpers of
+  `tests/support/cvss_chain.py`).
 
 Consumers import these plain helpers directly. The shared `va_user` and
 `tree` fixtures live in the separate plugin module
@@ -24,6 +28,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import event, select
@@ -153,9 +158,25 @@ def unassigned_event(username: str, reason: str) -> EventRow:
 # ---------------------------------------------------------------------------
 
 
+REACTIVE_GS_END = EVAL - timedelta(days=90)
+"""The General Support end of a Product in Reactive Support on `EVAL`."""
+
+REACTIVE_EXTENDED_END = BEFORE_EVAL
+"""The extended-support end of a Product in Reactive Support on `EVAL`."""
+
+REACTIVE_END = AFTER_EVAL
+"""The Reactive Support end of a Product in Reactive Support on `EVAL`."""
+
+
 @dataclass(frozen=True, slots=True)
 class Prod:
-    """One Product occurrence of a factory-built track."""
+    """One Product occurrence of a factory-built track.
+
+    `lifecycle=False` leaves every lifecycle date `NULL` (phase
+    unavailable); `reactive=True` places the catalog Product in Reactive
+    Support on `EVAL` and takes precedence over `eol`. `threshold` is the
+    catalog `Product.cvss_threshold` (`None` is SQL `NULL`).
+    """
 
     eligible: bool = True
     override: bool = False
@@ -163,6 +184,8 @@ class Prod:
     lifecycle: bool = True
     excluded: bool = False
     released: bool = False
+    threshold: Decimal | None = None
+    reactive: bool = False
 
 
 async def cveless(

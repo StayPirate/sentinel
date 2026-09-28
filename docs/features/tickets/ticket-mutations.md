@@ -662,9 +662,9 @@ Propagation dispositions describe the completed Ticket-scoped outcome:
 
 - `immediate`: the current locked workflow MUST apply automatic Product
   eligibility and any required final Ticket reconciliation before returning.
-- `deferred_until_reactivation`: an external mutation associated with an
-  `Ignored` or `Duplicated` Ticket is retained for package-owned propagation
-  after the explicit manual-zone exit.
+- `deferred_until_reactivation`: an external mutation or default-version
+  recalculation associated with an `Ignored` or `Duplicated` Ticket is retained
+  for package-owned propagation after the explicit manual-zone exit.
 - `not_applicable`: the CVE has no associated Ticket, so there is no Product
   eligibility or Ticket state to propagate.
 - `none`: the serialized outcome is `unchanged` or `not_found`, so there is no
@@ -672,7 +672,10 @@ Propagation dispositions describe the completed Ticket-scoped outcome:
 
 The disposition is part of every successful result and is actionable only for
 `created`, `updated`, or `deleted`. `unchanged` and `not_found` return the
-current resolution values with `propagation = none`.
+current resolution values with `propagation = none`. `recalculate_cvss_chain()`
+has no assessment action: its disposition is state-mapped as defined in its
+step 7, returns `none` only for `missing`, and is independent of its
+`changed`/`unchanged` classification.
 
 An authority rejection, manual-zone rejection, unchanged result, not-found
 result, waiting concurrent no-op, deferred Product outcome, or caller rollback
@@ -1142,7 +1145,11 @@ defines no Ticket convergence caller.
 7. Flush and return severity resolution, eligibility resolution, changed and
    skipped Product counts, whether severity changed, propagation, whether one
    reconciliation ran, `evaluation_date`, and the runner-facing classification
-   below.
+   below. Propagation uses the CVSS disposition vocabulary above: a ticketless
+   CVE returns `not_applicable`; association mode and default-version `New`,
+   `Analysis`, `Analyzed`, and `Resolved` return `immediate`; default-version
+   `Ignored` and `Duplicated` return `deferred_until_reactivation`; and
+   `missing` returns `none`.
 
 **Runner-facing classification**: the returned result classifies the unit
 transaction-locally as exactly one of:
@@ -1178,7 +1185,9 @@ final event to its caller.
 
 **Idempotency**: safe to call multiple times. With unchanged assessments and
 default version, severity, Product values, and audit are no-ops and the same
-current result is returned.
+current result is returned. In association mode the handover is one-shot: the
+supplied `association_previous_severity` is the comparison input, so a repeated
+call is a no-op when that argument equals the current derived severity.
 
 ### Read-Only Impact Projection
 
