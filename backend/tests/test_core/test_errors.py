@@ -82,6 +82,11 @@ class TestErrorCode:
         Service Exceptions)."""
         assert ErrorCode.TICKET_SEVERITY_DERIVED == "TICKET_SEVERITY_DERIVED"
 
+    def test_cve_not_found_is_registered(self) -> None:
+        """See docs/api-spec.md (Error Code Categories, CVE Accessibility
+        Check) and docs/features/tickets/cve-service.md (Exceptions)."""
+        assert ErrorCode.CVE_NOT_FOUND == "CVE_NOT_FOUND"
+
     def test_date_range_inverted_is_registered(self) -> None:
         """See docs/api-spec.md (Date Range Interpretation, Inverted
         range validation)."""

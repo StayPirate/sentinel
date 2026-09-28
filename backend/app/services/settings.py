@@ -11,7 +11,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import date, datetime
 
-from sqlalchemy import func, select
+from sqlalchemy import Select, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -72,6 +72,22 @@ async def bootstrap_system_settings(session: AsyncSession) -> None:
     await session.flush()
 
 
+def default_cvss_version_select() -> Select[tuple[str]]:
+    """The read-only SELECT of the persisted `default_cvss_version` value.
+
+    Returns at most one row. `get_default_cvss_version()` executes it on
+    its own; a read that must observe the setting in the same PostgreSQL
+    view as other rows embeds it as an uncorrelated scalar subquery
+    (`.scalar_subquery()`), which yields SQL `NULL` when the row is
+    absent. Such a caller must raise `RequiredSystemSettingMissingError`
+    for that `NULL`, never substitute a value. The setting key remains
+    owned by this module.
+    """
+    return select(SystemSetting.value).where(
+        SystemSetting.key == _DEFAULT_CVSS_VERSION_KEY
+    )
+
+
 async def get_default_cvss_version(session: AsyncSession) -> str:
     """Return the persisted `default_cvss_version` value.
 
@@ -81,11 +97,7 @@ async def get_default_cvss_version(session: AsyncSession) -> str:
     availability and schema errors propagate unchanged. Performs no
     writes and creates no audit event.
     """
-    result = await session.execute(
-        select(SystemSetting.value).where(
-            SystemSetting.key == _DEFAULT_CVSS_VERSION_KEY
-        )
-    )
+    result = await session.execute(default_cvss_version_select())
     value = result.scalar_one_or_none()
     if value is None:
         raise RequiredSystemSettingMissingError()

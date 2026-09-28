@@ -131,7 +131,7 @@ class TestAuditHistoryIsNotAccessState:
         assert offenders == []
 
     def test_visibility_and_resolution_do_not_import_the_audit_trail(self) -> None:
-        for module in ("ticket_visibility.py", "ticket_service.py"):
+        for module in ("ticket_visibility.py", "ticket_service.py", "cve_service.py"):
             imports = _imported_modules(_parse(APP_ROOT / "services" / module))
             assert "app.services.ticket_audit_log" not in imports, module
             assert "app.models.ticket_audit_event" not in imports, module

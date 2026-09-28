@@ -17,6 +17,7 @@ from app.api import health
 from app.api.v1 import (
     api_keys,
     auth,
+    cves,
     fetchers,
     identity_audit,
     ticket_audit,
@@ -156,3 +157,4 @@ app.include_router(fetchers.router)
 app.include_router(ticket_audit.router)
 app.include_router(tickets.router)
 app.include_router(ticket_packages.router)
+app.include_router(cves.router)

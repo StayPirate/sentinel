@@ -27,6 +27,7 @@ from app.services.settings import (
     RequiredSystemSettingMissingError,
     SettingAuditLog,
     bootstrap_system_settings,
+    default_cvss_version_select,
     get_default_cvss_version,
     list_setting_audit_events,
 )
@@ -230,6 +231,32 @@ class TestGetDefaultCvssVersion:
 
         with pytest.raises(OperationalError):
             await get_default_cvss_version(db_session)
+
+
+@pytest.mark.integration
+class TestDefaultCvssVersionSelect:
+    """The reusable SELECT behind `get_default_cvss_version()`, embeddable as
+    a scalar subquery by reads that need the setting in the same view."""
+
+    async def test_scalar_subquery_yields_the_persisted_value(
+        self, db_session: AsyncSession
+    ) -> None:
+        await bootstrap_system_settings(db_session)
+
+        value = await db_session.scalar(
+            select(default_cvss_version_select().scalar_subquery())
+        )
+
+        assert value == "3.1"
+
+    async def test_scalar_subquery_yields_null_when_the_row_is_missing(
+        self, db_session: AsyncSession
+    ) -> None:
+        value = await db_session.scalar(
+            select(default_cvss_version_select().scalar_subquery())
+        )
+
+        assert value is None
 
 
 @pytest.mark.integration
