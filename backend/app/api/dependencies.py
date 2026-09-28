@@ -25,7 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import settings
 from app.core.credentials import API_KEY_PREFIX, extract_credential
-from app.core.enums import Capability, CredentialKind
+from app.core.enums import Capability, CredentialKind, Role
 from app.core.errors import AppError, ErrorCode
 from app.core.exceptions import TicketNotFoundError
 from app.core.jwt import InvalidTokenError, decode_and_validate, refresh_token
@@ -493,25 +493,45 @@ OptionalCurrentUser = Annotated[
 # ---------------------------------------------------------------------------
 
 
+async def get_caller_roles(
+    db: DatabaseSession, principal: CurrentUser
+) -> frozenset[Role]:
+    """Load the authenticated caller's current roles once per request.
+
+    See `docs/features/identity/rbac.md` (`require_capability()`
+    Dependency, Optional Principal to Caller Context) and
+    `docs/api-spec.md` (Authorization Chain Evaluation Order): the roles
+    are read from the `UserRole` table when the request is authorized.
+    As a module-level dependency, FastAPI caches the result per request,
+    so the capability check and the Ticket caller information of one
+    request share this single role load and are never reconstructed
+    later in the request. A committed role change applies to the next
+    request.
+    """
+    return frozenset(await user_service.get_user_roles(db, principal.user.id))
+
+
+CallerRoles = Annotated[frozenset[Role], Depends(get_caller_roles)]
+
+
 def require_capability(
     capability: Capability,
 ) -> Callable[..., Awaitable[AuthenticatedPrincipal]]:
     """Dependency factory enforcing a single required capability.
 
     See `docs/features/identity/rbac.md` (`require_capability()`
-    Dependency): loads the principal's current roles from the
-    `UserRole` table on every request, unions their capabilities, and
-    returns the unchanged principal when `capability` is included.
-    Otherwise raises the generic 403 without disclosing the required or
-    the caller's missing capability. Assumes the request has already
-    passed `get_current_user` (which verifies `User.active`); this
-    dependency does not re-verify active status.
+    Dependency): unions the capabilities of the principal's current roles
+    (loaded once per request by `get_caller_roles`) and returns the
+    unchanged principal when `capability` is included. Otherwise raises
+    the generic 403 without disclosing the required or the caller's
+    missing capability. Assumes the request has already passed
+    `get_current_user` (which verifies `User.active`); this dependency
+    does not re-verify active status.
     """
 
     async def _dependency(
-        db: DatabaseSession, principal: CurrentUser
+        principal: CurrentUser, roles: CallerRoles
     ) -> AuthenticatedPrincipal:
-        roles = await user_service.get_user_roles(db, principal.user.id)
         if capability not in get_capabilities(roles):
             raise AppError(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -567,18 +587,18 @@ async def _ticket_caller_for(
     return TicketCaller.authenticated(principal.user.id, get_effective_scope(roles))
 
 
-async def get_ticket_caller(
-    db: DatabaseSession, principal: CurrentUser
-) -> TicketCaller:
+async def get_ticket_caller(principal: CurrentUser, roles: CallerRoles) -> TicketCaller:
     """Resolve the authenticated caller of a Ticket-derived operation.
 
     For `Access: Authenticated` and capability-protected endpoints: runs
     after `get_current_user`, so an absent or invalid credential returns
-    the global 401 before any role or Ticket lookup. FastAPI caches the
-    result per request, so the caller is resolved once and never
-    reconstructed later in the same request.
+    the global 401 before any role or Ticket lookup. The effective scope
+    derives from the same per-request role load (`get_caller_roles`) as
+    `require_capability`, and FastAPI caches the result per request, so
+    the caller is resolved once and never reconstructed later in the
+    same request.
     """
-    return await _ticket_caller_for(db, principal)
+    return TicketCaller.authenticated(principal.user.id, get_effective_scope(roles))
 
 
 async def get_optional_ticket_caller(

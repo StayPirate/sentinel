@@ -85,6 +85,23 @@ class TicketNotMutableError(ServiceError):
         super().__init__("Ticket is not mutable.")
 
 
+class SeverityDerivedError(ServiceError):
+    """A manual severity is requested for a Ticket whose severity is derived.
+
+    Raised when the locked-current Ticket has an associated CVE, so its
+    severity is derived from CVSS assessments and `severity_manual` is not
+    applicable (`docs/features/tickets/ticket-mutations.md`,
+    `set_severity_manual()`; Service Exceptions). Shared across service
+    modules (`ticket_mutations`, and `ticket_service` for manual creation)
+    per `docs/conventions.md` (Service Exception Conventions, Shared
+    exceptions) — inherits from `ServiceError` directly. Maps to
+    `409 TICKET_SEVERITY_DERIVED`. The message is static.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("Ticket severity is derived from CVSS assessments.")
+
+
 class InactiveUserError(ServiceError):
     """A user identified by a required owner/target parameter is inactive.
 

@@ -31,12 +31,11 @@ import ast
 import asyncio
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
-from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 import pytest
-from sqlalchemy import delete, event, func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.enums import (
@@ -52,9 +51,7 @@ from app.models.cve_cvss_assessment import CVECVSSAssessment
 from app.models.product import Product
 from app.models.ticket import Ticket
 from app.models.ticket_audit_event import TicketAuditEvent
-from app.models.ticket_package import TicketPackage
 from app.models.ticket_package_product import TicketPackageProduct
-from app.models.ticket_package_track import TicketPackageTrack
 from app.models.user import User
 from app.models.user_role import UserRole
 from app.services import ticket_mutations
@@ -72,109 +69,30 @@ from app.services.ticket_mutations import (
     stabilize_acting_user,
 )
 from tests.support.database import rollback_test_scope
+from tests.support.ticket_mutations import (
+    BEFORE_EVAL,
+    EVAL,
+    EventRow,
+    Prod,
+    StatementRecorder,
+    TicketFactory,
+    TreeBuilder,
+    VAUser,
+    cveless,
+    lock_ticket,
+    status_event,
+    ticket_events,
+    tree_for,
+    unassigned_event,
+)
 
-EVAL = date(2026, 9, 27)
-"""The fixed UTC evaluation date passed by gate tests."""
-
-BEFORE_EVAL = EVAL - timedelta(days=30)
-"""A General Support end before `EVAL`: the Product is EOL on `EVAL`."""
-
-AFTER_EVAL = EVAL + timedelta(days=365)
-"""A General Support end after `EVAL`: the Product is in support on `EVAL`."""
-
-RELEASED_AT = datetime(2026, 9, 1, 12, 0, tzinfo=UTC)
-
-TicketFactory = Callable[..., Awaitable[Ticket]]
-UserFactory = Callable[..., Awaitable[User]]
+pytest_plugins = ["tests.support.ticket_mutation_fixtures"]
+"""Provides the shared `va_user` and `tree` fixtures."""
 
 
 # ---------------------------------------------------------------------------
 # Test helpers
 # ---------------------------------------------------------------------------
-
-
-class _StatementRecorder:
-    """Records every SQL statement and its parameters on the test engine."""
-
-    def __init__(self, db: AsyncSession) -> None:
-        bind = db.bind
-        assert bind is not None
-        self._engine = bind.engine.sync_engine
-        self.statements: list[str] = []
-        self.parameters: list[Any] = []
-
-    def _record(self, *args: Any) -> None:
-        self.statements.append(args[2])
-        self.parameters.append(args[3])
-
-    def __enter__(self) -> _StatementRecorder:
-        event.listen(self._engine, "before_cursor_execute", self._record)
-        return self
-
-    def __exit__(self, *exc: object) -> None:
-        event.remove(self._engine, "before_cursor_execute", self._record)
-
-    def selects_from(self, table: str) -> list[str]:
-        return [
-            s
-            for s in self.statements
-            if s.lstrip().upper().startswith("SELECT") and f"FROM {table}" in s
-        ]
-
-    def row_locks(self) -> list[str]:
-        markers = ("FOR UPDATE", "FOR SHARE", "FOR NO KEY UPDATE", "FOR KEY SHARE")
-        return [s for s in self.statements if any(m in s for m in markers)]
-
-
-@dataclass(frozen=True, slots=True)
-class Prod:
-    """One Product occurrence of a factory-built track."""
-
-    eligible: bool = True
-    override: bool = False
-    eol: bool = False
-    lifecycle: bool = True
-    excluded: bool = False
-    released: bool = False
-
-
-@dataclass(frozen=True, slots=True)
-class EventRow:
-    event_type: str
-    user_id: uuid.UUID | None
-    old_value: str | None
-    new_value: str | None
-    comment: str | None
-    detail: Any
-
-
-async def _events(db: AsyncSession, ticket: Ticket) -> list[EventRow]:
-    rows = (
-        await db.execute(
-            select(TicketAuditEvent)
-            .where(TicketAuditEvent.ticket_id == ticket.id)
-            .order_by(TicketAuditEvent.id)
-        )
-    ).scalars()
-    return [
-        EventRow(r.event_type, r.user_id, r.old_value, r.new_value, r.comment, r.detail)
-        for r in rows
-    ]
-
-
-def _status_event(old: str, new: str) -> EventRow:
-    return EventRow("status_change", None, old, new, None, None)
-
-
-def _unassigned_event(username: str, reason: str) -> EventRow:
-    return EventRow(
-        "assignment",
-        None,
-        username,
-        None,
-        f"Unassigned from {username}: {reason}",
-        None,
-    )
 
 
 def _service_event_fields(
@@ -191,71 +109,6 @@ def _service_event_fields(
         if isinstance(parsed, dict) and parsed.get("event") == event_name:
             matches.append(parsed)
     return matches
-
-
-@pytest.fixture
-def va_user(
-    user_factory: UserFactory,
-    user_role_factory: Callable[..., Awaitable[UserRole]],
-) -> Callable[..., Awaitable[User]]:
-    """Create a User holding the given roles (default: one VA origin)."""
-
-    async def _create(
-        *, active: bool = True, roles: tuple[Role, ...] = (Role.VULNERABILITY_ANALYST,)
-    ) -> User:
-        user = await user_factory(active=active)
-        for index, role in enumerate(roles):
-            await user_role_factory(
-                user_id=user.id, role=role.value, group_name=f"_origin{index}"
-            )
-        return user
-
-    return _create
-
-
-@pytest.fixture
-def tree(
-    ticket_package_factory: Callable[..., Awaitable[TicketPackage]],
-    ticket_package_track_factory: Callable[..., Awaitable[TicketPackageTrack]],
-    ticket_package_product_factory: Callable[..., Awaitable[TicketPackageProduct]],
-    product_factory: Callable[..., Awaitable[Product]],
-) -> Callable[..., Awaitable[TicketPackageTrack]]:
-    """Add one package with one track (and its Products) to a Ticket."""
-
-    async def _add(
-        ticket: Ticket,
-        *,
-        status: PackageStatus = PackageStatus.AFFECTED,
-        products: tuple[Prod, ...] = (Prod(),),
-        package_excluded: bool = False,
-        track_excluded: bool = False,
-    ) -> TicketPackageTrack:
-        now = datetime.now(UTC)
-        package = await ticket_package_factory(
-            ticket_id=ticket.id, deleted_at=now if package_excluded else None
-        )
-        track = await ticket_package_track_factory(
-            ticket_package_id=package.id,
-            status=status.value,
-            deleted_at=now if track_excluded else None,
-        )
-        for spec in products:
-            if not spec.lifecycle:
-                gs_end = None
-            else:
-                gs_end = BEFORE_EVAL if spec.eol else AFTER_EVAL
-            product = await product_factory(general_support_end_date=gs_end)
-            await ticket_package_product_factory(
-                ticket_package_track_id=track.id,
-                product_id=product.id,
-                eligible=spec.eligible,
-                is_eligible_override=spec.override,
-                released_at=RELEASED_AT if spec.released else None,
-                deleted_at=now if spec.excluded else None,
-            )
-        return track
-
-    return _add
 
 
 @pytest.fixture
@@ -287,30 +140,10 @@ def cve_ticket(
     return _create
 
 
-async def _cveless(
-    ticket_factory: TicketFactory,
-    *,
-    status: TicketStatus = TicketStatus.ANALYSIS,
-    severity: Severity | None = Severity.HIGH,
-    **overrides: Any,
-) -> Ticket:
-    return await ticket_factory(
-        status=status.value,
-        severity_manual=severity.value if severity else None,
-        **overrides,
-    )
-
-
 async def _reconcile(db: AsyncSession, ticket: Ticket, **kwargs: Any) -> TicketStatus:
     kwargs.setdefault("evaluation_date", EVAL)
     await reconcile_ticket_status(ticket, db, **kwargs)
     return TicketStatus(ticket.status)
-
-
-async def _lock_ticket(db: AsyncSession, ticket: Ticket) -> Ticket:
-    return (
-        await db.execute(select(Ticket).where(Ticket.id == ticket.id).with_for_update())
-    ).scalar_one()
 
 
 # ---------------------------------------------------------------------------
@@ -367,13 +200,13 @@ class TestEnsureTicketOperable:
 @pytest.mark.integration
 class TestStabilizeActingUser:
     async def test_locks_user_for_share_and_loads_roles(
-        self, db_session: AsyncSession, va_user: Callable[..., Awaitable[User]]
+        self, db_session: AsyncSession, va_user: VAUser
     ) -> None:
         user = await va_user(roles=(Role.VULNERABILITY_ANALYST, Role.ADMIN))
         user_id = user.id
         db_session.expire(user)
 
-        with _StatementRecorder(db_session) as recorder:
+        with StatementRecorder(db_session) as recorder:
             stabilized = await stabilize_acting_user(db_session, user_id)
 
         assert stabilized.id == user_id
@@ -384,7 +217,7 @@ class TestStabilizeActingUser:
         }
 
     async def test_refreshes_stale_identity_map_state(
-        self, db_session: AsyncSession, va_user: Callable[..., Awaitable[User]]
+        self, db_session: AsyncSession, va_user: VAUser
     ) -> None:
         user = await va_user()
         assert user.active is True
@@ -484,28 +317,28 @@ class TestAutoAssignActor:
     async def test_system_actor_is_skipped(
         self, db_session: AsyncSession, ticket_factory: TicketFactory
     ) -> None:
-        ticket = await _cveless(ticket_factory, status=TicketStatus.NEW)
+        ticket = await cveless(ticket_factory, status=TicketStatus.NEW)
 
         assert await auto_assign_actor(ticket, None, db_session) is False
 
         assert ticket.assignee_id is None
         assert ticket.status == TicketStatus.NEW
-        assert await _events(db_session, ticket) == []
+        assert await ticket_events(db_session, ticket) == []
 
     async def test_already_assigned_ticket_is_skipped(
         self,
         db_session: AsyncSession,
         ticket_factory: TicketFactory,
-        va_user: Callable[..., Awaitable[User]],
+        va_user: VAUser,
     ) -> None:
         owner = await va_user()
         actor = await stabilize_acting_user(db_session, (await va_user()).id)
-        ticket = await _cveless(ticket_factory, assignee_id=owner.id)
+        ticket = await cveless(ticket_factory, assignee_id=owner.id)
 
         assert await auto_assign_actor(ticket, actor, db_session) is False
 
         assert ticket.assignee_id == owner.id
-        assert await _events(db_session, ticket) == []
+        assert await ticket_events(db_session, ticket) == []
 
     @pytest.mark.parametrize(
         ("active", "roles"),
@@ -519,49 +352,49 @@ class TestAutoAssignActor:
         self,
         db_session: AsyncSession,
         ticket_factory: TicketFactory,
-        va_user: Callable[..., Awaitable[User]],
+        va_user: VAUser,
         active: bool,
         roles: tuple[Role, ...],
     ) -> None:
         actor = await stabilize_acting_user(
             db_session, (await va_user(active=active, roles=roles)).id
         )
-        ticket = await _cveless(ticket_factory, status=TicketStatus.NEW)
+        ticket = await cveless(ticket_factory, status=TicketStatus.NEW)
 
         assert await auto_assign_actor(ticket, actor, db_session) is False
         assert await auto_assign_actor(ticket, actor, db_session, force=True) is False
 
         assert ticket.assignee_id is None
         assert ticket.status == TicketStatus.NEW
-        assert await _events(db_session, ticket) == []
+        assert await ticket_events(db_session, ticket) == []
 
     async def test_unchanged_assignee_with_force_is_a_no_op(
         self,
         db_session: AsyncSession,
         ticket_factory: TicketFactory,
-        va_user: Callable[..., Awaitable[User]],
+        va_user: VAUser,
     ) -> None:
         actor = await stabilize_acting_user(db_session, (await va_user()).id)
-        ticket = await _cveless(ticket_factory, assignee_id=actor.id)
+        ticket = await cveless(ticket_factory, assignee_id=actor.id)
 
         assert await auto_assign_actor(ticket, actor, db_session, force=True) is False
 
-        assert await _events(db_session, ticket) == []
+        assert await ticket_events(db_session, ticket) == []
 
     async def test_assigns_unassigned_gate_zone_ticket_without_status_change(
         self,
         db_session: AsyncSession,
         ticket_factory: TicketFactory,
-        va_user: Callable[..., Awaitable[User]],
+        va_user: VAUser,
     ) -> None:
         actor = await stabilize_acting_user(db_session, (await va_user()).id)
-        ticket = await _cveless(ticket_factory, status=TicketStatus.ANALYZED)
+        ticket = await cveless(ticket_factory, status=TicketStatus.ANALYZED)
 
         assert await auto_assign_actor(ticket, actor, db_session) is True
 
         assert ticket.assignee_id == actor.id
         assert ticket.status == TicketStatus.ANALYZED
-        assert await _events(db_session, ticket) == [
+        assert await ticket_events(db_session, ticket) == [
             EventRow("assignment", actor.id, None, actor.username, None, None)
         ]
 
@@ -569,32 +402,32 @@ class TestAutoAssignActor:
         self,
         db_session: AsyncSession,
         ticket_factory: TicketFactory,
-        va_user: Callable[..., Awaitable[User]],
+        va_user: VAUser,
     ) -> None:
         actor = await stabilize_acting_user(db_session, (await va_user()).id)
-        ticket = await _cveless(ticket_factory, status=TicketStatus.NEW)
+        ticket = await cveless(ticket_factory, status=TicketStatus.NEW)
 
         assert await auto_assign_actor(ticket, actor, db_session) is True
 
         assert ticket.status == TicketStatus.ANALYSIS
-        assert await _events(db_session, ticket) == [
+        assert await ticket_events(db_session, ticket) == [
             EventRow("assignment", actor.id, None, actor.username, None, None),
-            _status_event("New", "Analysis"),
+            status_event("New", "Analysis"),
         ]
 
     async def test_force_reassigns_with_previous_username(
         self,
         db_session: AsyncSession,
         ticket_factory: TicketFactory,
-        va_user: Callable[..., Awaitable[User]],
+        va_user: VAUser,
     ) -> None:
         previous = await va_user(active=False)
         actor = await stabilize_acting_user(db_session, (await va_user()).id)
-        ticket = await _lock_ticket(
-            db_session, await _cveless(ticket_factory, assignee_id=previous.id)
+        ticket = await lock_ticket(
+            db_session, await cveless(ticket_factory, assignee_id=previous.id)
         )
 
-        with _StatementRecorder(db_session) as recorder:
+        with StatementRecorder(db_session) as recorder:
             assert (
                 await auto_assign_actor(ticket, actor, db_session, force=True) is True
             )
@@ -604,7 +437,7 @@ class TestAutoAssignActor:
         assert recorder.row_locks() == []
 
         assert ticket.assignee_id == actor.id
-        assert await _events(db_session, ticket) == [
+        assert await ticket_events(db_session, ticket) == [
             EventRow(
                 "assignment", actor.id, previous.username, actor.username, None, None
             )
@@ -614,11 +447,11 @@ class TestAutoAssignActor:
         self,
         db_session: AsyncSession,
         ticket_factory: TicketFactory,
-        va_user: Callable[..., Awaitable[User]],
-        tree: Callable[..., Awaitable[TicketPackageTrack]],
+        va_user: VAUser,
+        tree: TreeBuilder,
     ) -> None:
         actor = await stabilize_acting_user(db_session, (await va_user()).id)
-        ticket = await _cveless(ticket_factory, status=TicketStatus.NEW)
+        ticket = await cveless(ticket_factory, status=TicketStatus.NEW)
         await tree(ticket, status=PackageStatus.NOT_AFFECTED)
 
         await auto_assign_actor(ticket, actor, db_session)
@@ -630,14 +463,14 @@ class TestAutoAssignActor:
         self,
         db_session: AsyncSession,
         ticket_factory: TicketFactory,
-        va_user: Callable[..., Awaitable[User]],
+        va_user: VAUser,
     ) -> None:
         actor = await stabilize_acting_user(db_session, (await va_user()).id)
-        ticket = await _lock_ticket(
-            db_session, await _cveless(ticket_factory, status=TicketStatus.NEW)
+        ticket = await lock_ticket(
+            db_session, await cveless(ticket_factory, status=TicketStatus.NEW)
         )
 
-        with _StatementRecorder(db_session) as recorder:
+        with StatementRecorder(db_session) as recorder:
             assert await auto_assign_actor(ticket, actor, db_session) is True
 
         assert recorder.selects_from('"user"') == []
@@ -648,14 +481,14 @@ class TestAutoAssignActor:
         self,
         db_session: AsyncSession,
         ticket_factory: TicketFactory,
-        va_user: Callable[..., Awaitable[User]],
+        va_user: VAUser,
     ) -> None:
         user = await va_user()
         db_session.expire(user, ["roles"])
-        ticket = await _cveless(ticket_factory, status=TicketStatus.NEW)
+        ticket = await cveless(ticket_factory, status=TicketStatus.NEW)
 
         with (
-            _StatementRecorder(db_session) as recorder,
+            StatementRecorder(db_session) as recorder,
             pytest.raises(ValueError, match="stabilize_acting_user"),
         ):
             await auto_assign_actor(ticket, user, db_session)
@@ -667,11 +500,11 @@ class TestAutoAssignActor:
         self,
         db_session: AsyncSession,
         ticket_factory: TicketFactory,
-        va_user: Callable[..., Awaitable[User]],
+        va_user: VAUser,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         actor_id = (await va_user()).id
-        ticket = await _cveless(ticket_factory, status=TicketStatus.NEW)
+        ticket = await cveless(ticket_factory, status=TicketStatus.NEW)
         original = TicketAuditLog.log_event
         calls = 0
 
@@ -692,7 +525,7 @@ class TestAutoAssignActor:
         await db_session.refresh(ticket)
         assert ticket.assignee_id is None
         assert ticket.status == TicketStatus.NEW
-        assert await _events(db_session, ticket) == []
+        assert await ticket_events(db_session, ticket) == []
 
 
 # ---------------------------------------------------------------------------
@@ -705,24 +538,24 @@ class TestReconcileGuards:
     async def test_new_ticket_is_skipped_without_query_or_event(
         self, db_session: AsyncSession, ticket_factory: TicketFactory
     ) -> None:
-        ticket = await _cveless(ticket_factory, status=TicketStatus.NEW)
+        ticket = await cveless(ticket_factory, status=TicketStatus.NEW)
 
-        with _StatementRecorder(db_session) as recorder:
+        with StatementRecorder(db_session) as recorder:
             assert await _reconcile(db_session, ticket) is TicketStatus.NEW
 
         assert recorder.statements == []
-        assert await _events(db_session, ticket) == []
+        assert await ticket_events(db_session, ticket) == []
         assert pending_ticket_convergence_effects(db_session) == ()
 
     async def test_assigned_new_ticket_logs_the_code_path_warning(
         self,
         db_session: AsyncSession,
         ticket_factory: TicketFactory,
-        va_user: Callable[..., Awaitable[User]],
+        va_user: VAUser,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         assignee = await va_user()
-        ticket = await _cveless(
+        ticket = await cveless(
             ticket_factory, status=TicketStatus.NEW, assignee_id=assignee.id
         )
 
@@ -736,7 +569,7 @@ class TestReconcileGuards:
         assert records[0]["level"] == "warning"
         assert ticket.assignee_id == assignee.id
         assert ticket.status == TicketStatus.NEW
-        assert await _events(db_session, ticket) == []
+        assert await ticket_events(db_session, ticket) == []
         assert pending_ticket_convergence_effects(db_session) == ()
 
     async def test_unassigned_new_ticket_logs_nothing(
@@ -745,7 +578,7 @@ class TestReconcileGuards:
         ticket_factory: TicketFactory,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        ticket = await _cveless(ticket_factory, status=TicketStatus.NEW)
+        ticket = await cveless(ticket_factory, status=TicketStatus.NEW)
 
         with caplog.at_level("WARNING"):
             await _reconcile(db_session, ticket)
@@ -759,17 +592,17 @@ class TestReconcileGuards:
         ticket_factory: TicketFactory,
         status: TicketStatus,
     ) -> None:
-        ticket = await _cveless(ticket_factory, status=status)
+        ticket = await cveless(ticket_factory, status=status)
 
         with (
-            _StatementRecorder(db_session) as recorder,
+            StatementRecorder(db_session) as recorder,
             pytest.raises(ValueError, match="manual-zone"),
         ):
             await _reconcile(db_session, ticket)
 
         assert recorder.statements == []
         assert ticket.status == status
-        assert await _events(db_session, ticket) == []
+        assert await ticket_events(db_session, ticket) == []
         assert pending_ticket_convergence_effects(db_session) == ()
 
 
@@ -783,7 +616,7 @@ class TestStructuralGate:
     async def test_no_track_keeps_analysis(
         self, db_session: AsyncSession, ticket_factory: TicketFactory
     ) -> None:
-        ticket = await _cveless(ticket_factory, status=TicketStatus.ANALYZED)
+        ticket = await cveless(ticket_factory, status=TicketStatus.ANALYZED)
 
         assert await _reconcile(db_session, ticket) is TicketStatus.ANALYSIS
 
@@ -798,10 +631,10 @@ class TestStructuralGate:
         self,
         db_session: AsyncSession,
         ticket_factory: TicketFactory,
-        tree: Callable[..., Awaitable[TicketPackageTrack]],
+        tree: TreeBuilder,
         exclusion: dict[str, bool],
     ) -> None:
-        ticket = await _cveless(ticket_factory)
+        ticket = await cveless(ticket_factory)
         await tree(ticket, status=PackageStatus.NOT_AFFECTED, **exclusion)
 
         assert await _reconcile(db_session, ticket) is TicketStatus.ANALYSIS
@@ -810,9 +643,9 @@ class TestStructuralGate:
         self,
         db_session: AsyncSession,
         ticket_factory: TicketFactory,
-        tree: Callable[..., Awaitable[TicketPackageTrack]],
+        tree: TreeBuilder,
     ) -> None:
-        ticket = await _cveless(ticket_factory)
+        ticket = await cveless(ticket_factory)
         await tree(ticket, status=PackageStatus.ANALYSIS, track_excluded=True)
         await tree(ticket, status=PackageStatus.NOT_AFFECTED)
 
@@ -822,9 +655,9 @@ class TestStructuralGate:
         self,
         db_session: AsyncSession,
         ticket_factory: TicketFactory,
-        tree: Callable[..., Awaitable[TicketPackageTrack]],
+        tree: TreeBuilder,
     ) -> None:
-        ticket = await _cveless(ticket_factory)
+        ticket = await cveless(ticket_factory)
         await tree(ticket, status=PackageStatus.ANALYSIS, products=(Prod(eol=True),))
         await tree(ticket, status=PackageStatus.AFFECTED, products=(Prod(eol=True),))
 
@@ -834,9 +667,9 @@ class TestStructuralGate:
         self,
         db_session: AsyncSession,
         ticket_factory: TicketFactory,
-        tree: Callable[..., Awaitable[TicketPackageTrack]],
+        tree: TreeBuilder,
     ) -> None:
-        ticket = await _cveless(ticket_factory)
+        ticket = await cveless(ticket_factory)
         await tree(ticket, status=PackageStatus.ANALYSIS, products=())
 
         assert await _reconcile(db_session, ticket) is TicketStatus.RESOLVED
@@ -845,9 +678,9 @@ class TestStructuralGate:
         self,
         db_session: AsyncSession,
         ticket_factory: TicketFactory,
-        tree: Callable[..., Awaitable[TicketPackageTrack]],
+        tree: TreeBuilder,
     ) -> None:
-        ticket = await _cveless(ticket_factory, status=TicketStatus.RESOLVED)
+        ticket = await cveless(ticket_factory, status=TicketStatus.RESOLVED)
         await tree(ticket, status=PackageStatus.NOT_AFFECTED)
         await tree(ticket, status=PackageStatus.ANALYSIS)
 
@@ -857,9 +690,9 @@ class TestStructuralGate:
         self,
         db_session: AsyncSession,
         ticket_factory: TicketFactory,
-        tree: Callable[..., Awaitable[TicketPackageTrack]],
+        tree: TreeBuilder,
     ) -> None:
-        ticket = await _cveless(ticket_factory)
+        ticket = await cveless(ticket_factory)
         await tree(
             ticket,
             status=PackageStatus.ANALYSIS,
@@ -873,9 +706,9 @@ class TestStructuralGate:
         self,
         db_session: AsyncSession,
         ticket_factory: TicketFactory,
-        tree: Callable[..., Awaitable[TicketPackageTrack]],
+        tree: TreeBuilder,
     ) -> None:
-        ticket = await _cveless(ticket_factory)
+        ticket = await cveless(ticket_factory)
         await tree(
             ticket,
             status=PackageStatus.ANALYSIS,
@@ -888,9 +721,9 @@ class TestStructuralGate:
         self,
         db_session: AsyncSession,
         ticket_factory: TicketFactory,
-        tree: Callable[..., Awaitable[TicketPackageTrack]],
+        tree: TreeBuilder,
     ) -> None:
-        ticket = await _cveless(ticket_factory)
+        ticket = await cveless(ticket_factory)
         await tree(
             ticket, status=PackageStatus.ANALYSIS, products=(Prod(lifecycle=False),)
         )
@@ -907,7 +740,7 @@ class TestResolutionCompleteness:
         self,
         db_session: AsyncSession,
         cve_ticket: Callable[..., Awaitable[Ticket]],
-        tree: Callable[..., Awaitable[TicketPackageTrack]],
+        tree: TreeBuilder,
         status: PackageStatus,
     ) -> None:
         ticket = await cve_ticket()
@@ -947,7 +780,7 @@ class TestResolutionCompleteness:
         self,
         db_session: AsyncSession,
         cve_ticket: Callable[..., Awaitable[Ticket]],
-        tree: Callable[..., Awaitable[TicketPackageTrack]],
+        tree: TreeBuilder,
         products: tuple[Prod, ...],
         expected: TicketStatus,
     ) -> None:
@@ -960,9 +793,9 @@ class TestResolutionCompleteness:
         self,
         db_session: AsyncSession,
         ticket_factory: TicketFactory,
-        tree: Callable[..., Awaitable[TicketPackageTrack]],
+        tree: TreeBuilder,
     ) -> None:
-        ticket = await _cveless(ticket_factory)
+        ticket = await cveless(ticket_factory)
         track = await tree(ticket, status=PackageStatus.FIXED, products=(Prod(),))
 
         assert await _reconcile(db_session, ticket) is TicketStatus.RESOLVED
@@ -1008,7 +841,7 @@ class TestResolutionCompleteness:
         self,
         db_session: AsyncSession,
         cve_ticket: Callable[..., Awaitable[Ticket]],
-        tree: Callable[..., Awaitable[TicketPackageTrack]],
+        tree: TreeBuilder,
         products: tuple[Prod, ...],
         expected: TicketStatus,
     ) -> None:
@@ -1021,7 +854,7 @@ class TestResolutionCompleteness:
         self,
         db_session: AsyncSession,
         cve_ticket: Callable[..., Awaitable[Ticket]],
-        tree: Callable[..., Awaitable[TicketPackageTrack]],
+        tree: TreeBuilder,
     ) -> None:
         ticket = await cve_ticket()
         await tree(ticket, status=PackageStatus.NOT_AFFECTED)
@@ -1033,7 +866,7 @@ class TestResolutionCompleteness:
         self,
         db_session: AsyncSession,
         cve_ticket: Callable[..., Awaitable[Ticket]],
-        tree: Callable[..., Awaitable[TicketPackageTrack]],
+        tree: TreeBuilder,
     ) -> None:
         ticket = await cve_ticket()
         await tree(ticket, status=PackageStatus.AFFECTED, products=(Prod(eol=True),))
@@ -1061,11 +894,11 @@ class TestSeverityAndSuseGates:
         self,
         db_session: AsyncSession,
         ticket_factory: TicketFactory,
-        tree: Callable[..., Awaitable[TicketPackageTrack]],
+        tree: TreeBuilder,
         severity: Severity | None,
         expected: TicketStatus,
     ) -> None:
-        ticket = await _cveless(ticket_factory, severity=severity)
+        ticket = await cveless(ticket_factory, severity=severity)
         await tree(ticket, status=PackageStatus.NOT_AFFECTED)
 
         assert await _reconcile(db_session, ticket) is expected
@@ -1081,7 +914,7 @@ class TestSeverityAndSuseGates:
         self,
         db_session: AsyncSession,
         cve_ticket: Callable[..., Awaitable[Ticket]],
-        tree: Callable[..., Awaitable[TicketPackageTrack]],
+        tree: TreeBuilder,
         severity: Severity | None,
         expected: TicketStatus,
     ) -> None:
@@ -1095,7 +928,7 @@ class TestSeverityAndSuseGates:
         self,
         db_session: AsyncSession,
         cve_ticket: Callable[..., Awaitable[Ticket]],
-        tree: Callable[..., Awaitable[TicketPackageTrack]],
+        tree: TreeBuilder,
         version: CVSSVersion,
     ) -> None:
         ticket = await cve_ticket(suse_versions=(version,))
@@ -1107,7 +940,7 @@ class TestSeverityAndSuseGates:
         self,
         db_session: AsyncSession,
         cve_ticket: Callable[..., Awaitable[Ticket]],
-        tree: Callable[..., Awaitable[TicketPackageTrack]],
+        tree: TreeBuilder,
     ) -> None:
         ticket = await cve_ticket(
             suse_versions=(), external_versions=tuple(CVSSVersion)
@@ -1120,7 +953,7 @@ class TestSeverityAndSuseGates:
         self,
         db_session: AsyncSession,
         cve_ticket: Callable[..., Awaitable[Ticket]],
-        tree: Callable[..., Awaitable[TicketPackageTrack]],
+        tree: TreeBuilder,
         system_setting_factory: Callable[..., Awaitable[Any]],
     ) -> None:
         await system_setting_factory(key="default_cvss_version", value="4.0")
@@ -1135,9 +968,9 @@ class TestSeverityAndSuseGates:
         self,
         db_session: AsyncSession,
         ticket_factory: TicketFactory,
-        tree: Callable[..., Awaitable[TicketPackageTrack]],
+        tree: TreeBuilder,
     ) -> None:
-        ticket = await _cveless(ticket_factory)
+        ticket = await cveless(ticket_factory)
         await tree(ticket, status=PackageStatus.AFFECTED)
 
         assert await _reconcile(db_session, ticket) is TicketStatus.ANALYZED
@@ -1146,20 +979,6 @@ class TestSeverityAndSuseGates:
 # ---------------------------------------------------------------------------
 # reconcile_ticket_status(): transitions, events, and date
 # ---------------------------------------------------------------------------
-
-
-async def _tree_for(
-    target: TicketStatus,
-    ticket: Ticket,
-    tree: Callable[..., Awaitable[TicketPackageTrack]],
-) -> None:
-    """Build a CVE-less tree whose gate result is `target`."""
-    status = {
-        TicketStatus.ANALYSIS: PackageStatus.ANALYSIS,
-        TicketStatus.ANALYZED: PackageStatus.AFFECTED,
-        TicketStatus.RESOLVED: PackageStatus.NOT_AFFECTED,
-    }[target]
-    await tree(ticket, status=status)
 
 
 GATE_STATUSES = (TicketStatus.ANALYSIS, TicketStatus.ANALYZED, TicketStatus.RESOLVED)
@@ -1180,17 +999,17 @@ class TestTransitions:
         self,
         db_session: AsyncSession,
         ticket_factory: TicketFactory,
-        tree: Callable[..., Awaitable[TicketPackageTrack]],
+        tree: TreeBuilder,
         current: TicketStatus,
         target: TicketStatus,
     ) -> None:
-        ticket = await _cveless(ticket_factory, status=current)
-        await _tree_for(target, ticket, tree)
+        ticket = await cveless(ticket_factory, status=current)
+        await tree_for(target, ticket, tree)
 
         assert await _reconcile(db_session, ticket) is target
 
-        assert await _events(db_session, ticket) == [
-            _status_event(current.value, target.value)
+        assert await ticket_events(db_session, ticket) == [
+            status_event(current.value, target.value)
         ]
         persisted = (
             await db_session.execute(
@@ -1204,30 +1023,30 @@ class TestTransitions:
         self,
         db_session: AsyncSession,
         ticket_factory: TicketFactory,
-        tree: Callable[..., Awaitable[TicketPackageTrack]],
+        tree: TreeBuilder,
         status: TicketStatus,
     ) -> None:
-        ticket = await _cveless(ticket_factory, status=status)
-        await _tree_for(status, ticket, tree)
+        ticket = await cveless(ticket_factory, status=status)
+        await tree_for(status, ticket, tree)
 
         assert await _reconcile(db_session, ticket) is status
         assert await _reconcile(db_session, ticket) is status
 
-        assert await _events(db_session, ticket) == []
+        assert await ticket_events(db_session, ticket) == []
 
     async def test_never_goes_below_analysis(
         self, db_session: AsyncSession, ticket_factory: TicketFactory
     ) -> None:
-        ticket = await _cveless(ticket_factory, severity=None)
+        ticket = await cveless(ticket_factory, severity=None)
 
         assert await _reconcile(db_session, ticket) is TicketStatus.ANALYSIS
-        assert await _events(db_session, ticket) == []
+        assert await ticket_events(db_session, ticket) == []
 
     async def test_one_evaluation_date_across_a_utc_midnight(
         self,
         db_session: AsyncSession,
         ticket_factory: TicketFactory,
-        tree: Callable[..., Awaitable[TicketPackageTrack]],
+        tree: TreeBuilder,
         product_factory: Callable[..., Awaitable[Product]],
         ticket_package_product_factory: Callable[..., Awaitable[TicketPackageProduct]],
         monkeypatch: pytest.MonkeyPatch,
@@ -1247,7 +1066,7 @@ class TestTransitions:
             return next(instants)
 
         monkeypatch.setattr(ticket_mutations, "_utc_now", clock)
-        ticket = await _cveless(ticket_factory)
+        ticket = await cveless(ticket_factory)
         # General Support ends on `day`: actionable on `day`, EOL the next day.
         track = await tree(ticket, status=PackageStatus.AFFECTED, products=())
         product = await product_factory(general_support_end_date=day)
@@ -1255,7 +1074,7 @@ class TestTransitions:
             ticket_package_track_id=track.id, product_id=product.id
         )
 
-        with _StatementRecorder(db_session) as recorder:
+        with StatementRecorder(db_session) as recorder:
             await reconcile_ticket_status(ticket, db_session)
 
         assert ticket.status == TicketStatus.ANALYZED
@@ -1278,7 +1097,7 @@ class TestTransitions:
             raise AssertionError("the supplied date must be reused")
 
         monkeypatch.setattr(ticket_mutations, "_utc_now", clock)
-        ticket = await _cveless(ticket_factory)
+        ticket = await cveless(ticket_factory)
 
         await reconcile_ticket_status(ticket, db_session, evaluation_date=EVAL)
 
@@ -1286,16 +1105,16 @@ class TestTransitions:
         self,
         db_session: AsyncSession,
         cve_ticket: Callable[..., Awaitable[Ticket]],
-        tree: Callable[..., Awaitable[TicketPackageTrack]],
-        va_user: Callable[..., Awaitable[User]],
+        tree: TreeBuilder,
+        va_user: VAUser,
     ) -> None:
         assignee = await va_user(active=False)
         ticket = await cve_ticket(status=TicketStatus.RESOLVED)
         ticket.assignee_id = assignee.id
         await tree(ticket, status=PackageStatus.AFFECTED)
-        ticket = await _lock_ticket(db_session, ticket)
+        ticket = await lock_ticket(db_session, ticket)
 
-        with _StatementRecorder(db_session) as recorder:
+        with StatementRecorder(db_session) as recorder:
             assert await _reconcile(db_session, ticket) is TicketStatus.ANALYZED
 
         assert recorder.row_locks() == []
@@ -1330,8 +1149,8 @@ class TestAssignmentSanitation:
         self,
         db_session: AsyncSession,
         ticket_factory: TicketFactory,
-        tree: Callable[..., Awaitable[TicketPackageTrack]],
-        va_user: Callable[..., Awaitable[User]],
+        tree: TreeBuilder,
+        va_user: VAUser,
         caplog: pytest.LogCaptureFixture,
         active: bool,
         roles: tuple[Role, ...],
@@ -1339,15 +1158,15 @@ class TestAssignmentSanitation:
         result: TicketStatus,
     ) -> None:
         assignee = await va_user(active=active, roles=roles)
-        ticket = await _cveless(ticket_factory, status=result, assignee_id=assignee.id)
-        await _tree_for(result, ticket, tree)
+        ticket = await cveless(ticket_factory, status=result, assignee_id=assignee.id)
+        await tree_for(result, ticket, tree)
 
         with caplog.at_level("WARNING"):
             assert await _reconcile(db_session, ticket) is result
 
         assert ticket.assignee_id is None
-        assert await _events(db_session, ticket) == [
-            _unassigned_event(assignee.username, reason)
+        assert await ticket_events(db_session, ticket) == [
+            unassigned_event(assignee.username, reason)
         ]
         records = _service_event_fields(caplog, "ticket_assignee_sanitized")
         assert len(records) == 1
@@ -1362,70 +1181,70 @@ class TestAssignmentSanitation:
         self,
         db_session: AsyncSession,
         ticket_factory: TicketFactory,
-        va_user: Callable[..., Awaitable[User]],
+        va_user: VAUser,
     ) -> None:
         assignee = await va_user(
             roles=(Role.RESTRICTED_ANALYST, Role.VULNERABILITY_ANALYST)
         )
-        ticket = await _cveless(ticket_factory, assignee_id=assignee.id)
+        ticket = await cveless(ticket_factory, assignee_id=assignee.id)
 
         assert await _reconcile(db_session, ticket) is TicketStatus.ANALYSIS
 
         assert ticket.assignee_id == assignee.id
-        assert await _events(db_session, ticket) == []
+        assert await ticket_events(db_session, ticket) == []
 
     async def test_resolved_result_retains_ineligible_assignee(
         self,
         db_session: AsyncSession,
         ticket_factory: TicketFactory,
-        tree: Callable[..., Awaitable[TicketPackageTrack]],
-        va_user: Callable[..., Awaitable[User]],
+        tree: TreeBuilder,
+        va_user: VAUser,
     ) -> None:
         assignee = await va_user(active=False, roles=())
-        ticket = await _cveless(ticket_factory, assignee_id=assignee.id)
-        await _tree_for(TicketStatus.RESOLVED, ticket, tree)
+        ticket = await cveless(ticket_factory, assignee_id=assignee.id)
+        await tree_for(TicketStatus.RESOLVED, ticket, tree)
 
         assert await _reconcile(db_session, ticket) is TicketStatus.RESOLVED
 
         assert ticket.assignee_id == assignee.id
-        assert await _events(db_session, ticket) == [
-            _status_event("Analysis", "Resolved")
+        assert await ticket_events(db_session, ticket) == [
+            status_event("Analysis", "Resolved")
         ]
 
     async def test_sanitation_event_precedes_the_final_status_event(
         self,
         db_session: AsyncSession,
         ticket_factory: TicketFactory,
-        tree: Callable[..., Awaitable[TicketPackageTrack]],
-        va_user: Callable[..., Awaitable[User]],
+        tree: TreeBuilder,
+        va_user: VAUser,
     ) -> None:
         assignee = await va_user(active=False)
-        ticket = await _cveless(
+        ticket = await cveless(
             ticket_factory, status=TicketStatus.RESOLVED, assignee_id=assignee.id
         )
-        await _tree_for(TicketStatus.ANALYZED, ticket, tree)
+        await tree_for(TicketStatus.ANALYZED, ticket, tree)
 
         assert await _reconcile(db_session, ticket) is TicketStatus.ANALYZED
 
-        assert await _events(db_session, ticket) == [
-            _unassigned_event(assignee.username, "inactive assignee"),
-            _status_event("Resolved", "Analyzed"),
+        assert await ticket_events(db_session, ticket) == [
+            unassigned_event(assignee.username, "inactive assignee"),
+            status_event("Resolved", "Analyzed"),
         ]
 
     async def test_observes_current_role_origins_without_user_lock(
         self,
         db_session: AsyncSession,
         ticket_factory: TicketFactory,
-        va_user: Callable[..., Awaitable[User]],
+        va_user: VAUser,
     ) -> None:
         assignee = await va_user()
-        ticket = await _cveless(ticket_factory, assignee_id=assignee.id)
+        ticket = await cveless(ticket_factory, assignee_id=assignee.id)
         # The final VA origin disappears after the assignee was loaded.
         await db_session.execute(
             delete(UserRole).where(UserRole.user_id == assignee.id)
         )
 
-        with _StatementRecorder(db_session) as recorder:
+        with StatementRecorder(db_session) as recorder:
             await _reconcile(db_session, ticket)
 
         assert ticket.assignee_id is None
@@ -1446,18 +1265,18 @@ class TestPreviousStatus:
         self,
         db_session: AsyncSession,
         ticket_factory: TicketFactory,
-        tree: Callable[..., Awaitable[TicketPackageTrack]],
+        tree: TreeBuilder,
         source: TicketStatus,
         result: TicketStatus,
     ) -> None:
         # The public exit workflow has prepared the Analysis floor.
-        ticket = await _cveless(ticket_factory, status=TicketStatus.ANALYSIS)
-        await _tree_for(result, ticket, tree)
+        ticket = await cveless(ticket_factory, status=TicketStatus.ANALYSIS)
+        await tree_for(result, ticket, tree)
 
         assert await _reconcile(db_session, ticket, previous_status=source) is result
 
-        assert await _events(db_session, ticket) == [
-            _status_event(source.value, result.value)
+        assert await ticket_events(db_session, ticket) == [
+            status_event(source.value, result.value)
         ]
         assert pending_ticket_convergence_effects(db_session) == (
             TicketConvergenceEffect(ticket.id),
@@ -1467,47 +1286,47 @@ class TestPreviousStatus:
         self,
         db_session: AsyncSession,
         ticket_factory: TicketFactory,
-        tree: Callable[..., Awaitable[TicketPackageTrack]],
-        va_user: Callable[..., Awaitable[User]],
+        tree: TreeBuilder,
+        va_user: VAUser,
     ) -> None:
         assignee = await va_user(active=False)
-        ticket = await _cveless(ticket_factory, assignee_id=assignee.id)
-        await _tree_for(TicketStatus.RESOLVED, ticket, tree)
+        ticket = await cveless(ticket_factory, assignee_id=assignee.id)
+        await tree_for(TicketStatus.RESOLVED, ticket, tree)
 
         await _reconcile(db_session, ticket, previous_status=TicketStatus.IGNORED)
 
         assert ticket.assignee_id == assignee.id
-        assert await _events(db_session, ticket) == [
-            _status_event("Ignored", "Resolved")
+        assert await ticket_events(db_session, ticket) == [
+            status_event("Ignored", "Resolved")
         ]
 
     async def test_exit_with_sanitation_orders_events(
         self,
         db_session: AsyncSession,
         ticket_factory: TicketFactory,
-        va_user: Callable[..., Awaitable[User]],
+        va_user: VAUser,
     ) -> None:
         assignee = await va_user(roles=())
-        ticket = await _cveless(ticket_factory, assignee_id=assignee.id)
+        ticket = await cveless(ticket_factory, assignee_id=assignee.id)
 
         await _reconcile(db_session, ticket, previous_status=TicketStatus.DUPLICATED)
 
-        assert await _events(db_session, ticket) == [
-            _unassigned_event(assignee.username, "vulnerability_analyst role removed"),
-            _status_event("Duplicated", "Analysis"),
+        assert await ticket_events(db_session, ticket) == [
+            unassigned_event(assignee.username, "vulnerability_analyst role removed"),
+            status_event("Duplicated", "Analysis"),
         ]
 
     async def test_exit_needs_no_cve_lock(
         self,
         db_session: AsyncSession,
         cve_ticket: Callable[..., Awaitable[Ticket]],
-        tree: Callable[..., Awaitable[TicketPackageTrack]],
+        tree: TreeBuilder,
     ) -> None:
         ticket = await cve_ticket()
         await tree(ticket, status=PackageStatus.NOT_AFFECTED)
-        ticket = await _lock_ticket(db_session, ticket)
+        ticket = await lock_ticket(db_session, ticket)
 
-        with _StatementRecorder(db_session) as recorder:
+        with StatementRecorder(db_session) as recorder:
             await _reconcile(db_session, ticket, previous_status=TicketStatus.IGNORED)
 
         assert ticket.status == TicketStatus.RESOLVED
@@ -1521,11 +1340,11 @@ class TestConvergenceRegistration:
         self,
         db_session: AsyncSession,
         ticket_factory: TicketFactory,
-        tree: Callable[..., Awaitable[TicketPackageTrack]],
+        tree: TreeBuilder,
         result: TicketStatus,
     ) -> None:
-        ticket = await _cveless(ticket_factory, status=TicketStatus.RESOLVED)
-        await _tree_for(result, ticket, tree)
+        ticket = await cveless(ticket_factory, status=TicketStatus.RESOLVED)
+        await tree_for(result, ticket, tree)
 
         await _reconcile(db_session, ticket)
 
@@ -1548,12 +1367,12 @@ class TestConvergenceRegistration:
         self,
         db_session: AsyncSession,
         ticket_factory: TicketFactory,
-        tree: Callable[..., Awaitable[TicketPackageTrack]],
+        tree: TreeBuilder,
         current: TicketStatus,
         result: TicketStatus,
     ) -> None:
-        ticket = await _cveless(ticket_factory, status=current)
-        await _tree_for(result, ticket, tree)
+        ticket = await cveless(ticket_factory, status=current)
+        await tree_for(result, ticket, tree)
 
         assert await _reconcile(db_session, ticket) is result
 
@@ -1562,8 +1381,8 @@ class TestConvergenceRegistration:
     async def test_repeated_reconciliation_registers_one_effect_in_order(
         self, db_session: AsyncSession, ticket_factory: TicketFactory
     ) -> None:
-        first = await _cveless(ticket_factory)
-        second = await _cveless(ticket_factory)
+        first = await cveless(ticket_factory)
+        second = await cveless(ticket_factory)
 
         await _reconcile(db_session, second, previous_status=TicketStatus.IGNORED)
         await _reconcile(db_session, first, previous_status=TicketStatus.DUPLICATED)
@@ -1578,14 +1397,14 @@ class TestConvergenceRegistration:
         self,
         db_session: AsyncSession,
         ticket_factory: TicketFactory,
-        tree: Callable[..., Awaitable[TicketPackageTrack]],
+        tree: TreeBuilder,
     ) -> None:
         # Registration is in-memory: beyond the gate evaluation, an exit issues
         # only its status-change audit INSERT.
-        ticket = await _cveless(ticket_factory)
-        await _tree_for(TicketStatus.ANALYSIS, ticket, tree)
+        ticket = await cveless(ticket_factory)
+        await tree_for(TicketStatus.ANALYSIS, ticket, tree)
 
-        with _StatementRecorder(db_session) as recorder:
+        with StatementRecorder(db_session) as recorder:
             await _reconcile(db_session, ticket, previous_status=TicketStatus.IGNORED)
 
         writes = [
@@ -1596,7 +1415,7 @@ class TestConvergenceRegistration:
         assert len(writes) == 1
         assert writes[0].lstrip().upper().startswith("INSERT INTO TICKET_AUDIT_EVENT")
         assert len(recorder.statements) == 2
-        assert [e.event_type for e in await _events(db_session, ticket)] == [
+        assert [e.event_type for e in await ticket_events(db_session, ticket)] == [
             "status_change"
         ]
         assert pending_ticket_convergence_effects(db_session) == (
@@ -1607,15 +1426,15 @@ class TestConvergenceRegistration:
         self,
         db_session: AsyncSession,
         ticket_factory: TicketFactory,
-        tree: Callable[..., Awaitable[TicketPackageTrack]],
-        va_user: Callable[..., Awaitable[User]],
+        tree: TreeBuilder,
+        va_user: VAUser,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         assignee_id = (await va_user(active=False)).id
-        ticket = await _cveless(
+        ticket = await cveless(
             ticket_factory, status=TicketStatus.RESOLVED, assignee_id=assignee_id
         )
-        await _tree_for(TicketStatus.ANALYZED, ticket, tree)
+        await tree_for(TicketStatus.ANALYZED, ticket, tree)
         original = TicketAuditLog.log_event
         calls = 0
 
@@ -1635,7 +1454,7 @@ class TestConvergenceRegistration:
         await db_session.refresh(ticket)
         assert ticket.status == TicketStatus.RESOLVED
         assert ticket.assignee_id == assignee_id
-        assert await _events(db_session, ticket) == []
+        assert await ticket_events(db_session, ticket) == []
         assert pending_ticket_convergence_effects(db_session) == ()
         assert calls == 2
 
@@ -1643,11 +1462,11 @@ class TestConvergenceRegistration:
         self,
         db_session: AsyncSession,
         ticket_factory: TicketFactory,
-        tree: Callable[..., Awaitable[TicketPackageTrack]],
+        tree: TreeBuilder,
     ) -> None:
-        other = await _cveless(ticket_factory)
+        other = await cveless(ticket_factory)
         await tree(other, status=PackageStatus.NOT_AFFECTED)
-        ticket = await _cveless(ticket_factory)
+        ticket = await cveless(ticket_factory)
 
         assert await _reconcile(db_session, ticket) is TicketStatus.ANALYSIS
         assert other.status == TicketStatus.ANALYSIS
