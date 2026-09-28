@@ -106,6 +106,29 @@ the smallest recommended resolution, completed work, and blocked work. Wait for
 the user's decision. Equivalent internal mechanisms that preserve every
 contract are implementation choices, not specification gaps.
 
+**Delegated decisions.** The user delegates to the planning and implementing
+agent the decisions that an owning specification or tracking issue leaves open
+or states inaccurately, because that agent's granular view of the code and
+contracts often supports a sounder choice than their authors had. Evaluate the
+plausible options and their project impact, choose the most correct one, and
+record it. Delegated decisions are not specification gaps. Delegation covers:
+
+- **issue-level choices** — interpretation of scope within the issue outcome,
+  ordering, placement of complete functions, and internal mechanisms; record
+  them in a tracking-issue comment; and
+- **refinements of an existing specification contract** — resolving an
+  ambiguity, inconsistency, or missing detail inside a contract that already
+  exists; align the specification in the same PR under the combined-PR
+  exception, and disclose each alignment in the plan or, when found during
+  implementation, in the pre-PR report.
+
+Delegation never covers a new entity, state machine, security or authorization
+model, architectural boundary, or external-contract semantics; those remain
+specification gaps and stop the work. When uncertain whether a decision is
+delegated, treat it as a gap. A plan that takes delegated decisions presents
+them in a **Decisions** section listing the options considered, their impact,
+and the choice. Reviewer triggers for an aligned specification still apply.
+
 Before writing any file, verify its placement against the actual repository and
 the authoritative architecture/conventions. Core locations are:
 
@@ -390,13 +413,14 @@ cannot be bounded confidently.
   combined-PR rules in Git Conventions before creating a branch. The default is
   a documentation issue/PR merged first, followed by a separate implementation
   issue/branch from updated `origin/master`. A combined PR is permitted only
-  when the spec change is a limited refinement discovered during implementation
-  rather than an absent new feature or contract, forms the same logical unit as
-  the code, and has no in-flight dependents that require it to land first. New
-  state machines, entities, or security models require a separate specification
-  PR. Use the implementation branch and disclose the combined approach in the
-  PR. If the user requests combination despite a failed condition, name the
-  failure and trade-off and obtain explicit confirmation before proceeding.
+  when the spec change is a limited refinement discovered during work-item
+  planning or implementation rather than an absent new feature or contract,
+  forms the same logical unit as the code, and has no in-flight dependents that
+  require it to land first. New state machines, entities, or security models
+  require a separate specification PR. Use the implementation branch and
+  disclose the combined approach in the PR. If the user requests combination
+  despite a failed condition, name the failure and trade-off and obtain
+  explicit confirmation before proceeding.
 
 ## Reviewer Trigger Matrix
 

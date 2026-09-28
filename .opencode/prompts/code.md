@@ -9,10 +9,11 @@ that satisfy the specifications, established architecture, and conventions.
 ## Scope
 
 You may edit project files subject to all project guardrails. Edits under
-`docs/**` require you to signal the specification gap, propose a resolution,
-and receive explicit user approval in the same conversation; OpenCode also
-asks for confirmation on each such edit. Apply the spec-first sequencing or
-combined-PR rules in `AGENTS.md` Guardrail 25 before making the edit.
+`docs/**` are limited to specification alignments for delegated decisions
+(`AGENTS.md`, Delegated decisions) and to resolutions of specification gaps
+the user has decided in the same conversation; OpenCode also asks for
+confirmation on each such edit. Apply the spec-first sequencing or combined-PR
+rules in `AGENTS.md` Guardrail 25 before making the edit.
 
 ## Before implementation
 
@@ -39,6 +40,13 @@ product behavior, guarantees, contract semantics, security or data-integrity
 requirements, or an architectural boundary, or when two plausible required
 outcomes remain. A choice among internal mechanisms that preserve all
 specified behavior and project constraints is not a gap.
+
+Delegated decisions (`AGENTS.md`, Delegated decisions) are not gaps either,
+including those discovered during implementation after the plan was approved:
+evaluate the options, decide, record the decision, align the specification in
+the same PR when the decision refines an existing contract, and disclose it in
+the pre-PR report. Anything outside that delegation, or uncertain, follows the
+protocol below.
 
 When a gap exists:
 
@@ -83,6 +91,29 @@ that remains documentation-only and unverified.
 After changing an external integration, invoke the on-demand
 `@external-contract-verifier` in addition to reviewers required by
 `AGENTS.md`.
+
+## Delegation to general tasks
+
+You may delegate parts of the approved plan to built-in `general` tasks to
+keep this session's context small; you remain responsible for the result.
+Delegation is optional. Prefer it for bounded, well-specified work with large
+tool output, such as writing tests, mechanical multi-file edits, or test-fix
+loops. Keep small changes and design-heavy work in this session, where the
+brief would cost more than it saves.
+
+- Run writing tasks sequentially, never in parallel: concurrent tasks can edit
+  the same files or run tests against a half-edited tree. Reviewers may run in
+  parallel.
+- Give each task a self-contained brief: the plan portion it implements, the
+  decisions already taken, the owning specification sections and authorities
+  it must read, the files in scope, the checks to run, and a statement that
+  the issue and branch already exist. A task does not inherit your reads or
+  your conversation.
+- Instruct each task not to start the Git workflow, commit, push, perform
+  GitHub mutations, edit `docs/**`, invoke reviewers, or take gap or delegated
+  decisions; it reports any such need in its result instead.
+- After each task, inspect its diff and rerun the focused checks yourself
+  before continuing. The task's summary is context, not evidence.
 
 ## Reviews and completion
 
@@ -144,6 +175,8 @@ Before opening a PR, report:
 - branch name and scope;
 - intended Conventional Commits title and PR description;
 - changed files;
+- decisions taken under delegation and the specification alignments they
+  required;
 - `@spec-conformance-reviewer` verdict; and
 - unresolved findings or risks.
 
