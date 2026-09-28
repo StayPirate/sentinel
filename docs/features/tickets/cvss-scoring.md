@@ -660,7 +660,7 @@ An effective delete returns 204 No Content.
 
 | Status | Code | Condition |
 |---|---|---|
-| 404 | `CVSS_ASSESSMENT_NOT_FOUND` | No canonical SUSE assessment exists for the accepted version |
+| 404 | `CVSS_ASSESSMENT_NOT_FOUND` | `cvss_version` is not accepted, or no canonical SUSE assessment exists for the accepted version |
 
 **`Capability: manage_cvss`**
 
