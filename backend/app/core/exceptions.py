@@ -67,6 +67,25 @@ class TicketNotFoundError(ServiceError):
         super().__init__("Ticket not found.")
 
 
+class CVENotFoundError(ServiceError):
+    """A consumer-facing CVE path does not resolve to an accessible CVE.
+
+    Shared exception per `docs/conventions.md` (Service Exception
+    Conventions, Shared exceptions) — inherits from `ServiceError`
+    directly, not from a `cve_service` base class, so CVE-facing service
+    boundaries share one not-found type
+    (`docs/features/tickets/cve-service.md`, Exceptions). A malformed
+    CVE-ID, a missing CVE, and a CVE whose associated Ticket is
+    inaccessible to the caller all raise this same exception, so the API
+    maps every cause to one identical `404 CVE_NOT_FOUND` response
+    (`docs/api-spec.md`, CVE Accessibility Check). The message is static
+    and never includes the identifier value or the denial cause.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("CVE not found.")
+
+
 class TicketNotMutableError(ServiceError):
     """A Ticket in the manual zone (`Ignored` or `Duplicated`) rejects a mutation.
 

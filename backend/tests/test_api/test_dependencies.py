@@ -279,6 +279,18 @@ class TestErrorFactories:
         assert error.detail == "Ticket not found."
         assert error.headers is None
 
+    def test_cve_not_found_error_shape(self) -> None:
+        error = dependencies.cve_not_found_error()
+        assert error.status_code == 404
+        assert error.code == ErrorCode.CVE_NOT_FOUND
+        assert error.detail == "CVE not found."
+        assert error.headers is None
+
+    def test_cve_not_found_error_returns_fresh_instance(self) -> None:
+        assert dependencies.cve_not_found_error() is not (
+            dependencies.cve_not_found_error()
+        )
+
 
 # ---------------------------------------------------------------------------
 # UnknownKeyWarningLimiter

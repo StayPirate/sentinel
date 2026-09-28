@@ -97,6 +97,22 @@ def ticket_not_found_error() -> AppError:
     )
 
 
+def cve_not_found_error() -> AppError:
+    """Create the scoped 404 for an unresolved or inaccessible CVE.
+
+    See `docs/api-spec.md` (CVE Accessibility Check, CVE Identifier
+    Resolution): a malformed CVE-ID, a missing CVE, and a CVE whose
+    associated Ticket is inaccessible all return this one identical
+    response — never `TICKET_NOT_FOUND` — so every endpoint that catches
+    the shared `CVENotFoundError` raises this.
+    """
+    return AppError(
+        status_code=status.HTTP_404_NOT_FOUND,
+        code=ErrorCode.CVE_NOT_FOUND,
+        detail="CVE not found.",
+    )
+
+
 def set_session_cookie(response: Response, token: str) -> None:
     """Set the `sentinel_session` cookie with the approved secure attributes.
 
@@ -629,6 +645,22 @@ TicketIdPath = Annotated[
 Deliberately an unconstrained string: a malformed value must reach the
 service and produce `404 TICKET_NOT_FOUND`, not the `422` a schema
 pattern would return (`docs/api-spec.md`, Ticket Identifier Resolution).
+"""
+
+CVEIdPath = Annotated[
+    str,
+    Path(
+        description=(
+            "CVE-ID (`CVE-YYYY-NNNN...`). The internal CVE UUID is never accepted."
+        ),
+        examples=["CVE-2024-1234"],
+    ),
+]
+"""The `{cve_id}` path parameter.
+
+Deliberately an unconstrained string: a malformed value must reach the
+service and produce `404 CVE_NOT_FOUND`, not the `422` a schema pattern
+would return (`docs/api-spec.md`, CVE Identifier Resolution).
 """
 
 
