@@ -31,3 +31,19 @@ class InvalidCVSSVectorError(TicketMutationsError):
 
     def __init__(self) -> None:
         super().__init__("Invalid CVSS vector.")
+
+
+class CVSSAssessmentNotFoundError(TicketMutationsError):
+    """No SUSE assessment can be addressed for the requested version.
+
+    Raised for a version that is not an accepted CVSS version — an
+    input-only check that precedes CVE resolution — and mapped by the API
+    from a serialized `not_found` delete outcome. Maps to `404
+    CVSS_ASSESSMENT_NOT_FOUND`. The message is static and never includes
+    the received version. See `docs/features/tickets/ticket-mutations.md`
+    (Service Exceptions) and `docs/features/tickets/cvss-scoring.md`
+    (Delete SUSE CVSS Assessment).
+    """
+
+    def __init__(self) -> None:
+        super().__init__("CVSS assessment not found.")

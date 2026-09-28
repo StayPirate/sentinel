@@ -1489,7 +1489,7 @@ them to the corresponding HTTP status code and error code per
 |-----------|------|------|-------------|
 | `TicketNotFoundError` † | 404 | `TICKET_NOT_FOUND` | Consumer Ticket locator is malformed, does not exist, or identifies an inaccessible Ticket; an internal UUID lookup may also be absent |
 | `TicketNotMutableError` † | 409 | `TICKET_NOT_MUTABLE` | Ticket is in manual zone (Ignored or Duplicated) |
-| `CVSSAssessmentNotFoundError` | 404 | `CVSS_ASSESSMENT_NOT_FOUND` | No SUSE assessment exists for the accepted `(cve_id, cvss_version)` after the CVE itself was resolved |
+| `CVSSAssessmentNotFoundError` | 404 | `CVSS_ASSESSMENT_NOT_FOUND` | The requested version is not an accepted CVSS version (an input-only check that precedes CVE resolution), or no SUSE assessment exists for the accepted `(cve_id, cvss_version)` after the CVE itself was resolved |
 | `InvalidCVSSVectorError` | 422 | `CVSS_INVALID_VECTOR` | CVSS vector string is malformed or invalid |
 | `InvalidTransitionError` † | 409 | `TICKET_INVALID_TRANSITION` | Requested status transition is not allowed |
 | `SeverityDerivedError` † | 409 | `TICKET_SEVERITY_DERIVED` | Cannot manually set severity when it is auto-derived |

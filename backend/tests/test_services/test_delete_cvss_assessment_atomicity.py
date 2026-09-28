@@ -1,26 +1,25 @@
 """Atomicity, evaluation-date, and independent-session tests for
-`upsert_cvss_assessment()` (backend/app/services/ticket_mutations.py).
+`delete_cvss_assessment()` (backend/app/services/ticket_mutations.py).
 
 Owning specifications:
 
 - docs/features/tickets/ticket-mutations.md (CVSS Mutation Authority and
-  Result: rollback of the complete chain; `upsert_cvss_assessment()`;
+  Result: rollback of the complete chain; `delete_cvss_assessment()`;
   Service Exceptions: `RequiredSystemSettingMissingError`; Architectural
-  Test Requirement: complete atomic chain, serialized outcomes,
-  independent-session races (default-version/CVSS), locked-current
-  consumer accessibility).
+  Test Requirement: complete atomic chain, serialized outcomes
+  (delete/not-found and upsert/delete races), locked-current consumer
+  accessibility).
 - docs/features/tickets/cvss-scoring.md (Serialization and Concurrent
-  Outcomes; Required Tests > Persistence and API Tests: two-session lock
-  tests and manual API concurrency tests).
-- docs/features/tickets/ticket-audit-log.md (Testing Requirements 7, 16,
-  23, 24).
+  Outcomes: "a waiting delete after another delete is `not_found`";
+  Required Tests > Persistence and API Tests: two-session lock tests and
+  manual API concurrency tests).
+- docs/features/tickets/ticket-audit-log.md (Canonical Mutation and
+  No-Event Matrix: concurrent-loser and rolled-back outcomes; Cross-Event
+  Ordering, Locking, and Rollback).
 - docs/features/platform/testing-strategy.md (Concurrency Testing; Ticket
-  Accessibility: Locked mutations).
+  Accessibility: Locked mutations; Audit Trail Testing).
 
-The cross-path races against CVE ingestion and two external batches are
-deferred to M3.1; the CVSS/reactivation and association/CVSS races to
-M2.3; the CVSS/override race to M2.4 (#669 Deferred). Expected values are
-transcribed from the specifications.
+Expected values are transcribed from the specifications.
 """
 
 from __future__ import annotations
@@ -58,18 +57,17 @@ from app.services.ticket_convergence_registry import (
 from app.services.ticket_mutations import (
     CVSSAssessmentAction,
     CVSSAssessmentMutationResult,
-    CVSSChainClassification,
-    CVSSChainMode,
-    recalculate_cvss_chain,
+    CVSSPropagation,
 )
 from app.services.ticket_visibility import TicketCaller
 from tests.support.cvss_chain import (
+    FALLBACK,
     CallCounter,
     cve_severity,
     eligibility,
     priority_event,
-    product_event,
     severity_event,
+    severity_resolution,
     ticket_state,
 )
 from tests.support.database import rollback_test_scope
@@ -77,9 +75,12 @@ from tests.support.suse_cvss import (
     V31_CRITICAL,
     V31_MEDIUM,
     V40_CRITICAL,
-    assignment_event,
+    Vector,
+    cvss_delete_event,
     cvss_event,
+    delete_assessment,
     persisted_assessments,
+    unit,
     upsert,
 )
 from tests.support.suse_cvss_races import (
@@ -89,13 +90,11 @@ from tests.support.suse_cvss_races import (
     prepare_loss,
 )
 from tests.support.ticket_mutations import (
-    EVAL,
     Prod,
     StatementRecorder,
     TicketFactory,
     TreeBuilder,
     VAUser,
-    status_event,
     ticket_events_by_id,
 )
 
@@ -125,7 +124,7 @@ def _sql_dates(recorder: StatementRecorder) -> set[date]:
 
 
 # ---------------------------------------------------------------------------
-# Whole-chain rollback (audit Testing Requirements 7 and 24)
+# Whole-chain rollback
 # ---------------------------------------------------------------------------
 
 
@@ -136,18 +135,25 @@ FAILURES = ["settings", "database", "eligibility", "audit", "flush", "reconcilia
 class TestRollback:
     async def _scenario(
         self,
-        db: AsyncSession,
         ticket_factory: TicketFactory,
         cve_factory: Factory,
+        cve_cvss_assessment_factory: Factory,
         tree: TreeBuilder,
         va_user: VAUser,
     ) -> tuple[User, CVE, Ticket]:
-        """An unassigned `New` Ticket whose effective chain assigns,
-        promotes, writes the assessment and severity, changes a Product,
-        refreshes priority, and reaches `Analyzed`."""
+        """An unassigned `New` Ticket whose effective delete assigns,
+        promotes, deletes the default-version SUSE assessment, changes the
+        severity (`Medium` to the SUSE v4.0 `Critical`) and a Product (the
+        `10.0` fallback), refreshes priority, and reaches `Analyzed`."""
         actor = await va_user()
-        cve: CVE = await cve_factory()
-        ticket = await ticket_factory(status=TicketStatus.NEW.value, cve_id=cve.id)
+        cve: CVE = await cve_factory(severity=Severity.MEDIUM.value)
+        for vector in (V31_MEDIUM, V40_CRITICAL):
+            await cve_cvss_assessment_factory(
+                cve_id=cve.id, provider_name="SUSE", **vector.columns()
+            )
+        ticket = await ticket_factory(
+            status=TicketStatus.NEW.value, cve_id=cve.id, priority_auto="P4"
+        )
         await tree(
             ticket,
             status=PackageStatus.AFFECTED,
@@ -162,13 +168,14 @@ class TestRollback:
         default_setting: SystemSetting,
         ticket_factory: TicketFactory,
         cve_factory: Factory,
+        cve_cvss_assessment_factory: Factory,
         tree: TreeBuilder,
         va_user: VAUser,
         monkeypatch: pytest.MonkeyPatch,
         failure: str,
     ) -> None:
         actor, cve, ticket = await self._scenario(
-            db_session, ticket_factory, cve_factory, tree, va_user
+            ticket_factory, cve_factory, cve_cvss_assessment_factory, tree, va_user
         )
         cve_id, ticket_id = cve.id, ticket.id
         expected_error: type[BaseException] = RuntimeError
@@ -245,17 +252,20 @@ class TestRollback:
                 )
 
             with pytest.raises(expected_error):
-                await upsert(db_session, cve_id, V31_CRITICAL.canonical, actor)
+                await delete_assessment(db_session, cve_id, "3.1", actor)
         monkeypatch.undo()
 
         assert reached is (failure != "settings")
-        assert await persisted_assessments(db_session, cve_id) == []
-        assert await cve_severity(db_session, cve_id) is None
+        assert await persisted_assessments(db_session, cve_id) == [
+            unit("SUSE", V31_MEDIUM),
+            unit("SUSE", V40_CRITICAL),
+        ]
+        assert await cve_severity(db_session, cve_id) == "Medium"
         assert await eligibility(db_session, ticket_id) == [(False, False)]
         assert await ticket_state(db_session, ticket_id) == (
             TicketStatus.NEW,
             None,
-            None,
+            "P4",
             None,
             None,
         )
@@ -268,18 +278,21 @@ class TestRollback:
         default_setting: SystemSetting,
         ticket_factory: TicketFactory,
         cve_factory: Factory,
+        cve_cvss_assessment_factory: Factory,
         tree: TreeBuilder,
         va_user: VAUser,
     ) -> None:
         """Control for the rollback matrix: without an injected failure the
         same scenario changes every asserted value."""
         actor, cve, ticket = await self._scenario(
-            db_session, ticket_factory, cve_factory, tree, va_user
+            ticket_factory, cve_factory, cve_cvss_assessment_factory, tree, va_user
         )
 
-        await upsert(db_session, cve.id, V31_CRITICAL.canonical, actor)
+        await delete_assessment(db_session, cve.id, "3.1", actor)
 
-        assert len(await persisted_assessments(db_session, cve.id)) == 1
+        assert await persisted_assessments(db_session, cve.id) == [
+            unit("SUSE", V40_CRITICAL)
+        ]
         assert await cve_severity(db_session, cve.id) == "Critical"
         assert await eligibility(db_session, ticket.id) == [(True, False)]
         assert await ticket_state(db_session, ticket.id) == (
@@ -315,6 +328,7 @@ class TestEvaluationDate:
         db_session: AsyncSession,
         ticket_factory: TicketFactory,
         cve_factory: Factory,
+        cve_cvss_assessment_factory: Factory,
         tree: TreeBuilder,
         va_user: VAUser,
         monkeypatch: pytest.MonkeyPatch,
@@ -325,7 +339,10 @@ class TestEvaluationDate:
         monkeypatch.setattr(ticket_mutations, "_utc_now", clock)
         reconcile = CallCounter(monkeypatch, "reconcile_ticket_status")
         actor = await va_user()
-        cve: CVE = await cve_factory()
+        cve: CVE = await cve_factory(severity=Severity.CRITICAL.value)
+        await cve_cvss_assessment_factory(
+            cve_id=cve.id, provider_name="SUSE", **V31_CRITICAL.columns()
+        )
         ticket = await ticket_factory(
             status=TicketStatus.ANALYSIS.value, cve_id=cve.id, assignee_id=actor.id
         )
@@ -333,12 +350,8 @@ class TestEvaluationDate:
         supplied = date(2026, 1, 2)
 
         with StatementRecorder(db_session) as recorder:
-            result = await upsert(
-                db_session,
-                cve.id,
-                V31_CRITICAL.canonical,
-                actor,
-                evaluation_date=supplied,
+            result = await delete_assessment(
+                db_session, cve.id, "3.1", actor, evaluation_date=supplied
             )
 
         assert result.evaluation_date == supplied
@@ -350,14 +363,17 @@ class TestEvaluationDate:
         db_session: AsyncSession,
         ticket_factory: TicketFactory,
         cve_factory: Factory,
+        cve_cvss_assessment_factory: Factory,
         tree: TreeBuilder,
         product_factory: Factory,
         ticket_package_product_factory: Factory,
         va_user: VAUser,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Extended support ends on `day`: the Product is eligible on `day`
-        and in Reactive Support (ineligible) the next day."""
+        """Extended support ends on `day`: the stale automatic Product is
+        eligible on `day` and in Reactive Support (ineligible) the next
+        day. Deleting the non-default SUSE v4.0 assessment re-evaluates
+        it."""
         day = date(2026, 12, 31)
         instants = iter(
             [
@@ -373,9 +389,16 @@ class TestEvaluationDate:
             return next(instants)
 
         actor = await va_user()
-        cve: CVE = await cve_factory()
+        cve: CVE = await cve_factory(severity=Severity.CRITICAL.value)
+        for vector in (V31_CRITICAL, V40_CRITICAL):
+            await cve_cvss_assessment_factory(
+                cve_id=cve.id, provider_name="SUSE", **vector.columns()
+            )
         ticket = await ticket_factory(
-            status=TicketStatus.ANALYSIS.value, cve_id=cve.id, assignee_id=actor.id
+            status=TicketStatus.ANALYSIS.value,
+            cve_id=cve.id,
+            assignee_id=actor.id,
+            priority_auto="P2",
         )
         track = await tree(ticket, status=PackageStatus.AFFECTED, products=())
         product = await product_factory(
@@ -390,8 +413,8 @@ class TestEvaluationDate:
         reconcile = CallCounter(monkeypatch, "reconcile_ticket_status")
 
         with StatementRecorder(db_session) as recorder:
-            result = await upsert(
-                db_session, cve.id, V31_CRITICAL.canonical, actor, evaluation_date=None
+            result = await delete_assessment(
+                db_session, cve.id, "4.0", actor, evaluation_date=None
             )
 
         assert calls == 1
@@ -418,202 +441,226 @@ async def committed_world(
         await world.cleanup()
 
 
-def _upsert_task(
+def _delete_task(
     world: CommittedWorld,
     session: AsyncSession,
     cve: CVE,
-    vector: str,
+    version: str,
     actor: User,
     *,
     scope: Scope = Scope.ALL,
 ) -> asyncio.Task[CVSSAssessmentMutationResult]:
-    """An upsert in `session`; the default version is passed explicitly
+    """A delete in `session`; the default version is passed explicitly
     because the committed test schema has no setting row."""
     return world.start(
         session,
-        upsert(session, cve.id, vector, actor, scope=scope, default_cvss_version="3.1"),
+        delete_assessment(
+            session, cve.id, version, actor, scope=scope, default_cvss_version="3.1"
+        ),
     )
+
+
+async def _world(
+    world: CommittedWorld, *assessments: Vector, severity: Severity | None
+) -> tuple[User, User, CVE, Ticket]:
+    """Two VA users and an `Analysis` Ticket assigned to the first, with a
+    `priority_auto` consistent with `severity`."""
+    owner = await world.user(role=Role.VULNERABILITY_ANALYST)
+    actor = await world.user(role=Role.VULNERABILITY_ANALYST)
+    cve = await world.cve(*assessments, severity=severity)
+    priority = {None: None, Severity.MEDIUM: "P4", Severity.CRITICAL: "P2"}[severity]
+    ticket = await world.ticket(
+        cve_id=cve.id, assignee_id=owner.id, priority_auto=priority
+    )
+    return owner, actor, cve, ticket
 
 
 @pytest.mark.integration
 class TestSerializedOutcomes:
-    async def test_waiting_equal_upsert_is_unchanged(
+    async def test_waiting_delete_after_a_delete_is_not_found(
         self, committed_world: CommittedWorld
     ) -> None:
-        owner = await committed_world.user(role=Role.VULNERABILITY_ANALYST)
-        actor = await committed_world.user(role=Role.VULNERABILITY_ANALYST)
-        cve = await committed_world.cve()
-        ticket = await committed_world.ticket(cve_id=cve.id, assignee_id=owner.id)
+        owner, actor, cve, ticket = await _world(
+            committed_world, V31_CRITICAL, severity=Severity.CRITICAL
+        )
         a = await committed_world.open_session()
         b = await committed_world.open_session()
 
-        winner = await upsert(
-            b, cve.id, V31_CRITICAL.canonical, owner, default_cvss_version="3.1"
+        winner = await delete_assessment(
+            b, cve.id, "3.1", owner, default_cvss_version="3.1"
         )
-        task = _upsert_task(committed_world, a, cve, V31_CRITICAL.canonical, actor)
+        task = _delete_task(committed_world, a, cve, "3.1", actor)
         await assert_blocked(task)
         await b.commit()
 
         loser = await asyncio.wait_for(task, timeout=5)
 
-        assert winner.action is CVSSAssessmentAction.CREATED
-        assert loser.action is CVSSAssessmentAction.UNCHANGED
-        assert loser.assessment is not None
-        assert winner.assessment is not None
-        assert loser.assessment.id == winner.assessment.id
+        assert winner.action is CVSSAssessmentAction.DELETED
+        assert loser.action is CVSSAssessmentAction.NOT_FOUND
+        assert loser.assessment is None
+        assert loser.propagation is CVSSPropagation.NONE
+        assert loser.severity_resolution is None
+        assert loser.eligibility_resolution == FALLBACK
+        assert (loser.assigned, loser.reconciled) == (False, False)
         assert await ticket_events_by_id(a, ticket.id) == [
-            cvss_event(owner, None, V31_CRITICAL),
+            cvss_delete_event(owner, V31_CRITICAL),
+            severity_event("Critical", None),
+            priority_event("P2", None),
+        ]
+        await a.rollback()
+
+    async def test_waiting_upsert_after_a_delete_creates(
+        self, committed_world: CommittedWorld
+    ) -> None:
+        owner, actor, cve, ticket = await _world(
+            committed_world, V31_MEDIUM, severity=Severity.MEDIUM
+        )
+        a = await committed_world.open_session()
+        b = await committed_world.open_session()
+
+        await delete_assessment(b, cve.id, "3.1", owner, default_cvss_version="3.1")
+        task = committed_world.start(
+            a,
+            upsert(
+                a, cve.id, V31_CRITICAL.canonical, actor, default_cvss_version="3.1"
+            ),
+        )
+        await assert_blocked(task)
+        await b.commit()
+
+        result = await asyncio.wait_for(task, timeout=5)
+
+        assert result.action is CVSSAssessmentAction.CREATED
+        assert result.propagation is CVSSPropagation.IMMEDIATE
+        assert result.severity_changed is True
+        assert await ticket_events_by_id(a, ticket.id) == [
+            cvss_delete_event(owner, V31_MEDIUM),
+            severity_event("Medium", None),
+            priority_event("P4", None),
+            cvss_event(actor, None, V31_CRITICAL),
             severity_event(None, "Critical"),
             priority_event(None, "P2"),
         ]
         await a.rollback()
 
-    async def test_waiting_differing_upsert_updates_from_the_winner(
+    async def test_waiting_delete_after_an_update_deletes_the_updated_row(
         self, committed_world: CommittedWorld
     ) -> None:
-        owner = await committed_world.user(role=Role.VULNERABILITY_ANALYST)
-        actor = await committed_world.user(role=Role.VULNERABILITY_ANALYST)
-        cve = await committed_world.cve()
-        ticket = await committed_world.ticket(cve_id=cve.id, assignee_id=owner.id)
+        owner, actor, cve, ticket = await _world(
+            committed_world, V31_MEDIUM, severity=Severity.MEDIUM
+        )
         a = await committed_world.open_session()
         b = await committed_world.open_session()
 
-        await upsert(b, cve.id, V31_MEDIUM.canonical, owner, default_cvss_version="3.1")
-        task = _upsert_task(committed_world, a, cve, V31_CRITICAL.canonical, actor)
+        await upsert(
+            b, cve.id, V31_CRITICAL.canonical, owner, default_cvss_version="3.1"
+        )
+        task = _delete_task(committed_world, a, cve, "3.1", actor)
         await assert_blocked(task)
         await b.commit()
 
         result = await asyncio.wait_for(task, timeout=5)
 
-        assert result.action is CVSSAssessmentAction.UPDATED
-        assert result.severity_changed is True
+        assert result.action is CVSSAssessmentAction.DELETED
+        assert result.assessment is not None
+        assert result.assessment.vector_string == V31_CRITICAL.canonical
+        assert result.propagation is CVSSPropagation.IMMEDIATE
+        assert (result.severity_resolution, result.severity_changed) == (None, True)
         assert await ticket_events_by_id(a, ticket.id) == [
-            cvss_event(owner, None, V31_MEDIUM),
-            severity_event(None, "Medium"),
-            priority_event(None, "P4"),
-            cvss_event(actor, V31_MEDIUM, V31_CRITICAL),
+            cvss_event(owner, V31_MEDIUM, V31_CRITICAL),
             severity_event("Medium", "Critical"),
             priority_event("P4", "P2"),
+            cvss_delete_event(actor, V31_CRITICAL),
+            severity_event("Critical", None),
+            priority_event("P2", None),
         ]
         await a.rollback()
 
-    async def test_first_upsert_on_an_unassigned_ticket_assigns_once(
+    async def test_waiting_delete_after_a_create_deletes_the_created_row(
         self, committed_world: CommittedWorld
     ) -> None:
-        """Two VA actors race on an unassigned Ticket: only the serialized
-        winner assigns; the waiter sees the locked-current assignee."""
-        first = await committed_world.user(role=Role.VULNERABILITY_ANALYST)
-        second = await committed_world.user(role=Role.VULNERABILITY_ANALYST)
-        cve = await committed_world.cve()
-        ticket = await committed_world.ticket(cve_id=cve.id)
+        """An unlocked pre-read would have classified `not_found`."""
+        owner, actor, cve, ticket = await _world(committed_world, severity=None)
         a = await committed_world.open_session()
         b = await committed_world.open_session()
 
-        await upsert(b, cve.id, V31_MEDIUM.canonical, first, default_cvss_version="3.1")
-        task = _upsert_task(committed_world, a, cve, V31_CRITICAL.canonical, second)
+        await upsert(
+            b, cve.id, V31_CRITICAL.canonical, owner, default_cvss_version="3.1"
+        )
+        task = _delete_task(committed_world, a, cve, "3.1", actor)
         await assert_blocked(task)
         await b.commit()
 
         result = await asyncio.wait_for(task, timeout=5)
 
-        assert result.assigned is False
-        events = await ticket_events_by_id(a, ticket.id)
-        assert [e for e in events if e.event_type == "assignment"] == [
-            assignment_event(first)
+        assert result.action is CVSSAssessmentAction.DELETED
+        assert await ticket_events_by_id(a, ticket.id) == [
+            cvss_event(owner, None, V31_CRITICAL),
+            severity_event(None, "Critical"),
+            priority_event(None, "P2"),
+            cvss_delete_event(actor, V31_CRITICAL),
+            severity_event("Critical", None),
+            priority_event("P2", None),
         ]
         await a.rollback()
 
-
-@pytest.mark.integration
-class TestDefaultVersionRace:
-    """`recalculate_cvss_chain()` in default-version mode (the M4 runner's
-    unit) and a manual SUSE upsert serialize on the CVE root; each
-    recomputes from the winner's committed state and never duplicates a
-    Product event or the final reconciliation."""
-
-    async def _world(
-        self, world: CommittedWorld
-    ) -> tuple[User, CVE, Ticket, dict[str, str]]:
-        owner = await world.user(role=Role.VULNERABILITY_ANALYST)
-        cve = await world.cve(V31_CRITICAL, severity=Severity.CRITICAL)
-        ticket = await world.ticket(
-            cve_id=cve.id, assignee_id=owner.id, priority_auto="P2"
-        )
-        # Converged under default 3.1: 9.8 < 9.9.
-        detail = await world.affected_product(
-            ticket, threshold=Decimal("9.9"), eligible=False
-        )
-        return owner, cve, ticket, detail
-
-    async def test_runner_first_then_the_waiting_upsert(
+    async def test_waiting_upsert_after_a_delete_of_another_version(
         self, committed_world: CommittedWorld
     ) -> None:
-        owner, cve, ticket, detail = await self._world(committed_world)
+        """The waiting upsert classifies from the winner's remaining set:
+        its SUSE v3.1 row still exists, so an equal vector is `unchanged`,
+        and its result resolves without the deleted v4.0 row."""
+        owner, actor, cve, ticket = await _world(
+            committed_world, V31_MEDIUM, V40_CRITICAL, severity=Severity.MEDIUM
+        )
         a = await committed_world.open_session()
         b = await committed_world.open_session()
 
-        runner = await recalculate_cvss_chain(
-            b,
-            cve_id=cve.id,
-            mode=CVSSChainMode.DEFAULT_VERSION,
-            default_cvss_version="4.0",
-            evaluation_date=EVAL,
-        )
+        await delete_assessment(b, cve.id, "4.0", owner, default_cvss_version="3.1")
         task = committed_world.start(
             a,
-            upsert(
-                a, cve.id, V40_CRITICAL.canonical, owner, default_cvss_version="4.0"
-            ),
+            upsert(a, cve.id, V31_MEDIUM.canonical, actor, default_cvss_version="3.1"),
         )
         await assert_blocked(task)
         await b.commit()
 
         result = await asyncio.wait_for(task, timeout=5)
 
-        assert (runner.products.changed, runner.reconciled) == (1, True)
-        assert result.products.changed == 1
-        assert result.reconciled is True
+        assert result.action is CVSSAssessmentAction.UNCHANGED
+        assert result.severity_resolution == severity_resolution("4.8", Severity.MEDIUM)
+        assert await persisted_assessments(a, cve.id) == [unit("SUSE", V31_MEDIUM)]
         assert await ticket_events_by_id(a, ticket.id) == [
-            product_event(detail, False, True),
-            status_event(TicketStatus.ANALYSIS.value, TicketStatus.ANALYZED.value),
-            cvss_event(owner, None, V40_CRITICAL),
-            product_event(detail, True, False),
-            status_event(TicketStatus.ANALYZED.value, TicketStatus.RESOLVED.value),
+            cvss_delete_event(owner, V40_CRITICAL)
         ]
         await a.rollback()
 
-    async def test_upsert_first_then_the_waiting_runner(
+    async def test_first_delete_on_an_unassigned_ticket_assigns_once(
         self, committed_world: CommittedWorld
     ) -> None:
-        owner, cve, ticket, _ = await self._world(committed_world)
+        """Two VA actors race to delete different versions on an unassigned
+        Ticket: only the serialized winner assigns."""
+        first = await committed_world.user(role=Role.VULNERABILITY_ANALYST)
+        second = await committed_world.user(role=Role.VULNERABILITY_ANALYST)
+        cve = await committed_world.cve(
+            V31_CRITICAL, V40_CRITICAL, severity=Severity.CRITICAL
+        )
+        ticket = await committed_world.ticket(cve_id=cve.id, priority_auto="P2")
         a = await committed_world.open_session()
         b = await committed_world.open_session()
 
-        created = await upsert(
-            a, cve.id, V40_CRITICAL.canonical, owner, default_cvss_version="4.0"
+        winner = await delete_assessment(
+            b, cve.id, "4.0", first, default_cvss_version="3.1"
         )
-        task = committed_world.start(
-            b,
-            recalculate_cvss_chain(
-                b,
-                cve_id=cve.id,
-                mode=CVSSChainMode.DEFAULT_VERSION,
-                default_cvss_version="4.0",
-                evaluation_date=EVAL,
-            ),
-        )
+        task = _delete_task(committed_world, a, cve, "3.1", second)
         await assert_blocked(task)
-        await a.commit()
+        await b.commit()
 
-        runner = await asyncio.wait_for(task, timeout=5)
+        result = await asyncio.wait_for(task, timeout=5)
 
-        assert (created.products.changed, created.reconciled) == (0, False)
-        assert runner.classification is CVSSChainClassification.UNCHANGED
-        assert (runner.products.changed, runner.reconciled) == (0, False)
-        assert await ticket_events_by_id(b, ticket.id) == [
-            cvss_event(owner, None, V40_CRITICAL)
-        ]
-        await b.rollback()
+        assert (winner.assigned, result.assigned) == (True, False)
+        events = await ticket_events_by_id(a, ticket.id)
+        assert [e.user_id for e in events if e.event_type == "assignment"] == [first.id]
+        await a.rollback()
 
 
 # ---------------------------------------------------------------------------
@@ -638,49 +685,49 @@ class TestLockedCurrentAccessibilityRaces:
         loss: str,
         timing: str,
     ) -> None:
-        user, cve, ticket, statements = await prepare_loss(committed_world, loss)
+        user, cve, ticket, statements = await prepare_loss(
+            committed_world, loss, V31_CRITICAL, severity=Severity.CRITICAL
+        )
         a = await committed_world.open_session()
         b = await committed_world.open_session()
         caller = TicketCaller.authenticated(user.id, Scope.NON_CONFIDENTIAL)
         assign = CallCounter(monkeypatch, "auto_assign_actor")
         reconcile = CallCounter(monkeypatch, "reconcile_ticket_status")
         propagate = CallCounter(monkeypatch, "_propagate_automatic_product_eligibility")
+        refresh = CallCounter(monkeypatch, "refresh_priority_auto")
 
         resolved = await cve_service.resolve_cve_locator(a, cve.cve_id, caller)
         assert resolved.id == cve.id
         for statement in statements:
             await b.execute(statement)
         if timing == "while-waiting":
-            task = _upsert_task(
-                committed_world,
-                a,
-                cve,
-                V31_CRITICAL.canonical,
-                user,
-                scope=Scope.NON_CONFIDENTIAL,
+            task = _delete_task(
+                committed_world, a, cve, "3.1", user, scope=Scope.NON_CONFIDENTIAL
             )
             await assert_blocked(task)
             await b.commit()
         else:
             await b.commit()
-            task = _upsert_task(
-                committed_world,
-                a,
-                cve,
-                V31_CRITICAL.canonical,
-                user,
-                scope=Scope.NON_CONFIDENTIAL,
+            task = _delete_task(
+                committed_world, a, cve, "3.1", user, scope=Scope.NON_CONFIDENTIAL
             )
 
         with pytest.raises(CVENotFoundError):
             await asyncio.wait_for(task, timeout=5)
 
-        assert (assign.calls, reconcile.calls, propagate.calls) == ([], [], [])
+        assert (assign.calls, reconcile.calls, propagate.calls, refresh.calls) == (
+            [],
+            [],
+            [],
+            [],
+        )
         assert pending_ticket_convergence_effects(a) == ()
         await a.rollback()
         fresh = await committed_world.open_session()
-        assert await persisted_assessments(fresh, cve.id) == []
-        assert await cve_severity(fresh, cve.id) is None
+        assert await persisted_assessments(fresh, cve.id) == [
+            unit("SUSE", V31_CRITICAL)
+        ]
+        assert await cve_severity(fresh, cve.id) == "Critical"
         assert await ticket_events_by_id(fresh, ticket.id) == []
         assert await ticket_state(fresh, ticket.id) == (
             TicketStatus.ANALYSIS,

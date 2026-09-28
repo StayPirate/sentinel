@@ -435,6 +435,7 @@ class TestClassification:
 
         assert result.action is CVSSAssessmentAction.CREATED
         assessment = result.assessment
+        assert assessment is not None
         assert (
             assessment.provider_name,
             assessment.cvss_version,
@@ -481,6 +482,7 @@ class TestClassification:
         result = await upsert(db_session, cve.id, V31_HIGH.canonical, actor)
 
         assert result.action is CVSSAssessmentAction.UPDATED
+        assert result.assessment is not None
         assert (result.assessment.id, result.assessment.created_at) == tuple(original)
         assert await persisted_assessments(db_session, cve.id) == [
             unit("SUSE", V31_HIGH)
@@ -677,6 +679,7 @@ class TestAuthority:
             db_session, cve.id, V31_MEDIUM.canonical, actor, provider=provider
         )
 
+        assert result.assessment is not None
         assert result.assessment.provider_name == "SUSE"
         assert await persisted_assessments(db_session, cve.id) == [
             unit("SUSE", V31_MEDIUM)

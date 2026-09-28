@@ -1,10 +1,11 @@
 """CVE endpoints.
 
 See `docs/features/tickets/cvss-scoring.md` (Get CVSS Assessments for a
-CVE, Set or Update SUSE CVSS Assessment, Shared Assessment Item) for the
-authoritative endpoint contracts, and `docs/api-spec.md` (CVE Identifier
-Resolution, CVE Accessibility Check, Authorization Chain Evaluation Order)
-for the shared `{cve_id}` path behavior.
+CVE, Set or Update SUSE CVSS Assessment, Delete SUSE CVSS Assessment,
+Shared Assessment Item) for the authoritative endpoint contracts, and
+`docs/api-spec.md` (CVE Identifier Resolution, CVE Accessibility Check,
+Authorization Chain Evaluation Order) for the shared `{cve_id}` path
+behavior.
 
 Handlers stay thin: they supply the request-resolved caller information to
 `cve_service` or `ticket_mutations`, map service exceptions to their HTTP
@@ -23,7 +24,7 @@ from __future__ import annotations
 from dataclasses import fields
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Response, status
+from fastapi import APIRouter, Depends, Path, Response, status
 from pydantic import TypeAdapter
 
 from app.api.dependencies import (
@@ -53,6 +54,7 @@ from app.services.cve_service import CVSSAssessmentProjection, ResolvedCVE
 from app.services.cvss import SUSE_PROVIDER_NAME
 from app.services.ticket_mutations import (
     CVSSAssessmentAction,
+    CVSSAssessmentNotFoundError,
     CVSSMutationCaller,
     InvalidCVSSVectorError,
 )
@@ -60,6 +62,48 @@ from app.services.ticket_mutations import (
 router = APIRouter(prefix="/api/v1", tags=["CVEs"])
 
 _ASSESSMENT_ITEM: TypeAdapter[CVSSAssessmentItem] = TypeAdapter(CVSSAssessmentItem)
+
+CVSSVersionPath = Annotated[
+    str,
+    Path(
+        description=(
+            "CVSS version of the SUSE assessment: `2.0`, `3.0`, `3.1`, or `4.0`."
+        ),
+        examples=["3.1"],
+    ),
+]
+"""The `{cvss_version}` path parameter.
+
+Deliberately an unconstrained string: an unrecognized value must produce
+`404 CVSS_ASSESSMENT_NOT_FOUND`, not the `422` an enum would return
+(`docs/features/tickets/cvss-scoring.md`, Delete SUSE CVSS Assessment).
+"""
+
+
+def _cvss_assessment_not_found_error() -> AppError:
+    """Create the 404 for an unrecognized version or an absent SUSE
+    assessment (ticket-mutations.md, Service Exceptions)."""
+    return AppError(
+        status_code=status.HTTP_404_NOT_FOUND,
+        code=ErrorCode.CVSS_ASSESSMENT_NOT_FOUND,
+        detail="CVSS assessment not found.",
+    )
+
+
+async def require_accepted_cvss_version(cvss_version: CVSSVersionPath) -> str:
+    """Reject an unrecognized `{cvss_version}` before any CVE resolution.
+
+    See `docs/features/tickets/cvss-scoring.md` (Delete SUSE CVSS
+    Assessment): the version check is input-only and precedes CVE-ID
+    resolution, so the endpoint declares this dependency after its
+    capability check and before `require_accessible_cve`. It performs no
+    query and delegates the accepted-version rule to `ticket_mutations`.
+    """
+    try:
+        ticket_mutations.require_accepted_cvss_version(cvss_version)
+    except CVSSAssessmentNotFoundError:
+        raise _cvss_assessment_not_found_error() from None
+    return cvss_version
 
 
 def serialize_cvss_assessment(
@@ -247,5 +291,80 @@ async def upsert_suse_cvss_assessment(
         ) from None
     if result.action is CVSSAssessmentAction.CREATED:
         response.status_code = status.HTTP_201_CREATED
+    assert result.assessment is not None  # created, updated, or unchanged
     projection = cve_service.project_cvss_assessment(cve.cve_id, result.assessment)
     return CVSSAssessmentResponse(data=serialize_cvss_assessment(projection))
+
+
+@router.delete(
+    "/cves/{cve_id}/cvss/suse/{cvss_version}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    response_class=Response,
+    summary="Delete the SUSE CVSS assessment",
+    description=(
+        "Deletes the internal SUSE assessment of one CVE for one CVSS version "
+        "(`2.0`, `3.0`, `3.1`, or `4.0`). The CVE severity is re-resolved; for "
+        "a CVE with a Ticket, an unassigned Ticket is auto-assigned to an "
+        "active vulnerability analyst, automatic Product eligibility and "
+        "priority are refreshed, and the Ticket status is re-evaluated "
+        "(deleting the last SUSE assessment reopens the analysis). Requires "
+        "`manage_cvss`."
+    ),
+    responses={
+        404: {
+            "model": ErrorResponse,
+            "description": (
+                "`CVSS_ASSESSMENT_NOT_FOUND`: the version is not recognized "
+                "(checked before the CVE-ID), or the CVE has no SUSE assessment "
+                "for it. `CVE_NOT_FOUND`: CVE-ID is malformed, does not exist, "
+                "or identifies a CVE associated with a Ticket inaccessible to "
+                "the caller."
+            ),
+        },
+        409: {
+            "model": ErrorResponse,
+            "description": (
+                "`TICKET_NOT_MUTABLE`: the CVE's Ticket is Ignored or Duplicated."
+            ),
+        },
+    },
+)
+async def delete_suse_cvss_assessment(
+    db: DatabaseSession,
+    principal: Annotated[
+        AuthenticatedPrincipal, Depends(require_capability(Capability.MANAGE_CVSS))
+    ],
+    cvss_version: Annotated[str, Depends(require_accepted_cvss_version)],
+    caller: AuthenticatedTicketCaller,
+    cve: Annotated[ResolvedCVE, Depends(require_accessible_cve)],
+) -> Response:
+    """Delete SUSE CVSS Assessment — see
+    `docs/features/tickets/cvss-scoring.md`.
+
+    Authorization follows `docs/api-spec.md` (Authorization Chain
+    Evaluation Order, flow 3). The dependency order is significant:
+    authentication, then `manage_cvss` before any lookup, then the
+    input-only version check, then the delegated preliminary CVE
+    resolution. `delete_cvss_assessment()` revalidates CVE accessibility
+    from its locked-current roots; the response comes only from its
+    serialized action (`deleted` → 204, `not_found` → 404).
+    """
+    try:
+        result = await ticket_mutations.delete_cvss_assessment(
+            db,
+            cve_id=cve.id,
+            provider=SUSE_PROVIDER_NAME,
+            cvss_version=cvss_version,
+            caller=CVSSMutationCaller.MANUAL_SUSE,
+            acting_user_id=principal.user.id,
+            ticket_caller=caller,
+        )
+    except CVENotFoundError:
+        raise cve_not_found_error() from None
+    except TicketNotMutableError:
+        raise ticket_not_mutable_error() from None
+    except CVSSAssessmentNotFoundError:
+        raise _cvss_assessment_not_found_error() from None
+    if result.action is CVSSAssessmentAction.NOT_FOUND:
+        raise _cvss_assessment_not_found_error()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
