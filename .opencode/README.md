@@ -44,15 +44,22 @@ They are configured in `opencode.json`.
 - **Code** — implements features from specifications, writes tests, and
   maintains all executable artifacts. Must signal unresolved behavioral or
   contract gaps, while retaining freedom over compliant internal technical
-  choices. Prompt:
+  choices. May delegate parts of an approved plan to built-in `general` tasks
+  that run sequentially, and must verify their diffs itself. Prompt:
   `.opencode/prompts/code.md`
+
+Plan and Code take the delegated decisions defined in `AGENTS.md` (Delegated
+decisions): Plan presents them in its plan, while Code records them and ships
+any specification alignment in the same PR.
 
 ## Subagents
 
-All subagents are defined in `.opencode/agents/`. Every subagent is a
-**read-only reviewer**: it analyzes code or specifications and reports
-findings without modifying files. All writing is owned by the primary
-agents.
+All project subagents are defined in `.opencode/agents/`. Every project
+subagent is a **read-only reviewer**: it analyzes code or specifications and
+reports findings without modifying files. All writing is owned by the primary
+agents; the built-in `general` task writes only on the Code agent's behalf,
+within a brief that excludes Git workflow, GitHub mutations, `docs/**` edits,
+reviewer invocation, and gap or delegated decisions.
 
 All reviewer agents apply the proportionality filter in `AGENTS.md`
 (legacy Guardrail 26) before reporting findings. Speculative, unnecessary,

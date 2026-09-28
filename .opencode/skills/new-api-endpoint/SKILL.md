@@ -43,9 +43,12 @@ authoritative definitions.
    - Response schema
    - Error responses (endpoint-specific; global/scoped responses are
      derivable per `docs/api-spec.md`)
-3. If the endpoint is **not specified** or is **underspecified** → STOP.
-   Complete the specification work first. Do not proceed with
-   implementation
+3. If the endpoint is **not specified** → STOP. Complete the specification
+   work first. Do not proceed with implementation. If it is
+   **underspecified**, classify each missing or inconsistent detail under
+   `AGENTS.md` (Delegated decisions): proceed only for a delegated
+   refinement, and STOP for anything else, including an undefined
+   authorization level.
 
 ### Step 2: Define the Pydantic schemas
 
