@@ -291,6 +291,19 @@ class TestErrorFactories:
             dependencies.cve_not_found_error()
         )
 
+    def test_ticket_not_mutable_error_shape(self) -> None:
+        """See docs/api-spec.md (Manual-Zone Mutability Guard)."""
+        error = dependencies.ticket_not_mutable_error()
+        assert error.status_code == 409
+        assert error.code == ErrorCode.TICKET_NOT_MUTABLE
+        assert error.detail == "Ticket is not mutable."
+        assert error.headers is None
+
+    def test_ticket_not_mutable_error_returns_fresh_instance(self) -> None:
+        assert dependencies.ticket_not_mutable_error() is not (
+            dependencies.ticket_not_mutable_error()
+        )
+
 
 # ---------------------------------------------------------------------------
 # UnknownKeyWarningLimiter

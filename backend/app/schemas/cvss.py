@@ -1,9 +1,9 @@
-"""Response schemas for CVSS assessments.
+"""Request and response schemas for CVSS assessments.
 
 See `docs/features/tickets/cvss-scoring.md` (API Endpoints: Shared
-Assessment Item, Get CVSS Assessments for a CVE; Accepted Base Vectors:
-per-version Base metrics and API wire values) for the authoritative
-contracts.
+Assessment Item, Get CVSS Assessments for a CVE, Set or Update SUSE CVSS
+Assessment; Input Rules; Accepted Base Vectors: per-version Base metrics
+and API wire values) for the authoritative contracts.
 
 `CVSSAssessmentItem` is the one shared assessment item schema: the GET
 composite and the SUSE upsert response serialize exactly this schema. It
@@ -185,3 +185,38 @@ class CVECVSSAssessmentsResponse(BaseModel):
     """`GET /api/v1/cves/{cve_id}/cvss` response envelope."""
 
     data: CVECVSSAssessments
+
+
+class CVSSAssessmentResponse(BaseModel):
+    """`POST /api/v1/cves/{cve_id}/cvss/suse` response envelope."""
+
+    data: CVSSAssessmentItem
+
+
+SUSE_CVSS_VECTOR_MAX_LENGTH = 200
+"""Maximum received length of a submitted vector, checked before trimming
+(cvss-scoring.md, Input Rules rule 1)."""
+
+
+class SUSECVSSAssessmentRequest(BaseModel):
+    """Request body of `POST /api/v1/cves/{cve_id}/cvss/suse`.
+
+    See `docs/features/tickets/cvss-scoring.md` (Set or Update SUSE CVSS
+    Assessment; Input Rules). Pydantic enforces only the transport shape:
+    a required JSON string of at most 200 received characters, measured
+    before any trimming. Every other rule (outer-whitespace trimming,
+    official case, prefix, complete Base metrics) belongs to the shared
+    parser and fails with the domain `422 CVSS_INVALID_VECTOR` instead of
+    the global `422 VALIDATION_ERROR`.
+    """
+
+    vector_string: str = Field(
+        max_length=SUSE_CVSS_VECTOR_MAX_LENGTH,
+        description=(
+            "Complete CVSS Base vector (v2.0, v3.0, v3.1, or v4.0), at most "
+            "200 characters as received. Leading and trailing whitespace is "
+            "trimmed; metrics may appear in any order and are stored in "
+            "canonical FIRST order."
+        ),
+        examples=["CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"],
+    )

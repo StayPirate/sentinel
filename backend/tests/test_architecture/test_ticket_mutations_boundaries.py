@@ -1,8 +1,9 @@
 """Structural tests for the Ticket mutation primitive boundaries.
 
-- `ticket_mutations` never imports `package_service` or `ticket_service`;
-  both import it (docs/features/tickets/ticket-mutations.md, Relationship
-  with other modules).
+- `ticket_mutations` never imports `package_service`, `ticket_service`,
+  or `cve_service`; they import it (docs/features/tickets/ticket-mutations.md,
+  Relationship with other modules; docs/features/tickets/cve-service.md,
+  Relationship with other modules).
 - The atomic CVSS chain's inline Product eligibility write reuses the one
   package-model-owned pure evaluator instead of copying the formula
   (ticket-mutations.md, Contract; docs/features/packages/package-model.md,
@@ -36,6 +37,14 @@ class TestTicketMutationsDependencies:
 
         forbidden = {"app.services.package_service", "app.services.ticket_service"}
         assert modules & forbidden == set()
+
+    def test_does_not_import_cve_service(self) -> None:
+        """`cve_service` resolves the preliminary CVE locator and depends on
+        `ticket_mutations`; the CVSS mutations make their own authoritative
+        locked-current CVE accessibility decision (#664 C2)."""
+        modules = imported_modules(_TICKET_MUTATIONS, "app.services")
+
+        assert "app.services.cve_service" not in modules
 
 
 @pytest.mark.unit

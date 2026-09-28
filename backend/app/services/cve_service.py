@@ -4,7 +4,10 @@ See `docs/features/tickets/cve-service.md` (Ownership; CVE Read and
 Accessibility Boundary; Caller Validation Responsibility; Service Read
 Contracts; Exceptions) for the module contract, and
 `docs/features/tickets/cvss-scoring.md` (Get CVSS Assessments for a CVE)
-for the CVSS read implemented here.
+for the CVSS read implemented here. `resolve_cve_locator()` is the
+preliminary `{cve_id}` resolution of the CVE mutation paths, whose locked
+mutation in `ticket_mutations` makes the authoritative accessibility
+decision; `ticket_mutations` never imports this module.
 
 CVE accessibility is a projection of the one canonical Ticket visibility
 predicate (`docs/features/identity/rbac.md`, Scope and Confidential Ticket
@@ -130,7 +133,26 @@ def _cve_accessibility_condition(caller: TicketCaller) -> ColumnElement[bool]:
     return or_(Ticket.id.is_(None), ticket_visibility_condition(caller))
 
 
-def _mismatched_fields(row: Row[Any], parsed: ParsedCVSSVector | None) -> list[str]:
+type _StoredAssessment = Row[Any] | CVECVSSAssessment
+"""A persisted assessment: a row of the one-statement read (the assessment
+`id` labeled `id`) or a `CVECVSSAssessment` instance."""
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedCVE:
+    """An accessible CVE selected by its public CVE-ID.
+
+    `id` is the internal CVE UUID, usable only as an internal service
+    locator; it is never a consumer response field.
+    """
+
+    id: uuid.UUID
+    cve_id: str
+
+
+def _mismatched_fields(
+    row: _StoredAssessment, parsed: ParsedCVSSVector | None
+) -> list[str]:
     """Names of stored columns that disagree with the re-parsed vector."""
     if parsed is None:
         return ["vector_string"]
@@ -146,7 +168,9 @@ def _mismatched_fields(row: Row[Any], parsed: ParsedCVSSVector | None) -> list[s
     return mismatched
 
 
-def _project_assessment(cve_id: str, row: Row[Any]) -> CVSSAssessmentProjection:
+def _project_assessment(
+    cve_id: str, row: _StoredAssessment
+) -> CVSSAssessmentProjection:
     """Expand one persisted row, verifying its vector-derived unit.
 
     The stored vector must parse through the shared parser and already be
@@ -164,12 +188,12 @@ def _project_assessment(cve_id: str, row: Row[Any]) -> CVSSAssessmentProjection:
         logger.error(
             "cvss_assessment_integrity_violation",
             cve_id=cve_id,
-            assessment_id=str(row.assessment_id),
+            assessment_id=str(row.id),
             fields=mismatched,
         )
         raise CVSSAssessmentIntegrityError()
     return CVSSAssessmentProjection(
-        id=row.assessment_id,
+        id=row.id,
         provider_name=row.provider_name,
         cvss_version=parsed.version,
         score=parsed.score,
@@ -229,7 +253,7 @@ async def get_cvss_assessments(
             default_cvss_version_select()
             .scalar_subquery()
             .label("default_cvss_version"),
-            CVECVSSAssessment.id.label("assessment_id"),
+            CVECVSSAssessment.id,
             CVECVSSAssessment.provider_name,
             CVECVSSAssessment.cvss_version,
             CVECVSSAssessment.score,
@@ -252,11 +276,7 @@ async def get_cvss_assessments(
         raise RequiredSystemSettingMissingError()
 
     assessments = sorted(
-        (
-            _project_assessment(cve_id, row)
-            for row in rows
-            if row.assessment_id is not None
-        ),
+        (_project_assessment(cve_id, row) for row in rows if row.id is not None),
         key=_list_order,
     )
     severity = resolve_severity_score(assessments, default_cvss_version)
@@ -267,3 +287,70 @@ async def get_cvss_assessments(
         severity=severity,
         eligibility=eligibility,
     )
+
+
+def project_cvss_assessment(
+    cve_id: str, assessment: CVECVSSAssessment
+) -> CVSSAssessmentProjection:
+    """Project one persisted assessment for the shared assessment item.
+
+    See `docs/features/tickets/cvss-scoring.md` (Shared Assessment Item):
+    GET and POST serialize exactly the same item, so a mutation response
+    uses the same projection and vector-derived-unit verification as
+    `get_cvss_assessments()`. `cve_id` is the public CVE-ID, used only to
+    identify the row in the integrity-violation log.
+
+    Category B: pure; performs no database operation. The caller supplies
+    an assessment whose columns, including the server-generated
+    timestamps, are loaded.
+
+    Raises:
+        CVSSAssessmentIntegrityError: The row violates its vector-derived
+            unit.
+    """
+    return _project_assessment(cve_id, assessment)
+
+
+async def resolve_cve_locator(
+    db: AsyncSession, cve_id: str, caller: TicketCaller
+) -> ResolvedCVE:
+    """Resolve a consumer `{cve_id}` path value to an accessible CVE.
+
+    The preliminary CVE accessibility decision of an authenticated CVE
+    mutation path — the thin `require_accessible_cve` boundary role of
+    `docs/api-spec.md` (CVE Accessibility Check; CVE Identifier
+    Resolution). Category B read (cve-service.md, CVE Read and
+    Accessibility Boundary).
+
+    Q1: `cve_id` is the raw path value; `caller` is the request-resolved
+    caller information.
+
+    Q3: a value rejected by `core.identifiers.is_valid_cve_id()` performs
+    no query. Otherwise one statement selects the CVE by the unique
+    `CVE.cve_id`, outer-joined to its Ticket and constrained by the CVE
+    accessibility projection of the canonical Ticket predicate. Creates no
+    row or event, acquires no lock, and never flushes, commits, or rolls
+    back.
+
+    Q4: returns the internal CVE UUID and the CVE-ID. This is a
+    preliminary decision only: it never authorizes a later unconstrained
+    query. The locked mutation that follows re-evaluates accessibility
+    from its locked-current roots, and that decision is authoritative.
+
+    Q6: raises `CVENotFoundError` for a malformed, missing, or
+    inaccessible CVE without distinguishing the causes. Database
+    exceptions propagate unchanged.
+    """
+    if not is_valid_cve_id(cve_id):
+        raise CVENotFoundError()
+    row = (
+        await db.execute(
+            select(CVE.id, CVE.cve_id)
+            .select_from(CVE)
+            .outerjoin(Ticket, Ticket.cve_id == CVE.id)
+            .where(CVE.cve_id == cve_id, _cve_accessibility_condition(caller))
+        )
+    ).one_or_none()
+    if row is None:
+        raise CVENotFoundError()
+    return ResolvedCVE(id=row.id, cve_id=row.cve_id)

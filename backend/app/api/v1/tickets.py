@@ -32,6 +32,7 @@ from app.api.dependencies import (
     require_accessible_ticket,
     require_capability,
     ticket_not_found_error,
+    ticket_not_mutable_error,
 )
 from app.api.v1.ticket_packages import serialize_package
 from app.core.enums import (
@@ -544,11 +545,7 @@ async def set_ticket_severity(
     except TicketNotFoundError:
         raise ticket_not_found_error() from None
     except TicketNotMutableError:
-        raise AppError(
-            status_code=status.HTTP_409_CONFLICT,
-            code=ErrorCode.TICKET_NOT_MUTABLE,
-            detail="Ticket is not mutable.",
-        ) from None
+        raise ticket_not_mutable_error() from None
     except SeverityDerivedError:
         raise AppError(
             status_code=status.HTTP_409_CONFLICT,
