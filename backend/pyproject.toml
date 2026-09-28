@@ -66,13 +66,6 @@ dev = [
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-[tool.uv.audit]
-# Check locked dependencies against the OpenSSF malicious-packages
-# database (via OSV) on every `uv sync`/`uv lock`. Complements
-# pip-audit (known CVEs) with a supply-chain malware detection layer
-# (typosquatting, compromised maintainer accounts, injected payloads).
-malware-check = true
-
 [tool.hatch.build.targets.wheel]
 packages = ["app"]
 

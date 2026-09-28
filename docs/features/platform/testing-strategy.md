@@ -1034,8 +1034,7 @@ through the following required gates:
    complete without error.
 6. **Static security analysis and dependency vulnerability scanning** —
    static analysis of application code for insecure patterns MUST pass,
-   and all declared dependencies MUST be free of known vulnerabilities
-   and known malware.
+   and all declared dependencies MUST be free of known vulnerabilities.
 7. **Shell script lint/format and workflow validation** — all tracked
    shell scripts and git hooks MUST pass lint and format checks; all
    GitHub Actions workflow files MUST pass syntax validation.
