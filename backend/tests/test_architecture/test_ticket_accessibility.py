@@ -10,7 +10,9 @@ Model-aware resource resolution):
   reference the Ticket visibility predicate; they delegate to services.
 - Ticket audit history is read only by the Ticket audit trail module,
   so no authorization, resolution, or mutation code can use it as
-  current visibility state.
+  current visibility state. Mutation modules may import only its
+  write-side surface (`TicketAuditLog.log_event()` and the canonical
+  comment vocabulary), never its read operation.
 
 Behavioral tests (tests/test_services/test_ticket_visibility.py and the
 consumer tests) prove the predicate itself; these AST checks only guard
@@ -38,6 +40,13 @@ _QUERY_EXECUTION_METHODS = frozenset(
 _VISIBILITY_PREDICATE = "ticket_visibility_condition"
 _AUDIT_EVENT_MODEL = "TicketAuditEvent"
 _AUDIT_READ_OWNER = APP_ROOT / "services" / "ticket_audit_log.py"
+_AUDIT_TRAIL_MODULE = "app.services.ticket_audit_log"
+# Write-side names a Ticket mutation module may import from the audit
+# trail module (ticket-audit-log.md, Event Type Contract; Canonical
+# Automatic Comment Vocabulary).
+_AUDIT_WRITE_SURFACE = frozenset(
+    {"TicketAuditLog", "CVE_SOURCE_AUDIT_LABELS", "MANUAL_TICKET_CREATED_COMMENT"}
+)
 
 
 def _python_files(*parts: str) -> list[Path]:
@@ -131,10 +140,28 @@ class TestAuditHistoryIsNotAccessState:
         assert offenders == []
 
     def test_visibility_and_resolution_do_not_import_the_audit_trail(self) -> None:
-        for module in ("ticket_visibility.py", "ticket_service.py", "cve_service.py"):
+        for module in ("ticket_visibility.py", "cve_service.py"):
             imports = _imported_modules(_parse(APP_ROOT / "services" / module))
-            assert "app.services.ticket_audit_log" not in imports, module
+            assert _AUDIT_TRAIL_MODULE not in imports, module
             assert "app.models.ticket_audit_event" not in imports, module
+
+    def test_ticket_service_imports_only_the_audit_write_surface(self) -> None:
+        tree = _parse(APP_ROOT / "services" / "ticket_service.py")
+        assert "app.models.ticket_audit_event" not in _imported_modules(tree)
+        imported = {
+            alias.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom) and node.module == _AUDIT_TRAIL_MODULE
+            for alias in node.names
+        }
+        assert imported <= _AUDIT_WRITE_SURFACE
+        whole_module_imports = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Import)
+            and any(alias.name == _AUDIT_TRAIL_MODULE for alias in node.names)
+        ]
+        assert whole_module_imports == []
 
 
 @pytest.mark.unit

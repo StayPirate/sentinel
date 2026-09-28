@@ -39,6 +39,36 @@ class TestAppError:
         )
         assert error.headers == {"Retry-After": "60"}
 
+    def test_extra_defaults_to_an_empty_mapping(self) -> None:
+        error = AppError(status_code=404, code=ErrorCode.TICKET_NOT_FOUND, detail="x")
+        assert error.extra == {}
+
+    def test_carries_a_copy_of_the_extra_body_fields(self) -> None:
+        """See docs/api-spec.md (Response Format): `existing_ticket_id` is
+        the contract-defined top-level field of `TICKET_CVE_CONFLICT`."""
+        extra = {"existing_ticket_id": "SNTL-42"}
+        error = AppError(
+            status_code=409,
+            code=ErrorCode.TICKET_CVE_CONFLICT,
+            detail="conflict",
+            extra=extra,
+        )
+        extra["existing_ticket_id"] = "SNTL-7"
+        extra["other"] = "value"
+
+        assert error.extra == {"existing_ticket_id": "SNTL-42"}
+        assert error.extra is not extra
+
+    @pytest.mark.parametrize("key", ["code", "detail", "errors"])
+    def test_extra_cannot_override_an_envelope_key(self, key: str) -> None:
+        with pytest.raises(ValueError, match="envelope keys"):
+            AppError(
+                status_code=409,
+                code=ErrorCode.TICKET_CVE_CONFLICT,
+                detail="conflict",
+                extra={"existing_ticket_id": "SNTL-42", key: "override"},
+            )
+
 
 @pytest.mark.unit
 class TestErrorCode:
@@ -86,6 +116,18 @@ class TestErrorCode:
         """See docs/api-spec.md (Error Code Categories, CVE Accessibility
         Check) and docs/features/tickets/cve-service.md (Exceptions)."""
         assert ErrorCode.CVE_NOT_FOUND == "CVE_NOT_FOUND"
+
+    def test_cve_invalid_format_is_registered(self) -> None:
+        """See docs/features/tickets/tickets.md (Create Ticket) and
+        docs/features/tickets/cve-service.md (Caller Validation
+        Responsibility, Exceptions)."""
+        assert ErrorCode.CVE_INVALID_FORMAT == "CVE_INVALID_FORMAT"
+
+    def test_ticket_cve_conflict_is_registered(self) -> None:
+        """See docs/api-spec.md (Response Format, Anti-Enumeration
+        Boundary) and docs/features/tickets/tickets.md (CVE Resolution
+        Behavior, Create Ticket)."""
+        assert ErrorCode.TICKET_CVE_CONFLICT == "TICKET_CVE_CONFLICT"
 
     def test_cvss_invalid_vector_is_registered(self) -> None:
         """See docs/api-spec.md (Error Code Categories) and

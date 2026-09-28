@@ -95,10 +95,11 @@ async def _app_error_handler(request: Request, exc: AppError) -> JSONResponse:
     """Render `AppError` as the standard `{"code": ..., "detail": ...}`
     envelope — see `docs/api-spec.md` (Response Format). Propagates
     `exc.headers` (e.g. `Retry-After` for `AUTH_ACCOUNT_LOCKED`) onto
-    the response verbatim."""
+    the response verbatim, and merges any contract-defined top-level
+    fields (`AppError.extra`, e.g. `existing_ticket_id`)."""
     return JSONResponse(
         status_code=exc.status_code,
-        content={"code": exc.code.value, "detail": exc.detail},
+        content={**exc.extra, "code": exc.code.value, "detail": exc.detail},
         headers=exc.headers,
     )
 

@@ -1,8 +1,8 @@
 """Request and response schemas for Tickets.
 
 See `docs/features/tickets/tickets.md` (Response Schemas > TicketSummary
-and TicketDetail, Endpoint -> Schema Mapping, List Tickets, Set Severity
-Manual) for the
+and TicketDetail, Endpoint -> Schema Mapping, List Tickets, Create Ticket,
+Set Severity Manual) for the
 authoritative contract,
 `docs/features/tickets/ticket-priority.md` (API Surface) for the priority
 fields, and `docs/features/tickets/ticket-deadlines.md` (Actors and
@@ -18,10 +18,10 @@ lowercase.
 
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Literal
+from datetime import UTC, date, datetime
+from typing import Literal, Self
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.core.enums import SortOrder, TicketSortField
 from app.schemas.common import PaginationMeta, SeverityValue, UserReference
@@ -239,3 +239,106 @@ class TicketSeverityUpdateRequest(BaseModel):
         ),
         examples=["high", None],
     )
+
+
+class TicketCreateRequest(BaseModel):
+    """Request body of `POST /api/v1/tickets`.
+
+    See `docs/features/tickets/tickets.md` (Create Ticket). Every field is
+    optional. `cve_id` carries no schema length limit, so any string —
+    including an empty or over-length one — reaches the endpoint's
+    `422 CVE_INVALID_FORMAT` check. The endpoint distinguishes an omitted
+    `is_confidential` from an explicit `false` through `model_fields_set`
+    (the field-level `manage_confidentiality` check is presence-based).
+    A non-null `coordinated_release_at` without `is_confidential: true`
+    fails with the global `422 VALIDATION_ERROR`.
+    """
+
+    cve_id: str | None = Field(
+        default=None,
+        description=(
+            "CVE identifier to associate (e.g. `CVE-2024-1234`), matching "
+            "`^CVE-[0-9]{4}-[0-9]{4,}$` with at most 20 characters; otherwise "
+            "`422 CVE_INVALID_FORMAT`. An empty string is rejected the same "
+            "way: omit the field or send `null` for no CVE. An unknown CVE is "
+            "created as a placeholder record."
+        ),
+        examples=["CVE-2024-1234"],
+    )
+    severity: SeverityValue | None = Field(
+        default=None,
+        description=(
+            "Initial manual severity: `critical`, `high`, `medium`, `low`, or "
+            "`none` (CVSS score 0.0, informational). Omitted or `null` leaves "
+            "it unresolved. Not allowed together with `cve_id` (`409 "
+            "TICKET_SEVERITY_DERIVED`): severity is then derived from CVSS."
+        ),
+        examples=["high"],
+    )
+    is_confidential: bool = Field(
+        default=False,
+        description=(
+            "Create the Ticket as confidential. When present (`true` or "
+            "`false`), the caller also needs the `manage_confidentiality` "
+            "capability; otherwise `403 AUTH_INSUFFICIENT_PERMISSION`. "
+            "Default `false`."
+        ),
+        examples=[True],
+    )
+    coordinated_release_at: datetime | None = Field(
+        default=None,
+        description=(
+            "Initial Coordinated Release Date (embargo publication instant), "
+            "an ISO 8601 date-time. Accepted only with `is_confidential: "
+            "true`. A value without a UTC offset is interpreted as UTC; an "
+            "offset is converted to UTC. Past instants are accepted. Omitted "
+            "or `null` creates the Ticket without a CRD."
+        ),
+        examples=["2026-10-06T14:00:00Z"],
+    )
+
+    @field_validator("coordinated_release_at", mode="before")
+    @classmethod
+    def _parse_coordinated_release_at(cls, value: object) -> datetime | None:
+        """Accept only an ISO 8601 date-time string (or `null`); interpret
+        a naive value as UTC and convert an offset to UTC.
+
+        A date without a time component, a number, and any other
+        non-string input are rejected, so no implicit midnight or Unix
+        timestamp interpretation applies. Errors raise `ValueError`,
+        rendered as the global `422 VALIDATION_ERROR`.
+        """
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValueError(
+                "coordinated_release_at must be an ISO 8601 datetime string."
+            )
+        try:
+            date.fromisoformat(value)
+        except ValueError:
+            pass
+        else:
+            raise ValueError("coordinated_release_at must include a time component.")
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError as exc:
+            raise ValueError(
+                "coordinated_release_at must be a valid ISO 8601 datetime."
+            ) from exc
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=UTC)
+        try:
+            return parsed.astimezone(UTC)
+        except OverflowError as exc:
+            raise ValueError(
+                "coordinated_release_at is out of the representable datetime range."
+            ) from exc
+
+    @model_validator(mode="after")
+    def _crd_requires_confidential_creation(self) -> Self:
+        if self.coordinated_release_at is not None and not self.is_confidential:
+            raise ValueError(
+                "coordinated_release_at requires is_confidential to be true."
+            )
+        return self

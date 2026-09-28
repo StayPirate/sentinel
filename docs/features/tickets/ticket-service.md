@@ -151,8 +151,9 @@ committed post-state.
 
 | Module | Relationship |
 |--------|-------------|
-| `services/ticket_mutations.py` | `ticket_service` imports `reconcile_ticket_status()`, `recalculate_cvss_chain()`, `auto_assign_actor()`, `ensure_ticket_operable()`, and `refresh_priority_auto()` from `ticket_mutations`. The dependency is unidirectional: `ticket_service` → `ticket_mutations`. Neither module imports from the other in the reverse direction |
+| `services/ticket_mutations.py` | `ticket_service` imports `reconcile_ticket_status()`, `recalculate_cvss_chain()`, `auto_assign_actor()`, `ensure_ticket_operable()`, and `refresh_priority_auto()` from `ticket_mutations`, plus the acting-User stabilization and its active-VA predicate for the creation-time eligibility decision. The dependency is unidirectional: `ticket_service` → `ticket_mutations`. Neither module imports from the other in the reverse direction |
 | `services/package_service.py` | `ticket_service` invokes package-owned projection behavior for Ticket detail and the synchronous eligibility boundary during manual-zone exits. `package_service` does not import `ticket_service`; both modules depend on `ticket_mutations` for status evaluation |
+| `services/cve_service.py` | `ticket_service` calls the lock-aware form of `ensure_cve_exists()` to resolve, create, and lock the CVE root for creation and association. `cve_service` in turn calls `create_ticket()` and other lifecycle compositions from `upsert_cve()` (see `cve-service.md`, Relationship with other modules); the Python import mechanism that keeps this mutual dependency cycle-safe is an implementation choice |
 | `services/cvss.py` | No direct dependency. CVSS resolution is delegated through `ticket_mutations.recalculate_cvss_chain()` where this service requires it |
 
 ## Scope Boundary
@@ -462,8 +463,9 @@ mapping location is an implementation choice.
 - If `cve_id` is provided: CVE Resolution Behavior applies (on-demand
   fetch if unknown, conflict check if already associated with another
   ticket)
-- If `is_confidential` is True: the acting user must hold
-  `manage_confidentiality` capability (enforced at the API layer)
+- If the API request supplies `is_confidential` (`true` or `false`): the
+  acting user must hold `manage_confidentiality` capability (enforced at the
+  API layer; see `docs/features/identity/rbac.md`, Business Rule 13)
 - `coordinated_release_at` is a timezone-aware UTC instant and is permitted
   only with `is_confidential = True` and `source = manual`. The API rejects a
   non-null value without confidential creation through schema validation; a
@@ -523,11 +525,16 @@ and the function does not call `ignore_new_for_rejected_cve()` or create the
 automatic `CVE rejected` status event. The authorized user may invoke the
 ordinary manual ignore operation separately.
 
-**Concurrency — CVE uniqueness**: If the INSERT raises an
-`IntegrityError` due to the UNIQUE constraint on `Ticket.cve_id` (race
-between concurrent creation for the same CVE), the service catches the
-exception and raises `TicketCVEConflictError`. The API handler maps this
-to `409 TICKET_CVE_CONFLICT`.
+**Concurrency — CVE uniqueness**: concurrent creations for the same CVE
+serialize on the CVE `FOR UPDATE` lock of step 2. The association state is
+read under that lock, before the INSERT: an existing association, including
+one committed by a creator this transaction waited for, raises
+`TicketCVEConflictError` carrying that Ticket's `SNTL-{n}`, which the API
+handler maps to `409 TICKET_CVE_CONFLICT` with `existing_ticket_id`. The
+UNIQUE constraint on `Ticket.cve_id` remains a database integrity backstop,
+not a catch-and-continue path: a violation escapes untranslated and the
+caller rolls back without any further query (`cve-service.md`, CVE Upsert
+Serialization › Ticket creation winner).
 
 **Locking**: manual creation locks User `FOR SHARE`; CVE-associated creation
 then locks the CVE before the Ticket INSERT. System creation omits the User

@@ -739,8 +739,9 @@ here with the required authorization level and a link to the owning spec.
     `AUTH_INSUFFICIENT_PERMISSION`. This prevents users without
     `manage_confidentiality` from creating confidential tickets they
     cannot subsequently access.
-    (This is a _hard conditional check_ — see Conditional Capability Checks
-    above for the pattern definition.)
+    (This is a field-level capability check — see the † note under the
+    Endpoint Permission Map and `docs/api-spec.md` § What belongs in an
+    endpoint error table › Conditional authorization.)
 14. **Restricted analyst account setup**: restricted analyst accounts
     are local users created via CLI with the `restricted_analyst` role:
 

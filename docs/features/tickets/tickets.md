@@ -1624,10 +1624,12 @@ Request body:
   provided — severity is derived from CVSS; providing both yields 409
   `TICKET_SEVERITY_DERIVED`
 - `is_confidential` (boolean, optional): if `true`, the ticket is
-  created as confidential. Requires the `manage_confidentiality`
-  capability in addition to `create_ticket`. If the caller lacks
-  `manage_confidentiality`, the endpoint returns 403
-  `AUTH_INSUFFICIENT_PERMISSION`. Default: `false`
+  created as confidential. When the field is present (`true` or `false`),
+  it requires the `manage_confidentiality` capability in addition to
+  `create_ticket`; if the caller lacks `manage_confidentiality`, the
+  endpoint returns 403 `AUTH_INSUFFICIENT_PERMISSION`. When the field is
+  absent, the capability is not checked (see
+  [rbac.md](../identity/rbac.md), Business Rule 13). Default: `false`
 - `coordinated_release_at` (datetime | null, optional): initial
   [Coordinated Release Date](#coordinated-release-date). Accepted only
   together with `is_confidential: true`; a non-null value with

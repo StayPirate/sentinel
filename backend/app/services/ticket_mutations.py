@@ -135,6 +135,7 @@ __all__ = [
     "auto_assign_actor",
     "delete_cvss_assessment",
     "ensure_ticket_operable",
+    "is_stabilized_vulnerability_analyst",
     "recalculate_cvss_chain",
     "reconcile_ticket_status",
     "refresh_priority_auto",
@@ -234,8 +235,14 @@ async def stabilize_acting_user(db: AsyncSession, user_id: UUID) -> User:
     return user
 
 
-def _is_stabilized_vulnerability_analyst(user: User) -> bool:
+def is_stabilized_vulnerability_analyst(user: User) -> bool:
     """Whether the stabilized `user` currently holds any VA origin.
+
+    Category C (pure; no database operation). Shared by
+    `auto_assign_actor()` and the initial-status decision of
+    `ticket_service.create_ticket()`, which reads the creator's
+    eligibility from the same locked row without emitting the
+    auto-assignment events.
 
     Reads the roles loaded by `stabilize_acting_user()`; raises
     `ValueError` if they are not loaded, because loading them here would
@@ -293,7 +300,7 @@ async def auto_assign_actor(
         return False
     if not force and ticket.assignee_id is not None:
         return False
-    if not acting_user.active or not _is_stabilized_vulnerability_analyst(acting_user):
+    if not acting_user.active or not is_stabilized_vulnerability_analyst(acting_user):
         return False
     if ticket.assignee_id == acting_user.id:
         return False

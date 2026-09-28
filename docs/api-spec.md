@@ -465,6 +465,10 @@ Fields:
   - `msg` (string, required): a human-readable error message
   - `type` (string, required): a stable machine-readable error type
     identifier, e.g. `"missing"`, `"string_type"`
+- `existing_ticket_id` (string, required; present only for `TICKET_CVE_CONFLICT`
+  responses): the conflicting Ticket's `SNTL-{n}` identifier, a top-level
+  field beside `code` and `detail` (see
+  [tickets.md](features/tickets/tickets.md#cve-resolution-behavior))
 
 #### Error Code Categories
 

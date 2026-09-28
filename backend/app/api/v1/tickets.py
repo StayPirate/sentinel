@@ -2,9 +2,10 @@
 
 See `docs/features/tickets/tickets.md` (API Endpoints > List Tickets and
 Get Ticket, Response Schemas > TicketSummary and TicketDetail) for the
-authoritative endpoint contracts, and Set Severity Manual for the
-manual-severity mutation (`docs/features/tickets/ticket-mutations.md`,
-`set_severity_manual()`).
+authoritative endpoint contracts, Create Ticket for manual creation
+(`docs/features/tickets/ticket-service.md`, `create_ticket`), and Set
+Severity Manual for the manual-severity mutation
+(`docs/features/tickets/ticket-mutations.md`, `set_severity_manual()`).
 Handlers stay thin: they supply caller information to `ticket_service`,
 map its outcomes to HTTP, and serialize its semantic projection. The
 service owns SNTL resolution, visibility-constrained selection, and the
@@ -27,10 +28,14 @@ from fastapi import APIRouter, Depends, Query, status
 from app.api.dependencies import (
     AuthenticatedPrincipal,
     AuthenticatedTicketCaller,
+    CallerRoles,
     OptionalTicketCaller,
     TicketIdPath,
+    cve_invalid_format_error,
+    insufficient_permission_error,
     require_accessible_ticket,
     require_capability,
+    ticket_cve_conflict_error,
     ticket_not_found_error,
     ticket_not_mutable_error,
 )
@@ -50,6 +55,8 @@ from app.core.exceptions import (
     TicketNotFoundError,
     TicketNotMutableError,
 )
+from app.core.identifiers import is_valid_cve_id
+from app.core.permissions import get_capabilities
 from app.database import DatabaseSession
 from app.schemas.common import PaginationMeta, UserReference
 from app.schemas.cve import (
@@ -61,8 +68,9 @@ from app.schemas.cve import (
     CVESummary,
     CVEWeaknessResponse,
 )
-from app.schemas.errors import ErrorResponse
+from app.schemas.errors import ErrorResponse, TicketCVEConflictErrorResponse
 from app.schemas.ticket import (
+    TicketCreateRequest,
     TicketDetail,
     TicketDetailResponse,
     TicketListQuery,
@@ -71,9 +79,12 @@ from app.schemas.ticket import (
     TicketSummary,
 )
 from app.services import ticket_mutations, ticket_service
+from app.services.cve_service import CVEIdFormatError
 from app.services.ticket_service import (
     CVEDetailProjection,
     ResolvedTicket,
+    TicketCreationSource,
+    TicketCVEConflictError,
     TicketDetailProjection,
     TicketSummaryProjection,
 )
@@ -433,6 +444,106 @@ async def list_tickets(
     )
 
 
+def _severity_derived_error() -> AppError:
+    return AppError(
+        status_code=status.HTTP_409_CONFLICT,
+        code=ErrorCode.TICKET_SEVERITY_DERIVED,
+        detail="Ticket severity is derived from CVSS assessments.",
+    )
+
+
+@router.post(
+    "/tickets",
+    status_code=status.HTTP_201_CREATED,
+    response_model=TicketDetailResponse,
+    summary="Create Ticket",
+    description=(
+        "Creates a Ticket manually, optionally associated with a CVE (an "
+        "unknown CVE is created as a placeholder record), with an initial "
+        "manual severity (only without a CVE), as confidential, and with an "
+        "initial Coordinated Release Date (only when confidential). An active "
+        "vulnerability analyst creator is assigned and the Ticket starts in "
+        "`analysis`; otherwise it starts `new` and unassigned. Returns the "
+        "created Ticket detail. Requires `create_ticket`; supplying "
+        "`is_confidential` (`true` or `false`) additionally requires "
+        "`manage_confidentiality`."
+    ),
+    responses={
+        409: {
+            "model": TicketCVEConflictErrorResponse | ErrorResponse,
+            "description": (
+                "`TICKET_CVE_CONFLICT`: the CVE is already associated with "
+                "another Ticket, identified by `existing_ticket_id` "
+                "(`SNTL-{n}`). `TICKET_SEVERITY_DERIVED`: both `cve_id` and "
+                "`severity` were provided (that body has no "
+                "`existing_ticket_id`)."
+            ),
+        },
+        422: {
+            "model": ErrorResponse,
+            "description": (
+                "`CVE_INVALID_FORMAT`: `cve_id` does not match "
+                "`^CVE-[0-9]{4}-[0-9]{4,}$` or exceeds 20 characters. "
+                "`VALIDATION_ERROR`: the body is invalid, including a "
+                "`coordinated_release_at` without `is_confidential: true`."
+            ),
+        },
+    },
+)
+async def create_ticket(
+    body: TicketCreateRequest,
+    db: DatabaseSession,
+    principal: Annotated[
+        AuthenticatedPrincipal, Depends(require_capability(Capability.CREATE_TICKET))
+    ],
+    roles: CallerRoles,
+) -> TicketDetailResponse:
+    """Create Ticket — see `docs/features/tickets/tickets.md` (Create
+    Ticket).
+
+    Order (`docs/api-spec.md`, Authorization Chain Evaluation Order):
+    authentication, then `create_ticket` before any lookup, then body
+    validation, then the presence-based field-level
+    `manage_confidentiality` check from the same per-request role load
+    (`docs/features/identity/rbac.md`, Endpoint Permission Map † and
+    Business Rule 13), then the `CVE_INVALID_FORMAT` pre-validation, with
+    no database work before the service call. The handler captures the
+    one UTC date reused by the `TicketDetail` assembled from the
+    transaction-owned new Ticket (`docs/features/tickets/ticket-service.md`,
+    `get_ticket_detail()`).
+    """
+    if (
+        "is_confidential" in body.model_fields_set
+        and Capability.MANAGE_CONFIDENTIALITY not in get_capabilities(roles)
+    ):
+        raise insufficient_permission_error()
+    if body.cve_id is not None and not is_valid_cve_id(body.cve_id):
+        raise cve_invalid_format_error()
+    evaluation_date = _utc_now().date()
+    try:
+        ticket = await ticket_service.create_ticket(
+            db,
+            acting_user_id=principal.user.id,
+            cve_id=body.cve_id,
+            severity_manual=(
+                _SEVERITY_INPUT[body.severity] if body.severity is not None else None
+            ),
+            is_confidential=body.is_confidential,
+            coordinated_release_at=body.coordinated_release_at,
+            source=TicketCreationSource.MANUAL,
+        )
+    except SeverityDerivedError:
+        raise _severity_derived_error() from None
+    except TicketCVEConflictError as exc:
+        raise ticket_cve_conflict_error(exc.existing_ticket_id) from None
+    except CVEIdFormatError:
+        raise cve_invalid_format_error() from None
+    detail = await ticket_service.assemble_ticket_detail(
+        db, ticket_id=ticket.id, evaluation_date=evaluation_date
+    )
+    return TicketDetailResponse(data=serialize_ticket_detail(detail))
+
+
 @router.get(
     "/tickets/{ticket_id}",
     response_model=TicketDetailResponse,
@@ -547,11 +658,7 @@ async def set_ticket_severity(
     except TicketNotMutableError:
         raise ticket_not_mutable_error() from None
     except SeverityDerivedError:
-        raise AppError(
-            status_code=status.HTTP_409_CONFLICT,
-            code=ErrorCode.TICKET_SEVERITY_DERIVED,
-            detail="Ticket severity is derived from CVSS assessments.",
-        ) from None
+        raise _severity_derived_error() from None
     detail = await ticket_service.assemble_ticket_detail(
         db, ticket_id=ticket.id, evaluation_date=evaluation_date
     )

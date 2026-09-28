@@ -6,7 +6,12 @@ Covers the production generic exception handler
 or dependency code must render as the standard `500 INTERNAL_ERROR`
 envelope (`docs/api-spec.md`, Global Responses), never leak the
 exception's own message to the client, and be logged at ERROR with the
-traceback for operator diagnosis. See issue #185.
+traceback for operator diagnosis. See issue #185. Also covers the
+production `AppError` handler (`_app_error_handler`): the standard
+`{"code", "detail"}` envelope plus the top-level fields of
+`AppError.extra` (`existing_ticket_id` of `TICKET_CVE_CONFLICT`,
+`docs/api-spec.md`, Response Format), with `code` and `detail` always
+taken from the exception.
 
 A minimal standalone FastAPI app registers the real, imported handler
 function (not a re-implementation) plus one route that deliberately
@@ -43,8 +48,8 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import app.main as main_module
-from app.core.errors import ErrorCode
-from app.main import _unhandled_exception_handler
+from app.core.errors import AppError, ErrorCode
+from app.main import _app_error_handler, _unhandled_exception_handler
 from app.models.fetcher_config import FetcherConfig
 from app.models.setting_audit_event import SettingAuditEvent
 from app.models.system_setting import SystemSetting
@@ -129,6 +134,96 @@ class TestUnhandledExceptionHandler:
             await error_client.get("/boom")
 
         assert "RuntimeError" in caplog.text
+
+
+def _build_app_error_app() -> FastAPI:
+    """A standalone app registering the real `_app_error_handler`."""
+    test_app = FastAPI()
+    test_app.exception_handler(AppError)(_app_error_handler)
+
+    @test_app.get("/plain")
+    async def plain() -> None:
+        raise AppError(
+            status_code=404, code=ErrorCode.TICKET_NOT_FOUND, detail="Ticket not found."
+        )
+
+    @test_app.get("/extra")
+    async def extra() -> None:
+        raise AppError(
+            status_code=409,
+            code=ErrorCode.TICKET_CVE_CONFLICT,
+            detail="CVE is already associated with another Ticket.",
+            headers={"X-Example": "1"},
+            extra={"existing_ticket_id": "SNTL-42"},
+        )
+
+    @test_app.get("/tampered")
+    async def tampered() -> None:
+        error = AppError(
+            status_code=409, code=ErrorCode.TICKET_CVE_CONFLICT, detail="real detail"
+        )
+        # Bypasses the constructor guard to prove the handler's own
+        # precedence: `code` and `detail` always come from the exception.
+        error.extra = {
+            "code": "FORGED",
+            "detail": "forged detail",
+            "existing_ticket_id": "SNTL-7",
+        }
+        raise error
+
+    return test_app
+
+
+@pytest.fixture
+async def app_error_client() -> AsyncGenerator[AsyncClient]:
+    async with AsyncClient(
+        transport=ASGITransport(app=_build_app_error_app()),
+        base_url="http://test",
+    ) as client:
+        yield client
+
+
+@pytest.mark.unit
+class TestAppErrorHandler:
+    """`_app_error_handler` renders the standard envelope and merges the
+    contract-defined top-level fields of `AppError.extra`
+    (`docs/api-spec.md`, Response Format)."""
+
+    async def test_renders_exactly_code_and_detail_without_extra(
+        self, app_error_client: AsyncClient
+    ) -> None:
+        response = await app_error_client.get("/plain")
+
+        assert response.status_code == 404
+        assert response.json() == {
+            "code": "TICKET_NOT_FOUND",
+            "detail": "Ticket not found.",
+        }
+
+    async def test_merges_extra_fields_at_the_top_level(
+        self, app_error_client: AsyncClient
+    ) -> None:
+        response = await app_error_client.get("/extra")
+
+        assert response.status_code == 409
+        assert response.json() == {
+            "code": "TICKET_CVE_CONFLICT",
+            "detail": "CVE is already associated with another Ticket.",
+            "existing_ticket_id": "SNTL-42",
+        }
+        assert response.headers["X-Example"] == "1"
+
+    async def test_code_and_detail_always_come_from_the_exception(
+        self, app_error_client: AsyncClient
+    ) -> None:
+        response = await app_error_client.get("/tampered")
+
+        assert response.status_code == 409
+        assert response.json() == {
+            "code": "TICKET_CVE_CONFLICT",
+            "detail": "real detail",
+            "existing_ticket_id": "SNTL-7",
+        }
 
 
 async def _delete_default_cvss_version_setting(

@@ -9,7 +9,7 @@ schemas never construct a response themselves.
 
 from __future__ import annotations
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class ErrorResponse(BaseModel):
@@ -17,3 +17,20 @@ class ErrorResponse(BaseModel):
 
     code: str
     detail: str
+
+
+class TicketCVEConflictErrorResponse(ErrorResponse):
+    """The `409 TICKET_CVE_CONFLICT` body: the standard envelope plus the
+    conflicting Ticket's identity (`docs/api-spec.md`, Response Format;
+    `docs/features/tickets/tickets.md`, CVE Resolution Behavior)."""
+
+    existing_ticket_id: str = Field(
+        description=(
+            "Canonical identity (`SNTL-{n}`) of the Ticket already associated "
+            "with the CVE. Only for `TICKET_CVE_CONFLICT`; it is returned even "
+            "when that Ticket is otherwise inaccessible, and following it "
+            "applies ordinary accessibility (identifier only, no Ticket "
+            "content)."
+        ),
+        examples=["SNTL-42"],
+    )

@@ -5,8 +5,9 @@ specification. This module currently implements the consumer-facing
 Ticket locator resolution (Ticket Query Operations > Ticket locator
 resolution), the Ticket list (`list_tickets()`), and the Ticket detail
 read in its consumer and mutation-assembly modes (Ticket Query
-Operations > `get_ticket_detail()`); the lifecycle operations are added
-by their owning work items.
+Operations > `get_ticket_detail()`), and Ticket creation
+(`create_ticket()`); the remaining lifecycle operations are added by
+their owning work items.
 
 Every operation accepts the caller's `AsyncSession` and never commits or
 rolls back; database exceptions propagate unchanged (Transaction
@@ -70,17 +71,23 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from app.core.enums import (
+    CVESourceType,
     CveState,
     MilestonePhase,
     MilestoneStatus,
     Severity,
     SortOrder,
+    TicketAuditEventType,
     TicketPriority,
     TicketSortField,
     TicketStatus,
 )
-from app.core.exceptions import TicketNotFoundError
-from app.core.identifiers import format_ticket_id, parse_ticket_id
+from app.core.exceptions import (
+    ServiceError,
+    SeverityDerivedError,
+    TicketNotFoundError,
+)
+from app.core.identifiers import format_ticket_id, is_valid_cve_id, parse_ticket_id
 from app.models.cve import CVE
 from app.models.cve_cwe import CVECWE
 from app.models.cve_epss_score import CVEEPSSScore
@@ -92,14 +99,24 @@ from app.models.ticket_package import TicketPackage
 from app.models.ticket_package_maintainer import TicketPackageMaintainer
 from app.models.ticket_package_track import TicketPackageTrack
 from app.models.user import User
-from app.services import package_service
+from app.services import cve_service, package_service
 from app.services.package_service import PackageProjection
+from app.services.ticket_audit_log import (
+    CVE_SOURCE_AUDIT_LABELS,
+    MANUAL_TICKET_CREATED_COMMENT,
+    TicketAuditLog,
+)
 from app.services.ticket_deadline_expressions import (
     TicketDueDateExpressions,
     ticket_due_date_expressions,
     track_milestone_status_expression,
 )
 from app.services.ticket_deadlines import DueDates, compute_due_dates
+from app.services.ticket_mutations import (
+    is_stabilized_vulnerability_analyst,
+    refresh_priority_auto,
+    stabilize_acting_user,
+)
 from app.services.ticket_severity import resolved_severity_expression
 from app.services.ticket_visibility import TicketCaller, ticket_visibility_condition
 from app.services.user_service import user_identifier_condition
@@ -1191,3 +1208,244 @@ async def list_tickets(
         page=page,
         per_page=per_page,
     )
+
+
+# ---------------------------------------------------------------------------
+# Service exceptions (ticket-service.md, Service Exceptions)
+# ---------------------------------------------------------------------------
+
+
+class TicketServiceError(ServiceError):
+    """Base of the module-owned `ticket_service` exceptions. Shared
+    exceptions (`TicketNotFoundError`, `SeverityDerivedError`, ...) inherit
+    from `ServiceError` directly and are caught explicitly."""
+
+
+class TicketCVEConflictError(TicketServiceError):
+    """The requested CVE is already associated with another Ticket.
+
+    Carries the conflicting Ticket's canonical `SNTL-{n}` identity, which
+    the API returns as `existing_ticket_id` even when that Ticket is
+    otherwise inaccessible (tickets.md, Identifier Disclosure Boundary).
+    Maps to `409 TICKET_CVE_CONFLICT`. The message is static.
+    """
+
+    def __init__(self, existing_ticket_id: str) -> None:
+        self.existing_ticket_id = existing_ticket_id
+        super().__init__("CVE is already associated with another Ticket.")
+
+
+# ---------------------------------------------------------------------------
+# Ticket creation (ticket-service.md, `create_ticket`)
+# ---------------------------------------------------------------------------
+
+
+class TicketCreationSource(StrEnum):
+    """Origin of a Ticket creation (service-layer only; not persisted)."""
+
+    MANUAL = "manual"
+    CVE_INGESTION = "cve_ingestion"
+
+
+def _format_utc_instant(value: datetime) -> str:
+    """Render an aware instant as UTC ISO 8601 with a `Z` suffix, the
+    `coordinated_release_changed` value format (ticket-audit-log.md,
+    Event Type Contract). Sub-second precision is kept when present."""
+    return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _creation_comment(
+    source: TicketCreationSource, ingestion_source: CVESourceType | None
+) -> str:
+    """The exact canonical `ticket_created.comment` (ticket-audit-log.md,
+    Canonical Automatic Comment Vocabulary)."""
+    if ingestion_source is None:
+        return MANUAL_TICKET_CREATED_COMMENT
+    return f"CVE ingested from {CVE_SOURCE_AUDIT_LABELS[ingestion_source]}"
+
+
+def _validate_creation_input(
+    *,
+    acting_user_id: UUID | None,
+    cve_id: str | None,
+    severity_manual: Severity | None,
+    is_confidential: bool,
+    coordinated_release_at: datetime | None,
+    source: TicketCreationSource,
+    ingestion_source: CVESourceType | None,
+) -> None:
+    """Input-only guards of `create_ticket()`; no database access."""
+    manual = source is TicketCreationSource.MANUAL
+    if manual == (ingestion_source is not None):
+        raise ValueError("ingestion_source is required exactly for cve_ingestion.")
+    if manual == (acting_user_id is None):
+        raise ValueError(
+            "manual creation requires an acting user; cve_ingestion is a system action."
+        )
+    if coordinated_release_at is not None:
+        if not is_confidential or not manual:
+            raise ValueError(
+                "coordinated_release_at requires a confidential manual creation."
+            )
+        if coordinated_release_at.tzinfo is None:
+            raise ValueError("coordinated_release_at must be timezone-aware.")
+    if not manual and (cve_id is None or is_confidential):
+        raise ValueError(
+            "cve_ingestion creates a non-confidential Ticket with its CVE set."
+        )
+    if cve_id is not None and severity_manual is not None:
+        raise SeverityDerivedError()
+    if cve_id is not None and not is_valid_cve_id(cve_id):
+        raise cve_service.CVEIdFormatError()
+
+
+async def create_ticket(
+    db: AsyncSession,
+    *,
+    acting_user_id: UUID | None,
+    cve_id: str | None = None,
+    severity_manual: Severity | None = None,
+    is_confidential: bool = False,
+    coordinated_release_at: datetime | None = None,
+    source: TicketCreationSource,
+    ingestion_source: CVESourceType | None = None,
+) -> Ticket:
+    """Create a Ticket, optionally associated with a CVE.
+
+    Category A lifecycle operation (ticket-service.md, `create_ticket`;
+    tickets.md, Ticket Creation, CVE Resolution Behavior).
+
+    Q1: `source = MANUAL` requires the authenticated `acting_user_id` and
+    forbids `ingestion_source`; `source = CVE_INGESTION` is the system
+    path (`acting_user_id = None`, `ingestion_source` set, `cve_id` set,
+    not confidential). `cve_id` is a pre-validated CVE-ID string.
+    `severity_manual` is only for CVE-less Tickets.
+    `coordinated_release_at` is an aware instant, permitted only for a
+    confidential manual creation. The API has already enforced
+    `manage_confidentiality` for a supplied `is_confidential`.
+
+    Q2: the caller owns the transaction. Locks, in order: the manual
+    acting User `FOR SHARE` (`stabilize_acting_user()`), then the CVE
+    `FOR UPDATE` through the lock-aware `ensure_cve_exists()`. A system
+    creation has no User root. The new Ticket is transaction-owned.
+
+    Q3: (1) manual: stabilizes the creator and reads active VA
+    eligibility from the locked row. (2) With a CVE: resolves it (a
+    placeholder is created if absent) under the CVE lock, then reads the
+    existing association under that lock, before any INSERT. (3)-(4)
+    Inserts the Ticket with its initial fields: `Analysis` assigned to an
+    active VA creator, otherwise `New` unassigned. (5)-(9) Creates, in
+    order, `ticket_created` (exact canonical comment), optional
+    `assignment`, optional `severity_changed` (`NULL -> label`), optional
+    `coordinated_release_changed` (`NULL -> UTC ISO 8601`), and optional
+    `cve_associated`, attributed to the creating user (system for
+    ingestion); every comment but the first is `NULL`. (10) Manual only:
+    `refresh_priority_auto()`, whose optional system `priority_changed`
+    follows every creation event; ingestion leaves the refresh to its
+    caller. Never reconciles, assigns through `auto_assign_actor()`,
+    registers convergence, or commits. A locked-current `REJECTED` CVE
+    changes nothing (no automatic `CVE rejected` status). The CVE
+    freshness step (step 11) is not part of this implementation.
+
+    Q4: returns the new, flushed Ticket; its server-generated columns
+    (`sequence_id`, timestamps) are not loaded.
+
+    Q6: before any database access, raises `ValueError` for a
+    source/actor/`ingestion_source` mismatch, a CRD without confidential
+    manual creation or without a timezone, and an ingestion creation
+    without a CVE or marked confidential; `SeverityDerivedError` when both
+    `cve_id` and `severity_manual` are given; `CVEIdFormatError` (from
+    `cve_service`) for a malformed `cve_id`, which the lock-aware
+    `ensure_cve_exists()` would also reject. Raises
+    `TicketCVEConflictError` with the conflicting Ticket's `SNTL-{n}`
+    (even an inaccessible one) when the CVE is already associated. A
+    `Ticket.cve_id` unique violation is an invariant failure and escapes
+    untranslated; the caller rolls back without further queries. Audit,
+    database, and flush exceptions propagate and roll back the caller's
+    transaction.
+    """
+    _validate_creation_input(
+        acting_user_id=acting_user_id,
+        cve_id=cve_id,
+        severity_manual=severity_manual,
+        is_confidential=is_confidential,
+        coordinated_release_at=coordinated_release_at,
+        source=source,
+        ingestion_source=ingestion_source,
+    )
+
+    acting_user: User | None = None
+    if acting_user_id is not None:
+        acting_user = await stabilize_acting_user(db, acting_user_id)
+
+    cve: CVE | None = None
+    if cve_id is not None:
+        cve = await cve_service.ensure_cve_exists(db, cve_id, lock=True)
+        existing_sequence = (
+            await db.execute(select(Ticket.sequence_id).where(Ticket.cve_id == cve.id))
+        ).scalar_one_or_none()
+        if existing_sequence is not None:
+            raise TicketCVEConflictError(format_ticket_id(existing_sequence))
+
+    assignee = (
+        acting_user
+        if acting_user is not None
+        and acting_user.active
+        and is_stabilized_vulnerability_analyst(acting_user)
+        else None
+    )
+    ticket = Ticket(
+        cve_id=cve.id if cve is not None else None,
+        severity_manual=severity_manual.value if severity_manual is not None else None,
+        is_confidential=is_confidential,
+        coordinated_release_at=coordinated_release_at,
+        status=(
+            TicketStatus.ANALYSIS if assignee is not None else TicketStatus.NEW
+        ).value,
+        assignee_id=assignee.id if assignee is not None else None,
+    )
+    db.add(ticket)
+    await db.flush()
+
+    await TicketAuditLog.log_event(
+        db,
+        ticket_id=ticket.id,
+        event_type=TicketAuditEventType.TICKET_CREATED,
+        user_id=acting_user_id,
+        comment=_creation_comment(source, ingestion_source),
+    )
+    if assignee is not None:
+        await TicketAuditLog.log_event(
+            db,
+            ticket_id=ticket.id,
+            event_type=TicketAuditEventType.ASSIGNMENT,
+            user_id=assignee.id,
+            new_value=assignee.username,
+        )
+    if severity_manual is not None:
+        await TicketAuditLog.log_event(
+            db,
+            ticket_id=ticket.id,
+            event_type=TicketAuditEventType.SEVERITY_CHANGED,
+            user_id=acting_user_id,
+            new_value=severity_manual.value,
+        )
+    if coordinated_release_at is not None:
+        await TicketAuditLog.log_event(
+            db,
+            ticket_id=ticket.id,
+            event_type=TicketAuditEventType.COORDINATED_RELEASE_CHANGED,
+            user_id=acting_user_id,
+            new_value=_format_utc_instant(coordinated_release_at),
+        )
+    if cve is not None:
+        await TicketAuditLog.log_event(
+            db,
+            ticket_id=ticket.id,
+            event_type=TicketAuditEventType.CVE_ASSOCIATED,
+            user_id=acting_user_id,
+            new_value=cve.cve_id,
+        )
+    if source is TicketCreationSource.MANUAL:
+        await refresh_priority_auto(db, ticket=ticket)
+    return ticket

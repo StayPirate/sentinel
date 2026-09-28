@@ -1,8 +1,10 @@
-"""CVE service: CVE identifier resolution and accessibility-constrained reads.
+"""CVE service: CVE identifier resolution, accessibility-constrained reads,
+and the placeholder-CVE data guarantee.
 
 See `docs/features/tickets/cve-service.md` (Ownership; CVE Read and
-Accessibility Boundary; Caller Validation Responsibility; Service Read
-Contracts; Exceptions) for the module contract, and
+Accessibility Boundary; On-Demand Fetch: `ensure_cve_exists()`; CVE Upsert
+Serialization; Caller Validation Responsibility; Service Read Contracts;
+Exceptions) for the module contract, and
 `docs/features/tickets/cvss-scoring.md` (Get CVSS Assessments for a CVE)
 for the CVSS read implemented here. `resolve_cve_locator()` is the
 preliminary `{cve_id}` resolution of the CVE mutation paths, whose locked
@@ -22,6 +24,11 @@ Reads are Category B: they create no row or audit event, acquire no lock,
 never flush, commit, or roll back, and perform no network I/O. Unexpected
 database and programming exceptions propagate unchanged. Results are
 semantic service values, not Pydantic schemas.
+
+`ensure_cve_exists()` is the pure placeholder-CVE data guarantee: it may
+create one `CVE` row and, in its lock-aware form, acquire the CVE root lock
+for the calling Ticket workflow, but it never commits or rolls back and
+performs no registry, Redis, task, or external I/O.
 """
 
 from __future__ import annotations
@@ -35,10 +42,11 @@ from typing import Any, Final
 
 import structlog
 from sqlalchemy import ColumnElement, Row, or_, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.enums import CVSSAssessmentSeverity, CVSSVersion
-from app.core.exceptions import CVENotFoundError
+from app.core.exceptions import CVENotFoundError, ServiceError
 from app.core.identifiers import is_valid_cve_id
 from app.models.cve import CVE
 from app.models.cve_cvss_assessment import CVECVSSAssessment
@@ -69,6 +77,27 @@ _LIST_VERSION_RANK: Final[Mapping[CVSSVersion, int]] = {
     CVSSVersion.V3_0: 2,
     CVSSVersion.V2_0: 3,
 }
+
+
+class CVEServiceError(ServiceError):
+    """Base of the module-owned operational `cve_service` exceptions
+    (cve-service.md, Exceptions). The shared `CVENotFoundError` does not
+    inherit from it."""
+
+
+class CVEIdFormatError(CVEServiceError):
+    """A CVE-ID reaching a service boundary is malformed.
+
+    Raised when the value does not match `^CVE-[0-9]{4}-[0-9]{4,}$` or
+    exceeds 20 characters (`core.identifiers.is_valid_cve_id()`). It is a
+    defense-in-depth backstop: callers pre-validate and map request-body
+    input to `422 CVE_INVALID_FORMAT` themselves (cve-service.md, Caller
+    Validation Responsibility). The message is static and never includes
+    the rejected value.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("CVE identifier format is invalid.")
 
 
 class CVSSAssessmentIntegrityError(RuntimeError):
@@ -354,3 +383,71 @@ async def resolve_cve_locator(
     if row is None:
         raise CVENotFoundError()
     return ResolvedCVE(id=row.id, cve_id=row.cve_id)
+
+
+async def ensure_cve_exists(
+    db: AsyncSession, cve_id: str, *, lock: bool = False
+) -> CVE:
+    """Ensure a CVE row exists, creating a placeholder when needed.
+
+    Category A data guarantee (cve-service.md, On-Demand Fetch:
+    `ensure_cve_exists()`, Placeholder Records, Concurrency; CVE Upsert
+    Serialization, New CVE).
+
+    Q1: `cve_id` is the CVE-ID string, expected to be pre-validated by the
+    caller. `lock=True` is the lock-aware form used by Ticket workflows
+    that hold the CVE as a root (`ticket_service.create_ticket()`, and
+    `associate_cve()`): it must be called before any Ticket lock, after
+    the optional acting-User lock (`docs/conventions.md`, Cross-Domain
+    Root Lock Order).
+
+    Q2: runs in the caller-owned transaction, which must be READ
+    COMMITTED (the application default), so a waiting statement observes
+    a concurrent transaction's committed winner row.
+
+    Q3: (1) validates the format before any database operation. (2) Reads
+    the row by the unique `CVE.cve_id`; with `lock=True` this read is
+    itself the `SELECT ... FOR UPDATE` and the first persistent read.
+    (3) If absent, inserts a placeholder with only `cve_id` set (every
+    other column takes its model or database default, including
+    `cve_state = PUBLISHED`; no `CVESource` row) through `INSERT ... ON CONFLICT
+    (cve_id) DO NOTHING`. PostgreSQL waits for a concurrent uncommitted
+    inserter of the same key: if it commits, this call inserts nothing
+    and (4) reads, and with `lock=True` locks, the committed winner; if
+    it rolls back, this call becomes the insert winner. No unique
+    violation is raised, so the caller's transaction and unrelated work
+    stay usable and no savepoint is needed. A newly inserted row is owned
+    by the transaction and is therefore already its locked root. Creates
+    no audit event and never commits or rolls back; performs no registry,
+    Redis, task, or external I/O.
+
+    Q4: returns the serialized winner row — the existing row unchanged,
+    the placeholder this call inserted, or a concurrent creator's
+    committed row — refreshed from the database.
+
+    Q6: raises `CVEIdFormatError` before any database operation for a
+    malformed, over-length, or non-string value. Database exceptions
+    propagate unchanged.
+    """
+    if not is_valid_cve_id(cve_id):
+        raise CVEIdFormatError()
+
+    statement = (
+        select(CVE)
+        .where(CVE.cve_id == cve_id)
+        .execution_options(populate_existing=True)
+    )
+    if lock:
+        statement = statement.with_for_update()
+
+    existing = (await db.execute(statement)).scalar_one_or_none()
+    if existing is not None:
+        return existing
+
+    # Inserter or loser, the winner row is then read (and locked) below.
+    await db.execute(
+        pg_insert(CVE)
+        .values(cve_id=cve_id)
+        .on_conflict_do_nothing(index_elements=[CVE.cve_id])
+    )
+    return (await db.execute(statement)).scalar_one()
