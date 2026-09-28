@@ -11,7 +11,7 @@
 ### CVS-GAP-10 — SUSE CVSS POST endpoint specifies upsert but service function rejects duplicates (Medium)
 
 **Category**: Error and failure paths
-**Status**: RESOLVED — Eliminated by replacing `create_cvss_assessment()` and `update_cvss_assessment()` with a single `upsert_cvss_assessment()` that handles create-or-update internally via `INSERT ... ON CONFLICT DO UPDATE`. `DuplicateCVSSAssessmentError` removed. See `docs/drafts/upsert-cvss-assessment.md` (2026-06-09)
+**Status**: RESOLVED — Eliminated by replacing `create_cvss_assessment()` and `update_cvss_assessment()` with a single `upsert_cvss_assessment()` that handles create-or-update internally via `INSERT ... ON CONFLICT DO UPDATE`. `DuplicateCVSSAssessmentError` removed. (2026-06-09)
 
 ### CVS-GAP-11 — CVSS v2.0 inclusion in Severity Resolution Cascade contradicts Key Principle 2 (Medium)
 
@@ -140,7 +140,7 @@
 ### CVS-DES-02 — API upsert endpoint inconsistent with service layer's separate create/update functions (Medium)
 
 **Category**: Architectural fitness
-**Status**: RESOLVED — Eliminated by replacing `create_cvss_assessment()` and `update_cvss_assessment()` with a single `upsert_cvss_assessment()`. Service API now matches the domain operation. See `docs/drafts/upsert-cvss-assessment.md` (2026-06-09)
+**Status**: RESOLVED — Eliminated by replacing `create_cvss_assessment()` and `update_cvss_assessment()` with a single `upsert_cvss_assessment()`. Service API now matches the domain operation. (2026-06-09)
 
 ### CVS-DES-03 — Batch CVSS recalculation has no defined result storage or admin feedback mechanism (Medium)
 

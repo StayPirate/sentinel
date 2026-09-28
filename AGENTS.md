@@ -140,7 +140,7 @@ the authoritative architecture/conventions. Core locations are:
 | Models / schemas / API / services / tasks / CLI | `backend/app/{models,schemas,api/v1,services,tasks,cli}/` |
 | Migrations / backend utilities / tests | `backend/alembic/versions/`, `backend/scripts/`, `backend/tests/` |
 | Repository orchestration / Git hooks / OpenCode tooling | `scripts/`, `.githooks/`, `.opencode/` |
-| TLS certificates / drafts / review archive | `backend/certs/`, `docs/drafts/`, `docs/reviews/` |
+| TLS certificates / review archive | `backend/certs/`, `docs/reviews/` |
 
 If a requested location is wrong, stop, identify the correct location, and ask
 whether to use it.
