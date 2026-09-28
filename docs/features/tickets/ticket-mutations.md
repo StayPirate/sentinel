@@ -662,9 +662,9 @@ Propagation dispositions describe the completed Ticket-scoped outcome:
 
 - `immediate`: the current locked workflow MUST apply automatic Product
   eligibility and any required final Ticket reconciliation before returning.
-- `deferred_until_reactivation`: an external mutation associated with an
-  `Ignored` or `Duplicated` Ticket is retained for package-owned propagation
-  after the explicit manual-zone exit.
+- `deferred_until_reactivation`: an external mutation or default-version
+  recalculation associated with an `Ignored` or `Duplicated` Ticket is retained
+  for package-owned propagation after the explicit manual-zone exit.
 - `not_applicable`: the CVE has no associated Ticket, so there is no Product
   eligibility or Ticket state to propagate.
 - `none`: the serialized outcome is `unchanged` or `not_found`, so there is no
@@ -1142,7 +1142,11 @@ defines no Ticket convergence caller.
 7. Flush and return severity resolution, eligibility resolution, changed and
    skipped Product counts, whether severity changed, propagation, whether one
    reconciliation ran, `evaluation_date`, and the runner-facing classification
-   below.
+   below. Propagation uses the CVSS disposition vocabulary above: a ticketless
+   CVE returns `not_applicable`; association mode and default-version `New`,
+   `Analysis`, `Analyzed`, and `Resolved` return `immediate`; default-version
+   `Ignored` and `Duplicated` return `deferred_until_reactivation`; and
+   `missing` returns `none`.
 
 **Runner-facing classification**: the returned result classifies the unit
 transaction-locally as exactly one of:

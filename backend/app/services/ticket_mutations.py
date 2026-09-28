@@ -13,7 +13,12 @@ Implements, from `docs/features/tickets/ticket-mutations.md`:
   semantics, and transaction-local Ticket convergence registration;
 - `refresh_priority_auto()` — the only writer of `Ticket.priority_auto`
   (`docs/features/tickets/ticket-priority.md`, Automatic Refresh);
-- `set_severity_manual()` — the manual-severity gate-relevant mutation.
+- `set_severity_manual()` — the manual-severity gate-relevant mutation;
+- `recalculate_cvss_chain()` — CVE-owned severity recalculation in
+  association and default-version modes, with the shared immediate
+  Product propagation helper (the narrow atomic-CVSS-chain exception that
+  updates system-managed Product eligibility inline through the
+  package-model-owned pure evaluator).
 
 The gates are exactly those of `docs/features/tickets/tickets.md` (Gate:
 Analysis → Analyzed, Gate: Analyzed → Resolved) over the canonical
@@ -38,8 +43,10 @@ both of them import these primitives. It re-exports the leaf
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, date, datetime
-from typing import Final
+from enum import Enum, StrEnum
+from typing import Final, Literal
 from uuid import UUID
 
 import structlog
@@ -50,6 +57,7 @@ from sqlalchemy.orm import aliased, selectinload
 
 from app.core.enums import (
     CVSSVersion,
+    LifecyclePhase,
     PackageStatus,
     Role,
     Severity,
@@ -74,11 +82,20 @@ from app.models.ticket_package_product import TicketPackageProduct
 from app.models.ticket_package_track import TicketPackageTrack
 from app.models.user import User
 from app.models.user_role import UserRole
-from app.services.cvss import SUSE_PROVIDER_NAME
+from app.services import settings as settings_service
+from app.services.cvss import (
+    SUSE_PROVIDER_NAME,
+    EligibilityResolution,
+    SeverityResolution,
+    resolve_eligibility_score,
+    resolve_severity_score,
+)
 from app.services.package_actionability import (
     product_actionable_expression,
     track_actionable_expression,
 )
+from app.services.product_eligibility import evaluate_product_eligibility
+from app.services.product_service import lifecycle_phase_expression
 from app.services.ticket_audit_log import TicketAuditLog
 from app.services.ticket_convergence_registry import register_ticket_convergence
 from app.services.ticket_mutations_errors import (
@@ -92,11 +109,17 @@ from app.services.ticket_visibility import TicketCaller, ticket_visibility_condi
 __all__ = [
     "INACTIVE_ASSIGNEE_REASON",
     "VA_ROLE_REMOVED_REASON",
+    "CVSSChainClassification",
+    "CVSSChainMode",
+    "CVSSChainResult",
+    "CVSSPropagation",
     "InvalidCVSSVectorError",
+    "ProductPropagationSummary",
     "TicketMutationsError",
     "TicketNotMutableError",
     "auto_assign_actor",
     "ensure_ticket_operable",
+    "recalculate_cvss_chain",
     "reconcile_ticket_status",
     "refresh_priority_auto",
     "set_severity_manual",
@@ -785,3 +808,400 @@ async def set_severity_manual(
     await refresh_priority_auto(db, ticket=ticket)
     await reconcile_ticket_status(ticket, db, evaluation_date=evaluation_date)
     return ticket
+
+
+# ---------------------------------------------------------------------------
+# CVSS chain recalculation (ticket-mutations.md, `recalculate_cvss_chain()`)
+# ---------------------------------------------------------------------------
+
+
+class CVSSChainMode(StrEnum):
+    """Semantic invocation mode of `recalculate_cvss_chain()`.
+
+    Service-internal; neither persisted nor serialized. `ASSOCIATION` is
+    the `ticket_service.associate_cve()` composition; `DEFAULT_VERSION` is
+    one unit of the all-CVE default-version recalculation.
+    """
+
+    ASSOCIATION = "association"
+    DEFAULT_VERSION = "default_version"
+
+
+class CVSSPropagation(StrEnum):
+    """Ticket-scoped propagation disposition of a CVSS chain.
+
+    The vocabulary of ticket-mutations.md (CVSS Mutation Authority and
+    Result); service-internal, neither persisted nor serialized.
+    """
+
+    IMMEDIATE = "immediate"
+    DEFERRED_UNTIL_REACTIVATION = "deferred_until_reactivation"
+    NOT_APPLICABLE = "not_applicable"
+    NONE = "none"
+
+
+class CVSSChainClassification(StrEnum):
+    """Runner-facing classification of one `recalculate_cvss_chain()` unit."""
+
+    CHANGED = "changed"
+    UNCHANGED = "unchanged"
+    MISSING = "missing"
+
+
+@dataclass(frozen=True, slots=True)
+class ProductPropagationSummary:
+    """Occurrence counts of one immediate Product propagation (all zero
+    when propagation was not applied)."""
+
+    examined: int = 0
+    override_skipped: int = 0
+    changed: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class CVSSChainResult:
+    """Transaction-local result of `recalculate_cvss_chain()`.
+
+    Valid inside the caller-owned transaction only; it is not evidence of
+    durability until that transaction commits. `severity_resolution` is
+    `None` for an empty assessment set or a `missing` unit;
+    `eligibility_resolution` is `None` only for `missing`.
+    `severity_changed` compares the mode's applicable old value (the
+    supplied pre-association manual severity in association mode, the old
+    `CVE.severity` in default-version mode) with the new CVE severity.
+    """
+
+    mode: CVSSChainMode
+    classification: CVSSChainClassification
+    severity_resolution: SeverityResolution | None
+    eligibility_resolution: EligibilityResolution | None
+    propagation: CVSSPropagation
+    products: ProductPropagationSummary
+    severity_changed: bool
+    reconciled: bool
+    evaluation_date: date
+
+
+class _Unset(Enum):
+    """Marker distinguishing an omitted argument from an explicit `None`."""
+
+    UNSET = "unset"
+
+
+_UNSET: Final = _Unset.UNSET
+_GATE_ZONE: Final = frozenset(
+    {TicketStatus.ANALYSIS, TicketStatus.ANALYZED, TicketStatus.RESOLVED}
+)
+
+
+def _eligibility_value(eligible: bool) -> str:
+    """The `product_eligibility_changed` old/new value (`true`/`false`)."""
+    return "true" if eligible else "false"
+
+
+async def _propagate_automatic_product_eligibility(
+    db: AsyncSession,
+    *,
+    ticket: Ticket,
+    eligibility: EligibilityResolution,
+    evaluation_date: date,
+) -> ProductPropagationSummary:
+    """Immediate automatic Product propagation of the atomic CVSS chain.
+
+    The sole narrow exception that lets `ticket_mutations` write
+    system-managed `TicketPackageProduct.eligible` inline
+    (ticket-mutations.md, Contract; package-model.md, Override Model).
+    Shared by `recalculate_cvss_chain()` and the manual SUSE assessment
+    mutations; never imports `package_service`.
+
+    Q1: `ticket` is the chain's Ticket; `eligibility` is the Eligibility
+    Score Resolution of the Ticket's current complete assessment set at
+    the chain's default version (or the fallback); `evaluation_date` is
+    the chain's one UTC date.
+
+    Q2: the caller holds the CVE then Ticket `FOR UPDATE` roots (and, for
+    manual work, the acting User before them). Acquires no lock.
+
+    Q3: reloads, in one statement ordered by `TicketPackageProduct.id`,
+    every Product occurrence of the Ticket — including directly or
+    effectively excluded, EOL, and unaffected occurrences — with its
+    current override marker, `eligible`, Product threshold, lifecycle
+    phase on `evaluation_date`, and the event-time subject (track
+    reference, package name, Product display name and CPE). Applies the
+    shared pure evaluator; skips overrides; updates only booleans that
+    change and creates one system `product_eligibility_changed` per change
+    (`reason = cvss`, `comment NULL`). Never touches the override marker
+    or any other package state.
+
+    Q4: returns the examined, override-skipped, and changed counts.
+
+    Q6: raises nothing of its own; audit, database, and flush exceptions
+    propagate and roll back the caller's complete transaction.
+    """
+    occurrence = TicketPackageProduct
+    rows = (
+        await db.execute(
+            select(
+                occurrence,
+                TicketPackageTrack.reference,
+                TicketPackage.package_name,
+                Product.display_name,
+                Product.cpe,
+                Product.cvss_threshold,
+                lifecycle_phase_expression(evaluation_date).label("lifecycle"),
+            )
+            .join(
+                TicketPackageTrack,
+                TicketPackageTrack.id == occurrence.ticket_package_track_id,
+            )
+            .join(
+                TicketPackage, TicketPackage.id == TicketPackageTrack.ticket_package_id
+            )
+            .join(Product, Product.id == occurrence.product_id)
+            .where(TicketPackage.ticket_id == ticket.id)
+            .order_by(occurrence.id)
+            .execution_options(populate_existing=True)
+        )
+    ).all()
+
+    override_skipped = 0
+    changed = 0
+    for row in rows:
+        product_occurrence: TicketPackageProduct = row[0]
+        outcome = evaluate_product_eligibility(
+            is_eligible_override=product_occurrence.is_eligible_override,
+            lifecycle_phase=(
+                LifecyclePhase(row.lifecycle) if row.lifecycle is not None else None
+            ),
+            cvss_threshold=row.cvss_threshold,
+            eligibility_score=eligibility,
+        )
+        new_eligible = outcome.automatic_eligible
+        if new_eligible is None:
+            override_skipped += 1
+            continue
+        old_eligible = product_occurrence.eligible
+        if new_eligible == old_eligible:
+            continue
+        product_occurrence.eligible = new_eligible
+        changed += 1
+        await TicketAuditLog.log_event(
+            db,
+            ticket_id=ticket.id,
+            event_type=TicketAuditEventType.PRODUCT_ELIGIBILITY_CHANGED,
+            user_id=None,
+            old_value=_eligibility_value(old_eligible),
+            new_value=_eligibility_value(new_eligible),
+            detail={
+                "track": row.reference,
+                "package": row.package_name,
+                "product_name": row.display_name,
+                "product_cpe": row.cpe,
+                "reason": "cvss",
+            },
+        )
+    return ProductPropagationSummary(
+        examined=len(rows), override_skipped=override_skipped, changed=changed
+    )
+
+
+def _propagation_for(mode: CVSSChainMode, ticket: Ticket | None) -> CVSSPropagation:
+    """Propagation disposition of an existing CVE (ticket-mutations.md,
+    `recalculate_cvss_chain()` step 7)."""
+    if ticket is None:
+        return CVSSPropagation.NOT_APPLICABLE
+    if mode is CVSSChainMode.DEFAULT_VERSION and ticket.status in _MANUAL_ZONE:
+        return CVSSPropagation.DEFERRED_UNTIL_REACTIVATION
+    return CVSSPropagation.IMMEDIATE
+
+
+async def recalculate_cvss_chain(
+    db: AsyncSession,
+    *,
+    cve_id: UUID,
+    mode: CVSSChainMode,
+    association_previous_severity: Severity | Literal[_Unset.UNSET] | None = _UNSET,
+    default_cvss_version: str | None = None,
+    evaluation_date: date | None = None,
+) -> CVSSChainResult:
+    """Recalculate CVE-owned severity and its mode-specific consequences.
+
+    Category A system/composition primitive (ticket-mutations.md,
+    `recalculate_cvss_chain()`; CVSS Status Matrix, default-version
+    paragraph). Never creates, updates, or deletes an assessment and never
+    changes an override.
+
+    Q1: `cve_id` is the internal CVE UUID. `mode` selects the composition.
+    `association_previous_severity` is required in association mode (the
+    Ticket's pre-association `severity_manual`, including `None`) and must
+    be omitted in default-version mode. `default_cvss_version`, when
+    given, is used for both resolutions instead of the setting (the M4
+    runner passes its target version). `evaluation_date` is the one UTC
+    date for lifecycle, eligibility, actionability, reconciliation, and
+    the result; captured once at entry when omitted.
+
+    Q2: the caller owns the transaction. Takes the CVE `FOR UPDATE` as the
+    first persistent read, then the associated Ticket `FOR UPDATE` (in
+    association mode both are same-transaction re-locks of the roots
+    `associate_cve()` already holds). Performs no accessibility check and
+    does not call `ensure_ticket_operable()`.
+
+    Q3: (1) default-version mode with no CVE row returns `missing` with no
+    other read or effect. (2) Reads `default_cvss_version` once (unless
+    supplied) and the complete assessment set; resolves severity and
+    eligibility with the pure `cvss` resolutions. (3) Persists a changed
+    `CVE.severity`; when a Ticket exists and the applicable old and new
+    values differ, creates one system `severity_changed`. (4) Association
+    mode: immediate Product propagation, then `refresh_priority_auto()`;
+    no assignment and no reconciliation (the caller reconciles once).
+    Default-version mode by locked Ticket status: ticketless — severity
+    only; `New` — Product propagation and priority, no reconciliation;
+    `Analysis`/`Analyzed`/`Resolved` — Product propagation, priority, and
+    exactly one final `reconcile_ticket_status()` when severity or a
+    Product value changed (a `Resolved` regression registers its normal
+    convergence effect there); `Ignored`/`Duplicated` — severity and its
+    direct event plus priority only. No state assigns or exits the manual
+    zone. (5) Flushes. Never commits, publishes, or performs network,
+    Redis, or Celery I/O.
+
+    Q4: returns `CVSSChainResult`. `changed` when the unit contains a
+    durable semantic mutation or required event (changed `CVE.severity`,
+    `severity_changed`, Product change, changed `priority_auto` including
+    one masked by an override, and any sanitation or status change of the
+    reconciliation that only a gate-input change triggers); otherwise
+    `unchanged`; `missing` only in default-version mode.
+
+    Q6: raises `ValueError` before any database operation for a mode and
+    `association_previous_severity` mismatch, and in association mode for
+    a missing CVE or associated Ticket (caller contract violations).
+    `RequiredSystemSettingMissingError`, `ValueError` from an invalid
+    default version or assessment set, and audit, database, flush, and
+    reconciliation exceptions propagate and roll back the caller's
+    complete transaction.
+    """
+    association = mode is CVSSChainMode.ASSOCIATION
+    if association and association_previous_severity is _UNSET:
+        raise ValueError("association mode requires association_previous_severity.")
+    if not association and association_previous_severity is not _UNSET:
+        raise ValueError(
+            "association_previous_severity is only valid in association mode."
+        )
+    if evaluation_date is None:
+        evaluation_date = _utc_now().date()
+
+    cve = (
+        await db.execute(
+            select(CVE)
+            .where(CVE.id == cve_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+    if cve is None:
+        if association:
+            raise ValueError("association mode requires the locked CVE to exist.")
+        return CVSSChainResult(
+            mode=mode,
+            classification=CVSSChainClassification.MISSING,
+            severity_resolution=None,
+            eligibility_resolution=None,
+            propagation=CVSSPropagation.NONE,
+            products=ProductPropagationSummary(),
+            severity_changed=False,
+            reconciled=False,
+            evaluation_date=evaluation_date,
+        )
+    ticket = (
+        await db.execute(
+            select(Ticket)
+            .where(Ticket.cve_id == cve.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+    if association and ticket is None:
+        raise ValueError("association mode requires the associated Ticket.")
+
+    if default_cvss_version is None:
+        default_cvss_version = await settings_service.get_default_cvss_version(db)
+    assessments = (
+        (
+            await db.execute(
+                select(CVECVSSAssessment).where(CVECVSSAssessment.cve_id == cve.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    severity_resolution = resolve_severity_score(assessments, default_cvss_version)
+    eligibility_resolution = resolve_eligibility_score(
+        assessments, default_cvss_version
+    )
+
+    new_severity = (
+        severity_resolution.label.value if severity_resolution is not None else None
+    )
+    old_cve_severity = cve.severity
+    cve_severity_written = new_severity != old_cve_severity
+    if cve_severity_written:
+        cve.severity = new_severity
+    if isinstance(association_previous_severity, Severity):
+        old_effective: str | None = association_previous_severity.value
+    elif association:
+        old_effective = None
+    else:
+        old_effective = old_cve_severity
+    severity_changed = old_effective != new_severity
+    if ticket is not None and severity_changed:
+        await TicketAuditLog.log_event(
+            db,
+            ticket_id=ticket.id,
+            event_type=TicketAuditEventType.SEVERITY_CHANGED,
+            user_id=None,
+            old_value=old_effective,
+            new_value=new_severity,
+        )
+
+    propagation = _propagation_for(mode, ticket)
+    products = ProductPropagationSummary()
+    priority_changed = False
+    reconciled = False
+    if ticket is not None:
+        if propagation is CVSSPropagation.IMMEDIATE:
+            products = await _propagate_automatic_product_eligibility(
+                db,
+                ticket=ticket,
+                eligibility=eligibility_resolution,
+                evaluation_date=evaluation_date,
+            )
+        priority_changed = await refresh_priority_auto(db, ticket=ticket)
+        if (
+            not association
+            and ticket.status in _GATE_ZONE
+            and (severity_changed or products.changed > 0)
+        ):
+            await reconcile_ticket_status(ticket, db, evaluation_date=evaluation_date)
+            reconciled = True
+    await db.flush()
+
+    effective = (
+        cve_severity_written
+        or (ticket is not None and severity_changed)
+        or products.changed > 0
+        or priority_changed
+    )
+    return CVSSChainResult(
+        mode=mode,
+        classification=(
+            CVSSChainClassification.CHANGED
+            if effective
+            else CVSSChainClassification.UNCHANGED
+        ),
+        severity_resolution=severity_resolution,
+        eligibility_resolution=eligibility_resolution,
+        propagation=propagation,
+        products=products,
+        severity_changed=severity_changed,
+        reconciled=reconciled,
+        evaluation_date=evaluation_date,
+    )
