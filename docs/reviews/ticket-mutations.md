@@ -131,7 +131,7 @@
 
 ### TKM-DES-07 — Race window between deactivate_user and concurrent ticket mutations (Medium)
 
-**Status**: RESOLVED — Auto-resolved: race window is a benign transient handled by design — reconcile_ticket_status includes Inactive Assignee Sanitization (ticket-mutations.md lines 173-197) that catches missed tickets on next mutation; periodic reconciliation task added to open-points as additional defense-in-depth (2026-05-25)
+**Status**: RESOLVED — Auto-resolved: race window is a benign transient handled by design — reconcile_ticket_status includes Inactive Assignee Sanitization (ticket-mutations.md lines 173-197) that catches missed tickets on next mutation (2026-05-25)
 
 ### TKM-DES-08 — Redundant gate evaluation for inactive assignees (Low)
 

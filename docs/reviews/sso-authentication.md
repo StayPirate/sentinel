@@ -84,7 +84,7 @@ _No findings. The spec is well-aligned with all referenced specifications (`auth
 
 ### SSO-SEC-02 — No rate limiting on SSO callback endpoint (Medium)
 
-**Status**: RESOLVED — Deferred to dedicated reverse proxy (see `docs/drafts/open-points.md`, section 2). Rate limiting is a cross-cutting infrastructure concern; recommended limits documented for future proxy configuration. No spec change. (2026-05-07)
+**Status**: RESOLVED — Deferred to dedicated reverse proxy (see issue #682). Rate limiting is a cross-cutting infrastructure concern; recommended limits documented for future proxy configuration. No spec change. (2026-05-07)
 
 ### SSO-SEC-03 — Frontend JWT storage mechanism unspecified (Medium)
 
