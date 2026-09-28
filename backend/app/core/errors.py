@@ -3,7 +3,8 @@
 See `docs/api-spec.md` (Response Format, Error Code Categories) for the
 authoritative error response contract this module implements: every
 error response body is `{"code": "...", "detail": "..."}` (plus an
-optional `errors` array for `VALIDATION_ERROR`). `ErrorCode` is the
+optional `errors` array for `VALIDATION_ERROR`, and the top-level
+`existing_ticket_id` of `TICKET_CVE_CONFLICT`). `ErrorCode` is the
 "Python enum in the backend (`app/core/errors.py`)" the spec refers to
 as the canonical registry of valid codes — new codes are added
 incrementally as the corresponding feature is implemented, not
@@ -20,7 +21,9 @@ produce each of those two responses.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from enum import StrEnum
+from typing import Final
 
 
 class ErrorCode(StrEnum):
@@ -52,7 +55,9 @@ class ErrorCode(StrEnum):
     TICKET_NOT_FOUND = "TICKET_NOT_FOUND"
     TICKET_NOT_MUTABLE = "TICKET_NOT_MUTABLE"
     TICKET_SEVERITY_DERIVED = "TICKET_SEVERITY_DERIVED"
+    TICKET_CVE_CONFLICT = "TICKET_CVE_CONFLICT"
     CVE_NOT_FOUND = "CVE_NOT_FOUND"
+    CVE_INVALID_FORMAT = "CVE_INVALID_FORMAT"
     CVSS_INVALID_VECTOR = "CVSS_INVALID_VECTOR"
     CVSS_ASSESSMENT_NOT_FOUND = "CVSS_ASSESSMENT_NOT_FOUND"
     DATE_RANGE_INVERTED = "DATE_RANGE_INVERTED"
@@ -66,6 +71,9 @@ class ErrorCode(StrEnum):
     CELERY_UNAVAILABLE = "CELERY_UNAVAILABLE"
 
 
+_RESERVED_BODY_FIELDS: Final = frozenset({"code", "detail", "errors"})
+
+
 class AppError(Exception):
     """Carries the standard `{"code": ..., "detail": ...}` error envelope.
 
@@ -76,6 +84,11 @@ class AppError(Exception):
     given, are attached to the response verbatim — used by
     `AUTH_ACCOUNT_LOCKED` to carry the `Retry-After` header (see
     `docs/features/identity/local-authentication.md`, Login Endpoint).
+    `extra`, when given, holds additional top-level body fields that an
+    owning error contract defines beside `code` and `detail` — only
+    `existing_ticket_id` of `TICKET_CVE_CONFLICT` (`docs/api-spec.md`,
+    Response Format). The envelope keys `code`, `detail`, and `errors`
+    cannot be overridden.
     """
 
     def __init__(
@@ -84,9 +97,13 @@ class AppError(Exception):
         code: ErrorCode,
         detail: str,
         headers: dict[str, str] | None = None,
+        extra: Mapping[str, str] | None = None,
     ) -> None:
+        if extra is not None and not _RESERVED_BODY_FIELDS.isdisjoint(extra):
+            raise ValueError("extra must not override the error envelope keys.")
         self.status_code = status_code
         self.code = code
         self.detail = detail
         self.headers = headers
+        self.extra: Mapping[str, str] = dict(extra) if extra is not None else {}
         super().__init__(detail)

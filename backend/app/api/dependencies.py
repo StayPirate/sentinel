@@ -114,6 +114,54 @@ def cve_not_found_error() -> AppError:
     )
 
 
+def insufficient_permission_error() -> AppError:
+    """Create the generic 403 for a missing capability.
+
+    See `docs/features/identity/rbac.md` (`require_capability()`
+    Dependency) and `docs/api-spec.md` (What belongs in an endpoint error
+    table > Conditional authorization): base and field-level capability
+    failures share this one response, which discloses neither the
+    required nor the missing capability.
+    """
+    return AppError(
+        status_code=status.HTTP_403_FORBIDDEN,
+        code=ErrorCode.AUTH_INSUFFICIENT_PERMISSION,
+        detail="Insufficient permissions",
+    )
+
+
+def cve_invalid_format_error() -> AppError:
+    """Create the 422 for a malformed CVE-ID in a request body.
+
+    See `docs/features/tickets/cve-service.md` (Caller Validation
+    Responsibility): request-body CVE-IDs are pre-validated with
+    `core.identifiers.is_valid_cve_id()`, and the service backstop
+    `CVEIdFormatError` maps to this same response.
+    """
+    return AppError(
+        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+        code=ErrorCode.CVE_INVALID_FORMAT,
+        detail="CVE identifier format is invalid.",
+    )
+
+
+def ticket_cve_conflict_error(existing_ticket_id: str) -> AppError:
+    """Create the 409 for a CVE already associated with another Ticket.
+
+    See `docs/features/tickets/tickets.md` (CVE Resolution Behavior;
+    Identifier Disclosure Boundary) and `docs/api-spec.md` (Response
+    Format): the body carries the conflicting Ticket's `SNTL-{n}` as the
+    top-level `existing_ticket_id`, even for an inaccessible Ticket, and
+    nothing else about it.
+    """
+    return AppError(
+        status_code=status.HTTP_409_CONFLICT,
+        code=ErrorCode.TICKET_CVE_CONFLICT,
+        detail="CVE is already associated with another Ticket.",
+        extra={"existing_ticket_id": existing_ticket_id},
+    )
+
+
 def ticket_not_mutable_error() -> AppError:
     """Create the 409 for a mutation rejected by the manual-zone guard.
 
@@ -564,11 +612,7 @@ def require_capability(
         principal: CurrentUser, roles: CallerRoles
     ) -> AuthenticatedPrincipal:
         if capability not in get_capabilities(roles):
-            raise AppError(
-                status_code=status.HTTP_403_FORBIDDEN,
-                code=ErrorCode.AUTH_INSUFFICIENT_PERMISSION,
-                detail="Insufficient permissions",
-            )
+            raise insufficient_permission_error()
         return principal
 
     return _dependency

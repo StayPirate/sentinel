@@ -1694,7 +1694,9 @@ class TestDetailReadRaces:
 
 @pytest.mark.unit
 class TestTicketServiceQueryBoundary:
-    def test_query_operations_are_the_only_coroutines(self) -> None:
+    def test_coroutines_are_the_query_and_implemented_lifecycle_operations(
+        self,
+    ) -> None:
         coroutines = {
             name
             for name, member in inspect.getmembers(ticket_service, inspect.isfunction)
@@ -1707,6 +1709,7 @@ class TestTicketServiceQueryBoundary:
             "list_tickets",
             "get_ticket_detail",
             "assemble_ticket_detail",
+            "create_ticket",
         }
 
     def test_projection_exposes_no_internal_ticket_uuid(self) -> None:
