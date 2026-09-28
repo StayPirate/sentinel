@@ -18,7 +18,10 @@ Implements, from `docs/features/tickets/ticket-mutations.md`:
   association and default-version modes, with the shared immediate
   Product propagation helper (the narrow atomic-CVSS-chain exception that
   updates system-managed Product eligibility inline through the
-  package-model-owned pure evaluator).
+  package-model-owned pure evaluator);
+- `upsert_cvss_assessment()` — the manual SUSE assessment create/update
+  with its atomic CVSS chain (CVSS Mutation Authority and Result, CVSS
+  Status Matrix, `upsert_cvss_assessment()`).
 
 The gates are exactly those of `docs/features/tickets/tickets.md` (Gate:
 Analysis → Analyzed, Gate: Analyzed → Resolved) over the canonical
@@ -35,16 +38,19 @@ Authorization: the module performs no capability check. API callers apply
 `require_capability()` first; consumer operations revalidate Ticket
 accessibility from locked-current roots before calling these primitives.
 
-Dependency direction: this module never imports `package_service` or
-`ticket_service` (ticket-mutations.md, Relationship with other modules);
-both of them import these primitives. It re-exports the leaf
-`ticket_mutations_errors` hierarchy.
+Dependency direction: this module never imports `package_service`,
+`ticket_service`, or `cve_service` (ticket-mutations.md, Relationship with
+other modules; cve-service.md, Relationship with other modules); they
+import these primitives. The CVSS mutations therefore perform their own
+authoritative locked-current CVE accessibility check. It re-exports the
+leaf `ticket_mutations_errors` hierarchy.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
+from decimal import Decimal
 from enum import Enum, StrEnum
 from typing import Final, Literal
 from uuid import UUID
@@ -65,6 +71,7 @@ from app.core.enums import (
     TicketStatus,
 )
 from app.core.exceptions import (
+    CVENotFoundError,
     SeverityDerivedError,
     TicketNotFoundError,
     TicketNotMutableError,
@@ -87,8 +94,10 @@ from app.services.cvss import (
     SUSE_PROVIDER_NAME,
     EligibilityResolution,
     SeverityResolution,
+    is_reserved_provider_name,
     resolve_eligibility_score,
     resolve_severity_score,
+    validate_cvss_vector,
 )
 from app.services.package_actionability import (
     product_actionable_expression,
@@ -109,9 +118,12 @@ from app.services.ticket_visibility import TicketCaller, ticket_visibility_condi
 __all__ = [
     "INACTIVE_ASSIGNEE_REASON",
     "VA_ROLE_REMOVED_REASON",
+    "CVSSAssessmentAction",
+    "CVSSAssessmentMutationResult",
     "CVSSChainClassification",
     "CVSSChainMode",
     "CVSSChainResult",
+    "CVSSMutationCaller",
     "CVSSPropagation",
     "InvalidCVSSVectorError",
     "ProductPropagationSummary",
@@ -124,6 +136,7 @@ __all__ = [
     "refresh_priority_auto",
     "set_severity_manual",
     "stabilize_acting_user",
+    "upsert_cvss_assessment",
 ]
 
 logger = structlog.get_logger(__name__)
@@ -1202,6 +1215,351 @@ async def recalculate_cvss_chain(
         propagation=propagation,
         products=products,
         severity_changed=severity_changed,
+        reconciled=reconciled,
+        evaluation_date=evaluation_date,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Manual SUSE CVSS assessment (ticket-mutations.md, CVSS Mutation Authority
+# and Result; CVSS Status Matrix; `upsert_cvss_assessment()`)
+# ---------------------------------------------------------------------------
+
+
+class CVSSMutationCaller(StrEnum):
+    """Caller authority of a single-assessment CVSS mutation.
+
+    Service-internal; neither persisted nor serialized. `MANUAL_SUSE` is
+    the only category: an authorized consumer operation on the internal
+    SUSE assessment. Trusted external ingestion uses its own system-only
+    batch boundary; authority is never inferred from the acting user.
+    """
+
+    MANUAL_SUSE = "manual_suse"
+
+
+class CVSSAssessmentAction(StrEnum):
+    """Serialized action of a CVSS assessment mutation, classified after
+    the roots are locked (service-internal)."""
+
+    CREATED = "created"
+    UPDATED = "updated"
+    UNCHANGED = "unchanged"
+
+
+@dataclass(frozen=True, slots=True)
+class CVSSAssessmentMutationResult:
+    """Transaction-local result of a manual SUSE assessment mutation.
+
+    Valid inside the caller-owned transaction only; it is not evidence of
+    durability until that transaction commits. `assessment` is the
+    locked-current persisted assessment with its server timestamps
+    loaded. `severity_resolution` is `None` only for an empty set (never
+    after a create or update). `severity_changed` compares the old and new
+    unified `CVE.severity`. `products` holds the counts of an applied
+    immediate propagation (all zero otherwise); `assigned` and
+    `reconciled` summarize the Ticket-scoped chain.
+    """
+
+    assessment: CVECVSSAssessment
+    action: CVSSAssessmentAction
+    severity_resolution: SeverityResolution | None
+    severity_changed: bool
+    eligibility_resolution: EligibilityResolution
+    propagation: CVSSPropagation
+    products: ProductPropagationSummary
+    assigned: bool
+    reconciled: bool
+    evaluation_date: date
+
+
+def _canonical_assessment_value(
+    provider: str, version: str, vector: str, score: Decimal
+) -> str:
+    """The canonical `cvss_assessment_changed` old/new value
+    (ticket-audit-log.md, Event Type Contract)."""
+    return f"{provider} v{version} {vector} ({score:.1f})"
+
+
+async def _lock_accessible_cve_roots(
+    db: AsyncSession, cve_id: UUID, caller: TicketCaller
+) -> tuple[CVE, Ticket | None]:
+    """Lock the CVE then its associated Ticket and revalidate accessibility.
+
+    The CVE `FOR UPDATE` is taken first; the Ticket currently associated
+    with the locked CVE is then locked `FOR UPDATE`, so a concurrent
+    association composes in the global CVE then Ticket order. The
+    accessibility decision is a separate statement issued after both
+    locks are granted, so it observes the confidentiality, grants,
+    included-package maintainership, and association committed while this
+    transaction waited (`docs/api-spec.md`, Authorization Chain
+    Evaluation Order, flow 3). A ticketless CVE is accessible. A missing
+    CVE and an inaccessible associated Ticket both raise the one shared
+    `CVENotFoundError`, never a Ticket error.
+    """
+    cve = (
+        await db.execute(
+            select(CVE)
+            .where(CVE.id == cve_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+    if cve is None:
+        raise CVENotFoundError()
+    ticket = (
+        await db.execute(
+            select(Ticket)
+            .where(Ticket.cve_id == cve.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+    if ticket is not None:
+        accessible = (
+            await db.execute(
+                select(ticket_visibility_condition(caller))
+                .select_from(Ticket)
+                .where(Ticket.id == ticket.id)
+            )
+        ).scalar_one()
+        if not accessible:
+            raise CVENotFoundError()
+    return cve, ticket
+
+
+def _has_suse_assessment(assessments: list[CVECVSSAssessment]) -> bool:
+    """Whether a canonical `SUSE` assessment exists in an accepted version
+    (the CVSS Workflow Gate input)."""
+    return any(
+        a.provider_name == SUSE_PROVIDER_NAME
+        and a.cvss_version in _ACCEPTED_CVSS_VERSIONS
+        for a in assessments
+    )
+
+
+async def upsert_cvss_assessment(
+    db: AsyncSession,
+    *,
+    cve_id: UUID,
+    provider: str,
+    vector_string: str,
+    caller: CVSSMutationCaller,
+    acting_user_id: UUID,
+    ticket_caller: TicketCaller,
+    default_cvss_version: str | None = None,
+    evaluation_date: date | None = None,
+) -> CVSSAssessmentMutationResult:
+    """Create or update the manual SUSE assessment of a CVE.
+
+    Category A consumer mutation (ticket-mutations.md,
+    `upsert_cvss_assessment()`, CVSS Mutation Authority and Result, CVSS
+    Status Matrix; cvss-scoring.md, Assessment Persistence and Ticket
+    Status, Serialization and Concurrent Outcomes).
+
+    Q1: `cve_id` is the internal CVE UUID (the API resolves the public
+    CVE-ID first). `provider` must be the reserved SUSE provider in any
+    case or outer-whitespace variant; it is stored as `SUSE`.
+    `vector_string` is the received vector. `caller` must be
+    `MANUAL_SUSE`. `acting_user_id` is the authenticated acting user;
+    `ticket_caller` is the request-resolved caller information whose
+    `user_id` must equal `acting_user_id`. `default_cvss_version`, when
+    given, is used for both resolutions instead of the setting.
+    `evaluation_date` is the workflow's one UTC date; captured once at
+    entry when omitted.
+
+    Q2: the caller has verified `manage_cvss` and owns the transaction.
+    Locks, in order: the acting User `FOR SHARE`
+    (`stabilize_acting_user()`), the CVE `FOR UPDATE`, then the Ticket
+    associated with the locked CVE `FOR UPDATE`.
+
+    Q3: (1) validates authority and parses the vector from input only.
+    (2) Locks the roots and (3) revalidates CVE accessibility from the
+    locked-current Ticket before any other read. (4) Rejects an `Ignored`
+    or `Duplicated` Ticket. (5) Reads `default_cvss_version` once unless
+    supplied. (6) Loads the assessments under the CVE lock and classifies
+    `created`, `updated`, or `unchanged` by comparing canonical vectors.
+    `unchanged` returns the current resolutions with no write, assignment,
+    event, propagation, priority refresh, or reconciliation. (7) An
+    effective mutation persists the vector-derived unit and the
+    re-resolved `CVE.severity` (assigned even when equal). (8) With a
+    Ticket: `auto_assign_actor()` with the stabilized User; the
+    acting-user `cvss_assessment_changed`; a system `severity_changed`
+    when the unified severity changed; immediate automatic Product
+    propagation (`reason = cvss`); `refresh_priority_auto()`; and exactly
+    one `reconcile_ticket_status()` with the one `evaluation_date` when
+    the Ticket is now in the gate zone and the severity, a Product value,
+    or canonical-SUSE presence changed, or the assignment moved `New`
+    into `Analysis`. A ticketless CVE maintains CVE-owned state only.
+    (9) Flushes and loads the assessment's server timestamps. Never
+    commits, publishes, or performs network, Redis, or Celery I/O.
+
+    Q4: returns `CVSSAssessmentMutationResult`. Propagation is
+    `not_applicable` for a ticketless CVE, `immediate` for an effective
+    mutation with a Ticket, and `none` for `unchanged`.
+
+    Q5: a repeated call with an equivalent vector is `unchanged`.
+
+    Q6: raises `ValueError` before any database operation for a
+    non-`MANUAL_SUSE` caller, a missing actor, a non-reserved provider,
+    or a `ticket_caller` that does not identify `acting_user_id`;
+    `InvalidCVSSVectorError` before any database operation for a vector
+    violating the accepted Base-vector contract; `CVENotFoundError` for a
+    missing or inaccessible CVE, before any other decision;
+    `TicketNotMutableError` for an `Ignored` or `Duplicated` Ticket.
+    `RequiredSystemSettingMissingError`, `UserNotFoundError` (an
+    invariant violation for an authenticated caller), and audit,
+    database, eligibility, flush, and reconciliation exceptions propagate
+    and roll back the caller's complete transaction.
+    """
+    if caller is not CVSSMutationCaller.MANUAL_SUSE:
+        raise ValueError("upsert_cvss_assessment() requires MANUAL_SUSE authority.")
+    if acting_user_id is None:
+        raise ValueError("MANUAL_SUSE authority requires an acting user.")
+    if not is_reserved_provider_name(provider):
+        raise ValueError("MANUAL_SUSE authority may only mutate the SUSE provider.")
+    if ticket_caller.user_id != acting_user_id:
+        raise ValueError("ticket_caller must identify the acting user.")
+    parsed = validate_cvss_vector(vector_string)
+    if evaluation_date is None:
+        evaluation_date = _utc_now().date()
+
+    acting_user = await stabilize_acting_user(db, acting_user_id)
+    cve, ticket = await _lock_accessible_cve_roots(db, cve_id, ticket_caller)
+    if ticket is not None:
+        ensure_ticket_operable(ticket)
+    if default_cvss_version is None:
+        default_cvss_version = await settings_service.get_default_cvss_version(db)
+    assessments = list(
+        (
+            await db.execute(
+                select(CVECVSSAssessment)
+                .where(CVECVSSAssessment.cve_id == cve.id)
+                .execution_options(populate_existing=True)
+            )
+        ).scalars()
+    )
+    version = parsed.version.value
+    existing = next(
+        (
+            a
+            for a in assessments
+            if a.provider_name == SUSE_PROVIDER_NAME and a.cvss_version == version
+        ),
+        None,
+    )
+
+    if existing is not None and existing.vector_string == parsed.canonical_vector:
+        return CVSSAssessmentMutationResult(
+            assessment=existing,
+            action=CVSSAssessmentAction.UNCHANGED,
+            severity_resolution=resolve_severity_score(
+                assessments, default_cvss_version
+            ),
+            severity_changed=False,
+            eligibility_resolution=resolve_eligibility_score(
+                assessments, default_cvss_version
+            ),
+            propagation=CVSSPropagation.NONE,
+            products=ProductPropagationSummary(),
+            assigned=False,
+            reconciled=False,
+            evaluation_date=evaluation_date,
+        )
+
+    suse_present_before = _has_suse_assessment(assessments)
+    if existing is None:
+        action = CVSSAssessmentAction.CREATED
+        old_value: str | None = None
+        assessment = CVECVSSAssessment(
+            cve_id=cve.id,
+            provider_name=SUSE_PROVIDER_NAME,
+            cvss_version=version,
+            score=parsed.score,
+            severity=parsed.severity.value,
+            vector_string=parsed.canonical_vector,
+        )
+        db.add(assessment)
+        assessments.append(assessment)
+    else:
+        action = CVSSAssessmentAction.UPDATED
+        old_value = _canonical_assessment_value(
+            existing.provider_name,
+            existing.cvss_version,
+            existing.vector_string,
+            existing.score,
+        )
+        assessment = existing
+        assessment.score = parsed.score
+        assessment.severity = parsed.severity.value
+        assessment.vector_string = parsed.canonical_vector
+    new_value = _canonical_assessment_value(
+        SUSE_PROVIDER_NAME, version, parsed.canonical_vector, parsed.score
+    )
+
+    severity_resolution = resolve_severity_score(assessments, default_cvss_version)
+    eligibility_resolution = resolve_eligibility_score(
+        assessments, default_cvss_version
+    )
+    new_severity = (
+        severity_resolution.label.value if severity_resolution is not None else None
+    )
+    old_severity = cve.severity
+    severity_changed = old_severity != new_severity
+    cve.severity = new_severity
+    await db.flush()
+
+    assigned = False
+    reconciled = False
+    products = ProductPropagationSummary()
+    propagation = CVSSPropagation.NOT_APPLICABLE
+    if ticket is not None:
+        propagation = CVSSPropagation.IMMEDIATE
+        was_new = ticket.status == TicketStatus.NEW
+        assigned = await auto_assign_actor(ticket, acting_user, db)
+        promoted = was_new and ticket.status == TicketStatus.ANALYSIS
+        await TicketAuditLog.log_event(
+            db,
+            ticket_id=ticket.id,
+            event_type=TicketAuditEventType.CVSS_ASSESSMENT_CHANGED,
+            user_id=acting_user.id,
+            old_value=old_value,
+            new_value=new_value,
+        )
+        if severity_changed:
+            await TicketAuditLog.log_event(
+                db,
+                ticket_id=ticket.id,
+                event_type=TicketAuditEventType.SEVERITY_CHANGED,
+                user_id=None,
+                old_value=old_severity,
+                new_value=new_severity,
+            )
+        products = await _propagate_automatic_product_eligibility(
+            db,
+            ticket=ticket,
+            eligibility=eligibility_resolution,
+            evaluation_date=evaluation_date,
+        )
+        await refresh_priority_auto(db, ticket=ticket)
+        gate_input_changed = (
+            severity_changed or products.changed > 0 or not suse_present_before
+        )
+        if ticket.status in _GATE_ZONE and (gate_input_changed or promoted):
+            await reconcile_ticket_status(ticket, db, evaluation_date=evaluation_date)
+            reconciled = True
+    await db.flush()
+    await db.refresh(assessment, ["created_at", "updated_at"])
+
+    return CVSSAssessmentMutationResult(
+        assessment=assessment,
+        action=action,
+        severity_resolution=severity_resolution,
+        severity_changed=severity_changed,
+        eligibility_resolution=eligibility_resolution,
+        propagation=propagation,
+        products=products,
+        assigned=assigned,
         reconciled=reconciled,
         evaluation_date=evaluation_date,
     )

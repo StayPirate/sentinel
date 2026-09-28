@@ -27,12 +27,13 @@ from app.config import settings
 from app.core.credentials import API_KEY_PREFIX, extract_credential
 from app.core.enums import Capability, CredentialKind, Role
 from app.core.errors import AppError, ErrorCode
-from app.core.exceptions import TicketNotFoundError
+from app.core.exceptions import CVENotFoundError, TicketNotFoundError
 from app.core.jwt import InvalidTokenError, decode_and_validate, refresh_token
 from app.core.permissions import get_capabilities, get_effective_scope
 from app.database import DatabaseSession, async_session_factory
 from app.models.user import User
-from app.services import api_key_service, ticket_service, user_service
+from app.services import api_key_service, cve_service, ticket_service, user_service
+from app.services.cve_service import ResolvedCVE
 from app.services.session_service import is_session_active
 from app.services.ticket_service import ResolvedTicket
 from app.services.ticket_visibility import ANONYMOUS_CALLER, TicketCaller
@@ -110,6 +111,20 @@ def cve_not_found_error() -> AppError:
         status_code=status.HTTP_404_NOT_FOUND,
         code=ErrorCode.CVE_NOT_FOUND,
         detail="CVE not found.",
+    )
+
+
+def ticket_not_mutable_error() -> AppError:
+    """Create the 409 for a mutation rejected by the manual-zone guard.
+
+    See `docs/api-spec.md` (Manual-Zone Mutability Guard, CVE
+    Accessibility Check): Ticket-path and CVE-path mutations that catch
+    the shared `TicketNotMutableError` raise this one identical response.
+    """
+    return AppError(
+        status_code=status.HTTP_409_CONFLICT,
+        code=ErrorCode.TICKET_NOT_MUTABLE,
+        detail="Ticket is not mutable.",
     )
 
 
@@ -686,3 +701,24 @@ async def require_accessible_ticket(
         return await ticket_service.resolve_ticket_locator(db, ticket_id, caller)
     except TicketNotFoundError:
         raise ticket_not_found_error() from None
+
+
+async def require_accessible_cve(
+    cve_id: CVEIdPath,
+    db: DatabaseSession,
+    caller: AuthenticatedTicketCaller,
+) -> ResolvedCVE:
+    """The `require_accessible_cve` boundary role for authenticated CVE paths.
+
+    See `docs/api-spec.md` (CVE Accessibility Check, CVE Identifier
+    Resolution): delegates CVE-ID parsing, resolution, and the
+    accessibility projection to `cve_service.resolve_cve_locator()` and
+    maps its `CVENotFoundError` to the one identical `404 CVE_NOT_FOUND`.
+    It performs no ORM query itself. The result is a preliminary decision
+    only: the locked mutation that follows re-evaluates accessibility
+    from its locked-current roots and never relies on this result.
+    """
+    try:
+        return await cve_service.resolve_cve_locator(db, cve_id, caller)
+    except CVENotFoundError:
+        raise cve_not_found_error() from None

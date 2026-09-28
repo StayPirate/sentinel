@@ -58,7 +58,10 @@ from app.models.user import User
 from app.services.cve_service import (
     CVECVSSAssessments,
     CVSSAssessmentIntegrityError,
+    ResolvedCVE,
     get_cvss_assessments,
+    project_cvss_assessment,
+    resolve_cve_locator,
 )
 from app.services.cvss import (
     EligibilityResolution,
@@ -1439,3 +1442,160 @@ class TestChangeAfterFirstStatement:
             score=Decimal("9.3"), source=EligibilitySource.SUSE
         )
         _assert_self_consistent(after)
+
+
+# ---------------------------------------------------------------------------
+# Preliminary CVE locator of the mutation paths (`resolve_cve_locator()`)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+class TestResolveCVELocator:
+    """The thin `require_accessible_cve` boundary role (api-spec.md, CVE
+    Accessibility Check; CVE Identifier Resolution): the same malformed,
+    missing, and inaccessible outcomes as the read, in one read-only
+    statement."""
+
+    @pytest.mark.parametrize("cve_id", MALFORMED_CVE_IDS)
+    async def test_malformed_identifier_raises_without_any_statement(
+        self, db_session: AsyncSession, cve_factory: Factory, cve_id: str
+    ) -> None:
+        await cve_factory(cve_id="CVE-2099-0001")
+
+        with (
+            _StatementRecorder(db_session) as recorder,
+            pytest.raises(CVENotFoundError),
+        ):
+            await resolve_cve_locator(db_session, cve_id, ALL_SCOPE)
+
+        assert recorder.statements == []
+
+    async def test_internal_uuid_is_never_accepted(
+        self, db_session: AsyncSession, cve_factory: Factory
+    ) -> None:
+        cve: CVE = await cve_factory()
+
+        with pytest.raises(CVENotFoundError):
+            await resolve_cve_locator(db_session, str(cve.id), ALL_SCOPE)
+
+    async def test_well_formed_missing_identifier_is_not_found(
+        self, db_session: AsyncSession
+    ) -> None:
+        with pytest.raises(CVENotFoundError):
+            await resolve_cve_locator(db_session, "CVE-2099-99999", ALL_SCOPE)
+
+    async def test_ticketless_cve_resolves_in_one_read_only_statement(
+        self, db_session: AsyncSession, cve_factory: Factory, user_factory: Factory
+    ) -> None:
+        cve: CVE = await cve_factory()
+        user: User = await user_factory()
+
+        with _StatementRecorder(db_session) as recorder:
+            resolved = await resolve_cve_locator(
+                db_session, cve.cve_id, _restricted(user)
+            )
+
+        assert resolved == ResolvedCVE(id=cve.id, cve_id=cve.cve_id)
+        assert len(recorder.statements) == 1
+        statement = recorder.statements[0]
+        assert statement.lstrip().upper().startswith("SELECT")
+        assert "FOR UPDATE" not in statement
+        assert "FOR SHARE" not in statement
+
+    async def test_confidential_associated_cve_follows_the_canonical_predicate(
+        self,
+        db_session: AsyncSession,
+        cve_factory: Factory,
+        ticket_factory: Factory,
+        user_factory: Factory,
+        ticket_access_grant_factory: Factory,
+        ticket_package_factory: Factory,
+        ticket_package_maintainer_factory: Factory,
+    ) -> None:
+        hidden: CVE = await cve_factory()
+        granted: CVE = await cve_factory()
+        maintained: CVE = await cve_factory()
+        excluded: CVE = await cve_factory()
+        user: User = await user_factory()
+        await ticket_factory(cve_id=hidden.id, is_confidential=True)
+        granted_ticket = await ticket_factory(cve_id=granted.id, is_confidential=True)
+        await ticket_access_grant_factory(ticket_id=granted_ticket.id, user_id=user.id)
+        maintained_ticket = await ticket_factory(
+            cve_id=maintained.id, is_confidential=True
+        )
+        package = await ticket_package_factory(ticket_id=maintained_ticket.id)
+        await ticket_package_maintainer_factory(
+            ticket_package_id=package.id, user_id=user.id
+        )
+        excluded_ticket = await ticket_factory(cve_id=excluded.id, is_confidential=True)
+        excluded_package = await ticket_package_factory(
+            ticket_id=excluded_ticket.id, deleted_at=CREATED_AT
+        )
+        await ticket_package_maintainer_factory(
+            ticket_package_id=excluded_package.id, user_id=user.id
+        )
+        caller = _restricted(user)
+
+        for cve in (granted, maintained):
+            resolved = await resolve_cve_locator(db_session, cve.cve_id, caller)
+            assert resolved.id == cve.id
+        for cve in (hidden, excluded):
+            with pytest.raises(CVENotFoundError) as denied:
+                await resolve_cve_locator(db_session, cve.cve_id, caller)
+            with pytest.raises(CVENotFoundError) as missing:
+                await resolve_cve_locator(db_session, "CVE-2099-99999", caller)
+            assert str(denied.value) == str(missing.value)
+        for cve in (hidden, excluded):
+            resolved = await resolve_cve_locator(db_session, cve.cve_id, ALL_SCOPE)
+            assert resolved.id == cve.id
+
+
+# ---------------------------------------------------------------------------
+# Shared item projection of a mutation result (`project_cvss_assessment()`)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+@pytest.mark.usefixtures("default_setting")
+class TestProjectCVSSAssessment:
+    async def test_projects_the_same_item_as_the_read(
+        self,
+        db_session: AsyncSession,
+        cve_factory: Factory,
+        cve_cvss_assessment_factory: Factory,
+    ) -> None:
+        cve: CVE = await cve_factory()
+        assessment = await cve_cvss_assessment_factory(
+            cve_id=cve.id,
+            provider_name=SUSE,
+            created_at=CREATED_AT,
+            updated_at=UPDATED_AT,
+            **_unit(V40),
+        )
+
+        with _StatementRecorder(db_session) as recorder:
+            projection = project_cvss_assessment(cve.cve_id, assessment)
+
+        assert recorder.statements == []
+        (read,) = (await _read(db_session, cve)).assessments
+        assert projection == read
+
+    async def test_inconsistent_instance_is_logged_and_raised(
+        self,
+        db_session: AsyncSession,
+        cve_factory: Factory,
+        cve_cvss_assessment_factory: Factory,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        cve: CVE = await cve_factory()
+        corrupt = await cve_cvss_assessment_factory(
+            cve_id=cve.id, provider_name=SUSE, **{**_unit(V31), "score": Decimal("9.7")}
+        )
+
+        with caplog.at_level("ERROR"), pytest.raises(CVSSAssessmentIntegrityError):
+            project_cvss_assessment(cve.cve_id, corrupt)
+
+        events = _integrity_events(caplog)
+        assert [(e["assessment_id"], e["fields"]) for e in events] == [
+            (str(corrupt.id), ["score"])
+        ]

@@ -1,9 +1,10 @@
-"""Unit tests for the CVSS response schemas (`backend/app/schemas/cvss.py`).
+"""Unit tests for the CVSS request and response schemas
+(`backend/app/schemas/cvss.py`).
 
 See docs/features/tickets/cvss-scoring.md (API Endpoints > Shared
-Assessment Item and Get CVSS Assessments for a CVE; Accepted Base
-Vectors > per-version Base metrics and API wire values) for the
-authoritative contract under test.
+Assessment Item, Get CVSS Assessments for a CVE, and Set or Update SUSE
+CVSS Assessment; Input Rules; Accepted Base Vectors > per-version Base
+metrics and API wire values) for the authoritative contract under test.
 """
 
 from __future__ import annotations
@@ -28,8 +29,10 @@ from app.schemas.cvss import (
     CVSS31Assessment,
     CVSS40Assessment,
     CVSSAssessmentItem,
+    CVSSAssessmentResponse,
     CVSSVersionValue,
     DefaultCVSSVersionValue,
+    SUSECVSSAssessmentRequest,
 )
 
 ITEM: TypeAdapter[CVSSAssessmentItem] = TypeAdapter(CVSSAssessmentItem)
@@ -317,3 +320,57 @@ class TestComposite:
             CVECVSSAssessments.model_validate(
                 _composite(eligibility={"score": 10.0, "source": source})
             )
+
+
+@pytest.mark.unit
+class TestSUSEAssessmentRequest:
+    """Pydantic owns only the transport shape; the received-length limit is
+    checked before any trimming (cvss-scoring.md, Input Rules rule 1)."""
+
+    def test_exactly_200_received_characters_are_accepted_untrimmed(self) -> None:
+        value = " " * 10 + "x" * 180 + " " * 10
+
+        request = SUSECVSSAssessmentRequest.model_validate({"vector_string": value})
+
+        assert request.vector_string == value
+        assert len(request.vector_string) == 200
+
+    def test_201_received_characters_are_rejected_even_if_trimming_would_fit(
+        self,
+    ) -> None:
+        value = " " + "x" * 199 + " "
+
+        with pytest.raises(ValidationError) as caught:
+            SUSECVSSAssessmentRequest.model_validate({"vector_string": value})
+
+        assert [e["type"] for e in caught.value.errors()] == ["string_too_long"]
+
+    @pytest.mark.parametrize(
+        ("body", "error_type"),
+        [
+            pytest.param({}, "missing", id="missing"),
+            pytest.param({"vector_string": None}, "string_type", id="null"),
+            pytest.param({"vector_string": 3.1}, "string_type", id="number"),
+            pytest.param({"vector_string": ["x"]}, "string_type", id="list"),
+        ],
+    )
+    def test_non_string_or_missing_value_is_rejected(
+        self, body: dict[str, Any], error_type: str
+    ) -> None:
+        with pytest.raises(ValidationError) as caught:
+            SUSECVSSAssessmentRequest.model_validate(body)
+
+        assert [e["type"] for e in caught.value.errors()] == [error_type]
+
+    def test_domain_rules_are_left_to_the_parser(self) -> None:
+        for value in ("", "   ", "cvss:3.1/AV:N", "CVSS:3.1/AV:N /AC:L"):
+            request = SUSECVSSAssessmentRequest.model_validate({"vector_string": value})
+            assert request.vector_string == value
+
+    def test_response_envelope_wraps_the_shared_item(self) -> None:
+        schema = CVSSAssessmentResponse.model_json_schema()
+
+        assert list(schema["properties"]) == ["data"]
+        assert schema["required"] == ["data"]
+        item = schema["$defs"][schema["properties"]["data"]["$ref"].rsplit("/", 1)[1]]
+        assert item["discriminator"]["propertyName"] == "cvss_version"

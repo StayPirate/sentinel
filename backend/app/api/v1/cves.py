@@ -1,15 +1,17 @@
 """CVE endpoints.
 
 See `docs/features/tickets/cvss-scoring.md` (Get CVSS Assessments for a
-CVE, Shared Assessment Item) for the authoritative endpoint contract, and
-`docs/api-spec.md` (CVE Identifier Resolution, CVE Accessibility Check)
+CVE, Set or Update SUSE CVSS Assessment, Shared Assessment Item) for the
+authoritative endpoint contracts, and `docs/api-spec.md` (CVE Identifier
+Resolution, CVE Accessibility Check, Authorization Chain Evaluation Order)
 for the shared `{cve_id}` path behavior.
 
 Handlers stay thin: they supply the request-resolved caller information to
-`cve_service`, map `CVENotFoundError` to the one identical
-`404 CVE_NOT_FOUND`, and serialize the semantic projection. The service
-owns CVE-ID resolution and the accessibility-constrained selection; no
-business logic or database query lives here.
+`cve_service` or `ticket_mutations`, map service exceptions to their HTTP
+responses (`CVENotFoundError` to the one identical `404 CVE_NOT_FOUND`),
+and serialize the semantic projection. The services own CVE-ID
+resolution, the accessibility-constrained selection, and the locked
+mutation; no business logic or database query lives here.
 
 `serialize_cvss_assessment()` is the one shared assessment-item
 serializer, so every endpoint that returns an assessment item serializes
@@ -19,21 +21,41 @@ the same schema.
 from __future__ import annotations
 
 from dataclasses import fields
+from typing import Annotated
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends, Response, status
 from pydantic import TypeAdapter
 
-from app.api.dependencies import CVEIdPath, OptionalTicketCaller, cve_not_found_error
-from app.core.exceptions import CVENotFoundError
+from app.api.dependencies import (
+    AuthenticatedPrincipal,
+    AuthenticatedTicketCaller,
+    CVEIdPath,
+    OptionalTicketCaller,
+    cve_not_found_error,
+    require_accessible_cve,
+    require_capability,
+    ticket_not_mutable_error,
+)
+from app.core.enums import Capability
+from app.core.errors import AppError, ErrorCode
+from app.core.exceptions import CVENotFoundError, TicketNotMutableError
 from app.database import DatabaseSession
 from app.schemas.cvss import (
     CVECVSSAssessments,
     CVECVSSAssessmentsResponse,
     CVSSAssessmentItem,
+    CVSSAssessmentResponse,
+    SUSECVSSAssessmentRequest,
 )
 from app.schemas.errors import ErrorResponse
-from app.services import cve_service
-from app.services.cve_service import CVSSAssessmentProjection
+from app.services import cve_service, ticket_mutations
+from app.services.cve_service import CVSSAssessmentProjection, ResolvedCVE
+from app.services.cvss import SUSE_PROVIDER_NAME
+from app.services.ticket_mutations import (
+    CVSSAssessmentAction,
+    CVSSMutationCaller,
+    InvalidCVSSVectorError,
+)
 
 router = APIRouter(prefix="/api/v1", tags=["CVEs"])
 
@@ -137,3 +159,93 @@ async def get_cve_cvss_assessments(
     except CVENotFoundError:
         raise cve_not_found_error() from None
     return CVECVSSAssessmentsResponse(data=serialize_cve_cvss_assessments(result))
+
+
+@router.post(
+    "/cves/{cve_id}/cvss/suse",
+    response_model=CVSSAssessmentResponse,
+    summary="Set or update the SUSE CVSS assessment",
+    description=(
+        "Creates or updates the internal SUSE assessment of one CVE for the "
+        "version derived from the submitted CVSS Base vector. Returns 201 "
+        "only when this request created the assessment, and 200 for an "
+        "update or an equivalent (unchanged) vector. The CVE severity is "
+        "re-resolved; for a CVE with a Ticket, an unassigned Ticket is "
+        "auto-assigned to an active vulnerability analyst, automatic Product "
+        "eligibility and priority are refreshed, and the Ticket status is "
+        "re-evaluated. Requires `manage_cvss`."
+    ),
+    responses={
+        201: {
+            "model": CVSSAssessmentResponse,
+            "description": "The SUSE assessment was created by this request.",
+        },
+        404: {
+            "model": ErrorResponse,
+            "description": (
+                "`CVE_NOT_FOUND`: CVE-ID is malformed, does not exist, or "
+                "identifies a CVE associated with a Ticket inaccessible to the "
+                "caller."
+            ),
+        },
+        409: {
+            "model": ErrorResponse,
+            "description": (
+                "`TICKET_NOT_MUTABLE`: the CVE's Ticket is Ignored or Duplicated."
+            ),
+        },
+        422: {
+            "model": ErrorResponse,
+            "description": (
+                "`CVSS_INVALID_VECTOR`: the string passes the schema checks but "
+                "violates the accepted Base-vector contract. `VALIDATION_ERROR`: "
+                "the body fails schema validation."
+            ),
+        },
+    },
+)
+async def upsert_suse_cvss_assessment(
+    body: SUSECVSSAssessmentRequest,
+    response: Response,
+    db: DatabaseSession,
+    principal: Annotated[
+        AuthenticatedPrincipal, Depends(require_capability(Capability.MANAGE_CVSS))
+    ],
+    caller: AuthenticatedTicketCaller,
+    cve: Annotated[ResolvedCVE, Depends(require_accessible_cve)],
+) -> CVSSAssessmentResponse:
+    """Set or Update SUSE CVSS Assessment — see
+    `docs/features/tickets/cvss-scoring.md`.
+
+    Authorization follows `docs/api-spec.md` (Authorization Chain
+    Evaluation Order, flow 3): authentication, then `manage_cvss` before
+    any CVE lookup, then the delegated preliminary CVE resolution. The
+    capability decision and the caller's scope share one role load per
+    request. `upsert_cvss_assessment()` revalidates CVE accessibility from
+    its locked-current roots; the HTTP status comes only from its
+    serialized action.
+    """
+    try:
+        result = await ticket_mutations.upsert_cvss_assessment(
+            db,
+            cve_id=cve.id,
+            provider=SUSE_PROVIDER_NAME,
+            vector_string=body.vector_string,
+            caller=CVSSMutationCaller.MANUAL_SUSE,
+            acting_user_id=principal.user.id,
+            ticket_caller=caller,
+        )
+    except CVENotFoundError:
+        raise cve_not_found_error() from None
+    except TicketNotMutableError:
+        raise ticket_not_mutable_error() from None
+    except InvalidCVSSVectorError:
+        raise AppError(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            code=ErrorCode.CVSS_INVALID_VECTOR,
+            detail="Invalid CVSS vector.",
+        ) from None
+    if result.action is CVSSAssessmentAction.CREATED:
+        response.status_code = status.HTTP_201_CREATED
+    projection = cve_service.project_cvss_assessment(cve.cve_id, result.assessment)
+    return CVSSAssessmentResponse(data=serialize_cvss_assessment(projection))

@@ -87,6 +87,11 @@ class TestErrorCode:
         Check) and docs/features/tickets/cve-service.md (Exceptions)."""
         assert ErrorCode.CVE_NOT_FOUND == "CVE_NOT_FOUND"
 
+    def test_cvss_invalid_vector_is_registered(self) -> None:
+        """See docs/api-spec.md (Error Code Categories) and
+        docs/features/tickets/cvss-scoring.md (Input Rules)."""
+        assert ErrorCode.CVSS_INVALID_VECTOR == "CVSS_INVALID_VECTOR"
+
     def test_date_range_inverted_is_registered(self) -> None:
         """See docs/api-spec.md (Date Range Interpretation, Inverted
         range validation)."""
