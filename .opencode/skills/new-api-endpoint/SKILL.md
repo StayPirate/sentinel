@@ -43,12 +43,12 @@ authoritative definitions.
    - Response schema
    - Error responses (endpoint-specific; global/scoped responses are
      derivable per `docs/api-spec.md`)
-3. If the endpoint is **not specified**, or its missing detail is a
-   specification gap → STOP. Complete the specification work first. Do not
-   proceed with implementation. A missing or inconsistent detail inside an
-   endpoint contract that already exists is a delegated refinement
-   (`AGENTS.md`, Delegated decisions): decide it, align the specification in
-   the same PR, and disclose it
+3. If the endpoint is **not specified** → STOP. Complete the specification
+   work first. Do not proceed with implementation. If it is
+   **underspecified**, classify each missing or inconsistent detail under
+   `AGENTS.md` (Delegated decisions): proceed only for a delegated
+   refinement, and STOP for anything else, including an undefined
+   authorization level.
 
 ### Step 2: Define the Pydantic schemas
 
