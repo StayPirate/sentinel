@@ -92,6 +92,13 @@ class TestErrorCode:
         docs/features/tickets/cvss-scoring.md (Input Rules)."""
         assert ErrorCode.CVSS_INVALID_VECTOR == "CVSS_INVALID_VECTOR"
 
+    def test_cvss_assessment_not_found_is_registered(self) -> None:
+        """See docs/api-spec.md (Error Code Categories),
+        docs/features/tickets/ticket-mutations.md (Service Exceptions),
+        and docs/features/tickets/cvss-scoring.md (Delete SUSE CVSS
+        Assessment)."""
+        assert ErrorCode.CVSS_ASSESSMENT_NOT_FOUND == "CVSS_ASSESSMENT_NOT_FOUND"
+
     def test_date_range_inverted_is_registered(self) -> None:
         """See docs/api-spec.md (Date Range Interpretation, Inverted
         range validation)."""

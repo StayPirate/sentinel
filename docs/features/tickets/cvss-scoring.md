@@ -652,6 +652,10 @@ DELETE /api/v1/cves/{cve_id}/cvss/suse/{cvss_version}
 
 `cvss_version` accepts exactly `2.0`, `3.0`, `3.1`, or `4.0`. An unrecognized
 value or absent canonical SUSE assessment returns the existing not-found error.
+The version check is input-only and precedes CVE-ID resolution: after
+authentication and capability, an unrecognized value returns `404
+CVSS_ASSESSMENT_NOT_FOUND` for every `{cve_id}` value, including a malformed,
+missing, or inaccessible one, without any CVE lookup or lock.
 An effective delete returns 204 No Content.
 
 | Status | Code | Condition |

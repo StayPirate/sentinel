@@ -1,4 +1,4 @@
-"""Shared helpers for the manual SUSE CVSS upsert tests.
+"""Shared helpers for the manual SUSE CVSS upsert and delete tests.
 
 Consumers:
 
@@ -6,7 +6,10 @@ Consumers:
   classification, authority, assignment, gate, propagation, audit,
   accessibility, lock order);
 - `tests/test_services/test_upsert_cvss_assessment_atomicity.py`
-  (rollback, evaluation date, independent-session races).
+  (rollback, evaluation date, independent-session races);
+- `tests/test_services/test_delete_cvss_assessment.py` and
+  `tests/test_services/test_delete_cvss_assessment_atomicity.py` (the
+  same concerns for `delete_cvss_assessment()`).
 
 The vectors and their canonical values, scores, and severities are
 transcribed from the CVSS specifications (cvss-scoring.md, Accepted Base
@@ -31,6 +34,7 @@ from app.models.user import User
 from app.services.ticket_mutations import (
     CVSSAssessmentMutationResult,
     CVSSMutationCaller,
+    delete_cvss_assessment,
     upsert_cvss_assessment,
 )
 from app.services.ticket_visibility import TicketCaller
@@ -121,6 +125,32 @@ async def upsert(
     )
 
 
+async def delete_assessment(
+    db: AsyncSession,
+    cve_id: uuid.UUID,
+    version: str,
+    actor: User,
+    *,
+    scope: Scope = Scope.ALL,
+    provider: str = "SUSE",
+    evaluation_date: date | None = EVAL,
+    **kwargs: Any,
+) -> CVSSAssessmentMutationResult:
+    """Call the delete service as the DELETE handler would, with the fixed
+    `EVAL`."""
+    return await delete_cvss_assessment(
+        db,
+        cve_id=cve_id,
+        provider=provider,
+        cvss_version=version,
+        caller=CVSSMutationCaller.MANUAL_SUSE,
+        acting_user_id=actor.id,
+        ticket_caller=TicketCaller.authenticated(actor.id, scope),
+        evaluation_date=evaluation_date,
+        **kwargs,
+    )
+
+
 def cvss_event(actor: User, old: Vector | None, new: Vector) -> EventRow:
     """The acting-user `cvss_assessment_changed` event."""
     return EventRow(
@@ -130,6 +160,14 @@ def cvss_event(actor: User, old: Vector | None, new: Vector) -> EventRow:
         new.audit_value,
         None,
         None,
+    )
+
+
+def cvss_delete_event(actor: User, old: Vector) -> EventRow:
+    """The acting-user `cvss_assessment_changed` event of a deletion
+    (`new_value` SQL `NULL`)."""
+    return EventRow(
+        "cvss_assessment_changed", actor.id, old.audit_value, None, None, None
     )
 
 
