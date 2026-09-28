@@ -672,7 +672,10 @@ Propagation dispositions describe the completed Ticket-scoped outcome:
 
 The disposition is part of every successful result and is actionable only for
 `created`, `updated`, or `deleted`. `unchanged` and `not_found` return the
-current resolution values with `propagation = none`.
+current resolution values with `propagation = none`. `recalculate_cvss_chain()`
+has no assessment action: its disposition is state-mapped as defined in its
+step 7, returns `none` only for `missing`, and is independent of its
+`changed`/`unchanged` classification.
 
 An authority rejection, manual-zone rejection, unchanged result, not-found
 result, waiting concurrent no-op, deferred Product outcome, or caller rollback
@@ -1182,7 +1185,9 @@ final event to its caller.
 
 **Idempotency**: safe to call multiple times. With unchanged assessments and
 default version, severity, Product values, and audit are no-ops and the same
-current result is returned.
+current result is returned. In association mode the handover is one-shot: the
+supplied `association_previous_severity` is the comparison input, so a repeated
+call is a no-op when that argument equals the current derived severity.
 
 ### Read-Only Impact Projection
 
