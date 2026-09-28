@@ -44,16 +44,13 @@ They are configured in `opencode.json`.
 - **Code** — implements features from specifications, writes tests, and
   maintains all executable artifacts. Must signal unresolved behavioral or
   contract gaps, while retaining freedom over compliant internal technical
-  choices. May delegate parts of an approved plan to built-in `general` tasks,
-  run sequentially, and verifies their diffs itself. Prompt:
+  choices. May delegate parts of an approved plan to built-in `general` tasks
+  that run sequentially, and verifies their diffs itself. Prompt:
   `.opencode/prompts/code.md`
 
 Plan and Code take the delegated decisions defined in `AGENTS.md` (Delegated
-decisions): issue-level choices and refinements of an existing specification
-contract are decided, recorded, and disclosed by the agent, and aligned
-specifications ship in the same PR under the combined-PR exception. New
-entities, state machines, security models, architectural boundaries, and
-external-contract semantics remain specification gaps that require the user.
+decisions): Plan presents them in its plan, while Code records them and ships
+any specification alignment in the same PR.
 
 ## Subagents
 

@@ -115,7 +115,8 @@ record it. Delegated decisions are not specification gaps. Delegation covers:
 
 - **issue-level choices** — interpretation of scope within the issue outcome,
   ordering, placement of complete functions, and internal mechanisms; record
-  them in a tracking-issue comment; and
+  them in a tracking-issue comment (a read-only planning session presents them
+  in its plan, and the implementing agent records them); and
 - **refinements of an existing specification contract** — resolving an
   ambiguity, inconsistency, or missing detail inside a contract that already
   exists; align the specification in the same PR under the combined-PR
