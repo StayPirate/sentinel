@@ -45,7 +45,7 @@ They are configured in `opencode.json`.
   maintains all executable artifacts. Must signal unresolved behavioral or
   contract gaps, while retaining freedom over compliant internal technical
   choices. May delegate parts of an approved plan to built-in `general` tasks
-  that run sequentially, and verifies their diffs itself. Prompt:
+  that run sequentially, and must verify their diffs itself. Prompt:
   `.opencode/prompts/code.md`
 
 Plan and Code take the delegated decisions defined in `AGENTS.md` (Delegated
