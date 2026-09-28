@@ -70,6 +70,18 @@ class TestErrorCode:
         Accessibility Check)."""
         assert ErrorCode.TICKET_NOT_FOUND == "TICKET_NOT_FOUND"
 
+    def test_ticket_not_mutable_is_registered(self) -> None:
+        """See docs/api-spec.md (Error Code Categories, Manual-Zone
+        Mutability Guard) and docs/features/tickets/ticket-mutations.md
+        (Service Exceptions)."""
+        assert ErrorCode.TICKET_NOT_MUTABLE == "TICKET_NOT_MUTABLE"
+
+    def test_ticket_severity_derived_is_registered(self) -> None:
+        """See docs/api-spec.md (Error Code Categories) and
+        docs/features/tickets/ticket-mutations.md (`set_severity_manual()`,
+        Service Exceptions)."""
+        assert ErrorCode.TICKET_SEVERITY_DERIVED == "TICKET_SEVERITY_DERIVED"
+
     def test_date_range_inverted_is_registered(self) -> None:
         """See docs/api-spec.md (Date Range Interpretation, Inverted
         range validation)."""

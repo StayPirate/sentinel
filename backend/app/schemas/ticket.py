@@ -1,7 +1,8 @@
-"""Response schemas for Tickets.
+"""Request and response schemas for Tickets.
 
 See `docs/features/tickets/tickets.md` (Response Schemas > TicketSummary
-and TicketDetail, Endpoint -> Schema Mapping, List Tickets) for the
+and TicketDetail, Endpoint -> Schema Mapping, List Tickets, Set Severity
+Manual) for the
 authoritative contract,
 `docs/features/tickets/ticket-priority.md` (API Surface) for the priority
 fields, and `docs/features/tickets/ticket-deadlines.md` (Actors and
@@ -218,3 +219,23 @@ class TicketDetailResponse(BaseModel):
     """Response body for `GET /api/v1/tickets/{ticket_id}`."""
 
     data: TicketDetail
+
+
+class TicketSeverityUpdateRequest(BaseModel):
+    """Request body of `PATCH /api/v1/tickets/{ticket_id}/severity`.
+
+    See `docs/features/tickets/tickets.md` (Set Severity Manual). The single
+    field is required and nullable (`docs/api-spec.md`, Partial Update
+    Semantics: single-field PATCH): a lowercase label sets the manual
+    severity, while JSON `null` clears it. An omitted field or any other
+    value fails with the global `422 VALIDATION_ERROR`.
+    """
+
+    severity: SeverityValue | None = Field(
+        description=(
+            "Manual severity: `critical`, `high`, `medium`, `low`, or `none` "
+            "(CVSS score 0.0, informational) sets the value; JSON `null` clears "
+            "it (unresolved). Required."
+        ),
+        examples=["high", None],
+    )

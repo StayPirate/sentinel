@@ -2,7 +2,9 @@
 
 See `docs/features/tickets/tickets.md` (API Endpoints > List Tickets and
 Get Ticket, Response Schemas > TicketSummary and TicketDetail) for the
-authoritative endpoint contracts.
+authoritative endpoint contracts, and Set Severity Manual for the
+manual-severity mutation (`docs/features/tickets/ticket-mutations.md`,
+`set_severity_manual()`).
 Handlers stay thin: they supply caller information to `ticket_service`,
 map its outcomes to HTTP, and serialize its semantic projection. The
 service owns SNTL resolution, visibility-constrained selection, and the
@@ -17,17 +19,23 @@ drift. It never captures a date or instant.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import UTC, datetime
 from typing import Annotated, Final
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, status
 
 from app.api.dependencies import (
+    AuthenticatedPrincipal,
+    AuthenticatedTicketCaller,
     OptionalTicketCaller,
     TicketIdPath,
+    require_accessible_ticket,
+    require_capability,
     ticket_not_found_error,
 )
 from app.api.v1.ticket_packages import serialize_package
 from app.core.enums import (
+    Capability,
     MilestonePhase,
     Severity,
     SortOrder,
@@ -35,7 +43,12 @@ from app.core.enums import (
     TicketSortField,
     TicketStatus,
 )
-from app.core.exceptions import TicketNotFoundError
+from app.core.errors import AppError, ErrorCode
+from app.core.exceptions import (
+    SeverityDerivedError,
+    TicketNotFoundError,
+    TicketNotMutableError,
+)
 from app.database import DatabaseSession
 from app.schemas.common import PaginationMeta, UserReference
 from app.schemas.cve import (
@@ -53,11 +66,13 @@ from app.schemas.ticket import (
     TicketDetailResponse,
     TicketListQuery,
     TicketListResponse,
+    TicketSeverityUpdateRequest,
     TicketSummary,
 )
-from app.services import ticket_service
+from app.services import ticket_mutations, ticket_service
 from app.services.ticket_service import (
     CVEDetailProjection,
+    ResolvedTicket,
     TicketDetailProjection,
     TicketSummaryProjection,
 )
@@ -78,6 +93,18 @@ _PRIORITY_FILTER: Final[Mapping[str, TicketPriority | None]] = {
     **{member.value.lower(): member for member in TicketPriority},
     "unresolved": None,
 }
+# Lowercase request-body label -> domain severity (tickets.md, Set Severity
+# Manual). JSON `null` is handled separately as "clear".
+_SEVERITY_INPUT: Final[Mapping[str, Severity]] = {
+    member.value.lower(): member for member in Severity
+}
+
+
+def _utc_now() -> datetime:
+    """The current instant in UTC (patched by controlled-clock tests)."""
+    return datetime.now(UTC)
+
+
 _OVERDUE_FILTER: Final[Mapping[str, MilestonePhase]] = {
     member.value: member for member in MilestonePhase
 }
@@ -447,4 +474,88 @@ async def get_ticket(
         )
     except TicketNotFoundError:
         raise ticket_not_found_error() from None
+    return TicketDetailResponse(data=serialize_ticket_detail(detail))
+
+
+@router.patch(
+    "/tickets/{ticket_id}/severity",
+    response_model=TicketDetailResponse,
+    summary="Set Severity Manual",
+    description=(
+        "Sets or clears the manual severity of a Ticket without a CVE. A "
+        "lowercase label (`critical`, `high`, `medium`, `low`, `none`) sets "
+        "it; JSON `null` clears it (unresolved). An unassigned Ticket is "
+        "auto-assigned to an active vulnerability analyst, the automatic "
+        "priority is refreshed, and the Ticket status is re-evaluated. "
+        "Returns the post-mutation Ticket detail. Requires `triage_ticket`."
+    ),
+    responses={
+        404: {
+            "model": ErrorResponse,
+            "description": (
+                "`TICKET_NOT_FOUND`: Ticket identifier is malformed, does not "
+                "exist, or identifies a Ticket inaccessible to the caller."
+            ),
+        },
+        409: {
+            "model": ErrorResponse,
+            "description": (
+                "`TICKET_SEVERITY_DERIVED`: the Ticket has an associated CVE, so "
+                "its severity is derived from CVSS. `TICKET_NOT_MUTABLE`: the "
+                "Ticket is Ignored or Duplicated."
+            ),
+        },
+    },
+)
+async def set_ticket_severity(
+    ticket_id: TicketIdPath,
+    body: TicketSeverityUpdateRequest,
+    db: DatabaseSession,
+    principal: Annotated[
+        AuthenticatedPrincipal, Depends(require_capability(Capability.TRIAGE_TICKET))
+    ],
+    caller: AuthenticatedTicketCaller,
+    ticket: Annotated[ResolvedTicket, Depends(require_accessible_ticket)],
+) -> TicketDetailResponse:
+    """Set Severity Manual — see `docs/features/tickets/tickets.md`.
+
+    Authorization follows `docs/api-spec.md` (Authorization Chain
+    Evaluation Order, flow 3): authentication, then `triage_ticket`
+    before any Ticket lookup, then the delegated preliminary SNTL
+    resolution. The capability decision and the caller's scope share one
+    role load per request. `set_severity_manual()` revalidates
+    accessibility from locked-current state; the handler captures the
+    one workflow `evaluation_date`, reused by reconciliation and by the
+    `TicketDetail` assembled from the locked post-state inside the same
+    transaction (`docs/features/tickets/ticket-service.md`,
+    `get_ticket_detail()`).
+    """
+    evaluation_date = _utc_now().date()
+    severity = _SEVERITY_INPUT[body.severity] if body.severity is not None else None
+    try:
+        await ticket_mutations.set_severity_manual(
+            db,
+            ticket_id=ticket.id,
+            severity=severity,
+            acting_user_id=principal.user.id,
+            caller=caller,
+            evaluation_date=evaluation_date,
+        )
+    except TicketNotFoundError:
+        raise ticket_not_found_error() from None
+    except TicketNotMutableError:
+        raise AppError(
+            status_code=status.HTTP_409_CONFLICT,
+            code=ErrorCode.TICKET_NOT_MUTABLE,
+            detail="Ticket is not mutable.",
+        ) from None
+    except SeverityDerivedError:
+        raise AppError(
+            status_code=status.HTTP_409_CONFLICT,
+            code=ErrorCode.TICKET_SEVERITY_DERIVED,
+            detail="Ticket severity is derived from CVSS assessments.",
+        ) from None
+    detail = await ticket_service.assemble_ticket_detail(
+        db, ticket_id=ticket.id, evaluation_date=evaluation_date
+    )
     return TicketDetailResponse(data=serialize_ticket_detail(detail))

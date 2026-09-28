@@ -10,7 +10,10 @@ Implements, from `docs/features/tickets/ticket-mutations.md`:
 - `auto_assign_actor()` — the Auto-Assignment Rule;
 - `reconcile_ticket_status()` — the sole gate-zone status authority,
   including assignment-eligibility sanitation, the `previous_status`
-  semantics, and transaction-local Ticket convergence registration.
+  semantics, and transaction-local Ticket convergence registration;
+- `refresh_priority_auto()` — the only writer of `Ticket.priority_auto`
+  (`docs/features/tickets/ticket-priority.md`, Automatic Refresh);
+- `set_severity_manual()` — the manual-severity gate-relevant mutation.
 
 The gates are exactly those of `docs/features/tickets/tickets.md` (Gate:
 Analysis → Analyzed, Gate: Analyzed → Resolved) over the canonical
@@ -49,11 +52,21 @@ from app.core.enums import (
     CVSSVersion,
     PackageStatus,
     Role,
+    Severity,
     TicketAuditEventType,
     TicketStatus,
 )
-from app.core.exceptions import TicketNotMutableError, UserNotFoundError
+from app.core.exceptions import (
+    SeverityDerivedError,
+    TicketNotFoundError,
+    TicketNotMutableError,
+    UserNotFoundError,
+)
+from app.models.cve import CVE
 from app.models.cve_cvss_assessment import CVECVSSAssessment
+from app.models.cve_epss_score import CVEEPSSScore
+from app.models.cve_kev_entry import CVEKEVEntry
+from app.models.cve_ssvc_assessment import CVESSVCAssessment
 from app.models.product import Product
 from app.models.ticket import Ticket
 from app.models.ticket_package import TicketPackage
@@ -72,7 +85,9 @@ from app.services.ticket_mutations_errors import (
     InvalidCVSSVectorError,
     TicketMutationsError,
 )
+from app.services.ticket_priority import classify_exploitation, resolve_priority
 from app.services.ticket_severity import resolved_severity_expression
+from app.services.ticket_visibility import TicketCaller, ticket_visibility_condition
 
 __all__ = [
     "INACTIVE_ASSIGNEE_REASON",
@@ -83,6 +98,8 @@ __all__ = [
     "auto_assign_actor",
     "ensure_ticket_operable",
     "reconcile_ticket_status",
+    "refresh_priority_auto",
+    "set_severity_manual",
     "stabilize_acting_user",
 ]
 
@@ -557,3 +574,214 @@ async def reconcile_ticket_status(
 
     if _registers_convergence(effective_previous, new_status):
         register_ticket_convergence(db, ticket.id)
+
+
+# ---------------------------------------------------------------------------
+# Automatic priority (ticket-priority.md, Automatic Refresh)
+# ---------------------------------------------------------------------------
+
+
+async def refresh_priority_auto(db: AsyncSession, *, ticket: Ticket) -> bool:
+    """Recompute and persist the Ticket's automatic priority.
+
+    Category A primitive (`docs/features/tickets/ticket-priority.md`,
+    `refresh_priority_auto()`; ticket-mutations.md, Utility Functions). The
+    only writer of `Ticket.priority_auto`.
+
+    Q1: `ticket` is the caller's locked Ticket instance (or a Ticket
+    inserted in the current transaction).
+
+    Q2: trusted preconditions, not rediscovered: the caller holds the
+    Ticket `FOR UPDATE` and, for a CVE-associated Ticket, the preceding CVE
+    root lock. Acquires no lock, performs no accessibility check, and does
+    not call `ensure_ticket_operable()`: it applies in every Ticket status.
+
+    Q3: (1) reads the resolved severity from locked-current state —
+    `CVE.severity` when `cve_id` is set, otherwise `severity_manual`; the
+    CVE read observes the enclosing transaction's writes (autoflush).
+    (2) For a CVE-associated Ticket, reads in the same statement whether a
+    `CVEKEVEntry` exists, the SSVC `exploitation`, and the EPSS
+    `percentile`; a CVE-less Ticket uses no evidence. (3) Computes
+    `resolve_priority(severity, classify_exploitation(...))`. (4) An
+    unchanged result returns `False` with no write or event. (5) Otherwise
+    persists the new `priority_auto`, and (6) creates one system
+    `priority_changed` event with the old and new effective priorities
+    (`COALESCE(priority_override, priority_auto)`), `comment` and `detail`
+    `NULL`, only when the effective priority changed; an override that
+    masks the change creates no event. (7) Flushes. Never assigns,
+    reconciles, changes status, registers convergence, reads audit
+    history, or performs network, Redis, or Celery I/O.
+
+    Q4: returns `True` exactly when this call changed `priority_auto`.
+
+    Q6: raises nothing of its own. Database, audit, and flush exceptions
+    propagate unchanged and roll back the caller's complete transaction.
+    """
+    kev_listed = False
+    ssvc_exploitation: str | None = None
+    epss_percentile: float | None = None
+    if ticket.cve_id is not None:
+        row = (
+            await db.execute(
+                select(
+                    CVE.severity,
+                    exists().where(CVEKEVEntry.cve_id == CVE.id),
+                    select(CVESSVCAssessment.exploitation)
+                    .where(CVESSVCAssessment.cve_id == CVE.id)
+                    .scalar_subquery(),
+                    select(CVEEPSSScore.percentile)
+                    .where(CVEEPSSScore.cve_id == CVE.id)
+                    .scalar_subquery(),
+                ).where(CVE.id == ticket.cve_id)
+            )
+        ).one()
+        severity_value, kev_listed, ssvc_exploitation, epss_percentile = row
+    else:
+        severity_value = ticket.severity_manual
+
+    severity = Severity(severity_value) if severity_value is not None else None
+    resolved = resolve_priority(
+        severity,
+        classify_exploitation(
+            kev_listed=kev_listed,
+            ssvc_exploitation=ssvc_exploitation,
+            epss_percentile=epss_percentile,
+        ),
+    )
+    new_auto = resolved.value if resolved is not None else None
+    if new_auto == ticket.priority_auto:
+        return False
+
+    override = ticket.priority_override
+    old_effective = override if override is not None else ticket.priority_auto
+    ticket.priority_auto = new_auto
+    new_effective = override if override is not None else new_auto
+    if new_effective != old_effective:
+        await TicketAuditLog.log_event(
+            db,
+            ticket_id=ticket.id,
+            event_type=TicketAuditEventType.PRIORITY_CHANGED,
+            user_id=None,
+            old_value=old_effective,
+            new_value=new_effective,
+        )
+    await db.flush()
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Manual severity (ticket-mutations.md, `set_severity_manual()`)
+# ---------------------------------------------------------------------------
+
+
+async def _lock_accessible_ticket(
+    db: AsyncSession, ticket_id: UUID, caller: TicketCaller
+) -> Ticket:
+    """Lock the Ticket `FOR UPDATE` and revalidate consumer accessibility.
+
+    The accessibility decision is a separate statement issued after the
+    lock is granted, so it observes the confidentiality, explicit grants,
+    and included-package maintainership committed while this transaction
+    waited for the lock (`docs/api-spec.md`, Authorization Chain
+    Evaluation Order, flow 3). Missing and inaccessible Tickets both raise
+    the one `TicketNotFoundError`.
+    """
+    ticket = (
+        await db.execute(
+            select(Ticket)
+            .where(Ticket.id == ticket_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+    if ticket is None:
+        raise TicketNotFoundError()
+    accessible = (
+        await db.execute(
+            select(ticket_visibility_condition(caller))
+            .select_from(Ticket)
+            .where(Ticket.id == ticket_id)
+        )
+    ).scalar_one()
+    if not accessible:
+        raise TicketNotFoundError()
+    return ticket
+
+
+async def set_severity_manual(
+    db: AsyncSession,
+    *,
+    ticket_id: UUID,
+    severity: Severity | None,
+    acting_user_id: UUID,
+    caller: TicketCaller,
+    evaluation_date: date | None = None,
+) -> Ticket:
+    """Set or clear the manual severity of a CVE-less Ticket.
+
+    Category A consumer mutation (ticket-mutations.md,
+    `set_severity_manual()`; tickets.md, Set Severity Manual).
+
+    Q1: `ticket_id` is the internal Ticket UUID (the API resolves the
+    public `SNTL-{n}` locator first). `severity` is the requested label, or
+    `None` to clear `severity_manual` (SQL `NULL`, distinct from the
+    `Severity.NONE` label). `acting_user_id` is the authenticated acting
+    user; `caller` is the request-resolved caller information whose
+    `user_id` must equal `acting_user_id`. `evaluation_date` is the
+    workflow's UTC date shared with any `TicketDetail` response; one UTC
+    date is captured at entry when omitted.
+
+    Q2: the caller has verified `triage_ticket` and owns the transaction.
+    Locks, in order: the acting User `FOR SHARE`
+    (`stabilize_acting_user()`), then the Ticket `FOR UPDATE`.
+
+    Q3: (2) revalidates accessibility from locked-current state with the
+    canonical visibility predicate; (3) `ensure_ticket_operable()`;
+    (4) rejects a CVE-associated Ticket; (5) an unchanged value is a no-op
+    with no assignment, write, event, or reconciliation; (6)
+    `auto_assign_actor()` with the stabilized User; (7) writes
+    `severity_manual`; (8) creates one `severity_changed` event attributed
+    to the acting user (old/new PascalCase labels or `NULL`), then calls
+    `refresh_priority_auto()`; (9) calls `reconcile_ticket_status()` once
+    with the one `evaluation_date`. Never commits.
+
+    Q4: returns the locked Ticket in its post-mutation state.
+
+    Q6: raises `ValueError` before any database operation when `caller`
+    does not identify `acting_user_id` (an internal contract violation);
+    `TicketNotFoundError` for a missing or inaccessible Ticket, before any
+    other decision; `TicketNotMutableError` for `Ignored` or `Duplicated`;
+    `SeverityDerivedError` when `cve_id IS NOT NULL`. `UserNotFoundError`
+    (an invariant violation for an authenticated caller), audit, database,
+    flush, and reconciliation exceptions propagate and roll back the
+    caller's complete transaction.
+    """
+    if caller.user_id != acting_user_id:
+        raise ValueError("caller must identify the acting user.")
+    if evaluation_date is None:
+        evaluation_date = _utc_now().date()
+
+    acting_user = await stabilize_acting_user(db, acting_user_id)
+    ticket = await _lock_accessible_ticket(db, ticket_id, caller)
+    ensure_ticket_operable(ticket)
+    if ticket.cve_id is not None:
+        raise SeverityDerivedError()
+
+    new_value = severity.value if severity is not None else None
+    old_value = ticket.severity_manual
+    if new_value == old_value:
+        return ticket
+
+    await auto_assign_actor(ticket, acting_user, db)
+    ticket.severity_manual = new_value
+    await TicketAuditLog.log_event(
+        db,
+        ticket_id=ticket.id,
+        event_type=TicketAuditEventType.SEVERITY_CHANGED,
+        user_id=acting_user.id,
+        old_value=old_value,
+        new_value=new_value,
+    )
+    await refresh_priority_auto(db, ticket=ticket)
+    await reconcile_ticket_status(ticket, db, evaluation_date=evaluation_date)
+    return ticket

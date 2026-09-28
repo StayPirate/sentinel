@@ -31,6 +31,7 @@ import redis.asyncio as redis_asyncio
 from fastapi import Depends, FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api import dependencies
@@ -57,6 +58,7 @@ from app.models.api_key import ApiKey
 from app.models.session import Session
 from app.models.ticket import Ticket
 from app.models.user import User
+from app.models.user_role import UserRole
 from app.services import api_key_service, ticket_service, user_service
 from app.services.session_service import create_session
 from app.services.ticket_service import ResolvedTicket
@@ -155,6 +157,27 @@ def _build_test_app() -> FastAPI:
 
     @test_app.get("/tickets/{ticket_id}/accessible")
     async def accessible_ticket(
+        caller: AuthenticatedTicketCaller,
+        ticket: Annotated[ResolvedTicket, Depends(require_accessible_ticket)],
+    ) -> dict[str, int | str | None]:
+        return {"sequence_id": ticket.sequence_id, **_caller_body(caller)}
+
+    @test_app.get("/triage-caller")
+    async def triage_caller(
+        principal: Annotated[
+            AuthenticatedPrincipal,
+            Depends(require_capability(Capability.TRIAGE_TICKET)),
+        ],
+        caller: AuthenticatedTicketCaller,
+    ) -> dict[str, str | None]:
+        return _caller_body(caller)
+
+    @test_app.get("/tickets/{ticket_id}/triage")
+    async def triage_accessible_ticket(
+        principal: Annotated[
+            AuthenticatedPrincipal,
+            Depends(require_capability(Capability.TRIAGE_TICKET)),
+        ],
         caller: AuthenticatedTicketCaller,
         ticket: Annotated[ResolvedTicket, Depends(require_accessible_ticket)],
     ) -> dict[str, int | str | None]:
@@ -1954,3 +1977,282 @@ class TestRequireAccessibleTicket:
 
         assert response.status_code == 401
         resolver.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Single role resolution per request (require_capability + Ticket caller)
+# ---------------------------------------------------------------------------
+
+
+_FORBIDDEN_BODY = {
+    "code": "AUTH_INSUFFICIENT_PERMISSION",
+    "detail": "Insufficient permissions",
+}
+
+
+def _change_roles_after_load(
+    monkeypatch: pytest.MonkeyPatch,
+    change: Callable[[AsyncSession, uuid.UUID], Awaitable[None]],
+) -> list[uuid.UUID]:
+    """Spy on `user_service.get_user_roles()` that applies `change` to the
+    user's roles right after each load has completed.
+
+    Deterministically simulates a role change landing between the
+    request's single role load and the rest of its dependencies and
+    handler: any later reload in the same request would observe it.
+    """
+    calls: list[uuid.UUID] = []
+    original = user_service.get_user_roles
+
+    async def _spy(session: AsyncSession, user_id: uuid.UUID) -> list[Role]:
+        calls.append(user_id)
+        roles = await original(session, user_id)
+        await change(session, user_id)
+        return roles
+
+    monkeypatch.setattr(user_service, "get_user_roles", _spy)
+    return calls
+
+
+def _spy_resolver(monkeypatch: pytest.MonkeyPatch) -> list[TicketCaller]:
+    """Record the caller handed to `ticket_service.resolve_ticket_locator()`
+    while delegating to the real implementation."""
+    callers: list[TicketCaller] = []
+    original = ticket_service.resolve_ticket_locator
+
+    async def _spy(
+        session: AsyncSession, ticket_id: str, caller: TicketCaller
+    ) -> ResolvedTicket:
+        callers.append(caller)
+        return await original(session, ticket_id, caller)
+
+    monkeypatch.setattr(ticket_service, "resolve_ticket_locator", _spy)
+    return callers
+
+
+@pytest.mark.e2e
+class TestSingleRoleResolution:
+    """`require_capability()` and the Ticket caller share one role load per
+    request (docs/features/identity/rbac.md, Optional Principal to Caller
+    Context, Permission Checking; docs/api-spec.md, Authorization Chain
+    Evaluation Order; testing-strategy.md, Ticket Accessibility)."""
+
+    @pytest.mark.parametrize(
+        ("roles", "scope"),
+        [
+            ([Role.VULNERABILITY_ANALYST], "all"),
+            ([Role.RESTRICTED_ANALYST], "non_confidential"),
+            ([Role.RESTRICTED_ANALYST, Role.ADMIN], "all"),
+        ],
+    )
+    async def test_capability_and_caller_scope_come_from_one_role_load(
+        self,
+        roles: list[Role],
+        scope: str,
+        dep_client: AsyncClient,
+        db_session: AsyncSession,
+        user_factory: Callable[..., Awaitable[User]],
+        user_role_factory: Callable[..., Awaitable[Any]],
+        redis_client: redis_asyncio.Redis,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        user = await user_factory()
+        for role in roles:
+            await user_role_factory(user_id=user.id, role=role.value)
+        headers = await _bearer(db_session, user)
+        calls = _count_role_lookups(monkeypatch)
+
+        response = await dep_client.get("/triage-caller", headers=headers)
+
+        assert response.status_code == 200
+        assert response.json() == {"user_id": str(user.id), "scope": scope}
+        assert calls == [user.id]
+
+    @pytest.mark.parametrize(
+        ("role", "granted", "scope"),
+        [
+            (Role.VULNERABILITY_ANALYST, False, "all"),
+            (Role.RESTRICTED_ANALYST, True, "non_confidential"),
+        ],
+    )
+    async def test_accessible_ticket_route_loads_roles_once(
+        self,
+        role: Role,
+        granted: bool,
+        scope: str,
+        dep_client: AsyncClient,
+        db_session: AsyncSession,
+        user_factory: Callable[..., Awaitable[User]],
+        user_role_factory: Callable[..., Awaitable[Any]],
+        ticket_factory: Callable[..., Awaitable[Ticket]],
+        ticket_access_grant_factory: Callable[..., Awaitable[Any]],
+        redis_client: redis_asyncio.Redis,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        user = await user_factory()
+        await user_role_factory(user_id=user.id, role=role.value)
+        ticket = await ticket_factory(is_confidential=True)
+        if granted:
+            await ticket_access_grant_factory(ticket_id=ticket.id, user_id=user.id)
+        headers = await _bearer(db_session, user)
+        calls = _count_role_lookups(monkeypatch)
+        callers = _spy_resolver(monkeypatch)
+
+        response = await dep_client.get(
+            f"/tickets/{format_ticket_id(ticket.sequence_id)}/triage", headers=headers
+        )
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "sequence_id": ticket.sequence_id,
+            "user_id": str(user.id),
+            "scope": scope,
+        }
+        assert calls == [user.id]
+        assert [(c.user_id, c.scope and c.scope.value) for c in callers] == [
+            (user.id, scope)
+        ]
+
+    @pytest.mark.parametrize(
+        "roles",
+        [pytest.param([], id="no-roles"), pytest.param([Role.ADMIN], id="admin")],
+    )
+    async def test_missing_capability_is_403_after_one_load_and_before_lookup(
+        self,
+        roles: list[Role],
+        dep_client: AsyncClient,
+        db_session: AsyncSession,
+        user_factory: Callable[..., Awaitable[User]],
+        user_role_factory: Callable[..., Awaitable[Any]],
+        ticket_factory: Callable[..., Awaitable[Ticket]],
+        redis_client: redis_asyncio.Redis,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        user = await user_factory()
+        for role in roles:
+            await user_role_factory(user_id=user.id, role=role.value)
+        ticket = await ticket_factory()
+        headers = await _bearer(db_session, user)
+        user_id = user.id
+        paths = [
+            "/triage-caller",
+            f"/tickets/{format_ticket_id(ticket.sequence_id)}/triage",
+            "/tickets/SNTL-2147483647/triage",
+            "/tickets/not-a-ticket/triage",
+        ]
+        # Checkpoint the fixtures: each 403 rolls back the request's work.
+        await db_session.commit()
+        resolver = AsyncMock()
+        monkeypatch.setattr(ticket_service, "resolve_ticket_locator", resolver)
+
+        for path in paths:
+            calls = _count_role_lookups(monkeypatch)
+            response = await dep_client.get(path, headers=headers)
+            assert response.status_code == 403, path
+            assert response.json() == _FORBIDDEN_BODY, path
+            assert calls == [user_id], path
+
+        resolver.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        "path", ["/triage-caller", "/tickets/SNTL-1/triage", "/tickets/bad/triage"]
+    )
+    async def test_missing_credential_is_401_without_any_role_load(
+        self, path: str, dep_client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls = _count_role_lookups(monkeypatch)
+        resolver = AsyncMock()
+        monkeypatch.setattr(ticket_service, "resolve_ticket_locator", resolver)
+
+        response = await dep_client.get(path)
+
+        assert response.status_code == 401
+        assert response.json() == {
+            "code": "AUTH_NOT_AUTHENTICATED",
+            "detail": "Authentication required",
+        }
+        assert calls == []
+        resolver.assert_not_awaited()
+
+    async def test_role_removed_after_the_load_keeps_the_in_flight_authorization(
+        self,
+        dep_client: AsyncClient,
+        db_session: AsyncSession,
+        user_factory: Callable[..., Awaitable[User]],
+        user_role_factory: Callable[..., Awaitable[Any]],
+        ticket_factory: Callable[..., Awaitable[Ticket]],
+        redis_client: redis_asyncio.Redis,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The VA role disappears right after the single load. The in-flight
+        request keeps both the capability and the `all` scope that lets it
+        see a confidential Ticket without a grant; a reload would see no
+        role and deny. The committed removal applies to the next request."""
+        user = await user_factory()
+        await user_role_factory(user_id=user.id, role=Role.VULNERABILITY_ANALYST.value)
+        ticket = await ticket_factory(is_confidential=True)
+        headers = await _bearer(db_session, user)
+        user_id = user.id
+        path = f"/tickets/{format_ticket_id(ticket.sequence_id)}/triage"
+        await db_session.commit()
+
+        async def _remove_roles(session: AsyncSession, target: uuid.UUID) -> None:
+            await session.execute(delete(UserRole).where(UserRole.user_id == target))
+
+        original = user_service.get_user_roles
+        calls = _change_roles_after_load(monkeypatch, _remove_roles)
+        callers = _spy_resolver(monkeypatch)
+
+        in_flight = await dep_client.get(path, headers=headers)
+
+        assert in_flight.status_code == 200
+        assert in_flight.json()["scope"] == "all"
+        assert calls == [user_id]
+        assert [c.scope and c.scope.value for c in callers] == ["all"]
+
+        monkeypatch.setattr(user_service, "get_user_roles", original)
+        next_calls = _count_role_lookups(monkeypatch)
+        next_request = await dep_client.get(path, headers=headers)
+
+        assert next_request.status_code == 403
+        assert next_request.json() == _FORBIDDEN_BODY
+        assert next_calls == [user_id]
+        assert len(callers) == 1
+
+    async def test_role_added_after_the_load_applies_to_the_next_request(
+        self,
+        dep_client: AsyncClient,
+        db_session: AsyncSession,
+        user_factory: Callable[..., Awaitable[User]],
+        user_role_factory: Callable[..., Awaitable[Any]],
+        redis_client: redis_asyncio.Redis,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A restricted analyst gains the VA role right after the single
+        load: the in-flight caller keeps `non_confidential`, the next
+        request resolves `all`."""
+        user = await user_factory()
+        await user_role_factory(user_id=user.id, role=Role.RESTRICTED_ANALYST.value)
+        headers = await _bearer(db_session, user)
+        user_id = user.id
+
+        async def _add_va(session: AsyncSession, target: uuid.UUID) -> None:
+            session.add(UserRole(user_id=target, role=Role.VULNERABILITY_ANALYST.value))
+            await session.flush()
+
+        original = user_service.get_user_roles
+        calls = _change_roles_after_load(monkeypatch, _add_va)
+        in_flight = await dep_client.get("/triage-caller", headers=headers)
+        monkeypatch.setattr(user_service, "get_user_roles", original)
+        next_calls = _count_role_lookups(monkeypatch)
+        next_request = await dep_client.get("/triage-caller", headers=headers)
+
+        assert in_flight.status_code == 200
+        assert in_flight.json() == {
+            "user_id": str(user_id),
+            "scope": "non_confidential",
+        }
+        assert calls == [user_id]
+        assert next_request.status_code == 200
+        assert next_request.json() == {"user_id": str(user_id), "scope": "all"}
+        assert next_calls == [user_id]
