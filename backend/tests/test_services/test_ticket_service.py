@@ -1714,6 +1714,8 @@ class TestTicketServiceQueryBoundary:
             "associate_cve",
             "assign_ticket",
             "set_priority_override",
+            "ignore_ticket",
+            "mark_as_duplicate",
         }
 
     def test_projection_exposes_no_internal_ticket_uuid(self) -> None:

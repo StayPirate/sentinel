@@ -1,11 +1,15 @@
-"""Shared helpers for the Ticket-path PATCH endpoint e2e tests.
+"""Shared helpers for the Ticket-path mutation endpoint e2e tests.
 
 Consumers:
 
 - `tests/test_api/test_ticket_priority_override.py`
   (`PATCH /api/v1/tickets/{ticket_id}/priority`);
 - `tests/test_api/test_ticket_assignee.py`
-  (`PATCH /api/v1/tickets/{ticket_id}/assignee`).
+  (`PATCH /api/v1/tickets/{ticket_id}/assignee`);
+- `tests/test_api/test_ticket_ignore.py`
+  (`POST /api/v1/tickets/{ticket_id}/ignore`);
+- `tests/test_api/test_ticket_duplicate.py`
+  (`POST /api/v1/tickets/{ticket_id}/duplicate`).
 
 The complete error bodies are transcribed from docs/api-spec.md (Global
 Responses, Ticket Accessibility Check, Manual-Zone Mutability Guard).
@@ -24,6 +28,7 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any
 
+import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -49,6 +54,7 @@ FORBIDDEN = {
     "detail": "Insufficient permissions",
 }
 NOT_MUTABLE = {"code": "TICKET_NOT_MUTABLE", "detail": "Ticket is not mutable."}
+INTERNAL_ERROR = {"code": "INTERNAL_ERROR", "detail": "An unexpected error occurred."}
 MAX_SEQUENCE = 2_147_483_647
 
 TICKET_DETAIL_FIELDS = {
@@ -99,7 +105,7 @@ def validation_error(*errors: dict[str, Any]) -> dict[str, Any]:
 
 
 async def ticket_row(db: AsyncSession, ticket_id: uuid.UUID) -> dict[str, Any]:
-    """The persisted Ticket columns the two endpoints may change."""
+    """The persisted Ticket columns the consumer endpoints may change."""
     row = (
         await db.execute(
             select(
@@ -107,6 +113,7 @@ async def ticket_row(db: AsyncSession, ticket_id: uuid.UUID) -> dict[str, Any]:
                 Ticket.assignee_id,
                 Ticket.priority_auto,
                 Ticket.priority_override,
+                Ticket.duplicate_of_id,
                 Ticket.updated_at,
             ).where(Ticket.id == ticket_id)
         )
@@ -133,6 +140,16 @@ def user_reference(user: User) -> dict[str, Any]:
         "full_name": user.full_name,
         "active": user.active,
     }
+
+
+def force_production_error_page(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Render an unhandled exception through the application's generic
+    `500 INTERNAL_ERROR` handler even when a local `DEBUG=true` selects
+    Starlette's traceback page (mirrors `tests/test_api/test_cves.py`,
+    `transmitting_client`): debug is forced off and the cached middleware
+    stack is cleared so it is rebuilt; monkeypatch restores both."""
+    monkeypatch.setattr(app, "debug", False)
+    monkeypatch.setattr(app, "middleware_stack", None)
 
 
 class Clock:

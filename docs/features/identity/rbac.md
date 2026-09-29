@@ -722,12 +722,15 @@ here with the required authorization level and a link to the owning spec.
     `restricted_analyst` (or any other non-VA role), auto-assignment is
     skipped — the operation proceeds but the ticket remains unassigned
     for a vulnerability analyst to claim
-12. **Status transitions with embedded assignment**: the reopen,
-    revert-duplicate, and mark-as-duplicate flows embed a reassignment
-    step. When an inactive user or a user without the
-    `vulnerability_analyst` role performs
-    these operations (they have `triage_ticket` capability to do so), the
-    reassignment step is skipped — the ticket retains its current assignee.
+12. **Status transitions with embedded assignment**: the reopen and
+    revert-duplicate flows embed a reassignment step: an active acting user
+    holding the `vulnerability_analyst` role becomes the assignee even when
+    the ticket is already assigned. The ignore and mark-as-duplicate flows
+    apply only the auto-assignment of Business Rule 11, so they assign the
+    acting user only to an unassigned ticket. When an inactive user or a
+    user without the `vulnerability_analyst` role performs any of these
+    operations (they have `triage_ticket` capability to do so), the
+    assignment step is skipped — the ticket retains its current assignee.
     If the ticket was unassigned, it remains unassigned. Non-VA users can
     trigger status transitions but are never assigned as ticket owners
 13. **Confidential ticket creation**: the `is_confidential` field in

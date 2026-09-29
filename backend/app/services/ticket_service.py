@@ -8,8 +8,9 @@ read in its consumer and mutation-assembly modes (Ticket Query
 Operations > `get_ticket_detail()`), Ticket creation
 (`create_ticket()`), CVE association (`associate_cve()`), explicit
 assignment (`assign_ticket()`), and the manual priority override
-(`set_priority_override()`); the remaining lifecycle operations are added
-by their owning work items.
+(`set_priority_override()`), and the manual-zone entries (`ignore_ticket()`,
+`mark_as_duplicate()`); the remaining lifecycle operations are added by
+their owning work items.
 
 Every operation accepts the caller's `AsyncSession` and never commits or
 rolls back; database exceptions propagate unchanged (Transaction
@@ -69,6 +70,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import JSON, aggregate_order_by
 from sqlalchemy.engine import Row
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased, selectinload
 
@@ -85,6 +87,7 @@ from app.core.enums import (
     TicketStatus,
 )
 from app.core.exceptions import (
+    InvalidTransitionError,
     ServiceError,
     SeverityDerivedError,
     TicketNotFoundError,
@@ -1268,6 +1271,32 @@ class AssigneeInactiveError(TicketServiceError):
         super().__init__("Assignee is inactive.")
 
 
+class SelfDuplicateError(TicketServiceError):
+    """A Ticket cannot be marked as a duplicate of itself. Maps to
+    `400 TICKET_SELF_DUPLICATE`. The message is static."""
+
+    def __init__(self) -> None:
+        super().__init__("Ticket cannot be marked as a duplicate of itself.")
+
+
+class DuplicateTargetIsDuplicatedError(TicketServiceError):
+    """The duplicate target is itself `Duplicated`. Maps to
+    `409 TICKET_DUPLICATE_TARGET_DUPLICATED`. The message is static."""
+
+    def __init__(self) -> None:
+        super().__init__("Duplicate target is itself a duplicate.")
+
+
+class DuplicateConcurrentModificationError(TicketServiceError):
+    """A Ticket pointing to the source is locked by a concurrent
+    operation, so the `NOWAIT` dependent lock failed. Maps to
+    `409 TICKET_DUPLICATE_CONCURRENT_MODIFICATION`. The message is
+    static."""
+
+    def __init__(self) -> None:
+        super().__init__("A duplicate dependent is being modified concurrently.")
+
+
 async def _ensure_cve_unassociated(db: AsyncSession, cve: CVE) -> None:
     """Read the association of the locked `cve` and reject an existing one.
 
@@ -1835,3 +1864,242 @@ async def set_priority_override(
     )
     await reconcile_ticket_status(ticket, db, evaluation_date=evaluation_date)
     return ticket
+
+
+# ---------------------------------------------------------------------------
+# Manual-zone entry (ticket-service.md, `ignore_ticket`, `mark_as_duplicate`)
+# ---------------------------------------------------------------------------
+
+_IGNORABLE: Final = frozenset({TicketStatus.NEW.value, TicketStatus.ANALYSIS.value})
+_LOCK_NOT_AVAILABLE: Final = "55P03"
+"""PostgreSQL SQLSTATE `lock_not_available`, raised by `FOR UPDATE NOWAIT`."""
+
+
+async def ignore_ticket(
+    db: AsyncSession,
+    *,
+    ticket_id: UUID,
+    acting_user_id: UUID,
+    caller: TicketCaller,
+) -> Ticket:
+    """Move a `New` or `Analysis` Ticket into `Ignored` (manual-zone entry).
+
+    Category A lifecycle operation (ticket-service.md, `ignore_ticket`;
+    tickets.md, Status Transitions, Ignore Ticket).
+
+    Q1: `ticket_id` is the internal Ticket UUID (the API resolves the
+    public `SNTL-{n}` locator first). `acting_user_id` is the
+    authenticated acting user (there is no system caller); `caller` is the
+    request-resolved caller information whose `user_id` must identify
+    `acting_user_id`. No `evaluation_date`: nothing here reconciles.
+
+    Q2: the caller has verified `triage_ticket` and owns the transaction.
+    Locks, in order: the acting User `FOR SHARE`
+    (`stabilize_acting_user()`), then the Ticket `FOR UPDATE`.
+
+    Q3: (3) revalidates accessibility from locked-current state; (4)
+    `ensure_ticket_operable()` rejects `Ignored` and `Duplicated` before
+    (5) the source-status guard, which accepts only `New` and `Analysis`
+    (the ordering is contractual); (6) `auto_assign_actor()` with the
+    stabilized User, so a VA actor on an unassigned `New` Ticket records
+    `assignment` and the system `New → Analysis` first; (7)-(8) sets
+    `Ignored` and creates one `status_change` attributed to the acting
+    user from the status after any auto-assignment (`comment NULL`).
+    Never reconciles, registers convergence, reads audit history, or
+    commits.
+
+    Q4: returns the locked Ticket in its post-mutation state.
+
+    Q6: raises `ValueError` before any database operation when `caller`
+    does not identify `acting_user_id`. Raises `TicketNotFoundError` for
+    a missing or inaccessible Ticket, before any other decision;
+    `TicketNotMutableError` for `Ignored` or `Duplicated`;
+    `InvalidTransitionError` for `Analyzed` or `Resolved`.
+    `UserNotFoundError` (an invariant violation for an authenticated
+    caller), audit, database, and flush exceptions propagate and roll back
+    the status, assignment, and every event together.
+    """
+    if caller.user_id != acting_user_id:
+        raise ValueError("caller must identify the acting user.")
+
+    acting_user = await stabilize_acting_user(db, acting_user_id)
+    ticket = await lock_accessible_ticket(db, ticket_id, caller)
+    ensure_ticket_operable(ticket)
+    if ticket.status not in _IGNORABLE:
+        raise InvalidTransitionError()
+
+    await auto_assign_actor(ticket, acting_user, db)
+    previous_status = ticket.status
+    ticket.status = TicketStatus.IGNORED.value
+    await TicketAuditLog.log_event(
+        db,
+        ticket_id=ticket.id,
+        event_type=TicketAuditEventType.STATUS_CHANGE,
+        user_id=acting_user_id,
+        old_value=previous_status,
+        new_value=TicketStatus.IGNORED.value,
+    )
+    return ticket
+
+
+async def _lock_ticket_row(db: AsyncSession, ticket_id: UUID) -> Ticket | None:
+    """Lock one Ticket row `FOR UPDATE` (blocking), refreshing any
+    identity-map copy; `None` when no Ticket has `ticket_id`."""
+    statement = (
+        select(Ticket)
+        .where(Ticket.id == ticket_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    return (await db.execute(statement)).scalar_one_or_none()
+
+
+async def _accessible_ticket_ids(
+    db: AsyncSession, ticket_ids: Collection[UUID], caller: TicketCaller
+) -> set[UUID]:
+    """The subset of `ticket_ids` visible to `caller`, evaluated in one
+    statement issued after every root lock is held, so it observes the
+    visibility state committed while this transaction waited."""
+    statement = select(Ticket.id).where(
+        Ticket.id.in_(ticket_ids), ticket_visibility_condition(caller)
+    )
+    return set((await db.execute(statement)).scalars())
+
+
+def _is_lock_not_available(exc: DBAPIError) -> bool:
+    """Whether `exc` is PostgreSQL `lock_not_available` (`55P03`). The
+    asyncpg dialect exposes the SQLSTATE on the wrapped DBAPI error."""
+    return getattr(exc.orig, "sqlstate", None) == _LOCK_NOT_AVAILABLE
+
+
+async def mark_as_duplicate(
+    db: AsyncSession,
+    *,
+    ticket_id: UUID,
+    duplicate_of_id: UUID,
+    acting_user_id: UUID,
+    caller: TicketCaller,
+) -> Ticket:
+    """Mark a Ticket as a duplicate of another non-`Duplicated` Ticket.
+
+    Category A lifecycle operation (ticket-service.md, `mark_as_duplicate`;
+    tickets.md, Duplicate Handling, Mark Ticket as Duplicate). Tickets
+    currently pointing to the source are repointed to the target in the
+    same transaction.
+
+    Q1: `ticket_id` is the internal UUID of the source and
+    `duplicate_of_id` that of the target (the API resolves both public
+    `SNTL-{n}` identifiers first; those preliminary decisions authorize
+    nothing). `acting_user_id` is the authenticated acting user (there is
+    no system caller); `caller` is the request-resolved caller
+    information whose `user_id` must identify `acting_user_id`.
+
+    Q2: the caller has verified `triage_ticket`, owns the transaction, and
+    holds no Ticket row lock in it (Constraint). Locks, in order: the
+    acting User `FOR SHARE` (`stabilize_acting_user()`); Phase 1, both
+    roots with blocking `FOR UPDATE` in ascending UUID order regardless of
+    which one is the source (one row when they are equal); Phase 2, every
+    dependent (`duplicate_of_id = source`) in UUID order with
+    `FOR UPDATE NOWAIT`.
+
+    Q3: after both roots are locked, one statement revalidates
+    accessibility for both from locked-current state; then, in order,
+    `ensure_ticket_operable(source)`, the non-`Duplicated` target guard,
+    and the self guard. Phase 2 follows. The mutations are
+    `auto_assign_actor(source)` with the stabilized User; `Duplicated` and
+    `duplicate_of_id` set together (preserving
+    `chk_ticket_duplicate_status_coherence`); an acting-user
+    `status_change` from the status after any auto-assignment; an
+    acting-user `duplicate_set` whose `new_value` is the target's
+    `SNTL-{n}`; then, per dependent in locked UUID order, the repoint and
+    one system `duplicate_target_changed` (`old_value` the source's and
+    `new_value` the target's `SNTL-{n}`, `detail = {"triggered_by_ticket":
+    source SNTL}`). Dependents are a trusted system consequence and are
+    not visibility-checked. Never reconciles, registers a post-commit
+    effect, reads audit history, commits, or rolls back.
+
+    Q4: returns the locked source Ticket in its post-mutation state.
+
+    Q6: raises `ValueError` before any database operation when `caller`
+    does not identify `acting_user_id`. Raises `TicketNotFoundError` when
+    either root is missing or inaccessible, before any other decision;
+    `TicketNotMutableError` for a manual-zone source;
+    `DuplicateTargetIsDuplicatedError`; `SelfDuplicateError`;
+    `DuplicateConcurrentModificationError` when a dependent is locked by
+    another transaction (the database transaction is then aborted and the
+    caller rolls it back). `UserNotFoundError` (an invariant violation for
+    an authenticated caller), audit, database, and flush exceptions
+    propagate and roll back the status, link, repoints, assignment, and
+    every event together.
+    """
+    if caller.user_id != acting_user_id:
+        raise ValueError("caller must identify the acting user.")
+
+    acting_user = await stabilize_acting_user(db, acting_user_id)
+    roots: dict[UUID, Ticket | None] = {}
+    for root_id in sorted({ticket_id, duplicate_of_id}):
+        roots[root_id] = await _lock_ticket_row(db, root_id)
+    source = roots[ticket_id]
+    target = roots[duplicate_of_id]
+    if source is None or target is None:
+        raise TicketNotFoundError()
+    if await _accessible_ticket_ids(db, roots.keys(), caller) != roots.keys():
+        raise TicketNotFoundError()
+    ensure_ticket_operable(source)
+    if target.status == TicketStatus.DUPLICATED:
+        raise DuplicateTargetIsDuplicatedError()
+    if source.id == target.id:
+        raise SelfDuplicateError()
+
+    try:
+        dependents = (
+            (
+                await db.execute(
+                    select(Ticket)
+                    .where(Ticket.duplicate_of_id == source.id)
+                    .order_by(Ticket.id)
+                    .with_for_update(nowait=True)
+                    .execution_options(populate_existing=True)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    except DBAPIError as exc:
+        if _is_lock_not_available(exc):
+            raise DuplicateConcurrentModificationError() from exc
+        raise
+
+    await auto_assign_actor(source, acting_user, db)
+    previous_status = source.status
+    source_identifier = format_ticket_id(source.sequence_id)
+    target_identifier = format_ticket_id(target.sequence_id)
+    source.status = TicketStatus.DUPLICATED.value
+    source.duplicate_of_id = target.id
+    await TicketAuditLog.log_event(
+        db,
+        ticket_id=source.id,
+        event_type=TicketAuditEventType.STATUS_CHANGE,
+        user_id=acting_user_id,
+        old_value=previous_status,
+        new_value=TicketStatus.DUPLICATED.value,
+    )
+    await TicketAuditLog.log_event(
+        db,
+        ticket_id=source.id,
+        event_type=TicketAuditEventType.DUPLICATE_SET,
+        user_id=acting_user_id,
+        new_value=target_identifier,
+    )
+    for dependent in dependents:
+        dependent.duplicate_of_id = target.id
+        await TicketAuditLog.log_event(
+            db,
+            ticket_id=dependent.id,
+            event_type=TicketAuditEventType.DUPLICATE_TARGET_CHANGED,
+            user_id=None,
+            old_value=source_identifier,
+            new_value=target_identifier,
+            detail={"triggered_by_ticket": source_identifier},
+        )
+    return source

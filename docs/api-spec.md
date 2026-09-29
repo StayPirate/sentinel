@@ -1000,7 +1000,7 @@ resource."
 
 ```
 POST /api/v1/tickets/{ticket_id}/ignore
-Body: {"reason": "..."}
+(no request body)
 ```
 
 Used when the operation has characteristics that go beyond a field

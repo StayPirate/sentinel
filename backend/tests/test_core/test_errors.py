@@ -112,6 +112,23 @@ class TestErrorCode:
         Service Exceptions)."""
         assert ErrorCode.TICKET_SEVERITY_DERIVED == "TICKET_SEVERITY_DERIVED"
 
+    def test_manual_zone_entry_error_codes_are_registered(self) -> None:
+        """See docs/api-spec.md (Error Code Categories, `TICKET_*`) and
+        docs/features/tickets/ticket-service.md (Service Exceptions:
+        `InvalidTransitionError`, `SelfDuplicateError`,
+        `DuplicateTargetIsDuplicatedError`,
+        `DuplicateConcurrentModificationError`)."""
+        assert ErrorCode.TICKET_INVALID_TRANSITION == "TICKET_INVALID_TRANSITION"
+        assert ErrorCode.TICKET_SELF_DUPLICATE == "TICKET_SELF_DUPLICATE"
+        assert (
+            ErrorCode.TICKET_DUPLICATE_TARGET_DUPLICATED
+            == "TICKET_DUPLICATE_TARGET_DUPLICATED"
+        )
+        assert (
+            ErrorCode.TICKET_DUPLICATE_CONCURRENT_MODIFICATION
+            == "TICKET_DUPLICATE_CONCURRENT_MODIFICATION"
+        )
+
     def test_cve_not_found_is_registered(self) -> None:
         """See docs/api-spec.md (Error Code Categories, CVE Accessibility
         Check) and docs/features/tickets/cve-service.md (Exceptions)."""
