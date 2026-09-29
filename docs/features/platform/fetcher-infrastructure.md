@@ -808,7 +808,7 @@ execution. The following additional rules apply:
   **Concurrent catch-up and periodic execution**: if a ticket is
   converged shortly before a periodic `execute()` run, both
   `catch_up()` and `execute()` may call `fetch_single()` for the same
-  CVE concurrently. This is safe — `upsert_cve()` uses `FOR UPDATE`
+  CVE concurrently. This is safe — `upsert_cve()` uses CVE root
   locks and unique constraints, so the second call is a no-op or an
   idempotent update. The duplicated external API call is acceptable
   given the low frequency of convergence events relative to periodic

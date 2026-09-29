@@ -1762,10 +1762,10 @@ class TestLockOrder:
         user_lock, cve_lock, ticket_lock = _root_order(statements)
         # The acting User lock is the first statement of the operation.
         assert user_lock == 0
-        # The first CVE statement is the resolution SELECT ... FOR UPDATE:
+        # The first CVE statement is the resolution SELECT ... FOR NO KEY UPDATE:
         # no unlocked CVE read precedes it, and no Ticket statement does.
         assert statements[cve_lock].lstrip().startswith("SELECT")
-        assert statements[cve_lock].rstrip().endswith("FOR UPDATE")
+        assert statements[cve_lock].rstrip().endswith("FOR NO KEY UPDATE")
         assert "FROM cve " in statements[cve_lock]
         assert user_lock < cve_lock < ticket_lock
         assert statements[ticket_lock].lstrip().startswith("SELECT")
@@ -1799,10 +1799,10 @@ class TestLockOrder:
         first, placeholder, relock = (statements[i] for i in cve_statements[:3])
         assert user_lock == 0
         assert first.lstrip().startswith("SELECT")
-        assert first.rstrip().endswith("FOR UPDATE")
+        assert first.rstrip().endswith("FOR NO KEY UPDATE")
         assert placeholder.startswith("INSERT INTO cve ")
         assert "ON CONFLICT (cve_id) DO NOTHING" in placeholder
-        assert relock.rstrip().endswith("FOR UPDATE")
+        assert relock.rstrip().endswith("FOR NO KEY UPDATE")
         assert user_lock < first_cve < cve_statements[1] < cve_statements[2]
         assert cve_statements[2] < ticket_lock
         assert statements[ticket_lock].rstrip().endswith("FOR UPDATE")

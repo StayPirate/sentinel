@@ -561,7 +561,8 @@ Each ticket-mutation function below follows the same pattern unless its own
 contract places semantic no-op or operation-specific guards before assignment:
 
 1. For a user-attributed operation capable of assignment, acquire `FOR SHARE`
-   on the acting User; then acquire `FOR UPDATE` on the owning CVE/Ticket roots
+   on the acting User; then acquire the owning CVE root with `FOR NO KEY
+   UPDATE` and the owning Ticket root with `FOR UPDATE`
 2. For a consumer operation, revalidate accessibility from the locked-current
    required roots
 3. Call `ensure_ticket_operable(ticket)`
@@ -613,10 +614,10 @@ system-wide ingestion rule that governs how scores and versions are handled.
 Parsing and caller/provider validation use request input only and may run before
 the transaction's first database operation. For a manual CVSS assessment
 mutation, the first persistent root is the acting User under `FOR SHARE`, then
-the owning CVE under `FOR UPDATE`, followed by the associated Ticket under `FOR
-UPDATE` when one exists. Trusted external ingestion has no assignment-capable
-actor and retains CVE then optional Ticket. Every operation follows the
-cross-domain root order in `docs/conventions.md`.
+the owning CVE under `FOR NO KEY UPDATE`, followed by the associated Ticket
+under `FOR UPDATE` when one exists. Trusted external ingestion has no
+assignment-capable actor and retains CVE then optional Ticket. Every operation
+follows the cross-domain root order in `docs/conventions.md`.
 
 ### CVSS Mutation Authority and Result
 
@@ -759,10 +760,10 @@ new one is created. External-provider assessments never use this boundary.
    version-specific assessment severity. Parsing failure raises
    `InvalidCVSSVectorError` before database access.
 2. Acquire `FOR SHARE` on the acting User and stabilize current active/VA
-   eligibility, then load the CVE with `FOR UPDATE`. If the User is no longer
-   eligible, the effective CVSS mutation continues but its assignment step is
-   skipped. If the CVE does not exist, return the CVE-path `CVE_NOT_FOUND`
-   outcome.
+   eligibility, then load the CVE with `FOR NO KEY UPDATE`. If the User is no
+   longer eligible, the effective CVSS mutation continues but its assignment
+   step is skipped. If the CVE does not exist, return the CVE-path
+   `CVE_NOT_FOUND` outcome.
 3. Load the Ticket associated with that locked CVE, if any, with `FOR UPDATE`.
    This makes concurrent association compose in `CVE` then `Ticket` order.
 4. Revalidate CVE accessibility from the locked CVE and its
@@ -882,10 +883,11 @@ writing severity, propagating eligibility, reconciling, or creating audit.
    bounded CVSS list's version/provider order in `cvss-scoring.md`; it is not the
    multi-factor Severity Resolution Cascade. Database collation and input order
    never control mutation or event order.
-2. As the first persistent read, obtain the CVE with `FOR UPDATE`, then obtain
-   its unique associated Ticket with `FOR UPDATE` when one exists. When called
-   by `upsert_cve()`, both are same-transaction locks already held; reacquisition
-   is a no-op and does not change the global CVE-then-Ticket order.
+2. As the first persistent read, obtain the CVE with `FOR NO KEY UPDATE`, then
+   obtain its unique associated Ticket with `FOR UPDATE` when one exists. When
+   called by `upsert_cve()`, both are same-transaction locks already held;
+   reacquisition is a no-op and does not change the global CVE-then-Ticket
+   order.
 3. Read `default_cvss_version` exactly once through
    `settings_service.get_default_cvss_version(db)`. The same value governs the
    final severity and eligibility resolutions.
@@ -969,10 +971,10 @@ callers to resolve the assessment ID.
    data. External caller categories and external providers raise `ValueError`;
    they cannot use this deletion boundary.
 2. Acquire `FOR SHARE` on the acting User and stabilize current active/VA
-   eligibility; then load the CVE with `FOR UPDATE` and its associated Ticket,
-   if any, with `FOR UPDATE`. An ineligible User does not block an otherwise
-   effective delete but makes its assignment step a skip. A missing CVE
-   produces the consumer CVE-path `CVE_NOT_FOUND` outcome.
+   eligibility; then load the CVE with `FOR NO KEY UPDATE` and its associated
+   Ticket, if any, with `FOR UPDATE`. An ineligible User does not block an
+   otherwise effective delete but makes its assignment step a skip. A missing
+   CVE produces the consumer CVE-path `CVE_NOT_FOUND` outcome.
 3. Revalidate consumer CVE accessibility from the locked CVE and its
    locked-current associated Ticket. Denial produces `CVE_NOT_FOUND` before
    status, assessment existence, no-op, assignment, or mutation decisions.
@@ -1088,13 +1090,13 @@ defines no Ticket convergence caller.
 
 **Behavior**:
 
-1. Acquire `FOR UPDATE` on the CVE as the first persistent read, then load and
-   lock its associated Ticket, if any. A CVE without an associated Ticket uses
-   `not_applicable`. In default-version mode, a lock lookup that returns no CVE
-   row is the `missing` result defined under Runner-facing classification
-   below; association mode retains its existing precondition that
-   `associate_cve()` has already resolved and locked the CVE. This function
-   does not call `ensure_ticket_operable()`:
+1. Acquire `FOR NO KEY UPDATE` on the CVE as the first persistent read, then
+   load and lock its associated Ticket, if any, with `FOR UPDATE`. A CVE
+   without an associated Ticket uses `not_applicable`. In default-version mode,
+   a lock lookup that returns no CVE row is the `missing` result defined under
+   Runner-facing classification below; association mode retains its existing
+   precondition that `associate_cve()` has already resolved and locked the
+   CVE. This function does not call `ensure_ticket_operable()`:
    association mode has already passed that caller-owned guard, while default-
    version mode must maintain CVE-owned severity for every Ticket status and
    applies only the state-specific Product/gate effects below. Association mode
@@ -1457,7 +1459,12 @@ and status reconciliation). The test must cover:
   CVSS/reactivation, and default-version/CVSS races recompute from
   winner-current assessments, setting, threshold, lifecycle, override,
   Product, and Ticket state and never duplicate assignment, Product events, or
-  final reconciliation
+  final reconciliation. A Ticket-first mutation that writes a CVE-associated
+  Ticket more than once completes and commits while a manual CVSS upsert or
+  delete holds the CVE root and waits for that Ticket (no deadlock; the CVSS
+  outcome reflects the committed winner), and CVE-root holders still
+  serialize against one another (`docs/conventions.md`, Cross-Domain Root Lock
+  Order)
 - **Locked-current consumer accessibility**: for manual severity and manual SUSE
   CVSS upsert/delete, race preliminary delegated access with confidentiality, explicit
   grant, and last included-package maintainership changes. Verify

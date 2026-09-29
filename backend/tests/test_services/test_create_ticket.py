@@ -355,7 +355,7 @@ class TestLockOrder:
         association = _association_read_index(statements)
         (insert,) = _ticket_insert_indexes(statements)
         assert first_cve.startswith("SELECT")
-        assert first_cve.rstrip().endswith("FOR UPDATE")
+        assert first_cve.rstrip().endswith("FOR NO KEY UPDATE")
         assert user_lock < cve_statements[0] < association < insert
         assert not any("FROM cve" in s for s in statements[:user_lock])
         assert [s for s in statements if s.startswith("INSERT INTO cve")] == []
@@ -374,9 +374,9 @@ class TestLockOrder:
         association = _association_read_index(statements)
         (insert,) = _ticket_insert_indexes(statements)
         first, placeholder, relock = (statements[i] for i in cve_statements[:3])
-        assert first.rstrip().endswith("FOR UPDATE")
+        assert first.rstrip().endswith("FOR NO KEY UPDATE")
         assert placeholder.startswith("INSERT INTO cve")
-        assert relock.rstrip().endswith("FOR UPDATE")
+        assert relock.rstrip().endswith("FOR NO KEY UPDATE")
         assert user_lock < cve_statements[0] < cve_statements[2] < association < insert
 
     async def test_cve_less_creation_locks_only_the_user(
@@ -409,7 +409,7 @@ class TestLockOrder:
         assert not any("FOR SHARE" in s for s in statements)
         cve_statements = _cve_indexes(statements)
         (insert,) = _ticket_insert_indexes(statements)
-        assert statements[cve_statements[0]].rstrip().endswith("FOR UPDATE")
+        assert statements[cve_statements[0]].rstrip().endswith("FOR NO KEY UPDATE")
         assert cve_statements[0] < _association_read_index(statements) < insert
 
 
@@ -756,7 +756,7 @@ class TestConflict:
         assert expected not in str(raised.value)
         statements = recorder.statements
         cve_lock = _cve_indexes(statements)[0]
-        assert statements[cve_lock].rstrip().endswith("FOR UPDATE")
+        assert statements[cve_lock].rstrip().endswith("FOR NO KEY UPDATE")
         assert _user_lock_index(statements) < cve_lock
         assert _association_read_index(statements) > cve_lock
         assert _association_read_index(statements) == len(statements) - 1

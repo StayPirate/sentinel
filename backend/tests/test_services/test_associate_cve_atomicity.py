@@ -312,7 +312,7 @@ def _is_user_share(statement: str) -> bool:
 
 
 def _is_cve_lock(statement: str) -> bool:
-    return "FROM cve " in statement and statement.rstrip().endswith("FOR UPDATE")
+    return "FROM cve " in statement and statement.rstrip().endswith("FOR NO KEY UPDATE")
 
 
 def _is_ticket_lock(statement: str) -> bool:

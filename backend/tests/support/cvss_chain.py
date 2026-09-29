@@ -117,7 +117,9 @@ async def associate(db: AsyncSession, ticket: Ticket, cve: CVE) -> Ticket:
     """Reproduce the pre-chain part of `associate_cve()`: lock the CVE then
     the Ticket, point the Ticket at the CVE, and clear `severity_manual` in
     the same transaction."""
-    await db.execute(select(CVE.id).where(CVE.id == cve.id).with_for_update())
+    await db.execute(
+        select(CVE.id).where(CVE.id == cve.id).with_for_update(key_share=True)
+    )
     locked = await lock_ticket(db, ticket)
     locked.cve_id = cve.id
     locked.severity_manual = None

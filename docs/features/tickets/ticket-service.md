@@ -485,9 +485,9 @@ mapping location is an implementation choice.
    not assigned; creation continues under the existing non-assignment branch.
    A system creation skips this step
 2. If `cve_id` is provided, resolve CVE via CVE Resolution Behavior and retain
-   `FOR UPDATE` on the CVE before reading association state or inserting the
-   Ticket. A newly inserted CVE is already owned by the transaction. If no CVE
-   is provided, no row lock is required
+   `FOR NO KEY UPDATE` on the CVE before reading association state or
+   inserting the Ticket. A newly inserted CVE is already owned by the
+   transaction. If no CVE is provided, no row lock is required
 3. INSERT new Ticket row with initial fields, including
    `coordinated_release_at` when supplied (all unspecified columns
    use database defaults: `duplicate_of_id = NULL`,
@@ -527,8 +527,8 @@ automatic `CVE rejected` status event. The authorized user may invoke the
 ordinary manual ignore operation separately.
 
 **Concurrency — CVE uniqueness**: concurrent creations for the same CVE
-serialize on the CVE `FOR UPDATE` lock of step 2. The association state is
-read under that lock, before the INSERT: an existing association, including
+serialize on the CVE `FOR NO KEY UPDATE` lock of step 2. The association state
+is read under that lock, before the INSERT: an existing association, including
 one committed by a creator this transaction waited for, raises
 `TicketCVEConflictError` carrying that Ticket's `SNTL-{n}`, which the API
 handler maps to `409 TICKET_CVE_CONFLICT` with `existing_ticket_id`. The
@@ -592,9 +592,10 @@ omit it; the function then captures one date at entry for its complete chain.
    skipped
 2. Resolve or create the local CVE through CVE Resolution Behavior without
    holding a Ticket lock. For an existing CVE, the resolution query acquires
-   `FOR UPDATE` as its first persistent read; a newly inserted CVE becomes the
-   transaction's locked root. No external I/O occurs in this transaction.
-3. Retain the CVE `FOR UPDATE` lock established by step 2.
+   `FOR NO KEY UPDATE` as its first persistent read; a newly inserted CVE
+   becomes the transaction's locked root. No external I/O occurs in this
+   transaction.
+3. Retain the CVE `FOR NO KEY UPDATE` lock established by step 2.
 4. Acquire `FOR UPDATE` on the Ticket row.
 5. For a consumer call, revalidate Ticket accessibility from the locked-current
    Ticket. Capability has already been checked before CVE or Ticket lookup. An
@@ -640,8 +641,8 @@ severity-source handover, Product, and gate sequence above. It does not invoke
 `ignore_new_for_rejected_cve()` or create an automatic `CVE rejected` event; the
 authorized user may ignore the Ticket through the ordinary manual operation.
 
-**Locking**: `FOR SHARE` on acting User, `FOR UPDATE` on CVE, then `FOR
-UPDATE` on Ticket. CVE Resolution
+**Locking**: `FOR SHARE` on acting User, `FOR NO KEY UPDATE` on CVE, then
+`FOR UPDATE` on Ticket. CVE Resolution
 Behavior involves only local database operations and may insert a minimal CVE
 before that row can be locked. No synchronous external HTTP call or
 Redis/Celery operation occurs while either lock is held. Re-locking either row

@@ -1499,8 +1499,13 @@ class TestResolveCVELocator:
         assert len(recorder.statements) == 1
         statement = recorder.statements[0]
         assert statement.lstrip().upper().startswith("SELECT")
-        assert "FOR UPDATE" not in statement
-        assert "FOR SHARE" not in statement
+        for row_lock in (
+            "FOR UPDATE",
+            "FOR NO KEY UPDATE",
+            "FOR SHARE",
+            "FOR KEY SHARE",
+        ):
+            assert row_lock not in statement
 
     async def test_confidential_associated_cve_follows_the_canonical_predicate(
         self,

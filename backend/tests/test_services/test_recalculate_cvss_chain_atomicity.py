@@ -820,7 +820,7 @@ class TestLockOrder:
 
         statements = recorder.statements
         assert _CVE_TABLE.search(statements[0])
-        assert "FOR UPDATE" in statements[0]
+        assert "FOR NO KEY UPDATE" in statements[0]
         assert "FROM ticket" in statements[1]
         assert "FOR UPDATE" in statements[1]
         assert "ticket.cve_id" in statements[1]
@@ -905,13 +905,16 @@ class TestLockSerialization:
     async def test_waits_for_the_cve_lock_and_recalculates_from_the_winner(
         self, committed_world: _CommittedWorld
     ) -> None:
-        """Session B holds the CVE `FOR UPDATE` and adds the first SUSE
-        assessment; A's recalculation blocks on the CVE lock and, after B
-        commits, derives severity and priority from B's committed set."""
+        """Session B holds the CVE `FOR NO KEY UPDATE` (the CVE root mode)
+        and adds the first SUSE assessment; A's recalculation blocks on the
+        CVE lock and, after B commits, derives severity and priority from
+        B's committed set."""
         cve_id, ticket_id = await committed_world.cve_with_ticket()
         a = await committed_world.open_session()
         b = await committed_world.open_session()
-        await b.execute(select(CVE.id).where(CVE.id == cve_id).with_for_update())
+        await b.execute(
+            select(CVE.id).where(CVE.id == cve_id).with_for_update(key_share=True)
+        )
         b.add(
             CVECVSSAssessment(
                 cve_id=cve_id,

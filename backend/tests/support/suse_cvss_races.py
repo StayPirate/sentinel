@@ -305,7 +305,7 @@ async def prepare_loss(
             cve,
             ticket,
             [
-                select(CVE.id).where(CVE.id == cve.id).with_for_update(),
+                select(CVE.id).where(CVE.id == cve.id).with_for_update(key_share=True),
                 select(Ticket.id).where(Ticket.id == ticket.id).with_for_update(),
                 update(Ticket).where(Ticket.id == ticket.id).values(cve_id=cve.id),
             ],
