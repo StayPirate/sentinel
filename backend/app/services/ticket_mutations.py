@@ -722,7 +722,7 @@ async def refresh_priority_auto(db: AsyncSession, *, ticket: Ticket) -> bool:
 # ---------------------------------------------------------------------------
 
 
-async def _lock_accessible_ticket(
+async def lock_accessible_ticket(
     db: AsyncSession, ticket_id: UUID, caller: TicketCaller
 ) -> Ticket:
     """Lock the Ticket `FOR UPDATE` and revalidate consumer accessibility.
@@ -732,7 +732,10 @@ async def _lock_accessible_ticket(
     and included-package maintainership committed while this transaction
     waited for the lock (`docs/api-spec.md`, Authorization Chain
     Evaluation Order, flow 3). Missing and inaccessible Tickets both raise
-    the one `TicketNotFoundError`.
+    the one `TicketNotFoundError`. Shared by `set_severity_manual()` and
+    the `ticket_service` consumer mutations that lock the Ticket as their
+    own root (`associate_cve()`); the caller has already taken any
+    earlier root in the global User, CVE, Ticket order.
     """
     ticket = (
         await db.execute(
@@ -810,7 +813,7 @@ async def set_severity_manual(
         evaluation_date = _utc_now().date()
 
     acting_user = await stabilize_acting_user(db, acting_user_id)
-    ticket = await _lock_accessible_ticket(db, ticket_id, caller)
+    ticket = await lock_accessible_ticket(db, ticket_id, caller)
     ensure_ticket_operable(ticket)
     if ticket.cve_id is not None:
         raise SeverityDerivedError()

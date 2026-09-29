@@ -1701,6 +1701,7 @@ class TestTicketServiceQueryBoundary:
             name
             for name, member in inspect.getmembers(ticket_service, inspect.isfunction)
             if member.__module__ == ticket_service.__name__
+            and not name.startswith("_")
             and inspect.iscoroutinefunction(member)
         }
 
@@ -1710,6 +1711,7 @@ class TestTicketServiceQueryBoundary:
             "get_ticket_detail",
             "assemble_ticket_detail",
             "create_ticket",
+            "associate_cve",
         }
 
     def test_projection_exposes_no_internal_ticket_uuid(self) -> None:

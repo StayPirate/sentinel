@@ -4,7 +4,11 @@ mutation tests.
 Consumers:
 
 - `tests/test_services/test_upsert_cvss_assessment_atomicity.py`;
-- `tests/test_services/test_delete_cvss_assessment_atomicity.py`.
+- `tests/test_services/test_delete_cvss_assessment_atomicity.py`;
+- `tests/test_services/test_associate_cve_atomicity.py` (which also uses
+  `SessionStatementRecorder`, the optional `CommittedWorld.ticket()`
+  status/`severity_manual` parameters, and the optional
+  `CommittedWorld.affected_product()` `occurrence_id`/`package_name`).
 
 `CommittedWorld` owns committed rows that each consumer deletes explicitly
 at teardown (testing-strategy.md, Concurrency Testing); each consumer
@@ -25,7 +29,7 @@ from typing import Any
 
 import pytest
 from sqlalchemy import delete, select, update
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
 from app.core.enums import PackageStatus, Role, Severity, TicketStatus
 from app.models.cve import CVE
@@ -41,7 +45,7 @@ from app.models.ticket_package_track import TicketPackageTrack
 from app.models.user import User
 from app.models.user_role import UserRole
 from tests.support.suse_cvss import Vector
-from tests.support.ticket_mutations import EVAL
+from tests.support.ticket_mutations import EVAL, StatementRecorder
 
 
 class CommittedWorld:
@@ -113,13 +117,16 @@ class CommittedWorld:
         is_confidential: bool = False,
         assignee_id: uuid.UUID | None = None,
         priority_auto: str | None = None,
+        status: TicketStatus = TicketStatus.ANALYSIS,
+        severity_manual: Severity | None = None,
     ) -> Ticket:
         ticket = Ticket(
-            status=TicketStatus.ANALYSIS.value,
+            status=status.value,
             cve_id=cve_id,
             is_confidential=is_confidential,
             assignee_id=assignee_id,
             priority_auto=priority_auto,
+            severity_manual=severity_manual.value if severity_manual else None,
         )
         self.session.add(ticket)
         await self.session.flush()
@@ -146,10 +153,20 @@ class CommittedWorld:
         return package
 
     async def affected_product(
-        self, ticket: Ticket, *, threshold: Decimal, eligible: bool
+        self,
+        ticket: Ticket,
+        *,
+        threshold: Decimal,
+        eligible: bool,
+        occurrence_id: uuid.UUID | None = None,
+        package_name: str = "fictional-race-b",
     ) -> dict[str, str]:
         """One AFFECTED track with one in-support Product occurrence;
-        returns the `reason = cvss` event detail of that occurrence."""
+        returns the `reason = cvss` event detail of that occurrence.
+
+        `occurrence_id` fixes the `TicketPackageProduct.id` (the Product
+        event ordering key) instead of taking the generated one; a second
+        call on the same Ticket needs a distinct `package_name`."""
         suffix = uuid.uuid4().hex[:10]
         product = Product(
             name=f"Example Product {suffix}",
@@ -161,7 +178,7 @@ class CommittedWorld:
             general_support_end_date=EVAL + timedelta(days=365),
         )
         self.session.add(product)
-        package = TicketPackage(ticket_id=ticket.id, package_name="fictional-race-b")
+        package = TicketPackage(ticket_id=ticket.id, package_name=package_name)
         self.session.add(package)
         await self.session.flush()
         self.product_ids.append(product.id)
@@ -173,13 +190,14 @@ class CommittedWorld:
         )
         self.session.add(track)
         await self.session.flush()
-        self.session.add(
-            TicketPackageProduct(
-                ticket_package_track_id=track.id,
-                product_id=product.id,
-                eligible=eligible,
-            )
+        occurrence = TicketPackageProduct(
+            ticket_package_track_id=track.id,
+            product_id=product.id,
+            eligible=eligible,
         )
+        if occurrence_id is not None:
+            occurrence.id = occurrence_id
+        self.session.add(occurrence)
         await self.session.commit()
         return {
             "track": track.reference,
@@ -241,6 +259,18 @@ class CommittedWorld:
         ):
             await self.session.execute(statement)
         await self.session.commit()
+
+
+class SessionStatementRecorder(StatementRecorder):
+    """`StatementRecorder` limited to the statements of one session's own
+    connection: independent sessions share the engine, so the engine-level
+    recorder would interleave the statements of racing sessions."""
+
+    def __init__(self, db: AsyncSession) -> None:
+        super().__init__(db)
+        bind = db.bind
+        assert isinstance(bind, AsyncConnection)
+        self._engine = bind.sync_connection
 
 
 async def assert_blocked(task: asyncio.Task[Any]) -> None:

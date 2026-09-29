@@ -162,6 +162,18 @@ def ticket_cve_conflict_error(existing_ticket_id: str) -> AppError:
     )
 
 
+def ticket_cve_already_set_error() -> AppError:
+    """Create the 400 for associating a CVE with a Ticket that has one.
+
+    See `docs/features/tickets/tickets.md` (Associate CVE).
+    """
+    return AppError(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        code=ErrorCode.TICKET_CVE_ALREADY_SET,
+        detail="Ticket already has a CVE associated.",
+    )
+
+
 def ticket_not_mutable_error() -> AppError:
     """Create the 409 for a mutation rejected by the manual-zone guard.
 

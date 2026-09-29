@@ -241,6 +241,27 @@ class TicketSeverityUpdateRequest(BaseModel):
     )
 
 
+class TicketAssociateCVERequest(BaseModel):
+    """Request body of `POST /api/v1/tickets/{ticket_id}/associate-cve`.
+
+    See `docs/features/tickets/tickets.md` (Associate CVE). `cve_id` is
+    required and carries no schema length limit, so any string — including
+    an empty or over-length one — reaches the endpoint's
+    `422 CVE_INVALID_FORMAT` check. A missing, `null`, or non-string value
+    fails with the global `422 VALIDATION_ERROR`.
+    """
+
+    cve_id: str = Field(
+        description=(
+            "CVE identifier to associate (e.g. `CVE-2024-1234`), matching "
+            "`^CVE-[0-9]{4}-[0-9]{4,}$` with at most 20 characters; otherwise "
+            "`422 CVE_INVALID_FORMAT`. An unknown CVE is created as a "
+            "placeholder record. Required."
+        ),
+        examples=["CVE-2024-1234"],
+    )
+
+
 class TicketCreateRequest(BaseModel):
     """Request body of `POST /api/v1/tickets`.
 
