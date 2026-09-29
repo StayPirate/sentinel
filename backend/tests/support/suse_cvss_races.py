@@ -8,7 +8,9 @@ Consumers:
 - `tests/test_services/test_associate_cve_atomicity.py` (which also uses
   `SessionStatementRecorder`, the optional `CommittedWorld.ticket()`
   status/`severity_manual` parameters, and the optional
-  `CommittedWorld.affected_product()` `occurrence_id`/`package_name`).
+  `CommittedWorld.affected_product()` `occurrence_id`/`package_name`);
+- `tests/test_services/test_cve_root_lock_mode_atomicity.py` (the CVE root
+  lock mode races, with `SessionStatementRecorder`).
 
 `CommittedWorld` owns committed rows that each consumer deletes explicitly
 at teardown (testing-strategy.md, Concurrency Testing); each consumer

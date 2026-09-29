@@ -1573,7 +1573,7 @@ Every new or modified API endpoint MUST be tested for:
 - Authorization enforcement when the declared capability can produce 403
 - Resource not found → 404
 - Edge cases: empty results, boundary values, concurrent modifications.
-  For an endpoint backed by `FOR UPDATE` locking, the service function's
+  For an endpoint backed by pessimistic row locking, the service function's
   two-session test (Service Functions) proves lock serialization. The
   endpoint repeats it only when the handler adds its own locking, ordering,
   or transaction step (see Tier Responsibility and Proportionality)

@@ -777,6 +777,12 @@ validation remains compatible. A mutation that can only make a User eligible,
 such as reactivation, may retain its owning specification's same or stronger
 User lock.
 
+The active contract currently applies this role-origin rule to manual role
+mutation. Deferred external-provisioning and `RoleMapping` workflows must
+define how they stabilize their complete affected-User set before those
+workflows become active; this ordering rule does not by itself choose their
+persistence owner or transaction-composition mechanism.
+
 Every acquisition of the CVE root uses `FOR NO KEY UPDATE`. This mode
 conflicts with itself, `FOR SHARE`, and `FOR UPDATE`, so every CVE-root holder
 still serializes on the CVE row, while the foreign-key `FOR KEY SHARE` of a
@@ -787,12 +793,6 @@ transaction writing its locked Ticket a second time would wait for a CVE holder
 that is itself waiting for that Ticket, and deadlock. `FOR UPDATE` on the CVE
 row is required only to delete a CVE or change its key, which no workflow does.
 The Ticket root keeps `FOR UPDATE`.
-
-The active contract currently applies this role-origin rule to manual role
-mutation. Deferred external-provisioning and `RoleMapping` workflows must
-define how they stabilize their complete affected-User set before those
-workflows become active; this ordering rule does not by itself choose their
-persistence owner or transaction-composition mechanism.
 
 When one workflow affects multiple Users or Tickets, it locks every applicable
 User in ascending UUID order before locking the union of applicable Tickets in

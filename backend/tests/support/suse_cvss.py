@@ -9,7 +9,9 @@ Consumers:
   (rollback, evaluation date, independent-session races);
 - `tests/test_services/test_delete_cvss_assessment.py` and
   `tests/test_services/test_delete_cvss_assessment_atomicity.py` (the
-  same concerns for `delete_cvss_assessment()`).
+  same concerns for `delete_cvss_assessment()`);
+- `tests/test_services/test_cve_root_lock_mode_atomicity.py` (the CVE root
+  lock mode races).
 
 The vectors and their canonical values, scores, and severities are
 transcribed from the CVSS specifications (cvss-scoring.md, Accepted Base

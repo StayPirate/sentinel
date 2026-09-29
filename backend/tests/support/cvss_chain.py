@@ -5,7 +5,9 @@ Consumers:
 - `tests/test_services/test_recalculate_cvss_chain.py` (eligibility
   formula, association mode, default-version matrix);
 - `tests/test_services/test_recalculate_cvss_chain_atomicity.py`
-  (classification, idempotency, rollback, evaluation date, locking).
+  (classification, idempotency, rollback, evaluation date, locking);
+- `tests/test_services/test_cve_root_lock_mode_atomicity.py` (event and
+  severity helpers for the CVE root lock mode races).
 
 The `cve_with` fixture lives in the plugin module
 `tests/support/ticket_mutation_fixtures.py`. Expected values in the

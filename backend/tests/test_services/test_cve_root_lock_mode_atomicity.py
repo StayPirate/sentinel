@@ -158,7 +158,7 @@ async def _race_ticket_first_against_cvss(
     with SessionStatementRecorder(a) as recorder:
         first = world.start(a, ticket_first(a))
         await asyncio.wait_for(pause.paused.wait(), timeout=WAIT)
-        assert [s for s in recorder.statements if _is_ticket_update(s)] != []
+        assert len([s for s in recorder.statements if _is_ticket_update(s)]) == 1
         assert await _is_locked(probe, _cve_row(cve)) is False
 
         second = world.start(b, cvss(b))
