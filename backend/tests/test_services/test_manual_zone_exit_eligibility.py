@@ -293,7 +293,9 @@ class TestCurrentInputs:
         """package-service.md, Synchronous manual-zone-exit eligibility
         convergence, step 2. A CVE-less Ticket (10.0) and implicit
         thresholds: every automatic record is eligible. The override would
-        also become eligible, yet keeps its value without an event."""
+        also become eligible, yet keeps its value without an event. The
+        boundary never restores exclusion: its only UPDATEs set
+        `ticket_package_product.eligible`, so no exclusion marker changes."""
         ticket = await cveless(ticket_factory)
         await tree(
             ticket,
@@ -306,9 +308,16 @@ class TestCurrentInputs:
         await tree(ticket, products=(Prod(eligible=False),), track_excluded=True)
         await tree(ticket, products=(Prod(eligible=False),), package_excluded=True)
 
-        result = await _converge(db_session, ticket)
+        with StatementRecorder(db_session) as recorder:
+            result = await _converge(db_session, ticket)
 
         assert result == _result(5, 1, 4)
+        updates = [
+            s for s in recorder.statements if s.lstrip().upper().startswith("UPDATE")
+        ]
+        assert len(updates) == 4
+        assert updates == _updates(recorder, "ticket_package_product")
+        assert all("deleted_at" not in s for s in updates)
         assert await eligibility(db_session, ticket.id) == [
             (True, False),
             (True, False),
