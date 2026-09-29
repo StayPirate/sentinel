@@ -26,6 +26,7 @@ specification, never computed by the module under test.
 
 from __future__ import annotations
 
+import ast
 import inspect
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -1449,18 +1450,17 @@ class TestTreeReadRaces:
 @pytest.mark.unit
 class TestPackageServiceModuleBoundary:
     def test_imports_no_higher_level_ticket_service(self) -> None:
-        """`package_service` never imports `ticket_service` or the audit
-        trail (package-service.md, Relationship with other modules)."""
+        """`package_service` never imports `ticket_service`
+        (package-service.md, Relationship with other modules)."""
         modules = imported_modules(
             APP_ROOT / "services" / "package_service.py", "app.services"
         )
 
         assert "app.services.ticket_service" not in modules
-        assert "app.services.ticket_audit_log" not in modules
         assert "app.models.ticket_package_maintainer" not in modules
         assert "app.models.user" not in modules
 
-    def test_query_is_the_only_coroutine(self) -> None:
+    def test_implemented_coroutines(self) -> None:
         coroutines = {
             name
             for name, member in inspect.getmembers(package_service, inspect.isfunction)
@@ -1468,4 +1468,66 @@ class TestPackageServiceModuleBoundary:
             and inspect.iscoroutinefunction(member)
         }
 
-        assert coroutines == {"get_ticket_packages"}
+        assert coroutines == {
+            "get_ticket_packages",
+            "converge_manual_zone_exit_eligibility",
+        }
+
+    def test_uses_no_private_ticket_mutations_helper(self) -> None:
+        """The manual-zone-exit convergence is package-owned; it neither
+        calls the CVSS chain's inline propagation helper nor imports any
+        private `ticket_mutations` name (ticket-service.md, Manual-Zone
+        Exit Operations; package-service.md, Synchronous manual-zone-exit
+        eligibility convergence)."""
+        tree = _package_service_tree()
+        referenced = {
+            node.attr if isinstance(node, ast.Attribute) else node.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Attribute | ast.Name)
+        }
+        private_imports = [
+            alias.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom)
+            and node.module == "app.services.ticket_mutations"
+            for alias in node.names
+            if alias.name.startswith("_")
+        ]
+        private_attributes = [
+            node.attr
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "ticket_mutations"
+            and node.attr.startswith("_")
+        ]
+
+        assert "_propagate_automatic_product_eligibility" not in referenced
+        assert (private_imports, private_attributes) == ([], [])
+
+    def test_calls_the_shared_evaluator_with_exactly_its_four_inputs(self) -> None:
+        """package-model.md, Axis 2: Eligibility: one shared pure evaluator,
+        fed only the override marker, lifecycle phase, Product threshold,
+        and Eligibility Score Resolution."""
+        calls = [
+            node
+            for node in ast.walk(_package_service_tree())
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "evaluate_product_eligibility"
+        ]
+
+        assert len(calls) >= 1
+        for call in calls:
+            assert call.args == []
+            assert {k.arg for k in call.keywords} == {
+                "is_eligible_override",
+                "lifecycle_phase",
+                "cvss_threshold",
+                "eligibility_score",
+            }
+
+
+def _package_service_tree() -> ast.Module:
+    path = APP_ROOT / "services" / "package_service.py"
+    return ast.parse(path.read_text(encoding="utf-8"))

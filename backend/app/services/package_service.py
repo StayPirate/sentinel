@@ -1,10 +1,13 @@
-"""Package-centric operations: package-tree queries.
+"""Package-centric operations: package-tree queries and eligibility.
 
 See `docs/features/packages/package-service.md` for the full
 specification. This module currently implements the package-tree query
 (Query Operations > `get_ticket_packages()`) in its standalone consumer
-mode and its composed mode; mutation, orchestration, and search
-operations are added by their owning work items.
+mode and its composed mode, and the synchronous manual-zone-exit
+eligibility convergence (`converge_manual_zone_exit_eligibility()`),
+which `ticket_service` composes with an already locked Ticket; mutation,
+orchestration, and search operations are added by their owning work
+items. This module never imports `ticket_service`.
 
 Every operation accepts the caller's `AsyncSession` and never commits or
 rolls back; database exceptions propagate unchanged (Transaction
@@ -48,16 +51,20 @@ from app.core.enums import (
     NonActionableReason,
     PackageStatus,
     Severity,
+    TicketAuditEventType,
     TicketStatus,
     WorkflowType,
 )
 from app.core.exceptions import TicketNotFoundError
 from app.core.identifiers import parse_ticket_id
+from app.models.cve_cvss_assessment import CVECVSSAssessment
 from app.models.product import Product
 from app.models.ticket import Ticket
 from app.models.ticket_package import TicketPackage
 from app.models.ticket_package_product import TicketPackageProduct
 from app.models.ticket_package_track import TicketPackageTrack
+from app.services import settings as settings_service
+from app.services.cvss import resolve_eligibility_score
 from app.services.package_actionability import (
     is_delivery_relevant,
     package_actionable_expression,
@@ -67,7 +74,9 @@ from app.services.package_actionability import (
     track_actionable_expression,
     track_non_actionable_reason,
 )
+from app.services.product_eligibility import evaluate_product_eligibility
 from app.services.product_service import lifecycle_phase_expression
+from app.services.ticket_audit_log import TicketAuditLog
 from app.services.ticket_deadline_expressions import active_release_request_exists
 from app.services.ticket_deadlines import (
     DueDates,
@@ -543,4 +552,163 @@ async def get_ticket_packages(
         row.packages,
         ticket=ticket_tree_context_from_row(row),
         evaluation_instant=evaluation_instant,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Synchronous manual-zone-exit eligibility convergence
+# ---------------------------------------------------------------------------
+
+_REACTIVATION_REASON: Final = "reactivation"
+
+
+@dataclass(frozen=True, slots=True)
+class ManualZoneExitEligibilityResult:
+    """Occurrence counts of one manual-zone-exit eligibility convergence."""
+
+    examined: int
+    override_skipped: int
+    changed: int
+
+
+def _eligibility_value(eligible: bool) -> str:
+    """The `product_eligibility_changed` old/new value (`true`/`false`)."""
+    return "true" if eligible else "false"
+
+
+async def converge_manual_zone_exit_eligibility(
+    db: AsyncSession,
+    *,
+    ticket: Ticket,
+    evaluation_date: date,
+) -> ManualZoneExitEligibilityResult:
+    """Converge every automatic Product occurrence of an exiting Ticket.
+
+    Category A composable boundary (package-service.md, Synchronous
+    manual-zone-exit eligibility convergence; package-model.md, Ticket
+    Convergence phase 1). Invoked only by
+    `ticket_service._complete_manual_zone_exit()`.
+
+    Q1: `ticket` is the Ticket the `ticket_service` exit workflow already
+    locked `FOR UPDATE`, validated in its exact `Ignored` or `Duplicated`
+    source state, and set to the intermediate `Analysis` floor.
+    `evaluation_date` is the workflow's one UTC date.
+
+    Q2: the caller owns the transaction and holds the Ticket lock (plus,
+    for a consumer exit, the acting User `FOR SHARE`). Acquires no lock:
+    it never reacquires the Ticket lock and never locks the CVE; the CVE
+    assessments are current committed state read without a lock.
+
+    Q3: (1) reads the current persisted `default_cvss_version` and, for a
+    CVE-associated Ticket, the complete assessment set, and resolves the
+    Eligibility Score Resolution (the `10.0` fallback without a SUSE
+    default-version assessment, including a CVE-less Ticket). (2) Reloads,
+    in one statement ordered by `TicketPackageProduct.id`, every Product
+    occurrence of the Ticket, including directly or effectively excluded
+    and EOL occurrences, with its override marker, `eligible`, Product
+    threshold, lifecycle phase on `evaluation_date`, and the event-time
+    subject (track reference, package name, Product display name and
+    CPE). (3) Applies the shared pure evaluator, skips every override
+    without change or event, and updates only booleans that differ, each
+    with one system `product_eligibility_changed` (`reason =
+    reactivation`, `comment NULL`, no `override_action`). (4) Flushes.
+    Never assigns, reconciles, writes `CVE.severity`, restores exclusion,
+    creates package descendants, reads audit history, commits, rolls
+    back, or performs network, Redis, or Celery I/O. Re-invocation with
+    the same date and inputs is a no-op.
+
+    Q4: returns the examined, override-skipped, and changed counts.
+
+    Q6: raises `ValueError` before any database operation when the Ticket
+    is not at the `Analysis` floor (a manual-zone Ticket is never passed
+    directly). `RequiredSystemSettingMissingError`, `ValueError` from an
+    invalid default version or assessment set, and audit, database, and
+    flush exceptions propagate and roll back the caller's complete
+    manual-zone-exit transaction.
+    """
+    if ticket.status != TicketStatus.ANALYSIS:
+        raise ValueError(
+            "the manual-zone exit must set the Analysis floor before converging."
+        )
+
+    default_cvss_version = await settings_service.get_default_cvss_version(db)
+    assessments: Sequence[CVECVSSAssessment] = ()
+    if ticket.cve_id is not None:
+        assessments = (
+            (
+                await db.execute(
+                    select(CVECVSSAssessment).where(
+                        CVECVSSAssessment.cve_id == ticket.cve_id
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    eligibility = resolve_eligibility_score(assessments, default_cvss_version)
+
+    occurrence = TicketPackageProduct
+    rows = (
+        await db.execute(
+            select(
+                occurrence,
+                TicketPackageTrack.reference,
+                TicketPackage.package_name,
+                Product.display_name,
+                Product.cpe,
+                Product.cvss_threshold,
+                lifecycle_phase_expression(evaluation_date).label("lifecycle"),
+            )
+            .join(
+                TicketPackageTrack,
+                TicketPackageTrack.id == occurrence.ticket_package_track_id,
+            )
+            .join(
+                TicketPackage, TicketPackage.id == TicketPackageTrack.ticket_package_id
+            )
+            .join(Product, Product.id == occurrence.product_id)
+            .where(TicketPackage.ticket_id == ticket.id)
+            .order_by(occurrence.id)
+            .execution_options(populate_existing=True)
+        )
+    ).all()
+
+    override_skipped = 0
+    changed = 0
+    for row in rows:
+        product_occurrence: TicketPackageProduct = row[0]
+        new_eligible = evaluate_product_eligibility(
+            is_eligible_override=product_occurrence.is_eligible_override,
+            lifecycle_phase=(
+                LifecyclePhase(row.lifecycle) if row.lifecycle is not None else None
+            ),
+            cvss_threshold=row.cvss_threshold,
+            eligibility_score=eligibility,
+        ).automatic_eligible
+        if new_eligible is None:
+            override_skipped += 1
+            continue
+        old_eligible = product_occurrence.eligible
+        if new_eligible == old_eligible:
+            continue
+        product_occurrence.eligible = new_eligible
+        changed += 1
+        await TicketAuditLog.log_event(
+            db,
+            ticket_id=ticket.id,
+            event_type=TicketAuditEventType.PRODUCT_ELIGIBILITY_CHANGED,
+            user_id=None,
+            old_value=_eligibility_value(old_eligible),
+            new_value=_eligibility_value(new_eligible),
+            detail={
+                "track": row.reference,
+                "package": row.package_name,
+                "product_name": row.display_name,
+                "product_cpe": row.cpe,
+                "reason": _REACTIVATION_REASON,
+            },
+        )
+    await db.flush()
+    return ManualZoneExitEligibilityResult(
+        examined=len(rows), override_skipped=override_skipped, changed=changed
     )

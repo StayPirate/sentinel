@@ -47,10 +47,26 @@ _AUDIT_TRAIL_MODULE = "app.services.ticket_audit_log"
 _AUDIT_WRITE_SURFACE = frozenset(
     {"TicketAuditLog", "CVE_SOURCE_AUDIT_LABELS", "MANUAL_TICKET_CREATED_COMMENT"}
 )
+# Service modules that write Ticket audit events, including the
+# manual-zone exits and their package-owned eligibility boundary.
+_AUDIT_WRITING_SERVICES = (
+    "ticket_service.py",
+    "ticket_mutations.py",
+    "package_service.py",
+)
 
 
 def _python_files(*parts: str) -> list[Path]:
     return sorted((APP_ROOT.joinpath(*parts)).rglob("*.py"))
+
+
+def _audit_reader_scan() -> list[Path]:
+    """Every module scanned for Ticket audit history reads."""
+    return [
+        path
+        for layer in ("api", "services", "tasks", "cli", "core")
+        for path in _python_files(layer)
+    ]
 
 
 def _parse(path: Path) -> ast.Module:
@@ -132,8 +148,7 @@ class TestAuditHistoryIsNotAccessState:
     def test_only_the_audit_trail_service_reads_ticket_audit_events(self) -> None:
         offenders = [
             _relative(path)
-            for layer in ("api", "services", "tasks", "cli", "core")
-            for path in _python_files(layer)
+            for path in _audit_reader_scan()
             if path != _AUDIT_READ_OWNER
             and _AUDIT_EVENT_MODEL in _referenced_names(_parse(path))
         ]
@@ -145,8 +160,11 @@ class TestAuditHistoryIsNotAccessState:
             assert _AUDIT_TRAIL_MODULE not in imports, module
             assert "app.models.ticket_audit_event" not in imports, module
 
-    def test_ticket_service_imports_only_the_audit_write_surface(self) -> None:
-        tree = _parse(APP_ROOT / "services" / "ticket_service.py")
+    @pytest.mark.parametrize("module", _AUDIT_WRITING_SERVICES)
+    def test_mutation_service_imports_only_the_audit_write_surface(
+        self, module: str
+    ) -> None:
+        tree = _parse(APP_ROOT / "services" / module)
         assert "app.models.ticket_audit_event" not in _imported_modules(tree)
         imported = {
             alias.name
@@ -162,6 +180,13 @@ class TestAuditHistoryIsNotAccessState:
             and any(alias.name == _AUDIT_TRAIL_MODULE for alias in node.names)
         ]
         assert whole_module_imports == []
+
+    def test_the_audit_reader_scan_covers_the_audit_writing_services(self) -> None:
+        """Guards the module-wide scan above against passing vacuously
+        (ticket-audit-log.md, Testing Requirement 25)."""
+        scanned = set(_audit_reader_scan())
+        for module in _AUDIT_WRITING_SERVICES:
+            assert APP_ROOT / "services" / module in scanned, module
 
 
 @pytest.mark.unit

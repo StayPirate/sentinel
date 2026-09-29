@@ -8,8 +8,10 @@ CVE for the later association (`associate_cve`), Assign Ticket
 (`assign_ticket`), Set Priority Override
 (`docs/features/tickets/ticket-priority.md`, `set_priority_override()`),
 Ignore Ticket (`ignore_ticket`), Mark Ticket as Duplicate
-(`mark_as_duplicate`), and Set Severity Manual for the manual-severity mutation
-(`docs/features/tickets/ticket-mutations.md`, `set_severity_manual()`).
+(`mark_as_duplicate`), Reopen Ticket (`reopen_from_ignored`), Revert
+Duplicate Status (`revert_duplicate`), and Set Severity Manual for the
+manual-severity mutation (`docs/features/tickets/ticket-mutations.md`,
+`set_severity_manual()`).
 Handlers stay thin: they supply caller information to `ticket_service`,
 map its outcomes to HTTP, and serialize its semantic projection. The
 service owns SNTL resolution, visibility-constrained selection, and the
@@ -1161,6 +1163,146 @@ async def mark_ticket_as_duplicate(
         raise _self_duplicate_error() from None
     except DuplicateConcurrentModificationError:
         raise _duplicate_concurrent_modification_error() from None
+    detail = await ticket_service.assemble_ticket_detail(
+        db, ticket_id=ticket.id, evaluation_date=evaluation_date
+    )
+    return TicketDetailResponse(data=serialize_ticket_detail(detail))
+
+
+@router.post(
+    "/tickets/{ticket_id}/reopen",
+    response_model=TicketDetailResponse,
+    summary="Reopen Ticket",
+    description=(
+        "Reopens an `ignored` Ticket. No request body. An active vulnerability "
+        "analyst caller becomes the assignee, replacing any current assignee; "
+        "otherwise the current assignee is kept. Automatic Product eligibility "
+        "is re-evaluated from current data, and the Ticket status is evaluated "
+        "from its gates (`analysis`, `analyzed`, or `resolved`). Returns the "
+        "post-mutation Ticket detail. Requires `triage_ticket`."
+    ),
+    responses={
+        404: {
+            "model": ErrorResponse,
+            "description": (
+                "`TICKET_NOT_FOUND`: Ticket identifier is malformed, does not "
+                "exist, or identifies a Ticket inaccessible to the caller."
+            ),
+        },
+        409: {
+            "model": ErrorResponse,
+            "description": (
+                "`TICKET_INVALID_TRANSITION`: the Ticket is not `ignored`."
+            ),
+        },
+    },
+)
+async def reopen_ticket(
+    ticket_id: TicketIdPath,
+    db: DatabaseSession,
+    principal: Annotated[
+        AuthenticatedPrincipal, Depends(require_capability(Capability.TRIAGE_TICKET))
+    ],
+    caller: AuthenticatedTicketCaller,
+    ticket: Annotated[ResolvedTicket, Depends(require_accessible_ticket)],
+) -> TicketDetailResponse:
+    """Reopen Ticket — see `docs/features/tickets/tickets.md`.
+
+    Authorization follows `docs/api-spec.md` (Authorization Chain
+    Evaluation Order, flow 3): authentication, then `triage_ticket`
+    before any Ticket lookup, then the delegated preliminary SNTL
+    resolution. `reopen_from_ignored()` revalidates accessibility from
+    locked-current state; it is the dedicated manual-zone exit and never
+    produces `TICKET_NOT_MUTABLE`. The handler captures the one workflow
+    `evaluation_date`, reused by the eligibility convergence, the final
+    reconciliation, and the `TicketDetail` assembled from the locked
+    post-state inside the same transaction
+    (`docs/features/tickets/ticket-service.md`, `get_ticket_detail()`).
+    """
+    evaluation_date = _utc_now().date()
+    try:
+        await ticket_service.reopen_from_ignored(
+            db,
+            ticket_id=ticket.id,
+            acting_user_id=principal.user.id,
+            caller=caller,
+            evaluation_date=evaluation_date,
+        )
+    except TicketNotFoundError:
+        raise ticket_not_found_error() from None
+    except InvalidTransitionError:
+        raise _invalid_transition_error() from None
+    detail = await ticket_service.assemble_ticket_detail(
+        db, ticket_id=ticket.id, evaluation_date=evaluation_date
+    )
+    return TicketDetailResponse(data=serialize_ticket_detail(detail))
+
+
+@router.post(
+    "/tickets/{ticket_id}/revert-duplicate",
+    response_model=TicketDetailResponse,
+    summary="Revert Duplicate Status",
+    description=(
+        "Reverts a `duplicated` Ticket into the gate zone and clears its "
+        "duplicate link. No request body. Tickets previously repointed away "
+        "from this Ticket keep their current target. An active vulnerability "
+        "analyst caller becomes the assignee, replacing any current assignee; "
+        "otherwise the current assignee is kept. Automatic Product eligibility "
+        "is re-evaluated from current data, and the Ticket status is evaluated "
+        "from its gates (`analysis`, `analyzed`, or `resolved`). Returns the "
+        "post-mutation Ticket detail. Requires `triage_ticket`."
+    ),
+    responses={
+        404: {
+            "model": ErrorResponse,
+            "description": (
+                "`TICKET_NOT_FOUND`: Ticket identifier is malformed, does not "
+                "exist, or identifies a Ticket inaccessible to the caller."
+            ),
+        },
+        409: {
+            "model": ErrorResponse,
+            "description": (
+                "`TICKET_INVALID_TRANSITION`: the Ticket is not `duplicated`."
+            ),
+        },
+    },
+)
+async def revert_ticket_duplicate(
+    ticket_id: TicketIdPath,
+    db: DatabaseSession,
+    principal: Annotated[
+        AuthenticatedPrincipal, Depends(require_capability(Capability.TRIAGE_TICKET))
+    ],
+    caller: AuthenticatedTicketCaller,
+    ticket: Annotated[ResolvedTicket, Depends(require_accessible_ticket)],
+) -> TicketDetailResponse:
+    """Revert Duplicate Status — see `docs/features/tickets/tickets.md`.
+
+    Authorization follows `docs/api-spec.md` (Authorization Chain
+    Evaluation Order, flow 3): authentication, then `triage_ticket`
+    before any Ticket lookup, then the delegated preliminary SNTL
+    resolution. `revert_duplicate()` revalidates accessibility from
+    locked-current state; it is the dedicated manual-zone exit and never
+    produces `TICKET_NOT_MUTABLE`. The handler captures the one workflow
+    `evaluation_date`, reused by the eligibility convergence, the final
+    reconciliation, and the `TicketDetail` assembled from the locked
+    post-state inside the same transaction
+    (`docs/features/tickets/ticket-service.md`, `get_ticket_detail()`).
+    """
+    evaluation_date = _utc_now().date()
+    try:
+        await ticket_service.revert_duplicate(
+            db,
+            ticket_id=ticket.id,
+            acting_user_id=principal.user.id,
+            caller=caller,
+            evaluation_date=evaluation_date,
+        )
+    except TicketNotFoundError:
+        raise ticket_not_found_error() from None
+    except InvalidTransitionError:
+        raise _invalid_transition_error() from None
     detail = await ticket_service.assemble_ticket_detail(
         db, ticket_id=ticket.id, evaluation_date=evaluation_date
     )
