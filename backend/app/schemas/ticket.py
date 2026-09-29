@@ -241,6 +241,48 @@ class TicketSeverityUpdateRequest(BaseModel):
     )
 
 
+class TicketPriorityUpdateRequest(BaseModel):
+    """Request body of `PATCH /api/v1/tickets/{ticket_id}/priority`.
+
+    See `docs/features/tickets/tickets.md` (Set Priority Override). The
+    single field is required and nullable (`docs/api-spec.md`, Partial
+    Update Semantics: single-field PATCH): a lowercase level sets or
+    changes the override, while JSON `null` clears it. An omitted field
+    or any other value fails with the global `422 VALIDATION_ERROR`.
+    """
+
+    priority: TicketPriorityValue | None = Field(
+        description=(
+            "Manual priority override: `p1`, `p2`, `p3`, or `p4` sets it; JSON "
+            "`null` clears it and returns the Ticket to its automatic priority. "
+            "Required."
+        ),
+        examples=["p2", None],
+    )
+
+
+class TicketAssigneeUpdateRequest(BaseModel):
+    """Request body of `PATCH /api/v1/tickets/{ticket_id}/assignee`.
+
+    See `docs/features/tickets/tickets.md` (Assign Ticket). `user_id` is a
+    required, non-nullable UUID-or-username string (`docs/api-spec.md`,
+    User Identifier Resolution): a Ticket cannot be unassigned through the
+    API. The service locks the target before the Ticket but reports its
+    absence only after locked-current Ticket accessibility. An omitted,
+    `null`, or non-string field fails with the global
+    `422 VALIDATION_ERROR`.
+    """
+
+    user_id: str = Field(
+        description=(
+            "Target user: UUID or exact username. The user must be active and "
+            "hold the `vulnerability_analyst` role. Required; `null` is "
+            "rejected (no unassignment through the API)."
+        ),
+        examples=["jdoe"],
+    )
+
+
 class TicketAssociateCVERequest(BaseModel):
     """Request body of `POST /api/v1/tickets/{ticket_id}/associate-cve`.
 
