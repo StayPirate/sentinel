@@ -7,7 +7,7 @@ Owning specifications:
   `ensure_cve_exists()` — Format guard, Placeholder Records, Concurrency;
   CVE Upsert Serialization > New CVE; Exceptions: `CVEIdFormatError`).
 - docs/features/tickets/ticket-service.md (`create_ticket` step 2: the
-  lock-aware resolution is the CVE `FOR UPDATE` read).
+  lock-aware resolution is the CVE `FOR NO KEY UPDATE` read).
 
 The independent-session races (ensure/ensure winner, rolled-back first
 inserter, a conflict loser holding the winner lock) live in
@@ -233,7 +233,7 @@ class TestLockAwareForm:
         statements = _cve_statements(recorder)
         assert len(statements) == 1
         assert statements[0].startswith("SELECT")
-        assert statements[0].rstrip().endswith("FOR UPDATE")
+        assert statements[0].rstrip().endswith("FOR NO KEY UPDATE")
 
     async def test_new_row_is_inserted_between_locked_reads(
         self, db_session: AsyncSession
@@ -244,10 +244,10 @@ class TestLockAwareForm:
         statements = _cve_statements(recorder)
         assert len(statements) == 3
         assert statements[0].startswith("SELECT")
-        assert statements[0].rstrip().endswith("FOR UPDATE")
+        assert statements[0].rstrip().endswith("FOR NO KEY UPDATE")
         assert statements[1].startswith("INSERT INTO cve")
         assert statements[2].startswith("SELECT")
-        assert statements[2].rstrip().endswith("FOR UPDATE")
+        assert statements[2].rstrip().endswith("FOR NO KEY UPDATE")
 
     @pytest.mark.parametrize("existing", [True, False], ids=["existing", "new"])
     async def test_plain_form_takes_no_row_lock(

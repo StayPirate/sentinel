@@ -948,8 +948,9 @@ async def _propagate_automatic_product_eligibility(
     the chain's default version (or the fallback); `evaluation_date` is
     the chain's one UTC date.
 
-    Q2: the caller holds the CVE then Ticket `FOR UPDATE` roots (and, for
-    manual work, the acting User before them). Acquires no lock.
+    Q2: the caller holds the CVE `FOR NO KEY UPDATE` then Ticket
+    `FOR UPDATE` roots (and, for manual work, the acting User before
+    them). Acquires no lock.
 
     Q3: reloads, in one statement ordered by `TicketPackageProduct.id`,
     every Product occurrence of the Ticket — including directly or
@@ -1069,11 +1070,11 @@ async def recalculate_cvss_chain(
     date for lifecycle, eligibility, actionability, reconciliation, and
     the result; captured once at entry when omitted.
 
-    Q2: the caller owns the transaction. Takes the CVE `FOR UPDATE` as the
-    first persistent read, then the associated Ticket `FOR UPDATE` (in
-    association mode both are same-transaction re-locks of the roots
-    `associate_cve()` already holds). Performs no accessibility check and
-    does not call `ensure_ticket_operable()`.
+    Q2: the caller owns the transaction. Takes the CVE `FOR NO KEY
+    UPDATE` as the first persistent read, then the associated Ticket
+    `FOR UPDATE` (in association mode both are same-transaction re-locks
+    of the roots `associate_cve()` already holds). Performs no
+    accessibility check and does not call `ensure_ticket_operable()`.
 
     Q3: (1) default-version mode with no CVE row returns `missing` with no
     other read or effect. (2) Reads `default_cvss_version` once (unless
@@ -1122,7 +1123,7 @@ async def recalculate_cvss_chain(
         await db.execute(
             select(CVE)
             .where(CVE.id == cve_id)
-            .with_for_update()
+            .with_for_update(key_share=True)
             .execution_options(populate_existing=True)
         )
     ).scalar_one_or_none()
@@ -1307,7 +1308,9 @@ async def _lock_accessible_cve_roots(
 ) -> tuple[CVE, Ticket | None]:
     """Lock the CVE then its associated Ticket and revalidate accessibility.
 
-    The CVE `FOR UPDATE` is taken first; the Ticket currently associated
+    The CVE `FOR NO KEY UPDATE` is taken first (`docs/conventions.md`,
+    Cross-Domain Root Lock Order: a referencing Ticket's foreign-key
+    `FOR KEY SHARE` stays compatible); the Ticket currently associated
     with the locked CVE is then locked `FOR UPDATE`, so a concurrent
     association composes in the global CVE then Ticket order. The
     accessibility decision is a separate statement issued after both
@@ -1322,7 +1325,7 @@ async def _lock_accessible_cve_roots(
         await db.execute(
             select(CVE)
             .where(CVE.id == cve_id)
-            .with_for_update()
+            .with_for_update(key_share=True)
             .execution_options(populate_existing=True)
         )
     ).scalar_one_or_none()
@@ -1409,8 +1412,8 @@ async def upsert_cvss_assessment(
 
     Q2: the caller has verified `manage_cvss` and owns the transaction.
     Locks, in order: the acting User `FOR SHARE`
-    (`stabilize_acting_user()`), the CVE `FOR UPDATE`, then the Ticket
-    associated with the locked CVE `FOR UPDATE`.
+    (`stabilize_acting_user()`), the CVE `FOR NO KEY UPDATE`, then the
+    Ticket associated with the locked CVE `FOR UPDATE`.
 
     Q3: (1) validates authority and parses the vector from input only.
     (2) Locks the roots and (3) revalidates CVE accessibility from the
@@ -1639,8 +1642,8 @@ async def delete_cvss_assessment(
 
     Q2: the caller has verified `manage_cvss` and owns the transaction.
     Locks, in order: the acting User `FOR SHARE`
-    (`stabilize_acting_user()`), the CVE `FOR UPDATE`, then the Ticket
-    associated with the locked CVE `FOR UPDATE`.
+    (`stabilize_acting_user()`), the CVE `FOR NO KEY UPDATE`, then the
+    Ticket associated with the locked CVE `FOR UPDATE`.
 
     Q3: (1) validates authority and the version from input only. (2)
     Locks the roots and (3) revalidates CVE accessibility from the

@@ -407,7 +407,8 @@ async def ensure_cve_exists(
 
     Q3: (1) validates the format before any database operation. (2) Reads
     the row by the unique `CVE.cve_id`; with `lock=True` this read is
-    itself the `SELECT ... FOR UPDATE` and the first persistent read.
+    itself the `SELECT ... FOR NO KEY UPDATE` and the first persistent
+    read.
     (3) If absent, inserts a placeholder with only `cve_id` set (every
     other column takes its model or database default, including
     `cve_state = PUBLISHED`; no `CVESource` row) through `INSERT ... ON CONFLICT
@@ -438,7 +439,10 @@ async def ensure_cve_exists(
         .execution_options(populate_existing=True)
     )
     if lock:
-        statement = statement.with_for_update()
+        # `FOR NO KEY UPDATE` (Cross-Domain Root Lock Order): serializes
+        # every CVE-root holder while a referencing Ticket's foreign-key
+        # `FOR KEY SHARE` stays compatible.
+        statement = statement.with_for_update(key_share=True)
 
     existing = (await db.execute(statement)).scalar_one_or_none()
     if existing is not None:

@@ -5,7 +5,9 @@ Consumers:
 - `tests/test_services/test_recalculate_cvss_chain.py` (eligibility
   formula, association mode, default-version matrix);
 - `tests/test_services/test_recalculate_cvss_chain_atomicity.py`
-  (classification, idempotency, rollback, evaluation date, locking).
+  (classification, idempotency, rollback, evaluation date, locking);
+- `tests/test_services/test_cve_root_lock_mode_atomicity.py` (event and
+  severity helpers for the CVE root lock mode races).
 
 The `cve_with` fixture lives in the plugin module
 `tests/support/ticket_mutation_fixtures.py`. Expected values in the
@@ -117,7 +119,9 @@ async def associate(db: AsyncSession, ticket: Ticket, cve: CVE) -> Ticket:
     """Reproduce the pre-chain part of `associate_cve()`: lock the CVE then
     the Ticket, point the Ticket at the CVE, and clear `severity_manual` in
     the same transaction."""
-    await db.execute(select(CVE.id).where(CVE.id == cve.id).with_for_update())
+    await db.execute(
+        select(CVE.id).where(CVE.id == cve.id).with_for_update(key_share=True)
+    )
     locked = await lock_ticket(db, ticket)
     locked.cve_id = cve.id
     locked.severity_manual = None

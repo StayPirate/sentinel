@@ -1573,7 +1573,7 @@ Every new or modified API endpoint MUST be tested for:
 - Authorization enforcement when the declared capability can produce 403
 - Resource not found → 404
 - Edge cases: empty results, boundary values, concurrent modifications.
-  For an endpoint backed by `FOR UPDATE` locking, the service function's
+  For an endpoint backed by pessimistic row locking, the service function's
   two-session test (Service Functions) proves lock serialization. The
   endpoint repeats it only when the handler adds its own locking, ordering,
   or transaction step (see Tier Responsibility and Proportionality)
@@ -1672,8 +1672,9 @@ Every new or modified service function MUST be tested for:
   Testing)
 - Re-invocation behavior (Q5 — idempotency characteristics)
 - Exception propagation to callers (Q6)
-- Lock serialization: every service function that acquires `FOR UPDATE`
-  (as documented in `docs/features/tickets/ticket-mutations.md`,
+- Lock serialization: every service function that acquires a pessimistic
+  row lock (`FOR UPDATE` or `FOR NO KEY UPDATE`, as documented in
+  `docs/features/tickets/ticket-mutations.md`,
   `docs/features/tickets/ticket-service.md`,
   `docs/features/packages/package-service.md`) MUST have at least one
   test verifying lock serialization using `db_session_factory` and the

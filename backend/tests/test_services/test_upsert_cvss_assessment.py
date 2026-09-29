@@ -1334,7 +1334,7 @@ class TestLockOrder:
             return next(i for i, s in enumerate(statements) if predicate(s))
 
         user_share = first(lambda s: 'FROM "user"' in s and "FOR SHARE" in s)
-        cve_lock = first(lambda s: "FROM cve " in s and "FOR UPDATE" in s)
+        cve_lock = first(lambda s: "FROM cve " in s and "FOR NO KEY UPDATE" in s)
         ticket_lock = first(lambda s: "FROM ticket " in s and "FOR UPDATE" in s)
         visibility = first(lambda s: "ticket_access_grant" in s)
         setting = first(lambda s: "FROM system_setting" in s)

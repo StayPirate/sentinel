@@ -1300,8 +1300,8 @@ class DuplicateConcurrentModificationError(TicketServiceError):
 async def _ensure_cve_unassociated(db: AsyncSession, cve: CVE) -> None:
     """Read the association of the locked `cve` and reject an existing one.
 
-    Runs under the CVE `FOR UPDATE` lock and before any write, so it
-    observes an association committed by a creator or associator this
+    Runs under the CVE `FOR NO KEY UPDATE` lock and before any write, so
+    it observes an association committed by a creator or associator this
     transaction waited for (cve-service.md, CVE Upsert Serialization >
     Ticket creation winner). Raises `TicketCVEConflictError` carrying the
     conflicting Ticket's `SNTL-{n}`, even when that Ticket is
@@ -1406,8 +1406,8 @@ async def create_ticket(
 
     Q2: the caller owns the transaction. Locks, in order: the manual
     acting User `FOR SHARE` (`stabilize_acting_user()`), then the CVE
-    `FOR UPDATE` through the lock-aware `ensure_cve_exists()`. A system
-    creation has no User root. The new Ticket is transaction-owned.
+    `FOR NO KEY UPDATE` through the lock-aware `ensure_cve_exists()`. A
+    system creation has no User root. The new Ticket is transaction-owned.
 
     Q3: (1) manual: stabilizes the creator and reads active VA
     eligibility from the locked row. (2) With a CVE: resolves it (a
@@ -1556,7 +1556,7 @@ async def associate_cve(
 
     Q2: the caller has verified `triage_ticket` and owns the transaction.
     Locks, in the global order: the acting User `FOR SHARE`
-    (`stabilize_acting_user()`), the CVE `FOR UPDATE` through the
+    (`stabilize_acting_user()`), the CVE `FOR NO KEY UPDATE` through the
     lock-aware `ensure_cve_exists()` (an existing CVE is locked by its
     resolution query; a placeholder is the locked root), then the Ticket
     `FOR UPDATE`. The CVE lock is retained. No Ticket lock is taken

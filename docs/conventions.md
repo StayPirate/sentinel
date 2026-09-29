@@ -783,6 +783,17 @@ define how they stabilize their complete affected-User set before those
 workflows become active; this ordering rule does not by itself choose their
 persistence owner or transaction-composition mechanism.
 
+Every acquisition of the CVE root uses `FOR NO KEY UPDATE`. This mode
+conflicts with itself, `FOR SHARE`, and `FOR UPDATE`, so every CVE-root holder
+still serializes on the CVE row, while the foreign-key `FOR KEY SHARE` of a
+referencing Ticket row remains compatible. PostgreSQL re-runs that check
+whenever a transaction UPDATEs a Ticket row it already updated earlier, even
+though `cve_id` is unchanged; with a `FOR UPDATE` CVE root, a Ticket-first
+transaction writing its locked Ticket a second time would wait for a CVE holder
+that is itself waiting for that Ticket, and deadlock. `FOR UPDATE` on the CVE
+row is required only to delete a CVE or change its key, which no workflow does.
+The Ticket root keeps `FOR UPDATE`.
+
 When one workflow affects multiple Users or Tickets, it locks every applicable
 User in ascending UUID order before locking the union of applicable Tickets in
 ascending UUID order. It MUST NOT alternate roots as User A, Ticket A, User B.
