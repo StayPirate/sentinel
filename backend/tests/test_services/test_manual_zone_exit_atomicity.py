@@ -33,7 +33,10 @@ adds only what needs independent sessions:
   CVSS/reactivation). When the exit holds the Ticket first it is paused
   inside the package boundary, so the CVSS mutation provably holds the CVE
   and waits for the Ticket while the exit completes: the exit never waits
-  for, or requests, the CVE lock. When the CVSS mutation locks first, its
+  for, or requests, the CVE root lock (the foreign-key `FOR KEY SHARE`
+  PostgreSQL takes on a second Ticket UPDATE stays compatible with the
+  CVE root's `FOR NO KEY UPDATE`; `docs/conventions.md`, Cross-Domain Root
+  Lock Order). When the CVSS mutation locks first, its
   `TicketNotMutableError` leaves its User, CVE, and Ticket locks held until
   the caller's rollback, so the exit provably waits on the Ticket without
   any additional pause;
@@ -352,8 +355,10 @@ def _is_user_share(statement: str) -> bool:
 
 
 def _is_cve_lock(statement: str) -> bool:
+    """The CVE root lock (`docs/conventions.md`, Cross-Domain Root Lock
+    Order: `FOR NO KEY UPDATE`)."""
     return CVE_STATEMENT.search(statement) is not None and statement.rstrip().endswith(
-        "FOR UPDATE"
+        "FOR NO KEY UPDATE"
     )
 
 
@@ -374,7 +379,8 @@ def _assert_exit_locks(recorder: StatementRecorder) -> None:
 
 
 def _assert_cvss_locks(recorder: StatementRecorder) -> None:
-    """User `FOR SHARE`, then CVE `FOR UPDATE`, then Ticket `FOR UPDATE`."""
+    """User `FOR SHARE`, then CVE `FOR NO KEY UPDATE`, then Ticket
+    `FOR UPDATE`."""
 
     def first(predicate: Callable[[str], bool]) -> int:
         return next(i for i, s in enumerate(recorder.statements) if predicate(s))
@@ -390,11 +396,18 @@ def _cve_row(cve: CVE) -> Select[Any]:
     return select(CVE.id).where(CVE.id == cve.id)
 
 
-async def _is_locked(probe: AsyncSession, statement: Select[Any]) -> bool:
-    """Whether another transaction holds a conflicting lock on the row that
-    `statement` selects (`FOR UPDATE NOWAIT`, released at once)."""
+async def _is_locked(
+    probe: AsyncSession, statement: Select[Any], *, cve_root: bool = False
+) -> bool:
+    """Whether another transaction holds a lock on the row that `statement`
+    selects conflicting with the probe (`FOR UPDATE NOWAIT`, released at
+    once). With `cve_root`, the probe is the CVE root mode
+    (`FOR NO KEY UPDATE NOWAIT`): the foreign-key `FOR KEY SHARE` that
+    PostgreSQL takes on the CVE when the exit updates its Ticket a second
+    time is expected and compatible with every CVE-root holder, so only a
+    conflicting CVE root lock counts."""
     try:
-        await probe.execute(statement.with_for_update(nowait=True))
+        await probe.execute(statement.with_for_update(nowait=True, key_share=cve_root))
     except DBAPIError:
         await probe.rollback()
         return True
@@ -554,12 +567,12 @@ class TestExitAndCVSSRace:
                 await asyncio.wait_for(boundary.reached.wait(), timeout=WAIT)
                 # Paused inside the boundary: A holds the Ticket, not the CVE.
                 assert await _is_locked(world.probe, _ticket_row(s.ticket.id))
-                assert not await _is_locked(world.probe, _cve_row(s.cve))
+                assert not await _is_locked(world.probe, _cve_row(s.cve), cve_root=True)
                 cvss_task = world.start(b, _cvss(b, op, s.cve, s.cvss_actor))
                 await assert_blocked(cvss_task)
                 # B holds the CVE and waits for the Ticket.
                 assert _is_ticket_lock(cvss_recorder.statements[-1])
-                assert await _is_locked(world.probe, _cve_row(s.cve))
+                assert await _is_locked(world.probe, _cve_row(s.cve), cve_root=True)
                 boundary.resume.set()
                 # A completes while B still holds the CVE lock.
                 exit_result = await asyncio.wait_for(
