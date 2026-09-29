@@ -5,9 +5,9 @@ specification. This module currently implements the consumer-facing
 Ticket locator resolution (Ticket Query Operations > Ticket locator
 resolution), the Ticket list (`list_tickets()`), and the Ticket detail
 read in its consumer and mutation-assembly modes (Ticket Query
-Operations > `get_ticket_detail()`), and Ticket creation
-(`create_ticket()`); the remaining lifecycle operations are added by
-their owning work items.
+Operations > `get_ticket_detail()`), Ticket creation
+(`create_ticket()`), and CVE association (`associate_cve()`); the
+remaining lifecycle operations are added by their owning work items.
 
 Every operation accepts the caller's `AsyncSession` and never commits or
 rolls back; database exceptions propagate unchanged (Transaction
@@ -113,7 +113,13 @@ from app.services.ticket_deadline_expressions import (
 )
 from app.services.ticket_deadlines import DueDates, compute_due_dates
 from app.services.ticket_mutations import (
+    CVSSChainMode,
+    auto_assign_actor,
+    ensure_ticket_operable,
     is_stabilized_vulnerability_analyst,
+    lock_accessible_ticket,
+    recalculate_cvss_chain,
+    reconcile_ticket_status,
     refresh_priority_auto,
     stabilize_acting_user,
 )
@@ -1235,6 +1241,32 @@ class TicketCVEConflictError(TicketServiceError):
         super().__init__("CVE is already associated with another Ticket.")
 
 
+class TicketCVEAlreadySetError(TicketServiceError):
+    """The Ticket already has a CVE associated. Maps to
+    `400 TICKET_CVE_ALREADY_SET`. The message is static."""
+
+    def __init__(self) -> None:
+        super().__init__("Ticket already has a CVE associated.")
+
+
+async def _ensure_cve_unassociated(db: AsyncSession, cve: CVE) -> None:
+    """Read the association of the locked `cve` and reject an existing one.
+
+    Runs under the CVE `FOR UPDATE` lock and before any write, so it
+    observes an association committed by a creator or associator this
+    transaction waited for (cve-service.md, CVE Upsert Serialization >
+    Ticket creation winner). Raises `TicketCVEConflictError` carrying the
+    conflicting Ticket's `SNTL-{n}`, even when that Ticket is
+    inaccessible. The `Ticket.cve_id` UNIQUE constraint stays a backstop:
+    its violation is never translated.
+    """
+    existing_sequence = (
+        await db.execute(select(Ticket.sequence_id).where(Ticket.cve_id == cve.id))
+    ).scalar_one_or_none()
+    if existing_sequence is not None:
+        raise TicketCVEConflictError(format_ticket_id(existing_sequence))
+
+
 # ---------------------------------------------------------------------------
 # Ticket creation (ticket-service.md, `create_ticket`)
 # ---------------------------------------------------------------------------
@@ -1381,11 +1413,7 @@ async def create_ticket(
     cve: CVE | None = None
     if cve_id is not None:
         cve = await cve_service.ensure_cve_exists(db, cve_id, lock=True)
-        existing_sequence = (
-            await db.execute(select(Ticket.sequence_id).where(Ticket.cve_id == cve.id))
-        ).scalar_one_or_none()
-        if existing_sequence is not None:
-            raise TicketCVEConflictError(format_ticket_id(existing_sequence))
+        await _ensure_cve_unassociated(db, cve)
 
     assignee = (
         acting_user
@@ -1448,4 +1476,111 @@ async def create_ticket(
         )
     if source is TicketCreationSource.MANUAL:
         await refresh_priority_auto(db, ticket=ticket)
+    return ticket
+
+
+# ---------------------------------------------------------------------------
+# CVE association (ticket-service.md, `associate_cve`)
+# ---------------------------------------------------------------------------
+
+
+async def associate_cve(
+    db: AsyncSession,
+    *,
+    ticket_id: UUID,
+    cve_id: str,
+    acting_user_id: UUID,
+    caller: TicketCaller,
+    evaluation_date: date | None = None,
+) -> Ticket:
+    """Associate a CVE with a Ticket that has none.
+
+    Category A lifecycle operation (ticket-service.md, `associate_cve`;
+    tickets.md, Associating a CVE Later, CVE Resolution Behavior).
+
+    Q1: `ticket_id` is the internal Ticket UUID (the API resolves the
+    public `SNTL-{n}` locator first). `cve_id` is the CVE-ID string the
+    caller pre-validated. `acting_user_id` is the authenticated acting
+    user; `caller` is the request-resolved caller information whose
+    `user_id` must identify `acting_user_id`. `evaluation_date` is the
+    workflow's UTC date, shared with any `TicketDetail` response; one UTC
+    date is captured at entry when omitted.
+
+    Q2: the caller has verified `triage_ticket` and owns the transaction.
+    Locks, in the global order: the acting User `FOR SHARE`
+    (`stabilize_acting_user()`), the CVE `FOR UPDATE` through the
+    lock-aware `ensure_cve_exists()` (an existing CVE is locked by its
+    resolution query; a placeholder is the locked root), then the Ticket
+    `FOR UPDATE`. The CVE lock is retained. No Ticket lock is taken
+    before the CVE lock, and no external, Redis, or Celery I/O occurs.
+
+    Q3: (5) revalidates accessibility from the locked-current Ticket
+    (`TicketNotFoundError` even though the CVE was locked first); (6)
+    `ensure_ticket_operable()`; (7) rejects a Ticket that already has a
+    CVE, then reads the CVE's association under its lock and rejects an
+    existing one; (8) `auto_assign_actor()` with the stabilized User; (9)
+    captures `severity_manual`; (10) sets `cve_id` and clears
+    `severity_manual` in one UPDATE; (11) creates `cve_associated`
+    attributed to the acting user; (12) `recalculate_cvss_chain()` in
+    association mode with the captured severity and the one date, which
+    confirms CVE-owned severity, emits the optional system handover
+    `severity_changed`, recalculates every automatic Product with
+    `reason = cvss`, and refreshes the automatic priority; (13) exactly
+    one `reconcile_ticket_status()` with the same date and no second
+    assignment. Step 14 (the CVE freshness refresh) is not part of this
+    implementation. A locked-current `REJECTED` CVE changes nothing extra
+    (no automatic `CVE rejected` status).
+
+    Q4: returns the locked Ticket in its post-mutation state.
+
+    Q6: before any database operation, raises `ValueError` when `caller`
+    does not identify `acting_user_id`, and `CVEIdFormatError` for a
+    malformed `cve_id`. Raises `TicketNotFoundError` for a missing or
+    inaccessible Ticket, before any other Ticket decision;
+    `TicketNotMutableError` for `Ignored` or `Duplicated`;
+    `TicketCVEAlreadySetError`; `TicketCVEConflictError` with the
+    conflicting Ticket's `SNTL-{n}` (even an inaccessible one). Settings,
+    database, eligibility, audit, flush, and reconciliation exceptions
+    propagate and roll back the caller's transaction, including a
+    placeholder CVE this call inserted. A `Ticket.cve_id` unique violation
+    is an invariant failure and escapes untranslated.
+    """
+    if caller.user_id != acting_user_id:
+        raise ValueError("caller must identify the acting user.")
+    if not is_valid_cve_id(cve_id):
+        raise cve_service.CVEIdFormatError()
+    if evaluation_date is None:
+        evaluation_date = _utc_now().astimezone(UTC).date()
+
+    acting_user = await stabilize_acting_user(db, acting_user_id)
+    cve = await cve_service.ensure_cve_exists(db, cve_id, lock=True)
+    ticket = await lock_accessible_ticket(db, ticket_id, caller)
+    ensure_ticket_operable(ticket)
+    if ticket.cve_id is not None:
+        raise TicketCVEAlreadySetError()
+    await _ensure_cve_unassociated(db, cve)
+
+    await auto_assign_actor(ticket, acting_user, db)
+    previous_severity = (
+        Severity(ticket.severity_manual) if ticket.severity_manual is not None else None
+    )
+    ticket.cve_id = cve.id
+    ticket.severity_manual = None
+    await db.flush()
+
+    await TicketAuditLog.log_event(
+        db,
+        ticket_id=ticket.id,
+        event_type=TicketAuditEventType.CVE_ASSOCIATED,
+        user_id=acting_user_id,
+        new_value=cve.cve_id,
+    )
+    await recalculate_cvss_chain(
+        db,
+        cve_id=cve.id,
+        mode=CVSSChainMode.ASSOCIATION,
+        association_previous_severity=previous_severity,
+        evaluation_date=evaluation_date,
+    )
+    await reconcile_ticket_status(ticket, db, evaluation_date=evaluation_date)
     return ticket

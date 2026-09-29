@@ -3,8 +3,9 @@
 See `docs/features/tickets/tickets.md` (API Endpoints > List Tickets and
 Get Ticket, Response Schemas > TicketSummary and TicketDetail) for the
 authoritative endpoint contracts, Create Ticket for manual creation
-(`docs/features/tickets/ticket-service.md`, `create_ticket`), and Set
-Severity Manual for the manual-severity mutation
+(`docs/features/tickets/ticket-service.md`, `create_ticket`), Associate
+CVE for the later association (`associate_cve`), and Set Severity Manual
+for the manual-severity mutation
 (`docs/features/tickets/ticket-mutations.md`, `set_severity_manual()`).
 Handlers stay thin: they supply caller information to `ticket_service`,
 map its outcomes to HTTP, and serialize its semantic projection. The
@@ -35,6 +36,7 @@ from app.api.dependencies import (
     insufficient_permission_error,
     require_accessible_ticket,
     require_capability,
+    ticket_cve_already_set_error,
     ticket_cve_conflict_error,
     ticket_not_found_error,
     ticket_not_mutable_error,
@@ -70,6 +72,7 @@ from app.schemas.cve import (
 )
 from app.schemas.errors import ErrorResponse, TicketCVEConflictErrorResponse
 from app.schemas.ticket import (
+    TicketAssociateCVERequest,
     TicketCreateRequest,
     TicketDetail,
     TicketDetailResponse,
@@ -84,6 +87,7 @@ from app.services.ticket_service import (
     CVEDetailProjection,
     ResolvedTicket,
     TicketCreationSource,
+    TicketCVEAlreadySetError,
     TicketCVEConflictError,
     TicketDetailProjection,
     TicketSummaryProjection,
@@ -659,6 +663,106 @@ async def set_ticket_severity(
         raise ticket_not_mutable_error() from None
     except SeverityDerivedError:
         raise _severity_derived_error() from None
+    detail = await ticket_service.assemble_ticket_detail(
+        db, ticket_id=ticket.id, evaluation_date=evaluation_date
+    )
+    return TicketDetailResponse(data=serialize_ticket_detail(detail))
+
+
+@router.post(
+    "/tickets/{ticket_id}/associate-cve",
+    response_model=TicketDetailResponse,
+    summary="Associate CVE",
+    description=(
+        "Associates a CVE with a Ticket that has none (an unknown CVE is "
+        "created as a placeholder record). Clears the manual severity, which "
+        "the CVE's CVSS-derived severity replaces; recalculates the automatic "
+        "Product eligibility and the automatic priority from the CVE's "
+        "current assessments and evidence; and re-evaluates the Ticket status, "
+        "which may regress. An unassigned Ticket is auto-assigned to an "
+        "active vulnerability analyst caller. Returns the post-mutation "
+        "Ticket detail. Requires `triage_ticket`."
+    ),
+    responses={
+        400: {
+            "model": ErrorResponse,
+            "description": (
+                "`TICKET_CVE_ALREADY_SET`: the Ticket already has a CVE associated."
+            ),
+        },
+        404: {
+            "model": ErrorResponse,
+            "description": (
+                "`TICKET_NOT_FOUND`: Ticket identifier is malformed, does not "
+                "exist, or identifies a Ticket inaccessible to the caller."
+            ),
+        },
+        409: {
+            "model": TicketCVEConflictErrorResponse | ErrorResponse,
+            "description": (
+                "`TICKET_CVE_CONFLICT`: the CVE is already associated with "
+                "another Ticket, identified by `existing_ticket_id` "
+                "(`SNTL-{n}`). `TICKET_NOT_MUTABLE`: the Ticket is Ignored or "
+                "Duplicated (that body has no `existing_ticket_id`)."
+            ),
+        },
+        422: {
+            "model": ErrorResponse,
+            "description": (
+                "`CVE_INVALID_FORMAT`: `cve_id` does not match "
+                "`^CVE-[0-9]{4}-[0-9]{4,}$` or exceeds 20 characters. "
+                "`VALIDATION_ERROR`: `cve_id` is missing, `null`, or not a "
+                "string."
+            ),
+        },
+    },
+)
+async def associate_ticket_cve(
+    ticket_id: TicketIdPath,
+    body: TicketAssociateCVERequest,
+    db: DatabaseSession,
+    principal: Annotated[
+        AuthenticatedPrincipal, Depends(require_capability(Capability.TRIAGE_TICKET))
+    ],
+    caller: AuthenticatedTicketCaller,
+    ticket: Annotated[ResolvedTicket, Depends(require_accessible_ticket)],
+) -> TicketDetailResponse:
+    """Associate CVE — see `docs/features/tickets/tickets.md` (Associate
+    CVE).
+
+    Authorization follows `docs/api-spec.md` (Authorization Chain
+    Evaluation Order, flow 3): authentication, then `triage_ticket`
+    before any Ticket lookup, then the delegated preliminary SNTL
+    resolution and body validation, then the `CVE_INVALID_FORMAT`
+    pre-validation with no database work. `associate_cve()` revalidates
+    accessibility from locked-current state after the User and CVE locks.
+    The handler captures the one workflow `evaluation_date`, reused by the
+    CVSS chain, the reconciliation, and the `TicketDetail` assembled from
+    the locked post-state inside the same transaction
+    (`docs/features/tickets/ticket-service.md`, `get_ticket_detail()`).
+    """
+    if not is_valid_cve_id(body.cve_id):
+        raise cve_invalid_format_error()
+    evaluation_date = _utc_now().date()
+    try:
+        await ticket_service.associate_cve(
+            db,
+            ticket_id=ticket.id,
+            cve_id=body.cve_id,
+            acting_user_id=principal.user.id,
+            caller=caller,
+            evaluation_date=evaluation_date,
+        )
+    except TicketNotFoundError:
+        raise ticket_not_found_error() from None
+    except TicketNotMutableError:
+        raise ticket_not_mutable_error() from None
+    except TicketCVEAlreadySetError:
+        raise ticket_cve_already_set_error() from None
+    except TicketCVEConflictError as exc:
+        raise ticket_cve_conflict_error(exc.existing_ticket_id) from None
+    except CVEIdFormatError:
+        raise cve_invalid_format_error() from None
     detail = await ticket_service.assemble_ticket_detail(
         db, ticket_id=ticket.id, evaluation_date=evaluation_date
     )
