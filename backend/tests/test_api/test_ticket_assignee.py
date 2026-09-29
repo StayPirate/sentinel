@@ -33,6 +33,7 @@ from unittest.mock import AsyncMock
 import pytest
 import pytest_asyncio
 from httpx import AsyncClient
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1 import tickets as route
@@ -683,3 +684,60 @@ class TestOpenApiContract:
         assert "TICKET_ASSIGNEE_INACTIVE" in responses["409"]["description"]
         assert "TICKET_NOT_MUTABLE" in responses["409"]["description"]
         assert "422" in responses
+
+
+# ---------------------------------------------------------------------------
+# Locked-current accessibility through HTTP (handler mapping of the
+# service's authoritative denial; api-spec.md, flow 3)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.e2e
+class TestIndependentRaces:
+    async def test_visibility_lost_to_a_committed_change_after_the_preliminary_check(
+        self,
+        committed_app: tuple[CommittedApp, AsyncClient],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Another session commits the confidentiality flag after the
+        preliminary dependency check but before the service locks the
+        Ticket. The service's locked-current denial maps to the identical
+        `404 TICKET_NOT_FOUND` with no effect. The service tier owns the
+        race matrix; this proves only the handler's mapping of that denial."""
+        world, committed_client = committed_app
+        _, headers = await world.va_headers(role=Role.RESTRICTED_ANALYST)
+        assignee = await world.user(role=Role.VULNERABILITY_ANALYST)
+        target = await world.ticket()
+        ticket_id = target.id
+        before = await ticket_row(await world.session(), ticket_id)
+        original = ticket_service.assign_ticket
+        reached: list[bool] = []
+
+        async def _lose_then_call(db: AsyncSession, **kwargs: Any) -> Ticket:
+            reached.append(True)
+            racer = await world.session()
+            await racer.execute(
+                update(Ticket)
+                .where(Ticket.id == ticket_id)
+                .values(is_confidential=True)
+            )
+            await racer.commit()
+            return await original(db, **kwargs)
+
+        monkeypatch.setattr(ticket_service, "assign_ticket", _lose_then_call)
+
+        response = await committed_client.patch(
+            _url(target), json={"user_id": str(assignee.id)}, headers=headers
+        )
+        monkeypatch.undo()
+
+        assert response.status_code == 404
+        assert response.content == NOT_FOUND
+        assert reached == [True]
+        fresh = await world.session()
+        after = await ticket_row(fresh, ticket_id)
+        # Only the racer's own write (and its `updated_at`) is committed.
+        assert {k: v for k, v in after.items() if k != "updated_at"} == {
+            k: v for k, v in before.items() if k != "updated_at"
+        }
+        assert await event_count(fresh, ticket_id) == 0

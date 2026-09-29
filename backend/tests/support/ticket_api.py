@@ -177,9 +177,12 @@ class CommittedApp:
         await db.commit()
         return user
 
-    async def va_headers(self) -> tuple[User, dict[str, str]]:
-        """A committed vulnerability analyst and its Bearer credential."""
-        user = await self.user(role=Role.VULNERABILITY_ANALYST)
+    async def va_headers(
+        self, *, role: Role = Role.VULNERABILITY_ANALYST
+    ) -> tuple[User, dict[str, str]]:
+        """A committed user holding `role` (a vulnerability analyst by
+        default) and its Bearer credential."""
+        user = await self.user(role=role)
         db = await self.session()
         created = await create_session(
             db, user, SessionCreationReason.LOCAL_LOGIN, expected_password_hash=None
