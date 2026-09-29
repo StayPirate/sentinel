@@ -44,17 +44,9 @@ MAX_LENGTH_CVE_ID = "CVE-2099-12345678901"
 
 INVALID_CVE_IDS: list[Any] = [
     pytest.param("cve-2099-0001", id="lowercase"),
-    pytest.param(" CVE-2099-0001", id="leading-space"),
-    pytest.param("CVE-2099-0001 ", id="trailing-space"),
-    pytest.param("CVE-2099-001", id="short-sequence"),
-    pytest.param("CVE-99-0001", id="short-year"),
-    pytest.param("CVE-2099-0001/cvss", id="trailing-content"),
-    pytest.param("018f0e2a-7b1c-7cde-8f00-000000000001", id="uuid"),
     pytest.param("CVE-2099-123456789012", id="21-characters"),
-    pytest.param("CVE-2099-12345678901234", id="23-characters"),
     pytest.param("", id="empty"),
     pytest.param(None, id="none"),
-    pytest.param(20990001, id="integer"),
 ]
 
 

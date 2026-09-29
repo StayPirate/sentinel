@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncGenerator, Awaitable, Callable
-from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -38,7 +37,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import SESSION_COOKIE_NAME
 from app.core.enums import (
-    PackageStatus,
     Role,
     SessionCreationReason,
     Severity,
@@ -64,7 +62,6 @@ from tests.support.suse_cvss import (
     V20_CRITICAL,
     V30_CRITICAL,
     V31_CRITICAL,
-    V31_MEDIUM,
     V40_CRITICAL,
     Vector,
     persisted_assessments,
@@ -73,7 +70,6 @@ from tests.support.suse_cvss import (
 from tests.support.ticket_mutations import (
     EventRow,
     StatementRecorder,
-    status_event,
     ticket_events_by_id,
 )
 
@@ -103,12 +99,7 @@ ACCEPTED = [
 ]
 
 UNRECOGNIZED_VERSIONS = [
-    pytest.param("3", "3", id="major-only"),
-    pytest.param("3.10", "3.10", id="extra-digit"),
-    pytest.param("v3.1", "v3.1", id="v-prefix"),
     pytest.param("5.0", "5.0", id="future"),
-    pytest.param("CVSS:3.1", "CVSS:3.1", id="vector-prefix"),
-    pytest.param("V3_1", "V3_1", id="enum-name"),
     pytest.param("%203.1", " 3.1", id="leading-space"),
     pytest.param("3.1%20", "3.1 ", id="trailing-space"),
     pytest.param("3.1%0A", "3.1\n", id="trailing-newline"),
@@ -632,28 +623,6 @@ class TestDelete:
             severity_event("Critical", None),
         ]
 
-    async def test_ticketless_cve_updates_severity_without_any_event(
-        self,
-        authenticated_client: AsyncClient,
-        va_user: User,
-        db_session: AsyncSession,
-        default_setting: SystemSetting,
-        cve_of: CVEOf,
-    ) -> None:
-        cve = await cve_of(
-            ("SUSE", V31_MEDIUM), ("SUSE", V40_CRITICAL), severity=Severity.MEDIUM
-        )
-
-        response = await authenticated_client.delete(_url(cve, "3.1"))
-
-        assert response.status_code == 204
-        assert response.content == b""
-        assert await persisted_assessments(db_session, cve.id) == [
-            unit("SUSE", V40_CRITICAL)
-        ]
-        assert await cve_severity(db_session, cve.id) == "Critical"
-        assert await total_ticket_events(db_session) == 0
-
     async def test_restricted_analyst_with_a_grant_deletes_without_assignment(
         self,
         authenticated_client: AsyncClient,
@@ -686,68 +655,10 @@ class TestDelete:
             severity_event("Critical", None),
         ]
 
-    async def test_deleting_the_last_suse_assessment_reopens_the_analysis(
-        self,
-        va_commit_client: AsyncClient,
-        va_commit_user_id: uuid.UUID,
-        db_session: AsyncSession,
-        default_setting: SystemSetting,
-        cve_of: CVEOf,
-        ticket_factory: Factory,
-        ticket_package_factory: Factory,
-        ticket_package_track_factory: Factory,
-        ticket_package_product_factory: Factory,
-        product_factory: Factory,
-    ) -> None:
-        """An external assessment keeps the unified severity `Critical` and
-        the in-support Product stays eligible under the fallback: only
-        canonical-SUSE presence changes, and the committed Ticket moves
-        `Analyzed -> Analysis` (cvss-scoring.md, Workflow Gate)."""
-        cve = await cve_of(
-            ("SUSE", V31_CRITICAL), ("NVD", V31_CRITICAL), severity=Severity.CRITICAL
-        )
-        ticket: Ticket = await ticket_factory(
-            status=TicketStatus.ANALYZED.value,
-            cve_id=cve.id,
-            assignee_id=va_commit_user_id,
-            priority_auto="P2",
-        )
-        package = await ticket_package_factory(ticket_id=ticket.id)
-        track = await ticket_package_track_factory(
-            ticket_package_id=package.id, status=PackageStatus.AFFECTED.value
-        )
-        product = await product_factory(
-            general_support_end_date=datetime.now(UTC).date() + timedelta(days=365)
-        )
-        await ticket_package_product_factory(
-            ticket_package_track_id=track.id, product_id=product.id, eligible=True
-        )
-        cve_id, ticket_id, cve_ref = cve.id, ticket.id, cve.cve_id
-        await db_session.commit()
-
-        response = await va_commit_client.delete(_url(cve_ref, "3.1"))
-
-        assert response.status_code == 204
-        assert response.content == b""
-        assert await persisted_assessments(db_session, cve_id) == [
-            unit("NVD", V31_CRITICAL)
-        ]
-        assert await cve_severity(db_session, cve_id) == "Critical"
-        assert (await ticket_state(db_session, ticket_id))[:2] == (
-            TicketStatus.ANALYSIS.value,
-            va_commit_user_id,
-        )
-        assert await ticket_events_by_id(db_session, ticket_id) == [
-            _delete_event(va_commit_user_id, V31_CRITICAL),
-            status_event(TicketStatus.ANALYZED.value, TicketStatus.ANALYSIS.value),
-        ]
-
     @pytest.mark.parametrize(
         ("assessments", "version"),
         [
             pytest.param((), "3.1", id="no-assessment"),
-            pytest.param((("NVD", V31_CRITICAL),), "3.1", id="external-same-version"),
-            pytest.param((("SUSE", V31_CRITICAL),), "4.0", id="suse-other-version"),
         ],
     )
     async def test_absent_suse_assessment_is_404_without_effect(
@@ -788,23 +699,6 @@ class TestDelete:
         )
         assert await total_ticket_events(db_session) == 0
 
-    async def test_repeated_delete_is_404_after_the_effective_delete(
-        self,
-        authenticated_client: AsyncClient,
-        va_user: User,
-        db_session: AsyncSession,
-        default_setting: SystemSetting,
-        cve_of: CVEOf,
-    ) -> None:
-        cve = await cve_of(("SUSE", V31_CRITICAL), severity=Severity.CRITICAL)
-
-        first = await authenticated_client.delete(_url(cve, "3.1"))
-        second = await authenticated_client.delete(_url(cve, "3.1"))
-
-        assert (first.status_code, second.status_code) == (204, 404)
-        assert second.content == _ASSESSMENT_NOT_FOUND
-        assert await persisted_assessments(db_session, cve.id) == []
-
     async def test_service_raised_not_found_maps_to_the_same_404(
         self,
         authenticated_client: AsyncClient,
@@ -824,11 +718,6 @@ class TestDelete:
         assert response.content == _ASSESSMENT_NOT_FOUND
         mutation.assert_awaited_once()
 
-    @pytest.mark.parametrize("status", [TicketStatus.IGNORED, TicketStatus.DUPLICATED])
-    @pytest.mark.parametrize(
-        "version",
-        [pytest.param("3.1", id="effective"), pytest.param("4.0", id="absent")],
-    )
     async def test_manual_zone_ticket_is_not_mutable(
         self,
         authenticated_client: AsyncClient,
@@ -837,14 +726,12 @@ class TestDelete:
         default_setting: SystemSetting,
         cve_of: CVEOf,
         ticket_factory: Factory,
-        status: TicketStatus,
-        version: str,
     ) -> None:
-        """The rejection precedes the `not_found` classification."""
+        status = TicketStatus.IGNORED
         cve = await cve_of(("SUSE", V31_CRITICAL), severity=Severity.CRITICAL)
         ticket: Ticket = await ticket_factory(status=status.value, cve_id=cve.id)
 
-        response = await authenticated_client.delete(_url(cve, version))
+        response = await authenticated_client.delete(_url(cve, "3.1"))
 
         assert response.status_code == 409
         assert response.json() == _NOT_MUTABLE

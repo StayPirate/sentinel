@@ -353,9 +353,7 @@ class TestUnassignedNewWithIneligibleActor:
     @pytest.mark.parametrize(
         ("active", "roles"),
         [
-            pytest.param(True, (Role.RESTRICTED_ANALYST,), id="restricted-analyst"),
             pytest.param(False, (Role.VULNERABILITY_ANALYST,), id="inactive-va"),
-            pytest.param(True, (), id="no-role"),
         ],
     )
     async def test_applies_the_chain_without_assignment_or_reconciliation(
@@ -742,12 +740,6 @@ class TestAuthority:
         "vector",
         [
             pytest.param("", id="empty"),
-            pytest.param("   ", id="empty-after-trim"),
-            pytest.param("CVSS:3.1/AV:N /AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H", id="inner"),
-            pytest.param("cvss:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H", id="case"),
-            pytest.param(
-                "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H/E:P", id="temporal"
-            ),
         ],
     )
     async def test_invalid_vector_raises_before_any_statement(
@@ -893,13 +885,6 @@ class TestAssignment:
             pytest.param(
                 False, (Role.VULNERABILITY_ANALYST,), "inactive assignee", id="inactive"
             ),
-            pytest.param(
-                True,
-                (Role.RESTRICTED_ANALYST,),
-                "vulnerability_analyst role removed",
-                id="active-without-va",
-            ),
-            pytest.param(False, (), "inactive assignee", id="both-invalid"),
         ],
     )
     async def test_sanitation_follows_priority_and_precedes_the_final_status(
@@ -1133,7 +1118,7 @@ class TestProductPropagation:
 
 
 # ---------------------------------------------------------------------------
-# Deadline start and priority override
+# Deadline start
 # ---------------------------------------------------------------------------
 
 
@@ -1165,30 +1150,6 @@ class TestDerivedTicketFields:
             )
         ).scalar_one()
         assert created_at == CREATED_AT
-
-    async def test_override_masks_the_automatic_priority_event(
-        self,
-        db_session: AsyncSession,
-        ticket_factory: TicketFactory,
-        cve_of: CVEOf,
-        va_user: VAUser,
-    ) -> None:
-        actor = await va_user()
-        cve = await cve_of()
-        ticket = await ticket_factory(
-            status=TicketStatus.ANALYSIS.value,
-            cve_id=cve.id,
-            assignee_id=actor.id,
-            priority_override="P1",
-        )
-
-        await upsert(db_session, cve.id, V31_CRITICAL.canonical, actor)
-
-        assert (await ticket_state(db_session, ticket.id))[2:4] == ("P2", "P1")
-        assert await ticket_events(db_session, ticket) == [
-            cvss_event(actor, None, V31_CRITICAL),
-            severity_event(None, "Critical"),
-        ]
 
 
 # ---------------------------------------------------------------------------

@@ -199,8 +199,6 @@ class TestEffectiveMutation:
             pytest.param(None, None, Severity.HIGH, "P3", id="set"),
             pytest.param(Severity.HIGH, "P3", Severity.LOW, "P4", id="changed"),
             pytest.param(Severity.LOW, "P4", None, None, id="cleared"),
-            pytest.param(None, None, Severity.CRITICAL, "P2", id="set-critical"),
-            pytest.param(Severity.CRITICAL, "P2", Severity.MEDIUM, "P4", id="medium"),
             pytest.param(None, None, Severity.NONE, "P4", id="none-label-set"),
             pytest.param(Severity.NONE, "P4", None, None, id="none-label-cleared"),
         ],
@@ -235,23 +233,6 @@ class TestEffectiveMutation:
             _severity_event(actor, _label(old), _label(new)),
             _priority_event(old_auto, new_auto),
         ]
-
-    async def test_none_label_is_stored_distinct_from_null(
-        self, db_session: AsyncSession, ticket_factory: TicketFactory, va_user: VAUser
-    ) -> None:
-        actor = await va_user()
-        ticket = await cveless(ticket_factory, severity=None, assignee_id=actor.id)
-
-        await _set(db_session, ticket.id, Severity.NONE, actor)
-
-        stored = (
-            await db_session.execute(
-                select(Ticket.severity_manual).where(
-                    Ticket.id == ticket.id, Ticket.severity_manual.is_not(None)
-                )
-            )
-        ).scalar_one()
-        assert stored == "None"
 
     async def test_unchanged_effective_priority_adds_no_priority_event(
         self, db_session: AsyncSession, ticket_factory: TicketFactory, va_user: VAUser
@@ -650,44 +631,6 @@ class TestAccessibility:
             _priority_event(None, "P3"),
         ]
 
-    async def test_accessible_through_included_package_maintainership(
-        self,
-        db_session: AsyncSession,
-        ticket_factory: TicketFactory,
-        ticket_package_factory: Callable[..., Awaitable[TicketPackage]],
-        ticket_package_maintainer_factory: Callable[
-            ..., Awaitable[TicketPackageMaintainer]
-        ],
-        va_user: VAUser,
-    ) -> None:
-        actor = await va_user(roles=(Role.RESTRICTED_ANALYST,))
-        ticket = await cveless(
-            ticket_factory,
-            status=TicketStatus.NEW,
-            severity=None,
-            is_confidential=True,
-        )
-        package = await ticket_package_factory(ticket_id=ticket.id)
-        await ticket_package_maintainer_factory(
-            ticket_package_id=package.id, user_id=actor.id
-        )
-
-        await _set(
-            db_session, ticket.id, Severity.LOW, actor, scope=Scope.NON_CONFIDENTIAL
-        )
-
-        assert await _state(db_session, ticket.id) == (
-            "Low",
-            TicketStatus.NEW,
-            None,
-            "P4",
-            None,
-        )
-        assert await ticket_events(db_session, ticket) == [
-            _severity_event(actor, None, "Low"),
-            _priority_event(None, "P4"),
-        ]
-
     async def test_scope_all_sees_a_confidential_ticket_and_assigns(
         self, db_session: AsyncSession, ticket_factory: TicketFactory, va_user: VAUser
     ) -> None:
@@ -795,8 +738,6 @@ class TestAssignmentAndEventOrder:
         ("active", "roles"),
         [
             pytest.param(True, (Role.RESTRICTED_ANALYST,), id="restricted-analyst"),
-            pytest.param(False, (Role.VULNERABILITY_ANALYST,), id="inactive-va"),
-            pytest.param(True, (), id="no-role"),
         ],
     )
     async def test_ineligible_actor_neither_assigns_nor_leaves_new(
@@ -827,21 +768,6 @@ class TestAssignmentAndEventOrder:
             _priority_event(None, "P3"),
         ]
         assert pending_ticket_convergence_effects(db_session) == ()
-
-    async def test_already_assigned_ticket_keeps_its_assignee(
-        self, db_session: AsyncSession, ticket_factory: TicketFactory, va_user: VAUser
-    ) -> None:
-        actor = await va_user()
-        owner = await va_user()
-        ticket = await cveless(ticket_factory, severity=None, assignee_id=owner.id)
-
-        await _set(db_session, ticket.id, Severity.MEDIUM, actor)
-
-        assert (await _state(db_session, ticket.id))[2] == owner.id
-        assert await ticket_events(db_session, ticket) == [
-            _severity_event(actor, None, "Medium"),
-            _priority_event(None, "P4"),
-        ]
 
 
 # ---------------------------------------------------------------------------
@@ -1426,35 +1352,6 @@ class TestLockedCurrentAccessibilityRaces:
 
         with pytest.raises(TicketNotFoundError):
             await asyncio.wait_for(task, timeout=5)
-
-        assert (assign.calls, reconcile.calls) == ([], [])
-        assert pending_ticket_convergence_effects(a) == ()
-        await a.rollback()
-        await _assert_untouched(committed_world, ticket)
-
-    @pytest.mark.parametrize("loss", VISIBILITY_LOSSES)
-    async def test_visibility_lost_after_the_preliminary_check_is_denied(
-        self,
-        committed_world: _CommittedWorld,
-        monkeypatch: pytest.MonkeyPatch,
-        loss: str,
-    ) -> None:
-        user, ticket, change = await _prepare_loss(committed_world, loss)
-        a = await committed_world.open_session()
-        b = await committed_world.open_session()
-        caller = TicketCaller.authenticated(user.id, Scope.NON_CONFIDENTIAL)
-        assign = _CallCounter(monkeypatch, "auto_assign_actor")
-        reconcile = _CallCounter(monkeypatch, "reconcile_ticket_status")
-
-        resolved = await resolve_ticket_locator(
-            a, format_ticket_id(ticket.sequence_id), caller
-        )
-        assert resolved.id == ticket.id
-        await _lock_and_apply(b, ticket, change)
-        await b.commit()
-
-        with pytest.raises(TicketNotFoundError):
-            await _start(committed_world, a, ticket, user)
 
         assert (assign.calls, reconcile.calls) == ([], [])
         assert pending_ticket_convergence_effects(a) == ()

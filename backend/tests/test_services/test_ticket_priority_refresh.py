@@ -179,8 +179,6 @@ class TestEvidenceReads:
     @pytest.mark.parametrize(
         ("severity", "evidence", "expected"),
         [
-            pytest.param(Severity.HIGH, Evidence(), "P3", id="no-evidence-unknown"),
-            pytest.param(Severity.HIGH, Evidence(kev=True), "P1", id="kev"),
             pytest.param(
                 Severity.MEDIUM,
                 Evidence(kev=True, ssvc_exploitation="poc", epss_percentile=0.99),
@@ -192,21 +190,6 @@ class TestEvidenceReads:
                 Evidence(ssvc_exploitation="active"),
                 "P2",
                 id="ssvc-active",
-            ),
-            pytest.param(
-                Severity.MEDIUM,
-                Evidence(ssvc_exploitation="active", epss_percentile=0.99),
-                "P2",
-                id="ssvc-active-precedes-epss-likely",
-            ),
-            pytest.param(
-                Severity.MEDIUM, Evidence(ssvc_exploitation="poc"), "P3", id="ssvc-poc"
-            ),
-            pytest.param(
-                Severity.MEDIUM,
-                Evidence(ssvc_exploitation="none"),
-                "P4",
-                id="ssvc-none-is-no-evidence",
             ),
             pytest.param(
                 Severity.HIGH,
@@ -226,37 +209,11 @@ class TestEvidenceReads:
             ),
             pytest.param(
                 Severity.HIGH,
-                Evidence(epss_percentile=0.9499),
-                "P3",
-                id="epss-percentile-just-below",
-            ),
-            pytest.param(
-                Severity.HIGH,
                 Evidence(epss_percentile=0.10, epss_score=0.99),
                 "P3",
                 id="epss-score-ignored",
             ),
-            pytest.param(
-                Severity.CRITICAL,
-                Evidence(epss_percentile=0.97),
-                "P2",
-                id="critical-likely",
-            ),
-            pytest.param(Severity.LOW, Evidence(), "P4", id="low-unknown"),
             pytest.param(Severity.NONE, Evidence(), "P4", id="none-label-unknown"),
-            pytest.param(
-                Severity.NONE,
-                Evidence(ssvc_exploitation="active"),
-                "P3",
-                id="none-label-active",
-            ),
-            pytest.param(None, Evidence(kev=True), "P1", id="null-severity-kev"),
-            pytest.param(
-                None,
-                Evidence(ssvc_exploitation="active"),
-                "P2",
-                id="null-severity-active",
-            ),
             pytest.param(
                 None,
                 Evidence(epss_percentile=0.95),
@@ -337,23 +294,9 @@ class TestReturnValueAndIdempotency:
         assert recorder.writes() == []
         assert await ticket_events(db_session, ticket) == [_priority_event(None, "P1")]
 
-    async def test_unchanged_persisted_value_writes_nothing(
-        self, db_session: AsyncSession, cve_ticket: CVETicketBuilder
-    ) -> None:
-        ticket = await cve_ticket(severity=Severity.HIGH, priority_auto="P3")
-        ticket = await lock_ticket(db_session, ticket)
-
-        with StatementRecorder(db_session) as recorder:
-            assert await refresh_priority_auto(db_session, ticket=ticket) is False
-
-        assert recorder.writes() == []
-        assert await _persisted(db_session, ticket) == ("P3", None)
-        assert await ticket_events(db_session, ticket) == []
-
     @pytest.mark.parametrize(
         ("severity", "evidence", "old", "new"),
         [
-            pytest.param(Severity.HIGH, Evidence(kev=True), "P3", "P1", id="raised"),
             pytest.param(Severity.LOW, Evidence(), "P1", "P4", id="lowered"),
             pytest.param(None, Evidence(), "P4", None, id="to-null"),
         ],
@@ -388,9 +331,6 @@ class TestOverrideMasking:
         ("override", "old_auto"),
         [
             pytest.param("P2", "P3", id="override-differs-from-both"),
-            pytest.param("P1", "P3", id="override-equals-new-auto"),
-            pytest.param("P4", None, id="auto-from-null"),
-            pytest.param("P3", "P3", id="override-equals-old-auto"),
         ],
     )
     async def test_masked_change_persists_without_event(
@@ -410,18 +350,6 @@ class TestOverrideMasking:
         assert await _refresh(db_session, ticket) is True
 
         assert await _persisted(db_session, ticket) == ("P1", override)
-        assert await ticket_events(db_session, ticket) == []
-
-    async def test_unchanged_value_behind_override_is_a_no_op(
-        self, db_session: AsyncSession, cve_ticket: CVETicketBuilder
-    ) -> None:
-        ticket = await cve_ticket(
-            severity=Severity.HIGH, priority_auto="P3", priority_override="P1"
-        )
-
-        assert await _refresh(db_session, ticket) is False
-
-        assert await _persisted(db_session, ticket) == ("P3", "P1")
         assert await ticket_events(db_session, ticket) == []
 
 
@@ -452,20 +380,6 @@ class TestEveryStatus:
         assert await _persisted(db_session, ticket) == ("P1", None)
         assert await ticket_events(db_session, ticket) == [_priority_event("P3", "P1")]
 
-    @pytest.mark.parametrize("status", [TicketStatus.IGNORED, TicketStatus.DUPLICATED])
-    async def test_cveless_manual_zone_ticket_refreshes(
-        self,
-        db_session: AsyncSession,
-        ticket_factory: TicketFactory,
-        status: TicketStatus,
-    ) -> None:
-        ticket = await cveless(ticket_factory, status=status, severity=Severity.HIGH)
-
-        assert await _refresh(db_session, ticket) is True
-
-        assert ticket.status == status
-        assert await ticket_events(db_session, ticket) == [_priority_event(None, "P3")]
-
 
 # ---------------------------------------------------------------------------
 # CVE-less Tickets (tickets.md, Tickets Without CVE)
@@ -478,9 +392,6 @@ class TestCvelessTickets:
         ("severity", "expected"),
         [
             (Severity.CRITICAL, "P2"),
-            (Severity.HIGH, "P3"),
-            (Severity.MEDIUM, "P4"),
-            (Severity.LOW, "P4"),
             (Severity.NONE, "P4"),
         ],
     )

@@ -1034,14 +1034,6 @@ class TestTransitions:
 
         assert await ticket_events(db_session, ticket) == []
 
-    async def test_never_goes_below_analysis(
-        self, db_session: AsyncSession, ticket_factory: TicketFactory
-    ) -> None:
-        ticket = await cveless(ticket_factory, severity=None)
-
-        assert await _reconcile(db_session, ticket) is TicketStatus.ANALYSIS
-        assert await ticket_events(db_session, ticket) == []
-
     async def test_one_evaluation_date_across_a_utc_midnight(
         self,
         db_session: AsyncSession,

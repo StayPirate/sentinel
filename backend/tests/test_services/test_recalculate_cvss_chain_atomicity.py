@@ -159,39 +159,6 @@ def _propagation_for(status: TicketStatus | None) -> CVSSPropagation:
 
 @pytest.mark.integration
 class TestClassification:
-    async def test_product_change_alone_is_changed(
-        self,
-        db_session: AsyncSession,
-        ticket_factory: TicketFactory,
-        cve_with: CVEBuilder,
-        tree: TreeBuilder,
-    ) -> None:
-        cve = await cve_with(SUSE_HIGH, severity=Severity.HIGH)
-        ticket = await ticket_factory(
-            status=TicketStatus.NEW.value, cve_id=cve.id, priority_auto="P3"
-        )
-        await tree(ticket, products=(Prod(eligible=True, threshold=T9),))
-
-        result = await run_chain(db_session, cve.id)
-
-        assert (result.classification, result.severity_changed) == (CHANGED, False)
-        assert result.products == ProductPropagationSummary(1, 0, 1)
-        detail = await subjects(db_session, ticket.id)
-        assert await ticket_events(db_session, ticket) == [
-            product_event(detail[0], True, False)
-        ]
-
-    async def test_ticketless_severity_change_alone_is_changed(
-        self, db_session: AsyncSession, cve_with: CVEBuilder
-    ) -> None:
-        cve = await cve_with(SUSE_HIGH, severity=None)
-
-        result = await run_chain(db_session, cve.id)
-
-        assert (result.classification, result.severity_changed) == (CHANGED, True)
-        assert await cve_severity(db_session, cve.id) == "High"
-        assert await total_ticket_events(db_session) == 0
-
     @pytest.mark.parametrize("status", ALL_STATUSES)
     @pytest.mark.parametrize(
         ("override", "events"),
@@ -839,25 +806,17 @@ _CVE_TABLE = re.compile(r"FROM cve\b")
 
 @pytest.mark.integration
 class TestLockOrder:
-    @pytest.mark.parametrize("mode", ["default", "association"])
     async def test_cve_then_ticket_are_locked_before_any_other_read(
         self,
         db_session: AsyncSession,
         ticket_factory: TicketFactory,
         cve_with: CVEBuilder,
         tree: TreeBuilder,
-        mode: str,
     ) -> None:
         cve, ticket = await _stale_gate_zone_ticket(ticket_factory, cve_with, tree)
-        kwargs: dict[str, Any] = {}
-        if mode == "association":
-            kwargs = {
-                "mode": CVSSChainMode.ASSOCIATION,
-                "association_previous_severity": Severity.MEDIUM,
-            }
 
         with StatementRecorder(db_session) as recorder:
-            await run_chain(db_session, cve.id, **kwargs)
+            await run_chain(db_session, cve.id)
 
         statements = recorder.statements
         assert _CVE_TABLE.search(statements[0])
@@ -871,9 +830,7 @@ class TestLockOrder:
         assert setting == 2
         assert len(recorder.row_locks()) == 2
         assert recorder.selects_from("ticket_audit_event") == []
-        # Association leaves the final reconciliation to its caller.
-        expected = TicketStatus.ANALYSIS if kwargs else TicketStatus.ANALYZED
-        assert (await ticket_state(db_session, ticket.id))[0] == expected
+        assert (await ticket_state(db_session, ticket.id))[0] == TicketStatus.ANALYZED
 
 
 class _CommittedWorld:

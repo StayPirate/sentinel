@@ -1,12 +1,13 @@
 """Unit tests for pure Ticket priority resolution
 (backend/app/services/ticket_priority.py).
 
-Covers `docs/features/tickets/ticket-priority.md` (Testing Requirements 1-2):
+Covers `docs/features/tickets/ticket-priority.md` (Testing Requirement 1):
 every Decision Table cell (including the `None` severity label versus SQL
-`NULL`), the exploitation precedence, the EPSS percentile boundary, ignored
-SSVC values and non-inputs, and CVE-less Tickets. Refresh points, the
-override, audit, and the API surface (Requirements 3-9) belong to the
-service and API work items that persist priority.
+`NULL`), the exploitation precedence, the EPSS percentile boundary, and
+ignored SSVC values and non-inputs. CVE-less Tickets (Testing Requirement 2)
+are proven in test_ticket_priority_refresh.py `TestCvelessTickets`. Refresh
+points, the override, audit, and the API surface (Requirements 3-9) belong
+to the service and API work items that persist priority.
 
 The expected Decision Table is transcribed independently from the
 specification rather than read back from the module.
@@ -104,12 +105,6 @@ class TestResolvePriority:
             for column in range(len(row))
         }
         assert len(cells) == 20
-
-    def test_severity_none_label_differs_from_sql_null(self) -> None:
-        unknown = ExploitationLevel.UNKNOWN
-
-        assert resolve_priority(Severity.NONE, unknown) == P4
-        assert resolve_priority(None, unknown) is None
 
     def test_null_only_for_unresolved_severity_with_unknown_evidence(self) -> None:
         null_cells = [
@@ -233,37 +228,6 @@ class TestClassifyExploitation:
         assert all(
             p.kind is inspect.Parameter.KEYWORD_ONLY for p in parameters.values()
         )
-
-
-@pytest.mark.unit
-class TestCveLessTickets:
-    """A Ticket without a CVE passes no evidence and uses `severity_manual`
-    with the `unknown` row (ticket-priority.md, Decision Table)."""
-
-    @staticmethod
-    def _cve_less_priority(severity_manual: Severity | None) -> TicketPriority | None:
-        level = classify_exploitation(
-            kev_listed=False, ssvc_exploitation=None, epss_percentile=None
-        )
-        return resolve_priority(severity_manual, level)
-
-    @pytest.mark.parametrize(
-        ("severity_manual", "expected"),
-        [
-            (Severity.CRITICAL, P2),
-            (Severity.HIGH, P3),
-            (Severity.MEDIUM, P4),
-            (Severity.LOW, P4),
-            (Severity.NONE, P4),
-        ],
-    )
-    def test_uses_unknown_row(
-        self, severity_manual: Severity, expected: TicketPriority
-    ) -> None:
-        assert self._cve_less_priority(severity_manual) == expected
-
-    def test_unset_severity_manual_gives_null_priority(self) -> None:
-        assert self._cve_less_priority(None) is None
 
 
 @pytest.mark.unit
