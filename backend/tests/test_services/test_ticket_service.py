@@ -1716,6 +1716,9 @@ class TestTicketServiceQueryBoundary:
             "set_priority_override",
             "ignore_ticket",
             "mark_as_duplicate",
+            "reopen_from_ignored",
+            "reopen_from_ignored_as_system",
+            "revert_duplicate",
         }
 
     def test_projection_exposes_no_internal_ticket_uuid(self) -> None:

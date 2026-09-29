@@ -1891,8 +1891,8 @@ POST /api/v1/tickets/{ticket_id}/reopen
 **`Capability: triage_ticket`**
 - **Response schema**: `TicketDetail`
 
-Reopens an Ignored ticket. If the calling user holds the
-`vulnerability_analyst` role, they become the new assignee; otherwise,
+Reopens an Ignored ticket. If the locked-current calling user is active and
+holds the `vulnerability_analyst` role, they become the new assignee; otherwise,
 the ticket retains its current assignee (or remains unassigned). After
 assignment (if applicable), the workflow enters the gate zone at the
 unconditional `Analysis` floor, then
@@ -1934,6 +1934,8 @@ eligibility, and evaluates upward exactly once. The result is `Analysis`,
 `Analyzed`, or `Resolved` from current gate conditions.
 See [Duplicate Handling](#duplicate-handling) for revert behavior and
 status reconciliation.
+
+No request body is required.
 
 Response: `TicketDetail` object in standard `{"data": ...}` envelope
 (200 OK).

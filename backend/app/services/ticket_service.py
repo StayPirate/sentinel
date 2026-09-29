@@ -8,9 +8,13 @@ read in its consumer and mutation-assembly modes (Ticket Query
 Operations > `get_ticket_detail()`), Ticket creation
 (`create_ticket()`), CVE association (`associate_cve()`), explicit
 assignment (`assign_ticket()`), and the manual priority override
-(`set_priority_override()`), and the manual-zone entries (`ignore_ticket()`,
-`mark_as_duplicate()`); the remaining lifecycle operations are added by
-their owning work items.
+(`set_priority_override()`), the manual-zone entries (`ignore_ticket()`,
+`mark_as_duplicate()`), and the manual-zone exits
+(`reopen_from_ignored()` with its trusted system form
+`reopen_from_ignored_as_system()`, and `revert_duplicate()`), which
+compose the package-owned eligibility convergence with one final
+reconciliation; the remaining lifecycle operations are added by their
+owning work items.
 
 Every operation accepts the caller's `AsyncSession` and never commits or
 rolls back; database exceptions propagate unchanged (Transaction
@@ -2103,3 +2107,274 @@ async def mark_as_duplicate(
             detail={"triggered_by_ticket": source_identifier},
         )
     return source
+
+
+# ---------------------------------------------------------------------------
+# Manual-zone exits (ticket-service.md, Manual-Zone Exit Operations)
+# ---------------------------------------------------------------------------
+
+
+async def _complete_manual_zone_exit(
+    db: AsyncSession,
+    *,
+    ticket: Ticket,
+    original_status: TicketStatus,
+    evaluation_date: date,
+) -> None:
+    """Shared finalization of `reopen_from_ignored()` and `revert_duplicate()`.
+
+    Category A private composition (ticket-service.md,
+    `_complete_manual_zone_exit()`; ticket-mutations.md, Manual-zone exit
+    composition). Called only by the two exit workflows.
+
+    Q1: `ticket` is locked `FOR UPDATE` by the calling workflow, which has
+    validated its exact source state and set the `Analysis` floor (and,
+    for `Duplicated`, already cleared `duplicate_of_id`).
+    `original_status` is that preserved source status; `evaluation_date`
+    the workflow's one UTC date.
+
+    Q2: the caller holds its roots (acting User `FOR SHARE` for a consumer
+    exit, then the Ticket) through this call. Acquires no lock.
+
+    Q3: (1) the package-owned synchronous eligibility convergence
+    (`package_service.converge_manual_zone_exit_eligibility()`), whose
+    changed Product events use the system actor and `reason =
+    reactivation` in occurrence-ID order; (2) exactly one
+    `reconcile_ticket_status()` with `previous_status = original_status`
+    and the same date, which records the optional sanitation `assignment`
+    and the final system `status_change` from the source status, and (3)
+    registers the one transaction-local Ticket convergence effect for
+    every final status, including `Resolved`. No CVE write or lock,
+    external I/O, Redis command, publication, commit, or rollback.
+
+    Q4: returns `None`; the Ticket holds its final evaluated status.
+
+    Q6: settings, database, eligibility, audit, flush, and reconciliation
+    errors propagate and roll back the complete caller-owned transaction.
+    """
+    await package_service.converge_manual_zone_exit_eligibility(
+        db, ticket=ticket, evaluation_date=evaluation_date
+    )
+    await reconcile_ticket_status(
+        ticket, db, previous_status=original_status, evaluation_date=evaluation_date
+    )
+
+
+async def _reopen_locked_ticket(
+    db: AsyncSession,
+    *,
+    ticket: Ticket,
+    acting_user: User | None,
+    evaluation_date: date | None,
+) -> Ticket:
+    """Steps 2-4 of `reopen_from_ignored()` for an already locked Ticket."""
+    if ticket.status != TicketStatus.IGNORED:
+        raise InvalidTransitionError()
+    if evaluation_date is None:
+        evaluation_date = _utc_now().astimezone(UTC).date()
+
+    await auto_assign_actor(ticket, acting_user, db, force=True)
+    ticket.status = TicketStatus.ANALYSIS.value
+    await _complete_manual_zone_exit(
+        db,
+        ticket=ticket,
+        original_status=TicketStatus.IGNORED,
+        evaluation_date=evaluation_date,
+    )
+    return ticket
+
+
+async def reopen_from_ignored(
+    db: AsyncSession,
+    *,
+    ticket_id: UUID,
+    acting_user_id: UUID,
+    caller: TicketCaller,
+    evaluation_date: date | None = None,
+) -> Ticket:
+    """Reopen an `Ignored` Ticket for a consumer (manual-zone exit).
+
+    Category A lifecycle composition (ticket-service.md,
+    `reopen_from_ignored()`; tickets.md, Ignored, Reopen Ticket). The
+    trusted system form is the separate `reopen_from_ignored_as_system()`
+    boundary: this consumer signature cannot express a system call.
+
+    Q1: `ticket_id` is the internal Ticket UUID (the API resolves the
+    public `SNTL-{n}` locator first). `acting_user_id` is the
+    authenticated acting user; `caller` is the request-resolved caller
+    information whose `user_id` must identify `acting_user_id`.
+    `evaluation_date` is the one UTC date shared by the eligibility
+    convergence, reconciliation, and the caller's `TicketDetail`; captured
+    once after the locks when omitted.
+
+    Q2: the caller has verified `triage_ticket` and owns the transaction.
+    Locks, in order and retained until the transaction ends: the acting
+    User `FOR SHARE` (`stabilize_acting_user()`), then the Ticket `FOR
+    UPDATE`. Does not call `ensure_ticket_operable()` (dedicated exit).
+
+    Q3: (1) revalidates accessibility from locked-current state before
+    the exact `Ignored` check; (2) preserves the source status and
+    resolves the date; (3) `auto_assign_actor(force=True)`: an active VA
+    actor becomes the assignee (replacing a different one), otherwise the
+    assignee is unchanged; (4) sets the `Analysis` floor and completes
+    the exit (`_complete_manual_zone_exit()`). Events: optional acting-user
+    `assignment`, system Product events, optional sanitation `assignment`,
+    then one system `status_change` from `Ignored` to the final status;
+    all comments `NULL` except sanitation. Never reads audit history,
+    publishes, or commits.
+
+    Q4: returns the locked Ticket with its final status (`Analysis`,
+    `Analyzed`, or `Resolved`), flushed.
+
+    Q6: raises `ValueError` before any database operation when `caller`
+    does not identify `acting_user_id`. Raises `TicketNotFoundError` for
+    a missing or inaccessible Ticket, before any other decision, and
+    `InvalidTransitionError` when the locked-current status is not
+    `Ignored`. `UserNotFoundError` (an invariant violation for an
+    authenticated caller), settings, audit, database, flush, and
+    reconciliation exceptions propagate and roll back every effect.
+    """
+    if caller.user_id != acting_user_id:
+        raise ValueError("caller must identify the acting user.")
+
+    acting_user = await stabilize_acting_user(db, acting_user_id)
+    ticket = await lock_accessible_ticket(db, ticket_id, caller)
+    return await _reopen_locked_ticket(
+        db, ticket=ticket, acting_user=acting_user, evaluation_date=evaluation_date
+    )
+
+
+async def reopen_from_ignored_as_system(
+    db: AsyncSession,
+    *,
+    ticket_id: UUID,
+    evaluation_date: date | None = None,
+) -> Ticket:
+    """Reopen an `Ignored` Ticket as the trusted system (manual-zone exit).
+
+    Category A system composition: the explicit trusted-caller boundary
+    of `reopen_from_ignored()` (ticket-service.md, `reopen_from_ignored()`
+    step 1 and CVE-ingestion composition). Its only specified caller is
+    the `cve_service` CVE-republication composition, which verifies the
+    association and `Ignored` status under its CVE-then-Ticket locks
+    first. Never expose it to an API, CLI, or task entry point.
+
+    Q1: `ticket_id` is the internal Ticket UUID; `evaluation_date` is the
+    caller's UTC date (captured once after the lock when omitted).
+
+    Q2: the caller owns the transaction and may already hold the CVE then
+    Ticket locks. Acquires no User lock and applies no consumer
+    visibility filtering; selects the Ticket `FOR UPDATE` (a no-op
+    same-transaction re-lock when the caller already holds it).
+
+    Q3: identical to the consumer form from the exact `Ignored` check on,
+    with no actor: the current assignee is retained (the final
+    reconciliation sanitizes an inactive or non-VA assignee only for
+    `Analysis` or `Analyzed`), and the same Product, sanitation, and
+    final system `status_change` events and convergence registration
+    follow.
+
+    Q4: returns the locked Ticket with its final status, flushed.
+
+    Q6: raises `TicketNotFoundError` when no Ticket has `ticket_id` and
+    `InvalidTransitionError` when its locked-current status is not
+    `Ignored`. Settings, audit, database, flush, and reconciliation
+    exceptions propagate and roll back every effect.
+    """
+    ticket = await _lock_ticket_row(db, ticket_id)
+    if ticket is None:
+        raise TicketNotFoundError()
+    return await _reopen_locked_ticket(
+        db, ticket=ticket, acting_user=None, evaluation_date=evaluation_date
+    )
+
+
+async def revert_duplicate(
+    db: AsyncSession,
+    *,
+    ticket_id: UUID,
+    acting_user_id: UUID,
+    caller: TicketCaller,
+    evaluation_date: date | None = None,
+) -> Ticket:
+    """Revert a `Duplicated` Ticket into the gate zone (manual-zone exit).
+
+    Category A lifecycle composition (ticket-service.md,
+    `revert_duplicate()`; tickets.md, Revert-Duplicate Operation, Revert
+    Duplicate Status).
+
+    Q1: `ticket_id` is the internal Ticket UUID (the API resolves the
+    public `SNTL-{n}` locator first). `acting_user_id` is the
+    authenticated acting user (there is no system caller); `caller` is the
+    request-resolved caller information whose `user_id` must identify
+    `acting_user_id`. `evaluation_date` is the one UTC date shared by the
+    eligibility convergence, reconciliation, and the caller's
+    `TicketDetail`; captured once after the locks when omitted.
+
+    Q2: the caller has verified `triage_ticket` and owns the transaction.
+    Locks, in order and retained until the transaction ends: the acting
+    User `FOR SHARE` (`stabilize_acting_user()`), then the Ticket `FOR
+    UPDATE`. The duplicate target is neither locked nor modified. Does not
+    call `ensure_ticket_operable()` (dedicated exit).
+
+    Q3: (1) revalidates accessibility from locked-current state before
+    the exact `Duplicated` check; (2) preserves the source status, reads
+    the current target's `SNTL-{n}` (`sequence_id` is immutable), and
+    resolves the date; (3) `auto_assign_actor(force=True)`; (4) clears
+    `duplicate_of_id` and sets `Analysis` consecutively, before any
+    operation that may flush, preserving
+    `chk_ticket_duplicate_status_coherence`; (5) one acting-user
+    `duplicate_removed` (`old_value` the pre-clear target identifier,
+    `new_value NULL`); (6) completes the exit
+    (`_complete_manual_zone_exit()`). Events: optional acting-user
+    `assignment`, `duplicate_removed`, system Product events, optional
+    sanitation `assignment`, then one system `status_change` from
+    `Duplicated` to the final status. Other Tickets are never repointed.
+    Never reads audit history, publishes, or commits.
+
+    Q4: returns the locked Ticket with its final status (`Analysis`,
+    `Analyzed`, or `Resolved`), flushed.
+
+    Q6: raises `ValueError` before any database operation when `caller`
+    does not identify `acting_user_id`. Raises `TicketNotFoundError` for
+    a missing or inaccessible Ticket, before any other decision, and
+    `InvalidTransitionError` when the locked-current status is not
+    `Duplicated`. `UserNotFoundError` (an invariant violation for an
+    authenticated caller), settings, audit, database, flush, and
+    reconciliation exceptions propagate and roll back the link clear and
+    every other effect.
+    """
+    if caller.user_id != acting_user_id:
+        raise ValueError("caller must identify the acting user.")
+
+    acting_user = await stabilize_acting_user(db, acting_user_id)
+    ticket = await lock_accessible_ticket(db, ticket_id, caller)
+    if ticket.status != TicketStatus.DUPLICATED:
+        raise InvalidTransitionError()
+    target_sequence_id = (
+        await db.execute(
+            select(Ticket.sequence_id).where(Ticket.id == ticket.duplicate_of_id)
+        )
+    ).scalar_one()
+    original_target_identifier = format_ticket_id(target_sequence_id)
+    if evaluation_date is None:
+        evaluation_date = _utc_now().astimezone(UTC).date()
+
+    await auto_assign_actor(ticket, acting_user, db, force=True)
+    ticket.duplicate_of_id = None
+    ticket.status = TicketStatus.ANALYSIS.value
+    await TicketAuditLog.log_event(
+        db,
+        ticket_id=ticket.id,
+        event_type=TicketAuditEventType.DUPLICATE_REMOVED,
+        user_id=acting_user_id,
+        old_value=original_target_identifier,
+        new_value=None,
+    )
+    await _complete_manual_zone_exit(
+        db,
+        ticket=ticket,
+        original_status=TicketStatus.DUPLICATED,
+        evaluation_date=evaluation_date,
+    )
+    return ticket

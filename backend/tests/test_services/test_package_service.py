@@ -1449,18 +1449,17 @@ class TestTreeReadRaces:
 @pytest.mark.unit
 class TestPackageServiceModuleBoundary:
     def test_imports_no_higher_level_ticket_service(self) -> None:
-        """`package_service` never imports `ticket_service` or the audit
-        trail (package-service.md, Relationship with other modules)."""
+        """`package_service` never imports `ticket_service`
+        (package-service.md, Relationship with other modules)."""
         modules = imported_modules(
             APP_ROOT / "services" / "package_service.py", "app.services"
         )
 
         assert "app.services.ticket_service" not in modules
-        assert "app.services.ticket_audit_log" not in modules
         assert "app.models.ticket_package_maintainer" not in modules
         assert "app.models.user" not in modules
 
-    def test_query_is_the_only_coroutine(self) -> None:
+    def test_implemented_coroutines(self) -> None:
         coroutines = {
             name
             for name, member in inspect.getmembers(package_service, inspect.isfunction)
@@ -1468,4 +1467,7 @@ class TestPackageServiceModuleBoundary:
             and inspect.iscoroutinefunction(member)
         }
 
-        assert coroutines == {"get_ticket_packages"}
+        assert coroutines == {
+            "get_ticket_packages",
+            "converge_manual_zone_exit_eligibility",
+        }
