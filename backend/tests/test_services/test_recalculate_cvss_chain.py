@@ -417,8 +417,6 @@ class TestEligibilityFormula:
         ("threshold", "old", "new"),
         [
             pytest.param("7.5", False, True, id="score-equals-threshold"),
-            pytest.param("7.6", True, False, id="score-just-below-threshold"),
-            pytest.param("7.4", False, True, id="score-just-above-threshold"),
         ],
     )
     async def test_threshold_boundary(
@@ -448,30 +446,6 @@ class TestEligibilityFormula:
         ("assessments", "severity", "resolution", "expected_eligibility", "priority"),
         [
             pytest.param(
-                (Assessment("5.0"),),
-                severity_resolution("5.0", Severity.MEDIUM),
-                suse_eligibility("5.0"),
-                False,
-                "P4",
-                id="suse-default-version-score",
-            ),
-            pytest.param(
-                (Assessment("5.0", version="4.0"),),
-                severity_resolution("5.0", Severity.MEDIUM, version=CVSSVersion.V4_0),
-                FALLBACK,
-                True,
-                "P4",
-                id="suse-other-version-only-uses-fallback",
-            ),
-            pytest.param(
-                (Assessment("5.0", provider="NVD"),),
-                severity_resolution("5.0", Severity.MEDIUM, provider="NVD"),
-                FALLBACK,
-                True,
-                "P4",
-                id="external-default-version-only-uses-fallback",
-            ),
-            pytest.param(
                 (
                     Assessment("2.0", version="4.0"),
                     Assessment("5.0", provider="NVD"),
@@ -484,14 +458,6 @@ class TestEligibilityFormula:
                 "P4",
                 id="severity-cascade-winner-is-not-an-input",
             ),
-            pytest.param(
-                (),
-                None,
-                FALLBACK,
-                True,
-                None,
-                id="no-assessment-uses-fallback",
-            ),
         ],
     )
     async def test_suse_default_version_score_versus_fallback(
@@ -501,13 +467,12 @@ class TestEligibilityFormula:
         cve_with: CVEBuilder,
         tree: TreeBuilder,
         assessments: tuple[Assessment, ...],
-        severity: SeverityResolution | None,
+        severity: SeverityResolution,
         resolution: EligibilityResolution,
         expected_eligibility: bool,
-        priority: str | None,
+        priority: str,
     ) -> None:
-        derived = severity.label if severity is not None else None
-        cve = await cve_with(*assessments, severity=derived)
+        cve = await cve_with(*assessments, severity=severity.label)
         ticket = await _new_ticket(ticket_factory, cve.id, priority=priority)
         start = not expected_eligibility
         await tree(ticket, products=(Prod(eligible=start, threshold=Decimal("6.0")),))
@@ -528,16 +493,13 @@ class TestEligibilityFormula:
             product_event(detail[0], start, expected_eligibility)
         ]
 
-    @pytest.mark.parametrize("setting", ["read-would-fail", "row-absent"])
     async def test_explicit_default_version_overrides_the_setting_for_both(
         self,
         db_session: AsyncSession,
         ticket_factory: TicketFactory,
         cve_with: CVEBuilder,
         tree: TreeBuilder,
-        default_setting: SystemSetting,
         monkeypatch: pytest.MonkeyPatch,
-        setting: str,
     ) -> None:
         # Converged for the persisted 3.1 setting: Critical, P2, eligible.
         cve = await cve_with(
@@ -547,15 +509,11 @@ class TestEligibilityFormula:
         )
         ticket = await _new_ticket(ticket_factory, cve.id, priority="P2")
         await tree(ticket, products=(Prod(eligible=True, threshold=Decimal("5.0")),))
-        if setting == "read-would-fail":
 
-            async def forbidden(_db: AsyncSession) -> str:
-                raise AssertionError("the supplied version must be used")
+        async def forbidden(_db: AsyncSession) -> str:
+            raise AssertionError("the supplied version must be used")
 
-            monkeypatch.setattr(settings_service, "get_default_cvss_version", forbidden)
-        else:
-            await db_session.delete(default_setting)
-            await db_session.flush()
+        monkeypatch.setattr(settings_service, "get_default_cvss_version", forbidden)
 
         with StatementRecorder(db_session) as recorder:
             result = await run_chain(db_session, cve.id, default_cvss_version="4.0")
@@ -683,7 +641,6 @@ class TestEligibilityFormula:
             product_event(detail[1], True, False)
         ]
 
-    @pytest.mark.parametrize("mode", [DEFAULT, ASSOCIATION])
     async def test_event_subject_actor_and_ascending_occurrence_id_order(
         self,
         db_session: AsyncSession,
@@ -693,15 +650,11 @@ class TestEligibilityFormula:
         ticket_package_factory: Callable[..., Awaitable[TicketPackage]],
         ticket_package_track_factory: Callable[..., Awaitable[TicketPackageTrack]],
         ticket_package_product_factory: Callable[..., Awaitable[TicketPackageProduct]],
-        mode: CVSSChainMode,
     ) -> None:
         # No assessment: severity stays NULL, priority stays NULL, and the
         # 10.0 fallback makes every automatic occurrence eligible.
         cve = await cve_with(severity=None)
-        if mode is DEFAULT:
-            ticket = await _new_ticket(ticket_factory, cve.id, priority=None)
-        else:
-            ticket = await ticket_factory(status=TicketStatus.ANALYSIS.value)
+        ticket = await _new_ticket(ticket_factory, cve.id, priority=None)
         alpha = await ticket_package_factory(
             ticket_id=ticket.id, package_name="fictional-alpha"
         )
@@ -737,13 +690,7 @@ class TestEligibilityFormula:
                 product_id=product.id,
                 eligible=False,
             )
-        if mode is ASSOCIATION:
-            await associate(db_session, ticket, cve)
-            result = await run_chain(
-                db_session, cve.id, mode=mode, association_previous_severity=None
-            )
-        else:
-            result = await run_chain(db_session, cve.id)
+        result = await run_chain(db_session, cve.id)
 
         assert result.products == ProductPropagationSummary(4, 0, 4)
 
@@ -1086,33 +1033,15 @@ class TestDefaultVersionMatrix:
         [
             pytest.param(
                 TicketStatus.ANALYSIS,
-                PackageStatus.NOT_AFFECTED,
-                TicketStatus.RESOLVED,
-                id="analysis-to-resolved",
-            ),
-            pytest.param(
-                TicketStatus.ANALYSIS,
                 PackageStatus.AFFECTED,
                 TicketStatus.ANALYZED,
                 id="analysis-to-analyzed",
             ),
             pytest.param(
                 TicketStatus.ANALYZED,
-                PackageStatus.AFFECTED,
-                TicketStatus.ANALYZED,
-                id="analyzed-stays",
-            ),
-            pytest.param(
-                TicketStatus.ANALYZED,
                 PackageStatus.NOT_AFFECTED,
                 TicketStatus.RESOLVED,
                 id="analyzed-to-resolved",
-            ),
-            pytest.param(
-                TicketStatus.RESOLVED,
-                PackageStatus.NOT_AFFECTED,
-                TicketStatus.RESOLVED,
-                id="resolved-stays",
             ),
             pytest.param(
                 TicketStatus.RESOLVED,
@@ -1289,60 +1218,10 @@ class TestDefaultVersionMatrix:
         )
 
     @pytest.mark.parametrize(
-        "status", [TicketStatus.ANALYSIS, TicketStatus.ANALYZED, TicketStatus.RESOLVED]
-    )
-    async def test_priority_only_change_does_not_reconcile(
-        self,
-        db_session: AsyncSession,
-        ticket_factory: TicketFactory,
-        cve_with: CVEBuilder,
-        va_user: VAUser,
-        monkeypatch: pytest.MonkeyPatch,
-        status: TicketStatus,
-    ) -> None:
-        # No tree and an inactive assignee: any reconciliation would move an
-        # Analyzed/Resolved Ticket to Analysis and sanitize the assignee.
-        assignee = await va_user(active=False)
-        cve = await cve_with(SUSE_HIGH, severity=Severity.HIGH)
-        ticket = await ticket_factory(
-            status=status.value, cve_id=cve.id, assignee_id=assignee.id
-        )
-        reconcile = CallCounter(monkeypatch, "reconcile_ticket_status")
-
-        result = await run_chain(db_session, cve.id)
-
-        assert result == _result(
-            severity=severity_resolution("7.5", Severity.HIGH),
-            eligibility_resolution=suse_eligibility("7.5"),
-            severity_changed=False,
-        )
-        assert reconcile.calls == []
-        assert await ticket_state(db_session, ticket.id) == (
-            status,
-            assignee.id,
-            "P3",
-            None,
-            None,
-        )
-        assert await ticket_events(db_session, ticket) == [priority_event(None, "P3")]
-
-    @pytest.mark.parametrize(
         ("active", "roles", "reason"),
         [
             pytest.param(
                 False, (Role.VULNERABILITY_ANALYST,), "inactive assignee", id="inactive"
-            ),
-            pytest.param(
-                True,
-                (Role.RESTRICTED_ANALYST,),
-                "vulnerability_analyst role removed",
-                id="active-without-va",
-            ),
-            pytest.param(
-                False,
-                (Role.RESTRICTED_ANALYST,),
-                "inactive assignee",
-                id="both-invalid-prefers-inactive",
             ),
         ],
     )

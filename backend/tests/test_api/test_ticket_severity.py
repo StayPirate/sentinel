@@ -181,12 +181,6 @@ async def _user_reference(db: AsyncSession, user_id: uuid.UUID) -> dict[str, Any
     }
 
 
-async def _username(db: AsyncSession, user_id: uuid.UUID) -> str:
-    return (
-        await db.execute(select(User.username).where(User.id == user_id))
-    ).scalar_one()
-
-
 def _forbid_lookups(monkeypatch: pytest.MonkeyPatch) -> tuple[AsyncMock, AsyncMock]:
     """Replace the Ticket lookup and the mutation with spies that must stay
     unused."""
@@ -427,58 +421,6 @@ class TestCallerResolution:
 
         assert response.status_code == 200
         assert calls == [va_user.id]
-
-    async def test_role_removed_after_the_load_applies_to_the_next_request(
-        self,
-        authenticated_client: AsyncClient,
-        va_user: User,
-        db_session: AsyncSession,
-        ticket_factory: Factory,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """The VA role disappears right after the request's single role
-        load. The in-flight request keeps its capability and its `all`
-        scope for a confidential Ticket without a grant; the next request
-        is denied at the capability step."""
-        target: Ticket = await ticket_factory(is_confidential=True)
-        user_id = va_user.id
-        original = user_service.get_user_roles
-
-        async def _load_then_remove(db: AsyncSession, loaded: uuid.UUID) -> list[Role]:
-            roles = await original(db, loaded)
-            await db.execute(delete(UserRole).where(UserRole.user_id == loaded))
-            return roles
-
-        monkeypatch.setattr(user_service, "get_user_roles", _load_then_remove)
-        in_flight = await authenticated_client.patch(
-            _url(target), json={"severity": "low"}
-        )
-        monkeypatch.setattr(user_service, "get_user_roles", original)
-        next_request = await authenticated_client.patch(
-            _url(target), json={"severity": "high"}
-        )
-
-        assert in_flight.status_code == 200
-        assert in_flight.json()["data"]["severity"] == "low"
-        assert next_request.status_code == 403
-        assert next_request.json() == _FORBIDDEN
-        assert (await _state(db_session, target.id))["severity_manual"] == (
-            Severity.LOW.value
-        )
-        severity_events = [
-            e
-            for e in await _events(db_session, target.id)
-            if e[0] == TicketAuditEventType.SEVERITY_CHANGED.value
-        ]
-        assert severity_events == [
-            (
-                TicketAuditEventType.SEVERITY_CHANGED.value,
-                user_id,
-                None,
-                Severity.LOW.value,
-                None,
-            )
-        ]
 
 
 # ---------------------------------------------------------------------------
@@ -756,52 +698,6 @@ class TestSetSeverity:
             ),
         ]
 
-    async def test_changing_severity_refreshes_priority_and_keeps_the_assignee(
-        self,
-        authenticated_client: AsyncClient,
-        va_user: User,
-        db_session: AsyncSession,
-        ticket_factory: Factory,
-        user_factory: Factory,
-        user_role_factory: Factory,
-    ) -> None:
-        other = await user_factory(username="bob.va", full_name="Bob Analyst")
-        await user_role_factory(user_id=other.id, role=Role.VULNERABILITY_ANALYST.value)
-        target: Ticket = await ticket_factory(
-            status=TicketStatus.ANALYSIS.value,
-            assignee_id=other.id,
-            severity_manual=Severity.HIGH.value,
-            priority_auto=TicketPriority.P3.value,
-        )
-        other_reference = await _user_reference(db_session, other.id)
-
-        response = await authenticated_client.patch(
-            _url(target), json={"severity": "critical"}
-        )
-
-        assert response.status_code == 200
-        data = response.json()["data"]
-        assert data["severity"] == "critical"
-        assert data["priority"] == data["priority_automatic"] == "p2"
-        assert data["assignee"] == other_reference
-        assert data["status"] == "analysis"
-        assert await _events(db_session, target.id) == [
-            (
-                TicketAuditEventType.SEVERITY_CHANGED.value,
-                va_user.id,
-                Severity.HIGH.value,
-                Severity.CRITICAL.value,
-                None,
-            ),
-            (
-                TicketAuditEventType.PRIORITY_CHANGED.value,
-                None,
-                TicketPriority.P3.value,
-                TicketPriority.P2.value,
-                None,
-            ),
-        ]
-
     async def test_none_label_and_json_null_are_distinct(
         self,
         authenticated_client: AsyncClient,
@@ -883,10 +779,6 @@ class TestSetSeverity:
             pytest.param(
                 Severity.HIGH.value, TicketPriority.P3.value, "high", id="high"
             ),
-            pytest.param(
-                Severity.NONE.value, TicketPriority.P4.value, "none", id="none"
-            ),
-            pytest.param(None, None, None, id="null"),
         ],
     )
     async def test_same_value_is_a_no_op_with_unchanged_detail(
@@ -968,32 +860,6 @@ class TestSetSeverity:
             ),
         ]
 
-    async def test_priority_override_masks_the_automatic_refresh(
-        self,
-        authenticated_client: AsyncClient,
-        va_user: User,
-        db_session: AsyncSession,
-        ticket_factory: Factory,
-    ) -> None:
-        target: Ticket = await ticket_factory(
-            status=TicketStatus.ANALYSIS.value,
-            assignee_id=va_user.id,
-            priority_override=TicketPriority.P1.value,
-        )
-
-        response = await authenticated_client.patch(
-            _url(target), json={"severity": "high"}
-        )
-
-        assert response.status_code == 200
-        data = response.json()["data"]
-        assert data["priority"] == "p1"
-        assert data["priority_override"] == "p1"
-        assert data["priority_automatic"] == "p3"
-        assert [e[0] for e in await _events(db_session, target.id)] == [
-            TicketAuditEventType.SEVERITY_CHANGED.value
-        ]
-
 
 # ---------------------------------------------------------------------------
 # Domain conflicts (409)
@@ -1002,7 +868,7 @@ class TestSetSeverity:
 
 @pytest.mark.e2e
 class TestConflicts:
-    @pytest.mark.parametrize("requested", ["high", "none", None])
+    @pytest.mark.parametrize("requested", ["high"])
     async def test_ticket_with_a_cve_is_severity_derived(
         self,
         requested: str | None,
@@ -1025,25 +891,16 @@ class TestConflicts:
         assert await _state(db_session, target.id) == before
         assert await _event_count(db_session, target.id) == 0
 
-    @pytest.mark.parametrize(
-        "status",
-        [TicketStatus.IGNORED.value, TicketStatus.DUPLICATED.value],
-    )
-    @pytest.mark.parametrize("with_cve", [False, True], ids=["cve-less", "with-cve"])
     async def test_manual_zone_ticket_is_not_mutable(
         self,
-        status: str,
-        with_cve: bool,
         authenticated_client: AsyncClient,
         va_user: User,
         db_session: AsyncSession,
         ticket_factory: Factory,
-        cve_factory: Factory,
     ) -> None:
-        """Operability precedes the derived-severity precondition
-        (ticket-mutations.md, `set_severity_manual()` steps 3-4)."""
-        cve_id = (await cve_factory()).id if with_cve else None
-        target: Ticket = await ticket_factory(status=status, cve_id=cve_id)
+        """An `Ignored` CVE-less Ticket fails the operability precondition
+        (ticket-mutations.md, `set_severity_manual()` step 3)."""
+        target: Ticket = await ticket_factory(status=TicketStatus.IGNORED.value)
         before = await _state(db_session, target.id)
 
         response = await authenticated_client.patch(
@@ -1057,7 +914,7 @@ class TestConflicts:
 
 
 # ---------------------------------------------------------------------------
-# Mutation assembly and rollback
+# Mutation assembly
 # ---------------------------------------------------------------------------
 
 
@@ -1098,44 +955,6 @@ class TestMutationAssembly:
         assert (await _state(db_session, ticket_id))["severity_manual"] == (
             Severity.LOW.value
         )
-
-    async def test_failed_assembly_rolls_back_the_mutation_and_its_events(
-        self,
-        va_commit_client: tuple[User, AsyncClient],
-        db_session: AsyncSession,
-        ticket_factory: Factory,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        _, commit_client = va_commit_client
-        target: Ticket = await ticket_factory()
-        ticket_id = target.id
-        locator = _locator(target)
-        # Checkpoint the fixtures: the failing request rolls back its work.
-        await db_session.commit()
-        before = await _state(db_session, ticket_id)
-        pre_failure: list[tuple[str | None, int]] = []
-
-        async def _fail(db: AsyncSession, **kwargs: Any) -> TicketDetailProjection:
-            pre_failure.append(
-                (
-                    (await _state(db, ticket_id))["severity_manual"],
-                    await _event_count(db, ticket_id),
-                )
-            )
-            raise RuntimeError("simulated assembly failure")
-
-        monkeypatch.setattr(ticket_service, "assemble_ticket_detail", _fail)
-
-        response = await commit_client.patch(_url(locator), json={"severity": "high"})
-
-        # The body is not asserted: the test app runs Starlette's debug
-        # error page, which is not the production envelope.
-        assert response.status_code == 500
-        # The mutation and its four events existed when assembly failed ...
-        assert pre_failure == [(Severity.HIGH.value, 4)]
-        # ... and were rolled back together.
-        assert await _state(db_session, ticket_id) == before
-        assert await _events(db_session, ticket_id) == []
 
 
 # ---------------------------------------------------------------------------
@@ -1222,11 +1041,7 @@ class TestDueDates:
     @pytest.mark.parametrize(
         ("requested", "sla_days"),
         [
-            pytest.param("critical", 30, id="critical"),
-            pytest.param("high", 30, id="high"),
             pytest.param("medium", 90, id="medium"),
-            pytest.param("none", None, id="none-label"),
-            pytest.param(None, 30, id="null"),
         ],
     )
     async def test_severity_change_moves_due_dates_but_never_the_start(

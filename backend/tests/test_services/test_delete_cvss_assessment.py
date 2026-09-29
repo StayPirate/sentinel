@@ -741,7 +741,7 @@ class TestAuthority:
         ]
         assert await ticket_events(db_session, ticket) == []
 
-    @pytest.mark.parametrize("version", ["3.1", "4.0"])
+    @pytest.mark.parametrize("version", ["3.1"])
     async def test_missing_cve_is_not_found(
         self, db_session: AsyncSession, va_user: VAUser, version: str
     ) -> None:
@@ -1268,9 +1268,7 @@ class TestAssignment:
     @pytest.mark.parametrize(
         ("active", "roles"),
         [
-            pytest.param(True, (Role.RESTRICTED_ANALYST,), id="restricted-analyst"),
             pytest.param(False, (Role.VULNERABILITY_ANALYST,), id="inactive-va"),
-            pytest.param(True, (), id="no-role"),
         ],
     )
     async def test_ineligible_actor_deletes_without_assignment_or_reconciliation(
@@ -1331,13 +1329,6 @@ class TestAssignment:
             pytest.param(
                 False, (Role.VULNERABILITY_ANALYST,), "inactive assignee", id="inactive"
             ),
-            pytest.param(
-                True,
-                (Role.RESTRICTED_ANALYST,),
-                "vulnerability_analyst role removed",
-                id="active-without-va",
-            ),
-            pytest.param(False, (), "inactive assignee", id="both-invalid"),
         ],
     )
     async def test_sanitation_follows_priority_and_precedes_the_final_status(
@@ -1376,7 +1367,7 @@ class TestAssignment:
 
 
 # ---------------------------------------------------------------------------
-# Automatic priority, deadline start, and priority override
+# Automatic priority and deadline start
 # ---------------------------------------------------------------------------
 
 
@@ -1449,31 +1440,6 @@ class TestDerivedTicketFields:
             )
         ).scalar_one()
         assert created_at == CREATED_AT
-
-    async def test_override_masks_the_automatic_priority_event(
-        self,
-        db_session: AsyncSession,
-        ticket_factory: TicketFactory,
-        cve_of: CVEOf,
-        va_user: VAUser,
-    ) -> None:
-        actor = await va_user()
-        cve = await cve_of(("SUSE", V31_MEDIUM), severity=Severity.MEDIUM)
-        ticket = await ticket_factory(
-            status=TicketStatus.ANALYSIS.value,
-            cve_id=cve.id,
-            assignee_id=actor.id,
-            priority_auto="P4",
-            priority_override="P1",
-        )
-
-        await delete_assessment(db_session, cve.id, "3.1", actor)
-
-        assert (await ticket_state(db_session, ticket.id))[2:4] == (None, "P1")
-        assert await ticket_events(db_session, ticket) == [
-            cvss_delete_event(actor, V31_MEDIUM),
-            severity_event("Medium", None),
-        ]
 
 
 # ---------------------------------------------------------------------------

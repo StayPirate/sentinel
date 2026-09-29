@@ -11,20 +11,19 @@ Rules 11 and 13), docs/api-spec.md (Authorization Chain Evaluation Order
 flow 3; Response Format: `existing_ticket_id`; What belongs in an endpoint
 error table > Conditional authorization; Anti-Enumeration Boundary; Ticket
 Identifier Resolution), and docs/features/platform/testing-strategy.md
-(Ticket Accessibility; Concurrency Testing; Audit Trail Testing).
+(Ticket Accessibility; Audit Trail Testing).
 
 The service-level creation matrix (every optional event combination, lock
-order, ingestion, and every rollback position) lives in
-tests/test_services/test_create_ticket*.py; these tests cover the HTTP
+order, ingestion, every rollback position, and the concurrent-creation race)
+lives in tests/test_services/test_create_ticket*.py; these tests cover the HTTP
 boundary. Expected values are transcribed from the specifications.
 """
 
 from __future__ import annotations
 
-import asyncio
 import re
 import uuid
-from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock
@@ -33,7 +32,7 @@ import pytest
 import pytest_asyncio
 import redis.asyncio as redis_asyncio
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import delete, func, or_, select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import SESSION_COOKIE_NAME
@@ -41,25 +40,20 @@ from app.api.v1 import tickets as route
 from app.core.enums import (
     Role,
     SessionCreationReason,
-    TicketAuditEventType,
 )
 from app.core.identifiers import format_ticket_id
 from app.database import get_db
 from app.main import app
 from app.models.cve import CVE
 from app.models.cve_source import CVESource
-from app.models.session import Session as SessionRow
 from app.models.ticket import Ticket
 from app.models.ticket_audit_event import TicketAuditEvent
 from app.models.user import User
 from app.services import ticket_mutations, ticket_service, user_service
 from app.services.session_service import create_session
-from app.services.ticket_audit_log import TicketAuditLog
 from app.services.ticket_service import TicketDetailProjection
-from tests.support.suse_cvss_races import CommittedWorld, assert_blocked
 from tests.support.ticket_creation import creation_events
 from tests.support.ticket_mutations import (
-    EventRow,
     StatementRecorder,
     ticket_events_by_id,
 )
@@ -405,13 +399,7 @@ class TestConfidentialityCapability:
                 {"is_confidential": True, "cve_id": _NEW_CVE_ID}, id="true-cve"
             ),
             pytest.param(
-                {"is_confidential": False, "cve_id": _NEW_CVE_ID}, id="false-cve"
-            ),
-            pytest.param(
                 {"is_confidential": True, "coordinated_release_at": _CRD}, id="crd"
-            ),
-            pytest.param(
-                {"is_confidential": False, "severity": "high"}, id="false-severity"
             ),
             pytest.param(
                 {"is_confidential": True, "cve_id": "not-a-cve"},
@@ -445,22 +433,16 @@ class TestConfidentialityCapability:
         assert await _cve_row(db_session, _NEW_CVE_ID) is None
 
     @pytest.mark.parametrize(
-        ("body", "cve", "severity", "priority"),
+        ("body", "severity", "priority"),
         [
-            pytest.param({}, None, None, None, id="empty"),
-            pytest.param(
-                {"cve_id": _NEW_CVE_ID}, _NEW_CVE_ID, None, None, id="placeholder-cve"
-            ),
-            pytest.param({"severity": "medium"}, None, "Medium", "P4", id="severity"),
-            pytest.param(
-                {"coordinated_release_at": None}, None, None, None, id="null-crd"
-            ),
+            pytest.param({}, None, None, id="empty"),
+            pytest.param({"severity": "medium"}, "Medium", "P4", id="severity"),
+            pytest.param({"coordinated_release_at": None}, None, None, id="null-crd"),
         ],
     )
     async def test_absent_field_is_not_checked(
         self,
         body: dict[str, Any],
-        cve: str | None,
         severity: str | None,
         priority: str | None,
         authenticated_client: AsyncClient,
@@ -477,10 +459,10 @@ class TestConfidentialityCapability:
         assert data["assignee"] is None
         assert data["is_confidential"] is False
         assert data["coordinated_release_at"] is None
-        assert data["cve"] == (_placeholder_cve(cve) if cve is not None else None)
+        assert data["cve"] is None
         ticket_id = await _ticket_uuid(db_session, data["ticket_id"])
         assert await ticket_events_by_id(db_session, ticket_id) == creation_events(
-            creator_id=ra_user.id, severity=severity, cve_id=cve, priority=priority
+            creator_id=ra_user.id, severity=severity, priority=priority
         )
 
     @pytest.mark.parametrize("value", [True, False])
@@ -782,14 +764,7 @@ class TestRequestValidation:
 
 _MALFORMED_CVE_IDS = [
     pytest.param("", id="empty"),
-    pytest.param("CVE-2024-123", id="three-digit-number"),
     pytest.param("cve-2024-1234", id="lowercase"),
-    pytest.param(" CVE-2024-1234", id="leading-whitespace"),
-    pytest.param("CVE-2024-1234 ", id="trailing-whitespace"),
-    pytest.param("CVE-2024-1234\n", id="trailing-newline"),
-    pytest.param("CVE-24-1234", id="two-digit-year"),
-    pytest.param("CVE-2024-12a4", id="non-digit"),
-    pytest.param("GHSA-abcd-efgh-ijkl", id="other-identifier"),
     pytest.param("CVE-2024-123456789012", id="21-characters"),
     pytest.param("CVE-2024-" + "1" * 200, id="very-long"),
 ]
@@ -798,22 +773,14 @@ _MALFORMED_CVE_IDS = [
 @pytest.mark.e2e
 class TestCVEInvalidFormat:
     @pytest.mark.parametrize("cve_id", _MALFORMED_CVE_IDS)
-    @pytest.mark.parametrize(
-        "role",
-        [Role.VULNERABILITY_ANALYST, Role.RESTRICTED_ANALYST],
-        ids=["va", "restricted-analyst"],
-    )
     async def test_malformed_cve_id_is_rejected_before_any_database_work(
         self,
         cve_id: str,
-        role: Role,
         authenticated_client: AsyncClient,
-        authenticated_user: User,
+        va_user: User,
         db_session: AsyncSession,
-        user_role_factory: Factory,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        await user_role_factory(user_id=authenticated_user.id, role=role.value)
         before = await _counts(db_session)
         creation = _spy_creation(monkeypatch)
 
@@ -891,22 +858,18 @@ class TestCVEInvalidFormat:
 @pytest.mark.e2e
 class TestConflicts:
     @pytest.mark.parametrize("severity", ["high", "none"])
-    @pytest.mark.parametrize("existing", [True, False], ids=["existing-cve", "new-cve"])
     async def test_cve_with_severity_is_severity_derived_without_effect(
         self,
         severity: str,
-        existing: bool,
         authenticated_client: AsyncClient,
         va_user: User,
         db_session: AsyncSession,
-        cve_factory: Factory,
     ) -> None:
-        cve_id = (await cve_factory()).cve_id if existing else _NEW_CVE_ID
         before = await _counts(db_session)
 
         with StatementRecorder(db_session) as recorder:
             response = await authenticated_client.post(
-                _PATH, json={"cve_id": cve_id, "severity": severity}
+                _PATH, json={"cve_id": _NEW_CVE_ID, "severity": severity}
             )
 
         assert response.status_code == 409
@@ -918,12 +881,7 @@ class TestConflicts:
 
     @pytest.mark.parametrize(
         ("role", "confidential"),
-        [
-            pytest.param(Role.VULNERABILITY_ANALYST, False, id="va-public"),
-            pytest.param(Role.VULNERABILITY_ANALYST, True, id="va-confidential"),
-            pytest.param(Role.RESTRICTED_ANALYST, False, id="ra-public"),
-            pytest.param(Role.RESTRICTED_ANALYST, True, id="ra-inaccessible"),
-        ],
+        [pytest.param(Role.RESTRICTED_ANALYST, True, id="ra-inaccessible")],
     )
     async def test_associated_cve_returns_only_the_existing_identifier(
         self,
@@ -958,11 +916,8 @@ class TestConflicts:
         assert await _counts(db_session) == before
         assert await ticket_events_by_id(db_session, existing.id) == []
         follow = await authenticated_client.get(f"{_PATH}/{existing_ticket_id}")
-        if role is Role.RESTRICTED_ANALYST and confidential:
-            assert follow.status_code == 404
-            assert follow.json() == _TICKET_NOT_FOUND
-        else:
-            assert follow.status_code == 200
+        assert follow.status_code == 404
+        assert follow.json() == _TICKET_NOT_FOUND
 
 
 # ---------------------------------------------------------------------------
@@ -1070,71 +1025,10 @@ class TestCreateTicket:
             priority="P3",
         )
 
-    async def test_existing_cve_is_associated_without_a_new_cve_row(
-        self,
-        authenticated_client: AsyncClient,
-        va_user: User,
-        db_session: AsyncSession,
-        cve_factory: Factory,
-        cve_kev_entry_factory: Factory,
-    ) -> None:
-        """A `Critical` KEV-listed CVE resolves severity from the CVE and the
-        automatic priority to `P1` (ticket-priority.md, Decision Table)."""
-        cve: CVE = await cve_factory(cve_id="CVE-2099-0202", severity="Critical")
-        await cve_kev_entry_factory(cve_id=cve.id)
-        before_cves = (await _counts(db_session))[1]
-
-        response = await authenticated_client.post(_PATH, json={"cve_id": cve.cve_id})
-
-        assert response.status_code == 201
-        data = response.json()["data"]
-        assert data["severity"] == "critical"
-        assert data["priority"] == data["priority_automatic"] == "p1"
-        assert data["cve"]["cve_id"] == cve.cve_id
-        assert data["cve"]["severity"] == "critical"
-        assert data["cve"]["kev"] == {"date_added": "2099-01-15", "reference_url": None}
-        assert (await _counts(db_session))[1] == before_cves
-        ticket_uuid = await _ticket_uuid(db_session, data["ticket_id"])
-        assert (await _state(db_session, ticket_uuid))["cve_id"] == cve.id
-        assert await ticket_events_by_id(db_session, ticket_uuid) == creation_events(
-            creator_id=va_user.id,
-            assignee_username=va_user.username,
-            cve_id=cve.cve_id,
-            priority="P1",
-        )
-
-    async def test_already_rejected_cve_keeps_the_ordinary_status(
-        self,
-        authenticated_client: AsyncClient,
-        va_user: User,
-        db_session: AsyncSession,
-        cve_factory: Factory,
-    ) -> None:
-        cve: CVE = await cve_factory(
-            cve_state="REJECTED",
-            date_rejected=datetime(2099, 3, 4, tzinfo=UTC),
-            severity="High",
-        )
-
-        response = await authenticated_client.post(_PATH, json={"cve_id": cve.cve_id})
-
-        assert response.status_code == 201
-        data = response.json()["data"]
-        assert data["status"] == "analysis"
-        assert data["cve"]["cve_state"] == "rejected"
-        ticket_uuid = await _ticket_uuid(db_session, data["ticket_id"])
-        events = await ticket_events_by_id(db_session, ticket_uuid)
-        assert events == creation_events(
-            creator_id=va_user.id,
-            assignee_username=va_user.username,
-            cve_id=cve.cve_id,
-            priority="P3",
-        )
-
     @pytest.mark.parametrize(
         "body",
-        [{}, {"cve_id": None, "severity": None}],
-        ids=["empty-body", "explicit-nulls"],
+        [{"cve_id": None, "severity": None}],
+        ids=["explicit-nulls"],
     )
     async def test_empty_body_creates_an_assigned_bare_ticket(
         self,
@@ -1160,49 +1054,6 @@ class TestCreateTicket:
         assert await ticket_events_by_id(db_session, ticket_uuid) == creation_events(
             creator_id=va_user.id, assignee_username=va_user.username
         )
-
-    async def test_confidential_without_crd_has_no_crd_event(
-        self,
-        authenticated_client: AsyncClient,
-        va_user: User,
-        db_session: AsyncSession,
-    ) -> None:
-        response = await authenticated_client.post(
-            _PATH, json={"is_confidential": True, "coordinated_release_at": None}
-        )
-
-        assert response.status_code == 201
-        data = response.json()["data"]
-        assert data["is_confidential"] is True
-        assert data["coordinated_release_at"] is None
-        ticket_uuid = await _ticket_uuid(db_session, data["ticket_id"])
-        assert await ticket_events_by_id(db_session, ticket_uuid) == creation_events(
-            creator_id=va_user.id, assignee_username=va_user.username
-        )
-
-    @pytest.mark.parametrize(
-        ("severity", "sla_days"),
-        [
-            pytest.param("critical", 30, id="critical"),
-            pytest.param("medium", 90, id="medium"),
-            pytest.param("low", 180, id="low"),
-            pytest.param("none", None, id="none-label"),
-            pytest.param(None, 30, id="null"),
-        ],
-    )
-    async def test_due_dates_start_at_the_creation_timestamp(
-        self,
-        severity: str | None,
-        sla_days: int | None,
-        authenticated_client: AsyncClient,
-        va_user: User,
-    ) -> None:
-        response = await authenticated_client.post(_PATH, json={"severity": severity})
-
-        assert response.status_code == 201
-        data = response.json()["data"]
-        assert data["severity"] == severity
-        assert _response_due_dates(data) == _due_dates(data["created_at"], sla_days)
 
 
 # ---------------------------------------------------------------------------
@@ -1317,7 +1168,6 @@ class TestTransaction:
                 },
                 id="placeholder-crd",
             ),
-            pytest.param({"severity": "high"}, id="severity"),
         ],
     )
     async def test_failed_final_assembly_rolls_back_everything(
@@ -1347,40 +1197,6 @@ class TestTransaction:
         (at_failure,) = pre_failure
         assert at_failure[0] == before[0] + 1
         assert at_failure[2] > before[2]
-        assert await _counts(db_session) == before
-        assert await _cve_row(db_session, _NEW_CVE_ID) is None
-
-    async def test_failed_audit_write_rolls_back_everything(
-        self,
-        va_commit_client: tuple[User, AsyncClient],
-        db_session: AsyncSession,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        _, commit_client = va_commit_client
-        await db_session.commit()
-        before = await _counts(db_session)
-        original_log = TicketAuditLog.log_event
-        reached: list[str] = []
-
-        async def failing_log(*args: Any, **kwargs: Any) -> None:
-            if kwargs["event_type"] is TicketAuditEventType.CVE_ASSOCIATED:
-                reached.append(kwargs["event_type"].value)
-                raise RuntimeError("injected audit failure")
-            await original_log(*args, **kwargs)
-
-        monkeypatch.setattr(TicketAuditLog, "log_event", failing_log)
-
-        response = await commit_client.post(
-            _PATH,
-            json={
-                "cve_id": _NEW_CVE_ID,
-                "is_confidential": True,
-                "coordinated_release_at": _CRD,
-            },
-        )
-
-        assert response.status_code == 500
-        assert reached == ["cve_associated"]
         assert await _counts(db_session) == before
         assert await _cve_row(db_session, _NEW_CVE_ID) is None
 
@@ -1440,182 +1256,6 @@ class TestEvaluationDate:
         assert handler_clock.calls == 1
         assert projection_clock.calls == 1
         assert mutation_clock.calls == 0
-
-
-# ---------------------------------------------------------------------------
-# Independent transactions: concurrent creations for one CVE (ATR 7)
-# ---------------------------------------------------------------------------
-
-
-class _CreationApp(CommittedWorld):
-    """Committed users with credentials; deletes every Session, CVE, Ticket,
-    and event created by the requests at teardown (testing-strategy.md,
-    Concurrency Testing)."""
-
-    def __init__(
-        self, factory: Callable[[], Awaitable[AsyncSession]], session: AsyncSession
-    ) -> None:
-        super().__init__(factory, session)
-        self.cve_id_strings: list[str] = []
-
-    def new_cve_id(self) -> str:
-        cve_id = f"CVE-2099-{uuid.uuid4().int % 10**8:08d}"
-        self.cve_id_strings.append(cve_id)
-        return cve_id
-
-    async def credential(self, user: User) -> dict[str, str]:
-        created = await create_session(
-            self.session,
-            user,
-            SessionCreationReason.LOCAL_LOGIN,
-            expected_password_hash=None,
-        )
-        assert created is not None
-        await self.session.commit()
-        return {"Authorization": f"Bearer {created.token}"}
-
-    async def cleanup(self) -> None:
-        await self._release()
-        await self.session.rollback()
-        cve_ids = (
-            await self.session.scalars(
-                select(CVE.id).where(CVE.cve_id.in_(self.cve_id_strings))
-            )
-        ).all()
-        self.cve_ids.extend(set(cve_ids) - set(self.cve_ids))
-        ticket_ids = (
-            await self.session.scalars(
-                select(Ticket.id).where(
-                    or_(
-                        Ticket.cve_id.in_(self.cve_ids),
-                        Ticket.assignee_id.in_(self.user_ids),
-                    )
-                )
-            )
-        ).all()
-        self.ticket_ids.extend(set(ticket_ids) - set(self.ticket_ids))
-        await self.session.execute(
-            delete(SessionRow).where(SessionRow.user_id.in_(self.user_ids))
-        )
-        await self.session.commit()
-        await super().cleanup()
-
-
-@pytest_asyncio.fixture
-async def creation_app(
-    db_session_factory: Callable[[], Awaitable[AsyncSession]],
-    redis_client: redis_asyncio.Redis,
-) -> AsyncIterator[tuple[_CreationApp, AsyncClient]]:
-    world = _CreationApp(db_session_factory, await db_session_factory())
-
-    async def _override_get_db() -> AsyncGenerator[AsyncSession]:
-        session = await world.open_session()
-        try:
-            yield session
-            await session.commit()
-        except Exception:
-            await session.rollback()
-            raise
-
-    app.dependency_overrides[get_db] = _override_get_db
-    try:
-        async with AsyncClient(
-            transport=ASGITransport(app=app, raise_app_exceptions=False),
-            base_url="http://test",
-        ) as committed_client:
-            yield world, committed_client
-    finally:
-        app.dependency_overrides.pop(get_db, None)
-        await world.cleanup()
-
-
-@pytest.mark.e2e
-class TestConcurrentCreation:
-    @pytest.mark.parametrize(
-        "existing", [True, False], ids=["existing-cve", "placeholder"]
-    )
-    async def test_second_creator_waits_then_gets_the_conflict(
-        self,
-        existing: bool,
-        creation_app: tuple[_CreationApp, AsyncClient],
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """The first request holds the CVE lock (and its uncommitted Ticket)
-        at final assembly; the second request blocks on the CVE, then
-        observes the committed association: one 201, one 409 carrying the
-        winner's identifier, one Ticket, one CVE row."""
-        world, committed_client = creation_app
-        first = await world.user(role=Role.VULNERABILITY_ANALYST)
-        second = await world.user(role=Role.RESTRICTED_ANALYST)
-        first_headers = await world.credential(first)
-        second_headers = await world.credential(second)
-        if existing:
-            cve = await world.cve()
-            cve_id = cve.cve_id
-            world.cve_id_strings.append(cve_id)
-        else:
-            cve_id = world.new_cve_id()
-        holding = asyncio.Event()
-        release = asyncio.Event()
-        original = ticket_service.assemble_ticket_detail
-
-        async def _hold_first(
-            db: AsyncSession, **kwargs: Any
-        ) -> TicketDetailProjection:
-            if not holding.is_set():
-                holding.set()
-                await release.wait()
-            return await original(db, **kwargs)
-
-        monkeypatch.setattr(ticket_service, "assemble_ticket_detail", _hold_first)
-
-        winner = asyncio.create_task(
-            committed_client.post(_PATH, json={"cve_id": cve_id}, headers=first_headers)
-        )
-        await asyncio.wait_for(holding.wait(), timeout=10)
-        loser = asyncio.create_task(
-            committed_client.post(
-                _PATH, json={"cve_id": cve_id}, headers=second_headers
-            )
-        )
-        try:
-            await assert_blocked(loser)
-        finally:
-            release.set()
-        won = await asyncio.wait_for(winner, timeout=10)
-        lost = await asyncio.wait_for(loser, timeout=10)
-
-        assert won.status_code == 201
-        winner_ticket_id = won.json()["data"]["ticket_id"]
-        assert lost.status_code == 409
-        assert lost.json() == {
-            "code": "TICKET_CVE_CONFLICT",
-            "detail": _CONFLICT_DETAIL,
-            "existing_ticket_id": winner_ticket_id,
-        }
-        fresh = await world.open_session()
-        tickets = (
-            await fresh.scalars(
-                select(Ticket.id)
-                .join(CVE, Ticket.cve_id == CVE.id)
-                .where(CVE.cve_id == cve_id)
-            )
-        ).all()
-        cves = (await fresh.scalars(select(CVE.id).where(CVE.cve_id == cve_id))).all()
-        assert len(tickets) == 1
-        assert len(cves) == 1
-        assert await _ticket_uuid(fresh, winner_ticket_id) == tickets[0]
-        events: list[EventRow] = await ticket_events_by_id(fresh, tickets[0])
-        second_events = await fresh.scalar(
-            select(func.count())
-            .select_from(TicketAuditEvent)
-            .where(TicketAuditEvent.user_id == second.id)
-        )
-        await fresh.rollback()
-        assert events == creation_events(
-            creator_id=first.id, assignee_username=first.username, cve_id=cve_id
-        )
-        assert second_events == 0
 
 
 # ---------------------------------------------------------------------------

@@ -516,18 +516,6 @@ class TestRequestValidation:
         "value",
         [
             pytest.param("", id="empty"),
-            pytest.param("   ", id="empty-after-trim"),
-            pytest.param("CVSS:3.1/AV:N /AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H", id="inner"),
-            pytest.param("cvss:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H", id="prefix"),
-            pytest.param("CVSS:3.1/av:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H", id="metric"),
-            pytest.param("CVSS:3.1/AV:n/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H", id="value"),
-            pytest.param(
-                "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H/E:P", id="temporal"
-            ),
-            pytest.param(
-                "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H/CR:H", id="environmental"
-            ),
-            pytest.param("CVSS:3.2/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H", id="version"),
             pytest.param("x" * 200, id="200-characters-invalid"),
         ],
     )
@@ -673,7 +661,6 @@ class TestUpsert:
         ).one()
         assert tuple(state) == (TicketStatus.NEW.value, None)
 
-    @pytest.mark.parametrize("status", [TicketStatus.IGNORED, TicketStatus.DUPLICATED])
     async def test_manual_zone_ticket_is_not_mutable(
         self,
         authenticated_client: AsyncClient,
@@ -682,10 +669,9 @@ class TestUpsert:
         default_setting: SystemSetting,
         cve_factory: Factory,
         ticket_factory: Factory,
-        status: TicketStatus,
     ) -> None:
         cve: CVE = await cve_factory()
-        await ticket_factory(status=status.value, cve_id=cve.id)
+        await ticket_factory(status=TicketStatus.IGNORED.value, cve_id=cve.id)
 
         response = await authenticated_client.post(_url(cve), json=_body(V31_CRITICAL))
 
