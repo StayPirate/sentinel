@@ -84,6 +84,32 @@ shapes, error codes, and permission enforcement. Business logic
 correctness is covered by integration tests; e2e tests focus on the
 HTTP layer.
 
+### Tier Responsibility and Proportionality
+
+Each behavior is proven once, by the lowest tier that can observe it. A
+higher tier tests only what exists at its own boundary and does not repeat a
+proof owned by a lower tier.
+
+| Behavior | Proving tier |
+|----------|--------------|
+| Pure logic: resolution cascades, parsers, validators | Unit |
+| Service behavior: guards and their order, state changes, audit events, lock order, rollback, independent-session races | Integration |
+| HTTP contract: authentication, capability and authorization order, request validation, status and error codes, response shape, OpenAPI, and steps owned by the handler (for example response assembly or a handler-captured value) | E2e |
+
+- An e2e module covers at least one complete successful request per
+  endpoint. It does not re-run the service matrix (every event combination,
+  guard order, or failure position) through HTTP.
+- A parametrized matrix lives in one module. Another tier covers a
+  representative case only when it adds its own step to that behavior.
+- Mandatory scenarios in this document and the test requirements of owning
+  specifications are satisfied once, at their proving tier. They do not
+  require repeating the same scenario at every tier.
+- A test whose mechanism cannot prove its claimed contract (for example,
+  concurrency inside one shared session) is not added next to a test that
+  can.
+- Removing a duplicate does not change coverage. The coverage floor never
+  justifies a test that proves nothing new.
+
 ### Default Marker
 
 Tests without an explicit marker are treated as **integration** tests.
@@ -1546,10 +1572,11 @@ Every new or modified API endpoint MUST be tested for:
   (see `api-spec.md`, Response Applicability Derivation)
 - Authorization enforcement when the declared capability can produce 403
 - Resource not found → 404
-- Edge cases: empty results, boundary values, concurrent modifications
-  (for endpoints backed by `FOR UPDATE` locking: verify lock
-  serialization using `db_session_factory` and the two-session pattern
-  described in Database Strategy — Concurrency Testing)
+- Edge cases: empty results, boundary values, concurrent modifications.
+  For an endpoint backed by `FOR UPDATE` locking, the service function's
+  two-session test (Service Functions) proves lock serialization. The
+  endpoint repeats it only when the handler adds its own locking, ordering,
+  or transaction step (see Tier Responsibility and Proportionality)
 
 ### Fetcher Outcome and Effect Accounting
 

@@ -170,6 +170,15 @@ presenting it to the user for a decision.
 - Backend: are API endpoints tested for auth, validation, and permissions?
 - Backend: are database constraints and relationships tested?
 
+### Proportionality
+
+- Apply Tier Responsibility and Proportionality in
+  `docs/features/platform/testing-strategy.md`. Identify tests that repeat a
+  behavior already proven at its proving tier, and tests whose mechanism
+  cannot prove their claimed contract.
+- For each, name the retained test that already proves the behavior and state
+  whether removing it loses any required scenario.
+
 ### Audit trail testing
 
 For every mutation covered by any audit trail registered in the Audit Trail
@@ -203,11 +212,15 @@ Provide a structured summary of:
 1. **Well tested**: what is adequately covered
 2. **Missing coverage**: specific gaps in test coverage
 3. **Weak tests**: tests that exist but are insufficient
-4. **Audit gaps**: mutations that create audit events but lack assertions
+4. **Redundant tests**: tests that repeat a proof owned by another test or
+   tier, each with the retained test that already proves it
+5. **Audit gaps**: mutations that create audit events but lack assertions
    for correct event creation
-5. **Suggestions**: specific additional test cases to write
-6. **Verdict**: one of:
-   - **Clean** — required behavior and applicable regressions are well tested
-   - **Minor issues** — useful non-blocking improvements remain
+6. **Suggestions**: specific additional test cases to write
+7. **Verdict**: one of:
+   - **Clean** — required behavior and applicable regressions are well
+     tested, without redundant tests
+   - **Minor issues** — useful non-blocking improvements remain, including
+     removable redundant tests
    - **Needs revision** — required behavior lacks coverage, a bug fix lacks a
      regression test, or a misleading test does not assert its claimed contract

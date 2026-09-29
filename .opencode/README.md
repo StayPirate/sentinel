@@ -114,7 +114,7 @@ summaries brief while preserving scope, limitations, evidence, and verdicts.
 | `@spec-coherence-reviewer` | Reviewer | Guardrail 15 | Detects contradictions and inconsistencies across feature specifications |
 | `@spec-conformance-reviewer` | Reviewer | Pre-PR (unconditional) | Verifies a pull request implements what its issue and owning specs require, and introduces no unspecified behavior |
 | `@spec-gap-analyzer` | Reviewer | Guardrail 17 | Identifies uncovered functional cases and missing edge-case handling in specs |
-| `@test-reviewer` | Reviewer | Guardrail 6 | Reviews new feature/module tests and bug regression tests for coverage, audit assertions, and testing conventions |
+| `@test-reviewer` | Reviewer | Guardrail 6 | Reviews new feature/module tests and bug regression tests for coverage, audit assertions, cross-tier duplication, and testing conventions |
 | `@identity-integrity-reviewer` | Reviewer | Guardrail 11 | Verifies identity audit integrity and centralized service ownership, reporting undefined RoleMapping persistence ownership as a specification gap |
 | `@ticket-integrity-reviewer` | Reviewer | Guardrail 11 | Verifies Ticket audit event/no-event contracts, centralized mutation ownership, locking, and transaction hygiene |
 
