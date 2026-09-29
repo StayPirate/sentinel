@@ -98,8 +98,8 @@ reserved exclusively for system entry points.
 inherently user-initiated — there is no system scenario for granting or
 revoking explicit access.
 
-`assign_ticket()`, `ignore_ticket()`, `mark_as_duplicate()`,
-`revert_duplicate()`, `set_confidentiality()`,
+`assign_ticket()`, `set_priority_override()`, `ignore_ticket()`,
+`mark_as_duplicate()`, `revert_duplicate()`, `set_confidentiality()`,
 `set_coordinated_release_date()`, and direct access-grant operations require a
 non-null authorized acting user. Their API handlers must
 not use system attribution. `create_ticket()` and `reopen_from_ignored()` retain
@@ -245,10 +245,11 @@ one of these functions would invert the global order.
 
 The matching semantics remain owned by `user_service`: valid UUID input selects
 `User.id`, all other input selects the exact stored username, and no match is an
-absent result. The grant workflow uses that user-domain boundary in a
-lock-aware, deferred-error form so it can retain the matched User lock or the
-absence result while it performs the Ticket check. It does not duplicate
-identifier parsing/matching in `ticket_service` and does not call the ordinary
+absent result. The explicit assignment and grant workflows use that
+user-domain boundary in a lock-aware, deferred-error form so they can retain
+the matched User lock or the absence result while they perform the Ticket
+check. This form does not duplicate identifier parsing/matching in
+`ticket_service` and does not call the ordinary
 read-only `resolve_user_identifier()` in a way that would raise before Ticket
 accessibility. The concrete private helper, optional parameter, or equivalent
 service result used to provide this behavior is an implementation choice, not a
@@ -711,11 +712,16 @@ async def assign_ticket(
     db: AsyncSession,
     *,
     ticket_id: UUID,
-    assignee_id: UUID,
+    assignee: str,
     acting_user_id: UUID,
     evaluation_date: date | None = None,
 ) -> Ticket:
 ```
+
+`assignee` is the target User's UUID-or-username identifier, resolved by step
+1 through the user-domain matching boundary (see Concurrency control). The API
+passes the request value unchanged; resolving it before the service would
+report target absence before Ticket accessibility.
 
 For an API workflow returning `TicketDetail`, the caller supplies the same UTC
 date to this function and final detail assembly. Other callers may omit it; the
@@ -739,10 +745,14 @@ function captures one date at entry if reconciliation becomes applicable.
 5. If the target was absent, raise `UserNotFoundError`. Validate the locked
    target user (active — else `AssigneeInactiveError`;
    holds VA role — else `AssigneeNotVAError`)
-6. **Idempotency check**: if `ticket.assignee_id == assignee_id`, return
-    ticket unchanged (no audit event, no status evaluation)
-7. Set `ticket.assignee_id = assignee_id`
-8. Create `TicketAuditEvent` (`assignment`)
+6. **Idempotency check**: if `ticket.assignee_id` equals the locked target's
+    `id`, return ticket unchanged (no audit event, no status evaluation)
+7. Set `ticket.assignee_id` to the locked target's `id`
+8. Create `TicketAuditEvent` (`assignment`, `user_id = acting_user_id`,
+    `new_value` = the locked target's username). For a reassignment,
+    `old_value` is the previous assignee's username from one unlocked
+    PostgreSQL observation under the Ticket lock; it is not an eligibility
+    decision and locks no User
 9. If `ticket.status == New`: set `ticket.status = Analysis`, create
     `TicketAuditEvent` (`status_change`, `user_id = NULL`,
     `old_value = "New"`, `new_value = "Analysis"`) — this is the explicit

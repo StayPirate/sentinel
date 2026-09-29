@@ -6,8 +6,10 @@ Ticket locator resolution (Ticket Query Operations > Ticket locator
 resolution), the Ticket list (`list_tickets()`), and the Ticket detail
 read in its consumer and mutation-assembly modes (Ticket Query
 Operations > `get_ticket_detail()`), Ticket creation
-(`create_ticket()`), and CVE association (`associate_cve()`); the
-remaining lifecycle operations are added by their owning work items.
+(`create_ticket()`), CVE association (`associate_cve()`), explicit
+assignment (`assign_ticket()`), and the manual priority override
+(`set_priority_override()`); the remaining lifecycle operations are added
+by their owning work items.
 
 Every operation accepts the caller's `AsyncSession` and never commits or
 rolls back; database exceptions propagate unchanged (Transaction
@@ -68,7 +70,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSON, aggregate_order_by
 from sqlalchemy.engine import Row
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import aliased
+from sqlalchemy.orm import aliased, selectinload
 
 from app.core.enums import (
     CVESourceType,
@@ -86,6 +88,7 @@ from app.core.exceptions import (
     ServiceError,
     SeverityDerivedError,
     TicketNotFoundError,
+    UserNotFoundError,
 )
 from app.core.identifiers import format_ticket_id, is_valid_cve_id, parse_ticket_id
 from app.models.cve import CVE
@@ -1249,6 +1252,22 @@ class TicketCVEAlreadySetError(TicketServiceError):
         super().__init__("Ticket already has a CVE associated.")
 
 
+class AssigneeNotVAError(TicketServiceError):
+    """The assignment target lacks the `vulnerability_analyst` role. Maps
+    to `400 TICKET_ASSIGNEE_NOT_VA`. The message is static."""
+
+    def __init__(self) -> None:
+        super().__init__("Assignee must hold the vulnerability_analyst role.")
+
+
+class AssigneeInactiveError(TicketServiceError):
+    """The assignment target is inactive. Maps to
+    `409 TICKET_ASSIGNEE_INACTIVE`. The message is static."""
+
+    def __init__(self) -> None:
+        super().__init__("Assignee is inactive.")
+
+
 async def _ensure_cve_unassociated(db: AsyncSession, cve: CVE) -> None:
     """Read the association of the locked `cve` and reject an existing one.
 
@@ -1581,6 +1600,238 @@ async def associate_cve(
         mode=CVSSChainMode.ASSOCIATION,
         association_previous_severity=previous_severity,
         evaluation_date=evaluation_date,
+    )
+    await reconcile_ticket_status(ticket, db, evaluation_date=evaluation_date)
+    return ticket
+
+
+# ---------------------------------------------------------------------------
+# Explicit assignment (ticket-service.md, `assign_ticket`)
+# ---------------------------------------------------------------------------
+
+
+async def _lock_assignment_target(db: AsyncSession, identifier: str) -> User | None:
+    """Resolve and lock the assignment target, preserving absence.
+
+    The lock-aware, deferred-error form of the user-domain matching
+    boundary (ticket-service.md, Concurrency control; user-service.md,
+    `resolve_user_identifier()`): one statement selects the User matched
+    by `user_identifier_condition(identifier)` with `FOR SHARE`,
+    refreshing any identity-map copy, and its current role origins are
+    loaded while that lock is held. Called before the Ticket lock
+    (`docs/conventions.md`, Cross-Domain Root Lock Order), so the target's
+    `active` value and VA origins stay stable against deactivation and
+    role-origin removal until the transaction ends.
+
+    Returns the locked User, or `None` when no User matches; it never
+    raises for absence, so the caller reports it only after locked-current
+    Ticket accessibility and operability.
+    """
+    statement = (
+        select(User)
+        .where(user_identifier_condition(identifier))
+        .options(selectinload(User.roles))
+        .with_for_update(read=True)
+        .execution_options(populate_existing=True)
+    )
+    return (await db.execute(statement)).scalar_one_or_none()
+
+
+async def assign_ticket(
+    db: AsyncSession,
+    *,
+    ticket_id: UUID,
+    assignee: str,
+    acting_user_id: UUID,
+    caller: TicketCaller,
+    evaluation_date: date | None = None,
+) -> Ticket:
+    """Assign or reassign a Ticket to an active vulnerability analyst.
+
+    Category A lifecycle operation (ticket-service.md, `assign_ticket`;
+    tickets.md, Reassignment, Assign Ticket).
+
+    Q1: `ticket_id` is the internal Ticket UUID (the API resolves the
+    public `SNTL-{n}` locator first). `assignee` is the target User's
+    raw UUID-or-username identifier. `acting_user_id` is the
+    authenticated acting user; `caller` is the request-resolved caller
+    information whose `user_id` must identify `acting_user_id`.
+    `evaluation_date` is the workflow's UTC date, shared with any
+    `TicketDetail` response; one UTC date is captured at entry when
+    omitted.
+
+    Q2: the caller has verified `triage_ticket` and owns the transaction.
+    Locks, in order: the target User `FOR SHARE` (absence preserved), then
+    the Ticket `FOR UPDATE`. The acting User is not locked: this operation
+    never auto-assigns the actor.
+
+    Q3: (1) resolves and locks the target; (2)-(3) locks the Ticket and
+    revalidates accessibility from locked-current state; (4)
+    `ensure_ticket_operable()`; (5) reports the deferred target result
+    from the locked row: absent, then inactive, then without any VA
+    origin; (6) an unchanged assignee is a no-op with no write, event, or
+    reconciliation; (7)-(8) sets the assignee and creates one
+    `assignment` event attributed to the acting user (`old_value` the
+    previous assignee's username from one unlocked observation or `NULL`,
+    `new_value` the target's username); (9) a `New` Ticket moves to
+    `Analysis` with the explicit system `status_change`; (10) exactly one
+    `reconcile_ticket_status()` with the one date, which may promote
+    further. Never calls `auto_assign_actor()`, reads audit history, or
+    commits.
+
+    Q4: returns the locked Ticket in its post-mutation state.
+
+    Q5: re-invocation with the same target is the step-6 no-op.
+
+    Q6: raises `ValueError` before any database operation when `caller`
+    does not identify `acting_user_id`. Raises `TicketNotFoundError` for
+    a missing or inaccessible Ticket before any target result;
+    `TicketNotMutableError` for `Ignored` or `Duplicated`;
+    `UserNotFoundError`, `AssigneeInactiveError`, then
+    `AssigneeNotVAError`. Audit, database, flush, and reconciliation
+    exceptions propagate and roll back the caller's transaction.
+    """
+    if caller.user_id != acting_user_id:
+        raise ValueError("caller must identify the acting user.")
+    if evaluation_date is None:
+        evaluation_date = _utc_now().astimezone(UTC).date()
+
+    target = await _lock_assignment_target(db, assignee)
+    ticket = await lock_accessible_ticket(db, ticket_id, caller)
+    ensure_ticket_operable(ticket)
+    if target is None:
+        raise UserNotFoundError()
+    if not target.active:
+        raise AssigneeInactiveError()
+    if not is_stabilized_vulnerability_analyst(target):
+        raise AssigneeNotVAError()
+    if ticket.assignee_id == target.id:
+        return ticket
+
+    previous_username: str | None = None
+    if ticket.assignee_id is not None:
+        previous_username = (
+            await db.execute(select(User.username).where(User.id == ticket.assignee_id))
+        ).scalar_one()
+    ticket.assignee_id = target.id
+    await TicketAuditLog.log_event(
+        db,
+        ticket_id=ticket.id,
+        event_type=TicketAuditEventType.ASSIGNMENT,
+        user_id=acting_user_id,
+        old_value=previous_username,
+        new_value=target.username,
+    )
+    if ticket.status == TicketStatus.NEW:
+        ticket.status = TicketStatus.ANALYSIS.value
+        await TicketAuditLog.log_event(
+            db,
+            ticket_id=ticket.id,
+            event_type=TicketAuditEventType.STATUS_CHANGE,
+            user_id=None,
+            old_value=TicketStatus.NEW.value,
+            new_value=TicketStatus.ANALYSIS.value,
+        )
+    await reconcile_ticket_status(ticket, db, evaluation_date=evaluation_date)
+    return ticket
+
+
+# ---------------------------------------------------------------------------
+# Manual priority override (ticket-priority.md, `set_priority_override()`)
+# ---------------------------------------------------------------------------
+
+
+def _override_action(old: str | None, new: str | None) -> str:
+    """Classify an effective override change from the locked pre-state."""
+    if old is None:
+        return "set"
+    if new is None:
+        return "cleared"
+    return "changed"
+
+
+async def set_priority_override(
+    db: AsyncSession,
+    *,
+    ticket_id: UUID,
+    priority: TicketPriority | None,
+    acting_user_id: UUID,
+    caller: TicketCaller,
+    evaluation_date: date | None = None,
+) -> Ticket:
+    """Set, change, or clear the sticky manual priority override.
+
+    Category A consumer mutation (ticket-priority.md,
+    `set_priority_override()`; ticket-service.md, `set_priority_override`;
+    tickets.md, Set Priority Override).
+
+    Q1: `ticket_id` is the internal Ticket UUID (the API resolves the
+    public `SNTL-{n}` locator first). `priority` is the requested
+    override, or `None` to clear it. `acting_user_id` is the authenticated
+    acting user (there is no system caller); `caller` is the
+    request-resolved caller information whose `user_id` must identify
+    `acting_user_id`. `evaluation_date` is the workflow's UTC date, shared
+    with any `TicketDetail` response; one UTC date is captured at entry
+    when omitted.
+
+    Q2: the caller has verified `triage_ticket` and owns the transaction.
+    Locks, in order: the acting User `FOR SHARE`
+    (`stabilize_acting_user()`), then the Ticket `FOR UPDATE`.
+
+    Q3: (2) revalidates accessibility from locked-current state; (3)
+    `ensure_ticket_operable()`; (4) a request equal to the current
+    override (including `None` without an override) is a no-op with no
+    assignment, write, event, or reconciliation; (5) `auto_assign_actor()`
+    with the stabilized User; (6) classifies `set`, `changed`, or
+    `cleared` from the locked pre-state and persists `priority_override`;
+    (7) creates one `priority_changed` attributed to the acting user with
+    the old and new effective priorities
+    (`COALESCE(priority_override, priority_auto)`, possibly equal) and
+    `detail = {"override_action": ...}`; (8) exactly one
+    `reconcile_ticket_status()` with the one date (required by the
+    auto-assignment rule; priority is not a gate input). Never writes
+    `priority_auto`, reads audit history, or commits.
+
+    Q4: returns the locked Ticket in its post-mutation state.
+
+    Q5: re-invocation with the same value is the step-4 no-op.
+
+    Q6: raises `ValueError` before any database operation when `caller`
+    does not identify `acting_user_id`. Raises `TicketNotFoundError` for
+    a missing or inaccessible Ticket, before any other decision;
+    `TicketNotMutableError` for `Ignored` or `Duplicated`.
+    `UserNotFoundError` (an invariant violation for an authenticated
+    caller), audit, database, flush, and reconciliation exceptions
+    propagate and roll back the override, assignment, status, and every
+    event together.
+    """
+    if caller.user_id != acting_user_id:
+        raise ValueError("caller must identify the acting user.")
+    if evaluation_date is None:
+        evaluation_date = _utc_now().astimezone(UTC).date()
+
+    acting_user = await stabilize_acting_user(db, acting_user_id)
+    ticket = await lock_accessible_ticket(db, ticket_id, caller)
+    ensure_ticket_operable(ticket)
+    new_override = priority.value if priority is not None else None
+    old_override = ticket.priority_override
+    if new_override == old_override:
+        return ticket
+
+    await auto_assign_actor(ticket, acting_user, db)
+    action = _override_action(old_override, new_override)
+    automatic = ticket.priority_auto
+    old_effective = old_override if old_override is not None else automatic
+    new_effective = new_override if new_override is not None else automatic
+    ticket.priority_override = new_override
+    await TicketAuditLog.log_event(
+        db,
+        ticket_id=ticket.id,
+        event_type=TicketAuditEventType.PRIORITY_CHANGED,
+        user_id=acting_user_id,
+        old_value=old_effective,
+        new_value=new_effective,
+        detail={"override_action": action},
     )
     await reconcile_ticket_status(ticket, db, evaluation_date=evaluation_date)
     return ticket

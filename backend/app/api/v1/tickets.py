@@ -4,8 +4,10 @@ See `docs/features/tickets/tickets.md` (API Endpoints > List Tickets and
 Get Ticket, Response Schemas > TicketSummary and TicketDetail) for the
 authoritative endpoint contracts, Create Ticket for manual creation
 (`docs/features/tickets/ticket-service.md`, `create_ticket`), Associate
-CVE for the later association (`associate_cve`), and Set Severity Manual
-for the manual-severity mutation
+CVE for the later association (`associate_cve`), Assign Ticket
+(`assign_ticket`), Set Priority Override
+(`docs/features/tickets/ticket-priority.md`, `set_priority_override()`),
+and Set Severity Manual for the manual-severity mutation
 (`docs/features/tickets/ticket-mutations.md`, `set_severity_manual()`).
 Handlers stay thin: they supply caller information to `ticket_service`,
 map its outcomes to HTTP, and serialize its semantic projection. The
@@ -40,6 +42,7 @@ from app.api.dependencies import (
     ticket_cve_conflict_error,
     ticket_not_found_error,
     ticket_not_mutable_error,
+    user_not_found_error,
 )
 from app.api.v1.ticket_packages import serialize_package
 from app.core.enums import (
@@ -56,6 +59,7 @@ from app.core.exceptions import (
     SeverityDerivedError,
     TicketNotFoundError,
     TicketNotMutableError,
+    UserNotFoundError,
 )
 from app.core.identifiers import is_valid_cve_id
 from app.core.permissions import get_capabilities
@@ -72,18 +76,22 @@ from app.schemas.cve import (
 )
 from app.schemas.errors import ErrorResponse, TicketCVEConflictErrorResponse
 from app.schemas.ticket import (
+    TicketAssigneeUpdateRequest,
     TicketAssociateCVERequest,
     TicketCreateRequest,
     TicketDetail,
     TicketDetailResponse,
     TicketListQuery,
     TicketListResponse,
+    TicketPriorityUpdateRequest,
     TicketSeverityUpdateRequest,
     TicketSummary,
 )
 from app.services import ticket_mutations, ticket_service
 from app.services.cve_service import CVEIdFormatError
 from app.services.ticket_service import (
+    AssigneeInactiveError,
+    AssigneeNotVAError,
     CVEDetailProjection,
     ResolvedTicket,
     TicketCreationSource,
@@ -113,6 +121,11 @@ _PRIORITY_FILTER: Final[Mapping[str, TicketPriority | None]] = {
 # Manual). JSON `null` is handled separately as "clear".
 _SEVERITY_INPUT: Final[Mapping[str, Severity]] = {
     member.value.lower(): member for member in Severity
+}
+# Lowercase request-body level -> domain priority (tickets.md, Set Priority
+# Override). JSON `null` is handled separately as "clear".
+_PRIORITY_INPUT: Final[Mapping[str, TicketPriority]] = {
+    member.value.lower(): member for member in TicketPriority
 }
 
 
@@ -763,6 +776,183 @@ async def associate_ticket_cve(
         raise ticket_cve_conflict_error(exc.existing_ticket_id) from None
     except CVEIdFormatError:
         raise cve_invalid_format_error() from None
+    detail = await ticket_service.assemble_ticket_detail(
+        db, ticket_id=ticket.id, evaluation_date=evaluation_date
+    )
+    return TicketDetailResponse(data=serialize_ticket_detail(detail))
+
+
+def _assignee_not_va_error() -> AppError:
+    return AppError(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        code=ErrorCode.TICKET_ASSIGNEE_NOT_VA,
+        detail="Assignee must hold the vulnerability_analyst role.",
+    )
+
+
+def _assignee_inactive_error() -> AppError:
+    return AppError(
+        status_code=status.HTTP_409_CONFLICT,
+        code=ErrorCode.TICKET_ASSIGNEE_INACTIVE,
+        detail="Assignee is inactive.",
+    )
+
+
+@router.patch(
+    "/tickets/{ticket_id}/priority",
+    response_model=TicketDetailResponse,
+    summary="Set Priority Override",
+    description=(
+        "Sets, changes, or clears the manual priority override. A lowercase "
+        "level (`p1`-`p4`) sets it; JSON `null` clears it, returning the Ticket "
+        "to its automatic priority (`priority_automatic`). The override is "
+        "sticky: automatic refresh never changes it. An unchanged request is an "
+        "idempotent success. An effective change auto-assigns an unassigned "
+        "Ticket to an active vulnerability analyst caller and re-evaluates the "
+        "Ticket status. Returns the post-mutation Ticket detail. Requires "
+        "`triage_ticket`."
+    ),
+    responses={
+        404: {
+            "model": ErrorResponse,
+            "description": (
+                "`TICKET_NOT_FOUND`: Ticket identifier is malformed, does not "
+                "exist, or identifies a Ticket inaccessible to the caller."
+            ),
+        },
+        409: {
+            "model": ErrorResponse,
+            "description": (
+                "`TICKET_NOT_MUTABLE`: the Ticket is Ignored or Duplicated."
+            ),
+        },
+    },
+)
+async def set_ticket_priority(
+    ticket_id: TicketIdPath,
+    body: TicketPriorityUpdateRequest,
+    db: DatabaseSession,
+    principal: Annotated[
+        AuthenticatedPrincipal, Depends(require_capability(Capability.TRIAGE_TICKET))
+    ],
+    caller: AuthenticatedTicketCaller,
+    ticket: Annotated[ResolvedTicket, Depends(require_accessible_ticket)],
+) -> TicketDetailResponse:
+    """Set Priority Override — see `docs/features/tickets/tickets.md`.
+
+    Authorization follows `docs/api-spec.md` (Authorization Chain
+    Evaluation Order, flow 3): authentication, then `triage_ticket`
+    before any Ticket lookup, then the delegated preliminary SNTL
+    resolution and body validation. `set_priority_override()` revalidates
+    accessibility from locked-current state; the handler captures the one
+    workflow `evaluation_date`, reused by reconciliation and by the
+    `TicketDetail` assembled from the locked post-state inside the same
+    transaction (`docs/features/tickets/ticket-service.md`,
+    `get_ticket_detail()`).
+    """
+    evaluation_date = _utc_now().date()
+    priority = _PRIORITY_INPUT[body.priority] if body.priority is not None else None
+    try:
+        await ticket_service.set_priority_override(
+            db,
+            ticket_id=ticket.id,
+            priority=priority,
+            acting_user_id=principal.user.id,
+            caller=caller,
+            evaluation_date=evaluation_date,
+        )
+    except TicketNotFoundError:
+        raise ticket_not_found_error() from None
+    except TicketNotMutableError:
+        raise ticket_not_mutable_error() from None
+    detail = await ticket_service.assemble_ticket_detail(
+        db, ticket_id=ticket.id, evaluation_date=evaluation_date
+    )
+    return TicketDetailResponse(data=serialize_ticket_detail(detail))
+
+
+@router.patch(
+    "/tickets/{ticket_id}/assignee",
+    response_model=TicketDetailResponse,
+    summary="Assign Ticket",
+    description=(
+        "Assigns or reassigns a Ticket to an active vulnerability analyst, "
+        "identified by UUID or exact username. A Ticket cannot be unassigned "
+        "through the API. Reassigning to the current assignee is an idempotent "
+        "success. A `new` Ticket moves to `analysis`, and the Ticket status is "
+        "re-evaluated. Returns the post-mutation Ticket detail. Requires "
+        "`triage_ticket`."
+    ),
+    responses={
+        400: {
+            "model": ErrorResponse,
+            "description": (
+                "`TICKET_ASSIGNEE_NOT_VA`: the target user does not hold the "
+                "`vulnerability_analyst` role."
+            ),
+        },
+        404: {
+            "model": ErrorResponse,
+            "description": (
+                "`TICKET_NOT_FOUND`: Ticket identifier is malformed, does not "
+                "exist, or identifies a Ticket inaccessible to the caller. "
+                "`USER_NOT_FOUND`: no user matches `user_id` (reported only for "
+                "an accessible, mutable Ticket)."
+            ),
+        },
+        409: {
+            "model": ErrorResponse,
+            "description": (
+                "`TICKET_ASSIGNEE_INACTIVE`: the target user is inactive. "
+                "`TICKET_NOT_MUTABLE`: the Ticket is Ignored or Duplicated."
+            ),
+        },
+    },
+)
+async def assign_ticket(
+    ticket_id: TicketIdPath,
+    body: TicketAssigneeUpdateRequest,
+    db: DatabaseSession,
+    principal: Annotated[
+        AuthenticatedPrincipal, Depends(require_capability(Capability.TRIAGE_TICKET))
+    ],
+    caller: AuthenticatedTicketCaller,
+    ticket: Annotated[ResolvedTicket, Depends(require_accessible_ticket)],
+) -> TicketDetailResponse:
+    """Assign Ticket — see `docs/features/tickets/tickets.md`.
+
+    Authorization follows `docs/api-spec.md` (Authorization Chain
+    Evaluation Order, flow 3): authentication, then `triage_ticket`
+    before any Ticket lookup, then the delegated preliminary SNTL
+    resolution and body validation. The UUID-or-username `user_id` is
+    passed unchanged: `assign_ticket()` resolves and locks the target
+    before the Ticket but reports its absence only after locked-current
+    Ticket accessibility and operability. The handler captures the one
+    workflow `evaluation_date`, reused by reconciliation and by the
+    `TicketDetail` assembled from the locked post-state inside the same
+    transaction (`docs/features/tickets/ticket-service.md`,
+    `get_ticket_detail()`).
+    """
+    evaluation_date = _utc_now().date()
+    try:
+        await ticket_service.assign_ticket(
+            db,
+            ticket_id=ticket.id,
+            assignee=body.user_id,
+            acting_user_id=principal.user.id,
+            caller=caller,
+            evaluation_date=evaluation_date,
+        )
+    except TicketNotFoundError:
+        raise ticket_not_found_error() from None
+    except TicketNotMutableError:
+        raise ticket_not_mutable_error() from None
+    except UserNotFoundError:
+        raise user_not_found_error() from None
+    except AssigneeInactiveError:
+        raise _assignee_inactive_error() from None
+    except AssigneeNotVAError:
+        raise _assignee_not_va_error() from None
     detail = await ticket_service.assemble_ticket_detail(
         db, ticket_id=ticket.id, evaluation_date=evaluation_date
     )

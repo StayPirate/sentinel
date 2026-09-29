@@ -317,7 +317,8 @@ User then optional CVE then ordered Tickets. A multi-User identity batch locks
 every User by UUID before the union of Ticket candidates by UUID. A username
 that the owning contract reads through a documented unlocked User observation
 under the Ticket lock (assignment-eligibility sanitation, or the previous
-assignee replaced by `auto_assign_actor(force=True)`) is the event-time value
+assignee replaced by `auto_assign_actor(force=True)` or by explicit
+`assign_ticket()`) is the event-time value
 of that observation. The central
 audit contract does not require every operation
 to route through `ticket_mutations` or acquire a Ticket lock first.
