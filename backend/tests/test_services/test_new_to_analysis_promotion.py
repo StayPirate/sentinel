@@ -8,7 +8,11 @@ one system `status_change` (`old_value = "New"`, `new_value = "Analysis"`,
 Auto-Assignment Rule and `auto_assign_actor()` step 7; tickets.md,
 Architectural Invariant). The paths are `assign_ticket()` (explicit
 assignment) and every existing consumer mutation that reaches
-`auto_assign_actor()`.
+`auto_assign_actor()`. For the manual-zone entries `ignore_ticket()` and
+`mark_as_duplicate()`, the acting-user entry transition (`Analysis ->
+Ignored` or `Analysis -> Duplicated`) follows the promotion (tickets.md,
+Auto-Assignment on Unassigned Tickets), so the promotion is the only
+system `status_change` and precedes that entry transition.
 
 This module is a thin guard over the path list only: every other property
 of each path (complete event sequences, reconciliation, rollback, races)
@@ -34,6 +38,8 @@ from app.services.ticket_mutations import set_severity_manual
 from app.services.ticket_service import (
     assign_ticket,
     associate_cve,
+    ignore_ticket,
+    mark_as_duplicate,
     set_priority_override,
 )
 from app.services.ticket_visibility import TicketCaller
@@ -62,6 +68,8 @@ PATHS = [
     "delete_cvss_assessment",
     "associate_cve",
     "set_priority_override",
+    "ignore_ticket",
+    "mark_as_duplicate",
 ]
 
 
@@ -79,6 +87,7 @@ async def test_assignment_of_a_new_ticket_is_followed_by_one_promotion(
     actor = await va_user()
     caller = TicketCaller.authenticated(actor.id, Scope.ALL)
     assignee = actor
+    entry: list[EventRow] = []
     match path:
         case "assign_ticket":
             assignee = await va_user()
@@ -150,12 +159,53 @@ async def test_assignment_of_a_new_ticket_is_followed_by_one_promotion(
                 caller=caller,
                 evaluation_date=EVAL,
             )
+        case "ignore_ticket":
+            ticket = await ticket_factory(status=TicketStatus.NEW.value)
+            await ignore_ticket(
+                db_session,
+                ticket_id=ticket.id,
+                acting_user_id=actor.id,
+                caller=caller,
+            )
+            entry = [
+                EventRow(
+                    "status_change",
+                    actor.id,
+                    TicketStatus.ANALYSIS.value,
+                    TicketStatus.IGNORED.value,
+                    None,
+                    None,
+                )
+            ]
+        case "mark_as_duplicate":
+            ticket = await ticket_factory(status=TicketStatus.NEW.value)
+            target = await ticket_factory(status=TicketStatus.ANALYSIS.value)
+            await mark_as_duplicate(
+                db_session,
+                ticket_id=ticket.id,
+                duplicate_of_id=target.id,
+                acting_user_id=actor.id,
+                caller=caller,
+            )
+            entry = [
+                EventRow(
+                    "status_change",
+                    actor.id,
+                    TicketStatus.ANALYSIS.value,
+                    TicketStatus.DUPLICATED.value,
+                    None,
+                    None,
+                )
+            ]
         case _:
             raise AssertionError(path)
 
     events = await ticket_events(db_session, ticket)
     assignment = EventRow("assignment", actor.id, None, assignee.username, None, None)
     assert [e for e in events if e.event_type == "assignment"] == [assignment]
-    assert [e for e in events if e.event_type == "status_change"] == [PROMOTION]
+    assert [e for e in events if e.event_type == "status_change"] == [
+        PROMOTION,
+        *entry,
+    ]
     position = events.index(assignment)
     assert events[position + 1] == PROMOTION

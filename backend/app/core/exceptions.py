@@ -104,6 +104,24 @@ class TicketNotMutableError(ServiceError):
         super().__init__("Ticket is not mutable.")
 
 
+class InvalidTransitionError(ServiceError):
+    """The requested Ticket status transition is not allowed from the
+    locked-current status.
+
+    Raised by `ticket_service` lifecycle operations whose source-status
+    guard rejects the Ticket (`docs/features/tickets/tickets.md`, Status
+    Transitions; `docs/features/tickets/ticket-service.md`, Service
+    Exceptions). Shared across service modules (`ticket_service` and
+    `ticket_mutations`) per `docs/conventions.md` (Service Exception
+    Conventions, Shared exceptions) — inherits from `ServiceError`
+    directly. Maps to `409 TICKET_INVALID_TRANSITION`. The message is
+    static and never includes the Ticket identifier or status.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("Ticket status transition is not allowed.")
+
+
 class SeverityDerivedError(ServiceError):
     """A manual severity is requested for a Ticket whose severity is derived.
 

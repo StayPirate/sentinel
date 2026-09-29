@@ -2,7 +2,7 @@
 
 See `docs/features/tickets/tickets.md` (Response Schemas > TicketSummary
 and TicketDetail, Endpoint -> Schema Mapping, List Tickets, Create Ticket,
-Set Severity Manual) for the
+Set Severity Manual, Mark Ticket as Duplicate) for the
 authoritative contract,
 `docs/features/tickets/ticket-priority.md` (API Surface) for the priority
 fields, and `docs/features/tickets/ticket-deadlines.md` (Actors and
@@ -24,6 +24,7 @@ from typing import Literal, Self
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.core.enums import SortOrder, TicketSortField
+from app.core.identifiers import parse_ticket_id
 from app.schemas.common import PaginationMeta, SeverityValue, UserReference
 from app.schemas.cve import CVEDetail, CVESummary
 from app.schemas.package import PackageDetail
@@ -281,6 +282,41 @@ class TicketAssigneeUpdateRequest(BaseModel):
         ),
         examples=["jdoe"],
     )
+
+
+class TicketDuplicateRequest(BaseModel):
+    """Request body of `POST /api/v1/tickets/{ticket_id}/duplicate`.
+
+    See `docs/features/tickets/tickets.md` (Mark Ticket as Duplicate) and
+    `docs/api-spec.md` (Ticket Identifier Resolution): a request-body
+    Ticket field uses the canonical `SNTL-{n}` grammar with ordinary
+    Pydantic semantics, so a missing, `null`, non-string, or malformed
+    value (lowercase prefix, whitespace, zero padding, overflow, a
+    Ticket UUID, ...) fails with the global `422 VALIDATION_ERROR`. A
+    well-formed target that is missing or inaccessible is a
+    `404 TICKET_NOT_FOUND` decided by the service, not here.
+    """
+
+    duplicate_of_ticket_id: str = Field(
+        description=(
+            "Canonical identity (`SNTL-{n}`) of the target Ticket, which must "
+            "not itself be Duplicated. Malformed syntax fails validation; a "
+            "missing or inaccessible target returns `404 TICKET_NOT_FOUND`. "
+            "Required."
+        ),
+        examples=["SNTL-42"],
+    )
+
+    @field_validator("duplicate_of_ticket_id")
+    @classmethod
+    def _canonical_ticket_id(cls, value: str) -> str:
+        """Accept only the canonical grammar, parsed by the pure Core
+        parser without trimming or normalization."""
+        if parse_ticket_id(value) is None:
+            raise ValueError(
+                "duplicate_of_ticket_id must be a canonical SNTL-{n} identifier."
+            )
+        return value
 
 
 class TicketAssociateCVERequest(BaseModel):

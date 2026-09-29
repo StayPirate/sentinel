@@ -7,7 +7,8 @@ authoritative endpoint contracts, Create Ticket for manual creation
 CVE for the later association (`associate_cve`), Assign Ticket
 (`assign_ticket`), Set Priority Override
 (`docs/features/tickets/ticket-priority.md`, `set_priority_override()`),
-and Set Severity Manual for the manual-severity mutation
+Ignore Ticket (`ignore_ticket`), Mark Ticket as Duplicate
+(`mark_as_duplicate`), and Set Severity Manual for the manual-severity mutation
 (`docs/features/tickets/ticket-mutations.md`, `set_severity_manual()`).
 Handlers stay thin: they supply caller information to `ticket_service`,
 map its outcomes to HTTP, and serialize its semantic projection. The
@@ -56,6 +57,7 @@ from app.core.enums import (
 )
 from app.core.errors import AppError, ErrorCode
 from app.core.exceptions import (
+    InvalidTransitionError,
     SeverityDerivedError,
     TicketNotFoundError,
     TicketNotMutableError,
@@ -81,6 +83,7 @@ from app.schemas.ticket import (
     TicketCreateRequest,
     TicketDetail,
     TicketDetailResponse,
+    TicketDuplicateRequest,
     TicketListQuery,
     TicketListResponse,
     TicketPriorityUpdateRequest,
@@ -93,7 +96,10 @@ from app.services.ticket_service import (
     AssigneeInactiveError,
     AssigneeNotVAError,
     CVEDetailProjection,
+    DuplicateConcurrentModificationError,
+    DuplicateTargetIsDuplicatedError,
     ResolvedTicket,
+    SelfDuplicateError,
     TicketCreationSource,
     TicketCVEAlreadySetError,
     TicketCVEConflictError,
@@ -953,6 +959,208 @@ async def assign_ticket(
         raise _assignee_inactive_error() from None
     except AssigneeNotVAError:
         raise _assignee_not_va_error() from None
+    detail = await ticket_service.assemble_ticket_detail(
+        db, ticket_id=ticket.id, evaluation_date=evaluation_date
+    )
+    return TicketDetailResponse(data=serialize_ticket_detail(detail))
+
+
+def _invalid_transition_error() -> AppError:
+    return AppError(
+        status_code=status.HTTP_409_CONFLICT,
+        code=ErrorCode.TICKET_INVALID_TRANSITION,
+        detail="Ticket status transition is not allowed.",
+    )
+
+
+def _self_duplicate_error() -> AppError:
+    return AppError(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        code=ErrorCode.TICKET_SELF_DUPLICATE,
+        detail="Ticket cannot be marked as a duplicate of itself.",
+    )
+
+
+def _duplicate_target_duplicated_error() -> AppError:
+    return AppError(
+        status_code=status.HTTP_409_CONFLICT,
+        code=ErrorCode.TICKET_DUPLICATE_TARGET_DUPLICATED,
+        detail="Duplicate target is itself a duplicate.",
+    )
+
+
+def _duplicate_concurrent_modification_error() -> AppError:
+    return AppError(
+        status_code=status.HTTP_409_CONFLICT,
+        code=ErrorCode.TICKET_DUPLICATE_CONCURRENT_MODIFICATION,
+        detail="A duplicate dependent is being modified concurrently.",
+    )
+
+
+@router.post(
+    "/tickets/{ticket_id}/ignore",
+    response_model=TicketDetailResponse,
+    summary="Ignore Ticket",
+    description=(
+        "Moves a `new` or `analysis` Ticket to `ignored` (manual zone). No "
+        "request body. An unassigned Ticket is first auto-assigned to an "
+        "active vulnerability analyst caller, which records `new` -> "
+        "`analysis` before the transition. Returns the post-mutation Ticket "
+        "detail. Requires `triage_ticket`."
+    ),
+    responses={
+        404: {
+            "model": ErrorResponse,
+            "description": (
+                "`TICKET_NOT_FOUND`: Ticket identifier is malformed, does not "
+                "exist, or identifies a Ticket inaccessible to the caller."
+            ),
+        },
+        409: {
+            "model": ErrorResponse,
+            "description": (
+                "`TICKET_INVALID_TRANSITION`: the Ticket is `analyzed` or "
+                "`resolved`. `TICKET_NOT_MUTABLE`: the Ticket is already "
+                "Ignored or Duplicated."
+            ),
+        },
+    },
+)
+async def ignore_ticket(
+    ticket_id: TicketIdPath,
+    db: DatabaseSession,
+    principal: Annotated[
+        AuthenticatedPrincipal, Depends(require_capability(Capability.TRIAGE_TICKET))
+    ],
+    caller: AuthenticatedTicketCaller,
+    ticket: Annotated[ResolvedTicket, Depends(require_accessible_ticket)],
+) -> TicketDetailResponse:
+    """Ignore Ticket — see `docs/features/tickets/tickets.md`.
+
+    Authorization follows `docs/api-spec.md` (Authorization Chain
+    Evaluation Order, flow 3): authentication, then `triage_ticket`
+    before any Ticket lookup, then the delegated preliminary SNTL
+    resolution. `ignore_ticket()` revalidates accessibility from
+    locked-current state and does not reconcile, so the handler captures
+    one UTC date at workflow entry solely for the `TicketDetail`
+    assembled from the locked post-state inside the same transaction
+    (`docs/features/tickets/ticket-service.md`, `get_ticket_detail()`).
+    """
+    evaluation_date = _utc_now().date()
+    try:
+        await ticket_service.ignore_ticket(
+            db,
+            ticket_id=ticket.id,
+            acting_user_id=principal.user.id,
+            caller=caller,
+        )
+    except TicketNotFoundError:
+        raise ticket_not_found_error() from None
+    except TicketNotMutableError:
+        raise ticket_not_mutable_error() from None
+    except InvalidTransitionError:
+        raise _invalid_transition_error() from None
+    detail = await ticket_service.assemble_ticket_detail(
+        db, ticket_id=ticket.id, evaluation_date=evaluation_date
+    )
+    return TicketDetailResponse(data=serialize_ticket_detail(detail))
+
+
+@router.post(
+    "/tickets/{ticket_id}/duplicate",
+    response_model=TicketDetailResponse,
+    summary="Mark Ticket as Duplicate",
+    description=(
+        "Marks a Ticket as a duplicate of another Ticket, identified by "
+        "`duplicate_of_ticket_id` (`SNTL-{n}`), which must not itself be "
+        "Duplicated. Tickets currently marked as duplicates of this Ticket are "
+        "atomically repointed to the new target. An unassigned Ticket is first "
+        "auto-assigned to an active vulnerability analyst caller. Returns the "
+        "post-mutation Ticket detail. Requires `triage_ticket`."
+    ),
+    responses={
+        400: {
+            "model": ErrorResponse,
+            "description": (
+                "`TICKET_SELF_DUPLICATE`: source and target are the same Ticket."
+            ),
+        },
+        404: {
+            "model": ErrorResponse,
+            "description": (
+                "`TICKET_NOT_FOUND`: the path Ticket identifier is malformed, "
+                "does not exist, or identifies a Ticket inaccessible to the "
+                "caller, or the well-formed `duplicate_of_ticket_id` does not "
+                "exist or is inaccessible."
+            ),
+        },
+        409: {
+            "model": ErrorResponse,
+            "description": (
+                "`TICKET_DUPLICATE_TARGET_DUPLICATED`: the target is itself "
+                "Duplicated (use its target instead). "
+                "`TICKET_DUPLICATE_CONCURRENT_MODIFICATION`: a Ticket that "
+                "duplicates this Ticket is locked by a concurrent operation; "
+                "re-read and retry. `TICKET_NOT_MUTABLE`: the Ticket is Ignored "
+                "or Duplicated."
+            ),
+        },
+        422: {
+            "model": ErrorResponse,
+            "description": (
+                "`VALIDATION_ERROR`: `duplicate_of_ticket_id` is missing, "
+                "`null`, not a string, or not a canonical `SNTL-{n}` identifier."
+            ),
+        },
+    },
+)
+async def mark_ticket_as_duplicate(
+    ticket_id: TicketIdPath,
+    body: TicketDuplicateRequest,
+    db: DatabaseSession,
+    principal: Annotated[
+        AuthenticatedPrincipal, Depends(require_capability(Capability.TRIAGE_TICKET))
+    ],
+    caller: AuthenticatedTicketCaller,
+    ticket: Annotated[ResolvedTicket, Depends(require_accessible_ticket)],
+) -> TicketDetailResponse:
+    """Mark Ticket as Duplicate — see `docs/features/tickets/tickets.md`.
+
+    Authorization follows `docs/api-spec.md` (Authorization Chain
+    Evaluation Order, flow 3, multi-root): authentication, then
+    `triage_ticket` before any Ticket lookup, then the delegated
+    preliminary SNTL resolution of the path and Pydantic validation of
+    the body. The target is resolved through the same visibility-
+    constrained service resolution (`docs/api-spec.md`, Ticket Identifier
+    Resolution: request-body Ticket field) only to obtain its internal
+    UUID; `mark_as_duplicate()` revalidates both roots from
+    locked-current state. It does not reconcile, so the handler captures
+    one UTC date at workflow entry solely for the `TicketDetail`
+    assembled from the locked source inside the same transaction
+    (`docs/features/tickets/ticket-service.md`, `get_ticket_detail()`).
+    """
+    evaluation_date = _utc_now().date()
+    try:
+        target = await ticket_service.resolve_ticket_locator(
+            db, body.duplicate_of_ticket_id, caller
+        )
+        await ticket_service.mark_as_duplicate(
+            db,
+            ticket_id=ticket.id,
+            duplicate_of_id=target.id,
+            acting_user_id=principal.user.id,
+            caller=caller,
+        )
+    except TicketNotFoundError:
+        raise ticket_not_found_error() from None
+    except TicketNotMutableError:
+        raise ticket_not_mutable_error() from None
+    except DuplicateTargetIsDuplicatedError:
+        raise _duplicate_target_duplicated_error() from None
+    except SelfDuplicateError:
+        raise _self_duplicate_error() from None
+    except DuplicateConcurrentModificationError:
+        raise _duplicate_concurrent_modification_error() from None
     detail = await ticket_service.assemble_ticket_detail(
         db, ticket_id=ticket.id, evaluation_date=evaluation_date
     )

@@ -941,8 +941,8 @@ async def mark_as_duplicate(
    f. Validate source != target (else `SelfDuplicateError`)
 3. **Phase 2 — lock dependents**:
    `SELECT ... WHERE duplicate_of_id = source_id ORDER BY id FOR UPDATE NOWAIT`
-   On SQLSTATE `55P03`: rollback and raise
-   `DuplicateConcurrentModificationError`
+   On SQLSTATE `55P03`: raise `DuplicateConcurrentModificationError`; the
+   caller-owned transaction rolls back (Transaction ownership)
 4. **Mutations** (only reached if all locks acquired):
    a. `auto_assign_actor(source, acting_user)` using the stabilized User; an
       inactive or non-VA actor is not assigned

@@ -733,8 +733,9 @@ async def lock_accessible_ticket(
     waited for the lock (`docs/api-spec.md`, Authorization Chain
     Evaluation Order, flow 3). Missing and inaccessible Tickets both raise
     the one `TicketNotFoundError`. Shared by `set_severity_manual()` and
-    the `ticket_service` consumer mutations that lock the Ticket as their
-    own root (`associate_cve()`); the caller has already taken any
+    the `ticket_service` consumer mutations that lock one Ticket as their
+    own root (for example `associate_cve()` and `ignore_ticket()`); the
+    caller has already taken any
     earlier root in the global User, CVE, Ticket order.
     """
     ticket = (
