@@ -55,6 +55,7 @@ from app.core.exceptions import (
 )
 from app.models.ticket import Ticket
 from app.models.ticket_access_grant import TicketAccessGrant
+from app.models.ticket_audit_event import TicketAuditEvent
 from app.models.user import User
 from app.services import ticket_service
 from app.services.ticket_audit_log import TicketAuditLog
@@ -455,33 +456,56 @@ class TestLockOrder:
 
 @pytest.mark.integration
 class TestRollback:
-    async def test_entry_audit_failure_rolls_back_assignment_status_and_events(
+    @pytest.mark.parametrize("failure", ["audit", "flush"])
+    async def test_entry_write_failure_rolls_back_assignment_status_and_events(
         self,
         db_session: AsyncSession,
         ticket_factory: TicketFactory,
         va_user: VAUser,
         monkeypatch: pytest.MonkeyPatch,
+        failure: str,
     ) -> None:
         """The failure is injected into the last write (the acting-user
-        `Analysis -> Ignored`), after the assignment and promotion."""
+        `Analysis -> Ignored`), after the assignment and promotion: either
+        its audit validation or the flush that inserts it."""
         actor = await va_user()
         ticket = await ticket_factory(status=TicketStatus.NEW.value)
         ticket_id = ticket.id
         original_log = TicketAuditLog.log_event
 
+        original_flush = db_session.flush
+        reached = False
+
         async def failing_log(*args: Any, **kwargs: Any) -> None:
+            nonlocal reached
             if (
                 kwargs["event_type"] is TicketAuditEventType.STATUS_CHANGE
                 and kwargs["new_value"] == TicketStatus.IGNORED
             ):
+                reached = True
                 raise RuntimeError("injected audit failure")
             await original_log(*args, **kwargs)
 
+        async def failing_flush(*args: Any, **kwargs: Any) -> None:
+            nonlocal reached
+            if any(
+                isinstance(o, TicketAuditEvent) and o.new_value == TicketStatus.IGNORED
+                for o in db_session.new
+            ):
+                reached = True
+                raise RuntimeError("injected flush failure")
+            await original_flush(*args, **kwargs)
+
         async with rollback_test_scope(db_session):
-            monkeypatch.setattr(TicketAuditLog, "log_event", failing_log)
+            if failure == "audit":
+                monkeypatch.setattr(TicketAuditLog, "log_event", failing_log)
+            else:
+                monkeypatch.setattr(db_session, "flush", failing_flush)
             with pytest.raises(RuntimeError, match="injected"):
                 await _ignore(db_session, ticket_id, actor)
         monkeypatch.undo()
+
+        assert reached
 
         assert await _state(db_session, ticket_id) == (TicketStatus.NEW, None)
         assert await ticket_events_by_id(db_session, ticket_id) == []

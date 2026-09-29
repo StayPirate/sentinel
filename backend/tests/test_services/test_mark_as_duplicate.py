@@ -745,17 +745,20 @@ class _DriverError(Exception):
 
 @pytest.mark.integration
 class TestRollback:
-    async def test_dependent_audit_failure_rolls_back_every_effect(
+    @pytest.mark.parametrize("failure", ["audit", "flush"])
+    async def test_dependent_write_failure_rolls_back_every_effect(
         self,
         db_session: AsyncSession,
         ticket_factory: TicketFactory,
         va_user: VAUser,
         monkeypatch: pytest.MonkeyPatch,
+        failure: str,
     ) -> None:
         """The failure is injected into the last write (the second
-        dependent's `duplicate_target_changed`), after the assignment,
-        promotion, source status and link, both source events, and the
-        first repoint."""
+        dependent's `duplicate_target_changed`: its audit validation or the
+        flush that inserts it together with the second repoint), after the
+        assignment, promotion, source status and link, both source events,
+        and the first repoint."""
         actor = await va_user()
         source = await ticket_factory(status=TicketStatus.NEW.value)
         target = await ticket_factory(status=TicketStatus.ANALYSIS.value)
@@ -776,8 +779,25 @@ class TestRollback:
                     raise RuntimeError("injected audit failure")
             await original_log(*args, **kwargs)
 
+        original_flush = db_session.flush
+
+        async def failing_flush(*args: Any, **kwargs: Any) -> None:
+            nonlocal repoints
+            if any(
+                isinstance(o, TicketAuditEvent)
+                and o.event_type == TicketAuditEventType.DUPLICATE_TARGET_CHANGED
+                and o.ticket_id == second_id
+                for o in db_session.new
+            ):
+                repoints = 2
+                raise RuntimeError("injected flush failure")
+            await original_flush(*args, **kwargs)
+
         async with rollback_test_scope(db_session):
-            monkeypatch.setattr(TicketAuditLog, "log_event", failing_log)
+            if failure == "audit":
+                monkeypatch.setattr(TicketAuditLog, "log_event", failing_log)
+            else:
+                monkeypatch.setattr(db_session, "flush", failing_flush)
             with pytest.raises(RuntimeError, match="injected"):
                 await _mark(db_session, source_id, target_id, actor)
         monkeypatch.undo()
