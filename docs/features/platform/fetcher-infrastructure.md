@@ -1286,11 +1286,13 @@ This registry is used by:
   `Settings.model_json_schema()` as the `settings_schema` field,
   providing a standard JSON Schema that the admin UI renders
   dynamically
-- The API validation layer: the PATCH endpoint instantiates the
-  `Settings` model with the candidate merged state (current stored
-  values plus the submitted changes) to validate it — see
-  `docs/features/platform/fetcher-operations.md` (`update_fetcher_config`,
-  step 6, Custom settings canonicalization)
+- The API validation layer: the PATCH endpoint type-checks each
+  submitted value against its `Settings` field type in strict JSON
+  mode, then instantiates the `Settings` model with the candidate
+  merged state (current stored values plus the submitted changes) to
+  validate it — see `docs/features/platform/fetcher-operations.md`
+  (`update_fetcher_config`, step 6, Custom settings type check and
+  Custom settings canonicalization)
 - The `sentinel fetcher config` CLI command (settings display)
 
 Because Pydantic produces standard JSON Schema, the admin UI can render

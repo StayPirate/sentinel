@@ -481,16 +481,17 @@ _VALIDATION_CASES = [
     pytest.param(
         CONFIDENTIALITY, {"is_confidential": None}, _BOOL_TYPE, id="confidential-null"
     ),
-    pytest.param(
-        CONFIDENTIALITY,
-        {"is_confidential": "maybe"},
-        _field_error(
-            "is_confidential",
-            "Input should be a valid boolean, unable to interpret input",
-            "bool_parsing",
-        ),
-        id="confidential-unparsable-string",
-    ),
+    # Strict JSON boolean (docs/api-spec.md, JSON Request Body Scalar
+    # Types): values Pydantic's lax mode would coerce are rejected too.
+    *[
+        pytest.param(
+            CONFIDENTIALITY,
+            {"is_confidential": value},
+            _BOOL_TYPE,
+            id=f"confidential-{value!r}",
+        )
+        for value in ("true", "false", "yes", "1", "maybe", 1, 0)
+    ],
     pytest.param(
         CONFIDENTIALITY, {"is_confidential": {}}, _BOOL_TYPE, id="confidential-object"
     ),

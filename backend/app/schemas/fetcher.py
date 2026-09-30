@@ -269,12 +269,16 @@ class FetcherConfigUpdateRequest(BaseModel):
     `422 VALIDATION_ERROR`: `schedule_override` cron syntax and
     50-character storage bound (matching `FetcherConfig.schedule_override`,
     `VARCHAR(50)`), and the `run_timeout`/`request_delay` numeric bounds.
+    `enabled`, `run_timeout`, and `request_delay` accept only their JSON
+    type without coercion (`docs/api-spec.md`, JSON Request Body Scalar
+    Types): a JSON integer is still a valid `request_delay`, but `600.0`
+    is not a valid `run_timeout`.
     """
 
-    enabled: bool | None = None
+    enabled: bool | None = Field(default=None, strict=True)
     schedule_override: str | None = Field(default=None, max_length=50)
-    run_timeout: int | None = Field(default=None, ge=60, le=604_800)
-    request_delay: float | None = Field(default=None, ge=0, le=300)
+    run_timeout: int | None = Field(default=None, strict=True, ge=60, le=604_800)
+    request_delay: float | None = Field(default=None, strict=True, ge=0, le=300)
     custom_settings: dict[str, Any] | None = None
 
     @field_validator("enabled", mode="before")

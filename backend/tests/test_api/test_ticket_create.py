@@ -664,15 +664,18 @@ _VALIDATION_CASES = [
         _field_error("is_confidential", "Input should be a valid boolean", "bool_type"),
         id="confidential-null",
     ),
-    pytest.param(
-        {"is_confidential": "maybe"},
-        _field_error(
-            "is_confidential",
-            "Input should be a valid boolean, unable to interpret input",
-            "bool_parsing",
-        ),
-        id="confidential-unparsable",
-    ),
+    # Strict JSON boolean (docs/api-spec.md, JSON Request Body Scalar
+    # Types): values Pydantic's lax mode would coerce are rejected too.
+    *[
+        pytest.param(
+            {"is_confidential": value},
+            _field_error(
+                "is_confidential", "Input should be a valid boolean", "bool_type"
+            ),
+            id=f"confidential-{value!r}",
+        )
+        for value in ("true", "false", "yes", "1", "maybe", 1, 0)
+    ],
     # Representative parser wiring; tests/test_schemas/test_ticket.py owns
     # the complete Coordinated Release Date parser matrix.
     pytest.param(_confidential_crd("2026-10-06"), _CRD_NO_TIME, id="crd-date-only"),

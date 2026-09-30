@@ -104,7 +104,7 @@ All exceptions inherit from `FetcherOperationsServiceError(ServiceError)`.
 | `FetcherDisabledError` | 409 | `FETCHER_DISABLED` | Fetcher is disabled (`enabled = false`) |
 | `FetcherAlreadyRunningError` | 409 | `FETCHER_ALREADY_RUNNING` | An active (`queued` or `running`, non-stale) run exists for this fetcher |
 | `FetcherSettingUnknownError` | 422 | `FETCHER_SETTING_UNKNOWN` | Unknown key in `custom_settings` |
-| `FetcherSettingInvalidError` | 422 | `FETCHER_SETTING_INVALID` | The candidate merged state (current stored values plus submitted changes) fails the `Settings` model's type/range/choices validation — the invalid field may be a value the caller did not submit |
+| `FetcherSettingInvalidError` | 422 | `FETCHER_SETTING_INVALID` | A submitted non-null `custom_settings` value has the wrong JSON type for its declared `Settings` field, or the candidate merged state (current stored values plus submitted changes) fails the `Settings` model's type/range/choices validation — in the latter case the invalid field may be a value the caller did not submit |
 | `FetcherBrokerUnavailableError` | 503 | `CELERY_UNAVAILABLE` | Task broker unavailable during manual trigger publication |
 
 #### System-Internal Exceptions
@@ -338,10 +338,11 @@ is in the registry but has no `FetcherConfig` row (bootstrap prerequisite
    non-stale active (`queued` or `running`) run exists (see Run Timeout
    Active Guard below).
 4. `FetcherSettingUnknownError` — unknown key in `custom_settings`.
-5. `FetcherSettingInvalidError` — the candidate merged state (current
-   stored values plus submitted changes) fails validation. The invalid
-   field is not necessarily one the caller submitted — see
-   `custom_settings` canonicalization below.
+5. `FetcherSettingInvalidError` — a submitted non-null value fails the
+   strict JSON type check, or the candidate merged state (current stored
+   values plus submitted changes) fails validation. In the merged-state
+   case the invalid field is not necessarily one the caller submitted —
+   see `custom_settings` canonicalization below.
 
 **Q3 (behavior)**:
 
@@ -394,12 +395,27 @@ is in the registry but has no `FetcherConfig` row (bootstrap prerequisite
      individually. Keys set to `null` are removed from the JSONB column
      (reset to default). Keys not in the payload are unchanged. Keys
      with value equal to the currently stored value are no-ops.
+   - **Custom settings type check**: each non-null submitted value must
+     have the JSON type of its declared `Settings` field, following the
+     type rule of `docs/api-spec.md` (JSON Request Body Scalar Types);
+     for example, `"500"` for an `int` field is rejected. A `str` field
+     accepts only a JSON string. The check uses Pydantic's strict JSON
+     mode, so `StrEnum`, `IntEnum`, and `Literal` fields accept their
+     members' JSON values. Because `Literal` members match by equality,
+     the submitted JSON type must also match the validated member: a
+     boolean for an integer member, a number for a boolean member, or a
+     number with a fraction or exponent for an integer member is
+     rejected. A violation raises `FetcherSettingInvalidError`. The
+     check covers only the submitted values; field constraints are
+     enforced by the merged-state validation below.
    - **Custom settings canonicalization**: each non-null submitted key
      is validated by constructing the fetcher's `Settings` model over
      the candidate merged state (current stored values plus the
-     submitted changes). Pydantic's own coercion rules apply (e.g., a
-     submitted string `"500"` for an `int` field is accepted and
-     coerced). The **new** value that is persisted, compared for the
+     submitted changes). This construction uses Pydantic's standard
+     validation mode — the same mode as the runtime construction in
+     `BaseFetcher.run()` — so previously stored canonical values are
+     unaffected by the strict submitted-value check. The **new** value
+     that is persisted, compared for the
      diff in step 5, and recorded in the audit event's `new_value`
      (step 7) is the **canonical value produced by the validated
      model** — via `model_dump(mode="json")`, extracting only the
@@ -1391,12 +1407,20 @@ with a caller-owned transaction.
 - `custom_settings`: each key must exist in the fetcher's `Settings`
   model. Unknown keys → 422 `FETCHER_SETTING_UNKNOWN`. Partial merge:
   omitted keys unchanged, `null` resets a key to its `Settings` field
-  default. The submitted, non-null keys are validated together with
-  the fetcher's current stored values (candidate merged state, see
-  `update_fetcher_config`, step 6) — if the merged state fails
-  validation, the response is 422 `FETCHER_SETTING_INVALID`, and the
-  invalid field named in `detail` may be a previously stored value the
-  caller did not submit in this request
+  default. Each submitted, non-null value must have the JSON type of its
+  declared `Settings` field without coercion (`docs/api-spec.md`, JSON
+  Request Body Scalar Types); otherwise the response is 422
+  `FETCHER_SETTING_INVALID`. The submitted, non-null keys are then
+  validated together with the fetcher's current stored values
+  (candidate merged state, see `update_fetcher_config`, step 6) — if
+  the merged state fails validation, the response is 422
+  `FETCHER_SETTING_INVALID`, and the invalid field named in `detail`
+  may be a previously stored value the caller did not submit in this
+  request
+- Type violations of `enabled`, `run_timeout`, and `request_delay`
+  (`docs/api-spec.md`, JSON Request Body Scalar Types) return the global
+  `422 VALIDATION_ERROR`; only `custom_settings` values use
+  `FETCHER_SETTING_INVALID`
 
 **Response** (200 OK): the updated config object (same schema as GET
 config response).
@@ -1412,7 +1436,7 @@ complete mutation, audit, and propagation contract.
 | 409 | `FETCHER_DEREGISTERED` | Fetcher exists in DB but code removed |
 | 409 | `FETCHER_ALREADY_RUNNING` | `run_timeout` change while a non-stale run is active |
 | 422 | `FETCHER_SETTING_UNKNOWN` | Unknown key in `custom_settings` |
-| 422 | `FETCHER_SETTING_INVALID` | The candidate merged state fails validation — the invalid field may not be one the caller submitted |
+| 422 | `FETCHER_SETTING_INVALID` | A submitted `custom_settings` value has the wrong JSON type, or the candidate merged state fails validation — in the latter case the invalid field may not be one the caller submitted |
 
 ### Get Fetcher Audit Log
 

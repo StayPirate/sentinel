@@ -189,6 +189,32 @@ query input. A parameter name used by another endpoint does not become valid
 globally; for example, an endpoint that declares fixed ordering but no
 `sort_by` parameter ignores a supplied `sort_by` value.
 
+### JSON Request Body Scalar Types
+
+A request-body field declared as `boolean`, `integer`, or `number` accepts only
+a JSON value of that type. Values are never coerced from another JSON type:
+
+- `boolean` accepts only `true` and `false`. Strings such as `"true"`, `"yes"`,
+  or `"1"` and numbers such as `1` or `0` are rejected.
+- `integer` accepts only a JSON number written without a fraction or exponent.
+  `60.0`, `6e1`, `"60"`, and `true` are rejected.
+- `number` accepts any JSON number, including one written as an integer (`2`
+  is read as `2.0`). Strings such as `"1.5"` and booleans are rejected.
+
+A violation returns the global `422 VALIDATION_ERROR`. The rule applies at
+every nesting level of the declared body schema. It changes neither `null`
+handling nor Partial Update Semantics. Fields carried as JSON strings, such as
+date-times, UUIDs, identifiers, and enum labels, are unaffected and keep their
+declared string formats. Query and path parameters are strings by transport
+and are converted to their declared type; this rule does not apply to them.
+
+When an endpoint validates body values against a runtime-declared schema
+instead of its request schema, the same type rule applies but a violation uses
+that endpoint's dedicated validation error. The only such case is
+`custom_settings` in `PATCH /api/v1/fetchers/{fetcher_name}/config`, which
+returns `422 FETCHER_SETTING_INVALID` (see
+[fetcher-operations.md](features/platform/fetcher-operations.md#update-fetcher-config)).
+
 ### Pagination
 
 List endpoints support pagination via query parameters:

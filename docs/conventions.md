@@ -455,6 +455,23 @@ exemption removal there so it is not forgotten.
 - Validate transport shape, types, and transport-specific constraints in
   Pydantic schemas. Services enforce domain and data-integrity invariants for
   every caller; endpoint handlers do not duplicate either validation layer
+- **Strict JSON body scalars**: implement `docs/api-spec.md` (JSON Request Body
+  Scalar Types) by declaring `Field(strict=True)` on every field of a JSON
+  request-body model whose type is `bool`, `int`, or `float`, including
+  optional and nullable fields and fields of nested request models. Keep the
+  plain annotation (`bool`, `int | None`, ...). Field-level strictness does not
+  reach collection items, so a scalar inside a collection is annotated at the
+  item: `list[Annotated[int, Strict()]]`. JSON object keys are strings by
+  transport and are not covered. Do not use a model-wide
+  `ConfigDict(strict=True)`. FastAPI validates the decoded JSON
+  in Pydantic's Python mode, where model-wide strict mode would also reject the
+  ISO-string forms of `datetime`, `UUID`, and enum fields. Query-parameter and
+  response models are not covered. A service that type-checks JSON-supplied
+  values against a runtime-declared schema uses Pydantic's strict JSON mode
+  (`TypeAdapter(...).validate_json(..., strict=True)`), which keeps enum and
+  `Literal` members valid in their JSON form. A structural test in
+  `backend/tests/test_api_conventions.py` enforces the field rule for every
+  registered route
 
 ## Database, Transactions, and State
 

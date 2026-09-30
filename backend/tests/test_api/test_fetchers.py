@@ -1817,6 +1817,74 @@ class TestUpdateFetcherConfigEndpoint:
         )
         assert follow_up.json()["data"]["enabled"] is False
 
+    @pytest.mark.parametrize(
+        ("body", "error_type"),
+        [
+            pytest.param({"enabled": value}, "bool_type", id=f"enabled-{value!r}")
+            for value in ("true", "false", "yes", 1, 0)
+        ]
+        + [
+            pytest.param({"run_timeout": value}, "int_type", id=f"timeout-{value!r}")
+            for value in ("600", 600.0, True)
+        ]
+        + [
+            pytest.param({"request_delay": value}, "float_type", id=f"delay-{value!r}")
+            for value in ("1.5", True)
+        ],
+    )
+    async def test_non_json_typed_scalar_returns_422_without_effect(
+        self,
+        admin_client: AsyncClient,
+        fetcher_config_factory: FetcherConfigFactory,
+        body: dict[str, Any],
+        error_type: str,
+    ) -> None:
+        """Strict JSON scalars (`docs/api-spec.md`, JSON Request Body
+        Scalar Types): values Pydantic's lax mode would coerce are
+        rejected with the global validation error and change nothing."""
+        _register(_StubFetcher)
+        config = await fetcher_config_factory(
+            fetcher_name=_StubFetcher.name,
+            enabled=True,
+            run_timeout=3600,
+            request_delay=0.0,
+        )
+        (field,) = body
+        response = await admin_client.patch(
+            f"/api/v1/fetchers/{config.fetcher_name}/config", json=body
+        )
+        assert response.status_code == 422
+        payload = response.json()
+        assert payload["code"] == "VALIDATION_ERROR"
+        assert [(e["loc"], e["type"]) for e in payload["errors"]] == [
+            (["body", field], error_type)
+        ]
+        follow_up = await admin_client.get(
+            f"/api/v1/fetchers/{config.fetcher_name}/config"
+        )
+        data = follow_up.json()["data"]
+        assert (data["enabled"], data["run_timeout"], data["request_delay"]) == (
+            True,
+            3600,
+            0.0,
+        )
+
+    async def test_integer_request_delay_is_accepted_as_a_number(
+        self,
+        admin_client: AsyncClient,
+        fetcher_config_factory: FetcherConfigFactory,
+    ) -> None:
+        """A JSON integer is a valid JSON `number`: strictness does not
+        reject `2` for `request_delay`."""
+        _register(_StubFetcher)
+        config = await fetcher_config_factory(fetcher_name=_StubFetcher.name)
+        response = await admin_client.patch(
+            f"/api/v1/fetchers/{config.fetcher_name}/config",
+            json={"request_delay": 2},
+        )
+        assert response.status_code == 200
+        assert response.json()["data"]["request_delay"] == 2.0
+
     async def test_admin_api_key_updates_config(
         self,
         admin_api_key_client: AsyncClient,
@@ -1833,11 +1901,16 @@ class TestUpdateFetcherConfigEndpoint:
         assert response.status_code == 200
         assert response.json()["data"]["enabled"] is False
 
-    async def test_custom_setting_coercion_persists_canonical_value(
+    async def test_coercible_custom_setting_string_returns_setting_invalid(
         self,
         admin_client: AsyncClient,
         fetcher_config_factory: FetcherConfigFactory,
     ) -> None:
+        """Representative wiring of the strict submitted-value type check:
+        the request schema passes the JSON value through unchanged, so a
+        string for an `int` setting reaches the service and is rejected
+        there (`fetcher-operations.md`, Custom settings type check). The
+        complete type matrix is owned by the service tests."""
         _register(_StubFetcherWithSettings)
         config = await fetcher_config_factory(
             fetcher_name=_StubFetcherWithSettings.name
@@ -1846,8 +1919,12 @@ class TestUpdateFetcherConfigEndpoint:
             f"/api/v1/fetchers/{config.fetcher_name}/config",
             json={"custom_settings": {"results_per_page": "500"}},
         )
-        assert response.status_code == 200
-        assert response.json()["data"]["custom_settings"] == {"results_per_page": 500}
+        assert response.status_code == 422
+        assert response.json()["code"] == "FETCHER_SETTING_INVALID"
+        follow_up = await admin_client.get(
+            f"/api/v1/fetchers/{config.fetcher_name}/config"
+        )
+        assert follow_up.json()["data"]["custom_settings"] == {}
 
     async def test_schedule_override_explicit_null_reverts_to_default(
         self,
