@@ -194,7 +194,10 @@ async def persisted_assessments(
         .where(CVECVSSAssessment.cve_id == cve_id)
         .order_by(CVECVSSAssessment.cvss_version, CVECVSSAssessment.provider_name)
     )
-    return [tuple(row) for row in rows]
+    return [
+        (provider, version, score, severity, vector)
+        for provider, version, score, severity, vector in rows
+    ]
 
 
 def unit(provider: str, vector: Vector) -> tuple[str, str, Decimal, str, str]:

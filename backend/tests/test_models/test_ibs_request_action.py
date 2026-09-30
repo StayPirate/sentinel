@@ -300,7 +300,7 @@ class TestIBSRequestActionDatabaseIndexes:
                 "AND indexname <> 'ibs_request_action_pkey'"
             )
         )
-        definitions = dict(result.tuples().all())
+        definitions: dict[str, str] = dict(result.all())
         assert set(definitions) == set(_EXPECTED_INDEXES)
         assert definitions[_INCIDENT_IDENTITY].endswith(
             "USING btree (ibs_request_id, source_project, source_package, "

@@ -40,6 +40,7 @@ from pydantic import ValidationError
 from redbeat import RedBeatSchedulerEntry
 from redis.exceptions import RedisError
 from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import distinct_on
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
 
@@ -694,7 +695,7 @@ async def list_fetchers(
 
     last_run_result = await db.execute(
         select(FetcherRun)
-        .distinct(FetcherRun.fetcher_name)
+        .ext(distinct_on(FetcherRun.fetcher_name))
         .order_by(
             FetcherRun.fetcher_name,
             FetcherRun.created_at.desc(),

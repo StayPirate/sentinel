@@ -1234,7 +1234,7 @@ class TestListTicketEventsProjection:
         def _record(*args: Any) -> None:
             statements.append(args[2])
 
-        sync_engine = db_session.bind.engine.sync_engine
+        sync_engine = db_session.get_bind().engine
         event.listen(sync_engine, "before_cursor_execute", _record)
         try:
             await list_ticket_events(
@@ -1267,7 +1267,7 @@ class TestListTicketEventsProjection:
         def _record(*args: Any) -> None:
             captured.append((args[2], args[3]))
 
-        sync_engine = db_session.bind.engine.sync_engine
+        sync_engine = db_session.get_bind().engine
         event.listen(sync_engine, "before_cursor_execute", _record)
         try:
             await list_ticket_events(

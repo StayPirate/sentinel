@@ -408,7 +408,7 @@ def _external_identifiers_column() -> ColumnElement[Any]:
     return type_coerce(identifiers, JSON)
 
 
-def _detail_statement(evaluation_date: date) -> Select[Any]:
+def _detail_statement(evaluation_date: date) -> Select[*tuple[Any, ...]]:
     """The single detail statement rooted at `Ticket`, without a filter.
 
     Every joined relation is at most one row per Ticket (`User.id`,
@@ -909,7 +909,7 @@ def _overdue_condition(
     return or_(*branches) if branches else false()
 
 
-def _user_filter_ids(identifier: str) -> Select[tuple[UUID]]:
+def _user_filter_ids(identifier: str) -> Select[UUID]:
     """The `User.id` matching a UUID-or-username filter value (at most
     one), resolved inside the list statement through the user-domain
     matching rules."""

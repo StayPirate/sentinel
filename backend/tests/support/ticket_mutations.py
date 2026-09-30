@@ -31,7 +31,7 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import event, select
+from sqlalchemy import Connection, Engine, event, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.enums import PackageStatus, Severity, TicketStatus
@@ -66,9 +66,8 @@ class StatementRecorder:
     """Records every SQL statement and its parameters on the test engine."""
 
     def __init__(self, db: AsyncSession) -> None:
-        bind = db.bind
-        assert bind is not None
-        self._engine = bind.engine.sync_engine
+        # A subclass may narrow the listener target to one connection.
+        self._engine: Engine | Connection = db.get_bind().engine
         self.statements: list[str] = []
         self.parameters: list[Any] = []
 

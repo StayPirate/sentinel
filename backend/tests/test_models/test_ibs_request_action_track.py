@@ -223,7 +223,7 @@ class TestIBSRequestActionTrackDatabaseIndexes:
                 "AND indexname <> 'ibs_request_action_track_pkey'"
             )
         )
-        definitions = dict(result.tuples().all())
+        definitions: dict[str, str] = dict(result.all())
         assert set(definitions) == {_UNIQUE, _ACTION_INDEX}
         assert definitions[_UNIQUE].startswith("CREATE UNIQUE INDEX")
         assert definitions[_UNIQUE].endswith(

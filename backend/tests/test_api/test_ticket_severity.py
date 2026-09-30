@@ -135,7 +135,10 @@ async def _events(db: AsyncSession, ticket_id: uuid.UUID) -> list[EventRow]:
             .order_by(TicketAuditEvent.id)
         )
     ).all()
-    return [tuple(row) for row in rows]
+    return [
+        (event_type, user_id, old_value, new_value, comment)
+        for event_type, user_id, old_value, new_value, comment in rows
+    ]
 
 
 async def _event_count(db: AsyncSession, *ticket_ids: uuid.UUID) -> int:

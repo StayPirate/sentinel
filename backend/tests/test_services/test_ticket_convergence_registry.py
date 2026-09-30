@@ -78,20 +78,19 @@ class TestRegistration:
         session = await db_session_factory()
         await session.execute(select(1))
         first, second = uuid.uuid7(), uuid.uuid7()
-        bind = session.bind
-        assert bind is not None
+        engine = session.get_bind().engine
         statements: list[str] = []
 
         def record(*args: Any) -> None:
             statements.append(args[2])
 
-        event.listen(bind.engine.sync_engine, "before_cursor_execute", record)
+        event.listen(engine, "before_cursor_execute", record)
         try:
             register_ticket_convergence(session, second)
             register_ticket_convergence(session, first)
             register_ticket_convergence(session, second)
         finally:
-            event.remove(bind.engine.sync_engine, "before_cursor_execute", record)
+            event.remove(engine, "before_cursor_execute", record)
 
         assert statements == []
         assert pending_ticket_convergence_effects(session) == (
