@@ -387,9 +387,11 @@ class TicketCreateRequest(BaseModel):
     including an empty or over-length one — reaches the endpoint's
     `422 CVE_INVALID_FORMAT` check. The endpoint distinguishes an omitted
     `is_confidential` from an explicit `false` through `model_fields_set`
-    (the field-level `manage_confidentiality` check is presence-based).
-    A non-null `coordinated_release_at` without `is_confidential: true`
-    fails with the global `422 VALIDATION_ERROR`.
+    (the field-level `manage_confidentiality` check is presence-based);
+    the field accepts only a JSON boolean (`docs/api-spec.md`, JSON
+    Request Body Scalar Types). A non-null `coordinated_release_at`
+    without `is_confidential: true` fails with the global
+    `422 VALIDATION_ERROR`.
     """
 
     cve_id: str | None = Field(
@@ -415,6 +417,7 @@ class TicketCreateRequest(BaseModel):
     )
     is_confidential: bool = Field(
         default=False,
+        strict=True,
         description=(
             "Create the Ticket as confidential. When present (`true` or "
             "`false`), the caller also needs the `manage_confidentiality` "
@@ -455,11 +458,13 @@ class TicketConfidentialityUpdateRequest(BaseModel):
     See `docs/features/tickets/tickets.md` (Set Confidentiality). The
     single field is required and non-nullable (`docs/api-spec.md`, Partial
     Update Semantics: single-field PATCH; `Ticket.is_confidential` is
-    non-nullable). An omitted field, `null`, or a value Pydantic cannot
-    read as a boolean fails with the global `422 VALIDATION_ERROR`.
+    non-nullable). An omitted field, `null`, or any value other than a
+    JSON boolean (`docs/api-spec.md`, JSON Request Body Scalar Types)
+    fails with the global `422 VALIDATION_ERROR`.
     """
 
     is_confidential: bool = Field(
+        strict=True,
         description=(
             "Requested confidentiality. `false` on a confidential Ticket "
             "declassifies it and deletes every explicit access grant; `true` "

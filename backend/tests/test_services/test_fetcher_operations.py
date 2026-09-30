@@ -27,14 +27,15 @@ import asyncio
 import threading
 from collections.abc import AsyncGenerator, Awaitable, Callable, Generator
 from datetime import UTC, datetime, timedelta
-from typing import Any, cast
+from enum import IntEnum, StrEnum
+from typing import Any, Literal, cast
 from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID, uuid4
 
 import pytest
 from celery import Celery
 from celery.schedules import crontab
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from redbeat import RedBeatSchedulerEntry
 from redbeat.schedulers import get_redis
 from redis.exceptions import RedisError
@@ -139,6 +140,44 @@ class _MultiSettingsFetcherStub:
 
 
 _MultiSettingsFetcher = cast("type[BaseFetcher]", _MultiSettingsFetcherStub)
+
+
+class _Format(StrEnum):
+    JSON = "json"
+    XML = "xml"
+
+
+class _Level(IntEnum):
+    LOW = 1
+    HIGH = 2
+
+
+class _TypedSettingsModel(BaseModel):
+    """One field per supported `Settings` scalar kind — exercises the
+    strict submitted-value type check (`fetcher-operations.md`,
+    `update_fetcher_config`, step 6, Custom settings type check)."""
+
+    model_config = ConfigDict(extra="ignore", validate_default=True)
+
+    count: int = 10
+    ratio: float = 1.0
+    flag: bool = False
+    label: str = "default"
+    output_format: _Format = _Format.JSON
+    level: _Level = _Level.LOW
+    page_size: Literal[1, 2] = 1
+    toggle: Literal[False, True] = False
+
+
+class _TypedSettingsFetcherStub:
+    name = "test_ops_typed_settings"
+    description = "Stub fetcher with one setting per scalar kind"
+    default_schedule = "0 7 * * *"
+    queue: str | None = None
+    Settings = _TypedSettingsModel
+
+
+_TypedSettingsFetcher = cast("type[BaseFetcher]", _TypedSettingsFetcherStub)
 
 
 def _register(*stubs: type[Any]) -> None:
@@ -2367,32 +2406,100 @@ class TestUpdateFetcherConfigBehavior:
         assert event.old_value == "250"
         assert event.new_value is None
 
-    async def test_custom_setting_coercion_persists_canonical_value(
+    @pytest.mark.parametrize(
+        ("key", "value"),
+        [
+            ("count", "500"),
+            ("count", 2.5),
+            ("count", 10.0),
+            ("count", True),
+            ("ratio", "1.5"),
+            ("ratio", True),
+            ("flag", "true"),
+            ("flag", 1),
+            ("label", 5),
+            ("label", False),
+            ("output_format", 1),
+            ("level", "1"),
+            ("level", True),
+            ("page_size", "1"),
+            ("page_size", True),
+            ("page_size", 1.0),
+            ("toggle", 1),
+        ],
+    )
+    async def test_non_json_typed_custom_setting_raises_without_effect(
+        self,
+        db_session: AsyncSession,
+        fetcher_config_factory: FetcherConfigFactory,
+        user_factory: UserFactory,
+        key: str,
+        value: Any,
+    ) -> None:
+        """Each submitted value must already have its declared field's
+        JSON type — no coercion (`docs/api-spec.md`, JSON Request Body
+        Scalar Types; `fetcher-operations.md`, `update_fetcher_config`,
+        step 6, Custom settings type check). `page_size: true`,
+        `page_size: 1.0`, and `toggle: 1` cover Pydantic's `Literal`
+        equality match (`true == 1 == 1.0`). The message
+        names the submitted key; nothing is persisted or audited."""
+        _register(_TypedSettingsFetcher)
+        config = await fetcher_config_factory(fetcher_name=_TypedSettingsFetcher.name)
+        admin = await user_factory()
+
+        with pytest.raises(FetcherSettingInvalidError) as exc_info:
+            await update_fetcher_config(
+                db_session,
+                fetcher_name=config.fetcher_name,
+                user_id=admin.id,
+                payload=UpdateConfigPayload(custom_settings={key: value}),
+            )
+
+        assert str(exc_info.value).startswith(f"{key}: ")
+        assert config.custom_settings == {}
+        events = (await db_session.execute(select(FetcherAuditEvent))).scalars()
+        assert events.all() == []
+
+    async def test_json_typed_custom_settings_are_accepted_and_canonicalized(
         self,
         db_session: AsyncSession,
         fetcher_config_factory: FetcherConfigFactory,
         user_factory: UserFactory,
     ) -> None:
-        """A coercible string value (`"500"`) is validated by the
-        `Settings` model and persisted/audited as its canonical integer
-        form — not the raw string payload
-        (`docs/features/platform/fetcher-operations.md`,
-        `update_fetcher_config`, step 6, Custom settings
-        canonicalization)."""
-        _register(_WithSettingsFetcher)
-        config = await fetcher_config_factory(fetcher_name=_WithSettingsFetcher.name)
+        """Values of the declared JSON type pass the strict check: a
+        JSON integer for a `float` field (persisted in canonical float
+        form), and `StrEnum`/`IntEnum`/`Literal` members in their JSON
+        form."""
+        _register(_TypedSettingsFetcher)
+        config = await fetcher_config_factory(fetcher_name=_TypedSettingsFetcher.name)
         admin = await user_factory()
+        submitted = {
+            "count": 500,
+            "ratio": 2,
+            "flag": True,
+            "label": "custom",
+            "output_format": "xml",
+            "level": 2,
+            "page_size": 2,
+            "toggle": True,
+        }
 
         result = await update_fetcher_config(
             db_session,
             fetcher_name=config.fetcher_name,
             user_id=admin.id,
-            payload=UpdateConfigPayload(custom_settings={"results_per_page": "500"}),
+            payload=UpdateConfigPayload(custom_settings=submitted),
         )
 
-        assert result.config.custom_settings == {"results_per_page": 500}
-        event = (await db_session.execute(select(FetcherAuditEvent))).scalars().one()
-        assert event.new_value == "500"
+        assert result.config.custom_settings == {**submitted, "ratio": 2.0}
+        ratio_event = (
+            await db_session.execute(
+                select(FetcherAuditEvent).where(
+                    FetcherAuditEvent.detail["key"].astext == "ratio"
+                )
+            )
+        ).scalar_one()
+        assert ratio_event.new_value == "2.0"
 
     async def test_legacy_raw_value_is_corrected_to_canonical_type(
         self,

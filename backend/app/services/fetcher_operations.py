@@ -36,7 +36,7 @@ from uuid import UUID
 
 import structlog
 from celery import Celery
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 from redbeat import RedBeatSchedulerEntry
 from redis.exceptions import RedisError
 from sqlalchemy import func, select
@@ -155,10 +155,12 @@ class FetcherSettingUnknownError(FetcherOperationsServiceError):
 
 
 class FetcherSettingInvalidError(FetcherOperationsServiceError):
-    """The candidate merged state (current stored `custom_settings`
-    values plus the submitted, non-null changes) fails the fetcher's
-    `Settings` model type/range/choices validation. The invalid field
-    is not necessarily one the caller submitted — see
+    """A submitted, non-null `custom_settings` value has the wrong JSON
+    type for its declared `Settings` field, or the candidate merged
+    state (current stored `custom_settings` values plus the submitted,
+    non-null changes) fails the fetcher's `Settings` model
+    type/range/choices validation. In the merged-state case the invalid
+    field is not necessarily one the caller submitted — see
     `docs/features/platform/fetcher-operations.md`
     (`update_fetcher_config`, Custom settings canonicalization)."""
 
@@ -460,6 +462,37 @@ def _first_settings_error_message(exc: ValidationError) -> str:
         for error in exc.errors()
     ]
     return "; ".join(parts)
+
+
+def _strict_setting_type_error(key: str, annotation: Any, value: Any) -> str | None:
+    """Type-check one submitted, non-null `custom_settings` value against
+    its declared `Settings` field type without coercion
+    (`docs/features/platform/fetcher-operations.md`,
+    `update_fetcher_config`, step 6, Custom settings type check).
+
+    `value` is JSON-decoded request data, so it is re-encoded and
+    validated in Pydantic's strict *JSON* mode: unlike strict Python
+    mode, that mode keeps `StrEnum`/`IntEnum` members valid in their
+    JSON form while rejecting cross-type coercion (`"500"` for an
+    `int`, `1` for a `bool`, `2.5` for an `int`). Because Pydantic
+    matches `Literal` members by equality (`true == 1 == 1.0`), the
+    JSON type is additionally compared with the validated value: a
+    boolean must stay a boolean (and only a boolean may become one),
+    and a number written with a fraction or exponent must stay a float.
+    Field constraints are left to the merged-state validation. Returns
+    a `key: message` string on failure, `None` when the type matches.
+    """
+    try:
+        validated = TypeAdapter(annotation).validate_json(
+            json.dumps(value), strict=True
+        )
+    except ValidationError as exc:
+        return "; ".join(f"{key}: {error['msg']}" for error in exc.errors())
+    if isinstance(value, bool) != isinstance(validated, bool) or (
+        isinstance(value, float) and not isinstance(validated, float)
+    ):
+        return f"{key}: Input has the wrong JSON type for this setting"
+    return None
 
 
 def _build_run_summary(
@@ -1026,8 +1059,11 @@ async def update_fetcher_config(
        proceeds).
     4. `FetcherSettingUnknownError` — a `payload.custom_settings` key is
        not declared in the fetcher's `Settings` model.
-    5. `FetcherSettingInvalidError` — the merged candidate
-       `custom_settings` state fails `Settings` model validation. The
+    5. `FetcherSettingInvalidError` — a submitted non-null value does
+       not have its declared field's JSON type (strict JSON-mode check,
+       no coercion; see `_strict_setting_type_error()`), or the merged
+       candidate `custom_settings` state fails `Settings` model
+       validation. The
        **entire** merged state (current stored values overlaid with
        `payload.custom_settings`) is validated, mirroring the same
        `Settings` model instantiation `BaseFetcher.run()` performs at
@@ -1157,6 +1193,14 @@ async def update_fetcher_config(
         for key in custom_settings:
             if key not in declared_fields:
                 raise FetcherSettingUnknownError(key)
+
+        for key, value in custom_settings.items():
+            if value is not None:
+                type_error = _strict_setting_type_error(
+                    key, declared_fields[key].annotation, value
+                )
+                if type_error is not None:
+                    raise FetcherSettingInvalidError(type_error)
 
         if settings_cls is not None and custom_settings:
             candidate = dict(config.custom_settings)

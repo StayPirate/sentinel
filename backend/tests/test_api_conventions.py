@@ -31,13 +31,17 @@ forbids. That cross-reference remains with `@docs-reviewer` /
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from typing import Any
+from types import UnionType
+from typing import Annotated, Any, Literal, Union, get_args, get_origin
 
 import pytest
 from fastapi import routing as fastapi_routing
 from fastapi.dependencies.models import Dependant
 from fastapi.routing import APIRoute
+from pydantic import BaseModel, Field, Strict
+from pydantic.fields import FieldInfo
 
 from app.database import get_db
 from app.main import app
@@ -262,6 +266,126 @@ class TestResponseEnvelopeFormat:
                     "standard response envelope)"
                 )
         assert not violations, "\n".join(violations)
+
+
+_JSON_SCALAR_TYPES = (bool, int, float)
+
+
+def _declares_strict(metadata: Iterable[Any]) -> bool:
+    return any(isinstance(item, Strict) and item.strict for item in metadata)
+
+
+def _has_lax_json_scalar(annotation: Any, strict: bool) -> bool:
+    """Whether `annotation` contains a `bool`, `int`, or `float` that is
+    not validated strictly. `strict` is the strictness inherited from the
+    enclosing level: field-level `Field(strict=True)` covers the field's
+    own type and its union members, but not collection items, so a
+    container resets it and only an item-level `Strict()` annotation
+    covers the items. JSON object keys are strings by transport, so only
+    mapping values are inspected. `Literal` values are not types and enum
+    subclasses are distinct classes, so neither matches.
+    """
+    origin = get_origin(annotation)
+    args = get_args(annotation)
+    if origin is Annotated:
+        return _has_lax_json_scalar(args[0], strict or _declares_strict(args[1:]))
+    if annotation in _JSON_SCALAR_TYPES:
+        return not strict
+    if origin is Literal:
+        return False
+    if origin in (Union, UnionType):
+        return any(_has_lax_json_scalar(arg, strict) for arg in args)
+    if isinstance(origin, type) and issubclass(origin, Mapping):
+        args = args[1:]
+    return any(_has_lax_json_scalar(arg, False) for arg in args)
+
+
+def _nested_models(annotation: Any) -> list[type[BaseModel]]:
+    """Every `BaseModel` subclass referenced by `annotation`, at any depth."""
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        return [annotation]
+    return [model for arg in get_args(annotation) for model in _nested_models(arg)]
+
+
+def _lax_scalar_fields(
+    owner: str, field_info: FieldInfo, seen: set[type[BaseModel]]
+) -> list[str]:
+    """Dotted names of every field reachable from `field_info` whose type
+    contains a non-strict JSON scalar, descending into nested request
+    models."""
+    violations: list[str] = []
+    annotation = field_info.annotation
+    if _has_lax_json_scalar(annotation, _declares_strict(field_info.metadata)):
+        violations.append(owner)
+    for model in _nested_models(annotation):
+        if model in seen:
+            continue
+        seen.add(model)
+        for name, nested in model.model_fields.items():
+            violations.extend(
+                _lax_scalar_fields(f"{model.__name__}.{name}", nested, seen)
+            )
+    return violations
+
+
+@pytest.mark.unit
+class TestStrictJsonBodyScalars:
+    """Every `bool`, `int`, or `float` in a JSON request body is strict
+    at every nesting level: `Field(strict=True)` on the field, or a
+    `Strict()` item annotation inside a collection.
+
+    See `docs/api-spec.md` (JSON Request Body Scalar Types) and
+    `docs/conventions.md` (Pydantic Conventions, Strict JSON body
+    scalars). Body parameters are collected from every route's
+    effective dependency graph, so a body declared by a dependency is
+    covered too.
+    """
+
+    def test_every_json_body_scalar_field_is_strict(self) -> None:
+        violations: list[str] = []
+        for info in _api_routes():
+            for node in _iter_dependants(info.dependant):
+                for param in node.body_params:
+                    violations.extend(
+                        f"Route '{info.path}': body field '{name}' has a "
+                        "non-strict bool/int/float (use Field(strict=True), or "
+                        "Annotated[<type>, Strict()] for collection items)"
+                        for name in _lax_scalar_fields(
+                            param.name, param.field_info, set()
+                        )
+                    )
+        assert not violations, "\n".join(violations)
+
+    def test_detection_covers_optional_collection_and_nested_fields(self) -> None:
+        """Guards the checker itself against passing vacuously."""
+
+        class _Inner(BaseModel):
+            lax: float
+            strict: float = Field(strict=True)
+
+        class _Body(BaseModel):
+            flag: bool | None = None
+            counts: list[int] = []
+            field_strict_counts: list[int] = Field(default=[], strict=True)
+            item_strict_counts: list[Annotated[int, Strict()]] = []
+            ratios: dict[str, float] = {}
+            item_strict_ratios: dict[int, Annotated[float, Strict()]] = {}
+            ok: int | None = Field(default=None, strict=True)
+            label: str = ""
+            choice: Literal[1, 2] = 1
+            inner: _Inner | None = None
+
+        violations = _lax_scalar_fields("body", FieldInfo(annotation=_Body), set())
+
+        # `field_strict_counts` is a violation: field-level strictness
+        # does not reach collection items.
+        assert violations == [
+            "_Body.flag",
+            "_Body.counts",
+            "_Body.field_strict_counts",
+            "_Body.ratios",
+            "_Inner.lax",
+        ]
 
 
 def _iter_dependants(dependant: Dependant) -> list[Dependant]:
