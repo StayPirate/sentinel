@@ -1061,9 +1061,10 @@ through the following required gates:
 6. **Static security analysis and dependency vulnerability scanning** —
    static analysis of application code for insecure patterns MUST pass
    on every run. The locked dependency set MUST be free of known
-   vulnerabilities whenever a run can change or ship it: the dependency
-   vulnerability scan is blocking for a pull request or push to `master`
-   that modifies `backend/pyproject.toml` or `backend/uv.lock`, for every
+   vulnerabilities whenever a run changes it or prepares a release: the
+   dependency vulnerability scan is blocking for a pull request or push to
+   `master` that modifies `backend/pyproject.toml` or `backend/uv.lock`,
+   for every
    release-please Release PR, for manual runs, and for any run whose
    changed files cannot be determined. Other runs skip the scan, so a
    vulnerability disclosed against an unchanged lockfile does not block

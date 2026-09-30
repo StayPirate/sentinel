@@ -260,6 +260,9 @@ def test_push_fetches_missing_before_commit_from_origin(
 
     assert result.returncode == 0, result.stderr
     assert values == {"required": "true"}
+    # The fetched base was actually compared; the fail-safe did not fire.
+    assert "dependency files changed: backend/uv.lock" in result.stdout
+    assert "could not be determined" not in result.stdout
 
 
 @pytest.mark.unit

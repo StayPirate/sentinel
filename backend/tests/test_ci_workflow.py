@@ -251,6 +251,7 @@ def test_pip_audit_runs_only_when_audit_scope_requires_it() -> None:
     assert "PUSH_BEFORE: ${{ github.event.before }}" in scope_step
     assert "if: steps.audit-scope.outputs.required == 'true'" in audit_step
     assert "uvx pip-audit@" in audit_step
+    assert "continue-on-error" not in audit_step
     # Untrusted context values reach the script only through env, never by
     # interpolation into the shell command.
     assert "${{" not in scope_step.split("run:", 1)[1]

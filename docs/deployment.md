@@ -442,8 +442,9 @@ three complementary mechanisms:
   Dependabot alerts. A fix Renovate cannot express as a direct-dependency
   update is delivered by the next lock file maintenance PR or by a manual
   PR.
-- **`pip-audit`** in `ci.yml` (`Backend Security Scan`) blocks every
-  change that modifies the dependency set and every Release PR — see
+- **`pip-audit`** in `ci.yml` (`Backend Security Scan`) audits the set
+  locked in `backend/uv.lock` and blocks every change to
+  `backend/pyproject.toml` or `backend/uv.lock` and every Release PR — see
   `docs/features/platform/testing-strategy.md` (CI Pipeline, gate 6).
   Other changes skip it, so a disclosure against an unchanged lockfile
   surfaces as an alert and a fix PR rather than as a failure of unrelated
@@ -725,7 +726,9 @@ Workflow Conventions, Python dependency updates and vulnerability
 response). A Release PR
 whose scan fails is not merged: fix the dependency on `master` through an
 ordinary PR, after which release-please updates the Release PR and CI
-reruns.
+reruns. The scan reflects the advisories known when the Release PR's CI
+last ran, and a vulnerability without a published fixed version keeps
+the Release PR blocked until a fix is available.
 
 To request a specific version outside the ordinary mapping, use the
 `Release-As` footer in the final squash commit message:
