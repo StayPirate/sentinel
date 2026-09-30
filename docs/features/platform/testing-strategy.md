@@ -1064,9 +1064,8 @@ through the following required gates:
    vulnerabilities whenever a run changes it or prepares a release: the
    dependency vulnerability scan is blocking for a pull request or push to
    `master` that modifies `backend/pyproject.toml` or `backend/uv.lock`,
-   for every
-   release-please Release PR, for manual runs, and for any run whose
-   changed files cannot be determined. Other runs skip the scan, so a
+   for every release-please Release PR, for manual runs, and for any run
+   whose changed files cannot be determined. Other runs skip the scan, so a
    vulnerability disclosed against an unchanged lockfile does not block
    unrelated changes; detecting and remediating such a disclosure is owned
    by the dependency-update process in `docs/deployment.md` (Workflow
