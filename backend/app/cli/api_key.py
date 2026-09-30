@@ -62,7 +62,7 @@ def api_key_group() -> None:
 
 
 @api_key_group.command("list")
-@click.option("--username", required=True)
+@click.option("--username", required=True, help="Username of the key owner.")
 def list_keys(username: str) -> None:
     """List every API key owned by a user.
 
@@ -157,7 +157,13 @@ def _render_key_table(result: ApiKeyCliList) -> str:
 
 
 @api_key_group.command("revoke")
-@click.option("--key-id", "key_id", required=True, type=click.UUID)
+@click.option(
+    "--key-id",
+    "key_id",
+    required=True,
+    type=click.UUID,
+    help="Globally unique API key UUID.",
+)
 def revoke(key_id: UUID) -> None:
     """Revoke the API key identified by its globally unique UUID.
 

@@ -3932,6 +3932,11 @@ CLI commands MUST be tested against the Output Contract in
   without exposing password material
 - `--help` at the root, group, and command levels and root `--version` exit 0
   without loading application settings or opening database/Redis connections
+- Every parameter of every registered command declares non-empty help text
+  (`docs/conventions.md`, Command Design — Parameter help), verified by
+  walking the registered command tree so that future commands are covered
+  without per-command tests; a command with positional arguments lists them
+  with their help under `Positional arguments` in its `--help` output
 
 The image suite verifies only CLI artifact risks: the installed `sentinel`
 entry point is on `PATH`, package version metadata is readable, and

@@ -1645,6 +1645,12 @@ with their current values, defaults, and descriptions.
 sentinel fetcher config sync_redhat_cves
 ```
 
+**Parameters**:
+
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `<name>` (positional) | Yes | Fetcher name, registered or deregistered |
+
 **Output** (to stdout):
 
 ```

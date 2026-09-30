@@ -1137,7 +1137,8 @@ handling, signal handling) backing the contract defined in this section.
 
 ### Framework
 
-- **Library**: Click
+- **Library**: Click 8.5 or later (the minimum supporting help text on
+  positional arguments, required by Command Design — Parameter help)
 - **Entry point**: `sentinel` (registered as a console script in `pyproject.toml`)
 - **Architecture**: command groups for related commands (e.g.,
   `sentinel manage-user create`, `sentinel manage-user update`)
@@ -1158,6 +1159,14 @@ handling, signal handling) backing the contract defined in this section.
   options
 - Repeatable options use multiple `--option` flags (e.g.,
   `--role admin --role vulnerability_analyst`)
+- **Parameter help**: every command parameter — option, flag, and
+  positional argument — MUST declare a non-empty, one-line help text
+  (Click's `help=`), so that `--help` describes each parameter and lists
+  positional arguments under `Positional arguments`. The text summarizes
+  the parameter's description in the owning command specification, which
+  remains authoritative; it does not restate markers Click already renders
+  (such as `[required]`) and does not introduce behavior absent from that
+  specification
 - **Repeatable filter semantics**: when a CLI command accepts a
   repeatable filter option, multiple values are combined with **OR**
   logic — the result includes resources matching ANY of the provided

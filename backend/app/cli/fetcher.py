@@ -236,7 +236,10 @@ def _render_table(headers: tuple[str, ...], rows: list[tuple[str, ...]]) -> str:
 
 
 @fetcher_group.command("config")
-@click.argument("name")
+@click.argument(
+    "name",
+    help="Fetcher name, registered or deregistered (e.g. sync_nvd_cves).",
+)
 def config_command(name: str) -> None:
     """Display the full configuration of a fetcher, including custom
     settings with their current values, defaults, and descriptions.
