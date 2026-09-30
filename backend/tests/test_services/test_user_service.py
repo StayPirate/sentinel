@@ -24,7 +24,7 @@ import redis.asyncio as redis_asyncio
 from email_validator import validate_email
 from redis.exceptions import RedisError
 from sqlalchemy import delete, or_, select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import EmulatedDBAPIException, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.enums import (
@@ -340,11 +340,25 @@ class TestConflictField:
         exc = IntegrityError("stmt", {}, _FakeConstraintError(constraint_name))
         assert user_service._conflict_field(exc) == expected_field
 
-    def test_matching_constraint_name_on_cause_is_a_conflict(self) -> None:
-        wrapped = Exception("wrapped")
-        wrapped.__cause__ = _FakeConstraintError("user_email_key")
-        exc = IntegrityError("stmt", {}, wrapped)
+    def test_emulated_wrapper_with_matching_constraint_is_a_conflict(self) -> None:
+        """Mirrors the real SQLAlchemy 2.1 + asyncpg shape: `exc.orig` is
+        the dialect's emulated DBAPI error, which carries no
+        `constraint_name` itself and exposes the raw driver error through
+        `driver_exception`."""
+        wrapper = EmulatedDBAPIException(
+            "emulated dbapi error", _FakeConstraintError("user_email_key")
+        )
+        exc = IntegrityError("stmt", {}, wrapper)
         assert user_service._conflict_field(exc) == "email"
+
+    def test_emulated_wrapper_with_different_constraint_is_not_a_conflict(
+        self,
+    ) -> None:
+        wrapper = EmulatedDBAPIException(
+            "emulated dbapi error", _FakeConstraintError("user_manager_id_fkey")
+        )
+        exc = IntegrityError("stmt", {}, wrapper)
+        assert user_service._conflict_field(exc) is None
 
     def test_different_constraint_name_is_not_a_conflict(self) -> None:
         exc = IntegrityError("stmt", {}, _FakeConstraintError("user_manager_id_fkey"))

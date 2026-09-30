@@ -27,7 +27,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy import delete, or_, select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import EmulatedDBAPIException, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.enums import ApiKeySortField, ApiKeyStatus, SortOrder
@@ -297,15 +297,26 @@ class TestIsNameConflict:
         )
         assert api_key_service._is_name_conflict(exc) is True
 
-    def test_matching_constraint_name_on_cause_is_a_conflict(self) -> None:
-        """Mirrors the real SQLAlchemy+asyncpg shape: the dialect wraps
-        the raw driver error (which carries `constraint_name`) via
-        `raise ... from error`, so it is reachable at `exc.orig.__cause__`
-        rather than directly on `exc.orig`."""
-        wrapper = Exception("wrapped dbapi error")
-        wrapper.__cause__ = _FakeConstraintError("uq_api_key_user_id_name_active")
+    def test_emulated_wrapper_with_matching_constraint_is_a_conflict(self) -> None:
+        """Mirrors the real SQLAlchemy 2.1 + asyncpg shape: `exc.orig` is
+        the dialect's emulated DBAPI error, which carries no
+        `constraint_name` itself and exposes the raw driver error through
+        `driver_exception`."""
+        wrapper = EmulatedDBAPIException(
+            "emulated dbapi error",
+            _FakeConstraintError("uq_api_key_user_id_name_active"),
+        )
         exc = IntegrityError("stmt", {}, wrapper)
         assert api_key_service._is_name_conflict(exc) is True
+
+    def test_emulated_wrapper_with_different_constraint_is_not_a_conflict(
+        self,
+    ) -> None:
+        wrapper = EmulatedDBAPIException(
+            "emulated dbapi error", _FakeConstraintError("api_key_key_hash_key")
+        )
+        exc = IntegrityError("stmt", {}, wrapper)
+        assert api_key_service._is_name_conflict(exc) is False
 
     def test_different_constraint_name_is_not_a_conflict(self) -> None:
         exc = IntegrityError(
