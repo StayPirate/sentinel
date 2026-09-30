@@ -1719,6 +1719,9 @@ class TestTicketServiceQueryBoundary:
             "revert_duplicate",
             "set_confidentiality",
             "set_coordinated_release_date",
+            "grant_access",
+            "revoke_access",
+            "list_access_grants",
         }
 
     def test_projection_exposes_no_internal_ticket_uuid(self) -> None:

@@ -3,7 +3,8 @@
 See `docs/features/tickets/tickets.md` (Response Schemas > TicketSummary
 and TicketDetail, Endpoint -> Schema Mapping, List Tickets, Create Ticket,
 Set Severity Manual, Mark Ticket as Duplicate, Set Confidentiality, Set
-Coordinated Release Date) for the authoritative contract,
+Coordinated Release Date, Access Grant Management and
+TicketAccessGrantResponse) for the authoritative contract,
 `docs/features/tickets/ticket-priority.md` (API Surface) for the priority
 fields, and `docs/features/tickets/ticket-deadlines.md` (Actors and
 Phases, Due Dates, API Surface) for the due-date semantics these OpenAPI
@@ -502,3 +503,64 @@ class TicketCoordinatedReleaseDateUpdateRequest(BaseModel):
     @classmethod
     def _parse_coordinated_release_at(cls, value: object) -> datetime | None:
         return parse_coordinated_release_at(value)
+
+
+class TicketAccessGrantRequest(BaseModel):
+    """Request body of `POST /api/v1/tickets/{ticket_id}/access`.
+
+    See `docs/features/tickets/tickets.md` (Grant Access). `user` is a
+    required, non-nullable UUID-or-username string (`docs/api-spec.md`,
+    User Identifier Resolution), passed unchanged to the service, which
+    locks the target before the Ticket but reports its absence only after
+    locked-current Ticket accessibility and the confidentiality guard. An
+    omitted, `null`, or non-string field fails with the global
+    `422 VALIDATION_ERROR`.
+    """
+
+    user: str = Field(
+        description=(
+            "Target user: UUID or exact username. Creating a new grant "
+            "requires an active user; an existing grant is returned unchanged "
+            "even when its user is inactive. Required."
+        ),
+        examples=["jdoe"],
+    )
+
+
+class TicketAccessGrantResponse(BaseModel):
+    """One explicit access grant (`docs/features/tickets/tickets.md`,
+    TicketAccessGrantResponse).
+
+    Both user references are complete current profiles (`docs/api-spec.md`,
+    User References in Responses): a deactivated user is projected with
+    `active = false`, and neither inactivity nor reactivation rewrites the
+    grant's provenance.
+    """
+
+    user: UserReference = Field(
+        description=(
+            "Current profile of the user holding the grant, including "
+            "`active = false` when deactivated."
+        )
+    )
+    granted_at: datetime = Field(description="Original grant creation time (UTC).")
+    granted_by: UserReference = Field(
+        description="Current profile of the user who created the grant."
+    )
+
+
+class TicketAccessGrantDataResponse(BaseModel):
+    """Response body of `POST /api/v1/tickets/{ticket_id}/access`."""
+
+    data: TicketAccessGrantResponse
+
+
+class TicketAccessGrantListResponse(BaseModel):
+    """Response body of `GET /api/v1/tickets/{ticket_id}/access`.
+
+    Unpaginated (no `meta`): explicit grants per Ticket are a bounded
+    dataset. Items are in the fixed order `granted_at ASC, user.id ASC`,
+    which is not client-configurable.
+    """
+
+    data: list[TicketAccessGrantResponse]

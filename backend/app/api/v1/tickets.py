@@ -11,8 +11,9 @@ Ignore Ticket (`ignore_ticket`), Mark Ticket as Duplicate
 (`mark_as_duplicate`), Reopen Ticket (`reopen_from_ignored`), Revert
 Duplicate Status (`revert_duplicate`), Set Confidentiality
 (`set_confidentiality`), Set Coordinated Release Date
-(`set_coordinated_release_date`), and Set Severity Manual for the
-manual-severity mutation (`docs/features/tickets/ticket-mutations.md`,
+(`set_coordinated_release_date`), Access Grant Management
+(`grant_access`, `revoke_access`, `list_access_grants`), and Set Severity
+Manual for the manual-severity mutation (`docs/features/tickets/ticket-mutations.md`,
 `set_severity_manual()`).
 Handlers stay thin: they supply caller information to `ticket_service`,
 map its outcomes to HTTP, and serialize its semantic projection. The
@@ -31,7 +32,7 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Annotated, Final
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, Path, Query, Response, status
 
 from app.api.dependencies import (
     AuthenticatedPrincipal,
@@ -61,6 +62,7 @@ from app.core.enums import (
 )
 from app.core.errors import AppError, ErrorCode
 from app.core.exceptions import (
+    InactiveUserError,
     InvalidTransitionError,
     SeverityDerivedError,
     TicketNotFoundError,
@@ -82,6 +84,10 @@ from app.schemas.cve import (
 )
 from app.schemas.errors import ErrorResponse, TicketCVEConflictErrorResponse
 from app.schemas.ticket import (
+    TicketAccessGrantDataResponse,
+    TicketAccessGrantListResponse,
+    TicketAccessGrantRequest,
+    TicketAccessGrantResponse,
     TicketAssigneeUpdateRequest,
     TicketAssociateCVERequest,
     TicketConfidentialityUpdateRequest,
@@ -99,6 +105,7 @@ from app.schemas.ticket import (
 from app.services import ticket_mutations, ticket_service
 from app.services.cve_service import CVEIdFormatError
 from app.services.ticket_service import (
+    AccessGrantAction,
     AssigneeInactiveError,
     AssigneeNotVAError,
     CVEDetailProjection,
@@ -1463,3 +1470,261 @@ async def set_ticket_coordinated_release_date(
         db, ticket_id=ticket.id, evaluation_date=evaluation_date
     )
     return TicketDetailResponse(data=serialize_ticket_detail(detail))
+
+
+# ---------------------------------------------------------------------------
+# Access Grant Management (tickets.md, List Access Grants, Grant Access,
+# Revoke Access)
+# ---------------------------------------------------------------------------
+
+AccessGrantUserPath = Annotated[
+    str,
+    Path(
+        description="Target user: UUID or exact username.",
+        examples=["jdoe"],
+    ),
+]
+"""The `{user}` path parameter of Revoke Access.
+
+Deliberately an unconstrained string (tickets.md, Revoke Access): the
+UUID-or-username value is passed unchanged to `revoke_access()`, which
+reports an unknown user only after locked-current Ticket accessibility
+and the confidentiality guard.
+"""
+
+
+def _user_inactive_error() -> AppError:
+    return AppError(
+        status_code=status.HTTP_409_CONFLICT,
+        code=ErrorCode.USER_INACTIVE,
+        detail="User is inactive.",
+    )
+
+
+def serialize_access_grant(
+    grant: ticket_service.AccessGrantProjection,
+) -> TicketAccessGrantResponse:
+    """Build `TicketAccessGrantResponse`, shared by the list and grant
+    endpoints so both item shapes are identical."""
+    return TicketAccessGrantResponse(
+        user=UserReference(
+            id=grant.user.id,
+            username=grant.user.username,
+            full_name=grant.user.full_name,
+            active=grant.user.active,
+        ),
+        granted_at=grant.granted_at,
+        granted_by=UserReference(
+            id=grant.granted_by.id,
+            username=grant.granted_by.username,
+            full_name=grant.granted_by.full_name,
+            active=grant.granted_by.active,
+        ),
+    )
+
+
+_TICKET_NOT_FOUND_DESCRIPTION: Final = (
+    "`TICKET_NOT_FOUND`: Ticket identifier is malformed, does not exist, or "
+    "identifies a Ticket inaccessible to the caller."
+)
+
+
+@router.get(
+    "/tickets/{ticket_id}/access",
+    response_model=TicketAccessGrantListResponse,
+    summary="List Access Grants",
+    description=(
+        "Lists every user holding an explicit access grant on a confidential "
+        "Ticket, with the current profiles of the user and of the grantor "
+        "(deactivated users are included with `active = false`). Unpaginated: "
+        "grants per Ticket are a bounded dataset, so the response has no "
+        "`meta` object. The order is fixed, `granted_at` ascending then user "
+        "UUID ascending; `sort_by` and `sort_order` are not accepted. "
+        "Requires `manage_confidentiality`."
+    ),
+    responses={
+        404: {"model": ErrorResponse, "description": _TICKET_NOT_FOUND_DESCRIPTION},
+        409: {
+            "model": ErrorResponse,
+            "description": "`TICKET_NOT_CONFIDENTIAL`: the Ticket is not confidential.",
+        },
+    },
+)
+async def list_ticket_access_grants(
+    ticket_id: TicketIdPath,
+    db: DatabaseSession,
+    _principal: Annotated[
+        AuthenticatedPrincipal,
+        Depends(require_capability(Capability.MANAGE_CONFIDENTIALITY)),
+    ],
+    caller: AuthenticatedTicketCaller,
+    ticket: Annotated[ResolvedTicket, Depends(require_accessible_ticket)],
+) -> TicketAccessGrantListResponse:
+    """List Access Grants — see `docs/features/tickets/tickets.md`.
+
+    Authorization follows `docs/api-spec.md` (Authorization Chain
+    Evaluation Order, flow 2): authentication, then
+    `manage_confidentiality` before any Ticket lookup, then the delegated
+    preliminary SNTL resolution. `list_access_grants()` re-applies Ticket
+    visibility in the one statement that selects the parent and its
+    grants, so the response never relies on that preliminary decision.
+    """
+    try:
+        grants = await ticket_service.list_access_grants(
+            db, ticket_id=ticket.id, caller=caller
+        )
+    except TicketNotFoundError:
+        raise ticket_not_found_error() from None
+    except TicketNotConfidentialError:
+        raise _ticket_not_confidential_error() from None
+    return TicketAccessGrantListResponse(
+        data=[serialize_access_grant(grant) for grant in grants]
+    )
+
+
+@router.post(
+    "/tickets/{ticket_id}/access",
+    status_code=status.HTTP_201_CREATED,
+    response_model=TicketAccessGrantDataResponse,
+    summary="Grant Access",
+    description=(
+        "Grants a user, identified by UUID or exact username, explicit access "
+        "to a confidential Ticket. Returns 201 with the new grant; when the "
+        "grant already exists, returns 200 with the existing grant (original "
+        "`granted_by` and `granted_at`), even when its user is now inactive. "
+        "Valid in every Ticket status, including `ignored` and `duplicated`; "
+        "it never assigns the Ticket or changes its status. Requires "
+        "`manage_confidentiality`."
+    ),
+    responses={
+        200: {
+            "model": TicketAccessGrantDataResponse,
+            "description": "The grant already exists; no change was made.",
+        },
+        404: {
+            "model": ErrorResponse,
+            "description": (
+                f"{_TICKET_NOT_FOUND_DESCRIPTION} `USER_NOT_FOUND`: no user "
+                "matches `user` (reported only for an accessible confidential "
+                "Ticket)."
+            ),
+        },
+        409: {
+            "model": ErrorResponse,
+            "description": (
+                "`TICKET_NOT_CONFIDENTIAL`: the Ticket is not confidential "
+                "(reported whether or not the user exists). `USER_INACTIVE`: the "
+                "user is inactive and holds no grant on the Ticket."
+            ),
+        },
+    },
+)
+async def grant_ticket_access(
+    ticket_id: TicketIdPath,
+    body: TicketAccessGrantRequest,
+    response: Response,
+    db: DatabaseSession,
+    principal: Annotated[
+        AuthenticatedPrincipal,
+        Depends(require_capability(Capability.MANAGE_CONFIDENTIALITY)),
+    ],
+    caller: AuthenticatedTicketCaller,
+    ticket: Annotated[ResolvedTicket, Depends(require_accessible_ticket)],
+) -> TicketAccessGrantDataResponse:
+    """Grant Access — see `docs/features/tickets/tickets.md`.
+
+    Authorization follows `docs/api-spec.md` (Authorization Chain
+    Evaluation Order, flow 3): authentication, then
+    `manage_confidentiality` before any Ticket lookup, then the delegated
+    preliminary SNTL resolution and body validation. The UUID-or-username
+    `user` is passed unchanged: `grant_access()` locks the target before
+    the Ticket but reports its absence only after locked-current
+    accessibility and the confidentiality guard. The status code comes
+    only from the service's serialized action (`created` → 201,
+    `already_exists` → 200), never from an unlocked pre-read.
+    """
+    try:
+        result = await ticket_service.grant_access(
+            db,
+            ticket_id=ticket.id,
+            target_user=body.user,
+            acting_user_id=principal.user.id,
+            caller=caller,
+        )
+    except TicketNotFoundError:
+        raise ticket_not_found_error() from None
+    except TicketNotConfidentialError:
+        raise _ticket_not_confidential_error() from None
+    except UserNotFoundError:
+        raise user_not_found_error() from None
+    except InactiveUserError:
+        raise _user_inactive_error() from None
+    if result.action is AccessGrantAction.ALREADY_EXISTS:
+        response.status_code = status.HTTP_200_OK
+    return TicketAccessGrantDataResponse(data=serialize_access_grant(result.projection))
+
+
+@router.delete(
+    "/tickets/{ticket_id}/access/{user}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    response_class=Response,
+    summary="Revoke Access",
+    description=(
+        "Revokes the explicit access grant of a user, identified by UUID or "
+        "exact username, on a confidential Ticket. Revoking from an inactive "
+        "user is valid. When no grant exists, the request is an idempotent "
+        "success. Valid in every Ticket status, including `ignored` and "
+        "`duplicated`; it never assigns the Ticket or changes its status. "
+        "Requires `manage_confidentiality`."
+    ),
+    responses={
+        404: {
+            "model": ErrorResponse,
+            "description": (
+                f"{_TICKET_NOT_FOUND_DESCRIPTION} `USER_NOT_FOUND`: no user "
+                "matches `user` (reported only for an accessible confidential "
+                "Ticket)."
+            ),
+        },
+        409: {
+            "model": ErrorResponse,
+            "description": (
+                "`TICKET_NOT_CONFIDENTIAL`: the Ticket is not confidential "
+                "(reported whether or not the user exists)."
+            ),
+        },
+    },
+)
+async def revoke_ticket_access(
+    ticket_id: TicketIdPath,
+    user: AccessGrantUserPath,
+    db: DatabaseSession,
+    principal: Annotated[
+        AuthenticatedPrincipal,
+        Depends(require_capability(Capability.MANAGE_CONFIDENTIALITY)),
+    ],
+    caller: AuthenticatedTicketCaller,
+    ticket: Annotated[ResolvedTicket, Depends(require_accessible_ticket)],
+) -> Response:
+    """Revoke Access — see `docs/features/tickets/tickets.md`.
+
+    Authorization follows `docs/api-spec.md` (Authorization Chain
+    Evaluation Order, flow 3), as Grant Access. The `{user}` path value
+    is passed unchanged to `revoke_access()`; both an effective revoke and
+    an absent-grant no-op return 204 with an empty body.
+    """
+    try:
+        await ticket_service.revoke_access(
+            db,
+            ticket_id=ticket.id,
+            target_user=user,
+            acting_user_id=principal.user.id,
+            caller=caller,
+        )
+    except TicketNotFoundError:
+        raise ticket_not_found_error() from None
+    except TicketNotConfidentialError:
+        raise _ticket_not_confidential_error() from None
+    except UserNotFoundError:
+        raise user_not_found_error() from None
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
