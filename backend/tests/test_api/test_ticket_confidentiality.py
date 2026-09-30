@@ -18,14 +18,15 @@ grants).
 These tests cover only the HTTP boundary, parametrized over both endpoints
 where the contract is shared: authentication, capability before lookup, the
 identical 404 family (before the confidentiality guard), request
-validation (including the shared Coordinated Release Date parser, so both
-CRD-accepting endpoints are proven to accept the same inputs), the complete
-body of the one error mapping, the response shape, OpenAPI, and the
-handler-owned steps (the one captured date and the final `TicketDetail`
-assembly with its rollback). The service matrix (every status, exact event
-values, no-op classification, guard and lock order, grant deletion scope,
-maintainer retention, injected service failures, and the races) is proven
-once in `tests/test_services/test_confidentiality.py`,
+validation (with representative cases proving the wiring of the shared
+Coordinated Release Date parser, whose complete matrix is proven once in
+`tests/test_schemas/test_ticket.py`), the complete body of the one error
+mapping, the response shape, OpenAPI, and the handler-owned steps (the one
+captured date and the final `TicketDetail` assembly with its rollback). The
+service matrix (every status, exact event values, no-op classification,
+guard and lock order, grant deletion scope, maintainer retention, injected
+service failures, and the races) is proven once in
+`tests/test_services/test_confidentiality.py`,
 `tests/test_services/test_coordinated_release_date.py`, and
 `tests/test_services/test_confidentiality_atomicity.py`.
 
@@ -446,16 +447,6 @@ _CRD_NO_TIME = _field_error(
     "Value error, coordinated_release_at must include a time component.",
     "value_error",
 )
-_CRD_INVALID = _field_error(
-    "coordinated_release_at",
-    "Value error, coordinated_release_at must be a valid ISO 8601 datetime.",
-    "value_error",
-)
-_CRD_OUT_OF_RANGE = _field_error(
-    "coordinated_release_at",
-    "Value error, coordinated_release_at is out of the representable datetime range.",
-    "value_error",
-)
 _NON_OBJECT_BODY = {
     "loc": ["body"],
     "msg": "Input should be a valid dictionary or object to extract fields from",
@@ -506,29 +497,10 @@ _VALIDATION_CASES = [
     pytest.param(
         CONFIDENTIALITY, {"is_confidential": []}, _BOOL_TYPE, id="confidential-list"
     ),
-    pytest.param(CRD_ENDPOINT, _crd(1791295200), _CRD_NOT_A_STRING, id="crd-number"),
-    pytest.param(CRD_ENDPOINT, _crd(True), _CRD_NOT_A_STRING, id="crd-bool"),
-    pytest.param(CRD_ENDPOINT, _crd({"at": _CRD}), _CRD_NOT_A_STRING, id="crd-object"),
-    pytest.param(CRD_ENDPOINT, _crd([_CRD]), _CRD_NOT_A_STRING, id="crd-list"),
+    # Representative parser wiring; tests/test_schemas/test_ticket.py owns
+    # the complete Coordinated Release Date parser matrix.
     pytest.param(CRD_ENDPOINT, _crd("2026-10-06"), _CRD_NO_TIME, id="crd-date-only"),
-    pytest.param(CRD_ENDPOINT, _crd("20261006"), _CRD_NO_TIME, id="crd-basic-date"),
-    pytest.param(CRD_ENDPOINT, _crd("not-a-date"), _CRD_INVALID, id="crd-invalid"),
-    pytest.param(CRD_ENDPOINT, _crd(""), _CRD_INVALID, id="crd-empty-string"),
-    pytest.param(
-        CRD_ENDPOINT, _crd("2026-13-01T00:00:00Z"), _CRD_INVALID, id="crd-bad-month"
-    ),
-    pytest.param(
-        CRD_ENDPOINT,
-        _crd("0001-01-01T00:00:00+01:00"),
-        _CRD_OUT_OF_RANGE,
-        id="crd-underflow",
-    ),
-    pytest.param(
-        CRD_ENDPOINT,
-        _crd("9999-12-31T23:59:59-01:00"),
-        _CRD_OUT_OF_RANGE,
-        id="crd-overflow",
-    ),
+    pytest.param(CRD_ENDPOINT, _crd(1791295200), _CRD_NOT_A_STRING, id="crd-number"),
 ]
 
 
@@ -717,7 +689,16 @@ class TestSetConfidentiality:
             before["duplicate_of_id"],
             None,
         )
-        assert await event_count(db_session, target.id) == 1
+        assert await ticket_events_by_id(db_session, target.id) == [
+            EventRow(
+                "confidentiality_changed",
+                va_user.id,
+                str(not value).lower(),
+                str(value).lower(),
+                None,
+                None,
+            )
+        ]
 
 
 # ---------------------------------------------------------------------------
@@ -733,17 +714,6 @@ class TestSetCoordinatedReleaseDate:
             pytest.param(_CRD, _CRD, id="utc-z"),
             pytest.param("2026-10-06T14:00:00", _CRD, id="naive-is-utc"),
             pytest.param("2026-10-06T16:00:00+02:00", _CRD, id="offset"),
-            pytest.param("2026-10-06T14:00:00+00:00", _CRD, id="explicit-zero-offset"),
-            pytest.param(
-                "2026-12-31T23:30:00-05:00",
-                "2027-01-01T04:30:00Z",
-                id="offset-crossing-midnight",
-            ),
-            pytest.param(
-                "2026-10-06T14:00:00.5Z",
-                "2026-10-06T14:00:00.500000Z",
-                id="sub-second",
-            ),
             pytest.param("2020-01-02T03:04:05Z", "2020-01-02T03:04:05Z", id="past"),
         ],
     )
@@ -756,9 +726,10 @@ class TestSetCoordinatedReleaseDate:
         supplied: str,
         expected: str,
     ) -> None:
-        """The same input matrix as `POST /api/v1/tickets` (the shared
-        parser): the response and the event carry the UTC instant with a
-        `Z` suffix, and the stored value is that aware UTC instant."""
+        """Representative inputs of the shared parser (whose complete
+        matrix is in `tests/test_schemas/test_ticket.py`): the response and
+        the event carry the UTC instant with a `Z` suffix, and the stored
+        value is that aware UTC instant."""
         target: Ticket = await ticket_factory(is_confidential=True)
 
         response = await authenticated_client.patch(
@@ -882,7 +853,9 @@ class TestSetCoordinatedReleaseDate:
             before["duplicate_of_id"],
             None,
         )
-        assert await event_count(db_session, target.id) == 1
+        assert await ticket_events_by_id(db_session, target.id) == [
+            _crd_event(va_user, None, _CRD)
+        ]
 
     @pytest.mark.parametrize(
         "stored",
