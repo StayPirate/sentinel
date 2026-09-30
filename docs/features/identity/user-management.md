@@ -498,6 +498,12 @@ sentinel manage-user set-password \
   --username <username>
 ```
 
+**Parameters**:
+
+| Parameter    | Required | Description                                        |
+|--------------|----------|----------------------------------------------------|
+| `--username` | Yes      | Username of the local user whose password is set   |
+
 **Behavior** (in this order):
 
 1. Validate the username format (see `docs/conventions.md`, Username

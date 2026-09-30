@@ -117,10 +117,17 @@ def _normalize_email_or_exit(email: str) -> str:
 
 
 @manage_user_group.command("create")
-@click.option("--username", required=True)
-@click.option("--email", required=True)
-@click.option("--full-name", default=None)
-@click.option("--role", "roles", multiple=True)
+@click.option("--username", required=True, help="Unique username for the account.")
+@click.option("--email", required=True, help="Unique email address.")
+@click.option("--full-name", default=None, help="Display name.")
+@click.option(
+    "--role",
+    "roles",
+    multiple=True,
+    help=(
+        "Role to assign: admin, vulnerability_analyst, restricted_analyst. Repeatable."
+    ),
+)
 def create(
     username: str, email: str, full_name: str | None, roles: tuple[str, ...]
 ) -> None:
@@ -236,10 +243,23 @@ async def _create_flow(
 
 
 @manage_user_group.command("list")
-@click.option("--active", is_flag=True)
-@click.option("--inactive", is_flag=True)
-@click.option("--role", "roles", multiple=True)
-@click.option("--type", "user_type_value", default=None)
+@click.option("--active", is_flag=True, help="Show only active users.")
+@click.option("--inactive", is_flag=True, help="Show only inactive users.")
+@click.option(
+    "--role",
+    "roles",
+    multiple=True,
+    help=(
+        "Filter by role: admin, vulnerability_analyst, restricted_analyst. "
+        "Repeatable (OR)."
+    ),
+)
+@click.option(
+    "--type",
+    "user_type_value",
+    default=None,
+    help="Filter by type: local or external.",
+)
 def list_users(
     active: bool, inactive: bool, roles: tuple[str, ...], user_type_value: str | None
 ) -> None:
@@ -355,7 +375,7 @@ def _render_user_row(user: User) -> tuple[str, str, str, str, str, str]:
 
 
 @manage_user_group.command("show")
-@click.option("--username", required=True)
+@click.option("--username", required=True, help="Username of the user to display.")
 def show(username: str) -> None:
     """Display detailed information about a single user.
 
@@ -456,7 +476,11 @@ def _external_user_password_error_message(username: str) -> str:
 
 
 @manage_user_group.command("set-password")
-@click.option("--username", required=True)
+@click.option(
+    "--username",
+    required=True,
+    help="Username of the local user whose password is set.",
+)
 def set_password(username: str) -> None:
     """Set or reset the password for a local user.
 
@@ -563,7 +587,7 @@ async def _set_password_flow(
 
 
 @manage_user_group.command("unlock")
-@click.option("--username", required=True)
+@click.option("--username", required=True, help="Username of the user to unlock.")
 def unlock(username: str) -> None:
     """Clear the login lockout counter for a user.
 

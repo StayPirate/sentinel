@@ -1164,7 +1164,7 @@ requires-dist = [
     { name = "bcrypt", specifier = ">=4.2.0" },
     { name = "celery", extras = ["redis"], specifier = ">=5.6.3" },
     { name = "celery-redbeat", specifier = ">=2.4.2" },
-    { name = "click", specifier = ">=8.1.0" },
+    { name = "click", specifier = ">=8.5.0" },
     { name = "cvss", specifier = ">=3.6" },
     { name = "email-validator", specifier = ">=2.3.0" },
     { name = "fastapi", specifier = ">=0.141.1" },

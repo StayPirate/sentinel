@@ -175,6 +175,100 @@ def test_api_key_command_help_exits_zero_without_bootstrap(
     assert "Traceback" not in result.output
 
 
+# ---------------------------------------------------------------------------
+# Parameter help: every parameter of every registered command
+# (docs/conventions.md, CLI Conventions -> Command Design -> Parameter help)
+# ---------------------------------------------------------------------------
+
+
+def _parameters_without_help(
+    command: click.Command, path: tuple[str, ...] = ("sentinel",)
+) -> list[str]:
+    """Walk the registered command tree from `command` and return the
+    qualified name of every parameter (option, flag, or positional
+    argument) whose help text is missing, blank, or spans multiple
+    lines. Click's own injected `--help` option is not part of
+    `Command.params` and is therefore not inspected."""
+    offenders = [
+        f"{' '.join(path)} {param.name}"
+        for param in command.params
+        if not (help_text := getattr(param, "help", None))
+        or not help_text.strip()
+        or "\n" in help_text
+    ]
+    if isinstance(command, click.Group):
+        for name, subcommand in sorted(command.commands.items()):
+            offenders.extend(_parameters_without_help(subcommand, (*path, name)))
+    return offenders
+
+
+@pytest.mark.unit
+def test_every_registered_cli_parameter_declares_help() -> None:
+    assert _parameters_without_help(cli) == []
+
+
+@pytest.mark.unit
+def test_parameter_help_walker_reports_parameters_without_help() -> None:
+    """Guards the walker above against silently passing: a nested command
+    whose option, flag, and positional argument lack help (or carry a
+    blank or multi-line help) is reported, while a documented parameter
+    is not."""
+
+    @click.group("_probe-group")
+    def _probe_group() -> None:
+        pass
+
+    @_probe_group.command("_probe")
+    @click.argument("target")
+    @click.option("--flag", is_flag=True, help="   ")
+    @click.option("--value", help="First line.\nSecond line.")
+    @click.option("--documented", help="Documented option.")
+    def _probe(target: str, flag: bool, value: str, documented: str) -> None:
+        pass
+
+    assert _parameters_without_help(_probe_group) == [
+        "sentinel _probe target",
+        "sentinel _probe flag",
+        "sentinel _probe value",
+    ]
+
+
+@pytest.mark.unit
+def test_fetcher_config_help_lists_positional_argument_without_bootstrap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _forbid_bootstrap(monkeypatch)
+    result = _invoke(["fetcher", "config", "--help"])
+
+    assert result.exit_code == 0
+    positional_section = result.output.split("Positional arguments:", 1)[1]
+    positional_section = positional_section.split("Options:", 1)[0]
+    assert "NAME" in positional_section
+    assert "Fetcher name, registered or deregistered" in positional_section
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("args", "expected_fragments"),
+    [
+        (
+            ["manage-user", "list", "--help"],
+            ["Show only active users.", "Filter by type: local or external."],
+        ),
+        (["api-key", "revoke", "--help"], ["Globally unique API key UUID."]),
+    ],
+)
+def test_command_help_renders_option_help_without_bootstrap(
+    monkeypatch: pytest.MonkeyPatch, args: list[str], expected_fragments: list[str]
+) -> None:
+    _forbid_bootstrap(monkeypatch)
+    result = _invoke(args)
+
+    assert result.exit_code == 0
+    for fragment in expected_fragments:
+        assert fragment in result.output
+
+
 @pytest.mark.unit
 def test_root_missing_command_exits_one() -> None:
     result = _invoke([])
