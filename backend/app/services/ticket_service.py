@@ -14,8 +14,10 @@ assignment (`assign_ticket()`), and the manual priority override
 `reopen_from_ignored_as_system()`, and `revert_duplicate()`), which
 compose the package-owned eligibility convergence with one final
 reconciliation, and the Confidentiality Management operations
-`set_confidentiality()` and `set_coordinated_release_date()`; the
-remaining operations are added by their owning work items.
+`set_confidentiality()`, `set_coordinated_release_date()`, and the
+explicit access grants (`grant_access()`, `revoke_access()`,
+`list_access_grants()`); the remaining operations are added by their
+owning work items.
 
 Every operation accepts the caller's `AsyncSession` and never commits or
 rolls back; database exceptions propagate unchanged (Transaction
@@ -78,7 +80,7 @@ from sqlalchemy.dialects.postgresql import JSON, aggregate_order_by
 from sqlalchemy.engine import Row
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import aliased, selectinload
+from sqlalchemy.orm import aliased, joinedload, selectinload
 
 from app.core.enums import (
     CVESourceType,
@@ -93,6 +95,7 @@ from app.core.enums import (
     TicketStatus,
 )
 from app.core.exceptions import (
+    InactiveUserError,
     InvalidTransitionError,
     ServiceError,
     SeverityDerivedError,
@@ -1655,30 +1658,53 @@ async def associate_cve(
 # ---------------------------------------------------------------------------
 
 
-async def _lock_assignment_target(db: AsyncSession, identifier: str) -> User | None:
-    """Resolve and lock the assignment target, preserving absence.
+class _TargetLockPurpose(StrEnum):
+    """Why a target User is locked, which fixes the lock mode and loads.
+
+    - `ASSIGNMENT` (`assign_ticket()`): `FOR SHARE`, with the role origins
+      loaded under the lock for the active-VA eligibility decision
+      (ticket-service.md, Concurrency control; `docs/conventions.md`,
+      Cross-Domain Root Lock Order).
+    - `ACCESS_GRANT` (`grant_access()`, `revoke_access()`): `FOR NO KEY
+      UPDATE`, stabilizing the target's ID, username, and active state
+      against deactivation, reactivation, and rename without conflicting
+      with foreign-key `FOR KEY SHARE` validation (ticket-service.md,
+      `grant_access` step 1). No roles are loaded: grants never evaluate
+      them.
+    """
+
+    ASSIGNMENT = "assignment"
+    ACCESS_GRANT = "access_grant"
+
+
+async def _lock_target_user(
+    db: AsyncSession, identifier: str, *, purpose: _TargetLockPurpose
+) -> User | None:
+    """Resolve and lock a target User before the Ticket, preserving absence.
 
     The lock-aware, deferred-error form of the user-domain matching
     boundary (ticket-service.md, Concurrency control; user-service.md,
     `resolve_user_identifier()`): one statement selects the User matched
-    by `user_identifier_condition(identifier)` with `FOR SHARE`,
-    refreshing any identity-map copy, and its current role origins are
-    loaded while that lock is held. Called before the Ticket lock
-    (`docs/conventions.md`, Cross-Domain Root Lock Order), so the target's
-    `active` value and VA origins stay stable against deactivation and
-    role-origin removal until the transaction ends.
+    by `user_identifier_condition(identifier)` with the lock mode of
+    `purpose`, refreshing any identity-map copy. Called before the Ticket
+    lock (`docs/conventions.md`, Cross-Domain Root Lock Order), so the
+    locked state stays stable until the transaction ends.
 
     Returns the locked User, or `None` when no User matches; it never
-    raises for absence, so the caller reports it only after locked-current
-    Ticket accessibility and operability.
+    raises for absence, so the caller reports it only after its
+    locked-current Ticket checks.
     """
     statement = (
         select(User)
         .where(user_identifier_condition(identifier))
-        .options(selectinload(User.roles))
-        .with_for_update(read=True)
         .execution_options(populate_existing=True)
     )
+    if purpose is _TargetLockPurpose.ASSIGNMENT:
+        statement = statement.options(selectinload(User.roles)).with_for_update(
+            read=True
+        )
+    else:
+        statement = statement.with_for_update(key_share=True)
     return (await db.execute(statement)).scalar_one_or_none()
 
 
@@ -1741,7 +1767,9 @@ async def assign_ticket(
     if evaluation_date is None:
         evaluation_date = _utc_now().astimezone(UTC).date()
 
-    target = await _lock_assignment_target(db, assignee)
+    target = await _lock_target_user(
+        db, assignee, purpose=_TargetLockPurpose.ASSIGNMENT
+    )
     ticket = await lock_accessible_ticket(db, ticket_id, caller)
     ensure_ticket_operable(ticket)
     if target is None:
@@ -2556,3 +2584,333 @@ async def set_coordinated_release_date(
         ),
     )
     return ticket
+
+
+# ---------------------------------------------------------------------------
+# Explicit access grants (ticket-service.md, `grant_access`,
+# `revoke_access`, `list_access_grants`)
+# ---------------------------------------------------------------------------
+
+_LISTED_GRANT = aliased(TicketAccessGrant, name="listed_grant")
+_GRANT_TARGET = aliased(User, name="grant_target")
+_GRANT_GRANTOR = aliased(User, name="grant_grantor")
+
+
+class AccessGrantAction(StrEnum):
+    """The classification of a `grant_access()` call (ticket-service.md,
+    `grant_access`). The API maps `created` to 201 and `already_exists` to
+    200."""
+
+    CREATED = "created"
+    ALREADY_EXISTS = "already_exists"
+
+
+@dataclass(frozen=True, slots=True)
+class AccessGrantProjection:
+    """The current projection of one explicit grant (tickets.md,
+    TicketAccessGrantResponse): the current target and grantor User
+    profiles, never historical snapshots, and the original grant time."""
+
+    user: TicketUserProjection
+    granted_at: datetime
+    granted_by: TicketUserProjection
+
+
+@dataclass(frozen=True, slots=True)
+class AccessGrantMutationResult:
+    """The transaction-local result of `grant_access()`.
+
+    `grant` is the created or winner-current grant row, `action` its
+    classification from locked-current state, and `projection` its
+    response projection, built in the service so the API performs no
+    query or relationship load.
+    """
+
+    grant: TicketAccessGrant
+    action: AccessGrantAction
+    projection: AccessGrantProjection
+
+
+def _user_projection(user: User) -> TicketUserProjection:
+    return TicketUserProjection(
+        id=user.id, username=user.username, full_name=user.full_name, active=user.active
+    )
+
+
+async def _load_grant(
+    db: AsyncSession, ticket_id: UUID, user_id: UUID
+) -> TicketAccessGrant | None:
+    """Select one grant with its current target and grantor Users.
+
+    `populate_existing` refreshes an identity-map copy, so a grant flushed
+    by this transaction exposes its database-assigned `granted_at`. The
+    User rows are an unlocked observation used only for the response
+    projection; the target is additionally locked by the caller.
+    """
+    statement = (
+        select(TicketAccessGrant)
+        .where(
+            TicketAccessGrant.ticket_id == ticket_id,
+            TicketAccessGrant.user_id == user_id,
+        )
+        .options(
+            joinedload(TicketAccessGrant.user), joinedload(TicketAccessGrant.granted_by)
+        )
+        .execution_options(populate_existing=True)
+    )
+    return (await db.execute(statement)).scalar_one_or_none()
+
+
+def _grant_result(
+    grant: TicketAccessGrant, action: AccessGrantAction
+) -> AccessGrantMutationResult:
+    return AccessGrantMutationResult(
+        grant=grant,
+        action=action,
+        projection=AccessGrantProjection(
+            user=_user_projection(grant.user),
+            granted_at=grant.granted_at,
+            granted_by=_user_projection(grant.granted_by),
+        ),
+    )
+
+
+async def grant_access(
+    db: AsyncSession,
+    *,
+    ticket_id: UUID,
+    target_user: str,
+    acting_user_id: UUID,
+    caller: TicketCaller,
+) -> AccessGrantMutationResult:
+    """Grant a user explicit access to a confidential Ticket.
+
+    Category A visibility-only consumer mutation (ticket-service.md,
+    `grant_access`; tickets.md, Grant Access, Confidential Tickets > Audit
+    Trail; rbac.md, Scope and Confidential Ticket Visibility).
+
+    Q1: `ticket_id` is the internal Ticket UUID (the API resolves the
+    public `SNTL-{n}` locator first). `target_user` is the raw
+    UUID-or-username identifier (api-spec.md, User Identifier
+    Resolution). `acting_user_id` is the authenticated acting user (no
+    system caller exists); `caller` is the request-resolved caller
+    information whose `user_id` must identify `acting_user_id`.
+
+    Q2: the caller has verified `manage_confidentiality`, owns the
+    transaction, and holds no Ticket lock in it. Locks, in order: the
+    target User `FOR NO KEY UPDATE` (absence preserved), then the Ticket
+    `FOR UPDATE`. Does not call `ensure_ticket_operable()`: valid in
+    every Ticket status, including `Ignored` and `Duplicated`.
+
+    Q3: (1) resolves and locks the target; (2)-(3) locks the Ticket and
+    revalidates accessibility from locked-current state; (4) rejects a
+    non-confidential Ticket whether or not the target exists; (5) reports
+    target absence; (6) a grant already present under the Ticket lock is
+    returned as `already_exists` with its original provenance, without an
+    activity check, write, or event; (7) rejects an inactive target; (8)
+    inserts the grant (`granted_by_id = acting_user_id`, `granted_at` by
+    the database default); (9) creates one acting-user
+    `access_grant_added` whose `new_value` is the locked target's
+    username; (10) flushes. Never assigns, reconciles, changes status,
+    registers a post-commit effect, reads audit history, or commits. The
+    unique key is a backstop only: the existing-grant decision is made
+    under the locks, and no unique violation is caught.
+
+    Q4: returns the created or winner-current grant with its action and
+    response projection.
+
+    Q5: re-invocation returns `already_exists` with no effect.
+
+    Q6: raises `ValueError` before any database operation when `caller`
+    does not identify `acting_user_id`. Raises `TicketNotFoundError` for
+    a missing or inaccessible Ticket before any other decision, then
+    `TicketNotConfidentialError`, `UserNotFoundError`, and, only for an
+    absent grant, `InactiveUserError`. Audit, database, and flush
+    exceptions propagate and roll back the grant and the event together.
+    """
+    if caller.user_id != acting_user_id:
+        raise ValueError("caller must identify the acting user.")
+
+    target = await _lock_target_user(
+        db, target_user, purpose=_TargetLockPurpose.ACCESS_GRANT
+    )
+    ticket = await lock_accessible_ticket(db, ticket_id, caller)
+    if not ticket.is_confidential:
+        raise TicketNotConfidentialError()
+    if target is None:
+        raise UserNotFoundError()
+    existing = await _load_grant(db, ticket.id, target.id)
+    if existing is not None:
+        return _grant_result(existing, AccessGrantAction.ALREADY_EXISTS)
+    if not target.active:
+        raise InactiveUserError()
+
+    db.add(
+        TicketAccessGrant(
+            ticket_id=ticket.id, user_id=target.id, granted_by_id=acting_user_id
+        )
+    )
+    await TicketAuditLog.log_event(
+        db,
+        ticket_id=ticket.id,
+        event_type=TicketAuditEventType.ACCESS_GRANT_ADDED,
+        user_id=acting_user_id,
+        new_value=target.username,
+    )
+    created = await _load_grant(db, ticket.id, target.id)
+    assert created is not None  # flushed above in this transaction
+    return _grant_result(created, AccessGrantAction.CREATED)
+
+
+async def revoke_access(
+    db: AsyncSession,
+    *,
+    ticket_id: UUID,
+    target_user: str,
+    acting_user_id: UUID,
+    caller: TicketCaller,
+) -> None:
+    """Revoke a user's explicit access to a confidential Ticket.
+
+    Category A visibility-only consumer mutation (ticket-service.md,
+    `revoke_access`; tickets.md, Revoke Access, Confidential Tickets >
+    Audit Trail).
+
+    Q1: as `grant_access()`: internal Ticket UUID, raw UUID-or-username
+    `target_user`, the authenticated `acting_user_id`, and the
+    request-resolved `caller` identifying it.
+
+    Q2: as `grant_access()`: `manage_confidentiality` verified, caller-
+    owned transaction without a prior Ticket lock, target User `FOR NO KEY
+    UPDATE` then Ticket `FOR UPDATE`, no `ensure_ticket_operable()`.
+
+    Q3: (1) resolves and locks the target (its activity is not a guard:
+    revoking from an inactive user is valid cleanup); (2)-(3) locks the
+    Ticket and revalidates accessibility; (4) rejects a non-confidential
+    Ticket whether or not the target exists; (5) reports target absence;
+    (6) an absent grant is a no-op with no write or event; (7) deletes the
+    grant; (8) creates one acting-user `access_grant_removed` whose
+    `old_value` is the locked target's username; (9) flushes. Never
+    assigns, reconciles, changes status, registers a post-commit effect,
+    reads audit history, or commits.
+
+    Q4: returns `None`.
+
+    Q5: re-invocation is the step-6 no-op.
+
+    Q6: raises `ValueError` before any database operation when `caller`
+    does not identify `acting_user_id`. Raises `TicketNotFoundError`
+    before any other decision, then `TicketNotConfidentialError`, then
+    `UserNotFoundError`. Audit, database, and flush exceptions propagate;
+    the caller's rollback restores the grant and removes the event.
+    """
+    if caller.user_id != acting_user_id:
+        raise ValueError("caller must identify the acting user.")
+
+    target = await _lock_target_user(
+        db, target_user, purpose=_TargetLockPurpose.ACCESS_GRANT
+    )
+    ticket = await lock_accessible_ticket(db, ticket_id, caller)
+    if not ticket.is_confidential:
+        raise TicketNotConfidentialError()
+    if target is None:
+        raise UserNotFoundError()
+    grant_exists = (
+        await db.execute(
+            select(
+                exists().where(
+                    TicketAccessGrant.ticket_id == ticket.id,
+                    TicketAccessGrant.user_id == target.id,
+                )
+            )
+        )
+    ).scalar_one()
+    if not grant_exists:
+        return
+
+    await db.execute(
+        delete(TicketAccessGrant).where(
+            TicketAccessGrant.ticket_id == ticket.id,
+            TicketAccessGrant.user_id == target.id,
+        )
+    )
+    await TicketAuditLog.log_event(
+        db,
+        ticket_id=ticket.id,
+        event_type=TicketAuditEventType.ACCESS_GRANT_REMOVED,
+        user_id=acting_user_id,
+        old_value=target.username,
+    )
+
+
+async def list_access_grants(
+    db: AsyncSession, *, ticket_id: UUID, caller: TicketCaller
+) -> list[AccessGrantProjection]:
+    """List the explicit grants of one accessible confidential Ticket.
+
+    Category B read (ticket-service.md, `list_access_grants`, ATR 16;
+    tickets.md, List Access Grants, TicketAccessGrantResponse).
+
+    Q1: `ticket_id` is the internal Ticket UUID of the preliminary SNTL
+    resolution; `caller` is the request-resolved caller information.
+
+    Q3: one SQL statement, and therefore one PostgreSQL snapshot, selects
+    the parent Ticket under the canonical visibility predicate, LEFT
+    JOINed to its grants and their current target and grantor Users,
+    ordered by `granted_at` then target `user_id` (ascending). The grants
+    use an alias, so the predicate's own grant branch stays correlated to
+    the Ticket only. Creates no event, acquires no lock, and never commits
+    or rolls back.
+
+    Q4: returns the grant projections in that fixed order; an empty list
+    only for an accessible confidential Ticket without grants. Inactive
+    users are projected with `active = false`.
+
+    Q6: raises `TicketNotFoundError` for a missing or inaccessible Ticket
+    (never an empty list), then `TicketNotConfidentialError` for an
+    accessible non-confidential Ticket. Database exceptions propagate.
+    """
+    statement = (
+        select(
+            Ticket.is_confidential,
+            _LISTED_GRANT.granted_at,
+            _GRANT_TARGET.id.label("target_id"),
+            _GRANT_TARGET.username.label("target_username"),
+            _GRANT_TARGET.full_name.label("target_full_name"),
+            _GRANT_TARGET.active.label("target_active"),
+            _GRANT_GRANTOR.id.label("grantor_id"),
+            _GRANT_GRANTOR.username.label("grantor_username"),
+            _GRANT_GRANTOR.full_name.label("grantor_full_name"),
+            _GRANT_GRANTOR.active.label("grantor_active"),
+        )
+        .select_from(Ticket)
+        .outerjoin(_LISTED_GRANT, _LISTED_GRANT.ticket_id == Ticket.id)
+        .outerjoin(_GRANT_TARGET, _GRANT_TARGET.id == _LISTED_GRANT.user_id)
+        .outerjoin(_GRANT_GRANTOR, _GRANT_GRANTOR.id == _LISTED_GRANT.granted_by_id)
+        .where(Ticket.id == ticket_id, ticket_visibility_condition(caller))
+        .order_by(_LISTED_GRANT.granted_at, _LISTED_GRANT.user_id)
+    )
+    rows = (await db.execute(statement)).all()
+    if not rows:
+        raise TicketNotFoundError()
+    if not rows[0].is_confidential:
+        raise TicketNotConfidentialError()
+    return [
+        AccessGrantProjection(
+            user=TicketUserProjection(
+                id=row.target_id,
+                username=row.target_username,
+                full_name=row.target_full_name,
+                active=row.target_active,
+            ),
+            granted_at=row.granted_at,
+            granted_by=TicketUserProjection(
+                id=row.grantor_id,
+                username=row.grantor_username,
+                full_name=row.grantor_full_name,
+                active=row.grantor_active,
+            ),
+        )
+        for row in rows
+        if row.granted_at is not None
+    ]
