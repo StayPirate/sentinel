@@ -129,6 +129,12 @@ class TestErrorCode:
             == "TICKET_DUPLICATE_CONCURRENT_MODIFICATION"
         )
 
+    def test_ticket_not_confidential_is_registered(self) -> None:
+        """See docs/api-spec.md (Error Code Categories, `TICKET_*`) and
+        docs/features/tickets/ticket-service.md (Service Exceptions:
+        `TicketNotConfidentialError`)."""
+        assert ErrorCode.TICKET_NOT_CONFIDENTIAL == "TICKET_NOT_CONFIDENTIAL"
+
     def test_cve_not_found_is_registered(self) -> None:
         """See docs/api-spec.md (Error Code Categories, CVE Accessibility
         Check) and docs/features/tickets/cve-service.md (Exceptions)."""

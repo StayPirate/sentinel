@@ -620,16 +620,6 @@ _CRD_NO_TIME = _field_error(
     "Value error, coordinated_release_at must include a time component.",
     "value_error",
 )
-_CRD_INVALID = _field_error(
-    "coordinated_release_at",
-    "Value error, coordinated_release_at must be a valid ISO 8601 datetime.",
-    "value_error",
-)
-_CRD_OUT_OF_RANGE = _field_error(
-    "coordinated_release_at",
-    "Value error, coordinated_release_at is out of the representable datetime range.",
-    "value_error",
-)
 _CVE_NOT_A_STRING = _field_error(
     "cve_id", "Input should be a valid string", "string_type"
 )
@@ -683,25 +673,10 @@ _VALIDATION_CASES = [
         ),
         id="confidential-unparsable",
     ),
+    # Representative parser wiring; tests/test_schemas/test_ticket.py owns
+    # the complete Coordinated Release Date parser matrix.
     pytest.param(_confidential_crd("2026-10-06"), _CRD_NO_TIME, id="crd-date-only"),
-    pytest.param(_confidential_crd("20261006"), _CRD_NO_TIME, id="crd-basic-date"),
     pytest.param(_confidential_crd(1791295200), _CRD_NOT_A_STRING, id="crd-number"),
-    pytest.param(_confidential_crd(True), _CRD_NOT_A_STRING, id="crd-bool"),
-    pytest.param(_confidential_crd({"at": _CRD}), _CRD_NOT_A_STRING, id="crd-object"),
-    pytest.param(_confidential_crd("not-a-date"), _CRD_INVALID, id="crd-invalid"),
-    pytest.param(
-        _confidential_crd("2026-13-01T00:00:00Z"), _CRD_INVALID, id="crd-bad-month"
-    ),
-    pytest.param(
-        _confidential_crd("0001-01-01T00:00:00+01:00"),
-        _CRD_OUT_OF_RANGE,
-        id="crd-underflow",
-    ),
-    pytest.param(
-        _confidential_crd("9999-12-31T23:59:59-01:00"),
-        _CRD_OUT_OF_RANGE,
-        id="crd-overflow",
-    ),
     pytest.param(
         [],
         [
@@ -1063,23 +1038,14 @@ class TestCreateTicket:
 
 @pytest.mark.e2e
 class TestCoordinatedReleaseDate:
+    # Representative end-to-end cases; tests/test_schemas/test_ticket.py
+    # owns the complete Coordinated Release Date parser matrix.
     @pytest.mark.parametrize(
         ("supplied", "expected"),
         [
             pytest.param(_CRD, _CRD, id="utc-z"),
             pytest.param("2026-10-06T14:00:00", _CRD, id="naive-is-utc"),
             pytest.param("2026-10-06T16:00:00+02:00", _CRD, id="offset"),
-            pytest.param("2026-10-06T14:00:00+00:00", _CRD, id="explicit-zero-offset"),
-            pytest.param(
-                "2026-12-31T23:30:00-05:00",
-                "2027-01-01T04:30:00Z",
-                id="offset-crossing-midnight",
-            ),
-            pytest.param(
-                "2026-10-06T14:00:00.5Z",
-                "2026-10-06T14:00:00.500000Z",
-                id="sub-second",
-            ),
             pytest.param("2020-01-02T03:04:05Z", "2020-01-02T03:04:05Z", id="past"),
         ],
     )
