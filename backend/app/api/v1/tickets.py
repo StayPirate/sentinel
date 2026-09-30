@@ -1539,7 +1539,8 @@ _TICKET_NOT_FOUND_DESCRIPTION: Final = (
         "(deactivated users are included with `active = false`). Unpaginated: "
         "grants per Ticket are a bounded dataset, so the response has no "
         "`meta` object. The order is fixed, `granted_at` ascending then user "
-        "UUID ascending; `sort_by` and `sort_order` are not accepted. "
+        "UUID ascending, and not client-configurable: supplied `sort_by` or "
+        "`sort_order` values are ignored. "
         "Requires `manage_confidentiality`."
     ),
     responses={
