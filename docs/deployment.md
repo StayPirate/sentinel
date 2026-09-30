@@ -442,6 +442,15 @@ three complementary mechanisms:
   Dependabot alerts. A fix Renovate cannot express as a direct-dependency
   update is delivered by the next lock file maintenance PR or by a manual
   PR.
+- **Release signal.** A security fix is a patch release under the
+  Semantic Versioning Policy, so it is merged as `fix(deps):` —
+  `renovate.jsonc` sets this prefix on vulnerability-fix PRs. Routine
+  updates and lock file maintenance use `chore(deps):` and never create a
+  release on their own. A security fix delivered by a lock file
+  maintenance PR or a manual PR is merged with a `fix(deps):` title so
+  that release-please proposes a patch release; the hidden `chore` type
+  is not made visible for this purpose, because it would turn every
+  routine update and infrastructure change into a release.
 - **`pip-audit`** in `ci.yml` (`Backend Security Scan`) audits the set
   locked in `backend/uv.lock` and blocks every change to
   `backend/pyproject.toml` or `backend/uv.lock` and every Release PR — see

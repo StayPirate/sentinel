@@ -21,8 +21,13 @@
   // and Dependabot alerts to be enabled and the Mend Renovate App to have
   // read access to Dependabot alerts — see docs/deployment.md (Workflow
   // Conventions, Python dependency updates and vulnerability response).
+  // fix(deps): makes a merged security fix a release signal (patch) for
+  // release-please, whereas routine chore(deps): updates never cut a
+  // release on their own. Renovate appends alert rules after packageRules,
+  // so this prefix overrides the per-manager chore(deps): prefixes below.
   "vulnerabilityAlerts": {
-    "labels": ["dependencies", "security"]
+    "labels": ["dependencies", "security"],
+    "commitMessagePrefix": "fix(deps):"
   },
   // This repository overrides Renovate's default ignorePaths (inherited
   // from the "config:recommended" preset) to drop "**/tests/**" ONLY —
