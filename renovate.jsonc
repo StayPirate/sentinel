@@ -7,6 +7,23 @@
   ],
   "labels": ["dependencies"],
   "prConcurrentLimit": 0,
+  // Weekly regeneration of backend/uv.lock (the only lock file in this
+  // repository). The pep621 manager extracts direct dependencies only, so
+  // this is what keeps transitive dependencies current. Runs on the
+  // default "before 4am on monday" schedule, aligned with
+  // schedule:earlyMondays above.
+  "lockFileMaintenance": {
+    "enabled": true,
+    "commitMessagePrefix": "chore(deps):"
+  },
+  // Fix PRs raised from GitHub vulnerability (Dependabot) alerts. They
+  // bypass the weekly schedule by design. Requires the Dependency graph
+  // and Dependabot alerts to be enabled and the Mend Renovate App to have
+  // read access to Dependabot alerts — see docs/deployment.md (Workflow
+  // Conventions, Python dependency updates and vulnerability response).
+  "vulnerabilityAlerts": {
+    "labels": ["dependencies", "security"]
+  },
   // This repository overrides Renovate's default ignorePaths (inherited
   // from the "config:recommended" preset) to drop "**/tests/**" ONLY —
   // that pattern silently excluded backend/tests/conftest.py from every
@@ -65,6 +82,11 @@
     }
   ],
   "packageRules": [
+    {
+      "description": "Python (backend) requirements are open-ended floors (>=), so the default rangeStrategy never proposes an in-range update. update-lockfile refreshes backend/uv.lock (what CI and the image install via uv sync --locked) for in-range updates and replaces the range only when a new version falls outside it",
+      "matchManagers": ["pep621"],
+      "rangeStrategy": "update-lockfile"
+    },
     {
       "description": "Group Python (backend) minor and patch updates into a single PR",
       "matchManagers": ["pep621"],

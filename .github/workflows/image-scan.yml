@@ -2,9 +2,11 @@ name: Image Vulnerability Scan
 
 # Weekly, non-blocking scan of the published backend image for OS-level
 # vulnerabilities. See docs/deployment.md (Image Vulnerability
-# Monitoring) for the full rationale: pip-audit already gates Python
-# dependencies on every merge, but the Debian base layer
-# (python:3.14-slim) is otherwise unmonitored for known vulnerabilities.
+# Monitoring) for the full rationale: Python dependencies are covered by
+# GitHub Dependabot alerts, Renovate vulnerability-fix PRs, and the
+# pip-audit gate on dependency changes and Release PRs, but the Debian
+# base layer (python:3.14-slim) is otherwise unmonitored for known
+# vulnerabilities.
 # Renovate proposes PRs bumping the ARG-templated base image digest in
 # backend/Dockerfile (its dockerfile manager resolves ARG values
 # natively), but that only refreshes the pinned layer going forward —
@@ -57,9 +59,10 @@ jobs:
 
       # Fixable-only scan: drives issue creation, update, and closure.
       # Restricted to vuln-type "os" — Python dependency vulnerabilities
-      # are already gated by pip-audit on every merge (see ci.yml,
-      # backend-security); this workflow exists specifically for the
-      # unmonitored OS layer.
+      # are covered separately (see docs/deployment.md, Workflow
+      # Conventions, Python dependency updates and vulnerability
+      # response); this workflow exists specifically for the unmonitored
+      # OS layer.
       # scanners is restricted to "vuln": Trivy's secret scanner is
       # deliberately not enabled here — no CI job or Action performs
       # secret scanning (see docs/features/platform/testing-strategy.md,

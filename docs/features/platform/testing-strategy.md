@@ -1059,8 +1059,17 @@ through the following required gates:
 5. **OpenAPI schema verification** — the OpenAPI schema generation MUST
    complete without error.
 6. **Static security analysis and dependency vulnerability scanning** —
-   static analysis of application code for insecure patterns MUST pass,
-   and all declared dependencies MUST be free of known vulnerabilities.
+   static analysis of application code for insecure patterns MUST pass
+   on every run. The locked dependency set MUST be free of known
+   vulnerabilities whenever a run can change or ship it: the dependency
+   vulnerability scan is blocking for a pull request or push to `master`
+   that modifies `backend/pyproject.toml` or `backend/uv.lock`, for every
+   release-please Release PR, for manual runs, and for any run whose
+   changed files cannot be determined. Other runs skip the scan, so a
+   vulnerability disclosed against an unchanged lockfile does not block
+   unrelated changes; detecting and remediating such a disclosure is owned
+   by the dependency-update process in `docs/deployment.md` (Workflow
+   Conventions, Python dependency updates and vulnerability response).
 7. **Shell script lint/format and workflow validation** — all tracked
    shell scripts and git hooks MUST pass lint and format checks; all
    GitHub Actions workflow files MUST pass syntax validation.
