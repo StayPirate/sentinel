@@ -1459,16 +1459,20 @@ class TestPackageServiceModuleBoundary:
         assert "app.models.user" not in modules
 
     def test_implemented_coroutines(self) -> None:
+        """The public operations implemented so far; private helpers are
+        implementation details and are not part of the inventory."""
         coroutines = {
             name
             for name, member in inspect.getmembers(package_service, inspect.isfunction)
             if member.__module__ == package_service.__name__
             and inspect.iscoroutinefunction(member)
+            and not name.startswith("_")
         }
 
         assert coroutines == {
             "get_ticket_packages",
             "converge_manual_zone_exit_eligibility",
+            "set_track_status",
         }
 
     def test_uses_no_private_ticket_mutations_helper(self) -> None:

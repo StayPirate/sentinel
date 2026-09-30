@@ -1,9 +1,10 @@
-"""Response schemas for the Ticket package tree.
+"""Request and response schemas for the Ticket package tree.
 
 See `docs/features/tickets/tickets.md` (Response Schemas > ProductDetail,
 TrackDetail, TrackMilestones, PackageDetail) for the authoritative
 contracts, `docs/features/packages/package-model.md` (Derived
-Actionability, Delivery Relevance Indicator, List Ticket Packages), and
+Actionability, Delivery Relevance Indicator, List Ticket Packages,
+Change Track Status), and
 `docs/features/tickets/ticket-deadlines.md` (Actors and Phases, Track
 Milestones, API Surface) for the field semantics these OpenAPI
 descriptions convey to external consumers.
@@ -47,6 +48,21 @@ _MILESTONE_VALUES = (
     "(no SLA applies, or Sentinel cannot observe the phase for this track, "
     "such as a Git track or a Ticket without a CVE). A milestone `pending` "
     "is unrelated to `delivery_status = pending`."
+)
+
+# Consumer-facing guidance required on every response schema exposing the
+# two fields (package-model.md, Delivery Relevance Indicator).
+_DELIVERY_STATUS_DESCRIPTION = (
+    "Delivery pipeline status: `pending`, `in_progress`, or `released`. "
+    "`pending` is the system default: it does not imply that a fix is "
+    "expected, does not prove that no submission request exists, and does "
+    "not establish that synchronization succeeded. Use `delivery_relevant` to "
+    "decide whether this value is operationally significant."
+)
+_DELIVERY_RELEVANT_DESCRIPTION = (
+    "Computed: `true` when the affectedness is `analysis` or `affected`, or "
+    "`delivery_status` is not `pending`. When `false`, consumers should not "
+    "display `delivery_status` or make decisions based on it."
 )
 
 
@@ -147,23 +163,9 @@ class TrackDetail(BaseModel):
         )
     )
     delivery_status: DeliveryStatusValue = Field(
-        description=(
-            "Delivery pipeline status: `pending`, `in_progress`, or "
-            "`released`. `pending` is the system default: it does not imply "
-            "that a fix is expected, does not prove that no submission "
-            "request exists, and does not establish that synchronization "
-            "succeeded. Use `delivery_relevant` to decide whether this value "
-            "is operationally significant."
-        )
+        description=_DELIVERY_STATUS_DESCRIPTION
     )
-    delivery_relevant: bool = Field(
-        description=(
-            "Computed: `true` when the affectedness is `analysis` or "
-            "`affected`, or `delivery_status` is not `pending`. When `false`, "
-            "consumers should not display `delivery_status` or make decisions "
-            "based on it."
-        )
-    )
+    delivery_relevant: bool = Field(description=_DELIVERY_RELEVANT_DESCRIPTION)
     products: list[ProductDetail] = Field(
         description=(
             "Product occurrences under this track, including excluded and "
@@ -271,3 +273,101 @@ class TicketPackageListResponse(BaseModel):
     """
 
     data: list[PackageDetail]
+
+
+class TrackStatusUpdateRequest(BaseModel):
+    """Request body of `PATCH .../packages/{package_id}/tracks/{track_id}`.
+
+    See `docs/features/packages/package-model.md` (Change Track Status).
+    The single field is required and non-nullable; an omitted field,
+    `null`, a non-string, or any value outside the five lowercase
+    affectedness labels fails with the global `422 VALIDATION_ERROR`.
+    """
+
+    status: PackageStatusValue = Field(
+        description=(
+            "New affectedness status: `analysis`, `affected`, `not_affected`, "
+            "`fixed`, or `wont_fix`. `fixed` accepts `admin_ticket_ops` (any "
+            "Ticket) or `manage_packages` (only a Ticket without a CVE); every "
+            "other value requires `manage_packages`. Required."
+        ),
+        examples=["affected"],
+    )
+
+
+class TrackStatusProduct(BaseModel):
+    """One Product occurrence of a track-status mutation response."""
+
+    id: UUID = Field(description="TicketPackageProduct occurrence identifier.")
+    product_cpe: str = Field(
+        description="Canonical public identity (CPE) of the related catalog Product."
+    )
+    product_name: str = Field(description="Product display name.")
+    eligible: bool = Field(
+        description="Whether this Product receives the fix (effective eligibility)."
+    )
+    is_eligible_override: bool = Field(
+        description="`true` if an authorized acting user manually set eligibility."
+    )
+    lifecycle_phase: LifecyclePhaseValue | None = Field(
+        description=(
+            "Product lifecycle phase for the mutation's UTC evaluation date; "
+            "`null` when lifecycle data is unavailable."
+        )
+    )
+    actionable: bool = Field(
+        description=(
+            "Whether the Product currently participates in operational "
+            "decisions: no manual exclusion at package, track, or Product "
+            "level, and not end-of-life."
+        )
+    )
+    non_actionable_reason: ProductReasonValue | None = Field(
+        description=(
+            "First applicable reason in the order `package_excluded`, "
+            "`track_excluded`, `product_excluded`, `eol`; `null` when "
+            "actionable."
+        )
+    )
+
+
+class TrackStatusTrack(BaseModel):
+    """The locked-current track returned by a track-status mutation."""
+
+    ticket_id: str = Field(description="Canonical Ticket identity (`SNTL-{n}`).")
+    package_name: str = Field(description="Source package name.")
+    reference: str = Field(description="Codestream project name or branch reference.")
+    status: PackageStatusValue = Field(
+        description=(
+            "Current affectedness of the track: `analysis`, `affected`, "
+            "`not_affected`, `fixed`, or `wont_fix`."
+        )
+    )
+    delivery_status: DeliveryStatusValue = Field(
+        description=_DELIVERY_STATUS_DESCRIPTION
+    )
+    delivery_relevant: bool = Field(description=_DELIVERY_RELEVANT_DESCRIPTION)
+    actionable: bool = Field(
+        description=(
+            "Whether the track is not manually excluded (directly or through "
+            "its package) and has at least one actionable Product."
+        )
+    )
+    non_actionable_reason: TrackReasonValue | None = Field(
+        description=(
+            "First applicable reason in the order `package_excluded`, "
+            "`track_excluded`, `no_actionable_products`; `null` when actionable."
+        )
+    )
+    products: list[TrackStatusProduct] = Field(
+        description=(
+            "Every Product occurrence of the track, including excluded and "
+            "non-actionable ones, ordered by `product_cpe` (Unicode code point)."
+        )
+    )
+
+
+class TrackStatusResponse(BaseModel):
+    """Response body of `PATCH .../packages/{package_id}/tracks/{track_id}`."""
+
+    data: TrackStatusTrack
