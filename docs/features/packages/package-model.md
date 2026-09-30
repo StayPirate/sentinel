@@ -2344,6 +2344,27 @@ audit, Ticket reconciliation, or post-commit effect.
 }
 ```
 
+The same `200 OK` shape is returned for an effective override, change, or
+reset and for a true no-op. Every value is projected from locked-current state;
+lifecycle and actionability use the one UTC `evaluation_date` shared with
+eligibility recalculation and Ticket reconciliation (see
+[Derived Actionability](#derived-actionability)). The response contains exactly
+these fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `ticket_id` | string | Canonical parent Ticket identity (`SNTL-{n}`) |
+| `package_name` | string | Parent package name |
+| `reference` | string | Parent track reference |
+| `id` | UUID | `TicketPackageProduct.id` occurrence locator |
+| `product_cpe` | string | Related catalog Product CPE |
+| `product_name` | string | Related catalog Product display name |
+| `eligible` | boolean | Effective eligibility |
+| `is_eligible_override` | boolean | Whether eligibility is a manual override |
+| `lifecycle_phase` | string \| null | Lifecycle phase on the evaluation date: `pre_release`, `general_support`, `extended_support`, `reactive_support`, or `eol`; `null` when lifecycle data is unavailable |
+| `actionable` | boolean | Derived Product actionability |
+| `non_actionable_reason` | string \| null | First applicable Product reason from [Derived Actionability](#derived-actionability); `null` when actionable |
+
 **`Capability: manage_packages`**
 
 **Error responses**:

@@ -11,7 +11,9 @@ Consumers:
 - `tests/test_api/test_ticket_duplicate.py`
   (`POST /api/v1/tickets/{ticket_id}/duplicate`);
 - `tests/test_api/test_ticket_track_status.py`
-  (`PATCH /api/v1/tickets/{ticket_id}/packages/{package_id}/tracks/{track_id}`).
+  (`PATCH /api/v1/tickets/{ticket_id}/packages/{package_id}/tracks/{track_id}`);
+- `tests/test_api/test_ticket_product_eligibility.py`
+  (`PATCH .../tracks/{track_id}/products/{ticket_package_product_id}`).
 
 The complete error bodies are transcribed from docs/api-spec.md (Global
 Responses, Ticket Accessibility Check, Manual-Zone Mutability Guard).

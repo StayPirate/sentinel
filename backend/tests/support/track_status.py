@@ -8,7 +8,10 @@ Consumers:
 - `tests/test_services/test_set_track_status_scope.py` (part B:
   accessibility, manual zone, excluded and EOL tracks, dimension
   independence, result projection, shared evaluation date, rollback, and
-  audit-history independence).
+  audit-history independence);
+- the `set_product_eligibility()` tests (`Spy`, `ticket_state`), see
+  `tests/support/product_eligibility.py`, and
+  `tests/test_services/test_set_product_eligibility_atomicity.py` (`Spy`).
 
 The helpers observe persisted state and record calls; nothing here computes
 an expectation with the module under test.

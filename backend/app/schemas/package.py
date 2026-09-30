@@ -4,7 +4,7 @@ See `docs/features/tickets/tickets.md` (Response Schemas > ProductDetail,
 TrackDetail, TrackMilestones, PackageDetail) for the authoritative
 contracts, `docs/features/packages/package-model.md` (Derived
 Actionability, Delivery Relevance Indicator, List Ticket Packages,
-Change Track Status), and
+Change Track Status, Override Product Eligibility), and
 `docs/features/tickets/ticket-deadlines.md` (Actors and Phases, Track
 Milestones, API Surface) for the field semantics these OpenAPI
 descriptions convey to external consumers.
@@ -371,3 +371,77 @@ class TrackStatusResponse(BaseModel):
     """Response body of `PATCH .../packages/{package_id}/tracks/{track_id}`."""
 
     data: TrackStatusTrack
+
+
+class ProductEligibilityUpdateRequest(BaseModel):
+    """Request body of `PATCH .../products/{ticket_package_product_id}`.
+
+    See `docs/features/packages/package-model.md` (Override Product
+    Eligibility). The single field is required and nullable
+    (`docs/api-spec.md`, Partial Update Semantics: single-field PATCH): a
+    JSON boolean sets or changes the override, while JSON `null` resets
+    the Product to automatic calculation. An omitted field or any value
+    other than a JSON boolean or `null` (`docs/api-spec.md`, JSON Request
+    Body Scalar Types) fails with the global `422 VALIDATION_ERROR`.
+    """
+
+    eligible: bool | None = Field(
+        strict=True,
+        description=(
+            "Eligibility override: `true` or `false` sets or changes the manual "
+            "override; JSON `null` removes it and immediately recalculates "
+            "eligibility automatically (CVSS threshold and lifecycle phase). "
+            "Required."
+        ),
+        examples=[False, None],
+    )
+
+
+class ProductEligibilityProduct(BaseModel):
+    """The locked-current Product occurrence returned by an eligibility override."""
+
+    ticket_id: str = Field(description="Canonical Ticket identity (`SNTL-{n}`).")
+    package_name: str = Field(description="Parent source package name.")
+    reference: str = Field(
+        description="Parent track reference (codestream project name or branch)."
+    )
+    id: UUID = Field(description="TicketPackageProduct occurrence identifier.")
+    product_cpe: str = Field(
+        description="Canonical public identity (CPE) of the related catalog Product."
+    )
+    product_name: str = Field(description="Product display name.")
+    eligible: bool = Field(
+        description="Whether this Product receives the fix (effective eligibility)."
+    )
+    is_eligible_override: bool = Field(
+        description=(
+            "`true` if an authorized acting user manually set eligibility; "
+            "`false` when eligibility is calculated automatically."
+        )
+    )
+    lifecycle_phase: LifecyclePhaseValue | None = Field(
+        description=(
+            "Product lifecycle phase for the mutation's UTC evaluation date; "
+            "`null` when lifecycle data is unavailable."
+        )
+    )
+    actionable: bool = Field(
+        description=(
+            "Whether the Product currently participates in operational "
+            "decisions: no manual exclusion at package, track, or Product "
+            "level, and not end-of-life."
+        )
+    )
+    non_actionable_reason: ProductReasonValue | None = Field(
+        description=(
+            "First applicable reason in the order `package_excluded`, "
+            "`track_excluded`, `product_excluded`, `eol`; `null` when "
+            "actionable."
+        )
+    )
+
+
+class ProductEligibilityResponse(BaseModel):
+    """Response body of `PATCH .../products/{ticket_package_product_id}`."""
+
+    data: ProductEligibilityProduct
