@@ -276,9 +276,9 @@ async def _transaction_now(db: AsyncSession) -> datetime:
 
 async def _ticket_state(
     db: AsyncSession, ticket_id: uuid.UUID
-) -> tuple[str, uuid.UUID | None, uuid.UUID | None, bool]:
+) -> tuple[str, uuid.UUID | None, uuid.UUID | None, bool, datetime]:
     """The persisted `(status, assignee_id, duplicate_of_id,
-    is_confidential)` of a Ticket."""
+    is_confidential, updated_at)` of a Ticket."""
     row = (
         await db.execute(
             select(
@@ -286,10 +286,17 @@ async def _ticket_state(
                 Ticket.assignee_id,
                 Ticket.duplicate_of_id,
                 Ticket.is_confidential,
+                Ticket.updated_at,
             ).where(Ticket.id == ticket_id)
         )
     ).one()
-    return (row.status, row.assignee_id, row.duplicate_of_id, row.is_confidential)
+    return (
+        row.status,
+        row.assignee_id,
+        row.duplicate_of_id,
+        row.is_confidential,
+        row.updated_at,
+    )
 
 
 def _forbid(monkeypatch: pytest.MonkeyPatch) -> list[str]:
@@ -629,22 +636,31 @@ class TestPrecedence:
             scope=Scope.NON_CONFIDENTIAL,
         )
 
-    @pytest.mark.parametrize("kind", ["active", "absent"])
+    @pytest.mark.parametrize("kind", ["active", "absent", "granted"])
     @pytest.mark.parametrize("op", OPERATIONS)
     async def test_non_confidential_ticket_is_rejected_whether_or_not_target_exists(
         self,
         db_session: AsyncSession,
         ticket_factory: TicketFactory,
+        ticket_access_grant_factory: GrantFactory,
         user_factory: UserFactory,
         va_user: VAUser,
         op: str,
         kind: str,
     ) -> None:
         """Step 4: the confidentiality guard precedes the deferred
-        target-user result."""
+        target-user result and the existing-grant decision (`granted`: a
+        grant row the database does not prevent on a non-confidential
+        Ticket, so grant would otherwise be `already_exists` and revoke
+        effective)."""
         actor = await va_user()
         ticket = await ticket_factory(is_confidential=False)
-        target, _ = await _target(kind, user_factory)
+        target, user = await _target(
+            "active" if kind == "granted" else kind, user_factory
+        )
+        if kind == "granted":
+            assert user is not None
+            await ticket_access_grant_factory(ticket_id=ticket.id, user_id=user.id)
 
         await _assert_rejected(
             db_session,
@@ -792,7 +808,12 @@ class TestEveryStatus:
         actor = await va_user()
         target = await _person(user_factory, "grantee-h")
         ticket = await ticket_factory(status=status.value, is_confidential=True)
+        # Backdate `updated_at` so any Ticket row UPDATE is observable within
+        # the one test transaction (testing-strategy.md, `onupdate` testing).
+        ticket.updated_at = PAST
+        await db_session.flush()
         before = await _ticket_state(db_session, ticket.id)
+        assert before[4] == PAST
         calls = _forbid(monkeypatch)
 
         result = await _grant(db_session, ticket.id, str(target.id), actor)
