@@ -226,3 +226,43 @@ def test_ci_and_release_workflows_share_sbom_gate() -> None:
     gate_command = "./scripts/sbom-gate.sh"
     assert ci_workflow.count(gate_command) == 1
     assert release_workflow.count(gate_command) == 1
+
+
+def _backend_security_job() -> str:
+    workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+    return workflow.split("  backend-security:", 1)[1].split("\n  shell-lint:", 1)[0]
+
+
+@pytest.mark.unit
+def test_pip_audit_runs_only_when_audit_scope_requires_it() -> None:
+    # testing-strategy.md (CI Pipeline, gate 6); issue #708.
+    job = _backend_security_job()
+    scope_step = job.split("- name: Determine dependency audit scope", 1)[1].split(
+        "- name: Run pip-audit", 1
+    )[0]
+    audit_step = job.split("- name: Run pip-audit", 1)[1]
+
+    assert "name: Backend Security Scan" in job
+    assert "fetch-depth: 2" in job
+    assert "id: audit-scope" in scope_step
+    assert "run: ../scripts/dependency-audit-scope.sh" in scope_step
+    assert "EVENT_NAME: ${{ github.event_name }}" in scope_step
+    assert "HEAD_REF: ${{ github.head_ref }}" in scope_step
+    assert "PUSH_BEFORE: ${{ github.event.before }}" in scope_step
+    assert "if: steps.audit-scope.outputs.required == 'true'" in audit_step
+    assert "uvx pip-audit@" in audit_step
+    assert "continue-on-error" not in audit_step
+    # Untrusted context values reach the script only through env, never by
+    # interpolation into the shell command.
+    assert "${{" not in scope_step.split("run:", 1)[1]
+
+
+@pytest.mark.unit
+def test_bandit_and_security_job_run_unconditionally() -> None:
+    job = _backend_security_job()
+    header = job.split("steps:", 1)[0]
+    bandit_step = job.split("- name: Run bandit", 1)[1].split("- name:", 1)[0]
+
+    assert "if:" not in header
+    assert "if:" not in bandit_step
+    assert "uvx bandit@" in bandit_step

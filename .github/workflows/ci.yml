@@ -148,13 +148,32 @@ jobs:
         working-directory: backend
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Two commits so the audit-scope step can diff a pull request's
+          # merge commit against its first parent (the base branch tip).
+          fetch-depth: 2
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           version: "0.12.19"
           enable-cache: true
       - name: Run bandit (static analysis)
         run: uvx bandit@1.9.4 -c pyproject.toml -r app/
+      # The dependency vulnerability scan is blocking only where a run can
+      # change or ship the locked dependency set — see
+      # docs/features/platform/testing-strategy.md (CI Pipeline, gate 6).
+      # Disclosures against an unchanged lockfile are handled by GitHub
+      # Dependabot alerts and Renovate vulnerability-fix PRs instead
+      # (docs/deployment.md, Workflow Conventions). Any failure to
+      # determine the changed files falls back to running the scan.
+      - name: Determine dependency audit scope
+        id: audit-scope
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_REF: ${{ github.head_ref }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: ../scripts/dependency-audit-scope.sh
       - name: Run pip-audit (dependency vulnerabilities)
+        if: steps.audit-scope.outputs.required == 'true'
         run: uvx pip-audit@2.10.1 --requirement <(uv export --no-hashes --no-dev --no-emit-project)
 
   shell-lint:

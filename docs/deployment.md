@@ -415,6 +415,51 @@ requests, and is not a required merge check. A failure is intentionally
 visible as a red Actions status while remaining non-blocking; the Mend-hosted
 Renovate App remains the only component that creates dependency-update PRs.
 
+**Python dependency updates and vulnerability response.** Renovate's
+`pep621` manager reads `backend/pyproject.toml` together with
+`backend/uv.lock`. The declared requirements are open-ended floors
+(`>=`), so `renovate.jsonc` sets `rangeStrategy: update-lockfile` for
+this manager: an update inside the declared range refreshes only
+`backend/uv.lock` — the file that CI and the image install from with
+`uv sync --locked` — and the floor in `pyproject.toml` changes only when a
+new version falls outside it. Minor and patch updates are grouped into one
+weekly PR; each major update gets its own PR. Weekly lock file
+maintenance regenerates `backend/uv.lock` in a separate PR, which keeps
+transitive dependencies current because the manager extracts only direct
+dependencies.
+
+Known vulnerabilities in the locked Python dependency set are handled by
+three complementary mechanisms:
+
+- **GitHub Dependabot alerts** (with the Dependency graph) monitor
+  `backend/uv.lock`, including transitive dependencies, as advisories are
+  published — independently of repository activity. Dependabot security
+  updates stay disabled so that Renovate remains the only component that
+  creates dependency PRs.
+- **Renovate vulnerability-fix PRs** (`vulnerabilityAlerts`) are raised
+  from those alerts immediately, outside the weekly schedule, and labelled
+  `security`. This requires the Mend Renovate App to have read access to
+  Dependabot alerts. A fix Renovate cannot express as a direct-dependency
+  update is delivered by the next lock file maintenance PR or by a manual
+  PR.
+- **Release signal.** A security fix is a patch release under the
+  Semantic Versioning Policy, so it is merged as `fix(deps):` —
+  `renovate.jsonc` sets this prefix on vulnerability-fix PRs. Routine
+  updates and lock file maintenance use `chore(deps):` and never create a
+  release on their own. A security fix delivered by a lock file
+  maintenance PR or a manual PR is merged with a `fix(deps):` title so
+  that release-please proposes a patch release; the hidden `chore` type
+  is not made visible for this purpose, because it would turn every
+  routine update and infrastructure change into a release.
+- **`pip-audit`** in `ci.yml` (`Backend Security Scan`) audits the set
+  locked in `backend/uv.lock` and blocks every change to
+  `backend/pyproject.toml` or `backend/uv.lock` and every Release PR — see
+  `docs/features/platform/testing-strategy.md` (CI Pipeline, gate 6).
+  Other changes skip it, so a disclosure against an unchanged lockfile
+  surfaces as an alert and a fix PR rather than as a failure of unrelated
+  work, while a Release PR cannot pass CI with a known vulnerability in
+  the locked set.
+
 **Testcontainers image references.** The `testcontainers`-provisioned
 PostgreSQL and Redis images used by `backend/tests/conftest.py` (see
 `docs/features/platform/testing-strategy.md`, Database Provisioning)
@@ -684,6 +729,15 @@ breaking changes require a major version and the API versioning policy in
 
 To create a release, merge the open Release PR. No manual version
 bumping, tagging, or changelog editing is required.
+
+CI always runs the dependency vulnerability scan on the Release PR (see
+Workflow Conventions, Python dependency updates and vulnerability
+response). A Release PR
+whose scan fails is not merged: fix the dependency on `master` through an
+ordinary PR, after which release-please updates the Release PR and CI
+reruns. The scan reflects the advisories known when the Release PR's CI
+last ran, and a vulnerability without a published fixed version keeps
+the Release PR blocked until a fix is available.
 
 To request a specific version outside the ordinary mapping, use the
 `Release-As` footer in the final squash commit message:
@@ -1682,10 +1736,12 @@ the published `ghcr.io/<repo>:latest` backend image for OS-level
 vulnerabilities using Trivy. It also supports manual dispatch for
 on-demand checks between scheduled runs.
 
-**Why the OS layer needs its own visibility.** `pip-audit` (see
-Pipeline Chain above) gates Python dependencies on every merge, but the
-image is Debian-based (`python:3.14-slim`) and the OS package layer is
-not covered by any dependency scanner. Renovate proposes PRs refreshing
+**Why the OS layer needs its own visibility.** Python dependencies are
+covered by GitHub Dependabot alerts, Renovate vulnerability-fix PRs, and
+the `pip-audit` gate on dependency changes and Release PRs (see Workflow
+Conventions, Python dependency updates and vulnerability response), but
+the image is Debian-based (`python:3.14-slim`) and the OS package layer
+is not covered by any dependency scanner. Renovate proposes PRs refreshing
 the `PYTHON_BASE_DIGEST` `ARG` (see Container Build Conventions, Base
 image pinning) when a new base image digest is published, but that is
 a forward-looking freshness mechanism — it does not scan the image
