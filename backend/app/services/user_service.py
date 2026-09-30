@@ -476,16 +476,14 @@ def _conflict_field(exc: IntegrityError) -> ConflictField | None:
     by asyncpg for integrity constraint violations) rather than matching on
     message text, so an unrelated integrity error (e.g. a foreign key
     violation on `manager_id`) is never misclassified as a conflict.
-    SQLAlchemy's asyncpg dialect wraps the raw
-    `asyncpg.exceptions.PostgresError` (which carries `constraint_name`) via
-    `raise ... from error`; the raw error is therefore reachable at
-    `exc.orig` directly on some versions and at `exc.orig.__cause__` on
-    others — both are checked (mirrors `api_key_service._is_name_conflict()`).
+    The raw `asyncpg.exceptions.PostgresError` that carries
+    `constraint_name` is read through SQLAlchemy's public
+    `DBAPIError.driver_exception`, which resolves the asyncpg dialect's
+    emulated DBAPI wrapper (mirrors `api_key_service._is_name_conflict()`).
     """
-    for candidate in (exc.orig, getattr(exc.orig, "__cause__", None)):
-        constraint_name = getattr(candidate, "constraint_name", None)
-        if isinstance(constraint_name, str) and constraint_name in _CONSTRAINT_TO_FIELD:
-            return _CONSTRAINT_TO_FIELD[constraint_name]
+    constraint_name = getattr(exc.driver_exception, "constraint_name", None)
+    if isinstance(constraint_name, str):
+        return _CONSTRAINT_TO_FIELD.get(constraint_name)
     return None
 
 
