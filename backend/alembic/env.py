@@ -50,11 +50,24 @@ def do_run_migrations(connection: Connection) -> None:
     project's actual `server_default` patterns (`func.now()`,
     `text("uuidv7()")`, and literal string/boolean defaults) to produce
     no false-positive diffs.
+
+    `alembic.ext.checkconstraint_byname` restores name-based detection
+    of added/removed CHECK constraints, which Alembic 1.19.2 moved out
+    of the default `alembic.autogenerate.*` set because it reports false
+    positives for unnamed CHECKs. Every model CHECK is named `chk_*`
+    (docs/conventions.md, Enum Storage Strategy), so it is reliable
+    here. It never compares CHECK expressions: an expression change
+    under an unchanged name must still be written by hand and is
+    covered by the migration tests.
     """
     context.configure(
         connection=connection,
         target_metadata=target_metadata,
         compare_server_default=True,
+        autogenerate_plugins=[
+            "alembic.autogenerate.*",
+            "alembic.ext.checkconstraint_byname",
+        ],
     )
 
     with context.begin_transaction():

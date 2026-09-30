@@ -394,9 +394,7 @@ class TestDueDateExpressions:
 
 class _Recorder:
     def __init__(self, db: AsyncSession) -> None:
-        bind = db.bind
-        assert bind is not None
-        self._engine = bind.engine.sync_engine
+        self._engine = db.get_bind().engine
         self.statements: list[str] = []
 
     def _record(self, *args: Any) -> None:

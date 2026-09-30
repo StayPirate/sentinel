@@ -72,7 +72,7 @@ async def bootstrap_system_settings(session: AsyncSession) -> None:
     await session.flush()
 
 
-def default_cvss_version_select() -> Select[tuple[str]]:
+def default_cvss_version_select() -> Select[str]:
     """The read-only SELECT of the persisted `default_cvss_version` value.
 
     Returns at most one row. `get_default_cvss_version()` executes it on

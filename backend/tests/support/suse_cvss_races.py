@@ -272,7 +272,9 @@ class SessionStatementRecorder(StatementRecorder):
         super().__init__(db)
         bind = db.bind
         assert isinstance(bind, AsyncConnection)
-        self._engine = bind.sync_connection
+        connection = bind.sync_connection
+        assert connection is not None
+        self._engine = connection
 
 
 async def assert_blocked(task: asyncio.Task[Any]) -> None:

@@ -227,7 +227,7 @@ class TestTrackReleaseCheckpointDatabaseIndexes:
                 "AND indexname <> 'track_release_checkpoint_pkey'"
             )
         )
-        definitions = dict(result.tuples().all())
+        definitions: dict[str, str] = dict(result.all())
         assert set(definitions) == {_UNIQUE}
         assert definitions[_UNIQUE].startswith("CREATE UNIQUE INDEX")
         assert definitions[_UNIQUE].endswith("USING btree (ticket_package_track_id)")

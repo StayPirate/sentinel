@@ -9,7 +9,7 @@ atomicity, date filtering, and actor filtering.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Awaitable, Callable, Generator
+from collections.abc import Awaitable, Callable, Generator, Sequence
 from datetime import UTC, date, datetime, timedelta, timezone
 from typing import Any
 from unittest.mock import AsyncMock
@@ -58,7 +58,7 @@ def _isolated_registry() -> Generator[None]:
 
 
 async def _event_types(db_session: AsyncSession, query: Any) -> set[str]:
-    rows = (await db_session.execute(query)).scalars().all()
+    rows: Sequence[Any] = (await db_session.execute(query)).scalars().all()
     return {row.event_type for row in rows}
 
 
