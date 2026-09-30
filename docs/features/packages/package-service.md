@@ -231,6 +231,7 @@ Sets the affectedness status of a `TicketPackageTrack` record.
 | `status` | `PackageStatus` | Yes | New status value |
 | `acting_user_id` | `UUID \| None` | No | Who is performing the action |
 | `force` | `bool` | No | Caller-verified `admin_ticket_ops` marker (default `False`) for unrestricted user-attributed `FIXED`; `False` also permits `FIXED` when the locked-current Ticket is CVE-less and the caller verified `manage_packages` |
+| `evaluation_date` | `date \| None` | No | UTC date shared by Ticket reconciliation, result projection, and any package-tree mutation response. If omitted, capture once at entry |
 
 User-attributed calls additionally supply the authenticated User ID and
 request-resolved effective scope through the module-level consumer caller
@@ -280,8 +281,12 @@ scope.
    changes never assign.
 10. Update `TicketPackageTrack.status`, create one `track_status_changed` event
    with the locked old value and requested new value, and call
-   `reconcile_ticket_status()`.
+   `reconcile_ticket_status()` with the one `evaluation_date`.
 11. Flush and return `changed` with the updated track.
+
+The returned track, including its Products' lifecycle phase and actionability,
+is projected from locked-current state with the same `evaluation_date` used by
+reconciliation.
 
 **TicketAuditEvent**: `track_status_changed`
 

@@ -2231,6 +2231,32 @@ The response includes the updated track and all its child Products with their
 current eligibility and actionability, allowing the client to update
 the UI tree without a separate fetch.
 
+The same `200 OK` shape is returned for an effective change and for a true
+no-op. Every value is projected from locked-current state; lifecycle and
+actionability use the one UTC `evaluation_date` shared with Ticket
+reconciliation (see [Derived Actionability](#derived-actionability)). The
+response contains exactly these fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `ticket_id` | string | Canonical parent Ticket identity (`SNTL-{n}`) |
+| `package_name` | string | Parent package name |
+| `reference` | string | Track reference |
+| `status` | string | Current affectedness: `analysis`, `affected`, `not_affected`, `fixed`, or `wont_fix` |
+| `delivery_status` | string | System-managed delivery status: `pending`, `in_progress`, or `released` |
+| `delivery_relevant` | boolean | Computed delivery relevance (see [Delivery Relevance Indicator](#delivery-relevance-indicator)) |
+| `actionable` | boolean | Derived track actionability |
+| `non_actionable_reason` | string \| null | First applicable track reason from [Derived Actionability](#derived-actionability); `null` when actionable |
+| `products` | array | Every Product occurrence of the track, including excluded and non-actionable ones, ordered by `product_cpe` in ascending Unicode code-point order with the occurrence `id` as tie-breaker |
+| `products[].id` | UUID | `TicketPackageProduct.id` occurrence locator |
+| `products[].product_cpe` | string | Related catalog Product CPE |
+| `products[].product_name` | string | Related catalog Product display name |
+| `products[].eligible` | boolean | Effective eligibility |
+| `products[].is_eligible_override` | boolean | Whether eligibility is a manual override |
+| `products[].lifecycle_phase` | string \| null | Lifecycle phase on the evaluation date: `pre_release`, `general_support`, `extended_support`, `reactive_support`, or `eol`; `null` when lifecycle data is unavailable |
+| `products[].actionable` | boolean | Derived Product actionability |
+| `products[].non_actionable_reason` | string \| null | First applicable Product reason from [Derived Actionability](#derived-actionability); `null` when actionable |
+
 **`Capability: admin_ticket_ops OR manage_packages when status = fixed;
 manage_packages for every other status`**
 

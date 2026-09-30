@@ -16,9 +16,8 @@ system `status_change` and precedes that entry transition.
 
 This module is a thin guard over the path list only: every other property
 of each path (complete event sequences, reconciliation, rollback, races)
-is proven in the path's owning module. `set_track_status()` coverage is
-deferred to M2.4 and `add_package_to_ticket()` coverage to M3.3; neither
-function exists yet.
+is proven in the path's owning module. `add_package_to_ticket()` coverage
+is deferred to M3.3; the function does not exist yet.
 
 Expected values are transcribed from the specifications, never computed
 with the module under test.
@@ -32,8 +31,15 @@ from typing import Any
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.enums import Scope, Severity, TicketPriority, TicketStatus
+from app.core.enums import (
+    PackageStatus,
+    Scope,
+    Severity,
+    TicketPriority,
+    TicketStatus,
+)
 from app.models.cve import CVE
+from app.services.package_service import set_track_status
 from app.services.ticket_mutations import set_severity_manual
 from app.services.ticket_service import (
     assign_ticket,
@@ -49,13 +55,14 @@ from tests.support.ticket_mutations import (
     EVAL,
     EventRow,
     TicketFactory,
+    TreeBuilder,
     VAUser,
     status_event,
     ticket_events,
 )
 
 pytest_plugins = ["tests.support.ticket_mutation_fixtures"]
-"""Provides the shared `va_user` fixture."""
+"""Provides the shared `va_user` and `tree` fixtures."""
 
 Factory = Callable[..., Awaitable[Any]]
 
@@ -70,6 +77,7 @@ PATHS = [
     "set_priority_override",
     "ignore_ticket",
     "mark_as_duplicate",
+    "set_track_status",
 ]
 
 
@@ -82,6 +90,7 @@ async def test_assignment_of_a_new_ticket_is_followed_by_one_promotion(
     cve_cvss_assessment_factory: Factory,
     system_setting_factory: Factory,
     va_user: VAUser,
+    tree: TreeBuilder,
     path: str,
 ) -> None:
     actor = await va_user()
@@ -197,6 +206,23 @@ async def test_assignment_of_a_new_ticket_is_followed_by_one_promotion(
                     None,
                 )
             ]
+        case "set_track_status":
+            # CVE-less with no resolved severity: the effective `analysis ->
+            # affected` change leaves the promoted Ticket in `Analysis`
+            # (tickets.md, Gate: Analysis -> Analyzed), so no gate
+            # `status_change` follows the promotion.
+            ticket = await ticket_factory(status=TicketStatus.NEW.value)
+            track = await tree(ticket, status=PackageStatus.ANALYSIS)
+            await set_track_status(
+                db_session,
+                ticket_id=ticket.id,
+                package_id=track.ticket_package_id,
+                track_id=track.id,
+                status=PackageStatus.AFFECTED,
+                acting_user_id=actor.id,
+                caller=caller,
+                evaluation_date=EVAL,
+            )
         case _:
             raise AssertionError(path)
 

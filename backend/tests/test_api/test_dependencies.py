@@ -45,6 +45,7 @@ from app.api.dependencies import (
     OptionalTicketCaller,
     UnknownKeyWarningLimiter,
     require_accessible_ticket,
+    require_any_capability,
     require_capability,
     require_session_authentication,
 )
@@ -1762,6 +1763,30 @@ class TestRequireCapability:
 # ---------------------------------------------------------------------------
 # require_session_authentication (e2e)
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestRequireAnyCapabilityDeclaration:
+    """`require_any_capability()` declares a union of alternatives; a single
+    capability uses `require_capability()` (docs/api-spec.md,
+    Authorization, `Capability: <a> OR <b>`)."""
+
+    @pytest.mark.parametrize(
+        "capabilities",
+        [
+            pytest.param((), id="none"),
+            pytest.param((Capability.MANAGE_PACKAGES,), id="one"),
+            pytest.param(
+                (Capability.MANAGE_PACKAGES, Capability.MANAGE_PACKAGES),
+                id="duplicate",
+            ),
+        ],
+    )
+    def test_fewer_than_two_distinct_alternatives_are_rejected(
+        self, capabilities: tuple[Capability, ...]
+    ) -> None:
+        with pytest.raises(ValueError, match="at least two capabilities"):
+            require_any_capability(*capabilities)
 
 
 @pytest.mark.e2e

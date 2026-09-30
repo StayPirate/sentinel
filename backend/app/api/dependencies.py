@@ -188,6 +188,21 @@ def ticket_not_mutable_error() -> AppError:
     )
 
 
+def resource_not_found_error() -> AppError:
+    """Create the 404 for a missing or mismatched nested resource.
+
+    See `docs/features/packages/package-model.md` (API Endpoints): a
+    nested package-tree identifier that is missing or belongs to another
+    declared parent returns this one identical response at every level,
+    so no endpoint reveals that the child exists under another path.
+    """
+    return AppError(
+        status_code=status.HTTP_404_NOT_FOUND,
+        code=ErrorCode.RESOURCE_NOT_FOUND,
+        detail="Resource not found.",
+    )
+
+
 def set_session_cookie(response: Response, token: str) -> None:
     """Set the `sentinel_session` cookie with the approved secure attributes.
 
@@ -624,6 +639,38 @@ def require_capability(
         principal: CurrentUser, roles: CallerRoles
     ) -> AuthenticatedPrincipal:
         if capability not in get_capabilities(roles):
+            raise insufficient_permission_error()
+        return principal
+
+    return _dependency
+
+
+def require_any_capability(
+    *capabilities: Capability,
+) -> Callable[..., Awaitable[AuthenticatedPrincipal]]:
+    """Dependency factory enforcing a union of alternative capabilities.
+
+    See `docs/api-spec.md` (Authorization, `Capability: <a> OR <b>`;
+    Authorization Chain Evaluation Order, alternative capabilities): the
+    union is checked from the principal's current roles (the same
+    per-request `get_caller_roles` load as `require_capability()`)
+    without loading any resource. A caller holding none of the
+    alternatives receives the same generic 403 as `require_capability()`,
+    which discloses no capability. Any resource-state condition on a
+    specific alternative is enforced later by the owning service.
+
+    Raises `ValueError` at declaration time unless at least two distinct
+    alternatives are given (a single capability uses
+    `require_capability()`).
+    """
+    alternatives = frozenset(capabilities)
+    if len(alternatives) < 2:
+        raise ValueError("require_any_capability() needs at least two capabilities.")
+
+    async def _dependency(
+        principal: CurrentUser, roles: CallerRoles
+    ) -> AuthenticatedPrincipal:
+        if alternatives.isdisjoint(get_capabilities(roles)):
             raise insufficient_permission_error()
         return principal
 
