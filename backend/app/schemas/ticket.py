@@ -2,8 +2,8 @@
 
 See `docs/features/tickets/tickets.md` (Response Schemas > TicketSummary
 and TicketDetail, Endpoint -> Schema Mapping, List Tickets, Create Ticket,
-Set Severity Manual, Mark Ticket as Duplicate) for the
-authoritative contract,
+Set Severity Manual, Mark Ticket as Duplicate, Set Confidentiality, Set
+Coordinated Release Date) for the authoritative contract,
 `docs/features/tickets/ticket-priority.md` (API Surface) for the priority
 fields, and `docs/features/tickets/ticket-deadlines.md` (Actors and
 Phases, Due Dates, API Surface) for the due-date semantics these OpenAPI
@@ -85,6 +85,45 @@ _RELEASE_DUE_DESCRIPTION = (
 )
 _CREATED_AT_DESCRIPTION = "Creation timestamp (UTC)."
 _UPDATED_AT_DESCRIPTION = "Last modification timestamp (UTC)."
+
+
+def parse_coordinated_release_at(value: object) -> datetime | None:
+    """Parse a Coordinated Release Date request value (tickets.md, Create
+    Ticket, Set Coordinated Release Date).
+
+    Shared by every request field carrying a CRD so that all endpoints
+    accept exactly the same inputs. Accepts only an ISO 8601 date-time
+    string (or `null`); interprets a naive value as UTC and converts an
+    offset to UTC (`docs/conventions.md`, Timestamps & Timezones). A date
+    without a time component, a number, and any other non-string input
+    are rejected, so no implicit midnight or Unix timestamp
+    interpretation applies. Errors raise `ValueError`, rendered as the
+    global `422 VALIDATION_ERROR`.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("coordinated_release_at must be an ISO 8601 datetime string.")
+    try:
+        date.fromisoformat(value)
+    except ValueError:
+        pass
+    else:
+        raise ValueError("coordinated_release_at must include a time component.")
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError(
+            "coordinated_release_at must be a valid ISO 8601 datetime."
+        ) from exc
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    try:
+        return parsed.astimezone(UTC)
+    except OverflowError as exc:
+        raise ValueError(
+            "coordinated_release_at is out of the representable datetime range."
+        ) from exc
 
 
 class TicketSummary(BaseModel):
@@ -399,40 +438,7 @@ class TicketCreateRequest(BaseModel):
     @field_validator("coordinated_release_at", mode="before")
     @classmethod
     def _parse_coordinated_release_at(cls, value: object) -> datetime | None:
-        """Accept only an ISO 8601 date-time string (or `null`); interpret
-        a naive value as UTC and convert an offset to UTC.
-
-        A date without a time component, a number, and any other
-        non-string input are rejected, so no implicit midnight or Unix
-        timestamp interpretation applies. Errors raise `ValueError`,
-        rendered as the global `422 VALIDATION_ERROR`.
-        """
-        if value is None:
-            return None
-        if not isinstance(value, str):
-            raise ValueError(
-                "coordinated_release_at must be an ISO 8601 datetime string."
-            )
-        try:
-            date.fromisoformat(value)
-        except ValueError:
-            pass
-        else:
-            raise ValueError("coordinated_release_at must include a time component.")
-        try:
-            parsed = datetime.fromisoformat(value)
-        except ValueError as exc:
-            raise ValueError(
-                "coordinated_release_at must be a valid ISO 8601 datetime."
-            ) from exc
-        if parsed.tzinfo is None:
-            return parsed.replace(tzinfo=UTC)
-        try:
-            return parsed.astimezone(UTC)
-        except OverflowError as exc:
-            raise ValueError(
-                "coordinated_release_at is out of the representable datetime range."
-            ) from exc
+        return parse_coordinated_release_at(value)
 
     @model_validator(mode="after")
     def _crd_requires_confidential_creation(self) -> Self:
@@ -441,3 +447,53 @@ class TicketCreateRequest(BaseModel):
                 "coordinated_release_at requires is_confidential to be true."
             )
         return self
+
+
+class TicketConfidentialityUpdateRequest(BaseModel):
+    """Request body of `PATCH /api/v1/tickets/{ticket_id}/confidentiality`.
+
+    See `docs/features/tickets/tickets.md` (Set Confidentiality). The
+    single field is required and non-nullable (`docs/api-spec.md`, Partial
+    Update Semantics: single-field PATCH; `Ticket.is_confidential` is
+    non-nullable). An omitted field, `null`, or a value Pydantic cannot
+    read as a boolean fails with the global `422 VALIDATION_ERROR`.
+    """
+
+    is_confidential: bool = Field(
+        description=(
+            "Requested confidentiality. `false` on a confidential Ticket "
+            "declassifies it and deletes every explicit access grant; `true` "
+            "never recreates grants. The same value as the current one is a "
+            "no-op. Required."
+        ),
+        examples=[False],
+    )
+
+
+class TicketCoordinatedReleaseDateUpdateRequest(BaseModel):
+    """Request body of
+    `PATCH /api/v1/tickets/{ticket_id}/coordinated-release-date`.
+
+    See `docs/features/tickets/tickets.md` (Set Coordinated Release Date).
+    The single field is required and nullable (`docs/api-spec.md`, Partial
+    Update Semantics: single-field PATCH): an ISO 8601 date-time sets or
+    replaces the CRD, JSON `null` clears it. The value is parsed by the
+    shared `parse_coordinated_release_at()`, so it accepts exactly the
+    inputs of `POST /api/v1/tickets`. An omitted field or a non-datetime
+    value fails with the global `422 VALIDATION_ERROR`.
+    """
+
+    coordinated_release_at: datetime | None = Field(
+        description=(
+            "Coordinated Release Date (embargo publication instant), an ISO "
+            "8601 date-time, or JSON `null` to clear it. A value without a UTC "
+            "offset is interpreted as UTC; an offset is converted to UTC. Past "
+            "instants are accepted. Required."
+        ),
+        examples=["2026-10-06T14:00:00Z", None],
+    )
+
+    @field_validator("coordinated_release_at", mode="before")
+    @classmethod
+    def _parse_coordinated_release_at(cls, value: object) -> datetime | None:
+        return parse_coordinated_release_at(value)

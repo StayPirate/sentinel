@@ -13,8 +13,9 @@ assignment (`assign_ticket()`), and the manual priority override
 (`reopen_from_ignored()` with its trusted system form
 `reopen_from_ignored_as_system()`, and `revert_duplicate()`), which
 compose the package-owned eligibility convergence with one final
-reconciliation; the remaining lifecycle operations are added by their
-owning work items.
+reconciliation, and the Confidentiality Management operations
+`set_confidentiality()` and `set_coordinated_release_date()`; the
+remaining operations are added by their owning work items.
 
 Every operation accepts the caller's `AsyncSession` and never commits or
 rolls back; database exceptions propagate unchanged (Transaction
@@ -62,6 +63,7 @@ from sqlalchemy import (
     and_,
     case,
     cast,
+    delete,
     exists,
     false,
     func,
@@ -105,6 +107,7 @@ from app.models.cve_external_identifier import CVEExternalIdentifier
 from app.models.cve_kev_entry import CVEKEVEntry
 from app.models.cve_ssvc_assessment import CVESSVCAssessment
 from app.models.ticket import Ticket
+from app.models.ticket_access_grant import TicketAccessGrant
 from app.models.ticket_package import TicketPackage
 from app.models.ticket_package_maintainer import TicketPackageMaintainer
 from app.models.ticket_package_track import TicketPackageTrack
@@ -1301,6 +1304,15 @@ class DuplicateConcurrentModificationError(TicketServiceError):
         super().__init__("A duplicate dependent is being modified concurrently.")
 
 
+class TicketNotConfidentialError(TicketServiceError):
+    """The operation requires a confidential Ticket, but the locked-current
+    Ticket is not confidential. Maps to `409 TICKET_NOT_CONFIDENTIAL`. The
+    message is static."""
+
+    def __init__(self) -> None:
+        super().__init__("Operation requires a confidential Ticket.")
+
+
 async def _ensure_cve_unassociated(db: AsyncSession, cve: CVE) -> None:
     """Read the association of the locked `cve` and reject an existing one.
 
@@ -2376,5 +2388,171 @@ async def revert_duplicate(
         ticket=ticket,
         original_status=TicketStatus.DUPLICATED,
         evaluation_date=evaluation_date,
+    )
+    return ticket
+
+
+# ---------------------------------------------------------------------------
+# Confidentiality Management (ticket-service.md, `set_confidentiality`,
+# `set_coordinated_release_date`)
+# ---------------------------------------------------------------------------
+
+
+def _bool_value(value: bool) -> str:
+    """The `confidentiality_changed` value format: `"true"` or `"false"`
+    (ticket-audit-log.md, Event Type Contract)."""
+    return "true" if value else "false"
+
+
+async def set_confidentiality(
+    db: AsyncSession,
+    *,
+    ticket_id: UUID,
+    is_confidential: bool,
+    acting_user_id: UUID,
+    caller: TicketCaller,
+) -> Ticket:
+    """Set the `is_confidential` flag of a Ticket.
+
+    Category A visibility-only consumer mutation (ticket-service.md,
+    `set_confidentiality`; tickets.md, Set Confidentiality, Confidential
+    Tickets > Audit Trail; rbac.md, Scope and Confidential Ticket
+    Visibility).
+
+    Q1: `ticket_id` is the internal Ticket UUID (the API resolves the
+    public `SNTL-{n}` locator first). `is_confidential` is the requested
+    flag. `acting_user_id` is the authenticated acting user (there is no
+    system caller); `caller` is the request-resolved caller information
+    whose `user_id` must identify `acting_user_id`. No `evaluation_date`:
+    nothing here reconciles.
+
+    Q2: the caller has verified `manage_confidentiality` and owns the
+    transaction. Locks only the Ticket `FOR UPDATE` (no User lock: the
+    operation never assigns). Does not call `ensure_ticket_operable()`:
+    valid in every Ticket status, including `Ignored` and `Duplicated`.
+
+    Q3: (2) revalidates accessibility from locked-current state; (3) a
+    request equal to the locked-current flag is a no-op with no write or
+    event; (4) preserves the locked flag and sets the requested one; (5)
+    for an effective `true` to `false` transition, deletes every
+    `TicketAccessGrant` of the Ticket in one statement, creating no
+    `access_grant_removed` event (`false` to `true` performs no grant
+    query and recreates nothing); (6) creates one acting-user
+    `confidentiality_changed` (`"true"`/`"false"`, `comment` and `detail`
+    `NULL`), which (7) flushes the flag, deletions, and event. Never
+    modifies `coordinated_release_at` or `TicketPackageMaintainer` rows,
+    assigns, reconciles, registers a post-commit effect, performs
+    external I/O, reads audit history, or commits.
+
+    Q4: returns the locked Ticket in its post-mutation state.
+
+    Q5: re-invocation with the same value is the step-3 no-op.
+
+    Q6: raises `ValueError` before any database operation when `caller`
+    does not identify `acting_user_id`, and `TicketNotFoundError` for a
+    missing or inaccessible Ticket before any other decision. Grant
+    deletion, audit, database, and flush exceptions propagate and roll
+    back the flag, every deletion, and the event together.
+    """
+    if caller.user_id != acting_user_id:
+        raise ValueError("caller must identify the acting user.")
+
+    ticket = await lock_accessible_ticket(db, ticket_id, caller)
+    old_value = ticket.is_confidential
+    if old_value == is_confidential:
+        return ticket
+
+    ticket.is_confidential = is_confidential
+    if old_value and not is_confidential:
+        await db.execute(
+            delete(TicketAccessGrant).where(TicketAccessGrant.ticket_id == ticket.id)
+        )
+    await TicketAuditLog.log_event(
+        db,
+        ticket_id=ticket.id,
+        event_type=TicketAuditEventType.CONFIDENTIALITY_CHANGED,
+        user_id=acting_user_id,
+        old_value=_bool_value(old_value),
+        new_value=_bool_value(is_confidential),
+    )
+    return ticket
+
+
+async def set_coordinated_release_date(
+    db: AsyncSession,
+    *,
+    ticket_id: UUID,
+    coordinated_release_at: datetime | None,
+    acting_user_id: UUID,
+    caller: TicketCaller,
+) -> Ticket:
+    """Set, change, or clear the Coordinated Release Date of a confidential
+    Ticket.
+
+    Category A embargo-metadata consumer mutation (ticket-service.md,
+    `set_coordinated_release_date`; tickets.md, Coordinated Release Date,
+    Set Coordinated Release Date).
+
+    Q1: `ticket_id` is the internal Ticket UUID (the API resolves the
+    public `SNTL-{n}` locator first). `coordinated_release_at` is a
+    timezone-aware instant (the API normalizes it to UTC), or `None` to
+    clear the CRD; a past instant is valid. `acting_user_id` is the
+    authenticated acting user (there is no system caller); `caller` is
+    the request-resolved caller information whose `user_id` must identify
+    `acting_user_id`.
+
+    Q2: the caller has verified `manage_confidentiality` and owns the
+    transaction. Locks only the Ticket `FOR UPDATE` (no User lock: the
+    operation never assigns). Does not call `ensure_ticket_operable()`:
+    valid in every Ticket status, including `Ignored` and `Duplicated`.
+
+    Q3: (2) revalidates accessibility from locked-current state; (3)
+    rejects a non-confidential Ticket, including one declassified with a
+    retained CRD; (4) a request equal to the stored value (both `NULL`, or
+    the same instant regardless of UTC offset) is a no-op with no write
+    or event; (5) persists the requested value and creates one
+    acting-user `coordinated_release_changed` whose old and new values
+    are the preserved and requested instants in UTC ISO 8601 (`Z`
+    suffix), `NULL` for an absent side, with `comment` and `detail`
+    `NULL`; (6) the event insert flushes the column and event. Never
+    assigns, reconciles, changes status, registers a post-commit effect,
+    reads audit history, or commits. The CRD is informational: it is not
+    an input to gates, eligibility, deadlines, priority, or visibility.
+
+    Q4: returns the locked Ticket in its post-mutation state.
+
+    Q5: re-invocation with the same instant is the step-4 no-op.
+
+    Q6: raises `ValueError` before any database operation when `caller`
+    does not identify `acting_user_id` or `coordinated_release_at` is
+    naive. Raises `TicketNotFoundError` for a missing or inaccessible
+    Ticket before any other decision, then `TicketNotConfidentialError`.
+    Audit, database, and flush exceptions propagate and roll back the
+    value and the event together.
+    """
+    if caller.user_id != acting_user_id:
+        raise ValueError("caller must identify the acting user.")
+    if coordinated_release_at is not None and coordinated_release_at.tzinfo is None:
+        raise ValueError("coordinated_release_at must be timezone-aware.")
+
+    ticket = await lock_accessible_ticket(db, ticket_id, caller)
+    if not ticket.is_confidential:
+        raise TicketNotConfidentialError()
+    old_value = ticket.coordinated_release_at
+    if old_value == coordinated_release_at:
+        return ticket
+
+    ticket.coordinated_release_at = coordinated_release_at
+    await TicketAuditLog.log_event(
+        db,
+        ticket_id=ticket.id,
+        event_type=TicketAuditEventType.COORDINATED_RELEASE_CHANGED,
+        user_id=acting_user_id,
+        old_value=_format_utc_instant(old_value) if old_value is not None else None,
+        new_value=(
+            _format_utc_instant(coordinated_release_at)
+            if coordinated_release_at is not None
+            else None
+        ),
     )
     return ticket

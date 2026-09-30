@@ -9,7 +9,9 @@ CVE for the later association (`associate_cve`), Assign Ticket
 (`docs/features/tickets/ticket-priority.md`, `set_priority_override()`),
 Ignore Ticket (`ignore_ticket`), Mark Ticket as Duplicate
 (`mark_as_duplicate`), Reopen Ticket (`reopen_from_ignored`), Revert
-Duplicate Status (`revert_duplicate`), and Set Severity Manual for the
+Duplicate Status (`revert_duplicate`), Set Confidentiality
+(`set_confidentiality`), Set Coordinated Release Date
+(`set_coordinated_release_date`), and Set Severity Manual for the
 manual-severity mutation (`docs/features/tickets/ticket-mutations.md`,
 `set_severity_manual()`).
 Handlers stay thin: they supply caller information to `ticket_service`,
@@ -82,6 +84,8 @@ from app.schemas.errors import ErrorResponse, TicketCVEConflictErrorResponse
 from app.schemas.ticket import (
     TicketAssigneeUpdateRequest,
     TicketAssociateCVERequest,
+    TicketConfidentialityUpdateRequest,
+    TicketCoordinatedReleaseDateUpdateRequest,
     TicketCreateRequest,
     TicketDetail,
     TicketDetailResponse,
@@ -106,6 +110,7 @@ from app.services.ticket_service import (
     TicketCVEAlreadySetError,
     TicketCVEConflictError,
     TicketDetailProjection,
+    TicketNotConfidentialError,
     TicketSummaryProjection,
 )
 
@@ -1303,6 +1308,157 @@ async def revert_ticket_duplicate(
         raise ticket_not_found_error() from None
     except InvalidTransitionError:
         raise _invalid_transition_error() from None
+    detail = await ticket_service.assemble_ticket_detail(
+        db, ticket_id=ticket.id, evaluation_date=evaluation_date
+    )
+    return TicketDetailResponse(data=serialize_ticket_detail(detail))
+
+
+def _ticket_not_confidential_error() -> AppError:
+    return AppError(
+        status_code=status.HTTP_409_CONFLICT,
+        code=ErrorCode.TICKET_NOT_CONFIDENTIAL,
+        detail="Operation requires a confidential Ticket.",
+    )
+
+
+@router.patch(
+    "/tickets/{ticket_id}/confidentiality",
+    response_model=TicketDetailResponse,
+    summary="Set Confidentiality",
+    description=(
+        "Sets whether a Ticket is confidential. Valid in every Ticket status, "
+        "including `ignored` and `duplicated`; it never assigns the Ticket or "
+        "changes its status. Making a confidential Ticket non-confidential "
+        "deletes every explicit access grant; making it confidential again "
+        "does not recreate them. Package-maintainer visibility and the "
+        "Coordinated Release Date are unchanged. An unchanged request is an "
+        "idempotent success. Returns the post-mutation Ticket detail. Requires "
+        "`manage_confidentiality`."
+    ),
+    responses={
+        404: {
+            "model": ErrorResponse,
+            "description": (
+                "`TICKET_NOT_FOUND`: Ticket identifier is malformed, does not "
+                "exist, or identifies a Ticket inaccessible to the caller."
+            ),
+        },
+    },
+)
+async def set_ticket_confidentiality(
+    ticket_id: TicketIdPath,
+    body: TicketConfidentialityUpdateRequest,
+    db: DatabaseSession,
+    principal: Annotated[
+        AuthenticatedPrincipal,
+        Depends(require_capability(Capability.MANAGE_CONFIDENTIALITY)),
+    ],
+    caller: AuthenticatedTicketCaller,
+    ticket: Annotated[ResolvedTicket, Depends(require_accessible_ticket)],
+) -> TicketDetailResponse:
+    """Set Confidentiality — see `docs/features/tickets/tickets.md`.
+
+    Authorization follows `docs/api-spec.md` (Authorization Chain
+    Evaluation Order, flow 3): authentication, then
+    `manage_confidentiality` before any Ticket lookup, then the delegated
+    preliminary SNTL resolution and body validation.
+    `set_confidentiality()` revalidates accessibility from locked-current
+    state; it is a visibility-only opt-out from `ensure_ticket_operable()`
+    and never produces `TICKET_NOT_MUTABLE`. It takes no evaluation date,
+    so the handler captures one UTC date at workflow entry solely for the
+    `TicketDetail` assembled from the locked post-state inside the same
+    transaction (`docs/features/tickets/ticket-service.md`,
+    `get_ticket_detail()`).
+    """
+    evaluation_date = _utc_now().date()
+    try:
+        await ticket_service.set_confidentiality(
+            db,
+            ticket_id=ticket.id,
+            is_confidential=body.is_confidential,
+            acting_user_id=principal.user.id,
+            caller=caller,
+        )
+    except TicketNotFoundError:
+        raise ticket_not_found_error() from None
+    detail = await ticket_service.assemble_ticket_detail(
+        db, ticket_id=ticket.id, evaluation_date=evaluation_date
+    )
+    return TicketDetailResponse(data=serialize_ticket_detail(detail))
+
+
+@router.patch(
+    "/tickets/{ticket_id}/coordinated-release-date",
+    response_model=TicketDetailResponse,
+    summary="Set Coordinated Release Date",
+    description=(
+        "Sets, changes, or clears the Coordinated Release Date (embargo "
+        "publication instant) of a confidential Ticket. An ISO 8601 date-time "
+        "sets or replaces it (a value without a UTC offset is interpreted as "
+        "UTC; past instants are accepted); JSON `null` clears it. Valid in "
+        "every Ticket status, including `ignored` and `duplicated`; it never "
+        "assigns the Ticket or changes its status. An unchanged request (the "
+        "same instant, or `null` when none is set) is an idempotent success. "
+        "Returns the post-mutation Ticket detail. Requires "
+        "`manage_confidentiality`."
+    ),
+    responses={
+        404: {
+            "model": ErrorResponse,
+            "description": (
+                "`TICKET_NOT_FOUND`: Ticket identifier is malformed, does not "
+                "exist, or identifies a Ticket inaccessible to the caller."
+            ),
+        },
+        409: {
+            "model": ErrorResponse,
+            "description": (
+                "`TICKET_NOT_CONFIDENTIAL`: the Ticket is not confidential "
+                "(including a declassified Ticket that retains its date)."
+            ),
+        },
+    },
+)
+async def set_ticket_coordinated_release_date(
+    ticket_id: TicketIdPath,
+    body: TicketCoordinatedReleaseDateUpdateRequest,
+    db: DatabaseSession,
+    principal: Annotated[
+        AuthenticatedPrincipal,
+        Depends(require_capability(Capability.MANAGE_CONFIDENTIALITY)),
+    ],
+    caller: AuthenticatedTicketCaller,
+    ticket: Annotated[ResolvedTicket, Depends(require_accessible_ticket)],
+) -> TicketDetailResponse:
+    """Set Coordinated Release Date — see `docs/features/tickets/tickets.md`.
+
+    Authorization follows `docs/api-spec.md` (Authorization Chain
+    Evaluation Order, flow 3): authentication, then
+    `manage_confidentiality` before any Ticket lookup, then the delegated
+    preliminary SNTL resolution and body validation (the body value is
+    already UTC). `set_coordinated_release_date()` revalidates
+    accessibility from locked-current state before its confidentiality
+    guard; it is an embargo-metadata opt-out from
+    `ensure_ticket_operable()` and never produces `TICKET_NOT_MUTABLE`. It
+    takes no evaluation date, so the handler captures one UTC date at
+    workflow entry solely for the `TicketDetail` assembled from the locked
+    post-state inside the same transaction
+    (`docs/features/tickets/ticket-service.md`, `get_ticket_detail()`).
+    """
+    evaluation_date = _utc_now().date()
+    try:
+        await ticket_service.set_coordinated_release_date(
+            db,
+            ticket_id=ticket.id,
+            coordinated_release_at=body.coordinated_release_at,
+            acting_user_id=principal.user.id,
+            caller=caller,
+        )
+    except TicketNotFoundError:
+        raise ticket_not_found_error() from None
+    except TicketNotConfidentialError:
+        raise _ticket_not_confidential_error() from None
     detail = await ticket_service.assemble_ticket_detail(
         db, ticket_id=ticket.id, evaluation_date=evaluation_date
     )
