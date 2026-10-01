@@ -149,6 +149,24 @@ def _start_postgres_container(max_connections: int = 100) -> str:
     return url
 
 
+def _reject_worker_without_harness(variable: str, service: str) -> None:
+    """Fail a pytest-xdist worker that lacks a harness URL.
+
+    The controller exports both harness URLs to its workers unless the
+    run selects only unit tests (see `pytest_configure`), which use no
+    database and no Redis. A worker reaching this point therefore runs a
+    unit test that requests a database or Redis fixture; starting one
+    container per worker would hide that Tier 1 violation.
+    """
+    if worker_id() is not None:
+        raise RuntimeError(
+            f"{variable} is unset in pytest-xdist worker {worker_id()}: a test "
+            f"selected by `-m unit` requested {service}. Unit tests use no "
+            "database and no Redis; mark the test `integration` instead (see "
+            "docs/features/platform/testing-strategy.md, Tier 1 — Unit Tests)."
+        )
+
+
 def _base_database_url() -> str:
     """Resolve the PostgreSQL test-harness URL, before the per-worker
     database is applied.
@@ -164,6 +182,7 @@ def _base_database_url() -> str:
     if url:
         return url
 
+    _reject_worker_without_harness("TEST_DATABASE_URL", "PostgreSQL")
     if _container_url is None:
         _container_url = _start_postgres_container()
     return _container_url
@@ -216,6 +235,7 @@ def _redis_base_url() -> str:
     if url:
         return url
 
+    _reject_worker_without_harness("TEST_REDIS_URL", "Redis")
     if _redis_container_url is None:
         _redis_container_url = _start_redis_container()
     return _redis_container_url
@@ -244,6 +264,10 @@ def pytest_configure(config: pytest.Config) -> None:
     Without TEST_DATABASE_URL/TEST_REDIS_URL, the controller starts one
     PostgreSQL and one Redis container for the whole run and exports
     their URLs through those variables, which the workers inherit.
+
+    A run whose marker expression is exactly `unit` (the pre-commit
+    gate) selects only tests that use no database and no Redis, so it
+    skips the capacity checks and starts no container.
     """
     if hasattr(config, "workerinput"):
         return
@@ -251,6 +275,21 @@ def pytest_configure(config: pytest.Config) -> None:
     if workers == 0:
         return
 
+    if (config.option.markexpr or "").strip() != "unit":
+        _provision_parallel_services(workers)
+
+    # A single-process run attaches output captured before its first test
+    # (application log lines emitted while conftest imports `app`, container
+    # start-up) to that test's report, shown only on failure. The controller
+    # runs no test, so pytest would print that output after the summary;
+    # discard it once provisioning has succeeded.
+    capture = config.pluginmanager.getplugin("capturemanager")
+    if capture is not None:
+        capture.read_global_capture()
+
+
+def _provision_parallel_services(workers: int) -> None:
+    """Check capacity and start missing containers for `workers` workers."""
     check_redis_capacity(
         redis_base_index(os.environ.get("TEST_REDIS_URL", "")), workers
     )
@@ -270,15 +309,6 @@ def pytest_configure(config: pytest.Config) -> None:
             f"PostgreSQL test server unreachable at {shown}: {exc}"
         ) from exc
     check_postgres_capacity(workers, capacity)
-
-    # A single-process run attaches output captured before its first test
-    # (application log lines emitted while conftest imports `app`, container
-    # start-up) to that test's report, shown only on failure. The controller
-    # runs no test, so pytest would print that output after the summary;
-    # discard it once provisioning has succeeded.
-    capture = config.pluginmanager.getplugin("capturemanager")
-    if capture is not None:
-        capture.read_global_capture()
 
 
 @pytest_asyncio.fixture(scope="session", loop_scope="session")

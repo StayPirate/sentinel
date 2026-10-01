@@ -47,8 +47,16 @@ class _FakeConfig:
     """The subset of `pytest.Config` that `planned_worker_count` and the
     root conftest's `pytest_configure` read."""
 
-    def __init__(self, dist: str | None, tx: list[str] | None = None) -> None:
-        self.option = SimpleNamespace() if dist is None else SimpleNamespace(dist=dist)
+    def __init__(
+        self,
+        dist: str | None,
+        tx: list[str] | None = None,
+        *,
+        markexpr: str = "not image and not system",
+    ) -> None:
+        self.option = SimpleNamespace(markexpr=markexpr)
+        if dist is not None:
+            self.option.dist = dist
         self._tx = tx or []
         self.capture = _FakeCapture()
         self.pluginmanager = SimpleNamespace(
@@ -388,6 +396,195 @@ class TestControllerConfigure:
             root_conftest.pytest_configure(cast("pytest.Config", config))
 
         assert read == []
+
+
+_STARTED_DATABASE_URL = "postgresql+asyncpg://user:secret@container.example.com/test"
+_STARTED_REDIS_URL = "redis://container.example.com:6379/0"
+
+
+@pytest.fixture
+def unconfigured_servers(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """No configured test servers and a recording container starter.
+
+    Returns the services whose container the harness started, in order.
+    """
+    for name in ("TEST_DATABASE_URL", "TEST_REDIS_URL"):
+        # setenv first so teardown restores the original state even when
+        # the variable was absent: the hook under test assigns
+        # os.environ directly, which monkeypatch alone would not undo.
+        monkeypatch.setenv(name, "")
+        monkeypatch.delenv(name)
+    started: list[str] = []
+
+    def _start_postgres(max_connections: int = 100) -> str:
+        started.append("postgres")
+        return _STARTED_DATABASE_URL
+
+    def _start_redis() -> str:
+        started.append("redis")
+        return _STARTED_REDIS_URL
+
+    monkeypatch.setattr(root_conftest, "_start_postgres_container", _start_postgres)
+    monkeypatch.setattr(root_conftest, "_start_redis_container", _start_redis)
+    return started
+
+
+@pytest.mark.unit
+class TestControllerUnitOnlySelection:
+    """A parallel run selecting exactly `-m unit` provisions nothing.
+
+    Synchronous tests: the hook runs its capacity read with
+    `asyncio.run()` (testing-strategy.md, Sync Entry-Point Tests).
+    """
+
+    @pytest.mark.parametrize("markexpr", ["unit", " unit "])
+    def test_unit_only_starts_no_container_and_reads_no_capacity(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        unconfigured_servers: list[str],
+        markexpr: str,
+    ) -> None:
+        read = _serve_capacity(monkeypatch, RuntimeError("must not be read"))
+        config = _FakeConfig("load", ["popen"] * 4, markexpr=markexpr)
+
+        root_conftest.pytest_configure(cast("pytest.Config", config))
+
+        assert unconfigured_servers == []
+        assert read == []
+        assert "TEST_DATABASE_URL" not in os.environ
+        assert "TEST_REDIS_URL" not in os.environ
+        assert config.capture.discarded is True
+
+    def test_unit_only_skips_redis_range_check(
+        self, monkeypatch: pytest.MonkeyPatch, configured_servers: None
+    ) -> None:
+        read = _serve_capacity(monkeypatch, RuntimeError("must not be read"))
+        config = _FakeConfig("load", ["popen"] * 15, markexpr="unit")
+
+        root_conftest.pytest_configure(cast("pytest.Config", config))
+
+        assert read == []
+
+    @pytest.mark.parametrize(
+        "markexpr",
+        [
+            "not image and not system",
+            "not image",
+            "",
+            "integration",
+            "not unit",
+            "unit or integration",
+            "unit and not slow",
+        ],
+    )
+    def test_other_selection_starts_containers_and_checks_capacity(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        unconfigured_servers: list[str],
+        markexpr: str,
+    ) -> None:
+        read = _serve_capacity(monkeypatch, _capacity(max_connections=100))
+        config = _FakeConfig("load", ["popen"] * 2, markexpr=markexpr)
+
+        root_conftest.pytest_configure(cast("pytest.Config", config))
+
+        assert unconfigured_servers == ["postgres", "redis"]
+        assert read == [_STARTED_DATABASE_URL]
+        assert os.environ["TEST_DATABASE_URL"] == _STARTED_DATABASE_URL
+        assert os.environ["TEST_REDIS_URL"] == _STARTED_REDIS_URL
+
+
+@pytest.mark.unit
+class TestWorkerWithoutHarness:
+    """A worker lacking a harness URL fails instead of starting a container."""
+
+    def test_worker_without_database_url_raises(
+        self, monkeypatch: pytest.MonkeyPatch, unconfigured_servers: list[str]
+    ) -> None:
+        monkeypatch.setenv("PYTEST_XDIST_WORKER", "gw1")
+
+        with pytest.raises(RuntimeError, match="TEST_DATABASE_URL is unset") as raised:
+            root_conftest._base_database_url()
+
+        assert "gw1" in str(raised.value)
+        assert "PostgreSQL" in str(raised.value)
+        assert unconfigured_servers == []
+
+    def test_worker_without_redis_url_raises(
+        self, monkeypatch: pytest.MonkeyPatch, unconfigured_servers: list[str]
+    ) -> None:
+        monkeypatch.setenv("PYTEST_XDIST_WORKER", "gw1")
+
+        with pytest.raises(RuntimeError, match="TEST_REDIS_URL is unset") as raised:
+            root_conftest._redis_base_url()
+
+        assert "Redis" in str(raised.value)
+        assert unconfigured_servers == []
+
+    def test_worker_with_urls_uses_them(
+        self, monkeypatch: pytest.MonkeyPatch, configured_servers: None
+    ) -> None:
+        monkeypatch.setenv("PYTEST_XDIST_WORKER", "gw1")
+
+        assert root_conftest._base_database_url() == _CONFIGURED_DATABASE_URL
+        assert root_conftest._redis_base_url() == "redis://redis.example.com:6379/2"
+
+    def test_single_process_without_urls_starts_containers(
+        self, monkeypatch: pytest.MonkeyPatch, unconfigured_servers: list[str]
+    ) -> None:
+        monkeypatch.delenv("PYTEST_XDIST_WORKER", raising=False)
+        monkeypatch.setattr(root_conftest, "_container_url", None)
+        monkeypatch.setattr(root_conftest, "_redis_container_url", None)
+
+        assert root_conftest._base_database_url() == _STARTED_DATABASE_URL
+        assert root_conftest._redis_base_url() == _STARTED_REDIS_URL
+        assert unconfigured_servers == ["postgres", "redis"]
+
+
+@pytest.mark.integration
+def test_unit_only_parallel_run_needs_no_docker() -> None:
+    """End to end: `-m unit -n 2` passes without harness URLs or Docker.
+
+    DOCKER_HOST points at a socket that does not exist, so any attempt to
+    start a testcontainer would fail the run.
+    """
+    env = {
+        name: value
+        for name, value in os.environ.items()
+        if not name.startswith(
+            ("PYTEST_", "COV_CORE_", "TEST_DATABASE_", "TEST_REDIS_")
+        )
+    }
+    env["DOCKER_HOST"] = "unix:///nonexistent/docker.sock"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-p",
+            "no:cacheprovider",
+            "-m",
+            "unit",
+            "-n",
+            "2",
+            "--max-worker-restart",
+            "0",
+            "-q",
+            "tests/test_support/test_parallel.py",
+            "-k",
+            "TestWorkerIdentity",
+        ],
+        cwd=_BACKEND_DIR,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+
+    assert result.returncode == pytest.ExitCode.OK, result.stdout + result.stderr
+    assert " passed" in result.stdout
 
 
 @pytest.mark.integration

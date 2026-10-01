@@ -117,7 +117,11 @@ authoritative definitions.
 6. For **mutations**: assert audit event creation with correct field
    values (see `docs/features/platform/testing-strategy.md`, Audit
    Trail Testing)
-7. Run `cd backend && uv run pytest` and verify all tests pass
+7. Run the endpoint's focused test modules first in a single process (e.g.
+   `cd backend && uv run pytest tests/test_api/test_<endpoint>.py`), then run
+   the full backend suite in parallel:
+   `cd backend && uv run pytest -m "not image" -n auto --maxprocesses 8 --max-worker-restart 0`
+   and verify all tests pass
 
 ### Step 7: Reviews
 
