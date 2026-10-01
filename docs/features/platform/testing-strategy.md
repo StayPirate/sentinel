@@ -4162,7 +4162,7 @@ comprehensive test coverage:
    re-invocation behavior.
 
 8. **Run the suite**: run focused service tests first (e.g. `cd backend &&
-   pytest tests/test_services/test_<module>.py`), then run the full suite in
+   uv run pytest tests/test_services/test_<module>.py`), then run the full suite in
    parallel (`cd backend && uv run pytest -m "not image" -n auto
    --maxprocesses 8 --max-worker-restart 0`) — all tests must pass before
    declaring the task complete.
