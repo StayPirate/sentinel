@@ -1088,10 +1088,12 @@ database.
 
 **Connection budget.** Each worker may hold up to 20 PostgreSQL
 connections: the shared test engine's pool (5 persistent and 10 overflow
-connections) plus 5 for the `NullPool` CLI-test engine, dedicated
-engines of cross-loop and migration tests, the Celery worker and Beat
-processes spawned by the system suite, and administrative database
-connections.
+connections) plus 5 auxiliary connections. A worker runs one test at a
+time, so the auxiliary connections serve whichever of these the current
+test uses: the `NullPool` CLI-test engine, dedicated engines of
+cross-loop and migration tests, the Celery worker and Beat processes
+spawned by the system suite (each runs one task or scheduler tick at a
+time), or administrative database connections.
 
 **Controller checks.** Before any worker starts, the xdist controller
 fails the run with a usage error that names the remedy, and for a
@@ -1232,8 +1234,8 @@ through the following required gates:
 8. **Container image artifact gate** — on pull requests, the final OCI
    candidate MUST pass the artifact-risk checks defined below. This gate is
    blocking on PRs only (not on pushes to `master`).
-9. **Local process system test** — the system suite (`-m system`) MUST
-   pass. This gate verifies the inter-process fetcher pipeline using
+9. **Local process system test** — the system suite (tests marked
+   `system`) MUST pass. This gate verifies the inter-process fetcher pipeline using
    real worker and Beat processes against the test infrastructure. It
    runs inside the coverage-measured invocation of gate 3, selected with
    `-m "not image"`; a system-test failure fails the build like any other
@@ -1288,10 +1290,10 @@ justified merely by running inside the container.
 | Default run | **Excluded** — `pyproject.toml` sets `addopts = "-m 'not image and not system'"` |
 
 Because the marker is excluded from the default invocation, `cd backend
-&& uv run pytest` never attempts to start containers, and — since
-coverage is measured on that same default invocation — the image suite
-**does not contribute to, and is not counted toward, the ≥95% coverage
-gate**. This is intentional: it runs against a separately built artifact,
+&& uv run pytest` never attempts to start containers, and — since the
+coverage-measured CI invocation (`-m "not image"`) excludes it too — the
+image suite **does not contribute to, and is not counted toward, the ≥95%
+coverage gate**. This is intentional: it runs against a separately built artifact,
 not the instrumented local installation.
 
 ### Artifact-Risk Rule
@@ -1688,7 +1690,8 @@ or failed. The required ordering:
    This includes all `FetcherConfig` rows created by the spawned
    processes' bootstrap (which inserts rows for every fetcher in
    the subprocess registry), not only the test fetcher's own row.
-7. Restore/remove the test registry entry in the pytest process.
+7. Remove the test registry entry from the pytest process, returning
+   its registry to the pre-test state.
 8. Verify that processes are dead and test artifacts are absent.
 
 A cleanup failure MUST fail the test — including when the primary

@@ -33,9 +33,12 @@ ENGINE_MAX_OVERFLOW = 10
 """Additional transient connections the shared test engine may open."""
 
 AUXILIARY_CONNECTIONS_PER_WORKER = 5
-"""Connections a worker may hold outside the shared engine's pool: the
-`NullPool` CLI-test engine, dedicated engines of cross-loop and migration
-tests, and administrative `CREATE DATABASE`/`DROP DATABASE` connections."""
+"""Connections a worker may hold outside the shared engine's pool, shared by
+whichever of these the worker's current test uses (a worker runs one test at
+a time): the `NullPool` CLI-test engine, dedicated engines of cross-loop and
+migration tests, the Celery worker and Beat processes spawned by the system
+suite (each runs one task or scheduler tick at a time), and administrative
+`CREATE DATABASE`/`DROP DATABASE` connections."""
 
 CONNECTIONS_PER_WORKER = (
     ENGINE_POOL_SIZE + ENGINE_MAX_OVERFLOW + AUXILIARY_CONNECTIONS_PER_WORKER

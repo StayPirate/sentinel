@@ -695,29 +695,6 @@ async def fetcher_pipeline_harness(
     step (4), `redis_client`'s own teardown is an additional safety net,
     not a substitute.
     """
-    # Snapshot the registry BEFORE the lazy import below: the first
-    # import of `tests.support.system_fetcher` already registers
-    # `EvaluateTestPipeline` through `BaseFetcher.__init_subclass__`, so
-    # a snapshot taken afterwards would treat the test fetcher as prior
-    # state and teardown would leave it registered in this process —
-    # leaking into every later test that runs in the same pytest worker
-    # (testing-strategy.md, Registration Boundary).
-    registry_before = dict(FETCHER_REGISTRY)
-
-    # Registration boundary: import only now — never at collection time
-    # — so a `pytest -m 'not system'` run of the wider suite never
-    # registers this class (see testing-strategy.md, Registration
-    # Boundary).
-    import tests.support.system_fetcher as system_fetcher_module
-
-    fetcher_cls = system_fetcher_module.EvaluateTestPipeline
-    assert fetcher_cls.name == SYSTEM_FETCHER_NAME, (
-        f"tests/system/conftest.py's duplicated SYSTEM_FETCHER_NAME "
-        f"constant ({SYSTEM_FETCHER_NAME!r}) has drifted from "
-        f"EvaluateTestPipeline.name ({fetcher_cls.name!r})"
-    )
-    FETCHER_REGISTRY[SYSTEM_FETCHER_NAME] = fetcher_cls
-
     # Baseline: capture any `FetcherRun` ids that already exist for the
     # test fetcher BEFORE the preflight purge below — residue left by a
     # prior invocation of this suite that was interrupted before its
@@ -756,8 +733,35 @@ async def fetcher_pipeline_harness(
         preexisting_run_ids=preexisting_run_ids,
     )
 
+    # Registration happens only inside the `try` below, after every
+    # other setup step, so no failure path can leave the test fetcher
+    # registered without the cleanup below running.
+    #
+    # Snapshot the registry BEFORE the lazy import below: the first
+    # import of `tests.support.system_fetcher` already registers
+    # `EvaluateTestPipeline` through `BaseFetcher.__init_subclass__`, so
+    # a snapshot taken afterwards would treat the test fetcher as prior
+    # state and teardown would leave it registered in this process —
+    # leaking into every later test that runs in the same pytest worker
+    # (testing-strategy.md, Registration Boundary).
+    registry_before = dict(FETCHER_REGISTRY)
+
     cleanup_errors: list[str] = []
     try:
+        # Registration boundary: import only now — never at collection time
+        # — so a `pytest -m 'not system'` run of the wider suite never
+        # registers this class (see testing-strategy.md, Registration
+        # Boundary).
+        import tests.support.system_fetcher as system_fetcher_module
+
+        fetcher_cls = system_fetcher_module.EvaluateTestPipeline
+        assert fetcher_cls.name == SYSTEM_FETCHER_NAME, (
+            f"tests/system/conftest.py's duplicated SYSTEM_FETCHER_NAME "
+            f"constant ({SYSTEM_FETCHER_NAME!r}) has drifted from "
+            f"EvaluateTestPipeline.name ({fetcher_cls.name!r})"
+        )
+        FETCHER_REGISTRY[SYSTEM_FETCHER_NAME] = fetcher_cls
+
         yield harness
     finally:
         # 1. Stop Beat first (prevents new task enqueues). No-op if the

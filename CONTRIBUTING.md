@@ -162,8 +162,11 @@ cd backend
 # Run the default suite in a single process
 uv run pytest
 
-# Run it in parallel workers (as the pre-push hook does)
+# Run it in parallel workers
 uv run pytest -n auto --maxprocesses 8 --max-worker-restart 0
+
+# Also include the local process system suite (as the pre-push hook does)
+uv run pytest -m "not image" -n auto --maxprocesses 8 --max-worker-restart 0
 
 # Run with coverage
 uv run pytest --cov
