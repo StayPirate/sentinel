@@ -47,7 +47,6 @@ Fast, isolated tests for pure logic. No external dependencies.
 |----------|-------|
 | Marker | `@pytest.mark.unit` |
 | Isolation | In-process only. No database, no Redis, no network I/O |
-| Speed target | Full unit suite < 10 seconds |
 | Typical subjects | Resolution cascades, parsers, validators, status evaluators, enum logic, Pydantic schema validation, utility functions |
 
 A test that requires a database session, Redis connection, or HTTP
@@ -62,7 +61,6 @@ Tests that exercise service-layer functions with real database state.
 |----------|-------|
 | Marker | `@pytest.mark.integration` |
 | Isolation | Real PostgreSQL (per-test transaction rollback). Redis available through the shared fixture when needed. No external network I/O |
-| Speed target | Full integration suite < 120 seconds |
 | Typical subjects | Service functions, CRUD operations, audit event creation, status gate evaluation, query builders, authorization checks |
 
 Integration tests are the **primary verification layer** for
@@ -79,7 +77,6 @@ FastAPI's test client.
 |----------|-------|
 | Marker | `@pytest.mark.e2e` |
 | Isolation | Real PostgreSQL + FastAPI test client (ASGI transport). Redis available via the shared fixture when exercised by the request path. No external network I/O |
-| Speed target | Full e2e suite < 60 seconds |
 | Typical subjects | API endpoint handlers, request validation, response schemas, authentication/authorization enforcement, error envelope format, pagination |
 
 E2e tests verify the API contract — correct status codes, response
@@ -1061,7 +1058,8 @@ System Testing › Automation).
 ### Parallel Execution
 
 The pre-push hook and CI run the default in-process suite in parallel
-with `pytest-xdist`. Each pytest worker is an independent process that
+with `pytest-xdist`, and the pre-commit hook runs the unit suite the
+same way (see Unit-only runs below). Each pytest worker is an independent process that
 runs a share of the tests against its own PostgreSQL database and its
 own Redis logical database, so no test observes another worker's state.
 Parallelism is chosen explicitly on the command line (`-n`); it is not
@@ -1115,8 +1113,20 @@ the whole run, sizes PostgreSQL's `max_connections` for the planned
 workers, and passes the container URLs to the workers through those
 variables.
 
-**Worker count.** The pre-push hook uses one worker per CPU, at most 8
-(`-n auto --maxprocesses 8`); `PYTEST_XDIST_AUTO_NUM_WORKERS` lowers the
+**Unit-only runs.** When the marker expression is exactly `unit`
+(`-m unit`, as in the pre-commit hook), the selected tests use no
+database and no Redis (see Tier 1 — Unit Tests), so the controller skips
+the checks above and starts no container; such a run needs no Docker
+daemon. Any other marker expression, including one that combines `unit`
+with further terms, is provisioned as described above. A worker that
+lacks `TEST_DATABASE_URL` or `TEST_REDIS_URL` fails the test requesting
+it instead of starting its own container, so a `unit`-marked test that
+uses a database or Redis fixture, directly or through an autouse
+fixture, fails the unit-only run.
+
+**Worker count.** The pre-push and pre-commit hooks use one worker per
+CPU, at most 8 (`-n auto --maxprocesses 8`);
+`PYTEST_XDIST_AUTO_NUM_WORKERS` lowers the
 count, for example when `TEST_DATABASE_URL` points at a server with less
 connection capacity. CI uses a fixed count that fits its runner and
 service containers (see CI Pipeline).
@@ -1134,10 +1144,15 @@ CI. Configured as shell scripts in `.githooks/` and activated
 per-repository via `core.hooksPath` (see activation steps below):
 
 - **pre-commit**: ruff check + ruff format check + mypy strict type check +
-  `pytest -m unit` (fast gate, < 15 seconds) + `gitleaks git --staged`
-  (secret scan on staged changes). Tool invocations use `uv run --locked`,
-  so the hook never mutates `backend/uv.lock` as a side effect of running
-  a check.
+  the unit suite as a fast gate, run in parallel workers without test
+  containers (`pytest -m unit -n auto --maxprocesses 8
+  --max-worker-restart 0`, see Parallel Execution) + `gitleaks git
+  --staged` (secret scan on staged changes). The gate stays fast because
+  it selects only unit tests, which are in-process by definition; no
+  wall-clock limit is specified, because duration depends on the host and
+  grows with the suite. Tool invocations use `uv run --locked`, so the
+  hook never mutates `backend/uv.lock` as a side effect of running a
+  check.
 - **pre-push**: full test suite including integration and e2e tests
   and the system suite, run in one invocation of parallel workers
   (`pytest -m "not image" -n auto --maxprocesses 8
