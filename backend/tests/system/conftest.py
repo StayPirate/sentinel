@@ -73,8 +73,12 @@ _CONFIG_BOOTSTRAP_TIMEOUT = 20.0
 _REDBEAT_ENTRY_TIMEOUT = 20.0
 _RUN_FINALIZED_TIMEOUT = 30.0
 _PROCESS_TERM_TIMEOUT = 10.0
-_POLL_INTERVAL = 0.5
-_INSPECT_TIMEOUT = 5.0
+_POLL_INTERVAL = 0.2
+# Reply timeout of one `inspect` call. kombu returns as soon as the single
+# destination worker replies; the timeout is only paid in full when the
+# worker is not consuming its control queue yet, so a short value keeps
+# readiness detection prompt while `_WORKER_READY_TIMEOUT` bounds the wait.
+_INSPECT_TIMEOUT = 1.0
 
 # Fictional JWT secret — never a real credential (AGENTS.md Guardrail 23).
 _SYSTEM_TEST_JWT_SECRET_KEY = "system-test-jwt-secret-key-not-for-production-32ch"
@@ -299,7 +303,7 @@ class FetcherPipelineHarness:
     def start_beat(self) -> None:
         self.beat_process = _spawn_celery_process(
             "beat",
-            ["beat", "--max-interval=5", "--loglevel=info"],
+            ["beat", "--max-interval=1", "--loglevel=info"],
             self.env,
             self.run_dir,
         )
@@ -466,7 +470,7 @@ class FetcherPipelineHarness:
         """Force the existing redbeat entry to be immediately overdue,
         via RedBeat's own public `reschedule()` API — Beat still performs
         the actual dispatch through the broker on its next tick (bounded
-        by `--max-interval=5`); this only removes the wait for a real
+        by `--max-interval=1`); this only removes the wait for a real
         cron boundary. See testing-strategy.md, Behavioral Requirements.
 
         The default fetcher (`EvaluateTestPipeline.default_schedule`) is
@@ -691,21 +695,6 @@ async def fetcher_pipeline_harness(
     step (4), `redis_client`'s own teardown is an additional safety net,
     not a substitute.
     """
-    # Registration boundary: import only now — never at collection time
-    # — so a `pytest -m 'not system'` run of the wider suite never
-    # registers this class (see testing-strategy.md, Registration
-    # Boundary).
-    import tests.support.system_fetcher as system_fetcher_module
-
-    fetcher_cls = system_fetcher_module.EvaluateTestPipeline
-    assert fetcher_cls.name == SYSTEM_FETCHER_NAME, (
-        f"tests/system/conftest.py's duplicated SYSTEM_FETCHER_NAME "
-        f"constant ({SYSTEM_FETCHER_NAME!r}) has drifted from "
-        f"EvaluateTestPipeline.name ({fetcher_cls.name!r})"
-    )
-    previous_registry_entry = FETCHER_REGISTRY.get(SYSTEM_FETCHER_NAME)
-    FETCHER_REGISTRY[SYSTEM_FETCHER_NAME] = fetcher_cls
-
     # Baseline: capture any `FetcherRun` ids that already exist for the
     # test fetcher BEFORE the preflight purge below — residue left by a
     # prior invocation of this suite that was interrupted before its
@@ -744,8 +733,35 @@ async def fetcher_pipeline_harness(
         preexisting_run_ids=preexisting_run_ids,
     )
 
+    # Registration happens only inside the `try` below, after every
+    # other setup step, so no failure path can leave the test fetcher
+    # registered without the cleanup below running.
+    #
+    # Snapshot the registry BEFORE the lazy import below: the first
+    # import of `tests.support.system_fetcher` already registers
+    # `EvaluateTestPipeline` through `BaseFetcher.__init_subclass__`, so
+    # a snapshot taken afterwards would treat the test fetcher as prior
+    # state and teardown would leave it registered in this process —
+    # leaking into every later test that runs in the same pytest worker
+    # (testing-strategy.md, Registration Boundary).
+    registry_before = dict(FETCHER_REGISTRY)
+
     cleanup_errors: list[str] = []
     try:
+        # Registration boundary: import only now — never at collection time
+        # — so a `pytest -m 'not system'` run of the wider suite never
+        # registers this class (see testing-strategy.md, Registration
+        # Boundary).
+        import tests.support.system_fetcher as system_fetcher_module
+
+        fetcher_cls = system_fetcher_module.EvaluateTestPipeline
+        assert fetcher_cls.name == SYSTEM_FETCHER_NAME, (
+            f"tests/system/conftest.py's duplicated SYSTEM_FETCHER_NAME "
+            f"constant ({SYSTEM_FETCHER_NAME!r}) has drifted from "
+            f"EvaluateTestPipeline.name ({fetcher_cls.name!r})"
+        )
+        FETCHER_REGISTRY[SYSTEM_FETCHER_NAME] = fetcher_cls
+
         yield harness
     finally:
         # 1. Stop Beat first (prevents new task enqueues). No-op if the
@@ -796,22 +812,46 @@ async def fetcher_pipeline_harness(
         except Exception as exc:
             cleanup_errors.append(f"postgres row cleanup failed: {exc!r}")
 
-        # 7. Restore/remove the test registry entry in the pytest process
-        # — without clearing the global registry.
-        if previous_registry_entry is None:
-            FETCHER_REGISTRY.pop(SYSTEM_FETCHER_NAME, None)
-        else:
-            FETCHER_REGISTRY[SYSTEM_FETCHER_NAME] = previous_registry_entry
+        # 7. Remove the test registry entry from the pytest process —
+        # without clearing the global registry. The test-only fetcher is
+        # never registered in the pytest host outside this fixture, so
+        # removal (not restoration of a prior entry) is the correct
+        # pre-fixture state.
+        FETCHER_REGISTRY.pop(SYSTEM_FETCHER_NAME, None)
 
         # 8. Verify processes are dead and test artifacts are absent —
-        # reads back exactly what steps 4-6 claim to have removed, so a
+        # reads back exactly what steps 4-7 claim to have removed, so a
         # silent regression in any of them (wrong filter, FK-order bug,
-        # a swallowed exception) fails THIS invocation instead of
-        # surfacing later as the next invocation's preflight purge
-        # quietly absorbing the leftover residue.
+        # a swallowed exception, a leaked registry entry) fails THIS
+        # invocation instead of surfacing later as the next invocation's
+        # preflight purge quietly absorbing the leftover residue, or as
+        # a later test in the same pytest worker observing the test
+        # fetcher.
         for proc in (harness.worker_process, harness.beat_process):
             if proc is not None and proc.is_alive():
                 cleanup_errors.append(f"{proc.name} process still alive after cleanup")
+
+        # Two independent registry checks: absence of the test fetcher
+        # holds even if the snapshot itself were taken too late (after
+        # the import already registered the class), and equality with the
+        # snapshot catches any other entry this fixture added or dropped.
+        if SYSTEM_FETCHER_NAME in FETCHER_REGISTRY:
+            cleanup_errors.append(
+                f"test-only fetcher '{SYSTEM_FETCHER_NAME}' still registered in "
+                "the pytest process after cleanup"
+            )
+        if registry_before != FETCHER_REGISTRY:
+            changed = sorted(
+                name
+                for name in FETCHER_REGISTRY.keys() & registry_before.keys()
+                if FETCHER_REGISTRY[name] is not registry_before[name]
+            )
+            cleanup_errors.append(
+                "FETCHER_REGISTRY differs from its pre-fixture state after "
+                f"cleanup: added={sorted(FETCHER_REGISTRY.keys() - registry_before)} "
+                f"removed={sorted(registry_before.keys() - FETCHER_REGISTRY)} "
+                f"changed={changed}"
+            )
 
         try:
             residues = await _residual_fetcher_artifacts(

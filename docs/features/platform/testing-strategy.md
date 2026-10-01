@@ -25,16 +25,19 @@ The unit, integration, and end-to-end tiers form the **default in-process
 suite**. `pytest` without a marker filter runs this suite; "default" describes
 its normal invocation, not a claim that it includes every test boundary.
 
-Two separately invoked suites sit outside the pyramid:
+Two further suites sit outside the pyramid and are excluded from an unadorned
+`pytest` run:
 
 - the **system suite** starts real local application processes and verifies
-  inter-process communication against test infrastructure; and
+  inter-process communication against test infrastructure; the pre-push hook
+  and CI run it inside the same parallel invocation as the default in-process
+  suite (see Local Process System Testing); and
 - the **image suite** verifies the final OCI artifact and acts as a blocking
   publication gate.
 
-Neither separate suite contributes to coverage measured for the default
-in-process suite. They complement the pyramid rather than forming fourth and
-fifth functional tiers.
+Code executed in the system suite's spawned processes and in the image suite's
+container is not measured by coverage. They complement the pyramid rather than
+forming fourth and fifth functional tiers.
 
 ### Tier 1 — Unit Tests
 
@@ -1085,9 +1088,12 @@ database.
 
 **Connection budget.** Each worker may hold up to 20 PostgreSQL
 connections: the shared test engine's pool (5 persistent and 10 overflow
-connections) plus 5 for the `NullPool` CLI-test engine, dedicated
-engines of cross-loop and migration tests, and administrative database
-connections.
+connections) plus 5 auxiliary connections. A worker runs one test at a
+time, so the auxiliary connections serve whichever of these the current
+test uses: the `NullPool` CLI-test engine, dedicated engines of
+cross-loop and migration tests, the Celery worker and Beat processes
+spawned by the system suite (each runs one task or scheduler tick at a
+time), or administrative database connections.
 
 **Controller checks.** Before any worker starts, the xdist controller
 fails the run with a usage error that names the remedy, and for a
@@ -1130,11 +1136,11 @@ per-repository via `core.hooksPath` (see activation steps below):
   (secret scan on staged changes). Tool invocations use `uv run --locked`,
   so the hook never mutates `backend/uv.lock` as a side effect of running
   a check.
-- **pre-push**: full test suite including integration and e2e tests,
-  run in parallel workers (`pytest -n auto --maxprocesses 8
-  --max-worker-restart 0`, see Parallel Execution), followed by the
-  system suite (`pytest -m system tests/system/`) — see Local Process
-  System Testing. Also uses `uv run --locked`, for the same reason.
+- **pre-push**: full test suite including integration and e2e tests
+  and the system suite, run in one invocation of parallel workers
+  (`pytest -m "not image" -n auto --maxprocesses 8
+  --max-worker-restart 0`, see Parallel Execution and Local Process
+  System Testing). Also uses `uv run --locked`, for the same reason.
 - **post-checkout / post-merge / post-rewrite**: after switching
   branches, pulling, merging, or completing a rebase, the backend
   environment (`backend/.venv`) is automatically synchronized with
@@ -1204,7 +1210,8 @@ through the following required gates:
    integration, and e2e suite MUST pass with a minimum line-coverage
    percentage enforced as a blocking gate. The suite runs in parallel
    workers (see Parallel Execution), one per runner vCPU within the
-   PostgreSQL connection budget.
+   PostgreSQL connection budget, in the same invocation as the local
+   process system test (gate 9).
 4. **Migration drift detection** — model definitions and migration
    scripts MUST remain in sync; the build fails if they diverge.
 5. **OpenAPI schema verification** — the OpenAPI schema generation MUST
@@ -1227,10 +1234,12 @@ through the following required gates:
 8. **Container image artifact gate** — on pull requests, the final OCI
    candidate MUST pass the artifact-risk checks defined below. This gate is
    blocking on PRs only (not on pushes to `master`).
-9. **Local process system test** — the system suite (`-m system`) MUST
-   pass. This gate verifies the inter-process fetcher pipeline using
+9. **Local process system test** — the system suite (tests marked
+   `system`) MUST pass. This gate verifies the inter-process fetcher pipeline using
    real worker and Beat processes against the test infrastructure. It
-   is a separate invocation from the coverage-measured suite.
+   runs inside the coverage-measured invocation of gate 3, selected with
+   `-m "not image"`; a system-test failure fails the build like any other
+   test failure.
 10. **Release SBOM validation** — on pull requests, the final image built for
     the image smoke gate MUST also produce a valid CycloneDX SBOM with the
     required runtime-component coverage. The SBOM is retained as a short-lived
@@ -1281,10 +1290,10 @@ justified merely by running inside the container.
 | Default run | **Excluded** — `pyproject.toml` sets `addopts = "-m 'not image and not system'"` |
 
 Because the marker is excluded from the default invocation, `cd backend
-&& uv run pytest` never attempts to start containers, and — since
-coverage is measured on that same default invocation — the image suite
-**does not contribute to, and is not counted toward, the ≥95% coverage
-gate**. This is intentional: it runs against a separately built artifact,
+&& uv run pytest` never attempts to start containers, and — since the
+coverage-measured CI invocation (`-m "not image"`) excludes it too — the
+image suite **does not contribute to, and is not counted toward, the ≥95%
+coverage gate**. This is intentional: it runs against a separately built artifact,
 not the instrumented local installation.
 
 ### Artifact-Risk Rule
@@ -1552,22 +1561,24 @@ infrastructure.
 | Location | `backend/tests/system/` |
 | Marker | `@pytest.mark.system` |
 | Isolation | Spawns real worker and Beat processes against test PostgreSQL and test Redis. Does NOT use the `db_session` rollback fixture for subprocess-committed rows |
-| Default run | **Excluded** — `addopts` excludes both `image` and `system` markers |
-| Coverage | Not counted toward the coverage gate — subprocess execution is not observable by the pytest-host tracer |
+| Default run | **Excluded** from an unadorned `pytest` — `addopts` excludes both `image` and `system` markers. The pre-push hook and CI select it explicitly (see Execution) |
+| Coverage | Subprocess execution is not observable by the pytest-host tracer and is never measured. In the coverage-measured CI invocation, the test's pytest-host code is measured like any other test's |
 
 ### Execution
 
-The suite runs via a dedicated pytest invocation:
+The pre-push hook and CI run the suite inside the parallel invocation of
+the default in-process suite by overriding the default marker filter
+(`pytest -m "not image" -n ...`; a later `-m` replaces the one in
+`addopts`). The system test then runs on one pytest-xdist worker,
+concurrently with other workers' tests, against that worker's database
+and Redis logical database (see Parallel Safety). It remains a blocking
+requirement on every pull request and push to `master`.
+
+Run it on its own with:
 
 ```bash
 cd backend && uv run pytest -m system tests/system/
 ```
-
-This invocation is included in the **pre-push hook** (after the
-default in-process suite) and as a **separate blocking CI gate** on every
-pull request and push to `master`. The CI environment provides the
-same `TEST_DATABASE_URL` and `TEST_REDIS_URL` used by the default in-process
-suite.
 
 ### Test-Only Fetcher
 
@@ -1614,8 +1625,9 @@ the normal Celery entrypoint. This ensures:
 - The test class is registered process-locally in spawned test
   processes and in the pytest host (for API visibility assertions).
 - Process exit removes subprocess registry state.
-- Pytest teardown restores only the specific test entry without
-  clearing the global registry.
+- Pytest teardown removes only the test entry, returning the pytest
+  host's registry to its pre-test state without clearing the global
+  registry.
 
 The spawned worker and Beat subprocesses MUST receive an explicit
 environment that sets `DATABASE_URL` and `CELERY_BROKER_URL` (and
@@ -1678,7 +1690,8 @@ or failed. The required ordering:
    This includes all `FetcherConfig` rows created by the spawned
    processes' bootstrap (which inserts rows for every fetcher in
    the subprocess registry), not only the test fetcher's own row.
-7. Restore/remove the test registry entry in the pytest process.
+7. Remove the test registry entry from the pytest process, returning
+   its registry to the pre-test state.
 8. Verify that processes are dead and test artifacts are absent.
 
 A cleanup failure MUST fail the test — including when the primary
@@ -1688,12 +1701,17 @@ assertion already failed.
 
 - Uses the worker-specific Redis logical database and PostgreSQL
   database (same isolation as the ordinary suite).
+- Leaves the pytest process's fetcher registry exactly as it found it,
+  so later tests on the same worker never observe the test-only fetcher
+  (see Registration Boundary); cleanup verification fails the test
+  otherwise.
 - `FLUSHALL` is forbidden.
 - PostgreSQL cleanup predicates are restricted to test-fetcher-
   specific names and IDs (no table-wide deletions).
 - Worker hostname, temporary files, and diagnostic paths are unique
   per test invocation.
-- The suite remains safe if assigned to a pytest-xdist worker.
+- The suite is safe on any pytest-xdist worker, interleaved with the
+  default in-process suite's tests.
 
 ### Relationship to Other Test Suites
 
@@ -1712,10 +1730,9 @@ that behavior was once exercised in a container.
 
 The system suite MUST be executed automatically:
 
-- **Pre-push hook**: invoked after the default in-process suite completes
-  successfully.
-- **CI pipeline**: a separate blocking invocation alongside the
-  existing gates (not merged into the coverage-measured run).
+- **Pre-push hook**: inside the hook's single parallel test invocation.
+- **CI pipeline**: inside the coverage-measured parallel invocation, as
+  blocking gate 9 (see CI Pipeline).
 
 No manual invocation is required for normal development workflow.
 

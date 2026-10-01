@@ -76,7 +76,7 @@ What the hooks do:
 |------|--------|
 | `pre-commit` | ruff lint, ruff format, mypy, unit tests, shellcheck/shfmt (if installed), gitleaks secret scanning |
 | `commit-msg` | Validates Conventional Commits format, breaking-marker policy, and 72-character subject limit |
-| `pre-push` | Full test suite (in parallel) and local process system suite; blocks direct pushes to `master` and local tag pushes |
+| `pre-push` | Full test suite including the local process system suite, in one parallel run; blocks direct pushes to `master` and local tag pushes |
 | `post-checkout` / `post-merge` / `post-rewrite` | Auto-syncs the Python virtualenv when `uv.lock` changes |
 
 The hooks degrade gracefully: optional tools (`shellcheck`, `shfmt`, `gitleaks`) produce a warning if missing, but do not block the operation.
@@ -162,8 +162,11 @@ cd backend
 # Run the default suite in a single process
 uv run pytest
 
-# Run it in parallel workers (as the pre-push hook does)
+# Run it in parallel workers
 uv run pytest -n auto --maxprocesses 8 --max-worker-restart 0
+
+# Also include the local process system suite (as the pre-push hook does)
+uv run pytest -m "not image" -n auto --maxprocesses 8 --max-worker-restart 0
 
 # Run with coverage
 uv run pytest --cov

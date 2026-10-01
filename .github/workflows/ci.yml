@@ -131,19 +131,17 @@ jobs:
           -c "ALTER SYSTEM SET synchronous_commit = off"
           -c "ALTER SYSTEM SET full_page_writes = off"
           -c "SELECT pg_reload_conf()"
-      - name: Run default in-process suite with coverage
+      - name: Run default in-process and local process system suites with coverage
         # Four pytest-xdist workers: one per runner vCPU, and within the
         # PostgreSQL service's 100-connection budget (20 per worker). A
-        # crashed worker fails the run instead of being replaced. See
-        # docs/features/platform/testing-strategy.md (Parallel Execution).
-        run: uv run pytest -n 4 --max-worker-restart 0 -v --cov=app --cov-report=term-missing --cov-report=xml:coverage.xml --cov-fail-under=95
-      - name: Run local process system suite
-        # Separate, blocking invocation from the coverage-measured run
-        # above — spawns real worker/Beat processes against this job's
-        # same PostgreSQL/Redis service containers. See
-        # docs/features/platform/testing-strategy.md (Local Process
-        # System Testing, CI Pipeline).
-        run: uv run pytest -m system tests/system/ -v
+        # crashed worker fails the run instead of being replaced.
+        # -m "not image" overrides the pyproject default marker filter so
+        # the local process system suite, which spawns real worker/Beat
+        # processes against this job's service containers, runs in the
+        # same invocation; its subprocesses are not measured. See
+        # docs/features/platform/testing-strategy.md (Parallel Execution;
+        # Local Process System Testing, Automation).
+        run: uv run pytest -m "not image" -n 4 --max-worker-restart 0 -v --cov=app --cov-report=term-missing --cov-report=xml:coverage.xml --cov-fail-under=95
       - name: Upload coverage to Codecov
         if: always()
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
