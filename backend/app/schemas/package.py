@@ -4,7 +4,8 @@ See `docs/features/tickets/tickets.md` (Response Schemas > ProductDetail,
 TrackDetail, TrackMilestones, PackageDetail) for the authoritative
 contracts, `docs/features/packages/package-model.md` (Derived
 Actionability, Delivery Relevance Indicator, List Ticket Packages,
-Change Track Status, Override Product Eligibility), and
+Change Track Status, Override Product Eligibility, Soft-Delete and Restore
+Package, Track, and Product), and
 `docs/features/tickets/ticket-deadlines.md` (Actors and Phases, Track
 Milestones, API Surface) for the field semantics these OpenAPI
 descriptions convey to external consumers.
@@ -445,3 +446,88 @@ class ProductEligibilityResponse(BaseModel):
     """Response body of `PATCH .../products/{ticket_package_product_id}`."""
 
     data: ProductEligibilityProduct
+
+
+# Exclusion and restoration (package-model.md, Soft-Delete and Restore Package,
+# Track, and Product). One schema per level, shared by exclude and restore.
+
+
+class PackageExclusionPackage(BaseModel):
+    """The locked-current package returned by a package exclude or restore."""
+
+    package_name: str = Field(description="Source package name.")
+    actionable: bool = Field(
+        description=(
+            "Whether the package is not manually excluded and has at least "
+            "one actionable track, on the mutation's UTC evaluation date."
+        )
+    )
+    non_actionable_reason: PackageReasonValue | None = Field(
+        description=(
+            "First applicable reason in the order `package_excluded`, "
+            "`no_actionable_tracks`; `null` when actionable."
+        )
+    )
+
+
+class PackageExclusionResponse(BaseModel):
+    """Response body of `POST .../packages/{package_id}/exclude|restore`."""
+
+    data: PackageExclusionPackage
+
+
+class TrackExclusionTrack(BaseModel):
+    """The locked-current track returned by a track exclude or restore."""
+
+    reference: str = Field(
+        description="Track reference (codestream project name or branch)."
+    )
+    actionable: bool = Field(
+        description=(
+            "Whether the track is not manually excluded (directly or through "
+            "its package) and has at least one actionable Product, on the "
+            "mutation's UTC evaluation date."
+        )
+    )
+    non_actionable_reason: TrackReasonValue | None = Field(
+        description=(
+            "First applicable reason in the order `package_excluded`, "
+            "`track_excluded`, `no_actionable_products`; `null` when actionable."
+        )
+    )
+
+
+class TrackExclusionResponse(BaseModel):
+    """Response body of `POST .../tracks/{track_id}/exclude|restore`."""
+
+    data: TrackExclusionTrack
+
+
+class ProductExclusionProduct(BaseModel):
+    """The locked-current Product occurrence returned by an exclude or restore."""
+
+    id: UUID = Field(description="TicketPackageProduct occurrence identifier.")
+    product_cpe: str = Field(
+        description="Canonical public identity (CPE) of the related catalog Product."
+    )
+    product_name: str = Field(description="Product display name.")
+    actionable: bool = Field(
+        description=(
+            "Whether the Product currently participates in operational "
+            "decisions: no manual exclusion at package, track, or Product "
+            "level, and not end-of-life on the mutation's UTC evaluation date."
+        )
+    )
+    non_actionable_reason: ProductReasonValue | None = Field(
+        description=(
+            "First applicable reason in the order `package_excluded`, "
+            "`track_excluded`, `product_excluded`, `eol`; `null` when "
+            "actionable."
+        )
+    )
+
+
+class ProductExclusionResponse(BaseModel):
+    """Response body of `POST .../products/{id}/exclude|restore` (occurrence id)."""
+
+    data: ProductExclusionProduct

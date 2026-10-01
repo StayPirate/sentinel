@@ -1474,6 +1474,12 @@ class TestPackageServiceModuleBoundary:
             "converge_manual_zone_exit_eligibility",
             "set_track_status",
             "set_product_eligibility",
+            "soft_delete_ticket_package",
+            "soft_delete_ticket_package_track",
+            "soft_delete_ticket_package_product",
+            "restore_ticket_package",
+            "restore_ticket_package_track",
+            "restore_ticket_package_product",
         }
 
     def test_uses_no_private_ticket_mutations_helper(self) -> None:

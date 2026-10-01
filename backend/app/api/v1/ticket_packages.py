@@ -1,8 +1,9 @@
 """Ticket package-tree endpoints.
 
 See `docs/features/packages/package-model.md` (API Endpoints > List Ticket
-Packages, Change Track Status, Override Product Eligibility) for the
-authoritative endpoint contracts.
+Packages, Change Track Status, Override Product Eligibility, Soft-Delete
+and Restore Package, Track, and Product) for the authoritative endpoint
+contracts.
 Handlers stay thin: they capture the request's single evaluation instant
 or date (`docs/features/tickets/ticket-deadlines.md`, Evaluation Instant;
 package-model.md, Derived Actionability), delegate the protected read or
@@ -12,12 +13,14 @@ exceptions to HTTP. No business logic or database query lives here.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Annotated
+from typing import Annotated, Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Path
+from fastapi import status as http_status
 
 from app.api.dependencies import (
     AuthenticatedPrincipal,
@@ -34,18 +37,25 @@ from app.api.dependencies import (
     ticket_not_mutable_error,
 )
 from app.core.enums import Capability, PackageStatus
+from app.core.errors import AppError, ErrorCode
 from app.core.exceptions import TicketNotFoundError, TicketNotMutableError
 from app.core.permissions import get_capabilities
 from app.database import DatabaseSession
 from app.schemas.errors import ErrorResponse
 from app.schemas.package import (
     PackageDetail,
+    PackageExclusionPackage,
+    PackageExclusionResponse,
     ProductDetail,
     ProductEligibilityProduct,
     ProductEligibilityResponse,
     ProductEligibilityUpdateRequest,
+    ProductExclusionProduct,
+    ProductExclusionResponse,
     TicketPackageListResponse,
     TrackDetail,
+    TrackExclusionResponse,
+    TrackExclusionTrack,
     TrackMilestones,
     TrackStatusProduct,
     TrackStatusResponse,
@@ -54,12 +64,17 @@ from app.schemas.package import (
 )
 from app.services import package_service
 from app.services.package_service import (
+    PackageAlreadyExcludedError,
+    PackageMarkerProjection,
+    PackageNotExcludedError,
     PackageNotFoundError,
     PackageProjection,
     ProductEligibilityProjection,
+    ProductMarkerProjection,
     ProductNotFoundError,
     ProductProjection,
     TrackFixedStatusRestrictedError,
+    TrackMarkerProjection,
     TrackNotFoundError,
     TrackProjection,
     TrackStatusProjection,
@@ -507,3 +522,375 @@ async def override_product_eligibility(
     return ProductEligibilityResponse(
         data=_serialize_product_eligibility(result.product)
     )
+
+
+# ---------------------------------------------------------------------------
+# Exclusion and restoration (Soft-Delete / Restore Package, Track, Product)
+# ---------------------------------------------------------------------------
+
+
+def package_already_excluded_error() -> AppError:
+    """Create the 409 for an exclusion of an already directly excluded record.
+
+    See package-model.md (Soft-Delete Package, Track, and Product) and
+    package-service.md (Service Exceptions, `PackageAlreadyExcludedError`).
+    """
+    return AppError(
+        status_code=http_status.HTTP_409_CONFLICT,
+        code=ErrorCode.PACKAGE_ALREADY_EXCLUDED,
+        detail="Record is already excluded.",
+    )
+
+
+def package_not_excluded_error() -> AppError:
+    """Create the 422 for a restoration of a record not directly excluded.
+
+    See package-model.md (Restore Package, Track, and Product) and
+    package-service.md (Service Exceptions, `PackageNotExcludedError`).
+    """
+    return AppError(
+        status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
+        code=ErrorCode.PACKAGE_NOT_EXCLUDED,
+        detail="Record is not directly excluded.",
+    )
+
+
+async def _run_marker_change[R](change: Awaitable[R]) -> R:
+    """Await one exclusion or restoration and map its service exceptions."""
+    try:
+        return await change
+    except TicketNotFoundError:
+        raise ticket_not_found_error() from None
+    except TicketNotMutableError:
+        raise ticket_not_mutable_error() from None
+    except PackageNotFoundError, TrackNotFoundError, ProductNotFoundError:
+        raise resource_not_found_error() from None
+    except PackageAlreadyExcludedError:
+        raise package_already_excluded_error() from None
+    except PackageNotExcludedError:
+        raise package_not_excluded_error() from None
+
+
+def _serialize_package_marker(
+    package: PackageMarkerProjection,
+) -> PackageExclusionResponse:
+    return PackageExclusionResponse(
+        data=PackageExclusionPackage.model_validate(
+            {
+                "package_name": package.package_name,
+                "actionable": package.actionable,
+                "non_actionable_reason": _lower(package.non_actionable_reason),
+            }
+        )
+    )
+
+
+def _serialize_track_marker(track: TrackMarkerProjection) -> TrackExclusionResponse:
+    return TrackExclusionResponse(
+        data=TrackExclusionTrack.model_validate(
+            {
+                "reference": track.reference,
+                "actionable": track.actionable,
+                "non_actionable_reason": _lower(track.non_actionable_reason),
+            }
+        )
+    )
+
+
+def _serialize_product_marker(
+    product: ProductMarkerProjection,
+) -> ProductExclusionResponse:
+    return ProductExclusionResponse(
+        data=ProductExclusionProduct.model_validate(
+            {
+                "id": product.id,
+                "product_cpe": product.product_cpe,
+                "product_name": product.product_name,
+                "actionable": product.actionable,
+                "non_actionable_reason": _lower(product.non_actionable_reason),
+            }
+        )
+    )
+
+
+_TICKET_NOT_FOUND_DESCRIPTION = (
+    "`TICKET_NOT_FOUND`: Ticket identifier is malformed, does not exist, or "
+    "identifies a Ticket inaccessible to the caller."
+)
+_NOT_MUTABLE_RESPONSE: dict[str, Any] = {
+    "model": ErrorResponse,
+    "description": "`TICKET_NOT_MUTABLE`: the Ticket is Ignored or Duplicated.",
+}
+
+
+def _exclude_responses(level: str, path: str) -> dict[int | str, dict[str, Any]]:
+    return {
+        404: {
+            "model": ErrorResponse,
+            "description": (
+                f"{_TICKET_NOT_FOUND_DESCRIPTION} `RESOURCE_NOT_FOUND`: the {path} "
+                "does not exist under the declared path."
+            ),
+        },
+        409: {
+            "model": ErrorResponse,
+            "description": (
+                f"`PACKAGE_ALREADY_EXCLUDED`: the {level} is already directly "
+                "excluded. `TICKET_NOT_MUTABLE`: the Ticket is Ignored or "
+                "Duplicated."
+            ),
+        },
+    }
+
+
+def _restore_responses(level: str, path: str) -> dict[int | str, dict[str, Any]]:
+    return {
+        404: {
+            "model": ErrorResponse,
+            "description": (
+                f"{_TICKET_NOT_FOUND_DESCRIPTION} `RESOURCE_NOT_FOUND`: the {path} "
+                "does not exist under the declared path."
+            ),
+        },
+        409: _NOT_MUTABLE_RESPONSE,
+        422: {
+            "model": ErrorResponse,
+            "description": (
+                f"`PACKAGE_NOT_EXCLUDED`: the {level} is not directly excluded "
+                "(an exclusion inherited from an ancestor does not count). "
+                "`VALIDATION_ERROR`: a nested identifier is not a UUID."
+            ),
+        },
+    }
+
+
+ManagePackagesPrincipal = Annotated[
+    AuthenticatedPrincipal, Depends(require_capability(Capability.MANAGE_PACKAGES))
+]
+AccessibleTicket = Annotated[ResolvedTicket, Depends(require_accessible_ticket)]
+
+_SHARED_BEHAVIOR = (
+    "Requires `manage_packages`. Changes only this record's direct marker: "
+    "ancestors and descendants are never modified. Records one audit event, "
+    "auto-assigns an unassigned Ticket to an active vulnerability analyst, and "
+    "re-evaluates the Ticket status. The response reports current "
+    "actionability, which may remain `false` because of an ancestor exclusion, "
+    "end-of-life, or the descendant set."
+)
+
+
+@router.post(
+    "/tickets/{ticket_id}/packages/{package_id}/exclude",
+    response_model=PackageExclusionResponse,
+    summary="Soft-Delete Package from Ticket",
+    description=(
+        "Directly excludes one package. Its tracks and Products become "
+        "effectively excluded without being modified. Excluding the caller's "
+        "last included maintained package may remove the caller's access to a "
+        f"confidential Ticket after this request. {_SHARED_BEHAVIOR}"
+    ),
+    responses=_exclude_responses("package", "package"),
+)
+async def exclude_package(
+    package_id: PackageIdPath,
+    db: DatabaseSession,
+    principal: ManagePackagesPrincipal,
+    caller: AuthenticatedTicketCaller,
+    ticket: AccessibleTicket,
+) -> PackageExclusionResponse:
+    """Soft-Delete Package from Ticket — see
+    `docs/features/packages/package-model.md`.
+
+    Authorization follows `docs/api-spec.md` (Authorization Chain
+    Evaluation Order, flow 3). The handler captures the one workflow UTC
+    date shared by reconciliation and the locked-current projection; the
+    service revalidates accessibility, operability, nested ownership, and
+    the direct-marker guard under the Ticket lock.
+    """
+    result = await _run_marker_change(
+        package_service.soft_delete_ticket_package(
+            db,
+            ticket_id=ticket.id,
+            package_id=package_id,
+            acting_user_id=principal.user.id,
+            caller=caller,
+            evaluation_date=_utc_now().date(),
+        )
+    )
+    return _serialize_package_marker(result.target)
+
+
+@router.post(
+    "/tickets/{ticket_id}/packages/{package_id}/restore",
+    response_model=PackageExclusionResponse,
+    summary="Restore Package",
+    description=(
+        "Restores one directly excluded package. Child markers are not "
+        "modified, so the package may remain non-actionable "
+        "(`no_actionable_tracks`). Restoring a maintained package reactivates "
+        f"maintainer visibility. {_SHARED_BEHAVIOR}"
+    ),
+    responses=_restore_responses("package", "package"),
+)
+async def restore_package(
+    package_id: PackageIdPath,
+    db: DatabaseSession,
+    principal: ManagePackagesPrincipal,
+    caller: AuthenticatedTicketCaller,
+    ticket: AccessibleTicket,
+) -> PackageExclusionResponse:
+    """Restore Package — see `docs/features/packages/package-model.md`."""
+    result = await _run_marker_change(
+        package_service.restore_ticket_package(
+            db,
+            ticket_id=ticket.id,
+            package_id=package_id,
+            acting_user_id=principal.user.id,
+            caller=caller,
+            evaluation_date=_utc_now().date(),
+        )
+    )
+    return _serialize_package_marker(result.target)
+
+
+@router.post(
+    "/tickets/{ticket_id}/packages/{package_id}/tracks/{track_id}/exclude",
+    response_model=TrackExclusionResponse,
+    summary="Soft-Delete Track",
+    description=(
+        "Directly excludes one track, also beneath an excluded package (the "
+        "response reason is then `package_excluded`). Its Products become "
+        f"effectively excluded without being modified. {_SHARED_BEHAVIOR}"
+    ),
+    responses=_exclude_responses("track", "package or track"),
+)
+async def exclude_track(
+    package_id: PackageIdPath,
+    track_id: TrackIdPath,
+    db: DatabaseSession,
+    principal: ManagePackagesPrincipal,
+    caller: AuthenticatedTicketCaller,
+    ticket: AccessibleTicket,
+) -> TrackExclusionResponse:
+    """Soft-Delete Track — see `docs/features/packages/package-model.md`."""
+    result = await _run_marker_change(
+        package_service.soft_delete_ticket_package_track(
+            db,
+            ticket_id=ticket.id,
+            package_id=package_id,
+            track_id=track_id,
+            acting_user_id=principal.user.id,
+            caller=caller,
+            evaluation_date=_utc_now().date(),
+        )
+    )
+    return _serialize_track_marker(result.target)
+
+
+@router.post(
+    "/tickets/{ticket_id}/packages/{package_id}/tracks/{track_id}/restore",
+    response_model=TrackExclusionResponse,
+    summary="Restore Track",
+    description=(
+        "Restores one directly excluded track. Product markers are not "
+        "modified, so the track may remain non-actionable "
+        f"(`no_actionable_products`). {_SHARED_BEHAVIOR}"
+    ),
+    responses=_restore_responses("track", "package or track"),
+)
+async def restore_track(
+    package_id: PackageIdPath,
+    track_id: TrackIdPath,
+    db: DatabaseSession,
+    principal: ManagePackagesPrincipal,
+    caller: AuthenticatedTicketCaller,
+    ticket: AccessibleTicket,
+) -> TrackExclusionResponse:
+    """Restore Track — see `docs/features/packages/package-model.md`."""
+    result = await _run_marker_change(
+        package_service.restore_ticket_package_track(
+            db,
+            ticket_id=ticket.id,
+            package_id=package_id,
+            track_id=track_id,
+            acting_user_id=principal.user.id,
+            caller=caller,
+            evaluation_date=_utc_now().date(),
+        )
+    )
+    return _serialize_track_marker(result.target)
+
+
+@router.post(
+    "/tickets/{ticket_id}/packages/{package_id}/tracks/{track_id}"
+    "/products/{ticket_package_product_id}/exclude",
+    response_model=ProductExclusionResponse,
+    summary="Soft-Delete Product",
+    description=(
+        "Directly excludes one Product occurrence, also beneath an excluded "
+        "package or track and while the Product is end-of-life (ancestor "
+        "reasons take precedence over `product_excluded`, which takes "
+        f"precedence over `eol`). {_SHARED_BEHAVIOR}"
+    ),
+    responses=_exclude_responses("Product", "package, track, or Product occurrence"),
+)
+async def exclude_product(
+    package_id: PackageIdPath,
+    track_id: TrackIdPath,
+    ticket_package_product_id: ProductOccurrenceIdPath,
+    db: DatabaseSession,
+    principal: ManagePackagesPrincipal,
+    caller: AuthenticatedTicketCaller,
+    ticket: AccessibleTicket,
+) -> ProductExclusionResponse:
+    """Soft-Delete Product — see `docs/features/packages/package-model.md`."""
+    result = await _run_marker_change(
+        package_service.soft_delete_ticket_package_product(
+            db,
+            ticket_id=ticket.id,
+            package_id=package_id,
+            track_id=track_id,
+            ticket_package_product_id=ticket_package_product_id,
+            acting_user_id=principal.user.id,
+            caller=caller,
+            evaluation_date=_utc_now().date(),
+        )
+    )
+    return _serialize_product_marker(result.target)
+
+
+@router.post(
+    "/tickets/{ticket_id}/packages/{package_id}/tracks/{track_id}"
+    "/products/{ticket_package_product_id}/restore",
+    response_model=ProductExclusionResponse,
+    summary="Restore Product",
+    description=(
+        "Restores one directly excluded Product occurrence. No ancestor or "
+        "lifecycle pre-check applies, so the Product may remain non-actionable "
+        f"(for example `eol`). {_SHARED_BEHAVIOR}"
+    ),
+    responses=_restore_responses("Product", "package, track, or Product occurrence"),
+)
+async def restore_product(
+    package_id: PackageIdPath,
+    track_id: TrackIdPath,
+    ticket_package_product_id: ProductOccurrenceIdPath,
+    db: DatabaseSession,
+    principal: ManagePackagesPrincipal,
+    caller: AuthenticatedTicketCaller,
+    ticket: AccessibleTicket,
+) -> ProductExclusionResponse:
+    """Restore Product — see `docs/features/packages/package-model.md`."""
+    result = await _run_marker_change(
+        package_service.restore_ticket_package_product(
+            db,
+            ticket_id=ticket.id,
+            package_id=package_id,
+            track_id=track_id,
+            ticket_package_product_id=ticket_package_product_id,
+            acting_user_id=principal.user.id,
+            caller=caller,
+            evaluation_date=_utc_now().date(),
+        )
+    )
+    return _serialize_product_marker(result.target)
