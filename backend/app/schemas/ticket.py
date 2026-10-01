@@ -26,13 +26,15 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.core.enums import SortOrder, TicketSortField
 from app.core.identifiers import parse_ticket_id
-from app.schemas.common import PaginationMeta, SeverityValue, UserReference
+from app.schemas.common import (
+    PaginationMeta,
+    SeverityValue,
+    TicketStatusValue,
+    UserReference,
+)
 from app.schemas.cve import CVEDetail, CVESummary
 from app.schemas.package import PackageDetail
 
-type TicketStatusValue = Literal[
-    "new", "analysis", "analyzed", "resolved", "ignored", "duplicated"
-]
 type TicketPriorityValue = Literal["p1", "p2", "p3", "p4"]
 
 # Field descriptions shared by `TicketSummary` and `TicketDetail`, so the

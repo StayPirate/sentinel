@@ -1471,6 +1471,7 @@ class TestPackageServiceModuleBoundary:
 
         assert coroutines == {
             "get_ticket_packages",
+            "search_packages",
             "converge_manual_zone_exit_eligibility",
             "set_track_status",
             "set_product_eligibility",

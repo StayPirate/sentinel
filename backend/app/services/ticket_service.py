@@ -117,6 +117,7 @@ from app.models.ticket_package_track import TicketPackageTrack
 from app.models.user import User
 from app.services import cve_service, package_service
 from app.services.package_service import PackageProjection
+from app.services.sql_patterns import LIKE_ESCAPE, escape_like
 from app.services.ticket_audit_log import (
     CVE_SOURCE_AUDIT_LABELS,
     MANUAL_TICKET_CREATED_COMMENT,
@@ -750,7 +751,6 @@ ASSIGNEE_NONE: Final = "none"
 handled before User resolution (docs/api-spec.md, User Identifier
 Resolution)."""
 
-_LIKE_ESCAPE: Final = "\\"
 _SNTL_PREFIX: Final = "sntl-"
 _CVE_PREFIX: Final = "CVE-"
 _DIGITS: Final = re.compile(r"[0-9]+")
@@ -786,16 +786,6 @@ _LIST_ASSIGNEE = aliased(User, name="list_assignee")
 _LIST_DUPLICATE_TARGET = aliased(Ticket, name="list_duplicate_target")
 
 
-def _escape_like(term: str) -> str:
-    """Escape `term` so `%`, `_`, and backslash match literally under
-    `ESCAPE '\\'` (backslash first, so added escapes are not doubled)."""
-    return (
-        term.replace(_LIKE_ESCAPE, _LIKE_ESCAPE * 2)
-        .replace("%", f"{_LIKE_ESCAPE}%")
-        .replace("_", f"{_LIKE_ESCAPE}_")
-    )
-
-
 def _sequence_prefix(term: str) -> str | None:
     """The digits searched in the SNTL identifier field, or `None` when
     the field does not apply (tickets.md, Search): an optional
@@ -821,7 +811,7 @@ def _search_condition(term: str) -> ColumnElement[bool]:
     """The multi-field OR search condition on `Ticket` for a normalized,
     non-empty term. Every one-to-many field uses existence semantics, so
     the condition never multiplies Ticket rows."""
-    escaped = _escape_like(term)
+    escaped = escape_like(term)
     branches: list[ColumnElement[bool]] = []
     digits = _sequence_prefix(term)
     if digits is not None:
@@ -830,7 +820,9 @@ def _search_condition(term: str) -> ColumnElement[bool]:
         exists(
             select(CVE.id).where(
                 CVE.id == Ticket.cve_id,
-                CVE.cve_id.ilike(f"{_escape_like(_cve_prefix(term))}%", escape="\\"),
+                CVE.cve_id.ilike(
+                    f"{escape_like(_cve_prefix(term))}%", escape=LIKE_ESCAPE
+                ),
             )
         ).correlate(Ticket)
     )
@@ -839,7 +831,7 @@ def _search_condition(term: str) -> ColumnElement[bool]:
             select(TicketPackage.id).where(
                 TicketPackage.ticket_id == Ticket.id,
                 TicketPackage.deleted_at.is_(None),
-                TicketPackage.package_name.ilike(f"%{escaped}%", escape="\\"),
+                TicketPackage.package_name.ilike(f"%{escaped}%", escape=LIKE_ESCAPE),
             )
         ).correlate(Ticket)
     )
@@ -847,7 +839,9 @@ def _search_condition(term: str) -> ColumnElement[bool]:
         exists(
             select(CVEExternalIdentifier.id).where(
                 CVEExternalIdentifier.cve_id == Ticket.cve_id,
-                CVEExternalIdentifier.identifier.ilike(f"{escaped}%", escape="\\"),
+                CVEExternalIdentifier.identifier.ilike(
+                    f"{escaped}%", escape=LIKE_ESCAPE
+                ),
             )
         ).correlate(Ticket)
     )

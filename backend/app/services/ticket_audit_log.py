@@ -75,6 +75,7 @@ from app.models.ticket import Ticket
 from app.models.ticket_audit_event import TicketAuditEvent
 from app.models.user import User
 from app.services.base_audit_log import BaseAuditLog
+from app.services.sql_patterns import LIKE_ESCAPE, escape_like
 from app.services.ticket_visibility import TicketCaller, ticket_visibility_condition
 
 # ---------------------------------------------------------------------------
@@ -405,8 +406,6 @@ class TicketAuditLog(BaseAuditLog):
 MAX_PER_PAGE: Final = 100
 """Largest accepted `per_page` (docs/api-spec.md, Pagination)."""
 
-_LIKE_ESCAPE: Final = "\\"
-
 
 @dataclass(frozen=True, slots=True)
 class TicketEventActor:
@@ -447,20 +446,6 @@ class TicketEventPage:
     total: int
     page: int
     per_page: int
-
-
-def _literal_substring_pattern(term: str) -> str:
-    """Build an `ILIKE` pattern matching `term` as a literal substring.
-
-    Backslash is escaped first, so the escapes added for `%` and `_`
-    are not themselves doubled. Used with `ESCAPE '\\'`.
-    """
-    escaped = (
-        term.replace(_LIKE_ESCAPE, _LIKE_ESCAPE * 2)
-        .replace("%", f"{_LIKE_ESCAPE}%")
-        .replace("_", f"{_LIKE_ESCAPE}_")
-    )
-    return f"%{escaped}%"
 
 
 async def list_ticket_events(
@@ -552,13 +537,13 @@ async def list_ticket_events(
     events = TicketAuditLog.filter_by_actor(events, actor)
     normalized_search = search.strip() if search is not None else ""
     if normalized_search:
-        pattern = _literal_substring_pattern(normalized_search)
+        pattern = f"%{escape_like(normalized_search)}%"
         events = events.where(
             or_(
-                TicketAuditEvent.comment.ilike(pattern, escape=_LIKE_ESCAPE),
-                TicketAuditEvent.old_value.ilike(pattern, escape=_LIKE_ESCAPE),
-                TicketAuditEvent.new_value.ilike(pattern, escape=_LIKE_ESCAPE),
-                cast(TicketAuditEvent.detail, Text).ilike(pattern, escape=_LIKE_ESCAPE),
+                TicketAuditEvent.comment.ilike(pattern, escape=LIKE_ESCAPE),
+                TicketAuditEvent.old_value.ilike(pattern, escape=LIKE_ESCAPE),
+                TicketAuditEvent.new_value.ilike(pattern, escape=LIKE_ESCAPE),
+                cast(TicketAuditEvent.detail, Text).ilike(pattern, escape=LIKE_ESCAPE),
             )
         )
     events = TicketAuditLog.apply_date_filters(events, from_date, to_date)

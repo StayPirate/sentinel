@@ -297,6 +297,21 @@ class TicketSortField(StrEnum):
     RELEASE_DUE_AT = "release_due_at"
 
 
+class PackageSortField(StrEnum):
+    """Sortable fields for the cross-Ticket package search.
+
+    Category B — classification (Python Enum only; never stored in the
+    database). See `docs/features/packages/package-model.md` (Search
+    Packages Across Tickets) and `docs/features/packages/package-service.md`
+    (`search_packages()`): `package_name` sorts in Unicode code-point
+    order independent of database collation, and `created_at` refers to
+    `TicketPackage.created_at` (when the package was added to the Ticket).
+    """
+
+    PACKAGE_NAME = "package_name"
+    CREATED_AT = "created_at"
+
+
 class CveState(StrEnum):
     """CVE record state, defined by the CVE Program.
 
