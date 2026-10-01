@@ -164,6 +164,13 @@ class TestErrorCode:
         Assessment)."""
         assert ErrorCode.CVSS_ASSESSMENT_NOT_FOUND == "CVSS_ASSESSMENT_NOT_FOUND"
 
+    def test_package_exclusion_error_codes_are_registered(self) -> None:
+        """See docs/api-spec.md (Error Code Categories, `PACKAGE_*`) and
+        docs/features/packages/package-service.md (Service Exceptions:
+        `PackageAlreadyExcludedError`, `PackageNotExcludedError`)."""
+        assert ErrorCode.PACKAGE_ALREADY_EXCLUDED == "PACKAGE_ALREADY_EXCLUDED"
+        assert ErrorCode.PACKAGE_NOT_EXCLUDED == "PACKAGE_NOT_EXCLUDED"
+
     def test_date_range_inverted_is_registered(self) -> None:
         """See docs/api-spec.md (Date Range Interpretation, Inverted
         range validation)."""

@@ -1798,7 +1798,8 @@ async def _change_direct_marker(
             )
             target, subject = track, track.reference
             detail = {"track": track.reference, "package": package.package_name}
-        case _MarkerLevel.PRODUCT:
+        case _:
+            assert level is _MarkerLevel.PRODUCT
             assert track_id is not None  # guaranteed by the public functions
             assert ticket_package_product_id is not None
             path = await _load_locked_product(
