@@ -1090,7 +1090,15 @@ class TestListTicketEventsInputGuards:
 
     @pytest.mark.parametrize(
         "locator",
-        ["sntl-1", " SNTL-1", "SNTL-01", "SNTL-2147483648", str(uuid.uuid4())],
+        [
+            "sntl-1",
+            " SNTL-1",
+            "SNTL-01",
+            "SNTL-2147483648",
+            # Fixed rather than random: pytest-xdist workers must collect
+            # identical test ids.
+            "8d0a6f1e-3c2b-4f5a-9e7d-1b2c3d4e5f60",
+        ],
     )
     async def test_malformed_locator_raises_before_query(self, locator: str) -> None:
         db = AsyncMock(spec=AsyncSession)
@@ -1451,7 +1459,11 @@ class TestListTicketEventsFilters:
         ]
         assert await _page_ids(db_session, ticket, actor="Fictional.Alice") == []
 
-    @pytest.mark.parametrize("actor", ["fictional.nobody", str(uuid.uuid4())])
+    # A fixed UUID rather than a random one: pytest-xdist workers must
+    # collect identical test ids.
+    @pytest.mark.parametrize(
+        "actor", ["fictional.nobody", "5e3c9a7b-2d1f-4b6e-8a0c-9f8e7d6c5b4a"]
+    )
     async def test_unknown_actor_returns_empty_page_for_accessible_ticket(
         self,
         actor: str,

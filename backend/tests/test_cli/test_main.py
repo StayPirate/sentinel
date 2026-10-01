@@ -529,7 +529,7 @@ def test_main_maps_unhandled_exception_with_empty_message_to_class_name(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.integration
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("signum", "expected_exit"),
     [(signal.SIGINT, 130), (signal.SIGTERM, 143)],
@@ -537,17 +537,15 @@ def test_main_maps_unhandled_exception_with_empty_message_to_class_name(
 def test_signal_produces_documented_exit_code(signum: int, expected_exit: int) -> None:
     """A long-running command reacts to SIGINT/SIGTERM with exit 130/143.
 
-    Spawns `_signal_probe.py`, a thin test-only wrapper that installs the
-    real signal handlers and immediately prints an unbuffered "READY"
-    marker before dispatching to the real, unmodified `app.cli.main()`
-    invoked as `manage-user list` against the real dev-env PostgreSQL.
-    Waiting for that marker on the child's stdout is the observable
+    Spawns `_signal_probe.py`, which runs the real, unmodified
+    `app.cli.main()` entry point with a hidden test-only command whose
+    body prints an unbuffered "READY" marker and then blocks. `main()`
+    installs the signal handlers before dispatching the command, so
+    waiting for that marker on the child's stdout is the observable
     readiness point required by
     docs/features/platform/testing-strategy.md (CLI Commands) instead of
-    guessing with a fixed sleep. If no PostgreSQL is reachable the
-    process exits 2 before the signal is delivered, which would falsify
-    `expected_exit` and fail the assertion below rather than silently
-    pass.
+    guessing with a fixed sleep, and the signal always arrives while the
+    command is still running. The probe needs no database or Redis.
     """
     proc = subprocess.Popen(
         [sys.executable, str(_SIGNAL_PROBE)],

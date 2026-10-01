@@ -22,7 +22,13 @@ echo "  full test suite..."
 # instead of being pushed out of view by the remaining tests in the
 # run (or truncated by an external time limit on a long-running full
 # suite before the run reaches its own completion summary).
-(cd backend && uv run --locked pytest --no-header -q -x) || [ $? -eq 5 ]
+# The suite runs in parallel pytest-xdist workers, one per CPU up to 8;
+# set PYTEST_XDIST_AUTO_NUM_WORKERS to use fewer. A crashed worker fails
+# the run instead of being replaced, because a replacement would need a
+# worker number outside the validated range. See
+# docs/features/platform/testing-strategy.md (Parallel Execution).
+(cd backend && uv run --locked pytest -n auto --maxprocesses 8 \
+    --max-worker-restart 0 --no-header -q -x) || [ $? -eq 5 ]
 
 echo "  local process system suite..."
 # Separate invocation from the ordinary suite above (excluded from its

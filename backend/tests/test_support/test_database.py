@@ -11,12 +11,20 @@ from typing import Any
 
 import pytest
 from sqlalchemy import delete, select, text
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
+from sqlalchemy.pool import NullPool
 
 from app.models.user import User
 from tests.support.database import (
     assert_lock_wait,
     backend_pid,
+    create_database,
+    drop_database,
     rollback_test_scope,
 )
 
@@ -287,3 +295,96 @@ class TestAssertLockWait:
 
         with pytest.raises(ValueError, match="other than the waiter"):
             await assert_lock_wait(task, waiter=waiter, blocked_by=blocked_by)
+
+
+class _Server:
+    """The PostgreSQL test server, inspected through this worker's database."""
+
+    def __init__(self, engine: AsyncEngine) -> None:
+        self.engine = engine
+        self.url = engine.url.render_as_string(hide_password=False)
+
+    def database_url(self, name: str) -> str:
+        return self.engine.url.set(database=name).render_as_string(hide_password=False)
+
+    async def exists(self, name: str) -> bool:
+        async with self.engine.connect() as conn:
+            found = await conn.scalar(
+                text("SELECT count(*) FROM pg_database WHERE datname = :name"),
+                {"name": name},
+            )
+        return bool(found == 1)
+
+
+@pytest.fixture
+def server(_engine: AsyncEngine) -> _Server:
+    return _Server(_engine)
+
+
+@pytest.fixture
+async def database_name(server: _Server) -> AsyncIterator[str]:
+    """A unique database name that needs quoting; dropped at teardown."""
+    name = f"Parallel-Test_{uuid.uuid4().hex[:10]}"
+    try:
+        yield name
+    finally:
+        await drop_database(server.url, name)
+
+
+@pytest.mark.integration
+class TestCreateAndDropDatabase:
+    async def test_create_makes_an_empty_database_with_the_exact_name(
+        self, server: _Server, database_name: str
+    ) -> None:
+        await create_database(server.url, database_name)
+
+        assert await server.exists(database_name)
+        engine = create_async_engine(
+            server.database_url(database_name), poolclass=NullPool
+        )
+        try:
+            async with engine.connect() as conn:
+                tables = await conn.scalar(
+                    text(
+                        "SELECT count(*) FROM information_schema.tables "
+                        "WHERE table_schema = 'public'"
+                    )
+                )
+        finally:
+            await engine.dispose()
+        assert tables == 0
+
+    async def test_drop_removes_the_database(
+        self, server: _Server, database_name: str
+    ) -> None:
+        await create_database(server.url, database_name)
+
+        await drop_database(server.url, database_name)
+
+        assert not await server.exists(database_name)
+
+    async def test_drop_of_an_absent_database_succeeds(
+        self, server: _Server, database_name: str
+    ) -> None:
+        await drop_database(server.url, database_name)
+
+        assert not await server.exists(database_name)
+
+    async def test_drop_terminates_connections_left_open(
+        self, server: _Server, database_name: str
+    ) -> None:
+        await create_database(server.url, database_name)
+        leaked = create_async_engine(
+            server.database_url(database_name), poolclass=NullPool
+        )
+        connection = await leaked.connect()
+        try:
+            await connection.execute(text("SELECT 1"))
+
+            await drop_database(server.url, database_name)
+
+            assert not await server.exists(database_name)
+        finally:
+            with contextlib.suppress(Exception):
+                await connection.close()
+            await leaked.dispose()

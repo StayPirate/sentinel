@@ -33,9 +33,9 @@ from typing import Any
 
 import pytest
 from alembic.config import Config
-from sqlalchemy import text
-from sqlalchemy.engine import URL
-from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncEngine
+
+from tests.support.database import create_database, drop_database
 
 _ALEMBIC_INI = Path(__file__).resolve().parents[2] / "alembic.ini"
 
@@ -54,26 +54,6 @@ def run_sync[T](coro: Coroutine[Any, Any, T]) -> T:
     return asyncio.run(coro)
 
 
-async def _create_database(admin_url: URL, db_name: str) -> None:
-    engine = create_async_engine(admin_url, isolation_level="AUTOCOMMIT")
-    try:
-        async with engine.connect() as conn:
-            await conn.execute(text(f'CREATE DATABASE "{db_name}"'))
-    finally:
-        await engine.dispose()
-
-
-async def _drop_database(admin_url: URL, db_name: str) -> None:
-    engine = create_async_engine(admin_url, isolation_level="AUTOCOMMIT")
-    try:
-        async with engine.connect() as conn:
-            await conn.execute(
-                text(f'DROP DATABASE IF EXISTS "{db_name}" WITH (FORCE)')
-            )
-    finally:
-        await engine.dispose()
-
-
 @pytest.fixture
 def alembic_test_database_url(_engine: AsyncEngine) -> Iterator[str]:
     """A fresh, empty PostgreSQL database dedicated to one test's
@@ -83,11 +63,11 @@ def alembic_test_database_url(_engine: AsyncEngine) -> Iterator[str]:
     db_name = f"alembic_test_{uuid.uuid4().hex[:12]}"
     admin_url = _engine.url.set(database="postgres")
 
-    run_sync(_create_database(admin_url, db_name))
+    run_sync(create_database(admin_url, db_name))
 
     yield _engine.url.set(database=db_name).render_as_string(hide_password=False)
 
-    run_sync(_drop_database(admin_url, db_name))
+    run_sync(drop_database(admin_url, db_name))
 
 
 def isolated_alembic_config() -> Config:
