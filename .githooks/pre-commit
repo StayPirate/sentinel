@@ -18,14 +18,7 @@ echo "  unit tests..."
 # first unit test is added. -x stops at the first failure so its
 # location is always the last thing printed, instead of being pushed
 # out of view by the remaining tests in the run.
-# The suite runs in parallel pytest-xdist workers, one per CPU up to 8;
-# set PYTEST_XDIST_AUTO_NUM_WORKERS to use fewer. A crashed worker fails
-# the run instead of being replaced, because a replacement would need a
-# worker number outside the validated range. See
-# docs/features/platform/testing-strategy.md (Parallel Execution).
-(cd backend && uv run --locked pytest -m unit -n auto \
-    --maxprocesses 8 --max-worker-restart 0 --no-header -q -x) ||
-    [ $? -eq 5 ]
+(cd backend && uv run --locked pytest -m unit --no-header -q -x) || [ $? -eq 5 ]
 
 # --- Shell script checks (shellcheck + shfmt) ---
 # Run only on staged shell files. Because shellcheck and shfmt are not
