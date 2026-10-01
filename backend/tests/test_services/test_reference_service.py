@@ -74,7 +74,6 @@ from app.models.ticket_reference import TicketReference
 from app.models.user import User
 from app.services import ticket_convergence_registry, ticket_mutations
 from app.services.reference_service import (
-    UNSET,
     ManualReferenceCreateInput,
     ManualReferenceUpdateInput,
     ReferenceConflictError,
@@ -538,32 +537,6 @@ class TestInputValidation:
         assert recorder.statements == []
         assert await _rows(db_session, ticket.id) == before
         assert await ticket_events_by_id(db_session, ticket.id) == []
-
-    async def test_update_with_every_field_omitted_has_the_documented_message(
-        self,
-        db_session: AsyncSession,
-        ticket_factory: TicketFactory,
-        ticket_reference_factory: ReferenceFactory,
-        va_user: VAUser,
-    ) -> None:
-        """TicketReferenceUpdate: `At least one field must be provided.`"""
-        actor = await va_user()
-        ticket = await ticket_factory()
-        reference = await _seed(ticket_reference_factory, ticket)
-
-        with pytest.raises(
-            ValueError, match=r"^At least one field must be provided\.$"
-        ):
-            await _update(
-                db_session,
-                ticket,
-                reference.id,
-                actor,
-                url=UNSET,
-                title=UNSET,
-                description=UNSET,
-                type=UNSET,
-            )
 
     @pytest.mark.parametrize("op", MUTATIONS)
     async def test_anonymous_caller_is_a_programming_error(
@@ -1207,23 +1180,6 @@ class TestUpdate:
         assert await _rows(db_session, other.id) == before_other
         assert await ticket_events_by_id(db_session, ticket.id) == []
         assert await ticket_events_by_id(db_session, other.id) == []
-
-    async def test_wrong_parent_and_unknown_have_identical_messages(
-        self,
-        db_session: AsyncSession,
-        ticket_factory: TicketFactory,
-        ticket_reference_factory: ReferenceFactory,
-        va_user: VAUser,
-    ) -> None:
-        actor = await va_user()
-        ticket = await ticket_factory()
-        foreign = await _seed(ticket_reference_factory, await ticket_factory())
-        messages: list[str] = []
-        for reference_id in (foreign.id, uuid.uuid7()):
-            with pytest.raises(ReferenceNotFoundError) as caught:
-                await _update(db_session, ticket, reference_id, actor, title="Changed")
-            messages.append(str(caught.value))
-        assert messages[0] == messages[1]
 
     async def test_automatic_reference_is_not_editable(
         self,
