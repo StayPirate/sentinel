@@ -74,9 +74,10 @@ fetcher compliance, transaction hygiene, dimension orthogonality, security,
 CI/CD, and data-model rules whenever their triggers apply.
 
 Satisfy Guardrail 6 in full for every code change: add the required tests,
-cover the mandated scenarios, run the relevant and full suites, fix failures,
-and invoke test review when required. Run all applicable lint, formatting,
-type, migration, or artifact-specific checks before completion.
+cover the mandated scenarios, run the relevant and full suites (the full suite
+in parallel, per `AGENTS.md` Quality and findings), fix failures, and invoke
+test review when required. Run all applicable lint, formatting, type,
+migration, or artifact-specific checks before completion.
 
 ### External contracts
 

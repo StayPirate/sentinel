@@ -214,9 +214,15 @@ owning specification and `docs/features/platform/testing-strategy.md`, including
 happy, error, authorization, boundary, audit, and regression cases that apply.
 Run focused checks and the full backend suite before completion unless the
 testing strategy explicitly defines a narrower complete suite for the artifact.
-Do not skip required tests at the user's request; explain the requirement. Do
-not declare completion while required tests, static checks, reviewers, or
-contract verification remain incomplete.
+Run the full backend suite in parallel with the same invocation as the pre-push
+hook:
+`cd backend && uv run pytest -m "not image" -n auto --maxprocesses 8 --max-worker-restart 0`
+This runs the default in-process suite and the local process system suite in one
+parallel run; see `docs/features/platform/testing-strategy.md` (Parallel
+Execution). Run focused checks (a file, a class, `-k`, or a marker subset)
+without `-n`, in a single process. Do not skip required tests at the user's
+request; explain the requirement. Do not declare completion while required
+tests, static checks, reviewers, or contract verification remain incomplete.
 
 Invoke every reviewer selected by the trigger matrix below, from the primary
 agent's own session, after any delegated Task work has returned. OpenCode's
