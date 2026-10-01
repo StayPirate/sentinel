@@ -187,7 +187,11 @@ Two provisioning modes, selected automatically:
    `conftest.py` fixture uses `testcontainers` to start an ephemeral
    PostgreSQL 18 container automatically. The container is created once
    per test session and destroyed at the end. Zero manual setup required
-   — the developer just runs `pytest`.
+   — the developer just runs `pytest`. Because the server is discarded
+   with the container, it runs with durability disabled (`fsync`,
+   `synchronous_commit`, and `full_page_writes` off). In a parallel run
+   the xdist controller starts this container once for all workers (see
+   Parallel Execution).
 
    Prerequisite: Docker Engine or Docker Desktop must be available locally.
    Testcontainers uses the Docker daemon; Podman compatibility endpoints are
@@ -200,6 +204,9 @@ At the start of each test session, the test engine runs
 definitions. This is faster than running Alembic migrations and
 sufficient for correctness — the Alembic drift check (see Execution
 Model, CI) separately verifies that migrations stay in sync with models.
+A single-process session creates the tables in the harness database and
+drops them at the end; each parallel worker creates them in its own
+database (see Parallel Execution).
 
 ### Per-Test Isolation: Transaction Rollback
 
@@ -477,9 +484,10 @@ designated range; additional workers use consecutive logical databases.
 The harness MUST verify that each worker maps to a distinct database and
 that the Redis server provides enough logical databases. It MUST fail
 explicitly if the configured range is insufficient; it must not continue
-with worker mappings that overlap one another. The harness cannot infer
-ownership by unrelated processes, so it relies on the exclusive-range
-contract of `TEST_REDIS_URL` above.
+with worker mappings that overlap one another. A parallel run checks the
+range before any worker starts (see Parallel Execution). The harness
+cannot infer ownership by unrelated processes, so it relies on the
+exclusive-range contract of `TEST_REDIS_URL` above.
 
 All Redis clients and application processes created within one test MUST
 use that test's worker database. This intentionally preserves realistic
@@ -735,6 +743,10 @@ Coverage is measured by `pytest-cov` with the following settings (in
   visible symptom: a small file can show as low as 70% coverage while
   every line is demonstrably exercised by passing tests, because the
   project-wide aggregate is large enough to mask the gap.
+- Parallel runs: `pytest-cov` measures each pytest-xdist worker with the
+  same settings and combines the worker data before reporting and
+  enforcing the threshold. A parallel run therefore reports the same
+  metric as a single-process run of the same tests.
 
 ---
 
@@ -875,9 +887,11 @@ backend/tests/
 ├── test_docs_links.py          # Structural documentation link tests
 ├── support/                    # Test-only helpers with no app/ counterpart
 │   ├── audit_models.py         # Concrete AuditEventMixin subclass for mixin/base-class tests
-│   └── database.py             # Shared database transaction and lock-wait test helpers
+│   ├── database.py             # Shared database transaction, lock-wait, and database lifecycle helpers
+│   └── parallel.py             # Parallel worker identity, isolation, and capacity helpers
 ├── test_support/               # Tests for importable test support helpers
-│   └── test_database.py
+│   ├── test_database.py
+│   └── test_parallel.py
 ├── test_architecture/          # Structural model and layer tests
 │   ├── test_model_conventions.py   # Invariants over Base.metadata
 │   └── test_layer_dependencies.py  # Layer dependency direction (AST)
@@ -1031,6 +1045,80 @@ test session. Redis
 tests require no application `REDIS_URL` or `CELERY_BROKER_URL`; leaving
 `TEST_REDIS_URL` unset is the normal local setup.
 
+An unadorned `pytest` invocation runs in a single process, which keeps
+focused runs and debugging simple. The complete default suite normally
+runs in parallel (see Parallel Execution):
+
+```bash
+cd backend && pytest -n auto --maxprocesses 8 --max-worker-restart 0
+```
+
+### Parallel Execution
+
+The pre-push hook and CI run the default in-process suite in parallel
+with `pytest-xdist`. Each pytest worker is an independent process that
+runs a share of the tests against its own PostgreSQL database and its
+own Redis logical database, so no test observes another worker's state.
+Parallelism is chosen explicitly on the command line (`-n`); it is not
+part of the default `addopts`.
+
+**Worker identity.** Workers are numbered from the `PYTEST_XDIST_WORKER`
+id (`gw0`, `gw1`, ...). A single-process run behaves as worker number 0
+for Redis and uses the harness database itself for PostgreSQL. A crashed
+worker is not replaced (`--max-worker-restart 0`): a replacement would
+receive a worker number outside the validated range, so a crash fails
+the run instead.
+
+**PostgreSQL worker databases.** Each worker uses the database
+`<database>_gw<N>` on the server of `TEST_DATABASE_URL`, where
+`<database>` is that URL's database. At session start the worker drops
+any database of that name left by an interrupted earlier run, creates it
+empty through an autocommit connection to the harness database, and runs
+`Base.metadata.create_all()` in it. At session end it drops the
+database. A long-lived server therefore keeps no worker database after a
+completed run, and at most one per worker number after an interrupted
+run, reclaimed by the next run. A worker database name longer than
+PostgreSQL's 63-byte identifier limit fails the run instead of being
+truncated. All per-test isolation rules (rollback, `db_session_factory`,
+explicit cleanup of committed rows) apply unchanged inside each worker
+database.
+
+**Connection budget.** Each worker may hold up to 20 PostgreSQL
+connections: the shared test engine's pool (5 persistent and 10 overflow
+connections) plus 5 for the `NullPool` CLI-test engine, dedicated
+engines of cross-loop and migration tests, and administrative database
+connections.
+
+**Controller checks.** Before any worker starts, the xdist controller
+fails the run with a usage error that names the remedy, and for a
+capacity limit the largest safe worker count, when:
+
+- the workers need Redis logical databases beyond the 16 of a default
+  Redis server, counted from the database in `TEST_REDIS_URL`;
+- the workers' connection budget exceeds the PostgreSQL server's
+  `max_connections` minus its reserved connections and the clients
+  already connected; or
+- the `TEST_DATABASE_URL` role can neither create databases nor is a
+  superuser.
+
+**Local containers.** When `TEST_DATABASE_URL` or `TEST_REDIS_URL` is
+unset, the controller starts one PostgreSQL and one Redis container for
+the whole run, sizes PostgreSQL's `max_connections` for the planned
+workers, and passes the container URLs to the workers through those
+variables.
+
+**Worker count.** The pre-push hook uses one worker per CPU, at most 8
+(`-n auto --maxprocesses 8`); `PYTEST_XDIST_AUTO_NUM_WORKERS` lowers the
+count, for example when `TEST_DATABASE_URL` points at a server with less
+connection capacity. CI uses a fixed count that fits its runner and
+service containers (see CI Pipeline).
+
+**Deterministic collection.** Every worker collects the suite
+independently, and xdist fails the run when the workers' test ids differ.
+Parametrize values that appear in test ids MUST therefore be
+deterministic; generate random values inside the test, not in its
+parametrization.
+
 ### Pre-Commit Hooks (Local Automation)
 
 Repository-level git hooks provide fast feedback before commits reach
@@ -1042,10 +1130,11 @@ per-repository via `core.hooksPath` (see activation steps below):
   (secret scan on staged changes). Tool invocations use `uv run --locked`,
   so the hook never mutates `backend/uv.lock` as a side effect of running
   a check.
-- **pre-push**: full test suite (`pytest`) including integration and
-  e2e tests, followed by the system suite (`pytest -m system
-  tests/system/`) — see Local Process System Testing. Also uses
-  `uv run --locked`, for the same reason.
+- **pre-push**: full test suite including integration and e2e tests,
+  run in parallel workers (`pytest -n auto --maxprocesses 8
+  --max-worker-restart 0`, see Parallel Execution), followed by the
+  system suite (`pytest -m system tests/system/`) — see Local Process
+  System Testing. Also uses `uv run --locked`, for the same reason.
 - **post-checkout / post-merge / post-rewrite**: after switching
   branches, pulling, merging, or completing a rebase, the backend
   environment (`backend/.venv`) is automatically synchronized with
@@ -1113,7 +1202,9 @@ through the following required gates:
    scripts (`alembic/`).
 3. **Default in-process suite with coverage threshold** — the unit,
    integration, and e2e suite MUST pass with a minimum line-coverage
-   percentage enforced as a blocking gate.
+   percentage enforced as a blocking gate. The suite runs in parallel
+   workers (see Parallel Execution), one per runner vCPU within the
+   PostgreSQL connection budget.
 4. **Migration drift detection** — model definitions and migration
    scripts MUST remain in sync; the build fails if they diverge.
 5. **OpenAPI schema verification** — the OpenAPI schema generation MUST
@@ -1155,7 +1246,12 @@ The test execution environment MUST provide PostgreSQL 18 and Redis 8
 instances, exposed to the test harness via `TEST_DATABASE_URL` and
 `TEST_REDIS_URL` respectively. When the suite runs with parallel
 workers, the Redis instance MUST offer enough logical databases for one
-dedicated database per worker (see Worker and Test Isolation, above).
+dedicated database per worker (see Worker and Test Isolation, above),
+the `TEST_DATABASE_URL` role MUST be able to create databases, and the
+PostgreSQL server MUST accept the workers' connection budget (see
+Parallel Execution). Because the CI PostgreSQL service container is
+discarded with the job, the workflow disables its durability (`fsync`,
+`synchronous_commit`, and `full_page_writes` off) before the suite runs.
 
 ---
 
@@ -1590,8 +1686,8 @@ assertion already failed.
 
 ### Parallel Safety
 
-- Uses the worker-specific Redis logical database (same isolation as
-  the ordinary suite).
+- Uses the worker-specific Redis logical database and PostgreSQL
+  database (same isolation as the ordinary suite).
 - `FLUSHALL` is forbidden.
 - PostgreSQL cleanup predicates are restricted to test-fetcher-
   specific names and IDs (no table-wide deletions).

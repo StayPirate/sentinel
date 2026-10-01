@@ -13,7 +13,7 @@ import warnings
 from collections.abc import AsyncGenerator, Awaitable, Callable, Iterator
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any
+from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 import pytest
@@ -24,6 +24,8 @@ from httpx import ASGITransport, AsyncClient
 from redbeat.schedulers import ensure_conf
 from redis.exceptions import RedisError
 from sqlalchemy import delete, select
+from sqlalchemy.engine import make_url
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -31,10 +33,6 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 from sqlalchemy.pool import NullPool
-
-if TYPE_CHECKING:
-    from testcontainers.community.postgres import PostgresContainer
-    from testcontainers.community.redis import RedisContainer
 
 # Provide required settings for test environment (must precede app imports)
 os.environ.setdefault(
@@ -99,77 +97,98 @@ from app.models import (
 from app.services import local_auth_service, session_service
 from app.services.session_service import create_session
 from tests.support.audit_models import SampleAuditEvent
+from tests.support.database import create_database, drop_database
+from tests.support.parallel import (
+    ENGINE_MAX_OVERFLOW,
+    ENGINE_POOL_SIZE,
+    check_postgres_capacity,
+    check_redis_capacity,
+    planned_worker_count,
+    postgres_container_max_connections,
+    read_postgres_capacity,
+    redis_base_index,
+    redis_worker_db_index,
+    worker_database_url,
+    worker_id,
+)
 
 # Fictional bcrypt-shaped value — never a real hash (see AGENTS.md Guardrail 23)
 _FICTIONAL_PASSWORD_HASH = "$2b$12$" + "a" * 53
 
-# Module-level cache for the auto-provisioned testcontainers PostgreSQL
-# instance (started once per session, reused across tests). Kept as a
-# module global — rather than function attributes — for clean typing.
-_container: PostgresContainer | None = None
+# Module-level cache for the URL of the auto-provisioned testcontainers
+# PostgreSQL instance of a single-process run (started once per session,
+# reused across tests). Kept as a module global — rather than function
+# attributes — for clean typing.
 _container_url: str | None = None
 
 
-def _database_url() -> str:
-    """Resolve the test database URL.
+def _start_postgres_container(max_connections: int = 100) -> str:
+    """Start an ephemeral PostgreSQL test server and return its asyncpg URL.
 
-    Priority:
-    1. TEST_DATABASE_URL env var (set by CI or developer override)
-    2. Auto-provisioned PostgreSQL via testcontainers (local dev)
+    `max_connections` raises the server default (100) when parallel
+    workers need a larger connection budget (see `pytest_configure`).
+    Durability is disabled because the server is discarded with the
+    container: otherwise the checkpoint forced by `DROP DATABASE` must
+    fsync every file the per-worker databases created. The container is
+    stopped when this process exits.
     """
-    global _container, _container_url
-
-    url = os.environ.get("TEST_DATABASE_URL")
-    if url:
-        return url
-
-    if _container_url is not None:
-        return _container_url
-
     # Lazy import — testcontainers is only needed when no URL is provided
     from testcontainers.community.postgres import PostgresContainer
 
     # renovate: depName=postgres
     container = PostgresContainer("postgres:18")
+    container.with_command(
+        "postgres -c fsync=off -c synchronous_commit=off -c full_page_writes=off"
+        f" -c max_connections={max_connections}"
+    )
     container.start()
     atexit.register(container.stop)
-    # Build asyncpg URL from the container's connection params
-    _container_url = container.get_connection_url().replace(
+    url: str = container.get_connection_url().replace(
         "postgresql+psycopg2://", "postgresql+asyncpg://"
     )
-    _container = container
-    return _container_url
+    return url
 
 
-# Module-level cache for the auto-provisioned testcontainers Redis
-# instance (started once per session, reused across tests). Mirrors the
-# PostgreSQL pattern above.
-_redis_container: RedisContainer | None = None
-_redis_container_url: str | None = None
-
-# Standard Redis server logical database count (`databases 16` default
-# config). Used to validate worker-to-database allocation safety — see
-# docs/features/platform/testing-strategy.md (Worker and Test Isolation).
-_REDIS_LOGICAL_DB_COUNT = 16
-
-
-def _redis_base_url() -> str:
-    """Resolve the base Redis test-harness URL, before the per-worker
-    logical database offset is applied.
+def _base_database_url() -> str:
+    """Resolve the PostgreSQL test-harness URL, before the per-worker
+    database is applied.
 
     Priority:
-    1. TEST_REDIS_URL env var (set by CI or developer override)
-    2. Auto-provisioned Redis 7 via testcontainers (local dev)
+    1. TEST_DATABASE_URL env var (set by CI, by a developer override, or
+       by the xdist controller for its workers — see `pytest_configure`)
+    2. Auto-provisioned PostgreSQL via testcontainers (local dev)
     """
-    global _redis_container, _redis_container_url
+    global _container_url
 
-    url = os.environ.get("TEST_REDIS_URL")
+    url = os.environ.get("TEST_DATABASE_URL")
     if url:
         return url
 
-    if _redis_container_url is not None:
-        return _redis_container_url
+    if _container_url is None:
+        _container_url = _start_postgres_container()
+    return _container_url
 
+
+def _database_url() -> str:
+    """This test session's PostgreSQL URL.
+
+    A single-process run uses the harness database itself; a pytest-xdist
+    worker uses its dedicated `<database>_gw<N>` database on the same
+    server (see docs/features/platform/testing-strategy.md, Parallel
+    Execution), created and dropped by `_engine`.
+    """
+    return worker_database_url(_base_database_url(), worker_id())
+
+
+# Module-level cache for the URL of the auto-provisioned testcontainers
+# Redis instance of a single-process run. Mirrors the PostgreSQL pattern
+# above.
+_redis_container_url: str | None = None
+
+
+def _start_redis_container() -> str:
+    """Start an ephemeral Redis test server and return its URL (logical
+    database 0). The container is stopped when this process exits."""
     # Lazy import — testcontainers is only needed when no URL is provided
     from testcontainers.community.redis import RedisContainer
 
@@ -179,33 +198,87 @@ def _redis_base_url() -> str:
     atexit.register(container.stop)
     host = container.get_container_host_ip()
     port = container.get_exposed_port(container.port)
-    _redis_container_url = f"redis://{host}:{port}/0"
-    _redis_container = container
+    return f"redis://{host}:{port}/0"
+
+
+def _redis_base_url() -> str:
+    """Resolve the base Redis test-harness URL, before the per-worker
+    logical database offset is applied.
+
+    Priority:
+    1. TEST_REDIS_URL env var (set by CI, by a developer override, or by
+       the xdist controller for its workers — see `pytest_configure`)
+    2. Auto-provisioned Redis via testcontainers (local dev)
+    """
+    global _redis_container_url
+
+    url = os.environ.get("TEST_REDIS_URL")
+    if url:
+        return url
+
+    if _redis_container_url is None:
+        _redis_container_url = _start_redis_container()
     return _redis_container_url
 
 
 def _redis_worker_db_index(base_index: int) -> int:
     """This pytest worker's dedicated logical database index.
 
-    Workers are identified by `PYTEST_XDIST_WORKER` (`"gw0"`, `"gw1"`,
-    ...), set by pytest-xdist when parallel execution is active; absent
-    otherwise (single-process run). Each worker's index is
-    `base_index + worker_number`, so consecutive workers use consecutive
-    databases with no overlap. Raises explicitly — never silently
-    shares a database — if the resulting index would meet or exceed the
-    number of databases the server offers.
+    See `tests.support.parallel.redis_worker_db_index`: consecutive
+    workers use consecutive databases from `base_index`, and an index the
+    server does not offer raises instead of sharing a database.
     """
-    worker_input = os.environ.get("PYTEST_XDIST_WORKER")
-    offset = 0 if not worker_input else int(worker_input.removeprefix("gw"))
-    index = base_index + offset
-    if index >= _REDIS_LOGICAL_DB_COUNT:
-        raise RuntimeError(
-            f"Redis test harness requires logical database {index}, but the "
-            f"server only offers {_REDIS_LOGICAL_DB_COUNT} (0-"
-            f"{_REDIS_LOGICAL_DB_COUNT - 1}). Reduce the number of parallel "
-            "test workers or configure a server with more logical databases."
+    return redis_worker_db_index(base_index, worker_id())
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Prepare shared test infrastructure for parallel workers.
+
+    Runs in the pytest-xdist controller before any worker starts; does
+    nothing for a single-process run or inside a worker. Fails the run
+    with a usage error when the planned worker count exceeds the Redis
+    logical-database range or the PostgreSQL connection budget, or when
+    the test role cannot create the per-worker databases (see
+    docs/features/platform/testing-strategy.md, Parallel Execution).
+
+    Without TEST_DATABASE_URL/TEST_REDIS_URL, the controller starts one
+    PostgreSQL and one Redis container for the whole run and exports
+    their URLs through those variables, which the workers inherit.
+    """
+    if hasattr(config, "workerinput"):
+        return
+    workers = planned_worker_count(config)
+    if workers == 0:
+        return
+
+    check_redis_capacity(
+        redis_base_index(os.environ.get("TEST_REDIS_URL", "")), workers
+    )
+    if not os.environ.get("TEST_DATABASE_URL"):
+        os.environ["TEST_DATABASE_URL"] = _start_postgres_container(
+            postgres_container_max_connections(workers)
         )
-    return index
+    if not os.environ.get("TEST_REDIS_URL"):
+        os.environ["TEST_REDIS_URL"] = _start_redis_container()
+
+    base_url = os.environ["TEST_DATABASE_URL"]
+    try:
+        capacity = asyncio.run(read_postgres_capacity(base_url))
+    except (OSError, SQLAlchemyError) as exc:
+        shown = make_url(base_url).render_as_string(hide_password=True)
+        raise pytest.UsageError(
+            f"PostgreSQL test server unreachable at {shown}: {exc}"
+        ) from exc
+    check_postgres_capacity(workers, capacity)
+
+    # A single-process run attaches output captured before its first test
+    # (application log lines emitted while conftest imports `app`, container
+    # start-up) to that test's report, shown only on failure. The controller
+    # runs no test, so pytest would print that output after the summary;
+    # discard it once provisioning has succeeded.
+    capture = config.pluginmanager.getplugin("capturemanager")
+    if capture is not None:
+        capture.read_global_capture()
 
 
 @pytest_asyncio.fixture(scope="session", loop_scope="session")
@@ -221,8 +294,7 @@ async def _redis_test_url() -> str:
     """
     base_url = _redis_base_url()
     parsed = urlsplit(base_url)
-    base_index = int((parsed.path or "/0").lstrip("/") or "0")
-    db_index = _redis_worker_db_index(base_index)
+    db_index = _redis_worker_db_index(redis_base_index(base_url))
     url = urlunsplit((parsed.scheme, parsed.netloc, f"/{db_index}", "", ""))
 
     client = redis_asyncio.Redis.from_url(url)
@@ -294,14 +366,37 @@ def celery_test_app(
 
 @pytest_asyncio.fixture(scope="session", loop_scope="session")
 async def _engine() -> AsyncGenerator[AsyncEngine]:
-    """Create the async engine and tables once per session."""
-    engine = create_async_engine(_database_url(), echo=False)
+    """Create the async engine and tables once per session.
+
+    A pytest-xdist worker first recreates its dedicated database (dropping
+    one leaked by an interrupted earlier run) and drops it at teardown; a
+    single-process run creates and drops the tables in the harness
+    database itself. The pool bounds are the per-worker connection budget
+    validated by `pytest_configure` (see
+    docs/features/platform/testing-strategy.md, Parallel Execution).
+    """
+    database_url = _database_url()
+    worker_database = (
+        make_url(database_url).database if worker_id() is not None else None
+    )
+    if worker_database is not None:
+        await drop_database(_base_database_url(), worker_database)
+        await create_database(_base_database_url(), worker_database)
+    engine = create_async_engine(
+        database_url,
+        echo=False,
+        pool_size=ENGINE_POOL_SIZE,
+        max_overflow=ENGINE_MAX_OVERFLOW,
+    )
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     yield engine
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
+    if worker_database is None:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.drop_all)
     await engine.dispose()
+    if worker_database is not None:
+        await drop_database(_base_database_url(), worker_database)
 
 
 @pytest.fixture

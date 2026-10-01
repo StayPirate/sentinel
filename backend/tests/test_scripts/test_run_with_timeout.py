@@ -15,6 +15,12 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SCRIPT_PATH = REPO_ROOT / "scripts" / "run-with-timeout.py"
 
+# Supervisor timeout for cases that expect it to expire. Before it does, a
+# Python parent and a Python child must start and install their SIGTERM
+# handlers; the bound leaves room for interpreter start-up under the CPU
+# contention of parallel test workers.
+EXPIRING_TIMEOUT = 3
+
 
 def _run_supervisor(
     command: list[str], *, timeout: float = 2.0, grace_period: float = 0.5
@@ -58,7 +64,7 @@ def _process_exists(process_id: int) -> bool:
 
 
 def _wait_for_process_exit(process_id: int) -> bool:
-    deadline = time.monotonic() + 2
+    deadline = time.monotonic() + 5
     while time.monotonic() < deadline:
         if not _process_exists(process_id):
             return True
@@ -222,7 +228,7 @@ def test_supervisor_timeout_sends_term_to_group_and_returns_124(
                 str(child_term_marker),
                 str(child_ready_marker),
             ],
-            timeout=1,
+            timeout=EXPIRING_TIMEOUT,
         )
         child_pid = int(child_pid_path.read_text(encoding="utf-8"))
 
@@ -231,7 +237,7 @@ def test_supervisor_timeout_sends_term_to_group_and_returns_124(
         assert parent_term_marker.read_text(encoding="utf-8") == "TERM"
         assert child_term_marker.read_text(encoding="utf-8") == "TERM"
         assert "label='unit-test-stage'" in result.stderr
-        assert "timeout=1s" in result.stderr
+        assert f"timeout={EXPIRING_TIMEOUT}s" in result.stderr
         assert sys.executable in result.stderr
         assert "Timeout escalation" not in result.stderr
         assert _wait_for_process_exit(child_pid)
@@ -286,7 +292,7 @@ def test_supervisor_interrupted_terminates_group_without_leaked_child(
     )
 
     try:
-        deadline = time.monotonic() + 3
+        deadline = time.monotonic() + 10
         while not ready_marker.exists() and time.monotonic() < deadline:
             time.sleep(0.02)
         assert ready_marker.read_text(encoding="utf-8") == "ready"
@@ -346,7 +352,7 @@ def test_supervisor_term_resistant_group_escalates_kill_without_leaked_child(
                 str(child_pid_path),
                 str(child_ready_marker),
             ],
-            timeout=1,
+            timeout=EXPIRING_TIMEOUT,
             grace_period=0.2,
         )
         child_pid = int(child_pid_path.read_text(encoding="utf-8"))

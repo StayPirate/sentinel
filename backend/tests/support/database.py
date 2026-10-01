@@ -2,7 +2,9 @@
 
 See docs/features/platform/testing-strategy.md (Rollback Within a Test) for
 the savepoint contract of `rollback_test_scope()`, and (Concurrency Testing,
-Lock-Wait Observation) for the lock-wait proof of `assert_lock_wait()`.
+Lock-Wait Observation) for the lock-wait proof of `assert_lock_wait()`, and
+(Parallel Execution) for the per-worker databases created and dropped with
+`create_database()` and `drop_database()`.
 """
 
 from __future__ import annotations
@@ -14,7 +16,9 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
+from sqlalchemy.engine import URL
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession, create_async_engine
+from sqlalchemy.pool import NullPool
 
 LOCK_WAIT_DEADLINE = 5.0
 """Default bound, in seconds, on detecting a lock wait that never happens."""
@@ -137,4 +141,40 @@ async def assert_lock_wait(
         f"expected blocking PIDs {sorted(holder_pids)}, "
         f"pg_blocking_pids {blocking}, state {state!r}, "
         f"wait_event_type {wait_event_type!r}, wait_event {wait_event!r}"
+    )
+
+
+async def _execute_database_ddl(
+    admin_url: str | URL, statement: str, name: str
+) -> None:
+    """Run `statement`, with `{name}` replaced by the quoted database name,
+    on an AUTOCOMMIT connection to `admin_url`.
+
+    `CREATE DATABASE` and `DROP DATABASE` cannot run inside a transaction
+    block, and target a database other than the one connected to.
+    """
+    engine = create_async_engine(
+        admin_url, isolation_level="AUTOCOMMIT", poolclass=NullPool
+    )
+    try:
+        async with engine.connect() as conn:
+            quoted = conn.dialect.identifier_preparer.quote_identifier(name)
+            await conn.execute(text(statement.format(name=quoted)))
+    finally:
+        await engine.dispose()
+
+
+async def create_database(admin_url: str | URL, name: str) -> None:
+    """Create the empty database `name` on the server of `admin_url`."""
+    await _execute_database_ddl(admin_url, "CREATE DATABASE {name}", name)
+
+
+async def drop_database(admin_url: str | URL, name: str) -> None:
+    """Drop the database `name` on the server of `admin_url` if it exists.
+
+    `WITH (FORCE)` terminates connections still open to it, such as a
+    leaked connection of an interrupted earlier run.
+    """
+    await _execute_database_ddl(
+        admin_url, "DROP DATABASE IF EXISTS {name} WITH (FORCE)", name
     )
