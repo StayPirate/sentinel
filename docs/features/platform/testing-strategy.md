@@ -1134,10 +1134,11 @@ CI. Configured as shell scripts in `.githooks/` and activated
 per-repository via `core.hooksPath` (see activation steps below):
 
 - **pre-commit**: ruff check + ruff format check + mypy strict type check +
-  `pytest -m unit` (fast gate, < 15 seconds) + `gitleaks git --staged`
-  (secret scan on staged changes). Tool invocations use `uv run --locked`,
-  so the hook never mutates `backend/uv.lock` as a side effect of running
-  a check.
+  unit test suite run in parallel workers (`pytest -m unit -n auto
+  --maxprocesses 8 --max-worker-restart 0`, fast gate, < 15 seconds, see
+  Parallel Execution) + `gitleaks git --staged` (secret scan on staged
+  changes). Tool invocations use `uv run --locked`, so the hook never mutates
+  `backend/uv.lock` as a side effect of running a check.
 - **pre-push**: full test suite including integration and e2e tests
   and the system suite, run in one invocation of parallel workers
   (`pytest -m "not image" -n auto --maxprocesses 8
