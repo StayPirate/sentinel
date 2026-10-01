@@ -13,6 +13,7 @@ import pytest
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
+from tests import conftest as root_conftest
 from tests.support.parallel import (
     CONNECTIONS_PER_WORKER,
     POSTGRES_MAX_IDENTIFIER_BYTES,
@@ -34,12 +35,25 @@ from tests.support.parallel import (
 _BACKEND_DIR = Path(__file__).resolve().parents[2]
 
 
+class _FakeCapture:
+    def __init__(self) -> None:
+        self.discarded = False
+
+    def read_global_capture(self) -> None:
+        self.discarded = True
+
+
 class _FakeConfig:
-    """The subset of `pytest.Config` that `planned_worker_count` reads."""
+    """The subset of `pytest.Config` that `planned_worker_count` and the
+    root conftest's `pytest_configure` read."""
 
     def __init__(self, dist: str | None, tx: list[str] | None = None) -> None:
         self.option = SimpleNamespace() if dist is None else SimpleNamespace(dist=dist)
         self._tx = tx or []
+        self.capture = _FakeCapture()
+        self.pluginmanager = SimpleNamespace(
+            getplugin=lambda name: self.capture if name == "capturemanager" else None
+        )
 
     def getvalue(self, name: str) -> list[str]:
         assert name == "tx"
@@ -262,6 +276,118 @@ class TestReadPostgresCapacity:
         assert capacity.other_clients >= 1
         assert capacity.can_create_databases is True
         assert capacity.available_connections < capacity.max_connections
+
+
+_CONFIGURED_DATABASE_URL = "postgresql+asyncpg://user:secret@db.example.com/sentinel"
+
+
+@pytest.fixture
+def configured_servers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Configured test servers, so the controller starts no container."""
+    monkeypatch.setenv("TEST_DATABASE_URL", _CONFIGURED_DATABASE_URL)
+    monkeypatch.setenv("TEST_REDIS_URL", "redis://redis.example.com:6379/2")
+
+
+def _serve_capacity(
+    monkeypatch: pytest.MonkeyPatch, capacity: PostgresCapacity | Exception
+) -> list[str]:
+    """Replace the controller's capacity read; return the URLs it reads."""
+    read: list[str] = []
+
+    async def _read(url: str) -> PostgresCapacity:
+        read.append(url)
+        if isinstance(capacity, Exception):
+            raise capacity
+        return capacity
+
+    monkeypatch.setattr(root_conftest, "read_postgres_capacity", _read)
+    return read
+
+
+@pytest.mark.unit
+@pytest.mark.usefixtures("configured_servers")
+class TestControllerConfigure:
+    """The root conftest's `pytest_configure` in the xdist controller.
+
+    Synchronous tests: the hook runs its capacity read with
+    `asyncio.run()` (testing-strategy.md, Sync Entry-Point Tests).
+    """
+
+    def test_single_process_run_does_nothing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        read = _serve_capacity(monkeypatch, RuntimeError("must not be read"))
+        config = _FakeConfig("no")
+
+        root_conftest.pytest_configure(cast("pytest.Config", config))
+
+        assert read == []
+        assert config.capture.discarded is False
+
+    def test_worker_process_does_nothing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        read = _serve_capacity(monkeypatch, RuntimeError("must not be read"))
+        config = _FakeConfig("load", ["popen"] * 2)
+        config.workerinput = {"workerid": "gw0"}  # type: ignore[attr-defined]
+
+        root_conftest.pytest_configure(cast("pytest.Config", config))
+
+        assert read == []
+
+    def test_sufficient_capacity_passes_and_discards_controller_output(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        read = _serve_capacity(monkeypatch, _capacity(max_connections=100))
+        config = _FakeConfig("load", ["popen"] * 4)
+
+        root_conftest.pytest_configure(cast("pytest.Config", config))
+
+        assert read == [_CONFIGURED_DATABASE_URL]
+        assert config.capture.discarded is True
+
+    def test_connection_budget_exceeded_raises_usage_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _serve_capacity(monkeypatch, _capacity(max_connections=100))
+        config = _FakeConfig("load", ["popen"] * 5)
+
+        with pytest.raises(pytest.UsageError, match="need up to 100 PostgreSQL"):
+            root_conftest.pytest_configure(cast("pytest.Config", config))
+
+        assert config.capture.discarded is False
+
+    def test_role_without_createdb_raises_usage_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _serve_capacity(monkeypatch, _capacity(can_create_databases=False))
+        config = _FakeConfig("load", ["popen"] * 2)
+
+        with pytest.raises(pytest.UsageError, match="neither CREATEDB"):
+            root_conftest.pytest_configure(cast("pytest.Config", config))
+
+    def test_unreachable_server_raises_usage_error_without_password(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _serve_capacity(monkeypatch, ConnectionRefusedError("connection refused"))
+        config = _FakeConfig("load", ["popen"] * 2)
+
+        with pytest.raises(pytest.UsageError) as raised:
+            root_conftest.pytest_configure(cast("pytest.Config", config))
+
+        message = str(raised.value)
+        assert "PostgreSQL test server unreachable" in message
+        assert "user:***@db.example.com" in message
+        assert "secret" not in message
+
+    def test_redis_range_is_checked_before_postgres(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        read = _serve_capacity(monkeypatch, RuntimeError("must not be read"))
+        config = _FakeConfig("load", ["popen"] * 15)
+
+        with pytest.raises(pytest.UsageError, match="Redis logical databases 2-16"):
+            root_conftest.pytest_configure(cast("pytest.Config", config))
+
+        assert read == []
 
 
 @pytest.mark.integration

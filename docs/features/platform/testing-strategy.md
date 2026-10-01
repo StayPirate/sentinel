@@ -485,9 +485,9 @@ The harness MUST verify that each worker maps to a distinct database and
 that the Redis server provides enough logical databases. It MUST fail
 explicitly if the configured range is insufficient; it must not continue
 with worker mappings that overlap one another. A parallel run checks the
-range before any worker starts (see Parallel Execution). The harness cannot infer
-ownership by unrelated processes, so it relies on the exclusive-range
-contract of `TEST_REDIS_URL` above.
+range before any worker starts (see Parallel Execution). The harness
+cannot infer ownership by unrelated processes, so it relies on the
+exclusive-range contract of `TEST_REDIS_URL` above.
 
 All Redis clients and application processes created within one test MUST
 use that test's worker database. This intentionally preserves realistic
@@ -1055,12 +1055,12 @@ cd backend && pytest -n auto --maxprocesses 8 --max-worker-restart 0
 
 ### Parallel Execution
 
-The default in-process suite runs in parallel with `pytest-xdist`. Each
-pytest worker is an independent process that runs a share of the tests
-against its own PostgreSQL database and its own Redis logical database,
-so no test observes another worker's state. Parallelism is chosen
-explicitly on the command line (`-n`); it is not part of the default
-`addopts`.
+The pre-push hook and CI run the default in-process suite in parallel
+with `pytest-xdist`. Each pytest worker is an independent process that
+runs a share of the tests against its own PostgreSQL database and its
+own Redis logical database, so no test observes another worker's state.
+Parallelism is chosen explicitly on the command line (`-n`); it is not
+part of the default `addopts`.
 
 **Worker identity.** Workers are numbered from the `PYTEST_XDIST_WORKER`
 id (`gw0`, `gw1`, ...). A single-process run behaves as worker number 0
@@ -1090,11 +1090,11 @@ engines of cross-loop and migration tests, and administrative database
 connections.
 
 **Controller checks.** Before any worker starts, the xdist controller
-fails the run with a usage error that names the largest safe worker
-count and the remedy when:
+fails the run with a usage error that names the remedy, and for a
+capacity limit the largest safe worker count, when:
 
-- the workers need Redis logical databases beyond the server's 16,
-  counted from the database in `TEST_REDIS_URL`;
+- the workers need Redis logical databases beyond the 16 of a default
+  Redis server, counted from the database in `TEST_REDIS_URL`;
 - the workers' connection budget exceeds the PostgreSQL server's
   `max_connections` minus its reserved connections and the clients
   already connected; or
