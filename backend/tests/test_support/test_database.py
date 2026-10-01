@@ -198,6 +198,18 @@ class TestAssertLockWait:
         assert raised.value.__cause__ is error
         assert time.monotonic() - started < 2.5
 
+    async def test_cancelled_task_fails_immediately(self, row: _Row) -> None:
+        holder = await row.session()
+        waiter = await row.session()
+        await row.lock(holder)
+        task = row.start(asyncio.sleep(30))
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+        with pytest.raises(AssertionError, match="was cancelled before waiting"):
+            await assert_lock_wait(task, waiter=waiter, blocked_by=holder)
+
     async def test_task_delayed_without_a_lock_wait_fails_at_the_deadline(
         self, row: _Row
     ) -> None:
@@ -251,14 +263,27 @@ class TestAssertLockWait:
         second_task = row.start(row.lock(second))
         await assert_lock_wait(second_task, waiter=second, blocked_by=(holder, first))
 
+        # PostgreSQL reports the earlier waiter, not the holder, for the
+        # queued waiter: the holder alone is not accepted.
+        with pytest.raises(
+            AssertionError, match=rf"pg_blocking_pids \[{backend_pid(first)}\]"
+        ):
+            await assert_lock_wait(
+                second_task, waiter=second, blocked_by=holder, deadline=0.2
+            )
+
         await holder.rollback()
         await asyncio.wait_for(first_task, timeout=5)
         await first.rollback()
         await asyncio.wait_for(second_task, timeout=5)
 
-    async def test_waiter_named_as_its_own_blocker_is_rejected(self, row: _Row) -> None:
+    @pytest.mark.parametrize("blockers", ["waiter", "none"])
+    async def test_blocked_by_without_another_session_is_rejected(
+        self, row: _Row, blockers: str
+    ) -> None:
         waiter = await row.session()
         task = row.start(asyncio.sleep(30))
+        blocked_by = (waiter,) if blockers == "waiter" else ()
 
         with pytest.raises(ValueError, match="other than the waiter"):
-            await assert_lock_wait(task, waiter=waiter, blocked_by=(waiter,))
+            await assert_lock_wait(task, waiter=waiter, blocked_by=blocked_by)
