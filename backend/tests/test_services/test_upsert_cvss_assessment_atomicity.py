@@ -18,9 +18,11 @@ Owning specifications:
   Accessibility: Locked mutations).
 
 The cross-path races against CVE ingestion and two external batches are
-deferred to M3.1; the CVSS/reactivation and association/CVSS races to
-M2.3; the CVSS/override race to M2.4 (#669 Deferred). Expected values are
-transcribed from the specifications.
+deferred to M3.1 (#669 Deferred). The CVSS/reactivation, association/CVSS,
+and CVSS/override races live in test_manual_zone_exit_atomicity.py,
+test_associate_cve_atomicity.py, and
+test_set_product_eligibility_atomicity.py. Expected values are transcribed
+from the specifications.
 """
 
 from __future__ import annotations
