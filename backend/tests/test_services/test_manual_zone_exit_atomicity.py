@@ -64,10 +64,13 @@ Not applicable, hence not tested here:
   locks (ATR 18, the CVE republication composition).
 
 Committed rows are deleted explicitly at teardown (testing-strategy.md,
-Concurrency Testing). Every wait is bounded with `asyncio.wait_for()` (over
-`asyncio.shield()` where the task must survive the timeout) so a regression
-fails instead of hanging. Expected values are transcribed from the
-specifications, never computed with the module under test.
+Concurrency Testing). A waiter is proven blocked by observing its wait in
+PostgreSQL's lock manager (`assert_lock_wait`; testing-strategy.md,
+Lock-Wait Observation). Every other wait is bounded with
+`asyncio.wait_for()` (over `asyncio.shield()` where the task must survive
+the timeout) so a regression fails instead of hanging. Expected values are
+transcribed from the specifications, never computed with the module under
+test.
 """
 
 from __future__ import annotations
@@ -118,6 +121,7 @@ from tests.support.cvss_chain import (
     severity_event,
     ticket_state,
 )
+from tests.support.database import assert_lock_wait
 from tests.support.suse_cvss import (
     V31_CRITICAL,
     cvss_delete_event,
@@ -130,7 +134,6 @@ from tests.support.suse_cvss import (
 from tests.support.suse_cvss_races import (
     CommittedWorld,
     SessionStatementRecorder,
-    assert_blocked,
     prepare_loss,
 )
 from tests.support.ticket_mutations import (
@@ -569,7 +572,7 @@ class TestExitAndCVSSRace:
                 assert await _is_locked(world.probe, _ticket_row(s.ticket.id))
                 assert not await _is_locked(world.probe, _cve_row(s.cve), cve_root=True)
                 cvss_task = world.start(b, _cvss(b, op, s.cve, s.cvss_actor))
-                await assert_blocked(cvss_task)
+                await assert_lock_wait(cvss_task, waiter=b, blocked_by=a)
                 # B holds the CVE and waits for the Ticket.
                 assert _is_ticket_lock(cvss_recorder.statements[-1])
                 assert await _is_locked(world.probe, _cve_row(s.cve), cve_root=True)
@@ -578,7 +581,7 @@ class TestExitAndCVSSRace:
                 exit_result = await asyncio.wait_for(
                     asyncio.shield(exit_task), timeout=WAIT
                 )
-                await assert_blocked(cvss_task)
+                await assert_lock_wait(cvss_task, waiter=b, blocked_by=a)
                 await a.commit()
                 cvss_result = await asyncio.wait_for(
                     asyncio.shield(cvss_task), timeout=WAIT
@@ -590,7 +593,7 @@ class TestExitAndCVSSRace:
                 # The rejected mutation still holds its roots until rollback.
                 assert cvss_recorder.writes() == []
                 exit_task = world.start(a, _exit(a, exit_, s.ticket.id, s.exit_actor))
-                await assert_blocked(exit_task)
+                await assert_lock_wait(exit_task, waiter=a, blocked_by=b)
                 assert _is_ticket_lock(exit_recorder.statements[-1])
                 await b.rollback()
                 exit_result = await asyncio.wait_for(
@@ -738,7 +741,7 @@ class TestLockedCurrentAccessibilityRaces:
             task = world.start(
                 a, _exit(a, exit_, ticket.id, user, scope=Scope.NON_CONFIDENTIAL)
             )
-            await assert_blocked(task)
+            await assert_lock_wait(task, waiter=a, blocked_by=b)
             assert _is_user_share(recorder.statements[0])
             assert _is_ticket_lock(recorder.statements[-1])
             await b.commit()
@@ -797,7 +800,7 @@ class TestExitLockSerialization:
         await _exit(winner, "reopen", ticket.id, winner_actor)
         with SessionStatementRecorder(loser) as recorder:
             task = world.start(loser, _exit(loser, "reopen", ticket.id, loser_actor))
-            await assert_blocked(task)
+            await assert_lock_wait(task, waiter=loser, blocked_by=winner)
             assert _is_user_share(recorder.statements[0])
             assert _is_ticket_lock(recorder.statements[-1])
             await winner.commit()

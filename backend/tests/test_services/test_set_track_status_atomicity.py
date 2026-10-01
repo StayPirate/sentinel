@@ -30,7 +30,7 @@ what needs independent sessions:
   system form taking no User lock.
 
 Every race serializes a winner that keeps its locks in an open transaction
-and a waiter proven blocked (`assert_blocked`) on a named lock. The
+and a waiter proven blocked (`assert_lock_wait`) on a named lock. The
 identity lifecycle writer is simulated by its documented `FOR NO KEY
 UPDATE` lock on the User row. Committed rows are deleted explicitly at
 teardown by `CommittedWorld` (testing-strategy.md, Concurrency Testing).
@@ -68,10 +68,10 @@ from app.services.ticket_convergence_registry import (
 )
 from app.services.ticket_service import resolve_ticket_locator
 from app.services.ticket_visibility import TicketCaller
+from tests.support.database import assert_lock_wait
 from tests.support.suse_cvss_races import (
     CommittedWorld,
     SessionStatementRecorder,
-    assert_blocked,
     prepare_loss,
 )
 from tests.support.ticket_mutations import (
@@ -366,7 +366,7 @@ class TestLockedCurrentAccessibilityRaces:
                 package_id=package_id,
                 scope=Scope.NON_CONFIDENTIAL,
             )
-            await assert_blocked(task)
+            await assert_lock_wait(task, waiter=a, blocked_by=b)
             assert _is_user_share(recorder.statements[0])
             assert _is_ticket_lock(recorder.statements[-1])
             await b.commit()
@@ -418,7 +418,7 @@ class TestSameTrackSerialization:
                 waiter_actor,
                 ticket=ticket,
             )
-            await assert_blocked(task)
+            await assert_lock_wait(task, waiter=waiter, blocked_by=winner)
             assert _is_user_share(recorder.statements[0])
             assert _is_ticket_lock(recorder.statements[-1])
             await winner.commit()
@@ -471,7 +471,7 @@ class TestSameTrackSerialization:
                 waiter_actor,
                 ticket=ticket,
             )
-            await assert_blocked(task)
+            await assert_lock_wait(task, waiter=waiter, blocked_by=winner)
             assert _is_ticket_lock(recorder.statements[-1])
             await winner.commit()
             result = await asyncio.wait_for(task, timeout=WAIT)
@@ -523,7 +523,7 @@ class TestSystemAgainstUserFinalState:
             task = _start(
                 committed_world, system, track, PackageStatus.FIXED, None, ticket=ticket
             )
-            await assert_blocked(task)
+            await assert_lock_wait(task, waiter=system, blocked_by=winner)
             assert len(recorder.statements) == 1
             assert _is_ticket_lock(recorder.statements[0])
             await winner.commit()
@@ -580,7 +580,7 @@ class TestActingUserLockOrder:
             task = _start(
                 committed_world, a, track, PackageStatus.AFFECTED, actor, ticket=ticket
             )
-            await assert_blocked(task)
+            await assert_lock_wait(task, waiter=a, blocked_by=b)
             assert _is_user_share(recorder.statements[-1])
             assert not any(TICKET_STATEMENT.search(s) for s in recorder.statements)
             assert not await _is_locked(

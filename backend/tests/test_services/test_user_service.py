@@ -68,7 +68,7 @@ from app.services.user_service import (
     update_user,
     user_identifier_condition,
 )
-from tests.support.database import rollback_test_scope
+from tests.support.database import assert_lock_wait, rollback_test_scope
 
 # Fictional bcrypt-shaped value — never a real hash (see AGENTS.md Guardrail 23)
 _FICTIONAL_PASSWORD_HASH = "$2b$12$" + "a" * 53
@@ -966,8 +966,7 @@ class TestCreateUser:
                     acting_user_id=None,
                 )
             )
-            with pytest.raises(TimeoutError):
-                await asyncio.wait_for(asyncio.shield(task_b), timeout=0.3)
+            await assert_lock_wait(task_b, waiter=session_b, blocked_by=session_a)
 
             await session_a.commit()
             user_ids.append(user_a.id)
@@ -1013,8 +1012,7 @@ class TestCreateUser:
                     acting_user_id=None,
                 )
             )
-            with pytest.raises(TimeoutError):
-                await asyncio.wait_for(asyncio.shield(task_b), timeout=0.3)
+            await assert_lock_wait(task_b, waiter=session_b, blocked_by=session_a)
 
             await session_a.commit()
             user_ids.append(user_a.id)
@@ -1535,8 +1533,7 @@ class TestUpdateUser:
                     email="conc-same-value-new@example.com",
                 )
             )
-            with pytest.raises(TimeoutError):
-                await asyncio.wait_for(asyncio.shield(task_b), timeout=0.3)
+            await assert_lock_wait(task_b, waiter=session_b, blocked_by=session_a)
 
             await session_a.commit()
 
@@ -1737,8 +1734,7 @@ class TestUpdateUser:
                     email="second-update@example.com",
                 )
             )
-            with pytest.raises(TimeoutError):
-                await asyncio.wait_for(asyncio.shield(task_b), timeout=0.3)
+            await assert_lock_wait(task_b, waiter=session_b, blocked_by=session_a)
 
             await session_a.commit()
 
@@ -1806,8 +1802,7 @@ class TestUpdateUser:
                     email="conc-cross-target@example.com",
                 )
             )
-            with pytest.raises(TimeoutError):
-                await asyncio.wait_for(asyncio.shield(task_b), timeout=0.3)
+            await assert_lock_wait(task_b, waiter=session_b, blocked_by=session_a)
 
             await session_a.commit()
 
@@ -2025,8 +2020,7 @@ class TestReactivateUser:
             task_b = asyncio.create_task(
                 reactivate_user(session_b, user_id, acting_user_id=None)
             )
-            with pytest.raises(TimeoutError):
-                await asyncio.wait_for(asyncio.shield(task_b), timeout=0.3)
+            await assert_lock_wait(task_b, waiter=session_b, blocked_by=session_a)
 
             await session_a.commit()
 
@@ -2505,8 +2499,7 @@ class TestResetPassword:
                     acting_user_id=None,
                 )
             )
-            with pytest.raises(TimeoutError):
-                await asyncio.wait_for(asyncio.shield(task_b), timeout=0.3)
+            await assert_lock_wait(task_b, waiter=session_b, blocked_by=session_a)
 
             await session_a.commit()
 
@@ -2560,8 +2553,7 @@ class TestResetPassword:
                     full_name="Concurrent Update",
                 )
             )
-            with pytest.raises(TimeoutError):
-                await asyncio.wait_for(asyncio.shield(task_b), timeout=0.3)
+            await assert_lock_wait(task_b, waiter=session_b, blocked_by=session_a)
 
             await session_a.commit()
 

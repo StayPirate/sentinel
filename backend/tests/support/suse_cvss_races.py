@@ -1,26 +1,14 @@
-"""Shared independent-session infrastructure for the manual SUSE CVSS
-mutation tests.
-
-Consumers:
-
-- `tests/test_services/test_upsert_cvss_assessment_atomicity.py`;
-- `tests/test_services/test_delete_cvss_assessment_atomicity.py`;
-- `tests/test_services/test_associate_cve_atomicity.py` (which also uses
-  `SessionStatementRecorder`, the optional `CommittedWorld.ticket()`
-  status/`severity_manual` parameters, and the optional
-  `CommittedWorld.affected_product()` `occurrence_id`/`package_name`);
-- `tests/test_services/test_cve_root_lock_mode_atomicity.py` (the CVE root
-  lock mode races, with `SessionStatementRecorder`);
-- `tests/test_services/test_set_product_eligibility_atomicity.py` (the
-  CVSS/override, override/override, and locked-current accessibility races
-  of `set_product_eligibility()`, with `SessionStatementRecorder` and
-  `prepare_loss()`).
+"""Shared independent-session infrastructure for the Ticket, CVE, and
+package mutation race tests (the `*_atomicity.py` service modules and the
+support and test modules built on them).
 
 `CommittedWorld` owns committed rows that each consumer deletes explicitly
 at teardown (testing-strategy.md, Concurrency Testing); each consumer
-defines its own `committed_world` fixture around it. `prepare_loss()`
-commits one visibility path and returns the statements that remove it
-(testing-strategy.md, Ticket Accessibility: Locked mutations).
+defines its own `committed_world` fixture around it.
+`SessionStatementRecorder` records the statements of one racing session.
+`prepare_loss()` commits one visibility path and returns the statements
+that remove it (testing-strategy.md, Ticket Accessibility: Locked
+mutations).
 """
 
 from __future__ import annotations
@@ -33,7 +21,6 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
-import pytest
 from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
@@ -279,12 +266,6 @@ class SessionStatementRecorder(StatementRecorder):
         connection = bind.sync_connection
         assert connection is not None
         self._engine = connection
-
-
-async def assert_blocked(task: asyncio.Task[Any]) -> None:
-    """The task is still waiting for a row lock after 0.5 s."""
-    with pytest.raises(TimeoutError):
-        await asyncio.wait_for(asyncio.shield(task), timeout=0.5)
 
 
 VISIBILITY_LOSSES = [

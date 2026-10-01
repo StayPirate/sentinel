@@ -68,7 +68,7 @@ from app.services.ticket_mutations import (
     reconcile_ticket_status,
     stabilize_acting_user,
 )
-from tests.support.database import rollback_test_scope
+from tests.support.database import assert_lock_wait, rollback_test_scope
 from tests.support.ticket_mutations import (
     BEFORE_EVAL,
     EVAL,
@@ -282,8 +282,7 @@ class TestStabilizeActingUserLocking:
                 .with_for_update(key_share=True)
             )
         )
-        with pytest.raises(TimeoutError):
-            await asyncio.wait_for(asyncio.shield(blocked), timeout=0.5)
+        await assert_lock_wait(blocked, waiter=lifecycle, blocked_by=assigner)
 
         await assigner.rollback()
         await asyncio.wait_for(blocked, timeout=5)

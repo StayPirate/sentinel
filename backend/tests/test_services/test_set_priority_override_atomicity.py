@@ -50,11 +50,11 @@ from app.services.ticket_mutations import set_severity_manual
 from app.services.ticket_service import resolve_ticket_locator, set_priority_override
 from app.services.ticket_visibility import TicketCaller
 from tests.support.cvss_chain import priority_event, severity_event, ticket_state
+from tests.support.database import assert_lock_wait
 from tests.support.suse_cvss import V31_CRITICAL, cvss_event, upsert
 from tests.support.suse_cvss_races import (
     CommittedWorld,
     SessionStatementRecorder,
-    assert_blocked,
     prepare_loss,
 )
 from tests.support.ticket_mutations import EVAL, EventRow, ticket_events_by_id
@@ -196,7 +196,7 @@ class TestOverrideAndManualSeverityRace:
             task = committed_world.start(
                 a, _override(a, ticket, TicketPriority.P1, overrider)
             )
-            await assert_blocked(task)
+            await assert_lock_wait(task, waiter=a, blocked_by=b)
             assert _is_ticket_lock(recorder.statements[-1])
             await b.commit()
             await asyncio.wait_for(task, timeout=5)
@@ -223,7 +223,7 @@ class TestOverrideAndManualSeverityRace:
         await _override(b, ticket, TicketPriority.P1, overrider)
         with SessionStatementRecorder(a) as recorder:
             task = committed_world.start(a, _severity(a, ticket, owner))
-            await assert_blocked(task)
+            await assert_lock_wait(task, waiter=a, blocked_by=b)
             assert _is_ticket_lock(recorder.statements[-1])
             await b.commit()
             await asyncio.wait_for(task, timeout=5)
@@ -260,7 +260,7 @@ class TestOverrideAndManualSUSERace:
             task = committed_world.start(
                 a, _override(a, ticket, TicketPriority.P1, overrider)
             )
-            await assert_blocked(task)
+            await assert_lock_wait(task, waiter=a, blocked_by=b)
             assert _is_ticket_lock(recorder.statements[-1])
             await b.commit()
             await asyncio.wait_for(task, timeout=5)
@@ -289,7 +289,7 @@ class TestOverrideAndManualSUSERace:
         await _override(b, ticket, TicketPriority.P1, overrider)
         with SessionStatementRecorder(a) as recorder:
             task = committed_world.start(a, _suse(a, cve, owner))
-            await assert_blocked(task)
+            await assert_lock_wait(task, waiter=a, blocked_by=b)
             # The upsert holds its CVE root and waits for the Ticket.
             assert _is_ticket_lock(recorder.statements[-1])
             await b.commit()
@@ -334,7 +334,7 @@ class TestOverrideWinnerAndLoser:
             task = committed_world.start(
                 a, _override(a, ticket, TicketPriority.P1, second)
             )
-            await assert_blocked(task)
+            await assert_lock_wait(task, waiter=a, blocked_by=b)
             await b.commit()
             result = await asyncio.wait_for(task, timeout=5)
 
@@ -365,7 +365,7 @@ class TestOverrideWinnerAndLoser:
 
         await _override(b, ticket, TicketPriority.P1, first)
         task = committed_world.start(a, _override(a, ticket, TicketPriority.P2, second))
-        await assert_blocked(task)
+        await assert_lock_wait(task, waiter=a, blocked_by=b)
         await b.commit()
         await asyncio.wait_for(task, timeout=5)
         await a.commit()
@@ -429,7 +429,7 @@ class TestLockedCurrentAccessibilityRaces:
                 a,
                 _override(a, ticket, requested, user, scope=Scope.NON_CONFIDENTIAL),
             )
-            await assert_blocked(task)
+            await assert_lock_wait(task, waiter=a, blocked_by=b)
             assert _is_ticket_lock(recorder.statements[-1])
             await b.commit()
             with pytest.raises(TicketNotFoundError):

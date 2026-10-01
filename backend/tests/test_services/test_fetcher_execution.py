@@ -37,6 +37,7 @@ from app.services.fetcher_execution import (
     is_run_stale,
     resolve_effective_hard_limit,
 )
+from tests.support.database import assert_lock_wait
 
 
 def _service_log_text(caplog: pytest.LogCaptureFixture) -> str:
@@ -1221,8 +1222,7 @@ class TestAcquireFetcherRunConcurrency:
                 hard_time_limit_seconds=3600,
             )
         )
-        with pytest.raises(TimeoutError):
-            await asyncio.wait_for(asyncio.shield(task_b), timeout=0.3)
+        await assert_lock_wait(task_b, waiter=session_b, blocked_by=session_a)
 
         # Releasing A's lock lets B proceed — B now observes A's
         # committed running run and silently discards.
@@ -1296,8 +1296,7 @@ class TestAcquireFetcherRunConcurrency:
                 hard_time_limit_seconds=3600,
             )
         )
-        with pytest.raises(TimeoutError):
-            await asyncio.wait_for(asyncio.shield(task_b), timeout=0.3)
+        await assert_lock_wait(task_b, waiter=session_b, blocked_by=session_a)
 
         await session_a.commit()
         acquisition_b = await asyncio.wait_for(task_b, timeout=5)
@@ -1381,8 +1380,7 @@ class TestAcquireFetcherRunConcurrency:
                 now=datetime.now(UTC),
             )
         )
-        with pytest.raises(TimeoutError):
-            await asyncio.wait_for(asyncio.shield(task_b), timeout=0.3)
+        await assert_lock_wait(task_b, waiter=session_b, blocked_by=session_a)
 
         # Releasing A's locks lets B proceed — B's UPDATE re-evaluates
         # against the committed 'running' state and matches zero rows.
@@ -1456,8 +1454,7 @@ class TestAcquireFetcherRunConcurrency:
                 hard_time_limit_seconds=3600,
             )
         )
-        with pytest.raises(TimeoutError):
-            await asyncio.wait_for(asyncio.shield(task_b), timeout=0.3)
+        await assert_lock_wait(task_b, waiter=session_b, blocked_by=session_a)
 
         await session_a.commit()
         acquisition_b = await asyncio.wait_for(task_b, timeout=5)

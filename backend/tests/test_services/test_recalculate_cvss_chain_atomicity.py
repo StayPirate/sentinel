@@ -85,7 +85,7 @@ from tests.support.cvss_chain import (
     ticket_state,
     total_ticket_events,
 )
-from tests.support.database import rollback_test_scope
+from tests.support.database import assert_lock_wait, rollback_test_scope
 from tests.support.ticket_mutations import (
     EVAL,
     Prod,
@@ -931,8 +931,7 @@ class TestLockSerialization:
             run_chain(a, cve_id, default_cvss_version=DEFAULT_VERSION)
         )
         committed_world.track(task)
-        with pytest.raises(TimeoutError):
-            await asyncio.wait_for(asyncio.shield(task), timeout=0.5)
+        await assert_lock_wait(task, waiter=a, blocked_by=b)
         await b.commit()
 
         result = await asyncio.wait_for(task, timeout=5)

@@ -39,7 +39,7 @@ needs independent sessions:
   (ATR 16), and the acquisition direction.
 
 Every race serializes a winner that keeps its locks in an open transaction
-and a waiter proven blocked (`assert_blocked`) on a named lock: the target
+and a waiter proven blocked (`assert_lock_wait`) on a named lock: the target
 User `FOR NO KEY UPDATE` when the winner holds that User (another grant or
 revoke of the same target, a reactivation, or a rename, which lock it `FOR
 UPDATE`), or the Ticket `FOR UPDATE` when the winner holds only the Ticket
@@ -112,10 +112,10 @@ from app.services.ticket_service import (
 )
 from app.services.ticket_visibility import TicketCaller
 from app.services.user_service import reactivate_user, update_user
+from tests.support.database import assert_lock_wait
 from tests.support.suse_cvss_races import (
     CommittedWorld,
     SessionStatementRecorder,
-    assert_blocked,
     prepare_loss,
 )
 from tests.support.ticket_mutations import (
@@ -411,7 +411,8 @@ async def _serialize(
 ) -> _Race:
     """Run `first` in a winner session that keeps its locks, start `then`
     in a waiter session holding stale copies of the Ticket (and of
-    `stale`), and prove the waiter blocked: its statements so far are
+    `stale`), and prove the waiter blocked by the winner in PostgreSQL's
+    lock manager (`assert_lock_wait`): its statements so far are
     exactly the row locks `blocked_on`, the last being the one it waits
     for. Then end the winner (`release`: `commit`, or `rollback` after a
     rejected winner, as the API transaction dependency would) and wait,
@@ -427,7 +428,7 @@ async def _serialize(
     winner_result = await first(winner)
     with SessionStatementRecorder(waiter) as recorder:
         task: asyncio.Task[Any] = world.start(waiter, then(waiter))
-        await assert_blocked(task)
+        await assert_lock_wait(task, waiter=waiter, blocked_by=winner)
         assert [_lock_kind(s) for s in recorder.statements] == blocked_on
         if release == "commit":
             await winner.commit()
@@ -997,7 +998,7 @@ class TestLockedCurrentAccessibilityRaces:
             await b.execute(statement)
         with SessionStatementRecorder(a) as recorder:
             task = world.start(a, call(a))
-            await assert_blocked(task)
+            await assert_lock_wait(task, waiter=a, blocked_by=b)
             assert [_lock_kind(s) for s in recorder.statements] == [TARGET, TICKET]
             await b.commit()
             with pytest.raises(TicketNotFoundError):

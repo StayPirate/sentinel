@@ -53,7 +53,7 @@ from app.services.api_key_service import (
     update_last_used_at,
 )
 from app.services.identity_audit_log import IdentityAuditLog
-from tests.support.database import rollback_test_scope
+from tests.support.database import assert_lock_wait, rollback_test_scope
 
 # Fictional bcrypt-shaped value — never a real hash (see AGENTS.md Guardrail 23)
 _FICTIONAL_PASSWORD_HASH = "$2b$12$" + "a" * 53
@@ -661,15 +661,14 @@ class TestCreateKey:
             user_id = user.id
 
             # session_a's create_key() call fully completes (flushed, not
-            # committed) — its initial owner FOR UPDATE lock remains held by
-            # the still-open transaction.
+            # committed) — its initial owner FOR NO KEY UPDATE lock remains
+            # held by the still-open transaction.
             result_a = await create_key(session_a, user_id, "shared-name", None)
 
             task_b = asyncio.create_task(
                 create_key(session_b, user_id, "shared-name", None)
             )
-            with pytest.raises(TimeoutError):
-                await asyncio.wait_for(asyncio.shield(task_b), timeout=0.3)
+            await assert_lock_wait(task_b, waiter=session_b, blocked_by=session_a)
 
             await session_a.commit()
 
@@ -726,8 +725,9 @@ class TestCreateKey:
             create_task = asyncio.create_task(
                 create_key(create_session, user_id, "blocked-key", None)
             )
-            with pytest.raises(TimeoutError):
-                await asyncio.wait_for(asyncio.shield(create_task), timeout=0.3)
+            await assert_lock_wait(
+                create_task, waiter=create_session, blocked_by=deactivation_session
+            )
 
             await deactivation_session.commit()
 
@@ -941,8 +941,7 @@ class TestRevokeKey:
             task_b = asyncio.create_task(
                 revoke_key(session_b, key_id, acting_user_id=None)
             )
-            with pytest.raises(TimeoutError):
-                await asyncio.wait_for(asyncio.shield(task_b), timeout=0.3)
+            await assert_lock_wait(task_b, waiter=session_b, blocked_by=session_a)
 
             await session_a.commit()
             result_b = await asyncio.wait_for(task_b, timeout=5)
@@ -1162,10 +1161,11 @@ class TestRevokeAllUserKeys:
                 revoke_all_user_keys(bulk_session, user_id, acting_user_id=None)
             )
 
-            # Give the bulk task enough time to acquire the user lock
-            # and begin waiting for the key lock.
-            with pytest.raises(TimeoutError):
-                await asyncio.wait_for(asyncio.shield(bulk_task), timeout=0.5)
+            # Observe the bulk task waiting for the key lock held by
+            # single_session; it has acquired the user lock by then.
+            await assert_lock_wait(
+                bulk_task, waiter=bulk_session, blocked_by=single_session
+            )
 
             # Step 3: while bulk holds the user lock and waits for the
             # key, execute the single revocation in full.  This flushes

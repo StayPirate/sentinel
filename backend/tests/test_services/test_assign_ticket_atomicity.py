@@ -55,10 +55,10 @@ from app.services.ticket_service import (
     resolve_ticket_locator,
 )
 from app.services.ticket_visibility import TicketCaller
+from tests.support.database import assert_lock_wait
 from tests.support.suse_cvss_races import (
     CommittedWorld,
     SessionStatementRecorder,
-    assert_blocked,
     prepare_loss,
 )
 from tests.support.ticket_mutations import (
@@ -222,7 +222,7 @@ class TestTicketLockSerialization:
         await _assign(b, ticket, str(x.id), actor_b)
         with SessionStatementRecorder(a) as recorder:
             task = _start(committed_world, a, ticket, str(y.id), actor_a)
-            await assert_blocked(task)
+            await assert_lock_wait(task, waiter=a, blocked_by=b)
             assert _is_user_share(recorder.statements[0])
             assert _is_ticket_lock(recorder.statements[-1])
             assert await _is_locked(probe, select(User.id).where(User.id == y.id))
@@ -256,7 +256,7 @@ class TestTicketLockSerialization:
         await _assign(b, ticket, str(x.id), actor_b)
         with SessionStatementRecorder(a) as recorder:
             task = _start(committed_world, a, ticket, x.username, actor_a)
-            await assert_blocked(task)
+            await assert_lock_wait(task, waiter=a, blocked_by=b)
             await b.commit()
             result = await asyncio.wait_for(task, timeout=5)
 
@@ -297,7 +297,7 @@ class TestTargetUserLockSerialization:
         await _hold_for_lifecycle_write(b, target)
         with SessionStatementRecorder(a) as recorder:
             task = _start(committed_world, a, ticket, str(target.id), actor)
-            await assert_blocked(task)
+            await assert_lock_wait(task, waiter=a, blocked_by=b)
             assert _is_user_share(recorder.statements[-1])
             assert not any(TICKET_STATEMENT.search(s) for s in recorder.statements)
             assert not await _is_locked(
@@ -330,7 +330,7 @@ class TestTargetUserLockSerialization:
 
         await _assign(a, ticket, str(target.id), actor)
         writer = committed_world.start(b, _hold_for_lifecycle_write(b, target))
-        await assert_blocked(writer)
+        await assert_lock_wait(writer, waiter=b, blocked_by=a)
         await a.commit()
         await asyncio.wait_for(writer, timeout=5)
         await b.commit()
@@ -389,7 +389,7 @@ class TestLockedCurrentAccessibilityRaces:
             task = _start(
                 committed_world, a, ticket, target, user, scope=Scope.NON_CONFIDENTIAL
             )
-            await assert_blocked(task)
+            await assert_lock_wait(task, waiter=a, blocked_by=b)
             assert _is_user_share(recorder.statements[0])
             assert _is_ticket_lock(recorder.statements[-1])
             await b.commit()

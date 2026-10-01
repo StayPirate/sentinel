@@ -54,6 +54,7 @@ from app.services.ticket_mutations import (
 from app.services.ticket_service import assign_ticket, ignore_ticket
 from app.services.ticket_visibility import TicketCaller
 from tests.support.cvss_chain import cve_severity, priority_event, severity_event
+from tests.support.database import assert_lock_wait
 from tests.support.suse_cvss import (
     V31_CRITICAL,
     V31_MEDIUM,
@@ -67,7 +68,6 @@ from tests.support.suse_cvss import (
 from tests.support.suse_cvss_races import (
     CommittedWorld,
     SessionStatementRecorder,
-    assert_blocked,
 )
 from tests.support.ticket_mutations import (
     EVAL,
@@ -162,14 +162,14 @@ async def _race_ticket_first_against_cvss(
         assert await _is_locked(probe, _cve_row(cve)) is False
 
         second = world.start(b, cvss(b))
-        await assert_blocked(second)
+        await assert_lock_wait(second, waiter=b, blocked_by=a)
         assert await _is_locked(probe, _cve_row(cve)) is True
 
         pause.resume.set()
         await asyncio.wait_for(first, timeout=WAIT)
 
     assert len([s for s in recorder.statements if _is_ticket_update(s)]) >= 2
-    assert not second.done()
+    await assert_lock_wait(second, waiter=b, blocked_by=a)
     assert await _is_locked(probe, _cve_row(cve)) is True
     await a.commit()
     return b, second
@@ -338,7 +338,7 @@ class TestCVERootSerialization:
                 a, cve.id, V31_CRITICAL.canonical, second, default_cvss_version="3.1"
             ),
         )
-        await assert_blocked(task)
+        await assert_lock_wait(task, waiter=a, blocked_by=b)
         await b.commit()
 
         loser = await asyncio.wait_for(task, timeout=WAIT)
