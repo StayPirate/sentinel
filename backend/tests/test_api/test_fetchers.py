@@ -1211,7 +1211,7 @@ async def _cleanup_trigger_fetcher_rows(
         await session.commit()
 
 
-@pytest.mark.unit
+@pytest.mark.e2e
 class TestGetFetcherTriggerSessionFactory:
     def test_returns_the_shared_application_session_factory(self) -> None:
         """Every trigger endpoint test overrides this dependency (via
@@ -2475,7 +2475,7 @@ class TestListFetcherAuditEventsEndpoint:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.unit
+@pytest.mark.e2e
 class TestFetchersConfigAndAuditLogOpenAPISurface:
     def test_both_endpoints_have_summary_and_description(self) -> None:
         openapi_paths = app.openapi()["paths"]

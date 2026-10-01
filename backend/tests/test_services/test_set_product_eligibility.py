@@ -1574,7 +1574,7 @@ class TestDimensionIndependence:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.unit
+@pytest.mark.integration
 class TestProductNotFoundError:
     """package-service.md, Service Exceptions: a module-owned exception with
     a static message that never reveals another path."""

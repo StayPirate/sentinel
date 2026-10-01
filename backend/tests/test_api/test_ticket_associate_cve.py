@@ -2592,7 +2592,7 @@ class TestEvaluationDate:
 _OPENAPI_PATH = "/api/v1/tickets/{ticket_id}/associate-cve"
 
 
-@pytest.mark.unit
+@pytest.mark.e2e
 class TestOpenApiContract:
     def _spec(self) -> dict[str, Any]:
         spec: dict[str, Any] = app.openapi()
