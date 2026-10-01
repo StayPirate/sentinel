@@ -118,7 +118,7 @@ async def test_scheduled_fetcher_pipeline_end_to_end(
 
     # 3. Make the existing entry immediately overdue via RedBeat's own
     # public API — Beat still performs the actual dispatch through the
-    # broker on its next tick (bounded by --max-interval=5), the broker
+    # broker on its next tick (bounded by --max-interval=1), the broker
     # path is never bypassed with a manual send_task().
     harness.make_due()
 

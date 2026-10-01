@@ -127,12 +127,12 @@ asyncio_default_fixture_loop_scope = "session"
 asyncio_default_test_loop_scope = "session"
 testpaths = ["tests"]
 # Exclude the OCI artifact suite and the local process system suite from
-# the default run. The image suite requires a running container (started
-# by scripts/image-smoke.sh); the system suite spawns
-# real worker/Beat processes (see docs/features/platform/testing-strategy.md,
-# Local Process System Testing). Neither must be pulled into
-# `uv run pytest` or the coverage measurement — both run as separate,
-# dedicated invocations (pre-push hook, CI).
+# a plain `uv run pytest`. The image suite requires a running container
+# (started by scripts/image-smoke.sh) and runs as its own invocation; the
+# system suite spawns real worker/Beat processes, so focused runs skip it,
+# while the pre-push hook and CI include it in their parallel run with
+# `-m "not image"` (see docs/features/platform/testing-strategy.md, Local
+# Process System Testing).
 # --strict-markers: an unregistered marker fails the run instead of
 # emitting a silent warning.
 # --strict-config: an unrecognized ini option fails the run instead of

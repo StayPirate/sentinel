@@ -22,18 +22,16 @@ echo "  full test suite..."
 # instead of being pushed out of view by the remaining tests in the
 # run (or truncated by an external time limit on a long-running full
 # suite before the run reaches its own completion summary).
+# -m "not image" overrides the pyproject default marker filter so the
+# local process system suite, which spawns real worker/Beat processes,
+# runs inside this same parallel invocation. See
+# docs/features/platform/testing-strategy.md (Local Process System
+# Testing, Automation).
 # The suite runs in parallel pytest-xdist workers, one per CPU up to 8;
 # set PYTEST_XDIST_AUTO_NUM_WORKERS to use fewer. A crashed worker fails
 # the run instead of being replaced, because a replacement would need a
 # worker number outside the validated range. See
 # docs/features/platform/testing-strategy.md (Parallel Execution).
-(cd backend && uv run --locked pytest -n auto --maxprocesses 8 \
-    --max-worker-restart 0 --no-header -q -x) || [ $? -eq 5 ]
-
-echo "  local process system suite..."
-# Separate invocation from the ordinary suite above (excluded from its
-# default run) — spawns real worker/Beat processes against the test
-# infrastructure. See docs/features/platform/testing-strategy.md
-# (Local Process System Testing, Automation).
-(cd backend && uv run --locked pytest -m system tests/system/ --no-header -q -x) ||
+(cd backend && uv run --locked pytest -m "not image" -n auto \
+    --maxprocesses 8 --max-worker-restart 0 --no-header -q -x) ||
     [ $? -eq 5 ]
