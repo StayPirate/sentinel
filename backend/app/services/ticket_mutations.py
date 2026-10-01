@@ -78,6 +78,7 @@ from app.core.exceptions import (
     TicketNotMutableError,
     UserNotFoundError,
 )
+from app.core.identifiers import parse_ticket_id
 from app.models.cve import CVE
 from app.models.cve_cvss_assessment import CVECVSSAssessment
 from app.models.cve_epss_score import CVEEPSSScore
@@ -738,10 +739,38 @@ async def lock_accessible_ticket(
     caller has already taken any
     earlier root in the global User, CVE, Ticket order.
     """
+    return await _lock_ticket_and_check_access(db, Ticket.id == ticket_id, caller)
+
+
+async def lock_accessible_ticket_by_locator(
+    db: AsyncSession, ticket_id: str, caller: TicketCaller
+) -> Ticket:
+    """Lock the Ticket named by its public `SNTL-{n}` locator.
+
+    Same contract as `lock_accessible_ticket()` for a mutation whose
+    service boundary receives the public locator (for example the manual
+    reference mutations, ticket-references.md, Manual Mutation Ordering):
+    the `FOR UPDATE` selection by `sequence_id` is the first persistent
+    read, and accessibility is decided by a separate statement after the
+    lock is granted. A malformed locator raises `TicketNotFoundError`
+    before any database access; missing and inaccessible Tickets raise
+    the same exception.
+    """
+    sequence_id = parse_ticket_id(ticket_id)
+    if sequence_id is None:
+        raise TicketNotFoundError()
+    return await _lock_ticket_and_check_access(
+        db, Ticket.sequence_id == sequence_id, caller
+    )
+
+
+async def _lock_ticket_and_check_access(
+    db: AsyncSession, locator: ColumnElement[bool], caller: TicketCaller
+) -> Ticket:
     ticket = (
         await db.execute(
             select(Ticket)
-            .where(Ticket.id == ticket_id)
+            .where(locator)
             .with_for_update()
             .execution_options(populate_existing=True)
         )
@@ -752,7 +781,7 @@ async def lock_accessible_ticket(
         await db.execute(
             select(ticket_visibility_condition(caller))
             .select_from(Ticket)
-            .where(Ticket.id == ticket_id)
+            .where(Ticket.id == ticket.id)
         )
     ).scalar_one()
     if not accessible:

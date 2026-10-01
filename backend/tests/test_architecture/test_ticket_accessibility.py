@@ -48,11 +48,13 @@ _AUDIT_WRITE_SURFACE = frozenset(
     {"TicketAuditLog", "CVE_SOURCE_AUDIT_LABELS", "MANUAL_TICKET_CREATED_COMMENT"}
 )
 # Service modules that write Ticket audit events, including the
-# manual-zone exits and their package-owned eligibility boundary.
+# manual-zone exits and their package-owned eligibility boundary, and the
+# manual reference mutations.
 _AUDIT_WRITING_SERVICES = (
     "ticket_service.py",
     "ticket_mutations.py",
     "package_service.py",
+    "reference_service.py",
 )
 
 

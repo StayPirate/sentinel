@@ -166,7 +166,16 @@ For each URL, in this order:
 3. Parse the complete value as an absolute URL. Accept only `http` or `https`,
    case-insensitively. Require a syntactically valid, non-empty host. Reject
    any user-information component, including a username or password, whether
-   or not a password is present.
+   or not a password is present. The authority accepts exactly:
+   - a host that is one of:
+     - an ASCII RFC 3986 `reg-name` of unreserved characters, percent-encoded
+       triplets, and sub-delimiters, with no IDNA conversion and no
+       percent-decoding; a host that consists only of digits and dots must be
+       a valid dotted-quad IPv4 address;
+     - a bracketed IPv6 literal that is a valid IPv6 address, with no zone
+       identifier and no IPvFuture form;
+   - an optional port of one to five digits not exceeding 65535. A port
+     delimiter with no digits is rejected.
 4. Lowercase the scheme and host and replace `http` with `https`.
 5. Remove the path slash only when it is the slash representing an otherwise
    empty root path. Preserve an explicit port, every non-root path, query, and
