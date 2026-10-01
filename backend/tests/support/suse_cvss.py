@@ -11,7 +11,9 @@ Consumers:
   `tests/test_services/test_delete_cvss_assessment_atomicity.py` (the
   same concerns for `delete_cvss_assessment()`);
 - `tests/test_services/test_cve_root_lock_mode_atomicity.py` (the CVE root
-  lock mode races).
+  lock mode races);
+- `tests/test_services/test_set_product_eligibility_atomicity.py` (the
+  CVSS side of the CVSS/override races).
 
 The vectors and their canonical values, scores, and severities are
 transcribed from the CVSS specifications (cvss-scoring.md, Accepted Base

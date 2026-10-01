@@ -39,7 +39,7 @@ from app.core.enums import (
     TicketStatus,
 )
 from app.models.cve import CVE
-from app.services.package_service import set_track_status
+from app.services.package_service import set_product_eligibility, set_track_status
 from app.services.ticket_mutations import set_severity_manual
 from app.services.ticket_service import (
     assign_ticket,
@@ -50,6 +50,7 @@ from app.services.ticket_service import (
 )
 from app.services.ticket_visibility import TicketCaller
 from tests.support.cvss_chain import DEFAULT_VERSION
+from tests.support.product_eligibility import only_occurrence
 from tests.support.suse_cvss import V31_CRITICAL, delete_assessment, upsert
 from tests.support.ticket_mutations import (
     EVAL,
@@ -78,6 +79,7 @@ PATHS = [
     "ignore_ticket",
     "mark_as_duplicate",
     "set_track_status",
+    "set_product_eligibility",
 ]
 
 
@@ -219,6 +221,23 @@ async def test_assignment_of_a_new_ticket_is_followed_by_one_promotion(
                 package_id=track.ticket_package_id,
                 track_id=track.id,
                 status=PackageStatus.AFFECTED,
+                acting_user_id=actor.id,
+                caller=caller,
+                evaluation_date=EVAL,
+            )
+        case "set_product_eligibility":
+            # The same CVE-less Ticket without a resolved severity: the
+            # effective override leaves the promoted Ticket in `Analysis`.
+            ticket = await ticket_factory(status=TicketStatus.NEW.value)
+            track = await tree(ticket, status=PackageStatus.ANALYSIS)
+            occurrence = await only_occurrence(db_session, track)
+            await set_product_eligibility(
+                db_session,
+                ticket_id=ticket.id,
+                package_id=track.ticket_package_id,
+                track_id=track.id,
+                ticket_package_product_id=occurrence.id,
+                eligible=False,
                 acting_user_id=actor.id,
                 caller=caller,
                 evaluation_date=EVAL,

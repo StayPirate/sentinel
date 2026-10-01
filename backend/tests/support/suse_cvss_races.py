@@ -10,7 +10,11 @@ Consumers:
   status/`severity_manual` parameters, and the optional
   `CommittedWorld.affected_product()` `occurrence_id`/`package_name`);
 - `tests/test_services/test_cve_root_lock_mode_atomicity.py` (the CVE root
-  lock mode races, with `SessionStatementRecorder`).
+  lock mode races, with `SessionStatementRecorder`);
+- `tests/test_services/test_set_product_eligibility_atomicity.py` (the
+  CVSS/override, override/override, and locked-current accessibility races
+  of `set_product_eligibility()`, with `SessionStatementRecorder` and
+  `prepare_loss()`).
 
 `CommittedWorld` owns committed rows that each consumer deletes explicitly
 at teardown (testing-strategy.md, Concurrency Testing); each consumer

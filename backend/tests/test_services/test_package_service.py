@@ -1473,6 +1473,7 @@ class TestPackageServiceModuleBoundary:
             "get_ticket_packages",
             "converge_manual_zone_exit_eligibility",
             "set_track_status",
+            "set_product_eligibility",
         }
 
     def test_uses_no_private_ticket_mutations_helper(self) -> None:

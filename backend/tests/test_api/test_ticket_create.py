@@ -1233,6 +1233,11 @@ class TestEvaluationDate:
 
 
 _TICKET_IDENTITY_FIELDS = {"ticket_id", "duplicate_of_ticket_id", "existing_ticket_id"}
+_OCCURRENCE_LOCATOR_PARAMETERS = {"ticket_package_product_id"}
+"""Nested package-tree occurrence locators whose documented path names
+contain `ticket` but which are not Ticket identities: they remain UUIDs
+(api-spec.md, Ticket Identifier Resolution; package-model.md, API
+Endpoints)."""
 
 
 def _walk_properties(node: Any, found: list[tuple[str, dict[str, Any]]]) -> None:
@@ -1360,7 +1365,9 @@ class TestOpenApiContract:
         for path, operations in spec["paths"].items():
             for method, operation in operations.items():
                 for parameter in operation.get("parameters", []):
-                    if "ticket" in parameter["name"].lower():
+                    if parameter["name"] in _OCCURRENCE_LOCATOR_PARAMETERS:
+                        assert parameter["schema"]["format"] == "uuid", (path, method)
+                    elif "ticket" in parameter["name"].lower():
                         assert parameter["name"] == "ticket_id", (path, method)
                         assert parameter["in"] == "path", (path, method)
                         assert "format" not in parameter["schema"], (path, method)

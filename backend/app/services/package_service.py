@@ -7,11 +7,12 @@ mode and its composed mode, the synchronous manual-zone-exit
 eligibility convergence (`converge_manual_zone_exit_eligibility()`),
 which `ticket_service` composes with an already locked Ticket, and the
 package mutation foundation (`PackageServiceError` hierarchy, the
-explicit system invocation context, the locked semantic-locator loader)
-with its first mutation, `set_track_status()`; the remaining mutation,
-orchestration, and search operations are added by their owning work
-items. This module never imports `ticket_service`; it consumes the
-`ticket_mutations` primitives, which never import it back.
+explicit system invocation context, the locked semantic-locator loader
+at the track and Product levels) with the mutations `set_track_status()`
+and `set_product_eligibility()`; the remaining mutation, orchestration,
+and search operations are added by their owning work items. This module
+never imports `ticket_service`; it consumes the `ticket_mutations`
+primitives, which never import it back.
 
 Every operation accepts the caller's `AsyncSession` and never commits or
 rolls back; database exceptions propagate unchanged (Transaction
@@ -71,7 +72,7 @@ from app.models.ticket_package import TicketPackage
 from app.models.ticket_package_product import TicketPackageProduct
 from app.models.ticket_package_track import TicketPackageTrack
 from app.services import settings as settings_service
-from app.services.cvss import resolve_eligibility_score
+from app.services.cvss import EligibilityResolution, resolve_eligibility_score
 from app.services.package_actionability import (
     is_delivery_relevant,
     package_actionable_expression,
@@ -592,6 +593,38 @@ def _eligibility_value(eligible: bool) -> str:
     return "true" if eligible else "false"
 
 
+async def _current_eligibility_score(
+    db: AsyncSession, ticket: Ticket
+) -> EligibilityResolution:
+    """Resolve the Ticket's current Eligibility Score Resolution.
+
+    Reads the current persisted `default_cvss_version` and, for a
+    CVE-associated Ticket, the complete assessment set of its CVE
+    (current committed state, refreshing identity-map copies, without a
+    CVE lock), then applies `resolve_eligibility_score()`: the canonical
+    SUSE score at the default version, otherwise the `10.0` fallback,
+    including for a CVE-less Ticket.
+
+    Raises `RequiredSystemSettingMissingError` when the setting is absent
+    and `ValueError` for an invalid default version or assessment set.
+    """
+    default_cvss_version = await settings_service.get_default_cvss_version(db)
+    assessments: Sequence[CVECVSSAssessment] = ()
+    if ticket.cve_id is not None:
+        assessments = (
+            (
+                await db.execute(
+                    select(CVECVSSAssessment)
+                    .where(CVECVSSAssessment.cve_id == ticket.cve_id)
+                    .execution_options(populate_existing=True)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    return resolve_eligibility_score(assessments, default_cvss_version)
+
+
 async def converge_manual_zone_exit_eligibility(
     db: AsyncSession,
     *,
@@ -647,21 +680,7 @@ async def converge_manual_zone_exit_eligibility(
             "the manual-zone exit must set the Analysis floor before converging."
         )
 
-    default_cvss_version = await settings_service.get_default_cvss_version(db)
-    assessments: Sequence[CVECVSSAssessment] = ()
-    if ticket.cve_id is not None:
-        assessments = (
-            (
-                await db.execute(
-                    select(CVECVSSAssessment).where(
-                        CVECVSSAssessment.cve_id == ticket.cve_id
-                    )
-                )
-            )
-            .scalars()
-            .all()
-        )
-    eligibility = resolve_eligibility_score(assessments, default_cvss_version)
+    eligibility = await _current_eligibility_score(db, ticket)
 
     occurrence = TicketPackageProduct
     rows = (
@@ -764,6 +783,19 @@ class TrackNotFoundError(PackageServiceError):
 
     def __init__(self) -> None:
         super().__init__("Track not found.")
+
+
+class ProductNotFoundError(PackageServiceError):
+    """The Product occurrence ID does not exist under the declared path.
+
+    The identifier is a `TicketPackageProduct.id` under the declared
+    Ticket/package/track path, never a catalog `Product.id`. Maps to `404
+    RESOURCE_NOT_FOUND`. The static message never reveals whether the
+    occurrence exists under another path.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("Product not found.")
 
 
 class TrackFixedStatusRestrictedError(PackageServiceError):
@@ -897,6 +929,96 @@ async def _load_locked_track(
     if track is None:
         raise TrackNotFoundError()
     return package, track
+
+
+@dataclass(frozen=True, slots=True)
+class _LockedProductPath:
+    """The declared Ticket/package/track/Product path reloaded under lock.
+
+    `product` is the related catalog Product (threshold, display name,
+    CPE); `lifecycle_phase` is its phase on the operation's
+    `evaluation_date` (`None` when lifecycle data is unavailable).
+    """
+
+    package: TicketPackage
+    track: TicketPackageTrack
+    occurrence: TicketPackageProduct
+    product: Product
+    lifecycle_phase: LifecyclePhase | None
+
+
+async def _load_locked_product(
+    db: AsyncSession,
+    *,
+    ticket_id: uuid.UUID,
+    package_id: uuid.UUID,
+    track_id: uuid.UUID,
+    ticket_package_product_id: uuid.UUID,
+    evaluation_date: date,
+) -> _LockedProductPath:
+    """Reload and validate the declared Ticket/package/track/Product chain.
+
+    Called only while the caller holds the Ticket `FOR UPDATE` lock and
+    after locked-current accessibility (package-service.md, Semantic
+    locators and locked ownership validation). One statement selects the
+    package under the declared Ticket and, through outer joins, the track
+    under that package, the `TicketPackageProduct` occurrence under that
+    track, and its catalog Product with the lifecycle phase on
+    `evaluation_date`. Directly or effectively excluded and EOL records
+    are included. `ticket_package_product_id` is matched only against the
+    occurrence identifier, never the catalog `Product.id`. Identity-map
+    copies are refreshed so the returned rows are the committed-current
+    state observed under the lock.
+
+    Raises `PackageNotFoundError`, `TrackNotFoundError`, or
+    `ProductNotFoundError` for the first missing or mismatched level.
+    None of them reveals or touches an occurrence under another path.
+    """
+    row = (
+        await db.execute(
+            select(
+                TicketPackage,
+                TicketPackageTrack,
+                TicketPackageProduct,
+                Product,
+                lifecycle_phase_expression(evaluation_date, Product).label(
+                    "lifecycle_phase"
+                ),
+            )
+            .outerjoin(
+                TicketPackageTrack,
+                and_(
+                    TicketPackageTrack.ticket_package_id == TicketPackage.id,
+                    TicketPackageTrack.id == track_id,
+                ),
+            )
+            .outerjoin(
+                TicketPackageProduct,
+                and_(
+                    TicketPackageProduct.ticket_package_track_id
+                    == TicketPackageTrack.id,
+                    TicketPackageProduct.id == ticket_package_product_id,
+                ),
+            )
+            .outerjoin(Product, Product.id == TicketPackageProduct.product_id)
+            .where(TicketPackage.id == package_id, TicketPackage.ticket_id == ticket_id)
+            .execution_options(populate_existing=True)
+        )
+    ).one_or_none()
+    if row is None:
+        raise PackageNotFoundError()
+    package, track, occurrence, product, phase = row
+    if track is None:
+        raise TrackNotFoundError()
+    if occurrence is None:
+        raise ProductNotFoundError()
+    return _LockedProductPath(
+        package=package,
+        track=track,
+        occurrence=occurrence,
+        product=product,
+        lifecycle_phase=LifecyclePhase(phase) if phase is not None else None,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1143,6 +1265,294 @@ async def _track_status_result(
         outcome=outcome,
         track=await _project_track(
             db, ticket=ticket, track_id=track_id, evaluation_date=evaluation_date
+        ),
+        evaluation_date=evaluation_date,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Product eligibility override (package-service.md, `set_product_eligibility()`;
+# package-model.md, Override Product Eligibility response)
+# ---------------------------------------------------------------------------
+
+_VA_OVERRIDE_REASON: Final = "va_override"
+
+
+class OverrideAction(StrEnum):
+    """The `override_action` of an authorized-user eligibility event.
+
+    `SET`: automatic management becomes a manual override (including a
+    metadata-only set with an unchanged boolean). `CHANGED`: an existing
+    override changes value. `CLEARED`: the override is removed.
+    """
+
+    SET = "set"
+    CHANGED = "changed"
+    CLEARED = "cleared"
+
+
+@dataclass(frozen=True, slots=True)
+class ProductEligibilityProjection:
+    """The locked-current Product occurrence of an eligibility result.
+
+    `ticket_id` is the canonical `SNTL-{n}` identity; `package_name` and
+    `reference` identify the parent package and track; `id` is the
+    `TicketPackageProduct` occurrence UUID. `lifecycle_phase`,
+    `actionable`, and `non_actionable_reason` use the shared
+    `evaluation_date`.
+    """
+
+    ticket_id: str
+    package_name: str
+    reference: str
+    id: uuid.UUID
+    product_cpe: str
+    product_name: str
+    eligible: bool
+    is_eligible_override: bool
+    lifecycle_phase: LifecyclePhase | None
+    actionable: bool
+    non_actionable_reason: NonActionableReason | None
+
+
+@dataclass(frozen=True, slots=True)
+class ProductEligibilityResult:
+    """Result of `set_product_eligibility()`.
+
+    `outcome` is `changed` or `no_op`; `product` is projected from state
+    observed under the Ticket lock with `evaluation_date`, the one UTC
+    date also used by lifecycle evaluation and reconciliation.
+    """
+
+    outcome: MutationOutcome
+    product: ProductEligibilityProjection
+    evaluation_date: date
+
+
+async def _project_product(
+    db: AsyncSession,
+    *,
+    ticket: Ticket,
+    ticket_package_product_id: uuid.UUID,
+    evaluation_date: date,
+) -> ProductEligibilityProjection:
+    """Project one Product occurrence under the held Ticket lock.
+
+    One statement reads the occurrence, its catalog Product, the parent
+    track and package with their direct markers, the lifecycle phase, and
+    the SQL Product actionability, all for `evaluation_date`; the reason
+    is derived by the canonical precedence. Performs no write.
+    """
+    row = (
+        await db.execute(
+            select(
+                TicketPackage.package_name,
+                TicketPackage.deleted_at.label("package_deleted_at"),
+                TicketPackageTrack.reference,
+                TicketPackageTrack.deleted_at.label("track_deleted_at"),
+                TicketPackageProduct.id,
+                TicketPackageProduct.eligible,
+                TicketPackageProduct.is_eligible_override,
+                TicketPackageProduct.deleted_at.label("product_deleted_at"),
+                Product.cpe,
+                Product.display_name,
+                lifecycle_phase_expression(evaluation_date, Product).label(
+                    "lifecycle_phase"
+                ),
+                product_actionable_expression(evaluation_date).label("actionable"),
+            )
+            .select_from(TicketPackageProduct)
+            .join(
+                TicketPackageTrack,
+                TicketPackageTrack.id == TicketPackageProduct.ticket_package_track_id,
+            )
+            .join(
+                TicketPackage, TicketPackage.id == TicketPackageTrack.ticket_package_id
+            )
+            .join(Product, Product.id == TicketPackageProduct.product_id)
+            .where(TicketPackageProduct.id == ticket_package_product_id)
+        )
+    ).one()
+    phase = row.lifecycle_phase
+    lifecycle_phase = LifecyclePhase(phase) if phase is not None else None
+    return ProductEligibilityProjection(
+        ticket_id=format_ticket_id(ticket.sequence_id),
+        package_name=row.package_name,
+        reference=row.reference,
+        id=row.id,
+        product_cpe=row.cpe,
+        product_name=row.display_name,
+        eligible=row.eligible,
+        is_eligible_override=row.is_eligible_override,
+        lifecycle_phase=lifecycle_phase,
+        actionable=row.actionable,
+        non_actionable_reason=product_non_actionable_reason(
+            package_excluded=row.package_deleted_at is not None,
+            track_excluded=row.track_deleted_at is not None,
+            product_excluded=row.product_deleted_at is not None,
+            lifecycle_phase=lifecycle_phase,
+        ),
+    )
+
+
+async def set_product_eligibility(
+    db: AsyncSession,
+    *,
+    ticket_id: uuid.UUID,
+    package_id: uuid.UUID,
+    track_id: uuid.UUID,
+    ticket_package_product_id: uuid.UUID,
+    eligible: bool | None,
+    acting_user_id: uuid.UUID,
+    caller: TicketCaller,
+    evaluation_date: date | None = None,
+) -> ProductEligibilityResult:
+    """Set, change, or clear the eligibility override of one occurrence.
+
+    Category A mutation (package-service.md, `set_product_eligibility()`;
+    package-model.md, Authorized-User Overrides Product Eligibility,
+    Override Model, Override Product Eligibility).
+
+    Q1: `ticket_id`, `package_id`, `track_id`, `ticket_package_product_id`
+    are the declared semantic locator (internal UUIDs; the API resolves
+    `SNTL-{n}` first; the last is a `TicketPackageProduct.id`, never a
+    catalog `Product.id`). `eligible` is the override value, or `None` to
+    reset to automatic calculation. `acting_user_id` is the authenticated
+    user and `caller` the request-resolved caller identifying it; there is
+    no system form. `evaluation_date` is the one UTC date shared by
+    lifecycle evaluation, eligibility, reconciliation, and the result
+    projection; captured once at entry when omitted.
+
+    Q2: the caller owns the transaction and has verified
+    `manage_packages`. Locks: the acting User `FOR SHARE`
+    (`stabilize_acting_user()`), then the Ticket `FOR UPDATE`. CVE
+    assessments are read as current committed state without a CVE lock.
+
+    Q3: (2) locked-current accessibility; (3) `ensure_ticket_operable()`;
+    (4) locked path reload. Override (`eligible` is a bool): (5) `no_op`
+    when the locked value equals `eligible` and the marker is already
+    `true`; (6) `auto_assign_actor()`; (7-8) sets the value and the
+    marker; (9) one acting-user `product_eligibility_changed` with the
+    event-time Product subject, `reason = va_override`, and
+    `override_action = set` (from automatic management, even with an
+    unchanged boolean) or `changed` (an override value change); (10)
+    `reconcile_ticket_status()` once; (11) flushes. Reset (`None`): (5)
+    `no_op` when the marker is already `false`; (6) `auto_assign_actor()`;
+    (7) clears the marker; (8-9) recalculates `eligible` with the shared
+    pure evaluator from the current `default_cvss_version`, assessment
+    set (the `10.0` fallback without a SUSE default-version assessment,
+    including a CVE-less Ticket), Product threshold, and lifecycle phase;
+    (10) one event with `override_action = cleared` and truthful old/new
+    values, which may be equal; (11) reconciles once; (12) flushes.
+    Excluded and EOL occurrences remain mutable; affectedness, delivery,
+    `released_at`, and exclusion markers are never changed. No-op
+    outcomes create no assignment, audit event, reconciliation, or
+    convergence registration. Never commits, reads audit history, or
+    performs external I/O.
+
+    Q4: returns the outcome, the locked-current Product projection, and
+    the shared `evaluation_date`.
+
+    Q6: raises `ValueError` before any database operation when the actor
+    is null or `caller` is not a consumer caller identifying it. Raises
+    `TicketNotFoundError` for a missing or inaccessible Ticket before any
+    other decision, `TicketNotMutableError` for `Ignored`/`Duplicated`,
+    and `PackageNotFoundError` / `TrackNotFoundError` /
+    `ProductNotFoundError` for a missing or mismatched path level, all
+    without side effects. `UserNotFoundError` (an invariant violation),
+    settings, eligibility-resolution, audit, database, flush, and
+    reconciliation exceptions propagate and roll back the caller's
+    transaction.
+    """
+    if (
+        acting_user_id is None
+        or not isinstance(caller, TicketCaller)
+        or caller.user_id != acting_user_id
+    ):
+        raise ValueError("caller must identify a non-null acting user.")
+    if evaluation_date is None:
+        evaluation_date = _utc_today()
+
+    acting_user = await stabilize_acting_user(db, acting_user_id)
+    ticket = await lock_accessible_ticket(db, ticket_id, caller)
+    ensure_ticket_operable(ticket)
+    path = await _load_locked_product(
+        db,
+        ticket_id=ticket.id,
+        package_id=package_id,
+        track_id=track_id,
+        ticket_package_product_id=ticket_package_product_id,
+        evaluation_date=evaluation_date,
+    )
+    occurrence = path.occurrence
+    old_eligible = occurrence.eligible
+    was_override = occurrence.is_eligible_override
+
+    if eligible is None:
+        if not was_override:
+            return await _product_eligibility_result(
+                db, MutationOutcome.NO_OP, ticket, occurrence.id, evaluation_date
+            )
+        action = OverrideAction.CLEARED
+    else:
+        if was_override and old_eligible == eligible:
+            return await _product_eligibility_result(
+                db, MutationOutcome.NO_OP, ticket, occurrence.id, evaluation_date
+            )
+        action = OverrideAction.CHANGED if was_override else OverrideAction.SET
+
+    await auto_assign_actor(ticket, acting_user, db)
+    if eligible is None:
+        occurrence.is_eligible_override = False
+        automatic = evaluate_product_eligibility(
+            is_eligible_override=False,
+            lifecycle_phase=path.lifecycle_phase,
+            cvss_threshold=path.product.cvss_threshold,
+            eligibility_score=await _current_eligibility_score(db, ticket),
+        ).automatic_eligible
+        assert automatic is not None  # an automatic record always has a value
+        new_eligible = automatic
+    else:
+        occurrence.is_eligible_override = True
+        new_eligible = eligible
+    occurrence.eligible = new_eligible
+    await TicketAuditLog.log_event(
+        db,
+        ticket_id=ticket.id,
+        event_type=TicketAuditEventType.PRODUCT_ELIGIBILITY_CHANGED,
+        user_id=acting_user_id,
+        old_value=_eligibility_value(old_eligible),
+        new_value=_eligibility_value(new_eligible),
+        detail={
+            "track": path.track.reference,
+            "package": path.package.package_name,
+            "product_name": path.product.display_name,
+            "product_cpe": path.product.cpe,
+            "reason": _VA_OVERRIDE_REASON,
+            "override_action": action.value,
+        },
+    )
+    await reconcile_ticket_status(ticket, db, evaluation_date=evaluation_date)
+    await db.flush()
+    return await _product_eligibility_result(
+        db, MutationOutcome.CHANGED, ticket, occurrence.id, evaluation_date
+    )
+
+
+async def _product_eligibility_result(
+    db: AsyncSession,
+    outcome: MutationOutcome,
+    ticket: Ticket,
+    ticket_package_product_id: uuid.UUID,
+    evaluation_date: date,
+) -> ProductEligibilityResult:
+    return ProductEligibilityResult(
+        outcome=outcome,
+        product=await _project_product(
+            db,
+            ticket=ticket,
+            ticket_package_product_id=ticket_package_product_id,
+            evaluation_date=evaluation_date,
         ),
         evaluation_date=evaluation_date,
     )

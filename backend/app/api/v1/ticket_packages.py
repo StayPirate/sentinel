@@ -1,7 +1,8 @@
 """Ticket package-tree endpoints.
 
 See `docs/features/packages/package-model.md` (API Endpoints > List Ticket
-Packages, Change Track Status) for the authoritative endpoint contracts.
+Packages, Change Track Status, Override Product Eligibility) for the
+authoritative endpoint contracts.
 Handlers stay thin: they capture the request's single evaluation instant
 or date (`docs/features/tickets/ticket-deadlines.md`, Evaluation Instant;
 package-model.md, Derived Actionability), delegate the protected read or
@@ -27,6 +28,7 @@ from app.api.dependencies import (
     insufficient_permission_error,
     require_accessible_ticket,
     require_any_capability,
+    require_capability,
     resource_not_found_error,
     ticket_not_found_error,
     ticket_not_mutable_error,
@@ -39,6 +41,9 @@ from app.schemas.errors import ErrorResponse
 from app.schemas.package import (
     PackageDetail,
     ProductDetail,
+    ProductEligibilityProduct,
+    ProductEligibilityResponse,
+    ProductEligibilityUpdateRequest,
     TicketPackageListResponse,
     TrackDetail,
     TrackMilestones,
@@ -51,6 +56,8 @@ from app.services import package_service
 from app.services.package_service import (
     PackageNotFoundError,
     PackageProjection,
+    ProductEligibilityProjection,
+    ProductNotFoundError,
     ProductProjection,
     TrackFixedStatusRestrictedError,
     TrackNotFoundError,
@@ -381,3 +388,122 @@ async def change_track_status(
     except TrackFixedStatusRestrictedError:
         raise insufficient_permission_error() from None
     return TrackStatusResponse(data=_serialize_track_status(result.track))
+
+
+# ---------------------------------------------------------------------------
+# Override Product Eligibility
+# ---------------------------------------------------------------------------
+
+ProductOccurrenceIdPath = Annotated[
+    UUID,
+    Path(
+        description=(
+            "TicketPackageProduct occurrence identifier (UUID), as returned in "
+            "`products[].id`; never the catalog Product identifier."
+        )
+    ),
+]
+
+
+def _serialize_product_eligibility(
+    product: ProductEligibilityProjection,
+) -> ProductEligibilityProduct:
+    return ProductEligibilityProduct.model_validate(
+        {
+            "ticket_id": product.ticket_id,
+            "package_name": product.package_name,
+            "reference": product.reference,
+            "id": product.id,
+            "product_cpe": product.product_cpe,
+            "product_name": product.product_name,
+            "eligible": product.eligible,
+            "is_eligible_override": product.is_eligible_override,
+            "lifecycle_phase": _lower(product.lifecycle_phase),
+            "actionable": product.actionable,
+            "non_actionable_reason": _lower(product.non_actionable_reason),
+        }
+    )
+
+
+@router.patch(
+    "/tickets/{ticket_id}/packages/{package_id}/tracks/{track_id}"
+    "/products/{ticket_package_product_id}",
+    response_model=ProductEligibilityResponse,
+    summary="Override Product Eligibility",
+    description=(
+        "Sets, changes, or clears the eligibility override of one Product "
+        "occurrence. `eligible: true` or `false` sets or changes the manual "
+        "override; `eligible: null` removes it and immediately recalculates "
+        "eligibility from the current CVSS threshold and lifecycle rules "
+        "(the SUSE assessment of the default CVSS version, otherwise the 10.0 "
+        "fallback, including for a Ticket without a CVE). An effective change "
+        "records a `product_eligibility_changed` event, auto-assigns an "
+        "unassigned Ticket to an active vulnerability analyst, and "
+        "re-evaluates the Ticket status; an unchanged request returns the "
+        "current Product with no side effect. Excluded and end-of-life "
+        "Products remain editable. Requires `manage_packages`. Returns the "
+        "Product with its current eligibility and actionability."
+    ),
+    responses={
+        404: {
+            "model": ErrorResponse,
+            "description": (
+                "`TICKET_NOT_FOUND`: Ticket identifier is malformed, does not "
+                "exist, or identifies a Ticket inaccessible to the caller. "
+                "`RESOURCE_NOT_FOUND`: the package, track, or Product occurrence "
+                "does not exist under the declared Ticket, package, and track."
+            ),
+        },
+        409: {
+            "model": ErrorResponse,
+            "description": "`TICKET_NOT_MUTABLE`: the Ticket is Ignored or Duplicated.",
+        },
+    },
+)
+async def override_product_eligibility(
+    body: ProductEligibilityUpdateRequest,
+    package_id: PackageIdPath,
+    track_id: TrackIdPath,
+    ticket_package_product_id: ProductOccurrenceIdPath,
+    db: DatabaseSession,
+    principal: Annotated[
+        AuthenticatedPrincipal,
+        Depends(require_capability(Capability.MANAGE_PACKAGES)),
+    ],
+    caller: AuthenticatedTicketCaller,
+    ticket: Annotated[ResolvedTicket, Depends(require_accessible_ticket)],
+) -> ProductEligibilityResponse:
+    """Override Product Eligibility — see
+    `docs/features/packages/package-model.md`.
+
+    Authorization follows `docs/api-spec.md` (Authorization Chain
+    Evaluation Order, flow 3): authentication, then `manage_packages`
+    before any lookup, then the delegated preliminary SNTL resolution
+    and request validation. The handler captures the one workflow UTC
+    date, shared by the service's lifecycle evaluation, reconciliation,
+    and locked-current Product projection; `set_product_eligibility()`
+    revalidates accessibility, operability, and nested ownership under
+    the Ticket lock.
+    """
+    evaluation_date = _utc_now().date()
+    try:
+        result = await package_service.set_product_eligibility(
+            db,
+            ticket_id=ticket.id,
+            package_id=package_id,
+            track_id=track_id,
+            ticket_package_product_id=ticket_package_product_id,
+            eligible=body.eligible,
+            acting_user_id=principal.user.id,
+            caller=caller,
+            evaluation_date=evaluation_date,
+        )
+    except TicketNotFoundError:
+        raise ticket_not_found_error() from None
+    except TicketNotMutableError:
+        raise ticket_not_mutable_error() from None
+    except PackageNotFoundError, TrackNotFoundError, ProductNotFoundError:
+        raise resource_not_found_error() from None
+    return ProductEligibilityResponse(
+        data=_serialize_product_eligibility(result.product)
+    )
