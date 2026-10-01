@@ -40,7 +40,7 @@ from unittest.mock import AsyncMock
 import pytest
 import pytest_asyncio
 from httpx import AsyncClient
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import SESSION_COOKIE_NAME
@@ -57,6 +57,7 @@ from app.core.identifiers import format_ticket_id
 from app.main import app
 from app.models.product import Product
 from app.models.ticket import Ticket
+from app.models.ticket_access_grant import TicketAccessGrant
 from app.models.ticket_package import TicketPackage
 from app.models.ticket_package_maintainer import TicketPackageMaintainer
 from app.models.ticket_package_product import TicketPackageProduct
@@ -478,6 +479,75 @@ class TestOptionalAuthentication:
         assert response.status_code == 401
         assert response.json() == UNAUTHENTICATED
         spy.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        "loss", ["confidentiality", "grant_revoked", "last_maintained_excluded"]
+    )
+    async def test_access_lost_before_the_protected_selection_is_not_listed(
+        self,
+        authenticated_client: AsyncClient,
+        authenticated_user: User,
+        fixed_clock: Clock,
+        ticket_factory: Factory,
+        ticket_access_grant_factory: Factory,
+        ticket_package_maintainer_factory: Factory,
+        trees: Trees,
+        monkeypatch: pytest.MonkeyPatch,
+        loss: str,
+    ) -> None:
+        """testing-strategy.md, Ticket Accessibility (List and count reads):
+        the caller is resolved first, then visibility is lost after that
+        preliminary point but before the protected selection. The one
+        protected selection alone decides items and total, so a split
+        implementation reusing an earlier access decision would fail.
+        The Ticket also has a second actionable package the caller does not
+        maintain, so the excluded case proves loss of Ticket visibility."""
+        target: Ticket = await ticket_factory(is_confidential=loss != "confidentiality")
+        maintained = await trees.package(target, "example-maintained")
+        await trees.package(target, "example-other")
+        if loss == "grant_revoked":
+            await ticket_access_grant_factory(
+                ticket_id=target.id, user_id=authenticated_user.id
+            )
+        if loss == "last_maintained_excluded":
+            await ticket_package_maintainer_factory(
+                ticket_package_id=maintained.id, user_id=authenticated_user.id
+            )
+        before = await _names(authenticated_client)
+        assert sorted(before) == ["example-maintained", "example-other"]
+        original = package_service.search_packages
+
+        async def _lose_access_then_search(
+            db: AsyncSession, **kwargs: Any
+        ) -> package_service.PackageSearchPage:
+            if loss == "confidentiality":
+                await db.execute(
+                    update(Ticket)
+                    .where(Ticket.id == target.id)
+                    .values(is_confidential=True)
+                )
+            elif loss == "grant_revoked":
+                await db.execute(
+                    delete(TicketAccessGrant).where(
+                        TicketAccessGrant.ticket_id == target.id
+                    )
+                )
+            else:
+                await db.execute(
+                    update(TicketPackage)
+                    .where(TicketPackage.id == maintained.id)
+                    .values(deleted_at=_NOW)
+                )
+            return await original(db, **kwargs)
+
+        monkeypatch.setattr(
+            package_service, "search_packages", _lose_access_then_search
+        )
+
+        body = await _search(authenticated_client)
+
+        assert body["data"] == []
+        assert body["meta"]["total"] == 0
 
 
 # ---------------------------------------------------------------------------

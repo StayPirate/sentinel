@@ -21,12 +21,19 @@ Owning specifications:
 The single-session behavior is covered by
 `tests/test_services/test_package_search.py`.
 
-Session R searches once (the access decision a split implementation would
-reuse), session W commits a visibility change, and R searches again on the
-same connection inside the same open transaction. Under PostgreSQL's
-default `READ COMMITTED` isolation the second search observes W's commit:
-it must return no row from a Ticket that became invisible, and its total
-must agree with its items. Every Ticket is CVE-less in `Analysis`; each
+Session R searches once, session W commits a visibility change, and R
+searches again on the same connection inside the same open transaction.
+Under PostgreSQL's default `READ COMMITTED` isolation the second search
+observes W's commit: it must return no row from a Ticket that became
+invisible, and its total must agree with its items. These tests prove
+that every call observes committed visibility state as one coherent
+result. The in-request form, where visibility is lost after caller
+resolution but before the protected selection of the same request (which
+fails a split implementation reusing a stale access decision), is
+`TestOptionalAuthentication.test_access_lost_before_the_protected_selection_is_not_listed`
+in `tests/test_api/test_package_search.py`; the single-statement assertion
+in `tests/test_services/test_package_search.py` (`TestBoundedRead`)
+backs it. Every Ticket is CVE-less in `Analysis`; each
 package path carries one track with one eligible Product in General
 Support on `EVAL`. Names are unique per test (a random token generated in
 the test body), and committed rows are deleted explicitly at teardown by
