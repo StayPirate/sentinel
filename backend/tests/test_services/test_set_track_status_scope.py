@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Awaitable, Callable
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 from unittest.mock import Mock
 
@@ -1012,6 +1012,47 @@ class TestSharedEvaluationDate:
         await self._assert_consistent(
             db_session, result, ticket, track, actor, ON_LAST_SUPPORT_DAY
         )
+
+    async def test_omitted_date_defaults_to_live_utc_today_unpatched(
+        self,
+        db_session: AsyncSession,
+        ticket_factory: TicketFactory,
+        va_user: VAUser,
+        product_factory: ProductFactory,
+        ticket_package_factory: PackageFactory,
+        ticket_package_track_factory: TrackFactory,
+        ticket_package_product_factory: OccurrenceFactory,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """When `evaluation_date` is omitted and `_utc_today()` is unpatched,
+        `set_track_status()` captures the current UTC calendar date."""
+        actor = await va_user()
+        ticket = await cveless(ticket_factory, assignee_id=actor.id)
+        track = await self._boundary_track(
+            ticket,
+            product_factory,
+            ticket_package_factory,
+            ticket_package_track_factory,
+            ticket_package_product_factory,
+        )
+        reconcile = Spy(monkeypatch, "reconcile_ticket_status")
+        before = datetime.now(UTC).date()
+
+        result = await set_track_status(
+            db_session,
+            ticket_id=ticket.id,
+            package_id=track.ticket_package_id,
+            track_id=track.id,
+            status=PackageStatus.AFFECTED,
+            acting_user_id=actor.id,
+            caller=TicketCaller.authenticated(actor.id, Scope.ALL),
+        )
+        after = datetime.now(UTC).date()
+
+        assert before <= result.evaluation_date <= after
+        assert [kwargs for _, kwargs in reconcile.calls] == [
+            {"evaluation_date": result.evaluation_date}
+        ]
 
 
 # ---------------------------------------------------------------------------
