@@ -1,9 +1,9 @@
 """Ticket package-tree endpoints.
 
 See `docs/features/packages/package-model.md` (API Endpoints > List Ticket
-Packages, Change Track Status, Override Product Eligibility, Soft-Delete
-and Restore Package, Track, and Product) for the authoritative endpoint
-contracts.
+Packages, Search Packages Across Tickets, Change Track Status, Override
+Product Eligibility, Soft-Delete and Restore Package, Track, and Product)
+for the authoritative endpoint contracts.
 Handlers stay thin: they capture the request's single evaluation instant
 or date (`docs/features/tickets/ticket-deadlines.md`, Evaluation Instant;
 package-model.md, Derived Actionability), delegate the protected read or
@@ -13,14 +13,16 @@ exceptions to HTTP. No business logic or database query lives here.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Annotated, Any
+from typing import Annotated, Any, Final
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Path
+from fastapi import APIRouter, Depends, Path, Query
 from fastapi import status as http_status
+from fastapi.exceptions import RequestValidationError
+from pydantic import ValidationError
 
 from app.api.dependencies import (
     AuthenticatedPrincipal,
@@ -36,16 +38,26 @@ from app.api.dependencies import (
     ticket_not_found_error,
     ticket_not_mutable_error,
 )
-from app.core.enums import Capability, PackageStatus
+from app.core.enums import (
+    Capability,
+    PackageSortField,
+    PackageStatus,
+    SortOrder,
+    TicketStatus,
+)
 from app.core.errors import AppError, ErrorCode
 from app.core.exceptions import TicketNotFoundError, TicketNotMutableError
 from app.core.permissions import get_capabilities
 from app.database import DatabaseSession
+from app.schemas.common import PaginationMeta
 from app.schemas.errors import ErrorResponse
 from app.schemas.package import (
     PackageDetail,
     PackageExclusionPackage,
     PackageExclusionResponse,
+    PackageListItem,
+    PackageListResponse,
+    PackageSearchQuery,
     ProductDetail,
     ProductEligibilityProduct,
     ProductEligibilityResponse,
@@ -53,6 +65,7 @@ from app.schemas.package import (
     ProductExclusionProduct,
     ProductExclusionResponse,
     TicketPackageListResponse,
+    TicketPackageRef,
     TrackDetail,
     TrackExclusionResponse,
     TrackExclusionTrack,
@@ -61,6 +74,7 @@ from app.schemas.package import (
     TrackStatusResponse,
     TrackStatusTrack,
     TrackStatusUpdateRequest,
+    TrackSummary,
 )
 from app.services import package_service
 from app.services.package_service import (
@@ -69,6 +83,7 @@ from app.services.package_service import (
     PackageNotExcludedError,
     PackageNotFoundError,
     PackageProjection,
+    PackageSearchItem,
     ProductEligibilityProjection,
     ProductMarkerProjection,
     ProductNotFoundError,
@@ -211,6 +226,193 @@ async def list_ticket_packages(
     except TicketNotFoundError:
         raise ticket_not_found_error() from None
     return TicketPackageListResponse(data=[serialize_package(p) for p in packages])
+
+
+# ---------------------------------------------------------------------------
+# Search Packages Across Tickets
+# ---------------------------------------------------------------------------
+
+# Lowercase wire value -> domain filter member (tickets.md, Response
+# Schemas: enum serialization; package-model.md, Query Parameters).
+_TICKET_STATUS_FILTER: Final[Mapping[str, TicketStatus]] = {
+    member.value.lower(): member for member in TicketStatus
+}
+
+
+def _ticket_status_filter(raw: list[str]) -> list[TicketStatus] | None:
+    """Resolve the raw repeatable `ticket_status` values.
+
+    Returns `None` when the parameter was not supplied (no filter), or
+    the valid members otherwise. Invalid values, including
+    comma-separated lists, are silently dropped, so an all-invalid
+    filter yields an empty list, which the service turns into an empty
+    page (`docs/api-spec.md`, Enum Filter Validation).
+    """
+    if not raw:
+        return None
+    members = _TICKET_STATUS_FILTER
+    return [members[value] for value in raw if value in members]
+
+
+def _package_search_query(
+    *,
+    search: Annotated[
+        str | None,
+        Query(
+            description=(
+                "Case-insensitive substring match on the package name. Outer "
+                "whitespace is trimmed once; an empty result means no search "
+                "filter. `%`, `_`, and backslash are literal characters. "
+                "Mutually exclusive with `name`."
+            )
+        ),
+    ] = None,
+    name: Annotated[
+        str | None,
+        Query(
+            description=(
+                "Exact, case-sensitive match on the package name. Mutually "
+                "exclusive with a non-empty `search`."
+            )
+        ),
+    ] = None,
+    ticket_status: Annotated[
+        list[str],
+        Query(
+            default_factory=list,
+            description=(
+                "Ticket statuses to include: `new`, `analysis`, `analyzed`, "
+                "`resolved`, `ignored`, `duplicated`. Repeatable; OR semantics. "
+                "Invalid values are ignored; if all values are invalid, the "
+                "result is empty. Default: all statuses."
+            ),
+        ),
+    ],
+    sort_by: Annotated[
+        PackageSortField,
+        Query(
+            description=(
+                "Sort field (default `created_at`): `package_name` (Unicode "
+                "code-point order) or `created_at` (when the package was added "
+                "to the Ticket)."
+            )
+        ),
+    ] = PackageSortField.CREATED_AT,
+    sort_order: Annotated[
+        SortOrder, Query(description="`asc` or `desc` (default `desc`).")
+    ] = SortOrder.DESC,
+    page: Annotated[int, Query(ge=1, le=2_147_483_647, description="Page number.")] = 1,
+    per_page: Annotated[
+        int, Query(ge=1, le=100, description="Items per page; maximum 100.")
+    ] = 20,
+) -> PackageSearchQuery:
+    """Collect and validate the Search Packages query parameters.
+
+    Declared as individual `Query()` parameters so each one is visible to
+    the shared query-length-limit dependency (`app.core.query_limits`).
+    The `search`/`name` exclusivity is a cross-field rule of
+    `PackageSearchQuery`; its failure is re-raised as the global
+    `422 VALIDATION_ERROR`.
+    """
+    try:
+        return PackageSearchQuery(
+            search=search,
+            name=name,
+            ticket_status=ticket_status,
+            sort_by=sort_by,
+            sort_order=sort_order,
+            page=page,
+            per_page=per_page,
+        )
+    except ValidationError as exc:
+        raise RequestValidationError(
+            [
+                {
+                    "loc": ("query", *error["loc"]),
+                    "msg": error["msg"],
+                    "type": error["type"],
+                }
+                for error in exc.errors()
+            ]
+        ) from None
+
+
+def _serialize_search_item(item: PackageSearchItem) -> PackageListItem:
+    ticket = item.ticket
+    summary = item.track_summary
+    return PackageListItem.model_validate(
+        {
+            "id": item.id,
+            "package_name": item.package_name,
+            "ticket": TicketPackageRef.model_validate(
+                {
+                    "ticket_id": ticket.ticket_id,
+                    "status": ticket.status.lower(),
+                    "severity": _lower(ticket.severity),
+                }
+            ),
+            "track_summary": TrackSummary.model_validate(
+                {
+                    "total": summary.total,
+                    "affected": summary.affected,
+                    "fixed": summary.fixed,
+                    "not_affected": summary.not_affected,
+                    "wont_fix": summary.wont_fix,
+                    "analysis": summary.analysis,
+                }
+            ),
+            "created_at": item.created_at,
+            "updated_at": item.updated_at,
+        }
+    )
+
+
+@router.get(
+    "/packages",
+    response_model=PackageListResponse,
+    summary="Search packages across Tickets",
+    description=(
+        "Returns a paginated list of actionable package occurrences across the "
+        "Tickets visible to the caller; each item is one (package name, Ticket) "
+        "pair. Non-actionable packages (directly excluded, or without an "
+        "actionable track) are always omitted. Supports a literal substring "
+        "`search` or an exact `name`, a repeatable `ticket_status` filter, and "
+        "sorting. Visibility is applied before every filter, sort, count, page, "
+        "and track aggregate. Public; optional authentication determines access "
+        "to confidential Tickets."
+    ),
+)
+async def search_packages(
+    db: DatabaseSession,
+    caller: OptionalTicketCaller,
+    query: Annotated[PackageSearchQuery, Depends(_package_search_query)],
+) -> PackageListResponse:
+    """Search Packages Across Tickets — see
+    `docs/features/packages/package-model.md` (Search Packages Across
+    Tickets).
+
+    Captures one UTC evaluation date for the complete response; the
+    service applies visibility, actionability, filters, the total, and
+    the track aggregates from one statement.
+    """
+    result = await package_service.search_packages(
+        db,
+        caller=caller,
+        evaluation_date=_utc_now().astimezone(UTC).date(),
+        search=query.search,
+        name=query.name,
+        ticket_status=_ticket_status_filter(query.ticket_status),
+        sort_by=query.sort_by,
+        sort_order=query.sort_order,
+        page=query.page,
+        per_page=query.per_page,
+    )
+    return PackageListResponse(
+        data=[_serialize_search_item(item) for item in result.items],
+        meta=PaginationMeta(
+            total=result.total, page=result.page, per_page=result.per_page
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------

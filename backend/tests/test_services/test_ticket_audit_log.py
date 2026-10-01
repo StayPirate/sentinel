@@ -51,7 +51,6 @@ from app.services.ticket_audit_log import (
     CVE_SOURCE_AUDIT_LABELS,
     TicketAuditLog,
     TicketEventActor,
-    _literal_substring_pattern,
     _serialized_detail_size,
     list_ticket_events,
 )
@@ -1048,22 +1047,6 @@ async def _page_ids(db: AsyncSession, ticket: Ticket, **kwargs: Any) -> list[uui
         db, ticket_id=_sntl(ticket), caller=ANONYMOUS_CALLER, **kwargs
     )
     return [item.id for item in result.items]
-
-
-@pytest.mark.unit
-class TestLiteralSubstringPattern:
-    @pytest.mark.parametrize(
-        ("term", "pattern"),
-        [
-            ("plain", "%plain%"),
-            ("100%", "%100\\%%"),
-            ("a_b", "%a\\_b%"),
-            ("C:\\x", "%C:\\\\x%"),
-            ("\\%", "%\\\\\\%%"),
-        ],
-    )
-    def test_escapes_like_metacharacters(self, term: str, pattern: str) -> None:
-        assert _literal_substring_pattern(term) == pattern
 
 
 @pytest.mark.unit

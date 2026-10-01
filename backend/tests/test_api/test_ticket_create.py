@@ -1238,6 +1238,14 @@ _OCCURRENCE_LOCATOR_PARAMETERS = {"ticket_package_product_id"}
 contain `ticket` but which are not Ticket identities: they remain UUIDs
 (api-spec.md, Ticket Identifier Resolution; package-model.md, API
 Endpoints)."""
+_EMBEDDED_TICKET_REFERENCES = {"ticket": "TicketPackageRef"}
+"""Embedded Ticket reference objects (property name -> schema). Their
+schema identifies the Ticket only by `ticket_id` (package-model.md,
+Response Schema: `PackageListItem` > `TicketPackageRef`)."""
+_TICKET_FILTER_PARAMETERS = {"ticket_status"}
+"""Query filters whose names contain `ticket` but which are Ticket
+attributes, not Ticket identities (package-model.md, Search Packages
+Across Tickets, naming note)."""
 
 
 def _walk_properties(node: Any, found: list[tuple[str, dict[str, Any]]]) -> None:
@@ -1351,7 +1359,18 @@ class TestOpenApiContract:
         _walk_properties(spec, found)
 
         ticket_fields = {name for name, _ in found if "ticket" in name.lower()}
-        assert ticket_fields == _TICKET_IDENTITY_FIELDS
+        assert ticket_fields == _TICKET_IDENTITY_FIELDS | set(
+            _EMBEDDED_TICKET_REFERENCES
+        )
+        for name, schema in found:
+            if name in _EMBEDDED_TICKET_REFERENCES:
+                reference = _EMBEDDED_TICKET_REFERENCES[name]
+                assert schema["$ref"] == f"#/components/schemas/{reference}", name
+                assert set(self._schema(reference)["properties"]) == {
+                    "ticket_id",
+                    "status",
+                    "severity",
+                }
         for name, schema in found:
             if name in _TICKET_IDENTITY_FIELDS:
                 assert "format" not in str(schema), name
@@ -1367,6 +1386,8 @@ class TestOpenApiContract:
                 for parameter in operation.get("parameters", []):
                     if parameter["name"] in _OCCURRENCE_LOCATOR_PARAMETERS:
                         assert parameter["schema"]["format"] == "uuid", (path, method)
+                    elif parameter["name"] in _TICKET_FILTER_PARAMETERS:
+                        assert parameter["in"] == "query", (path, method)
                     elif "ticket" in parameter["name"].lower():
                         assert parameter["name"] == "ticket_id", (path, method)
                         assert parameter["in"] == "path", (path, method)

@@ -11,9 +11,10 @@ explicit system invocation context, the locked semantic-locator loader
 at the package, track, and Product levels) with the mutations
 `set_track_status()`, `set_product_eligibility()`, and the six direct
 exclusion and restoration operations (`soft_delete_ticket_package[_track|
-_product]()`, `restore_ticket_package[_track|_product]()`); the remaining
-mutation, orchestration, and search operations are added by their owning
-work items. This module
+_product]()`, `restore_ticket_package[_track|_product]()`), and the
+cross-Ticket package search (`search_packages()`); the remaining
+mutation, orchestration, and workbench operations are added by their
+owning work items. This module
 never imports `ticket_service`; it consumes the `ticket_mutations`
 primitives, which never import it back.
 
@@ -30,12 +31,18 @@ adds the column to its own single, already visibility-constrained or
 mutation-owned statement, so the tree is observed in the same database
 snapshot as the rest of its response. The internal Ticket UUID is only an
 internal correlation key and never an API locator.
+
+Search. `search_packages()` runs one SQL statement (a CTE chain: the
+visible, actionable, filtered package occurrences, their total, the
+requested page, then the page's actionable-track aggregate), so items,
+total, and `track_summary` derive from one PostgreSQL observation and one
+`evaluation_date`.
 """
 
 from __future__ import annotations
 
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from enum import Enum, StrEnum
@@ -46,22 +53,27 @@ from sqlalchemy import (
     ColumnElement,
     SQLColumnExpression,
     and_,
+    false,
     func,
     literal_column,
     select,
+    true,
     type_coerce,
 )
 from sqlalchemy.dialects.postgresql import JSON, aggregate_order_by
 from sqlalchemy.engine import Row
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 from sqlalchemy.orm.util import AliasedClass
 
 from app.core.enums import (
     DeliveryStatus,
     LifecyclePhase,
     NonActionableReason,
+    PackageSortField,
     PackageStatus,
     Severity,
+    SortOrder,
     TicketAuditEventType,
     TicketStatus,
     WorkflowType,
@@ -87,6 +99,7 @@ from app.services.package_actionability import (
 )
 from app.services.product_eligibility import evaluate_product_eligibility
 from app.services.product_service import lifecycle_phase_expression
+from app.services.sql_patterns import LIKE_ESCAPE, escape_like
 from app.services.ticket_audit_log import TicketAuditLog
 from app.services.ticket_deadline_expressions import active_release_request_exists
 from app.services.ticket_deadlines import (
@@ -572,6 +585,288 @@ async def get_ticket_packages(
         row.packages,
         ticket=ticket_tree_context_from_row(row),
         evaluation_instant=evaluation_instant,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Cross-Ticket package search (package-service.md, Query Operations >
+# `search_packages()`; package-model.md, Search Packages Across Tickets)
+# ---------------------------------------------------------------------------
+
+MAX_PER_PAGE: Final = 100
+"""Largest accepted `per_page` (docs/api-spec.md, Pagination)."""
+
+
+@dataclass(frozen=True, slots=True)
+class TicketPackageRefProjection:
+    """The lightweight parent-Ticket reference of a search item
+    (`TicketPackageRef`).
+
+    `ticket_id` is the canonical `SNTL-{n}` identity; the internal Ticket
+    UUID is never part of the projection. `severity` is the resolved
+    severity (tickets.md, Severity Resolution): `None` is SQL `NULL`
+    (unresolved), while `Severity.NONE` is the resolved `None` label.
+    """
+
+    ticket_id: str
+    status: TicketStatus
+    severity: Severity | None
+
+
+@dataclass(frozen=True, slots=True)
+class TrackSummaryProjection:
+    """Counts of the actionable tracks of one package occurrence by
+    affectedness status (`TrackSummary`); `total` is their sum."""
+
+    total: int
+    affected: int
+    fixed: int
+    not_affected: int
+    wont_fix: int
+    analysis: int
+
+
+@dataclass(frozen=True, slots=True)
+class PackageSearchItem:
+    """One actionable, caller-visible `TicketPackage` occurrence
+    (`PackageListItem`).
+
+    `id` is the `TicketPackage` UUID (a public nested-resource locator);
+    `created_at` and `updated_at` are the `TicketPackage` timestamps.
+    """
+
+    id: uuid.UUID
+    package_name: str
+    ticket: TicketPackageRefProjection
+    track_summary: TrackSummaryProjection
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class PackageSearchPage:
+    """One page of search items and the total of the visible candidates."""
+
+    items: tuple[PackageSearchItem, ...]
+    total: int
+    page: int
+    per_page: int
+
+
+# Ordered (field, status) pairs of the `TrackSummary` aggregate.
+_TRACK_SUMMARY_STATUSES: Final = (
+    ("affected", PackageStatus.AFFECTED),
+    ("fixed", PackageStatus.FIXED),
+    ("not_affected", PackageStatus.NOT_AFFECTED),
+    ("wont_fix", PackageStatus.WONT_FIX),
+    ("analysis", PackageStatus.ANALYSIS),
+)
+
+
+def _search_order(
+    sort_key: ColumnElement[Any],
+    package_id: ColumnElement[Any],
+    *,
+    sort_by: PackageSortField,
+    sort_order: SortOrder,
+) -> tuple[ColumnElement[Any], ColumnElement[Any]]:
+    """Primary order on `sort_key`, then the internal `TicketPackage.id`
+    tie-breaker in the same direction. `package_name` compares by Unicode
+    code point (`COLLATE "C"`) regardless of the database collation."""
+    key = (
+        sort_key.collate(_CODE_POINT_COLLATION)
+        if sort_by is PackageSortField.PACKAGE_NAME
+        else sort_key
+    )
+    if sort_order is SortOrder.ASC:
+        return key.asc(), package_id.asc()
+    return key.desc(), package_id.desc()
+
+
+def _search_item(row: Row[Any]) -> PackageSearchItem:
+    """Assemble one search item from a search-statement row. Pure."""
+    return PackageSearchItem(
+        id=row.package_pk,
+        package_name=row.package_name,
+        ticket=TicketPackageRefProjection(
+            ticket_id=format_ticket_id(row.sequence_id),
+            status=TicketStatus(row.ticket_status),
+            severity=Severity(row.severity) if row.severity is not None else None,
+        ),
+        track_summary=TrackSummaryProjection(
+            total=row.summary_total,
+            affected=row.summary_affected,
+            fixed=row.summary_fixed,
+            not_affected=row.summary_not_affected,
+            wont_fix=row.summary_wont_fix,
+            analysis=row.summary_analysis,
+        ),
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+async def search_packages(
+    db: AsyncSession,
+    *,
+    caller: TicketCaller,
+    evaluation_date: date,
+    search: str | None = None,
+    name: str | None = None,
+    ticket_status: Collection[TicketStatus] | None = None,
+    sort_by: PackageSortField = PackageSortField.CREATED_AT,
+    sort_order: SortOrder = SortOrder.DESC,
+    page: int = 1,
+    per_page: int = 20,
+) -> PackageSearchPage:
+    """Search the actionable package occurrences of the visible Tickets.
+
+    Category B read (package-service.md, Query Operations >
+    `search_packages()`; package-model.md, Search Packages Across
+    Tickets).
+
+    Q1: `caller` is the request-resolved caller information and
+    `evaluation_date` the one UTC date of the request. `search` is the
+    raw substring term (the transport schema has already enforced its
+    exclusivity with `name`); `name` the exact package name.
+    `ticket_status` is `None` when omitted (no filter) or the valid
+    supplied members, so an empty collection (every supplied value was
+    invalid) matches nothing. `page` is positive and `per_page` is 1-100.
+
+    Q3: in one SQL statement, and therefore one PostgreSQL snapshot:
+    1. selects the `TicketPackage` occurrences joined to their Ticket
+       under the canonical visibility predicate (anonymous callers
+       evaluate no grant or maintainer branch);
+    2. keeps only actionable packages
+       (`package_actionable_expression(evaluation_date)`);
+    3. applies `ticket_status` (OR within the filter); trims `search`
+       once and, when non-empty, matches it as a case-insensitive
+       substring with `%`, `_`, and backslash literal; applies `name` as
+       a case-sensitive exact match; all filters combine with AND;
+    4. orders by `package_name` in Unicode code-point order or by
+       `TicketPackage.created_at`, then by `TicketPackage.id` in the same
+       direction;
+    5. counts the candidates before page slicing;
+    6. aggregates, for the page rows only and in the same statement,
+       the actionable tracks on the same `evaluation_date` by status
+       (`track_summary`), so database work does not grow with page size
+       or result cardinality;
+    7. projects the canonical Ticket identity, status, and resolved
+       severity (`resolved_severity_expression()`).
+    Creates no event, acquires no lock, and never commits or rolls back.
+
+    Q4: returns the page items, the total, and the echoed `page` and
+    `per_page`. An empty candidate set or a page beyond the last returns
+    no items with the correct total.
+
+    Q6: raises `ValueError` before any query for `page < 1` or
+    `per_page` outside 1-100. Database exceptions propagate unchanged.
+    """
+    if page < 1:
+        raise ValueError("page must be at least 1")
+    if not 1 <= per_page <= MAX_PER_PAGE:
+        raise ValueError(f"per_page must be between 1 and {MAX_PER_PAGE}")
+
+    conditions: list[ColumnElement[bool]] = [
+        ticket_visibility_condition(caller),
+        package_actionable_expression(evaluation_date),
+    ]
+    if ticket_status is not None:
+        values = sorted({member.value for member in ticket_status})
+        conditions.append(Ticket.status.in_(values) if values else false())
+    normalized_search = search.strip() if search is not None else ""
+    if normalized_search:
+        conditions.append(
+            TicketPackage.package_name.ilike(
+                f"%{escape_like(normalized_search)}%", escape=LIKE_ESCAPE
+            )
+        )
+    if name is not None:
+        conditions.append(TicketPackage.package_name == name)
+
+    sort_column: ColumnElement[Any] = (
+        TicketPackage.package_name.expression
+        if sort_by is PackageSortField.PACKAGE_NAME
+        else TicketPackage.created_at.expression
+    )
+    filtered = (
+        select(TicketPackage.id.label("id"), sort_column.label("sort_key"))
+        .join(Ticket, Ticket.id == TicketPackage.ticket_id)
+        .where(*conditions)
+        .cte("filtered")
+    )
+    total = select(func.count().label("total")).select_from(filtered).cte("total")
+    page_rows = (
+        select(filtered)
+        .order_by(
+            *_search_order(
+                filtered.c.sort_key,
+                filtered.c.id,
+                sort_by=sort_by,
+                sort_order=sort_order,
+            )
+        )
+        .limit(per_page)
+        .offset((page - 1) * per_page)
+        .cte("page")
+    )
+    summary_package = aliased(TicketPackage)
+    summary_track = aliased(TicketPackageTrack)
+    summary = (
+        select(
+            summary_track.ticket_package_id.label("package_id"),
+            func.count().label("total"),
+            *(
+                func.count().filter(summary_track.status == status.value).label(field)
+                for field, status in _TRACK_SUMMARY_STATUSES
+            ),
+        )
+        .join(summary_package, summary_package.id == summary_track.ticket_package_id)
+        .where(
+            summary_track.ticket_package_id.in_(select(page_rows.c.id)),
+            track_actionable_expression(
+                evaluation_date, package=summary_package, track=summary_track
+            ),
+        )
+        .group_by(summary_track.ticket_package_id)
+        .cte("summary")
+    )
+    statement = (
+        select(
+            total.c.total,
+            TicketPackage.id.label("package_pk"),
+            TicketPackage.package_name,
+            TicketPackage.created_at,
+            TicketPackage.updated_at,
+            Ticket.sequence_id,
+            Ticket.status.label("ticket_status"),
+            resolved_severity_expression().label("severity"),
+            func.coalesce(summary.c.total, 0).label("summary_total"),
+            *(
+                func.coalesce(summary.c[field], 0).label(f"summary_{field}")
+                for field, _ in _TRACK_SUMMARY_STATUSES
+            ),
+        )
+        .select_from(total)
+        .outerjoin(page_rows, true())
+        .outerjoin(TicketPackage, TicketPackage.id == page_rows.c.id)
+        .outerjoin(Ticket, Ticket.id == TicketPackage.ticket_id)
+        .outerjoin(summary, summary.c.package_id == page_rows.c.id)
+        .order_by(
+            *_search_order(
+                page_rows.c.sort_key,
+                page_rows.c.id,
+                sort_by=sort_by,
+                sort_order=sort_order,
+            )
+        )
+    )
+    rows = (await db.execute(statement)).all()
+    return PackageSearchPage(
+        items=tuple(_search_item(row) for row in rows if row.package_pk is not None),
+        total=rows[0].total,
+        page=page,
+        per_page=per_page,
     )
 
 

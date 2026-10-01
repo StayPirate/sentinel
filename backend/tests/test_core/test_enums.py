@@ -6,7 +6,8 @@ docs/data-model.md (Role Enum), docs/features/tickets/cvss-scoring.md
 (Accepted Base Vectors, Severity, Eligibility Score Resolution), and
 docs/features/tickets/ticket-deadlines.md (Actors and Phases, Track
 Milestones), docs/features/packages/product-catalog.md (Product
-Lifecycle Phases), and docs/data-model.md (CveState Enum,
+Lifecycle Phases), docs/features/packages/package-model.md (Search
+Packages Across Tickets), and docs/data-model.md (CveState Enum,
 CVESourceFetchStatus Enum, CVESourceType Python Enum,
 CVEExternalIdentifierSource Python Enum, TicketAuditEventType Enum,
 ReferenceType Enum, IBSRequestState Enum, IBSRequestActionType Enum).
@@ -53,6 +54,7 @@ from app.core.enums import (
     LifecyclePhase,
     MilestonePhase,
     MilestoneStatus,
+    PackageSortField,
     PackageStatus,
     ReferenceType,
     Role,
@@ -276,6 +278,18 @@ class TestTicketSortFieldEnum:
             "um_due_at",
             "qa_due_at",
             "release_due_at",
+        }
+
+
+@pytest.mark.unit
+class TestPackageSortFieldEnum:
+    """PackageSortField must have exactly the two `sort_by` values of
+    package-model.md (Search Packages Across Tickets, Query Parameters)."""
+
+    def test_exact_members(self) -> None:
+        assert {member.value for member in PackageSortField} == {
+            "package_name",
+            "created_at",
         }
 
 

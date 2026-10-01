@@ -564,7 +564,7 @@ class TestSchemaEnumerations:
     @pytest.mark.parametrize(
         ("alias", "expected"),
         [
-            (ticket.TicketStatusValue, {s.value.lower() for s in TicketStatus}),
+            (common.TicketStatusValue, {s.value.lower() for s in TicketStatus}),
             (ticket.TicketPriorityValue, {p.value.lower() for p in TicketPriority}),
             (common.SeverityValue, {s.value.lower() for s in Severity}),
             (cve.CveStateValue, {s.value.lower() for s in CveState}),

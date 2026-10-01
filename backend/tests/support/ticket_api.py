@@ -16,7 +16,8 @@ Consumers:
   (`PATCH .../tracks/{track_id}/products/{ticket_package_product_id}`);
 - `tests/test_api/test_ticket_package_exclusion.py`
   (`POST .../packages/{package_id}[/tracks/{track_id}[/products/
-  {ticket_package_product_id}]]/exclude|restore`).
+  {ticket_package_product_id}]]/exclude|restore`);
+- `tests/test_api/test_package_search.py` (`GET /api/v1/packages`).
 
 The complete error bodies are transcribed from docs/api-spec.md (Global
 Responses, Ticket Accessibility Check, Manual-Zone Mutability Guard).

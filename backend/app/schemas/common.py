@@ -19,6 +19,14 @@ A nullable severity field serializes JSON `null` when unresolved; the
 (`docs/features/tickets/tickets.md`, Response Schemas).
 """
 
+type TicketStatusValue = Literal[
+    "new", "analysis", "analyzed", "resolved", "ignored", "duplicated"
+]
+"""Lowercase wire values of `TicketStatus`, shared by every schema that
+exposes a Ticket status (`docs/features/tickets/tickets.md`, Response
+Schemas: enum serialization).
+"""
+
 
 class PaginationMeta(BaseModel):
     """The `meta` object of a paginated list response.

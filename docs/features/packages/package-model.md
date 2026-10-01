@@ -2569,7 +2569,7 @@ itself is a ticket.
 |-------|------|-------------|
 | `ticket_id` | string | Canonical Ticket identity (e.g., `SNTL-123`) |
 | `status` | string | Current ticket status |
-| `severity` | string \| null | Ticket severity |
+| `severity` | string \| null | Resolved Ticket severity per `docs/features/tickets/tickets.md` (Severity Resolution); same value set as `TicketSummary.severity`: `critical`, `high`, `medium`, `low`, `none`, or `null` when unresolved |
 
 **`track_summary`** (`TrackSummary`) — aggregated track status counts for the
 package within this Ticket. Counts only actionable tracks, using the same UTC

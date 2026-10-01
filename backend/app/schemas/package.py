@@ -5,7 +5,7 @@ TrackDetail, TrackMilestones, PackageDetail) for the authoritative
 contracts, `docs/features/packages/package-model.md` (Derived
 Actionability, Delivery Relevance Indicator, List Ticket Packages,
 Change Track Status, Override Product Eligibility, Soft-Delete and Restore
-Package, Track, and Product), and
+Package, Track, and Product, Search Packages Across Tickets), and
 `docs/features/tickets/ticket-deadlines.md` (Actors and Phases, Track
 Milestones, API Surface) for the field semantics these OpenAPI
 descriptions convey to external consumers.
@@ -19,10 +19,13 @@ Resolution).
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
+from typing import Literal, Self
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+
+from app.core.enums import PackageSortField, SortOrder
+from app.schemas.common import PaginationMeta, SeverityValue, TicketStatusValue
 
 type PackageStatusValue = Literal[
     "analysis", "affected", "not_affected", "fixed", "wont_fix"
@@ -531,3 +534,102 @@ class ProductExclusionResponse(BaseModel):
     """Response body of `POST .../products/{id}/exclude|restore` (occurrence id)."""
 
     data: ProductExclusionProduct
+
+
+# Cross-Ticket package search (package-model.md, Search Packages Across
+# Tickets; Response Schema: PackageListItem).
+
+
+class PackageSearchQuery(BaseModel):
+    """Query parameters of `GET /api/v1/packages`.
+
+    `ticket_status` is intentionally a raw `list[str]`: an invalid value is
+    silently dropped rather than rejected (`docs/api-spec.md`, Enum Filter
+    Validation), and an empty list means the filter was omitted.
+    `sort_by` and `sort_order` are typed, so an invalid value is the
+    global `422 VALIDATION_ERROR` (Sort Parameter Validation). String
+    parameters share the global 500-character limit, applied to the raw
+    values before this model is built.
+
+    `search` and `name` are mutually exclusive. `search` counts as
+    present only when it is non-empty after trimming outer whitespace; the
+    value itself is passed through unchanged, and the service performs the
+    one effective trim.
+    """
+
+    search: str | None = None
+    name: str | None = None
+    ticket_status: list[str] = Field(default_factory=list)
+    sort_by: PackageSortField = PackageSortField.CREATED_AT
+    sort_order: SortOrder = SortOrder.DESC
+    page: int = Field(default=1, ge=1, le=2_147_483_647)
+    per_page: int = Field(default=20, ge=1, le=100)
+
+    @model_validator(mode="after")
+    def _search_and_name_are_exclusive(self) -> Self:
+        if self.name is not None and self.search is not None and self.search.strip():
+            raise ValueError("search and name are mutually exclusive.")
+        return self
+
+
+class TicketPackageRef(BaseModel):
+    """Lightweight reference to the Ticket of a package occurrence."""
+
+    ticket_id: str = Field(
+        description="Canonical Ticket identity (`SNTL-{n}`).", examples=["SNTL-123"]
+    )
+    status: TicketStatusValue = Field(
+        description=(
+            "Current Ticket status: `new`, `analysis`, `analyzed`, `resolved`, "
+            "`ignored`, or `duplicated`."
+        )
+    )
+    severity: SeverityValue | None = Field(
+        description=(
+            "Resolved Ticket severity (the CVE severity for a Ticket with a "
+            "CVE, otherwise the manual severity): `critical`, `high`, "
+            "`medium`, `low`, or `none` (CVSS score 0.0, informational), or "
+            "`null` when unresolved. `none` is distinct from `null`."
+        )
+    )
+
+
+class TrackSummary(BaseModel):
+    """Counts of the package's actionable tracks by affectedness status.
+
+    Only actionable tracks are counted, on the same UTC evaluation date as
+    the package filtering and pagination of the response.
+    """
+
+    total: int = Field(description="Total actionable tracks.")
+    affected: int = Field(description="Actionable tracks with status `affected`.")
+    fixed: int = Field(description="Actionable tracks with status `fixed`.")
+    not_affected: int = Field(
+        description="Actionable tracks with status `not_affected`."
+    )
+    wont_fix: int = Field(description="Actionable tracks with status `wont_fix`.")
+    analysis: int = Field(description="Actionable tracks with status `analysis`.")
+
+
+class PackageListItem(BaseModel):
+    """One actionable package occurrence: one `(package_name, Ticket)` pair."""
+
+    id: UUID = Field(description="TicketPackage identifier.")
+    package_name: str = Field(description="Source package name.")
+    ticket: TicketPackageRef = Field(description="The Ticket tracking the package.")
+    track_summary: TrackSummary = Field(
+        description="Actionable track counts of the package within this Ticket."
+    )
+    created_at: datetime = Field(
+        description="When the package was added to the Ticket (UTC)."
+    )
+    updated_at: datetime = Field(
+        description="Last modification of the package occurrence (UTC)."
+    )
+
+
+class PackageListResponse(BaseModel):
+    """Response body of `GET /api/v1/packages` (paginated)."""
+
+    data: list[PackageListItem]
+    meta: PaginationMeta
