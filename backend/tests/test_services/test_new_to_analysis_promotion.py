@@ -8,7 +8,9 @@ one system `status_change` (`old_value = "New"`, `new_value = "Analysis"`,
 Auto-Assignment Rule and `auto_assign_actor()` step 7; tickets.md,
 Architectural Invariant). The paths are `assign_ticket()` (explicit
 assignment) and every existing consumer mutation that reaches
-`auto_assign_actor()`. For the manual-zone entries `ignore_ticket()` and
+`auto_assign_actor()`, including the six package-tree exclusion and
+restoration operations (package-service.md, Exclusion and restoration
+operations, step 7). For the manual-zone entries `ignore_ticket()` and
 `mark_as_duplicate()`, the acting-user entry transition (`Analysis ->
 Ignored` or `Analysis -> Duplicated`) follows the promotion (tickets.md,
 Auto-Assignment on Unassigned Tickets), so the promotion is the only
@@ -50,6 +52,7 @@ from app.services.ticket_service import (
 )
 from app.services.ticket_visibility import TicketCaller
 from tests.support.cvss_chain import DEFAULT_VERSION
+from tests.support.package_exclusion import Direction, Level, change, gate_world
 from tests.support.product_eligibility import only_occurrence
 from tests.support.suse_cvss import V31_CRITICAL, delete_assessment, upsert
 from tests.support.ticket_mutations import (
@@ -80,7 +83,24 @@ PATHS = [
     "mark_as_duplicate",
     "set_track_status",
     "set_product_eligibility",
+    "soft_delete_ticket_package",
+    "soft_delete_ticket_package_track",
+    "soft_delete_ticket_package_product",
+    "restore_ticket_package",
+    "restore_ticket_package_track",
+    "restore_ticket_package_product",
 ]
+
+MARKER_PATHS = {
+    "soft_delete_ticket_package": (Level.PACKAGE, Direction.EXCLUDE),
+    "soft_delete_ticket_package_track": (Level.TRACK, Direction.EXCLUDE),
+    "soft_delete_ticket_package_product": (Level.PRODUCT, Direction.EXCLUDE),
+    "restore_ticket_package": (Level.PACKAGE, Direction.RESTORE),
+    "restore_ticket_package_track": (Level.TRACK, Direction.RESTORE),
+    "restore_ticket_package_product": (Level.PRODUCT, Direction.RESTORE),
+}
+"""The direct-marker operations, invoked through
+`tests.support.package_exclusion.change()` by `Level` and `Direction`."""
 
 
 @pytest.mark.integration
@@ -242,6 +262,24 @@ async def test_assignment_of_a_new_ticket_is_followed_by_one_promotion(
                 caller=caller,
                 evaluation_date=EVAL,
             )
+        case _ if path in MARKER_PATHS:
+            # The same CVE-less Ticket without a resolved severity, plus an
+            # untouched included `analysis` track: before and after the
+            # effective marker change an undecided actionable track remains,
+            # so the promoted Ticket stays in `Analysis` (tickets.md, Gate:
+            # Analysis -> Analyzed) and no gate `status_change` follows. A
+            # restore seeds only the target's direct marker.
+            level, direction = MARKER_PATHS[path]
+            ticket = await ticket_factory(status=TicketStatus.NEW.value)
+            occurrence = await gate_world(
+                db_session,
+                tree,
+                ticket,
+                level,
+                direction,
+                other=PackageStatus.ANALYSIS,
+            )
+            await change(db_session, level, direction, occurrence, actor)
         case _:
             raise AssertionError(path)
 

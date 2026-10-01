@@ -1054,12 +1054,16 @@ restore events because they do not mutate package-tree records.
 
 | Action | `event_type` | `user_id` | Details recorded |
 |--------|-------------|-----------|------------------|
-| Authorized user soft-deletes a package | `package_excluded` | Acting user | `package_name` |
-| Authorized user soft-deletes a track | `track_excluded` | Acting user | `track_name`, `package_name` |
-| Authorized user soft-deletes a product | `product_excluded` | Acting user | `track_name`, `package_name`, event-time Product name and CPE |
-| Authorized user restores a package | `package_restored` | Acting user | `package_name` |
-| Authorized user restores a track | `track_restored` | Acting user | `track_name`, `package_name` |
-| Authorized user restores a product | `product_restored` | Acting user | `track_name`, `package_name`, event-time Product name and CPE |
+| Authorized user soft-deletes a package | `package_excluded` | Acting user | Package name in `old_value`; `detail = NULL` |
+| Authorized user soft-deletes a track | `track_excluded` | Acting user | Track reference in `old_value`; `detail` keys `track`, `package` |
+| Authorized user soft-deletes a product | `product_excluded` | Acting user | Product display name in `old_value`; event-time Product subject in `detail` (`track`, `package`, `product_name`, `product_cpe`) |
+| Authorized user restores a package | `package_restored` | Acting user | Package name in `new_value`; `detail = NULL` |
+| Authorized user restores a track | `track_restored` | Acting user | Track reference in `new_value`; `detail` keys `track`, `package` |
+| Authorized user restores a product | `product_restored` | Acting user | Product display name in `new_value`; event-time Product subject in `detail` (`track`, `package`, `product_name`, `product_cpe`) |
+
+The exact field contract, including `comment = NULL`, is owned by
+`docs/features/tickets/ticket-audit-log.md` (Event Type Contract and detail
+JSONB Schema Contract).
 
 ---
 
@@ -1922,6 +1926,17 @@ Analyzed gate).
 }
 ```
 
+The response is projected from locked-current state after the exclusion;
+actionability uses the one UTC `evaluation_date` shared with Ticket
+reconciliation (see [Derived Actionability](#derived-actionability)).
+It contains exactly these fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `package_name` | string | Package name |
+| `actionable` | boolean | Derived package actionability |
+| `non_actionable_reason` | string \| null | First applicable package reason from [Derived Actionability](#derived-actionability); `null` when actionable |
+
 **`Capability: manage_packages`**
 
 **Error responses**:
@@ -1960,6 +1975,17 @@ Creates a single `TicketAuditEvent`. See
 If every track remains non-actionable after the restore, the same successful
 response instead returns `actionable = false` and
 `non_actionable_reason = "no_actionable_tracks"`.
+
+The response is projected from locked-current state after the restore;
+actionability uses the one UTC `evaluation_date` shared with Ticket
+reconciliation (see [Derived Actionability](#derived-actionability)).
+It contains exactly these fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `package_name` | string | Package name |
+| `actionable` | boolean | Derived package actionability |
+| `non_actionable_reason` | string \| null | First applicable package reason from [Derived Actionability](#derived-actionability); `null` when actionable |
 
 **`Capability: manage_packages`**
 
@@ -2017,13 +2043,24 @@ by ticket gates (Resolved gate and Analyzed gate).
 }
 ```
 
+The response is projected from locked-current state after the exclusion;
+actionability uses the one UTC `evaluation_date` shared with Ticket
+reconciliation (see [Derived Actionability](#derived-actionability)).
+It contains exactly these fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `reference` | string | Track reference |
+| `actionable` | boolean | Derived track actionability |
+| `non_actionable_reason` | string \| null | First applicable track reason from [Derived Actionability](#derived-actionability); `null` when actionable |
+
 **`Capability: manage_packages`**
 
 **Error responses**:
 
 | Status | Code | Condition |
 |--------|------|-----------|
-| 404 | `RESOURCE_NOT_FOUND` | Track not found on this ticket |
+| 404 | `RESOURCE_NOT_FOUND` | Package or track not found on this ticket |
 | 409 | `PACKAGE_ALREADY_EXCLUDED` | Track is already soft-deleted |
 
 ---
@@ -2055,13 +2092,24 @@ If every Product remains non-actionable after the restore, the same successful
 response instead returns `actionable = false` and
 `non_actionable_reason = "no_actionable_products"`.
 
+The response is projected from locked-current state after the restore;
+actionability uses the one UTC `evaluation_date` shared with Ticket
+reconciliation (see [Derived Actionability](#derived-actionability)).
+It contains exactly these fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `reference` | string | Track reference |
+| `actionable` | boolean | Derived track actionability |
+| `non_actionable_reason` | string \| null | First applicable track reason from [Derived Actionability](#derived-actionability); `null` when actionable |
+
 **`Capability: manage_packages`**
 
 **Error responses**:
 
 | Status | Code | Condition |
 |--------|------|-----------|
-| 404 | `RESOURCE_NOT_FOUND` | Track not found on this ticket |
+| 404 | `RESOURCE_NOT_FOUND` | Package or track not found on this ticket |
 | 422 | `PACKAGE_NOT_EXCLUDED` | Track is not directly soft-deleted |
 
 ---
@@ -2106,13 +2154,26 @@ by ticket gates (Resolved gate and Analyzed gate).
 }
 ```
 
+The response is projected from locked-current state after the exclusion;
+actionability uses the one UTC `evaluation_date` shared with Ticket
+reconciliation (see [Derived Actionability](#derived-actionability)).
+It contains exactly these fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | UUID | `TicketPackageProduct.id` occurrence locator |
+| `product_cpe` | string | Related catalog Product CPE |
+| `product_name` | string | Related catalog Product display name |
+| `actionable` | boolean | Derived Product actionability |
+| `non_actionable_reason` | string \| null | First applicable Product reason from [Derived Actionability](#derived-actionability); `null` when actionable |
+
 **`Capability: manage_packages`**
 
 **Error responses**:
 
 | Status | Code | Condition |
 |--------|------|-----------|
-| 404 | `RESOURCE_NOT_FOUND` | Product not found on this track |
+| 404 | `RESOURCE_NOT_FOUND` | Package, track, or product not found on this ticket |
 | 409 | `PACKAGE_ALREADY_EXCLUDED` | Product is already soft-deleted |
 
 ---
@@ -2145,13 +2206,26 @@ The example remains non-actionable because the restored Product is EOL. A
 non-EOL Product under manually included ancestors returns `actionable = true`
 and `non_actionable_reason = null`.
 
+The response is projected from locked-current state after the restore;
+actionability uses the one UTC `evaluation_date` shared with Ticket
+reconciliation (see [Derived Actionability](#derived-actionability)).
+It contains exactly these fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | UUID | `TicketPackageProduct.id` occurrence locator |
+| `product_cpe` | string | Related catalog Product CPE |
+| `product_name` | string | Related catalog Product display name |
+| `actionable` | boolean | Derived Product actionability |
+| `non_actionable_reason` | string \| null | First applicable Product reason from [Derived Actionability](#derived-actionability); `null` when actionable |
+
 **`Capability: manage_packages`**
 
 **Error responses**:
 
 | Status | Code | Condition |
 |--------|------|-----------|
-| 404 | `RESOURCE_NOT_FOUND` | Product not found on this track |
+| 404 | `RESOURCE_NOT_FOUND` | Package, track, or product not found on this ticket |
 | 422 | `PACKAGE_NOT_EXCLUDED` | Product is not directly soft-deleted |
 
 ---

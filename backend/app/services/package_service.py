@@ -8,9 +8,12 @@ eligibility convergence (`converge_manual_zone_exit_eligibility()`),
 which `ticket_service` composes with an already locked Ticket, and the
 package mutation foundation (`PackageServiceError` hierarchy, the
 explicit system invocation context, the locked semantic-locator loader
-at the track and Product levels) with the mutations `set_track_status()`
-and `set_product_eligibility()`; the remaining mutation, orchestration,
-and search operations are added by their owning work items. This module
+at the package, track, and Product levels) with the mutations
+`set_track_status()`, `set_product_eligibility()`, and the six direct
+exclusion and restoration operations (`soft_delete_ticket_package[_track|
+_product]()`, `restore_ticket_package[_track|_product]()`); the remaining
+mutation, orchestration, and search operations are added by their owning
+work items. This module
 never imports `ticket_service`; it consumes the `ticket_mutations`
 primitives, which never import it back.
 
@@ -798,6 +801,31 @@ class ProductNotFoundError(PackageServiceError):
         super().__init__("Product not found.")
 
 
+class PackageAlreadyExcludedError(PackageServiceError):
+    """The targeted package-tree record is already directly excluded.
+
+    Raised by `soft_delete_ticket_package[_track|_product]()` when the
+    locked target's own `deleted_at` marker is already set. Maps to `409
+    PACKAGE_ALREADY_EXCLUDED`.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("Record is already excluded.")
+
+
+class PackageNotExcludedError(PackageServiceError):
+    """The targeted package-tree record is not directly excluded.
+
+    Raised by `restore_ticket_package[_track|_product]()` when the locked
+    target's own `deleted_at` marker is NULL, even if the record is
+    effectively excluded through an ancestor. Maps to `422
+    PACKAGE_NOT_EXCLUDED`.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("Record is not directly excluded.")
+
+
 class TrackFixedStatusRestrictedError(PackageServiceError):
     """The user-attributed affectedness target violates caller authority.
 
@@ -868,6 +896,24 @@ def _resolve_actor(
     return False
 
 
+def _require_consumer_actor(
+    acting_user_id: uuid.UUID | None, caller: TicketCaller
+) -> uuid.UUID:
+    """Validate a user-attributed-only boundary's actor before any I/O.
+
+    Raises `ValueError` when the actor is null, `caller` is not a
+    consumer `TicketCaller`, or the caller does not identify the actor.
+    Returns the validated acting user UUID.
+    """
+    if (
+        acting_user_id is None
+        or not isinstance(caller, TicketCaller)
+        or caller.user_id != acting_user_id
+    ):
+        raise ValueError("caller must identify a non-null acting user.")
+    return acting_user_id
+
+
 async def _lock_system_ticket(db: AsyncSession, ticket_id: uuid.UUID) -> Ticket:
     """Lock the declared Ticket `FOR UPDATE` for a system invocation.
 
@@ -885,6 +931,32 @@ async def _lock_system_ticket(db: AsyncSession, ticket_id: uuid.UUID) -> Ticket:
     if ticket is None:
         raise TicketNotFoundError()
     return ticket
+
+
+async def _load_locked_package(
+    db: AsyncSession, *, ticket_id: uuid.UUID, package_id: uuid.UUID
+) -> TicketPackage:
+    """Reload and validate the declared Ticket/package chain.
+
+    Called only while the caller holds the Ticket `FOR UPDATE` lock and
+    after locked-current accessibility (package-service.md, Semantic
+    locators and locked ownership validation). One statement selects the
+    package under the declared Ticket, including a directly excluded
+    one, and refreshes any identity-map copy.
+
+    Raises `PackageNotFoundError` when the package is missing or belongs
+    to another Ticket, without revealing or touching that occurrence.
+    """
+    package = (
+        await db.execute(
+            select(TicketPackage)
+            .where(TicketPackage.id == package_id, TicketPackage.ticket_id == ticket_id)
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+    if package is None:
+        raise PackageNotFoundError()
+    return package
 
 
 async def _load_locked_track(
@@ -1464,12 +1536,7 @@ async def set_product_eligibility(
     reconciliation exceptions propagate and roll back the caller's
     transaction.
     """
-    if (
-        acting_user_id is None
-        or not isinstance(caller, TicketCaller)
-        or caller.user_id != acting_user_id
-    ):
-        raise ValueError("caller must identify a non-null acting user.")
+    _require_consumer_actor(acting_user_id, caller)
     if evaluation_date is None:
         evaluation_date = _utc_today()
 
@@ -1554,5 +1621,621 @@ async def _product_eligibility_result(
             ticket_package_product_id=ticket_package_product_id,
             evaluation_date=evaluation_date,
         ),
+        evaluation_date=evaluation_date,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Exclusion and restoration (package-service.md, Exclusion and restoration
+# operations; package-model.md, Exclusion and Actionability, Soft-Delete and
+# Restore Package, Track, and Product responses)
+# ---------------------------------------------------------------------------
+
+
+class _MarkerLevel(Enum):
+    """The package-tree level whose direct `deleted_at` marker changes."""
+
+    PACKAGE = "package"
+    TRACK = "track"
+    PRODUCT = "product"
+
+
+class _MarkerDirection(Enum):
+    """Exclusion sets the direct marker; restoration clears it."""
+
+    EXCLUDE = "exclude"
+    RESTORE = "restore"
+
+
+_MARKER_EVENTS: Final[
+    Mapping[tuple[_MarkerLevel, _MarkerDirection], TicketAuditEventType]
+] = {
+    (_MarkerLevel.PACKAGE, _MarkerDirection.EXCLUDE): (
+        TicketAuditEventType.PACKAGE_EXCLUDED
+    ),
+    (_MarkerLevel.TRACK, _MarkerDirection.EXCLUDE): TicketAuditEventType.TRACK_EXCLUDED,
+    (_MarkerLevel.PRODUCT, _MarkerDirection.EXCLUDE): (
+        TicketAuditEventType.PRODUCT_EXCLUDED
+    ),
+    (_MarkerLevel.PACKAGE, _MarkerDirection.RESTORE): (
+        TicketAuditEventType.PACKAGE_RESTORED
+    ),
+    (_MarkerLevel.TRACK, _MarkerDirection.RESTORE): TicketAuditEventType.TRACK_RESTORED,
+    (_MarkerLevel.PRODUCT, _MarkerDirection.RESTORE): (
+        TicketAuditEventType.PRODUCT_RESTORED
+    ),
+}
+
+
+@dataclass(frozen=True, slots=True)
+class PackageMarkerProjection:
+    """The locked-current package of an exclusion or restoration result.
+
+    `actionable` and `non_actionable_reason` (`package_excluded`, then
+    `no_actionable_tracks`) use the shared `evaluation_date`.
+    """
+
+    package_name: str
+    actionable: bool
+    non_actionable_reason: NonActionableReason | None
+
+
+@dataclass(frozen=True, slots=True)
+class TrackMarkerProjection:
+    """The locked-current track of an exclusion or restoration result.
+
+    `reference` is the track reference; `actionable` and
+    `non_actionable_reason` (`package_excluded`, `track_excluded`, then
+    `no_actionable_products`) use the shared `evaluation_date`.
+    """
+
+    reference: str
+    actionable: bool
+    non_actionable_reason: NonActionableReason | None
+
+
+@dataclass(frozen=True, slots=True)
+class ProductMarkerProjection:
+    """The locked-current Product occurrence of an exclusion or restoration.
+
+    `id` is the `TicketPackageProduct` occurrence UUID; `product_cpe` and
+    `product_name` come from the related catalog Product. `actionable`
+    and `non_actionable_reason` (`package_excluded`, `track_excluded`,
+    `product_excluded`, then `eol`) use the shared `evaluation_date`.
+    """
+
+    id: uuid.UUID
+    product_cpe: str
+    product_name: str
+    actionable: bool
+    non_actionable_reason: NonActionableReason | None
+
+
+@dataclass(frozen=True, slots=True)
+class MarkerChangeResult[P]:
+    """Result of one effective direct-marker exclusion or restoration.
+
+    `target` is the targeted record projected from state observed under
+    the Ticket lock after the flush; `evaluation_date` is the one UTC
+    date also used by Ticket reconciliation. There is no outcome field:
+    a repeated call fails on the direct-marker guard instead of
+    returning a no-op.
+    """
+
+    target: P
+    evaluation_date: date
+
+
+def _marker_now() -> datetime:
+    """The current UTC instant set on an exclusion marker (patched by tests)."""
+    return datetime.now(UTC)
+
+
+async def _change_direct_marker(
+    db: AsyncSession,
+    *,
+    level: _MarkerLevel,
+    direction: _MarkerDirection,
+    ticket_id: uuid.UUID,
+    package_id: uuid.UUID,
+    track_id: uuid.UUID | None,
+    ticket_package_product_id: uuid.UUID | None,
+    acting_user_id: uuid.UUID,
+    caller: TicketCaller,
+    evaluation_date: date | None,
+) -> tuple[Ticket, date]:
+    """Apply the shared Category A direct-marker contract.
+
+    package-service.md, Exclusion and restoration operations, steps 1-9
+    (the public function projects the result, step 10):
+
+    1. validate the actor before any database operation (`ValueError`);
+    2. resolve one `evaluation_date`, stabilize the acting User `FOR
+       SHARE`, then lock the declared Ticket `FOR UPDATE`;
+    3. locked-current accessibility (`TicketNotFoundError`);
+    4. `ensure_ticket_operable()` (`TicketNotMutableError`);
+    5. reload the declared path for `level` under the lock
+       (`PackageNotFoundError` / `TrackNotFoundError` /
+       `ProductNotFoundError`);
+    6. inspect only the target's direct marker: exclusion of a set
+       marker raises `PackageAlreadyExcludedError`, restoration of a NULL
+       marker raises `PackageNotExcludedError`, before any effect;
+    7. `auto_assign_actor()`;
+    8. set the target marker to the current UTC instant, or clear it;
+       ancestor and descendant markers and every other dimension stay
+       unchanged;
+    9. one acting-user event with the exact level payload (package
+       name, track reference with `{track, package}`, or Product display
+       name with the event-time Product subject; `comment = NULL`), then
+       one `reconcile_ticket_status()` with the shared date, then flush.
+
+    No ancestor, descendant, EOL, or child-existence condition is a
+    guard. Returns the locked Ticket and the shared `evaluation_date`.
+    Audit, reconciliation, database, and flush failures propagate and
+    roll back the caller's transaction. Never commits, reads audit
+    history, or performs external I/O.
+    """
+    actor_id = _require_consumer_actor(acting_user_id, caller)
+    if evaluation_date is None:
+        evaluation_date = _utc_today()
+
+    acting_user = await stabilize_acting_user(db, actor_id)
+    ticket = await lock_accessible_ticket(db, ticket_id, caller)
+    ensure_ticket_operable(ticket)
+
+    target: TicketPackage | TicketPackageTrack | TicketPackageProduct
+    detail: dict[str, str] | None
+    match level:
+        case _MarkerLevel.PACKAGE:
+            package = await _load_locked_package(
+                db, ticket_id=ticket.id, package_id=package_id
+            )
+            target, subject, detail = package, package.package_name, None
+        case _MarkerLevel.TRACK:
+            assert track_id is not None  # guaranteed by the public functions
+            package, track = await _load_locked_track(
+                db, ticket_id=ticket.id, package_id=package_id, track_id=track_id
+            )
+            target, subject = track, track.reference
+            detail = {"track": track.reference, "package": package.package_name}
+        case _:
+            assert level is _MarkerLevel.PRODUCT
+            assert track_id is not None  # guaranteed by the public functions
+            assert ticket_package_product_id is not None
+            path = await _load_locked_product(
+                db,
+                ticket_id=ticket.id,
+                package_id=package_id,
+                track_id=track_id,
+                ticket_package_product_id=ticket_package_product_id,
+                evaluation_date=evaluation_date,
+            )
+            target, subject = path.occurrence, path.product.display_name
+            detail = {
+                "track": path.track.reference,
+                "package": path.package.package_name,
+                "product_name": path.product.display_name,
+                "product_cpe": path.product.cpe,
+            }
+
+    directly_excluded = target.deleted_at is not None
+    if direction is _MarkerDirection.EXCLUDE:
+        if directly_excluded:
+            raise PackageAlreadyExcludedError()
+    elif not directly_excluded:
+        raise PackageNotExcludedError()
+
+    await auto_assign_actor(ticket, acting_user, db)
+    if direction is _MarkerDirection.EXCLUDE:
+        target.deleted_at = _marker_now()
+        old_value, new_value = subject, None
+    else:
+        target.deleted_at = None
+        old_value, new_value = None, subject
+    await TicketAuditLog.log_event(
+        db,
+        ticket_id=ticket.id,
+        event_type=_MARKER_EVENTS[level, direction],
+        user_id=actor_id,
+        old_value=old_value,
+        new_value=new_value,
+        detail=detail,
+    )
+    await reconcile_ticket_status(ticket, db, evaluation_date=evaluation_date)
+    await db.flush()
+    return ticket, evaluation_date
+
+
+async def _project_marker_package(
+    db: AsyncSession, *, package_id: uuid.UUID, evaluation_date: date
+) -> PackageMarkerProjection:
+    """Project one package under the held Ticket lock (one statement).
+
+    When the direct marker is NULL, SQL package actionability equals the
+    existence of an actionable track, so it feeds the canonical reason
+    precedence directly; with the marker set, `package_excluded` wins.
+    """
+    row = (
+        await db.execute(
+            select(
+                TicketPackage.package_name,
+                TicketPackage.deleted_at,
+                package_actionable_expression(evaluation_date).label("actionable"),
+            ).where(TicketPackage.id == package_id)
+        )
+    ).one()
+    return PackageMarkerProjection(
+        package_name=row.package_name,
+        actionable=row.actionable,
+        non_actionable_reason=package_non_actionable_reason(
+            package_excluded=row.deleted_at is not None,
+            has_actionable_track=row.actionable,
+        ),
+    )
+
+
+async def _project_marker_track(
+    db: AsyncSession, *, track_id: uuid.UUID, evaluation_date: date
+) -> TrackMarkerProjection:
+    """Project one track under the held Ticket lock (one statement).
+
+    When both direct markers are NULL, SQL track actionability equals
+    the existence of an actionable Product, so it feeds the canonical
+    reason precedence directly; otherwise an exclusion reason wins.
+    """
+    row = (
+        await db.execute(
+            select(
+                TicketPackage.deleted_at.label("package_deleted_at"),
+                TicketPackageTrack.reference,
+                TicketPackageTrack.deleted_at.label("track_deleted_at"),
+                track_actionable_expression(evaluation_date).label("actionable"),
+            )
+            .select_from(TicketPackageTrack)
+            .join(
+                TicketPackage, TicketPackage.id == TicketPackageTrack.ticket_package_id
+            )
+            .where(TicketPackageTrack.id == track_id)
+        )
+    ).one()
+    return TrackMarkerProjection(
+        reference=row.reference,
+        actionable=row.actionable,
+        non_actionable_reason=track_non_actionable_reason(
+            package_excluded=row.package_deleted_at is not None,
+            track_excluded=row.track_deleted_at is not None,
+            has_actionable_product=row.actionable,
+        ),
+    )
+
+
+async def _project_marker_product(
+    db: AsyncSession,
+    *,
+    ticket: Ticket,
+    ticket_package_product_id: uuid.UUID,
+    evaluation_date: date,
+) -> ProductMarkerProjection:
+    """Project one Product occurrence under the held Ticket lock.
+
+    Reuses the one-statement occurrence projection of the eligibility
+    override and keeps only the exclusion response fields.
+    """
+    product = await _project_product(
+        db,
+        ticket=ticket,
+        ticket_package_product_id=ticket_package_product_id,
+        evaluation_date=evaluation_date,
+    )
+    return ProductMarkerProjection(
+        id=product.id,
+        product_cpe=product.product_cpe,
+        product_name=product.product_name,
+        actionable=product.actionable,
+        non_actionable_reason=product.non_actionable_reason,
+    )
+
+
+async def _change_package_marker(
+    db: AsyncSession,
+    direction: _MarkerDirection,
+    *,
+    ticket_id: uuid.UUID,
+    package_id: uuid.UUID,
+    acting_user_id: uuid.UUID,
+    caller: TicketCaller,
+    evaluation_date: date | None,
+) -> MarkerChangeResult[PackageMarkerProjection]:
+    _, resolved_date = await _change_direct_marker(
+        db,
+        level=_MarkerLevel.PACKAGE,
+        direction=direction,
+        ticket_id=ticket_id,
+        package_id=package_id,
+        track_id=None,
+        ticket_package_product_id=None,
+        acting_user_id=acting_user_id,
+        caller=caller,
+        evaluation_date=evaluation_date,
+    )
+    return MarkerChangeResult(
+        target=await _project_marker_package(
+            db, package_id=package_id, evaluation_date=resolved_date
+        ),
+        evaluation_date=resolved_date,
+    )
+
+
+async def _change_track_marker(
+    db: AsyncSession,
+    direction: _MarkerDirection,
+    *,
+    ticket_id: uuid.UUID,
+    package_id: uuid.UUID,
+    track_id: uuid.UUID,
+    acting_user_id: uuid.UUID,
+    caller: TicketCaller,
+    evaluation_date: date | None,
+) -> MarkerChangeResult[TrackMarkerProjection]:
+    _, resolved_date = await _change_direct_marker(
+        db,
+        level=_MarkerLevel.TRACK,
+        direction=direction,
+        ticket_id=ticket_id,
+        package_id=package_id,
+        track_id=track_id,
+        ticket_package_product_id=None,
+        acting_user_id=acting_user_id,
+        caller=caller,
+        evaluation_date=evaluation_date,
+    )
+    return MarkerChangeResult(
+        target=await _project_marker_track(
+            db, track_id=track_id, evaluation_date=resolved_date
+        ),
+        evaluation_date=resolved_date,
+    )
+
+
+async def _change_product_marker(
+    db: AsyncSession,
+    direction: _MarkerDirection,
+    *,
+    ticket_id: uuid.UUID,
+    package_id: uuid.UUID,
+    track_id: uuid.UUID,
+    ticket_package_product_id: uuid.UUID,
+    acting_user_id: uuid.UUID,
+    caller: TicketCaller,
+    evaluation_date: date | None,
+) -> MarkerChangeResult[ProductMarkerProjection]:
+    ticket, resolved_date = await _change_direct_marker(
+        db,
+        level=_MarkerLevel.PRODUCT,
+        direction=direction,
+        ticket_id=ticket_id,
+        package_id=package_id,
+        track_id=track_id,
+        ticket_package_product_id=ticket_package_product_id,
+        acting_user_id=acting_user_id,
+        caller=caller,
+        evaluation_date=evaluation_date,
+    )
+    return MarkerChangeResult(
+        target=await _project_marker_product(
+            db,
+            ticket=ticket,
+            ticket_package_product_id=ticket_package_product_id,
+            evaluation_date=resolved_date,
+        ),
+        evaluation_date=resolved_date,
+    )
+
+
+async def soft_delete_ticket_package(
+    db: AsyncSession,
+    *,
+    ticket_id: uuid.UUID,
+    package_id: uuid.UUID,
+    acting_user_id: uuid.UUID,
+    caller: TicketCaller,
+    evaluation_date: date | None = None,
+) -> MarkerChangeResult[PackageMarkerProjection]:
+    """Directly exclude one `TicketPackage` (sets only its `deleted_at`).
+
+    Category A mutation under the shared contract of package-service.md
+    (Exclusion and restoration operations); see `_change_direct_marker()`
+    for the complete ordered behavior.
+
+    Q1: `ticket_id` and `package_id` are the declared semantic locator
+    (internal UUIDs; the API resolves `SNTL-{n}` first). `acting_user_id`
+    is the authenticated user and `caller` the request-resolved caller
+    identifying it; there is no system form. `evaluation_date` is the one
+    UTC date shared by reconciliation and the projection; captured once
+    at entry when omitted.
+
+    Q2: the caller owns the transaction and has verified
+    `manage_packages`. Locks: acting User `FOR SHARE`, then Ticket `FOR
+    UPDATE`.
+
+    Q3-Q5: a NULL direct marker is set to the current UTC instant, with
+    one `package_excluded` event (`old_value` = package name), optional
+    assignment, and one reconciliation. Tracks and Products keep their
+    markers and become effectively excluded. Excluding the caller's last
+    qualifying maintained package may remove its visibility; the call
+    still succeeds (authorized on the locked pre-state).
+
+    Q4: returns the locked-current package projection and the date.
+
+    Q6: `ValueError` before any database operation for a null or
+    mismatched actor; `TicketNotFoundError`, `TicketNotMutableError`,
+    `PackageNotFoundError`, and `PackageAlreadyExcludedError` without
+    side effects; audit, database, flush, and reconciliation failures
+    propagate.
+    """
+    return await _change_package_marker(
+        db,
+        _MarkerDirection.EXCLUDE,
+        ticket_id=ticket_id,
+        package_id=package_id,
+        acting_user_id=acting_user_id,
+        caller=caller,
+        evaluation_date=evaluation_date,
+    )
+
+
+async def restore_ticket_package(
+    db: AsyncSession,
+    *,
+    ticket_id: uuid.UUID,
+    package_id: uuid.UUID,
+    acting_user_id: uuid.UUID,
+    caller: TicketCaller,
+    evaluation_date: date | None = None,
+) -> MarkerChangeResult[PackageMarkerProjection]:
+    """Restore one directly excluded `TicketPackage` (clears its marker).
+
+    Same contract, parameters, locks, and exceptions as
+    `soft_delete_ticket_package()`, except that the guard requires a set
+    direct marker (`PackageNotExcludedError` otherwise) and the event is
+    `package_restored` (`new_value` = package name). Child markers are
+    not modified; the package may remain non-actionable
+    (`no_actionable_tracks`). Restoring a maintained package reactivates
+    the retained maintainer visibility without external I/O.
+    """
+    return await _change_package_marker(
+        db,
+        _MarkerDirection.RESTORE,
+        ticket_id=ticket_id,
+        package_id=package_id,
+        acting_user_id=acting_user_id,
+        caller=caller,
+        evaluation_date=evaluation_date,
+    )
+
+
+async def soft_delete_ticket_package_track(
+    db: AsyncSession,
+    *,
+    ticket_id: uuid.UUID,
+    package_id: uuid.UUID,
+    track_id: uuid.UUID,
+    acting_user_id: uuid.UUID,
+    caller: TicketCaller,
+    evaluation_date: date | None = None,
+) -> MarkerChangeResult[TrackMarkerProjection]:
+    """Directly exclude one `TicketPackageTrack` (sets only its marker).
+
+    Same contract as `soft_delete_ticket_package()` with the
+    Ticket/package/track locator (`TrackNotFoundError` for a missing or
+    mismatched track). The event is `track_excluded` (`old_value` = track
+    reference, `detail = {track, package}`). Valid beneath an excluded
+    package; Product markers are not modified and maintainer visibility
+    is unaffected.
+    """
+    return await _change_track_marker(
+        db,
+        _MarkerDirection.EXCLUDE,
+        ticket_id=ticket_id,
+        package_id=package_id,
+        track_id=track_id,
+        acting_user_id=acting_user_id,
+        caller=caller,
+        evaluation_date=evaluation_date,
+    )
+
+
+async def restore_ticket_package_track(
+    db: AsyncSession,
+    *,
+    ticket_id: uuid.UUID,
+    package_id: uuid.UUID,
+    track_id: uuid.UUID,
+    acting_user_id: uuid.UUID,
+    caller: TicketCaller,
+    evaluation_date: date | None = None,
+) -> MarkerChangeResult[TrackMarkerProjection]:
+    """Restore one directly excluded `TicketPackageTrack`.
+
+    Same contract as `soft_delete_ticket_package_track()` with the
+    restore guard (`PackageNotExcludedError`) and the `track_restored`
+    event (`new_value` = track reference, `detail = {track, package}`).
+    Valid beneath an excluded package; the track may remain
+    non-actionable.
+    """
+    return await _change_track_marker(
+        db,
+        _MarkerDirection.RESTORE,
+        ticket_id=ticket_id,
+        package_id=package_id,
+        track_id=track_id,
+        acting_user_id=acting_user_id,
+        caller=caller,
+        evaluation_date=evaluation_date,
+    )
+
+
+async def soft_delete_ticket_package_product(
+    db: AsyncSession,
+    *,
+    ticket_id: uuid.UUID,
+    package_id: uuid.UUID,
+    track_id: uuid.UUID,
+    ticket_package_product_id: uuid.UUID,
+    acting_user_id: uuid.UUID,
+    caller: TicketCaller,
+    evaluation_date: date | None = None,
+) -> MarkerChangeResult[ProductMarkerProjection]:
+    """Directly exclude one `TicketPackageProduct` occurrence.
+
+    Same contract as `soft_delete_ticket_package()` with the complete
+    Ticket/package/track/occurrence locator (`ProductNotFoundError` for a
+    missing or mismatched occurrence; a catalog `Product.id` never
+    resolves). The event is `product_excluded` (`old_value` =
+    `Product.display_name`, `detail` = event-time `{track, package,
+    product_name, product_cpe}`). Valid beneath an excluded ancestor and
+    on an EOL Product.
+    """
+    return await _change_product_marker(
+        db,
+        _MarkerDirection.EXCLUDE,
+        ticket_id=ticket_id,
+        package_id=package_id,
+        track_id=track_id,
+        ticket_package_product_id=ticket_package_product_id,
+        acting_user_id=acting_user_id,
+        caller=caller,
+        evaluation_date=evaluation_date,
+    )
+
+
+async def restore_ticket_package_product(
+    db: AsyncSession,
+    *,
+    ticket_id: uuid.UUID,
+    package_id: uuid.UUID,
+    track_id: uuid.UUID,
+    ticket_package_product_id: uuid.UUID,
+    acting_user_id: uuid.UUID,
+    caller: TicketCaller,
+    evaluation_date: date | None = None,
+) -> MarkerChangeResult[ProductMarkerProjection]:
+    """Restore one directly excluded `TicketPackageProduct` occurrence.
+
+    Same contract as `soft_delete_ticket_package_product()` with the
+    restore guard (`PackageNotExcludedError`) and the `product_restored`
+    event (`new_value` = `Product.display_name`). No ancestor or
+    lifecycle pre-check; the Product may remain non-actionable (for
+    example `eol`).
+    """
+    return await _change_product_marker(
+        db,
+        _MarkerDirection.RESTORE,
+        ticket_id=ticket_id,
+        package_id=package_id,
+        track_id=track_id,
+        ticket_package_product_id=ticket_package_product_id,
+        acting_user_id=acting_user_id,
+        caller=caller,
         evaluation_date=evaluation_date,
     )
