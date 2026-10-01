@@ -1027,18 +1027,21 @@ verified with unit-level mock tests asserting call order — see
 Developers (and OpenCode agents) run tests locally using:
 
 ```bash
-# Default in-process suite
-cd backend && pytest
+# Complete suite in parallel (default in-process and system suites)
+cd backend && uv run pytest -m "not image" -n auto --maxprocesses 8 --max-worker-restart 0
+
+# Default in-process suite in parallel
+cd backend && uv run pytest -n auto --maxprocesses 8 --max-worker-restart 0
+
+# Single-process run for focused work and debugging
+cd backend && uv run pytest tests/test_services/test_ticket_mutations.py
+cd backend && uv run pytest -k "test_set_track_status"
 
 # Unit tests only (fast feedback)
-cd backend && pytest -m unit
+cd backend && uv run pytest -m unit
 
 # Integration tests only
-cd backend && pytest -m integration
-
-# Specific file or test
-cd backend && pytest tests/test_services/test_ticket_mutations.py
-cd backend && pytest -k "test_set_track_status"
+cd backend && uv run pytest -m integration
 ```
 
 When `TEST_DATABASE_URL` or `TEST_REDIS_URL` is not set, the corresponding
@@ -1050,11 +1053,10 @@ tests require no application `REDIS_URL` or `CELERY_BROKER_URL`; leaving
 
 An unadorned `pytest` invocation runs in a single process, which keeps
 focused runs and debugging simple. The complete default suite normally
-runs in parallel (see Parallel Execution):
-
-```bash
-cd backend && pytest -n auto --maxprocesses 8 --max-worker-restart 0
-```
+runs in parallel (see Parallel Execution), and the full backend suite
+including the local process system suite runs in one parallel invocation
+with `-m "not image"` as in the pre-push hook and CI (see Local Process
+System Testing › Automation).
 
 ### Parallel Execution
 
@@ -4159,8 +4161,11 @@ comprehensive test coverage:
    pattern in Database Strategy — Concurrency Testing is mandatory),
    re-invocation behavior.
 
-8. **Run the suite**: `cd backend && pytest` — all tests must pass
-   before declaring the task complete.
+8. **Run the suite**: run focused service tests first (e.g. `cd backend &&
+   uv run pytest tests/test_services/test_<module>.py`), then run the full suite in
+   parallel (`cd backend && uv run pytest -m "not image" -n auto
+   --maxprocesses 8 --max-worker-restart 0`) — all tests must pass before
+   declaring the task complete.
 
 9. **Review**: invoke `@test-reviewer` for new features or modules (see
    Guardrail 6).
