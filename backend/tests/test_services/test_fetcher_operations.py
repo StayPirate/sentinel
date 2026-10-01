@@ -70,6 +70,7 @@ from app.services.fetcher_operations import (
     trigger_fetcher,
     update_fetcher_config,
 )
+from tests.support.database import assert_lock_wait
 
 FetcherConfigFactory = Callable[..., Awaitable[FetcherConfig]]
 FetcherRunFactory = Callable[..., Awaitable[FetcherRun]]
@@ -3050,8 +3051,7 @@ class TestUpdateFetcherConfigConcurrency:
                 payload=UpdateConfigPayload(request_delay=9.0),
             )
         )
-        with pytest.raises(TimeoutError):
-            await asyncio.wait_for(asyncio.shield(task_b), timeout=0.3)
+        await assert_lock_wait(task_b, waiter=session_b, blocked_by=session_a)
 
         # Releasing A's lock lets B proceed — B observes A's committed
         # value (5.0) as its "old" state, not the pre-A value (0.0).
@@ -3583,7 +3583,8 @@ class TestListFetcherAuditEvents:
 # docstring and `docs/features/platform/fetcher-operations.md`,
 # `trigger_fetcher`). Every test below therefore uses `real_session_factory`
 # (a real `async_sessionmaker`, per `tests/conftest.py`) both to pass as
-# `trigger_fetcher`'s `session_factory` argument and to arrange/clean up
+# `trigger_fetcher`'s `session_factory` argument (except
+# `TestTriggerFetcherConcurrency`, see its docstring) and to arrange/clean up
 # its own committed `FetcherConfig`/`User`/`FetcherRun` rows directly —
 # the `fetcher_config_factory`/`user_factory`/`fetcher_run_factory`
 # fixtures are bound to the separate, savepoint-scoped `db_session`
@@ -4287,16 +4288,29 @@ class TestTriggerFetcherConcurrency:
     `trigger_fetcher()` manages its own sessions internally, so the
     blocking point is injected via `FetcherAuditLog.log_event` — called
     once per successful trigger, immediately before commit, i.e. while
-    the `FetcherConfig` row lock is still held."""
+    the `FetcherConfig` row lock is still held. Each call receives a
+    session factory bound to its own `db_session_factory` connection, so
+    the second call's lock wait is observed on known backend PIDs (Lock-Wait
+    Observation)."""
 
     async def test_concurrent_triggers_serialize_on_the_config_lock(
         self,
         trigger_env: tuple[str, UUID],
-        real_session_factory: async_sessionmaker[AsyncSession],
+        db_session_factory: Callable[[], Awaitable[AsyncSession]],
         celery_test_app: Celery,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         fetcher_name, user_id = trigger_env
+        # Connection/PID carriers only: each trigger_fetcher() call opens
+        # its sessions on one of these dedicated connections.
+        holder = await db_session_factory()
+        waiter = await db_session_factory()
+        factory_a = async_sessionmaker(
+            bind=holder.bind, class_=AsyncSession, expire_on_commit=False
+        )
+        factory_b = async_sessionmaker(
+            bind=waiter.bind, class_=AsyncSession, expire_on_commit=False
+        )
         monkeypatch.setattr(celery_test_app, "send_task", MagicMock())
 
         hold_event = asyncio.Event()
@@ -4318,7 +4332,7 @@ class TestTriggerFetcherConcurrency:
             trigger_fetcher(
                 fetcher_name,
                 user_id=user_id,
-                session_factory=real_session_factory,
+                session_factory=factory_a,
                 celery_app=celery_test_app,
             )
         )
@@ -4328,12 +4342,11 @@ class TestTriggerFetcherConcurrency:
             trigger_fetcher(
                 fetcher_name,
                 user_id=user_id,
-                session_factory=real_session_factory,
+                session_factory=factory_b,
                 celery_app=celery_test_app,
             )
         )
-        with pytest.raises(TimeoutError):
-            await asyncio.wait_for(asyncio.shield(task_b), timeout=0.3)
+        await assert_lock_wait(task_b, waiter=waiter, blocked_by=holder)
 
         proceed_event.set()
         result_a = await asyncio.wait_for(task_a, timeout=5)

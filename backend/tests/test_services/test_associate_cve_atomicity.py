@@ -102,6 +102,7 @@ from tests.support.cvss_chain import (
     severity_event,
     ticket_state,
 )
+from tests.support.database import assert_lock_wait
 from tests.support.suse_cvss import (
     V31_CRITICAL,
     assignment_event,
@@ -115,7 +116,6 @@ from tests.support.suse_cvss import (
 from tests.support.suse_cvss_races import (
     CommittedWorld,
     SessionStatementRecorder,
-    assert_blocked,
 )
 from tests.support.ticket_mutations import (
     EVAL,
@@ -620,7 +620,7 @@ class TestAssociationAndCVSSRace:
                 task = world.start(
                     a, _associate(a, ticket.id, cve.cve_id, va1, evaluation_date=EVAL)
                 )
-                await assert_blocked(task)
+                await assert_lock_wait(task, waiter=a, blocked_by=b)
                 blocked = list(association.statements)
                 # User lock first, then waiting on the CVE lock; no Ticket
                 # lock is held or requested while waiting.
@@ -635,7 +635,7 @@ class TestAssociationAndCVSSRace:
             else:
                 await _associate(a, ticket.id, cve.cve_id, va1, evaluation_date=EVAL)
                 mutation_task = world.start(b, _cvss(b, race, cve, va2))
-                await assert_blocked(mutation_task)
+                await assert_lock_wait(mutation_task, waiter=b, blocked_by=a)
                 blocked = list(mutation.statements)
                 assert _is_user_share(blocked[0])
                 assert _is_cve_lock(blocked[-1])
@@ -756,7 +756,7 @@ class TestAssociationRaces:
             task = world.start(
                 b, _associate(b, loser_ticket.id, cve_string, loser_actor)
             )
-            await assert_blocked(task)
+            await assert_lock_wait(task, waiter=b, blocked_by=a)
             # Waiting on the CVE root: no Ticket statement has been issued.
             assert _is_user_share(recorder.statements[0])
             assert not _touches_ticket(recorder.statements)
@@ -824,7 +824,7 @@ class TestAssociationRaces:
         await _associate(a, ticket.id, first_string, winner_actor)
         with SessionStatementRecorder(b) as recorder:
             task = world.start(b, _associate(b, ticket.id, second_string, loser_actor))
-            await assert_blocked(task)
+            await assert_lock_wait(task, waiter=b, blocked_by=a)
             # The loser got past its own CVE root and waits for the Ticket.
             assert _is_user_share(recorder.statements[0])
             assert _is_ticket_lock(recorder.statements[-1])
@@ -1009,7 +1009,7 @@ class TestLockedCurrentAccessibility:
                         a, ticket.id, cve_string, user, scope=Scope.NON_CONFIDENTIAL
                     ),
                 )
-                await assert_blocked(task)
+                await assert_lock_wait(task, waiter=a, blocked_by=b)
                 # Holding the User and CVE locks, waiting on the Ticket lock.
                 assert any(_is_user_share(s) for s in recorder.statements)
                 assert _is_ticket_lock(recorder.statements[-1])

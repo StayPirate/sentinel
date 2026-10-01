@@ -101,10 +101,10 @@ from app.services.ticket_service import (
     set_coordinated_release_date,
 )
 from app.services.ticket_visibility import TicketCaller
+from tests.support.database import assert_lock_wait
 from tests.support.suse_cvss_races import (
     CommittedWorld,
     SessionStatementRecorder,
-    assert_blocked,
     prepare_loss,
 )
 from tests.support.ticket_mutations import (
@@ -257,8 +257,9 @@ async def _serialize(
 ) -> tuple[AsyncSession, StatementRecorder, asyncio.Task[Ticket]]:
     """Run `first` in a winner session that keeps its Ticket lock, start
     `then` in a waiter session holding a stale copy of the Ticket, prove the
-    waiter blocked on the Ticket `FOR UPDATE` as its first and only
-    statement, commit the winner, and wait for the waiter to finish.
+    waiter blocked by the winner (`assert_lock_wait`) on the Ticket `FOR
+    UPDATE` as its first and only statement, commit the winner, and wait
+    for the waiter to finish.
 
     Returns the waiter session (transaction still open), its recorder, and
     its finished task."""
@@ -270,7 +271,7 @@ async def _serialize(
     await first(winner)
     with SessionStatementRecorder(waiter) as recorder:
         task: asyncio.Task[Ticket] = world.start(waiter, then(waiter))
-        await assert_blocked(task)
+        await assert_lock_wait(task, waiter=waiter, blocked_by=winner)
         assert len(recorder.statements) == 1
         assert _is_ticket_lock(recorder.statements[0])
         await winner.commit()
@@ -607,7 +608,7 @@ class TestLockedCurrentAccessibilityRaces:
             await b.execute(statement)
         with SessionStatementRecorder(a) as recorder:
             task = world.start(a, call(a))
-            await assert_blocked(task)
+            await assert_lock_wait(task, waiter=a, blocked_by=b)
             assert len(recorder.statements) == 1
             assert _is_ticket_lock(recorder.statements[0])
             await b.commit()

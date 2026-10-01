@@ -72,7 +72,7 @@ from tests.support.cvss_chain import (
     severity_event,
     ticket_state,
 )
-from tests.support.database import rollback_test_scope
+from tests.support.database import assert_lock_wait, rollback_test_scope
 from tests.support.suse_cvss import (
     V31_CRITICAL,
     V31_MEDIUM,
@@ -85,7 +85,6 @@ from tests.support.suse_cvss import (
 from tests.support.suse_cvss_races import (
     VISIBILITY_LOSSES,
     CommittedWorld,
-    assert_blocked,
     prepare_loss,
 )
 from tests.support.ticket_mutations import (
@@ -451,7 +450,7 @@ class TestSerializedOutcomes:
             b, cve.id, V31_CRITICAL.canonical, owner, default_cvss_version="3.1"
         )
         task = _upsert_task(committed_world, a, cve, V31_CRITICAL.canonical, actor)
-        await assert_blocked(task)
+        await assert_lock_wait(task, waiter=a, blocked_by=b)
         await b.commit()
 
         loser = await asyncio.wait_for(task, timeout=5)
@@ -480,7 +479,7 @@ class TestSerializedOutcomes:
 
         await upsert(b, cve.id, V31_MEDIUM.canonical, owner, default_cvss_version="3.1")
         task = _upsert_task(committed_world, a, cve, V31_CRITICAL.canonical, actor)
-        await assert_blocked(task)
+        await assert_lock_wait(task, waiter=a, blocked_by=b)
         await b.commit()
 
         result = await asyncio.wait_for(task, timeout=5)
@@ -511,7 +510,7 @@ class TestSerializedOutcomes:
 
         await upsert(b, cve.id, V31_MEDIUM.canonical, first, default_cvss_version="3.1")
         task = _upsert_task(committed_world, a, cve, V31_CRITICAL.canonical, second)
-        await assert_blocked(task)
+        await assert_lock_wait(task, waiter=a, blocked_by=b)
         await b.commit()
 
         result = await asyncio.wait_for(task, timeout=5)
@@ -565,7 +564,7 @@ class TestDefaultVersionRace:
                 a, cve.id, V40_CRITICAL.canonical, owner, default_cvss_version="4.0"
             ),
         )
-        await assert_blocked(task)
+        await assert_lock_wait(task, waiter=a, blocked_by=b)
         await b.commit()
 
         result = await asyncio.wait_for(task, timeout=5)
@@ -602,7 +601,7 @@ class TestDefaultVersionRace:
                 evaluation_date=EVAL,
             ),
         )
-        await assert_blocked(task)
+        await assert_lock_wait(task, waiter=b, blocked_by=a)
         await a.commit()
 
         runner = await asyncio.wait_for(task, timeout=5)
@@ -659,7 +658,7 @@ class TestLockedCurrentAccessibilityRaces:
                 user,
                 scope=Scope.NON_CONFIDENTIAL,
             )
-            await assert_blocked(task)
+            await assert_lock_wait(task, waiter=a, blocked_by=b)
             await b.commit()
         else:
             await b.commit()

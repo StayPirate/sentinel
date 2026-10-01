@@ -36,11 +36,13 @@ Committed rows are deleted explicitly at teardown (testing-strategy.md,
 Concurrency Testing). `CommittedWorld.cleanup()` deletes every audit event
 and grant before the Tickets, and removes all Tickets in one `DELETE`, so
 the non-deferrable `duplicate_of_id` self-reference is checked only once
-dependents and their targets are both gone. Every wait is bounded with
-`asyncio.wait_for()` (over `asyncio.shield()` where the task must survive
-the timeout) so a regression fails instead of hanging. Expected values are
-transcribed from the specifications, never computed with the module under
-test.
+dependents and their targets are both gone. A waiter is proven blocked
+by observing its wait in PostgreSQL's lock manager (`assert_lock_wait`;
+testing-strategy.md, Lock-Wait Observation). Every other wait is bounded
+with `asyncio.wait_for()` (over `asyncio.shield()` where the task must
+survive the timeout) so a regression fails instead of hanging. Expected
+values are transcribed from the specifications, never computed with the
+module under test.
 """
 
 from __future__ import annotations
@@ -71,10 +73,10 @@ from app.services.ticket_service import (
     resolve_ticket_locator,
 )
 from app.services.ticket_visibility import TicketCaller
+from tests.support.database import assert_lock_wait
 from tests.support.suse_cvss_races import (
     CommittedWorld,
     SessionStatementRecorder,
-    assert_blocked,
     prepare_loss,
 )
 from tests.support.ticket_mutations import EVAL, EventRow, status_event
@@ -376,8 +378,9 @@ class TestOrderedRootLocks:
         ):
             up_task = committed_world.start(up, _mark(up, low, high, actor_up))
             down_task = committed_world.start(down, _mark(down, high, low, actor_down))
-            await assert_blocked(up_task)
-            await assert_blocked(down_task)
+            # Both wait for the lower row; either may queue behind the other.
+            await assert_lock_wait(up_task, waiter=up, blocked_by=(holder, down))
+            await assert_lock_wait(down_task, waiter=down, blocked_by=(holder, up))
             for recorder in (up_recorder, down_recorder):
                 assert _is_ticket_lock(recorder.statements[-1])
                 assert recorder.parameters[-1][0] == low.id
@@ -398,7 +401,7 @@ class TestOrderedRootLocks:
             else:
                 winner, loser, loser_task = down, up, up_task
                 source, target, actor = high, low, actor_down
-            await assert_blocked(loser_task)
+            await assert_lock_wait(loser_task, waiter=loser, blocked_by=winner)
 
             await winner.commit()
             with pytest.raises(DuplicateTargetIsDuplicatedError):
@@ -444,7 +447,7 @@ class TestIgnoreLockSerialization:
         await _ignore(winner, ticket, winner_actor)
         with SessionStatementRecorder(loser) as recorder:
             task = committed_world.start(loser, _ignore(loser, ticket, loser_actor))
-            await assert_blocked(task)
+            await assert_lock_wait(task, waiter=loser, blocked_by=winner)
             assert _is_user_share(recorder.statements[0])
             assert _is_ticket_lock(recorder.statements[-1])
             await winner.commit()
@@ -487,7 +490,7 @@ class TestIgnoreLockSerialization:
             evaluation_date=EVAL,
         )
         task = committed_world.start(loser, _ignore(loser, ticket, actor))
-        await assert_blocked(task)
+        await assert_lock_wait(task, waiter=loser, blocked_by=winner)
         await winner.commit()
         await asyncio.wait_for(asyncio.shield(task), timeout=WAIT)
         await loser.commit()
@@ -551,7 +554,7 @@ class TestLockedCurrentAccessibilityRaces:
             task = committed_world.start(
                 a, _ignore(a, ticket, user, scope=Scope.NON_CONFIDENTIAL)
             )
-            await assert_blocked(task)
+            await assert_lock_wait(task, waiter=a, blocked_by=b)
             assert _is_user_share(recorder.statements[0])
             assert _is_ticket_lock(recorder.statements[-1])
             await b.commit()
@@ -612,7 +615,7 @@ class TestLockedCurrentAccessibilityRaces:
             task = committed_world.start(
                 a, _mark(a, source, target, user, scope=Scope.NON_CONFIDENTIAL)
             )
-            await assert_blocked(task)
+            await assert_lock_wait(task, waiter=a, blocked_by=b)
             assert _is_user_share(recorder.statements[0])
             assert _is_ticket_lock(recorder.statements[-1])
             assert recorder.parameters[-1][0] == lost_id

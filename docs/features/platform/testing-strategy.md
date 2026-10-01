@@ -315,14 +315,13 @@ pattern is:
    pessimistic row lock on the target row.
 3. Launch **B** as an `asyncio.Task` that attempts the conflicting lock
    on the same row.
-4. Verify that **B** blocks by using
-   `asyncio.wait_for(asyncio.shield(task_B), timeout=0.5)` and catching
-   `asyncio.TimeoutError`. `asyncio.shield()` prevents `wait_for` from
-   cancelling the task on timeout. A timeout confirms that B is blocked
-   on the lock held by A.
+4. Verify that **B** is waiting on a PostgreSQL lock held by **A** with
+   `assert_lock_wait()` from `tests.support.database`, which observes
+   the wait in PostgreSQL's lock manager (see Lock-Wait Observation). A
+   fixed timeout is not accepted as proof that B is blocked.
 5. Release the lock in **A** (rollback or commit).
-6. Await **B**'s completion — it should now acquire the lock
-   successfully.
+6. Await **B**'s completion with a bounded wait — it should now acquire
+   the lock successfully.
 7. Both sessions are tracked by the factory; fixture teardown rolls
    back open transactions and closes all sessions and connections.
 
@@ -331,6 +330,67 @@ visibility), the committed data is not rolled back by the fixture.
 The test MUST perform explicit `DELETE` cleanup before the factory
 teardown runs. Session and connection closure is still handled by the
 fixture.
+
+```python
+holder = await db_session_factory()
+waiter = await db_session_factory()
+await holder.execute(
+    select(Ticket.id).where(Ticket.id == ticket_id).with_for_update()
+)
+
+task = asyncio.create_task(mutate_ticket(waiter, ticket_id))
+await assert_lock_wait(task, waiter=waiter, blocked_by=holder)
+
+await holder.commit()
+result = await asyncio.wait_for(task, timeout=5)
+```
+
+#### Lock-Wait Observation
+
+Proof that a session is blocked is a direct observation that its
+PostgreSQL backend waits for a lock held by the expected session. The
+absence of task completion within a fixed time is not proof: it cannot
+distinguish a lock wait from a slow coroutine, CPU-bound work performed
+before the lock request (for example password hashing), or event-loop
+starvation under parallel execution.
+
+`assert_lock_wait(task, *, waiter, blocked_by, deadline=...)`:
+
+- reads the backend PID of the waiter session and of every session in
+  `blocked_by` (one session or several) from each session's bound
+  connection, without starting a transaction; each session must
+  therefore be bound to its own connection, as `db_session_factory`
+  sessions are;
+- while the task runs, polls `pg_blocking_pids(<waiter PID>)` from a
+  separate autocommit observer connection, and succeeds as soon as the
+  result contains the PID of a `blocked_by` session;
+- fails immediately when the task completes or raises before the wait
+  is observed, chaining the task's exception; and
+- fails when a monotonic deadline expires, reporting the waiter PID,
+  the expected blocking PIDs, the last reported blocking PIDs, and the
+  waiter's `wait_event_type` and `wait_event` from
+  `pg_stat_activity`. The deadline only bounds failure detection; a
+  passing proof returns as soon as the wait is observed.
+
+`pg_blocking_pids()` reports both row-lock waits and transaction-ID
+waits (a conflicting `INSERT`, `INSERT ... ON CONFLICT`, `UPDATE`, or
+`DELETE` on a row the holder already wrote), so the same proof covers
+both. When several sessions wait for the same row, PostgreSQL queues
+them: the first waiter is reported as blocked by the lock holder, while
+a later waiter may be reported as blocked by an earlier waiter. When
+the queue order is nondeterministic, `blocked_by` lists every session
+that can legitimately precede the waiter.
+
+When the code under test opens its own sessions from a session factory,
+the test supplies factories bound to `db_session_factory` connections so
+that the waiter and holder PIDs are known.
+
+This contract applies to PostgreSQL lock waits only. A wait on another
+synchronization mechanism (for example a Redis guard, or an asyncio
+event that pauses a workflow at a chosen boundary) keeps a bounded wait
+on that mechanism; it is not lock-serialization evidence. A wait that
+expects a task to complete uses a bounded `asyncio.wait_for()`, over
+`asyncio.shield()` when the task must survive a failed wait.
 
 ### `server_default=func.now()` and `onupdate=func.now()` Testing
 
@@ -815,7 +875,7 @@ backend/tests/
 ├── test_docs_links.py          # Structural documentation link tests
 ├── support/                    # Test-only helpers with no app/ counterpart
 │   ├── audit_models.py         # Concrete AuditEventMixin subclass for mixin/base-class tests
-│   └── database.py             # Shared database transaction test helpers
+│   └── database.py             # Shared database transaction and lock-wait test helpers
 ├── test_support/               # Tests for importable test support helpers
 │   └── test_database.py
 ├── test_architecture/          # Structural model and layer tests

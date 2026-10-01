@@ -75,7 +75,7 @@ from app.services.ticket_convergence_registry import (
 from app.services.ticket_mutations import set_severity_manual
 from app.services.ticket_service import resolve_ticket_locator
 from app.services.ticket_visibility import TicketCaller
-from tests.support.database import rollback_test_scope
+from tests.support.database import assert_lock_wait, rollback_test_scope
 from tests.support.ticket_mutations import (
     EVAL,
     EventRow,
@@ -1346,8 +1346,7 @@ class TestLockedCurrentAccessibilityRaces:
         assert resolved.id == ticket.id
         await _lock_and_apply(b, ticket, change)
         task = _start(committed_world, a, ticket, user)
-        with pytest.raises(TimeoutError):
-            await asyncio.wait_for(asyncio.shield(task), timeout=0.5)
+        await assert_lock_wait(task, waiter=a, blocked_by=b)
         await b.commit()
 
         with pytest.raises(TicketNotFoundError):
@@ -1380,8 +1379,7 @@ class TestLockedCurrentAccessibilityRaces:
             .values(deleted_at=datetime.now(UTC)),
         )
         task = _start(committed_world, a, ticket, user)
-        with pytest.raises(TimeoutError):
-            await asyncio.wait_for(asyncio.shield(task), timeout=0.5)
+        await assert_lock_wait(task, waiter=a, blocked_by=b)
         await b.commit()
 
         result = await asyncio.wait_for(task, timeout=5)
@@ -1426,8 +1424,7 @@ class TestLockedCurrentAccessibilityRaces:
             .values(status=TicketStatus.IGNORED.value),
         )
         task = _start(committed_world, a, ticket, user)
-        with pytest.raises(TimeoutError):
-            await asyncio.wait_for(asyncio.shield(task), timeout=0.5)
+        await assert_lock_wait(task, waiter=a, blocked_by=b)
         await b.commit()
 
         with pytest.raises(TicketNotMutableError):

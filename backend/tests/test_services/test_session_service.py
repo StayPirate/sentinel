@@ -38,6 +38,7 @@ from app.services.session_service import (
     is_session_active,
     purge_session_cache,
 )
+from tests.support.database import assert_lock_wait
 
 # Fictional bcrypt-shaped value — never a real hash (see AGENTS.md Guardrail 23)
 _FICTIONAL_PASSWORD_HASH = "$2b$12$" + "a" * 53
@@ -682,8 +683,7 @@ class TestCreateSessionLockSerialization:
                 await session_b.commit()
 
             task_b = asyncio.create_task(_conflicting_status_update())
-            with pytest.raises(TimeoutError):
-                await asyncio.wait_for(asyncio.shield(task_b), timeout=0.5)
+            await assert_lock_wait(task_b, waiter=session_b, blocked_by=session_a)
 
             # Session creation commits first; only then does the blocked
             # conflicting mutation proceed.
@@ -878,8 +878,7 @@ class TestCreateSessionPasswordResetSerialization:
                 await session_b.commit()
 
             task_b = asyncio.create_task(_conflicting_reset())
-            with pytest.raises(TimeoutError):
-                await asyncio.wait_for(asyncio.shield(task_b), timeout=0.5)
+            await assert_lock_wait(task_b, waiter=session_b, blocked_by=session_a)
 
             # Session creation commits first; only then does the blocked
             # reset proceed and invalidate the new Session.
@@ -939,8 +938,7 @@ class TestCreateSessionPasswordResetSerialization:
                 )
 
             task = asyncio.create_task(_create())
-            with pytest.raises(TimeoutError):
-                await asyncio.wait_for(asyncio.shield(task), timeout=0.5)
+            await assert_lock_wait(task, waiter=login, blocked_by=reset)
 
             # The reset commits first; Session creation then observes the
             # replaced hash and creates nothing.
@@ -1316,8 +1314,7 @@ class TestInvalidateSession:
         # session_b's concurrent UPDATE targeting the same row blocks
         # until session_a commits or rolls back.
         task_b = asyncio.create_task(invalidate_session(session_b, target.id))
-        with pytest.raises(TimeoutError):
-            await asyncio.wait_for(asyncio.shield(task_b), timeout=0.3)
+        await assert_lock_wait(task_b, waiter=session_b, blocked_by=session_a)
 
         await session_a.commit()
         result_b = await asyncio.wait_for(task_b, timeout=5)

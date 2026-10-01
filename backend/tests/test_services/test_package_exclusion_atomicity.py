@@ -40,7 +40,7 @@ out of scope (the orchestration operations are not implemented by this
 change).
 
 Every race serializes a winner that keeps its locks in an open transaction
-and a waiter proven blocked (`assert_blocked`) on the Ticket lock, whose
+and a waiter proven blocked (`assert_lock_wait`) on the Ticket lock, whose
 statements show the acting User `FOR SHARE` first and the Ticket `FOR
 UPDATE` last. The waiter holds a stale identity-map copy of its target path
 loaded before the winner's change. Each Ticket is CVE-less with
@@ -85,6 +85,7 @@ from app.services.ticket_convergence_registry import (
 )
 from app.services.ticket_service import resolve_ticket_locator
 from app.services.ticket_visibility import TicketCaller
+from tests.support.database import assert_lock_wait
 from tests.support.package_exclusion import (
     LEVELS,
     MARKER_NOW,
@@ -103,7 +104,6 @@ from tests.support.suse_cvss import assignment_event
 from tests.support.suse_cvss_races import (
     CommittedWorld,
     SessionStatementRecorder,
-    assert_blocked,
     prepare_loss,
 )
 from tests.support.ticket_mutations import EventRow, ticket_events_by_id
@@ -316,7 +316,7 @@ async def _race(
                 waiter, second.level, second.direction, second.path, second.actor
             ),
         )
-        await assert_blocked(task)
+        await assert_lock_wait(task, waiter=waiter, blocked_by=winner)
         assert _is_user_share(recorder.statements[0])
         assert _is_ticket_lock(recorder.statements[-1])
         await winner.commit()
@@ -600,7 +600,7 @@ async def _assert_denied(
                 **overrides,
             ),
         )
-        await assert_blocked(task)
+        await assert_lock_wait(task, waiter=a, blocked_by=b)
         assert _is_user_share(recorder.statements[0])
         assert _is_ticket_lock(recorder.statements[-1])
         await b.commit()
@@ -778,7 +778,7 @@ class TestActingUserLockOrder:
         await _hold_user(b, actor)
         with SessionStatementRecorder(a) as recorder:
             task = world.start(a, path_call(a, Level.PACKAGE, direction, path, actor))
-            await assert_blocked(task)
+            await assert_lock_wait(task, waiter=a, blocked_by=b)
             assert _is_user_share(recorder.statements[-1])
             assert not any(TICKET_STATEMENT.search(s) for s in recorder.statements)
             assert not await _is_locked(

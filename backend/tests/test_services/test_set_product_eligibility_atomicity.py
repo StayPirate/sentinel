@@ -42,7 +42,7 @@ adds only what needs independent sessions:
 - the acting-User `FOR SHARE` lock preceding the Ticket lock.
 
 Every race serializes a winner that keeps its locks in an open transaction
-and a waiter proven blocked (`assert_blocked`) on the lock. The fixture
+and a waiter proven blocked (`assert_lock_wait`) on the lock. The fixture
 Product threshold is `THRESHOLD` (9.0): the SUSE v3.1 medium score 4.8 is
 below it, while the critical scores 9.8 and 10.0 and the 10.0 fallback
 reach it (package-model.md, Axis 2: Eligibility, rules 3-5). Committed rows,
@@ -100,6 +100,7 @@ from tests.support.cvss_chain import (
     severity_event,
     ticket_state,
 )
+from tests.support.database import assert_lock_wait
 from tests.support.suse_cvss import (
     V31_CRITICAL,
     V31_CRITICAL_10,
@@ -114,7 +115,6 @@ from tests.support.suse_cvss import (
 from tests.support.suse_cvss_races import (
     CommittedWorld,
     SessionStatementRecorder,
-    assert_blocked,
     prepare_loss,
 )
 from tests.support.ticket_mutations import (
@@ -478,7 +478,7 @@ class TestCVSSFirstThenOverride:
         chain = await _cvss(b, operation, cve, scorer, V31_CRITICAL)
         with SessionStatementRecorder(a) as recorder:
             task = world.start(a, _override(a, occurrence, False, actor))
-            await assert_blocked(task)
+            await assert_lock_wait(task, waiter=a, blocked_by=b)
             assert _is_user_share(recorder.statements[0])
             assert _is_ticket_lock(recorder.statements[-1])
             await b.commit()
@@ -560,7 +560,7 @@ class TestCVSSFirstThenOverride:
 
         chain = await _cvss(b, operation, cve, scorer, V31_MEDIUM)
         task = world.start(a, _override(a, occurrence, None, actor))
-        await assert_blocked(task)
+        await assert_lock_wait(task, waiter=a, blocked_by=b)
         await b.commit()
         result = await asyncio.wait_for(task, timeout=WAIT)
         await a.commit()
@@ -641,7 +641,7 @@ class TestOverrideFirstThenCVSS:
 
         result = await _override(a, occurrence, False, actor)
         task = world.start(b, _cvss(b, operation, cve, scorer, V31_CRITICAL_10))
-        await assert_blocked(task)
+        await assert_lock_wait(task, waiter=b, blocked_by=a)
         assert await _cve_root_held(probe, cve) is True
         await a.commit()
         chain = await asyncio.wait_for(task, timeout=WAIT)
@@ -706,7 +706,7 @@ class TestOverrideFirstThenCVSS:
 
         result = await _override(a, occurrence, None, actor)
         task = world.start(b, _cvss(b, operation, cve, scorer, V31_CRITICAL))
-        await assert_blocked(task)
+        await assert_lock_wait(task, waiter=b, blocked_by=a)
         await a.commit()
         chain = await asyncio.wait_for(task, timeout=WAIT)
         await b.commit()
@@ -783,14 +783,14 @@ class TestTicketFirstOverrideAgainstCVSSHolder:
             assert await _cve_root_held(probe, cve) is False
 
             second = world.start(b, _cvss(b, operation, cve, scorer, V31_CRITICAL))
-            await assert_blocked(second)
+            await assert_lock_wait(second, waiter=b, blocked_by=a)
             assert await _cve_root_held(probe, cve) is True
 
             pause.resume.set()
             result = await asyncio.wait_for(first, timeout=WAIT)
 
         assert len([s for s in recorder.statements if _is_ticket_update(s)]) >= 2
-        assert not second.done()
+        await assert_lock_wait(second, waiter=b, blocked_by=a)
         await a.commit()
         chain = await asyncio.wait_for(second, timeout=WAIT)
         await b.commit()
@@ -875,7 +875,7 @@ class TestOverrideSerialization:
             task = world.start(
                 waiter, _override(waiter, occurrence, waiter_value, waiter_actor)
             )
-            await assert_blocked(task)
+            await assert_lock_wait(task, waiter=waiter, blocked_by=winner)
             assert _is_user_share(recorder.statements[0])
             assert _is_ticket_lock(recorder.statements[-1])
             await winner.commit()
@@ -1087,7 +1087,7 @@ class TestLockedCurrentAccessibilityRaces:
                     scope=Scope.NON_CONFIDENTIAL,
                 ),
             )
-            await assert_blocked(task)
+            await assert_lock_wait(task, waiter=a, blocked_by=b)
             assert _is_user_share(recorder.statements[0])
             assert _is_ticket_lock(recorder.statements[-1])
             await b.commit()
@@ -1136,7 +1136,7 @@ class TestActingUserLockOrder:
         await _hold_user(b, actor)
         with SessionStatementRecorder(a) as recorder:
             task = world.start(a, _override(a, occurrence, False, actor))
-            await assert_blocked(task)
+            await assert_lock_wait(task, waiter=a, blocked_by=b)
             assert _is_user_share(recorder.statements[-1])
             assert not any(TICKET_STATEMENT.search(s) for s in recorder.statements)
             assert not await _is_locked(

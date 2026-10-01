@@ -33,7 +33,6 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
-import pytest
 from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
@@ -279,12 +278,6 @@ class SessionStatementRecorder(StatementRecorder):
         connection = bind.sync_connection
         assert connection is not None
         self._engine = connection
-
-
-async def assert_blocked(task: asyncio.Task[Any]) -> None:
-    """The task is still waiting for a row lock after 0.5 s."""
-    with pytest.raises(TimeoutError):
-        await asyncio.wait_for(asyncio.shield(task), timeout=0.5)
 
 
 VISIBILITY_LOSSES = [

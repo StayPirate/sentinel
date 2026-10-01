@@ -46,7 +46,8 @@ from app.services.ticket_service import (
     TicketCVEConflictError,
     create_ticket,
 )
-from tests.support.suse_cvss_races import CommittedWorld, assert_blocked
+from tests.support.database import assert_lock_wait
+from tests.support.suse_cvss_races import CommittedWorld
 from tests.support.ticket_creation import creation_events
 from tests.support.ticket_mutations import StatementRecorder, ticket_events_by_id
 
@@ -164,7 +165,7 @@ class TestEnsureRace:
 
         winner = await ensure_cve_exists(a, cve_id, lock=lock)
         task = world.start(b, ensure_cve_exists(b, cve_id, lock=lock))
-        await assert_blocked(task)
+        await assert_lock_wait(task, waiter=b, blocked_by=a)
         await a.commit()
         loser = await asyncio.wait_for(task, timeout=5)
 
@@ -186,7 +187,7 @@ class TestEnsureRace:
 
         apparent = (await ensure_cve_exists(a, cve_id, lock=lock)).id
         task = world.start(b, ensure_cve_exists(b, cve_id, lock=lock))
-        await assert_blocked(task)
+        await assert_lock_wait(task, waiter=b, blocked_by=a)
         await a.rollback()
         created = await asyncio.wait_for(task, timeout=5)
 
@@ -205,7 +206,7 @@ class TestEnsureRace:
 
         winner = await ensure_cve_exists(a, cve_id, lock=True)
         task = world.start(b, ensure_cve_exists(b, cve_id, lock=True))
-        await assert_blocked(task)
+        await assert_lock_wait(task, waiter=b, blocked_by=a)
         await a.commit()
         loser = await asyncio.wait_for(task, timeout=5)
         assert loser.id == winner.id
@@ -228,7 +229,7 @@ class TestEnsureRace:
 
         winner = await ensure_cve_exists(a, cve_id)
         task = world.start(b, ensure_cve_exists(b, cve_id))
-        await assert_blocked(task)
+        await assert_lock_wait(task, waiter=b, blocked_by=a)
         await a.commit()
         await asyncio.wait_for(task, timeout=5)
 
@@ -275,7 +276,7 @@ class TestCreationRace:
         winner = await _manual(a, first, cve_id=cve_id)
         world.ticket_ids.append(winner.id)
         task = world.start(b, _manual(b, second, cve_id=cve_id))
-        await assert_blocked(task)
+        await assert_lock_wait(task, waiter=b, blocked_by=a)
         await a.commit()
 
         with pytest.raises(TicketCVEConflictError) as raised:
@@ -305,7 +306,7 @@ class TestCreationRace:
 
         await _manual(a, first, cve_id=cve_id)
         task = world.start(b, _manual(b, second, cve_id=cve_id))
-        await assert_blocked(task)
+        await assert_lock_wait(task, waiter=b, blocked_by=a)
         await a.rollback()
         created = await asyncio.wait_for(task, timeout=5)
         world.ticket_ids.append(created.id)
@@ -333,7 +334,7 @@ class TestCreationRace:
                 .with_for_update(key_share=True)
             ),
         )
-        await assert_blocked(task)
+        await assert_lock_wait(task, waiter=b, blocked_by=a)
         await a.commit()
         await asyncio.wait_for(task, timeout=5)
         await b.rollback()
