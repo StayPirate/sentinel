@@ -2060,7 +2060,7 @@ It contains exactly these fields:
 
 | Status | Code | Condition |
 |--------|------|-----------|
-| 404 | `RESOURCE_NOT_FOUND` | Track not found on this ticket |
+| 404 | `RESOURCE_NOT_FOUND` | Package or track not found on this ticket |
 | 409 | `PACKAGE_ALREADY_EXCLUDED` | Track is already soft-deleted |
 
 ---
@@ -2109,7 +2109,7 @@ It contains exactly these fields:
 
 | Status | Code | Condition |
 |--------|------|-----------|
-| 404 | `RESOURCE_NOT_FOUND` | Track not found on this ticket |
+| 404 | `RESOURCE_NOT_FOUND` | Package or track not found on this ticket |
 | 422 | `PACKAGE_NOT_EXCLUDED` | Track is not directly soft-deleted |
 
 ---
@@ -2173,7 +2173,7 @@ It contains exactly these fields:
 
 | Status | Code | Condition |
 |--------|------|-----------|
-| 404 | `RESOURCE_NOT_FOUND` | Product not found on this track |
+| 404 | `RESOURCE_NOT_FOUND` | Package, track, or product not found on this ticket |
 | 409 | `PACKAGE_ALREADY_EXCLUDED` | Product is already soft-deleted |
 
 ---
@@ -2225,7 +2225,7 @@ It contains exactly these fields:
 
 | Status | Code | Condition |
 |--------|------|-----------|
-| 404 | `RESOURCE_NOT_FOUND` | Product not found on this track |
+| 404 | `RESOURCE_NOT_FOUND` | Package, track, or product not found on this ticket |
 | 422 | `PACKAGE_NOT_EXCLUDED` | Product is not directly soft-deleted |
 
 ---

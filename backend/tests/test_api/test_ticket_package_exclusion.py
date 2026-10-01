@@ -896,34 +896,25 @@ class TestMarkerGuards:
         assert await _snapshot(db_session, tree) == before
         assert (await ticket_row(db_session, tree.ticket.id))["assignee_id"] is None
 
-    @pytest.mark.parametrize(
-        ("level", "ancestor"),
-        [
-            pytest.param(Level.TRACK, Level.PACKAGE, id="track-under-package"),
-            pytest.param(Level.PRODUCT, Level.PACKAGE, id="product-under-package"),
-            pytest.param(Level.PRODUCT, Level.TRACK, id="product-under-track"),
-        ],
-    )
     async def test_restore_of_a_record_excluded_only_through_an_ancestor_is_a_422(
         self,
         authenticated_client: AsyncClient,
         grant: Callable[..., Awaitable[User]],
         db_session: AsyncSession,
         build: Callable[..., Awaitable[Tree]],
-        level: Level,
-        ancestor: Level,
     ) -> None:
         """An exclusion inherited from an ancestor is not a direct marker
         (package-model.md, Restore; package-service.md, Service Exceptions:
-        `PackageNotExcludedError` on `deleted_at IS NULL`)."""
+        `PackageNotExcludedError` on `deleted_at IS NULL`). One HTTP
+        representative; every ancestor combination is proven at the service
+        tier (`test_package_exclusion.py`, `TestDirectMarkerGuard`)."""
         await grant(Role.VULNERABILITY_ANALYST)
-        tree = await build(
-            package_excluded=ancestor is Level.PACKAGE,
-            track_excluded=ancestor is Level.TRACK,
-        )
+        tree = await build(package_excluded=True)
         before = await _snapshot(db_session, tree)
 
-        response = await authenticated_client.post(tree.url(level, Direction.RESTORE))
+        response = await authenticated_client.post(
+            tree.url(Level.PRODUCT, Direction.RESTORE)
+        )
 
         assert response.status_code == 422
         assert response.json() == _NOT_EXCLUDED
