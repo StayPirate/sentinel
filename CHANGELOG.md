@@ -1,5 +1,57 @@
 # Changelog
 
+## [0.6.0](https://github.com/StayPirate/sentinel/compare/v0.5.1...v0.6.0) (2026-10-01)
+
+
+### Features
+
+* add automatic priority refresh and manual severity endpoint ([#674](https://github.com/StayPirate/sentinel/issues/674)) ([24091e7](https://github.com/StayPirate/sentinel/commit/24091e71a67c13157586ebc795f120d0417c7f99)), closes [#666](https://github.com/StayPirate/sentinel/issues/666)
+* add CPE-to-package mapping loader and resolvers ([#610](https://github.com/StayPirate/sentinel/issues/610)) ([4022f30](https://github.com/StayPirate/sentinel/commit/4022f302bf5a73d1eaa969176093debedf49a2a3))
+* add cross-Ticket package search endpoint ([#735](https://github.com/StayPirate/sentinel/issues/735)) ([ad23d39](https://github.com/StayPirate/sentinel/commit/ad23d39adb75f9b9fba76613ccc73d499b2e2637))
+* add CVE association and its endpoint ([#696](https://github.com/StayPirate/sentinel/issues/696)) ([1b98d04](https://github.com/StayPirate/sentinel/commit/1b98d042c318fcaf53bf543297d0ac62e8d25628)), closes [#689](https://github.com/StayPirate/sentinel/issues/689)
+* add CVE enrichment child tables and CVE child indexes ([#625](https://github.com/StayPirate/sentinel/issues/625)) ([c6574be](https://github.com/StayPirate/sentinel/commit/c6574be84f6636e8451daf25438df856559f01e7))
+* add CVE path resolution and the CVSS assessments read ([#681](https://github.com/StayPirate/sentinel/issues/681)) ([eda8854](https://github.com/StayPirate/sentinel/commit/eda88546a44ef3ae62ce62f84ae4b2c206b3aa6c)), closes [#668](https://github.com/StayPirate/sentinel/issues/668)
+* add CVE root, source, CVSS assessment, and identifier tables ([#620](https://github.com/StayPirate/sentinel/issues/620)) ([2bd7508](https://github.com/StayPirate/sentinel/commit/2bd7508c6303e064ca14537ddf7ec746dd92a80e)), closes [#613](https://github.com/StayPirate/sentinel/issues/613)
+* add derived actionability and the Ticket package-tree read ([#655](https://github.com/StayPirate/sentinel/issues/655)) ([b78b3a9](https://github.com/StayPirate/sentinel/commit/b78b3a9c3a44cc2eaffb9391fc7091313167624a))
+* add explicit Ticket assignment and the priority override ([#701](https://github.com/StayPirate/sentinel/issues/701)) ([dcc716c](https://github.com/StayPirate/sentinel/commit/dcc716c22651fafc4ac6d6c47efe2a0e09003200))
+* add FK access-path indexing criterion and ticket assignee index ([#626](https://github.com/StayPirate/sentinel/issues/626)) ([c6ccef5](https://github.com/StayPirate/sentinel/commit/c6ccef57f9af983e3350538abdb262c23601fd2d))
+* add IBS request and request action persistence ([#644](https://github.com/StayPirate/sentinel/issues/644)) ([0f96d0b](https://github.com/StayPirate/sentinel/commit/0f96d0b2a4227d45020fc731be99430a6c9ab02e)), closes [#638](https://github.com/StayPirate/sentinel/issues/638)
+* add IBS track release checkpoint and action track persistence ([#645](https://github.com/StayPirate/sentinel/issues/645)) ([96ac841](https://github.com/StayPirate/sentinel/commit/96ac841f958ce655cbb55e8e4a3189913caa82ed))
+* add identifier syntax and pure ticket priority and deadline rules ([#608](https://github.com/StayPirate/sentinel/issues/608)) ([43b8919](https://github.com/StayPirate/sentinel/commit/43b8919fbfb4b381b60fb109062e48e552d43d0d))
+* add manual Ticket references and reference read endpoints ([#739](https://github.com/StayPirate/sentinel/issues/739)) ([d678e1d](https://github.com/StayPirate/sentinel/commit/d678e1d0cd152feeacc51d127f3f5b9015012d43))
+* add manual-zone exits (reopen and revert-duplicate) and endpoints ([#705](https://github.com/StayPirate/sentinel/issues/705)) ([4e54475](https://github.com/StayPirate/sentinel/commit/4e544750655d4cfdcda290aff63336682e55a336))
+* add package exclusion and restoration endpoints ([#731](https://github.com/StayPirate/sentinel/issues/731)) ([32f9533](https://github.com/StayPirate/sentinel/commit/32f953354dd8da41bb3ec388d6a4136aef8f3324))
+* add Product catalog tables and lifecycle SQL expression ([#641](https://github.com/StayPirate/sentinel/issues/641)) ([0bcc039](https://github.com/StayPirate/sentinel/commit/0bcc0392ff112cb1b9e7b705fd9bdaed18a25fb5)), closes [#635](https://github.com/StayPirate/sentinel/issues/635)
+* add Product eligibility override endpoint ([#728](https://github.com/StayPirate/sentinel/issues/728)) ([4e5a848](https://github.com/StayPirate/sentinel/commit/4e5a8482961df12b23533f114c1545558f5afde9)), closes [#723](https://github.com/StayPirate/sentinel/issues/723)
+* add pure CVSS vector parsing and score resolution ([#606](https://github.com/StayPirate/sentinel/issues/606)) ([1bdf1e0](https://github.com/StayPirate/sentinel/commit/1bdf1e0e16e4cf4cb16f37ba54ae9fed770fa876)), closes [#602](https://github.com/StayPirate/sentinel/issues/602)
+* add pure product lifecycle and eligibility evaluators ([#609](https://github.com/StayPirate/sentinel/issues/609)) ([555ae7e](https://github.com/StayPirate/sentinel/commit/555ae7e0890acaedef6759f6771d2ba81e5b95b3))
+* add the CVSS chain recalculation in both modes ([#678](https://github.com/StayPirate/sentinel/issues/678)) ([3ffc564](https://github.com/StayPirate/sentinel/commit/3ffc56436d7a8ed16eb65e87ee8db029e37d56dd))
+* add the manual SUSE CVSS deletion and its endpoint ([#686](https://github.com/StayPirate/sentinel/issues/686)) ([a7fc207](https://github.com/StayPirate/sentinel/commit/a7fc207a093243250ceef55b81d4a35bfd794c57))
+* add the manual SUSE CVSS upsert and its endpoint ([#685](https://github.com/StayPirate/sentinel/issues/685)) ([c31cde3](https://github.com/StayPirate/sentinel/commit/c31cde353d22d33d331cf0f7c096f2b24a58d27c)), closes [#669](https://github.com/StayPirate/sentinel/issues/669)
+* add the Ticket detail read ([#656](https://github.com/StayPirate/sentinel/issues/656)) ([ef710ef](https://github.com/StayPirate/sentinel/commit/ef710ef103dd33567db2f5e9f015810a2b594962)), closes [#650](https://github.com/StayPirate/sentinel/issues/650)
+* add the Ticket list read ([#660](https://github.com/StayPirate/sentinel/issues/660)) ([90b8a75](https://github.com/StayPirate/sentinel/commit/90b8a75b915ae0909defd12f7c2cc2cfc1420eb8)), closes [#652](https://github.com/StayPirate/sentinel/issues/652)
+* add the Ticket mutation primitives ([#671](https://github.com/StayPirate/sentinel/issues/671)) ([81d0402](https://github.com/StayPirate/sentinel/commit/81d0402256c58c921e352c3541fb47787319d07a))
+* add Ticket access grant endpoints ([#720](https://github.com/StayPirate/sentinel/issues/720)) ([d40865a](https://github.com/StayPirate/sentinel/commit/d40865af529671a0ffe9366b059234f2dce19b82))
+* add Ticket audit event, access grant, and reference tables ([#623](https://github.com/StayPirate/sentinel/issues/623)) ([5d793a4](https://github.com/StayPirate/sentinel/commit/5d793a479e65b9ecd1de001bb941ce4222e9ba43)), closes [#615](https://github.com/StayPirate/sentinel/issues/615)
+* add Ticket audit trail service with typed event validation ([#653](https://github.com/StayPirate/sentinel/issues/653)) ([4f3b156](https://github.com/StayPirate/sentinel/commit/4f3b15691cac33e5f0007bfc02e5ffb2ae28a803)), closes [#647](https://github.com/StayPirate/sentinel/issues/647)
+* add Ticket confidentiality and Coordinated Release Date endpoints ([#715](https://github.com/StayPirate/sentinel/issues/715)) ([1b019a3](https://github.com/StayPirate/sentinel/commit/1b019a323a95ebc1ba45f4116f248cfec7db120d))
+* add Ticket core table ([#621](https://github.com/StayPirate/sentinel/issues/621)) ([bc4be0e](https://github.com/StayPirate/sentinel/commit/bc4be0e20be3408459ebd5cb1558c24c30b8961b)), closes [#614](https://github.com/StayPirate/sentinel/issues/614)
+* add Ticket creation with placeholder CVE and its endpoint ([#695](https://github.com/StayPirate/sentinel/issues/695)) ([e7efb6d](https://github.com/StayPirate/sentinel/commit/e7efb6dda0ef1a0d9fe81e9792e36d61b69ffee2)), closes [#688](https://github.com/StayPirate/sentinel/issues/688)
+* add Ticket due-date and track milestone SQL expressions ([#657](https://github.com/StayPirate/sentinel/issues/657)) ([4f2f00b](https://github.com/StayPirate/sentinel/commit/4f2f00b622257542914b026b885b896440fd98fd)), closes [#651](https://github.com/StayPirate/sentinel/issues/651)
+* add Ticket ignore and mark-as-duplicate with their endpoints ([#702](https://github.com/StayPirate/sentinel/issues/702)) ([d1cc3f1](https://github.com/StayPirate/sentinel/commit/d1cc3f10ba41ad4e49c74a6e17691f70586ad749))
+* add Ticket package and track persistence ([#642](https://github.com/StayPirate/sentinel/issues/642)) ([4a9d8d8](https://github.com/StayPirate/sentinel/commit/4a9d8d8b0f7e48bb14827ea0d4696fce4921a815))
+* add Ticket package Product occurrence and maintainer persistence ([#643](https://github.com/StayPirate/sentinel/issues/643)) ([9123fc5](https://github.com/StayPirate/sentinel/commit/9123fc5b6c1708991fe7af34abf59ecd1e3b1238))
+* add Ticket visibility, SNTL resolution, and audit-log API ([#654](https://github.com/StayPirate/sentinel/issues/654)) ([072beae](https://github.com/StayPirate/sentinel/commit/072beae18a363051910e094649a1fc48a5d19818))
+* add track affectedness change endpoint ([#727](https://github.com/StayPirate/sentinel/issues/727)) ([8749178](https://github.com/StayPirate/sentinel/commit/874917808633a1aebf540bdd8661db7354c212ff)), closes [#722](https://github.com/StayPirate/sentinel/issues/722)
+* **cli:** require help text on all CLI parameters ([#718](https://github.com/StayPirate/sentinel/issues/718)) ([25ca3e1](https://github.com/StayPirate/sentinel/commit/25ca3e1045234ae1b6af35c4e85c725e7190a037)), closes [#716](https://github.com/StayPirate/sentinel/issues/716)
+
+
+### Bug Fixes
+
+* **api:** reject coerced scalar types in JSON request bodies ([#719](https://github.com/StayPirate/sentinel/issues/719)) ([2e585f0](https://github.com/StayPirate/sentinel/commit/2e585f08435f8dff8aa08fa043d3f5d424605cfe)), closes [#714](https://github.com/StayPirate/sentinel/issues/714)
+* bump PyJWT to &gt;=2.14.0 to resolve CVE-2026-102274 ([#707](https://github.com/StayPirate/sentinel/issues/707)) ([7a136fd](https://github.com/StayPirate/sentinel/commit/7a136fd7a5058d74801e80a8d635c8ad447a9de1))
+* lock the CVE root with FOR NO KEY UPDATE to avoid FK deadlocks ([#704](https://github.com/StayPirate/sentinel/issues/704)) ([d5ef08f](https://github.com/StayPirate/sentinel/commit/d5ef08f1a635593be0876d071f6730eb470d2253))
+
 ## [0.5.1](https://github.com/StayPirate/sentinel/compare/v0.5.0...v0.5.1) (2026-09-23)
 
 
