@@ -171,6 +171,13 @@ class TestErrorCode:
         assert ErrorCode.PACKAGE_ALREADY_EXCLUDED == "PACKAGE_ALREADY_EXCLUDED"
         assert ErrorCode.PACKAGE_NOT_EXCLUDED == "PACKAGE_NOT_EXCLUDED"
 
+    def test_reference_error_codes_are_registered(self) -> None:
+        """See docs/api-spec.md (Error Code Categories, `RESOURCE_*`) and
+        docs/features/tickets/ticket-references.md (Service Exceptions:
+        `ReferenceNotEditableError`, `ReferenceConflictError`)."""
+        assert ErrorCode.RESOURCE_NOT_EDITABLE == "RESOURCE_NOT_EDITABLE"
+        assert ErrorCode.RESOURCE_CONFLICT == "RESOURCE_CONFLICT"
+
     def test_date_range_inverted_is_registered(self) -> None:
         """See docs/api-spec.md (Date Range Interpretation, Inverted
         range validation)."""
