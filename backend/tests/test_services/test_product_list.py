@@ -29,6 +29,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy import delete, event, func, insert, select, update
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import Executable
 
@@ -799,7 +800,7 @@ class TestReadOnlyStatement:
 
 
 @pytest.mark.unit
-class TestPaginationGuards:
+class TestGuardsAndPropagation:
     @pytest.mark.parametrize(
         ("page", "per_page"), [(0, 20), (-1, 20), (1, 0), (1, -1), (1, 101)]
     )
@@ -814,6 +815,16 @@ class TestPaginationGuards:
             )
 
         db.execute.assert_not_awaited()
+
+    async def test_database_error_propagates(self) -> None:
+        db = AsyncMock(spec=AsyncSession)
+        failure = OperationalError("SELECT 1", {}, Exception("connection lost"))
+        db.execute.side_effect = failure
+
+        with pytest.raises(OperationalError) as excinfo:
+            await list_products(db, evaluation_date=EVALUATION_DATE)
+
+        assert excinfo.value is failure
 
 
 @pytest.mark.integration
