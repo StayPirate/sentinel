@@ -21,10 +21,10 @@ receiver is actually a database session, since no legitimate use of
 either pattern exists in the API layer today (see `AGENTS.md`,
 Guardrail 26 — Reviewer Proportionality).
 
-Two functions are exempt, each for a documented, specification-mandated
+These functions are exempt, each for a documented, specification-mandated
 reason — narrowed to the specific function or method authorized to own
 its own session, not the whole file (see `_AUTHORIZED_QUALNAMES` below).
-An unauthorized use added anywhere ELSE in these same two modules —
+An unauthorized use added anywhere ELSE in these same modules —
 including a different function — is still detected:
 
 - `app/api/health.py`, function `get_readiness_session_factory`: the
@@ -54,8 +54,15 @@ including a different function — is still detected:
   row lock held (`docs/conventions.md`, Transaction Hygiene Rules). See
   `docs/features/platform/fetcher-operations.md` (`trigger_fetcher`).
 
+- `app/api/v1/cves.py`, function
+  `get_cve_source_status_session_factory`: `get_cve_source_status()` is
+  the service-owned read orchestration of
+  `docs/features/tickets/cve-service.md` (CVE Source Status, Transaction
+  Ownership): it opens and closes its own short-lived read transaction
+  before its best-effort Redis overlay.
+
 The module-level `import` of `async_session_factory` in each of these
-three files (needed for the authorized function to reference it at all)
+files (needed for the authorized function to reference it at all)
 is allowed only in the files that contain an authorized function —
 tracked separately from function-scoped usage, since an `import`
 statement is inherently outside any function body.
@@ -84,6 +91,7 @@ _AUTHORIZED_QUALNAMES: dict[Path, set[str]] = {
         "LastUsedDebouncer.touch",
     },
     Path("v1/fetchers.py"): {"get_fetcher_trigger_session_factory"},
+    Path("v1/cves.py"): {"get_cve_source_status_session_factory"},
 }
 
 _FORBIDDEN_NAMES = {"async_session_factory"}

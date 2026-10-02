@@ -94,7 +94,9 @@ from app.models import (
     User,
     UserRole,
 )
-from app.services import local_auth_service, session_service
+from app.services import cve_service, local_auth_service, session_service
+from app.services.base_cve_fetcher import _CVE_SOURCE_TYPE_MAP
+from app.services.base_fetcher import FETCHER_REGISTRY
 from app.services.session_service import create_session
 from tests.support.audit_models import SampleAuditEvent
 from tests.support.database import create_database, drop_database
@@ -603,6 +605,37 @@ def cleanup_users_by_username(
 
 
 @pytest.fixture
+def isolated_fetcher_registries() -> Iterator[None]:
+    """Snapshot both fetcher registries before the test and restore both
+    snapshots during teardown.
+
+    Defining a concrete `BaseFetcher` or `BaseCVEFetcher` subclass
+    registers it, as an import-time side effect of `__init_subclass__`,
+    in the process-wide `FETCHER_REGISTRY` (`app.services.base_fetcher`)
+    and, for a CVE fetcher, `_CVE_SOURCE_TYPE_MAP`
+    (`app.services.base_cve_fetcher`). Tests that define dynamic fetcher
+    classes request this fixture so neither registration leaks into a
+    later test — see docs/features/platform/cve-fetcher-infrastructure.md
+    (`__init_subclass__` Validation — Test isolation) and
+    docs/features/platform/testing-strategy.md (Test Independence).
+
+    Both dictionaries are restored in place (cleared and refilled), so
+    every module holding a reference to them observes the restored
+    content. A test may also clear either dictionary freely; teardown
+    restores it. Pure in-process state: no database or Redis access.
+    """
+    fetcher_snapshot = dict(FETCHER_REGISTRY)
+    source_type_snapshot = dict(_CVE_SOURCE_TYPE_MAP)
+    try:
+        yield
+    finally:
+        FETCHER_REGISTRY.clear()
+        FETCHER_REGISTRY.update(fetcher_snapshot)
+        _CVE_SOURCE_TYPE_MAP.clear()
+        _CVE_SOURCE_TYPE_MAP.update(source_type_snapshot)
+
+
+@pytest.fixture
 async def client(db_session: AsyncSession) -> AsyncGenerator[AsyncClient]:
     """Provide an async HTTP test client with DB session override.
 
@@ -636,8 +669,10 @@ async def redis_client(
     databases) and overrides every application-owned Redis boundary —
     `get_readiness_redis_urls` (readiness checks),
     `session_service.get_session_redis_url` (session liveness cache,
-    invalidation purge), and `local_auth_service.get_lockout_redis_url`
-    (login lockout counter) — so they observe this same instance during
+    invalidation purge), `local_auth_service.get_lockout_redis_url`
+    (login lockout counter), and `cve_service.get_fetch_pending_redis_url`
+    (per-CVE source-status pending overlay) — so they observe this same
+    instance during
     the test. Teardown restores every override, flushes again, and
     closes the client. Cleanup/provisioning failures fail the test
     rather than skip.
@@ -651,6 +686,9 @@ async def redis_client(
     )
     monkeypatch.setattr(
         local_auth_service, "get_lockout_redis_url", lambda: _redis_test_url
+    )
+    monkeypatch.setattr(
+        cve_service, "get_fetch_pending_redis_url", lambda: _redis_test_url
     )
     try:
         yield client

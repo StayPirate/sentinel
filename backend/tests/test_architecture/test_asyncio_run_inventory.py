@@ -40,6 +40,14 @@ REVIEWED_INVENTORY: dict[tuple[str, str], str] = {
         "This is the single choke point for every fetcher's execute() "
         "and any fetch_single() it calls."
     ),
+    ("fetchers.py", "_run_catch_up_sync"): (
+        "Repeated per-invocation task wrapper (run_catch_up), including "
+        "every Celery retry attempt. Its async workflow "
+        "(run_catch_up_async) awaits engine.dispose() exactly once on "
+        "every return and exception path before returning control to "
+        "asyncio.run() — see docs/conventions.md, Cross-loop pooled "
+        "connection lifecycle."
+    ),
     ("session_cleanup.py", "_cleanup_sessions_sync"): (
         "Repeated per-invocation task wrapper (cleanup_sessions). Its "
         "async workflow (run_cleanup_sessions) awaits engine.dispose() "

@@ -23,7 +23,9 @@ serializer, shared by `GET /cves/{cve_id}` and `TicketDetail.cve`.
 
 `GET /cve-sources` lives here because it lists CVE-source records; it is
 the intentional identifier-only exception to CVE accessibility and
-therefore resolves no caller.
+therefore resolves no caller. `GET /cves/{cve_id}/sources` is the one
+handler without a `DatabaseSession`: its service owns a short-lived read
+session (see `get_cve_source_status_session_factory`).
 """
 
 from __future__ import annotations
@@ -34,6 +36,7 @@ from typing import Annotated, Final
 
 from fastapi import APIRouter, Depends, Path, Query, Response, status
 from pydantic import TypeAdapter
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.api.dependencies import (
     AuthenticatedPrincipal,
@@ -54,7 +57,7 @@ from app.core.dates import (
 from app.core.enums import Capability, CVESortField, CVESourceSortField, SortOrder
 from app.core.errors import AppError, ErrorCode
 from app.core.exceptions import CVENotFoundError, TicketNotMutableError
-from app.database import DatabaseSession
+from app.database import DatabaseSession, async_session_factory
 from app.schemas.common import PaginationMeta
 from app.schemas.cve import (
     CVEAssociatedTicket,
@@ -70,6 +73,8 @@ from app.schemas.cve import (
     CVESourceListItem,
     CVESourceListQuery,
     CVESourceListResponse,
+    CVESourceStatusItem,
+    CVESourceStatusResponse,
     CVESSVCResponse,
     CVEWeaknessResponse,
 )
@@ -87,6 +92,7 @@ from app.services.cve_service import (
     CVEDetailResult,
     CVEListItemProjection,
     CVESourceListItemProjection,
+    CVESourceStatusEntry,
     CVSSAssessmentProjection,
     ResolvedCVE,
 )
@@ -649,6 +655,82 @@ async def list_cve_sources(
         meta=PaginationMeta(
             total=result.total, page=result.page, per_page=result.per_page
         ),
+    )
+
+
+def serialize_cve_source_status_entry(
+    entry: CVESourceStatusEntry,
+) -> CVESourceStatusItem:
+    return CVESourceStatusItem(
+        source=entry.source,
+        status=entry.status.value,
+        fetched_at=entry.fetched_at,
+        first_failed_at=entry.first_failed_at,
+        registered=entry.registered,
+        refetchable=entry.refetchable,
+        enabled=entry.enabled,
+    )
+
+
+def get_cve_source_status_session_factory() -> async_sessionmaker[AsyncSession]:
+    """Provide the session factory of `get_cve_source_status()`'s
+    service-owned read.
+
+    Performs no I/O — returns the production `async_session_factory`. The
+    service opens and closes its own short-lived read transaction before
+    its best-effort Redis overlay, so it does not participate in the
+    request-scoped `DatabaseSession` (cve-service.md, Transaction
+    Ownership). Overridable via `app.dependency_overrides` so tests can
+    point it at the test database engine, mirroring
+    `get_fetcher_trigger_session_factory` (`app/api/v1/fetchers.py`).
+    """
+    return async_session_factory
+
+
+@router.get(
+    "/cves/{cve_id}/sources",
+    response_model=CVESourceStatusResponse,
+    summary="Get CVE source status",
+    description=(
+        "Returns the fetch status of one CVE, identified by its CVE-ID, for "
+        "every currently registered CVE source plus every persisted "
+        "historical source no longer registered. Not paginated and not "
+        "sortable: one entry per source in fixed ascending `source` "
+        "code-point order. `pending` is a best-effort transient overlay; "
+        "when it cannot be read, the persisted status is returned. Public; "
+        "optional authentication determines access to CVEs associated with "
+        "confidential Tickets."
+    ),
+    responses={
+        404: {
+            "model": ErrorResponse,
+            "description": (
+                "CVE-ID is malformed, does not exist, or identifies a CVE "
+                "associated with a Ticket inaccessible to the caller."
+            ),
+        },
+    },
+)
+async def get_cve_source_status(
+    cve_id: CVEIdPath,
+    caller: OptionalTicketCaller,
+    session_factory: Annotated[
+        async_sessionmaker[AsyncSession],
+        Depends(get_cve_source_status_session_factory),
+    ],
+) -> CVESourceStatusResponse:
+    """CVE Source Status — see `docs/features/tickets/cve-service.md`.
+
+    The service applies CVE accessibility in its single durable
+    selection and closes that transaction before the Redis overlay."""
+    try:
+        result = await cve_service.get_cve_source_status(
+            cve_id, caller, session_factory=session_factory
+        )
+    except CVENotFoundError:
+        raise cve_not_found_error() from None
+    return CVESourceStatusResponse(
+        data=[serialize_cve_source_status_entry(entry) for entry in result.entries]
     )
 
 

@@ -16,8 +16,8 @@ real synchronous Celery wrapper — the scenario a long-lived prefork
 worker child repeats indefinitely — reproduces SQLAlchemy's cross-loop
 `RuntimeError`/`InterfaceError`.
 
-Both tests in this module are Tier 2 (integration): each exercises a
-real pooled engine against the shared test PostgreSQL server. Neither
+Every test in this module is Tier 2 (integration): each exercises a
+real pooled engine against the shared test PostgreSQL server. None
 requires a Celery broker or worker process — the failure is a
 SQLAlchemy/asyncio event-loop invariant, reproducible directly by
 calling the production synchronous entry point twice in the same test
@@ -27,9 +27,10 @@ process.
 from __future__ import annotations
 
 import asyncio
+from uuid import uuid4
 
 import pytest
-from sqlalchemy import delete
+from sqlalchemy import delete, text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -177,3 +178,94 @@ def test_run_fetcher_wrapper_survives_two_consecutive_event_loops(
     finally:
         FETCHER_REGISTRY.pop(fetcher_name, None)
         asyncio.run(_cleanup())
+
+
+@pytest.mark.integration
+@pytest.mark.usefixtures("isolated_fetcher_registries")
+def test_run_catch_up_wrapper_survives_two_consecutive_event_loops(
+    _engine: AsyncEngine,  # noqa: PT019 — value used below (.url), not just for setup
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two sequential invocations of the real `run_catch_up` synchronous
+    wrapper — each its own `asyncio.run()` event loop — both succeed
+    against one shared, pooled engine.
+
+    `run_catch_up_async` opens two sessions per invocation through the
+    module-level `async_session_factory` reference in
+    `app/tasks/fetchers.py`: the enabled read, then the caller-owned
+    session passed to `catch_up()`. The test-only fetcher's `catch_up()`
+    runs a trivial query through that session, so both sessions check a
+    connection out of the dedicated pool on every invocation. Celery
+    retries are also new invocations in the same worker child, so the
+    same disposal protects them.
+    """
+    fetcher_name = f"test_cross_loop_catch_up_probe_{uuid4().hex}"
+    probe_ticket_id = str(uuid4())
+    executed: list[str] = []
+
+    class _FakeRequest:
+        retries = 0
+
+    class _FakeTask:
+        """Minimal stand-in for the bound Celery Task instance (`self`),
+        carrying only what `_run_catch_up_sync` reads."""
+
+        request = _FakeRequest()
+
+        def retry(self, **kwargs: object) -> BaseException:
+            raise AssertionError(f"run_catch_up must not retry: {kwargs!r}")
+
+    class _CatchUpProbeFetcher(BaseFetcher):
+        name = fetcher_name
+        description = "Cross-loop lifecycle regression probe (SELECT 1 catch-up)"
+        default_schedule = "0 * * * *"
+        participates_in_catch_up = True
+
+        async def execute(self, session: AsyncSession) -> None:
+            pass
+
+        async def catch_up(self, ticket_id: str, session: AsyncSession) -> None:
+            await session.execute(text("SELECT 1"))
+            executed.append(ticket_id)
+
+    dedicated_engine = create_async_engine(
+        _engine.url.render_as_string(hide_password=False), echo=False
+    )
+    dedicated_factory = async_sessionmaker(
+        dedicated_engine, class_=AsyncSession, expire_on_commit=False
+    )
+
+    async def _seed_and_drain() -> None:
+        async with dedicated_factory() as session:
+            session.add(FetcherConfig(fetcher_name=fetcher_name))
+            await session.commit()
+        # Drain the seeding connection so the first real invocation does
+        # not receive a connection bound to this setup loop.
+        await dedicated_engine.dispose()
+
+    async def _cleanup() -> None:
+        async with dedicated_factory() as session:
+            await session.execute(
+                delete(FetcherConfig).where(FetcherConfig.fetcher_name == fetcher_name)
+            )
+            await session.commit()
+        await dedicated_engine.dispose()
+
+    monkeypatch.setattr(fetchers_module, "engine", dedicated_engine)
+    monkeypatch.setattr(fetchers_module, "async_session_factory", dedicated_factory)
+
+    try:
+        asyncio.run(_seed_and_drain())
+
+        # First invocation: its own event loop; disposes the pool before
+        # the loop closes.
+        fetchers_module._run_catch_up_sync(_FakeTask(), fetcher_name, probe_ticket_id)
+
+        # Second invocation: a brand-new event loop. Without disposal the
+        # pool would hand out a connection bound to the first (closed)
+        # loop.
+        fetchers_module._run_catch_up_sync(_FakeTask(), fetcher_name, probe_ticket_id)
+    finally:
+        asyncio.run(_cleanup())
+
+    assert executed == [probe_ticket_id, probe_ticket_id]
