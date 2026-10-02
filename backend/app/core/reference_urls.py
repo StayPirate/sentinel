@@ -2,8 +2,8 @@
 
 Implements `docs/features/tickets/ticket-references.md` (URL Boundary >
 URL Normalization) steps 1-6, shared by the Pydantic request schemas and
-by `reference_service` (manual references now, automatic ingestion
-later). A URL is URI identifier syntax: the algorithm is purely lexical
+by `reference_service` (manual references and automatic ingestion). A
+URL is URI identifier syntax: the algorithm is purely lexical
 and performs no DNS lookup, address resolution, request, TLS handshake,
 or other outbound operation (Security and Privacy).
 

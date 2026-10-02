@@ -40,21 +40,24 @@ precedence, validation, accessibility matrix) is covered by
   transaction stays usable (the write ran inside a savepoint);
 - committed cross-transaction timestamps: an equivalent-only PATCH keeps
   `updated_at`; a later effective PATCH advances it;
-- the automatic-first race through independent sessions (automatic row
-  inserted with a raw `TicketReference` insert, without the Ticket lock,
-  since `upsert_references()` is not implemented by this work item). The
-  insert's foreign-key check holds `FOR KEY SHARE` on the parent Ticket,
-  so the manual operation waits at its Ticket `FOR UPDATE` and then
-  observes the committed automatic row (or its absence after rollback);
+- the automatic-first race through independent sessions: the automatic
+  row is inserted by `upsert_references()`, which acquires no Ticket
+  lock. The insert's foreign-key check holds `FOR KEY SHARE` on the
+  parent Ticket, so manual create and manual URL change wait at their
+  Ticket `FOR UPDATE` and then observe the committed automatic row (or
+  its absence after rollback);
 - manual/manual races (create/create, update/update on one reference and
   on two references competing for one URL, update/delete in both orders,
   delete/delete), each waiter proven blocked on the Ticket lock;
 - locked-current accessibility races for the three Ticket-path visibility
   losses, and the single-read coherence of `list_references()`.
 
-Out of scope (deferred with automatic ingestion): the manual/automatic race
-matrix through `upsert_references()`, forced automatic unique-key
-conflicts, candidate order, and per-CVE rollback.
+Out of scope: the remaining manual/automatic races, automatic/automatic
+races, and the committed forced automatic unique-key conflict
+(`tests/test_services/test_reference_ingestion_races.py`); single-session
+automatic ingestion, including candidate order
+(`tests/test_services/test_reference_ingestion.py`); and per-CVE rollback,
+which belongs to the CVE ingestion workflow tests.
 
 Every race keeps the winner's transaction open, proves the waiter blocked
 with `assert_lock_wait()` (never a sleep), and then releases the winner.
@@ -95,6 +98,7 @@ from app.models.ticket_reference import TicketReference
 from app.models.user import User
 from app.services import reference_service
 from app.services.reference_service import (
+    AutomaticReferenceInput,
     ManualReferenceCreateInput,
     ManualReferenceUpdateInput,
     ReferenceConflictError,
@@ -105,6 +109,7 @@ from app.services.reference_service import (
     delete_reference,
     list_references,
     update_reference,
+    upsert_references,
 )
 from app.services.ticket_audit_log import TicketAuditLog
 from app.services.ticket_visibility import TicketCaller
@@ -126,6 +131,9 @@ Call = Callable[[AsyncSession], Awaitable[Any]]
 AUTO_SOURCE = "sync_example_cves"
 """A fictional stable automatic fetcher name (ticket-references.md,
 TicketReference: `source`)."""
+
+CVE_ID = "CVE-2026-0001"
+"""The canonical CVE ID passed to `upsert_references()`."""
 
 SEEDED_URL = "https://issues.example.test/tickets/1"
 SEEDED_RAW_VARIANT = "HTTP://ISSUES.EXAMPLE.TEST/tickets/1"
@@ -1250,18 +1258,29 @@ class TestDeleteDeleteRace:
 
 
 async def _insert_automatic(session: AsyncSession, ticket: Ticket) -> uuid.UUID:
-    """A raw automatic row, as automatic ingestion would write it, without
-    acquiring the Ticket lock; the transaction is left open."""
-    reference = TicketReference(
-        ticket_id=ticket.id,
-        url=AUTO_URL,
-        title="Fictional upstream advisory",
-        type=ReferenceType.ADVISORY.value,
-        source=AUTO_SOURCE,
+    """The automatic row inserted by `upsert_references()`, which acquires
+    no Ticket lock; the transaction is left open."""
+    await upsert_references(
+        session,
+        ticket.id,
+        CVE_ID,
+        AUTO_SOURCE,
+        None,
+        [
+            AutomaticReferenceInput(
+                url=AUTO_URL,
+                title="Fictional upstream advisory",
+                explicit_type=ReferenceType.ADVISORY,
+            )
+        ],
     )
-    session.add(reference)
-    await session.flush()
-    return reference.id
+    return (
+        await session.execute(
+            select(TicketReference.id).where(
+                TicketReference.ticket_id == ticket.id, TicketReference.url == AUTO_URL
+            )
+        )
+    ).scalar_one()
 
 
 async def _automatic_first(
@@ -1311,8 +1330,14 @@ class TestAutomaticFirstRace:
         await session.commit()
         rows, events = await _committed(probe, ticket)
         assert set(rows) == {auto_id, spare.id}
-        assert (rows[auto_id].url, rows[auto_id].source) == (AUTO_URL, AUTO_SOURCE)
-        assert rows[auto_id].title == "Fictional upstream advisory"
+        automatic = rows[auto_id]
+        assert (
+            automatic.url,
+            automatic.title,
+            automatic.description,
+            automatic.type,
+            automatic.source,
+        ) == (AUTO_URL, "Fictional upstream advisory", None, "advisory", AUTO_SOURCE)
         assert events == [_added(actor, SPARE_URL)]
 
     async def test_rolled_back_automatic_row_lets_manual_create_succeed(
@@ -1359,7 +1384,14 @@ class TestAutomaticFirstRace:
         assert rows[reference_id].url == SEEDED_URL
         assert rows[reference_id].title == "Later title"
         assert rows[reference_id].created_at == before[0][reference_id].created_at
-        assert rows[auto_id].source == AUTO_SOURCE
+        automatic = rows[auto_id]
+        assert (
+            automatic.url,
+            automatic.title,
+            automatic.description,
+            automatic.type,
+            automatic.source,
+        ) == (AUTO_URL, "Fictional upstream advisory", None, "advisory", AUTO_SOURCE)
         assert events == [
             _field_changed("title", actor, "Original title", "Later title", SEEDED_URL)
         ]
