@@ -369,6 +369,23 @@ class CVESourceFetchStatus(StrEnum):
     MISSING = "missing"
 
 
+class CVESourceDerivedStatus(StrEnum):
+    """Per-CVE source status derived at read time.
+
+    Category B — classification (Python Enum only; never stored in the
+    database). The persisted `CVESourceFetchStatus` values plus the
+    ephemeral `pending` overlay and `not_attempted`. See
+    `docs/features/tickets/cve-service.md` (CVE Source Status, Status
+    values).
+    """
+
+    SUCCESS = "success"
+    FAILURE = "failure"
+    MISSING = "missing"
+    PENDING = "pending"
+    NOT_ATTEMPTED = "not_attempted"
+
+
 class CVESourceType(StrEnum):
     """Short lowercase provider label of a CVE data source.
 

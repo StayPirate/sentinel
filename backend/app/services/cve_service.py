@@ -35,7 +35,11 @@ later unconstrained query.
 Reads are Category B: they create no row or audit event, acquire no lock,
 never flush, commit, or roll back, and perform no network or Redis I/O.
 Each read selects its rows (and any total) in one SQL statement, so they
-derive from one coherent PostgreSQL observation. Unexpected
+derive from one coherent PostgreSQL observation. `get_cve_source_status()`
+is the one deliberate exception to the caller-owned session: it opens and
+closes its own short-lived read session, then performs one best-effort
+read-only Redis pending-overlay lookup after that session is closed
+(cve-service.md, CVE Source Status; Transaction Ownership). Unexpected
 database and programming exceptions propagate unchanged. Results are
 semantic service values, not Pydantic schemas.
 
@@ -49,17 +53,21 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any, Final
 
+import redis.asyncio as redis_asyncio
 import structlog
 from pydantic import ValidationError
 from pydantic_core import PydanticCustomError
+from redis.exceptions import RedisError
 from sqlalchemy import (
     ColumnElement,
     Row,
+    Select,
     and_,
     delete,
     false,
@@ -70,16 +78,19 @@ from sqlalchemy import (
     true,
 )
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.config import settings
 from app.core.enums import (
     CVESortField,
+    CVESourceDerivedStatus,
     CVESourceFetchStatus,
     CVESourceSortField,
     CVESourceType,
     CveState,
     CVSSAssessmentSeverity,
     CVSSVersion,
+    FetcherRunStatus,
     Severity,
     SortOrder,
     TicketStatus,
@@ -95,8 +106,10 @@ from app.models.cve_external_identifier import CVEExternalIdentifier
 from app.models.cve_kev_entry import CVEKEVEntry
 from app.models.cve_source import CVESource
 from app.models.cve_ssvc_assessment import CVESSVCAssessment
+from app.models.fetcher_config import FetcherConfig
+from app.models.fetcher_run import FetcherRun
 from app.models.ticket import Ticket
-from app.services import ticket_mutations, ticket_service
+from app.services import base_cve_fetcher, ticket_mutations, ticket_service
 from app.services.cve_ingest import (
     AFFECTED_VERSION_FIELDS,
     AffectedVersionOperation,
@@ -1025,6 +1038,352 @@ async def list_cve_sources(
         page=page,
         per_page=per_page,
     )
+
+
+# ---------------------------------------------------------------------------
+# Per-CVE source status (cve-service.md, CVE Source Status)
+# ---------------------------------------------------------------------------
+
+KEV_FETCHER_NAME: Final = "sync_cisa_kev"
+"""Stable fetcher name of the KEV source, whose latest fully successful
+run proves KEV absence (cve-service.md, KEV status derivation)."""
+
+FETCH_PENDING_KEY_PREFIX: Final = "fetch_pending:"
+"""Prefix of the on-demand pending marker key
+`fetch_pending:{cve_id}:{source}` (cve-service.md, Database-Free
+Publication). This module only reads it."""
+
+_PENDING_REDIS_TIMEOUT_SECONDS: Final = 2
+
+
+def get_fetch_pending_redis_url() -> str:
+    """Return the Redis URL of the pending-marker overlay.
+
+    Performs no I/O. A function rather than an inline read so tests can
+    redirect it (testing-strategy.md, Redis Strategy).
+    """
+    return settings.redis_url
+
+
+def _new_redis_client() -> redis_asyncio.Redis:
+    """A fresh Redis client for one overlay lookup, closed by the caller.
+
+    Kept as its own function so tests can substitute a client that raises
+    `RedisError` deterministically.
+    """
+    client: redis_asyncio.Redis = redis_asyncio.Redis.from_url(
+        get_fetch_pending_redis_url(),
+        decode_responses=True,
+        socket_connect_timeout=_PENDING_REDIS_TIMEOUT_SECONDS,
+        socket_timeout=_PENDING_REDIS_TIMEOUT_SECONDS,
+    )
+    return client
+
+
+def fetch_pending_key(cve_id: str, source: str) -> str:
+    """The pending-marker key of one canonical CVE-ID and source value."""
+    return f"{FETCH_PENDING_KEY_PREFIX}{cve_id}:{source}"
+
+
+@dataclass(frozen=True, slots=True)
+class CVESourceStatusEntry:
+    """One roster entry of the per-CVE source status."""
+
+    source: str
+    status: CVESourceDerivedStatus
+    fetched_at: datetime | None
+    first_failed_at: datetime | None
+    registered: bool
+    refetchable: bool
+    enabled: bool
+
+
+@dataclass(frozen=True, slots=True)
+class CVESourceStatusResult:
+    """The complete, unpaginated roster in ascending `source` code-point
+    order."""
+
+    entries: tuple[CVESourceStatusEntry, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _PersistedSourceStatus:
+    status: CVESourceFetchStatus
+    fetched_at: datetime
+    first_failed_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class _DurableSourceProjection:
+    """The complete durable input of the status read, materialized from
+    one PostgreSQL observation."""
+
+    cve_created_at: datetime
+    persisted: Mapping[str, _PersistedSourceStatus]
+    config_names: frozenset[str]
+    disabled_names: frozenset[str]
+    kev_updated_at: datetime | None
+    kev_run_finished_at: datetime | None
+
+
+def _durable_source_status_statement(cve_id: str, caller: TicketCaller) -> Select[Any]:
+    """One statement: the accessible CVE with one row per `CVESource` row
+    (or one row without a source), each carrying the same scalar
+    `FetcherConfig`, `CVEKEVEntry`, and KEV-run inputs."""
+    config_names = select(func.array_agg(FetcherConfig.fetcher_name)).scalar_subquery()
+    disabled_names = select(
+        func.array_agg(FetcherConfig.fetcher_name).filter(
+            FetcherConfig.enabled.is_(false())
+        )
+    ).scalar_subquery()
+    kev_run_finished_at = (
+        select(FetcherRun.finished_at)
+        .where(
+            FetcherRun.fetcher_name == KEV_FETCHER_NAME,
+            FetcherRun.status == FetcherRunStatus.SUCCESS.value,
+        )
+        .order_by(FetcherRun.finished_at.desc().nulls_last(), FetcherRun.id.desc())
+        .limit(1)
+        .scalar_subquery()
+    )
+    return (
+        select(
+            CVE.created_at.label("cve_created_at"),
+            config_names.label("config_names"),
+            disabled_names.label("disabled_names"),
+            CVEKEVEntry.updated_at.label("kev_updated_at"),
+            kev_run_finished_at.label("kev_run_finished_at"),
+            CVESource.source.label("source"),
+            CVESource.status.label("status"),
+            CVESource.fetched_at.label("fetched_at"),
+            CVESource.first_failed_at.label("first_failed_at"),
+        )
+        .select_from(CVE)
+        .outerjoin(Ticket, Ticket.cve_id == CVE.id)
+        .outerjoin(CVEKEVEntry, CVEKEVEntry.cve_id == CVE.id)
+        .outerjoin(CVESource, CVESource.cve_id == CVE.id)
+        .where(CVE.cve_id == cve_id, _cve_accessibility_condition(caller))
+    )
+
+
+async def _read_durable_source_projection(
+    session_factory: async_sessionmaker[AsyncSession],
+    cve_id: str,
+    caller: TicketCaller,
+) -> _DurableSourceProjection:
+    """Materialize the durable projection in one short-lived service-owned
+    read transaction, closed before this function returns."""
+    async with session_factory() as session:
+        rows = (
+            await session.execute(_durable_source_status_statement(cve_id, caller))
+        ).all()
+    if not rows:
+        raise CVENotFoundError()
+    first = rows[0]
+    return _DurableSourceProjection(
+        cve_created_at=first.cve_created_at,
+        persisted={
+            row.source: _PersistedSourceStatus(
+                status=CVESourceFetchStatus(row.status),
+                fetched_at=row.fetched_at,
+                first_failed_at=row.first_failed_at,
+            )
+            for row in rows
+            if row.source is not None
+        },
+        config_names=frozenset(first.config_names or ()),
+        disabled_names=frozenset(first.disabled_names or ()),
+        kev_updated_at=first.kev_updated_at,
+        kev_run_finished_at=first.kev_run_finished_at,
+    )
+
+
+async def _load_pending_sources(cve_id: str, sources: Sequence[str]) -> frozenset[str]:
+    """The aggregate best-effort pending overlay: the subset of `sources`
+    whose marker exists, from one `MGET`.
+
+    No Redis I/O for an empty `sources`. A `RedisError` discards the
+    complete overlay (an empty result), so a response never mixes overlay
+    observations with durable fallbacks.
+    """
+    if not sources:
+        return frozenset()
+    client = _new_redis_client()
+    try:
+        values = await client.mget([fetch_pending_key(cve_id, s) for s in sources])
+    except RedisError as exc:
+        logger.warning(
+            "cve_source_pending_overlay_unavailable",
+            cve_id=cve_id,
+            error_type=type(exc).__name__,
+        )
+        return frozenset()
+    finally:
+        with suppress(RedisError):
+            await client.aclose()
+    return frozenset(
+        source
+        for source, value in zip(sources, values, strict=True)
+        if value is not None
+    )
+
+
+def _kev_entry(
+    projection: _DurableSourceProjection, *, refetchable: bool, enabled: bool
+) -> CVESourceStatusEntry:
+    """KEV status from `CVEKEVEntry` presence and the latest fully
+    successful `sync_cisa_kev` run; independent of `enabled`."""
+    status = CVESourceDerivedStatus.NOT_ATTEMPTED
+    fetched_at: datetime | None = None
+    if projection.kev_updated_at is not None:
+        status = CVESourceDerivedStatus.SUCCESS
+        fetched_at = projection.kev_updated_at
+    elif (
+        projection.kev_run_finished_at is not None
+        and projection.kev_run_finished_at >= projection.cve_created_at
+    ):
+        status = CVESourceDerivedStatus.MISSING
+        fetched_at = projection.kev_run_finished_at
+    return CVESourceStatusEntry(
+        source=CVESourceType.KEV.value,
+        status=status,
+        fetched_at=fetched_at,
+        first_failed_at=None,
+        registered=True,
+        refetchable=refetchable,
+        enabled=enabled,
+    )
+
+
+def _durable_entry(
+    source: str,
+    persisted: _PersistedSourceStatus | None,
+    *,
+    pending: bool,
+    registered: bool,
+    refetchable: bool,
+    enabled: bool,
+) -> CVESourceStatusEntry:
+    """A non-KEV entry: `pending` over any durable status (keeping the last
+    completed timestamps), otherwise the persisted status or
+    `not_attempted`."""
+    if pending:
+        status = CVESourceDerivedStatus.PENDING
+    elif persisted is not None:
+        status = CVESourceDerivedStatus(persisted.status.value)
+    else:
+        status = CVESourceDerivedStatus.NOT_ATTEMPTED
+    return CVESourceStatusEntry(
+        source=source,
+        status=status,
+        fetched_at=persisted.fetched_at if persisted is not None else None,
+        first_failed_at=persisted.first_failed_at if persisted is not None else None,
+        registered=registered,
+        refetchable=refetchable,
+        enabled=enabled,
+    )
+
+
+async def get_cve_source_status(
+    cve_id: str,
+    caller: TicketCaller,
+    *,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> CVESourceStatusResult:
+    """Report the fetch status of every CVE source for one accessible CVE.
+
+    Category B read with a service-owned session (cve-service.md, CVE
+    Source Status; Transaction Ownership).
+
+    Q1: `cve_id` is the raw path value; `caller` is the request-resolved
+    caller information (`ANONYMOUS_CALLER` for an anonymous request);
+    `session_factory` opens the one short-lived read session.
+
+    Q3 (Resolution algorithm):
+    1. a value rejected by `core.identifiers.is_valid_cve_id()` runs no
+       query. One SQL statement, and therefore one PostgreSQL observation,
+       selects the CVE under the CVE accessibility projection of the
+       canonical Ticket predicate together with its `CVESource` rows, the
+       `FetcherConfig` names and disabled names, `CVEKEVEntry.updated_at`,
+       and the latest successful `sync_cisa_kev` run (`finished_at DESC,
+       id DESC`). The session closes before any registry or Redis access;
+    2. loads the in-memory registry (`get_all_cve_source_types()`);
+    3. `enabled` is the materialized `FetcherConfig.enabled` of the
+       source's fetcher, `true` when the row is absent; `refetchable` is
+       exactly `supports_fetch_single`;
+    4. the roster is every registered source plus every persisted source
+       value that is not registered (historical), each exactly once;
+    5. one aggregate `MGET` of the pending markers of the registered,
+       enabled, non-KEV sources (none when that set is empty); KEV derives
+       from its data table; a registered enabled non-KEV source with a
+       marker is `pending` over its durable status, keeping the last
+       completed timestamps; disabled and historical sources never
+       receive the overlay; historical sources report
+       `registered`/`refetchable`/`enabled` as `false`;
+    6. orders the roster by `source` in ascending code-point order.
+    Creates no row or event, acquires no lock, never flushes or commits.
+
+    Q4: returns the complete ordered roster.
+
+    Q6: raises `CVENotFoundError` for a malformed, missing, or
+    inaccessible CVE without distinguishing the causes. A `RedisError`
+    never escapes: it discards the complete overlay and the durable view
+    is returned. Database exceptions propagate unchanged.
+    """
+    if not is_valid_cve_id(cve_id):
+        raise CVENotFoundError()
+    projection = await _read_durable_source_projection(session_factory, cve_id, caller)
+
+    registry = base_cve_fetcher.get_all_cve_source_types()
+    enabled = {
+        source: (
+            cls.name not in projection.disabled_names
+            if cls.name in projection.config_names
+            else True
+        )
+        for source, cls in registry.items()
+    }
+    overlay_sources = sorted(
+        source
+        for source in registry
+        if enabled[source] and source != CVESourceType.KEV.value
+    )
+    pending = await _load_pending_sources(cve_id, overlay_sources)
+
+    entries: list[CVESourceStatusEntry] = []
+    for source in sorted(registry.keys() | projection.persisted.keys()):
+        fetcher_cls = registry.get(source)
+        if fetcher_cls is None:
+            entries.append(
+                _durable_entry(
+                    source,
+                    projection.persisted[source],
+                    pending=False,
+                    registered=False,
+                    refetchable=False,
+                    enabled=False,
+                )
+            )
+        elif source == CVESourceType.KEV.value:
+            entries.append(
+                _kev_entry(
+                    projection,
+                    refetchable=fetcher_cls.supports_fetch_single,
+                    enabled=enabled[source],
+                )
+            )
+        else:
+            entries.append(
+                _durable_entry(
+                    source,
+                    projection.persisted.get(source),
+                    pending=source in pending,
+                    registered=True,
+                    refetchable=fetcher_cls.supports_fetch_single,
+                    enabled=enabled[source],
+                )
+            )
+    return CVESourceStatusResult(entries=tuple(entries))
 
 
 # ---------------------------------------------------------------------------

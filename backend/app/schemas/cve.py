@@ -6,7 +6,8 @@ CVESSVCResponse, CVEWeaknessResponse, CVEExternalIdentifierResponse) for
 the shared contracts, `docs/features/tickets/cve-tracking.md` (List CVEs:
 CVEListItem; Get CVE: CVEResourceDetail), and
 `docs/features/tickets/cve-service.md` (Global CVE Source Listing) for
-the endpoint schemas. `CVEDetail` exposes persisted evidence only:
+the endpoint schemas, and (CVE Source Status) for the per-CVE source
+status. `CVEDetail` exposes persisted evidence only:
 it never contains a CVE priority (`docs/features/tickets/ticket-priority.md`)
 or inline CVSS assessments, which remain in their dedicated sub-resource.
 
@@ -25,6 +26,9 @@ from app.schemas.common import PaginationMeta, SeverityValue
 
 type CveStateValue = Literal["published", "rejected"]
 type CVESourceStatusValue = Literal["success", "failure", "missing"]
+type CVESourceDerivedStatusValue = Literal[
+    "success", "failure", "missing", "pending", "not_attempted"
+]
 
 
 class CVEKEVResponse(BaseModel):
@@ -257,6 +261,55 @@ class CVESourceListResponse(BaseModel):
 
     data: list[CVESourceListItem]
     meta: PaginationMeta
+
+
+class CVESourceStatusItem(BaseModel):
+    """One source entry of `GET /api/v1/cves/{cve_id}/sources`
+    (cve-service.md, CVE Source Status > Response schema)."""
+
+    source: str = Field(
+        description=(
+            "CVE source type identifier (e.g. `nvd`, `kev`), currently "
+            "registered or historically persisted for this CVE."
+        )
+    )
+    status: CVESourceDerivedStatusValue = Field(
+        description=(
+            "Derived status: `success`, `failure`, `missing`, `pending` (an "
+            "on-demand fetch is in flight for an enabled registered source), "
+            "or `not_attempted` (no completed attempt is recorded)."
+        )
+    )
+    fetched_at: datetime | None = Field(
+        description=(
+            "Timestamp of the last completed fetch attempt (UTC); for KEV "
+            "`success`, the latest persisted KEV-evidence change. `null` "
+            "when no attempt has completed."
+        )
+    )
+    first_failed_at: datetime | None = Field(
+        description=(
+            "When the current failure streak began (UTC); `null` when the "
+            "record is not in a failure streak. Kept while `pending`."
+        )
+    )
+    registered: bool = Field(description="Whether the source is currently registered.")
+    refetchable: bool = Field(
+        description="Whether on-demand refetch is supported for the source."
+    )
+    enabled: bool = Field(
+        description=(
+            "Current effective enabled state of a registered source; "
+            "independent from `refetchable`. `false` for historical sources."
+        )
+    )
+
+
+class CVESourceStatusResponse(BaseModel):
+    """Response body for `GET /api/v1/cves/{cve_id}/sources` (unpaginated,
+    fixed ascending `source` code-point order)."""
+
+    data: list[CVESourceStatusItem]
 
 
 class CVEListQuery(BaseModel):

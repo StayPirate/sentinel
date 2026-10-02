@@ -7,11 +7,12 @@ finalization, HTTP teardown, exception propagation), import-time class
 validation (`__init_subclass__`), the custom Settings schema, error
 message sanitization, and the BaseFetcher HTTP client integration.
 
-Out of scope for this module (owned by later work items):
-`BaseCVEFetcher`, `BaseGitFetcher`, the `run_catch_up` Celery task, and
-any concrete production fetcher. The `run_fetcher` Celery task and the
-atomic run acquisition protocol are implemented in
-`app/tasks/fetchers.py` and `app/services/fetcher_execution.py`.
+`BaseCVEFetcher` and its source-type registry live in
+`app/services/base_cve_fetcher.py`. Out of scope for this module (owned
+by later work items): `BaseGitFetcher` and any concrete production
+fetcher. The `run_fetcher` and `run_catch_up` Celery tasks and the atomic
+run acquisition protocol are implemented in `app/tasks/fetchers.py` and
+`app/services/fetcher_execution.py`.
 Config bootstrap (`bootstrap_fetcher_configs()`) is implemented in
 `app/services/fetcher_bootstrap.py` and wired into worker/Beat startup
 via `app/tasks/worker_startup.py` and `app/tasks/beat_startup.py`.

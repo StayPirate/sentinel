@@ -1,27 +1,33 @@
-"""Celery task: generic fetcher execution.
+"""Celery tasks: generic fetcher execution and per-Ticket catch-up.
 
 See `docs/features/platform/fetcher-infrastructure.md` (Celery
 Integration, Concurrency Control, Stale Run Detection) for the
-authoritative contract this module implements.
+authoritative `run_fetcher` contract, and (Per-Ticket Catch-Up — Celery
+task wrapper, Interface contract; `fetch_single()` and `catch_up()`
+Lifecycle) for the `run_catch_up` contract this module implements.
 """
 
 from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Final
 from uuid import UUID
 
 import structlog
+from celery.exceptions import SoftTimeLimitExceeded
 
 from app.celery_app import celery_app
 from app.core.enums import FetcherRunTriggeredBy
 from app.database import async_session_factory, engine
-from app.services.base_fetcher import FETCHER_REGISTRY
+from app.services.base_cve_fetcher import CVENotInSource
+from app.services.base_fetcher import FETCHER_REGISTRY, BaseFetcher
 from app.services.fetcher_execution import (
     acquire_fetcher_run,
     finalize_manual_run_as_failure,
+    get_fetcher_enabled,
 )
+from app.services.http_client import is_retryable_condition
 
 logger = structlog.get_logger(__name__)
 
@@ -259,3 +265,166 @@ def _run_fetcher_sync(
 
 
 run_fetcher = celery_app.task(bind=True, name="run_fetcher")(_run_fetcher_sync)
+
+
+# ---------------------------------------------------------------------------
+# Per-Ticket catch-up
+# ---------------------------------------------------------------------------
+
+_CATCH_UP_RETRY_DELAYS: Final[tuple[int, ...]] = (5, 10, 20)
+"""Countdown in seconds before retry 1, 2, and 3 (at most three retries)."""
+
+
+class CatchUpTicketIdError(ValueError):
+    """`run_catch_up` received a `ticket_id` that is not a UUID.
+
+    A non-retryable caller-contract failure. The async workflow has
+    already emitted its one structured ERROR, so the synchronous wrapper
+    propagates it without a second terminal log.
+    """
+
+
+async def _execute_catch_up(
+    fetcher_name: str, ticket_id: str, instances: list[BaseFetcher]
+) -> None:
+    """Validate, resolve, and invoke one fetcher's `catch_up()`.
+
+    The instantiated fetcher is appended to `instances` so the caller
+    owns its HTTP teardown on every path.
+    """
+    if not isinstance(ticket_id, str) or not _is_valid_uuid(ticket_id):
+        logger.error(
+            "run_catch_up_invalid_ticket_id",
+            ticket_id=ticket_id,
+            fetcher_name=fetcher_name,
+            cause="ticket_id is not a valid UUID",
+        )
+        raise CatchUpTicketIdError("run_catch_up requires a UUID ticket_id")
+
+    fetcher_cls = FETCHER_REGISTRY.get(fetcher_name)
+    if fetcher_cls is None:
+        logger.error(
+            "run_catch_up_unknown_fetcher",
+            fetcher_name=fetcher_name,
+            ticket_id=ticket_id,
+        )
+        return
+
+    async with async_session_factory() as session:
+        enabled = await get_fetcher_enabled(session, fetcher_name)
+    if not enabled:
+        logger.info(
+            "run_catch_up_fetcher_disabled",
+            fetcher_name=fetcher_name,
+            ticket_id=ticket_id,
+        )
+        return
+
+    fetcher = fetcher_cls()
+    instances.append(fetcher)
+    async with async_session_factory() as session:
+        try:
+            await fetcher.catch_up(ticket_id, session)
+        except (NotImplementedError, CVENotInSource) as exc:
+            # Defensive: both indicate an invalid catch-up implementation,
+            # not a transient failure — no retry.
+            logger.error(
+                "run_catch_up_invalid_implementation",
+                fetcher_name=fetcher_name,
+                ticket_id=ticket_id,
+                cause=type(exc).__name__,
+            )
+
+
+async def _cleanup_catch_up(
+    instances: list[BaseFetcher], *, primary_failed: bool
+) -> None:
+    """Close the fetcher's HTTP client when created, then dispose the
+    engine exactly once. A disposal failure never masks a primary
+    exception that is already propagating."""
+    for fetcher in instances:
+        await fetcher._teardown_http_client()
+    try:
+        await engine.dispose()
+    except Exception:
+        if not primary_failed:
+            raise
+        logger.warning("run_catch_up_engine_dispose_failed")
+
+
+async def run_catch_up_async(fetcher_name: str, ticket_id: str) -> None:
+    """Run one fetcher's Ticket catch-up with one async lifecycle.
+
+    See `docs/features/platform/fetcher-infrastructure.md` (Per-Ticket
+    Catch-Up — Celery task wrapper, steps 1-6). Steps:
+    1. a `ticket_id` that is not a UUID logs one structured ERROR and
+       raises `CatchUpTicketIdError` before any database or fetcher work;
+    2. an unknown or deregistered `fetcher_name` logs ERROR and returns;
+       a registered fetcher without its `FetcherConfig` row raises
+       `FetcherConfigMissingError` (bootstrap invariant); a disabled one
+       logs INFO and returns;
+    3. instantiates the class and invokes `catch_up()` with a fresh
+       caller-owned session; the implementation owns commit, rollback, and
+       isolated status writes;
+    4. `NotImplementedError` and a leaked `CVENotInSource` log ERROR and
+       return (defensive, non-retryable); every other exception propagates
+       to the synchronous wrapper for retry classification;
+    5. cancellation, `SoftTimeLimitExceeded`, and `MemoryError` propagate
+       unchanged;
+    6. on every path closes the fetcher's HTTP client when created and
+       awaits `engine.dispose()` exactly once — this workflow is repeatedly
+       invoked in one long-lived worker child (`docs/conventions.md`,
+       Cross-Loop Pooled Connection Lifecycle).
+    Creates no `FetcherRun` and no `fetch_pending` key.
+    """
+    instances: list[BaseFetcher] = []
+    try:
+        await _execute_catch_up(fetcher_name, ticket_id, instances)
+    except BaseException:
+        await _cleanup_catch_up(instances, primary_failed=True)
+        raise
+    await _cleanup_catch_up(instances, primary_failed=False)
+
+
+def _run_catch_up_sync(
+    # `self` is the bound Celery Task instance (see `_run_fetcher_sync`).
+    self: Any,
+    fetcher_name: str,
+    ticket_id: str,
+) -> None:
+    """Thin synchronous Celery wrapper — calls `asyncio.run()` exactly
+    once per invocation to execute `run_catch_up_async()`, then applies
+    the retry classification of fetcher-infrastructure.md (Per-Ticket
+    Catch-Up — Celery task wrapper, steps 4-5).
+
+    `CatchUpTicketIdError`, `SoftTimeLimitExceeded`, `MemoryError`, and
+    cancellation propagate without classification. Any other exception
+    classified retryable by `is_retryable_condition()` is retried after
+    5, 10, then 20 seconds; after exhaustion, or immediately for a
+    non-retryable exception, one structured terminal ERROR is emitted and
+    the exception propagates. Each retry is a new invocation with a fresh
+    fetcher, HTTP client, and event loop.
+    """
+    try:
+        asyncio.run(run_catch_up_async(fetcher_name, ticket_id))
+    except CatchUpTicketIdError, SoftTimeLimitExceeded, MemoryError:
+        raise
+    except Exception as exc:
+        attempt = self.request.retries
+        if is_retryable_condition(exc) and attempt < len(_CATCH_UP_RETRY_DELAYS):
+            raise self.retry(
+                exc=exc, countdown=_CATCH_UP_RETRY_DELAYS[attempt]
+            ) from exc
+        logger.error(
+            "run_catch_up_failed",
+            fetcher_name=fetcher_name,
+            ticket_id=ticket_id,
+            cause=type(exc).__name__,
+            retries=attempt,
+        )
+        raise
+
+
+run_catch_up = celery_app.task(
+    bind=True, name="run_catch_up", max_retries=len(_CATCH_UP_RETRY_DELAYS)
+)(_run_catch_up_sync)

@@ -6,6 +6,9 @@ Control — Atomic Run Acquisition Protocol, Stale Run Detection) for
 the contract under test: `FetcherConfig`-root locking, disabled/active/
 stale run evaluation, scheduled acquisition vs. manual adoption, and
 the exact stale-threshold boundary (`elapsed > run_timeout + 60`).
+`get_fetcher_enabled()` is the execution-time enabled read of the
+`run_catch_up` sub-operation (Per-Ticket Catch-Up — Celery task wrapper,
+step 2).
 
 Functional (non-concurrency) assertions use the standard `db_session`
 fixture — `SELECT ... FOR UPDATE` is a no-op within a single
@@ -34,6 +37,7 @@ from app.services.fetcher_execution import (
     FetcherConfigMissingError,
     acquire_fetcher_run,
     finalize_manual_run_as_failure,
+    get_fetcher_enabled,
     is_run_stale,
     resolve_effective_hard_limit,
 )
@@ -242,6 +246,36 @@ class TestAcquireFetcherRunConfigMissing:
                 now=datetime.now(UTC),
                 hard_time_limit_seconds=3600,
             )
+
+
+# ---------------------------------------------------------------------------
+# Catch-up enabled read: get_fetcher_enabled
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+class TestGetFetcherEnabled:
+    @pytest.mark.parametrize("enabled", [True, False])
+    async def test_returns_persisted_enabled_flag(
+        self,
+        db_session: AsyncSession,
+        fetcher_config_factory: Callable[..., Awaitable[FetcherConfig]],
+        enabled: bool,
+    ) -> None:
+        config = await fetcher_config_factory(enabled=enabled)
+
+        assert await get_fetcher_enabled(db_session, config.fetcher_name) is enabled
+
+    async def test_missing_config_raises(
+        self,
+        db_session: AsyncSession,
+        fetcher_config_factory: Callable[..., Awaitable[FetcherConfig]],
+    ) -> None:
+        # An unrelated row proves the read is scoped to `fetcher_name`.
+        await fetcher_config_factory(enabled=True)
+
+        with pytest.raises(FetcherConfigMissingError, match="no_such_catch_up_fetcher"):
+            await get_fetcher_enabled(db_session, "no_such_catch_up_fetcher")
 
 
 # ---------------------------------------------------------------------------

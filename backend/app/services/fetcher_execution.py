@@ -32,6 +32,10 @@ function that surfaces the `stale` field (`list_fetchers`,
 prevents the acquisition protocol, the Active Guard, and the API-facing
 `stale` field from silently drifting apart on the threshold formula.
 
+`get_fetcher_enabled()` is the execution-time enabled read of the
+`run_catch_up` sub-operation (fetcher-infrastructure.md, Per-Ticket
+Catch-Up — Celery task wrapper).
+
 Registry lookup (`FETCHER_REGISTRY` membership) is the caller's
 responsibility: the task wrapper determines whether `fetcher_name` is
 a known, registered fetcher before calling `acquire_fetcher_run()`.
@@ -530,3 +534,28 @@ def mark_queued_run_stale(run: FetcherRun, *, now: datetime, fetcher_name: str) 
         fetcher_name=fetcher_name,
         created_at=run.created_at.isoformat(),
     )
+
+
+async def get_fetcher_enabled(session: AsyncSession, fetcher_name: str) -> bool:
+    """Read the current `FetcherConfig.enabled` of a registered fetcher.
+
+    The execution-time enabled check of the `run_catch_up` sub-operation
+    (fetcher-infrastructure.md, Per-Ticket Catch-Up — Celery task
+    wrapper, step 2). A plain read: no lock, no write, no commit.
+
+    Raises:
+        FetcherConfigMissingError: no `FetcherConfig` row exists for
+            `fetcher_name` (bootstrap invariant failure).
+    """
+    enabled = (
+        await session.execute(
+            select(FetcherConfig.enabled).where(
+                FetcherConfig.fetcher_name == fetcher_name
+            )
+        )
+    ).scalar_one_or_none()
+    if enabled is None:
+        raise FetcherConfigMissingError(
+            f"No FetcherConfig row for registered fetcher '{fetcher_name}'"
+        )
+    return enabled
