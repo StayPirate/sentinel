@@ -130,9 +130,10 @@ event type.
   event `detail`. Assignment-eligibility sanitation follows all gate-input events and
   precedes the final gate-derived `status_change`, which is always last.
 - One trusted-external ingestion batch orders its effective assessment events by
-  version `4.0`, `3.1`, `3.0`, `2.0`, then canonical provider ascending by Unicode code
-  point. It then emits at most one `severity_changed`, all changed Product
-  events, at most one automatic `priority_changed`, and at most one final
+  the Version Precedence of `cvss-scoring.md` (`4.0`, `3.1`, `3.0`, `2.0`), then
+  canonical provider ascending by Unicode code point. It then emits at most one
+  `severity_changed`, all changed Product events, at most one automatic
+  `priority_changed`, and at most one final
   reconciliation event. If the transaction also
   creates a Ticket, `ticket_created` and `cve_associated` precede that batch.
   When the batch is empty or all-unchanged, the ingestion's own priority refresh

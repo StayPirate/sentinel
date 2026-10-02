@@ -1715,6 +1715,7 @@ class TestTicketServiceQueryBoundary:
             "assign_ticket",
             "set_priority_override",
             "ignore_ticket",
+            "ignore_new_for_rejected_cve",
             "mark_as_duplicate",
             "reopen_from_ignored",
             "reopen_from_ignored_as_system",

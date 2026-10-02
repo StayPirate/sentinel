@@ -45,7 +45,12 @@ _AUDIT_TRAIL_MODULE = "app.services.ticket_audit_log"
 # trail module (ticket-audit-log.md, Event Type Contract; Canonical
 # Automatic Comment Vocabulary).
 _AUDIT_WRITE_SURFACE = frozenset(
-    {"TicketAuditLog", "CVE_SOURCE_AUDIT_LABELS", "MANUAL_TICKET_CREATED_COMMENT"}
+    {
+        "TicketAuditLog",
+        "CVE_REJECTED_COMMENT",
+        "CVE_SOURCE_AUDIT_LABELS",
+        "MANUAL_TICKET_CREATED_COMMENT",
+    }
 )
 # Service modules that write Ticket audit events, including the
 # manual-zone exits and their package-owned eligibility boundary, and the

@@ -13,7 +13,10 @@ Consumers:
 - `tests/test_services/test_cve_root_lock_mode_atomicity.py` (the CVE root
   lock mode races);
 - `tests/test_services/test_set_product_eligibility_atomicity.py` (the
-  CVSS side of the CVSS/override races).
+  CVSS side of the CVSS/override races);
+- `tests/support/external_cvss.py` and
+  `tests/test_services/test_upsert_external_cvss_batch.py` (the `Vector`
+  constants and persisted-row helpers for trusted-external assessments).
 
 The vectors and their canonical values, scores, and severities are
 transcribed from the CVSS specifications (cvss-scoring.md, Accepted Base

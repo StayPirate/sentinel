@@ -75,6 +75,7 @@ from app.services.cve_projection import (
     join_cve_evidence,
 )
 from app.services.cvss import (
+    CVSS_VERSION_RANK,
     CVSSBaseMetrics,
     EligibilityResolution,
     ParsedCVSSVector,
@@ -93,15 +94,6 @@ from app.services.ticket_severity import severity_rank_expression
 from app.services.ticket_visibility import TicketCaller, ticket_visibility_condition
 
 logger = structlog.get_logger(__name__)
-
-# Canonical list order of the bounded assessment set: version
-# 4.0 > 3.1 > 3.0 > 2.0 (cvss-scoring.md, Get CVSS Assessments for a CVE).
-_LIST_VERSION_RANK: Final[Mapping[CVSSVersion, int]] = {
-    CVSSVersion.V4_0: 0,
-    CVSSVersion.V3_1: 1,
-    CVSSVersion.V3_0: 2,
-    CVSSVersion.V2_0: 3,
-}
 
 
 class CVEServiceError(ServiceError):
@@ -260,8 +252,9 @@ def _project_assessment(
 
 
 def _list_order(assessment: CVSSAssessmentProjection) -> tuple[int, str]:
-    """Version rank, then provider by Unicode code point (Python `str` order)."""
-    return (_LIST_VERSION_RANK[assessment.cvss_version], assessment.provider_name)
+    """Version precedence, then provider by Unicode code point (Python `str`
+    order)."""
+    return (CVSS_VERSION_RANK[assessment.cvss_version], assessment.provider_name)
 
 
 async def get_cvss_assessments(

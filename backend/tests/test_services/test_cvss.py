@@ -32,6 +32,8 @@ from app.core.enums import (
 from app.core.exceptions import ServiceError
 from app.services import cvss
 from app.services.cvss import (
+    CVSS_VERSION_PRECEDENCE,
+    CVSS_VERSION_RANK,
     CVSS2BaseMetrics,
     CVSS3BaseMetrics,
     CVSS4BaseMetrics,
@@ -1203,6 +1205,34 @@ class TestResolutionContractViolations:
     ) -> None:
         with pytest.raises(ValueError, match=r"0\.0 through 10\.0"):
             resolve_severity_score([_a("NVD", "3.1", score)], "3.1")
+
+
+# ---------------------------------------------------------------------------
+# Version precedence
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestVersionPrecedence:
+    """The single version order shared by severity, list, and batch order."""
+
+    def test_precedence_is_the_specified_order(self) -> None:
+        assert CVSS_VERSION_PRECEDENCE == ("4.0", "3.1", "3.0", "2.0")
+
+    def test_precedence_contains_every_version_exactly_once(self) -> None:
+        # Guards a future CVSSVersion member added without a precedence.
+        assert len(CVSS_VERSION_PRECEDENCE) == len(set(CVSS_VERSION_PRECEDENCE))
+        assert set(CVSS_VERSION_PRECEDENCE) == set(CVSSVersion)
+
+    def test_rank_is_the_ascending_key_of_the_precedence(self) -> None:
+        assert list(CVSS_VERSION_RANK) == list(CVSS_VERSION_PRECEDENCE)
+        assert list(CVSS_VERSION_RANK.values()) == list(
+            range(len(CVSS_VERSION_PRECEDENCE))
+        )
+
+    def test_rank_is_read_only(self) -> None:
+        with pytest.raises(TypeError):
+            CVSS_VERSION_RANK[CVSSVersion.V2_0] = 0  # type: ignore[index]
 
 
 # ---------------------------------------------------------------------------

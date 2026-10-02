@@ -90,6 +90,15 @@ and delegates each candidate to this parser; it skips a rejected external
 candidate according to its own per-entry ingestion contract rather than
 reimplementing CVSS semantics.
 
+### Version Precedence
+
+The accepted versions have one precedence order, highest first: `4.0`, `3.1`,
+`3.0`, `2.0`. Every version-ordered rule uses this single order: the applicable
+version priority of the Severity Resolution Cascade, the canonical order of the
+bounded CVSS list, and the canonical order of the trusted-external ingestion
+batch and its audit events. Accepting a new version therefore places it once in
+this order; no consumer defines its own version order.
+
 ### CVSS v2.0 Base Metrics
 
 Canonical order: `AV/AC/Au/C/I/A`.
@@ -240,9 +249,10 @@ listed order:
    2. canonical SUSE assessment at another accepted version;
    3. non-SUSE assessment at the default version;
    4. non-SUSE assessment at another accepted version.
-2. **Applicable version priority**, highest first: `4.0`, `3.1`, `3.0`,
-   `2.0`. Within default-version steps there is only one applicable version,
-   so this component is equal for every candidate in that step.
+2. **Applicable version priority**, highest first, in Version Precedence
+   order (`4.0`, `3.1`, `3.0`, `2.0`). Within default-version steps there is
+   only one applicable version, so this component is equal for every candidate
+   in that step.
 3. **Score**, descending.
 4. **Provider name**, ascending by Unicode code-point lexical order on the
    exact persisted string. This comparison is performed independently of
@@ -420,8 +430,8 @@ final gate `status_change`. Deferred external mutations stop after the direct
 CVSS records and the automatic priority refresh.
 
 For the trusted-external ingestion batch, effective assessment events are
-ordered by version `4.0`, `3.1`, `3.0`, `2.0`, then canonical provider ascending
-by Unicode code point. After the last assessment event, the batch appends at most one
+ordered by Version Precedence, then canonical provider ascending by Unicode
+code point. After the last assessment event, the batch appends at most one
 derived `severity_changed`, Product events in occurrence-ID order, at most one
 system `priority_changed`, optional assignment-eligibility sanitation, and at
 most one final gate `status_change`. It never emits an aggregate replacement for
@@ -529,10 +539,9 @@ GET /api/v1/cves/{cve_id}/cvss
 The path uses the CVE Identifier Resolution contract in `docs/api-spec.md`.
 The endpoint returns one bounded composite resource and is not paginated.
 Client-controlled sorting is not supported because the bounded assessment set
-has one canonical order. Assessments are ordered by version `4.0`, `3.1`,
-`3.0`, `2.0`, then provider name ascending using the same code-point lexical
-comparison as resolution. This list order is independent of which assessment
-wins severity.
+has one canonical order. Assessments are ordered by Version Precedence, then
+provider name ascending using the same code-point lexical comparison as
+resolution. This list order is independent of which assessment wins severity.
 
 The API handler remains thin and delegates the read to a service-owned ORM
 query. The CVE, its current Ticket association, Ticket-derived accessibility,
@@ -754,6 +763,8 @@ testing strategy.
 - Every Severity Resolution Cascade step, absent result, and unified severity
   boundary at `0.0`, `0.1`, `3.9`, `4.0`, `6.9`, `7.0`, `8.9`, `9.0`, and
   `10.0`, including a v2.0 winner mapped to the unified scale.
+- Version Precedence contains every accepted version exactly once, in the
+  specified order.
 - Default-version preference, all non-default version priorities, descending
   score, ascending provider tie-break, Unicode code-point ordering that differs
   from database collation, and shuffled input producing an identical result.
