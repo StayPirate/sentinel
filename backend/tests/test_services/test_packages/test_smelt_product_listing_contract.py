@@ -7,6 +7,11 @@ characteristics), verified against sanitized live pages captured from
 the default `SMELT_API_URL` (docs/conventions.md, External Integration
 Contract Verification). Every field Sentinel consumes is asserted for
 name, type, nullability, and the continuation-metadata URL form.
+
+The parser-backed tests at the end serve the captured pages through
+`fetch_product_listing()` and `validate_snapshot()` to prove that the
+live serialization (the `http` metadata scheme and the omitted `page` in
+page 2's `previous`) and the live rows are accepted as specified.
 """
 
 from __future__ import annotations
@@ -16,7 +21,15 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
-from tests.support.smelt import FIXTURE_PAGES, load_products_page
+from app.services.packages.smelt_product_listing import (
+    SmeltProductListing,
+    fetch_product_listing,
+)
+from app.services.packages.sync_smelt_products import (
+    CatalogProduct,
+    validate_snapshot,
+)
+from tests.support.smelt import FIXTURE_PAGES, SmeltServer, load_products_page
 
 _TOTAL_PAGES = 6
 _PAGE_SIZE = "100"
@@ -141,3 +154,66 @@ class TestConsumedRowFields:
     def test_ignored_fields_are_present_upstream(self) -> None:
         for row in _all_rows():
             assert {"id", "end_of_life", "changed", "details"} <= set(row)
+
+
+# ---------------------------------------------------------------------------
+# Parser-backed contract: the live serialization is accepted
+# ---------------------------------------------------------------------------
+
+_LIVE_API_URL = "https://smelt.suse.de/api"
+
+
+def _live_listing_server() -> SmeltServer:
+    """Serve the captured pages verbatim at pages 1, 2, and 6.
+
+    Pages 3-5 were not captured; they repeat page 2's rows with
+    continuation metadata rewritten in the captured serialization (the
+    metadata base of page 1's `next`, explicit `page` first).
+    """
+    pages: dict[int, Any] = {page: load_products_page(page) for page in FIXTURE_PAGES}
+    base = load_products_page(1)["next"].split("?", 1)[0]
+    for page in (3, 4, 5):
+        pages[page] = {
+            **load_products_page(2),
+            "next": f"{base}?page={page + 1}&page_size={_PAGE_SIZE}",
+            "previous": f"{base}?page={page - 1}&page_size={_PAGE_SIZE}",
+        }
+    return SmeltServer(pages)
+
+
+@pytest.mark.unit
+class TestLiveSerializationAccepted:
+    async def test_live_pages_pass_pagination_validation(self) -> None:
+        server = _live_listing_server()
+
+        async with server.client() as client:
+            listing = await fetch_product_listing(
+                client, api_url=_LIVE_API_URL, request_delay=0
+            )
+
+        assert listing.count == load_products_page(1)["count"] == 556
+        assert len(listing.results) == 556
+        assert server.requested_pages == [1, 2, 3, 4, 5, 6]
+        assert listing.results[:100] == load_products_page(1)["results"]
+        assert listing.results[100:200] == load_products_page(2)["results"]
+        assert listing.results[500:] == load_products_page(6)["results"]
+        assert all(
+            url.startswith(f"{_LIVE_API_URL}/v1/basic/products/?")
+            for url in server.requested_urls
+        )
+
+    def test_live_rows_pass_complete_snapshot_validation_unchanged(self) -> None:
+        rows = _all_rows()
+
+        products = validate_snapshot(SmeltProductListing(count=len(rows), results=rows))
+
+        assert products == [
+            CatalogProduct(
+                cpe=row["cpe"],
+                name=row["name"],
+                version=row["version"],
+                display_name=row["friendly_name"],
+                repos=tuple(row["repos"]),
+            )
+            for row in rows
+        ]
