@@ -1418,7 +1418,9 @@ class TestKEVProjection:
     ) -> None:
         """The latest `finished_at` wins over a larger id and over insertion
         order; two successful runs sharing the latest `finished_at` (distinct
-        ids) select that instant deterministically."""
+        ids) select that instant deterministically. The `id DESC`
+        tie-breaker itself is not observable here: only the run's
+        `finished_at` reaches the response."""
         registry.kev()
         await fetcher_config_factory(fetcher_name=KEV_FETCHER_NAME)
         latest = CREATED + timedelta(days=3)
