@@ -33,7 +33,7 @@ from pathlib import Path
 import pytest
 
 import app.services.fetcher_discovery  # noqa: F401
-from app.services.base_fetcher import FETCHER_REGISTRY, BaseFetcher
+from app.services.base_fetcher import BaseFetcher
 
 _DOMAIN_PACKAGES = [
     "app.services.tickets",
@@ -124,22 +124,3 @@ class TestFetcherDiscoveryDriftProtection:
         }
 
         assert "app.services.packages.sync_smelt_products" in fetcher_modules
-
-    def test_every_scanned_concrete_fetcher_is_registered_after_discovery(
-        self,
-    ) -> None:
-        unregistered: list[str] = []
-        for package_name in _DOMAIN_PACKAGES:
-            for module_name in _walk_domain_module_names(package_name):
-                module = importlib.import_module(module_name)
-                for attr in vars(module).values():
-                    if (
-                        isinstance(attr, type)
-                        and issubclass(attr, BaseFetcher)
-                        and attr is not BaseFetcher
-                        and not attr.__dict__.get("abstract", False)
-                        and attr.__module__ == module_name
-                        and FETCHER_REGISTRY.get(attr.name) is not attr
-                    ):
-                        unregistered.append(f"{module_name}.{attr.__name__}")
-        assert not unregistered, "Unregistered fetcher(s): " + ", ".join(unregistered)

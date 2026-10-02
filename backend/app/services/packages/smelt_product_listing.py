@@ -215,7 +215,7 @@ def _check_page(
         if envelope.previous is None:
             _invalid(page, "previous must not be null after page 1")
         previous_page = _metadata_page(envelope.previous, origin, page, "previous")
-        if (previous_page or 1) != page - 1:
+        if (previous_page or "1") != str(page - 1):
             _invalid(page, "previous does not designate the adjacent page")
 
     if page < total_pages:
@@ -223,14 +223,19 @@ def _check_page(
             _invalid(page, "non-final page has no results")
         if envelope.next is None:
             _invalid(page, "next must not be null on a non-final page")
-        if _metadata_page(envelope.next, origin, page, "next") != page + 1:
+        if _metadata_page(envelope.next, origin, page, "next") != str(page + 1):
             _invalid(page, "next does not designate the adjacent page")
     elif envelope.next is not None:
         _invalid(page, "next must be null on the final page")
 
 
-def _metadata_page(url: str, origin: _Origin, page: int, field: str) -> int | None:
-    """Validate one continuation URL; return its page number, or None if omitted."""
+def _metadata_page(url: str, origin: _Origin, page: int, field: str) -> str | None:
+    """Validate one continuation URL; return its page value, or None if omitted.
+
+    The value is a canonical decimal (no sign or leading zero), so callers
+    compare it with the expected page number as a string; it is never
+    converted to an integer.
+    """
     if any(character.isspace() or not character.isprintable() for character in url):
         _invalid(page, f"{field} is malformed")
     if "#" in url:
@@ -271,7 +276,7 @@ def _metadata_page(url: str, origin: _Origin, page: int, field: str) -> int | No
         return None
     if _PAGE_VALUE.fullmatch(values[_PAGE_PARAMETER]) is None:
         _invalid(page, f"{field} has a malformed page value")
-    return int(values[_PAGE_PARAMETER])
+    return values[_PAGE_PARAMETER]
 
 
 def _invalid(page: int, rule: str) -> NoReturn:
