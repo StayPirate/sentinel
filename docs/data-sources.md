@@ -19,6 +19,7 @@ relevant feature specifications in `docs/features/`.
 | NVD | Public | CVE data, CVSS scores, CPE matches | Specified |
 | MITRE CVE Services | Public | Early CVE assignments | Specified |
 | Red Hat Security Data | Public | CVSS assessments | Specified |
+| SUSE CSAF VEX | Public | SUSE CVSS assessments per CVE | Not integrated |
 | IBS | Internal | Source packages, builds, repos, declarative product channels | Active |
 | OBS | Public | Source packages, builds, repos (openSUSE) | Not planned |
 | IBS RabbitMQ | Internal | Package and request wake-up events | Active |
@@ -111,6 +112,40 @@ provide a useful secondary perspective when evaluating vulnerabilities.
 
 > See [cve-sync-redhat.md](features/tickets/cve-sync-redhat.md) for the
 > full fetcher specification.
+
+### SUSE CSAF VEX
+
+SUSE Product Security publishes one CSAF 2.0 VEX document per CVE. It is the
+public source of SUSE's own CVSS assessment, including for CVEs that SUSE did
+not assign. A SUSE vector reaches the CVE Record and NVD only when SUSE is the
+CNA; for CVEs assigned by another CNA, neither carries it.
+
+- **Relevant data**: per-CVE document with the SUSE impact, the per-product
+  status, and the SUSE CVSS vector under `vulnerabilities[].scores[]`, each
+  with the list of products it applies to. Document `tracking` carries the
+  initial and current release dates and a status
+- **Observed limits** (random sample of 60 documents, 2026-10-02): scores
+  are present for a minority of CVEs (8 of 51 documents that contain a
+  vulnerability entry); every observed score is `cvss_v3` with a CVSS 3.1
+  vector; no document had more than one score entry, and no `cvss_v2` or
+  `cvss_v4` score was observed; 9 files contained no `vulnerabilities`
+  entry. A CVE assigned by SUSE (for example CVE-2024-22030) may have no
+  score in the document although the CVE Record carries one
+- **Access**: public HTTPS, no authentication, at
+  `https://ftp.suse.com/pub/projects/security/csaf-vex/`:
+  - `cve-<year>-<number>.json`, with a detached signature (`.asc`) and a
+    checksum (`.sha256`) per document;
+  - `index.txt`, the list of documents;
+  - `changes.csv`, one `"<file>","<timestamp>"` row per change.
+
+  No `provider-metadata.json` was found at that location
+- **Integration status**: **Not integrated**. The SMASH → Sentinel migration
+  tool described under SMASH retrieves the SUSE CVSS from these documents.
+  Sentinel itself does not ingest them: SUSE assessments are created in
+  Sentinel through the SUSE CVSS API (see
+  [cvss-scoring.md](features/tickets/cvss-scoring.md), Provider Identity and
+  Authority)
+- **Documentation**: https://www.suse.com/support/security/
 
 ### CISA KEV (Known Exploited Vulnerabilities)
 
@@ -1022,8 +1057,11 @@ multiple providers, and references to external bug trackers and advisories.
   via personal tokens. Endpoints include `/api/issues/`,
   `/api/embargoed-bugs/`, `/api2/issues/`, `/api2/cvss/`, and more
 - **Integration status**: **Not integrated**. Sentinel is designed as SMASH's
-  successor, not as an integration partner. However, a data migration path
-  from SMASH to Sentinel may be needed during the transition period
+  successor, not as an integration partner. A data migration from SMASH to
+  Sentinel is planned as a separate tool outside this repository. It uses
+  only the public Sentinel API once Sentinel is operational, and it retrieves
+  the SUSE CVSS assessments from the [SUSE CSAF VEX](#suse-csaf-vex)
+  documents
 - **Documentation**: https://tools.io.suse.de/smash/
 - **Source code**: https://gitlab.suse.de/tools/smash
 
