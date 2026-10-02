@@ -29,8 +29,8 @@ outputs of the operations.
 
 Out of scope here:
 
-- automatic ingestion (`upsert_references()`), which is not implemented
-  by this work item;
+- automatic ingestion (`upsert_references()`), covered by
+  `tests/test_services/test_reference_ingestion.py`;
 - the pure URL boundary (`tests/test_core/test_reference_urls.py`) and
   the URL-pattern table (`tests/test_services/test_reference_classification.py`),
   which are exercised here only through representative service inputs;

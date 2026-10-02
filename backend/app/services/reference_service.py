@@ -1,13 +1,14 @@
-"""Ticket references: URL-pattern classification and the manual operations.
+"""Ticket references: classification, automatic ingestion, manual operations.
 
 See `docs/features/tickets/ticket-references.md` for the full
-specification. This module implements the manual consumer functions
+specification. This module implements the trusted automatic ingestion
+boundary (`upsert_references()` with deterministic candidate
+preparation, the CVE Source Tag Mapping, automatic rejection logging,
+and the database merge rules), the manual consumer functions
 (`create_reference()`, `update_reference()`, `delete_reference()`,
 `list_references()`), their exception hierarchy, and URL-pattern type
-classification (`classify_reference_url()`). Automatic ingestion
-(`upsert_references()`, CVE source tag mapping, and automatic rejection
-logging) is added by its owning work item and reuses the Core URL
-boundary (`app.core.reference_urls`) and `classify_reference_url()`.
+classification (`classify_reference_url()`). Automatic and manual inputs
+share the Core URL boundary (`app.core.reference_urls`).
 
 Every function accepts the caller's `AsyncSession` and never commits or
 rolls back; database exceptions propagate unchanged. No function
@@ -18,40 +19,56 @@ Manual mutations are explicit opt-outs from `ensure_ticket_operable()`
 (Manual-Zone Exception): they lock the parent Ticket as their
 serialization root, but never assign a user, reconcile gates, change
 Ticket status, exit the manual zone, or register Ticket convergence.
+Automatic ingestion acquires no Ticket lock and creates no Ticket audit
+event; it runs inside the caller's per-CVE transaction.
 """
 
 from __future__ import annotations
 
 import re
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from typing import Final
 
-from sqlalchemy import ColumnElement, and_, case, false, select
+import structlog
+from sqlalchemy import ColumnElement, and_, case, false, func, or_, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.enums import ReferenceType, TicketAuditEventType
 from app.core.exceptions import ServiceError, TicketNotFoundError
-from app.core.identifiers import format_ticket_id, parse_ticket_id
-from app.core.reference_urls import normalize_reference_url
+from app.core.identifiers import format_ticket_id, is_valid_cve_id, parse_ticket_id
+from app.core.reference_urls import ReferenceUrlError, normalize_reference_url
 from app.models.ticket import Ticket
 from app.models.ticket_reference import TicketReference
 from app.services.ticket_audit_log import TicketAuditLog
 from app.services.ticket_mutations import lock_accessible_ticket_by_locator
 from app.services.ticket_visibility import TicketCaller, ticket_visibility_condition
 
+logger = structlog.get_logger(__name__)
+
 MANUAL_SOURCE: Final = "manual"
 """The reserved `TicketReference.source` of consumer-managed references."""
+
+SOURCE_MAX_LENGTH: Final = 100
+"""Maximum automatic source length (`VARCHAR(100)`)."""
 
 TITLE_MAX_LENGTH: Final = 500
 """Maximum title length (`VARCHAR(500)`)."""
 
 DESCRIPTION_MAX_LENGTH: Final = 2000
 """Maximum description length (`VARCHAR(2000)`)."""
+
+INVALID_METADATA_REASON: Final = "invalid_metadata"
+"""Automatic rejection reason for an invalid title or explicit type.
+
+The other reasons of the closed vocabulary (Automatic Rejection Logging)
+are the `ReferenceUrlRejection` values of the Core URL boundary.
+"""
 
 _UNIQUE_URL_CONSTRAINT: Final = "uq_ticket_reference_ticket_id_url"
 
@@ -69,6 +86,24 @@ UNSET: Final = Unset.UNSET
 # ---------------------------------------------------------------------------
 # Semantic types (ticket-references.md, Semantic Types)
 # ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class AutomaticReferenceInput:
+    """One automatic candidate (`AutomaticReferenceInput`).
+
+    An in-memory transfer contract from a CVE fetcher. `url` is typed as
+    `object` because the value is untrusted: `None`, non-string, and
+    malformed values are skipped with a bounded rejection log rather than
+    failing the call. `upstream_tags` are used only for classification and
+    never persisted. `explicit_type` has the highest classification
+    priority; `None` means no explicit hint.
+    """
+
+    url: object
+    title: str | None = None
+    upstream_tags: Sequence[str] | None = None
+    explicit_type: ReferenceType | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -248,6 +283,70 @@ def classify_reference_url(normalized_url: str) -> ReferenceType | None:
 
 
 # ---------------------------------------------------------------------------
+# Tag classification (ticket-references.md, CVE Source Tag Mapping)
+# ---------------------------------------------------------------------------
+
+_TAG_TABLE: Final[tuple[tuple[str | None, str | None, ReferenceType | None], ...]] = (
+    # (NVD tag, MITRE tag, type); `None` in a tag column means "no form".
+    ("Patch", "patch", ReferenceType.PATCH),
+    ("Vendor Advisory", "vendor-advisory", ReferenceType.ADVISORY),
+    ("Third Party Advisory", "third-party-advisory", ReferenceType.ADVISORY),
+    ("US Government Resource", "government-resource", ReferenceType.ADVISORY),
+    ("VDB Entry", "vdb-entry", ReferenceType.ADVISORY),
+    ("Issue Tracking", "issue-tracking", ReferenceType.ISSUE),
+    ("Exploit", "exploit", ReferenceType.ARTICLE),
+    ("Mailing List", "mailing-list", ReferenceType.ARTICLE),
+    ("Release Notes", "release-notes", ReferenceType.ARTICLE),
+    ("Technical Description", "technical-description", ReferenceType.ARTICLE),
+    ("Mitigation", "mitigation", ReferenceType.ARTICLE),
+    ("Press/Media Coverage", "media-coverage", ReferenceType.ARTICLE),
+    ("Tool Signature", "signature", ReferenceType.ARTICLE),
+    ("Broken Link", "broken-link", None),
+    ("Not Applicable", "not-applicable", None),
+    ("Permissions Required", "permissions-required", None),
+    ("URL Repurposed", None, None),
+    ("Product", "product", None),
+    (None, "customer-entitlement", None),
+    (None, "related", None),
+)
+
+# Recognized tags that map to a type. Tags mapped to `NULL` are omitted:
+# they never prevent a later tag or URL-pattern classification.
+_TAG_TYPES: Final[dict[str, ReferenceType]] = {
+    tag: reference_type
+    for nvd_tag, mitre_tag, reference_type in _TAG_TABLE
+    if reference_type is not None
+    for tag in (nvd_tag, mitre_tag)
+    if tag is not None
+}
+
+_TAG_TYPE_PRIORITY: Final[tuple[ReferenceType, ...]] = (
+    ReferenceType.PATCH,
+    ReferenceType.ADVISORY,
+    ReferenceType.ISSUE,
+    ReferenceType.ARTICLE,
+)
+
+
+def classify_reference_tags(tags: Sequence[object] | None) -> ReferenceType | None:
+    """Classify upstream reference tags by the CVE Source Tag Mapping.
+
+    Tags match exactly one of the listed NVD Title Case or MITRE
+    kebab-case forms. Unknown tags, non-string tags, and tags mapped to
+    `NULL` are ignored. When the recognized tags map to different types,
+    priority is `patch`, `advisory`, `issue`, then `article`. Returns
+    `None` when no tag maps to a type. Pure: no outbound operation.
+    """
+    if not tags:
+        return None
+    found = {_TAG_TYPES.get(tag) for tag in tags if isinstance(tag, str)}
+    for reference_type in _TAG_TYPE_PRIORITY:
+        if reference_type in found:
+            return reference_type
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Input-only validation (ticket-references.md, URL Normalization)
 # ---------------------------------------------------------------------------
 
@@ -371,6 +470,209 @@ async def _project(
         created_at=reference.created_at,
         updated_at=reference.updated_at,
     )
+
+
+# ---------------------------------------------------------------------------
+# Automatic ingestion (ticket-references.md, Automatic Ingestion)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(slots=True)
+class _PreparedCandidate:
+    """A validated, classified, coalesced automatic candidate."""
+
+    url: str
+    title: str | None
+    type: ReferenceType | None
+
+
+def _prepare_candidate(
+    candidate: AutomaticReferenceInput, *, cve_id: str, source: str
+) -> _PreparedCandidate | None:
+    """Validate and classify one candidate; log and return `None` if invalid."""
+    try:
+        url = normalize_reference_url(candidate.url)
+    except ReferenceUrlError as exc:
+        _log_rejection(cve_id=cve_id, source=source, reason=exc.reason.value)
+        return None
+    try:
+        title = _validate_text(
+            candidate.title, field="title", max_length=TITLE_MAX_LENGTH
+        )
+        explicit_type = _validate_type(candidate.explicit_type)
+    except ValueError:
+        _log_rejection(cve_id=cve_id, source=source, reason=INVALID_METADATA_REASON)
+        return None
+    reference_type = (
+        explicit_type
+        or classify_reference_tags(candidate.upstream_tags)
+        or classify_reference_url(url)
+    )
+    return _PreparedCandidate(url=url, title=title, type=reference_type)
+
+
+def _log_rejection(*, cve_id: str, source: str, reason: str) -> None:
+    # Only the bounded context: never the URL, title, or exception text
+    # (Automatic Rejection Logging).
+    logger.warning(
+        "automatic_reference_rejected", cve_id=cve_id, source=source, reason=reason
+    )
+
+
+def _prepare_candidates(
+    source_reference: AutomaticReferenceInput | None,
+    upstream_references: Sequence[AutomaticReferenceInput],
+    *,
+    cve_id: str,
+    source: str,
+) -> list[_PreparedCandidate]:
+    """Deterministic Candidate Preparation steps 1-4.
+
+    The source candidate comes first, followed by the upstream candidates
+    in their original order. Invalid candidates are logged and removed
+    without reordering the others. Same-URL candidates coalesce into the
+    first one, which keeps its position and every non-NULL field; later
+    duplicates only fill its missing `title` or `type`.
+    """
+    ordered = ([] if source_reference is None else [source_reference]) + list(
+        upstream_references
+    )
+    prepared: dict[str, _PreparedCandidate] = {}
+    for candidate in ordered:
+        current = _prepare_candidate(candidate, cve_id=cve_id, source=source)
+        if current is None:
+            continue
+        first = prepared.get(current.url)
+        if first is None:
+            prepared[current.url] = current
+            continue
+        if first.title is None:
+            first.title = current.title
+        if first.type is None:
+            first.type = current.type
+    return list(prepared.values())
+
+
+async def _merge_candidate(
+    session: AsyncSession,
+    *,
+    ticket_id: uuid.UUID,
+    source: str,
+    candidate: _PreparedCandidate,
+) -> None:
+    """Apply one prepared candidate by the Database Merge Rules.
+
+    One `INSERT ... ON CONFLICT DO UPDATE` resolves the current serialized
+    row for `(ticket_id, url)` atomically, including against concurrent
+    inserts and deletes, so no unique violation aborts the caller's
+    transaction:
+
+    - no row: insert with the automatic `source` and `description = NULL`;
+    - same automatic source: non-NULL candidate fields replace current
+      values;
+    - different automatic source: candidate fields fill only `NULL`
+      current fields;
+    - manual row: untouched (excluded by the `WHERE`).
+
+    `source` and `description` of an existing row never change. The
+    `WHERE` also skips updates that change nothing, so `updated_at`
+    (written explicitly: ORM `onupdate` does not apply to `ON CONFLICT`)
+    advances only on an effective update.
+    """
+    candidate_type = None if candidate.type is None else candidate.type.value
+    same_source = TicketReference.source == source
+    new_title = case(
+        (same_source, func.coalesce(candidate.title, TicketReference.title)),
+        else_=func.coalesce(TicketReference.title, candidate.title),
+    )
+    new_type = case(
+        (same_source, func.coalesce(candidate_type, TicketReference.type)),
+        else_=func.coalesce(TicketReference.type, candidate_type),
+    )
+    statement = (
+        pg_insert(TicketReference)
+        .values(
+            ticket_id=ticket_id,
+            url=candidate.url,
+            title=candidate.title,
+            description=None,
+            type=candidate_type,
+            source=source,
+        )
+        .on_conflict_do_update(
+            constraint=_UNIQUE_URL_CONSTRAINT,
+            set_={"title": new_title, "type": new_type, "updated_at": func.now()},
+            where=and_(
+                TicketReference.source != MANUAL_SOURCE,
+                or_(
+                    new_title.is_distinct_from(TicketReference.title),
+                    new_type.is_distinct_from(TicketReference.type),
+                ),
+            ),
+        )
+    )
+    await session.execute(statement)
+
+
+async def upsert_references(
+    session: AsyncSession,
+    ticket_id: uuid.UUID,
+    cve_id: str,
+    source: str,
+    source_reference: AutomaticReferenceInput | None,
+    upstream_references: Sequence[AutomaticReferenceInput],
+) -> None:
+    """Persist the automatic references of one CVE ingestion.
+
+    Category A trusted system mutation (ticket-references.md,
+    `upsert_references()`; Automatic Ingestion).
+
+    Q1: `ticket_id` is the internal UUID of the Ticket established by the
+    CVE ingestion workflow; `cve_id` is the canonical CVE ID, used only for
+    rejection logging; `source` is the calling fetcher's stable
+    `BaseFetcher.name`; `source_reference` is the optional source
+    candidate; `upstream_references` are the upstream candidates in their
+    original order.
+
+    Q2: the source and CVE-ID contract checks run before any persistent
+    work. Every candidate is then prepared (validated, classified, and
+    coalesced) before any database comparison; an invalid candidate logs
+    one WARNING with only the CVE ID, source, and closed reason and is
+    skipped. Prepared candidates are merged in order by the Database
+    Merge Rules, one atomic conflict-aware statement each. No Ticket lock
+    is acquired (the caller may already hold it), no parent lookup is
+    performed, no stale row is deleted, and no Ticket audit event is
+    created. Re-invocation with the same candidates is a no-op once every
+    fill opportunity is satisfied.
+
+    Q4: always `None`. With no valid candidate, nothing is written.
+
+    Q6: `ValueError` for a `source` that is not a non-empty string of at
+    most 100 characters different from `manual`, or for a non-canonical
+    `cve_id`, before persistent work. Unexpected database errors
+    (including the foreign-key violation for an absent Ticket),
+    cancellation, and programming errors propagate unchanged; the caller
+    rolls back the complete per-CVE transaction.
+    """
+    if (
+        not isinstance(source, str)
+        or not 1 <= len(source) <= SOURCE_MAX_LENGTH
+        or source == MANUAL_SOURCE
+    ):
+        raise ValueError(
+            "Automatic reference source must be a fetcher name of 1 to "
+            f"{SOURCE_MAX_LENGTH} characters other than '{MANUAL_SOURCE}'."
+        )
+    if not is_valid_cve_id(cve_id):
+        raise ValueError("Automatic reference cve_id must be a canonical CVE ID.")
+
+    candidates = _prepare_candidates(
+        source_reference, upstream_references, cve_id=cve_id, source=source
+    )
+    for candidate in candidates:
+        await _merge_candidate(
+            session, ticket_id=ticket_id, source=source, candidate=candidate
+        )
 
 
 # ---------------------------------------------------------------------------

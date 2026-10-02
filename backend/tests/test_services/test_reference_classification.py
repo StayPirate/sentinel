@@ -1,30 +1,50 @@
-"""Unit tests for URL-pattern type classification
-(`classify_reference_url()` in backend/app/services/reference_service.py).
+"""Unit tests for reference type classification in
+backend/app/services/reference_service.py: URL-pattern classification
+(`classify_reference_url()`) and upstream tag classification
+(`classify_reference_tags()`).
 
 Implements docs/features/tickets/ticket-references.md (Type
-Auto-Classification > URL Pattern Mapping): patterns match the host and
-path of the normalized URL case-insensitively without altering the stored
-value, and an unmatched URL remains `NULL` (`None`). Expected types are
-transcribed row by row from the specification table, never computed with
-the module under test. The table hosts are the specification's literal
-hosts; every path, identifier, and other host is fictional. The
-zero-outbound-call requirement comes from
-docs/features/platform/testing-strategy.md (Ticket References).
+Auto-Classification):
+
+- URL Pattern Mapping: patterns match the host and path of the
+  normalized URL case-insensitively without altering the stored value,
+  and an unmatched URL remains `NULL` (`None`).
+- CVE Source Tag Mapping: the NVD Title Case and MITRE kebab-case forms
+  of every table row map to the listed type or `NULL`; unknown tags do
+  not fail; a tag mapped to `NULL` does not prevent a later recognized
+  tag from supplying a type; and multiple recognized types resolve by
+  the priority `patch`, `advisory`, `issue`, `article`.
+
+Expected types are transcribed row by row from the specification tables,
+never computed with the module under test. The table hosts are the
+specification's literal hosts; every path, identifier, and other host is
+fictional. The zero-outbound-call requirement comes from
+docs/features/platform/testing-strategy.md (Ticket References). The
+end-to-end classification precedence of automatic candidates (explicit
+type, tags, URL pattern, `NULL`) is covered by
+`tests/test_services/test_reference_ingestion.py`.
 
 Some assertions pin behavior that the specification implies but does not
 spell out (each is marked "Interpretation" below): `*` spans `/`, a table
 host matches only exactly (no subdomains), the query and fragment never
-participate, the empty root path matches as `/`, and the first matching
-table row wins when rows overlap.
+participate, the empty root path matches as `/`, the first matching
+table row wins when rows overlap, tags match only the exact listed forms
+(case-sensitive, no trimming, no cross-form variants), and non-string
+tags are ignored like unknown tags.
 """
 
 from __future__ import annotations
+
+from collections.abc import Sequence
 
 import pytest
 
 from app.core.enums import ReferenceType
 from app.core.reference_urls import normalize_reference_url
-from app.services.reference_service import classify_reference_url
+from app.services.reference_service import (
+    classify_reference_tags,
+    classify_reference_url,
+)
 from tests.support.no_outbound import OutboundGuard
 
 pytest_plugins = ["tests.support.no_outbound_fixtures"]
@@ -378,6 +398,230 @@ class TestInputContract:
             classify_reference_url(value)
 
 
+# ---------------------------------------------------------------------------
+# CVE Source Tag Mapping (classify_reference_tags())
+# ---------------------------------------------------------------------------
+
+TAG_ROWS: list[tuple[str | None, str | None, ReferenceType | None]] = [
+    # (NVD tag, MITRE tag, expected type); `None` in a tag column is the
+    # table's "-" (no form), `None` as the type is the table's `NULL`.
+    ("Patch", "patch", PATCH),
+    ("Vendor Advisory", "vendor-advisory", ADVISORY),
+    ("Third Party Advisory", "third-party-advisory", ADVISORY),
+    ("US Government Resource", "government-resource", ADVISORY),
+    ("VDB Entry", "vdb-entry", ADVISORY),
+    ("Issue Tracking", "issue-tracking", ISSUE),
+    ("Exploit", "exploit", ARTICLE),
+    ("Mailing List", "mailing-list", ARTICLE),
+    ("Release Notes", "release-notes", ARTICLE),
+    ("Technical Description", "technical-description", ARTICLE),
+    ("Mitigation", "mitigation", ARTICLE),
+    ("Press/Media Coverage", "media-coverage", ARTICLE),
+    ("Tool Signature", "signature", ARTICLE),
+    ("Broken Link", "broken-link", None),
+    ("Not Applicable", "not-applicable", None),
+    ("Permissions Required", "permissions-required", None),
+    ("URL Repurposed", None, None),
+    ("Product", "product", None),
+    (None, "customer-entitlement", None),
+    (None, "related", None),
+]
+"""Every row of the CVE Source Tag Mapping table, in table order."""
+
+TAG_FORMS: list[tuple[str, str, ReferenceType | None]] = [
+    (form, label, expected)
+    for nvd, mitre, expected in TAG_ROWS
+    for form, label in ((nvd, "nvd"), (mitre, "mitre"))
+    if form is not None
+]
+"""`(tag, "nvd" | "mitre", expected type)` for every listed form."""
+
+REPRESENTATIVE_TAG = {
+    PATCH: "Patch",
+    ADVISORY: "Vendor Advisory",
+    ISSUE: "Issue Tracking",
+    ARTICLE: "Exploit",
+}
+"""One recognized NVD tag per type (table rows 1, 2, 6, and 7)."""
+
+TYPE_PRIORITY = [PATCH, ADVISORY, ISSUE, ARTICLE]
+"""The documented multi-tag priority, highest first."""
+
+PRIORITY_PAIRS: list[tuple[ReferenceType, ReferenceType]] = [
+    (higher, lower)
+    for index, higher in enumerate(TYPE_PRIORITY)
+    for lower in TYPE_PRIORITY[index + 1 :]
+]
+
+
+@pytest.mark.unit
+class TestTagSpecificationTable:
+    def test_every_specification_row_has_a_case(self) -> None:
+        # Transcribed from ticket-references.md (CVE Source Tag Mapping):
+        # 20 rows; 17 with both forms, one NVD-only, and two MITRE-only.
+        assert len(TAG_ROWS) == 20
+        assert len(TAG_FORMS) == 37
+        assert len({tag for tag, _, _ in TAG_FORMS}) == 37
+
+    @pytest.mark.parametrize(
+        ("tag", "expected"),
+        [(tag, expected) for tag, _, expected in TAG_FORMS],
+        ids=[f"{label}:{tag}" for tag, label, _ in TAG_FORMS],
+    )
+    def test_specification_form(self, tag: str, expected: ReferenceType | None) -> None:
+        assert classify_reference_tags([tag]) is expected
+
+
+@pytest.mark.unit
+class TestTagMatchingRules:
+    @pytest.mark.parametrize(
+        "tag",
+        [
+            # Case variants of listed forms.
+            "PATCH",
+            "pAtch",
+            "Vendor advisory",
+            "vendor advisory",
+            "VENDOR-ADVISORY",
+            "Vendor-Advisory",
+            "Issue tracking",
+            "ISSUE-TRACKING",
+            "MAILING LIST",
+            "EXPLOIT",
+            # Untrimmed forms.
+            " Patch",
+            "Patch ",
+            "patch\n",
+            # Cross-form variants that the table does not list.
+            "Government Resource",
+            "us-government-resource",
+            "Media Coverage",
+            "press-media-coverage",
+            "Signature",
+            "tool-signature",
+            "Issue-Tracking",
+            "issue tracking",
+        ],
+    )
+    def test_only_the_exact_listed_forms_are_recognized(self, tag: str) -> None:
+        # Interpretation: exact, case-sensitive matching of the listed NVD
+        # and MITRE forms; any other spelling is an unknown tag.
+        assert classify_reference_tags([tag]) is None
+
+    @pytest.mark.parametrize(
+        ("tags", "expected"),
+        [
+            (["Patch"], PATCH),
+            (["patch"], PATCH),
+            (["PATCH"], None),
+            (["PATCH", "patch"], PATCH),
+            (["Exploit", "EXPLOIT"], ARTICLE),
+        ],
+    )
+    def test_case_sensitivity(
+        self, tags: list[str], expected: ReferenceType | None
+    ) -> None:
+        assert classify_reference_tags(tags) is expected
+
+    @pytest.mark.parametrize(
+        ("tags", "expected"),
+        [
+            (["Unknown Example Tag"], None),
+            (["x-example-label", "another-example"], None),
+            (["Unknown Example Tag", "Issue Tracking"], ISSUE),
+            (["Issue Tracking", "x-example-label"], ISSUE),
+        ],
+    )
+    def test_unknown_tags_are_ignored(
+        self, tags: list[str], expected: ReferenceType | None
+    ) -> None:
+        assert classify_reference_tags(tags) is expected
+
+    @pytest.mark.parametrize(
+        ("tags", "expected"),
+        [
+            ([None], None),
+            ([1, 2.5, b"Patch"], None),
+            ([["Patch"]], None),
+            ([{"tag": "Patch"}], None),
+            ([None, 7, "Exploit"], ARTICLE),
+            ([b"Patch", "Mailing List"], ARTICLE),
+        ],
+    )
+    def test_non_string_tags_are_ignored(
+        self, tags: list[object], expected: ReferenceType | None
+    ) -> None:
+        # Interpretation (tracking-issue decision): a non-string tag is
+        # skipped like an unknown tag; it never fails the candidate.
+        assert classify_reference_tags(tags) is expected
+
+    @pytest.mark.parametrize("tags", [None, [], ()], ids=["none", "list", "tuple"])
+    def test_absent_or_empty_tags_are_none(self, tags: Sequence[str] | None) -> None:
+        assert classify_reference_tags(tags) is None
+
+    def test_any_sequence_is_accepted(self) -> None:
+        assert classify_reference_tags(("Mailing List", "Patch")) is PATCH
+
+    def test_repeated_tag(self) -> None:
+        assert classify_reference_tags(["Issue Tracking", "issue-tracking"]) is ISSUE
+
+
+@pytest.mark.unit
+class TestTagPriority:
+    @pytest.mark.parametrize(
+        ("higher", "lower"),
+        PRIORITY_PAIRS,
+        ids=[f"{h.value}-over-{lo.value}" for h, lo in PRIORITY_PAIRS],
+    )
+    @pytest.mark.parametrize("order", ["higher-first", "lower-first"])
+    def test_higher_priority_type_wins_in_either_order(
+        self, higher: ReferenceType, lower: ReferenceType, order: str
+    ) -> None:
+        tags = [REPRESENTATIVE_TAG[higher], REPRESENTATIVE_TAG[lower]]
+        if order == "lower-first":
+            tags.reverse()
+
+        assert classify_reference_tags(tags) is higher
+
+    def test_every_pair_of_types_is_covered(self) -> None:
+        assert len(PRIORITY_PAIRS) == 6
+
+    @pytest.mark.parametrize(
+        ("tags", "expected"),
+        [
+            (["Exploit", "Issue Tracking", "Vendor Advisory", "Patch"], PATCH),
+            (["mailing-list", "issue-tracking", "vdb-entry"], ADVISORY),
+            (["Release Notes", "issue-tracking"], ISSUE),
+            (["exploit", "Third Party Advisory"], ADVISORY),
+            (["signature", "Technical Description", "Mitigation"], ARTICLE),
+            (["government-resource", "Patch"], PATCH),
+        ],
+    )
+    def test_mixed_forms_and_several_types(
+        self, tags: list[str], expected: ReferenceType
+    ) -> None:
+        assert classify_reference_tags(tags) is expected
+
+    @pytest.mark.parametrize(
+        ("tags", "expected"),
+        [
+            (["Broken Link", "Exploit"], ARTICLE),
+            (["Exploit", "broken-link"], ARTICLE),
+            (["Not Applicable", "related", "Issue Tracking"], ISSUE),
+            (["URL Repurposed", "Vendor Advisory"], ADVISORY),
+            (["customer-entitlement", "product", "patch"], PATCH),
+            (["Permissions Required", "permissions-required"], None),
+            (["Broken Link", "Product", "related", "URL Repurposed"], None),
+        ],
+    )
+    def test_null_mapped_tags_do_not_block_recognized_tags(
+        self, tags: list[str], expected: ReferenceType | None
+    ) -> None:
+        """CVE Source Tag Mapping: a tag mapped to `NULL` does not prevent
+        later recognized tags from supplying a type."""
+        assert classify_reference_tags(tags) is expected
+
+
 @pytest.mark.unit
 class TestNoOutboundCalls:
     def test_classifying_a_batch_performs_no_outbound_call(
@@ -390,5 +634,14 @@ class TestNoOutboundCalls:
             "https://www.cve.org/CVERecord?id=CVE-2026-0001",
         ):
             assert classify_reference_url(url) is None
+
+        assert no_outbound.attempts == []
+
+    def test_classifying_tags_performs_no_outbound_call(
+        self, no_outbound: OutboundGuard
+    ) -> None:
+        for tag, _, expected in TAG_FORMS:
+            assert classify_reference_tags([tag]) is expected
+        assert classify_reference_tags(["https://unknown.example.test/tag"]) is None
 
         assert no_outbound.attempts == []
