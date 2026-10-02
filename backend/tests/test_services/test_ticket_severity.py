@@ -5,6 +5,10 @@ Resolution > Resolution Rules): a Ticket with a CVE uses `CVE.severity`
 (which may be SQL `NULL`), a CVE-less Ticket uses `severity_manual`, and
 otherwise the severity is unresolved. The `None` label is a value distinct
 from SQL `NULL`. Every case is evaluated in PostgreSQL over persisted rows.
+
+The semantic severity rank follows `docs/api-spec.md` (Semantic Sort
+Fields; Nullable Sort Field Ordering): None (0) < Low (1) < Medium (2) <
+High (3) < Critical (4); SQL `NULL` is not ranked.
 """
 
 from __future__ import annotations
@@ -14,14 +18,18 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import ColumnElement, String, literal, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from app.core.enums import Severity
+from app.models.cve import CVE
 from app.models.ticket import Ticket
 from app.services import ticket_severity
-from app.services.ticket_severity import resolved_severity_expression
+from app.services.ticket_severity import (
+    resolved_severity_expression,
+    severity_rank_expression,
+)
 from tests.support.module_imports import APP_ROOT, imported_modules
 
 Factory = Callable[..., Awaitable[Any]]
@@ -105,6 +113,67 @@ class TestResolvedSeverityExpression:
         ]
 
 
+def _stored(value: str | None) -> ColumnElement[str | None]:
+    """A bound stored-severity value (SQL `NULL` for `None`)."""
+    return literal(value, String)
+
+
+async def _rank(db: AsyncSession, value: str | None) -> int | None:
+    result = await db.execute(select(severity_rank_expression(_stored(value))))
+    rank: int | None = result.scalar_one()
+    return rank
+
+
+@pytest.mark.integration
+class TestSeverityRankExpression:
+    @pytest.mark.parametrize(
+        ("severity", "rank"),
+        [
+            (Severity.NONE, 0),
+            (Severity.LOW, 1),
+            (Severity.MEDIUM, 2),
+            (Severity.HIGH, 3),
+            (Severity.CRITICAL, 4),
+        ],
+        ids=lambda value: str(value),
+    )
+    async def test_each_stored_value_has_its_semantic_rank(
+        self, db_session: AsyncSession, severity: Severity, rank: int
+    ) -> None:
+        assert await _rank(db_session, severity.value) == rank
+
+    @pytest.mark.parametrize(
+        "value", [None, "Severe", "high", "NONE", ""], ids=lambda v: repr(v)
+    )
+    async def test_null_and_unrecognized_values_are_unranked(
+        self, db_session: AsyncSession, value: str | None
+    ) -> None:
+        assert await _rank(db_session, value) is None
+
+    async def test_orders_a_persisted_column_semantically_with_null_last(
+        self, db_session: AsyncSession, cve_factory: Factory
+    ) -> None:
+        values = [None, Severity.LOW, Severity.CRITICAL, Severity.NONE, Severity.HIGH]
+        by_id = {
+            (await cve_factory(severity=v.value if v else None)).id: v for v in values
+        }
+        rank = severity_rank_expression(CVE.severity.expression)
+
+        result = await db_session.execute(
+            select(CVE.id, rank)
+            .where(CVE.id.in_(by_id))
+            .order_by(rank.asc().nulls_last())
+        )
+
+        assert [(by_id[cve_id], value) for cve_id, value in result.all()] == [
+            (Severity.NONE, 0),
+            (Severity.LOW, 1),
+            (Severity.HIGH, 3),
+            (Severity.CRITICAL, 4),
+            (None, None),
+        ]
+
+
 @pytest.mark.unit
 class TestTicketSeverityModuleBoundary:
     def test_imports_only_models_and_core(self) -> None:
@@ -113,6 +182,7 @@ class TestTicketSeverityModuleBoundary:
         )
 
         assert {m for m in modules if m.startswith("app.")} == {
+            "app.core.enums",
             "app.models.cve",
             "app.models.ticket",
         }
@@ -121,3 +191,6 @@ class TestTicketSeverityModuleBoundary:
         assert not inspect.iscoroutinefunction(
             ticket_severity.resolved_severity_expression
         )
+
+    def test_rank_builder_is_synchronous(self) -> None:
+        assert not inspect.iscoroutinefunction(ticket_severity.severity_rank_expression)

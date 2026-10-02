@@ -66,15 +66,17 @@ from app.models.ticket_package_product import TicketPackageProduct
 from app.models.ticket_package_track import TicketPackageTrack
 from app.models.user import User
 from app.models.user_role import UserRole
-from app.services import package_service, ticket_service
-from app.services.ticket_deadlines import DueDates
-from app.services.ticket_service import (
+from app.services import cve_projection, package_service, ticket_service
+from app.services.cve_projection import (
     CVEDetailProjection,
     CVEEPSSProjection,
     CVEExternalIdentifierProjection,
     CVEKEVProjection,
     CVESSVCProjection,
     CVEWeaknessProjection,
+)
+from app.services.ticket_deadlines import DueDates
+from app.services.ticket_service import (
     ResolvedTicket,
     TicketDetailProjection,
     TicketUserProjection,
@@ -518,7 +520,7 @@ class TestDetailProjection:
         """The `(cve_id, cwe_id, source)` unique key already prevents
         duplicate rows; the grouping keeps sources exact-deduplicated
         even if it received one."""
-        grouped = ticket_service._cwes(
+        grouped = cve_projection._cwes(
             [["CWE-79", "MITRE"], ["CWE-79", "MITRE"], ["CWE-79", "NVD"]]
         )
 

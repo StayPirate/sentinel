@@ -312,6 +312,37 @@ class PackageSortField(StrEnum):
     CREATED_AT = "created_at"
 
 
+class CVESortField(StrEnum):
+    """Sortable fields for the CVE list query.
+
+    Category B — classification (Python Enum only; never stored in the
+    database). See `docs/features/tickets/cve-tracking.md` (List CVEs) and
+    `docs/features/tickets/cve-service.md` (CVE List): `cve_id` sorts in
+    Unicode code-point lexical order, `severity` by semantic rank, and the
+    nullable fields with `NULL` last.
+    """
+
+    CVE_ID = "cve_id"
+    PUBLISHED_DATE = "published_date"
+    SEVERITY = "severity"
+    CREATED_AT = "created_at"
+
+
+class CVESourceSortField(StrEnum):
+    """Sortable fields for the global persisted CVE-source listing.
+
+    Category B — classification (Python Enum only; never stored in the
+    database). See `docs/features/tickets/cve-service.md` (Global CVE
+    Source Listing): `source` and `status` sort in Unicode code-point
+    lexical order and `first_failed_at` with `NULL` last.
+    """
+
+    FETCHED_AT = "fetched_at"
+    FIRST_FAILED_AT = "first_failed_at"
+    SOURCE = "source"
+    STATUS = "status"
+
+
 class CveState(StrEnum):
     """CVE record state, defined by the CVE Program.
 

@@ -50,6 +50,7 @@ from app.api.dependencies import (
     ticket_not_mutable_error,
     user_not_found_error,
 )
+from app.api.v1.cves import serialize_cve_detail
 from app.api.v1.ticket_packages import serialize_package
 from app.core.enums import (
     Capability,
@@ -74,13 +75,7 @@ from app.core.permissions import get_capabilities
 from app.database import DatabaseSession
 from app.schemas.common import PaginationMeta, UserReference
 from app.schemas.cve import (
-    CVEDetail,
-    CVEEPSSResponse,
-    CVEExternalIdentifierResponse,
-    CVEKEVResponse,
-    CVESSVCResponse,
     CVESummary,
-    CVEWeaknessResponse,
 )
 from app.schemas.errors import ErrorResponse, TicketCVEConflictErrorResponse
 from app.schemas.ticket import (
@@ -108,7 +103,6 @@ from app.services.ticket_service import (
     AccessGrantAction,
     AssigneeInactiveError,
     AssigneeNotVAError,
-    CVEDetailProjection,
     DuplicateConcurrentModificationError,
     DuplicateTargetIsDuplicatedError,
     ResolvedTicket,
@@ -299,62 +293,6 @@ def _ticket_list_query(
 
 def _lower(value: str | None) -> str | None:
     return value.lower() if value is not None else None
-
-
-def serialize_cve_detail(cve: CVEDetailProjection) -> CVEDetail:
-    """Map the expanded CVE projection to its `CVEDetail` schema."""
-    return CVEDetail.model_validate(
-        {
-            "cve_id": cve.cve_id,
-            "title": cve.title,
-            "description": cve.description,
-            "published_date": cve.published_date,
-            "modified_date": cve.modified_date,
-            "cve_state": cve.cve_state.lower(),
-            "date_rejected": cve.date_rejected,
-            "severity": _lower(cve.severity),
-            "external_identifiers": [
-                CVEExternalIdentifierResponse(
-                    source=item.source.lower(),
-                    identifier=item.identifier,
-                    url=item.url,
-                )
-                for item in cve.external_identifiers
-            ],
-            "kev": (
-                CVEKEVResponse(
-                    date_added=cve.kev.date_added,
-                    reference_url=cve.kev.reference_url,
-                )
-                if cve.kev is not None
-                else None
-            ),
-            "epss": (
-                CVEEPSSResponse(
-                    score=cve.epss.score,
-                    percentile=cve.epss.percentile,
-                    assessed_at=cve.epss.assessed_at,
-                )
-                if cve.epss is not None
-                else None
-            ),
-            "ssvc": (
-                CVESSVCResponse(
-                    exploitation=cve.ssvc.exploitation,
-                    automatable=cve.ssvc.automatable,
-                    technical_impact=cve.ssvc.technical_impact,
-                    version=cve.ssvc.version,
-                    assessed_at=cve.ssvc.assessed_at,
-                )
-                if cve.ssvc is not None
-                else None
-            ),
-            "cwes": [
-                CVEWeaknessResponse(cwe_id=cwe.cwe_id, sources=list(cwe.sources))
-                for cwe in cve.cwes
-            ],
-        }
-    )
 
 
 def serialize_ticket_summary(summary: TicketSummaryProjection) -> TicketSummary:
