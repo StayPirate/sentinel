@@ -1,19 +1,27 @@
 """CVE service: CVE identifier resolution, accessibility-constrained reads,
-and the placeholder-CVE data guarantee.
+the placeholder-CVE data guarantee, and source-neutral CVE ingestion.
 
 See `docs/features/tickets/cve-service.md` (Ownership; CVE Read and
-Accessibility Boundary; On-Demand Fetch: `ensure_cve_exists()`; CVE Upsert
-Serialization; Caller Validation Responsibility; Service Read Contracts;
-Exceptions) for the module contract, and
-`docs/features/tickets/cvss-scoring.md` (Get CVSS Assessments for a CVE)
-for the CVSS read implemented here. `list_cves()`, `get_cve_detail()`, and
-`list_cve_sources()` implement the CVE List, CVE Detail, and Global CVE
-Source Listing read contracts; the CVE detail shares the `CVEDetail`
-projection of `cve_projection` with the Ticket detail, so this module
-never imports `ticket_service`. `resolve_cve_locator()` is the
-preliminary `{cve_id}` resolution of the CVE mutation paths, whose locked
-mutation in `ticket_mutations` makes the authoritative accessibility
-decision; `ticket_mutations` never imports this module.
+Accessibility Boundary; Primary Entry Point: `upsert_cve()`; On-Demand
+Fetch: `ensure_cve_exists()`; CVE Upsert Serialization; Caller Validation
+Responsibility; Service Read Contracts; Exceptions) for the module
+contract, and `docs/features/tickets/cvss-scoring.md` (Get CVSS
+Assessments for a CVE) for the CVSS read implemented here. `list_cves()`,
+`get_cve_detail()`, and `list_cve_sources()` implement the CVE List, CVE
+Detail, and Global CVE Source Listing read contracts; the CVE detail
+shares the `CVEDetail` projection of `cve_projection` with the Ticket
+detail. `resolve_cve_locator()` is the preliminary `{cve_id}` resolution
+of the CVE mutation paths, whose locked mutation in `ticket_mutations`
+makes the authoritative accessibility decision; `ticket_mutations` never
+imports this module.
+
+`upsert_cve()`, `record_source_status()`, and `build_post_ingest_tasks()`
+implement source-neutral ingestion. `upsert_cve()` composes
+`ticket_service` (Ticket creation and lifecycle) and `ticket_mutations`
+(trusted-external CVSS batch, automatic priority). `ticket_service` also
+imports this module (`ensure_cve_exists()`), so each side imports only
+the other's module object and dereferences it at call time; neither uses
+the other while being imported.
 
 CVE accessibility is a projection of the one canonical Ticket visibility
 predicate (`docs/features/identity/rbac.md`, Scope and Confidential Ticket
@@ -42,12 +50,25 @@ from __future__ import annotations
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any, Final
 
 import structlog
-from sqlalchemy import ColumnElement, Row, and_, false, func, or_, select, true
+from pydantic import ValidationError
+from pydantic_core import PydanticCustomError
+from sqlalchemy import (
+    ColumnElement,
+    Row,
+    and_,
+    delete,
+    false,
+    func,
+    literal,
+    or_,
+    select,
+    true,
+)
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -55,18 +76,41 @@ from app.core.enums import (
     CVESortField,
     CVESourceFetchStatus,
     CVESourceSortField,
+    CVESourceType,
     CveState,
     CVSSAssessmentSeverity,
     CVSSVersion,
     Severity,
     SortOrder,
+    TicketStatus,
 )
 from app.core.exceptions import CVENotFoundError, ServiceError
 from app.core.identifiers import format_ticket_id, is_valid_cve_id
 from app.models.cve import CVE
+from app.models.cve_affected_version import CVEAffectedVersion
 from app.models.cve_cvss_assessment import CVECVSSAssessment
+from app.models.cve_cwe import CVECWE
+from app.models.cve_epss_score import CVEEPSSScore
+from app.models.cve_external_identifier import CVEExternalIdentifier
+from app.models.cve_kev_entry import CVEKEVEntry
 from app.models.cve_source import CVESource
+from app.models.cve_ssvc_assessment import CVESSVCAssessment
 from app.models.ticket import Ticket
+from app.services import ticket_mutations, ticket_service
+from app.services.cve_ingest import (
+    AFFECTED_VERSION_FIELDS,
+    AffectedVersionOperation,
+    CVEIngestPayload,
+    NormalizedScopeOperation,
+    PostIngestTasks,
+    SerializedCPEMatch,
+    UpsertAction,
+    UpsertResult,
+    affected_version_content,
+    normalize_affected_version_operations,
+    normalize_cwe_classifications,
+    normalize_external_identifiers,
+)
 from app.services.cve_projection import (
     CODE_POINT_COLLATION,
     CVEDetailProjection,
@@ -89,6 +133,10 @@ from app.services.settings import (
     default_cvss_version_select,
 )
 from app.services.sql_patterns import LIKE_ESCAPE, escape_like
+from app.services.ticket_mutations import (
+    ParsedExternalCVSSAssessment,
+    is_valid_external_provider_name,
+)
 from app.services.ticket_mutations_errors import InvalidCVSSVectorError
 from app.services.ticket_severity import severity_rank_expression
 from app.services.ticket_visibility import TicketCaller, ticket_visibility_condition
@@ -450,7 +498,23 @@ async def ensure_cve_exists(
     """
     if not is_valid_cve_id(cve_id):
         raise CVEIdFormatError()
+    cve, _ = await _obtain_cve(db, cve_id, lock=lock)
+    return cve
 
+
+async def _obtain_cve(db: AsyncSession, cve_id: str, *, lock: bool) -> tuple[CVE, bool]:
+    """The shared conflict-safe CVE create-or-obtain protocol (cve-service.md,
+    CVE Upsert Serialization, New CVE).
+
+    Reads the row by the unique `CVE.cve_id` (with `lock`, the read is the
+    `FOR NO KEY UPDATE` root lock). If absent, inserts a placeholder through
+    `INSERT ... ON CONFLICT (cve_id) DO NOTHING RETURNING id`: PostgreSQL
+    waits for a concurrent uncommitted inserter of the same key, so this
+    call either becomes the insert winner (also when that inserter rolls
+    back) or inserts nothing and obtains the committed winner. No unique
+    violation is raised and the caller transaction stays usable. Returns the
+    row and whether this call inserted it.
+    """
     statement = (
         select(CVE)
         .where(CVE.cve_id == cve_id)
@@ -464,15 +528,18 @@ async def ensure_cve_exists(
 
     existing = (await db.execute(statement)).scalar_one_or_none()
     if existing is not None:
-        return existing
+        return existing, False
 
     # Inserter or loser, the winner row is then read (and locked) below.
-    await db.execute(
-        pg_insert(CVE)
-        .values(cve_id=cve_id)
-        .on_conflict_do_nothing(index_elements=[CVE.cve_id])
-    )
-    return (await db.execute(statement)).scalar_one()
+    inserted = (
+        await db.execute(
+            pg_insert(CVE)
+            .values(cve_id=cve_id)
+            .on_conflict_do_nothing(index_elements=[CVE.cve_id])
+            .returning(CVE.id)
+        )
+    ).scalar_one_or_none()
+    return (await db.execute(statement)).scalar_one(), inserted is not None
 
 
 # ---------------------------------------------------------------------------
@@ -957,4 +1024,576 @@ async def list_cve_sources(
         total=rows[0].total,
         page=page,
         per_page=per_page,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Source-neutral CVE ingestion (cve-service.md, Primary Entry Point:
+# `upsert_cve()`; CVESource Management; Complete `upsert_cve()` Composition;
+# Concurrency; PostIngestTasks)
+# ---------------------------------------------------------------------------
+
+CVSS_VECTOR_MAX_LENGTH: Final = 200
+"""Defensive received-length bound of an external CVSS vector candidate
+(cve-service.md, Phase 1 > CVSS assessment ingestion); equal to the API
+received-length limit of cvss-scoring.md (Input Rules, rule 1)."""
+
+INVALID_PROVIDER_REASON: Final = "invalid_provider"
+INVALID_VECTOR_REASON: Final = "invalid_vector"
+
+POST_INGEST_PACKAGE_NAME_MAX_LENGTH: Final = 50
+"""Heuristic filter bound of a package-name candidate
+(cve-service.md, `build_post_ingest_tasks()`)."""
+
+_NULLABLE_GLOBAL_FIELDS: Final[tuple[str, ...]] = (
+    "title",
+    "description",
+    "published_date",
+    "modified_date",
+)
+
+
+def _utc_now() -> datetime:
+    """The current instant; the single injection point of `upsert_cve()`'s
+    `evaluation_date`."""
+    return datetime.now(UTC)
+
+
+async def record_source_status(
+    session: AsyncSession,
+    cve_id: uuid.UUID,
+    source: CVESourceType,
+    status: CVESourceFetchStatus,
+) -> None:
+    """Create or update the latest `CVESource` state of `(cve_id, source)`.
+
+    Category A mutation, the single `CVESource` writer (cve-service.md,
+    CVESource Management).
+
+    Q1: `cve_id` is the CVE UUID primary key; `source` and `status` are
+    Enum members (raw strings are programming errors).
+
+    Q2: runs in the caller-owned transaction; the upsert's conflict
+    handling serializes every writer of the same key on its row.
+
+    Q3: one `INSERT ... ON CONFLICT (cve_id, source) DO UPDATE` whose
+    single `clock_timestamp()` instant (database wall clock, not
+    transaction start) becomes `fetched_at` and, when a failure starts a
+    new streak, `first_failed_at`. A failure preserves an existing
+    `first_failed_at`; success and missing clear it. The latest serialized
+    write wins; no history row is created and no unique violation can
+    abort the caller transaction. Never commits or rolls back.
+
+    Q6: raises `ValueError` for a non-UUID `cve_id` or a non-Enum `source`
+    or `status`. A missing CVE raises the foreign-key `IntegrityError`.
+    """
+    if not isinstance(cve_id, uuid.UUID):
+        raise ValueError("record_source_status() requires the CVE UUID.")
+    if not isinstance(source, CVESourceType):
+        raise ValueError("source must be a CVESourceType member.")
+    if not isinstance(status, CVESourceFetchStatus):
+        raise ValueError("status must be a CVESourceFetchStatus member.")
+
+    failure = status is CVESourceFetchStatus.FAILURE
+    instant = select(func.clock_timestamp().label("ts")).subquery()
+    row = select(
+        literal(cve_id, CVESource.cve_id.type),
+        literal(source.value, CVESource.source.type),
+        literal(status.value, CVESource.status.type),
+        instant.c.ts,
+        instant.c.ts if failure else literal(None, CVESource.first_failed_at.type),
+    )
+    statement = pg_insert(CVESource).from_select(
+        [
+            CVESource.cve_id,
+            CVESource.source,
+            CVESource.status,
+            CVESource.fetched_at,
+            CVESource.first_failed_at,
+        ],
+        row,
+        include_defaults=False,
+    )
+    excluded = statement.excluded
+    statement = statement.on_conflict_do_update(
+        index_elements=[CVESource.cve_id, CVESource.source],
+        set_={
+            "status": excluded.status,
+            "fetched_at": excluded.fetched_at,
+            "first_failed_at": (
+                func.coalesce(CVESource.first_failed_at, excluded.fetched_at)
+                if failure
+                else None
+            ),
+            "updated_at": func.now(),
+        },
+    )
+    await session.execute(statement)
+
+
+def _canonical_cvss_candidates(
+    cve_id: str, source: CVESourceType, payload: CVEIngestPayload
+) -> list[ParsedExternalCVSSAssessment]:
+    """Step 2: classify, parse, and group every CVSS candidate.
+
+    In input order, provider before vector: an invalid provider is
+    `invalid_provider`; a non-string vector, one over
+    `CVSS_VECTOR_MAX_LENGTH` received characters, or one the parser
+    rejects is `invalid_vector`. Each skip emits one WARNING carrying only
+    the CVE ID, source value, zero-based ordinal, and reason. Valid
+    candidates are grouped by `(provider, derived version)`: identical
+    canonical vectors collapse; differing ones reject the complete payload
+    with `pydantic.ValidationError` (no provider or vector in the error).
+    """
+    accepted: dict[tuple[str, CVSSVersion], ParsedExternalCVSSAssessment] = {}
+    conflict: int | None = None
+    for ordinal, entry in enumerate(payload.cvss_assessments or ()):
+        provider = entry.provider_name
+        vector = entry.vector_string
+        parsed: ParsedCVSSVector | None = None
+        reason = INVALID_VECTOR_REASON
+        if not isinstance(provider, str) or not is_valid_external_provider_name(
+            provider
+        ):
+            reason = INVALID_PROVIDER_REASON
+        elif isinstance(vector, str) and len(vector) <= CVSS_VECTOR_MAX_LENGTH:
+            try:
+                parsed = validate_cvss_vector(vector)
+            except InvalidCVSSVectorError:
+                parsed = None
+        if parsed is None or not isinstance(provider, str):
+            logger.warning(
+                "cve_cvss_candidate_skipped",
+                cve_id=cve_id,
+                source=source.value,
+                ordinal=ordinal,
+                reason=reason,
+            )
+            continue
+        key = (provider, parsed.version)
+        existing = accepted.get(key)
+        if existing is None:
+            accepted[key] = ParsedExternalCVSSAssessment(
+                provider=provider, parsed=parsed
+            )
+        elif existing.parsed.canonical_vector != parsed.canonical_vector:
+            conflict = ordinal if conflict is None else conflict
+    if conflict is not None:
+        raise ValidationError.from_exception_data(
+            "CVEIngestPayload",
+            [
+                {
+                    "type": PydanticCustomError(
+                        "cvss_assessment_conflict",
+                        "Contradictory canonical CVSS assessments share one"
+                        " (provider, version) key.",
+                    ),
+                    "loc": ("cvss_assessments", conflict),
+                    "input": None,
+                }
+            ],
+        )
+    return list(accepted.values())
+
+
+def _assign(cve: CVE, name: str, value: object) -> bool:
+    """Set one global field when the value differs; whether it changed."""
+    if getattr(cve, name) == value:
+        return False
+    setattr(cve, name, value)
+    return True
+
+
+def _merge_global_fields(cve: CVE, payload: CVEIngestPayload) -> bool:
+    """Step 4 global merge (cve-service.md, Merge Strategy).
+
+    Presence (`model_fields_set`) decides: omitted preserves, explicit
+    `null` clears, a value sets or replaces, an equal value is a no-op. A
+    resulting `PUBLISHED` always clears `date_rejected`; for `REJECTED` an
+    omitted date is preserved.
+    """
+    supplied = payload.model_fields_set
+    changed = False
+    for name in _NULLABLE_GLOBAL_FIELDS:
+        if name in supplied:
+            changed |= _assign(cve, name, getattr(payload, name))
+    if payload.cve_state is not None:
+        changed |= _assign(cve, "cve_state", payload.cve_state.value)
+    if cve.cve_state == CveState.PUBLISHED:
+        changed |= _assign(cve, "date_rejected", None)
+    elif "date_rejected" in supplied:
+        changed |= _assign(cve, "date_rejected", payload.date_rejected)
+    return changed
+
+
+async def _upsert_one_to_one(
+    db: AsyncSession, model: Any, cve_id: uuid.UUID, values: Mapping[str, object]
+) -> bool:
+    """Create or update a 1:1 child keyed by `cve_id`; equal content is a
+    no-op that does not touch `updated_at`. Whether a row changed."""
+    statement = pg_insert(model).values(cve_id=cve_id, **values)
+    excluded = statement.excluded
+    upsert = statement.on_conflict_do_update(
+        index_elements=[model.cve_id],
+        set_={**{name: excluded[name] for name in values}, "updated_at": func.now()},
+        where=or_(
+            *(getattr(model, name).is_distinct_from(excluded[name]) for name in values)
+        ),
+    ).returning(model.id)
+    return (await db.execute(upsert)).scalar_one_or_none() is not None
+
+
+async def _apply_affected_version_operation(
+    db: AsyncSession, cve_id: uuid.UUID, operation: NormalizedScopeOperation
+) -> bool:
+    """Apply one scope operation; whether the scope's row set changed.
+
+    The complete current set is compared with the snapshot before any
+    physical change, so an equal replacement, a repeated empty
+    replacement, or removal of an absent scope is a no-op.
+    """
+    scope = and_(
+        CVEAffectedVersion.cve_id == cve_id,
+        CVEAffectedVersion.source_container == operation.source_container,
+    )
+    columns = [getattr(CVEAffectedVersion, name) for name in AFFECTED_VERSION_FIELDS]
+    current = [
+        affected_version_content(row)
+        for row in (await db.execute(select(*columns).where(scope))).all()
+    ]
+    desired = operation.content()
+    if len(current) == len(set(current)) and set(current) == desired:
+        return False
+    await db.execute(
+        delete(CVEAffectedVersion)
+        .where(scope)
+        .execution_options(synchronize_session=False)
+    )
+    if operation.operation is AffectedVersionOperation.REPLACE and operation.entries:
+        await db.execute(
+            pg_insert(CVEAffectedVersion).values(
+                [
+                    {
+                        "cve_id": cve_id,
+                        "source_container": operation.source_container,
+                        **{n: getattr(entry, n) for n in AFFECTED_VERSION_FIELDS},
+                    }
+                    for entry in operation.entries
+                ]
+            )
+        )
+    return True
+
+
+async def _persist_children(
+    db: AsyncSession, cve_id: uuid.UUID, payload: CVEIngestPayload
+) -> bool:
+    """Step 4 child persistence (cve-service.md, Child Persistence Matrix);
+    whether any non-CVSS child changed effectively. Omitted, null, and
+    empty additive input retains every row."""
+    changed = False
+
+    cwe_keys = normalize_cwe_classifications(payload.cwe_classifications)
+    if cwe_keys:
+        inserted = (
+            await db.execute(
+                pg_insert(CVECWE)
+                .values(
+                    [
+                        {"cve_id": cve_id, "cwe_id": cwe_id, "source": source}
+                        for cwe_id, source in cwe_keys
+                    ]
+                )
+                .on_conflict_do_nothing(
+                    index_elements=[CVECWE.cve_id, CVECWE.cwe_id, CVECWE.source]
+                )
+                .returning(CVECWE.id)
+            )
+        ).all()
+        changed |= bool(inserted)
+
+    identifiers = normalize_external_identifiers(payload.external_identifiers)
+    if identifiers:
+        statement = pg_insert(CVEExternalIdentifier).values(
+            [
+                {
+                    "cve_id": cve_id,
+                    "source": entry.source.value,
+                    "identifier": entry.identifier,
+                    "url": entry.url,
+                }
+                for entry in identifiers
+            ]
+        )
+        excluded = statement.excluded
+        written = (
+            await db.execute(
+                statement.on_conflict_do_update(
+                    index_elements=[
+                        CVEExternalIdentifier.source,
+                        CVEExternalIdentifier.identifier,
+                    ],
+                    set_={
+                        "cve_id": excluded.cve_id,
+                        "url": excluded.url,
+                        "updated_at": func.now(),
+                    },
+                    where=or_(
+                        CVEExternalIdentifier.cve_id.is_distinct_from(excluded.cve_id),
+                        CVEExternalIdentifier.url.is_distinct_from(excluded.url),
+                    ),
+                ).returning(CVEExternalIdentifier.id)
+            )
+        ).all()
+        changed |= bool(written)
+
+    if payload.ssvc_assessment is not None:
+        ssvc = payload.ssvc_assessment
+        changed |= await _upsert_one_to_one(
+            db,
+            CVESSVCAssessment,
+            cve_id,
+            {
+                "exploitation": ssvc.exploitation.value,
+                "automatable": ssvc.automatable.value,
+                "technical_impact": ssvc.technical_impact.value,
+                "version": ssvc.version,
+                "assessed_at": ssvc.assessed_at,
+            },
+        )
+    if payload.kev_data is not None:
+        changed |= await _upsert_one_to_one(
+            db,
+            CVEKEVEntry,
+            cve_id,
+            {
+                "date_added": payload.kev_data.date_added,
+                "reference_url": payload.kev_data.reference_url,
+            },
+        )
+    if payload.epss_score is not None:
+        epss = payload.epss_score
+        changed |= await _upsert_one_to_one(
+            db,
+            CVEEPSSScore,
+            cve_id,
+            {
+                "score": epss.score,
+                "percentile": epss.percentile,
+                "assessed_at": epss.assessed_at,
+            },
+        )
+
+    for operation in normalize_affected_version_operations(
+        payload.affected_version_operations
+    ):
+        changed |= await _apply_affected_version_operation(db, cve_id, operation)
+    return changed
+
+
+async def _lock_ticket_of(db: AsyncSession, cve: CVE) -> Ticket | None:
+    """The unique Ticket associated with the locked `cve`, `FOR UPDATE`."""
+    return (
+        await db.execute(
+            select(Ticket)
+            .where(Ticket.cve_id == cve.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+
+
+async def upsert_cve(
+    db: AsyncSession,
+    cve_id: str,
+    source: CVESourceType,
+    cve_data: CVEIngestPayload,
+) -> UpsertResult:
+    """Central source-neutral entry point for all CVE data.
+
+    Category A trusted system composition (cve-service.md, Primary Entry
+    Point: `upsert_cve()`; Complete `upsert_cve()` Composition steps 1-9;
+    Concurrency; Transaction Boundaries, Phase 1). Callers are CVE fetchers
+    and the on-demand fetch path; never an API, CLI, or consumer boundary.
+
+    Q1: `cve_id` is a pre-validated canonical CVE-ID; `source` is the
+    fetcher's `CVESourceType` member; `cve_data` is a constructed
+    `CVEIngestPayload` (its model validators have run).
+
+    Q2: the caller owns the per-CVE transaction and commits once after its
+    automatic-reference work. Locks, in order and retained until the
+    transaction ends: the CVE `FOR NO KEY UPDATE`, then its unique Ticket
+    `FOR UPDATE` (delegates re-lock both as same-transaction no-ops). No
+    User root.
+
+    Q3: (1) format guard, source and payload type checks, then one UTC
+    `evaluation_date`; (2) CVSS candidates parsed, skipped with one
+    sanitized warning each, and grouped (contradictory duplicates reject
+    the payload); (3) the conflict-safe CVE create-or-lock, preserving the
+    locked pre-merge `cve_state`; (4) presence-sensitive global merge and
+    child persistence, flushed; (5) the unique Ticket loaded `FOR UPDATE`
+    or created through `ticket_service.create_ticket()` (ingestion
+    source); (6) `ticket_mutations.upsert_external_cvss_batch()` with the
+    valid candidates and the captured date, then one
+    `refresh_priority_auto()`; (7) exactly one lifecycle decision: the
+    rejection boundary for `PUBLISHED -> REJECTED` or a newly created
+    Ticket whose CVE is `REJECTED`; for `REJECTED -> PUBLISHED`, the system
+    `reopen_from_ignored()` form only when the locked Ticket is still the
+    CVE's association and `Ignored`; otherwise nothing; (8)
+    `record_source_status(SUCCESS)`; (9) flush. No HTTP, Redis, Celery,
+    DNS, or package work; never commits or rolls back.
+
+    Q4: `UpsertResult` with the CVE, the Ticket, and `created` (this call
+    won the CVE insert), `updated` (an effective global, child, or CVSS
+    change), or `unchanged`.
+
+    Q5: re-invocation derives every outcome from locked-current state;
+    equal data creates no row or Ticket event (source status may advance
+    its timestamp).
+
+    Q6: before any database operation, `CVEIdFormatError` for a malformed
+    `cve_id`, `ValueError` for a non-Enum `source` or a non-payload
+    `cve_data`, and `pydantic.ValidationError` for contradictory CVSS
+    duplicates. `RequiredSystemSettingMissingError`,
+    `TicketCVEConflictError` (invariant failure), and database, audit,
+    flush, cancellation, and programming exceptions from the delegates
+    propagate; the caller rolls back the complete per-CVE transaction.
+    """
+    if not is_valid_cve_id(cve_id):
+        raise CVEIdFormatError()
+    if not isinstance(source, CVESourceType):
+        raise ValueError("source must be a CVESourceType member.")
+    if not isinstance(cve_data, CVEIngestPayload):
+        raise ValueError("cve_data must be a CVEIngestPayload.")
+    evaluation_date: date = _utc_now().date()
+
+    candidates = _canonical_cvss_candidates(cve_id, source, cve_data)
+
+    cve, created = await _obtain_cve(db, cve_id, lock=True)
+    previous_state = cve.cve_state
+
+    changed = _merge_global_fields(cve, cve_data)
+    resulting_state = cve.cve_state
+    changed |= await _persist_children(db, cve.id, cve_data)
+    await db.flush()
+
+    ticket = await _lock_ticket_of(db, cve)
+    ticket_created = ticket is None
+    if ticket is None:
+        ticket = await ticket_service.create_ticket(
+            db,
+            acting_user_id=None,
+            cve_id=cve.cve_id,
+            source=ticket_service.TicketCreationSource.CVE_INGESTION,
+            ingestion_source=source,
+        )
+
+    batch = await ticket_mutations.upsert_external_cvss_batch(
+        db, cve_id=cve.id, assessments=candidates, evaluation_date=evaluation_date
+    )
+    changed |= batch.effective
+    await ticket_mutations.refresh_priority_auto(db, ticket=ticket)
+
+    if resulting_state == CveState.REJECTED and (
+        previous_state == CveState.PUBLISHED or ticket_created
+    ):
+        await ticket_service.ignore_new_for_rejected_cve(
+            db, cve_id=cve.id, ticket=ticket
+        )
+    elif (
+        previous_state == CveState.REJECTED
+        and resulting_state == CveState.PUBLISHED
+        and ticket.cve_id == cve.id
+        and ticket.status == TicketStatus.IGNORED
+    ):
+        ticket = await ticket_service.reopen_from_ignored_as_system(
+            db, ticket_id=ticket.id, evaluation_date=evaluation_date
+        )
+
+    await record_source_status(db, cve.id, source, CVESourceFetchStatus.SUCCESS)
+    await db.flush()
+
+    if created:
+        action = UpsertAction.CREATED
+    elif changed:
+        action = UpsertAction.UPDATED
+    else:
+        action = UpsertAction.UNCHANGED
+    return UpsertResult(cve=cve, ticket=ticket, action=action)
+
+
+def _is_package_name_candidate(value: str) -> bool:
+    """The `build_post_ingest_tasks()` package-name heuristic: non-empty, at
+    most 50 characters, no `/`, `:`, or whitespace."""
+    return (
+        bool(value)
+        and len(value) <= POST_INGEST_PACKAGE_NAME_MAX_LENGTH
+        and not any(c in "/:" or c.isspace() for c in value)
+    )
+
+
+def build_post_ingest_tasks(
+    result: UpsertResult,
+    payload: CVEIngestPayload,
+) -> PostIngestTasks | None:
+    """Extract the pure post-commit package-candidate handoff.
+
+    Category C pure helper (cve-service.md, `build_post_ingest_tasks()`):
+    no database, mapping, Redis, Celery, or network access and no domain
+    exception. CPE matches, affected-version CPEs and vendor/product pairs
+    of `replace` entries, and filtered package names (direct
+    `resolved_packages` and `replace` entry `package_name` values) are
+    exact-deduplicated and emitted in ascending Unicode code-point order;
+    CPE matches order by criteria, `vulnerable` (false first), then
+    `match_criteria_id` with `None` first. Returns `None` when every
+    collection is empty.
+    """
+    cpe_matches = sorted(
+        {
+            (
+                match.criteria,
+                match.vulnerable,
+                None if (mcid := match.match_criteria_id) is None else str(mcid),
+            )
+            for match in payload.cpe_matches or ()
+        },
+        key=lambda m: (m[0], m[1], m[2] is not None, m[2] or ""),
+    )
+    entries = [
+        entry
+        for operation in payload.affected_version_operations or ()
+        if operation.operation is AffectedVersionOperation.REPLACE
+        for entry in operation.entries or ()
+    ]
+    affected_cpes = sorted({e.cpe for e in entries if e.cpe is not None})
+    vendor_products = sorted(
+        {
+            (e.vendor, e.product)
+            for e in entries
+            if e.vendor is not None and e.product is not None
+        }
+    )
+    resolved_packages = sorted(
+        {
+            name
+            for name in [
+                *(payload.resolved_packages or ()),
+                *(e.package_name for e in entries if e.package_name is not None),
+            ]
+            if _is_package_name_candidate(name)
+        }
+    )
+    if not (cpe_matches or affected_cpes or vendor_products or resolved_packages):
+        return None
+    return PostIngestTasks(
+        ticket_id=str(result.ticket.id),
+        cpe_matches=[
+            SerializedCPEMatch(
+                criteria=criteria, vulnerable=vulnerable, match_criteria_id=mcid
+            )
+            for criteria, vulnerable, mcid in cpe_matches
+        ],
+        affected_cpes=affected_cpes,
+        vendor_products=[[vendor, product] for vendor, product in vendor_products],
+        resolved_packages=resolved_packages,
     )
