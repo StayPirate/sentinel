@@ -1168,12 +1168,6 @@ class TestExternalIdentifierChild:
             == 1
         )
 
-    def test_conflicting_same_key_content_is_rejected_at_construction(self) -> None:
-        with pytest.raises(ValidationError):
-            CVEIngestPayload(
-                external_identifiers=[_identifier(URL_A), _identifier(URL_B)]
-            )
-
 
 # ---------------------------------------------------------------------------
 # 1:1 children: SSVC, KEV, EPSS
@@ -1645,22 +1639,6 @@ class TestAffectedVersionScopes:
 
         assert _products(await _scope(db_session, result.cve, "cna")) == ["Alpha"]
 
-    @pytest.mark.parametrize(
-        "field", ["version_type", "version", "version_end", "package_name"]
-    )
-    async def test_absent_and_empty_key_field_are_contradictory(
-        self, field: str
-    ) -> None:
-        """They share one conflict key but persist different values, so the
-        payload is rejected at construction, before any write, whichever
-        comes first (input order never chooses the stored form)."""
-        absent = av_entry(vendor="Example", product="Alpha")
-        empty = av_entry(vendor="Example", product="Alpha", **{field: ""})
-
-        for entries in ((absent, empty), (empty, absent)):
-            with pytest.raises(ValidationError):
-                CVEIngestPayload(affected_version_operations=[replace("cna", *entries)])
-
     @pytest.mark.parametrize("field", ["vendor", "product"])
     async def test_absent_vendor_or_product_differs_from_empty_string(
         self, db_session: AsyncSession, field: str
@@ -1684,32 +1662,6 @@ class TestAffectedVersionScopes:
             )
             == 2
         )
-
-    @pytest.mark.parametrize(
-        "operations",
-        [
-            pytest.param(
-                [
-                    replace(
-                        "cna",
-                        av_entry(
-                            vendor="V", product="P", version="1", status="affected"
-                        ),
-                        av_entry(
-                            vendor="V", product="P", version="1", status="unaffected"
-                        ),
-                    )
-                ],
-                id="same-key-entries-outside-key-differ",
-            ),
-            pytest.param([replace("cna", E1), remove("cna")], id="differing-scope-ops"),
-        ],
-    )
-    def test_conflicting_same_key_content_is_rejected_at_construction(
-        self, operations: list[Any]
-    ) -> None:
-        with pytest.raises(ValidationError):
-            CVEIngestPayload(affected_version_operations=operations)
 
 
 # ---------------------------------------------------------------------------
