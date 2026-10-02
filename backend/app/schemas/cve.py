@@ -1,9 +1,12 @@
-"""Response schemas for compact and expanded CVE data.
+"""Schemas for compact and expanded CVE data and the CVE read endpoints.
 
 See `docs/features/tickets/tickets.md` (Response Schemas > Shared
 Sub-Schemas: CVESummary, CVEDetail, CVEKEVResponse, CVEEPSSResponse,
 CVESSVCResponse, CVEWeaknessResponse, CVEExternalIdentifierResponse) for
-the authoritative contracts. `CVEDetail` exposes persisted evidence only:
+the shared contracts, `docs/features/tickets/cve-tracking.md` (List CVEs:
+CVEListItem; Get CVE: CVEResourceDetail), and
+`docs/features/tickets/cve-service.md` (Global CVE Source Listing) for
+the endpoint schemas. `CVEDetail` exposes persisted evidence only:
 it never contains a CVE priority (`docs/features/tickets/ticket-priority.md`)
 or inline CVSS assessments, which remain in their dedicated sub-resource.
 
@@ -17,9 +20,11 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from app.schemas.common import SeverityValue
+from app.core.enums import CVESortField, CVESourceSortField, SortOrder
+from app.schemas.common import PaginationMeta, SeverityValue
 
 type CveStateValue = Literal["published", "rejected"]
+type CVESourceStatusValue = Literal["success", "failure", "missing"]
 
 
 class CVEKEVResponse(BaseModel):
@@ -148,3 +153,151 @@ class CVEDetail(BaseModel):
             "ascending Unicode code point of `cwe_id`; empty when none exist."
         )
     )
+
+
+# ---------------------------------------------------------------------------
+# CVE read endpoints
+# ---------------------------------------------------------------------------
+
+
+class CVEAssociatedTicket(BaseModel):
+    """The public identity of the Ticket associated with a CVE."""
+
+    ticket_id: str = Field(
+        description="Canonical Ticket identity (`SNTL-{n}`).", examples=["SNTL-42"]
+    )
+
+
+class CVEListItem(BaseModel):
+    """One accessible CVE in `GET /api/v1/cves` (cve-tracking.md, List
+    CVEs > Response Schema)."""
+
+    cve_id: str = Field(description="CVE identifier (e.g. `CVE-2024-1234`).")
+    title: str | None = Field(
+        description=(
+            "Brief summary from the CNA (at most 256 characters); `null` if "
+            "not provided by the CNA."
+        )
+    )
+    description: str | None = Field(description="Vulnerability description.")
+    severity: SeverityValue | None = Field(
+        description=(
+            "Resolved severity from the CVSS resolution cascade: `critical`, "
+            "`high`, `medium`, `low`, or `none` (CVSS score 0.0), or `null` "
+            "when no CVSS assessment is available (unresolved)."
+        )
+    )
+    cve_state: CveStateValue = Field(description="`published` or `rejected`.")
+    published_date: datetime | None = Field(description="CVE publication date (UTC).")
+    ticket: CVEAssociatedTicket | None = Field(
+        description="Associated Ticket, if any; `null` for a ticketless CVE."
+    )
+    created_at: datetime = Field(description="Record creation timestamp (UTC).")
+    updated_at: datetime = Field(description="Last modification timestamp (UTC).")
+
+
+class CVEListResponse(BaseModel):
+    """Response body for `GET /api/v1/cves` (paginated)."""
+
+    data: list[CVEListItem]
+    meta: PaginationMeta
+
+
+class CVEResourceDetail(CVEDetail):
+    """`GET /api/v1/cves/{cve_id}` (cve-tracking.md, Get CVE): every field
+    of `CVEDetail` plus the associated Ticket's identity. Evidence only:
+    no CVE priority and no inline CVSS assessments."""
+
+    ticket: CVEAssociatedTicket | None = Field(
+        description="Associated Ticket, if any; `null` for a ticketless CVE."
+    )
+
+
+class CVEResourceDetailResponse(BaseModel):
+    """Response body for `GET /api/v1/cves/{cve_id}`."""
+
+    data: CVEResourceDetail
+
+
+class CVESourceListItem(BaseModel):
+    """One persisted latest-state CVE source record in
+    `GET /api/v1/cve-sources` (cve-service.md, Global CVE Source Listing >
+    Response). The internal record UUID is deliberately absent."""
+
+    cve_id: str = Field(
+        description="CVE identifier (CVE-ID string, e.g. `CVE-2025-1234`)."
+    )
+    source: str = Field(
+        description=(
+            "CVE source type identifier (e.g. `nvd`, `mitre`, `kernel`), "
+            "whether currently registered or historically persisted."
+        )
+    )
+    status: CVESourceStatusValue = Field(
+        description="Persisted fetch status: `success`, `failure`, or `missing`."
+    )
+    fetched_at: datetime = Field(
+        description=(
+            "Database wall-clock instant of the latest serialized status "
+            "mutation (UTC)."
+        )
+    )
+    first_failed_at: datetime | None = Field(
+        description=(
+            "When the current failure streak began (UTC); `null` when the "
+            "record is not in a failure streak."
+        )
+    )
+    created_at: datetime = Field(description="Record creation timestamp (UTC).")
+    updated_at: datetime = Field(description="Record last update timestamp (UTC).")
+
+
+class CVESourceListResponse(BaseModel):
+    """Response body for `GET /api/v1/cve-sources` (paginated)."""
+
+    data: list[CVESourceListItem]
+    meta: PaginationMeta
+
+
+class CVEListQuery(BaseModel):
+    """Query parameters of `GET /api/v1/cves` (cve-tracking.md, List CVEs >
+    Query Parameters).
+
+    `cve_state` and the repeatable `severity` are intentionally raw
+    strings: an invalid value yields an empty page rather than an error
+    (`docs/api-spec.md`, Enum Filter Validation); `severity is None` means
+    omitted. The date bounds are already parsed, checked for inversion,
+    and normalized to UTC. `sort_by` and `sort_order` are typed, so an
+    invalid value is the global `422 VALIDATION_ERROR`.
+    """
+
+    search: str | None = None
+    cve_state: str | None = None
+    severity: list[str] | None = None
+    has_ticket: bool | None = None
+    from_date: datetime | None = None
+    to_date: datetime | None = None
+    page: int = Field(default=1, ge=1, le=2_147_483_647)
+    per_page: int = Field(default=20, ge=1, le=100)
+    sort_by: CVESortField = CVESortField.PUBLISHED_DATE
+    sort_order: SortOrder = SortOrder.DESC
+
+
+class CVESourceListQuery(BaseModel):
+    """Query parameters of `GET /api/v1/cve-sources` (cve-service.md,
+    Global CVE Source Listing > Query Parameters).
+
+    `source` is already grammar-bounded; `status` stays a raw string so an
+    invalid value yields an empty page. The date bounds are parsed,
+    checked for inversion, and normalized to UTC.
+    """
+
+    source: str | None = None
+    status: str | None = None
+    stalled: bool | None = None
+    from_date: datetime | None = None
+    to_date: datetime | None = None
+    page: int = Field(default=1, ge=1, le=2_147_483_647)
+    per_page: int = Field(default=20, ge=1, le=100)
+    sort_by: CVESourceSortField = CVESourceSortField.FETCHED_AT
+    sort_order: SortOrder = SortOrder.DESC

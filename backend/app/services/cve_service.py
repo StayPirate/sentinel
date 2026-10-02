@@ -6,7 +6,11 @@ Accessibility Boundary; On-Demand Fetch: `ensure_cve_exists()`; CVE Upsert
 Serialization; Caller Validation Responsibility; Service Read Contracts;
 Exceptions) for the module contract, and
 `docs/features/tickets/cvss-scoring.md` (Get CVSS Assessments for a CVE)
-for the CVSS read implemented here. `resolve_cve_locator()` is the
+for the CVSS read implemented here. `list_cves()`, `get_cve_detail()`, and
+`list_cve_sources()` implement the CVE List, CVE Detail, and Global CVE
+Source Listing read contracts; the CVE detail shares the `CVEDetail`
+projection of `cve_projection` with the Ticket detail, so this module
+never imports `ticket_service`. `resolve_cve_locator()` is the
 preliminary `{cve_id}` resolution of the CVE mutation paths, whose locked
 mutation in `ticket_mutations` makes the authoritative accessibility
 decision; `ticket_mutations` never imports this module.
@@ -21,7 +25,9 @@ supplies the response, so no preliminary access decision ever authorizes a
 later unconstrained query.
 
 Reads are Category B: they create no row or audit event, acquire no lock,
-never flush, commit, or roll back, and perform no network I/O. Unexpected
+never flush, commit, or roll back, and perform no network or Redis I/O.
+Each read selects its rows (and any total) in one SQL statement, so they
+derive from one coherent PostgreSQL observation. Unexpected
 database and programming exceptions propagate unchanged. Results are
 semantic service values, not Pydantic schemas.
 
@@ -36,21 +42,38 @@ from __future__ import annotations
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any, Final
 
 import structlog
-from sqlalchemy import ColumnElement, Row, or_, select
+from sqlalchemy import ColumnElement, Row, and_, false, func, or_, select, true
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.enums import CVSSAssessmentSeverity, CVSSVersion
+from app.core.enums import (
+    CVESortField,
+    CVESourceFetchStatus,
+    CVESourceSortField,
+    CveState,
+    CVSSAssessmentSeverity,
+    CVSSVersion,
+    Severity,
+    SortOrder,
+)
 from app.core.exceptions import CVENotFoundError, ServiceError
-from app.core.identifiers import is_valid_cve_id
+from app.core.identifiers import format_ticket_id, is_valid_cve_id
 from app.models.cve import CVE
 from app.models.cve_cvss_assessment import CVECVSSAssessment
+from app.models.cve_source import CVESource
 from app.models.ticket import Ticket
+from app.services.cve_projection import (
+    CODE_POINT_COLLATION,
+    CVEDetailProjection,
+    cve_detail_columns,
+    cve_detail_from_row,
+    join_cve_evidence,
+)
 from app.services.cvss import (
     CVSSBaseMetrics,
     EligibilityResolution,
@@ -64,7 +87,9 @@ from app.services.settings import (
     RequiredSystemSettingMissingError,
     default_cvss_version_select,
 )
+from app.services.sql_patterns import LIKE_ESCAPE, escape_like
 from app.services.ticket_mutations_errors import InvalidCVSSVectorError
+from app.services.ticket_severity import severity_rank_expression
 from app.services.ticket_visibility import TicketCaller, ticket_visibility_condition
 
 logger = structlog.get_logger(__name__)
@@ -455,3 +480,486 @@ async def ensure_cve_exists(
         .on_conflict_do_nothing(index_elements=[CVE.cve_id])
     )
     return (await db.execute(statement)).scalar_one()
+
+
+# ---------------------------------------------------------------------------
+# Service read contracts: CVE list, CVE detail, global CVE-source listing
+# (cve-service.md, Service Read Contracts)
+# ---------------------------------------------------------------------------
+
+MAX_PER_PAGE: Final = 100
+
+_STALLED_AFTER: Final = timedelta(days=30)
+"""Failure-streak age beyond which a persisted `failure` row is stalled
+(`docs/data-model.md`, CVESource, Derived predicate "stalled")."""
+
+# Documented lowercase wire value -> stored value (cve-tracking.md, List
+# CVEs, Query Parameters). `unresolved` is the SQL `NULL` severity.
+_CVE_STATE_FILTER: Final[Mapping[str, str]] = {
+    member.value.lower(): member.value for member in CveState
+}
+_SEVERITY_FILTER: Final[Mapping[str, str | None]] = {
+    **{member.value.lower(): member.value for member in Severity},
+    "unresolved": None,
+}
+_SOURCE_STATUS_FILTER: Final[frozenset[str]] = frozenset(
+    member.value for member in CVESourceFetchStatus
+)
+
+
+@dataclass(frozen=True, slots=True)
+class CVEListItemProjection:
+    """The semantic projection represented by `CVEListItem`.
+
+    `severity` is the CVE-owned unified severity (`None` is unresolved).
+    `ticket_id` is the associated Ticket's public `SNTL-{n}` identity, or
+    `None` for a ticketless CVE; the internal UUIDs are never part of it.
+    """
+
+    cve_id: str
+    title: str | None
+    description: str | None
+    severity: Severity | None
+    cve_state: CveState
+    published_date: datetime | None
+    ticket_id: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class CVEListResult:
+    """One page of accessible CVEs and the unpaginated total, both derived
+    from one PostgreSQL observation."""
+
+    items: tuple[CVEListItemProjection, ...]
+    total: int
+    page: int
+    per_page: int
+
+
+@dataclass(frozen=True, slots=True)
+class CVEDetailResult:
+    """The semantic projection represented by `CVEResourceDetail`: the
+    shared `CVEDetail` projection plus the associated Ticket's public
+    `SNTL-{n}` identity, or `None`."""
+
+    cve: CVEDetailProjection
+    ticket_id: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class CVESourceListItemProjection:
+    """One persisted `CVESource` latest-state row of the global listing.
+
+    `cve_id` is the public CVE-ID string; `CVESource.id`, the CVE UUID,
+    and every Ticket attribute are deliberately absent.
+    """
+
+    cve_id: str
+    source: str
+    status: CVESourceFetchStatus
+    fetched_at: datetime
+    first_failed_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class CVESourceListResult:
+    """One page of persisted CVE-source rows and the unpaginated total,
+    both derived from one PostgreSQL observation."""
+
+    items: tuple[CVESourceListItemProjection, ...]
+    total: int
+    page: int
+    per_page: int
+
+
+def _validate_page(page: int, per_page: int) -> None:
+    """Reject an out-of-contract page before any query (the API already
+    enforces the bounds as `422 VALIDATION_ERROR`)."""
+    if page < 1:
+        raise ValueError("page must be at least 1")
+    if not 1 <= per_page <= MAX_PER_PAGE:
+        raise ValueError(f"per_page must be between 1 and {MAX_PER_PAGE}")
+
+
+def _ordered(
+    sort_key: ColumnElement[Any], row_id: ColumnElement[Any], sort_order: SortOrder
+) -> tuple[ColumnElement[Any], ColumnElement[Any]]:
+    """Primary order with `NULL` last in both directions, then the internal
+    primary-key tie-breaker in the same direction."""
+    if sort_order is SortOrder.ASC:
+        return sort_key.asc().nulls_last(), row_id.asc()
+    return sort_key.desc().nulls_last(), row_id.desc()
+
+
+def _sntl(sequence_id: int | None) -> str | None:
+    return format_ticket_id(sequence_id) if sequence_id is not None else None
+
+
+def _cve_search_condition(term: str) -> ColumnElement[bool]:
+    """CVE-ID case-insensitive prefix, or title/description case-insensitive
+    substring, for a normalized non-empty term; `%`, `_`, and backslash
+    match literally."""
+    escaped = escape_like(term)
+    return or_(
+        CVE.cve_id.ilike(f"{escaped}%", escape=LIKE_ESCAPE),
+        CVE.title.ilike(f"%{escaped}%", escape=LIKE_ESCAPE),
+        CVE.description.ilike(f"%{escaped}%", escape=LIKE_ESCAPE),
+    )
+
+
+def _cve_severity_condition(values: Sequence[str]) -> ColumnElement[bool]:
+    """OR over the valid supplied severity wire values; `unresolved`
+    matches SQL `NULL`. No valid value matches nothing."""
+    valid = [_SEVERITY_FILTER[value] for value in values if value in _SEVERITY_FILTER]
+    stored = sorted({value for value in valid if value is not None})
+    branches: list[ColumnElement[bool]] = []
+    if stored:
+        branches.append(CVE.severity.in_(stored))
+    if None in valid:
+        branches.append(CVE.severity.is_(None))
+    return or_(*branches) if branches else false()
+
+
+def _cve_sort_key(sort_by: CVESortField) -> ColumnElement[Any]:
+    match sort_by:
+        case CVESortField.CVE_ID:
+            return CVE.cve_id.collate(CODE_POINT_COLLATION)
+        case CVESortField.PUBLISHED_DATE:
+            return CVE.published_date.expression
+        case CVESortField.SEVERITY:
+            return severity_rank_expression(CVE.severity.expression)
+        case CVESortField.CREATED_AT:
+            return CVE.created_at.expression
+
+
+async def list_cves(
+    db: AsyncSession,
+    caller: TicketCaller,
+    *,
+    search: str | None,
+    cve_state: str | None,
+    severity: Sequence[str] | None,
+    has_ticket: bool | None,
+    from_date: datetime | None,
+    to_date: datetime | None,
+    page: int,
+    per_page: int,
+    sort_by: CVESortField,
+    sort_order: SortOrder,
+) -> CVEListResult:
+    """List the accessible CVEs matching the filters, one page at a time.
+
+    Category B read (cve-service.md, Service Read Contracts > CVE List;
+    cve-tracking.md, List CVEs).
+
+    Q1: `caller` is the request-resolved caller information
+    (`ANONYMOUS_CALLER` for an anonymous request). `search` is the raw
+    free-text input. `cve_state` and each `severity` entry are raw wire
+    values; `None` means omitted and an empty `severity` sequence means
+    supplied with no value. `from_date`/`to_date` are UTC-normalized
+    inclusive bounds over `published_date`. `page` is positive and
+    `per_page` is 1-100.
+
+    Q3: in one SQL statement, and therefore one PostgreSQL observation
+    (a CTE chain: filtered CVEs, their total, the requested page, then
+    the page rows with their associated Ticket's `sequence_id`):
+    1. selects CVEs outer-joined to their at most one Ticket under the
+       CVE accessibility projection of the canonical Ticket predicate,
+       so inaccessible associated CVEs are absent from rows and total;
+    2. trims `search` once; a non-empty term matches the CVE-ID as a
+       case-insensitive prefix or the title or description as a
+       case-insensitive substring, with `%`, `_`, and backslash literal;
+    3. applies `cve_state` (an undocumented value matches nothing),
+       severity (valid values OR-combined; `none` is the resolved
+       `None` label, `unresolved` SQL `NULL`; no valid value matches
+       nothing), `has_ticket`, and the inclusive date bounds (a `NULL`
+       `published_date` satisfies neither bound), AND-combined;
+    4. never multiplies a CVE row: the Ticket join is unique by
+       `Ticket.cve_id` and no child relation is joined;
+    5. orders by `cve_id` (code point), `published_date`, `created_at`,
+       or the semantic severity rank, `NULL` last in both directions,
+       then by `CVE.id` in the same direction;
+    6. counts after accessibility and every filter, before paging.
+    Creates no row or event, acquires no lock, and never flushes,
+    commits, or rolls back.
+
+    Q4: returns the page items, the total, and the echoed `page` and
+    `per_page`. A page beyond the last is empty with the correct total.
+
+    Q6: raises `ValueError` before any query for `page < 1` or
+    `per_page` outside 1-100; no domain exception. Database exceptions
+    propagate unchanged.
+    """
+    _validate_page(page, per_page)
+
+    conditions: list[ColumnElement[bool]] = [_cve_accessibility_condition(caller)]
+    normalized_search = search.strip() if search is not None else ""
+    if normalized_search:
+        conditions.append(_cve_search_condition(normalized_search))
+    if cve_state is not None:
+        stored_state = _CVE_STATE_FILTER.get(cve_state)
+        conditions.append(
+            CVE.cve_state == stored_state if stored_state is not None else false()
+        )
+    if severity is not None:
+        conditions.append(_cve_severity_condition(severity))
+    if has_ticket is not None:
+        conditions.append(Ticket.id.is_not(None) if has_ticket else Ticket.id.is_(None))
+    if from_date is not None:
+        conditions.append(CVE.published_date >= from_date)
+    if to_date is not None:
+        conditions.append(CVE.published_date <= to_date)
+
+    filtered = (
+        select(CVE.id.label("id"), _cve_sort_key(sort_by).label("sort_key"))
+        .select_from(CVE)
+        .outerjoin(Ticket, Ticket.cve_id == CVE.id)
+        .where(*conditions)
+        .cte("filtered")
+    )
+    total = select(func.count().label("total")).select_from(filtered).cte("total")
+    page_rows = (
+        select(filtered)
+        .order_by(*_ordered(filtered.c.sort_key, filtered.c.id, sort_order))
+        .limit(per_page)
+        .offset((page - 1) * per_page)
+        .cte("page")
+    )
+    statement = (
+        select(
+            total.c.total,
+            CVE.id.label("cve_pk"),
+            CVE.cve_id,
+            CVE.title,
+            CVE.description,
+            CVE.severity,
+            CVE.cve_state,
+            CVE.published_date,
+            CVE.created_at,
+            CVE.updated_at,
+            Ticket.sequence_id.label("ticket_sequence_id"),
+        )
+        .select_from(total)
+        .outerjoin(page_rows, true())
+        .outerjoin(CVE, CVE.id == page_rows.c.id)
+        .outerjoin(Ticket, Ticket.cve_id == CVE.id)
+        .order_by(*_ordered(page_rows.c.sort_key, page_rows.c.id, sort_order))
+    )
+    rows = (await db.execute(statement)).all()
+    return CVEListResult(
+        items=tuple(
+            CVEListItemProjection(
+                cve_id=row.cve_id,
+                title=row.title,
+                description=row.description,
+                severity=Severity(row.severity) if row.severity is not None else None,
+                cve_state=CveState(row.cve_state),
+                published_date=row.published_date,
+                ticket_id=_sntl(row.ticket_sequence_id),
+                created_at=row.created_at,
+                updated_at=row.updated_at,
+            )
+            for row in rows
+            if row.cve_pk is not None
+        ),
+        total=rows[0].total,
+        page=page,
+        per_page=per_page,
+    )
+
+
+async def get_cve_detail(
+    db: AsyncSession, caller: TicketCaller, cve_id: str
+) -> CVEDetailResult:
+    """Return the detail of one accessible CVE.
+
+    Category B read (cve-service.md, Service Read Contracts > CVE Detail;
+    cve-tracking.md, Get CVE). Performs the `require_accessible_cve`
+    boundary role of `GET /api/v1/cves/{cve_id}` directly in its
+    selection.
+
+    Q1: `cve_id` is the raw path value; `caller` is the request-resolved
+    caller information.
+
+    Q3: (1) a value rejected by `core.identifiers.is_valid_cve_id()` runs
+    no query. (2) One SQL statement, and therefore one PostgreSQL
+    observation, selects the CVE by the unique `CVE.cve_id`, outer-joined
+    to its at most one Ticket and constrained by the CVE accessibility
+    projection of the canonical Ticket predicate, together with the
+    shared `CVEDetail` evidence (severity, ordered external identifiers,
+    KEV, EPSS, SSVC, grouped CWEs) and the Ticket's `sequence_id`.
+    (3) Projects the shared `CVEDetailProjection` and the `SNTL-{n}`
+    identity; never the internal UUIDs, protected Ticket content, a
+    priority, or CVSS assessments. Creates no row or event, acquires no
+    lock, and never flushes, commits, or rolls back.
+
+    Q4: returns the `CVEDetailResult`.
+
+    Q6: raises `CVENotFoundError` for a malformed, missing, or
+    inaccessible CVE without distinguishing the causes. Database
+    exceptions propagate unchanged.
+    """
+    if not is_valid_cve_id(cve_id):
+        raise CVENotFoundError()
+    statement = join_cve_evidence(
+        select(
+            *cve_detail_columns(),
+            Ticket.sequence_id.label("ticket_sequence_id"),
+        )
+        .select_from(CVE)
+        .outerjoin(Ticket, Ticket.cve_id == CVE.id)
+    ).where(CVE.cve_id == cve_id, _cve_accessibility_condition(caller))
+    row = (await db.execute(statement)).one_or_none()
+    cve = cve_detail_from_row(row) if row is not None else None
+    if row is None or cve is None:
+        raise CVENotFoundError()
+    return CVEDetailResult(cve=cve, ticket_id=_sntl(row.ticket_sequence_id))
+
+
+def _stalled_condition() -> ColumnElement[bool]:
+    """The stalled predicate at the statement's database instant `now()`.
+
+    `first_failed_at IS NOT NULL` keeps the predicate two-valued, so its
+    negation (`stalled=false`) returns every non-stalled row.
+    """
+    return and_(
+        CVESource.status == CVESourceFetchStatus.FAILURE.value,
+        CVESource.first_failed_at.is_not(None),
+        CVESource.first_failed_at < func.now() - _STALLED_AFTER,
+    )
+
+
+def _source_sort_key(sort_by: CVESourceSortField) -> ColumnElement[Any]:
+    match sort_by:
+        case CVESourceSortField.FETCHED_AT:
+            return CVESource.fetched_at.expression
+        case CVESourceSortField.FIRST_FAILED_AT:
+            return CVESource.first_failed_at.expression
+        case CVESourceSortField.SOURCE:
+            return CVESource.source.collate(CODE_POINT_COLLATION)
+        case CVESourceSortField.STATUS:
+            return CVESource.status.collate(CODE_POINT_COLLATION)
+
+
+async def list_cve_sources(
+    db: AsyncSession,
+    *,
+    source: str | None,
+    status: str | None,
+    stalled: bool | None,
+    from_date: datetime | None,
+    to_date: datetime | None,
+    page: int,
+    per_page: int,
+    sort_by: CVESourceSortField,
+    sort_order: SortOrder,
+) -> CVESourceListResult:
+    """List persisted `CVESource` latest-state rows, one page at a time.
+
+    Category B read (cve-service.md, Global CVE Source Listing > Service
+    contract). The intentional identifier-only exception to CVE
+    accessibility: no caller, no Ticket visibility join.
+
+    Q1: `source` is an exact, grammar-bounded persisted source
+    identifier; `status` a raw persisted-status value; `stalled` the
+    stalled-predicate filter; `from_date`/`to_date` UTC-normalized
+    inclusive bounds over `fetched_at`; `page` positive and `per_page`
+    1-100.
+
+    Q3: in one SQL statement, and therefore one PostgreSQL observation
+    whose `now()` is the single observation instant for the stalled
+    boundary, the page, and the total:
+    1. selects one row per `CVESource` with no Ticket join;
+    2. applies `source` (exact; a well-formed absent value matches
+       nothing), `status` (a value outside `success`/`failure`/`missing`
+       matches nothing), `stalled` (`true` keeps only `failure` rows whose
+       streak began more than 30 days before `now()`, `false` excludes
+       exactly those rows), and the inclusive `fetched_at` bounds,
+       AND-combined;
+    3. orders by `source` or `status` (code point), `fetched_at`, or
+       `first_failed_at` (`NULL` last in both directions), then by the
+       internal `CVESource.id` in the same direction;
+    4. counts after every filter, before paging;
+    5. resolves `CVESource.cve_id` to the public `CVE.cve_id`.
+    Creates no row or event, acquires no lock, and never flushes,
+    commits, or rolls back.
+
+    Q4: returns the page items (never `CVESource.id`, any Ticket UUID,
+    CVE content, user identity, or raw error), the total, and the echoed
+    `page` and `per_page`. A page beyond the last is empty with the
+    correct total.
+
+    Q6: raises `ValueError` before any query for `page < 1` or
+    `per_page` outside 1-100; no domain exception. Database exceptions
+    propagate unchanged.
+    """
+    _validate_page(page, per_page)
+
+    conditions: list[ColumnElement[bool]] = []
+    if source is not None:
+        conditions.append(CVESource.source == source)
+    if status is not None:
+        conditions.append(
+            CVESource.status == status if status in _SOURCE_STATUS_FILTER else false()
+        )
+    if stalled is not None:
+        conditions.append(_stalled_condition() if stalled else ~_stalled_condition())
+    if from_date is not None:
+        conditions.append(CVESource.fetched_at >= from_date)
+    if to_date is not None:
+        conditions.append(CVESource.fetched_at <= to_date)
+
+    filtered = (
+        select(CVESource.id.label("id"), _source_sort_key(sort_by).label("sort_key"))
+        .where(*conditions)
+        .cte("filtered")
+    )
+    total = select(func.count().label("total")).select_from(filtered).cte("total")
+    page_rows = (
+        select(filtered)
+        .order_by(*_ordered(filtered.c.sort_key, filtered.c.id, sort_order))
+        .limit(per_page)
+        .offset((page - 1) * per_page)
+        .cte("page")
+    )
+    statement = (
+        select(
+            total.c.total,
+            CVESource.id.label("source_pk"),
+            CVE.cve_id,
+            CVESource.source,
+            CVESource.status,
+            CVESource.fetched_at,
+            CVESource.first_failed_at,
+            CVESource.created_at,
+            CVESource.updated_at,
+        )
+        .select_from(total)
+        .outerjoin(page_rows, true())
+        .outerjoin(CVESource, CVESource.id == page_rows.c.id)
+        .outerjoin(CVE, CVE.id == CVESource.cve_id)
+        .order_by(*_ordered(page_rows.c.sort_key, page_rows.c.id, sort_order))
+    )
+    rows = (await db.execute(statement)).all()
+    return CVESourceListResult(
+        items=tuple(
+            CVESourceListItemProjection(
+                cve_id=row.cve_id,
+                source=row.source,
+                status=CVESourceFetchStatus(row.status),
+                fetched_at=row.fetched_at,
+                first_failed_at=row.first_failed_at,
+                created_at=row.created_at,
+                updated_at=row.updated_at,
+            )
+            for row in rows
+            if row.source_pk is not None
+        ),
+        total=rows[0].total,
+        page=page,
+        per_page=per_page,
+    )

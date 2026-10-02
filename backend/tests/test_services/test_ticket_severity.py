@@ -113,6 +113,7 @@ class TestTicketSeverityModuleBoundary:
         )
 
         assert {m for m in modules if m.startswith("app.")} == {
+            "app.core.enums",
             "app.models.cve",
             "app.models.ticket",
         }
