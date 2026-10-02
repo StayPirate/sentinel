@@ -9,7 +9,8 @@ Milestones), docs/features/packages/product-catalog.md (Product
 Lifecycle Phases), docs/features/packages/package-model.md (Search
 Packages Across Tickets), and docs/data-model.md (CveState Enum,
 CVESourceFetchStatus Enum, CVESourceType Python Enum,
-CVEExternalIdentifierSource Python Enum, TicketAuditEventType Enum,
+CVEExternalIdentifierSource Python Enum, CVESSVCAssessment,
+TicketAuditEventType Enum,
 ReferenceType Enum, IBSRequestState Enum, IBSRequestActionType Enum).
 """
 
@@ -61,6 +62,9 @@ from app.core.enums import (
     Scope,
     SettingAuditEventType,
     Severity,
+    SSVCAutomatable,
+    SSVCExploitation,
+    SSVCTechnicalImpact,
     TicketAuditEventType,
     TicketPriority,
     TicketSortField,
@@ -379,6 +383,27 @@ class TestCVEExternalIdentifierSourceEnum:
     )
     def test_value_fits_column_width(self, member: CVEExternalIdentifierSource) -> None:
         assert len(member.value) <= _EXTERNAL_IDENTIFIER_SOURCE_MAX_LENGTH
+
+
+@pytest.mark.unit
+class TestSSVCDecisionPointEnums:
+    """SSVC decision points per data-model.md (CVESSVCAssessment) and
+    cve-service.md (CVEIngestPayload Schema); each value fits its column."""
+
+    @pytest.mark.parametrize(
+        ("enum", "values", "width"),
+        [
+            (SSVCExploitation, ["none", "poc", "active"], 20),
+            (SSVCAutomatable, ["no", "yes"], 10),
+            (SSVCTechnicalImpact, ["partial", "total"], 20),
+        ],
+        ids=["exploitation", "automatable", "technical_impact"],
+    )
+    def test_exact_values_fit_column(
+        self, enum: type[StrEnum], values: list[str], width: int
+    ) -> None:
+        assert [member.value for member in enum] == values
+        assert all(len(value) <= width for value in values)
 
 
 @pytest.mark.unit

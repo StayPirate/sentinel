@@ -406,6 +406,44 @@ class CVEExternalIdentifierSource(StrEnum):
     RUSTSEC = "RUSTSEC"
 
 
+class SSVCExploitation(StrEnum):
+    """SSVC Exploitation decision point (CERT/CC v1.1.0).
+
+    Category B — classification (Python Enum only; stored in
+    `CVESSVCAssessment.exploitation`, VARCHAR(20)). See
+    `docs/data-model.md` (CVESSVCAssessment) and
+    `docs/features/tickets/cve-service.md` (CVEIngestPayload Schema).
+    """
+
+    NONE = "none"
+    POC = "poc"
+    ACTIVE = "active"
+
+
+class SSVCAutomatable(StrEnum):
+    """SSVC Automatable decision point (CERT/CC v2.0.0).
+
+    Category B — classification (Python Enum only; stored in
+    `CVESSVCAssessment.automatable`, VARCHAR(10)). See
+    `docs/data-model.md` (CVESSVCAssessment).
+    """
+
+    NO = "no"
+    YES = "yes"
+
+
+class SSVCTechnicalImpact(StrEnum):
+    """SSVC Technical Impact decision point (CERT/CC v1.0.0).
+
+    Category B — classification (Python Enum only; stored in
+    `CVESSVCAssessment.technical_impact`, VARCHAR(20)). See
+    `docs/data-model.md` (CVESSVCAssessment).
+    """
+
+    PARTIAL = "partial"
+    TOTAL = "total"
+
+
 class CVSSVersion(StrEnum):
     """Accepted CVSS Base-vector versions, always derived from the vector.
 

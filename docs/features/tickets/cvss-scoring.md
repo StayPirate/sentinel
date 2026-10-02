@@ -744,9 +744,9 @@ testing strategy.
 - One valid complete vector and correct canonical parsed result for every
   accepted version, including every Base metric field and lowercase wire value.
 - Arbitrary metric order canonicalizes to FIRST order for every version.
-- Received lengths of exactly 200 and 201 characters, proving length is checked
-  before trimming; leading and trailing whitespace at a valid length; empty
-  after trim; and embedded whitespace.
+- Leading and trailing whitespace at a valid length; empty after trim; and
+  embedded whitespace. The parser applies no length bound: rule 1 is tested at
+  its enforcing boundaries below.
 - Official-case acceptance and rejection of lowercase or mixed-case prefixes,
   abbreviations, and values; v2.0 unprefixed acceptance; missing or unexpected
   prefixes for every version.
@@ -776,6 +776,10 @@ testing strategy.
 
 ### Persistence and API Tests
 
+- Received lengths of exactly 200 and 201 characters, proving length is checked
+  before trimming, at the API request schema (`422 VALIDATION_ERROR`) and at the
+  defensive external-candidate bound of `cve-service.md` (skip as
+  `invalid_vector` without invoking the parser).
 - Manual SUSE create, update, unchanged, and delete, plus external create,
   update, unchanged, retained-on-source-absence behavior, and rejection of
   every reserved-name variant from system ingestion.

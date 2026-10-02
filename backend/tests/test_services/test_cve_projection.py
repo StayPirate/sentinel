@@ -5,7 +5,7 @@ Contracts > CVE Detail; Relationship with other modules) and
 docs/features/tickets/tickets.md (Shared Sub-Schemas: `CVEDetail`). The
 shared `CVEDetail` projection is a leaf module that imports only Models
 and Core, so `cve_service` (CVE detail) and `ticket_service`
-(`TicketDetail.cve`) share it without `cve_service` importing
+(`TicketDetail.cve`) share it without the CVE detail depending on
 `ticket_service`. Projection content, ordering, and the equality of both
 reads are covered in tests/test_services/test_cve_reads.py.
 """
@@ -49,11 +49,15 @@ class TestModuleBoundary:
             m for m in imports if not m.startswith(("app.models.", "app.core."))
         } == set()
 
-    def test_cve_service_does_not_import_ticket_service(self) -> None:
+    def test_cve_detail_projection_comes_from_the_leaf_module(self) -> None:
+        """The CVE detail takes its projection from `cve_projection`, not
+        from `ticket_service` (which `cve_service` imports only for the
+        ingestion composition, cve-service.md, Relationship with other
+        modules)."""
         imports = _app_imports("cve_service")
 
-        assert "app.services.ticket_service" not in imports
         assert "app.services.cve_projection" in imports
+        assert "CVEDetailProjection" in cve_projection.__dict__
 
     def test_both_detail_reads_share_the_projection_module(self) -> None:
         assert "app.services.cve_projection" in _app_imports("ticket_service")
