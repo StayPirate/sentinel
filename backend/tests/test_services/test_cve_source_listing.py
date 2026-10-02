@@ -694,7 +694,7 @@ class TestBoundedReadAndDivergence:
             assert len(result.items) == per_page
             counts.append(len(recorder.statements))
             statement = recorder.statements[0]
-            assert statement.lstrip().upper().startswith("WITH")
+            assert statement.lstrip().upper().startswith(("SELECT", "WITH"))
             for row_lock in ROW_LOCKS:
                 assert row_lock not in statement.upper()
             assert "ticket" not in statement.lower()

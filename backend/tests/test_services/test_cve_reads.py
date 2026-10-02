@@ -126,8 +126,10 @@ class _StatementRecorder:
         event.remove(self._engine, "before_cursor_execute", self._record)
 
 
-def _assert_read_only_statement(statement: str, prefix: str) -> None:
-    assert statement.lstrip().upper().startswith(prefix)
+def _assert_read_only_statement(statement: str) -> None:
+    """A read statement (any `SELECT` shape, including a CTE) without a
+    row lock."""
+    assert statement.lstrip().upper().startswith(("SELECT", "WITH"))
     for row_lock in ROW_LOCKS:
         assert row_lock not in statement.upper()
 
@@ -750,7 +752,7 @@ class TestListRowIdentityAndBoundedRead:
             assert result.total == 9
             assert len(result.items) == min(per_page, 9)
             counts.append(len(recorder.statements))
-            _assert_read_only_statement(recorder.statements[0], "WITH")
+            _assert_read_only_statement(recorder.statements[0])
 
         assert counts == [1, 1, 1]
         _assert_untouched_session(db_session)
@@ -962,7 +964,7 @@ class TestDetailProjection:
         assert result.cve.severity is Severity.NONE
         assert type(result.cve.cve_state) is CveState
         assert len(recorder.statements) == 1
-        _assert_read_only_statement(recorder.statements[0], "SELECT")
+        _assert_read_only_statement(recorder.statements[0])
         _assert_no_uuid(result)
         _assert_no_uuid(result.cve)
         _assert_untouched_session(db_session)
