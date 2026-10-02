@@ -717,7 +717,7 @@ Product table for Python-side filtering.
 |-----------|------|---------|-------------|
 | `page` | int | 1 | Page number |
 | `per_page` | int | 20 | Items per page (max: 100) |
-| `sort_by` | string | `name` | Sort field. Valid values: `name`, `display_name`, `version`, `cpe`, `catalog_last_seen_at`, `created_at` |
+| `sort_by` | string | `name` | Sort field. Valid values: `name`, `display_name`, `version`, `cpe` (the four string fields in Unicode code-point lexical order, independent of database collation), `catalog_last_seen_at`, `created_at` |
 | `sort_order` | string | `asc` | Sort direction: `asc` or `desc` |
 | `search` | string | -- | Case-insensitive substring match against `name`, `display_name`, `version`, or `cpe`. A Product matches when any of those fields matches. |
 | `cpe` | string | -- | Exact, case-sensitive match against the canonical stored CPE. |
