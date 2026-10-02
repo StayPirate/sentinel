@@ -863,8 +863,10 @@ effective assessment action contributes an effective CVSS child change to
 **Guards**:
 
 - `evaluation_date` is required; this boundary never captures a replacement.
-- Every provider must be non-empty, no longer than 100 characters, and not
+- Every provider must be non-empty after outer trim (a whitespace-only
+  provider is empty), no longer than 100 characters as received, and not
   equivalent to reserved `SUSE` after outer trim and Unicode case-folding.
+  The accepted provider is persisted unchanged.
 - Every item must contain a complete canonical parsed result for an accepted
   version, and the sequence must contain at most one canonical item for each
   `(provider, version)` key.
