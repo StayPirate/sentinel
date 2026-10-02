@@ -657,7 +657,10 @@ contract is:
    `run_catch_up: unknown fetcher {fetcher_name} — skipping`. A registered
    disabled fetcher logs INFO using
    `Catch-up skipped for {fetcher_name}: fetcher is disabled` and returns
-   without retry. Neither path creates a `FetcherRun`.
+   without retry. A registered fetcher without its `FetcherConfig` row is a
+   non-retryable bootstrap invariant failure: emit the structured terminal
+   ERROR, do not invoke `catch_up()`, and fail the task. None of these paths
+   creates a `FetcherRun`.
 3. Instantiate the class and open the caller-owned `AsyncSession`. Invoke
    `catch_up()`. The default CVE implementation owns its commit, rollback, and
    isolated status writes; the wrapper does not duplicate them.
