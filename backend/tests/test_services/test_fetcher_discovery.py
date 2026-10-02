@@ -18,10 +18,9 @@ producing a false negative where a fetcher missing from
 test imported it. Comparing dotted module-path strings avoids that
 self-fulfilling side effect entirely.
 
-No production fetcher exists yet — every domain package scan below
-currently returns nothing, so this test passes vacuously. It starts
-enforcing automatically as soon as the first fetcher module is added
-under one of the domain packages, with no update to this test needed.
+The scan is not vacuous: `app.services.packages` contains the first
+production fetcher (`sync_smelt_products`), and a dedicated test proves
+the scan finds it, so a scan that silently returns nothing fails.
 """
 
 from __future__ import annotations
@@ -34,7 +33,7 @@ from pathlib import Path
 import pytest
 
 import app.services.fetcher_discovery  # noqa: F401
-from app.services.base_fetcher import BaseFetcher
+from app.services.base_fetcher import FETCHER_REGISTRY, BaseFetcher
 
 _DOMAIN_PACKAGES = [
     "app.services.tickets",
@@ -66,8 +65,8 @@ def _imported_modules_in_discovery() -> set[str]:
 
 def _walk_domain_module_names(package_name: str) -> list[str]:
     """Every importable module's dotted name under `package_name`, or
-    an empty list if the package does not exist on disk yet (no
-    production fetcher domain packages currently exist)."""
+    an empty list if the package does not exist on disk yet (not every
+    domain package has a fetcher)."""
     try:
         package = importlib.import_module(package_name)
     except ModuleNotFoundError:
@@ -116,6 +115,31 @@ class TestFetcherDiscoveryDriftProtection:
             + ", ".join(sorted(missing))
         )
 
-    def test_passes_vacuously_when_no_domain_packages_exist_yet(self) -> None:
+    def test_scan_finds_the_production_fetcher_modules(self) -> None:
+        fetcher_modules = {
+            module_name
+            for package_name in _DOMAIN_PACKAGES
+            for module_name in _walk_domain_module_names(package_name)
+            if _module_defines_concrete_fetcher(module_name)
+        }
+
+        assert "app.services.packages.sync_smelt_products" in fetcher_modules
+
+    def test_every_scanned_concrete_fetcher_is_registered_after_discovery(
+        self,
+    ) -> None:
+        unregistered: list[str] = []
         for package_name in _DOMAIN_PACKAGES:
-            assert _walk_domain_module_names(package_name) == []
+            for module_name in _walk_domain_module_names(package_name):
+                module = importlib.import_module(module_name)
+                for attr in vars(module).values():
+                    if (
+                        isinstance(attr, type)
+                        and issubclass(attr, BaseFetcher)
+                        and attr is not BaseFetcher
+                        and not attr.__dict__.get("abstract", False)
+                        and attr.__module__ == module_name
+                        and FETCHER_REGISTRY.get(attr.name) is not attr
+                    ):
+                        unregistered.append(f"{module_name}.{attr.__name__}")
+        assert not unregistered, "Unregistered fetcher(s): " + ", ".join(unregistered)

@@ -27,6 +27,51 @@ def _split_comma(value: Any) -> Any:
 
 CommaSeparated = Annotated[list[str], NoDecode, BeforeValidator(_split_comma)]
 
+
+def _validate_https_api_prefix(value: str, variable: str) -> str:
+    """Validate and canonicalize an anonymous HTTPS API prefix setting.
+
+    Enforces the prefix rules of docs/features/packages/product-catalog.md
+    (Configuration): HTTPS; a hostname; no user information, query, or
+    fragment; a non-default port permitted; any trailing slash removed.
+    Malformed values (including whitespace or control characters and an
+    invalid port) are rejected. Every message names `variable`.
+    """
+    prefix = f"Invalid {variable}"
+
+    if any(character.isspace() or not character.isprintable() for character in value):
+        msg = f"{prefix}: malformed URL."
+        raise ValueError(msg)
+    if "?" in value or "#" in value:
+        msg = f"{prefix}: query or fragment components are not permitted."
+        raise ValueError(msg)
+
+    try:
+        parsed = urlsplit(value)
+        hostname = parsed.hostname
+        username = parsed.username
+        password = parsed.password
+        port = parsed.port
+    except ValueError:
+        msg = f"{prefix}: malformed URL."
+        raise ValueError(msg) from None
+    if port is None and parsed.netloc.endswith(":"):
+        msg = f"{prefix}: malformed URL."
+        raise ValueError(msg)
+
+    if parsed.scheme.lower() != "https":
+        msg = f"{prefix}: the scheme must be HTTPS."
+        raise ValueError(msg)
+    if not hostname:
+        msg = f"{prefix}: a non-empty hostname is required."
+        raise ValueError(msg)
+    if username is not None or password is not None:
+        msg = f"{prefix}: user information is not permitted."
+        raise ValueError(msg)
+
+    return value.rstrip("/")
+
+
 _VALID_LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 _VALID_LOG_FORMATS = ("auto", "json", "console")
 
@@ -70,6 +115,9 @@ class Settings(BaseSettings):
     ibs_username: str = ""
     ibs_password: SecretStr = SecretStr("")
     ibs_download_base_url: str = "https://download.suse.de/ibs"
+
+    # SMELT
+    smelt_api_url: str = "https://smelt.suse.de/api"
 
     # NVD API
     nvd_api_key: SecretStr = SecretStr("")
@@ -232,6 +280,16 @@ class Settings(BaseSettings):
             raise ValueError(msg)
 
         return value[:-1] if path.endswith("/") else value
+
+    @field_validator("smelt_api_url")
+    @classmethod
+    def _validate_smelt_api_url(cls, value: str) -> str:
+        """Validate and canonicalize SMELT_API_URL at startup.
+
+        See docs/features/packages/product-catalog.md (SMELT Integration,
+        Origin, Authentication, and Pagination).
+        """
+        return _validate_https_api_prefix(value, "SMELT_API_URL")
 
     @model_validator(mode="after")
     def _validate_ibs_settings(self) -> Settings:
