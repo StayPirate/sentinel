@@ -42,7 +42,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from decimal import Decimal
 from typing import Any, Final
 
@@ -489,9 +489,12 @@ async def ensure_cve_exists(
 
 MAX_PER_PAGE: Final = 100
 
-_STALLED_AFTER: Final = timedelta(days=30)
-"""Failure-streak age beyond which a persisted `failure` row is stalled
-(`docs/data-model.md`, CVESource, Derived predicate "stalled")."""
+_STALLED_AFTER_HOURS: Final = 30 * 24
+"""Failure-streak age (30 days) beyond which a persisted `failure` row is
+stalled (`docs/data-model.md`, CVESource, Derived predicate "stalled").
+Applied as a fixed-length `make_interval(hours => 720)`, so the boundary
+does not depend on the database session time zone (a `'30 days'`
+interval would follow calendar days across a daylight-saving change)."""
 
 # Documented lowercase wire value -> stored value (cve-tracking.md, List
 # CVEs, Query Parameters). `unresolved` is the SQL `NULL` severity.
@@ -829,7 +832,8 @@ def _stalled_condition() -> ColumnElement[bool]:
     return and_(
         CVESource.status == CVESourceFetchStatus.FAILURE.value,
         CVESource.first_failed_at.is_not(None),
-        CVESource.first_failed_at < func.now() - _STALLED_AFTER,
+        CVESource.first_failed_at
+        < func.now() - func.make_interval(0, 0, 0, 0, _STALLED_AFTER_HOURS),
     )
 
 
