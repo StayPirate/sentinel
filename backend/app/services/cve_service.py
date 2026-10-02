@@ -628,15 +628,14 @@ def _cve_severity_condition(values: Sequence[str]) -> ColumnElement[bool]:
 
 
 def _cve_sort_key(sort_by: CVESortField) -> ColumnElement[Any]:
-    match sort_by:
-        case CVESortField.CVE_ID:
-            return CVE.cve_id.collate(CODE_POINT_COLLATION)
-        case CVESortField.PUBLISHED_DATE:
-            return CVE.published_date.expression
-        case CVESortField.SEVERITY:
-            return severity_rank_expression(CVE.severity.expression)
-        case CVESortField.CREATED_AT:
-            return CVE.created_at.expression
+    """The primary sort expression for `sort_by` on `CVE`."""
+    keys: Mapping[CVESortField, ColumnElement[Any]] = {
+        CVESortField.CVE_ID: CVE.cve_id.collate(CODE_POINT_COLLATION),
+        CVESortField.PUBLISHED_DATE: CVE.published_date.expression,
+        CVESortField.SEVERITY: severity_rank_expression(CVE.severity.expression),
+        CVESortField.CREATED_AT: CVE.created_at.expression,
+    }
+    return keys[sort_by]
 
 
 async def list_cves(
@@ -838,15 +837,14 @@ def _stalled_condition() -> ColumnElement[bool]:
 
 
 def _source_sort_key(sort_by: CVESourceSortField) -> ColumnElement[Any]:
-    match sort_by:
-        case CVESourceSortField.FETCHED_AT:
-            return CVESource.fetched_at.expression
-        case CVESourceSortField.FIRST_FAILED_AT:
-            return CVESource.first_failed_at.expression
-        case CVESourceSortField.SOURCE:
-            return CVESource.source.collate(CODE_POINT_COLLATION)
-        case CVESourceSortField.STATUS:
-            return CVESource.status.collate(CODE_POINT_COLLATION)
+    """The primary sort expression for `sort_by` on `CVESource`."""
+    keys: Mapping[CVESourceSortField, ColumnElement[Any]] = {
+        CVESourceSortField.FETCHED_AT: CVESource.fetched_at.expression,
+        CVESourceSortField.FIRST_FAILED_AT: CVESource.first_failed_at.expression,
+        CVESourceSortField.SOURCE: CVESource.source.collate(CODE_POINT_COLLATION),
+        CVESourceSortField.STATUS: CVESource.status.collate(CODE_POINT_COLLATION),
+    }
+    return keys[sort_by]
 
 
 async def list_cve_sources(
