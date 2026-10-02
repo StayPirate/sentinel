@@ -98,6 +98,7 @@ from app.models.user import User
 from app.models.user_role import UserRole
 from app.services import settings as settings_service
 from app.services.cvss import (
+    CVSS_VERSION_RANK,
     SUSE_PROVIDER_NAME,
     EligibilityResolution,
     ParsedCVSSVector,
@@ -1869,15 +1870,6 @@ async def delete_cvss_assessment(
 EXTERNAL_PROVIDER_MAX_LENGTH: Final = 100
 """The persisted `CVECVSSAssessment.provider_name` limit (`VARCHAR(100)`)."""
 
-_BATCH_VERSION_ORDER: Final = {
-    CVSSVersion.V4_0: 0,
-    CVSSVersion.V3_1: 1,
-    CVSSVersion.V3_0: 2,
-    CVSSVersion.V2_0: 3,
-}
-"""Canonical batch order: version `4.0`, `3.1`, `3.0`, `2.0` (the bounded
-CVSS list order of cvss-scoring.md, not the Severity Resolution Cascade)."""
-
 
 def is_valid_external_provider_name(provider: object) -> bool:
     """Whether `provider` may identify a trusted-external assessment.
@@ -1996,7 +1988,7 @@ def _validated_batch(
             raise ValueError("Duplicate canonical (provider, version) candidate.")
         keys.add(key)
         candidates.append(item)
-    candidates.sort(key=lambda c: (_BATCH_VERSION_ORDER[c.parsed.version], c.provider))
+    candidates.sort(key=lambda c: (CVSS_VERSION_RANK[c.parsed.version], c.provider))
     return candidates
 
 

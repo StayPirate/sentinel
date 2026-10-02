@@ -33,7 +33,8 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import StrEnum
-from typing import Protocol
+from types import MappingProxyType
+from typing import Final, Protocol
 
 from cvss import CVSS2, CVSS3, CVSS4
 
@@ -72,14 +73,20 @@ _MIN_SCORE = Decimal("0.0")
 _MAX_SCORE = Decimal("10.0")
 _SCORE_QUANTUM = Decimal("0.1")
 
-# Applicable version priority for the Severity Resolution Cascade,
-# highest first: 4.0 > 3.1 > 3.0 > 2.0.
-_VERSION_PRIORITY: Mapping[CVSSVersion, int] = {
-    CVSSVersion.V4_0: 4,
-    CVSSVersion.V3_1: 3,
-    CVSSVersion.V3_0: 2,
-    CVSSVersion.V2_0: 1,
-}
+CVSS_VERSION_PRECEDENCE: Final[tuple[CVSSVersion, ...]] = (
+    CVSSVersion.V4_0,
+    CVSSVersion.V3_1,
+    CVSSVersion.V3_0,
+    CVSSVersion.V2_0,
+)
+"""Every accepted version, highest precedence first (cvss-scoring.md,
+Version Precedence). The single version order of the Severity Resolution
+Cascade, the bounded CVSS list, and the trusted-external batch."""
+
+CVSS_VERSION_RANK: Final[Mapping[CVSSVersion, int]] = MappingProxyType(
+    {version: rank for rank, version in enumerate(CVSS_VERSION_PRECEDENCE)}
+)
+"""Ascending sort key of `CVSS_VERSION_PRECEDENCE` (`0` is the highest)."""
 
 
 # ---------------------------------------------------------------------------
@@ -525,7 +532,7 @@ def _validated_assessments(
     validated: list[tuple[CVSSAssessmentLike, CVSSVersion]] = []
     natural_keys: set[tuple[str, CVSSVersion]] = set()
     for assessment in assessments:
-        if assessment.cvss_version not in _VERSION_PRIORITY:
+        if assessment.cvss_version not in CVSS_VERSION_RANK:
             raise ValueError("Unsupported CVSS assessment version.")
         version = CVSSVersion(assessment.cvss_version)
         natural_key = (assessment.provider_name, version)
@@ -576,7 +583,7 @@ def resolve_severity_score(
         step = (0 if is_suse else 2) + (0 if is_default else 1)
         return (
             step,
-            -_VERSION_PRIORITY[version],
+            CVSS_VERSION_RANK[version],
             -assessment.score,
             assessment.provider_name,
         )

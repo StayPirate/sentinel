@@ -880,11 +880,11 @@ writing severity, propagating eligibility, reconciling, or creating audit.
 
 **Behavior**:
 
-1. Sort candidates by version `4.0`, `3.1`, `3.0`, `2.0`, then canonical
-   provider ascending by Unicode code point. The order is identical to the
-   bounded CVSS list's version/provider order in `cvss-scoring.md`; it is not the
-   multi-factor Severity Resolution Cascade. Database collation and input order
-   never control mutation or event order.
+1. Sort candidates by the Version Precedence of `cvss-scoring.md` (`4.0`,
+   `3.1`, `3.0`, `2.0`), then canonical provider ascending by Unicode code
+   point. The order is identical to the bounded CVSS list's version/provider
+   order; it is not the multi-factor Severity Resolution Cascade. Database
+   collation and input order never control mutation or event order.
 2. As the first persistent read, obtain the CVE with `FOR NO KEY UPDATE`, then
    obtain its unique associated Ticket with `FOR UPDATE` when one exists. When
    called by `upsert_cve()`, both are same-transaction locks already held;
