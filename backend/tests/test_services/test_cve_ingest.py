@@ -694,16 +694,17 @@ class TestEntryConflictKey:
     def test_absent_coalesced_field_equals_empty_string_in_the_key(
         self, field: str
     ) -> None:
-        """An absent value and `""` share one conflict key. Semantic content
-        is every persisted field outside the key, so otherwise-identical
-        entries collapse to the first occurrence, while differing content
-        under that shared key is contradictory."""
+        """An absent value and `""` share one conflict key, but they persist
+        different values, so otherwise-identical entries are contradictory
+        rather than collapsed: input order never chooses the stored form
+        (cve-service.md, Canonical Payload Duplicate Handling)."""
         absent = _entry(**_KEY_ONLY, **{field: None})
         empty = _entry(**_KEY_ONLY, **{field: ""})
 
-        assert _entries_of(absent, empty) == (absent,)
         with pytest.raises(ValueError, match="conflict key"):
-            _entries_of(absent, _entry(**_KEY_ONLY, **{field: ""}, status="affected"))
+            _entries_of(absent, empty)
+        with pytest.raises(ValueError, match="conflict key"):
+            _entries_of(empty, absent)
 
     @pytest.mark.parametrize(
         "field", ["version_type", "version", "version_end", "package_name"]

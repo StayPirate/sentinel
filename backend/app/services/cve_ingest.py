@@ -231,33 +231,18 @@ class NormalizedScopeOperation:
         return frozenset(affected_version_content(e) for e in self.entries or ())
 
 
-_AFFECTED_VERSION_KEY_FIELDS: Final = frozenset(
-    {"vendor", "product", "version_type", "version", "version_end", "package_name"}
-)
-
-
-def _affected_version_semantic_content(entry: AffectedVersionEntry) -> tuple[Any, ...]:
-    """The persisted fields outside the entry conflict key, which decide
-    whether two same-key entries are identical or contradictory."""
-    return tuple(
-        value
-        for name, value in zip(
-            AFFECTED_VERSION_FIELDS, affected_version_content(entry), strict=True
-        )
-        if name not in _AFFECTED_VERSION_KEY_FIELDS
-    )
-
-
 def _normalized_entries(
     entries: Sequence[AffectedVersionEntry],
 ) -> tuple[AffectedVersionEntry, ...]:
-    """Same-key entries with identical semantic content collapse to the first
-    occurrence; differing semantic content is contradictory."""
-    by_key: dict[tuple[Any, ...], tuple[Any, ...]] = {}
+    """Same-key entries collapse only when every persisted value is exactly
+    equal. Entries sharing a key only through the absent/empty-string
+    equivalence persist different values and are therefore contradictory,
+    so input order never chooses the stored form."""
+    by_key: dict[tuple[Any, ...], AffectedVersionContent] = {}
     unique: list[AffectedVersionEntry] = []
     for entry in entries:
         key = _affected_version_key(entry)
-        content = _affected_version_semantic_content(entry)
+        content = affected_version_content(entry)
         existing = by_key.get(key)
         if existing is None:
             by_key[key] = content
