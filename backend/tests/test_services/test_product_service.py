@@ -292,7 +292,8 @@ class TestLifecycleExpressionFiltering:
 class TestProductServiceModuleBoundary:
     def test_imports_no_other_service_module(self) -> None:
         """The Product query service may be used by `package_service` and
-        other query consumers without a dependency cycle."""
+        other query consumers without a dependency cycle: its only service
+        import is the dependency-free `sql_patterns` leaf."""
         modules = imported_modules(
             APP_ROOT / "services" / "product_service.py", "app.services"
         )
@@ -300,6 +301,7 @@ class TestProductServiceModuleBoundary:
         assert {m for m in modules if m.startswith("app.")} == {
             "app.core.enums",
             "app.models.product",
+            "app.services.sql_patterns",
         }
 
     def test_expression_builder_is_synchronous(self) -> None:

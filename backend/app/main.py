@@ -20,6 +20,7 @@ from app.api.v1 import (
     cves,
     fetchers,
     identity_audit,
+    products,
     ticket_audit,
     ticket_packages,
     ticket_references,
@@ -161,3 +162,4 @@ app.include_router(tickets.router)
 app.include_router(ticket_packages.router)
 app.include_router(ticket_references.router)
 app.include_router(cves.router)
+app.include_router(products.router)

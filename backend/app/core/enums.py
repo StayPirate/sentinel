@@ -343,6 +343,37 @@ class CVESourceSortField(StrEnum):
     STATUS = "status"
 
 
+class ProductSortField(StrEnum):
+    """Sortable fields for the Product catalog list query.
+
+    Category B — classification (Python Enum only; never stored in the
+    database). See `docs/features/packages/product-catalog.md` (List
+    Products, Product Query Service): the four string fields sort in
+    Unicode code-point lexical order.
+    """
+
+    NAME = "name"
+    DISPLAY_NAME = "display_name"
+    VERSION = "version"
+    CPE = "cpe"
+    CATALOG_LAST_SEEN_AT = "catalog_last_seen_at"
+    CREATED_AT = "created_at"
+
+
+class CatalogPresence(StrEnum):
+    """Derived membership of a Product in the latest complete SMELT snapshot.
+
+    Category B — classification (Python Enum only; never stored in the
+    database — derived at read time from `Product.catalog_last_seen_at`
+    and `MAX(Product.catalog_last_seen_at)`). See
+    `docs/features/packages/product-catalog.md` (List Products, Product
+    Query Service).
+    """
+
+    CURRENT = "current"
+    HISTORICAL = "historical"
+
+
 class CveState(StrEnum):
     """CVE record state, defined by the CVE Program.
 
@@ -847,6 +878,25 @@ class LifecyclePhase(StrEnum):
     EXTENDED_SUPPORT = "extended_support"
     REACTIVE_SUPPORT = "reactive_support"
     EOL = "eol"
+
+
+class LifecyclePhaseFilter(StrEnum):
+    """Lifecycle filter values of the Product catalog list.
+
+    Category B — classification (Python Enum only; never stored in the
+    database). The five `LifecyclePhase` values plus the filter-only
+    `unavailable`, which selects Products whose Lifecycle Evaluator result
+    is `NULL`; `unavailable` is not a lifecycle phase and is never emitted
+    in a response. See `docs/features/packages/product-catalog.md` (List
+    Products, Product Query Service).
+    """
+
+    PRE_RELEASE = "pre_release"
+    GENERAL_SUPPORT = "general_support"
+    EXTENDED_SUPPORT = "extended_support"
+    REACTIVE_SUPPORT = "reactive_support"
+    EOL = "eol"
+    UNAVAILABLE = "unavailable"
 
 
 class IBSRequestState(StrEnum):
