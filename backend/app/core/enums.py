@@ -360,6 +360,23 @@ class ProductSortField(StrEnum):
     CREATED_AT = "created_at"
 
 
+class MaintainerWorkSortField(StrEnum):
+    """Sortable fields for the maintainer workbench global lists.
+
+    Category B — classification (Python Enum only; never stored in the
+    database). See `docs/features/packages/maintainer.md` (Shared
+    Global-List Query Contract) and `docs/features/packages/package-service.md`
+    (Maintainer workbench queries): `severity` uses the semantic rank,
+    `package` sorts `package_name` in Unicode code-point order independent
+    of database collation, and `submission_due_at` sorts by the track's
+    submission due date; unresolved severity and a null due date sort last.
+    """
+
+    SEVERITY = "severity"
+    PACKAGE = "package"
+    SUBMISSION_DUE_AT = "submission_due_at"
+
+
 class CatalogPresence(StrEnum):
     """Derived membership of a Product in the latest complete SMELT snapshot.
 

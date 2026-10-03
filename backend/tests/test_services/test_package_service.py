@@ -1483,6 +1483,10 @@ class TestPackageServiceModuleBoundary:
             "restore_ticket_package",
             "restore_ticket_package_track",
             "restore_ticket_package_product",
+            "list_maintainer_pending_work",
+            "list_maintainer_in_progress_work",
+            "list_maintainer_completed_work",
+            "get_maintainer_ticket_work",
         }
 
     def test_uses_no_private_ticket_mutations_helper(self) -> None:
