@@ -1384,9 +1384,9 @@ All other response fields (`codestream.url`, `product.id`,
 **Single authoritative representation**:
 
 The v2 endpoint aggregates results from both IBS channel records and
-Git/SLFO compose records. SMELT owns the selection of one authoritative
-representation for each Product, including the exclusion of channel
-records that only mirror a Product delivered through compose. Sentinel
+Git/SLFO compose records. Selecting one authoritative representation for
+each Product, including excluding channel records that only mirror a
+Product delivered through compose, is SMELT's responsibility. Sentinel
 applies no channel/compose deduplication and does not consume
 Product-definition provenance; every validated supported record is processed
 as returned.
@@ -1881,7 +1881,7 @@ added, all counts will be zero in the `created` fields.
 |--------|------|-----------|
 | 409 | `PACKAGE_ALREADY_EXCLUDED` | Package exists on this ticket but is soft-deleted — use the restore endpoint |
 | 422 | `PACKAGE_NOT_FOUND_IN_SMELT` | SMELT returned no results for the given package name |
-| 422 | `PACKAGE_TARGETS_UNRESOLVED` | SMELT returned tracks, but none of their targets resolved to a Product in Sentinel's current catalog snapshot |
+| 422 | `PACKAGE_TARGETS_UNRESOLVED` | SMELT returned tracks, but no target of a supported codestream resolved to a Product in Sentinel's current catalog snapshot, including when every codestream was skipped as unsupported or unclassified |
 | 503 | `PRODUCT_CATALOG_NOT_READY` | No complete SMELT Product catalog snapshot has committed yet |
 | 503 | `SMELT_UNAVAILABLE` | SMELT did not produce a valid successful response |
 

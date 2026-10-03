@@ -794,10 +794,11 @@ attribute it exposes.
   - `codestream.type` identifies the codestream maintenance process; the
     declared value `UNKNOWN` means SMELT could not classify the codestream.
     Target-level `product_definition.type` identifies how an individual
-    Product target was resolved and is not workflow authority.
-  - SMELT owns the selection of one authoritative representation per
-    Product, including the exclusion of channel records that only mirror a
-    Product delivered through compose. Sentinel does not deduplicate channel
+    Product target was resolved; it is not workflow authority and Sentinel
+    does not consume it.
+  - Selecting one authoritative representation per Product, including
+    excluding channel records that only mirror a Product delivered through
+    compose, is SMELT's responsibility. Sentinel does not deduplicate channel
     and compose representations.
   - Absence from one upstream catalog is not evidence that a Product is EOL,
     deleted, or ineligible. Catalog presence and lifecycle are independent.

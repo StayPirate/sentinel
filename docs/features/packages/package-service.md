@@ -1900,7 +1900,7 @@ Caught by endpoint handlers and mapped to HTTP responses:
 | `SmeltUnavailableError` | 503 | `SMELT_UNAVAILABLE` | SMELT transport fails after shared retries or SMELT does not produce a valid expected response |
 | `ProductCatalogNotReadyError` | 503 | `PRODUCT_CATALOG_NOT_READY` | No complete SMELT Product catalog snapshot has committed |
 | `PackageNotFoundInSmeltError` | 422 | `PACKAGE_NOT_FOUND_IN_SMELT` | SMELT returns zero tracks |
-| `PackageTargetsUnresolvedError` | 422 | `PACKAGE_TARGETS_UNRESOLVED` | SMELT returns tracks but no target resolves through the current Product catalog snapshot |
+| `PackageTargetsUnresolvedError` | 422 | `PACKAGE_TARGETS_UNRESOLVED` | SMELT returns tracks but no target of a supported codestream resolves through the current Product catalog snapshot, including when every codestream is skipped as unsupported or unclassified |
 | `TrackFixedStatusRestrictedError` | 403 | `AUTH_INSUFFICIENT_PERMISSION` | User-attributed caller uses the admin force marker inconsistently, or requests `FIXED` with only `manage_packages` while the locked-current Ticket has a CVE |
 
 † Shared exception — inherits from `ServiceError`, not from
