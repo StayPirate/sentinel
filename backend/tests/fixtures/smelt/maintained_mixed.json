@@ -1,0 +1,614 @@
+{
+  "status": "success",
+  "data": [
+    {
+      "codestream": {
+        "name": "SUSE:ALP:Source:Standard:1.0",
+        "url": "https://build.example.invalid/fictional/1",
+        "type": "SLE_15"
+      },
+      "binary_packages": [
+        {
+          "name": "amazon-dracut-config",
+          "source_package_name": "amazon-dracut-config",
+          "support_status": "L3",
+          "divergence_by_product_id": {
+            "2697": {
+              "is_support_status_divergent": false,
+              "support_statuses_observed": [
+                "L3"
+              ],
+              "is_architecture_divergent": false,
+              "architectures_observed": [
+                "aarch64",
+                "s390x",
+                "x86_64"
+              ],
+              "architectures_missing": []
+            }
+          }
+        }
+      ],
+      "targets": [
+        {
+          "product": {
+            "id": 2697,
+            "friendly_name": "SUSE Linux Micro 6.0",
+            "cpe": "cpe:/o:suse:sl-micro:6.0",
+            "support_status": "General Support"
+          },
+          "repository": "SUSE:Products:SL-Micro:6.0",
+          "product_definition": {
+            "name": "SL-Micro_6.0",
+            "url": "https://build.example.invalid/fictional/2",
+            "type": "channel"
+          }
+        }
+      ],
+      "support_status": "General Support"
+    },
+    {
+      "codestream": {
+        "name": "SUSE:ALP:Source:Standard:Core:1.0",
+        "url": "https://build.example.invalid/fictional/3",
+        "type": "SLFO"
+      },
+      "binary_packages": [
+        {
+          "name": "amazon-dracut-config",
+          "source_package_name": "amazon-dracut-config",
+          "support_status": "L3",
+          "divergence_by_product_id": {
+            "2697": {
+              "is_support_status_divergent": false,
+              "support_statuses_observed": [
+                "L3"
+              ],
+              "is_architecture_divergent": false,
+              "architectures_observed": [
+                "aarch64",
+                "ppc64le",
+                "s390x",
+                "x86_64"
+              ],
+              "architectures_missing": []
+            }
+          }
+        }
+      ],
+      "targets": [
+        {
+          "product": {
+            "id": 2697,
+            "friendly_name": "SUSE Linux Micro 6.0",
+            "cpe": "cpe:/o:suse:sl-micro:6.0",
+            "support_status": "General Support"
+          },
+          "repository": "SUSE:Products:SL-Micro:6.0",
+          "product_definition": {
+            "name": "sle_micro",
+            "url": "https://build.example.invalid/fictional/4",
+            "type": "compose"
+          }
+        }
+      ],
+      "support_status": "General Support"
+    },
+    {
+      "codestream": {
+        "name": "SUSE:SLE-15-SP3:Update",
+        "url": "https://build.example.invalid/fictional/5",
+        "type": "SLE_15"
+      },
+      "binary_packages": [
+        {
+          "name": "amazon-dracut-config",
+          "source_package_name": "amazon-dracut-config",
+          "support_status": "L3",
+          "divergence_by_product_id": {
+            "754": {
+              "is_support_status_divergent": false,
+              "support_statuses_observed": [
+                "L3"
+              ],
+              "is_architecture_divergent": false,
+              "architectures_observed": [
+                "aarch64",
+                "ppc64le",
+                "s390x",
+                "x86_64"
+              ],
+              "architectures_missing": []
+            },
+            "784": {
+              "is_support_status_divergent": false,
+              "support_statuses_observed": [
+                "L3"
+              ],
+              "is_architecture_divergent": false,
+              "architectures_observed": [
+                "aarch64",
+                "s390x",
+                "x86_64"
+              ],
+              "architectures_missing": []
+            },
+            "785": {
+              "is_support_status_divergent": false,
+              "support_statuses_observed": [
+                "L3"
+              ],
+              "is_architecture_divergent": false,
+              "architectures_observed": [
+                "aarch64",
+                "s390x",
+                "x86_64"
+              ],
+              "architectures_missing": []
+            },
+            "806": {
+              "is_support_status_divergent": false,
+              "support_statuses_observed": [
+                "L3"
+              ],
+              "is_architecture_divergent": false,
+              "architectures_observed": [
+                "aarch64",
+                "ppc64le",
+                "s390x",
+                "x86_64"
+              ],
+              "architectures_missing": []
+            },
+            "924": {
+              "is_support_status_divergent": false,
+              "support_statuses_observed": [
+                "L3"
+              ],
+              "is_architecture_divergent": false,
+              "architectures_observed": [
+                "aarch64",
+                "s390x",
+                "x86_64"
+              ],
+              "architectures_missing": []
+            },
+            "925": {
+              "is_support_status_divergent": false,
+              "support_statuses_observed": [
+                "L3"
+              ],
+              "is_architecture_divergent": false,
+              "architectures_observed": [
+                "aarch64",
+                "s390x",
+                "x86_64"
+              ],
+              "architectures_missing": []
+            },
+            "1256": {
+              "is_support_status_divergent": false,
+              "support_statuses_observed": [
+                "L3"
+              ],
+              "is_architecture_divergent": false,
+              "architectures_observed": [
+                "aarch64",
+                "ppc64le",
+                "s390x",
+                "x86_64"
+              ],
+              "architectures_missing": []
+            },
+            "1272": {
+              "is_support_status_divergent": false,
+              "support_statuses_observed": [
+                "L3"
+              ],
+              "is_architecture_divergent": false,
+              "architectures_observed": [
+                "aarch64",
+                "ppc64le",
+                "s390x",
+                "x86_64"
+              ],
+              "architectures_missing": []
+            },
+            "2282": {
+              "is_support_status_divergent": false,
+              "support_statuses_observed": [
+                "L3"
+              ],
+              "is_architecture_divergent": false,
+              "architectures_observed": [
+                "aarch64",
+                "ppc64le",
+                "s390x",
+                "x86_64"
+              ],
+              "architectures_missing": []
+            }
+          }
+        }
+      ],
+      "targets": [
+        {
+          "product": {
+            "id": 754,
+            "friendly_name": "Public Cloud Module 15-SP4",
+            "cpe": "cpe:/o:suse:sle-module-public-cloud:15:sp4",
+            "support_status": "LTSS"
+          },
+          "repository": "SUSE:Updates:SLE-Module-Public-Cloud:15-SP4",
+          "product_definition": {
+            "name": "SLE-Module-Public-Cloud_15-SP4",
+            "url": "https://build.example.invalid/fictional/6",
+            "type": "channel"
+          }
+        },
+        {
+          "product": {
+            "id": 806,
+            "friendly_name": "Public Cloud Module 15-SP5",
+            "cpe": "cpe:/o:suse:sle-module-public-cloud:15:sp5",
+            "support_status": "LTSS"
+          },
+          "repository": "SUSE:Updates:SLE-Module-Public-Cloud:15-SP5",
+          "product_definition": {
+            "name": "SLE-Module-Public-Cloud_15-SP5",
+            "url": "https://build.example.invalid/fictional/7",
+            "type": "channel"
+          }
+        },
+        {
+          "product": {
+            "id": 1256,
+            "friendly_name": "Public Cloud Module 15-SP6",
+            "cpe": "cpe:/o:suse:sle-module-public-cloud:15:sp6",
+            "support_status": "End Of Life"
+          },
+          "repository": "SUSE:Updates:SLE-Module-Public-Cloud:15-SP6",
+          "product_definition": {
+            "name": "SLE-Module-Public-Cloud_15-SP6",
+            "url": "https://build.example.invalid/fictional/8",
+            "type": "channel"
+          }
+        },
+        {
+          "product": {
+            "id": 2282,
+            "friendly_name": "Public Cloud Module 15-SP7",
+            "cpe": "cpe:/o:suse:sle-module-public-cloud:15:sp7",
+            "support_status": "General Support"
+          },
+          "repository": "SUSE:Updates:SLE-Module-Public-Cloud:15-SP7",
+          "product_definition": {
+            "name": "SLE-Module-Public-Cloud_15-SP7",
+            "url": "https://build.example.invalid/fictional/9",
+            "type": "channel"
+          }
+        },
+        {
+          "product": {
+            "id": 785,
+            "friendly_name": "SUSE Linux Enterprise Micro 5.3",
+            "cpe": "cpe:/o:suse:sle-micro:5.3",
+            "support_status": "General Support"
+          },
+          "repository": "SUSE:Updates:SLE-Micro:5.3",
+          "product_definition": {
+            "name": "SLE-Micro_5.3",
+            "url": "https://build.example.invalid/fictional/10",
+            "type": "channel"
+          }
+        },
+        {
+          "product": {
+            "id": 925,
+            "friendly_name": "SUSE Linux Enterprise Micro 5.4",
+            "cpe": "cpe:/o:suse:sle-micro:5.4",
+            "support_status": "General Support"
+          },
+          "repository": "SUSE:Updates:SLE-Micro:5.4",
+          "product_definition": {
+            "name": "SLE-Micro_5.4",
+            "url": "https://build.example.invalid/fictional/11",
+            "type": "channel"
+          }
+        },
+        {
+          "product": {
+            "id": 1272,
+            "friendly_name": "SUSE Linux Enterprise Micro 5.5",
+            "cpe": "cpe:/o:suse:sle-micro:5.5",
+            "support_status": "General Support"
+          },
+          "repository": "SUSE:Updates:SLE-Micro:5.5",
+          "product_definition": {
+            "name": "SLE-Micro_5.5",
+            "url": "https://build.example.invalid/fictional/12",
+            "type": "channel"
+          }
+        },
+        {
+          "product": {
+            "id": 784,
+            "friendly_name": "SUSE Linux Enterprise Micro for Rancher 5.3",
+            "cpe": "cpe:/o:suse:sle-micro-rancher:5.3",
+            "support_status": "Undefined"
+          },
+          "repository": "SUSE:Updates:SLE-Micro:5.3",
+          "product_definition": {
+            "name": "SLE-Micro_5.3",
+            "url": "https://build.example.invalid/fictional/13",
+            "type": "channel"
+          }
+        },
+        {
+          "product": {
+            "id": 924,
+            "friendly_name": "SUSE Linux Enterprise Micro for Rancher 5.4",
+            "cpe": "cpe:/o:suse:sle-micro-rancher:5.4",
+            "support_status": "Missing"
+          },
+          "repository": "SUSE:Updates:SLE-Micro:5.4",
+          "product_definition": {
+            "name": "SLE-Micro_5.4",
+            "url": "https://build.example.invalid/fictional/14",
+            "type": "channel"
+          }
+        }
+      ],
+      "support_status": "LTSS"
+    },
+    {
+      "codestream": {
+        "name": "SUSE:SLFO:1.1",
+        "url": "https://build.example.invalid/fictional/15",
+        "type": "SLFO"
+      },
+      "binary_packages": [
+        {
+          "name": "amazon-dracut-config",
+          "source_package_name": "amazon-dracut-config",
+          "support_status": "L3",
+          "divergence_by_product_id": {
+            "2698": {
+              "is_support_status_divergent": false,
+              "support_statuses_observed": [
+                "L3"
+              ],
+              "is_architecture_divergent": false,
+              "architectures_observed": [
+                "aarch64",
+                "ppc64le",
+                "s390x",
+                "x86_64"
+              ],
+              "architectures_missing": []
+            }
+          }
+        }
+      ],
+      "targets": [
+        {
+          "product": {
+            "id": 2698,
+            "friendly_name": "SUSE Linux Micro 6.1",
+            "cpe": "cpe:/o:suse:sl-micro:6.1",
+            "support_status": "General Support"
+          },
+          "repository": "SUSE:Products:SL-Micro:6.1",
+          "product_definition": {
+            "name": "sle_micro",
+            "url": "https://build.example.invalid/fictional/16",
+            "type": "compose"
+          }
+        }
+      ],
+      "support_status": "General Support"
+    },
+    {
+      "codestream": {
+        "name": "SUSE:SLFO:1.2",
+        "url": "https://build.example.invalid/fictional/17",
+        "type": "SLFO"
+      },
+      "binary_packages": [
+        {
+          "name": "amazon-dracut-config",
+          "source_package_name": "amazon-dracut-config",
+          "support_status": "L3",
+          "divergence_by_product_id": {
+            "3315": {
+              "is_support_status_divergent": false,
+              "support_statuses_observed": [
+                "L3"
+              ],
+              "is_architecture_divergent": false,
+              "architectures_observed": [
+                "ppc64le",
+                "x86_64"
+              ],
+              "architectures_missing": []
+            },
+            "3779": {
+              "is_support_status_divergent": false,
+              "support_statuses_observed": [
+                "L3"
+              ],
+              "is_architecture_divergent": false,
+              "architectures_observed": [
+                "aarch64",
+                "ppc64le",
+                "s390x",
+                "x86_64"
+              ],
+              "architectures_missing": []
+            },
+            "4396": {
+              "is_support_status_divergent": false,
+              "support_statuses_observed": [
+                "UNSUPPORTED"
+              ],
+              "is_architecture_divergent": false,
+              "architectures_observed": [
+                "aarch64",
+                "ppc64le",
+                "s390x",
+                "x86_64"
+              ],
+              "architectures_missing": []
+            }
+          }
+        }
+      ],
+      "targets": [
+        {
+          "product": {
+            "id": 4396,
+            "friendly_name": "SUSE Linux Enterprise Server - BCI 16.0",
+            "cpe": "cpe:/o:suse:sle-bci:16:16.0",
+            "support_status": "Missing"
+          },
+          "repository": "SUSE:Products:SLE-BCI:16.0",
+          "product_definition": {
+            "name": "bci",
+            "url": "https://build.example.invalid/fictional/18",
+            "type": "compose"
+          }
+        },
+        {
+          "product": {
+            "id": 3779,
+            "friendly_name": "SUSE Linux Enterprise Server 16.0",
+            "cpe": "cpe:/o:suse:sles:16:16.0:server",
+            "support_status": "General Support"
+          },
+          "repository": "SUSE:Products:SLE-Product-SLES:16.0",
+          "product_definition": {
+            "name": "SLE-Product-SLES_16.0",
+            "url": "https://build.example.invalid/fictional/19",
+            "type": "channel"
+          }
+        },
+        {
+          "product": {
+            "id": 3315,
+            "friendly_name": "SUSE Linux Enterprise Server for SAP applications 16.0",
+            "cpe": "cpe:/o:suse:sles:16:16.0:server-sap",
+            "support_status": "General Support"
+          },
+          "repository": "SUSE:Products:SLE-Product-SLES_SAP:16.0",
+          "product_definition": {
+            "name": "sles_sap",
+            "url": "https://build.example.invalid/fictional/20",
+            "type": "compose"
+          }
+        }
+      ],
+      "support_status": "General Support"
+    },
+    {
+      "codestream": {
+        "name": "SUSE:SLFO:1.3",
+        "url": "https://build.example.invalid/fictional/21",
+        "type": "SLE_15"
+      },
+      "binary_packages": [
+        {
+          "name": "amazon-dracut-config",
+          "source_package_name": "amazon-dracut-config",
+          "support_status": "L3",
+          "divergence_by_product_id": {
+            "3901": {
+              "is_support_status_divergent": false,
+              "support_statuses_observed": [
+                "L3"
+              ],
+              "is_architecture_divergent": false,
+              "architectures_observed": [
+                "aarch64",
+                "ppc64le",
+                "s390x",
+                "x86_64"
+              ],
+              "architectures_missing": []
+            },
+            "3902": {
+              "is_support_status_divergent": false,
+              "support_statuses_observed": [
+                "L3"
+              ],
+              "is_architecture_divergent": false,
+              "architectures_observed": [
+                "ppc64le",
+                "x86_64"
+              ],
+              "architectures_missing": []
+            },
+            "4397": {
+              "is_support_status_divergent": false,
+              "support_statuses_observed": [
+                "UNSUPPORTED"
+              ],
+              "is_architecture_divergent": false,
+              "architectures_observed": [
+                "aarch64",
+                "ppc64le",
+                "s390x",
+                "x86_64"
+              ],
+              "architectures_missing": []
+            }
+          }
+        }
+      ],
+      "targets": [
+        {
+          "product": {
+            "id": 4397,
+            "friendly_name": "SUSE Linux Enterprise Server - BCI 16.1",
+            "cpe": "cpe:/o:suse:sle-bci:16:16.1",
+            "support_status": "Missing"
+          },
+          "repository": "SUSE:Products:SLE-BCI:16.1",
+          "product_definition": {
+            "name": "bci",
+            "url": "https://build.example.invalid/fictional/22",
+            "type": "compose"
+          }
+        },
+        {
+          "product": {
+            "id": 3901,
+            "friendly_name": "SUSE Linux Enterprise Server 16.1",
+            "cpe": "cpe:/o:suse:sles:16:16.1:server",
+            "support_status": "General Support"
+          },
+          "repository": "SUSE:Products:SLE-Product-SLES:16.1",
+          "product_definition": {
+            "name": "SLE-Product-SLES_16.1",
+            "url": "https://build.example.invalid/fictional/23",
+            "type": "channel"
+          }
+        },
+        {
+          "product": {
+            "id": 3902,
+            "friendly_name": "SUSE Linux Enterprise Server for SAP Applications 16.1",
+            "cpe": "cpe:/o:suse:sles:16:16.1:server-sap",
+            "support_status": "General Support"
+          },
+          "repository": "SUSE:Products:SLE-Product-SLES_SAP:16.1",
+          "product_definition": {
+            "name": "sles_sap",
+            "url": "https://build.example.invalid/fictional/24",
+            "type": "compose"
+          }
+        }
+      ],
+      "support_status": "General Support"
+    }
+  ]
+}
