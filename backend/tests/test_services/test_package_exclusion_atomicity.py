@@ -36,8 +36,10 @@ only what needs independent sessions:
 - the acting-User `FOR SHARE` lock preceding the Ticket lock.
 
 The public-add and internal re-resolution races of Concurrency Control are
-out of scope (the orchestration operations are not implemented by this
-change).
+covered at the `add_package_records()` level by
+`tests/test_services/test_add_package_records_atomicity.py`; their
+composition with the external I/O of `add_package_to_ticket()` remains for
+that function.
 
 Every race serializes a winner that keeps its locks in an open transaction
 and a waiter proven blocked (`assert_lock_wait`) on the Ticket lock, whose

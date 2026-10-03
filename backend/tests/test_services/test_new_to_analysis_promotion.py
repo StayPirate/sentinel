@@ -10,7 +10,9 @@ Architectural Invariant). The paths are `assign_ticket()` (explicit
 assignment) and every existing consumer mutation that reaches
 `auto_assign_actor()`, including the six package-tree exclusion and
 restoration operations (package-service.md, Exclusion and restoration
-operations, step 7). For the manual-zone entries `ignore_ticket()` and
+operations, step 7) and a user-attributed, record-creating
+`add_package_records()` call (package-service.md, `add_package_records()`
+step 9). For the manual-zone entries `ignore_ticket()` and
 `mark_as_duplicate()`, the acting-user entry transition (`Analysis ->
 Ignored` or `Analysis -> Duplicated`) follows the promotion (tickets.md,
 Auto-Assignment on Unassigned Tickets), so the promotion is the only
@@ -18,8 +20,9 @@ system `status_change` and precedes that entry transition.
 
 This module is a thin guard over the path list only: every other property
 of each path (complete event sequences, reconciliation, rollback, races)
-is proven in the path's owning module. `add_package_to_ticket()` coverage
-is deferred to M3.3; the function does not exist yet.
+is proven in the path's owning module. Package addition is covered here at
+the `add_package_records()` level; the `add_package_to_ticket()` path is
+deferred to M3.4, since that function does not exist yet.
 
 Expected values are transcribed from the specifications, never computed
 with the module under test.
@@ -53,6 +56,8 @@ from app.services.ticket_service import (
 from app.services.ticket_visibility import TicketCaller
 from tests.support.cvss_chain import DEFAULT_VERSION
 from tests.support.package_exclusion import Direction, Level, change, gate_world
+from tests.support.package_records import add_records, catalog_product
+from tests.support.package_records import target as resolved_track
 from tests.support.product_eligibility import only_occurrence
 from tests.support.suse_cvss import V31_CRITICAL, delete_assessment, upsert
 from tests.support.ticket_mutations import (
@@ -89,6 +94,7 @@ PATHS = [
     "restore_ticket_package",
     "restore_ticket_package_track",
     "restore_ticket_package_product",
+    "add_package_records",
 ]
 
 MARKER_PATHS = {
@@ -280,6 +286,22 @@ async def test_assignment_of_a_new_ticket_is_followed_by_one_promotion(
                 other=PackageStatus.ANALYSIS,
             )
             await change(db_session, level, direction, occurrence, actor)
+        case "add_package_records":
+            # The same CVE-less Ticket without a resolved severity: the new
+            # `analysis` track leaves the promoted Ticket in `Analysis`, so
+            # `package_added` is followed by no gate `status_change`.
+            await system_setting_factory(
+                key="default_cvss_version", value=DEFAULT_VERSION
+            )
+            ticket = await ticket_factory(status=TicketStatus.NEW.value)
+            product = await catalog_product(db_session)
+            await add_records(
+                db_session,
+                ticket.id,
+                "fictional-libexample",
+                [resolved_track("Fictional:Product:15-SP7:Update", product)],
+                actor=actor,
+            )
         case _:
             raise AssertionError(path)
 

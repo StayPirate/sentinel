@@ -50,6 +50,7 @@ _AUDIT_WRITE_SURFACE = frozenset(
         "CVE_REJECTED_COMMENT",
         "CVE_SOURCE_AUDIT_LABELS",
         "MANUAL_TICKET_CREATED_COMMENT",
+        "PACKAGE_ADDED_AUTOMATIC_COMMENTS",
     }
 )
 # Service modules that write Ticket audit events, including the

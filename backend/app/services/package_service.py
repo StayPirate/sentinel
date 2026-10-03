@@ -20,7 +20,9 @@ cross-Ticket package search (`search_packages()`), and the four
 maintainer workbench queries (`list_maintainer_pending_work()`,
 `list_maintainer_in_progress_work()`, `list_maintainer_completed_work()`,
 `get_maintainer_ticket_work()`, built by the leaf module
-`app.services.packages.maintainer_workbench`); the remaining mutation and
+`app.services.packages.maintainer_workbench`), and the package-record
+creation boundary `add_package_records()` with its additive maintainer
+association; the remaining mutation and
 orchestration operations are added by their owning work items. This module
 never imports `ticket_service`; it consumes the `ticket_mutations`
 primitives, which never import it back.
@@ -52,6 +54,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from enum import Enum, StrEnum
@@ -94,8 +97,10 @@ from app.models.cve_cvss_assessment import CVECVSSAssessment
 from app.models.product import Product
 from app.models.ticket import Ticket
 from app.models.ticket_package import TicketPackage
+from app.models.ticket_package_maintainer import TicketPackageMaintainer
 from app.models.ticket_package_product import TicketPackageProduct
 from app.models.ticket_package_track import TicketPackageTrack
+from app.models.user import User
 from app.services import settings as settings_service
 from app.services.cvss import EligibilityResolution, resolve_eligibility_score
 from app.services.package_actionability import (
@@ -119,7 +124,10 @@ from app.services.packages.maintainer_workbench import (
 from app.services.product_eligibility import evaluate_product_eligibility
 from app.services.product_service import lifecycle_phase_expression
 from app.services.sql_patterns import LIKE_ESCAPE, escape_like
-from app.services.ticket_audit_log import TicketAuditLog
+from app.services.ticket_audit_log import (
+    PACKAGE_ADDED_AUTOMATIC_COMMENTS,
+    TicketAuditLog,
+)
 from app.services.ticket_deadline_expressions import active_release_request_exists
 from app.services.ticket_deadlines import (
     DueDates,
@@ -1425,7 +1433,9 @@ class PackageAlreadyExcludedError(PackageServiceError):
     """The targeted package-tree record is already directly excluded.
 
     Raised by `soft_delete_ticket_package[_track|_product]()` when the
-    locked target's own `deleted_at` marker is already set. Maps to `409
+    locked target's own `deleted_at` marker is already set, and by
+    `add_package_records()` outside re-resolution mode when the existing
+    package occurrence is directly excluded. Maps to `409
     PACKAGE_ALREADY_EXCLUDED`.
     """
 
@@ -2446,6 +2456,452 @@ async def reconcile_lifecycle_actionability_for_ticket(
         changed=current is not previous,
         skipped=False,
     )
+
+
+# ---------------------------------------------------------------------------
+# Package-record creation (package-service.md, `add_package_records()`;
+# package-maintainership.md, Acquisition Workflow > Locked mutation)
+# ---------------------------------------------------------------------------
+
+PackageAddedComment = Literal[
+    "CVE package resolution", "Product catalog backfill", "Ticket convergence"
+]
+"""Closed system context recorded as the `package_added` comment."""
+
+_ACTIVE_STATUSES: Final = frozenset(
+    {TicketStatus.NEW, TicketStatus.ANALYSIS, TicketStatus.ANALYZED}
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedTrackData:
+    """One fully validated and locally resolved track of a package.
+
+    `reference` is the unique SMELT codestream name, already validated
+    against the persisted track-reference constraints; `workflow_type` is
+    already mapped from the authoritative maintenance process type;
+    `catalog_product_ids` are the distinct internal IDs of existing local
+    Products resolved by exact CPE under this codestream (a tuple, so a
+    duplicate remains a detectable caller-contract violation).
+    """
+
+    reference: str
+    workflow_type: WorkflowType
+    catalog_product_ids: tuple[uuid.UUID, ...]
+
+
+class PackageRecordsOutcome(StrEnum):
+    """Semantic outcome of `add_package_records()`. Never persisted."""
+
+    PACKAGE_TREE_CHANGED = "package_tree_changed"
+    PACKAGE_TREE_NO_OP = "package_tree_no_op"
+    MAINTAINER_ONLY = "maintainer_only"
+    ACTIVE_TICKET_ONLY_SKIPPED = "active_ticket_only_skipped"
+
+
+@dataclass(frozen=True, slots=True)
+class CreatedTrack:
+    """A track newly created by one invocation, with its persisted
+    `workflow_type` (the post-commit IBS catch-up signal)."""
+
+    track_id: uuid.UUID
+    reference: str
+    workflow_type: WorkflowType
+
+
+@dataclass(frozen=True, slots=True)
+class PackageRecordsResult:
+    """Result of `add_package_records()`, derived from state under the lock.
+
+    The counts cover the supplied tracks and Product IDs: a skip is an
+    existing record (active or soft-deleted), including one committed by a
+    concurrent winner. Maintainer additions change no count and add no
+    field. An `active_ticket_only` skip examines nothing and has zero
+    counts. `created_tracks` lists only the newly created tracks.
+    """
+
+    outcome: PackageRecordsOutcome
+    tracks_created: int
+    tracks_skipped: int
+    products_created: int
+    products_skipped: int
+    created_tracks: tuple[CreatedTrack, ...]
+
+
+@dataclass(slots=True)
+class _TrackPlan:
+    """One supplied track resolved against the locked package tree."""
+
+    data: ResolvedTrackData
+    existing_track_id: uuid.UUID | None
+    missing_product_ids: list[uuid.UUID]
+
+
+def _validate_package_records_input(
+    acting_user_id: uuid.UUID | None,
+    caller: TicketCaller | SystemInvocation,
+    tracks: Sequence[ResolvedTrackData],
+    audit_comment: str | None,
+) -> None:
+    """Reject a caller-contract violation before any database operation."""
+    is_system = _resolve_actor(acting_user_id, caller)
+    if not tracks:
+        raise ValueError("tracks must not be empty.")
+    references: set[str] = set()
+    for track in tracks:
+        if not track.catalog_product_ids:
+            raise ValueError("a track must resolve at least one Product.")
+        if len(set(track.catalog_product_ids)) != len(track.catalog_product_ids):
+            raise ValueError("a track's catalog Product IDs must be distinct.")
+        if track.reference in references:
+            raise ValueError("track references must be distinct.")
+        references.add(track.reference)
+    if audit_comment is not None and (
+        audit_comment not in PACKAGE_ADDED_AUTOMATIC_COMMENTS
+    ):
+        raise ValueError(f"unsupported package_added comment: {audit_comment!r}")
+    if is_system and audit_comment is None:
+        raise ValueError("a system invocation requires its canonical comment.")
+    if not is_system and audit_comment is not None:
+        raise ValueError("a user-attributed invocation has no audit comment.")
+
+
+async def add_package_records(
+    db: AsyncSession,
+    *,
+    ticket_id: uuid.UUID,
+    package_name: str,
+    tracks: Sequence[ResolvedTrackData],
+    maintainer_emails: AbstractSet[str],
+    acting_user_id: uuid.UUID | None,
+    caller: TicketCaller | SystemInvocation,
+    audit_comment: PackageAddedComment | None = None,
+    active_ticket_only: bool = False,
+    allow_excluded_reresolution: bool = False,
+) -> PackageRecordsResult:
+    """Create the missing package-tree records and maintainer associations.
+
+    Category A mutation (package-service.md, `add_package_records()`,
+    Record Creation Logic, Concurrency Control; package-maintainership.md,
+    Acquisition Workflow > Locked mutation, Audit event; package-model.md,
+    Adding Packages to a Ticket). The locked boundary delegated to by
+    `add_package_to_ticket()` after all external I/O.
+
+    Q1: `tracks` are the fully validated, locally resolved targets and
+    `maintainer_emails` the validated, lowercase, globally deduplicated
+    individual emails (empty when none). A user-attributed call passes
+    the acting user's `acting_user_id`, the consumer `caller` identifying
+    it, and `audit_comment=None`; a system call passes
+    `acting_user_id=None`, `caller=SYSTEM_INVOCATION`, and its canonical
+    `audit_comment`. `active_ticket_only` skips an inactive locked Ticket;
+    `allow_excluded_reresolution` is the Ticket convergence mode.
+
+    Q2: the caller owns the transaction and has completed all external
+    I/O. Locks: a user-attributed call takes the acting User `FOR SHARE`
+    (`stabilize_acting_user()`) then the Ticket `FOR UPDATE`; a system
+    call takes only the Ticket lock. One UTC `evaluation_date` is captured
+    at entry.
+
+    Q3: (1) consumer locked-current accessibility; (2) an
+    `active_ticket_only` call on a Ticket that is not `New`, `Analysis`,
+    or `Analyzed` returns `active_ticket_only_skipped`; (3)
+    `ensure_ticket_operable()`; (4) the existing package occurrence is
+    reloaded under the lock and, outside re-resolution mode, a directly
+    excluded one raises `PackageAlreadyExcludedError`; (5) the missing
+    tracks, Product occurrences, and associations are determined under
+    the lock (matching Users: exact `User.email` in `maintainer_emails`
+    with `active` true, ordered by `User.id`, an unlocked observation);
+    (6) nothing missing returns `package_tree_no_op`; (7) when a
+    package-tree record is missing, `auto_assign_actor()`; (8) creates the
+    package, new tracks (`ANALYSIS`/`PENDING`), and missing Product
+    occurrences with creation eligibility from the shared evaluator
+    (current threshold, lifecycle phase on `evaluation_date`, and the
+    Ticket's Eligibility Score Resolution loaded once); existing records,
+    including soft-deleted ones, are skipped unchanged and no marker is
+    set or cleared; (9) inserts each missing association in ascending
+    `User.id` order with one system `package_maintainer_added`
+    (`new_value` the event-time username, `detail = {package}`); (10)
+    when the package tree changed, one `package_added` (acting user and
+    `NULL` comment, or system and `audit_comment`) and exactly one
+    `reconcile_ticket_status()` with `evaluation_date`; a maintainer-only
+    mutation assigns and reconciles nothing; (11) flushes. Never commits,
+    reads audit history, logs a personal identifier, or performs network,
+    Redis, or broker I/O; the only post-commit effect is a convergence
+    registration made by the delegated reconciliation.
+
+    Q4: returns the semantic outcome, the creation and skip counts, and
+    the newly created tracks with their persisted `workflow_type`.
+
+    Q5: idempotent: with unchanged inputs and state a repeat call is a
+    `package_tree_no_op` without any write or event. Same-Ticket calls
+    serialize on the Ticket lock and report a concurrent winner's rows as
+    skips.
+
+    Q6: raises `ValueError` before any database operation for an
+    inconsistent actor/context pairing, empty `tracks`, a track without
+    Products, duplicate Products within a track, a duplicate `reference`,
+    or an `audit_comment` outside the closed set or inconsistent with the
+    actor, and under the lock for a catalog Product that does not exist.
+    Raises `TicketNotFoundError` for a missing or (consumer) inaccessible
+    Ticket and `TicketNotMutableError` for a manual-zone Ticket before any
+    other decision, and `PackageAlreadyExcludedError` before any effect.
+    Settings, eligibility-resolution, database (including a unique
+    violation), audit, flush, and reconciliation exceptions propagate and
+    roll back the caller's complete transaction.
+    """
+    _validate_package_records_input(acting_user_id, caller, tracks, audit_comment)
+    evaluation_date = _utc_today()
+
+    if isinstance(caller, SystemInvocation):
+        acting_user = None
+        ticket = await _lock_system_ticket(db, ticket_id)
+    else:
+        assert acting_user_id is not None  # guaranteed by the validation
+        acting_user = await stabilize_acting_user(db, acting_user_id)
+        ticket = await lock_accessible_ticket(db, ticket_id, caller)
+
+    if active_ticket_only and ticket.status not in _ACTIVE_STATUSES:
+        return PackageRecordsResult(
+            outcome=PackageRecordsOutcome.ACTIVE_TICKET_ONLY_SKIPPED,
+            tracks_created=0,
+            tracks_skipped=0,
+            products_created=0,
+            products_skipped=0,
+            created_tracks=(),
+        )
+    ensure_ticket_operable(ticket)
+
+    package = (
+        await db.execute(
+            select(TicketPackage)
+            .where(
+                TicketPackage.ticket_id == ticket.id,
+                TicketPackage.package_name == package_name,
+            )
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+    if (
+        package is not None
+        and package.deleted_at is not None
+        and not allow_excluded_reresolution
+    ):
+        raise PackageAlreadyExcludedError()
+
+    existing_tracks: dict[str, uuid.UUID] = {}
+    existing_products: set[tuple[uuid.UUID, uuid.UUID]] = set()
+    existing_maintainers: set[uuid.UUID] = set()
+    if package is not None:
+        track_rows = await db.execute(
+            select(
+                TicketPackageTrack.id,
+                TicketPackageTrack.reference,
+                TicketPackageProduct.product_id,
+            )
+            .outerjoin(
+                TicketPackageProduct,
+                TicketPackageProduct.ticket_package_track_id == TicketPackageTrack.id,
+            )
+            .where(
+                TicketPackageTrack.ticket_package_id == package.id,
+                TicketPackageTrack.reference.in_([t.reference for t in tracks]),
+            )
+        )
+        for track_id, reference, product_id in track_rows:
+            existing_tracks[reference] = track_id
+            if product_id is not None:
+                existing_products.add((track_id, product_id))
+        existing_maintainers = set(
+            (
+                await db.execute(
+                    select(TicketPackageMaintainer.user_id).where(
+                        TicketPackageMaintainer.ticket_package_id == package.id
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    new_maintainers: list[tuple[uuid.UUID, str]] = []
+    if maintainer_emails:
+        matches = await db.execute(
+            select(User.id, User.username)
+            .where(User.email.in_(sorted(maintainer_emails)), User.active.is_(True))
+            .order_by(User.id)
+        )
+        new_maintainers = [
+            (user_id, username)
+            for user_id, username in matches
+            if user_id not in existing_maintainers
+        ]
+
+    plans: list[_TrackPlan] = []
+    tracks_skipped = 0
+    products_skipped = 0
+    for data in tracks:
+        existing_track_id = existing_tracks.get(data.reference)
+        if existing_track_id is None:
+            missing = list(data.catalog_product_ids)
+        else:
+            tracks_skipped += 1
+            missing = [
+                product_id
+                for product_id in data.catalog_product_ids
+                if (existing_track_id, product_id) not in existing_products
+            ]
+            products_skipped += len(data.catalog_product_ids) - len(missing)
+        plans.append(_TrackPlan(data, existing_track_id, missing))
+
+    tree_changed = package is None or any(
+        plan.existing_track_id is None or plan.missing_product_ids for plan in plans
+    )
+    if not tree_changed and not new_maintainers:
+        return PackageRecordsResult(
+            outcome=PackageRecordsOutcome.PACKAGE_TREE_NO_OP,
+            tracks_created=0,
+            tracks_skipped=tracks_skipped,
+            products_created=0,
+            products_skipped=products_skipped,
+            created_tracks=(),
+        )
+
+    created_tracks: list[CreatedTrack] = []
+    products_created = 0
+    if tree_changed:
+        await auto_assign_actor(ticket, acting_user, db)
+        if package is None:
+            package = TicketPackage(ticket_id=ticket.id, package_name=package_name)
+            db.add(package)
+            await db.flush()
+        created_tracks, products_created = await _create_package_tree(
+            db,
+            ticket=ticket,
+            package=package,
+            plans=plans,
+            evaluation_date=evaluation_date,
+        )
+
+    assert package is not None  # a maintainer-only outcome found the package
+    for user_id, username in new_maintainers:
+        db.add(TicketPackageMaintainer(ticket_package_id=package.id, user_id=user_id))
+        await TicketAuditLog.log_event(
+            db,
+            ticket_id=ticket.id,
+            event_type=TicketAuditEventType.PACKAGE_MAINTAINER_ADDED,
+            user_id=None,
+            new_value=username,
+            detail={"package": package.package_name},
+        )
+
+    if tree_changed:
+        await TicketAuditLog.log_event(
+            db,
+            ticket_id=ticket.id,
+            event_type=TicketAuditEventType.PACKAGE_ADDED,
+            user_id=acting_user_id,
+            new_value=package.package_name,
+            comment=audit_comment,
+        )
+        await reconcile_ticket_status(ticket, db, evaluation_date=evaluation_date)
+    await db.flush()
+    return PackageRecordsResult(
+        outcome=(
+            PackageRecordsOutcome.PACKAGE_TREE_CHANGED
+            if tree_changed
+            else PackageRecordsOutcome.MAINTAINER_ONLY
+        ),
+        tracks_created=len(created_tracks),
+        tracks_skipped=tracks_skipped,
+        products_created=products_created,
+        products_skipped=products_skipped,
+        created_tracks=tuple(created_tracks),
+    )
+
+
+async def _create_package_tree(
+    db: AsyncSession,
+    *,
+    ticket: Ticket,
+    package: TicketPackage,
+    plans: Sequence[_TrackPlan],
+    evaluation_date: date,
+) -> tuple[list[CreatedTrack], int]:
+    """Insert the planned new tracks and missing Product occurrences.
+
+    New tracks start at `ANALYSIS`/`PENDING`. Each new occurrence gets its
+    creation eligibility from the shared pure evaluator over the current
+    Product threshold, the lifecycle phase on `evaluation_date`, and the
+    Ticket's Eligibility Score Resolution, loaded once (package-service.md,
+    Record Creation Logic). Returns the created tracks and the number of
+    created occurrences. Raises `ValueError` for an unknown catalog
+    Product.
+    """
+    targets: list[tuple[_TrackPlan, TicketPackageTrack | None]] = []
+    for plan in plans:
+        track = None
+        if plan.existing_track_id is None:
+            track = TicketPackageTrack(
+                ticket_package_id=package.id,
+                workflow_type=plan.data.workflow_type.value,
+                reference=plan.data.reference,
+                status=PackageStatus.ANALYSIS.value,
+                delivery_status=DeliveryStatus.PENDING.value,
+            )
+            db.add(track)
+        targets.append((plan, track))
+    await db.flush()
+
+    created_tracks: list[CreatedTrack] = []
+    occurrences: list[tuple[uuid.UUID, uuid.UUID]] = []
+    for plan, track in targets:
+        if track is None:
+            assert plan.existing_track_id is not None
+            track_id = plan.existing_track_id
+        else:
+            track_id = track.id
+            created_tracks.append(
+                CreatedTrack(track.id, track.reference, plan.data.workflow_type)
+            )
+        occurrences.extend((track_id, p) for p in plan.missing_product_ids)
+
+    eligibility = await _current_eligibility_score(db, ticket)
+    product_ids = {product_id for _, product_id in occurrences}
+    inputs = {
+        row.id: row
+        for row in await db.execute(
+            select(
+                Product.id,
+                Product.cvss_threshold,
+                lifecycle_phase_expression(evaluation_date).label("lifecycle"),
+            ).where(Product.id.in_(product_ids))
+        )
+    }
+    for track_id, product_id in occurrences:
+        product = inputs.get(product_id)
+        if product is None:
+            raise ValueError("a resolved catalog Product does not exist.")
+        eligible = evaluate_product_eligibility(
+            is_eligible_override=False,
+            lifecycle_phase=(
+                LifecyclePhase(product.lifecycle)
+                if product.lifecycle is not None
+                else None
+            ),
+            cvss_threshold=product.cvss_threshold,
+            eligibility_score=eligibility,
+        ).automatic_eligible
+        assert eligible is not None  # no override on a new occurrence
+        db.add(
+            TicketPackageProduct(
+                ticket_package_track_id=track_id,
+                product_id=product_id,
+                eligible=eligible,
+                is_eligible_override=False,
+            )
+        )
+    await db.flush()
+    return created_tracks, len(occurrences)
 
 
 # ---------------------------------------------------------------------------
