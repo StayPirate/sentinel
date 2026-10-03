@@ -992,7 +992,7 @@ that abort the run:
 | Request timeout | `"AIMAAS request timed out"` |
 | Non-success HTTP response | `"AIMAAS returned HTTP {status_code}"` |
 | Invalid pagination or response schema | `"AIMAAS returned invalid Product lifecycle response"` |
-| Complete-response validation failure (duplicate `cpe`) | `"AIMAAS Product lifecycle validation failed"` |
+| Complete-response validation failure (duplicate non-empty `cpe`) | `"AIMAAS Product lifecycle validation failed"` |
 | Publication database failure | `"Failed to synchronize AIMAAS lifecycle dates"` |
 
 Logs identify the failed page or validation category without retaining full
@@ -1065,7 +1065,7 @@ that abort the run:
 | Non-success HTTP response | `"AIMAAS returned HTTP {status_code}"` |
 | Invalid Product-list pagination or response schema | `"AIMAAS returned invalid Product list response"` |
 | Invalid threshold-list pagination or response schema | `"AIMAAS returned invalid CVSS threshold response"` |
-| Complete-response validation failure (duplicate `id`/`cpe`/`product`, or out-of-range `threshold`) | `"AIMAAS CVSS threshold validation failed"` |
+| Complete-response validation failure (duplicate `id`, non-empty `cpe`, or `product`, or out-of-range `threshold`) | `"AIMAAS CVSS threshold validation failed"` |
 | Publication database failure | `"Failed to synchronize AIMAAS CVSS thresholds"` |
 
 A threshold whose AIMAAS Product ID cannot be resolved through the retrieved

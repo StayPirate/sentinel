@@ -138,10 +138,6 @@ class TestConsumedItemFields:
     def test_default_list_contains_no_deleted_entries(self) -> None:
         assert all(item["deleted"] is False for item in _all_items())
 
-    def test_ignored_fields_are_present_upstream(self) -> None:
-        for item in _all_items():
-            assert set(_IGNORED_FIELDS) <= set(item)
-
     def test_items_contain_only_consumed_and_ignored_fields(self) -> None:
         for item in _all_items():
             assert set(item) == {"cpe", *_DATE_FIELDS, *_IGNORED_FIELDS}
