@@ -132,8 +132,9 @@ The consumer validates and consumes only these payload fields:
 Whitespace-only values are invalid, and so is a value containing U+0000 under
 External String Admissibility (`docs/conventions.md`), because both values are
 exact-match query parameters. An invalid value makes the delivery malformed.
-Every other payload field is ignored without validation. In particular, `rev`, `requestid`, `srcmd5`, sender, user,
-comment, and file data are neither consumed nor persisted.
+Every other payload field is ignored without validation. In particular, `rev`,
+`requestid`, `srcmd5`, sender, user, comment, and file data are neither
+consumed nor persisted.
 
 `project` and `package` form a wake-up identity only. They do not prove a
 source revision or release. For a valid event, the handler:

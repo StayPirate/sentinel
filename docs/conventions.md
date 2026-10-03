@@ -1077,9 +1077,9 @@ contain U+0000:
   integration contract's existing invalid-data outcome applies at that
   contract's existing granularity, such as a complete response, snapshot,
   run, CVE item, candidate, or message. The rule adds no separate outcome.
-- The value is rejected, never stripped, replaced, or escaped, so a persisted
-  external value is always exactly the received value. This applies equally
-  to identifiers, match keys, and free text.
+- The value is rejected, never stripped, replaced, or escaped, so the rule
+  never silently alters a received value. This applies equally to
+  identifiers, match keys, and free text.
 - The check completes before the value reaches PostgreSQL. A database
   encoding error is never a documented outcome.
 - Values that never reach PostgreSQL, such as fields used only in log
@@ -1093,8 +1093,9 @@ contain U+0000:
 
 Each owning specification of a non-XML consumer references this rule at its
 validation contract and names the applicable outcome. Consumer-supplied API
-input is not an external source under this rule. The mandatory test scenario is defined in
-`docs/features/platform/testing-strategy.md` (External String Admissibility).
+input is not an external source under this rule. The mandatory test scenario
+is defined in `docs/features/platform/testing-strategy.md` (External String
+Admissibility).
 
 ### Runtime Version
 

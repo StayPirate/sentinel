@@ -330,7 +330,8 @@ Caller authority is exhaustive:
 
 An ingestion caller that supplies `SUSE` or any reserved equivalent is
 rejected before persistence. An external provider name containing U+0000 is
-likewise invalid under External String Admissibility (`docs/conventions.md`).
+invalid under External String Admissibility (`docs/conventions.md`); an
+ingestion candidate with such a provider is skipped as described below.
 Source-specific normalization of non-reserved provider names remains with each
 ingestion specification. System ingestion
 does not delete external assessments: if a source stops publishing an
