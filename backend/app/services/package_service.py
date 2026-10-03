@@ -15,10 +15,13 @@ explicit system invocation context, the locked semantic-locator loader
 at the package, track, and Product levels) with the mutations
 `set_track_status()`, `set_product_eligibility()`, and the six direct
 exclusion and restoration operations (`soft_delete_ticket_package[_track|
-_product]()`, `restore_ticket_package[_track|_product]()`), and the
-cross-Ticket package search (`search_packages()`); the remaining
-mutation, orchestration, and workbench operations are added by their
-owning work items. This module
+_product]()`, `restore_ticket_package[_track|_product]()`), the
+cross-Ticket package search (`search_packages()`), and the four
+maintainer workbench queries (`list_maintainer_pending_work()`,
+`list_maintainer_in_progress_work()`, `list_maintainer_completed_work()`,
+`get_maintainer_ticket_work()`, built by the leaf module
+`app.services.packages.maintainer_workbench`); the remaining mutation and
+orchestration operations are added by their owning work items. This module
 never imports `ticket_service`; it consumes the `ticket_mutations`
 primitives, which never import it back.
 
@@ -40,7 +43,9 @@ Search. `search_packages()` runs one SQL statement (a CTE chain: the
 visible, actionable, filtered package occurrences, their total, the
 requested page, then the page's actionable-track aggregate), so items,
 total, and `track_summary` derive from one PostgreSQL observation and one
-`evaluation_date`.
+`evaluation_date`. Each maintainer workbench query likewise runs one
+statement, so its rows and total, or its Ticket selection and three
+collections, come from one observation.
 """
 
 from __future__ import annotations
@@ -73,6 +78,7 @@ from sqlalchemy.orm.util import AliasedClass
 from app.core.enums import (
     DeliveryStatus,
     LifecyclePhase,
+    MaintainerWorkSortField,
     NonActionableReason,
     PackageSortField,
     PackageStatus,
@@ -100,6 +106,15 @@ from app.services.package_actionability import (
     product_non_actionable_reason,
     track_actionable_expression,
     track_non_actionable_reason,
+)
+from app.services.packages.maintainer_workbench import (
+    MaintainerTicketWork,
+    MaintainerWorkItem,
+    MaintainerWorkPage,
+    WorkbenchClassification,
+    global_list_statement,
+    item_from_row,
+    ticket_work_statement,
 )
 from app.services.product_eligibility import evaluate_product_eligibility
 from app.services.product_service import lifecycle_phase_expression
@@ -871,6 +886,260 @@ async def search_packages(
         total=rows[0].total,
         page=page,
         per_page=per_page,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Maintainer workbench queries (package-service.md, Query Operations >
+# Maintainer workbench queries; maintainer.md)
+# ---------------------------------------------------------------------------
+
+
+def _workbench_caller_user_id(
+    caller: TicketCaller, evaluation_instant: datetime
+) -> uuid.UUID:
+    """Validate the workbench caller contract and return the owner ID.
+
+    The workbench owner is the authenticated caller; an anonymous caller
+    and a naive evaluation instant are caller-contract violations.
+    """
+    if caller.user_id is None:
+        raise ValueError("The maintainer workbench requires an authenticated caller.")
+    if evaluation_instant.utcoffset() is None:
+        raise ValueError("evaluation_instant must be a timezone-aware datetime.")
+    return caller.user_id
+
+
+async def _list_maintainer_work(
+    db: AsyncSession,
+    classification: WorkbenchClassification,
+    *,
+    caller: TicketCaller,
+    evaluation_date: date,
+    evaluation_instant: datetime,
+    package: str | None,
+    sort_by: MaintainerWorkSortField,
+    sort_order: SortOrder,
+    page: int,
+    per_page: int,
+) -> MaintainerWorkPage:
+    caller_user_id = _workbench_caller_user_id(caller, evaluation_instant)
+    if page < 1:
+        raise ValueError("page must be at least 1")
+    if not 1 <= per_page <= MAX_PER_PAGE:
+        raise ValueError(f"per_page must be between 1 and {MAX_PER_PAGE}")
+    statement = global_list_statement(
+        classification,
+        caller=caller,
+        caller_user_id=caller_user_id,
+        evaluation_date=evaluation_date,
+        evaluation_instant=evaluation_instant,
+        package=package,
+        sort_by=sort_by,
+        sort_order=sort_order,
+        page=page,
+        per_page=per_page,
+    )
+    rows = (await db.execute(statement)).all()
+    return MaintainerWorkPage(
+        items=tuple(item_from_row(row) for row in rows if row.track_pk is not None),
+        total=rows[0].total,
+        page=page,
+        per_page=per_page,
+    )
+
+
+async def list_maintainer_pending_work(
+    db: AsyncSession,
+    *,
+    caller: TicketCaller,
+    evaluation_date: date,
+    evaluation_instant: datetime,
+    package: str | None = None,
+    sort_by: MaintainerWorkSortField = MaintainerWorkSortField.SEVERITY,
+    sort_order: SortOrder = SortOrder.DESC,
+    page: int = 1,
+    per_page: int = 20,
+) -> MaintainerWorkPage:
+    """List the caller's pending workbench tracks.
+
+    Category B read (package-service.md, Maintainer workbench queries;
+    maintainer.md, Pending, Shared Global-List Query Contract).
+
+    Q1: `caller` is the request-resolved authenticated caller: its
+    `user_id` is the workbench owner and its effective scope feeds the
+    canonical visibility predicate. `evaluation_date` is the one UTC date
+    of the response, for classification; `evaluation_instant` the one
+    timezone-aware instant from which it was derived, for the submission
+    milestone. `package` is an optional case-sensitive exact package
+    name; `page` is positive and `per_page` is 1-100.
+
+    Q3: in one SQL statement, and therefore one PostgreSQL observation,
+    selects one row per exact `TicketPackageTrack` whose Ticket is
+    visible to the caller, whose included parent package has a
+    maintainer association for the caller, and which is pending: Ticket
+    `Analysis` or `Analyzed`, actionable track, affectedness `AFFECTED`,
+    delivery `PENDING`, and at least one actionable Product with
+    persisted `eligible = true` (existence semantics, no fan-out). Applies
+    `package` with AND, orders by semantic severity, code-point package
+    name, or submission due date (`NULL` last in both directions) and
+    then the track UUID in the same direction, counts the candidates,
+    slices the page, and projects the ten item fields. Acquires no lock,
+    writes nothing, creates no event, performs no external or Redis I/O,
+    enqueues no task, and never commits or rolls back.
+
+    Q4: returns the page items, the total, and the echoed `page` and
+    `per_page`; an empty candidate set or a page beyond the last returns
+    no items with the correct total.
+
+    Q6: raises `ValueError` before any query for an anonymous caller, a
+    naive `evaluation_instant`, `page < 1`, or `per_page` outside 1-100.
+    Database exceptions propagate unchanged.
+    """
+    return await _list_maintainer_work(
+        db,
+        WorkbenchClassification.PENDING,
+        caller=caller,
+        evaluation_date=evaluation_date,
+        evaluation_instant=evaluation_instant,
+        package=package,
+        sort_by=sort_by,
+        sort_order=sort_order,
+        page=page,
+        per_page=per_page,
+    )
+
+
+async def list_maintainer_in_progress_work(
+    db: AsyncSession,
+    *,
+    caller: TicketCaller,
+    evaluation_date: date,
+    evaluation_instant: datetime,
+    package: str | None = None,
+    sort_by: MaintainerWorkSortField = MaintainerWorkSortField.SEVERITY,
+    sort_order: SortOrder = SortOrder.DESC,
+    page: int = 1,
+    per_page: int = 20,
+) -> MaintainerWorkPage:
+    """List the caller's in-progress workbench tracks.
+
+    Identical to `list_maintainer_pending_work()` except for the
+    classification (maintainer.md, In Progress): Ticket `Analysis` or
+    `Analyzed`, actionable track, affectedness `AFFECTED` or `FIXED`,
+    delivery `IN_PROGRESS`, and at least one actionable Product with
+    persisted `eligible = true`.
+    """
+    return await _list_maintainer_work(
+        db,
+        WorkbenchClassification.IN_PROGRESS,
+        caller=caller,
+        evaluation_date=evaluation_date,
+        evaluation_instant=evaluation_instant,
+        package=package,
+        sort_by=sort_by,
+        sort_order=sort_order,
+        page=page,
+        per_page=per_page,
+    )
+
+
+async def list_maintainer_completed_work(
+    db: AsyncSession,
+    *,
+    caller: TicketCaller,
+    evaluation_date: date,
+    evaluation_instant: datetime,
+    package: str | None = None,
+    sort_by: MaintainerWorkSortField = MaintainerWorkSortField.SEVERITY,
+    sort_order: SortOrder = SortOrder.DESC,
+    page: int = 1,
+    per_page: int = 20,
+) -> MaintainerWorkPage:
+    """List the caller's completed workbench tracks.
+
+    Identical to `list_maintainer_pending_work()` except for the
+    classification (maintainer.md, Completed): Ticket `Analysis`,
+    `Analyzed`, or `Resolved`, actionable track, and delivery `RELEASED`,
+    with no eligible-Product requirement.
+    """
+    return await _list_maintainer_work(
+        db,
+        WorkbenchClassification.COMPLETED,
+        caller=caller,
+        evaluation_date=evaluation_date,
+        evaluation_instant=evaluation_instant,
+        package=package,
+        sort_by=sort_by,
+        sort_order=sort_order,
+        page=page,
+        per_page=per_page,
+    )
+
+
+async def get_maintainer_ticket_work(
+    db: AsyncSession,
+    *,
+    ticket_id: str,
+    caller: TicketCaller,
+    evaluation_date: date,
+    evaluation_instant: datetime,
+) -> MaintainerTicketWork:
+    """Return the caller's classified work on one accessible Ticket.
+
+    Category B read (package-service.md, Maintainer workbench queries;
+    maintainer.md, Package Details for Ticket).
+
+    Q1: `ticket_id` is the public `SNTL-{n}` locator; `caller`,
+    `evaluation_date`, and `evaluation_instant` are as in
+    `list_maintainer_pending_work()`.
+
+    Q3: parses the locator with the canonical SNTL parser, then in one
+    SQL statement, and therefore one PostgreSQL observation, selects the
+    Ticket under the canonical visibility predicate together with its
+    caller-owned tracks that satisfy one of the three classifications on
+    `evaluation_date`, each projected once. Ownership and classification
+    are evaluated only for the selected accessible Ticket. Partitions the
+    items by classification, each collection in ascending code-point
+    order of `package_name`, then `reference`, then the internal track
+    UUID. Acquires no lock, writes nothing, creates no event, performs no
+    external or Redis I/O, enqueues no task, and never commits or rolls
+    back.
+
+    Q4: returns the three collections; all three are empty when the
+    accessible Ticket has no qualifying caller work, whatever the cause.
+
+    Q6: raises `TicketNotFoundError` for a malformed locator (including a
+    lowercase, padded, or UUID value; no query is run), a missing Ticket,
+    or an inaccessible Ticket, without distinguishing the causes. Raises
+    `ValueError` before any query for an anonymous caller or a naive
+    `evaluation_instant`. Database exceptions propagate unchanged.
+    """
+    caller_user_id = _workbench_caller_user_id(caller, evaluation_instant)
+    sequence_id = parse_ticket_id(ticket_id)
+    if sequence_id is None:
+        raise TicketNotFoundError()
+    statement = ticket_work_statement(
+        sequence_id=sequence_id,
+        caller=caller,
+        caller_user_id=caller_user_id,
+        evaluation_date=evaluation_date,
+        evaluation_instant=evaluation_instant,
+    )
+    rows = (await db.execute(statement)).all()
+    if not rows:
+        raise TicketNotFoundError()
+    collections: dict[WorkbenchClassification, list[MaintainerWorkItem]] = {
+        classification: [] for classification in WorkbenchClassification
+    }
+    for row in rows:
+        if row.track_pk is not None:
+            classification = WorkbenchClassification(row.classification)
+            collections[classification].append(item_from_row(row))
+    return MaintainerTicketWork(
+        pending=tuple(collections[WorkbenchClassification.PENDING]),
+        in_progress=tuple(collections[WorkbenchClassification.IN_PROGRESS]),
+        completed=tuple(collections[WorkbenchClassification.COMPLETED]),
     )
 
 
