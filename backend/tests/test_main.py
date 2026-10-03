@@ -248,16 +248,29 @@ class _StubBootstrapFetcher:
 
 
 @pytest.fixture
-def _registered_stub_fetcher() -> Generator[None]:
-    """Register `_StubBootstrapFetcher` in `FETCHER_REGISTRY` for the
-    duration of a test, restoring the original registry afterward —
-    mirrors `tests/test_services/test_base_fetcher.py` (Test
-    Independence)."""
+def _empty_fetcher_registry() -> Generator[None]:
+    """Empty `FETCHER_REGISTRY` for the duration of a test, restoring the
+    original registry afterward — mirrors
+    `tests/test_services/test_base_fetcher.py` (Test Independence).
+
+    The real lifespan bootstraps a `FetcherConfig` row for every registered
+    fetcher through `real_session_factory`, outside the per-test savepoint
+    rollback. Without this isolation it would commit rows for the production
+    fetchers registered by `app.services.fetcher_discovery`, which these
+    tests' explicit cleanup does not remove.
+    """
     original = dict(FETCHER_REGISTRY)
-    FETCHER_REGISTRY[_StubBootstrapFetcher.name] = _StubBootstrapFetcher  # type: ignore[assignment]
+    FETCHER_REGISTRY.clear()
     yield
     FETCHER_REGISTRY.clear()
     FETCHER_REGISTRY.update(original)
+
+
+@pytest.fixture
+def _registered_stub_fetcher(_empty_fetcher_registry: None) -> None:
+    """Make `_StubBootstrapFetcher` the only `FETCHER_REGISTRY` entry for
+    the duration of a test (see `_empty_fetcher_registry`)."""
+    FETCHER_REGISTRY[_StubBootstrapFetcher.name] = _StubBootstrapFetcher  # type: ignore[assignment]
 
 
 async def _delete_fetcher_config(
@@ -274,6 +287,7 @@ async def _delete_fetcher_config(
 
 
 @pytest.mark.integration
+@pytest.mark.usefixtures("_empty_fetcher_registry")
 class TestLifespanBootstrap:
     """Contract under test:
     `docs/features/platform/system-settings.md` (FastAPI Lifespan

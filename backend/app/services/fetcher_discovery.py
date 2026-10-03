@@ -9,10 +9,12 @@ Beat) imports this module once at startup.
 See `docs/features/platform/fetcher-infrastructure.md` (Fetcher
 Discovery (Module Import)) for the full specification.
 
-No production fetcher exists yet — see
-`docs/features/platform/fetcher-infrastructure.md` (Domain Placement)
-for where future fetchers will be added, one import line per fetcher,
-when they are implemented.
+One `import` line per concrete fetcher module, placed in its domain
+package (`docs/features/platform/fetcher-infrastructure.md`, Domain
+Placement). The drift test parses these statements statically, so each
+must use the plain `import app.services.<domain>.<module>` form.
 """
 
 from __future__ import annotations
+
+import app.services.packages.sync_smelt_products  # noqa: F401
