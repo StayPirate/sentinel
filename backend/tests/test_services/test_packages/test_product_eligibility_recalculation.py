@@ -13,6 +13,11 @@ Owning specifications:
   Result handling: a non-fetcher sub-operation creates no `FetcherRun`).
 - docs/features/platform/testing-strategy.md (Concurrency Testing:
   explicit cleanup of committed rows).
+- docs/features/packages/product-catalog.md (CVSS Threshold Sync step 10)
+  and product-lifecycle-transitions.md (Integration with AIMAAS
+  Synchronization): `dispatch_product_eligibility_recalculation()` publishes
+  the sub-task by name through `task_publication.publish_task()` and
+  propagates every publication failure to its dispatcher.
 
 The single-Ticket service boundary
 `package_service.recalculate_product_eligibility_for_ticket()` is covered
@@ -43,6 +48,7 @@ from unittest.mock import Mock
 
 import pytest
 from celery.app.task import Task
+from celery.exceptions import OperationalError as KombuOperationalError
 from celery.exceptions import SoftTimeLimitExceeded
 from sqlalchemy import delete, event, func, select, update
 from sqlalchemy.exc import OperationalError
@@ -61,7 +67,7 @@ from app.models.ticket_package import TicketPackage
 from app.models.ticket_package_product import TicketPackageProduct
 from app.models.ticket_package_track import TicketPackageTrack
 from app.models.user import User
-from app.services import package_service
+from app.services import package_service, task_publication
 from app.services.package_service import (
     ProductEligibilityRecalculationResult,
     ProductNotFoundError,
@@ -69,7 +75,9 @@ from app.services.package_service import (
 )
 from app.services.packages import product_eligibility_recalculation as workflow
 from app.services.packages.product_eligibility_recalculation import (
+    RE_EVALUATE_PRODUCT_ELIGIBILITY_TASK,
     ProductEligibilityRecalculationSummary,
+    dispatch_product_eligibility_recalculation,
     parse_recalculation_arguments,
     re_evaluate_product_eligibility,
     select_candidate_ticket_ids,
@@ -78,6 +86,7 @@ from app.services.ticket_convergence_registry import (
     TicketConvergenceEffect,
     pending_ticket_convergence_effects,
 )
+from app.tasks import package_tasks
 from tests.support.cvss_chain import DEFAULT_VERSION, eligibility, ticket_state
 from tests.support.suse_cvss_races import CommittedWorld
 from tests.support.ticket_mutations import (
@@ -1078,3 +1087,75 @@ class TestWorkflowConvergence:
             [(True, False)],
             [CHANGED, ("status_change", "Resolved", "Analysis")],
         )
+
+
+# ---------------------------------------------------------------------------
+# Post-commit dispatch (product-catalog.md, CVSS Threshold Sync step 10;
+# product-lifecycle-transitions.md, Integration with AIMAAS Synchronization)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestDispatchProductEligibilityRecalculation:
+    def test_task_name_is_the_registered_sub_task(self) -> None:
+        assert RE_EVALUATE_PRODUCT_ELIGIBILITY_TASK == "re_evaluate_product_eligibility"
+        task = celery_app.tasks[RE_EVALUATE_PRODUCT_ELIGIBILITY_TASK]
+        assert task.name == RE_EVALUATE_PRODUCT_ELIGIBILITY_TASK
+        assert package_tasks.re_evaluate_product_eligibility_task.name == task.name
+
+    @pytest.mark.parametrize("reason", _REASONS)
+    async def test_publishes_detached_string_arguments_by_name(
+        self, monkeypatch: pytest.MonkeyPatch, reason: ProductRecalculationReason
+    ) -> None:
+        calls: list[tuple[str, dict[str, str]]] = []
+
+        async def publish(task_name: str, *, kwargs: dict[str, str]) -> None:
+            calls.append((task_name, dict(kwargs)))
+
+        monkeypatch.setattr(task_publication, "publish_task", publish)
+        product_id = uuid.uuid4()
+
+        await dispatch_product_eligibility_recalculation(product_id, reason)
+
+        assert calls == [
+            (
+                "re_evaluate_product_eligibility",
+                {"catalog_product_id": str(product_id), "reason": reason},
+            )
+        ]
+
+    async def test_reaches_the_broker_through_send_task(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        send_task = Mock()
+        monkeypatch.setattr(celery_app, "send_task", send_task)
+        product_id = uuid.uuid4()
+
+        await dispatch_product_eligibility_recalculation(product_id, "threshold")
+
+        send_task.assert_called_once_with(
+            "re_evaluate_product_eligibility",
+            kwargs={"catalog_product_id": str(product_id), "reason": "threshold"},
+            ignore_result=True,
+        )
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            pytest.param(KombuOperationalError("example broker failure"), id="broker"),
+            pytest.param(RuntimeError("example failure"), id="programming"),
+            pytest.param(SoftTimeLimitExceeded(), id="soft-time-limit"),
+        ],
+    )
+    async def test_publication_failure_propagates_unchanged(
+        self, monkeypatch: pytest.MonkeyPatch, error: Exception
+    ) -> None:
+        async def publish(task_name: str, *, kwargs: dict[str, str]) -> None:
+            raise error
+
+        monkeypatch.setattr(task_publication, "publish_task", publish)
+
+        with pytest.raises(type(error)) as raised:
+            await dispatch_product_eligibility_recalculation(uuid.uuid4(), "threshold")
+
+        assert raised.value is error

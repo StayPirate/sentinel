@@ -19,13 +19,12 @@ import structlog
 from app.celery_app import celery_app
 from app.database import async_session_factory, engine
 from app.services.packages.product_eligibility_recalculation import (
+    RE_EVALUATE_PRODUCT_ELIGIBILITY_TASK,
     parse_recalculation_arguments,
     re_evaluate_product_eligibility,
 )
 
 logger = structlog.get_logger(__name__)
-
-RE_EVALUATE_PRODUCT_ELIGIBILITY_TASK = "re_evaluate_product_eligibility"
 
 
 async def _dispose_engine(*, primary_failed: bool) -> None:

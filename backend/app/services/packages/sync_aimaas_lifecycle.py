@@ -42,7 +42,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.models.product import Product
 from app.services.base_fetcher import BaseFetcher, FetcherError
-from app.services.packages.aimaas_listing import fetch_aimaas_products
+from app.services.packages.aimaas_listing import fetch_aimaas_products, item_cpe
 from app.services.product_lifecycle import (
     LifecycleDateViolation,
     lifecycle_date_violations,
@@ -123,18 +123,14 @@ def parse_lifecycle_entries(items: Sequence[dict[str, Any]]) -> list[LifecycleEn
     """
     entries: list[LifecycleEntry] = []
     for position, item in enumerate(items):
-        if "cpe" not in item:
-            raise LifecycleResponseError(f"item {position}: cpe is missing")
-        cpe = item["cpe"]
-        if cpe is not None and not isinstance(cpe, str):
-            raise LifecycleResponseError(f"item {position}: cpe must be a string")
+        cpe = item_cpe(item, position, LifecycleResponseError)
         fcs, end_of_gs, end_of_ltss, end_of_espos, end_of_reactive_ltss = (
             _date(item, field, position) for field in _DATE_FIELDS
         )
         extended = [value for value in (end_of_ltss, end_of_espos) if value is not None]
         entries.append(
             LifecycleEntry(
-                cpe=cpe or None,
+                cpe=cpe,
                 dates=LifecycleDates(
                     first_customer_ship_date=fcs,
                     general_support_end_date=end_of_gs,

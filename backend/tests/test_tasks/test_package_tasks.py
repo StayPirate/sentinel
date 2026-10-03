@@ -40,6 +40,9 @@ from structlog.testing import capture_logs
 import app.celery_app as celery_app_module
 from app.celery_app import celery_app
 from app.services.base_fetcher import FETCHER_REGISTRY
+from app.services.packages.product_eligibility_recalculation import (
+    RE_EVALUATE_PRODUCT_ELIGIBILITY_TASK,
+)
 from app.tasks import package_tasks
 from tests.support.module_imports import APP_ROOT
 
@@ -378,7 +381,7 @@ class TestReEvaluateProductEligibilityTaskRegistration:
         task = celery_app.tasks[TASK_NAME]
 
         assert task.name == TASK_NAME
-        assert package_tasks.RE_EVALUATE_PRODUCT_ELIGIBILITY_TASK == TASK_NAME
+        assert RE_EVALUATE_PRODUCT_ELIGIBILITY_TASK == TASK_NAME
         assert package_tasks.re_evaluate_product_eligibility_task.name == TASK_NAME
         assert task.run is package_tasks._re_evaluate_product_eligibility_sync
 

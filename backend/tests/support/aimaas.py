@@ -22,6 +22,10 @@ with correct metadata for a page beyond `pages`. Tests mutate `pages` to
 build negative cases, register raw `responses` (status codes, undecodable
 bodies, transport errors), and inspect `requests`.
 
+`AimaasRouter` serves several such endpoints from one client, routed by
+the request URL without its query: `sync_aimaas_thresholds` reads both the
+Product list and the CVSS threshold list through one HTTP client.
+
 All values built here are fictional (`aimaas.example.test`,
 `cpe:/o:example:...`).
 """
@@ -110,6 +114,27 @@ def make_items(total: int, *, start: int = 1) -> list[dict[str, Any]]:
     return [product_item(index) for index in range(start, start + total)]
 
 
+def threshold_item(
+    index: int, *, product: int, threshold: Any = 7.0, **overrides: Any
+) -> dict[str, Any]:
+    """One fictional AIMAAS CVSS threshold entry with every live field.
+
+    `product` is the AIMAAS Product ID the threshold applies to; the
+    ignored fields are present as served upstream. `overrides` replaces or
+    adds any key.
+    """
+    item: dict[str, Any] = {
+        "slug": f"example-threshold-{index}",
+        "name": f"Example Threshold {index}",
+        "id": 10_000 + index,
+        "deleted": False,
+        "product": product,
+        "threshold": threshold,
+    }
+    item.update(overrides)
+    return item
+
+
 def paginate(items: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
     """Split `items` into a valid page sequence keyed by page number.
 
@@ -195,6 +220,63 @@ class AimaasServer:
     @property
     def requested_pages(self) -> list[int | None]:
         return [_requested_page(request) for request in self.requests]
+
+
+class AimaasRouter:
+    """Several fake AIMAAS endpoints behind one `httpx.MockTransport`.
+
+    `routes` maps an endpoint URL without query (for example
+    `AIMAAS_TEST_THRESHOLDS_ENDPOINT`) to the `AimaasServer` answering it;
+    a request for any other URL is answered with HTTP 404. Every request is
+    recorded in `requests`; when `events` is supplied, `("http", url)` is
+    also appended to it, so the routed servers need no `events` of their
+    own.
+    """
+
+    def __init__(
+        self,
+        routes: Mapping[str, AimaasServer],
+        *,
+        events: list[tuple[str, str]] | None = None,
+    ) -> None:
+        self.routes: dict[str, AimaasServer] = dict(routes)
+        self.requests: list[httpx.Request] = []
+        self.events = events
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        if self.events is not None:
+            self.events.append(("http", str(request.url)))
+        server = self.routes.get(str(request.url.copy_with(query=None)))
+        if server is None:
+            return httpx.Response(404, json={"detail": "Not Found"})
+        return server.handler(request)
+
+    def client(self) -> httpx.AsyncClient:
+        """A client whose transport is this router (redirects not followed)."""
+        return httpx.AsyncClient(transport=httpx.MockTransport(self.handler))
+
+    @property
+    def requested_urls(self) -> list[str]:
+        return [str(request.url) for request in self.requests]
+
+
+def threshold_sync_router(
+    products: Iterable[dict[str, Any]],
+    thresholds: Iterable[dict[str, Any]],
+    *,
+    events: list[tuple[str, str]] | None = None,
+) -> AimaasRouter:
+    """Serve `products` as the Product list and `thresholds` as the CVSS
+    threshold list of `AIMAAS_TEST_API_URL`, each a valid paginated
+    collection."""
+    return AimaasRouter(
+        {
+            AIMAAS_TEST_PRODUCTS_ENDPOINT: AimaasServer.for_items(products),
+            AIMAAS_TEST_THRESHOLDS_ENDPOINT: AimaasServer.for_items(thresholds),
+        },
+        events=events,
+    )
 
 
 def _requested_page(request: httpx.Request) -> int | None:

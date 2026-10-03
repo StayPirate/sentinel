@@ -48,6 +48,7 @@ from app.models.ticket import Ticket
 from app.models.ticket_package import TicketPackage
 from app.models.ticket_package_product import TicketPackageProduct
 from app.models.ticket_package_track import TicketPackageTrack
+from app.services import task_publication
 from app.services.package_service import (
     PRODUCT_RECALCULATION_REASONS,
     ProductRecalculationReason,
@@ -55,6 +56,9 @@ from app.services.package_service import (
 )
 
 logger = structlog.get_logger(__name__)
+
+RE_EVALUATE_PRODUCT_ELIGIBILITY_TASK: Final = "re_evaluate_product_eligibility"
+"""Explicit registered name of the Celery sub-task."""
 
 OPERABLE_TICKET_STATUSES: Final = (
     TicketStatus.NEW,
@@ -90,6 +94,25 @@ def parse_recalculation_arguments(
     except ValueError:
         logger.error("product_eligibility_recalculation_invalid_product_id")
         raise ValueError("catalog_product_id must be a UUID") from None
+
+
+async def dispatch_product_eligibility_recalculation(
+    catalog_product_id: uuid.UUID, reason: ProductRecalculationReason
+) -> None:
+    """Enqueue one `re_evaluate_product_eligibility` task for one Product.
+
+    Category C (broker I/O only). Called by the post-commit dispatchers
+    (`sync_aimaas_thresholds` with `reason = "threshold"`,
+    `evaluate_lifecycle_transitions` with `reason = "reactive_ltss"`) with no
+    database transaction or row lock open. Publishes the detached string
+    arguments by task name through `task_publication.publish_task()`;
+    every publication exception propagates to the dispatcher, which logs it
+    per Product and continues.
+    """
+    await task_publication.publish_task(
+        RE_EVALUATE_PRODUCT_ELIGIBILITY_TASK,
+        kwargs={"catalog_product_id": str(catalog_product_id), "reason": reason},
+    )
 
 
 @dataclass(frozen=True, slots=True)
