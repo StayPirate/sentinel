@@ -9,8 +9,10 @@ commit (implementation decision for issue #765, roadmap umbrella #761 H10).
   import the Celery application at module level. The application is
   resolved lazily inside `publish_task()`, when every module is loaded.
 - **Layer direction.** The task is published by its registered name through
-  `Celery.send_task()`; no `app.tasks` module is imported
-  (docs/architecture.md, Backend Layer Architecture).
+  `Celery.send_task()`; this Service module never imports a task module
+  itself, so no Service → Task dependency exists (docs/architecture.md,
+  Backend Layer Architecture). Only the Celery application module, which
+  registers the task modules, is resolved at call time.
 - **No result.** `ignore_result=True` is explicit, matching the
   no-result-backend contract (docs/features/platform/fetcher-infrastructure.md,
   Celery Integration, Result handling); no task result is ever read.
