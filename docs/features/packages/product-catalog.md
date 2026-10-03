@@ -557,9 +557,9 @@ the threshold-specific rule below.
   CPE match is silently ignored. The AIMAAS schema does not require `cpe`:
   an entry whose `cpe` is null or the empty string cannot match a local
   Product (whose CPE is non-empty) and is ignored in the same way. An entry
-  that omits the `cpe` key or one of the consumed date keys is a
-  response-schema failure, because a reduced field set would otherwise be
-  read as cleared dates.
+  that omits the `cpe` key or one of the consumed date keys, or whose `cpe`
+  is neither a string nor null, is a response-schema failure, because a
+  reduced field set would otherwise be read as cleared dates.
 
 The `all_fields=true` parameter is required. Without it, the list endpoint
 returns a reduced field set that omits `fcs`, `end_of_reactive_ltss`, and
@@ -641,6 +641,16 @@ eligibility and EOL-derived actionability when applicable.
   `product` value against the product list's `id` field to obtain the
   corresponding `cpe`. This avoids per-threshold detail requests and
   produces an internally consistent snapshot.
+- **Consumed-field schema**: neither the AIMAAS Product nor the threshold
+  schema requires these fields. A Product-list entry that omits the `id` or
+  `cpe` key, whose `id` is not an integer, or whose `cpe` is neither a string
+  nor null, is a Product-list response-schema failure. A threshold entry that
+  omits the `product` or `threshold` key, or whose `product` is not an
+  integer, is a threshold-list response-schema failure; an absent `threshold`
+  would otherwise be read as a cleared threshold. As for lifecycle
+  synchronization, a null or empty `cpe` is unmatchable: a threshold whose
+  `product` resolves to such an entry is ignored like a resolved CPE with no
+  local Product.
 - **Sync behavior**:
   1. Fetch all AIMAAS product pages (with `all_fields=true`) and all
      threshold pages before opening a database transaction. Build a

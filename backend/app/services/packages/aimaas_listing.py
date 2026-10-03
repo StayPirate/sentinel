@@ -79,6 +79,25 @@ class InvalidAimaasListingError(Exception):
     """
 
 
+def item_cpe(
+    item: Mapping[str, Any], position: int, error: type[Exception]
+) -> str | None:
+    """Return the matchable `cpe` of one AIMAAS Product entry.
+
+    Shared consumed-field rule of both AIMAAS fetchers (product-catalog.md,
+    Product Lifecycle Sync; CVSS Threshold Sync): the `cpe` key must be
+    present with a string or null value; a null or empty `cpe` is
+    unmatchable and returned as `None`. A violation raises `error` with a
+    message naming the entry position and field only.
+    """
+    if "cpe" not in item:
+        raise error(f"item {position}: cpe is missing")
+    cpe = item["cpe"]
+    if cpe is not None and not isinstance(cpe, str):
+        raise error(f"item {position}: cpe must be a string")
+    return cpe or None
+
+
 def endpoint_url(api_url: str, path: str) -> str:
     """Return the endpoint URL for a canonical `AIMAAS_API_URL`."""
     return f"{api_url}/{path}"

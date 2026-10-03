@@ -34,6 +34,7 @@ from tests.support.aimaas import (
     AIMAAS_TEST_API_URL,
     FIXTURE_PAGES,
     PAGE_SIZE,
+    PRODUCT_LIST_PAGES,
     AimaasServer,
     load_products_page,
 )
@@ -155,15 +156,8 @@ _INCONSISTENT_CAPTURED_CPE: Final = "cpe:/o:suse:sles-ltss-core:12:sp5"
 
 
 def _live_listing_server() -> AimaasServer:
-    """Serve the captured pages verbatim at pages 1, 3, 5, and 6.
-
-    Pages 2 and 4 were not captured; they repeat page 3's items with
-    `page` rewritten.
-    """
-    pages: dict[int, Any] = {page: load_products_page(page) for page in FIXTURE_PAGES}
-    for page in (2, 4):
-        pages[page] = {**load_products_page(3), "page": page}
-    return AimaasServer(pages)
+    """Serve every captured Product list page verbatim."""
+    return AimaasServer({page: load_products_page(page) for page in PRODUCT_LIST_PAGES})
 
 
 def _optional_date(value: str | None) -> date | None:
@@ -202,9 +196,11 @@ class TestLiveSerializationAccepted:
         assert listing.total == _TOTAL
         assert len(listing.items) == _TOTAL
         assert server.requested_pages == [1, 2, 3, 4, 5]
-        assert listing.items[:100] == load_products_page(1)["items"]
-        assert listing.items[200:300] == load_products_page(3)["items"]
-        assert listing.items[400:] == load_products_page(5)["items"]
+        assert listing.items == [
+            item
+            for page in PRODUCT_LIST_PAGES
+            for item in load_products_page(page)["items"]
+        ]
 
     def test_live_items_parse_with_the_documented_field_mapping(self) -> None:
         items = _all_items()

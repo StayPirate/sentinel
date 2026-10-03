@@ -27,10 +27,13 @@ process.
 from __future__ import annotations
 
 import asyncio
-from uuid import uuid4
+from dataclasses import dataclass
+from datetime import UTC, date, datetime
+from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import delete, text
+from celery.exceptions import SoftTimeLimitExceeded
+from sqlalchemy import delete, select, text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -39,11 +42,25 @@ from sqlalchemy.ext.asyncio import (
 )
 
 import app.services.base_fetcher as base_fetcher_module
+from app.core.enums import PackageStatus, Severity, TicketStatus
 from app.models.fetcher_config import FetcherConfig
 from app.models.fetcher_run import FetcherRun
+from app.models.product import Product
+from app.models.system_setting import SystemSetting
+from app.models.ticket import Ticket
+from app.models.ticket_audit_event import TicketAuditEvent
+from app.models.ticket_package import TicketPackage
+from app.models.ticket_package_product import TicketPackageProduct
+from app.models.ticket_package_track import TicketPackageTrack
+from app.services import package_service
 from app.services.base_fetcher import FETCHER_REGISTRY, BaseFetcher
+from app.services.package_service import (
+    ProductEligibilityRecalculationResult,
+    ProductRecalculationReason,
+)
+from app.services.packages import product_eligibility_recalculation
 from app.tasks import fetchers as fetchers_module
-from app.tasks import session_cleanup
+from app.tasks import package_tasks, session_cleanup
 
 
 @pytest.mark.integration
@@ -269,3 +286,237 @@ def test_run_catch_up_wrapper_survives_two_consecutive_event_loops(
         asyncio.run(_cleanup())
 
     assert executed == [probe_ticket_id, probe_ticket_id]
+
+
+@dataclass(frozen=True, slots=True)
+class _EligibilitySeed:
+    """Committed rows of the `re_evaluate_product_eligibility` regressions."""
+
+    product_id: UUID
+    ticket_id: UUID
+    owns_setting: bool
+
+
+async def _seed_eligibility_candidate(
+    factory: async_sessionmaker[AsyncSession],
+) -> _EligibilitySeed:
+    """Commit one candidate: a CVE-less `High` `Analysis` Ticket whose only
+    occurrence of a catalog Product without lifecycle dates or threshold is
+    seeded `false`, so the first successful recalculation changes it to
+    `true` (one write, event, and commit) and a later one is a no-op."""
+    suffix = uuid4().hex[:10]
+    async with factory() as session:
+        owns_setting = await session.get(SystemSetting, "default_cvss_version") is None
+        if owns_setting:
+            session.add(SystemSetting(key="default_cvss_version", value="3.1"))
+        product = Product(
+            name=f"Example Product {suffix}",
+            version="1",
+            display_name=f"EP {suffix}",
+            cpe=f"cpe:/o:example:product:{suffix}",
+            catalog_last_seen_at=datetime.now(UTC),
+        )
+        ticket = Ticket(
+            status=TicketStatus.ANALYSIS.value, severity_manual=Severity.HIGH.value
+        )
+        session.add_all([product, ticket])
+        await session.flush()
+        package = TicketPackage(ticket_id=ticket.id, package_name=f"fictional-{suffix}")
+        session.add(package)
+        await session.flush()
+        track = TicketPackageTrack(
+            ticket_package_id=package.id,
+            workflow_type="ibs",
+            reference=f"Example:Codestream:{suffix}:Update",
+            status=PackageStatus.ANALYSIS.value,
+        )
+        session.add(track)
+        await session.flush()
+        session.add(
+            TicketPackageProduct(
+                ticket_package_track_id=track.id, product_id=product.id, eligible=False
+            )
+        )
+        await session.commit()
+        return _EligibilitySeed(product.id, ticket.id, owns_setting)
+
+
+async def _read_and_delete_eligibility_candidate(
+    factory: async_sessionmaker[AsyncSession], seed: _EligibilitySeed
+) -> tuple[list[bool], list[str]]:
+    """Return the committed occurrence eligibility and audit event types,
+    then delete every seeded row in FK-safe order."""
+    packages = select(TicketPackage.id).where(TicketPackage.ticket_id == seed.ticket_id)
+    tracks = select(TicketPackageTrack.id).where(
+        TicketPackageTrack.ticket_package_id.in_(packages)
+    )
+    async with factory() as session:
+        eligible = list(
+            (
+                await session.execute(
+                    select(TicketPackageProduct.eligible).where(
+                        TicketPackageProduct.ticket_package_track_id.in_(tracks)
+                    )
+                )
+            ).scalars()
+        )
+        events = list(
+            (
+                await session.execute(
+                    select(TicketAuditEvent.event_type).where(
+                        TicketAuditEvent.ticket_id == seed.ticket_id
+                    )
+                )
+            ).scalars()
+        )
+        for statement in (
+            delete(TicketAuditEvent).where(
+                TicketAuditEvent.ticket_id == seed.ticket_id
+            ),
+            delete(TicketPackageProduct).where(
+                TicketPackageProduct.ticket_package_track_id.in_(tracks)
+            ),
+            delete(TicketPackageTrack).where(
+                TicketPackageTrack.ticket_package_id.in_(packages)
+            ),
+            delete(TicketPackage).where(TicketPackage.ticket_id == seed.ticket_id),
+            delete(Ticket).where(Ticket.id == seed.ticket_id),
+            delete(Product).where(Product.id == seed.product_id),
+        ):
+            await session.execute(statement)
+        if seed.owns_setting:
+            await session.execute(
+                delete(SystemSetting).where(SystemSetting.key == "default_cvss_version")
+            )
+        await session.commit()
+    return eligible, events
+
+
+@pytest.mark.integration
+def test_re_evaluate_product_eligibility_wrapper_survives_two_consecutive_event_loops(
+    _engine: AsyncEngine,  # noqa: PT019 — value used below (.url), not just for setup
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two sequential invocations of the real `re_evaluate_product_eligibility`
+    synchronous wrapper — each its own `asyncio.run()` event loop — both
+    succeed against one shared, pooled engine.
+
+    Each invocation opens the read-only candidate-selection session and one
+    per-Ticket session through the module-level `async_session_factory`
+    reference in `app/tasks/package_tasks.py`. The seeded candidate makes
+    the first invocation lock, write, audit, and commit, and the second
+    lock and read it as a converged no-op, so both check real connections
+    out of the dedicated pool.
+    """
+    dedicated_engine = create_async_engine(
+        _engine.url.render_as_string(hide_password=False), echo=False
+    )
+    dedicated_factory = async_sessionmaker(
+        dedicated_engine, class_=AsyncSession, expire_on_commit=False
+    )
+
+    async def _seed_and_drain() -> _EligibilitySeed:
+        seed = await _seed_eligibility_candidate(dedicated_factory)
+        # Drain the seeding connection so the first real invocation does
+        # not receive a connection bound to this setup loop.
+        await dedicated_engine.dispose()
+        return seed
+
+    async def _cleanup(seed: _EligibilitySeed) -> tuple[list[bool], list[str]]:
+        committed = await _read_and_delete_eligibility_candidate(
+            dedicated_factory, seed
+        )
+        await dedicated_engine.dispose()
+        return committed
+
+    monkeypatch.setattr(package_tasks, "engine", dedicated_engine)
+    monkeypatch.setattr(package_tasks, "async_session_factory", dedicated_factory)
+
+    seed = asyncio.run(_seed_and_drain())
+    try:
+        # First invocation: its own event loop; disposes the pool before
+        # the loop closes.
+        package_tasks._re_evaluate_product_eligibility_sync(
+            str(seed.product_id), "threshold"
+        )
+
+        # Second invocation: a brand-new event loop. Without disposal the
+        # pool would hand out a connection bound to the first (closed)
+        # loop.
+        package_tasks._re_evaluate_product_eligibility_sync(
+            str(seed.product_id), "threshold"
+        )
+    finally:
+        committed = asyncio.run(_cleanup(seed))
+
+    assert committed == ([True], ["product_eligibility_changed"])
+
+
+@pytest.mark.integration
+def test_re_evaluate_product_eligibility_wrapper_survives_a_failed_event_loop(
+    _engine: AsyncEngine,  # noqa: PT019 — value used below (.url), not just for setup
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A first invocation that fails after using pooled connections (the
+    per-Ticket call raises `SoftTimeLimitExceeded` after its real writes)
+    still disposes the pool, so the next invocation in a new event loop
+    succeeds and recalculates the rolled-back Ticket."""
+    dedicated_engine = create_async_engine(
+        _engine.url.render_as_string(hide_password=False), echo=False
+    )
+    dedicated_factory = async_sessionmaker(
+        dedicated_engine, class_=AsyncSession, expire_on_commit=False
+    )
+    real_service = package_service.recalculate_product_eligibility_for_ticket
+    interrupted: list[UUID] = []
+
+    async def _interrupt_first_call(
+        db: AsyncSession,
+        ticket_id: UUID,
+        catalog_product_id: UUID,
+        reason: ProductRecalculationReason,
+        evaluation_date: date | None = None,
+    ) -> ProductEligibilityRecalculationResult:
+        result = await real_service(
+            db, ticket_id, catalog_product_id, reason, evaluation_date=evaluation_date
+        )
+        if not interrupted:
+            interrupted.append(ticket_id)
+            raise SoftTimeLimitExceeded()
+        return result
+
+    async def _seed_and_drain() -> _EligibilitySeed:
+        seed = await _seed_eligibility_candidate(dedicated_factory)
+        await dedicated_engine.dispose()
+        return seed
+
+    async def _cleanup(seed: _EligibilitySeed) -> tuple[list[bool], list[str]]:
+        committed = await _read_and_delete_eligibility_candidate(
+            dedicated_factory, seed
+        )
+        await dedicated_engine.dispose()
+        return committed
+
+    monkeypatch.setattr(package_tasks, "engine", dedicated_engine)
+    monkeypatch.setattr(package_tasks, "async_session_factory", dedicated_factory)
+    monkeypatch.setattr(
+        product_eligibility_recalculation,
+        "recalculate_product_eligibility_for_ticket",
+        _interrupt_first_call,
+    )
+
+    seed = asyncio.run(_seed_and_drain())
+    try:
+        with pytest.raises(SoftTimeLimitExceeded):
+            package_tasks._re_evaluate_product_eligibility_sync(
+                str(seed.product_id), "threshold"
+            )
+
+        package_tasks._re_evaluate_product_eligibility_sync(
+            str(seed.product_id), "threshold"
+        )
+    finally:
+        committed = asyncio.run(_cleanup(seed))
+
+    assert interrupted == [seed.ticket_id]
+    assert committed == ([True], ["product_eligibility_changed"])

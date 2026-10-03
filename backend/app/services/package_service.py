@@ -5,7 +5,9 @@ specification. This module currently implements the package-tree query
 (Query Operations > `get_ticket_packages()`) in its standalone consumer
 mode and its composed mode, the synchronous manual-zone-exit
 eligibility convergence (`converge_manual_zone_exit_eligibility()`),
-which `ticket_service` composes with an already locked Ticket, and the
+which `ticket_service` composes with an already locked Ticket, the
+Product-originated system recalculation
+(`recalculate_product_eligibility_for_ticket()`), and the
 package mutation foundation (`PackageServiceError` hierarchy, the
 explicit system invocation context, the locked semantic-locator loader
 at the package, track, and Product levels) with the mutations
@@ -46,7 +48,7 @@ from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from enum import Enum, StrEnum
-from typing import Any, Final
+from typing import Any, Final, Literal, get_args
 
 import structlog
 from sqlalchemy import (
@@ -886,6 +888,15 @@ class ManualZoneExitEligibilityResult:
     changed: int
 
 
+@dataclass(frozen=True, slots=True)
+class _RecalculationCounts:
+    """Occurrence counts of one automatic eligibility recalculation loop."""
+
+    examined: int
+    override_skipped: int
+    changed: int
+
+
 def _eligibility_value(eligible: bool) -> str:
     """The `product_eligibility_changed` old/new value (`true`/`false`)."""
     return "true" if eligible else "false"
@@ -978,33 +989,75 @@ async def converge_manual_zone_exit_eligibility(
             "the manual-zone exit must set the Analysis floor before converging."
         )
 
+    counts = await _recalculate_automatic_eligibility(
+        db,
+        ticket=ticket,
+        evaluation_date=evaluation_date,
+        reason=_REACTIVATION_REASON,
+    )
+    await db.flush()
+    return ManualZoneExitEligibilityResult(
+        examined=counts.examined,
+        override_skipped=counts.override_skipped,
+        changed=counts.changed,
+    )
+
+
+async def _recalculate_automatic_eligibility(
+    db: AsyncSession,
+    *,
+    ticket: Ticket,
+    evaluation_date: date,
+    reason: str,
+    catalog_product_id: uuid.UUID | None = None,
+) -> _RecalculationCounts:
+    """Recalculate the automatic Product occurrences of one locked Ticket.
+
+    The one load → evaluate → update → audit loop shared by the manual-zone
+    exit convergence and `recalculate_product_eligibility_for_ticket()`.
+    The caller holds the Ticket lock and owns the transaction.
+
+    Resolves the Ticket's current Eligibility Score Resolution, then
+    reloads, in one statement ordered by `TicketPackageProduct.id`, every
+    Product occurrence of the Ticket (only those of `catalog_product_id`
+    when supplied), including directly or effectively excluded and EOL
+    occurrences under every track status, with its override marker,
+    `eligible`, Product threshold, lifecycle phase on `evaluation_date`,
+    and the event-time subject. Applies the shared pure evaluator, skips
+    every override without change or event, and updates only booleans that
+    differ, each with one system `product_eligibility_changed` (`reason`,
+    `comment NULL`, no `override_action`). Does not flush, assign,
+    reconcile, commit, or roll back.
+
+    Returns the examined (including override-skipped), override-skipped,
+    and changed occurrence counts.
+    """
     eligibility = await _current_eligibility_score(db, ticket)
 
     occurrence = TicketPackageProduct
-    rows = (
-        await db.execute(
-            select(
-                occurrence,
-                TicketPackageTrack.reference,
-                TicketPackage.package_name,
-                Product.display_name,
-                Product.cpe,
-                Product.cvss_threshold,
-                lifecycle_phase_expression(evaluation_date).label("lifecycle"),
-            )
-            .join(
-                TicketPackageTrack,
-                TicketPackageTrack.id == occurrence.ticket_package_track_id,
-            )
-            .join(
-                TicketPackage, TicketPackage.id == TicketPackageTrack.ticket_package_id
-            )
-            .join(Product, Product.id == occurrence.product_id)
-            .where(TicketPackage.ticket_id == ticket.id)
-            .order_by(occurrence.id)
-            .execution_options(populate_existing=True)
+    statement = (
+        select(
+            occurrence,
+            TicketPackageTrack.reference,
+            TicketPackage.package_name,
+            Product.display_name,
+            Product.cpe,
+            Product.cvss_threshold,
+            lifecycle_phase_expression(evaluation_date).label("lifecycle"),
         )
-    ).all()
+        .join(
+            TicketPackageTrack,
+            TicketPackageTrack.id == occurrence.ticket_package_track_id,
+        )
+        .join(TicketPackage, TicketPackage.id == TicketPackageTrack.ticket_package_id)
+        .join(Product, Product.id == occurrence.product_id)
+        .where(TicketPackage.ticket_id == ticket.id)
+        .order_by(occurrence.id)
+        .execution_options(populate_existing=True)
+    )
+    if catalog_product_id is not None:
+        statement = statement.where(occurrence.product_id == catalog_product_id)
+    rows = (await db.execute(statement)).all()
 
     override_skipped = 0
     changed = 0
@@ -1038,11 +1091,10 @@ async def converge_manual_zone_exit_eligibility(
                 "package": row.package_name,
                 "product_name": row.display_name,
                 "product_cpe": row.cpe,
-                "reason": _REACTIVATION_REASON,
+                "reason": reason,
             },
         )
-    await db.flush()
-    return ManualZoneExitEligibilityResult(
+    return _RecalculationCounts(
         examined=len(rows), override_skipped=override_skipped, changed=changed
     )
 
@@ -1084,12 +1136,14 @@ class TrackNotFoundError(PackageServiceError):
 
 
 class ProductNotFoundError(PackageServiceError):
-    """The Product occurrence ID does not exist under the declared path.
+    """The Product occurrence or catalog Product does not exist.
 
-    The identifier is a `TicketPackageProduct.id` under the declared
-    Ticket/package/track path, never a catalog `Product.id`. Maps to `404
-    RESOURCE_NOT_FOUND`. The static message never reveals whether the
-    occurrence exists under another path.
+    On consumer paths the identifier is a `TicketPackageProduct.id` under
+    the declared Ticket/package/track path; it maps to `404
+    RESOURCE_NOT_FOUND`, and the static message never reveals whether the
+    occurrence exists under another path. The system-internal
+    `recalculate_product_eligibility_for_ticket()` also raises it when its
+    catalog `Product.id` does not exist; that path has no HTTP mapping.
     """
 
     def __init__(self) -> None:
@@ -1917,6 +1971,124 @@ async def _product_eligibility_result(
             evaluation_date=evaluation_date,
         ),
         evaluation_date=evaluation_date,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Product-originated eligibility recalculation (package-service.md,
+# `recalculate_product_eligibility_for_ticket()`)
+# ---------------------------------------------------------------------------
+
+ProductRecalculationReason = Literal["threshold", "reactive_ltss"]
+"""System trigger recorded in Product-originated eligibility events."""
+
+PRODUCT_RECALCULATION_REASONS: Final[frozenset[str]] = frozenset(
+    get_args(ProductRecalculationReason)
+)
+
+_MANUAL_ZONE: Final = frozenset({TicketStatus.IGNORED, TicketStatus.DUPLICATED})
+
+
+@dataclass(frozen=True, slots=True)
+class ProductEligibilityRecalculationResult:
+    """Outcome of one Product-originated recalculation in one Ticket.
+
+    `examined` counts every occurrence of the catalog Product in the Ticket,
+    including `override_skipped`; `changed` the occurrences whose `eligible`
+    value was updated. A Ticket found in the manual zone has
+    `manual_zone_skipped = True` and zero counts.
+    """
+
+    examined: int
+    override_skipped: int
+    changed: int
+    manual_zone_skipped: bool
+
+
+async def recalculate_product_eligibility_for_ticket(
+    db: AsyncSession,
+    ticket_id: uuid.UUID,
+    catalog_product_id: uuid.UUID,
+    reason: ProductRecalculationReason,
+    evaluation_date: date | None = None,
+) -> ProductEligibilityRecalculationResult:
+    """Recalculate one catalog Product's automatic eligibility in one Ticket.
+
+    Category A system mutation boundary (package-service.md,
+    `recalculate_product_eligibility_for_ticket()`;
+    product-lifecycle-transitions.md, Sub-task:
+    `re_evaluate_product_eligibility`). Used after an AIMAAS threshold
+    change (`reason = "threshold"`) or a Reactive Support lifecycle change
+    (`reason = "reactive_ltss"`).
+
+    Q1: `catalog_product_id` is the internal catalog `Product.id`, never a
+    `TicketPackageProduct.id`. `evaluation_date` is the caller's UTC date;
+    when omitted, one UTC date is captured at entry. No threshold,
+    lifecycle phase, score, or expected result is supplied by the caller.
+
+    Q2: validates `reason` before any database operation. Acquires `FOR
+    UPDATE` on the Ticket as the first database operation (no User lock,
+    no CVE lock). An `Ignored` or `Duplicated` Ticket returns a manual-zone
+    skip result; otherwise `ensure_ticket_operable()` applies and the
+    catalog Product must exist.
+
+    Q3: recalculates every occurrence of the Product in the Ticket,
+    including directly or effectively excluded and EOL occurrences under
+    every track status, from the current persisted `default_cvss_version`,
+    assessment set, threshold, and lifecycle dates with the shared pure
+    evaluator; skips manual overrides; updates differing values in
+    ascending `TicketPackageProduct.id` order with one system
+    `product_eligibility_changed` each (`user_id`/`comment` NULL, event-time
+    Product subject, `reason`); when at least one value changed, calls
+    `reconcile_ticket_status()` exactly once with the same
+    `evaluation_date`; flushes. Never assigns, never creates or clears an
+    override, never commits or rolls back.
+
+    Q4: returns the examined, override-skipped, and changed counts and
+    whether the Ticket was skipped in the manual zone.
+
+    Q5: deterministic and idempotent: a converged Ticket is a no-op without
+    event or reconciliation.
+
+    Q6: `ValueError` for an unsupported `reason` (caller contract);
+    `TicketNotFoundError` for a missing Ticket; `ProductNotFoundError` for a
+    missing catalog Product. Settings, database, eligibility-resolution,
+    audit, and reconciliation exceptions propagate and roll back the
+    caller's whole Ticket transaction.
+    """
+    if reason not in PRODUCT_RECALCULATION_REASONS:
+        raise ValueError(f"unsupported eligibility recalculation reason: {reason!r}")
+    if evaluation_date is None:
+        evaluation_date = _utc_today()
+
+    ticket = await _lock_system_ticket(db, ticket_id)
+    if ticket.status in _MANUAL_ZONE:
+        return ProductEligibilityRecalculationResult(
+            examined=0, override_skipped=0, changed=0, manual_zone_skipped=True
+        )
+    ensure_ticket_operable(ticket)
+
+    product_exists = (
+        await db.execute(select(Product.id).where(Product.id == catalog_product_id))
+    ).scalar_one_or_none()
+    if product_exists is None:
+        raise ProductNotFoundError()
+
+    counts = await _recalculate_automatic_eligibility(
+        db,
+        ticket=ticket,
+        evaluation_date=evaluation_date,
+        reason=reason,
+        catalog_product_id=catalog_product_id,
+    )
+    if counts.changed:
+        await reconcile_ticket_status(ticket, db, evaluation_date=evaluation_date)
+    await db.flush()
+    return ProductEligibilityRecalculationResult(
+        examined=counts.examined,
+        override_skipped=counts.override_skipped,
+        changed=counts.changed,
+        manual_zone_skipped=False,
     )
 
 

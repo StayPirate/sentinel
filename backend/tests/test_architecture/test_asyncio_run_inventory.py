@@ -48,6 +48,14 @@ REVIEWED_INVENTORY: dict[tuple[str, str], str] = {
         "asyncio.run() — see docs/conventions.md, Cross-loop pooled "
         "connection lifecycle."
     ),
+    ("package_tasks.py", "_re_evaluate_product_eligibility_sync"): (
+        "Repeated per-invocation task wrapper (re_evaluate_product_eligibility). "
+        "Its async workflow (re_evaluate_product_eligibility_async) awaits "
+        "engine.dispose() exactly once on every return and exception path, "
+        "including argument-validation failures, before returning control to "
+        "asyncio.run() — see docs/conventions.md, Cross-loop pooled connection "
+        "lifecycle, and product-lifecycle-transitions.md, Sub-task."
+    ),
     ("session_cleanup.py", "_cleanup_sessions_sync"): (
         "Repeated per-invocation task wrapper (cleanup_sessions). Its "
         "async workflow (run_cleanup_sessions) awaits engine.dispose() "
