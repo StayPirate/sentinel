@@ -1,0 +1,93 @@
+{
+  "status": "success",
+  "data": [
+    {
+      "codestream": {
+        "name": "Fictional:Codestream:1",
+        "url": "https://example.com/fictional-codestream-1"
+      },
+      "users": [
+        {
+          "username": "maintainer-1",
+          "email": "maintainer.1@example.com"
+        }
+      ],
+      "groups": []
+    },
+    {
+      "codestream": {
+        "name": "Fictional:Codestream:2",
+        "url": "https://example.com/fictional-codestream-2"
+      },
+      "users": [],
+      "groups": [
+        {
+          "name": "fictional-group-1",
+          "email": null,
+          "members": [
+            {
+              "username": "maintainer-2",
+              "email": "maintainer.2@example.com"
+            },
+            {
+              "username": "maintainer-3",
+              "email": "maintainer.3@example.com"
+            },
+            {
+              "username": "maintainer-4",
+              "email": "maintainer.4@example.com"
+            },
+            {
+              "username": "maintainer-5",
+              "email": "maintainer.5@example.com"
+            },
+            {
+              "username": "maintainer-1",
+              "email": "maintainer.1@example.com"
+            },
+            {
+              "username": "maintainer-6",
+              "email": "maintainer.6@example.com"
+            },
+            {
+              "username": "maintainer-7",
+              "email": "maintainer.7@example.com"
+            },
+            {
+              "username": "maintainer-8",
+              "email": "maintainer.8@example.com"
+            },
+            {
+              "username": "maintainer-9",
+              "email": "maintainer.9@example.com"
+            },
+            {
+              "username": "maintainer-10",
+              "email": "maintainer.10@example.com"
+            },
+            {
+              "username": "maintainer-11",
+              "email": "maintainer.11@example.com"
+            },
+            {
+              "username": "maintainer-12",
+              "email": "maintainer.12@example.com"
+            },
+            {
+              "username": "maintainer-13",
+              "email": "maintainer.13@example.com"
+            },
+            {
+              "username": "maintainer-14",
+              "email": "maintainer.14@example.com"
+            },
+            {
+              "username": "maintainer-15",
+              "email": "maintainer.15@example.com"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
