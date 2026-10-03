@@ -14,6 +14,17 @@ name and URL, and the package name in the 404 message was replaced with a
 deterministic fictional value. Structure, key order, types, nullness, and
 duplicate relationships are preserved.
 
+The `maintained_*.json` files are live
+`experimental/v2/maintained/{package_name}?include_reactive_ltss=true`
+responses captured anonymously from the default `SMELT_API_URL` on
+2026-10-03, before `tools/smelt#1465` was deployed (#780 refreshes them if
+the deployed shape changes). Every URL-valued string (`codestream.url`,
+`product_definition.url`) was replaced with a fictional
+`build.example.invalid` URL, and the unconsumed `binary_packages` array was
+trimmed to its first element per entry. Codestream names, Product CPEs,
+and Product friendly names are retained: they are consumed match keys and
+public Product identifiers. No personal identifier was present.
+
 `SmeltServer` is an in-process `httpx.MockTransport` handler that serves
 a paginated `v1/basic/products/` listing in the verified live
 serialization (docs/features/packages/product-catalog.md, SMELT
@@ -24,7 +35,9 @@ mutate `pages` to build negative cases, register raw `responses` (status
 codes, undecodable bodies, transport errors), and inspect `requests`.
 
 Consumers: `tests/test_services/test_packages/test_smelt_product_listing.py`,
-`test_smelt_product_listing_contract.py`, and `test_sync_smelt_products.py`.
+`test_smelt_product_listing_contract.py`, `test_sync_smelt_products.py`,
+`test_smelt_maintainership.py`, `test_smelt_maintainership_contract.py`,
+`test_smelt_maintained.py`, and `test_smelt_maintained_contract.py`.
 All values are fictional (`smelt.example.test`, `cpe:/o:example:...`).
 """
 
@@ -80,6 +93,20 @@ MAINTAINERSHIP_NOT_FOUND_FIXTURE = "not_found"
 def load_maintainership_fixture(name: str) -> Any:
     """Return one sanitized live maintainership response as parsed JSON."""
     path = FIXTURE_DIR / f"maintainership_{name}.json"
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+MAINTAINED_SUCCESS_FIXTURES = ("sle15_only", "slfo_only", "mixed", "reactive_ltss")
+"""Sanitized live HTTP 200 maintained-package responses, by fixture name."""
+
+MAINTAINED_NOT_FOUND_FIXTURES = ("not_found", "case_variant")
+"""Sanitized live HTTP 404 responses: an unknown package and a case
+variant (`Kernel-Default`) of a known one."""
+
+
+def load_maintained_fixture(name: str) -> Any:
+    """Return one sanitized live maintained-package response as parsed JSON."""
+    path = FIXTURE_DIR / f"maintained_{name}.json"
     return json.loads(path.read_text(encoding="utf-8"))
 
 

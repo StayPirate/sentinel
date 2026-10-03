@@ -1,0 +1,645 @@
+{
+  "status": "success",
+  "data": [
+    {
+      "codestream": {
+        "name": "SUSE:ALP:Products:Marble:6.0",
+        "url": "https://build.example.invalid/fictional/1",
+        "type": "SLFO"
+      },
+      "binary_packages": [
+        {
+          "name": "SL-Micro-Extras-release",
+          "source_package_name": "000release-packages",
+          "support_status": "L3",
+          "divergence_by_product_id": {
+            "4394": {
+              "is_support_status_divergent": true,
+              "support_statuses_observed": [
+                "L3",
+                "UNKNOWN"
+              ],
+              "is_architecture_divergent": false,
+              "architectures_observed": [
+                "aarch64",
+                "s390x",
+                "x86_64"
+              ],
+              "architectures_missing": []
+            }
+          }
+        }
+      ],
+      "targets": [
+        {
+          "product": {
+            "id": 2697,
+            "friendly_name": "SUSE Linux Micro 6.0",
+            "cpe": "cpe:/o:suse:sl-micro:6.0",
+            "support_status": "General Support"
+          },
+          "repository": "SUSE:Products:SL-Micro:6.0",
+          "product_definition": {
+            "name": "sle_micro",
+            "url": "https://build.example.invalid/fictional/2",
+            "type": "compose"
+          }
+        },
+        {
+          "product": {
+            "id": 4394,
+            "friendly_name": "SUSE Linux Micro Extras 6.0",
+            "cpe": "cpe:/o:suse:sl-micro-extras:6.0",
+            "support_status": "General Support"
+          },
+          "repository": "SUSE:Products:SL-Micro-Extras:6.0",
+          "product_definition": {
+            "name": "sle_micro_extras",
+            "url": "https://build.example.invalid/fictional/3",
+            "type": "compose"
+          }
+        }
+      ],
+      "support_status": "General Support"
+    },
+    {
+      "codestream": {
+        "name": "SUSE:SLFO:Products:Multi-Linux-Manager:5.1",
+        "url": "https://build.example.invalid/fictional/4",
+        "type": "SLFO"
+      },
+      "binary_packages": [
+        {
+          "name": "Multi-Linux-Manager-Proxy-release",
+          "source_package_name": "000release-packages",
+          "support_status": "L3",
+          "divergence_by_product_id": {
+            "3954": {
+              "is_support_status_divergent": false,
+              "support_statuses_observed": [
+                "L3"
+              ],
+              "is_architecture_divergent": false,
+              "architectures_observed": [
+                "aarch64",
+                "ppc64le",
+                "s390x",
+                "x86_64"
+              ],
+              "architectures_missing": []
+            }
+          }
+        }
+      ],
+      "targets": [
+        {
+          "product": {
+            "id": 3954,
+            "friendly_name": "SUSE Multi-Linux Manager Proxy 5.1",
+            "cpe": "cpe:/o:suse:multi-linux-manager-proxy:5.1",
+            "support_status": "General Support"
+          },
+          "repository": "SUSE:Products:Multi-Linux-Manager-Proxy:5.1",
+          "product_definition": {
+            "name": "multilinux_manager_proxy",
+            "url": "https://build.example.invalid/fictional/5",
+            "type": "compose"
+          }
+        },
+        {
+          "product": {
+            "id": 3957,
+            "friendly_name": "SUSE Multi-Linux Manager Retail Branch Server 5.1",
+            "cpe": "cpe:/o:suse:multi-linux-manager-retail-branch-server:5.1",
+            "support_status": "General Support"
+          },
+          "repository": "SUSE:Products:Multi-Linux-Manager-Retail-Branch-Server:5.1",
+          "product_definition": {
+            "name": "multilinux_manager_rbs",
+            "url": "https://build.example.invalid/fictional/6",
+            "type": "compose"
+          }
+        },
+        {
+          "product": {
+            "id": 3960,
+            "friendly_name": "SUSE Multi-Linux Manager Server 5.1",
+            "cpe": "cpe:/o:suse:multi-linux-manager-server:5.1",
+            "support_status": "General Support"
+          },
+          "repository": "SUSE:Products:Multi-Linux-Manager-Server:5.1",
+          "product_definition": {
+            "name": "multilinux_manager_server",
+            "url": "https://build.example.invalid/fictional/7",
+            "type": "compose"
+          }
+        }
+      ],
+      "support_status": "General Support"
+    },
+    {
+      "codestream": {
+        "name": "SUSE:SLFO:Products:Multi-Linux-Manager:5.2",
+        "url": "https://build.example.invalid/fictional/8",
+        "type": "SLFO"
+      },
+      "binary_packages": [
+        {
+          "name": "Multi-Linux-Manager-Proxy-release",
+          "source_package_name": "000release-packages",
+          "support_status": "L3",
+          "divergence_by_product_id": {
+            "3956": {
+              "is_support_status_divergent": false,
+              "support_statuses_observed": [
+                "L3"
+              ],
+              "is_architecture_divergent": false,
+              "architectures_observed": [
+                "aarch64",
+                "ppc64le",
+                "s390x",
+                "x86_64"
+              ],
+              "architectures_missing": []
+            }
+          }
+        }
+      ],
+      "targets": [
+        {
+          "product": {
+            "id": 3956,
+            "friendly_name": "SUSE Multi-Linux Manager Proxy 5.2",
+            "cpe": "cpe:/o:suse:multi-linux-manager-proxy:5.2",
+            "support_status": "General Support"
+          },
+          "repository": "SUSE:Products:Multi-Linux-Manager-Proxy:5.2",
+          "product_definition": {
+            "name": "multilinux_manager_proxy",
+            "url": "https://build.example.invalid/fictional/9",
+            "type": "compose"
+          }
+        },
+        {
+          "product": {
+            "id": 3959,
+            "friendly_name": "SUSE Multi-Linux Manager Retail Branch Server 5.2",
+            "cpe": "cpe:/o:suse:multi-linux-manager-retail-branch-server:5.2",
+            "support_status": "General Support"
+          },
+          "repository": "SUSE:Products:Multi-Linux-Manager-Retail-Branch-Server:5.2",
+          "product_definition": {
+            "name": "multilinux_manager_rbs",
+            "url": "https://build.example.invalid/fictional/10",
+            "type": "compose"
+          }
+        },
+        {
+          "product": {
+            "id": 3962,
+            "friendly_name": "SUSE Multi-Linux Manager Server 5.2",
+            "cpe": "cpe:/o:suse:multi-linux-manager-server:5.2",
+            "support_status": "General Support"
+          },
+          "repository": "SUSE:Products:Multi-Linux-Manager-Server:5.2",
+          "product_definition": {
+            "name": "multilinux_manager_server",
+            "url": "https://build.example.invalid/fictional/11",
+            "type": "compose"
+          }
+        }
+      ],
+      "support_status": "General Support"
+    },
+    {
+      "codestream": {
+        "name": "SUSE:SLFO:Products:MultiLinuxManagerTools-Beta:SLES-16",
+        "url": "https://build.example.invalid/fictional/12",
+        "type": "SLFO"
+      },
+      "binary_packages": [
+        {
+          "name": "Multi-Linux-ManagerTools-Beta-SLE-release",
+          "source_package_name": "000release-packages",
+          "support_status": "L3",
+          "divergence_by_product_id": {
+            "4392": {
+              "is_support_status_divergent": false,
+              "support_statuses_observed": [
+                "L3"
+              ],
+              "is_architecture_divergent": false,
+              "architectures_observed": [
+                "aarch64",
+                "ppc64le",
+                "s390x",
+                "x86_64"
+              ],
+              "architectures_missing": []
+            }
+          }
+        }
+      ],
+      "targets": [
+        {
+          "product": {
+            "id": 4392,
+            "friendly_name": "SUSE Multi-Linux Manager Beta Client Tools for SLE 16",
+            "cpe": "cpe:/o:suse:multi-linux-managertools-beta-sle:16",
+            "support_status": "Undefined"
+          },
+          "repository": "SUSE:Products:MultiLinuxManagerTools-Beta:SLE-16",
+          "product_definition": {
+            "name": "multilinux_managertools_sle16",
+            "url": "https://build.example.invalid/fictional/13",
+            "type": "compose"
+          }
+        }
+      ],
+      "support_status": "Undefined"
+    },
+    {
+      "codestream": {
+        "name": "SUSE:SLFO:Products:MultiLinuxManagerTools:SL-Micro-6",
+        "url": "https://build.example.invalid/fictional/14",
+        "type": "SLFO"
+      },
+      "binary_packages": [
+        {
+          "name": "Multi-Linux-ManagerTools-SL-Micro-release",
+          "source_package_name": "000release-packages",
+          "support_status": "L3",
+          "divergence_by_product_id": {
+            "4840": {
+              "is_support_status_divergent": false,
+              "support_statuses_observed": [
+                "L3"
+              ],
+              "is_architecture_divergent": false,
+              "architectures_observed": [
+                "aarch64",
+                "ppc64le",
+                "s390x",
+                "x86_64"
+              ],
+              "architectures_missing": []
+            }
+          }
+        }
+      ],
+      "targets": [
+        {
+          "product": {
+            "id": 4840,
+            "friendly_name": "SUSE Multi-Linux Manager Client Tools for SUSE Linux Micro 6",
+            "cpe": "cpe:/o:suse:multi-linux-managertools-sl-micro:6",
+            "support_status": "General Support"
+          },
+          "repository": "SUSE:Products:MultiLinuxManagerTools:SL-Micro-6",
+          "product_definition": {
+            "name": "multilinux_managertools_slmicro6",
+            "url": "https://build.example.invalid/fictional/15",
+            "type": "compose"
+          }
+        }
+      ],
+      "support_status": "General Support"
+    },
+    {
+      "codestream": {
+        "name": "SUSE:SLFO:Products:MultiLinuxManagerTools:SLES-16",
+        "url": "https://build.example.invalid/fictional/16",
+        "type": "SLFO"
+      },
+      "binary_packages": [
+        {
+          "name": "Multi-Linux-ManagerTools-SLE-release",
+          "source_package_name": "000release-packages",
+          "support_status": "L3",
+          "divergence_by_product_id": {
+            "3963": {
+              "is_support_status_divergent": false,
+              "support_statuses_observed": [
+                "L3"
+              ],
+              "is_architecture_divergent": false,
+              "architectures_observed": [
+                "aarch64",
+                "ppc64le",
+                "s390x",
+                "x86_64"
+              ],
+              "architectures_missing": []
+            }
+          }
+        }
+      ],
+      "targets": [
+        {
+          "product": {
+            "id": 3963,
+            "friendly_name": "SUSE Multi-Linux Manager Client Tools for SLE 16",
+            "cpe": "cpe:/o:suse:multi-linux-managertools-sle:16",
+            "support_status": "Undefined"
+          },
+          "repository": "SUSE:Products:MultiLinuxManagerTools:SLE-16",
+          "product_definition": {
+            "name": "multilinux_managertools_sle16",
+            "url": "https://build.example.invalid/fictional/17",
+            "type": "compose"
+          }
+        }
+      ],
+      "support_status": "Undefined"
+    },
+    {
+      "codestream": {
+        "name": "SUSE:SLFO:Products:SL-Micro:6.1",
+        "url": "https://build.example.invalid/fictional/18",
+        "type": "SLFO"
+      },
+      "binary_packages": [
+        {
+          "name": "SL-Micro-Extras-release",
+          "source_package_name": "000release-packages",
+          "support_status": "L3",
+          "divergence_by_product_id": {
+            "2696": {
+              "is_support_status_divergent": true,
+              "support_statuses_observed": [
+                "L3",
+                "UNKNOWN"
+              ],
+              "is_architecture_divergent": false,
+              "architectures_observed": [
+                "aarch64",
+                "ppc64le",
+                "s390x",
+                "x86_64"
+              ],
+              "architectures_missing": []
+            }
+          }
+        }
+      ],
+      "targets": [
+        {
+          "product": {
+            "id": 2698,
+            "friendly_name": "SUSE Linux Micro 6.1",
+            "cpe": "cpe:/o:suse:sl-micro:6.1",
+            "support_status": "General Support"
+          },
+          "repository": "SUSE:Products:SL-Micro:6.1",
+          "product_definition": {
+            "name": "sle_micro",
+            "url": "https://build.example.invalid/fictional/19",
+            "type": "compose"
+          }
+        },
+        {
+          "product": {
+            "id": 2696,
+            "friendly_name": "SUSE Linux Micro Extras 6.1",
+            "cpe": "cpe:/o:suse:sl-micro-extras:6.1",
+            "support_status": "General Support"
+          },
+          "repository": "SUSE:Products:SL-Micro-Extras:6.1",
+          "product_definition": {
+            "name": "sle_micro_extras",
+            "url": "https://build.example.invalid/fictional/20",
+            "type": "compose"
+          }
+        }
+      ],
+      "support_status": "General Support"
+    },
+    {
+      "codestream": {
+        "name": "SUSE:SLFO:Products:SL-Micro:6.2",
+        "url": "https://build.example.invalid/fictional/21",
+        "type": "SLFO"
+      },
+      "binary_packages": [
+        {
+          "name": "SL-Micro-Extras-release",
+          "source_package_name": "000release-packages",
+          "support_status": "L3",
+          "divergence_by_product_id": {
+            "3792": {
+              "is_support_status_divergent": true,
+              "support_statuses_observed": [
+                "L3",
+                "UNKNOWN"
+              ],
+              "is_architecture_divergent": false,
+              "architectures_observed": [
+                "aarch64",
+                "ppc64le",
+                "s390x",
+                "x86_64"
+              ],
+              "architectures_missing": []
+            }
+          }
+        }
+      ],
+      "targets": [
+        {
+          "product": {
+            "id": 4395,
+            "friendly_name": "SUSE Linux Micro 6.2",
+            "cpe": "cpe:/o:suse:sl-micro:6.2",
+            "support_status": "General Support"
+          },
+          "repository": "SUSE:Products:SL-Micro:6.2",
+          "product_definition": {
+            "name": "sle_micro",
+            "url": "https://build.example.invalid/fictional/22",
+            "type": "compose"
+          }
+        },
+        {
+          "product": {
+            "id": 3792,
+            "friendly_name": "SUSE Linux Micro Extras 6.2",
+            "cpe": "cpe:/o:suse:sl-micro-extras:6.2",
+            "support_status": "General Support"
+          },
+          "repository": "SUSE:Products:SL-Micro-Extras:6.2",
+          "product_definition": {
+            "name": "sle_micro_extras",
+            "url": "https://build.example.invalid/fictional/23",
+            "type": "compose"
+          }
+        }
+      ],
+      "support_status": "General Support"
+    },
+    {
+      "codestream": {
+        "name": "SUSE:SLFO:Products:SLES:16.0",
+        "url": "https://build.example.invalid/fictional/24",
+        "type": "SLFO"
+      },
+      "binary_packages": [
+        {
+          "name": "PackageHub-release",
+          "source_package_name": "000release-packages",
+          "support_status": "L3",
+          "divergence_by_product_id": {
+            "4393": {
+              "is_support_status_divergent": false,
+              "support_statuses_observed": [
+                "L3"
+              ],
+              "is_architecture_divergent": false,
+              "architectures_observed": [
+                "aarch64",
+                "ppc64le",
+                "s390x",
+                "x86_64"
+              ],
+              "architectures_missing": []
+            }
+          }
+        }
+      ],
+      "targets": [
+        {
+          "product": {
+            "id": 3779,
+            "friendly_name": "SUSE Linux Enterprise Server 16.0",
+            "cpe": "cpe:/o:suse:sles:16:16.0:server",
+            "support_status": "General Support"
+          },
+          "repository": "SUSE:Products:SLE-Product-SLES:16.0",
+          "product_definition": {
+            "name": "SLE-Product-SLES_16.0",
+            "url": "https://build.example.invalid/fictional/25",
+            "type": "channel"
+          }
+        },
+        {
+          "product": {
+            "id": 4398,
+            "friendly_name": "SUSE Linux Enterprise Server High Availability Extension 16.0",
+            "cpe": "cpe:/o:suse:sle-ha:16:16.0",
+            "support_status": "General Support"
+          },
+          "repository": "SUSE:Products:SLE-Product-HA:16.0",
+          "product_definition": {
+            "name": "SLE-Product-HA_16.0",
+            "url": "https://build.example.invalid/fictional/26",
+            "type": "channel"
+          }
+        },
+        {
+          "product": {
+            "id": 3315,
+            "friendly_name": "SUSE Linux Enterprise Server for SAP applications 16.0",
+            "cpe": "cpe:/o:suse:sles:16:16.0:server-sap",
+            "support_status": "General Support"
+          },
+          "repository": "SUSE:Products:SLE-Product-SLES_SAP:16.0",
+          "product_definition": {
+            "name": "SLE-Product-SLES_SAP_16.0",
+            "url": "https://build.example.invalid/fictional/27",
+            "type": "channel"
+          }
+        },
+        {
+          "product": {
+            "id": 4393,
+            "friendly_name": "SUSE Package Hub 16.0",
+            "cpe": "cpe:/o:suse:packagehub:16:16.0",
+            "support_status": "General Support"
+          },
+          "repository": "SUSE:Products:PackageHub:16.0",
+          "product_definition": {
+            "name": "packagehub",
+            "url": "https://build.example.invalid/fictional/28",
+            "type": "compose"
+          }
+        }
+      ],
+      "support_status": "General Support"
+    },
+    {
+      "codestream": {
+        "name": "SUSE:SLFO:Products:SLES:16.1",
+        "url": "https://build.example.invalid/fictional/29",
+        "type": "SLFO"
+      },
+      "binary_packages": [
+        {
+          "name": "SLES-release",
+          "source_package_name": "000release-packages",
+          "support_status": "L3",
+          "divergence_by_product_id": {
+            "3901": {
+              "is_support_status_divergent": false,
+              "support_statuses_observed": [
+                "L3"
+              ],
+              "is_architecture_divergent": false,
+              "architectures_observed": [
+                "aarch64",
+                "ppc64le",
+                "s390x",
+                "x86_64"
+              ],
+              "architectures_missing": []
+            }
+          }
+        }
+      ],
+      "targets": [
+        {
+          "product": {
+            "id": 3901,
+            "friendly_name": "SUSE Linux Enterprise Server 16.1",
+            "cpe": "cpe:/o:suse:sles:16:16.1:server",
+            "support_status": "General Support"
+          },
+          "repository": "SUSE:Products:SLE-Product-SLES:16.1",
+          "product_definition": {
+            "name": "SLE-Product-SLES_16.1",
+            "url": "https://build.example.invalid/fictional/30",
+            "type": "channel"
+          }
+        },
+        {
+          "product": {
+            "id": 3898,
+            "friendly_name": "SUSE Linux Enterprise Server High Availability Extension 16.1",
+            "cpe": "cpe:/o:suse:sle-ha:16:16.1",
+            "support_status": "General Support"
+          },
+          "repository": "SUSE:Products:SLE-Product-HA:16.1",
+          "product_definition": {
+            "name": "sles_ha",
+            "url": "https://build.example.invalid/fictional/31",
+            "type": "compose"
+          }
+        },
+        {
+          "product": {
+            "id": 3902,
+            "friendly_name": "SUSE Linux Enterprise Server for SAP Applications 16.1",
+            "cpe": "cpe:/o:suse:sles:16:16.1:server-sap",
+            "support_status": "General Support"
+          },
+          "repository": "SUSE:Products:SLE-Product-SLES_SAP:16.1",
+          "product_definition": {
+            "name": "SLE-Product-SLES_SAP_16.1",
+            "url": "https://build.example.invalid/fictional/32",
+            "type": "channel"
+          }
+        }
+      ],
+      "support_status": "General Support"
+    }
+  ]
+}
