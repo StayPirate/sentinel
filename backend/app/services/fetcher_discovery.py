@@ -17,6 +17,7 @@ must use the plain `import app.services.<domain>.<module>` form.
 
 from __future__ import annotations
 
+import app.services.packages.evaluate_lifecycle_transitions
 import app.services.packages.sync_aimaas_lifecycle
 import app.services.packages.sync_aimaas_thresholds
 import app.services.packages.sync_smelt_products  # noqa: F401

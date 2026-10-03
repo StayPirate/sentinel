@@ -1476,6 +1476,7 @@ class TestPackageServiceModuleBoundary:
             "set_track_status",
             "set_product_eligibility",
             "recalculate_product_eligibility_for_ticket",
+            "reconcile_lifecycle_actionability_for_ticket",
             "soft_delete_ticket_package",
             "soft_delete_ticket_package_track",
             "soft_delete_ticket_package_product",
