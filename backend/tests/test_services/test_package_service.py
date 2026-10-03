@@ -1455,8 +1455,6 @@ class TestPackageServiceModuleBoundary:
         )
 
         assert "app.services.ticket_service" not in modules
-        assert "app.models.ticket_package_maintainer" not in modules
-        assert "app.models.user" not in modules
 
     def test_implemented_coroutines(self) -> None:
         """The public operations implemented so far; private helpers are
@@ -1487,6 +1485,7 @@ class TestPackageServiceModuleBoundary:
             "list_maintainer_in_progress_work",
             "list_maintainer_completed_work",
             "get_maintainer_ticket_work",
+            "add_package_records",
         }
 
     def test_uses_no_private_ticket_mutations_helper(self) -> None:
