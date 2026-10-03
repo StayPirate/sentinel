@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import Any
 
 import pytest
 from pydantic import ValidationError
@@ -592,109 +593,147 @@ class TestIbsDownloadBaseUrlValidation:
 
 
 @pytest.mark.unit
-class TestSmeltApiUrlValidation:
-    """`SMELT_API_URL` startup validation and canonicalization
-    (`docs/features/packages/product-catalog.md`, SMELT Integration ->
-    Origin, Authentication, and Pagination; Configuration).
+class TestHttpsApiPrefixValidation:
+    """`SMELT_API_URL` and `AIMAAS_API_URL` startup validation and
+    canonicalization (`docs/features/packages/product-catalog.md`, SMELT
+    Integration and AIMAAS Integration -> Origin, Authentication, and
+    Pagination; Configuration).
 
-    Only the specified rules are enforced: HTTPS, a hostname, no user
-    information, query, or fragment, a permitted non-default port, and
-    trailing-slash removal, plus malformed-URL rejection. The stricter
-    `IBS_DOWNLOAD_BASE_URL` path rules are deliberately not mirrored.
+    Both settings follow the same rules, so every case runs for each:
+    HTTPS, a hostname, no user information, query, or fragment, a permitted
+    non-default port, and trailing-slash removal, plus malformed-URL
+    rejection. The stricter `IBS_DOWNLOAD_BASE_URL` path rules are
+    deliberately not mirrored.
     """
 
-    def test_default_when_unset(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    @pytest.fixture(
+        params=[
+            ("SMELT_API_URL", "smelt_api_url", "https://smelt.suse.de/api"),
+            ("AIMAAS_API_URL", "aimaas_api_url", "https://aimaas.suse.de/api"),
+        ],
+        ids=["smelt", "aimaas"],
+    )
+    def setting(self, request: pytest.FixtureRequest) -> tuple[str, str, str]:
+        """`(environment variable, Settings attribute, default)`."""
+        value: tuple[str, str, str] = request.param
+        return value
+
+    def test_default_when_unset(
+        self, monkeypatch: pytest.MonkeyPatch, setting: tuple[str, str, str]
+    ) -> None:
+        variable, attribute, default = setting
         monkeypatch.setenv("JWT_SECRET_KEY", "a" * 32)
-        monkeypatch.delenv("SMELT_API_URL", raising=False)
+        monkeypatch.delenv(variable, raising=False)
         s = Settings(_env_file=None)
-        assert s.smelt_api_url == "https://smelt.suse.de/api"
+        assert getattr(s, attribute) == default
 
     @pytest.mark.parametrize(
         ("value", "expected"),
         [
-            ("https://smelt.example.test/api", "https://smelt.example.test/api"),
-            ("https://smelt.example.test/api/", "https://smelt.example.test/api"),
-            ("https://smelt.example.test/api//", "https://smelt.example.test/api"),
-            ("https://smelt.example.test", "https://smelt.example.test"),
-            ("https://smelt.example.test/", "https://smelt.example.test"),
+            ("https://service.example.test/api", "https://service.example.test/api"),
+            ("https://service.example.test/api/", "https://service.example.test/api"),
+            ("https://service.example.test/api//", "https://service.example.test/api"),
+            ("https://service.example.test", "https://service.example.test"),
+            ("https://service.example.test/", "https://service.example.test"),
             (
-                "https://smelt.example.test:8443/api",
-                "https://smelt.example.test:8443/api",
+                "https://service.example.test:8443/api",
+                "https://service.example.test:8443/api",
             ),
             (
-                "https://smelt.example.test:8443/api/",
-                "https://smelt.example.test:8443/api",
+                "https://service.example.test:8443/api/",
+                "https://service.example.test:8443/api",
             ),
-            ("HTTPS://smelt.example.test/api", "HTTPS://smelt.example.test/api"),
+            ("HTTPS://service.example.test/api", "HTTPS://service.example.test/api"),
         ],
     )
     def test_accepted_values_are_canonicalized(
-        self, monkeypatch: pytest.MonkeyPatch, value: str, expected: str
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        setting: tuple[str, str, str],
+        value: str,
+        expected: str,
     ) -> None:
+        variable, attribute, _ = setting
         monkeypatch.setenv("JWT_SECRET_KEY", "a" * 32)
-        monkeypatch.setenv("SMELT_API_URL", value)
+        monkeypatch.setenv(variable, value)
         s = Settings(_env_file=None)
-        assert s.smelt_api_url == expected
+        assert getattr(s, attribute) == expected
 
     @pytest.mark.parametrize(
         "value",
         [
-            "http://smelt.example.test/api",
-            "ftp://smelt.example.test/api",
-            "smelt.example.test/api",
-            "//smelt.example.test/api",
+            "http://service.example.test/api",
+            "ftp://service.example.test/api",
+            "service.example.test/api",
+            "//service.example.test/api",
             "",
         ],
     )
     def test_rejected_non_https_scheme_names_setting(
-        self, monkeypatch: pytest.MonkeyPatch, value: str
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        setting: tuple[str, str, str],
+        value: str,
     ) -> None:
+        variable, _, _ = setting
         monkeypatch.setenv("JWT_SECRET_KEY", "a" * 32)
-        monkeypatch.setenv("SMELT_API_URL", value)
-        with pytest.raises(ValidationError, match="SMELT_API_URL"):
+        monkeypatch.setenv(variable, value)
+        with pytest.raises(ValidationError, match=variable):
             Settings(_env_file=None)
 
     @pytest.mark.parametrize("value", ["https://", "https:///api", "https://:8443/api"])
     def test_rejected_missing_hostname_names_setting(
-        self, monkeypatch: pytest.MonkeyPatch, value: str
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        setting: tuple[str, str, str],
+        value: str,
     ) -> None:
+        variable, _, _ = setting
         monkeypatch.setenv("JWT_SECRET_KEY", "a" * 32)
-        monkeypatch.setenv("SMELT_API_URL", value)
-        with pytest.raises(ValidationError, match="SMELT_API_URL"):
+        monkeypatch.setenv(variable, value)
+        with pytest.raises(ValidationError, match=variable):
             Settings(_env_file=None)
 
     @pytest.mark.parametrize(
         "value",
         [
-            "https://user@smelt.example.test/api",
-            "https://user:password@smelt.example.test/api",
-            "https://:password@smelt.example.test/api",
-            "https://@smelt.example.test/api",
+            "https://user@service.example.test/api",
+            "https://user:password@service.example.test/api",
+            "https://:password@service.example.test/api",
+            "https://@service.example.test/api",
         ],
     )
     def test_rejected_user_information_names_setting(
-        self, monkeypatch: pytest.MonkeyPatch, value: str
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        setting: tuple[str, str, str],
+        value: str,
     ) -> None:
+        variable, _, _ = setting
         monkeypatch.setenv("JWT_SECRET_KEY", "a" * 32)
-        monkeypatch.setenv("SMELT_API_URL", value)
-        with pytest.raises(ValidationError, match="SMELT_API_URL"):
+        monkeypatch.setenv(variable, value)
+        with pytest.raises(ValidationError, match=variable):
             Settings(_env_file=None)
 
     @pytest.mark.parametrize(
         "value",
         [
-            "https://smelt.example.test/api?page_size=100",
-            "https://smelt.example.test/api?",
-            "https://smelt.example.test/api#section",
-            "https://smelt.example.test/api#",
+            "https://service.example.test/api?page_size=100",
+            "https://service.example.test/api?",
+            "https://service.example.test/api#section",
+            "https://service.example.test/api#",
         ],
     )
     def test_rejected_query_or_fragment_names_setting(
-        self, monkeypatch: pytest.MonkeyPatch, value: str
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        setting: tuple[str, str, str],
+        value: str,
     ) -> None:
+        variable, _, _ = setting
         monkeypatch.setenv("JWT_SECRET_KEY", "a" * 32)
-        monkeypatch.setenv("SMELT_API_URL", value)
-        with pytest.raises(ValidationError, match="SMELT_API_URL"):
+        monkeypatch.setenv(variable, value)
+        with pytest.raises(ValidationError, match=variable):
             Settings(_env_file=None)
 
     @pytest.mark.parametrize(
@@ -702,33 +741,44 @@ class TestSmeltApiUrlValidation:
         [
             "https://[::1/api",
             "https://]smelt[.example.test/api",
-            "https://smelt.example.test:not-a-port/api",
-            "https://smelt.example.test:65536/api",
-            "https://smelt.example.test:/api",
-            " https://smelt.example.test/api",
-            "https://smelt.example.test /api",
+            "https://service.example.test:not-a-port/api",
+            "https://service.example.test:65536/api",
+            "https://service.example.test:/api",
+            " https://service.example.test/api",
+            "https://service.example.test /api",
         ],
     )
     def test_rejected_malformed_values_name_setting(
-        self, monkeypatch: pytest.MonkeyPatch, value: str
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        setting: tuple[str, str, str],
+        value: str,
     ) -> None:
+        variable, _, _ = setting
         monkeypatch.setenv("JWT_SECRET_KEY", "a" * 32)
-        monkeypatch.setenv("SMELT_API_URL", value)
-        with pytest.raises(ValidationError, match="SMELT_API_URL"):
+        monkeypatch.setenv(variable, value)
+        with pytest.raises(ValidationError, match=variable):
             Settings(_env_file=None)
 
     @pytest.mark.parametrize("character", ["\x00", "\t", "\n", "\x7f"])
     def test_rejected_control_characters_name_setting(
-        self, monkeypatch: pytest.MonkeyPatch, character: str
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        setting: tuple[str, str, str],
+        character: str,
     ) -> None:
+        variable, attribute, _ = setting
         monkeypatch.setenv("JWT_SECRET_KEY", "a" * 32)
-        value = f"https://smelt.example.test/api{character}/v"
-        with pytest.raises(ValidationError, match="SMELT_API_URL"):
-            Settings(_env_file=None, smelt_api_url=value)
+        overrides: dict[str, Any] = {
+            attribute: f"https://service.example.test/api{character}/v"
+        }
+        with pytest.raises(ValidationError, match=variable):
+            Settings(_env_file=None, **overrides)
 
-    def test_not_listed_in_env_example(self) -> None:
+    def test_not_listed_in_env_example(self, setting: tuple[str, str, str]) -> None:
+        variable, _, _ = setting
         env_example = Path(__file__).resolve().parents[1] / ".env.example"
-        assert "SMELT_API_URL" not in env_example.read_text(encoding="utf-8")
+        assert variable not in env_example.read_text(encoding="utf-8")
 
 
 @pytest.mark.unit
