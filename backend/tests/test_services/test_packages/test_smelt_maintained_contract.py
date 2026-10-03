@@ -128,7 +128,7 @@ class TestTargetShape:
             assert isinstance(target["product"]["friendly_name"], str)
 
     @pytest.mark.parametrize("name", MAINTAINED_SUCCESS_FIXTURES)
-    def test_unconsumed_fields_are_present_and_ignored(self, name: str) -> None:
+    def test_unconsumed_fields_are_present(self, name: str) -> None:
         for entry in _entries(name):
             assert {"binary_packages", "support_status"} <= set(entry)
             assert "url" in entry["codestream"]

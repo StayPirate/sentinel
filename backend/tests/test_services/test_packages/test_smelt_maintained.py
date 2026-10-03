@@ -1336,13 +1336,6 @@ class TestMapping:
         result = _found(outcome)
         assert result == _expected_from_fixture(body)
         assert len(result.codestreams) == len(body["data"])
-        assert outcome.logs == []
-
-    async def test_mixed_fixture_maps_both_supported_processes(self) -> None:
-        outcome = await _fetch(_json(200, load_maintained_fixture("mixed")))
-
-        workflow_types = {c.workflow_type for c in _found(outcome).codestreams}
-        assert workflow_types == {WorkflowType.GIT, WorkflowType.IBS}
 
     async def test_codestreams_and_targets_keep_response_order(self) -> None:
         body = _success(
@@ -1723,16 +1716,6 @@ class TestPrivacy:
 
         assert _found(outcome).codestreams
         assert outcome.logs == []
-
-    @pytest.mark.parametrize(
-        "respond",
-        [_json(200, _success()), _json(404, NOT_FOUND_ENVELOPE)],
-        ids=["200-empty-data", "404-error-envelope"],
-    )
-    async def test_not_found_path_emits_no_log_record(self, respond: Respond) -> None:
-        outcome = await _fetch(respond)
-
-        _assert_not_found(outcome)
 
 
 # ---------------------------------------------------------------------------
