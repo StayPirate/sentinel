@@ -33,6 +33,7 @@ import httpx
 import structlog
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from app.core.external_strings import contains_nul
 from app.services.base_fetcher import FetcherError
 
 logger = structlog.get_logger(__name__)
@@ -87,14 +88,18 @@ def item_cpe(
     Shared consumed-field rule of both AIMAAS fetchers (product-catalog.md,
     Product Lifecycle Sync; CVSS Threshold Sync): the `cpe` key must be
     present with a string or null value; a null or empty `cpe` is
-    unmatchable and returned as `None`. A violation raises `error` with a
-    message naming the entry position and field only.
+    unmatchable and returned as `None`. A `cpe` containing U+0000 is a
+    violation, not an unmatchable value (External String Admissibility). A
+    violation raises `error` with a message naming the entry position and
+    field only.
     """
     if "cpe" not in item:
         raise error(f"item {position}: cpe is missing")
     cpe = item["cpe"]
     if cpe is not None and not isinstance(cpe, str):
         raise error(f"item {position}: cpe must be a string")
+    if cpe is not None and contains_nul(cpe):
+        raise error(f"item {position}: cpe contains U+0000")
     return cpe or None
 
 

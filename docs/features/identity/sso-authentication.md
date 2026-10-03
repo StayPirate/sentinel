@@ -269,7 +269,13 @@ callback URL with an authorization `code` and `state` parameter.
    Log at WARNING level: `"SSO callback: expected claim
    '{claim_name}' not found in ID token from {issuer}. Available
    claims: {list_of_claim_names}."` (claim values are never logged —
-   only names, to aid debugging without leaking PII)
+   only names, to aid debugging without leaking PII).
+   If the claim value is a string containing U+0000, it is invalid under
+   External String Admissibility (`docs/conventions.md`), because it is a
+   query parameter in step 6: return the same HTTP 401 `AUTH_SSO_FAILED`
+   response and log at WARNING level: `"SSO callback: claim
+   '{claim_name}' in ID token from {issuer} contains U+0000."` (the
+   claim value is never logged)
 6. Look up the user by matching `username` to the extracted claim value
    (lowercased — see Matching rules). Additionally verify that
    `external_id IS NOT NULL` (i.e., the matched user is an

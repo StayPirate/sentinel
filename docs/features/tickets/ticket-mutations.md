@@ -864,14 +864,16 @@ effective assessment action contributes an effective CVSS child change to
 
 - `evaluation_date` is required; this boundary never captures a replacement.
 - Every provider must be non-empty after outer trim (a whitespace-only
-  provider is empty), no longer than 100 characters as received, and not
+  provider is empty), no longer than 100 characters as received, free of
+  U+0000 (External String Admissibility, `docs/conventions.md`), and not
   equivalent to reserved `SUSE` after outer trim and Unicode case-folding.
   The accepted provider is persisted unchanged.
 - Every item must contain a complete canonical parsed result for an accepted
   version, and the sequence must contain at most one canonical item for each
   `(provider, version)` key.
 - A missing `evaluation_date`, missing CVE UUID, malformed parsed-result type,
-  empty or over-length provider, reserved provider, or duplicate canonical key
+  empty, over-length, or U+0000-containing provider, reserved provider, or
+  duplicate canonical key
   raises `ValueError`. These are internal contract failures, not API outcomes.
 
 All guards use input only and complete before persistent writes. An empty

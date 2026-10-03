@@ -1348,6 +1348,10 @@ non-paginated JSend envelope.
   supported entry or target rejects the complete response and raises
   `SmeltUnavailableError`; targets are never individually skipped for
   structural validation failures.
+- Under External String Admissibility (`docs/conventions.md`), a
+  `codestream.name` of any entry or a supported target's `product.cpe` that
+  contains U+0000 is invalid and rejects the complete response with
+  `SmeltUnavailableError`.
 - `SLFO_IBS` is a known but unsupported maintenance process. Sentinel skips
   the complete codestream without validating or consuming its targets and
   emits one WARNING-level

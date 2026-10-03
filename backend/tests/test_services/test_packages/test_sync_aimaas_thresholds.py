@@ -436,6 +436,18 @@ class TestParseProductRefs:
         assert str(error) == "item 0: cpe must be a string"
         assert MARKER not in str(error)
 
+    @pytest.mark.parametrize(
+        "value",
+        ["\x00", f"\x00{MARKER}", f"{MARKER}\x00{MARKER}", f"{MARKER}\x00"],
+        ids=["only", "start", "middle", "end"],
+    )
+    def test_cpe_containing_nul_is_a_response_error(self, value: str) -> None:
+        """External String Admissibility: not unmatchable, not stripped."""
+        error = _product_error([product_item(1, cpe=value)])
+
+        assert str(error) == "item 0: cpe contains U+0000"
+        assert MARKER not in str(error)
+
     def test_empty_response_yields_no_refs(self) -> None:
         assert parse_product_refs([]) == []
 
@@ -1624,6 +1636,13 @@ _SCHEMA_FAILURES: Final[list[SchemaCase]] = [
     ("string-id", "products", "id", MARKER, "item 105: id must be an integer"),
     ("bool-id", "products", "id", True, "item 105: id must be an integer"),
     ("int-cpe", "products", "cpe", 7, "item 105: cpe must be a string"),
+    (
+        "nul-cpe",
+        "products",
+        "cpe",
+        "cpe:/o:example:nul\x00:1",
+        "item 105: cpe contains U+0000",
+    ),
     (
         "missing-product",
         "cvss_thresholds",

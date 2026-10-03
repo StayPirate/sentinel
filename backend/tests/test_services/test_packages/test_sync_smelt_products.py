@@ -315,6 +315,31 @@ class TestSnapshotValidation:
     def test_repository_over_column_length_is_rejected(self) -> None:
         _rejected(_listing(product_row(1, repos=["r" * (REPO_LIMIT + 1)])))
 
+    @pytest.mark.parametrize("field", FIELDS)
+    @pytest.mark.parametrize(
+        "template", ["\x00{}", "{}\x00{}", "{}\x00"], ids=["start", "middle", "end"]
+    )
+    def test_required_field_containing_nul_is_rejected(
+        self, field: str, template: str
+    ) -> None:
+        """External String Admissibility: U+0000 is never stripped. The
+        exact message proves that no source value is rendered."""
+        value = template.format("1", "2")
+
+        error = _rejected(_listing(product_row(1), product_row(2, **{field: value})))
+
+        assert str(error) == f"row 1: {field} contains U+0000"
+
+    def test_repository_containing_nul_is_rejected(self) -> None:
+        row = product_row(
+            1, repos=["EXAMPLE:Updates:ProductA:1:x86_64", f"{MARKER}\x00"]
+        )
+
+        error = _rejected(_listing(row))
+
+        assert str(error) == "row 0: repository contains U+0000"
+        assert MARKER not in str(error)
+
     def test_duplicate_cpe_is_rejected(self) -> None:
         duplicate = product_row(2, cpe=product_row(1)["cpe"])
 
@@ -866,6 +891,14 @@ def _invalid_row(server: SmeltServer) -> None:
     server.pages[3]["results"][0]["repos"] = []
 
 
+def _nul_cpe(server: SmeltServer) -> None:
+    server.pages[3]["results"][0]["cpe"] = "cpe:/o:example:nul\x00:1"
+
+
+def _nul_repository(server: SmeltServer) -> None:
+    server.pages[2]["results"][0]["repos"] = ["EXAMPLE:Updates:Nul\x00:1:x86_64"]
+
+
 def _duplicate_cpe(server: SmeltServer) -> None:
     server.pages[3]["results"][0]["cpe"] = server.pages[1]["results"][0]["cpe"]
 
@@ -889,6 +922,8 @@ _RUN_FAILURES: Final[list[FailureCase]] = [
     ("timeout", _read_timeout, "SMELT request timed out", httpx.ReadTimeout),
     ("pagination", _invalid_metadata, INVALID_RESPONSE, InvalidProductListingError),
     ("row", _invalid_row, VALIDATION_FAILED, SnapshotValidationError),
+    ("nul-cpe", _nul_cpe, VALIDATION_FAILED, SnapshotValidationError),
+    ("nul-repository", _nul_repository, VALIDATION_FAILED, SnapshotValidationError),
     ("duplicate-cpe", _duplicate_cpe, VALIDATION_FAILED, SnapshotValidationError),
     ("zero-count", _zero_count, VALIDATION_FAILED, SnapshotValidationError),
 ]

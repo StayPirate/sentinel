@@ -555,7 +555,10 @@ same incremental parsing safety boundary as source release data: DTDs, external
 entities, and parser network access are disabled, and no result is accepted
 until the complete document has parsed. Raw XML, response bodies, actor data,
 and free text never enter logs. A parser or interrupted-body failure produces
-the error or incomplete result assigned to that operation above.
+the error or incomplete result assigned to that operation above. A document
+containing U+0000, raw or as a character reference, is not well-formed XML and
+produces that parser failure, which satisfies External String Admissibility
+(`docs/conventions.md`).
 
 Every method is deterministic for one complete response and has no local or
 upstream mutation side effect. Re-invocation repeats the external read and may

@@ -36,7 +36,7 @@ import uuid
 from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta, timezone
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, get_args
 
 import pytest
 from pydantic import BaseModel, ValidationError
@@ -465,6 +465,125 @@ class TestFieldBounds:
     def test_cpe_match_malformed_criteria_id_is_rejected(self) -> None:
         with pytest.raises(ValidationError):
             CPEMatchEntry(criteria=_CPE, vulnerable=True, match_criteria_id="nope")
+
+
+def _string_fields(model: type[BaseModel]) -> list[tuple[str, bool]]:
+    """`(field, is_list)` for every `str` and `list[str]` field of `model`."""
+    fields = []
+    for name, info in model.model_fields.items():
+        members = get_args(info.annotation) or (info.annotation,)
+        if str in members:
+            fields.append((name, False))
+        elif list[str] in members:
+            fields.append((name, True))
+    return fields
+
+
+# Every string-bearing field, pinned so the derived cases cannot be vacuous.
+_NUL_CASES: list[tuple[type[BaseModel], str, bool]] = [
+    (model, name, is_list)
+    for model in _BASES
+    if model is not CVSSAssessmentEntry
+    for name, is_list in _string_fields(model)
+]
+_NUL_TEMPLATES = ["\x00", "\x00{}", "{}\x00{}", "{}\x00"]
+_NUL_MARKER = "FICTIONAL-SECRET-MARKER-0000"
+
+
+def _nul_id(case: tuple[Any, ...]) -> str:
+    return f"{case[0].__name__}.{case[1]}"
+
+
+@pytest.mark.unit
+class TestNulRejection:
+    """External String Admissibility (cve-service.md, CVEIngestPayload
+    Schema design notes): U+0000 in any string value is a payload
+    validation failure; untyped CVSS candidates are excluded."""
+
+    def test_every_string_field_is_covered(self) -> None:
+        assert {(model.__name__, name) for model, name, _ in _NUL_CASES} == {
+            ("CVEIngestPayload", "title"),
+            ("CVEIngestPayload", "description"),
+            ("CVEIngestPayload", "resolved_packages"),
+            ("CWEEntry", "cwe_id"),
+            ("CWEEntry", "source"),
+            *(
+                ("AffectedVersionEntry", name)
+                for name in AFFECTED_VERSION_FIELDS
+                if name != "version_end_inclusive"
+            ),
+            ("AffectedVersionScopeOperation", "source_container"),
+            ("SSVCEntry", "version"),
+            ("KEVEntry", "reference_url"),
+            ("CPEMatchEntry", "criteria"),
+            ("ExternalIdentifierEntry", "identifier"),
+            ("ExternalIdentifierEntry", "url"),
+        }
+
+    @pytest.mark.parametrize("template", _NUL_TEMPLATES)
+    @pytest.mark.parametrize(
+        ("model", "field", "is_list"), _NUL_CASES, ids=map(_nul_id, _NUL_CASES)
+    )
+    def test_string_containing_nul_is_rejected(
+        self, model: type[BaseModel], field: str, is_list: bool, template: str
+    ) -> None:
+        value = template.format("1", "2")
+
+        with pytest.raises(ValidationError):
+            _build(model, **{field: ["valid", value] if is_list else value})
+
+    @pytest.mark.parametrize(
+        "data",
+        [
+            pytest.param({"title": f"{_NUL_MARKER}\x00"}, id="global"),
+            pytest.param(
+                {
+                    "affected_version_operations": [
+                        {
+                            "source_container": "cna",
+                            "operation": "replace",
+                            "entries": [{"program_files": [f"{_NUL_MARKER}\x00"]}],
+                        }
+                    ]
+                },
+                id="nested-jsonb-item",
+            ),
+            pytest.param(
+                {
+                    "cpe_matches": [
+                        {"criteria": f"{_NUL_MARKER}\x00", "vulnerable": True}
+                    ]
+                },
+                id="non-persisted-candidate",
+            ),
+            pytest.param(
+                {"resolved_packages": ["widget", f"{_NUL_MARKER}\x00"]},
+                id="package-candidate",
+            ),
+        ],
+    )
+    def test_payload_rejects_nul_without_rendering_the_value(
+        self, data: dict[str, Any]
+    ) -> None:
+        with pytest.raises(ValidationError) as excinfo:
+            CVEIngestPayload.model_validate(data)
+
+        assert _NUL_MARKER not in str(excinfo.value)
+        assert _NUL_MARKER not in repr(excinfo.value)
+
+    def test_cvss_candidate_containing_nul_is_carried_for_individual_skip(
+        self,
+    ) -> None:
+        payload = CVEIngestPayload(
+            cvss_assessments=[
+                CVSSAssessmentEntry(
+                    provider_name="Example\x00CNA", vector_string="CVSS:3.1\x00"
+                )
+            ]
+        )
+
+        assert payload.cvss_assessments is not None
+        assert payload.cvss_assessments[0].provider_name == "Example\x00CNA"
 
 
 @pytest.mark.unit

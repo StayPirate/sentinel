@@ -142,7 +142,10 @@ their defaults:
 
 Sentinel validates the complete envelope, `data`/`users`/`groups` collection
 types, element object types, the codestream object, and every consumed `email`
-value's string-or-null type. An omitted optional `email` is equivalent to null;
+value's string-or-null type. A consumed `email` containing U+0000 is a malformed
+consumed value under External String Admissibility (`docs/conventions.md`),
+because the normalized email is compared with `User.email` in a database
+query. An omitted optional `email` is equivalent to null;
 an omitted `members` field is equivalent to its source-defined empty-array
 default. A malformed consumed structure rejects the **entire** maintainership
 response; Sentinel never grants from a partially valid response.

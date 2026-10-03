@@ -43,6 +43,7 @@
   - [Logging](#logging)
   - [Testing Conventions](#testing-conventions)
   - [External Integration Contract Verification](#external-integration-contract-verification)
+  - [External String Admissibility](#external-string-admissibility)
   - [Runtime Version](#runtime-version)
     - [Source of Truth](#source-of-truth)
     - [Dockerfile Convention](#dockerfile-convention)
@@ -1057,6 +1058,44 @@ documentation-only. If the real response contradicts an owning specification,
 stop implementation and resolve the discrepancy in a documentation PR before
 continuing — unless the combined-PR exception in `AGENTS.md` (Guardrail 25)
 applies, in which case the spec fix and implementation ship together.
+
+### External String Admissibility
+
+PostgreSQL cannot represent U+0000 (NUL): a `text` or `varchar` parameter
+containing it fails with SQLSTATE 22021, and a `jsonb` value containing its
+JSON escape fails with SQLSTATE 22P05. Both failures occur whether the value
+is written or only compared in a query. JSON permits the character as an
+escape sequence and Pydantic `str` accepts it, so a structurally valid
+external value could otherwise fail only at the database.
+
+A string received from an external source — an HTTP response, a repository
+file, a message-bus payload, or an identity-provider claim — that Sentinel
+persists, stores inside a `jsonb` value, or uses as a query parameter MUST NOT
+contain U+0000:
+
+- A value containing U+0000 is an invalid value of its field. The owning
+  integration contract's existing invalid-data outcome applies at that
+  contract's existing granularity, such as a complete response, snapshot,
+  run, CVE item, candidate, or message. The rule adds no separate outcome.
+- The value is rejected, never stripped, replaced, or escaped, so the rule
+  never silently alters a received value. This applies equally to
+  identifiers, match keys, and free text.
+- The check completes before the value reaches PostgreSQL. A database
+  encoding error is never a documented outcome.
+- Values that never reach PostgreSQL, such as fields used only in log
+  messages, and unconsumed fields are not checked.
+- Only U+0000 is covered. Other control characters are governed by per-field
+  rules where an owning contract defines them, for example reference URLs in
+  `docs/features/tickets/ticket-references.md` (URL Normalization).
+- An XML 1.0 document cannot contain U+0000, raw or as a character reference.
+  A conforming parser rejects it as not well-formed, so the owning
+  parse-failure outcome satisfies this rule without an additional check.
+
+Each owning specification of a non-XML consumer references this rule at its
+validation contract and names the applicable outcome. Consumer-supplied API
+input is not an external source under this rule. The mandatory test scenario
+is defined in `docs/features/platform/testing-strategy.md` (External String
+Admissibility).
 
 ### Runtime Version
 

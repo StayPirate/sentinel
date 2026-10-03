@@ -661,6 +661,10 @@ _METADATA_REJECTIONS: list[tuple[str, dict[str, Any]]] = [
     ("title-spaces", {"title": "   "}),
     ("title-tab", {"title": "\t"}),
     ("title-newline", {"title": "\n"}),
+    ("title-nul-only", {"title": "\x00"}),
+    ("title-nul-start", {"title": f"\x00{LEAK}"}),
+    ("title-nul-middle", {"title": f"{LEAK}\x00{LEAK}"}),
+    ("title-nul-end", {"title": f"{LEAK}\x00"}),
     ("type-plain-string", {"explicit_type": "patch"}),
     ("type-integer", {"explicit_type": 1}),
 ]
