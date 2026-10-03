@@ -123,7 +123,10 @@ HTTP 200 uses a JSend success envelope:
 }
 ```
 
-Source-inspected field shape:
+Source-inspected field shape. Live verification on 2026-10-03 confirmed it,
+the anonymous non-redirecting access, and the HTTP 404 error envelope; an
+omitted `email` or `members` was not observed live because SMELT serializes
+their defaults:
 
 | Field | Shape and nullability | Sentinel use |
 |---|---|---|
