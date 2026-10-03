@@ -303,12 +303,33 @@ class TestWireShape:
         assert (progress["workflow_type"], progress["status"]) == ("git", "fixed")
         assert (progress["severity"], progress["cve_id"]) == (None, None)
         assert progress["submission_milestone"] is None
+        # Unresolved severity uses the 30-day tier, so the due date exists.
+        assert progress["submission_due_at"] == _iso(RECENT + SUBMISSION_OFFSET_30)
         done = detail["data"]["completed"][0]
         assert (done["status"], done["delivery_status"]) == ("wont_fix", "released")
         # A Ticket without a CVE cannot observe the submission phase.
         assert done["submission_milestone"] is None
         for item in (progress, done, detail["data"]["pending"][0]):
             assert set(item) == _ITEM_FIELDS
+
+    async def test_no_sla_serializes_null_submission_fields(
+        self,
+        authenticated_client: AsyncClient,
+        authenticated_user: User,
+        seed: WorkbenchSeed,
+        clock: Clock,
+    ) -> None:
+        """The `none` severity label has no SLA (ticket-deadlines.md, SLA
+        Tier): both submission fields are JSON `null`."""
+        await seed.work(authenticated_user, severity=Severity.NONE)
+
+        (item,) = (await authenticated_client.get(_LISTS["pending"])).json()["data"]
+
+        assert item["severity"] == "none"
+        assert (item["submission_due_at"], item["submission_milestone"]) == (
+            None,
+            None,
+        )
 
     async def test_accessible_ticket_without_work_returns_three_empty_arrays(
         self,

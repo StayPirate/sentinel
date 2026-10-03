@@ -1074,13 +1074,15 @@ class TestDeadlineProjection:
         and milestone status, equal to the same track's `TrackDetail` values
         from `get_ticket_packages()` for the same instant, in both the global
         list and the per-Ticket aggregate."""
-        ticket_columns = {
-            key: work.pop(key)
-            for key in ("created_at", "cve", "severity")
-            if key in work
-        }
-        ticket = await seed.ticket(**ticket_columns)
-        await seed.work(owner, ticket=ticket, **work)
+        ticket_keys = ("created_at", "cve", "severity")
+        ticket = await seed.ticket(
+            **{key: value for key, value in work.items() if key in ticket_keys}
+        )
+        await seed.work(
+            owner,
+            ticket=ticket,
+            **{key: value for key, value in work.items() if key not in ticket_keys},
+        )
         caller = owner_caller(owner)
 
         aggregate = await _ticket_work(db_session, ticket, caller)
@@ -1207,6 +1209,48 @@ async def _bulk(seed: WorkbenchSeed, owner: User, *, tickets: int, tracks: int) 
         package = await seed.package(ticket, maintainers=(owner,))
         for _ in range(tracks):
             await seed.track(package, products=(ELIGIBLE, ELIGIBLE))
+
+
+@pytest.mark.integration
+class TestDatabaseSideFiltering:
+    @ALL_LISTS
+    async def test_page_and_total_exclude_rows_sorted_ahead_of_the_callers_work(
+        self,
+        db_session: AsyncSession,
+        seed: WorkbenchSeed,
+        owner: User,
+        classification: str,
+    ) -> None:
+        """Invisible, unowned, and unclassified tracks with a higher severity
+        sort ahead of the caller's one qualifying track. With `per_page=1`,
+        a broad page filtered in Python would return an empty first page or
+        an inflated total; database-side filtering returns the caller's row
+        and total 1."""
+        delivery = {
+            "pending": DeliveryStatus.PENDING,
+            "in_progress": DeliveryStatus.IN_PROGRESS,
+            "completed": DeliveryStatus.RELEASED,
+        }[classification]
+        other = await seed.user()
+        await seed.work(
+            other, severity=Severity.CRITICAL, confidential=True, delivery=delivery
+        )
+        await seed.work(other, severity=Severity.CRITICAL, delivery=delivery)
+        await seed.work(
+            owner,
+            severity=Severity.CRITICAL,
+            status=TicketStatus.NEW,
+            delivery=delivery,
+        )
+        mine = await seed.work(owner, severity=Severity.LOW, delivery=delivery)
+
+        first = await _list(db_session, classification, owner_caller(owner), per_page=1)
+        second = await _list(
+            db_session, classification, owner_caller(owner), page=2, per_page=1
+        )
+
+        assert (first.total, _references(first.items)) == (1, [mine.reference])
+        assert (second.total, second.items) == (1, ())
 
 
 @pytest.mark.integration
