@@ -755,11 +755,10 @@ attribute it exposes.
     relative to the API prefix (non-paginated) — package-scoped unified
     resolver that combines IBS channel records with Git/SLFO Product SBOM
     records. Returns codestream-grouped entries with direct Product CPE, the
-    authoritative codestream `maintenance_process_type`, target-level
-    Product-definition provenance (`product_definition.type`: `channel` or
-    `compose`), and aggregated targets. Sentinel consumes only the fields
-    required for package resolution (see `package-model.md`, SMELT Query for
-    Package Resolution)
+    authoritative codestream maintenance process (`codestream.type`:
+    `SLFO`, `SLFO_IBS`, `SLE_15`, or `UNKNOWN`), and aggregated targets.
+    Sentinel consumes only the fields required for package resolution (see
+    `package-model.md`, SMELT Query for Package Resolution)
   - `experimental/v2/maintained/` relative to the API prefix (paginated) —
     sweep operation with optional source-package, binary, and codestream
     filters. It is not used for Sentinel's per-package resolution
@@ -792,9 +791,14 @@ attribute it exposes.
     AIMAAS-derived Reactive LTSS status.
   - Git/SLFO package resolution originates from the latest released Product
     SBOM snapshot and Product-compose metadata, not from `SUSE:Channels`.
-  - `codestream.maintenance_process_type` identifies the codestream process;
-    `product_definition.type` identifies how an individual Product target was
-    resolved and is not workflow authority.
+  - `codestream.type` identifies the codestream maintenance process; the
+    declared value `UNKNOWN` means SMELT could not classify the codestream.
+    Target-level `product_definition.type` identifies how an individual
+    Product target was resolved and is not workflow authority.
+  - SMELT owns the selection of one authoritative representation per
+    Product, including the exclusion of channel records that only mirror a
+    Product delivered through compose. Sentinel does not deduplicate channel
+    and compose representations.
   - Absence from one upstream catalog is not evidence that a Product is EOL,
     deleted, or ineligible. Catalog presence and lifecycle are independent.
   - Maintained-package codestreams identify delivery/update or compose targets;
