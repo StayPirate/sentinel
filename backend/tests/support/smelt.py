@@ -1,10 +1,18 @@
-"""Shared SMELT Product listing fixtures and a fake SMELT server.
+"""Shared SMELT fixtures and a fake SMELT Product listing server.
 
-The files under `backend/tests/fixtures/smelt/` are live
-`v1/basic/products/` pages (first, middle, and final) captured from the
-default `SMELT_API_URL` with `page_size=100`, stored as served. They
+The `products_page_*.json` files under `backend/tests/fixtures/smelt/` are
+live `v1/basic/products/` pages (first, middle, and final) captured from
+the default `SMELT_API_URL` with `page_size=100`, stored as served. They
 contain Product catalog data only; no personal identifier was present
 (docs/conventions.md, External Integration Contract Verification).
+
+The `maintainership_*.json` files are live
+`experimental/v2/packages/{package_name}/maintainership` responses captured
+anonymously from the default `SMELT_API_URL` on 2026-10-03 and sanitized
+before saving: every username, email, group name, group email, codestream
+name and URL, and the package name in the 404 message was replaced with a
+deterministic fictional value. Structure, key order, types, nullness, and
+duplicate relationships are preserved.
 
 `SmeltServer` is an in-process `httpx.MockTransport` handler that serves
 a paginated `v1/basic/products/` listing in the verified live
@@ -54,6 +62,25 @@ def load_products_page(page: int) -> dict[str, Any]:
     path = FIXTURE_DIR / f"products_page_{page}.json"
     data: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
     return data
+
+
+MAINTAINERSHIP_SUCCESS_FIXTURES = (
+    "users_only",
+    "groups_only",
+    "users_and_groups",
+    "null_email",
+    "empty",
+)
+"""Sanitized live HTTP 200 maintainership responses, by fixture name."""
+
+MAINTAINERSHIP_NOT_FOUND_FIXTURE = "not_found"
+"""The sanitized live HTTP 404 response for an unknown package."""
+
+
+def load_maintainership_fixture(name: str) -> Any:
+    """Return one sanitized live maintainership response as parsed JSON."""
+    path = FIXTURE_DIR / f"maintainership_{name}.json"
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def product_row(index: int, **overrides: Any) -> dict[str, Any]:

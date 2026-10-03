@@ -1,0 +1,67 @@
+{
+  "status": "success",
+  "data": [
+    {
+      "codestream": {
+        "name": "Fictional:Codestream:1",
+        "url": "https://example.com/fictional-codestream-1"
+      },
+      "users": [],
+      "groups": [
+        {
+          "name": "fictional-group-1",
+          "email": "fictional-group-1@example.com",
+          "members": [
+            {
+              "username": "maintainer-1",
+              "email": "maintainer.1@example.com"
+            },
+            {
+              "username": "maintainer-2",
+              "email": "maintainer.2@example.com"
+            },
+            {
+              "username": "maintainer-3",
+              "email": "maintainer.3@example.com"
+            },
+            {
+              "username": "maintainer-4",
+              "email": "maintainer.4@example.com"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "codestream": {
+        "name": "Fictional:Codestream:2",
+        "url": "https://example.com/fictional-codestream-2"
+      },
+      "users": [],
+      "groups": [
+        {
+          "name": "fictional-group-1",
+          "email": "fictional-group-1@example.com",
+          "members": [
+            {
+              "username": "maintainer-1",
+              "email": "maintainer.1@example.com"
+            },
+            {
+              "username": "maintainer-2",
+              "email": "maintainer.2@example.com"
+            },
+            {
+              "username": "maintainer-3",
+              "email": "maintainer.3@example.com"
+            },
+            {
+              "username": "maintainer-4",
+              "email": "maintainer.4@example.com"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
