@@ -644,12 +644,13 @@ eligibility and EOL-derived actionability when applicable.
 - **Consumed-field schema**: neither the AIMAAS Product nor the threshold
   schema requires these fields. A Product-list entry that omits the `id` or
   `cpe` key, whose `id` is not an integer, or whose `cpe` is neither a string
-  nor null, is a Product-list response-schema failure. A threshold entry that omits the `product` or
-  `threshold` key, or whose `product` is not an integer, is a threshold-list
-  response-schema failure; an absent `threshold` would otherwise be read as a
-  cleared threshold. As for lifecycle synchronization, a null or empty `cpe`
-  is unmatchable: a threshold whose `product` resolves to such an entry is
-  ignored like a resolved CPE with no local Product.
+  nor null, is a Product-list response-schema failure. A threshold entry that
+  omits the `product` or `threshold` key, or whose `product` is not an
+  integer, is a threshold-list response-schema failure; an absent `threshold`
+  would otherwise be read as a cleared threshold. As for lifecycle
+  synchronization, a null or empty `cpe` is unmatchable: a threshold whose
+  `product` resolves to such an entry is ignored like a resolved CPE with no
+  local Product.
 - **Sync behavior**:
   1. Fetch all AIMAAS product pages (with `all_fields=true`) and all
      threshold pages before opening a database transaction. Build a
