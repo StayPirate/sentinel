@@ -469,8 +469,8 @@ def gate_status_expression(evaluation_date: date) -> ColumnElement[str]:
     Q1: `evaluation_date` is the one UTC date used by every lifecycle and
     actionability predicate.
 
-    Q4: evaluates to the `TicketStatus` value `resolved` (Analyzed and
-    resolution-complete), `analyzed`, or the `analysis` floor; never `new`
+    Q4: evaluates to the `TicketStatus` value `Resolved` (Analyzed and
+    resolution-complete), `Analyzed`, or the `Analysis` floor; never `New`
     or a manual-zone status. Status, assignee, and audit history are not
     inputs.
     """
