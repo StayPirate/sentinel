@@ -1894,7 +1894,7 @@ Caught by endpoint handlers and mapped to HTTP responses:
 | `TicketNotFoundError` † | 404 | `TICKET_NOT_FOUND` | A consumer Ticket locator is malformed, missing, or inaccessible, or an internal declared Ticket UUID is absent |
 | `TicketNotMutableError` † | 409 | `TICKET_NOT_MUTABLE` | Ticket is in manual zone (defense in depth — API layer catches first) |
 | `TrackNotFoundError` | 404 | `RESOURCE_NOT_FOUND` | Track ID does not exist under the declared Ticket/package path |
-| `ProductNotFoundError` | 404 | `RESOURCE_NOT_FOUND` | Product occurrence ID does not exist under the declared Ticket/package/track path |
+| `ProductNotFoundError` | 404 | `RESOURCE_NOT_FOUND` | Product occurrence ID does not exist under the declared Ticket/package/track path; also raised by the system-internal `recalculate_product_eligibility_for_ticket()` when its catalog `Product.id` does not exist (that path has no HTTP mapping) |
 | `PackageNotFoundError` | 404 | `RESOURCE_NOT_FOUND` | Package ID does not exist under the declared Ticket path |
 | `PackageAlreadyExcludedError` | 409 | `PACKAGE_ALREADY_EXCLUDED` | Soft-delete targets an already excluded record, or public package addition targets a directly excluded package occurrence |
 | `PackageNotExcludedError` | 422 | `PACKAGE_NOT_EXCLUDED` | Restore on record with `deleted_at IS NULL` |

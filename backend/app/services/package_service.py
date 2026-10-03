@@ -1084,12 +1084,14 @@ class TrackNotFoundError(PackageServiceError):
 
 
 class ProductNotFoundError(PackageServiceError):
-    """The Product occurrence ID does not exist under the declared path.
+    """The Product occurrence or catalog Product does not exist.
 
-    The identifier is a `TicketPackageProduct.id` under the declared
-    Ticket/package/track path, never a catalog `Product.id`. Maps to `404
-    RESOURCE_NOT_FOUND`. The static message never reveals whether the
-    occurrence exists under another path.
+    On consumer paths the identifier is a `TicketPackageProduct.id` under
+    the declared Ticket/package/track path; it maps to `404
+    RESOURCE_NOT_FOUND`, and the static message never reveals whether the
+    occurrence exists under another path. The system-internal
+    `recalculate_product_eligibility_for_ticket()` also raises it when its
+    catalog `Product.id` does not exist; that path has no HTTP mapping.
     """
 
     def __init__(self) -> None:

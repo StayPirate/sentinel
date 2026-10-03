@@ -180,8 +180,17 @@ independent schedule or dashboard entry.
 | `catalog_product_id` | `UUID` | Internal catalog `Product.id` |
 | `reason` | `Literal["threshold", "reactive_ltss"]` | Trigger recorded in changed-record audit events |
 
-The task validates `reason` before opening a database session. An unsupported
-value raises `ValueError` and performs no work.
+The task validates `reason` and `catalog_product_id` before opening a database
+session. An unsupported `reason`, or a `catalog_product_id` that is not a UUID,
+raises `ValueError` and performs no work.
+
+The synchronous Celery wrapper bridges into one async workflow with exactly one
+`asyncio.run()` call per invocation. Because the task is repeatedly invoked in
+one long-lived worker process, that async workflow is the disposal boundary
+required by `docs/conventions.md` (Cross-Loop Pooled Connection Lifecycle): it
+awaits `engine.dispose()` exactly once on every return and exception path,
+including argument-validation failures, before control returns to
+`asyncio.run()`.
 
 1. Capture one UTC `evaluation_date` for the complete task invocation.
 2. In a read-only session, select distinct IDs of operable Tickets containing
