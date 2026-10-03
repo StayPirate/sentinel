@@ -1,11 +1,17 @@
-"""Shared AIMAAS Product list fixtures and a fake AIMAAS server.
+"""Shared AIMAAS Product and CVSS threshold fixtures and a fake AIMAAS server.
 
-The files under `backend/tests/fixtures/aimaas/` are live
-`entity/products?all_fields=true&size=100` pages (first, middle, final, and
-one beyond `pages`) captured from the default `AIMAAS_API_URL` on
-2026-10-03 and stored as served. They contain Product lifecycle data only;
-no personal identifier was present (docs/conventions.md, External
-Integration Contract Verification).
+The files under `backend/tests/fixtures/aimaas/` are live pages captured
+from the default `AIMAAS_API_URL` on 2026-10-03 and stored as served plus a
+trailing newline:
+
+- `products_page_{1..6}.json`: `entity/products?all_fields=true&size=100`,
+  the complete Product list (pages 1-5) and one page beyond `pages` (6);
+- `thresholds_page_{1,2}.json`: `entity/cvss-threshold?size=100`, the
+  complete threshold list (page 1) and one page beyond `pages` (2).
+
+They contain Product lifecycle and threshold data only; no personal
+identifier was present (docs/conventions.md, External Integration Contract
+Verification).
 
 `AimaasServer` is an in-process `httpx.MockTransport` handler that serves a
 paginated AIMAAS collection in the verified live envelope
@@ -33,8 +39,17 @@ import httpx
 
 FIXTURE_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "aimaas"
 
-# Page numbers of the captured live pages (page 6 is beyond `pages`).
+# Representative captured Product list pages: first, middle, final, and
+# beyond `pages` (6).
 FIXTURE_PAGES = (1, 3, 5, 6)
+
+# Every captured Product list page: the complete collection (1-5) and the
+# page beyond `pages` (6).
+PRODUCT_LIST_PAGES = (1, 2, 3, 4, 5, 6)
+
+# Every captured threshold list page: the complete collection (1) and the
+# page beyond `pages` (2).
+THRESHOLD_FIXTURE_PAGES = (1, 2)
 
 AIMAAS_TEST_API_URL = "https://aimaas.example.test/api"
 """A fictional, validated `AIMAAS_API_URL` (no port)."""
@@ -42,13 +57,24 @@ AIMAAS_TEST_API_URL = "https://aimaas.example.test/api"
 AIMAAS_TEST_PRODUCTS_ENDPOINT = f"{AIMAAS_TEST_API_URL}/entity/products"
 """The Product list request URL for `AIMAAS_TEST_API_URL`."""
 
+AIMAAS_TEST_THRESHOLDS_ENDPOINT = f"{AIMAAS_TEST_API_URL}/entity/cvss-threshold"
+"""The CVSS threshold list request URL for `AIMAAS_TEST_API_URL`."""
+
 PAGE_SIZE = 100
 
 
 def load_products_page(page: int) -> dict[str, Any]:
     """Return one captured live Product list page as parsed JSON."""
-    path = FIXTURE_DIR / f"products_page_{page}.json"
-    data: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
+    return _load(f"products_page_{page}.json")
+
+
+def load_thresholds_page(page: int) -> dict[str, Any]:
+    """Return one captured live CVSS threshold list page as parsed JSON."""
+    return _load(f"thresholds_page_{page}.json")
+
+
+def _load(name: str) -> dict[str, Any]:
+    data: dict[str, Any] = json.loads((FIXTURE_DIR / name).read_text("utf-8"))
     return data
 
 
