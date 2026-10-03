@@ -62,7 +62,7 @@ from typing import Final, Literal
 from uuid import UUID
 
 import structlog
-from sqlalchemy import ColumnElement, and_, exists, not_, or_, select
+from sqlalchemy import ColumnElement, and_, case, exists, not_, or_, select
 from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased, selectinload
@@ -147,6 +147,7 @@ __all__ = [
     "auto_assign_actor",
     "delete_cvss_assessment",
     "ensure_ticket_operable",
+    "gate_status_expression",
     "is_stabilized_vulnerability_analyst",
     "is_valid_external_provider_name",
     "recalculate_cvss_chain",
@@ -349,44 +350,46 @@ async def auto_assign_actor(
 
 # ---------------------------------------------------------------------------
 # Gate predicates (tickets.md, Gate: Analysis → Analyzed / Analyzed → Resolved)
+#
+# Every predicate is correlated to the enclosing statement's `Ticket`, so the
+# same gate SQL serves `reconcile_ticket_status()` (one Ticket) and set-based
+# gate-mismatch discovery (`gate_status_expression()`).
 # ---------------------------------------------------------------------------
 
 
-def _has_manually_included_track(ticket_id: UUID) -> ColumnElement[bool]:
+def _has_manually_included_track() -> ColumnElement[bool]:
     """`|M| >= 1`: a track whose own and package markers are both NULL."""
     return exists(
         select(TicketPackageTrack.id)
         .join(TicketPackage, TicketPackage.id == TicketPackageTrack.ticket_package_id)
         .where(
-            TicketPackage.ticket_id == ticket_id,
+            TicketPackage.ticket_id == Ticket.id,
             TicketPackage.deleted_at.is_(None),
             TicketPackageTrack.deleted_at.is_(None),
         )
+        .correlate(Ticket)
     )
 
 
-def _actionable_track_condition(
-    ticket_id: UUID, evaluation_date: date
-) -> ColumnElement[bool]:
+def _actionable_track_condition(evaluation_date: date) -> ColumnElement[bool]:
     """Select the Ticket's actionable tracks `A` (`TicketPackageTrack` joined
     to its `TicketPackage`)."""
     return and_(
-        TicketPackage.ticket_id == ticket_id,
+        TicketPackage.ticket_id == Ticket.id,
         track_actionable_expression(evaluation_date),
     )
 
 
-def _has_actionable_analysis_track(
-    ticket_id: UUID, evaluation_date: date
-) -> ColumnElement[bool]:
+def _has_actionable_analysis_track(evaluation_date: date) -> ColumnElement[bool]:
     """Some track in `A` has affectedness `ANALYSIS`."""
     return exists(
         select(TicketPackageTrack.id)
         .join(TicketPackage, TicketPackage.id == TicketPackageTrack.ticket_package_id)
         .where(
-            _actionable_track_condition(ticket_id, evaluation_date),
+            _actionable_track_condition(evaluation_date),
             TicketPackageTrack.status == PackageStatus.ANALYSIS.value,
         )
+        .correlate(Ticket)
     )
 
 
@@ -401,9 +404,7 @@ def _has_canonical_suse_assessment() -> ColumnElement[bool]:
     ).correlate(Ticket)
 
 
-def _has_incomplete_actionable_track(
-    ticket_id: UUID, evaluation_date: date
-) -> ColumnElement[bool]:
+def _has_incomplete_actionable_track(evaluation_date: date) -> ColumnElement[bool]:
     """Some track in `A` is not resolution-complete.
 
     A track `t` is resolution-complete when (a) its status is
@@ -448,10 +449,42 @@ def _has_incomplete_actionable_track(
         select(track.id)
         .join(TicketPackage, TicketPackage.id == track.ticket_package_id)
         .where(
-            _actionable_track_condition(ticket_id, evaluation_date),
+            _actionable_track_condition(evaluation_date),
             not_(resolution_complete),
         )
         .correlate(Ticket)
+    )
+
+
+def gate_status_expression(evaluation_date: date) -> ColumnElement[str]:
+    """Build the highest valid gate-zone status of the enclosing `Ticket`.
+
+    Category B (expression builder; no I/O). The one SQL form of the gates
+    evaluated by `reconcile_ticket_status()` step 2 (tickets.md, Gate:
+    Analysis → Analyzed, Gate: Analyzed → Resolved; package-model.md, Gate
+    Participation), correlated to the `Ticket` of the enclosing statement
+    so a set-based gate-mismatch query applies exactly the reconciliation
+    gates (implementation roadmap umbrella #761, H7).
+
+    Q1: `evaluation_date` is the one UTC date used by every lifecycle and
+    actionability predicate.
+
+    Q4: evaluates to the `TicketStatus` value `resolved` (Analyzed and
+    resolution-complete), `analyzed`, or the `analysis` floor; never `new`
+    or a manual-zone status. Status, assignee, and audit history are not
+    inputs.
+    """
+    analyzed = and_(
+        _has_manually_included_track(),
+        not_(_has_actionable_analysis_track(evaluation_date)),
+        resolved_severity_expression(Ticket).is_not(None),
+        or_(Ticket.cve_id.is_(None), _has_canonical_suse_assessment()),
+    )
+    resolution_complete = not_(_has_incomplete_actionable_track(evaluation_date))
+    return case(
+        (not_(analyzed), TicketStatus.ANALYSIS.value),
+        (resolution_complete, TicketStatus.RESOLVED.value),
+        else_=TicketStatus.ANALYZED.value,
     )
 
 
@@ -462,25 +495,14 @@ async def _evaluate_gate_status(
 
     Every clause uses the same `evaluation_date`; nothing is persisted.
     """
-    analyzed = and_(
-        _has_manually_included_track(ticket_id),
-        not_(_has_actionable_analysis_track(ticket_id, evaluation_date)),
-        resolved_severity_expression(Ticket).is_not(None),
-        or_(Ticket.cve_id.is_(None), _has_canonical_suse_assessment()),
-    ).label("analyzed")
-    resolution_complete = not_(
-        _has_incomplete_actionable_track(ticket_id, evaluation_date)
-    ).label("resolution_complete")
-    row = (
+    status = (
         await db.execute(
-            select(analyzed, resolution_complete).where(Ticket.id == ticket_id)
+            select(gate_status_expression(evaluation_date)).where(
+                Ticket.id == ticket_id
+            )
         )
-    ).one()
-    if not row.analyzed:
-        return TicketStatus.ANALYSIS
-    if row.resolution_complete:
-        return TicketStatus.RESOLVED
-    return TicketStatus.ANALYZED
+    ).scalar_one()
+    return TicketStatus(status)
 
 
 # ---------------------------------------------------------------------------

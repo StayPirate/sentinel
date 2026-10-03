@@ -7,7 +7,9 @@ mode and its composed mode, the synchronous manual-zone-exit
 eligibility convergence (`converge_manual_zone_exit_eligibility()`),
 which `ticket_service` composes with an already locked Ticket, the
 Product-originated system recalculation
-(`recalculate_product_eligibility_for_ticket()`), and the
+(`recalculate_product_eligibility_for_ticket()`), the lifecycle
+actionability reconciliation
+(`reconcile_lifecycle_actionability_for_ticket()`), and the
 package mutation foundation (`PackageServiceError` hierarchy, the
 explicit system invocation context, the locked semantic-locator loader
 at the package, track, and Product levels) with the mutations
@@ -2089,6 +2091,91 @@ async def recalculate_product_eligibility_for_ticket(
         override_skipped=counts.override_skipped,
         changed=counts.changed,
         manual_zone_skipped=False,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Lifecycle actionability reconciliation (package-service.md,
+# `reconcile_lifecycle_actionability_for_ticket()`)
+# ---------------------------------------------------------------------------
+
+_LIFECYCLE_SKIPPED_STATUSES: Final = frozenset(
+    {TicketStatus.NEW, TicketStatus.IGNORED, TicketStatus.DUPLICATED}
+)
+
+
+@dataclass(frozen=True, slots=True)
+class LifecycleReconciliationResult:
+    """Outcome of one lifecycle actionability reconciliation.
+
+    `previous_status` is the locked-current status before reconciliation and
+    `current_status` the status after it; `changed` is true exactly when
+    they differ. A `New`, `Ignored`, or `Duplicated` Ticket has
+    `skipped = True` and an unchanged status.
+    """
+
+    previous_status: TicketStatus
+    current_status: TicketStatus
+    changed: bool
+    skipped: bool
+
+
+async def reconcile_lifecycle_actionability_for_ticket(
+    db: AsyncSession,
+    ticket_id: uuid.UUID,
+    evaluation_date: date,
+) -> LifecycleReconciliationResult:
+    """Reconcile one gate-zone Ticket against current derived actionability.
+
+    Category A system mutation boundary (package-service.md,
+    `reconcile_lifecycle_actionability_for_ticket()`;
+    product-lifecycle-transitions.md, Algorithm step 4 and Catch-Up). Used
+    after Product lifecycle data or the UTC date may have changed derived
+    actionability; neither the lifecycle phase nor actionability is
+    persisted.
+
+    Q1: `evaluation_date` is the caller's UTC date for its complete
+    lifecycle evaluation run.
+
+    Q2: acquires `FOR UPDATE` on the Ticket as the first database
+    operation (no User or CVE lock). `New`, `Ignored`, and `Duplicated`
+    return a skipped result (defensive race guard).
+
+    Q3: calls `reconcile_ticket_status()` exactly once with
+    `evaluation_date`, then flushes. The delegated reconciliation creates
+    the ordinary system `status_change` when the status changes and
+    registers Ticket convergence for a `Resolved` regression. Never
+    assigns, never creates a separate audit event, and never writes
+    exclusion markers, eligibility, affectedness, or delivery state; never
+    commits or rolls back.
+
+    Q4: returns the previous and current status and whether it changed.
+
+    Q5: deterministic and idempotent for the supplied date and current
+    persisted data: a converged Ticket is a no-op.
+
+    Q6: `TicketNotFoundError` for a missing Ticket; database, audit, and
+    reconciliation exceptions propagate and roll back the caller's
+    transaction.
+    """
+    ticket = await _lock_system_ticket(db, ticket_id)
+    previous = TicketStatus(ticket.status)
+    if previous in _LIFECYCLE_SKIPPED_STATUSES:
+        return LifecycleReconciliationResult(
+            previous_status=previous,
+            current_status=previous,
+            changed=False,
+            skipped=True,
+        )
+
+    await reconcile_ticket_status(ticket, db, evaluation_date=evaluation_date)
+    await db.flush()
+    current = TicketStatus(ticket.status)
+    return LifecycleReconciliationResult(
+        previous_status=previous,
+        current_status=current,
+        changed=current is not previous,
+        skipped=False,
     )
 
 
