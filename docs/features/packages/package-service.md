@@ -816,13 +816,13 @@ representation. Each item contains:
 | Field | Type | Contract |
 |-------|------|----------|
 | `reference` | `str` | Unique SMELT codestream name, already validated against the persisted track-reference constraints |
-| `workflow_type` | `WorkflowType` | Already mapped from the supported authoritative `codestream.maintenance_process_type` value |
+| `workflow_type` | `WorkflowType` | Already mapped from the supported authoritative `codestream.type` value |
 | `catalog_product_ids` | non-empty collection of `UUID` | Distinct internal IDs of existing local Products resolved by exact CPE under this codestream |
 
 Before calling `add_package_records()`, the caller has completed all external
-I/O, JSend and response validation, unsupported-process filtering,
-channel/compose deduplication, exact CPE lookup, workflow mapping, and
-deduplication of `catalog_product_ids` within each track. It has also converted
+I/O, JSend and response validation, unsupported and unclassified codestream
+filtering, exact CPE lookup, workflow mapping, and deduplication of
+`catalog_product_ids` within each track. It has also converted
 the independently validated maintainership response to `maintainer_emails` as
 specified in `package-maintainership.md`. Consequently this
 function
@@ -1077,13 +1077,12 @@ async def add_package_to_ticket(
    combination — including a non-200 response and HTTP 200 with
    `status = "error"` — raises `SmeltUnavailableError`. No records are
    created.
-6. Filter known unsupported codestreams, map `workflow_type` from the
-   authoritative `codestream.maintenance_process_type`, and apply the
-   synthetic same-CPE channel/compose deduplication rule as specified in
-   `package-model.md` (SMELT Query for Package Resolution). Match the
-   remaining product CPEs directly against local `Product.cpe` before the
-   Ticket lock is acquired. Build the validated `ResolvedTrackData` input
-   defined by `add_package_records()`. If resolution is partial, emit the
+6. Skip unsupported (`SLFO_IBS`) and unclassified (`UNKNOWN`) codestreams
+   with their warnings and map `workflow_type` from the authoritative
+   `codestream.type` as specified in `package-model.md` (SMELT Query for
+   Package Resolution). Match the remaining product CPEs directly against
+   local `Product.cpe` before the Ticket lock is acquired. Build the validated
+   `ResolvedTrackData` input defined by `add_package_records()`. If resolution is partial, emit the
    required structured warnings before mutation. If no Product CPE resolves to
    a local Product across supported codestreams, raise
    `PackageTargetsUnresolvedError`. No records are created.
@@ -1901,7 +1900,7 @@ Caught by endpoint handlers and mapped to HTTP responses:
 | `SmeltUnavailableError` | 503 | `SMELT_UNAVAILABLE` | SMELT transport fails after shared retries or SMELT does not produce a valid expected response |
 | `ProductCatalogNotReadyError` | 503 | `PRODUCT_CATALOG_NOT_READY` | No complete SMELT Product catalog snapshot has committed |
 | `PackageNotFoundInSmeltError` | 422 | `PACKAGE_NOT_FOUND_IN_SMELT` | SMELT returns zero tracks |
-| `PackageTargetsUnresolvedError` | 422 | `PACKAGE_TARGETS_UNRESOLVED` | SMELT returns tracks but no target resolves through the current Product catalog snapshot |
+| `PackageTargetsUnresolvedError` | 422 | `PACKAGE_TARGETS_UNRESOLVED` | SMELT returns tracks but no target of a supported codestream resolves through the current Product catalog snapshot, including when every codestream is skipped as unsupported or unclassified |
 | `TrackFixedStatusRestrictedError` | 403 | `AUTH_INSUFFICIENT_PERMISSION` | User-attributed caller uses the admin force marker inconsistently, or requests `FIXED` with only `manage_packages` while the locked-current Ticket has a CVE |
 
 † Shared exception — inherits from `ServiceError`, not from

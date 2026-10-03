@@ -80,11 +80,11 @@ human-readable. For git, the full repository URL is derivable from
 `package_name` (convention: `src.suse.de/pool/{package_name}`).
 
 The SMELT v2 maintained-package endpoint provides the codestream-level
-`maintenance_process_type`. Sentinel maps supported values directly to
-`workflow_type` at ingestion time: `SLFO` maps to `git` and `SLE_15` maps to
-`ibs`. The target-level `product_definition.type` (`channel` or `compose`)
-describes Product-definition provenance and is not workflow authority. Both
-supported workflows can coexist under the same package. See
+maintenance process as `codestream.type`. Sentinel maps supported values
+directly to `workflow_type` at ingestion time: `SLFO` maps to `git` and
+`SLE_15` maps to `ibs`. Target-level Product-definition provenance is not
+workflow authority and is not consumed. Both supported workflows can coexist
+under the same package. See
 [SMELT Query for Package Resolution](#smelt-query-for-package-resolution)
 for the full resolution contract.
 
@@ -242,8 +242,7 @@ that provides:
    (package-scoped `experimental/v2/maintained/{package_name}` relative to the
    configured SMELT API prefix): returns the list of codestreams where the
    package is maintained and the Products it is shipped to, with direct CPE
-   identification, authoritative codestream maintenance process, and
-   target-level Product-definition provenance. See
+   identification and the authoritative codestream maintenance process. See
    [SMELT Query for Package Resolution](#smelt-query-for-package-resolution)
    for the complete request contract.
 3. **Per-package maintainership**
@@ -1137,8 +1136,8 @@ add_package_to_ticket(ticket_id, package_name) -> AddPackageResult
 1. Query SMELT and resolve Products as specified in
    [SMELT Query for Package Resolution](#smelt-query-for-package-resolution):
    external I/O, envelope validation, catalog readiness check, CPE matching,
-   synthetic channel/compose deduplication, unsupported-process filtering, and
-   `workflow_type` determination from `codestream.maintenance_process_type`.
+   unsupported and unclassified codestream filtering, and `workflow_type`
+   determination from `codestream.type`.
    If no Product is resolved across the complete response, reject the
    operation without database writes.
 2. After successful maintained-package target resolution and before acquiring
@@ -1338,24 +1337,33 @@ non-paginated JSend envelope.
   ensure Products in Reactive LTSS are returned.
 - Each entry in `data` must have a `codestream` object with a non-empty
   string `name` that fits the persisted track-reference column length and a
-  non-null string `maintenance_process_type`. Codestream names must be unique
-  across the grouped response.
-- `maintenance_process_type` must be one of the declared SMELT values `SLFO`,
-  `SLFO_IBS`, or `SLE_15`. A missing, null, non-string, or unknown value, or a
-  repeated codestream name, rejects the complete response and raises
-  `SmeltUnavailableError`.
+  non-null string `type`, the codestream maintenance process. Codestream names
+  must be unique across the grouped response.
+- `codestream.type` must be one of the declared SMELT `MaintenanceProcessType`
+  values `SLFO`, `SLFO_IBS`, `SLE_15`, or `UNKNOWN`. A missing, null,
+  non-string, or undeclared value, or a repeated codestream name, rejects the
+  complete response and raises `SmeltUnavailableError`.
 - A supported `SLFO` or `SLE_15` entry must have a non-empty `targets` array.
-  Each target must have `product.cpe` as a non-empty string and
-  `product_definition.type` with a value of `"channel"` or `"compose"`.
-  An invalid supported entry or target rejects the complete response and
-  raises `SmeltUnavailableError`; targets are never individually skipped for
+  Each target must have `product.cpe` as a non-empty string. An invalid
+  supported entry or target rejects the complete response and raises
+  `SmeltUnavailableError`; targets are never individually skipped for
   structural validation failures.
 - `SLFO_IBS` is a known but unsupported maintenance process. Sentinel skips
   the complete codestream without validating or consuming its targets and
   emits one WARNING-level
   `package_codestream_maintenance_process_unsupported` event containing
-  `package_name`, `codestream`, and `maintenance_process_type`. Processing
-  continues with supported codestreams.
+  `package_name`, `codestream`, and `maintenance_process_type` (the
+  `codestream.type` value). Processing continues with supported codestreams.
+- `UNKNOWN` is a declared value with which SMELT reports that it could not
+  classify the codestream. It is an upstream data condition, not a contract
+  violation. Sentinel skips the complete codestream without validating or
+  consuming its targets and emits one WARNING-level
+  `package_codestream_maintenance_process_unknown` event containing
+  `package_name` and `codestream`. Processing continues with supported
+  codestreams. A later package resolution, after SMELT classifies the
+  codestream, adds the missing track through the normal idempotent path; no
+  dedicated retry is scheduled (see
+  [Accepted package-tree discovery gap](#accepted-package-tree-discovery-gap)).
 - `product.friendly_name` is used only for logging and warning messages.
   If absent or empty, the `product.cpe` value is used as a fallback in
   log messages. A missing `friendly_name` does not reject the response.
@@ -1365,25 +1373,23 @@ non-paginated JSend envelope.
 | Field | Purpose |
 |-------|---------|
 | `data[].codestream.name` | Track reference (`TicketPackageTrack.reference`) |
-| `data[].codestream.maintenance_process_type` | Authoritative track workflow: `SLFO` → `git`, `SLE_15` → `ibs`; known `SLFO_IBS` entries are unsupported and skipped |
+| `data[].codestream.type` | Authoritative track workflow: `SLFO` → `git`, `SLE_15` → `ibs`; `SLFO_IBS` (unsupported) and `UNKNOWN` (unclassified) entries are skipped |
 | `data[].targets[].product.cpe` | Product match key against local `Product.cpe` |
-| `data[].targets[].product_definition.type` | Validated as `channel` or `compose`; Product-definition provenance used for synthetic same-CPE channel/compose deduplication |
 | `data[].targets[].product.friendly_name` | Logging and warning messages |
 
 All other response fields (`codestream.url`, `product.id`,
-`product.support_status`, `product_definition.name`, `product_definition.url`,
-`binary_packages`, `repository`) are not consumed by Sentinel.
+`product.support_status`, `product_definition`, `binary_packages`,
+`repository`, `support_status`) are not consumed by Sentinel.
 
-**Deduplication**:
+**Single authoritative representation**:
 
 The v2 endpoint aggregates results from both IBS channel records and
-Git/SLFO compose records. During a transitional period, some Products may
-appear under two different codestreams: once via a synthetic channel file
-and once via the real compose resolution. When the same Product CPE appears
-in targets under both a `channel` and `compose` entry, the `channel` entry
-for that Product is discarded and only the `compose` entry is retained. This
-deduplication is a no-op once the transitional synthetic channel files are
-removed by SMELT.
+Git/SLFO compose records. Selecting one authoritative representation for
+each Product, including excluding channel records that only mirror a
+Product delivered through compose, is SMELT's responsibility. Sentinel
+applies no channel/compose deduplication and does not consume
+Product-definition provenance; every validated supported record is processed
+as returned.
 
 **Processing**:
 
@@ -1391,9 +1397,9 @@ removed by SMELT.
    response does not have a valid JSON/JSend envelope, expected HTTP/status
    pairing, and applicable structural shape, raise `SmeltUnavailableError`.
    For a non-empty successful response, this includes validating every
-   codestream identity and maintenance-process value, skipping known
-   unsupported `SLFO_IBS` entries as specified above, and validating all
-   targets of supported codestreams. No local Product lookup occurs yet.
+   codestream identity and maintenance-process value, skipping `SLFO_IBS`
+   and `UNKNOWN` entries as specified above, and validating all targets of
+   supported codestreams. No local Product lookup occurs yet.
 2. Require a ready Product catalog as defined in `product-catalog.md`. If no
    complete Product snapshot has committed, raise
    `ProductCatalogNotReadyError` before interpreting the response content.
@@ -1407,10 +1413,9 @@ removed by SMELT.
 4. Map each structurally validated supported codestream to one `workflow_type`:
    `SLFO` maps to `git`
    and `SLE_15` maps to `ibs`.
-5. Collect all `(codestream.name, workflow_type, product.cpe,
-   product_definition.type)` records from supported entries. Apply the
-   deduplication rule above.
-6. For each remaining record:
+5. Collect all `(codestream.name, workflow_type, product.cpe)` records from
+   supported entries.
+6. For each record:
    a. Look up the Product by exact `Product.cpe` match in the local catalog.
       If no local Product matches, ignore this triple and continue.
    b. Create or find a `TicketPackageTrack` with `reference =
@@ -1420,7 +1425,7 @@ removed by SMELT.
    c. Create a `TicketPackageProduct` linking the track to the matched
       Product (if one does not already exist).
 7. If no Product was resolved across the entire response, including when all
-   returned codestreams were skipped as unsupported, fail with
+   returned codestreams were skipped as unsupported or unclassified, fail with
    `PackageTargetsUnresolvedError`; no package-tree record is created.
 
 When at least one Product CPE has no local match in an otherwise successful
@@ -1876,7 +1881,7 @@ added, all counts will be zero in the `created` fields.
 |--------|------|-----------|
 | 409 | `PACKAGE_ALREADY_EXCLUDED` | Package exists on this ticket but is soft-deleted — use the restore endpoint |
 | 422 | `PACKAGE_NOT_FOUND_IN_SMELT` | SMELT returned no results for the given package name |
-| 422 | `PACKAGE_TARGETS_UNRESOLVED` | SMELT returned tracks, but none of their targets resolved to a Product in Sentinel's current catalog snapshot |
+| 422 | `PACKAGE_TARGETS_UNRESOLVED` | SMELT returned tracks, but no target of a supported codestream resolved to a Product in Sentinel's current catalog snapshot, including when every codestream was skipped as unsupported or unclassified |
 | 503 | `PRODUCT_CATALOG_NOT_READY` | No complete SMELT Product catalog snapshot has committed yet |
 | 503 | `SMELT_UNAVAILABLE` | SMELT did not produce a valid successful response |
 
@@ -2665,10 +2670,10 @@ Product sync tasks (`sync_smelt_products`, `sync_aimaas_lifecycle`,
       product-level)
 - [ ] Real-time event source for git workflow (webhook? polling?)
 - [x] SMELT API evolution — the v2 `maintained` endpoint exposes
-      `codestream.maintenance_process_type` as the authoritative workflow
-      discriminator
+      `codestream.type` as the authoritative workflow discriminator
 - [x] Workflow type mapping — `SLFO` maps to `git`, `SLE_15` maps to `ibs`,
-      and known unsupported `SLFO_IBS` codestreams are skipped
+      and unsupported `SLFO_IBS` and unclassified `UNKNOWN` codestreams are
+      skipped
 - [ ] Submission tracking (SR/RR) equivalent for git workflow, if any
 
 ---
