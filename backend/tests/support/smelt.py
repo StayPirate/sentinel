@@ -35,7 +35,9 @@ mutate `pages` to build negative cases, register raw `responses` (status
 codes, undecodable bodies, transport errors), and inspect `requests`.
 
 Consumers: `tests/test_services/test_packages/test_smelt_product_listing.py`,
-`test_smelt_product_listing_contract.py`, and `test_sync_smelt_products.py`.
+`test_smelt_product_listing_contract.py`, `test_sync_smelt_products.py`,
+`test_smelt_maintainership.py`, `test_smelt_maintainership_contract.py`,
+`test_smelt_maintained.py`, and `test_smelt_maintained_contract.py`.
 All values are fictional (`smelt.example.test`, `cpe:/o:example:...`).
 """
 
