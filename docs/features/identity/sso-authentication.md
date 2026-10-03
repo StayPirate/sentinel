@@ -263,7 +263,9 @@ callback URL with an authorization `code` and `state` parameter.
      drift between Sentinel and the IdP
 5. Extract the user identifier from the ID token: read the claim
    specified by `SSO_USER_CLAIM` (default: `sub`). If the claim is
-   absent from the ID token, or its value is `null` or an empty string,
+   absent from the ID token, or its value is `null`, an empty string, or
+   a string containing U+0000 (External String Admissibility,
+   `docs/conventions.md`; the value is a query parameter in step 6),
    return HTTP 401 with code `AUTH_SSO_FAILED`:
    `"SSO authentication failed. Please try again."`
    Log at WARNING level: `"SSO callback: expected claim

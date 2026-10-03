@@ -373,6 +373,17 @@ class TestParseLifecycleEntries:
 
         assert str(error) == "item 0: cpe must be a string"
 
+    @pytest.mark.parametrize(
+        "cpe",
+        ["\x00", "\x00cpe:/o:example:a:1", "cpe:/o:\x00example:a:1", "cpe:/o:a:1\x00"],
+        ids=["only", "start", "middle", "end"],
+    )
+    def test_cpe_containing_nul_is_a_response_error(self, cpe: str) -> None:
+        """External String Admissibility: not unmatchable, not stripped."""
+        error = _response_error([_item("cpe:/o:example:b:1"), _item(cpe)])
+
+        assert str(error) == "item 1: cpe contains U+0000"
+
     @pytest.mark.parametrize("field", ALL_DATE_FIELDS)
     def test_missing_date_key_is_a_response_error(self, field: str) -> None:
         item = _item("cpe:/o:example:a:1")
@@ -1284,6 +1295,10 @@ def _missing_cpe(server: AimaasServer) -> None:
     del server.pages[3]["items"][0]["cpe"]
 
 
+def _nul_cpe(server: AimaasServer) -> None:
+    server.pages[2]["items"][7]["cpe"] = "cpe:/o:example:nul\x00:1"
+
+
 def _invalid_date(server: AimaasServer) -> None:
     server.pages[2]["items"][5]["end_of_gs"] = "2026-02-30"
 
@@ -1309,6 +1324,7 @@ _RUN_FAILURES: Final[list[FailureCase]] = [
         InvalidAimaasListingError,
     ),
     ("missing-cpe", _missing_cpe, INVALID_RESPONSE_MESSAGE, LifecycleResponseError),
+    ("nul-cpe", _nul_cpe, INVALID_RESPONSE_MESSAGE, LifecycleResponseError),
     ("invalid-date", _invalid_date, INVALID_RESPONSE_MESSAGE, LifecycleResponseError),
     ("missing-date", _missing_date, INVALID_RESPONSE_MESSAGE, LifecycleResponseError),
     (

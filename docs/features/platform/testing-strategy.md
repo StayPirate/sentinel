@@ -1900,6 +1900,16 @@ Publication Handoff" below. Those tests distinguish best-effort automatic
 publication failure after a successful committed mutation from the explicit
 rerun endpoint's 503 publication failure.
 
+### External String Admissibility
+
+When a consumer of external strings governed by `docs/conventions.md`
+(External String Admissibility) is implemented or changed, its tests MUST
+supply U+0000 in every consumed string field it validates, including items of
+string collections, and prove that the owning contract's invalid-data outcome
+occurs at its documented granularity, with no database error and no write
+from the rejected unit. Fields validated by one shared check may be covered by
+one parametrized test.
+
 ### CVE Ingestion Persistence
 
 When `CVEIngestPayload`, `upsert_cve()`, `ensure_cve_exists()`, child

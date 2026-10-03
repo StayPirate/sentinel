@@ -41,6 +41,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.enums import ReferenceType, TicketAuditEventType
 from app.core.exceptions import ServiceError, TicketNotFoundError
+from app.core.external_strings import reject_nul
 from app.core.identifiers import format_ticket_id, is_valid_cve_id, parse_ticket_id
 from app.core.reference_urls import ReferenceUrlError, normalize_reference_url
 from app.models.ticket import Ticket
@@ -499,6 +500,10 @@ def _prepare_candidate(
         title = _validate_text(
             candidate.title, field="title", max_length=TITLE_MAX_LENGTH
         )
+        if title is not None:
+            # External String Admissibility: an upstream title is never
+            # stripped of U+0000; the candidate is invalid metadata.
+            reject_nul(title)
         explicit_type = _validate_type(candidate.explicit_type)
     except ValueError:
         _log_rejection(cve_id=cve_id, source=source, reason=INVALID_METADATA_REASON)

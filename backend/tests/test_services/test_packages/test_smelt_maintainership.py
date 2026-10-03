@@ -581,6 +581,22 @@ _UNCONSUMED_VALUES: list[tuple[str, dict[str, Any]]] = [
             )
         ),
     ),
+    (
+        "nul-in-unconsumed-strings",
+        _success(
+            _entry(
+                users=[_person(EMAIL_ONE, username="maintainer\x00one")],
+                groups=[
+                    _group(
+                        _person(EMAIL_TWO, username="maintainer\x00two"),
+                        name="fictional\x00group",
+                        email="fictional-group\x00@example.com",
+                    )
+                ],
+                codestream={"name": "Fictional:\x00Codestream:1"},
+            )
+        ),
+    ),
 ]
 
 
@@ -687,6 +703,10 @@ _BAD_EMAILS: list[tuple[str, Any]] = [
     ("bool", True),
     ("list", [EMAIL_ONE]),
     ("object", {"address": EMAIL_ONE}),
+    ("nul-only", "\x00"),
+    ("nul-start", f"\x00{EMAIL_ONE}"),
+    ("nul-middle", EMAIL_ONE.replace("@", "\x00@")),
+    ("nul-end", f"{EMAIL_ONE}\x00"),
 ]
 
 _SCHEMA_REJECTIONS: list[tuple[str, dict[str, Any]]] = [

@@ -924,6 +924,10 @@ _BAD_NAMES: list[tuple[str, Any]] = [
     ("list", [BROKEN_CODESTREAM]),
     ("bool", True),
     ("256-chars", "n" * 256),
+    ("nul-only", "\x00"),
+    ("nul-start", f"\x00{BROKEN_CODESTREAM}"),
+    ("nul-middle", f"{BROKEN_CODESTREAM}\x00{BROKEN_CODESTREAM}"),
+    ("nul-end", f"{BROKEN_CODESTREAM}\x00"),
 ]
 _BAD_TYPES: list[tuple[str, Any]] = [
     ("missing", _OMIT),
@@ -957,6 +961,10 @@ _BAD_CPES: list[tuple[str, Any]] = [
     ("null", None),
     ("list", [CPE_ONE]),
     ("bool", False),
+    ("nul-only", "\x00"),
+    ("nul-start", f"\x00{CPE_ONE}"),
+    ("nul-middle", f"{CPE_ONE}\x00{CPE_ONE}"),
+    ("nul-end", f"{CPE_ONE}\x00"),
 ]
 
 _SCHEMA_REJECTIONS: list[tuple[str, dict[str, Any]]] = [
@@ -1091,6 +1099,7 @@ _UNVALIDATED_TARGETS: list[tuple[str, Any]] = [
     ("object", {"product": None}),
     ("empty", []),
     ("garbage-list", [None, 1, "x", {"product": {"cpe": 1}}, {"product": None}]),
+    ("nul-cpe", [_target(f"{CPE_THREE}\x00", FRIENDLY_THREE)]),
     ("valid", [_target(CPE_THREE, FRIENDLY_THREE)]),
 ]
 
@@ -1441,6 +1450,19 @@ class TestMapping:
         assert first.log_label == CPE_ONE
         assert second.log_label == FRIENDLY_TWO
         assert outcome.logs == []
+
+    async def test_friendly_name_containing_nul_is_returned_unchecked(self) -> None:
+        """External String Admissibility covers only values that reach
+        PostgreSQL; the log-only friendly name is not checked."""
+        friendly_name = f"{FRIENDLY_ONE}\x00"
+        body = _success(_entry(targets=[_target(CPE_ONE, friendly_name)]))
+
+        outcome = await _fetch(_json(200, body))
+
+        (codestream,) = _found(outcome).codestreams
+        assert codestream.targets == (
+            MaintainedTarget(cpe=CPE_ONE, friendly_name=friendly_name),
+        )
 
     def test_log_label_prefers_friendly_name_over_cpe(self) -> None:
         assert MaintainedTarget(cpe=CPE_ONE, friendly_name=FRIENDLY_ONE).log_label == (

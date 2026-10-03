@@ -205,6 +205,8 @@ corresponding Pydantic rule as `422 VALIDATION_ERROR` before service mutation.
 Titles, when non-NULL, must be strings of 1 through 500 characters and must not
 be whitespace-only. Descriptions, when non-NULL, must be strings of 1 through
 2000 characters and must not be whitespace-only. These values are not trimmed.
+An automatic candidate title containing U+0000 is invalid under External String
+Admissibility (`docs/conventions.md`) and is skipped as `invalid_metadata`.
 
 ### Automatic Rejection Logging
 

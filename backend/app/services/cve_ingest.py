@@ -14,7 +14,8 @@ values in validation errors, so a rejected payload cannot leak upstream
 content into a log. Construction raises `pydantic.ValidationError` for
 the canonical model-validation failures: explicit-null `cve_state`, an
 explicit `PUBLISHED` with a non-null `date_rejected`, malformed
-affected-version operation shapes, and conflicting same-key child
+affected-version operation shapes, any string value containing U+0000
+outside the untyped CVSS candidates, and conflicting same-key child
 content whose canonical key is available here (CWE, external
 identifiers, affected-version operations and entries). Conflicting CVSS
 candidates are detected by `upsert_cve()`, which owns their
@@ -31,7 +32,14 @@ from datetime import UTC, date, datetime
 from enum import StrEnum
 from typing import Annotated, Any, Final, Self, TypedDict
 
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 
 from app.core.enums import (
     CVEExternalIdentifierSource,
@@ -40,6 +48,7 @@ from app.core.enums import (
     SSVCExploitation,
     SSVCTechnicalImpact,
 )
+from app.core.external_strings import reject_nul
 from app.models.cve import CVE
 from app.models.ticket import Ticket
 
@@ -62,13 +71,30 @@ _PAYLOAD_CONFIG: Final = ConfigDict(
 class _PayloadModel(BaseModel):
     model_config = _PAYLOAD_CONFIG
 
+    @field_validator("*", mode="after")
+    @classmethod
+    def _reject_nul(cls, value: Any) -> Any:
+        """No `str` value or `str` collection item contains U+0000 (External
+        String Admissibility). Nested models validate their own fields."""
+        if isinstance(value, str):
+            reject_nul(value)
+        elif isinstance(value, list):
+            for item in value:
+                if isinstance(item, str):
+                    reject_nul(item)
+        return value
 
-class CVSSAssessmentEntry(_PayloadModel):
+
+class CVSSAssessmentEntry(BaseModel):
     """Untrusted vector-only candidate from an external provider.
 
-    Both fields accept any object: an individually invalid candidate is
-    skipped by `upsert_cve()` without invalidating valid siblings.
+    Both fields accept any object: an individually invalid candidate,
+    including one containing U+0000, is skipped by `upsert_cve()` without
+    invalidating valid siblings, so this model does not apply the payload
+    U+0000 check.
     """
+
+    model_config = _PAYLOAD_CONFIG
 
     provider_name: object
     vector_string: object

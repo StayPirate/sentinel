@@ -329,8 +329,10 @@ Caller authority is exhaustive:
 | Any consumer API caller | No mutation of external-provider assessments |
 
 An ingestion caller that supplies `SUSE` or any reserved equivalent is
-rejected before persistence. Source-specific normalization of non-reserved
-provider names remains with each ingestion specification. System ingestion
+rejected before persistence. An external provider name containing U+0000 is
+likewise invalid under External String Admissibility (`docs/conventions.md`).
+Source-specific normalization of non-reserved provider names remains with each
+ingestion specification. System ingestion
 does not delete external assessments: if a source stops publishing an
 assessment, Sentinel retains the last persisted value until an explicit
 source-owned withdrawal contract exists.

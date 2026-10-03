@@ -1855,6 +1855,7 @@ class TestCVSSCandidateSkips:
             pytest.param("", id="empty"),
             pytest.param("  \t ", id="whitespace-only"),
             pytest.param("P" * 101, id="101-characters"),
+            pytest.param("Example\x00CNA", id="nul"),
             pytest.param(" suse ", id="reserved-padded"),
             pytest.param("Suse", id="reserved-mixed-case"),
             pytest.param("SUSE", id="reserved"),
@@ -1891,6 +1892,11 @@ class TestCVSSCandidateSkips:
             pytest.param(f"{V31_CRITICAL.canonical}/E:P", id="temporal-metric"),
             pytest.param("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H", id="incomplete"),
             pytest.param(V31_PADDED_201, id="201-received-characters"),
+            pytest.param(f"\x00{V31_HIGH.canonical}", id="nul-start"),
+            pytest.param(
+                V31_HIGH.canonical.replace("/AC:", "/\x00AC:"), id="nul-middle"
+            ),
+            pytest.param(f"{V31_HIGH.canonical}\x00", id="nul-end"),
         ],
     )
     async def test_invalid_vector_is_skipped_and_valid_sibling_persisted(
