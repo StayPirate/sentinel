@@ -917,7 +917,6 @@ _ENVELOPE_200: list[tuple[str, tuple[Respond, str | None]]] = [
     ("status-one", (_json(200, {"status": 1, "data": [_valid_entry()]}), None)),
     ("status-error", (_json(200, {"status": "error", "data": _NOT_FOUND}), None)),
     ("corrupt-gzip", (_corrupt_gzip(200), "DecodingError")),
-    ("deeply-nested", (_raw(200, b"[" * 100_000), "RecursionError")),
 ]
 
 
@@ -944,6 +943,32 @@ class TestEnvelopeFailure:
         outcome = await _fetch(respond)
 
         _assert_unavailable(outcome, "envelope", status_code=200, error_type=error_type)
+
+    async def test_recursion_error_while_decoding_yields_envelope(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def loads(content: bytes) -> Any:
+            raise RecursionError("maximum recursion depth exceeded")
+
+        monkeypatch.setattr(smelt_maintainership, "json", SimpleNamespace(loads=loads))
+
+        outcome = await _fetch(_json(200, _success(_valid_entry())))
+
+        _assert_unavailable(
+            outcome, "envelope", status_code=200, error_type="RecursionError"
+        )
+
+    async def test_deeply_nested_json_yields_envelope(self) -> None:
+        # Whether the decoder exhausts its depth guard (RecursionError) or
+        # reaches the unterminated end (JSONDecodeError) depends on the
+        # interpreter's available C stack; the outcome is the same.
+        outcome = await _fetch(_raw(200, b"[" * 100_000))
+
+        assert outcome.result == frozenset()
+        (record,) = outcome.logs
+        assert record["category"] == "envelope"
+        assert record["status_code"] == 200
+        assert record["error_type"] in {"RecursionError", "JSONDecodeError"}
 
 
 # ---------------------------------------------------------------------------
