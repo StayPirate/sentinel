@@ -7,6 +7,12 @@ and docs/data-sources.md (AIMAAS), verified against live pages captured
 from the default `AIMAAS_API_URL` with `size=100` (docs/conventions.md,
 External Integration Contract Verification). Every field Sentinel consumes
 is asserted for name, JSON type, nullability, and date representation.
+
+The parser-backed tests at the end serve the captured pages through
+`fetch_aimaas_products()` and parse the captured items with
+`parse_lifecycle_entries()` and `validate_lifecycle_entries()` to prove
+that the live envelope and the live items are accepted as specified and
+projected with the documented field mapping.
 """
 
 from __future__ import annotations
@@ -17,7 +23,20 @@ from typing import Any, Final
 
 import pytest
 
-from tests.support.aimaas import FIXTURE_PAGES, PAGE_SIZE, load_products_page
+from app.services.packages.aimaas_listing import fetch_aimaas_products
+from app.services.packages.sync_aimaas_lifecycle import (
+    LifecycleDates,
+    parse_lifecycle_entries,
+    validate_lifecycle_entries,
+)
+from app.services.product_lifecycle import LifecycleDateViolation
+from tests.support.aimaas import (
+    AIMAAS_TEST_API_URL,
+    FIXTURE_PAGES,
+    PAGE_SIZE,
+    AimaasServer,
+    load_products_page,
+)
 
 _TOTAL: Final = 475
 _PAGES: Final = 5
@@ -126,3 +145,117 @@ class TestConsumedItemFields:
     def test_items_contain_only_consumed_and_ignored_fields(self) -> None:
         for item in _all_items():
             assert set(item) == {"cpe", *_DATE_FIELDS, *_IGNORED_FIELDS}
+
+
+# ---------------------------------------------------------------------------
+# Parser-backed contract: the live envelope and items are accepted
+# ---------------------------------------------------------------------------
+
+_INVALID: Final = "AIMAAS returned invalid Product lifecycle response"
+
+# The one captured item whose dates violate a Lifecycle Evaluator rule: an
+# `end_of_ltss` without `end_of_gs` (verified from the captured fixtures).
+_INCONSISTENT_CAPTURED_CPE: Final = "cpe:/o:suse:sles-ltss-core:12:sp5"
+
+
+def _live_listing_server() -> AimaasServer:
+    """Serve the captured pages verbatim at pages 1, 3, 5, and 6.
+
+    Pages 2 and 4 were not captured; they repeat page 3's items with
+    `page` rewritten.
+    """
+    pages: dict[int, Any] = {page: load_products_page(page) for page in FIXTURE_PAGES}
+    for page in (2, 4):
+        pages[page] = {**load_products_page(3), "page": page}
+    return AimaasServer(pages)
+
+
+def _optional_date(value: str | None) -> date | None:
+    return None if value is None else date.fromisoformat(value)
+
+
+def _expected_projection(item: dict[str, Any]) -> LifecycleDates:
+    """The documented field mapping, transcribed from the raw JSON."""
+    ltss, espos = item["end_of_ltss"], item["end_of_espos"]
+    extended: date | None
+    if ltss is not None and espos is not None:
+        extended = max(date.fromisoformat(ltss), date.fromisoformat(espos))
+    else:
+        extended = _optional_date(ltss if ltss is not None else espos)
+    return LifecycleDates(
+        first_customer_ship_date=_optional_date(item["fcs"]),
+        general_support_end_date=_optional_date(item["end_of_gs"]),
+        extended_support_end_date=extended,
+        reactive_support_end_date=_optional_date(item["end_of_reactive_ltss"]),
+    )
+
+
+@pytest.mark.unit
+class TestLiveSerializationAccepted:
+    async def test_live_pages_pass_pagination_validation(self) -> None:
+        server = _live_listing_server()
+
+        async with server.client() as client:
+            listing = await fetch_aimaas_products(
+                client,
+                api_url=AIMAAS_TEST_API_URL,
+                request_delay=0,
+                invalid_message=_INVALID,
+            )
+
+        assert listing.total == _TOTAL
+        assert len(listing.items) == _TOTAL
+        assert server.requested_pages == [1, 2, 3, 4, 5]
+        assert listing.items[:100] == load_products_page(1)["items"]
+        assert listing.items[200:300] == load_products_page(3)["items"]
+        assert listing.items[400:] == load_products_page(5)["items"]
+
+    def test_live_items_parse_with_the_documented_field_mapping(self) -> None:
+        items = _all_items()
+
+        entries = parse_lifecycle_entries(items)
+
+        assert len(entries) == len(items)
+        for item, entry in zip(items, entries, strict=True):
+            assert entry.cpe is not None
+            assert entry.cpe == item["cpe"]
+            assert entry.dates == _expected_projection(item)
+
+    def test_live_items_pass_complete_response_validation(self) -> None:
+        items = _all_items()
+
+        projections = validate_lifecycle_entries(parse_lifecycle_entries(items))
+
+        assert projections == {
+            item["cpe"]: _expected_projection(item) for item in items
+        }
+
+    def test_live_items_map_both_extended_sources(self) -> None:
+        """The captured data exercises `end_of_ltss` and `end_of_espos` as
+        the extended-support source."""
+        entries = {entry.cpe: entry for entry in parse_lifecycle_entries(_all_items())}
+        sources = {
+            field
+            for item in _all_items()
+            for field in ("end_of_ltss", "end_of_espos")
+            if item[field] is not None
+            and entries[item["cpe"]].dates.extended_support_end_date
+            == date.fromisoformat(item[field])
+        }
+
+        assert sources == {"end_of_ltss", "end_of_espos"}
+
+    def test_only_the_known_inconsistent_live_item_reports_violations(self) -> None:
+        projections = validate_lifecycle_entries(parse_lifecycle_entries(_all_items()))
+
+        inconsistent = {
+            cpe: dates.violations()
+            for cpe, dates in projections.items()
+            if dates.violations()
+        }
+
+        assert inconsistent == {
+            _INCONSISTENT_CAPTURED_CPE: (
+                LifecycleDateViolation.MISSING_GENERAL_SUPPORT_END_DATE,
+            )
+        }

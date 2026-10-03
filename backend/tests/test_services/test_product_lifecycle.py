@@ -6,6 +6,11 @@ Owning specification: `docs/features/packages/product-catalog.md`
 Authority and Effects). The curated cases and the combinatorial grid come
 from the shared matrix in `tests/support/lifecycle_matrix.py`, which the
 Product query service's Python/SQL parity test reuses.
+
+`lifecycle_date_violations()` is tested against the same matrix and grid:
+its reasons are the stable `product_lifecycle_dates_inconsistent` warning
+values (product-catalog.md, Product Lifecycle Sync), and the evaluator
+must treat exactly its non-empty results as inconsistent.
 """
 
 from __future__ import annotations
@@ -19,12 +24,21 @@ import pytest
 
 from app.core.enums import LifecyclePhase
 from app.services import product_lifecycle
-from app.services.product_lifecycle import evaluate_product_lifecycle_phase
+from app.services.product_lifecycle import (
+    LifecycleDateViolation,
+    evaluate_product_lifecycle_phase,
+    lifecycle_date_violations,
+)
 from tests.support.lifecycle_matrix import (
     CONSISTENCY_VIOLATIONS,
+    EXTENDED_AFTER_REACTIVE,
+    EXTENDED_WITHOUT_GS,
+    FCS_AFTER_GS,
     GRID_DATES,
+    GS_AFTER_EXTENDED,
     LIFECYCLE_CASES,
     ONE_DAY,
+    REACTIVE_WITHOUT_EXTENDED,
     LifecycleCase,
     LifecycleInputs,
     grid_evaluation_dates,
@@ -274,6 +288,228 @@ class TestEvaluateProductLifecyclePhase:
             first = evaluate_product_lifecycle_phase(**case.evaluator_kwargs())
             second = evaluate_product_lifecycle_phase(**case.evaluator_kwargs())
             assert first == second
+
+
+# ---------------------------------------------------------------------------
+# Consistency rules: lifecycle_date_violations()
+# ---------------------------------------------------------------------------
+
+# The matrix's rule labels, in Lifecycle Evaluator rule order, mapped
+# explicitly to the stable warning reasons.
+_REASON_OF_LABEL: dict[str, LifecycleDateViolation] = {
+    EXTENDED_WITHOUT_GS: LifecycleDateViolation.MISSING_GENERAL_SUPPORT_END_DATE,
+    REACTIVE_WITHOUT_EXTENDED: LifecycleDateViolation.MISSING_EXTENDED_SUPPORT_END_DATE,
+    FCS_AFTER_GS: LifecycleDateViolation.FIRST_CUSTOMER_SHIP_AFTER_GENERAL_SUPPORT_END,
+    GS_AFTER_EXTENDED: (
+        LifecycleDateViolation.GENERAL_SUPPORT_END_AFTER_EXTENDED_SUPPORT_END
+    ),
+    EXTENDED_AFTER_REACTIVE: (
+        LifecycleDateViolation.EXTENDED_SUPPORT_END_AFTER_REACTIVE_SUPPORT_END
+    ),
+}
+
+_D1 = date(2025, 1, 31)
+_D2 = date(2026, 1, 31)
+_D3 = date(2027, 1, 31)
+_D4 = date(2028, 1, 31)
+
+_MISSING_GS = LifecycleDateViolation.MISSING_GENERAL_SUPPORT_END_DATE
+_MISSING_EXT = LifecycleDateViolation.MISSING_EXTENDED_SUPPORT_END_DATE
+_FCS_AFTER_GS = LifecycleDateViolation.FIRST_CUSTOMER_SHIP_AFTER_GENERAL_SUPPORT_END
+_GS_AFTER_EXT = LifecycleDateViolation.GENERAL_SUPPORT_END_AFTER_EXTENDED_SUPPORT_END
+_EXT_AFTER_RS = LifecycleDateViolation.EXTENDED_SUPPORT_END_AFTER_REACTIVE_SUPPORT_END
+
+
+def _violations_of(
+    fcs: date | None = None,
+    gs: date | None = None,
+    extended: date | None = None,
+    reactive: date | None = None,
+) -> tuple[LifecycleDateViolation, ...]:
+    return lifecycle_date_violations(
+        first_customer_ship_date=fcs,
+        general_support_end_date=gs,
+        extended_support_end_date=extended,
+        reactive_support_end_date=reactive,
+    )
+
+
+def _grid_date_sets() -> list[LifecycleInputs]:
+    """One grid input per distinct date set (evaluation date irrelevant)."""
+    seen: dict[tuple[date | None, ...], LifecycleInputs] = {}
+    for inputs in lifecycle_grid():
+        seen.setdefault(_dates_of(inputs), inputs)
+    return list(seen.values())
+
+
+@pytest.mark.unit
+class TestLifecycleDateViolations:
+    def test_reason_values_are_the_stable_warning_reasons(self) -> None:
+        assert [member.value for member in LifecycleDateViolation] == [
+            "missing_general_support_end_date",
+            "missing_extended_support_end_date",
+            "first_customer_ship_after_general_support_end",
+            "general_support_end_after_extended_support_end",
+            "extended_support_end_after_reactive_support_end",
+        ]
+
+    def test_every_matrix_label_maps_to_a_distinct_reason(self) -> None:
+        assert list(_REASON_OF_LABEL) == list(CONSISTENCY_VIOLATIONS)
+        assert list(_REASON_OF_LABEL.values()) == list(LifecycleDateViolation)
+
+    @pytest.mark.parametrize("case", LIFECYCLE_CASES, ids=lambda c: c.id)
+    def test_matrix_row_reports_exactly_its_labelled_rule(
+        self, case: LifecycleCase
+    ) -> None:
+        expected = () if case.violation is None else (_REASON_OF_LABEL[case.violation],)
+
+        assert _violations_of(*_dates_of(case.inputs)) == expected
+
+    @pytest.mark.parametrize(
+        ("dates", "expected"),
+        [
+            ((None, None, _D2, None), _MISSING_GS),
+            ((_D1, None, _D2, _D3), _MISSING_GS),
+            ((None, None, None, _D3), _MISSING_EXT),
+            ((_D1, _D2, None, _D3), _MISSING_EXT),
+            ((_D2, _D1, None, None), _FCS_AFTER_GS),
+            ((_D2, _D1, _D3, _D4), _FCS_AFTER_GS),
+            ((_D1, _D3, _D2, None), _GS_AFTER_EXT),
+            ((None, _D3, _D2, _D4), _GS_AFTER_EXT),
+            ((_D1, _D2, _D4, _D3), _EXT_AFTER_RS),
+            ((None, _D1, _D3, _D2), _EXT_AFTER_RS),
+        ],
+        ids=[
+            "extended-only",
+            "extended-and-reactive-without-gs",
+            "reactive-only",
+            "reactive-without-extended",
+            "fcs-after-gs",
+            "fcs-after-gs-full-chain",
+            "gs-after-extended",
+            "gs-after-extended-without-fcs",
+            "extended-after-reactive",
+            "extended-after-reactive-without-fcs",
+        ],
+    )
+    def test_each_rule_alone_reports_exactly_one_reason(
+        self,
+        dates: tuple[date | None, ...],
+        expected: LifecycleDateViolation,
+    ) -> None:
+        assert _violations_of(*dates) == (expected,)
+
+    @pytest.mark.parametrize(
+        ("dates", "expected"),
+        [
+            ((None, None, _D2, _D1), (_MISSING_GS, _EXT_AFTER_RS)),
+            ((_D2, _D1, None, _D3), (_MISSING_EXT, _FCS_AFTER_GS)),
+            ((_D3, _D2, _D1, None), (_FCS_AFTER_GS, _GS_AFTER_EXT)),
+            ((None, _D3, _D2, _D1), (_GS_AFTER_EXT, _EXT_AFTER_RS)),
+            ((_D2, _D1, _D4, _D3), (_FCS_AFTER_GS, _EXT_AFTER_RS)),
+            ((_D4, _D3, _D2, _D1), (_FCS_AFTER_GS, _GS_AFTER_EXT, _EXT_AFTER_RS)),
+        ],
+        ids=[
+            "missing-gs-and-extended-after-reactive",
+            "missing-extended-and-fcs-after-gs",
+            "fcs-after-gs-and-gs-after-extended",
+            "gs-after-extended-and-extended-after-reactive",
+            "fcs-after-gs-and-extended-after-reactive",
+            "fully-reversed-chain",
+        ],
+    )
+    def test_combined_violations_are_reported_once_each_in_rule_order(
+        self,
+        dates: tuple[date | None, ...],
+        expected: tuple[LifecycleDateViolation, ...],
+    ) -> None:
+        assert _violations_of(*dates) == expected
+
+    @pytest.mark.parametrize(
+        "dates",
+        [
+            (None, None, None, None),
+            (_D1, None, None, None),
+            (None, _D1, None, None),
+            (_D1, _D2, None, None),
+            (None, _D1, _D2, None),
+            (_D1, _D2, _D3, None),
+            (None, _D1, _D2, _D3),
+            (_D1, _D2, _D3, _D4),
+            (_D1, _D1, _D1, _D1),
+        ],
+        ids=[
+            "nothing",
+            "fcs-only",
+            "gs-only",
+            "fcs-and-gs",
+            "gs-and-extended",
+            "no-reactive",
+            "no-fcs",
+            "complete-chain",
+            "all-equal",
+        ],
+    )
+    def test_incomplete_or_complete_consistent_sets_report_nothing(
+        self, dates: tuple[date | None, ...]
+    ) -> None:
+        assert _violations_of(*dates) == ()
+
+    def test_grid_reports_the_independently_stated_rules_in_rule_order(
+        self,
+    ) -> None:
+        for inputs in _grid_date_sets():
+            expected = tuple(
+                _REASON_OF_LABEL[label]
+                for label in CONSISTENCY_VIOLATIONS
+                if label in _violations(inputs)
+            )
+            assert _violations_of(*_dates_of(inputs)) == expected, inputs
+
+    def test_both_missing_rules_never_apply_together(self) -> None:
+        for inputs in _grid_date_sets():
+            reasons = _violations_of(*_dates_of(inputs))
+            assert not {_MISSING_GS, _MISSING_EXT} <= set(reasons), inputs
+
+    def test_evaluator_is_null_on_every_date_when_violations_are_reported(
+        self,
+    ) -> None:
+        for inputs in lifecycle_grid():
+            if _violations_of(*_dates_of(inputs)):
+                assert _evaluate(inputs) is None, inputs
+
+    def test_evaluator_reaches_eol_after_every_consistent_chain(self) -> None:
+        for inputs in _grid_date_sets():
+            fcs, gs, extended, reactive = _dates_of(inputs)
+            ends = [d for d in (gs, extended, reactive) if d is not None]
+            if _violations_of(*_dates_of(inputs)) or not ends:
+                continue
+            phase = evaluate_product_lifecycle_phase(
+                evaluation_date=max(ends) + ONE_DAY,
+                first_customer_ship_date=fcs,
+                general_support_end_date=gs,
+                extended_support_end_date=extended,
+                reactive_support_end_date=reactive,
+            )
+            assert phase is LifecyclePhase.EOL, inputs
+
+    def test_signature_is_exactly_the_four_keyword_only_dates(self) -> None:
+        parameters = inspect.signature(lifecycle_date_violations).parameters
+
+        assert list(parameters) == [
+            "first_customer_ship_date",
+            "general_support_end_date",
+            "extended_support_end_date",
+            "reactive_support_end_date",
+        ]
+        assert all(
+            p.kind is inspect.Parameter.KEYWORD_ONLY for p in parameters.values()
+        )
+
+    def test_result_members_are_violation_enum_members(self) -> None:
+        for inputs in _grid_date_sets():
+            for reason in _violations_of(*_dates_of(inputs)):
+                assert type(reason) is LifecycleDateViolation
 
 
 # ---------------------------------------------------------------------------
