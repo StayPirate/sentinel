@@ -116,8 +116,9 @@ class Settings(BaseSettings):
     ibs_password: SecretStr = SecretStr("")
     ibs_download_base_url: str = "https://download.suse.de/ibs"
 
-    # SMELT
+    # SMELT / AIMAAS
     smelt_api_url: str = "https://smelt.suse.de/api"
+    aimaas_api_url: str = "https://aimaas.suse.de/api"
 
     # NVD API
     nvd_api_key: SecretStr = SecretStr("")
@@ -290,6 +291,16 @@ class Settings(BaseSettings):
         Origin, Authentication, and Pagination).
         """
         return _validate_https_api_prefix(value, "SMELT_API_URL")
+
+    @field_validator("aimaas_api_url")
+    @classmethod
+    def _validate_aimaas_api_url(cls, value: str) -> str:
+        """Validate and canonicalize AIMAAS_API_URL at startup.
+
+        See docs/features/packages/product-catalog.md (AIMAAS Integration,
+        Origin, Authentication, and Pagination).
+        """
+        return _validate_https_api_prefix(value, "AIMAAS_API_URL")
 
     @model_validator(mode="after")
     def _validate_ibs_settings(self) -> Settings:

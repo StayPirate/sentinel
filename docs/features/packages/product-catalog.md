@@ -497,16 +497,28 @@ return a 422 validation error. Page numbering is 1-based; page 0 returns
 404).
 
 Pagination validation invariants:
-- `total` and `pages` must remain constant across all pages of a single
-  retrieval.
+- Every page must be an object with non-negative integers `total` and
+  `pages`, integers `page` and `size`, and an array `items`. `page` must
+  equal the requested page number and `size` the requested page size.
+- `total`, `size`, and `pages` must remain constant across all pages of a
+  single retrieval.
 - Non-final pages must return exactly `size` items.
 - The final page must return `total - (pages - 1) * size` items.
 - Total collected items must equal `total`.
+- An empty collection is complete after page 1. When `pages = 0`, page 1 is
+  already beyond `pages`; it must report `total = 0` and return no items, and
+  no further page is requested. When `pages = 1` and `total = 0`, the
+  invariants above already describe the empty first page.
 - An inconsistency aborts the run without publication.
+
+Unknown item fields do not affect validation or persistence; each consumer
+validates only the fields it consumes.
 
 Live verification on 2026-08-26 confirmed this envelope on both the Products
 and CVSS threshold endpoints, 1-based page numbering, the 100-item page-size
-cap, and empty-array (not 404) behavior for pages beyond `pages`.
+cap, and empty-array (not 404) behavior for pages beyond `pages`. Live
+verification of the Products endpoint on 2026-10-03 also confirmed that `page`
+and `size` echo the request.
 
 ### Deleted Flag Semantics
 
@@ -537,12 +549,17 @@ the threshold-specific rule below.
 - **Response fields consumed**: `cpe`, `fcs`, `end_of_gs`, `end_of_ltss`,
   `end_of_espos`, `end_of_reactive_ltss`
 - **Response fields ignored**: `slug`, `name`, `id`, `deleted`, `version`,
-  `tracked_in_bz`, `end_of_lts_core`
+  `tracked_in_bz`, `end_of_lts_core`, `beta_release`
 - **Matching**: AIMAAS products are matched to local `Product` records by
   exact CPE. The two catalogs have different coverage (414 overlap out of
   475 AIMAAS and 556 SMELT); unmatched Products are expected and MUST NOT
   be matched heuristically by name or version. A product without a local
-  CPE match is silently ignored.
+  CPE match is silently ignored. The AIMAAS schema does not require `cpe`:
+  an entry whose `cpe` is null or the empty string cannot match a local
+  Product (whose CPE is non-empty) and is ignored in the same way. An entry
+  that omits the `cpe` key or one of the consumed date keys is a
+  response-schema failure, because a reduced field set would otherwise be
+  read as cleared dates.
 
 The `all_fields=true` parameter is required. Without it, the list endpoint
 returns a reduced field set that omits `fcs`, `end_of_reactive_ltss`, and
@@ -555,9 +572,11 @@ detail requests.
      under the shared AIMAAS pagination contract before opening a database
      transaction.
   2. Validate the complete retrieved response before applying any change:
-     the product list MUST NOT contain two entries with the same `cpe`. This
-     mirrors the identical validation applied by `sync_aimaas_thresholds` to
-     the same endpoint. Any violation aborts the complete run without
+     the product list MUST NOT contain two entries with the same non-empty
+     `cpe`; null or empty `cpe` values are unmatchable and do not
+     participate. This mirrors the identical validation applied by
+     `sync_aimaas_thresholds` to the same endpoint. Any violation aborts the
+     complete run without
      modifying local lifecycle data, raising `FetcherError`
      (`"AIMAAS Product lifecycle validation failed"`).
   3. For each AIMAAS product, match by exact `cpe` against local
@@ -628,10 +647,11 @@ eligibility and EOL-derived actionability when applicable.
      `product_id → cpe` mapping from the product list.
   2. Validate the complete retrieved response before applying any change:
      the product list MUST NOT contain two entries with the same `id` or
-     the same `cpe` (the latter mirrors the identical validation applied by
-     `sync_aimaas_lifecycle` to the same endpoint, and prevents two
-     different AIMAAS product IDs from resolving to the same local
-     `Product.cpe`); the threshold list MUST NOT contain two entries with
+     the same non-empty `cpe` (the latter mirrors the identical validation
+     applied by `sync_aimaas_lifecycle` to the same endpoint, and prevents
+     two different AIMAAS product IDs from resolving to the same local
+     `Product.cpe`; a null or empty `cpe` is unmatchable and does not
+     participate); the threshold list MUST NOT contain two entries with
      the same `product` ID; and every `threshold` value MUST be a number
      representable at one decimal place within `[0.0, 10.0]` (matching the
      persisted `Product.cvss_threshold` column). Any violation aborts the
@@ -972,7 +992,7 @@ that abort the run:
 | Request timeout | `"AIMAAS request timed out"` |
 | Non-success HTTP response | `"AIMAAS returned HTTP {status_code}"` |
 | Invalid pagination or response schema | `"AIMAAS returned invalid Product lifecycle response"` |
-| Complete-response validation failure (duplicate `cpe`) | `"AIMAAS Product lifecycle validation failed"` |
+| Complete-response validation failure (duplicate non-empty `cpe`) | `"AIMAAS Product lifecycle validation failed"` |
 | Publication database failure | `"Failed to synchronize AIMAAS lifecycle dates"` |
 
 Logs identify the failed page or validation category without retaining full
@@ -1045,7 +1065,7 @@ that abort the run:
 | Non-success HTTP response | `"AIMAAS returned HTTP {status_code}"` |
 | Invalid Product-list pagination or response schema | `"AIMAAS returned invalid Product list response"` |
 | Invalid threshold-list pagination or response schema | `"AIMAAS returned invalid CVSS threshold response"` |
-| Complete-response validation failure (duplicate `id`/`cpe`/`product`, or out-of-range `threshold`) | `"AIMAAS CVSS threshold validation failed"` |
+| Complete-response validation failure (duplicate `id`, non-empty `cpe`, or `product`, or out-of-range `threshold`) | `"AIMAAS CVSS threshold validation failed"` |
 | Publication database failure | `"Failed to synchronize AIMAAS CVSS thresholds"` |
 
 A threshold whose AIMAAS Product ID cannot be resolved through the retrieved

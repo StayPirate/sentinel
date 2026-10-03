@@ -17,6 +17,12 @@ The Product query service owns an equivalent reusable SQL expression;
 both forms must agree for every valid, incomplete, inconsistent, and
 boundary-date combination (shared matrix: `tests/support/lifecycle_matrix.py`).
 
+`lifecycle_date_violations()` is the single owner of the evaluator's
+consistency rules: the evaluator treats a date set as inconsistent exactly
+when it reports a violation, and `sync_aimaas_lifecycle` emits one
+`product_lifecycle_dates_inconsistent` warning per reported rule
+(product-catalog.md, Product Lifecycle Sync).
+
 This module imports no other service module, so `package_service`,
 `ticket_mutations`, and the Product query service may all use it without
 a dependency cycle.
@@ -25,38 +31,78 @@ a dependency cycle.
 from __future__ import annotations
 
 from datetime import date
+from enum import StrEnum
 
 from app.core.enums import LifecyclePhase
 
 
-def _is_consistent(
+class LifecycleDateViolation(StrEnum):
+    """One violated Lifecycle Evaluator consistency rule.
+
+    The values are the stable `reason` of the
+    `product_lifecycle_dates_inconsistent` warning
+    (product-catalog.md, Product Lifecycle Sync).
+    """
+
+    MISSING_GENERAL_SUPPORT_END_DATE = "missing_general_support_end_date"
+    MISSING_EXTENDED_SUPPORT_END_DATE = "missing_extended_support_end_date"
+    FIRST_CUSTOMER_SHIP_AFTER_GENERAL_SUPPORT_END = (
+        "first_customer_ship_after_general_support_end"
+    )
+    GENERAL_SUPPORT_END_AFTER_EXTENDED_SUPPORT_END = (
+        "general_support_end_after_extended_support_end"
+    )
+    EXTENDED_SUPPORT_END_AFTER_REACTIVE_SUPPORT_END = (
+        "extended_support_end_after_reactive_support_end"
+    )
+
+
+def lifecycle_date_violations(
+    *,
     first_customer_ship_date: date | None,
     general_support_end_date: date | None,
     extended_support_end_date: date | None,
     reactive_support_end_date: date | None,
-) -> bool:
-    """Whether the available dates form one valid continuous chain."""
+) -> tuple[LifecycleDateViolation, ...]:
+    """Return every consistency rule the four lifecycle dates violate.
+
+    The result lists each violated rule once, in the order of the
+    Lifecycle Evaluator validation rules; an empty tuple means the
+    available dates form one valid continuous chain (complete or
+    incomplete). The evaluator treats exactly the non-empty results as an
+    inconsistent date set. Pure; raises no exception for valid typed
+    inputs.
+    """
+    violations: list[LifecycleDateViolation] = []
     if extended_support_end_date is not None and general_support_end_date is None:
-        return False
+        violations.append(LifecycleDateViolation.MISSING_GENERAL_SUPPORT_END_DATE)
     if reactive_support_end_date is not None and extended_support_end_date is None:
-        return False
+        violations.append(LifecycleDateViolation.MISSING_EXTENDED_SUPPORT_END_DATE)
     if (
         first_customer_ship_date is not None
         and general_support_end_date is not None
         and first_customer_ship_date > general_support_end_date
     ):
-        return False
+        violations.append(
+            LifecycleDateViolation.FIRST_CUSTOMER_SHIP_AFTER_GENERAL_SUPPORT_END
+        )
     if (
         general_support_end_date is not None
         and extended_support_end_date is not None
         and general_support_end_date > extended_support_end_date
     ):
-        return False
-    return not (
+        violations.append(
+            LifecycleDateViolation.GENERAL_SUPPORT_END_AFTER_EXTENDED_SUPPORT_END
+        )
+    if (
         extended_support_end_date is not None
         and reactive_support_end_date is not None
         and extended_support_end_date > reactive_support_end_date
-    )
+    ):
+        violations.append(
+            LifecycleDateViolation.EXTENDED_SUPPORT_END_AFTER_REACTIVE_SUPPORT_END
+        )
+    return tuple(violations)
 
 
 def evaluate_product_lifecycle_phase(
@@ -90,11 +136,11 @@ def evaluate_product_lifecycle_phase(
     Returns the phase, or `None` when the phase is unavailable. Raises no
     exception for valid typed inputs.
     """
-    if not _is_consistent(
-        first_customer_ship_date,
-        general_support_end_date,
-        extended_support_end_date,
-        reactive_support_end_date,
+    if lifecycle_date_violations(
+        first_customer_ship_date=first_customer_ship_date,
+        general_support_end_date=general_support_end_date,
+        extended_support_end_date=extended_support_end_date,
+        reactive_support_end_date=reactive_support_end_date,
     ):
         return None
 
