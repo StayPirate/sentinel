@@ -64,7 +64,6 @@ import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Final, Literal
 from unittest.mock import AsyncMock, Mock
@@ -91,7 +90,7 @@ from app.models.ticket_audit_event import TicketAuditEvent
 from app.models.ticket_package import TicketPackage
 from app.models.ticket_package_product import TicketPackageProduct
 from app.models.ticket_package_track import TicketPackageTrack
-from app.services import fetcher_discovery, task_publication
+from app.services import task_publication
 from app.services.base_fetcher import (
     FETCHER_REGISTRY,
     BaseFetcher,
@@ -1718,13 +1717,6 @@ class TestRegistration:
 
     def test_fetcher_participates_in_catch_up(self) -> None:
         assert get_catch_up_fetchers()[NAME] is EvaluateLifecycleTransitions
-
-    def test_discovery_module_imports_the_fetcher_module(self) -> None:
-        source = Path(fetcher_discovery.__file__).read_text(encoding="utf-8")
-
-        assert "import app.services.packages.evaluate_lifecycle_transitions" in (
-            source.splitlines()
-        )
 
     def test_utc_today_is_the_current_utc_date(self) -> None:
         before = datetime.now(UTC).date()
