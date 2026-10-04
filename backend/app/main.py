@@ -34,6 +34,7 @@ from app.core.errors import AppError, ErrorCode
 from app.core.logging import configure_logging
 from app.core.middleware import RequestIDMiddleware
 from app.core.query_limits import enforce_query_parameter_length_limit
+from app.core.request_nul import reject_nul_in_request_input
 from app.database import async_session_factory
 from app.services import fetcher_discovery  # noqa: F401
 from app.services.fetcher_bootstrap import bootstrap_fetcher_configs
@@ -75,11 +76,16 @@ app = FastAPI(
     debug=settings.debug,
     lifespan=lifespan,
     # Applies the shared query-parameter length limit
-    # (docs/api-spec.md, Query Parameter Length Limit) to every current
-    # and future endpoint automatically — see
-    # docs/conventions.md (FastAPI Conventions, "Cross-cutting query
-    # parameter constraints").
-    dependencies=[Depends(enforce_query_parameter_length_limit)],
+    # (docs/api-spec.md, Query Parameter Length Limit) and the U+0000
+    # rejection (docs/api-spec.md, NUL Characters in Request Input) to
+    # every current and future endpoint automatically, before any
+    # route-level dependency such as authentication — see
+    # docs/conventions.md (FastAPI Conventions, "Cross-cutting request
+    # input constraints").
+    dependencies=[
+        Depends(enforce_query_parameter_length_limit),
+        Depends(reject_nul_in_request_input),
+    ],
 )
 
 app.add_middleware(

@@ -122,6 +122,9 @@ CVSSVersionPath = Annotated[
 Deliberately an unconstrained string: an unrecognized value must produce
 `404 CVSS_ASSESSMENT_NOT_FOUND`, not the `422` an enum would return
 (`docs/features/tickets/cvss-scoring.md`, Delete SUSE CVSS Assessment).
+The only exception is a value containing U+0000, which the app-wide
+`reject_nul_in_request_input` dependency rejects with `422` first
+(`docs/api-spec.md`, NUL Characters in Request Input).
 """
 
 

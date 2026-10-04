@@ -189,6 +189,48 @@ query input. A parameter name used by another endpoint does not become valid
 globally; for example, an endpoint that declares fixed ordering but no
 `sort_by` parameter ignores a supplied `sort_by` value.
 
+### NUL Characters in Request Input
+
+No string supplied in a request may contain U+0000 (NUL). PostgreSQL cannot
+store or compare the character, and no consumer input has a legitimate use for
+it. The rule covers:
+
+- every declared path parameter and every occurrence of a declared query
+  parameter, when the parameter's type is a string, a string enum, or a list
+  of either, including a percent-encoded `%00`; and
+- every string in a request body that the endpoint accepts and decodes as
+  JSON, at any nesting level, including object member names and members the
+  endpoint does not declare.
+
+Undeclared query parameters remain ignored. Path and query parameters of
+another type, such as integers and UUIDs, keep their own type validation.
+Request headers and cookies are not covered, and neither is a body sent to an
+endpoint that declares none or with a content type the endpoint does not
+decode as JSON.
+
+A violation returns the global `422 VALIDATION_ERROR`, with one `errors` entry
+per offending string, located at that string. An offending object member name
+is reported at its containing object, and that member's value is not inspected
+further. The value is rejected, never stripped or replaced, and is not echoed
+in the response. The rule applies to every endpoint, including public
+ones, without exception. It is evaluated before authentication, authorization,
+resource resolution, and every endpoint-specific validation outcome. A U+0000
+therefore returns this response even where another malformed value would
+receive a different outcome, including:
+
+- the not-found response for a Ticket, CVE, User, or CVSS-version locator,
+  such as `404 TICKET_NOT_FOUND`;
+- the generic `401` of local login;
+- a silently ignored enum filter value; and
+- an endpoint-specific error code, such as `422 CVE_INVALID_FORMAT` or `422
+  FETCHER_SETTING_INVALID`.
+
+The check inspects only the request, so it reveals nothing about any resource
+or account.
+
+Strings received from external sources follow `docs/conventions.md` (External
+String Admissibility) instead.
+
 ### JSON Request Body Scalar Types
 
 A request-body field declared as `boolean`, `integer`, or `number` accepts only
@@ -576,7 +618,7 @@ document only endpoint-specific errors; global responses are not repeated.
 |--------|--------------------------|------------------------------------------------|--------------------------------|
 | 401    | `AUTH_NOT_AUTHENTICATED` | Credential required but absent, or selected credential invalid | Authentication dependency |
 | 403    | `AUTH_INSUFFICIENT_PERMISSION` | User authenticated but lacks required capability | `require_capability` dependency |
-| 422    | `VALIDATION_ERROR`       | Request body/query/path fails schema validation | FastAPI automatic (Pydantic)   |
+| 422    | `VALIDATION_ERROR`       | Request body/query/path fails schema validation or a shared request-input constraint (see Request Conventions) | FastAPI automatic (Pydantic) or a shared app-level dependency |
 | 500    | `INTERNAL_ERROR`         | Unhandled server error                         | Framework                      |
 
 Notes:
@@ -637,7 +679,9 @@ reference lines are not used.
 
 Some shared dependencies apply to a specific resource group rather than to
 all endpoints. Like global responses, scoped responses are not repeated in
-per-endpoint error tables.
+per-endpoint error tables. A locator containing U+0000 never reaches these
+checks: it is rejected earlier with `422 VALIDATION_ERROR` (see NUL Characters
+in Request Input).
 
 #### Ticket Accessibility Check
 

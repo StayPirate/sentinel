@@ -8,8 +8,8 @@ limit returns the standard `422 VALIDATION_ERROR` envelope. See
 rule this dependency respects: a parameter name not declared by the
 matched route is never inspected, regardless of its value's length.
 
-See `docs/conventions.md` (FastAPI Conventions, "Cross-cutting query
-parameter constraints") for why this is a single shared dependency
+See `docs/conventions.md` (FastAPI Conventions, "Cross-cutting request
+input constraints") for why this is a single shared dependency
 rather than a per-schema `Field(max_length=500)` repeated on every
 string query field: a shared dependency, registered once at the app
 level (`app.main`), applies automatically to every current and future
@@ -19,71 +19,15 @@ the constraint on one of its fields.
 
 from __future__ import annotations
 
-from types import UnionType
-from typing import Any, Union, get_args, get_origin
+from typing import Any
 
 from fastapi import Request
-from fastapi.dependencies.models import Dependant
 from fastapi.exceptions import RequestValidationError
+
+from app.core.route_params import declared_string_param_names
 
 # docs/api-spec.md (Query Parameter Length Limit).
 _MAX_QUERY_STRING_LENGTH = 500
-
-
-def _is_string_like(annotation: Any) -> bool:
-    """Whether `annotation` denotes a string-shaped query field.
-
-    Covers `str`, `str | None`, `StrEnum` subclasses (which are `str`
-    subclasses), and `list[X]`/`list[X] | None` where `X` itself is
-    string-shaped — the shapes the 500-character limit applies to per
-    `docs/api-spec.md` ("Every **string** query parameter..."). A
-    repeatable filter (e.g. `role: list[str]`, `event_type:
-    list[IdentityAuditEventType]`) is declared as a `list[...]`
-    annotation by FastAPI's `Query()` mechanism; each raw occurrence is
-    still checked individually by `enforce_query_parameter_length_limit()`
-    via `request.query_params.getlist(name)`. Numeric, boolean, and UUID
-    fields are exempt: a legitimate value for those types is never close
-    to 500 characters, and an out-of-range value already fails its own
-    type validation with a more specific, more useful error.
-    """
-    origin = get_origin(annotation)
-    if origin in (Union, UnionType):
-        return any(
-            _is_string_like(arg)
-            for arg in get_args(annotation)
-            if arg is not type(None)
-        )
-    if origin is list:
-        args = get_args(annotation)
-        return bool(args) and _is_string_like(args[0])
-    return isinstance(annotation, type) and issubclass(annotation, str)
-
-
-def _declared_string_query_field_names(dependant: Dependant) -> set[str]:
-    """Every string-shaped query parameter name declared anywhere in
-    `dependant`'s tree, including nested dependencies.
-
-    A `Query()` field declared inside a sub-dependency (e.g. a shared
-    query-model builder function used via `Depends()`) is listed on
-    that sub-dependency's own `query_params`, not on the route's
-    top-level `Dependant` — this recurses into `dependant.dependencies`
-    to reach it. Mirrors the identical recursive-walk pattern in
-    `tests/test_api_conventions.py` (`_iter_dependants()`).
-
-    Uses `field.alias` (the wire name matched against the actual query
-    string), not `field.name` (the Python parameter name) — the two
-    differ whenever the endpoint declares an explicit `Query(alias=...)`
-    (e.g. to avoid shadowing the `fastapi.status` module import with a
-    parameter literally named `status`).
-    """
-    names = {
-        field.alias
-        for field in dependant.query_params
-        if _is_string_like(field.field_info.annotation)
-    }
-    for sub_dependant in dependant.dependencies:
-        names |= _declared_string_query_field_names(sub_dependant)
-    return names
 
 
 async def enforce_query_parameter_length_limit(request: Request) -> None:
@@ -115,7 +59,7 @@ async def enforce_query_parameter_length_limit(request: Request) -> None:
         return
 
     errors: list[dict[str, Any]] = []
-    for name in _declared_string_query_field_names(dependant):
+    for name in declared_string_param_names(dependant, "query"):
         for value in request.query_params.getlist(name):
             if len(value) > _MAX_QUERY_STRING_LENGTH:
                 errors.append(

@@ -1910,6 +1910,23 @@ occurs at its documented granularity, with no database error and no write
 from the rejected unit. Fields validated by one shared check may be covered by
 one parametrized test.
 
+### NUL Characters in Request Input
+
+When the shared check for `docs/api-spec.md` (NUL Characters in Request Input)
+is implemented or changed, its tests MUST cover U+0000 at the start, middle,
+and end of a value and as the whole value. The tests cover each input kind: a
+path parameter, including a percent-encoded `%00`; a single and repeated query
+parameter; and a body string value, list item, nested value, object member
+name, and undeclared member. Each violation must produce its own `errors`
+entry at the documented location. The tests must also prove that undeclared
+query parameters and non-string parameters are not inspected and that the
+offending value is not echoed. Through the registered application, end-to-end
+tests prove for representative real endpoints that each input kind returns
+`422 VALIDATION_ERROR` with no database error, no write, and no
+authentication-side effect, and that the response precedes authentication and
+the scoped Ticket not-found response. An endpoint relying only on the shared
+check needs no endpoint-specific U+0000 test.
+
 ### CVE Ingestion Persistence
 
 When `CVEIngestPayload`, `upsert_cve()`, `ensure_cve_exists()`, child
