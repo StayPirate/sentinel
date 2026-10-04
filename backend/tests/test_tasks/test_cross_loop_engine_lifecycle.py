@@ -27,6 +27,7 @@ process.
 from __future__ import annotations
 
 import asyncio
+import secrets
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -44,8 +45,10 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
+import app.services.base_cve_fetcher as base_cve_fetcher_module
 import app.services.base_fetcher as base_fetcher_module
-from app.core.enums import PackageStatus, Severity, TicketStatus
+from app.core.enums import CVESourceType, PackageStatus, Severity, TicketStatus
+from app.models.cve import CVE
 from app.models.fetcher_config import FetcherConfig
 from app.models.fetcher_run import FetcherRun
 from app.models.product import Product
@@ -56,7 +59,13 @@ from app.models.ticket_package import TicketPackage
 from app.models.ticket_package_product import TicketPackageProduct
 from app.models.ticket_package_track import TicketPackageTrack
 from app.services import package_service, task_publication
+from app.services.base_cve_fetcher import (
+    _CVE_SOURCE_TYPE_MAP,
+    BaseCVEFetcher,
+    CVEFetchResult,
+)
 from app.services.base_fetcher import FETCHER_REGISTRY, BaseFetcher
+from app.services.cve_ingest import UpsertAction
 from app.services.package_service import (
     PackageRecordsOutcome,
     ProductEligibilityRecalculationResult,
@@ -68,6 +77,7 @@ from app.services.packages import (
 )
 from app.tasks import cve_tasks, package_tasks, session_cleanup
 from app.tasks import fetchers as fetchers_module
+from tests.support.cve_catch_up import FakeTask, RetryRequested
 
 
 @pytest.mark.integration
@@ -850,3 +860,178 @@ def test_resolve_ticket_packages_wrapper_survives_a_failed_event_loop(
 
     assert result is None
     assert probed == [(ticket_id, name)] * 2
+
+
+def _define_fetch_single_probe(
+    fetched: list[str], *, fail_first: BaseException | None
+) -> str:
+    """Register a test-only fetch-single CVE fetcher whose `fetch_single()`
+    is the trivial innermost operation: a `SELECT 1` on the attempt session
+    (raising `fail_first` once, after the query, if given), then an
+    `unchanged` result without a package handoff."""
+    _CVE_SOURCE_TYPE_MAP.pop(CVESourceType.NVD, None)
+    probe_name = f"test_cross_loop_fetch_single_{uuid4().hex[:12]}"
+    pending = [fail_first] if fail_first is not None else []
+
+    class _FetchSingleProbeFetcher(BaseCVEFetcher):
+        name = probe_name
+        description = "Cross-loop lifecycle regression probe (SELECT 1 fetch)"
+        default_schedule = "0 * * * *"
+        cve_source_type = CVESourceType.NVD
+
+        async def execute(self, session: AsyncSession) -> None:
+            pass
+
+        async def fetch_single(
+            self, cve_id: str, session: AsyncSession
+        ) -> CVEFetchResult:
+            await session.execute(text("SELECT 1"))
+            fetched.append(cve_id)
+            if pending:
+                raise pending.pop()
+            return CVEFetchResult(action=UpsertAction.UNCHANGED, post_ingest=None)
+
+    return probe_name
+
+
+@dataclass(frozen=True, slots=True)
+class _FetchSingleSeed:
+    """Committed rows of the `fetch_single_cve` regressions."""
+
+    fetcher_name: str
+    cve_uuid: UUID
+    cve_id: str
+
+
+def _fetch_single_dedicated_engine(
+    _engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+    fetcher_name: str,
+) -> tuple[AsyncEngine, _CountingEngine, _FetchSingleSeed]:
+    """Point the wrapper (and the isolated status writer) at a dedicated
+    pooled engine, then commit the `FetcherConfig` row and the CVE and drain
+    the seeding connection so the first real attempt does not receive a
+    connection bound to this setup loop."""
+    dedicated_engine = create_async_engine(
+        _engine.url.render_as_string(hide_password=False), echo=False
+    )
+    dedicated_factory = async_sessionmaker(
+        dedicated_engine, class_=AsyncSession, expire_on_commit=False
+    )
+    counting = _CountingEngine(dedicated_engine)
+    monkeypatch.setattr(cve_tasks, "engine", counting)
+    monkeypatch.setattr(cve_tasks, "async_session_factory", dedicated_factory)
+    monkeypatch.setattr(
+        base_cve_fetcher_module, "async_session_factory", dedicated_factory
+    )
+
+    async def _seed_and_drain() -> _FetchSingleSeed:
+        async with dedicated_factory() as session:
+            cve = CVE(cve_id=f"CVE-2099-{uuid4().int % 10**8:08d}")
+            session.add_all([FetcherConfig(fetcher_name=fetcher_name), cve])
+            await session.commit()
+            seed = _FetchSingleSeed(fetcher_name, cve.id, cve.cve_id)
+        await dedicated_engine.dispose()
+        return seed
+
+    return dedicated_engine, counting, asyncio.run(_seed_and_drain())
+
+
+def _cleanup_fetch_single(engine: AsyncEngine, seed: _FetchSingleSeed) -> None:
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+    async def _cleanup() -> None:
+        async with factory() as session:
+            await session.execute(delete(CVE).where(CVE.id == seed.cve_uuid))
+            await session.execute(
+                delete(FetcherConfig).where(
+                    FetcherConfig.fetcher_name == seed.fetcher_name
+                )
+            )
+            await session.commit()
+        await engine.dispose()
+
+    asyncio.run(_cleanup())
+
+
+@pytest.mark.integration
+@pytest.mark.usefixtures("isolated_fetcher_registries", "redis_client")
+def test_fetch_single_cve_wrapper_survives_two_consecutive_event_loops(
+    _engine: AsyncEngine,  # noqa: PT019 — value used below (.url), not just for setup
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two sequential invocations of the real `fetch_single_cve`
+    synchronous wrapper — each its own `asyncio.run()` event loop — both
+    succeed against one shared, pooled engine and return `None`.
+
+    Each attempt opens its one session through the module-level
+    `async_session_factory` reference in `app/tasks/cve_tasks.py`: the
+    enabled and CVE prechecks, the test-only fetcher's `SELECT 1`, the flush,
+    and the `commit_and_dispatch()` commit check real connections out of the
+    dedicated pool. The pending-marker client targets the worker Redis
+    database (`redis_client`); the payload's marker is absent, so renewal
+    and release are no-ops. The engine is disposed exactly once per attempt.
+    """
+    fetched: list[str] = []
+    fetcher_name = _define_fetch_single_probe(fetched, fail_first=None)
+    dedicated_engine, counting, seed = _fetch_single_dedicated_engine(
+        _engine, monkeypatch, fetcher_name
+    )
+    token = secrets.token_urlsafe(32)
+    fetch: Callable[..., object] = cve_tasks._fetch_single_cve_sync
+
+    try:
+        # First invocation: its own event loop; disposes the pool before
+        # the loop closes.
+        first = fetch(FakeTask(), seed.fetcher_name, seed.cve_id, "nvd", token)
+        assert counting.disposals == 1
+
+        # Second invocation: a brand-new event loop. Without disposal the
+        # pool would hand out a connection bound to the first (closed)
+        # loop.
+        second = fetch(FakeTask(), seed.fetcher_name, seed.cve_id, "nvd", token)
+        assert counting.disposals == 2
+    finally:
+        _cleanup_fetch_single(dedicated_engine, seed)
+
+    assert (first, second) == (None, None)
+    assert fetched == [seed.cve_id] * 2
+
+
+@pytest.mark.integration
+@pytest.mark.usefixtures("isolated_fetcher_registries", "redis_client")
+def test_fetch_single_cve_wrapper_survives_a_retried_event_loop(
+    _engine: AsyncEngine,  # noqa: PT019 — value used below (.url), not just for setup
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A first attempt whose fetch fails retryably after using a pooled
+    connection rolls back, disposes the pool exactly once, and raises what
+    `self.retry()` returns; the retry attempt, a new event loop in the same
+    process, succeeds."""
+    fetched: list[str] = []
+    error = httpx.ConnectError("fictional refusal")
+    fetcher_name = _define_fetch_single_probe(fetched, fail_first=error)
+    dedicated_engine, counting, seed = _fetch_single_dedicated_engine(
+        _engine, monkeypatch, fetcher_name
+    )
+    token = secrets.token_urlsafe(32)
+    first_attempt = FakeTask(retries=0)
+
+    try:
+        with pytest.raises(RetryRequested):
+            cve_tasks._fetch_single_cve_sync(
+                first_attempt, seed.fetcher_name, seed.cve_id, "nvd", token
+            )
+        first_attempt.retry.assert_called_once_with(exc=error, countdown=5)
+        assert counting.disposals == 1
+
+        retry: Callable[..., object] = cve_tasks._fetch_single_cve_sync
+        result = retry(
+            FakeTask(retries=1), seed.fetcher_name, seed.cve_id, "nvd", token
+        )
+        assert counting.disposals == 2
+    finally:
+        _cleanup_fetch_single(dedicated_engine, seed)
+
+    assert result is None
+    assert fetched == [seed.cve_id] * 2

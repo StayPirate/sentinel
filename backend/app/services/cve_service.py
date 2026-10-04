@@ -36,7 +36,7 @@ Reads are Category B: they create no row or audit event, acquire no lock,
 never flush, commit, or roll back, and perform no network or Redis I/O.
 Each read selects its rows (and any total) in one SQL statement, so they
 derive from one coherent PostgreSQL observation. `get_cve_source_status()`
-is the one deliberate exception to the caller-owned session: it opens and
+is a deliberate exception to the caller-owned session: it opens and
 closes its own short-lived read session, then performs one best-effort
 read-only Redis pending-overlay lookup after that session is closed
 (cve-service.md, CVE Source Status; Transaction Ownership). Unexpected
@@ -47,20 +47,35 @@ semantic service values, not Pydantic schemas.
 create one `CVE` row and, in its lock-aware form, acquire the CVE root lock
 for the calling Ticket workflow, but it never commits or rolls back and
 performs no registry, Redis, task, or external I/O.
+
+On-demand single-CVE fetch has two parts here (cve-service.md, Fetch
+Orchestration: `trigger_on_demand_fetch()`; On-Demand Fetch:
+fetch_single_cve). `trigger_on_demand_fetch()` is the database-free
+publication: it writes the `fetch_pending:{cve_id}:{source}` token marker
+and publishes `fetch_single_cve` through `task_publication`.
+`run_fetch_single_cve()` is the second service-owned orchestration boundary
+(cve-service.md, Transaction Ownership): it owns the one session of a task
+attempt, renews and owner-releases the marker, and finalizes through
+`BaseCVEFetcher.commit_and_dispatch()`. The thin Celery wrapper and the
+engine disposal live in `app.tasks.cve_tasks`.
 """
 
 from __future__ import annotations
 
+import re
+import secrets
 import uuid
+from asyncio import CancelledError
 from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
-from typing import Any, Final
+from typing import Any, Final, cast
 
 import redis.asyncio as redis_asyncio
 import structlog
+from celery.exceptions import SoftTimeLimitExceeded
 from pydantic import ValidationError
 from pydantic_core import PydanticCustomError
 from redis.exceptions import RedisError
@@ -109,7 +124,13 @@ from app.models.cve_ssvc_assessment import CVESSVCAssessment
 from app.models.fetcher_config import FetcherConfig
 from app.models.fetcher_run import FetcherRun
 from app.models.ticket import Ticket
-from app.services import base_cve_fetcher, ticket_mutations, ticket_service
+from app.services import (
+    base_cve_fetcher,
+    task_publication,
+    ticket_mutations,
+    ticket_service,
+)
+from app.services.base_fetcher import FETCHER_REGISTRY
 from app.services.cve_ingest import (
     AFFECTED_VERSION_FIELDS,
     AffectedVersionOperation,
@@ -142,6 +163,11 @@ from app.services.cvss import (
     resolve_severity_score,
     validate_cvss_vector,
 )
+from app.services.fetcher_execution import (
+    FetcherConfigMissingError,
+    get_fetcher_enabled,
+)
+from app.services.http_client import is_retryable_condition
 from app.services.settings import (
     RequiredSystemSettingMissingError,
     default_cvss_version_select,
@@ -1052,7 +1078,9 @@ run proves KEV absence (cve-service.md, KEV status derivation)."""
 FETCH_PENDING_KEY_PREFIX: Final = "fetch_pending:"
 """Prefix of the on-demand pending marker key
 `fetch_pending:{cve_id}:{source}` (cve-service.md, Database-Free
-Publication). This module only reads it."""
+Publication). `trigger_on_demand_fetch()` writes it, the `fetch_single_cve`
+workflow renews and owner-releases it, and the source-status overlay
+reads it, all through `_new_redis_client()`."""
 
 _PENDING_REDIS_TIMEOUT_SECONDS: Final = 2
 
@@ -1943,3 +1971,470 @@ def build_post_ingest_tasks(
         vendor_products=[[vendor, product] for vendor, product in vendor_products],
         resolved_packages=resolved_packages,
     )
+
+
+# ---------------------------------------------------------------------------
+# On-demand single-CVE fetch (cve-service.md, Fetch Orchestration:
+# `trigger_on_demand_fetch()`; On-Demand Fetch: fetch_single_cve)
+# ---------------------------------------------------------------------------
+
+FETCH_SINGLE_CVE_TASK: Final = "fetch_single_cve"
+"""Explicit registered name of the on-demand single-CVE Celery task."""
+
+FETCH_PENDING_TTL_SECONDS: Final = 600
+"""Fixed TTL of the pending marker, set by the writer and every renewal."""
+
+FETCH_SINGLE_RETRY_DELAYS: Final[tuple[int, ...]] = (5, 10, 20)
+"""Countdown in seconds before retry 1, 2, and 3 (at most three retries)."""
+
+MARKER_UNAVAILABLE_EVENT: Final = "fetch_pending_marker_unavailable"
+"""WARNING: the marker `SET` raised `RedisError`; publication fails open."""
+
+MARKER_OPERATION_FAILED_EVENT: Final = "fetch_pending_marker_operation_failed"
+"""WARNING: a best-effort owner renewal or release raised `RedisError`."""
+
+PAYLOAD_INVALID_EVENT: Final = "fetch_single_cve_payload_invalid"
+UNKNOWN_FETCHER_EVENT: Final = "fetch_single_cve_unknown_fetcher"
+TARGET_MISMATCH_EVENT: Final = "fetch_single_cve_target_mismatch"
+CONFIG_MISSING_EVENT: Final = "fetch_single_cve_config_missing"
+FETCHER_DISABLED_EVENT: Final = "fetch_single_cve_fetcher_disabled"
+CVE_MISSING_EVENT: Final = "fetch_single_cve_cve_missing"
+RETRY_SCHEDULED_EVENT: Final = "fetch_single_cve_retry_scheduled"
+COMPLETED_EVENT: Final = "fetch_single_cve_completed"
+FAILED_EVENT: Final = "fetch_single_cve_failed"
+
+_TOKEN_BYTES: Final = 32
+_TOKEN_PATTERN: Final = re.compile(r"[A-Za-z0-9_-]{43}")
+_FETCHER_NAME_PATTERN: Final = re.compile(r"[a-z][a-z0-9_]*")
+_FETCHER_NAME_MAX_LENGTH: Final = 100
+_CVE_SOURCE_VALUES: Final = frozenset(member.value for member in CVESourceType)
+_CONTROL_SIGNALS: Final = (CancelledError, SoftTimeLimitExceeded, MemoryError)
+
+_COMPARE_AND_EXPIRE_SCRIPT: Final = """
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+    return redis.call('EXPIRE', KEYS[1], ARGV[2])
+end
+return 0
+"""
+"""Owner renewal: reset the TTL only while the marker holds the token."""
+
+_COMPARE_AND_DELETE_SCRIPT: Final = """
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+    return redis.call('DEL', KEYS[1])
+end
+return 0
+"""
+"""Owner release: delete the marker only while it holds the token."""
+
+
+@dataclass(frozen=True, slots=True)
+class FetchDispatchResult:
+    """Outcome of one database-free on-demand publication.
+
+    A service-layer value, not a response schema. Each list holds canonical
+    `CVESourceType` values in ascending code-point order; the four lists
+    are disjoint and their union is the complete prepared broadcast set
+    (cve-service.md, `FetchDispatchResult`).
+    """
+
+    sources_enqueued: list[str]
+    sources_already_pending: list[str]
+    sources_disabled: list[str]
+    sources_failed: list[str]
+
+
+@dataclass(frozen=True, slots=True)
+class FetchSingleRetry:
+    """Retry signal of one `fetch_single_cve` attempt.
+
+    The synchronous wrapper raises `self.retry()` with `countdown` and
+    `cause`; the workflow has already rolled back and renewed the marker.
+    """
+
+    countdown: int
+    cause: Exception
+
+
+def _new_marker_token() -> str:
+    """A cryptographically unpredictable pending-marker ownership token."""
+    return secrets.token_urlsafe(_TOKEN_BYTES)
+
+
+async def trigger_on_demand_fetch(
+    cve_id: str,
+    dispatch_sources: Sequence[tuple[str, str, str | None]],
+    disabled_sources: Sequence[str] = (),
+) -> FetchDispatchResult:
+    """Publish prepared single-CVE tasks after the owning commit.
+
+    Category C (Redis and broker I/O only; no database access or
+    configuration re-read). Callers invoke it with no transaction or row
+    lock open.
+
+    Q1: `cve_id` is the canonical CVE-ID; each `dispatch_sources` tuple is
+    `(fetcher_name, canonical source, queue or None)` of one enabled
+    fetch-single source prepared by the transactional preparation;
+    `disabled_sources` holds the canonical sources that preparation found
+    registered and refetchable but disabled.
+
+    Q2: a malformed or overlength `cve_id` raises `CVEIdFormatError`, and a
+    source repeated within or across both inputs raises `ValueError`, each
+    before any Redis or Celery I/O.
+
+    Q3: for each prepared source in code-point order, creates a fresh
+    token and attempts `SET fetch_pending:{cve_id}:{source} <token> NX EX
+    600`. An existing key adds the source to `sources_already_pending`
+    without publication. A `RedisError` logs one bounded WARNING and
+    publishes without a marker (fail open). Otherwise publishes
+    `fetch_single_cve` with `fetcher_name`, `cve_id`, `source`, and
+    `token`, passing `queue` only when non-`None`; a normal return adds the
+    source to `sources_enqueued`. Every prepared source is processed.
+
+    Q4: the `FetchDispatchResult`, including `disabled_sources` as
+    `sources_disabled`.
+
+    Q5: safe to re-invoke: a current marker coalesces the source, and
+    fail-open duplicate tasks are serialized by `upsert_cve()`.
+
+    Q6: any publication `Exception` is ambiguous broker acceptance: the
+    source goes to `sources_failed` and its owned marker is retained for
+    task cleanup or TTL expiry. Cancellation, `SoftTimeLimitExceeded`, and
+    `MemoryError` propagate.
+    """
+    if not is_valid_cve_id(cve_id):
+        raise CVEIdFormatError()
+    prepared = sorted(dispatch_sources, key=lambda entry: entry[1])
+    all_sources = [source for _, source, _ in prepared] + list(disabled_sources)
+    if len(set(all_sources)) != len(all_sources):
+        raise ValueError("on-demand dispatch sources must be distinct")
+
+    enqueued: list[str] = []
+    already_pending: list[str] = []
+    failed: list[str] = []
+    client: redis_asyncio.Redis | None = None
+    try:
+        for fetcher_name, source, queue in prepared:
+            token = _new_marker_token()
+            if client is None:
+                client = _new_redis_client()
+            try:
+                acquired = await client.set(
+                    fetch_pending_key(cve_id, source),
+                    token,
+                    nx=True,
+                    ex=FETCH_PENDING_TTL_SECONDS,
+                )
+            except RedisError as exc:
+                logger.warning(
+                    MARKER_UNAVAILABLE_EVENT,
+                    cve_id=cve_id,
+                    source=source,
+                    fetcher_name=fetcher_name,
+                    cause=type(exc).__name__,
+                )
+                acquired = True
+            if not acquired:
+                already_pending.append(source)
+                continue
+            try:
+                await task_publication.publish_task(
+                    FETCH_SINGLE_CVE_TASK,
+                    kwargs={
+                        "fetcher_name": fetcher_name,
+                        "cve_id": cve_id,
+                        "source": source,
+                        "token": token,
+                    },
+                    queue=queue,
+                )
+            except _CONTROL_SIGNALS:
+                raise
+            except Exception:
+                failed.append(source)
+            else:
+                enqueued.append(source)
+    finally:
+        if client is not None:
+            with suppress(RedisError):
+                await client.aclose()
+    return FetchDispatchResult(
+        sources_enqueued=enqueued,
+        sources_already_pending=already_pending,
+        sources_disabled=sorted(disabled_sources),
+        sources_failed=failed,
+    )
+
+
+class _PendingMarker:
+    """Owner-side access to one `fetch_pending` marker of a task attempt.
+
+    Renewal and release are atomic compare-by-token scripts that never
+    recreate an absent key, so an old task cannot extend or delete a newer
+    owner's marker. Both are best effort: a `RedisError` logs one bounded
+    WARNING and never alters database or retry classification.
+    """
+
+    def __init__(self, cve_id: str, source: str, token: str) -> None:
+        self._cve_id = cve_id
+        self._source = source
+        self._token = token
+        self._client: redis_asyncio.Redis | None = None
+
+    async def renew(self) -> None:
+        await self._run(
+            _COMPARE_AND_EXPIRE_SCRIPT, "renew", str(FETCH_PENDING_TTL_SECONDS)
+        )
+
+    async def release(self) -> None:
+        await self._run(_COMPARE_AND_DELETE_SCRIPT, "release")
+
+    async def aclose(self) -> None:
+        if self._client is not None:
+            with suppress(RedisError):
+                await self._client.aclose()
+            self._client = None
+
+    async def _run(self, script: str, operation: str, *args: str) -> None:
+        if self._client is None:
+            self._client = _new_redis_client()
+        try:
+            await self._client.eval(  # type: ignore[misc]
+                script,
+                1,
+                fetch_pending_key(self._cve_id, self._source),
+                self._token,
+                *args,
+            )
+        except RedisError as exc:
+            logger.warning(
+                MARKER_OPERATION_FAILED_EVENT,
+                operation=operation,
+                cve_id=self._cve_id,
+                source=self._source,
+                cause=type(exc).__name__,
+            )
+
+
+def _invalid_payload_fields(
+    fetcher_name: object, cve_id: object, source: object, token: object
+) -> list[str]:
+    """Names (never values) of the payload fields lacking their publication
+    format, in a fixed order."""
+    invalid: list[str] = []
+    if not (
+        isinstance(fetcher_name, str)
+        and len(fetcher_name) <= _FETCHER_NAME_MAX_LENGTH
+        and _FETCHER_NAME_PATTERN.fullmatch(fetcher_name)
+    ):
+        invalid.append("fetcher_name")
+    if not is_valid_cve_id(cve_id):
+        invalid.append("cve_id")
+    if not (isinstance(source, str) and source in _CVE_SOURCE_VALUES):
+        invalid.append("source")
+    if not (isinstance(token, str) and _TOKEN_PATTERN.fullmatch(token)):
+        invalid.append("token")
+    return invalid
+
+
+async def run_fetch_single_cve(
+    fetcher_name: object,
+    cve_id: object,
+    source: object,
+    token: object,
+    *,
+    attempt: int,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> FetchSingleRetry | None:
+    """Run one `fetch_single_cve` attempt.
+
+    Category A service-owned orchestration (cve-service.md, Transaction
+    Ownership): one fresh fetcher instance and one session from
+    `session_factory`; `commit_and_dispatch()` is the sole commit of the
+    fetched data. Creates no `FetcherRun`, audit event, or durable task
+    state. The caller disposes the engine after this function returns.
+
+    Q1: the four untrusted task-payload values and the zero-based Celery
+    `attempt` index (`request.retries`).
+
+    Q2: a malformed payload logs one WARNING naming only the malformed
+    fields and returns `None` without fetch, status write, or retry; the
+    marker is owner-released only when `cve_id`, `source`, and `token` are
+    all well-formed.
+
+    Q3: renews the marker by token, then applies the terminal matrix of
+    cve-service.md (On-Demand Fetch: fetch_single_cve): unknown target,
+    source mismatch or non-capable target, disabled meanwhile, and missing
+    CVE are bounded outcomes that never invoke the fetcher; otherwise
+    `fetch_single()`, flush, and `commit_and_dispatch()` outside the
+    pre-finalization handler. `CVENotInSource` writes an isolated
+    `missing` status. Every terminal outcome owner-releases the marker. The
+    fetcher's HTTP client is closed on every path.
+
+    Q4: `FetchSingleRetry` when a retryable pre-finalization exception
+    occurs within the retry budget (after rollback and owner renewal);
+    otherwise `None`.
+
+    Q5: each attempt is independent; ingestion is idempotent through
+    `upsert_cve()`.
+
+    Q6: `FetcherConfigMissingError` (bootstrap invariant) propagates.
+    After retry exhaustion, or immediately for a non-retryable exception,
+    the pre-finalization exception propagates after an isolated `failure`
+    status attempt. A commit or post-commit finalization exception
+    propagates without isolated status. Each of these emits one
+    `fetch_single_cve_failed` ERROR after owner release. Cancellation,
+    `SoftTimeLimitExceeded`, and `MemoryError` propagate without marker
+    cleanup (the TTL is the backstop).
+    """
+    invalid = _invalid_payload_fields(fetcher_name, cve_id, source, token)
+    if invalid:
+        logger.warning(PAYLOAD_INVALID_EVENT, invalid_fields=invalid)
+        if not {"cve_id", "source", "token"}.intersection(invalid):
+            orphan = _PendingMarker(str(cve_id), str(source), str(token))
+            try:
+                await orphan.release()
+            finally:
+                await orphan.aclose()
+        return None
+    # Every field is a well-formed string from here on.
+    fetcher_name, cve_id = cast(str, fetcher_name), cast(str, cve_id)
+    source, token = cast(str, source), cast(str, token)
+
+    marker = _PendingMarker(cve_id, source, token)
+    fetchers: list[base_cve_fetcher.BaseCVEFetcher] = []
+    try:
+        await marker.renew()
+        return await _fetch_single_attempt(
+            fetcher_name,
+            cve_id,
+            source,
+            marker,
+            attempt=attempt,
+            session_factory=session_factory,
+            fetchers=fetchers,
+        )
+    finally:
+        for fetcher in fetchers:
+            await fetcher._teardown_http_client()
+        await marker.aclose()
+
+
+def _resolve_fetch_single_target(
+    fetcher_name: str, source: str
+) -> tuple[str, type[base_cve_fetcher.BaseCVEFetcher] | None]:
+    """The registered fetch-single class serving `source`, or a closed
+    reason (`unknown_fetcher` / `target_mismatch`) and `None`."""
+    fetcher_cls = FETCHER_REGISTRY.get(fetcher_name)
+    if fetcher_cls is None:
+        return "unknown_fetcher", None
+    if not (
+        issubclass(fetcher_cls, base_cve_fetcher.BaseCVEFetcher)
+        and fetcher_cls.supports_fetch_single
+        and fetcher_cls.cve_source_type.value == source
+    ):
+        return "target_mismatch", None
+    return "ok", fetcher_cls
+
+
+async def _fetch_single_attempt(
+    fetcher_name: str,
+    cve_id: str,
+    source: str,
+    marker: _PendingMarker,
+    *,
+    attempt: int,
+    session_factory: async_sessionmaker[AsyncSession],
+    fetchers: list[base_cve_fetcher.BaseCVEFetcher],
+) -> FetchSingleRetry | None:
+    """The terminal matrix of one well-formed attempt (see
+    `run_fetch_single_cve`). Every created fetcher is appended to
+    `fetchers` so the caller owns its HTTP teardown."""
+    context = {"fetcher_name": fetcher_name, "cve_id": cve_id, "source": source}
+    reason, fetcher_cls = _resolve_fetch_single_target(fetcher_name, source)
+    if fetcher_cls is None:
+        logger.error(
+            UNKNOWN_FETCHER_EVENT
+            if reason == "unknown_fetcher"
+            else TARGET_MISMATCH_EVENT,
+            **context,
+        )
+        await marker.release()
+        return None
+
+    fetcher = fetcher_cls()
+    fetchers.append(fetcher)
+    async with session_factory() as session:
+        skip: str | None = None
+        try:
+            if not await get_fetcher_enabled(session, fetcher_name):
+                skip = FETCHER_DISABLED_EVENT
+            elif (
+                await session.scalar(select(CVE.id).where(CVE.cve_id == cve_id))
+            ) is None:
+                skip = CVE_MISSING_EVENT
+            # End the read-only precheck transaction before external I/O.
+            await session.rollback()
+            if skip is None:
+                result = await fetcher.fetch_single(cve_id, session)
+                await session.flush()
+        except _CONTROL_SIGNALS:
+            raise
+        except FetcherConfigMissingError:
+            logger.error(CONFIG_MISSING_EVENT, **context)
+            await marker.release()
+            raise
+        except base_cve_fetcher.CVENotInSource:
+            await session.rollback()
+            await fetcher._isolated_status_commit(cve_id, CVESourceFetchStatus.MISSING)
+            await marker.release()
+            logger.info(COMPLETED_EVENT, outcome="missing", **context)
+            return None
+        except Exception as exc:
+            await session.rollback()
+            if is_retryable_condition(exc) and attempt < len(FETCH_SINGLE_RETRY_DELAYS):
+                countdown = FETCH_SINGLE_RETRY_DELAYS[attempt]
+                await marker.renew()
+                logger.warning(
+                    RETRY_SCHEDULED_EVENT,
+                    cause=type(exc).__name__,
+                    retries=attempt,
+                    countdown=countdown,
+                    **context,
+                )
+                return FetchSingleRetry(countdown=countdown, cause=exc)
+            await fetcher._isolated_status_commit(cve_id, CVESourceFetchStatus.FAILURE)
+            await marker.release()
+            logger.error(
+                FAILED_EVENT,
+                stage="pre_finalization",
+                cause=type(exc).__name__,
+                retries=attempt,
+                **context,
+            )
+            raise
+
+        if skip is not None:
+            if skip == FETCHER_DISABLED_EVENT:
+                logger.info(skip, **context)
+            else:
+                logger.warning(skip, **context)
+            await marker.release()
+            return None
+
+        try:
+            await fetcher.commit_and_dispatch(session, result)
+        except _CONTROL_SIGNALS:
+            raise
+        except Exception as exc:
+            await marker.release()
+            logger.error(
+                FAILED_EVENT,
+                stage="finalization",
+                cause=type(exc).__name__,
+                retries=attempt,
+                **context,
+            )
+            raise
+    await marker.release()
+    logger.info(COMPLETED_EVENT, outcome=result.action.value, **context)
+    return None

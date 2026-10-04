@@ -44,6 +44,18 @@ REVIEWED_INVENTORY: dict[tuple[str, str], str] = {
         "connection lifecycle, and package-service.md, Post-ingest CVE "
         "package resolution (Resource lifecycle)."
     ),
+    ("cve_tasks.py", "_fetch_single_cve_sync"): (
+        "Repeated per-attempt task wrapper (fetch_single_cve), including "
+        "every Celery retry attempt, in a long-lived worker child. Its async "
+        "workflow (fetch_single_cve_async) runs the complete attempt, which "
+        "closes the fetcher's HTTP client, its one session, and the marker "
+        "Redis client, then awaits engine.dispose() exactly once on every "
+        "return and exception path, including cancellation, before "
+        "returning control to asyncio.run(); the wrapper raises self.retry() "
+        "only after asyncio.run() returns — see docs/conventions.md, "
+        "Cross-loop pooled connection lifecycle, and cve-service.md, "
+        "On-Demand Fetch: fetch_single_cve (Orchestrator Behavior)."
+    ),
     ("fetchers.py", "_run_fetcher_sync"): (
         "Repeated per-invocation task wrapper (run_fetcher). Its async "
         "workflow (run_fetcher_async) awaits engine.dispose() in a "
