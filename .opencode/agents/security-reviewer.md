@@ -4,7 +4,7 @@ description: >
   authorization, user input, secrets, external integrations, and sensitive
   dependencies. Use after security-relevant changes. Read-only.
 mode: subagent
-model: openrouter/deepseek/deepseek-v4.1-flash
+model: anthropic/claude-sonnet-5-5
 variant: high
 permission:
   edit: deny

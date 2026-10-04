@@ -6,12 +6,12 @@
       "disable": true
     },
     "plan": {
-      "model": "github-copilot/gpt-5.6-sol",
+      "model": "anthropic/claude-opus-5-5",
       "variant": "high"
     },
     "spec": {
       "description": "Writes and maintains specifications, project policy, and OpenCode configuration. Cannot modify implementation code.",
-      "model": "github-copilot/gpt-5.6-sol",
+      "model": "anthropic/claude-opus-5-5",
       "variant": "high",
       "mode": "primary",
       "color": "warning",
@@ -29,8 +29,8 @@
     },
     "code": {
       "description": "Implements features from specifications. Signals unresolved behavioral or contract gaps while choosing compliant internal technical mechanisms.",
-      "model": "openrouter/deepseek/deepseek-v4.1-flash",
-      "variant": "max",
+      "model": "anthropic/claude-opus-5-5",
+      "variant": "high",
       "mode": "primary",
       "color": "error",
       "prompt": "{file:./.opencode/prompts/code.md}",

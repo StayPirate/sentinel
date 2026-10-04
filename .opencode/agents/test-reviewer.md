@@ -4,7 +4,7 @@ description: >
   conventions. Use after adding tests for a new feature or module, adding a
   bug regression test, or on demand for broader test review. Read-only.
 mode: subagent
-model: openrouter/deepseek/deepseek-v4.1-flash
+model: anthropic/claude-sonnet-5-5
 variant: high
 permission:
   edit: deny

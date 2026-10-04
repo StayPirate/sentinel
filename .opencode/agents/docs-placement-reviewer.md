@@ -4,7 +4,7 @@ description: >
   spec, or in a cross-cutting authority, and detects premature
   generalization. Use after adding potentially shared rules. Read-only.
 mode: subagent
-model: openrouter/deepseek/deepseek-v4.1-flash
+model: anthropic/claude-sonnet-5-5
 variant: high
 permission:
   edit: deny

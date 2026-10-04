@@ -128,11 +128,11 @@ Trigger Matrix and mirrored in `.opencode/prompts/code.md` and
 
 ### Model Tiering
 
-All reviewer subagents are pinned to `openrouter/deepseek/deepseek-v4.1-flash` at
-the `high` reasoning-effort variant. The `code` primary agent uses the same model
-at the `max` variant. A single default-model tier keeps review costs
-predictable while ensuring reviews do not inherit the invoking primary
-agent's model.
+The `plan`, `spec`, and `code` primary agents use `anthropic/claude-opus-5-5`
+at the `high` reasoning-effort variant. All reviewer subagents are pinned to
+`anthropic/claude-sonnet-5-5` at the `high` variant. A single reviewer tier
+keeps review costs predictable while ensuring reviews do not inherit the
+invoking primary agent's model.
 
 ## Commands
 

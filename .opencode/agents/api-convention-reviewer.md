@@ -4,7 +4,7 @@ description: >
   error, pagination, envelope, and permission-map conventions. Use after a
   feature spec adds or changes endpoints. Read-only.
 mode: subagent
-model: openrouter/deepseek/deepseek-v4.1-flash
+model: anthropic/claude-sonnet-5-5
 variant: high
 permission:
   edit: deny

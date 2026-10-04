@@ -4,7 +4,7 @@ description: >
   coverage. Use after changing SQLAlchemy models, Alembic migrations, or
   `docs/data-model.md`. Read-only.
 mode: subagent
-model: openrouter/deepseek/deepseek-v4.1-flash
+model: anthropic/claude-sonnet-5-5
 variant: high
 permission:
   edit: deny

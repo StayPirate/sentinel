@@ -4,7 +4,7 @@ description: >
   required omissions and unauthorized behavior. Use before opening or
   updating every PR, or on demand with a PR reference. Read-only.
 mode: subagent
-model: openrouter/deepseek/deepseek-v4.1-flash
+model: anthropic/claude-sonnet-5-5
 variant: high
 permission:
   edit: deny
