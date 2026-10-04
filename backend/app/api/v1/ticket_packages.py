@@ -1,9 +1,9 @@
 """Ticket package-tree endpoints.
 
-See `docs/features/packages/package-model.md` (API Endpoints > List Ticket
-Packages, Search Packages Across Tickets, Change Track Status, Override
-Product Eligibility, Soft-Delete and Restore Package, Track, and Product)
-for the authoritative endpoint contracts.
+See `docs/features/packages/package-model.md` (API Endpoints > Add Package
+to Ticket, List Ticket Packages, Search Packages Across Tickets, Change
+Track Status, Override Product Eligibility, Soft-Delete and Restore
+Package, Track, and Product) for the authoritative endpoint contracts.
 Handlers stay thin: they capture the request's single evaluation instant
 or date (`docs/features/tickets/ticket-deadlines.md`, Evaluation Instant;
 package-model.md, Derived Actionability), delegate the protected read or
@@ -13,12 +13,13 @@ exceptions to HTTP. No business logic or database query lives here.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Annotated, Any, Final
 from uuid import UUID
 
+import httpx
 from fastapi import APIRouter, Depends, Path, Query
 from fastapi import status as http_status
 from fastapi.exceptions import RequestValidationError
@@ -52,6 +53,9 @@ from app.database import DatabaseSession
 from app.schemas.common import PaginationMeta
 from app.schemas.errors import ErrorResponse
 from app.schemas.package import (
+    PackageAdditionRequest,
+    PackageAdditionResponse,
+    PackageAdditionResult,
     PackageDetail,
     PackageExclusionPackage,
     PackageExclusionResponse,
@@ -77,17 +81,22 @@ from app.schemas.package import (
     TrackSummary,
 )
 from app.services import package_service
+from app.services.http_client import create_http_client
 from app.services.package_service import (
     PackageAlreadyExcludedError,
     PackageMarkerProjection,
     PackageNotExcludedError,
     PackageNotFoundError,
+    PackageNotFoundInSmeltError,
     PackageProjection,
     PackageSearchItem,
+    PackageTargetsUnresolvedError,
+    ProductCatalogNotReadyError,
     ProductEligibilityProjection,
     ProductMarkerProjection,
     ProductNotFoundError,
     ProductProjection,
+    SmeltUnavailableError,
     TrackFixedStatusRestrictedError,
     TrackMarkerProjection,
     TrackNotFoundError,
@@ -1096,3 +1105,157 @@ async def restore_product(
         )
     )
     return _serialize_product_marker(result.target)
+
+
+# ---------------------------------------------------------------------------
+# Add Package to Ticket
+# ---------------------------------------------------------------------------
+
+
+async def get_package_addition_http_client() -> AsyncIterator[httpx.AsyncClient]:
+    """Provide the request's one shared-factory SMELT HTTP client.
+
+    `add_package_to_ticket()` performs both SMELT requests of the request
+    with this client (`docs/features/platform/networking.md`, Shared HTTP
+    Client, Non-Fetcher Components). `function`-scoped so the client is
+    closed before the response is transmitted. Overridable via
+    `app.dependency_overrides` so tests can serve SMELT in-process.
+    """
+    async with create_http_client(package_service.HTTP_CLIENT_NAME) as client:
+        yield client
+
+
+PackageAdditionHttpClient = Annotated[
+    httpx.AsyncClient, Depends(get_package_addition_http_client, scope="function")
+]
+
+
+def _package_addition_error(status_code: int, code: ErrorCode, detail: str) -> AppError:
+    return AppError(status_code=status_code, code=code, detail=detail)
+
+
+@router.post(
+    "/tickets/{ticket_id}/packages",
+    status_code=http_status.HTTP_201_CREATED,
+    response_model=PackageAdditionResponse,
+    summary="Add Package to Ticket",
+    description=(
+        "Adds a source package to a Ticket. Sentinel resolves every currently "
+        "maintained track and Product of the package through SMELT, matches "
+        "the Products against the current Product catalog snapshot, acquires "
+        "package-wide maintainership, and creates the missing package, track, "
+        "and Product records. Existing records, included or excluded, are "
+        "skipped, so a repeated request is safe and reports zero created "
+        "records. An effective addition records a `package_added` event, "
+        "auto-assigns an unassigned Ticket to an active vulnerability "
+        "analyst, and re-evaluates the Ticket status. Requires "
+        "`manage_packages`. Error rows are not ordered by status: the "
+        "endpoint applies, in order, Ticket accessibility, SMELT "
+        "availability, catalog readiness, package-not-found, "
+        "target resolution, then the locked Ticket checks (accessibility, "
+        "`TICKET_NOT_MUTABLE`, `PACKAGE_ALREADY_EXCLUDED`)."
+    ),
+    responses={
+        404: {
+            "model": ErrorResponse,
+            "description": _TICKET_NOT_FOUND_DESCRIPTION,
+        },
+        409: {
+            "model": ErrorResponse,
+            "description": (
+                "`PACKAGE_ALREADY_EXCLUDED`: the package exists on this Ticket "
+                "but is directly excluded; use the restore endpoint. "
+                "`TICKET_NOT_MUTABLE`: the Ticket is Ignored or Duplicated."
+            ),
+        },
+        422: {
+            "model": ErrorResponse,
+            "description": (
+                "`PACKAGE_NOT_FOUND_IN_SMELT`: SMELT maintains no codestream "
+                "for the package. `PACKAGE_TARGETS_UNRESOLVED`: SMELT returned "
+                "codestreams, but no target of a supported codestream matches a "
+                "Product of the current catalog snapshot. `VALIDATION_ERROR`: "
+                "the request body is invalid."
+            ),
+        },
+        503: {
+            "model": ErrorResponse,
+            "description": (
+                "`SMELT_UNAVAILABLE`: SMELT did not produce a valid successful "
+                "response. `PRODUCT_CATALOG_NOT_READY`: no complete SMELT "
+                "Product catalog snapshot has been published yet."
+            ),
+        },
+    },
+)
+async def add_ticket_package(
+    body: PackageAdditionRequest,
+    db: DatabaseSession,
+    principal: ManagePackagesPrincipal,
+    caller: AuthenticatedTicketCaller,
+    ticket: AccessibleTicket,
+    http_client: PackageAdditionHttpClient,
+) -> PackageAdditionResponse:
+    """Add Package to Ticket — see `docs/features/packages/package-model.md`.
+
+    Authorization follows `docs/api-spec.md` (Authorization Chain
+    Evaluation Order, flow 4): authentication, then `manage_packages`
+    before any lookup, then the delegated preliminary SNTL resolution.
+    The service repeats the lock-free preliminary check before the SMELT
+    I/O and re-evaluates accessibility under the Ticket lock afterwards.
+    The handler passes the authenticated actor and caller with public-add
+    semantics and performs no package lookup; a `Resolved` regression it
+    causes is published after commit by the API convergence drain.
+    """
+    try:
+        result = await package_service.add_package_to_ticket(
+            db,
+            ticket_id=ticket.id,
+            package_name=body.package_name,
+            acting_user_id=principal.user.id,
+            caller=caller,
+            http_client=http_client,
+        )
+    except TicketNotFoundError:
+        raise ticket_not_found_error() from None
+    except TicketNotMutableError:
+        raise ticket_not_mutable_error() from None
+    except PackageAlreadyExcludedError:
+        raise _package_addition_error(
+            http_status.HTTP_409_CONFLICT,
+            ErrorCode.PACKAGE_ALREADY_EXCLUDED,
+            "Package is excluded from this Ticket; restore it instead.",
+        ) from None
+    except PackageNotFoundInSmeltError:
+        raise _package_addition_error(
+            http_status.HTTP_422_UNPROCESSABLE_CONTENT,
+            ErrorCode.PACKAGE_NOT_FOUND_IN_SMELT,
+            "Package not found in SMELT.",
+        ) from None
+    except PackageTargetsUnresolvedError:
+        raise _package_addition_error(
+            http_status.HTTP_422_UNPROCESSABLE_CONTENT,
+            ErrorCode.PACKAGE_TARGETS_UNRESOLVED,
+            "No package target resolves to a current catalog Product.",
+        ) from None
+    except ProductCatalogNotReadyError:
+        raise _package_addition_error(
+            http_status.HTTP_503_SERVICE_UNAVAILABLE,
+            ErrorCode.PRODUCT_CATALOG_NOT_READY,
+            "Product catalog is not ready.",
+        ) from None
+    except SmeltUnavailableError:
+        raise _package_addition_error(
+            http_status.HTTP_503_SERVICE_UNAVAILABLE,
+            ErrorCode.SMELT_UNAVAILABLE,
+            "SMELT is unavailable.",
+        ) from None
+    return PackageAdditionResponse(
+        data=PackageAdditionResult(
+            package_name=body.package_name,
+            tracks_created=result.tracks_created,
+            tracks_skipped=result.tracks_skipped,
+            products_created=result.products_created,
+            products_skipped=result.products_skipped,
+        )
+    )

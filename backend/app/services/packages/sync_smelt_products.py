@@ -14,13 +14,17 @@ snapshot, and publishes it atomically in one transaction with one shared
 - Products and associations absent from the snapshot are retained with
   their previous `catalog_last_seen_at`. The applied snapshot, and with
   it catalog readiness, is derived from `MAX(Product.catalog_last_seen_at)`.
-- Any failure publishes nothing and leaves the last committed snapshot
-  current. The publication creates no Ticket audit event
-  (ticket-audit-log.md, Canonical Mutation and No-Event Matrix).
-
-Product Sync steps 6 (newly-current retention) and 8 (post-commit Product
-catalog backfill enqueue) are not implemented here; they land with the
-backfill task and `add_package_to_ticket()` (#761 H3).
+- Any failure publishes nothing, dispatches no backfill, and leaves the
+  last committed snapshot current. The publication creates no Ticket
+  audit event (ticket-audit-log.md, Canonical Mutation and No-Event
+  Matrix).
+- Step 6 retains, inside the publication transaction, whether at least
+  one Product CPE is newly current (absent from the previous snapshot).
+  Step 8 then publishes the Product catalog backfill task once, after the
+  commit and the terminal metrics, and only in that case. A publication
+  failure other than a whole-run signal is logged once and absorbed; it
+  changes no Product outcome or metric (product-catalog.md, Product Sync;
+  Fetcher: `sync_smelt_products` > Error Handling, Metrics).
 """
 
 from __future__ import annotations
@@ -31,6 +35,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import structlog
+from celery.exceptions import SoftTimeLimitExceeded
 from sqlalchemy import String, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import SQLAlchemyError
@@ -40,7 +45,11 @@ from app.config import settings
 from app.core.external_strings import contains_nul
 from app.models.product import Product
 from app.models.product_repository import ProductRepository
+from app.services import task_publication
 from app.services.base_fetcher import BaseFetcher, FetcherError
+from app.services.packages.product_catalog_backfill import (
+    BACKFILL_PRODUCT_CATALOG_TASK,
+)
 from app.services.packages.smelt_product_listing import (
     SmeltProductListing,
     fetch_product_listing,
@@ -50,6 +59,7 @@ logger = structlog.get_logger(__name__)
 
 VALIDATION_FAILED_MESSAGE = "SMELT Product catalog validation failed"
 PUBLICATION_FAILED_MESSAGE = "Failed to publish SMELT Product catalog"
+BACKFILL_DISPATCH_FAILED_EVENT = "smelt_product_catalog_backfill_dispatch_failed"
 
 # PostgreSQL `timestamptz` resolution: the smallest representable increment
 # used to keep every complete publication strictly newer (step 4).
@@ -165,12 +175,18 @@ def _repositories(row: dict[str, Any], position: int) -> tuple[str, ...]:
 
 @dataclass(frozen=True, slots=True)
 class PublicationOutcome:
-    """Work-unit accounting of one committed publication (§ Metrics)."""
+    """Work-unit accounting of one committed publication (§ Metrics).
+
+    `newly_current` is the step-6 signal: at least one Product CPE of the
+    committed snapshot was not in the previous snapshot (every CPE on the
+    first publication).
+    """
 
     snapshot_at: datetime
     selected: int
     created: int
     updated: int
+    newly_current: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,7 +206,7 @@ def _utc_now() -> datetime:
 async def publish_snapshot(
     session: AsyncSession, products: Sequence[CatalogProduct], snapshot_at: datetime
 ) -> PublicationOutcome:
-    """Publish one validated snapshot and commit once (steps 4, 5, and 7).
+    """Publish one validated snapshot and commit once (steps 4-7).
 
     `session` must have no open transaction and no pending work; the
     publication transaction begins here and is committed before return.
@@ -238,10 +254,13 @@ async def publish_snapshot(
 
     product_ids = await _upsert_products(session, products, snapshot_at)
     await _upsert_associations(session, products, product_ids, snapshot_at)
-    await session.commit()
 
+    # Step 6: newly current = incoming CPE absent from the previous snapshot.
     previous_cpes = {cpe for cpe, product in existing.items() if product.current}
     incoming = {product.cpe: product for product in products}
+    newly_current = not incoming.keys() <= previous_cpes
+    await session.commit()
+
     created = 0
     updated = 0
     for cpe in previous_cpes | incoming.keys():
@@ -259,7 +278,26 @@ async def publish_snapshot(
         selected=len(previous_cpes | incoming.keys()),
         created=created,
         updated=updated,
+        newly_current=newly_current,
     )
+
+
+async def dispatch_backfill() -> None:
+    """Step 8: publish the Product catalog backfill task after the commit.
+
+    Publishes by registered name through `task_publication` (default
+    queue, no arguments). `SoftTimeLimitExceeded` and `MemoryError`
+    propagate, as does cancellation (not an `Exception`); every other
+    publication exception is logged once with its class only and
+    absorbed, so the committed catalog and the recorded Product outcomes
+    and metrics are unchanged.
+    """
+    try:
+        await task_publication.publish_task(BACKFILL_PRODUCT_CATALOG_TASK, kwargs={})
+    except SoftTimeLimitExceeded, MemoryError:
+        raise
+    except Exception as exc:
+        logger.warning(BACKFILL_DISPATCH_FAILED_EVENT, cause=type(exc).__name__)
 
 
 def _projection_changed(
@@ -396,4 +434,10 @@ class SyncSmeltProducts(BaseFetcher):
             selected=outcome.selected,
             created=outcome.created,
             updated=outcome.updated,
+            newly_current=outcome.newly_current,
         )
+
+        # Step 8: best-effort backfill dispatch, only for a newly current
+        # Product; never changes the outcomes recorded above.
+        if outcome.newly_current:
+            await dispatch_backfill()

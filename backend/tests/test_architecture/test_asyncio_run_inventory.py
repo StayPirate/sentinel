@@ -66,6 +66,16 @@ REVIEWED_INVENTORY: dict[tuple[str, str], str] = {
         "connection lifecycle, and package-service.md, "
         "run_ticket_convergence() workflow."
     ),
+    ("package_tasks.py", "_backfill_product_catalog_sync"): (
+        "Repeated per-invocation task wrapper (backfill_product_catalog), "
+        "without automatic retry, in a long-lived worker child. Its async "
+        "workflow (backfill_product_catalog_async) runs the complete backfill, "
+        "which closes its HTTP client and every pair session, then awaits "
+        "engine.dispose() exactly once on every return and exception path, "
+        "including cancellation, before returning control to asyncio.run() — "
+        "see docs/conventions.md, Cross-loop pooled connection lifecycle, and "
+        "product-catalog.md, Product Catalog Backfill."
+    ),
     ("session_cleanup.py", "_cleanup_sessions_sync"): (
         "Repeated per-invocation task wrapper (cleanup_sessions). Its "
         "async workflow (run_cleanup_sessions) awaits engine.dispose() "

@@ -8,12 +8,16 @@
   `docs/features/packages/package-service.md` (`run_ticket_convergence()`
   workflow) and `docs/features/tickets/ticket-service.md` (Ticket
   Convergence); published by `app.services.ticket_convergence_publication`.
+- `backfill_product_catalog`: the Product catalog backfill, see
+  `docs/features/packages/product-catalog.md` (Product Catalog Backfill)
+  and `app/services/packages/product_catalog_backfill.py`; published by
+  `sync_smelt_products` (Product Sync step 8).
 
 This module is the thin boundary only: the explicit task names, the single
 `asyncio.run()` per invocation, the engine disposal (`docs/conventions.md`,
 Sync-to-Async Bridging; Cross-Loop Pooled Connection Lifecycle), and the
-convergence wrapper's retry policy. Both tasks are sub-operations, not
-`BaseFetcher`s: no `FETCHER_REGISTRY` entry, schedule, or `FetcherRun`.
+convergence wrapper's retry policy. Every task is a sub-operation, not a
+`BaseFetcher`: no `FETCHER_REGISTRY` entry, schedule, or `FetcherRun`.
 """
 
 from __future__ import annotations
@@ -30,6 +34,10 @@ from app.database import async_session_factory, engine
 from app.services.package_service import (
     run_ticket_convergence,
     ticket_convergence_failure_phase,
+)
+from app.services.packages.product_catalog_backfill import (
+    BACKFILL_PRODUCT_CATALOG_TASK,
+    run_product_catalog_backfill,
 )
 from app.services.packages.product_eligibility_recalculation import (
     RE_EVALUATE_PRODUCT_ELIGIBILITY_TASK,
@@ -195,3 +203,42 @@ run_ticket_convergence_task = celery_app.task(
     name=RUN_TICKET_CONVERGENCE_TASK,
     max_retries=len(TICKET_CONVERGENCE_RETRY_DELAYS),
 )(_run_ticket_convergence_sync)
+
+
+# ---------------------------------------------------------------------------
+# Product catalog backfill task
+# ---------------------------------------------------------------------------
+
+
+async def backfill_product_catalog_async() -> None:
+    """Run one backfill invocation with one async lifecycle.
+
+    Runs the complete workflow (which closes its HTTP client and every
+    pair session itself) and then awaits `engine.dispose()` exactly once
+    on every return and exception path, including cancellation, because
+    the task is repeatedly invoked in one long-lived worker child.
+    """
+    try:
+        await run_product_catalog_backfill(session_factory=async_session_factory)
+    except BaseException:
+        await _dispose_engine(
+            primary_failed=True, event="product_catalog_backfill_engine_dispose_failed"
+        )
+        raise
+    await _dispose_engine(
+        primary_failed=False, event="product_catalog_backfill_engine_dispose_failed"
+    )
+
+
+def _backfill_product_catalog_sync() -> None:
+    """Thin synchronous Celery wrapper: exactly one `asyncio.run()` per
+    invocation. No arguments and no automatic retry: an escaping failure
+    is a task failure, recovered by the next qualifying trigger
+    (product-catalog.md, Product Catalog Backfill).
+    """
+    asyncio.run(backfill_product_catalog_async())
+
+
+backfill_product_catalog_task = celery_app.task(name=BACKFILL_PRODUCT_CATALOG_TASK)(
+    _backfill_product_catalog_sync
+)
