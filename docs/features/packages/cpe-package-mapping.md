@@ -372,8 +372,11 @@ lookup values. A successful result remains immutable in memory for the
 process lifetime. Modifications require a commit and new deployment;
 there is no hot reload or runtime cache invalidation.
 
-Generic worker startup never imports or validates CPE mapping data. A
-corrupt non-empty file therefore fails the first task that requires a
+Generic worker startup never reads, loads, or validates CPE mapping data.
+Startup may import this module transitively, for example through the
+post-ingest consumer's task module, because importing it performs no
+mapping lookup. A corrupt non-empty file therefore fails the first task
+that requires a
 concrete mapping lookup, while unrelated generic worker tasks remain
 operational. Any future eager check may run only in a process or task
 role dedicated to a real mapping consumer. No eager check is currently
