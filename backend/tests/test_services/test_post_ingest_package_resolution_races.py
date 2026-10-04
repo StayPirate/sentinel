@@ -19,7 +19,9 @@ Owning specifications:
 
 Every racing operation happens while one invocation is deterministically
 held inside a SMELT request (a `Pause` or a barrier of the `Smelt` fake);
-the Ticket lock then serializes the units. The harness, conventions, and
+the tests then assert the committed outcome. No PostgreSQL lock wait is
+observed in this module (the delegated Ticket lock's lock-wait proof is in
+the `add_package_records()` atomicity tests). The harness, conventions, and
 defaults are those of `tests/test_services/test_post_ingest_package_resolution.py`
 (`tests/support/post_ingest_resolution.py`). Expected values are transcribed
 from the specifications, never computed with the module under test.
@@ -203,55 +205,6 @@ class TestInactiveRace:
 
 
 # ---------------------------------------------------------------------------
-# Cancellation (Resource lifecycle)
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.integration
-class TestCancellation:
-    async def test_cancellation_during_a_smelt_request_propagates_after_cleanup(
-        self,
-        world: CommittedWorld,
-        sessions: Sessions,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """The workflow task is cancelled while `b` waits on its maintained
-        request: cancellation propagates, `a` stays committed, the shared
-        client and `b`'s session are closed, and no event is logged."""
-        ticket = await seed_ticket(world)
-        p1, p2 = await current_product(world), await current_product(world)
-        a, b = package_names("a", "b")
-        pause = Pause()
-        smelt = Smelt(
-            {
-                a: resolves(codestream(IBS_REF, "SLE_15", p1.cpe)),
-                b: Answer(
-                    held_response(
-                        pause, maintained(codestream(IBS_REF, "SLE_15", p2.cpe))
-                    )
-                ),
-            }
-        )
-        smelt.install(monkeypatch)
-
-        with capture_logs() as logs:
-            task = asyncio.create_task(resolve(sessions, ticket.id, a, b))
-            await arrive(pause, task)
-            task.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await asyncio.wait_for(task, timeout=WAIT)
-
-        assert task.cancelled()
-        assert smelt.closed() == [True]
-        assert sessions.closed == [True, True]
-        assert sessions.of(1) == ["close"]
-        assert workflow_logs(logs) == []
-        assert await committed(world, ticket.id, a, b) == Committed(
-            (ANALYSIS, None), [added(a)], {a: created_tree(p1), b: None}, []
-        )
-
-
-# ---------------------------------------------------------------------------
 # Idempotency, delivery, and recovery
 # ---------------------------------------------------------------------------
 
@@ -359,8 +312,11 @@ class TestIdempotencyAndRecovery:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Two invocations over the same payload are both held in `a`'s
-        maintainership request, then serialize on the Ticket lock: each
-        tree row, association, and event exists exactly once, each
+        maintainership request and then proceed concurrently. They converge
+        without duplicates: each tree row, association, and event exists
+        exactly once (no lock wait is observed here; the lock-wait proof of
+        the delegated Ticket lock belongs to the `add_package_records()`
+        atomicity tests), each
         invocation used its own one client, and both complete with one
         package-tree change, one maintainer-only unit, and two no-ops in
         total."""
@@ -472,9 +428,13 @@ class TestIdempotencyAndRecovery:
         real_session_factory: async_sessionmaker[AsyncSession],
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """A delivery cancelled while `b` waits on SMELT (simulated worker
-        loss) keeps `a` committed and nothing of `b`; a later delivery
-        creates `b` and leaves `a` unchanged."""
+        """A delivery cancelled while `b` waits on its maintained request
+        (simulated worker loss): cancellation propagates without a workflow
+        event, the shared client and both package sessions are closed (`b`'s
+        without commit or rollback of its own), `a` stays committed and
+        nothing of `b` exists. A later delivery creates `b` and leaves `a`
+        unchanged (Resource lifecycle; Idempotency, delivery, and
+        recovery)."""
         ticket = await seed_ticket(world)
         p1, p2 = await current_product(world), await current_product(world)
         a, b = package_names("a", "b")
@@ -488,19 +448,26 @@ class TestIdempotencyAndRecovery:
         )
         smelt.install(monkeypatch)
 
+        lost_sessions = Sessions(real_session_factory)
+
         with capture_logs() as logs:
-            task = asyncio.create_task(
-                resolve(Sessions(real_session_factory), ticket.id, a, b)
-            )
+            task = asyncio.create_task(resolve(lost_sessions, ticket.id, a, b))
             await arrive(pause, task)
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await asyncio.wait_for(task, timeout=WAIT)
+            clients_after_loss = smelt.closed()
             lost = await committed(world, ticket.id, a, b)
             smelt.answers[b] = resolves(codestream(IBS_REF, "SLE_15", p2.cpe))
             await resolve(Sessions(real_session_factory), ticket.id, a, b)
 
-        assert lost.trees == {a: created_tree(p1), b: None}
+        assert task.cancelled()
+        assert clients_after_loss == [True]
+        assert lost_sessions.closed == [True, True]
+        assert lost_sessions.of(1) == ["close"]
+        assert lost == Committed(
+            (ANALYSIS, None), [added(a)], {a: created_tree(p1), b: None}, []
+        )
         assert workflow_logs(logs) == [
             completed(ticket.id, 2, package_tree_changed=1, package_tree_no_op=1)
         ]

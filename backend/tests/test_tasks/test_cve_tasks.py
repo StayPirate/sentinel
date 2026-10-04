@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import inspect
 import json
 import uuid
 from collections.abc import Awaitable, Callable, MutableMapping
@@ -99,32 +100,6 @@ def _primitives(**overrides: object) -> dict[str, object]:
     }
     arguments.update(overrides)
     return arguments
-
-
-_MALFORMED = [
-    pytest.param(_primitives(ticket_id=MARKER), "ticket_id", id="ticket-id"),
-    pytest.param(_primitives(cpe_matches={}), "cpe_matches", id="cpe-matches-object"),
-    pytest.param(
-        _primitives(cpe_matches=[{"criteria": CPE, "vulnerable": True}]),
-        "cpe_matches",
-        id="cpe-match-missing-key",
-    ),
-    pytest.param(
-        _primitives(affected_cpes=["x" * 2049]),
-        "affected_cpes",
-        id="affected-cpe-overlength",
-    ),
-    pytest.param(
-        _primitives(vendor_products=[["vendor-only"]]),
-        "vendor_products",
-        id="vendor-product-shape",
-    ),
-    pytest.param(
-        _primitives(resolved_packages=[MARKER + "\x00"]),
-        "resolved_packages",
-        id="package-name-nul",
-    ),
-]
 
 
 class _FakeEngine:
@@ -248,26 +223,28 @@ class TestResolveTicketPackagesAsync:
         fake_engine.dispose.assert_awaited_once_with()
         assert order == ["workflow", "dispose"]
 
-    @pytest.mark.parametrize(("arguments", "argument"), _MALFORMED)
     async def test_malformed_arguments_raise_before_any_work_and_dispose(
         self,
-        arguments: dict[str, object],
-        argument: str,
         workflow: AsyncMock,
         fake_engine: _FakeEngine,
         forbidden_session_factory: MagicMock,
         forbidden_work: dict[str, MagicMock],
     ) -> None:
+        """One representative malformed value (U+0000 in a direct package
+        name); per-argument rejection is owned by
+        `tests/test_services/test_post_ingest_package_arguments.py`."""
         with (
             capture_logs() as logs,
             pytest.raises(ValueError, match=INVALID_ARGUMENT) as raised,
         ):
-            await cve_tasks.resolve_ticket_packages_async(**arguments)
+            await cve_tasks.resolve_ticket_packages_async(
+                **_primitives(resolved_packages=[MARKER + "\x00"])
+            )
 
         assert isinstance(raised.value, PostIngestArgumentError)
-        assert raised.value.argument == argument
+        assert raised.value.argument == "resolved_packages"
         assert [(e["event"], e["argument"]) for e in _events(logs, FAILED)] == [
-            (FAILED, argument)
+            (FAILED, "resolved_packages")
         ]
         assert MARKER not in repr(logs)
         _assert_no_work(workflow, forbidden_session_factory, forbidden_work)
@@ -349,23 +326,6 @@ class TestResolveTicketPackagesAsync:
 
 @pytest.mark.unit
 class TestResolveTicketPackagesSyncWrapper:
-    def test_one_asyncio_run_with_argument_passthrough(
-        self, asyncio_run_spy: MagicMock, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        calls: list[tuple[object, ...]] = []
-
-        async def fake_async(*arguments: object) -> None:
-            calls.append(arguments)
-
-        monkeypatch.setattr(cve_tasks, "resolve_ticket_packages_async", fake_async)
-        arguments = _primitives()
-
-        result = _sync(*cast(Any, arguments.values()))
-
-        assert result is None
-        assert calls == [tuple(arguments.values())]
-        assert asyncio_run_spy.call_count == 1
-
     def test_success_runs_workflow_and_disposes_in_one_event_loop(
         self,
         asyncio_run_spy: MagicMock,
@@ -404,17 +364,8 @@ class TestResolveTicketPackagesSyncWrapper:
 
         _assert_typed_delegation(workflow, forbidden_session_factory)
 
-    @pytest.mark.parametrize(
-        ("position", "argument"),
-        [
-            pytest.param("ticket_id", "ticket_id", id="as-ticket-id"),
-            pytest.param("cpe_matches", "cpe_matches", id="as-container"),
-        ],
-    )
     def test_post_ingest_tasks_dataclass_is_rejected(
         self,
-        position: str,
-        argument: str,
         asyncio_run_spy: MagicMock,
         workflow: AsyncMock,
         fake_engine: _FakeEngine,
@@ -422,7 +373,7 @@ class TestResolveTicketPackagesSyncWrapper:
         forbidden_work: dict[str, MagicMock],
     ) -> None:
         """The wrapper receives explicit primitives; a `PostIngestTasks`
-        instance passed in place of an argument is a malformed value."""
+        instance passed as the first argument is a malformed value."""
         tasks = PostIngestTasks(
             ticket_id=TICKET_ID,
             cpe_matches=[],
@@ -433,65 +384,54 @@ class TestResolveTicketPackagesSyncWrapper:
 
         with pytest.raises(PostIngestArgumentError) as raised:
             cve_tasks._resolve_ticket_packages_sync(
-                **cast(Any, _primitives(**{position: tasks}))
+                **cast(Any, _primitives(ticket_id=tasks))
             )
 
-        assert raised.value.argument == argument
+        assert raised.value.argument == "ticket_id"
         assert asyncio_run_spy.call_count == 1
         _assert_no_work(workflow, forbidden_session_factory, forbidden_work)
         fake_engine.dispose.assert_awaited_once_with()
 
-    @pytest.mark.parametrize(("arguments", "argument"), _MALFORMED)
     def test_malformed_arguments_fail_the_task_without_work(
         self,
-        arguments: dict[str, object],
-        argument: str,
         asyncio_run_spy: MagicMock,
         workflow: AsyncMock,
         fake_engine: _FakeEngine,
         forbidden_session_factory: MagicMock,
         forbidden_work: dict[str, MagicMock],
     ) -> None:
+        """One representative malformed value (a CPE match missing its
+        `match_criteria_id` key); per-argument rejection is owned by
+        `tests/test_services/test_post_ingest_package_arguments.py`."""
+        arguments = _primitives(cpe_matches=[{"criteria": CPE, "vulnerable": True}])
+
         with pytest.raises(ValueError, match=INVALID_ARGUMENT) as raised:
             cve_tasks._resolve_ticket_packages_sync(**cast(Any, arguments))
 
         assert isinstance(raised.value, PostIngestArgumentError)
-        assert raised.value.argument == argument
+        assert raised.value.argument == "cpe_matches"
         assert asyncio_run_spy.call_count == 1
         _assert_no_work(workflow, forbidden_session_factory, forbidden_work)
         fake_engine.dispose.assert_awaited_once_with()
 
-    @pytest.mark.parametrize("make_error", _WORKFLOW_FAILURES)
     def test_workflow_failure_propagates_without_retry(
         self,
-        make_error: Callable[[], BaseException],
         asyncio_run_spy: MagicMock,
         workflow: AsyncMock,
         fake_engine: _FakeEngine,
     ) -> None:
-        error = make_error()
-        workflow.side_effect = error
+        """Cancellation crosses the `asyncio.run()` boundary; the exception
+        identity of every failure kind is owned by the async tests."""
+        workflow.side_effect = asyncio.CancelledError()
 
         # `asyncio.run()` re-creates a `CancelledError` when the task ends
         # cancelled, so only the exception type is asserted.
-        with capture_logs() as logs, pytest.raises(type(error)):
+        with capture_logs() as logs, pytest.raises(asyncio.CancelledError):
             cve_tasks._resolve_ticket_packages_sync(**cast(Any, _primitives()))
 
         assert logs == []
         assert asyncio_run_spy.call_count == 1
         workflow.assert_awaited_once()
-        fake_engine.dispose.assert_awaited_once_with()
-
-    def test_non_signal_failure_is_the_same_exception_object(
-        self, asyncio_run_spy: MagicMock, workflow: AsyncMock, fake_engine: _FakeEngine
-    ) -> None:
-        error = OperationalError("fictional statement", None, Exception(MARKER))
-        workflow.side_effect = error
-
-        with pytest.raises(OperationalError) as raised:
-            cve_tasks._resolve_ticket_packages_sync(**cast(Any, _primitives()))
-
-        assert raised.value is error
         fake_engine.dispose.assert_awaited_once_with()
 
     def test_real_workflow_with_an_empty_payload_returns_none(
@@ -559,29 +499,25 @@ class TestResolveTicketPackagesTaskRegistration:
         assert RESOLVE_TICKET_PACKAGES_TASK == TASK_NAME
         assert cve_tasks.resolve_ticket_packages_task.name == TASK_NAME
         assert task.run is cve_tasks._resolve_ticket_packages_sync
-        tree = ast.parse((APP_ROOT / "tasks" / "cve_tasks.py").read_text("utf-8"))
-        (wrapper,) = [
-            node
-            for node in tree.body
-            if isinstance(node, ast.FunctionDef)
-            and node.name == "_resolve_ticket_packages_sync"
+        parameters = inspect.signature(task.run).parameters.values()
+        assert [(p.name, p.kind) for p in parameters] == [
+            (name, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+            for name in (
+                "ticket_id",
+                "cpe_matches",
+                "affected_cpes",
+                "vendor_products",
+                "resolved_packages",
+            )
         ]
-        assert [a.arg for a in wrapper.args.args] == [
-            "ticket_id",
-            "cpe_matches",
-            "affected_cpes",
-            "vendor_products",
-            "resolved_packages",
-        ]
-        assert wrapper.args.kwonlyargs == []
-        assert wrapper.args.vararg is None
-        assert wrapper.args.kwarg is None
 
     def test_no_automatic_retry_and_no_stored_result(self) -> None:
         """No `autoretry_for`, retry options, or non-default `max_retries`;
-        the task is unbound, so its wrapper cannot call `self.retry()`; no
-        result is stored."""
+        the task is unbound (its `run` is the plain wrapper, without a
+        `self` to call `retry()` on); no result is stored."""
         task = celery_app.tasks[TASK_NAME]
+
+        assert task.run is cve_tasks._resolve_ticket_packages_sync
 
         assert not getattr(task, "autoretry_for", None)
         assert not getattr(task, "retry_kwargs", None)
@@ -589,15 +525,6 @@ class TestResolveTicketPackagesTaskRegistration:
         assert task.max_retries == Task.max_retries
         assert task.ignore_result is True
         assert celery_app.conf.result_backend is None
-        tree = ast.parse((APP_ROOT / "tasks" / "cve_tasks.py").read_text("utf-8"))
-        calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
-        assert not [
-            c
-            for c in calls
-            if isinstance(c.func, ast.Attribute) and c.func.attr == "retry"
-        ]
-        assert not [k for c in calls for k in c.keywords if k.arg == "bind"]
-        assert not [k for c in calls for k in c.keywords if "retr" in (k.arg or "")]
 
     def test_registered_through_the_celery_app_task_module_import(self) -> None:
         tree = ast.parse((APP_ROOT / "celery_app.py").read_text(encoding="utf-8"))

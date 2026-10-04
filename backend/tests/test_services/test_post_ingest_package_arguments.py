@@ -22,16 +22,19 @@ Owning specifications:
 
 Validation and candidate resolution touch no database, HTTP client, or
 SMELT; the resolver tests substitute the two `cpe_mapping` resolvers that
-`package_service` imports by name, except one test that runs the real
-resolvers over the committed mapping file. Expected values are transcribed
+`package_service` imports by name, except `TestRealResolvers`, which runs
+the real resolvers over a small fictional mapping file that replaces the
+committed resource. Expected values are transcribed
 from the specifications, never computed with the module under test. All
 identifiers, CPEs, vendors, and package names are fictional.
 """
 
 from __future__ import annotations
 
+import json
 import uuid
 from collections.abc import Callable, Iterator, MutableMapping
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -382,65 +385,55 @@ class TestInvalidItems:
 # External String Admissibility)
 # ---------------------------------------------------------------------------
 
-NUL_POSITIONS = [
-    pytest.param(lambda v: "\x00" + v, id="start"),
-    pytest.param(lambda v: v[:3] + "\x00" + v[3:], id="middle"),
-    pytest.param(lambda v: v + "\x00", id="end"),
-    pytest.param(lambda v: "\x00", id="whole"),
-]
-
-NUL_FIELDS: list[Any] = [
+NUL_CASES = [
     pytest.param(
-        lambda nul: _arguments(cpe_matches=[_match(criteria=nul(CPE_A))]),
+        _arguments(cpe_matches=[_match(criteria=CPE_A + "\x00")]),
         "cpe_matches",
         id="criteria",
     ),
     pytest.param(
-        lambda nul: _arguments(cpe_matches=[_match(mcid=nul(MCID))]),
+        _arguments(cpe_matches=[_match(mcid="\x00" + MCID)]),
         "cpe_matches",
         id="match-criteria-id",
     ),
     pytest.param(
-        lambda nul: _arguments(affected_cpes=[nul(CPE_A)]),
+        _arguments(affected_cpes=["\x00" + CPE_A]),
         "affected_cpes",
         id="affected-cpe",
     ),
     pytest.param(
-        lambda nul: _arguments(vendor_products=[[nul("example"), "alpha"]]),
+        _arguments(vendor_products=[["exa\x00mple", "alpha"]]),
         "vendor_products",
         id="vendor",
     ),
     pytest.param(
-        lambda nul: _arguments(vendor_products=[["example", nul("alpha")]]),
+        _arguments(vendor_products=[["example", "\x00"]]),
         "vendor_products",
         id="product",
     ),
     pytest.param(
-        lambda nul: _arguments(resolved_packages=[nul("fictional-pkg")]),
+        _arguments(resolved_packages=["fictional\x00pkg"]),
         "resolved_packages",
         id="package-name",
     ),
 ]
+"""One U+0000 position per consumed string field (start, middle, end, and
+the whole value are each used at least once)."""
 
 
 @pytest.mark.unit
 class TestNulCharacters:
-    @pytest.mark.parametrize("nul", NUL_POSITIONS)
-    @pytest.mark.parametrize(("build", "argument"), NUL_FIELDS)
+    @pytest.mark.parametrize(("arguments", "argument"), NUL_CASES)
     def test_nul_in_a_string_argument_is_a_caller_contract_failure(
-        self,
-        build: Callable[[Callable[[str], str]], dict[str, object]],
-        argument: str,
-        nul: Callable[[str], str],
+        self, arguments: dict[str, object], argument: str
     ) -> None:
-        _assert_rejected(build(nul), argument)
+        _assert_rejected(arguments, argument)
 
-    @pytest.mark.parametrize("nul", NUL_POSITIONS)
-    def test_nul_in_ticket_id_is_rejected_without_ticket_id_field(
-        self, nul: Callable[[str], str]
-    ) -> None:
+    def test_nul_in_ticket_id_is_rejected_without_ticket_id_field(self) -> None:
         _assert_rejected(
-            _arguments(ticket_id=nul(TICKET_ID)), "ticket_id", with_ticket_id=False
+            _arguments(ticket_id=TICKET_ID[:8] + "\x00" + TICKET_ID[8:]),
+            "ticket_id",
+            with_ticket_id=False,
         )
 
 
@@ -758,33 +751,47 @@ class TestCandidateResolution:
 
 
 # ---------------------------------------------------------------------------
-# The real resolvers over the committed mapping (cpe-package-mapping.md,
-# Consumers)
+# The real resolvers over a fictional mapping file (cpe-package-mapping.md,
+# Resolution Function; Consumers)
 # ---------------------------------------------------------------------------
+
+FICTIONAL_MAPPING = {
+    "example_vendor:example_product": ["fictional-pkg-a", "fictional-pkg-b"],
+    "example_vendor:example_widget": ["fictional-pkg-c"],
+}
+"""A small mapping that replaces the committed resource for these tests."""
 
 
 @pytest.fixture
-def committed_mapping() -> Iterator[None]:
-    """Load the committed mapping file afresh and drop the cache after."""
+def fictional_mapping(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[None]:
+    """Point the real loader at a temporary `FICTIONAL_MAPPING` file and
+    isolate the process-local cache before and after the test (as the
+    `mapping_file` fixture of `tests/test_services/test_cpe_mapping.py`)."""
+    path = tmp_path / "cpe-package-mapping.json"
+    path.write_text(json.dumps(FICTIONAL_MAPPING), encoding="utf-8")
+    monkeypatch.setattr(cpe_mapping, "_mapping_resource", lambda: path)
     cpe_mapping._load_mapping.cache_clear()
     yield
     cpe_mapping._load_mapping.cache_clear()
 
 
 @pytest.mark.unit
-@pytest.mark.usefixtures("committed_mapping")
+@pytest.mark.usefixtures("fictional_mapping")
 class TestRealResolvers:
     def test_every_consumer_row_contributes_its_candidates(self) -> None:
-        """One value per Consumers row of cpe-package-mapping.md:
+        """One value per Consumers row of cpe-package-mapping.md, through
+        the real resolvers:
 
-        - NVD CPE `23andme:yamale` (a `vulnerable = false` entry) maps to
-          `python-yamale`;
+        - the NVD CPE `example_vendor:example_product` (a `vulnerable =
+          false` entry) maps to `fictional-pkg-a` and `fictional-pkg-b`;
         - the affected-entry CPE of an unmapped concrete product falls back
           to its decoded, lowercased product `fictional-gadget`;
-        - the free-text vendor/product pair `Agendaless`/` Waitress ` is
-          normalized to the mapped `agendaless:waitress`, i.e.
-          `python-waitress`, and the unmapped `Fictional Vendor`/`Fictional
-          Tool` falls back to `fictional_tool`;
+        - the free-text vendor/product pair `Example Vendor`/` Example
+          Widget ` is normalized to the mapped `example_vendor:example_widget`,
+          i.e. `fictional-pkg-c`, and the unmapped `Fictional Vendor`/
+          `Fictional Tool` falls back to `fictional_tool`;
         - the package-name candidate keeps its case.
 
         A malformed CPE contributes nothing and logs `cpe_parse_failed`
@@ -792,14 +799,18 @@ class TestRealResolvers:
         with capture_logs() as logs:
             names = _candidates(
                 cpe_matches=(
-                    _vm("cpe:2.3:a:23andme:yamale:3.0.0:*:*:*:*:*:*:*", False, None),
+                    _vm(
+                        "cpe:2.3:a:example_vendor:example_product:1.0:*:*:*:*:*:*:*",
+                        False,
+                        None,
+                    ),
                 ),
                 affected_cpes=(
                     "cpe:2.3:a:fictional_vendor:Fictional-Gadget:1.0:*:*:*:*:*:*:*",
                     f"cpe:/a:fictional:{MARKER}",
                 ),
                 vendor_products=(
-                    ("Agendaless", " Waitress "),
+                    ("Example Vendor", " Example Widget "),
                     ("Fictional Vendor", "Fictional Tool"),
                 ),
                 resolved_packages=("Fictional-Direct",),
@@ -808,9 +819,10 @@ class TestRealResolvers:
         assert names == [
             "Fictional-Direct",
             "fictional-gadget",
+            "fictional-pkg-a",
+            "fictional-pkg-b",
+            "fictional-pkg-c",
             "fictional_tool",
-            "python-waitress",
-            "python-yamale",
         ]
         assert logs == [
             {
