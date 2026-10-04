@@ -52,7 +52,7 @@ from app.models.ticket_audit_event import TicketAuditEvent
 from app.models.ticket_package import TicketPackage
 from app.models.ticket_package_product import TicketPackageProduct
 from app.models.ticket_package_track import TicketPackageTrack
-from app.services import package_service
+from app.services import package_service, task_publication
 from app.services.base_fetcher import FETCHER_REGISTRY, BaseFetcher
 from app.services.package_service import (
     ProductEligibilityRecalculationResult,
@@ -520,3 +520,91 @@ def test_re_evaluate_product_eligibility_wrapper_survives_a_failed_event_loop(
 
     assert interrupted == [seed.ticket_id]
     assert committed == ([True], ["product_eligibility_changed"])
+
+
+@pytest.mark.integration
+@pytest.mark.usefixtures("isolated_fetcher_registries")
+def test_run_ticket_convergence_wrapper_survives_two_consecutive_event_loops(
+    _engine: AsyncEngine,  # noqa: PT019 — value used below (.url), not just for setup
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two sequential invocations of the real `run_ticket_convergence`
+    synchronous wrapper — each its own `asyncio.run()` event loop — both
+    succeed against one shared, pooled engine.
+
+    Each invocation opens the read-only enumeration session through the
+    module-level `async_session_factory` reference in
+    `app/tasks/package_tasks.py`, so it checks a real connection out of the
+    dedicated pool. The innermost domain work is trivial: the Ticket UUID
+    has no package marker, and the roster holds only a test-only
+    participating fetcher whose publication goes to a substituted
+    `task_publication.publish_task`. Celery retries are new invocations in
+    the same worker child, so the same disposal protects them. Nothing is
+    written, so no cleanup is needed beyond disposing the engine.
+    """
+    fetcher_name = f"test_cross_loop_convergence_probe_{uuid4().hex}"
+    probe_ticket_id = str(uuid4())
+    published: list[dict[str, object]] = []
+
+    class _FakeRequest:
+        retries = 0
+
+    class _FakeTask:
+        """Minimal stand-in for the bound Celery Task instance (`self`),
+        carrying only what `_run_ticket_convergence_sync` reads."""
+
+        request = _FakeRequest()
+
+        def retry(self, **kwargs: object) -> BaseException:
+            raise AssertionError(f"run_ticket_convergence must not retry: {kwargs!r}")
+
+    FETCHER_REGISTRY.clear()
+
+    class _ConvergenceProbeFetcher(BaseFetcher):
+        name = fetcher_name
+        description = "Cross-loop lifecycle regression probe (convergence roster)"
+        default_schedule = "0 * * * *"
+        participates_in_catch_up = True
+
+        async def execute(self, session: AsyncSession) -> None:
+            pass
+
+        async def catch_up(self, ticket_id: str, session: AsyncSession) -> None:
+            pass
+
+    async def _publish(task_name: str, **options: object) -> None:
+        published.append({"task_name": task_name, **options})
+
+    dedicated_engine = create_async_engine(
+        _engine.url.render_as_string(hide_password=False), echo=False
+    )
+    dedicated_factory = async_sessionmaker(
+        dedicated_engine, class_=AsyncSession, expire_on_commit=False
+    )
+    monkeypatch.setattr(package_tasks, "engine", dedicated_engine)
+    monkeypatch.setattr(package_tasks, "async_session_factory", dedicated_factory)
+    monkeypatch.setattr(task_publication, "publish_task", _publish)
+
+    try:
+        # First invocation: its own event loop; disposes the pool before
+        # the loop closes.
+        package_tasks._run_ticket_convergence_sync(_FakeTask(), probe_ticket_id)
+
+        # Second invocation: a brand-new event loop. Without disposal the
+        # pool would hand out a connection bound to the first (closed)
+        # loop.
+        package_tasks._run_ticket_convergence_sync(_FakeTask(), probe_ticket_id)
+    finally:
+        asyncio.run(dedicated_engine.dispose())
+
+    assert (
+        published
+        == [
+            {
+                "task_name": "run_catch_up",
+                "kwargs": {"fetcher_name": fetcher_name, "ticket_id": probe_ticket_id},
+                "queue": None,
+            }
+        ]
+        * 2
+    )

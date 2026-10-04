@@ -1487,6 +1487,7 @@ class TestPackageServiceModuleBoundary:
             "get_maintainer_ticket_work",
             "add_package_records",
             "add_package_to_ticket",
+            "run_ticket_convergence",
         }
 
     def test_uses_no_private_ticket_mutations_helper(self) -> None:

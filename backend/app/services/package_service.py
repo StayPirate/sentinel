@@ -24,7 +24,10 @@ maintainer workbench queries (`list_maintainer_pending_work()`,
 creation boundary `add_package_records()` with its additive maintainer
 association, and its orchestrator `add_package_to_ticket()` (SMELT target
 resolution, the Product catalog readiness gate, and best-effort
-maintainership acquisition before the locked delegation); the remaining
+maintainership acquisition before the locked delegation), and the Ticket
+convergence workflow `run_ticket_convergence()` that re-resolves every
+persisted package marker in independent units and dispatches the
+per-Ticket catch-up roster; the remaining
 mutation and orchestration operations are added by their owning work
 items. This module
 never imports `ticket_service`; it consumes the `ticket_mutations`
@@ -32,7 +35,8 @@ primitives, which never import it back.
 
 Every operation accepts the caller's `AsyncSession` and never commits or
 rolls back; database exceptions propagate unchanged (Transaction
-ownership).
+ownership). The one exception is the orchestration boundary
+`run_ticket_convergence()`, which owns its sessions from a factory.
 
 Composed mode. The complete tree is exposed as one correlated scalar
 column (`ticket_package_tree_column()`) that aggregates packages, tracks,
@@ -65,6 +69,7 @@ from typing import Any, Final, Literal, get_args
 
 import httpx
 import structlog
+from celery.exceptions import SoftTimeLimitExceeded
 from sqlalchemy import (
     ColumnElement,
     SQLColumnExpression,
@@ -78,7 +83,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import JSON, aggregate_order_by
 from sqlalchemy.engine import Row
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import aliased
 from sqlalchemy.orm.util import AliasedClass
 
@@ -95,7 +100,11 @@ from app.core.enums import (
     TicketStatus,
     WorkflowType,
 )
-from app.core.exceptions import ServiceError, TicketNotFoundError
+from app.core.exceptions import (
+    ServiceError,
+    TicketNotFoundError,
+    TicketNotMutableError,
+)
 from app.core.identifiers import format_ticket_id, parse_ticket_id
 from app.models.cve_cvss_assessment import CVECVSSAssessment
 from app.models.product import Product
@@ -106,6 +115,8 @@ from app.models.ticket_package_product import TicketPackageProduct
 from app.models.ticket_package_track import TicketPackageTrack
 from app.models.user import User
 from app.services import settings as settings_service
+from app.services import task_publication
+from app.services.base_fetcher import get_catch_up_fetchers
 from app.services.cvss import EligibilityResolution, resolve_eligibility_score
 from app.services.http_client import create_http_client
 from app.services.package_actionability import (
@@ -144,6 +155,7 @@ from app.services.ticket_audit_log import (
     PACKAGE_ADDED_AUTOMATIC_COMMENTS,
     TicketAuditLog,
 )
+from app.services.ticket_convergence_publication import drain_ticket_convergence
 from app.services.ticket_deadline_expressions import active_release_request_exists
 from app.services.ticket_deadlines import (
     DueDates,
@@ -3221,6 +3233,252 @@ async def _resolve_targets(
             unmatched_cpes=list(unmatched),
         )
     return tracks
+
+
+# ---------------------------------------------------------------------------
+# Ticket convergence workflow (package-service.md, `run_ticket_convergence()`
+# workflow; package-model.md, Ticket Convergence; fetcher-infrastructure.md,
+# Per-Ticket Catch-Up, Post-commit enqueue and Invocation points)
+# ---------------------------------------------------------------------------
+
+TICKET_CONVERGENCE_COMMENT: Final[PackageAddedComment] = "Ticket convergence"
+"""Canonical `package_added` comment of a convergence package unit."""
+
+TICKET_CONVERGENCE_HTTP_CLIENT_NAME: Final = "run_ticket_convergence"
+"""Shared-factory HTTP client name of one convergence workflow invocation."""
+
+RUN_CATCH_UP_TASK: Final = "run_catch_up"
+"""Registered name of the generic per-Ticket catch-up Celery task."""
+
+_ISOLATED_PACKAGE_FAILURES: Final = (
+    SmeltUnavailableError,
+    PackageNotFoundInSmeltError,
+    PackageTargetsUnresolvedError,
+    ProductCatalogNotReadyError,
+    ValueError,
+)
+"""Package-specific resolution or validation failures isolated per unit
+(package-service.md, `run_ticket_convergence()` workflow; #781 K10 (b))."""
+
+
+class TicketConvergencePhase(StrEnum):
+    """Workflow phase reported by the wrapper for an escaping failure."""
+
+    ENUMERATION = "package_enumeration"
+    PACKAGE = "package_resolution"
+    DRAIN = "package_convergence_drain"
+    CATCH_UP_DISPATCH = "catch_up_dispatch"
+
+
+_PHASE_ATTRIBUTE: Final = "_ticket_convergence_phase"
+
+
+def ticket_convergence_failure_phase(exc: BaseException) -> str:
+    """The workflow phase recorded on an exception escaping the workflow.
+
+    `"unknown"` when the exception did not originate in a classified
+    phase (for example a failure while opening the HTTP client).
+    """
+    phase = getattr(exc, _PHASE_ATTRIBUTE, None)
+    return phase if isinstance(phase, str) else "unknown"
+
+
+def _mark_phase(exc: BaseException, phase: TicketConvergencePhase) -> None:
+    if getattr(exc, _PHASE_ATTRIBUTE, None) is None:
+        setattr(exc, _PHASE_ATTRIBUTE, phase.value)
+
+
+async def _persisted_package_names(
+    session_factory: async_sessionmaker[AsyncSession], ticket_id: uuid.UUID
+) -> list[str]:
+    """Every distinct persisted package name of the Ticket, in name order.
+
+    One read-only session closed before any external I/O. Includes
+    soft-deleted `TicketPackage` markers; a missing Ticket has none. Names
+    are distinct per Ticket by the `(ticket_id, package_name)` unique
+    constraint.
+    """
+    async with session_factory() as session:
+        statement = (
+            select(TicketPackage.package_name)
+            .where(TicketPackage.ticket_id == ticket_id)
+            .order_by(TicketPackage.package_name.collate(_CODE_POINT_COLLATION))
+        )
+        return list((await session.execute(statement)).scalars())
+
+
+async def _converge_package(
+    session_factory: async_sessionmaker[AsyncSession],
+    http_client: httpx.AsyncClient,
+    *,
+    ticket_id: uuid.UUID,
+    package_name: str,
+) -> Literal["converged", "failed", "stale"]:
+    """One independent package unit: re-resolve, flush, commit, close, drain.
+
+    Package-specific failures roll back the unit and are logged; a
+    manual-zone re-entry is a stale no-op. Every other exception escapes
+    with the unit uncommitted; a drain exception escapes after the unit
+    committed.
+    """
+    async with session_factory() as session:
+        try:
+            await add_package_to_ticket(
+                session,
+                ticket_id=ticket_id,
+                package_name=package_name,
+                acting_user_id=None,
+                caller=SYSTEM_INVOCATION,
+                audit_comment=TICKET_CONVERGENCE_COMMENT,
+                allow_excluded_reresolution=True,
+                http_client=http_client,
+            )
+            await session.flush()
+        except _ISOLATED_PACKAGE_FAILURES as exc:
+            await session.rollback()
+            logger.warning(
+                "ticket_convergence_package_failed",
+                ticket_id=str(ticket_id),
+                package_name=package_name,
+                cause=type(exc).__name__,
+            )
+            return "failed"
+        except TicketNotMutableError:
+            await session.rollback()
+            return "stale"
+        except BaseException as exc:
+            _mark_phase(exc, TicketConvergencePhase.PACKAGE)
+            raise
+        try:
+            await session.commit()
+        except BaseException as exc:
+            _mark_phase(exc, TicketConvergencePhase.PACKAGE)
+            raise
+
+    try:
+        await drain_ticket_convergence(session)
+    except BaseException as exc:
+        _mark_phase(exc, TicketConvergencePhase.DRAIN)
+        raise
+    return "converged"
+
+
+async def _publish_catch_up_roster(ticket_id: uuid.UUID) -> int:
+    """Attempt one `run_catch_up` publication per participating fetcher.
+
+    Publishes in fetcher-name order with the class's `queue` when it is
+    not `None`; continues after a failure and raises the aggregate as an
+    `ExceptionGroup` after the last attempt. Control signals propagate
+    immediately. Returns the number of participants.
+    """
+    roster = sorted(get_catch_up_fetchers().items())
+    failures: list[Exception] = []
+    for fetcher_name, fetcher_cls in roster:
+        try:
+            await task_publication.publish_task(
+                RUN_CATCH_UP_TASK,
+                kwargs={"fetcher_name": fetcher_name, "ticket_id": str(ticket_id)},
+                queue=fetcher_cls.queue,
+            )
+        except SoftTimeLimitExceeded, MemoryError:
+            raise
+        except Exception as exc:
+            failures.append(exc)
+            logger.warning(
+                "ticket_convergence_catch_up_dispatch_failed",
+                ticket_id=str(ticket_id),
+                fetcher_name=fetcher_name,
+                cause=type(exc).__name__,
+            )
+    if failures:
+        aggregate = ExceptionGroup(
+            "Ticket convergence catch-up dispatch failed", failures
+        )
+        _mark_phase(aggregate, TicketConvergencePhase.CATCH_UP_DISPATCH)
+        raise aggregate
+    return len(roster)
+
+
+async def run_ticket_convergence(
+    *,
+    ticket_id: uuid.UUID,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Re-resolve a Ticket's packages and dispatch its catch-up roster.
+
+    Orchestration boundary owning one independent transaction per package
+    (package-service.md, `run_ticket_convergence()` workflow). It is the
+    complete post-commit recovery phase after a manual-zone exit or a
+    `Resolved` regression, executed by the `run_ticket_convergence` task.
+
+    Q1: `ticket_id` is the internal Ticket UUID; `session_factory` opens
+    every session of the invocation.
+
+    Q2: holds no lock itself; each unit serializes on the Ticket lock of
+    the delegated `add_package_records()`, taken after its SMELT I/O.
+
+    Q3: (1) reads every distinct persisted package name, including
+    soft-deleted markers, in one read-only session closed before any I/O;
+    (2) per package, in name order, calls `add_package_to_ticket()` with
+    system attribution, the `Ticket convergence` comment, and
+    re-resolution mode in a fresh session sharing one HTTP client, then
+    flushes, commits, closes, and drains that unit's registered Ticket
+    convergence effects before the next package; (3) a package-specific
+    failure rolls back that unit, is logged, and the next package
+    proceeds; `TicketNotMutableError` rolls back the unit as a stale
+    no-op; (4) after every package, publishes `run_catch_up` for every
+    participating fetcher with class queue routing; (5) logs completion,
+    as a WARNING when a package failed. No status guard, progress row,
+    `FetcherRun`, Redis guard, restoration, or audit event of its own.
+
+    Q4: returns `None`.
+
+    Q5: idempotent with respect to current persisted state; repeats SMELT
+    requests and catch-up publications by design.
+
+    Q6: an enumeration failure, a database or infrastructure failure
+    before or during a unit's commit, a non-operational drain exception,
+    and the catch-up dispatch aggregate escape, marked with their phase
+    (`ticket_convergence_failure_phase()`); committed units stay committed.
+    Cancellation, `SoftTimeLimitExceeded`, and `MemoryError` propagate.
+    """
+    try:
+        package_names = await _persisted_package_names(session_factory, ticket_id)
+    except BaseException as exc:
+        _mark_phase(exc, TicketConvergencePhase.ENUMERATION)
+        raise
+
+    converged = failed = stale = 0
+    if package_names:
+        async with create_http_client(TICKET_CONVERGENCE_HTTP_CLIENT_NAME) as client:
+            for package_name in package_names:
+                outcome = await _converge_package(
+                    session_factory,
+                    client,
+                    ticket_id=ticket_id,
+                    package_name=package_name,
+                )
+                if outcome == "converged":
+                    converged += 1
+                elif outcome == "failed":
+                    failed += 1
+                else:
+                    stale += 1
+
+    catch_ups = await _publish_catch_up_roster(ticket_id)
+
+    fields = {
+        "ticket_id": str(ticket_id),
+        "packages": len(package_names),
+        "packages_converged": converged,
+        "packages_failed": failed,
+        "packages_stale": stale,
+        "catch_ups_dispatched": catch_ups,
+    }
+    if failed:
+        logger.warning("ticket_convergence_completed_with_package_failures", **fields)
+    else:
+        logger.info("ticket_convergence_completed", **fields)
 
 
 # ---------------------------------------------------------------------------
