@@ -1497,3 +1497,46 @@ class TestOverlappingInvocations:
         assert state.trees == {a: _created(p1), b: _seeded_tree(p2)}
         assert state.maintainers == sorted([(a, m1.id), (b, m2.id)])
         assert published.calls == []
+
+
+# ---------------------------------------------------------------------------
+# Failed-pair rollback (Product Catalog Backfill pair outcome table: failed)
+# ---------------------------------------------------------------------------
+
+
+class _RollbackSession:
+    """Stands in for a pair session whose rollback raises `error`."""
+
+    def __init__(self, error: BaseException) -> None:
+        self.error = error
+        self.rollbacks = 0
+
+    async def rollback(self) -> None:
+        self.rollbacks += 1
+        raise self.error
+
+
+@pytest.mark.unit
+class TestFailedPairRollback:
+    async def test_a_failing_rollback_belongs_to_the_already_failed_pair(
+        self,
+    ) -> None:
+        """A rollback error after a pair failure is absorbed: the pair is
+        already counted as failed and its session is closed by its context
+        manager."""
+        session = _RollbackSession(OperationalError("ROLLBACK", None, Exception()))
+
+        await product_catalog_backfill._rollback(cast(AsyncSession, session))
+
+        assert session.rollbacks == 1
+
+    @pytest.mark.parametrize(
+        "signal", [SoftTimeLimitExceeded(), MemoryError()], ids=type
+    )
+    async def test_a_whole_run_signal_during_rollback_propagates(
+        self, signal: BaseException
+    ) -> None:
+        session = _RollbackSession(signal)
+
+        with pytest.raises(type(signal)):
+            await product_catalog_backfill._rollback(cast(AsyncSession, session))
