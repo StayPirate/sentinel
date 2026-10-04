@@ -312,6 +312,43 @@ class CVESourceStatusResponse(BaseModel):
     data: list[CVESourceStatusItem]
 
 
+class CVERefetchResult(BaseModel):
+    """The dispatch result of `POST /api/v1/cves/{cve_id}/refetch`
+    (cve-tracking.md, Re-fetch Endpoint; cve-service.md,
+    `FetchDispatchResult`). The four arrays are disjoint and each is in
+    ascending canonical source code-point order."""
+
+    sources_enqueued: list[str] = Field(
+        description=(
+            "Sources whose single-CVE fetch publication returned without raising."
+        )
+    )
+    sources_already_pending: list[str] = Field(
+        description=(
+            "Sources with an on-demand fetch already pending; no new "
+            "publication was attempted."
+        )
+    )
+    sources_disabled: list[str] = Field(
+        description=(
+            "Registered refetchable sources skipped because they are "
+            "disabled (broadcast only)."
+        )
+    )
+    sources_failed: list[str] = Field(
+        description=(
+            "Sources whose publication attempt raised; broker acceptance is "
+            "unconfirmed, not certainly rejected."
+        )
+    )
+
+
+class CVERefetchResponse(BaseModel):
+    """Response body for `POST /api/v1/cves/{cve_id}/refetch` (202)."""
+
+    data: CVERefetchResult
+
+
 class CVEListQuery(BaseModel):
     """Query parameters of `GET /api/v1/cves` (cve-tracking.md, List CVEs >
     Query Parameters).

@@ -1214,10 +1214,15 @@ async def create_ticket(
     ingestion); every comment but the first is `NULL`. (10) Manual only:
     `refresh_priority_auto()`, whose optional system `priority_changed`
     follows every creation event; ingestion leaves the refresh to its
-    caller. Never reconciles, assigns through `auto_assign_actor()`,
-    registers convergence, or commits. A locked-current `REJECTED` CVE
-    changes nothing (no automatic `CVE rejected` status). The CVE
-    freshness step (step 11) is not part of this implementation.
+    caller. (11) Manual creation with a CVE only, last: prepares the
+    all-source freshness refresh through
+    `cve_service.prepare_freshness_refresh()` under the held locks, which
+    registers its database-free publication as a post-commit effect or
+    logs the no-eligible-source outcome and registers nothing; ingestion
+    creation skips it. Never reconciles, assigns through
+    `auto_assign_actor()`, registers convergence, or commits. A
+    locked-current `REJECTED` CVE changes nothing (no automatic `CVE
+    rejected` status).
 
     Q4: returns the new, flushed Ticket; its server-generated columns
     (`sequence_id`, timestamps) are not loaded.
@@ -1233,8 +1238,10 @@ async def create_ticket(
     (even an inaccessible one) when the CVE is already associated. A
     `Ticket.cve_id` unique violation is an invariant failure and escapes
     untranslated; the caller rolls back without further queries. Audit,
-    database, and flush exceptions propagate and roll back the caller's
-    transaction.
+    database, flush, freshness-preparation (`FetcherConfigMissingError`),
+    and registration exceptions propagate and roll back the caller's
+    transaction. After commit, freshness publication failure is best effort
+    and logged by the registered effect.
     """
     _validate_creation_input(
         acting_user_id=acting_user_id,
@@ -1316,6 +1323,12 @@ async def create_ticket(
         )
     if source is TicketCreationSource.MANUAL:
         await refresh_priority_auto(db, ticket=ticket)
+        if cve is not None:
+            await cve_service.prepare_freshness_refresh(
+                db,
+                cve_id=cve.cve_id,
+                trigger=cve_service.OnDemandFetchTrigger.TICKET_CREATE,
+            )
     return ticket
 
 
@@ -1367,9 +1380,12 @@ async def associate_cve(
     `severity_changed`, recalculates every automatic Product with
     `reason = cvss`, and refreshes the automatic priority; (13) exactly
     one `reconcile_ticket_status()` with the same date and no second
-    assignment. Step 14 (the CVE freshness refresh) is not part of this
-    implementation. A locked-current `REJECTED` CVE changes nothing extra
-    (no automatic `CVE rejected` status).
+    assignment; (14) last, prepares the all-source freshness refresh
+    through `cve_service.prepare_freshness_refresh()` under the held locks,
+    which registers its database-free publication as a post-commit effect
+    or logs the no-eligible-source outcome and registers nothing. A
+    locked-current `REJECTED` CVE changes nothing extra (no automatic `CVE
+    rejected` status).
 
     Q4: returns the locked Ticket in its post-mutation state.
 
@@ -1380,10 +1396,13 @@ async def associate_cve(
     `TicketNotMutableError` for `Ignored` or `Duplicated`;
     `TicketCVEAlreadySetError`; `TicketCVEConflictError` with the
     conflicting Ticket's `SNTL-{n}` (even an inaccessible one). Settings,
-    database, eligibility, audit, flush, and reconciliation exceptions
-    propagate and roll back the caller's transaction, including a
-    placeholder CVE this call inserted. A `Ticket.cve_id` unique violation
-    is an invariant failure and escapes untranslated.
+    database, eligibility, audit, flush, reconciliation,
+    freshness-preparation (`FetcherConfigMissingError`), and registration
+    exceptions propagate and roll back the caller's transaction, including
+    a placeholder CVE this call inserted. A `Ticket.cve_id` unique
+    violation is an invariant failure and escapes untranslated. After
+    commit, freshness publication failure is best effort and logged by the
+    registered effect.
     """
     if caller.user_id != acting_user_id:
         raise ValueError("caller must identify the acting user.")
@@ -1423,6 +1442,11 @@ async def associate_cve(
         evaluation_date=evaluation_date,
     )
     await reconcile_ticket_status(ticket, db, evaluation_date=evaluation_date)
+    await cve_service.prepare_freshness_refresh(
+        db,
+        cve_id=cve.cve_id,
+        trigger=cve_service.OnDemandFetchTrigger.CVE_ASSOCIATE,
+    )
     return ticket
 
 

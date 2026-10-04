@@ -69,6 +69,14 @@ including a different function — is still detected:
   Ownership): it opens and closes its own short-lived read transaction
   before its best-effort Redis overlay.
 
+- `app/api/v1/cves.py`, function `get_cve_refetch_session_factory`:
+  `refetch_cve()` (the `POST .../refetch` service function) is a
+  service-owned orchestration boundary: it locks and validates the CVE
+  and optional Ticket in its own short transaction, commits and closes
+  it, and only then publishes with no lock held. See
+  `docs/features/tickets/cve-service.md` (Callers and Ordering,
+  Transaction Ownership).
+
 The module-level `import` of `async_session_factory` in each of these
 files (needed for the authorized function to reference it at all)
 is allowed only in the files that contain an authorized function —
@@ -99,7 +107,10 @@ _AUTHORIZED_QUALNAMES: dict[Path, set[str]] = {
         "LastUsedDebouncer.touch",
     },
     Path("v1/fetchers.py"): {"get_fetcher_trigger_session_factory"},
-    Path("v1/cves.py"): {"get_cve_source_status_session_factory"},
+    Path("v1/cves.py"): {
+        "get_cve_source_status_session_factory",
+        "get_cve_refetch_session_factory",
+    },
     Path("v1/tickets.py"): {"get_ticket_convergence_session_factory"},
 }
 
