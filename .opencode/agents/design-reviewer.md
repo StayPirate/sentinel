@@ -4,7 +4,7 @@ description: >
   unjustified complexity and proposing smaller alternatives. Use after
   creating or substantially changing a feature spec. Read-only.
 mode: subagent
-model: openrouter/deepseek/deepseek-v4.1-flash
+model: anthropic/claude-sonnet-5-5
 variant: high
 permission:
   edit: deny

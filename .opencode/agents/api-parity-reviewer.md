@@ -4,7 +4,7 @@ description: >
   required by feature specs, including CLI- or task-driven operations. Use
   after changing consumer-facing operations or endpoints. Read-only.
 mode: subagent
-model: openrouter/deepseek/deepseek-v4.1-flash
+model: anthropic/claude-sonnet-5-5
 variant: high
 permission:
   edit: deny

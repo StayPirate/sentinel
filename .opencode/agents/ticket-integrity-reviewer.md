@@ -4,7 +4,7 @@ description: >
   centralized service ownership, locking, and transaction hygiene. Use after
   changing Ticket mutation code or specs. Read-only.
 mode: subagent
-model: openrouter/deepseek/deepseek-v4.1-flash
+model: anthropic/claude-sonnet-5-5
 variant: high
 permission:
   edit: deny
