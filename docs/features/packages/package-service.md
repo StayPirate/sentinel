@@ -1495,14 +1495,19 @@ After the status-transition transaction commits, the workflow:
 
 If the Ticket does not exist or has no persisted package marker, package-tree
 resolution is a no-op and catch-up dispatch still proceeds. A package-specific
-resolution or validation failure from one `add_package_to_ticket()` unit rolls
-back that package transaction, logs the sanitized failure, and does not prevent
-the next package. If `TicketNotMutableError` reports that the Ticket re-entered
+resolution or validation failure from one `add_package_to_ticket()` unit
+(`SmeltUnavailableError`, `PackageNotFoundInSmeltError`,
+`PackageTargetsUnresolvedError`, `ProductCatalogNotReadyError`, or a
+package-input `ValueError` caller-contract violation) rolls back that package
+transaction, logs the sanitized failure, and does not prevent the next package.
+If `TicketNotMutableError` reports that the Ticket re-entered
 the manual zone during the loop, roll back that package unit and treat it as a
 successful stale/inapplicable no-op rather than a package failure. An
 infrastructure failure that prevents reliable enumeration
-or transaction completion, and the aggregate of catch-up dispatch failures,
-escapes to the root workflow wrapper.
+or transaction completion — including a database or driver error raised by a
+unit before or during its commit — and the aggregate of catch-up dispatch
+failures, escapes to the root workflow wrapper without rolling back package
+units that already committed.
 The wrapper retry policy below repeats enumeration, all package attempts, and
 all catch-up dispatch attempts; it never resumes from partial progress.
 
@@ -2101,8 +2106,11 @@ transitions. The test must cover:
   rollback; no dedicated submission task is used
 - **Ticket convergence workflow**: enumerate included and soft-deleted package
   markers; run SMELT target and maintainership resolution for every package;
-  commit successful packages independently; isolate every pre-commit package
-  failure; drain each package unit after commit; absorb only the broker
+  commit successful packages independently; isolate every package-specific
+  resolution or validation failure; let database and infrastructure failures
+  that prevent transaction completion escape to the wrapper retry without
+  rolling back earlier committed packages; treat `TicketNotMutableError` as a
+  stale no-op; drain each package unit after commit; absorb only the broker
   operational publication error; propagate every other drain exception without
   reclassifying the committed package;
   attempt all registered catch-up publications and aggregate dispatch failures;
