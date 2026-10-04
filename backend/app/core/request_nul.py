@@ -31,6 +31,10 @@ from app.core.route_params import declared_string_param_names
 _NUL_ERROR_MESSAGE = "Value error, must not contain U+0000"
 _NUL_ERROR_TYPE = "value_error"
 
+# Stack marker for an object member name containing U+0000, so its error is
+# emitted in document order relative to its siblings' values.
+_NUL_MEMBER_NAME = object()
+
 
 def _nul_error(loc: tuple[str | int, ...]) -> dict[str, Any]:
     return {"loc": loc, "msg": _NUL_ERROR_MESSAGE, "type": _NUL_ERROR_TYPE}
@@ -78,7 +82,9 @@ def _body_nul_errors(body: Any) -> list[dict[str, Any]]:
     stack: list[tuple[tuple[str | int, ...], Any]] = [(("body",), body)]
     while stack:
         loc, value = stack.pop()
-        if isinstance(value, str):
+        if value is _NUL_MEMBER_NAME:
+            errors.append(_nul_error(loc))
+        elif isinstance(value, str):
             if contains_nul(value):
                 errors.append(_nul_error(loc))
         elif isinstance(value, list):
@@ -90,7 +96,7 @@ def _body_nul_errors(body: Any) -> list[dict[str, Any]]:
             members: list[tuple[tuple[str | int, ...], Any]] = []
             for key, item in value.items():
                 if contains_nul(key):
-                    errors.append(_nul_error(loc))
+                    members.append((loc, _NUL_MEMBER_NAME))
                 else:
                     members.append(((*loc, key), item))
             stack.extend(reversed(members))

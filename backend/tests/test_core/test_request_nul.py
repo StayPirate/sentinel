@@ -138,6 +138,17 @@ class TestBodyNulErrors:
 
         assert [error["loc"] for error in _body_nul_errors(body)] == [("body", "outer")]
 
+    def test_member_name_errors_keep_document_order_among_sibling_values(
+        self,
+    ) -> None:
+        body = {"a": {"b": "\x00"}, "c\x00": "v", "d": "\x00"}
+
+        assert [error["loc"] for error in _body_nul_errors(body)] == [
+            ("body", "a", "b"),
+            ("body",),
+            ("body", "d"),
+        ]
+
     def test_top_level_string_body(self) -> None:
         assert [error["loc"] for error in _body_nul_errors("\x00")] == [("body",)]
 
