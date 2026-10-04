@@ -442,12 +442,12 @@ exemption removal there so it is not forgotten.
   delegate that work and map the service outcome, but neither API nor Core
   builds a SQLAlchemy visibility expression
 
-- **Cross-cutting query parameter constraints**: enforce global constraints
-  (such as the 500-character string parameter length limit defined in
-  `docs/api-spec.md`) via a shared dependency injected at the app or router
-  level, rather than repeating validation logic in individual endpoint
-  handlers. This ensures consistent enforcement across all endpoints and
-  reduces the risk of omission
+- **Cross-cutting request input constraints**: enforce global constraints
+  (such as the 500-character string query parameter length limit and the
+  U+0000 rejection defined in `docs/api-spec.md`) via a shared dependency
+  injected at the app or router level, rather than repeating validation logic
+  in individual endpoint handlers or schema fields. This ensures consistent
+  enforcement across all endpoints and reduces the risk of omission
 
 ### Pydantic Conventions
 
@@ -1093,9 +1093,9 @@ contain U+0000:
 
 Each owning specification of a non-XML consumer references this rule at its
 validation contract and names the applicable outcome. Consumer-supplied API
-input is not an external source under this rule. The mandatory test scenario
-is defined in `docs/features/platform/testing-strategy.md` (External String
-Admissibility).
+input is not an external source under this rule; it follows `docs/api-spec.md`
+(NUL Characters in Request Input). The mandatory test scenario is defined in
+`docs/features/platform/testing-strategy.md` (External String Admissibility).
 
 ### Runtime Version
 

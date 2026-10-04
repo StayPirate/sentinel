@@ -189,6 +189,38 @@ query input. A parameter name used by another endpoint does not become valid
 globally; for example, an endpoint that declares fixed ordering but no
 `sort_by` parameter ignores a supplied `sort_by` value.
 
+### NUL Characters in Request Input
+
+No string supplied in a request may contain U+0000 (NUL). PostgreSQL cannot
+store or compare the character, and no consumer input has a legitimate use for
+it. The rule covers:
+
+- every declared path parameter and every occurrence of a declared query
+  parameter whose type is a string, a string enum, or a list of either,
+  including a percent-encoded `%00`; and
+- every string in a JSON request body at any nesting level, including object
+  member names and members the endpoint does not declare.
+
+Undeclared query parameters remain ignored. Path and query parameters of
+another type, such as integers and UUIDs, keep their own type validation.
+Request headers and cookies are not covered.
+
+A violation returns the global `422 VALIDATION_ERROR`, with one `errors` entry
+per offending string, located at that string. An offending object member name
+is reported at its containing object, and that member's value is not inspected
+further. The value is rejected, never stripped or replaced, and is not echoed
+in the response. The rule applies to every endpoint, including public
+ones, without exception. It is evaluated before authentication, authorization,
+resource resolution, and every endpoint-specific validation outcome. A U+0000
+therefore returns this response even where another malformed value would
+receive a different outcome, such as the scoped `404 TICKET_NOT_FOUND` for a
+Ticket locator, the generic `401` of local login, a silently ignored enum
+filter value, or `422 FETCHER_SETTING_INVALID`. The check inspects only the
+request, so it reveals nothing about any resource or account.
+
+Strings received from external sources follow `docs/conventions.md` (External
+String Admissibility) instead.
+
 ### JSON Request Body Scalar Types
 
 A request-body field declared as `boolean`, `integer`, or `number` accepts only

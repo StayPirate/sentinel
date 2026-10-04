@@ -15,7 +15,6 @@ from __future__ import annotations
 from collections.abc import AsyncGenerator
 from enum import StrEnum
 from typing import Annotated
-from uuid import UUID
 
 import pytest
 from fastapi import Depends, FastAPI, Query
@@ -23,62 +22,12 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from httpx import ASGITransport, AsyncClient
 
-from app.core.query_limits import (
-    _is_string_like,
-    enforce_query_parameter_length_limit,
-)
+from app.core.query_limits import enforce_query_parameter_length_limit
 
 
 class _Choice(StrEnum):
     ONE = "one"
     TWO = "two"
-
-
-@pytest.mark.unit
-class TestIsStringLike:
-    """Pure classification used to select which declared query fields
-    the 500-character limit applies to."""
-
-    def test_str_is_string_like(self) -> None:
-        assert _is_string_like(str) is True
-
-    def test_optional_str_is_string_like(self) -> None:
-        assert _is_string_like(str | None) is True
-
-    def test_str_enum_is_string_like(self) -> None:
-        assert _is_string_like(_Choice) is True
-
-    def test_optional_str_enum_is_string_like(self) -> None:
-        assert _is_string_like(_Choice | None) is True
-
-    def test_int_is_not_string_like(self) -> None:
-        assert _is_string_like(int) is False
-
-    def test_optional_int_is_not_string_like(self) -> None:
-        assert _is_string_like(int | None) is False
-
-    def test_bool_is_not_string_like(self) -> None:
-        assert _is_string_like(bool) is False
-
-    def test_uuid_is_not_string_like(self) -> None:
-        assert _is_string_like(UUID) is False
-
-    def test_list_str_is_string_like(self) -> None:
-        assert _is_string_like(list[str]) is True
-
-    def test_optional_list_str_is_string_like(self) -> None:
-        assert _is_string_like(list[str] | None) is True
-
-    def test_list_str_enum_is_string_like(self) -> None:
-        assert _is_string_like(list[_Choice]) is True
-
-    def test_list_int_is_not_string_like(self) -> None:
-        assert _is_string_like(list[int]) is False
-
-    def test_bare_list_is_not_string_like(self) -> None:
-        """A bare, unparameterized `list` has no element type to
-        inspect — treated as not string-shaped rather than raising."""
-        assert _is_string_like(list) is False
 
 
 def _flat_query(
@@ -190,7 +139,7 @@ class TestEnforceQueryParameterLengthLimit:
         when its raw value is over 500 characters — Python integers
         have no length limit, so this 501-digit value is a perfectly
         valid `page`. Applying the string length limit here would
-        incorrectly reject it (see `_is_string_like`)."""
+        incorrectly reject it (see `app.core.route_params.is_string_like`)."""
         response = await limit_client.get("/flat", params={"page": "1" * 501})
         assert response.status_code == 200
 
