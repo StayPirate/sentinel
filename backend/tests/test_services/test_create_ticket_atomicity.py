@@ -82,8 +82,7 @@ class _CreationWorld(CommittedWorld):
         """Exactly one registered refetchable CVE fetcher with a committed
         enabled `FetcherConfig` row, so a manual create-with-CVE registers
         its freshness effect (ticket-service.md, `create_ticket` step 11).
-        The test isolates the registries."""
-        clear_fetcher_registries()
+        The test isolates and empties the registries."""
         name = define_cve_fetcher(source=CVESourceType.NVD).name
         self.fetcher_names.append(name)
         self.session.add(FetcherConfig(fetcher_name=name, enabled=True))
@@ -306,7 +305,10 @@ class TestCreationRace:
         """ATR 7: one Ticket, one success, one `TicketCVEConflictError`
         carrying the winner's identifier. With an enabled refetchable source
         the winner registers exactly one freshness effect and the loser none
-        (ticket-service.md, `create_ticket` step 11)."""
+        (ticket-service.md, `create_ticket` step 11). The registries start
+        empty, so the non-refetchable cases never depend on the production
+        fetch-single roster."""
+        clear_fetcher_registries()
         if refetchable:
             await world.refetchable_source()
         first = await world.user(role=Role.VULNERABILITY_ANALYST)
