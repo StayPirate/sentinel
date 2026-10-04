@@ -1482,16 +1482,16 @@ After the status-transition transaction commits, the workflow:
    and attempted once after that unit's commit and session close and before the
    next package, because this workflow is itself an automatic best-effort owner
    (`ticket-service.md`, Publication policies).
-3. Logs each failed package with the sanitized cause, `ticket_id`, package
-   name, and `celery_task_id`, then continues. A failed package does not roll
-   back successful siblings.
+3. Logs each package-specific resolution or validation failure with the
+   sanitized cause, `ticket_id`, package name, and `celery_task_id`, then
+   continues. A failed package does not roll back successful siblings.
 4. After every package has been attempted, attempts dispatch of every
    registered per-ticket fetcher catch-up. It continues through the complete
    roster when an earlier publication fails, accumulates all dispatch failures,
    and raises the aggregate only after the last attempt. Catch-up therefore
    observes every package-tree addition that committed successfully. Existing
-   records remain eligible for catch-up even when another package failed
-   re-resolution.
+   records remain eligible for catch-up even when another package had a
+   package-specific failure in re-resolution.
 
 If the Ticket does not exist or has no persisted package marker, package-tree
 resolution is a no-op and catch-up dispatch still proceeds. A package-specific
@@ -1541,13 +1541,15 @@ enumeration is empty and catch-up dispatch still follows the registered roster,
 whose methods apply their own silent missing-Ticket guards. Package-specific
 resolution and validation exceptions are caught and logged as described above;
 manual-zone stale/inapplicable no-ops are not logged as package failures.
-Reliable-enumeration or transaction-completion failures, the accumulated
-catch-up-publication failure, and a non-operational exception escaping a
-per-package convergence drain escape the async workflow to the bound Celery
-wrapper, which retries the same `ticket_id`; after retry exhaustion the wrapper
-logs terminal failure and returns no result. A committed package unit is not
-rolled back by an escaping drain exception. These are the only exceptions that
-leave the workflow boundary.
+Reliable-enumeration or transaction-completion failures, any other exception
+from a package unit that is neither package-specific nor the stale
+`TicketNotMutableError` (for example an audit, delegated-service, or
+programming error), the accumulated catch-up-publication failure, and a
+non-operational exception escaping a per-package convergence drain escape the
+async workflow to the bound Celery wrapper, which retries the same
+`ticket_id`; after retry exhaustion the wrapper logs terminal failure and
+returns no result. A committed package unit is not rolled back by an escaping
+exception. These are the only exceptions that leave the workflow boundary.
 
 The bound synchronous Celery wrapper receives `ticket_id: str`, validates and
 converts it to UUID, invokes the async workflow through exactly one

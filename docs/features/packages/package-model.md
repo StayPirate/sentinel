@@ -1690,8 +1690,9 @@ regression then has two post-commit package-domain phases:
 3. After every package has been attempted and successful package units have
    committed, attempt dispatch of **every** registered per-Ticket catch-up
    against the resulting tree, including IBS request, IBS track-release, IBS
-   Product-release, and lifecycle evaluation. Failure to resolve one package or
-   to dispatch an earlier catch-up does not prevent later dispatch attempts.
+   Product-release, and lifecycle evaluation. A package-specific resolution
+   failure or an earlier catch-up dispatch failure does not prevent later
+   dispatch attempts.
 
 No special synchronous eligibility pass precedes a `Resolved` regression:
 ordinary local CVSS, default-version, threshold, and lifecycle workflows already
@@ -1710,8 +1711,11 @@ rather than every intermediate request state.
 
 The ordering above is a behavioral contract. The root Ticket convergence
 wrapper retries its complete workflow three times with 5, 10, and 20 second
-backoff when enumeration or accumulated catch-up publication failures make the
-wrapper fail. Each retry starts again at
+backoff when an escaping failure defined in `package-service.md`
+(`run_ticket_convergence()` workflow) makes the wrapper fail: enumeration, a
+package unit's transaction-completion or other non-package-specific failure, a
+non-operational per-package drain exception, or accumulated catch-up
+publication failures. Each retry starts again at
 package enumeration; successful package units and previously published
 catch-ups may repeat safely. After the final attempt, the wrapper logs terminal
 failure and requires a complete operator rerun through

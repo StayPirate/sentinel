@@ -831,8 +831,9 @@ registrations converge on this single invocation point:
 
 After the transition commits, the package-domain phase re-resolves persisted
 package markers. It then calls `get_catch_up_fetchers()` and attempts a
-`run_catch_up` Celery publication for every registered fetcher. Package-tree
-failure is isolated per package, and one publication failure does not stop
+`run_catch_up` Celery publication for every registered fetcher. A
+package-specific resolution failure is isolated per package, and one
+publication failure does not stop
 later publication attempts. Dispatch failures are accumulated and surfaced to
 the root Ticket convergence wrapper after the complete roster is attempted.
 
