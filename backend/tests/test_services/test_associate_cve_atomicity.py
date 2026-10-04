@@ -21,8 +21,9 @@ Owning specifications:
 The single-session behavior of `associate_cve()` is covered by
 `tests/test_services/test_associate_cve.py`; this module adds only what
 needs independent sessions or an independent committed observer. Step 14 of
-the specification (the CVE freshness refresh) is deferred to M3.1 and is
-neither tested nor expected here.
+the specification (the CVE freshness refresh) is covered by
+`tests/test_services/test_ticket_freshness_composition.py` and
+`tests/test_api/test_ticket_freshness_refresh.py`.
 
 Not reachable, hence not tested: the converse self-loss case of Architectural
 Test Requirement 15 (an authorized association that itself removes the

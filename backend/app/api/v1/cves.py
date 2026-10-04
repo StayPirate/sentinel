@@ -1030,9 +1030,9 @@ def serialize_cve_refetch_result(result: FetchDispatchResult) -> CVERefetchResul
             "model": ErrorResponse,
             "description": (
                 "`CVE_FETCH_FAILED`: no enabled source supports single-CVE "
-                "fetch. `CELERY_UNAVAILABLE`: the task broker confirmed no "
-                "publication and no source is already pending; the detail is "
-                "fixed and the tasks may still run."
+                "fetch. `CELERY_UNAVAILABLE`: no publication attempt was "
+                "confirmed by the task broker and no source is already "
+                "pending; the detail is fixed and the tasks may still run."
             ),
         },
     },

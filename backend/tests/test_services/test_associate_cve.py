@@ -28,8 +28,9 @@ Owning specifications:
 
 The independent-session races (CVSS mutation, locked-current visibility
 changes) are not part of this module. Step 14 of the specification (the
-CVE freshness refresh) is not implemented and is neither tested nor
-expected here.
+CVE freshness refresh) is covered by
+`tests/test_services/test_ticket_freshness_composition.py` and
+`tests/test_api/test_ticket_freshness_refresh.py`.
 
 Expected values are transcribed from the specifications, never computed
 with the module under test.
