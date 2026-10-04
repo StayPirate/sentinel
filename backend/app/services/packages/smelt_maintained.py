@@ -37,8 +37,7 @@ Only the specified failure classes are converted; programming errors,
 cancellation, `SoftTimeLimitExceeded`, and `MemoryError` propagate. The
 helper performs network I/O only: it opens no database session and
 acquires no lock (package-service.md, Module invariant: I/O-then-Lock
-pattern), so callers must not hold a Ticket lock or an open transaction
-while awaiting it.
+pattern), so callers must not hold a row lock while awaiting it.
 """
 
 from __future__ import annotations
@@ -179,17 +178,26 @@ _SUPPORTED_TARGETS: TypeAdapter[list[_Target]] = TypeAdapter(
 )
 
 
-def maintained_package_url(api_url: str, package_name: str) -> str:
-    """Return the maintained-package URL for a canonical `SMELT_API_URL`.
+def validate_package_name(package_name: str) -> None:
+    """Reject a name that cannot form one URL path segment.
 
-    The package name is percent-encoded into exactly one case-preserving
-    path segment. A name that cannot form one segment (empty, `.`, or
-    `..`, which HTTP path normalization would remove) is a caller-contract
-    violation and raises `ValueError`.
+    An empty name, `.`, or `..` (which HTTP path normalization would
+    remove) is a caller-contract violation and raises `ValueError`; an
+    orchestrator calls this before any database or network work.
     """
     if package_name in _NOT_A_PATH_SEGMENT:
         msg = "package_name cannot form a single URL path segment"
         raise ValueError(msg)
+
+
+def maintained_package_url(api_url: str, package_name: str) -> str:
+    """Return the maintained-package URL for a canonical `SMELT_API_URL`.
+
+    The package name is percent-encoded into exactly one case-preserving
+    path segment; `validate_package_name()` rejects a name that cannot
+    form one with `ValueError`.
+    """
+    validate_package_name(package_name)
     encoded = quote(package_name, safe="")
     return f"{api_url}/experimental/v2/maintained/{encoded}?include_reactive_ltss=true"
 
