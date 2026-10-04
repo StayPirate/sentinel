@@ -1144,7 +1144,10 @@ than restoring or completing it. Post-ingest CVE package resolution uses the
 same excluded-package guard but treats the exception as an expected package
 skip. Ticket convergence uses re-resolution semantics and may complete missing
 descendants or maintainers beneath an excluded package without clearing any
-marker. Product catalog backfill retains its existing exclusion behavior. The
+marker. Product catalog backfill selects only included package markers and
+treats a `PackageAlreadyExcludedError` from an exclusion committed after its
+selection as an expected excluded skip (`product-catalog.md`, Product Catalog
+Backfill). The
 concrete caller-context parameter is an implementation choice; the API handler
 does not perform the package lookup.
 
