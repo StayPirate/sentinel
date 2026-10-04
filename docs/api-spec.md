@@ -196,8 +196,8 @@ store or compare the character, and no consumer input has a legitimate use for
 it. The rule covers:
 
 - every declared path parameter and every occurrence of a declared query
-  parameter whose type is a string, a string enum, or a list of either,
-  including a percent-encoded `%00`; and
+  parameter, when the parameter's type is a string, a string enum, or a list
+  of either, including a percent-encoded `%00`; and
 - every string in a request body that the endpoint accepts and decodes as
   JSON, at any nesting level, including object member names and members the
   endpoint does not declare.
@@ -218,8 +218,8 @@ resource resolution, and every endpoint-specific validation outcome. A U+0000
 therefore returns this response even where another malformed value would
 receive a different outcome, including:
 
-- the scoped not-found response for a Ticket, CVE, User, or CVSS-version
-  locator, such as `404 TICKET_NOT_FOUND`;
+- the not-found response for a Ticket, CVE, User, or CVSS-version locator,
+  such as `404 TICKET_NOT_FOUND`;
 - the generic `401` of local login;
 - a silently ignored enum filter value; and
 - an endpoint-specific error code, such as `422 CVE_INVALID_FORMAT` or `422
