@@ -353,10 +353,15 @@ participate in catalog readiness.
 
 Package resolution requires catalog readiness. It checks readiness after
 retrieving and validating the complete SMELT v2 maintained-package response
-but before matching Product CPEs or modifying ticket data. This ordering
-preserves the I/O-then-transaction boundary: the caller-supplied database
-session performs no database operation before the external network I/O. If no
-complete snapshot exists, resolution raises `ProductCatalogNotReadyError`; it
+but before matching Product CPEs or modifying ticket data. Package resolution
+performs no catalog read, readiness check, or row lock before that external
+I/O; the lock-free preliminary Ticket accessibility check of a consumer
+invocation (`package-service.md`, `add_package_to_ticket()` step 1) is the
+only database work that may precede it. This ordering preserves the
+I/O-then-Lock invariant (`package-service.md`, Module invariant: I/O-then-Lock
+pattern; `docs/conventions.md`, Transaction Hygiene Rules): no row lock is
+held during the external network I/O. If no complete snapshot exists,
+resolution raises `ProductCatalogNotReadyError`; it
 MUST NOT report `PackageNotFoundInSmeltError` or
 `PackageTargetsUnresolvedError`. Readiness failure takes precedence over both
 the zero-track and zero-resolved-Product outcomes because neither can be

@@ -1378,7 +1378,7 @@ non-paginated JSend envelope.
 |-------|---------|
 | `data[].codestream.name` | Track reference (`TicketPackageTrack.reference`) |
 | `data[].codestream.type` | Authoritative track workflow: `SLFO` → `git`, `SLE_15` → `ibs`; `SLFO_IBS` (unsupported) and `UNKNOWN` (unclassified) entries are skipped |
-| `data[].targets[].product.cpe` | Product match key against local `Product.cpe` |
+| `data[].targets[].product.cpe` | Product match key against `Product.cpe` in the current catalog snapshot |
 | `data[].targets[].product.friendly_name` | Logging and warning messages |
 
 All other response fields (`codestream.url`, `product.id`,
@@ -1411,17 +1411,20 @@ as returned.
    targets-unresolved outcomes.
 3. If HTTP status is 404 with a valid `status = "error"` envelope, or status
    is 200 with `status = "success"` and an empty `data` array, raise
-   `PackageNotFoundInSmeltError`. Any other combination of HTTP status and
-   JSend `status` — including HTTP 200 with `status = "error"` — raises
-   `SmeltUnavailableError`.
+   `PackageNotFoundInSmeltError`. Every other combination of HTTP status and
+   JSend `status` — including HTTP 200 with `status = "error"` — has already
+   raised `SmeltUnavailableError` in step 1, before the readiness check.
 4. Map each structurally validated supported codestream to one `workflow_type`:
    `SLFO` maps to `git`
    and `SLE_15` maps to `ibs`.
 5. Collect all `(codestream.name, workflow_type, product.cpe)` records from
    supported entries.
 6. For each record:
-   a. Look up the Product by exact `Product.cpe` match in the local catalog.
-      If no local Product matches, ignore this triple and continue.
+   a. Look up the Product by exact `Product.cpe` match among the Products of
+      the current catalog snapshot (those whose `catalog_last_seen_at` equals
+      the applied snapshot timestamp defined in `product-catalog.md`, Product
+      Sync). A retained historical Product does not match.
+      If no current Product matches, ignore this triple and continue.
    b. Create or find a `TicketPackageTrack` with `reference =
       codestream.name` and the determined `workflow_type` (if one does not
       already exist for this package + reference combination, including
@@ -1432,17 +1435,18 @@ as returned.
    returned codestreams were skipped as unsupported or unclassified, fail with
    `PackageTargetsUnresolvedError`; no package-tree record is created.
 
-When at least one Product CPE has no local match in an otherwise successful
-resolution, log a WARNING-level `package_target_resolution_partial` event with
-the package name and unmatched CPEs. This accepted partial result does not
+When at least one Product CPE has no current Product match in an otherwise
+successful resolution, log a WARNING-level `package_target_resolution_partial`
+event with the package name and unmatched CPEs. This accepted partial result does not
 change the API response shape.
 
 For a package tree that is created partially, a newly introduced Product may
-be omitted until the Product catalog sync adds the corresponding `Product` row
-and invokes Product catalog backfill. A zero-resolution failure creates no
+be omitted until the Product catalog sync makes the corresponding Product
+current and invokes Product catalog backfill. A zero-resolution failure creates no
 `TicketPackage` and therefore cannot be discovered by backfill; recovery
 requires a later manual or automatic invocation. A CPE that remains absent
-from the local Product catalog is intentionally ignored on every invocation.
+from the current Product catalog snapshot is intentionally ignored on every
+invocation.
 Sentinel never creates a Product from a CPE string or falls back to
 name/version matching.
 

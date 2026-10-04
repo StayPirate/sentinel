@@ -61,25 +61,20 @@ test.
 from __future__ import annotations
 
 import asyncio
-import dataclasses
 import re
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
-from datetime import datetime
+from collections.abc import AsyncIterator, Coroutine
 from typing import Any
 
 import pytest
-from sqlalchemy import Select, delete, select, update
+from sqlalchemy import Select, select, update
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.enums import Role, Scope, Severity, TicketStatus, WorkflowType
+from app.core.enums import Role, Scope, TicketStatus, WorkflowType
 from app.core.exceptions import TicketNotFoundError
 from app.models.product import Product
-from app.models.system_setting import SystemSetting
 from app.models.ticket import Ticket
-from app.models.ticket_package import TicketPackage
-from app.models.ticket_package_product import TicketPackageProduct
 from app.models.user import User
 from app.services import package_service
 from app.services.package_service import (
@@ -94,7 +89,6 @@ from app.services.ticket_convergence_registry import (
     pending_ticket_convergence_effects,
 )
 from app.services.ticket_mutations import stabilize_acting_user
-from tests.support.cvss_chain import DEFAULT_VERSION
 from tests.support.database import assert_lock_wait
 from tests.support.package_exclusion import (
     MARKER_NOW,
@@ -116,18 +110,38 @@ from tests.support.package_records import (
     TrackState,
     Tree,
     add_records,
-    catalog_product,
     changed,
     maintainer_event,
-    maintainers,
     new_occurrence,
     outcome,
     package_added_event,
-    package_tree,
     target,
-    ticket_row,
     track_ids,
-    tree_rows,
+)
+from tests.support.package_records_races import (
+    ANALYSIS,
+    CVE_RESOLUTION,
+    EXPECTED_OUTCOME,
+    GIT_REF,
+    IBS_REF,
+    KINDS,
+    LOSSES,
+    WAIT,
+    CommittedState,
+    Factory,
+    assert_denied_without_effects,
+    committed_state,
+    committed_world,
+    existing_package,
+    marker_world,
+    path_tree,
+    pinned_ticket,
+    product_of,
+    protected_state,
+    sessions_of,
+    tree_events,
+    with_new_rows,
+    world_product,
 )
 from tests.support.suse_cvss import assignment_event
 from tests.support.suse_cvss_races import (
@@ -137,35 +151,14 @@ from tests.support.suse_cvss_races import (
 )
 from tests.support.ticket_mutations import (
     EVAL,
-    EventRow,
-    StatementRecorder,
-    ticket_events_by_id,
 )
 from tests.support.track_status import Spy
-
-Factory = Callable[[], Awaitable[AsyncSession]]
 
 TICKET_STATEMENT = re.compile(r"\b(?:FROM|JOIN|INTO|UPDATE) ticket\b")
 USER_STATEMENT = re.compile(r'\b(?:FROM|JOIN|UPDATE) "user"')
 ROW_LOCKS = ("FOR UPDATE", "FOR SHARE", "FOR NO KEY UPDATE", "FOR KEY SHARE")
-WAIT = 5
-"""Upper bound, in seconds, of every wait that is expected to finish."""
 
-ANALYSIS = TicketStatus.ANALYSIS.value
-IBS_REF = "Fictional:Product:15-SP7:Update"
-GIT_REF = "fictional/slfo-1.1"
-CVE_RESOLUTION: PackageAddedComment = "CVE package resolution"
 CONVERGENCE: PackageAddedComment = "Ticket convergence"
-
-UNDECIDED = (
-    "ticket_package.package_name =",
-    "FROM ticket_package_track",
-    "FROM ticket_package_product",
-    '"user".email IN',
-)
-"""Statement fragments of the package lookup (excluded-package guard), the
-locked tree reload (no-op and idempotency classification), and the
-maintainer match: none may precede a locked accessibility denial."""
 
 CONTEXTS = pytest.mark.parametrize("context", ["user", "system"])
 
@@ -174,23 +167,8 @@ CONTEXTS = pytest.mark.parametrize("context", ["user", "system"])
 async def world(db_session_factory: Factory) -> AsyncIterator[CommittedWorld]:
     """A `CommittedWorld` that also owns the committed `default_cvss_version`
     setting (the test schema has none), which every creation reads."""
-    created = CommittedWorld(db_session_factory, await db_session_factory())
-    owns_setting = False
-    try:
-        if await created.session.get(SystemSetting, "default_cvss_version") is None:
-            created.session.add(
-                SystemSetting(key="default_cvss_version", value=DEFAULT_VERSION)
-            )
-            owns_setting = True
-        await created.session.commit()
+    async with committed_world(db_session_factory) as created:
         yield created
-    finally:
-        await created.cleanup()
-        if owns_setting:
-            await created.session.execute(
-                delete(SystemSetting).where(SystemSetting.key == "default_cvss_version")
-            )
-            await created.session.commit()
 
 
 @pytest.fixture(autouse=True)
@@ -210,79 +188,6 @@ def _name() -> str:
     return f"fictional-librace-{uuid.uuid4().hex[:10]}"
 
 
-async def _ticket(world: CommittedWorld) -> Ticket:
-    """The committed unassigned pinned Ticket of the module docstring."""
-    ticket = await world.ticket(cve_id=None, severity_manual=Severity.HIGH)
-    await committed_path(world, ticket)
-    return ticket
-
-
-async def _product(world: CommittedWorld) -> Product:
-    """A committed catalog Product owned by the world."""
-    product = await catalog_product(world.session)
-    world.product_ids.append(product.id)
-    await world.session.commit()
-    return product
-
-
-async def _product_of(world: CommittedWorld, path: CommittedPath) -> uuid.UUID:
-    """The catalog Product of a committed path's occurrence."""
-    product_id = (
-        await world.session.execute(
-            select(TicketPackageProduct.product_id).where(
-                TicketPackageProduct.id == path.id
-            )
-        )
-    ).scalar_one()
-    await world.session.commit()
-    return product_id
-
-
-def _path_tree(
-    path: CommittedPath,
-    *,
-    package: datetime | None,
-    track: datetime | None,
-    product: datetime | None,
-    product_id: uuid.UUID,
-) -> Tree:
-    """The tree of a committed path (an `ibs` `ANALYSIS`/`PENDING` track
-    with one eligible unreleased occurrence) with the given direct
-    markers."""
-    reference = path.subject["track"]
-    return Tree(
-        package,
-        {reference: TrackState("ibs", "ANALYSIS", "PENDING", track)},
-        {(reference, product_id): OccurrenceState(True, False, None, product)},
-    )
-
-
-@dataclasses.dataclass(frozen=True, slots=True)
-class _State:
-    """The committed Ticket `(status, assignee_id)`, its audit events, the
-    tree of one package, and every maintainer association of the Ticket."""
-
-    ticket: tuple[str, uuid.UUID | None]
-    events: list[EventRow]
-    tree: Tree | None
-    maintainers: list[tuple[str, uuid.UUID]]
-
-
-async def _committed(
-    world: CommittedWorld, ticket_id: uuid.UUID, package_name: str
-) -> _State:
-    """The committed state, read through a fresh independent session."""
-    probe = await world.open_session()
-    state = _State(
-        await ticket_row(probe, ticket_id),
-        await ticket_events_by_id(probe, ticket_id),
-        await package_tree(probe, ticket_id, package_name),
-        await maintainers(probe, ticket_id),
-    )
-    await probe.rollback()
-    return state
-
-
 async def _track_ids(
     world: CommittedWorld, ticket_id: uuid.UUID, package_name: str
 ) -> dict[str, uuid.UUID]:
@@ -290,11 +195,6 @@ async def _track_ids(
     ids = await track_ids(probe, ticket_id, package_name)
     await probe.rollback()
     return ids
-
-
-def _sessions(spy: Spy, position: int) -> list[Any]:
-    """The session argument of each recorded call."""
-    return [args[position] for args, _kwargs in spy.calls]
 
 
 def _is_user_share(statement: str) -> bool:
@@ -420,8 +320,8 @@ class TestSerializedCreation:
         )
         m1 = await world.user(role=Role.RESTRICTED_ANALYST)
         m2 = await world.user(role=Role.RESTRICTED_ANALYST)
-        ticket = await _ticket(world)
-        p1, p2, p3 = [await _product(world) for _ in range(3)]
+        ticket = await pinned_ticket(world)
+        p1, p2, p3 = [await world_product(world) for _ in range(3)]
         pkg = _name()
         winner_tracks = [target(IBS_REF, p1)]
         waiter_tracks, waiter_emails = {
@@ -502,8 +402,8 @@ class TestSerializedCreation:
         # `auto_assign_actor(ticket, acting_user, db)`,
         # `reconcile_ticket_status(ticket, db, ...)`: only a tree change.
         expected_sessions = [winner, waiter] if partial else [winner]
-        assert _sessions(assign, 2) == expected_sessions
-        assert _sessions(reconcile, 1) == expected_sessions
+        assert sessions_of(assign, 2) == expected_sessions
+        assert sessions_of(reconcile, 1) == expected_sessions
 
         occurrences = {(IBS_REF, p1.id): new_occurrence(True)}
         tracks = {IBS_REF: NEW_TRACK[WorkflowType.IBS]}
@@ -518,7 +418,7 @@ class TestSerializedCreation:
             "maintainer-only": [maintainer_event(pkg, m2)],
             "partial": [package_added_event(pkg, waiter_actor, CVE_RESOLUTION)],
         }[case]
-        assert await _committed(world, ticket.id, pkg) == _State(
+        assert await committed_state(world, ticket.id, pkg) == CommittedState(
             (ANALYSIS, winner_actor.id),
             [
                 assignment_event(winner_actor),
@@ -553,8 +453,8 @@ class TestRootLockOrder:
         a rolled-back writer leaves an active VA that is assigned; after a
         committed deactivation the creation proceeds without assignment."""
         actor = await world.user(role=Role.VULNERABILITY_ANALYST)
-        ticket = await _ticket(world)
-        product = await _product(world)
+        ticket = await pinned_ticket(world)
+        product = await world_product(world)
         pkg = _name()
         a = await world.open_session()
         b = await world.open_session()
@@ -587,7 +487,7 @@ class TestRootLockOrder:
 
         assigned = release == "rollback"
         assert outcome(result) == changed(1, 0, 1, 0)
-        state = await _committed(world, ticket.id, pkg)
+        state = await committed_state(world, ticket.id, pkg)
         assert (state.ticket, state.events) == (
             (ANALYSIS, actor.id if assigned else None),
             [
@@ -612,8 +512,8 @@ class TestRootLockOrder:
             else None
         )
         maintainer = await world.user(role=Role.RESTRICTED_ANALYST)
-        ticket = await _ticket(world)
-        product = await _product(world)
+        ticket = await pinned_ticket(world)
+        product = await world_product(world)
         pkg = _name()
         writer = await world.open_session()
         a = await world.open_session()
@@ -642,7 +542,7 @@ class TestRootLockOrder:
             assert user_locks == [recorder.statements[0]]
             assert _is_user_share(recorder.statements[0])
         assert outcome(result) == changed(1, 0, 1, 0)
-        assert (await _committed(world, ticket.id, pkg)).maintainers == [
+        assert (await committed_state(world, ticket.id, pkg)).maintainers == [
             (pkg, maintainer.id)
         ]
 
@@ -674,13 +574,13 @@ class TestActiveTicketOnlyRace:
         reconciliation, convergence registration, records, or
         associations."""
         maintainer = await world.user(role=Role.RESTRICTED_ANALYST)
-        ticket = await _ticket(world)
+        ticket = await pinned_ticket(world)
         duplicate_of = (
             await world.ticket(cve_id=None)
             if status is TicketStatus.DUPLICATED
             else None
         )
-        product = await _product(world)
+        product = await world_product(world)
         pkg = _name()
         assign = Spy(monkeypatch, "auto_assign_actor")
         reconcile = Spy(monkeypatch, "reconcile_ticket_status")
@@ -717,7 +617,7 @@ class TestActiveTicketOnlyRace:
         assert (assign.calls, reconcile.calls) == ([], [])
         assert pending_ticket_convergence_effects(waiter) == ()
         await waiter.rollback()
-        assert await _committed(world, ticket.id, pkg) == _State(
+        assert await committed_state(world, ticket.id, pkg) == CommittedState(
             (status.value, None), [], None, []
         )
 
@@ -727,11 +627,6 @@ class TestActiveTicketOnlyRace:
 # (package-service.md, Concurrency Control; Architectural Test
 # Requirement: Concurrent direct mutations)
 # ---------------------------------------------------------------------------
-
-KINDS = ["no-op", "maintainer-only", "tree"]
-"""The adding call's input on the committed path `T1: {P1}`. `no-op`: the
-same tree, no email. `maintainer-only`: the same tree with maintainer M.
-`tree`: `T1: {P1, P2}` plus a new Git track `GIT_REF: {P3}`, with M."""
 
 
 def _input(
@@ -747,86 +642,6 @@ def _input(
             {m.email},
         )
     return [target(reference, p1)], ({m.email} if kind == "maintainer-only" else set())
-
-
-@dataclasses.dataclass(frozen=True, slots=True)
-class _MarkerWorld:
-    """A pinned unassigned Ticket with the target path, its exclusion or
-    restoration actor A, the adding actor B (`None` for a system call),
-    the maintainer M, and the extra catalog Products."""
-
-    ticket: Ticket
-    path: CommittedPath
-    p1: uuid.UUID
-    p2: Product
-    p3: Product
-    actor_a: User
-    actor_b: User | None
-    m: User
-
-
-async def _marker_world(
-    world: CommittedWorld, *, seeded: Level | None = None, system: bool = False
-) -> _MarkerWorld:
-    actor_a = await world.user(role=Role.VULNERABILITY_ANALYST)
-    actor_b = None if system else await world.user(role=Role.VULNERABILITY_ANALYST)
-    m = await world.user(role=Role.RESTRICTED_ANALYST)
-    ticket = await _ticket(world)
-    path = await committed_path(
-        world,
-        ticket,
-        package_excluded=seeded is Level.PACKAGE,
-        track_excluded=seeded is Level.TRACK,
-        product_excluded=seeded is Level.PRODUCT,
-    )
-    return _MarkerWorld(
-        ticket,
-        path,
-        await _product_of(world, path),
-        await _product(world),
-        await _product(world),
-        actor_a,
-        actor_b,
-        m,
-    )
-
-
-def _tree_events(
-    kind: str, w: _MarkerWorld, comment: PackageAddedComment = CVE_RESOLUTION
-) -> list[EventRow]:
-    """The adding call's own events (no assignment: A already assigned)."""
-    pkg = w.path.subject["package"]
-    return {
-        "no-op": [],
-        "maintainer-only": [maintainer_event(pkg, w.m)],
-        "tree": [
-            maintainer_event(pkg, w.m),
-            package_added_event(pkg, w.actor_b, comment),
-        ],
-    }[kind]
-
-
-def _with_new_rows(tree: Tree, kind: str, w: _MarkerWorld) -> Tree:
-    """`tree` plus the rows that the `tree` input creates."""
-    if kind != "tree":
-        return tree
-    reference = w.path.subject["track"]
-    return Tree(
-        tree.deleted_at,
-        tree.tracks | {GIT_REF: NEW_TRACK[WorkflowType.GIT]},
-        tree.occurrences
-        | {
-            (reference, w.p2.id): new_occurrence(True),
-            (GIT_REF, w.p3.id): new_occurrence(True),
-        },
-    )
-
-
-EXPECTED_OUTCOME = {
-    "no-op": (PackageRecordsOutcome.PACKAGE_TREE_NO_OP, 0, 1, 0, 1),
-    "maintainer-only": (PackageRecordsOutcome.MAINTAINER_ONLY, 0, 1, 0, 1),
-    "tree": changed(1, 1, 2, 1),
-}
 
 
 @pytest.mark.integration
@@ -850,7 +665,7 @@ class TestPublicAddRacingWithMarkers:
         even when it would add a maintainer or complete the tree: no write,
         record, association, event, assignment, reconciliation, or
         convergence registration."""
-        w = await _marker_world(world, system=context == "system")
+        w = await marker_world(world, system=context == "system")
         pkg = w.path.subject["package"]
         tracks, emails = _input(kind, w.path, w.p1, w.p2, w.p3, w.m)
         assign = Spy(monkeypatch, "auto_assign_actor")
@@ -871,17 +686,17 @@ class TestPublicAddRacingWithMarkers:
         )
 
         assert recorder.writes() == []
-        assert _sessions(assign, 2) == [holder]
-        assert _sessions(reconcile, 1) == [holder]
+        assert sessions_of(assign, 2) == [holder]
+        assert sessions_of(reconcile, 1) == [holder]
         assert pending_ticket_convergence_effects(waiter) == ()
         await waiter.rollback()
-        assert await _committed(world, w.ticket.id, pkg) == _State(
+        assert await committed_state(world, w.ticket.id, pkg) == CommittedState(
             (ANALYSIS, w.actor_a.id),
             [
                 assignment_event(w.actor_a),
                 path_event(Level.PACKAGE, Direction.EXCLUDE, w.path, w.actor_a),
             ],
-            _path_tree(
+            path_tree(
                 w.path, package=MARKER_NOW, track=None, product=None, product_id=w.p1
             ),
             [],
@@ -900,7 +715,7 @@ class TestPublicAddRacingWithMarkers:
         before the lock; after A's restore commits the guard no longer
         applies and B reaches its locked no-op, maintainer-only, or
         package-tree outcome."""
-        w = await _marker_world(world, seeded=Level.PACKAGE, system=context == "system")
+        w = await marker_world(world, seeded=Level.PACKAGE, system=context == "system")
         pkg = w.path.subject["package"]
         tracks, emails = _input(kind, w.path, w.p1, w.p2, w.p3, w.m)
         reconcile = Spy(monkeypatch, "reconcile_ticket_status")
@@ -921,18 +736,18 @@ class TestPublicAddRacingWithMarkers:
 
         assert result is not None
         assert outcome(result) == EXPECTED_OUTCOME[kind]
-        assert _sessions(reconcile, 1) == (
+        assert sessions_of(reconcile, 1) == (
             [holder, waiter] if kind == "tree" else [holder]
         )
-        assert await _committed(world, w.ticket.id, pkg) == _State(
+        assert await committed_state(world, w.ticket.id, pkg) == CommittedState(
             (ANALYSIS, w.actor_a.id),
             [
                 assignment_event(w.actor_a),
                 path_event(Level.PACKAGE, Direction.RESTORE, w.path, w.actor_a),
-                *_tree_events(kind, w),
+                *tree_events(kind, w),
             ],
-            _with_new_rows(
-                _path_tree(
+            with_new_rows(
+                path_tree(
                     w.path, package=None, track=None, product=None, product_id=w.p1
                 ),
                 kind,
@@ -955,7 +770,7 @@ class TestPublicAddRacingWithMarkers:
         skips, the new occurrence beneath an excluded track is created
         with `deleted_at = NULL`, and A's marker is left as committed."""
         restore = direction is Direction.RESTORE
-        w = await _marker_world(world, seeded=level if restore else None)
+        w = await marker_world(world, seeded=level if restore else None)
         pkg = w.path.subject["package"]
         tracks, emails = _input("tree", w.path, w.p1, w.p2, w.p3, w.m)
         holder = await world.open_session()
@@ -980,15 +795,15 @@ class TestPublicAddRacingWithMarkers:
         probe = await world.open_session()
         assert await markers_by_id(probe, w.path.id) == expected
         await probe.rollback()
-        assert await _committed(world, w.ticket.id, pkg) == _State(
+        assert await committed_state(world, w.ticket.id, pkg) == CommittedState(
             (ANALYSIS, w.actor_a.id),
             [
                 assignment_event(w.actor_a),
                 path_event(level, direction, w.path, w.actor_a),
-                *_tree_events("tree", w),
+                *tree_events("tree", w),
             ],
-            _with_new_rows(
-                _path_tree(
+            with_new_rows(
+                path_tree(
                     w.path,
                     package=None,
                     track=expected[1],
@@ -1018,12 +833,12 @@ class TestReresolutionBeneathAnExclusion:
         `GIT_REF: {P3}` plus M's association; `maintainer-only` adds only
         M. Neither clears or sets any package, track, or Product marker,
         and the events carry the system actor and the exact comment."""
-        w = await _marker_world(world, seeded=Level.PRODUCT, system=True)
+        w = await marker_world(world, seeded=Level.PRODUCT, system=True)
         pkg = w.path.subject["package"]
         sibling = await committed_path(
             world, w.ticket, package_id=w.path.package_id, track_excluded=True
         )
-        p0 = await _product_of(world, sibling)
+        p0 = await product_of(world, sibling)
         t1, t0 = w.path.subject["track"], sibling.subject["track"]
         tracks = [target(t1, w.p1), target(t0, p0)]
         if kind == "descendants":
@@ -1070,7 +885,7 @@ class TestReresolutionBeneathAnExclusion:
                 0,
                 2,
             )
-        assert _sessions(reconcile, 1) == (
+        assert sessions_of(reconcile, 1) == (
             [holder, waiter] if descendants else [holder]
         )
         probe = await world.open_session()
@@ -1091,7 +906,7 @@ class TestReresolutionBeneathAnExclusion:
                 (t1, w.p2.id): new_occurrence(True),
                 (GIT_REF, w.p3.id): new_occurrence(True),
             }
-        assert await _committed(world, w.ticket.id, pkg) == _State(
+        assert await committed_state(world, w.ticket.id, pkg) == CommittedState(
             (ANALYSIS, w.actor_a.id),
             [
                 assignment_event(w.actor_a),
@@ -1108,10 +923,6 @@ class TestReresolutionBeneathAnExclusion:
 # Atomic consumer accessibility (consumer-mutation part): locked-current
 # state (testing-strategy.md, Ticket Accessibility: Locked mutations)
 # ---------------------------------------------------------------------------
-
-LOSSES = ["confidentiality-set", "grant-revoked", "last-package-excluded"]
-"""The Ticket-scoped visibility losses of testing-strategy.md, Locked
-mutations (`association-changed` is a CVE-scoped loss)."""
 
 REQUESTS = [
     "would-create",
@@ -1131,53 +942,6 @@ or the excluded-package guard). `ignored`: B also makes the Ticket
 `Ignored` (a would-be `TicketNotMutableError`) for a `would-create` input.
 `active-ticket-only-resolved`: B also makes the Ticket `Resolved` and A
 passes `active_ticket_only` (a would-be skip)."""
-
-
-async def _existing_package(world: CommittedWorld, ticket: Ticket) -> uuid.UUID | None:
-    """The Ticket's maintained package created by `prepare_loss()`, if any."""
-    package_id = (
-        await world.session.execute(
-            select(TicketPackage.id).where(TicketPackage.ticket_id == ticket.id)
-        )
-    ).scalar_one_or_none()
-    await world.session.commit()
-    return package_id
-
-
-async def _protected_state(
-    world: CommittedWorld, ticket_id: uuid.UUID
-) -> tuple[Any, ...]:
-    """The committed assignee, events, maintainer associations, and every
-    package-tree row with the package markers left out (B's
-    `last-package-excluded` loss sets one)."""
-    probe = await world.open_session()
-    _status, assignee = await ticket_row(probe, ticket_id)
-    rows = [
-        r[:3] if r[0] == "package" else r for r in await tree_rows(probe, ticket_id)
-    ]
-    state = (
-        assignee,
-        await ticket_events_by_id(probe, ticket_id),
-        rows,
-        await maintainers(probe, ticket_id),
-    )
-    await probe.rollback()
-    return state
-
-
-def _assert_denied_without_effects(
-    recorder: StatementRecorder,
-    session: AsyncSession,
-    assign: Spy,
-    reconcile: Spy,
-) -> None:
-    """Zero domain write, assignment, reconciliation, and convergence
-    registration, and no excluded-package, no-op, idempotency, or
-    maintainer-match read before the denial."""
-    assert recorder.writes() == []
-    assert (assign.calls, reconcile.calls) == ([], [])
-    assert pending_ticket_convergence_effects(session) == ()
-    assert [s for s in recorder.statements if any(p in s for p in UNDECIDED)] == []
 
 
 @pytest.mark.integration
@@ -1208,13 +972,13 @@ class TestLockedCurrentAccessibilityRaces:
         user, _cve, ticket, statements = await prepare_loss(world, loss)
         if request_kind.startswith("existing-tree"):
             path = await committed_path(
-                world, ticket, package_id=await _existing_package(world, ticket)
+                world, ticket, package_id=await existing_package(world, ticket)
             )
             pkg = path.subject["package"]
-            tracks = [target(path.subject["track"], await _product_of(world, path))]
+            tracks = [target(path.subject["track"], await product_of(world, path))]
         else:
             pkg = _name()
-            tracks = [target(IBS_REF, await _product(world))]
+            tracks = [target(IBS_REF, await world_product(world))]
         emails = set() if request_kind == "existing-tree" else {user.email}
         status = {
             "ignored": TicketStatus.IGNORED,
@@ -1224,7 +988,7 @@ class TestLockedCurrentAccessibilityRaces:
             statements.append(
                 update(Ticket).where(Ticket.id == ticket.id).values(status=status.value)
             )
-        before = await _protected_state(world, ticket.id)
+        before = await protected_state(world, ticket.id)
         assign = Spy(monkeypatch, "auto_assign_actor")
         reconcile = Spy(monkeypatch, "reconcile_ticket_status")
         a = await world.open_session()
@@ -1252,10 +1016,10 @@ class TestLockedCurrentAccessibilityRaces:
             with pytest.raises(TicketNotFoundError):
                 await asyncio.wait_for(task, timeout=WAIT)
 
-        _assert_denied_without_effects(recorder, a, assign, reconcile)
+        assert_denied_without_effects(recorder, a, assign, reconcile)
         await a.rollback()
-        assert await _protected_state(world, ticket.id) == before
-        state = await _committed(world, ticket.id, pkg)
+        assert await protected_state(world, ticket.id) == before
+        state = await committed_state(world, ticket.id, pkg)
         assert state.ticket == (status.value, None)
         assert state.events == []
         if loss == "last-package-excluded":
@@ -1274,7 +1038,7 @@ class TestLockedCurrentAccessibilityRaces:
         and Ticket locks and is denied, with its own email supplied for a
         would-be package-tree change."""
         user, _cve, ticket, statements = await prepare_loss(world, loss)
-        product = await _product(world)
+        product = await world_product(world)
         pkg = _name()
         arrived = asyncio.Event()
         release = asyncio.Event()
@@ -1285,7 +1049,7 @@ class TestLockedCurrentAccessibilityRaces:
             return await stabilize_acting_user(db, user_id)
 
         monkeypatch.setattr(package_service, "stabilize_acting_user", paused)
-        before = await _protected_state(world, ticket.id)
+        before = await protected_state(world, ticket.id)
         assign = Spy(monkeypatch, "auto_assign_actor")
         reconcile = Spy(monkeypatch, "reconcile_ticket_status")
         a = await world.open_session()
@@ -1320,8 +1084,8 @@ class TestLockedCurrentAccessibilityRaces:
         assert _is_ticket_lock(
             next(s for s in recorder.statements if TICKET_STATEMENT.search(s))
         )
-        _assert_denied_without_effects(recorder, a, assign, reconcile)
+        assert_denied_without_effects(recorder, a, assign, reconcile)
         await a.rollback()
-        assert await _protected_state(world, ticket.id) == before
-        state = await _committed(world, ticket.id, pkg)
+        assert await protected_state(world, ticket.id) == before
+        state = await committed_state(world, ticket.id, pkg)
         assert (state.ticket, state.events, state.tree) == ((ANALYSIS, None), [], None)

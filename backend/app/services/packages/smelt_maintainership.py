@@ -28,7 +28,7 @@ Only those failure classes are caught; programming errors, cancellation,
 `SoftTimeLimitExceeded`, and `MemoryError` propagate. The helper performs
 network I/O only: it opens no database session and acquires no lock
 (§ Module invariant: I/O-then-Lock pattern), so callers must not hold a
-Ticket lock or an open transaction while awaiting it.
+row lock while awaiting it.
 """
 
 from __future__ import annotations

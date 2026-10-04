@@ -22,8 +22,11 @@ maintainer workbench queries (`list_maintainer_pending_work()`,
 `get_maintainer_ticket_work()`, built by the leaf module
 `app.services.packages.maintainer_workbench`), and the package-record
 creation boundary `add_package_records()` with its additive maintainer
-association; the remaining mutation and
-orchestration operations are added by their owning work items. This module
+association, and its orchestrator `add_package_to_ticket()` (SMELT target
+resolution, the Product catalog readiness gate, and best-effort
+maintainership acquisition before the locked delegation); the remaining
+mutation and orchestration operations are added by their owning work
+items. This module
 never imports `ticket_service`; it consumes the `ticket_mutations`
 primitives, which never import it back.
 
@@ -60,6 +63,7 @@ from datetime import UTC, date, datetime
 from enum import Enum, StrEnum
 from typing import Any, Final, Literal, get_args
 
+import httpx
 import structlog
 from sqlalchemy import (
     ColumnElement,
@@ -103,6 +107,7 @@ from app.models.ticket_package_track import TicketPackageTrack
 from app.models.user import User
 from app.services import settings as settings_service
 from app.services.cvss import EligibilityResolution, resolve_eligibility_score
+from app.services.http_client import create_http_client
 from app.services.package_actionability import (
     is_delivery_relevant,
     package_actionable_expression,
@@ -120,6 +125,17 @@ from app.services.packages.maintainer_workbench import (
     global_list_statement,
     item_from_row,
     ticket_work_statement,
+)
+from app.services.packages.smelt_maintained import (
+    MaintainedCodestream,
+    MaintainedPackageNotFound,
+    MaintainedPackageUnavailableError,
+    MaintainedUnavailableCategory,
+    fetch_maintained_package,
+    validate_package_name,
+)
+from app.services.packages.smelt_maintainership import (
+    fetch_package_maintainer_emails,
 )
 from app.services.product_eligibility import evaluate_product_eligibility
 from app.services.product_service import lifecycle_phase_expression
@@ -1469,6 +1485,71 @@ class TrackFixedStatusRestrictedError(PackageServiceError):
         super().__init__("Track status change not permitted.")
 
 
+class SmeltUnavailableError(PackageServiceError):
+    """SMELT did not produce a valid expected maintained-package response.
+
+    Raised by `add_package_to_ticket()` when transport fails after the
+    shared retries, or the response has no valid JSON/JSend envelope, a
+    valid HTTP/status pair, or a valid entry structure. Maps to `503
+    SMELT_UNAVAILABLE`. Carries only the bounded `category` (`transport`,
+    `http_status`, `envelope`, `schema`), the HTTP `status_code` when a
+    response exists, and the converted exception's class name, so a
+    caller's specified event can record a bounded reason; never a body,
+    URL, or raw exception text.
+    """
+
+    def __init__(
+        self,
+        category: MaintainedUnavailableCategory,
+        *,
+        status_code: int | None = None,
+        error_type: str | None = None,
+    ) -> None:
+        super().__init__("SMELT is unavailable.")
+        self.category = category
+        self.status_code = status_code
+        self.error_type = error_type
+
+
+class ProductCatalogNotReadyError(PackageServiceError):
+    """No complete SMELT Product catalog snapshot has committed.
+
+    Raised by `add_package_to_ticket()` after a valid maintained-package
+    response and before the not-found and targets-unresolved outcomes
+    (product-catalog.md, Catalog Readiness and Freshness). Maps to `503
+    PRODUCT_CATALOG_NOT_READY`.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("Product catalog is not ready.")
+
+
+class PackageNotFoundInSmeltError(PackageServiceError):
+    """SMELT maintains the package in zero codestreams.
+
+    Raised by `add_package_to_ticket()` for a valid HTTP 404 error
+    envelope or an HTTP 200 success with empty `data`. Maps to `422
+    PACKAGE_NOT_FOUND_IN_SMELT`.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("Package not found in SMELT.")
+
+
+class PackageTargetsUnresolvedError(PackageServiceError):
+    """No supported target resolves through the current catalog snapshot.
+
+    Raised by `add_package_to_ticket()` when SMELT returns codestreams but
+    no Product CPE of a supported codestream matches a Product of the
+    current Product catalog snapshot, including when every codestream was
+    skipped as unsupported or unclassified. Maps to `422
+    PACKAGE_TARGETS_UNRESOLVED`.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("Package targets could not be resolved.")
+
+
 # ---------------------------------------------------------------------------
 # Invocation context and semantic outcomes (package-service.md, Consumer
 # caller context and Ticket accessibility; Semantic locators)
@@ -2537,6 +2618,27 @@ class _TrackPlan:
     missing_product_ids: list[uuid.UUID]
 
 
+def _validate_invocation(
+    acting_user_id: uuid.UUID | None,
+    caller: TicketCaller | SystemInvocation,
+    audit_comment: str | None,
+) -> None:
+    """Reject an inconsistent actor, context, and `package_added` comment.
+
+    Shared by `add_package_to_ticket()` and `add_package_records()`;
+    raises `ValueError` before any database or network operation.
+    """
+    is_system = _resolve_actor(acting_user_id, caller)
+    if audit_comment is not None and (
+        audit_comment not in PACKAGE_ADDED_AUTOMATIC_COMMENTS
+    ):
+        raise ValueError(f"unsupported package_added comment: {audit_comment!r}")
+    if is_system and audit_comment is None:
+        raise ValueError("a system invocation requires its canonical comment.")
+    if not is_system and audit_comment is not None:
+        raise ValueError("a user-attributed invocation has no audit comment.")
+
+
 def _validate_package_records_input(
     acting_user_id: uuid.UUID | None,
     caller: TicketCaller | SystemInvocation,
@@ -2544,7 +2646,7 @@ def _validate_package_records_input(
     audit_comment: str | None,
 ) -> None:
     """Reject a caller-contract violation before any database operation."""
-    is_system = _resolve_actor(acting_user_id, caller)
+    _validate_invocation(acting_user_id, caller, audit_comment)
     if not tracks:
         raise ValueError("tracks must not be empty.")
     references: set[str] = set()
@@ -2556,14 +2658,6 @@ def _validate_package_records_input(
         if track.reference in references:
             raise ValueError("track references must be distinct.")
         references.add(track.reference)
-    if audit_comment is not None and (
-        audit_comment not in PACKAGE_ADDED_AUTOMATIC_COMMENTS
-    ):
-        raise ValueError(f"unsupported package_added comment: {audit_comment!r}")
-    if is_system and audit_comment is None:
-        raise ValueError("a system invocation requires its canonical comment.")
-    if not is_system and audit_comment is not None:
-        raise ValueError("a user-attributed invocation has no audit comment.")
 
 
 async def add_package_records(
@@ -2902,6 +2996,231 @@ async def _create_package_tree(
         )
     await db.flush()
     return created_tracks, len(occurrences)
+
+
+# ---------------------------------------------------------------------------
+# Package addition orchestration (package-service.md, `add_package_to_ticket()`;
+# package-model.md, Adding Packages to a Ticket, SMELT Query for Package
+# Resolution; product-catalog.md, Catalog Readiness and Freshness;
+# package-maintainership.md, Acquisition Workflow > Invocation boundary)
+# ---------------------------------------------------------------------------
+
+AddPackageResult = PackageRecordsResult
+"""The result of `add_package_to_ticket()`: the delegated locked result
+(semantic outcome, creation and skip counts, and the newly created tracks
+with their persisted `workflow_type`, the step-10 new-track signal)."""
+
+PARTIAL_RESOLUTION_EVENT: Final = "package_target_resolution_partial"
+HTTP_CLIENT_NAME: Final = "add_package_to_ticket"
+
+
+async def add_package_to_ticket(
+    db: AsyncSession,
+    *,
+    ticket_id: uuid.UUID,
+    package_name: str,
+    acting_user_id: uuid.UUID | None,
+    caller: TicketCaller | SystemInvocation,
+    audit_comment: PackageAddedComment | None = None,
+    active_ticket_only: bool = False,
+    allow_excluded_reresolution: bool = False,
+    http_client: httpx.AsyncClient | None = None,
+) -> AddPackageResult:
+    """Resolve a package through SMELT and add its package tree to a Ticket.
+
+    Orchestration (package-service.md, `add_package_to_ticket()` steps
+    1-8 and 10; step 9, the package-add IBS request catch-up, belongs to
+    the M6 submission-tracking area). I/O-then-Lock: this function
+    acquires no row lock; the only locks are those of the delegated
+    `add_package_records()`, taken after every SMELT request.
+
+    Q1: a user-attributed call passes the authenticated `acting_user_id`,
+    the consumer `caller` identifying it, and `audit_comment=None`; a
+    system call passes `acting_user_id=None`, `caller=SYSTEM_INVOCATION`,
+    and its canonical `audit_comment`. `active_ticket_only` and
+    `allow_excluded_reresolution` are passed through unchanged.
+    `http_client` is the caller's shared-factory client, so a
+    multi-package owner keeps one client lifetime per invocation; when
+    absent, one `create_http_client()` client is created and closed
+    before the locked delegation.
+
+    Q2: the caller owns the transaction. No lock is held on entry or
+    during either SMELT request.
+
+    Q3: (1) for a consumer caller, one lock-free preliminary read with the
+    canonical visibility predicate (system calls skip it); (2-3) the
+    validated maintained-package request, whose unavailable outcome
+    (transport, HTTP status, envelope or HTTP/status pairing, entry
+    schema) raises `SmeltUnavailableError`; (4) catalog readiness from
+    `MAX(Product.catalog_last_seen_at)`; (5) the not-found
+    classification; (6) exact CPE matching against the Products of the
+    current catalog snapshot, read in one statement: duplicate CPEs
+    within a codestream collapse, a codestream without a match yields no
+    track, and a partial resolution logs one
+    `package_target_resolution_partial` WARNING with the package name and
+    the unmatched CPEs; (7) the maintainership request, whose failures
+    yield an empty email set (the client logs its own sanitized warning);
+    (8) delegation to `add_package_records()`, which re-evaluates
+    accessibility under the Ticket lock and performs every write, event,
+    assignment, and reconciliation. Never commits, logs a SMELT body,
+    email, username, URL, or raw exception text, or performs Redis or
+    broker I/O.
+
+    Q4: returns the delegated `AddPackageResult`.
+
+    Q5: idempotent: every call repeats both requests; with unchanged
+    SMELT data and complete local state the delegated result is a
+    `package_tree_no_op` without any write or event, and a repeat can
+    still fail with any blocking SMELT or catalog error.
+
+    Q6: raises `ValueError` before any database or network operation for
+    an inconsistent actor, context, or comment, or a `package_name` that
+    cannot form one URL path segment. Then, in this order:
+    `TicketNotFoundError` (preliminary), `SmeltUnavailableError`,
+    `ProductCatalogNotReadyError`, `PackageNotFoundInSmeltError`,
+    `PackageTargetsUnresolvedError`, all before any write and before the
+    maintainership request; afterwards the delegated exceptions
+    (`TicketNotFoundError` from the locked check, `TicketNotMutableError`,
+    `PackageAlreadyExcludedError`, database, audit, and reconciliation
+    failures) propagate and roll back the caller's transaction.
+    """
+    _validate_invocation(acting_user_id, caller, audit_comment)
+    validate_package_name(package_name)
+    if isinstance(caller, TicketCaller):
+        await _require_preliminary_access(db, ticket_id, caller)
+
+    if http_client is None:
+        async with create_http_client(HTTP_CLIENT_NAME) as client:
+            tracks, emails = await _resolve_package(
+                db, client, ticket_id=ticket_id, package_name=package_name
+            )
+    else:
+        tracks, emails = await _resolve_package(
+            db, http_client, ticket_id=ticket_id, package_name=package_name
+        )
+
+    return await add_package_records(
+        db,
+        ticket_id=ticket_id,
+        package_name=package_name,
+        tracks=tracks,
+        maintainer_emails=emails,
+        acting_user_id=acting_user_id,
+        caller=caller,
+        audit_comment=audit_comment,
+        active_ticket_only=active_ticket_only,
+        allow_excluded_reresolution=allow_excluded_reresolution,
+    )
+
+
+async def _require_preliminary_access(
+    db: AsyncSession, ticket_id: uuid.UUID, caller: TicketCaller
+) -> None:
+    """Step 1: the lock-free preliminary accessibility read.
+
+    Missing and inaccessible both raise `TicketNotFoundError`. The result
+    never authorizes the later mutation, which re-evaluates accessibility
+    under the Ticket lock.
+    """
+    visible = (
+        await db.execute(
+            select(Ticket.id).where(
+                Ticket.id == ticket_id, ticket_visibility_condition(caller)
+            )
+        )
+    ).scalar_one_or_none()
+    if visible is None:
+        raise TicketNotFoundError()
+
+
+async def _resolve_package(
+    db: AsyncSession,
+    client: httpx.AsyncClient,
+    *,
+    ticket_id: uuid.UUID,
+    package_name: str,
+) -> tuple[list[ResolvedTrackData], frozenset[str]]:
+    """Steps 2-7: the external phase and the lock-free catalog reads."""
+    try:
+        maintained = await fetch_maintained_package(client, package_name=package_name)
+    except MaintainedPackageUnavailableError as unavailable:
+        raise SmeltUnavailableError(
+            unavailable.category,
+            status_code=unavailable.status_code,
+            error_type=unavailable.error_type,
+        ) from None
+    snapshot_at = (
+        await db.execute(select(func.max(Product.catalog_last_seen_at)))
+    ).scalar_one()
+    if snapshot_at is None:
+        raise ProductCatalogNotReadyError()
+    if isinstance(maintained, MaintainedPackageNotFound):
+        raise PackageNotFoundInSmeltError()
+    tracks = await _resolve_targets(
+        db, package_name=package_name, codestreams=maintained.codestreams
+    )
+    emails = await fetch_package_maintainer_emails(
+        client, ticket_id=ticket_id, package_name=package_name
+    )
+    return tracks, emails
+
+
+async def _resolve_targets(
+    db: AsyncSession,
+    *,
+    package_name: str,
+    codestreams: Sequence[MaintainedCodestream],
+) -> list[ResolvedTrackData]:
+    """Step 6: match supported targets against the current catalog snapshot.
+
+    One statement selects the matching Products whose
+    `catalog_last_seen_at` equals the snapshot `MAX`, so the match reads
+    one coherent snapshot even if a sync commits after the readiness
+    read. Codestreams keep response order; each track lists its distinct
+    matched Products in first-seen order. Raises
+    `PackageTargetsUnresolvedError` when no track remains.
+    """
+    cpes = sorted({t.cpe for codestream in codestreams for t in codestream.targets})
+    matched: dict[str, uuid.UUID] = {}
+    if cpes:
+        current_snapshot = select(
+            func.max(Product.catalog_last_seen_at)
+        ).scalar_subquery()
+        rows = await db.execute(
+            select(Product.cpe, Product.id).where(
+                Product.cpe.in_(cpes),
+                Product.catalog_last_seen_at == current_snapshot,
+            )
+        )
+        matched = {row.cpe: row.id for row in rows}
+
+    tracks: list[ResolvedTrackData] = []
+    unmatched: dict[str, None] = {}
+    for codestream in codestreams:
+        product_ids: dict[uuid.UUID, None] = {}
+        for t in codestream.targets:
+            product_id = matched.get(t.cpe)
+            if product_id is None:
+                unmatched[t.cpe] = None
+            else:
+                product_ids[product_id] = None
+        if product_ids:
+            tracks.append(
+                ResolvedTrackData(
+                    reference=codestream.name,
+                    workflow_type=codestream.workflow_type,
+                    catalog_product_ids=tuple(product_ids),
+                )
+            )
+    if not tracks:
+        raise PackageTargetsUnresolvedError()
+    if unmatched:
+        logger.warning(
+            PARTIAL_RESOLUTION_EVENT,
+            package_name=package_name,
+            unmatched_cpes=list(unmatched),
+        )
+    return tracks
 
 
 # ---------------------------------------------------------------------------

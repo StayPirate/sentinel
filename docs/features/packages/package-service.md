@@ -817,7 +817,7 @@ representation. Each item contains:
 |-------|------|----------|
 | `reference` | `str` | Unique SMELT codestream name, already validated against the persisted track-reference constraints |
 | `workflow_type` | `WorkflowType` | Already mapped from the supported authoritative `codestream.type` value |
-| `catalog_product_ids` | non-empty collection of `UUID` | Distinct internal IDs of existing local Products resolved by exact CPE under this codestream |
+| `catalog_product_ids` | non-empty collection of `UUID` | Distinct internal IDs of existing Products resolved by exact CPE against the current Product catalog snapshot under this codestream |
 
 Before calling `add_package_records()`, the caller has completed all external
 I/O, JSend and response validation, unsupported and unclassified codestream
@@ -1056,35 +1056,41 @@ async def add_package_to_ticket(
    for the given package name (external I/O — no lock held). Do not use the
    separate paginated maintained sweep operation. Parse the response body
    regardless of HTTP status and validate the JSON/JSend envelope, HTTP/status
-   pairing, and every applicable codestream and supported-target field before a
-   database lookup.
+   pairing, and every applicable codestream and supported-target field before the
+   readiness or Product lookup. Unsupported (`SLFO_IBS`) and unclassified
+   (`UNKNOWN`) codestreams are skipped during this validation, with their
+   warnings, as specified in `package-model.md` (SMELT Query for Package
+   Resolution).
 3. If connection, timeout, proxy, or remote-protocol failure remains after the
-   shared transport retries, or the response cannot be parsed as JSON or has
-   no recognized JSend `status` value, raise `SmeltUnavailableError`
-   corresponding to `503 SMELT_UNAVAILABLE`. The only recognized `status`
-   values are `success` and `error` (see `package-model.md`, SMELT Query for
-   Package Resolution); JSend `fail` and any other value are unrecognized. No
-   records are created.
+   shared transport retries, the response cannot be parsed as JSON or has
+   no recognized JSend `status` value, the HTTP status and JSend `status` do
+   not form a valid pair, or any applicable entry fails validation, raise
+   `SmeltUnavailableError` corresponding to `503 SMELT_UNAVAILABLE`. The only
+   recognized `status` values are `success` and `error` (see
+   `package-model.md`, SMELT Query for Package Resolution); JSend `fail` and
+   any other value are unrecognized. The only valid pairs are HTTP 200 with
+   `status = "success"` and HTTP 404 with a valid `status = "error"`
+   envelope; every other combination — including a non-200 response and HTTP
+   200 with `status = "error"` — is invalid. This failure precedes the step-4
+   readiness lookup. No records are created.
 4. Verify that a complete Product catalog snapshot exists; if none exists,
    raise `ProductCatalogNotReadyError` before interpreting the response
    outcome further or matching CPEs. Readiness failure takes precedence over both
    package-not-found and targets-unresolved outcomes. Error precedence is
    defined in `product-catalog.md` (Catalog Readiness and Freshness).
-5. If SMELT returns a package-not-found response (HTTP 404 with a valid
-   `status = "error"` envelope, or HTTP 200 with `status = "success"` and an
-   empty `data` array), raise `PackageNotFoundInSmeltError` corresponding to
-   `422 PACKAGE_NOT_FOUND_IN_SMELT`. Any other HTTP status and JSend `status`
-   combination — including a non-200 response and HTTP 200 with
-   `status = "error"` — raises `SmeltUnavailableError`. No records are
-   created.
-6. Skip unsupported (`SLFO_IBS`) and unclassified (`UNKNOWN`) codestreams
-   with their warnings and map `workflow_type` from the authoritative
-   `codestream.type` as specified in `package-model.md` (SMELT Query for
-   Package Resolution). Match the remaining product CPEs directly against
-   local `Product.cpe` before the Ticket lock is acquired. Build the validated
-   `ResolvedTrackData` input defined by `add_package_records()`. If resolution is partial, emit the
-   required structured warnings before mutation. If no Product CPE resolves to
-   a local Product across supported codestreams, raise
+5. Classify the already valid pair from steps 2–3. If SMELT returned a
+   package-not-found response (HTTP 404 with a valid `status = "error"`
+   envelope, or HTTP 200 with `status = "success"` and an empty `data`
+   array), raise `PackageNotFoundInSmeltError` corresponding to
+   `422 PACKAGE_NOT_FOUND_IN_SMELT`. No records are created.
+6. Map `workflow_type` of each remaining supported codestream from the
+   authoritative `codestream.type` as specified in `package-model.md` (SMELT
+   Query for Package Resolution). Match its product CPEs directly against
+   `Product.cpe` in the current Product catalog snapshot before the Ticket
+   lock is acquired. Build the validated `ResolvedTrackData` input defined by
+   `add_package_records()`. If resolution is partial, emit the required
+   structured warning before mutation. If no Product CPE resolves to
+   a current Product across supported codestreams, raise
    `PackageTargetsUnresolvedError`. No records are created.
 7. After target resolution succeeds, call the SMELT package maintainership
    endpoint with no codestream filter. Parse and validate the complete response,
