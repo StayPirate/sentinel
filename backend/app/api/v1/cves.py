@@ -1,10 +1,11 @@
 """CVE endpoints.
 
-See `docs/features/tickets/cve-tracking.md` (List CVEs, Get CVE),
-`docs/features/tickets/cve-service.md` (Service Read Contracts; Global
-CVE Source Listing), and `docs/features/tickets/cvss-scoring.md` (Get
-CVSS Assessments for a CVE, Set or Update SUSE CVSS Assessment, Delete
-SUSE CVSS Assessment, Shared Assessment Item) for the authoritative
+See `docs/features/tickets/cve-tracking.md` (List CVEs, Get CVE,
+Re-fetch Endpoint), `docs/features/tickets/cve-service.md` (Service Read
+Contracts; Global CVE Source Listing; Fetch Orchestration), and
+`docs/features/tickets/cvss-scoring.md` (Get CVSS Assessments for a CVE,
+Set or Update SUSE CVSS Assessment, Delete SUSE CVSS Assessment, Shared
+Assessment Item) for the authoritative
 endpoint contracts, and `docs/api-spec.md` (CVE Identifier Resolution,
 CVE Accessibility Check, Authorization Chain Evaluation Order) for the
 shared `{cve_id}` path behavior.
@@ -23,9 +24,11 @@ serializer, shared by `GET /cves/{cve_id}` and `TicketDetail.cve`.
 
 `GET /cve-sources` lives here because it lists CVE-source records; it is
 the intentional identifier-only exception to CVE accessibility and
-therefore resolves no caller. `GET /cves/{cve_id}/sources` is the one
-handler without a `DatabaseSession`: its service owns a short-lived read
-session (see `get_cve_source_status_session_factory`).
+therefore resolves no caller. `GET /cves/{cve_id}/sources` and
+`POST /cves/{cve_id}/refetch` are the handlers without a
+`DatabaseSession`: their services own a short-lived session (see
+`get_cve_source_status_session_factory` and
+`get_cve_refetch_session_factory`).
 """
 
 from __future__ import annotations
@@ -68,6 +71,8 @@ from app.schemas.cve import (
     CVEListItem,
     CVEListQuery,
     CVEListResponse,
+    CVERefetchResponse,
+    CVERefetchResult,
     CVEResourceDetail,
     CVEResourceDetailResponse,
     CVESourceListItem,
@@ -90,10 +95,14 @@ from app.services import cve_service, ticket_mutations
 from app.services.cve_projection import CVEDetailProjection
 from app.services.cve_service import (
     CVEDetailResult,
+    CVEFetchFailedError,
+    CVEInvalidSourceError,
     CVEListItemProjection,
+    CVESourceDisabledError,
     CVESourceListItemProjection,
     CVESourceStatusEntry,
     CVSSAssessmentProjection,
+    FetchDispatchResult,
     ResolvedCVE,
 )
 from app.services.cvss import SUSE_PROVIDER_NAME
@@ -944,3 +953,154 @@ async def delete_suse_cvss_assessment(
     if result.action is CVSSAssessmentAction.NOT_FOUND:
         raise _cvss_assessment_not_found_error()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+CVE_REFETCH_PUBLICATION_UNCONFIRMED_MESSAGE: Final = (
+    "CVE refetch could not be dispatched to the task broker"
+)
+"""Fixed `503 CELERY_UNAVAILABLE` detail of the refetch endpoint; never
+contains broker exception text."""
+
+
+def get_cve_refetch_session_factory() -> async_sessionmaker[AsyncSession]:
+    """Provide the session factory of `refetch_cve()`'s service-owned
+    preparation transaction.
+
+    Performs no I/O — returns the production `async_session_factory`.
+    `refetch_cve()` locks the CVE and optional Ticket in its own short
+    transaction, commits and closes it, and only then publishes with no
+    lock held (cve-service.md, Callers and Ordering; Transaction
+    Ownership), so it does not participate in the request-scoped
+    `DatabaseSession`. Overridable via `app.dependency_overrides` so tests
+    can point it at the test engine, mirroring
+    `get_ticket_convergence_session_factory` (`app/api/v1/tickets.py`).
+    """
+    return async_session_factory
+
+
+def serialize_cve_refetch_result(result: FetchDispatchResult) -> CVERefetchResult:
+    return CVERefetchResult(
+        sources_enqueued=list(result.sources_enqueued),
+        sources_already_pending=list(result.sources_already_pending),
+        sources_disabled=list(result.sources_disabled),
+        sources_failed=list(result.sources_failed),
+    )
+
+
+@router.post(
+    "/cves/{cve_id}/refetch",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=CVERefetchResponse,
+    summary="Re-fetch CVE data",
+    description=(
+        "Enqueues an on-demand re-fetch of one CVE, identified by its CVE-ID, "
+        "from one source (`source`) or from every enabled source that "
+        "supports single-CVE fetch, and returns immediately. No request "
+        "body. The result lists the sources newly enqueued, already pending, "
+        "skipped as disabled, and whose publication is unconfirmed. Progress "
+        "is visible through `GET /api/v1/cves/{cve_id}/sources`. Dispatch "
+        "only: accepted for a CVE whose Ticket is Ignored or Duplicated. "
+        "Requires `triage_ticket`."
+    ),
+    responses={
+        404: {
+            "model": ErrorResponse,
+            "description": (
+                "`CVE_NOT_FOUND`: CVE-ID is malformed, does not exist, or "
+                "identifies a CVE associated with a Ticket inaccessible to the "
+                "caller."
+            ),
+        },
+        409: {
+            "model": ErrorResponse,
+            "description": (
+                "`FETCHER_DISABLED`: the explicitly requested source is disabled."
+            ),
+        },
+        422: {
+            "model": ErrorResponse,
+            "description": (
+                "`CVE_INVALID_SOURCE`: `source` is not a registered source that "
+                "supports single-CVE fetch. `VALIDATION_ERROR`: a request input "
+                "fails a shared constraint (for example over 500 characters or "
+                "containing U+0000)."
+            ),
+        },
+        503: {
+            "model": ErrorResponse,
+            "description": (
+                "`CVE_FETCH_FAILED`: no enabled source supports single-CVE "
+                "fetch. `CELERY_UNAVAILABLE`: no publication attempt was "
+                "confirmed by the task broker and no source is already "
+                "pending; the detail is fixed and the tasks may still run."
+            ),
+        },
+    },
+)
+async def refetch_cve(
+    cve_id: CVEIdPath,
+    principal: Annotated[
+        AuthenticatedPrincipal, Depends(require_capability(Capability.TRIAGE_TICKET))
+    ],
+    caller: AuthenticatedTicketCaller,
+    session_factory: Annotated[
+        async_sessionmaker[AsyncSession],
+        Depends(get_cve_refetch_session_factory),
+    ],
+    source: Annotated[
+        str | None,
+        Query(
+            description=(
+                "Limit the re-fetch to one CVE source (for example `nvd`). "
+                "Omit to re-fetch from every enabled source that supports "
+                "single-CVE fetch."
+            ),
+            examples=["nvd"],
+        ),
+    ] = None,
+) -> CVERefetchResponse:
+    """Re-fetch CVE Data — see `docs/features/tickets/cve-tracking.md`.
+
+    Authorization follows `docs/api-spec.md` (Authorization Chain
+    Evaluation Order, flow 3; CVE Accessibility Check): authentication,
+    then `triage_ticket` before any CVE lookup. There is no preliminary
+    CVE resolution: `refetch_cve()` makes the only accessibility decision
+    from locked-current roots, commits and closes its preparation
+    transaction, then publishes. The handler only maps the outcome; a
+    result with neither enqueued nor already-pending sources is the
+    every-attempt-unconfirmed `503 CELERY_UNAVAILABLE`.
+    """
+    try:
+        result = await cve_service.refetch_cve(
+            cve_id=cve_id,
+            source=source,
+            caller=caller,
+            session_factory=session_factory,
+        )
+    except CVENotFoundError:
+        raise cve_not_found_error() from None
+    except CVEInvalidSourceError:
+        raise AppError(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            code=ErrorCode.CVE_INVALID_SOURCE,
+            detail="The requested source does not support single-CVE fetch.",
+        ) from None
+    except CVESourceDisabledError:
+        raise AppError(
+            status_code=status.HTTP_409_CONFLICT,
+            code=ErrorCode.FETCHER_DISABLED,
+            detail="The requested source is disabled.",
+        ) from None
+    except CVEFetchFailedError:
+        raise AppError(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            code=ErrorCode.CVE_FETCH_FAILED,
+            detail="No enabled source supports single-CVE fetch.",
+        ) from None
+    if not (result.sources_enqueued or result.sources_already_pending):
+        raise AppError(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            code=ErrorCode.CELERY_UNAVAILABLE,
+            detail=CVE_REFETCH_PUBLICATION_UNCONFIRMED_MESSAGE,
+        )
+    return CVERefetchResponse(data=serialize_cve_refetch_result(result))

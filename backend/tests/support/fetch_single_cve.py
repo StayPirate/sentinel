@@ -14,7 +14,11 @@ Consumers:
   and log privacy against real PostgreSQL and the worker Redis database);
 - `tests/test_tasks/test_fetch_single_cve_task.py` (the synchronous wrapper
   and its async boundary: one `asyncio.run()` and one engine disposal per
-  attempt, native retry, and task registration).
+  attempt, native retry, and task registration);
+- `tests/test_api/test_cve_refetch.py`,
+  `tests/test_api/test_ticket_freshness_refresh.py`, and
+  `tests/test_services/test_ticket_freshness_composition.py` (the refetch
+  endpoint and the create/associate freshness refresh).
 
 Provided here:
 
@@ -146,11 +150,15 @@ ALLOWED_LOG_KEYS: Final = frozenset(
         "operation",
         "status",
         "celery_task_id",
+        "sources_failed",
+        "trigger",
     }
 )
 """Structured fields the on-demand paths may emit: canonical identifiers,
 closed causes or class names, and correlation (logging.md, Secrets and PII
-Discipline; Correlation IDs)."""
+Discipline; Correlation IDs). `sources_failed` and `trigger` are the
+canonical source list and closed workflow name of the preparation events
+`cve_fetch_no_eligible_source` and `cve_fetch_publication_unconfirmed`."""
 
 
 def assert_private_logs(logs: Iterable[Mapping[str, Any]], *forbidden: str) -> None:

@@ -58,6 +58,15 @@ and publishes `fetch_single_cve` through `task_publication`.
 attempt, renews and owner-releases the marker, and finalizes through
 `BaseCVEFetcher.commit_and_dispatch()`. The thin Celery wrapper and the
 engine disposal live in `app.tasks.cve_tasks`.
+
+The transactional preparation locks the CVE then its optional Ticket,
+validates registry capability and enabled state, and projects the
+primitive dispatch values. `prepare_freshness_refresh()` runs it inside
+the caller-owned transaction of a manual create-with-CVE or CVE
+association and registers the publication as a post-commit effect.
+`refetch_cve()` is the third service-owned orchestration boundary: it
+runs the preparation in its own short transaction, commits and closes it,
+then publishes with no transaction or lock open.
 """
 
 from __future__ import annotations
@@ -71,6 +80,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from enum import StrEnum
 from typing import Any, Final, cast
 
 import redis.asyncio as redis_asyncio
@@ -112,6 +122,7 @@ from app.core.enums import (
 )
 from app.core.exceptions import CVENotFoundError, ServiceError
 from app.core.identifiers import format_ticket_id, is_valid_cve_id
+from app.database import register_post_commit_callback
 from app.models.cve import CVE
 from app.models.cve_affected_version import CVEAffectedVersion
 from app.models.cve_cvss_assessment import CVECVSSAssessment
@@ -203,6 +214,33 @@ class CVEIdFormatError(CVEServiceError):
 
     def __init__(self) -> None:
         super().__init__("CVE identifier format is invalid.")
+
+
+class CVEInvalidSourceError(CVEServiceError):
+    """The explicitly requested refetch source is not a registered CVE
+    source with `supports_fetch_single = True` (unknown, deregistered, or
+    not refetchable). Mapped to `422 CVE_INVALID_SOURCE`. The message is
+    static and never includes the rejected value."""
+
+    def __init__(self) -> None:
+        super().__init__("The requested source does not support single-CVE fetch.")
+
+
+class CVESourceDisabledError(CVEServiceError):
+    """The explicitly requested registered refetchable source is disabled.
+    Mapped to `409 FETCHER_DISABLED`."""
+
+    def __init__(self) -> None:
+        super().__init__("The requested source is disabled.")
+
+
+class CVEFetchFailedError(CVEServiceError):
+    """Broadcast refetch preparation found no registered enabled source
+    that supports single-CVE fetch, including an empty fetch-single
+    registry. Mapped to `503 CVE_FETCH_FAILED`."""
+
+    def __init__(self) -> None:
+        super().__init__("No enabled source supports single-CVE fetch.")
 
 
 class CVSSAssessmentIntegrityError(RuntimeError):
@@ -2438,3 +2476,283 @@ async def _fetch_single_attempt(
     await marker.release()
     logger.info(COMPLETED_EVENT, outcome=result.action.value, **context)
     return None
+
+
+# ---------------------------------------------------------------------------
+# Transactional preparation and the manual refetch orchestration
+# (cve-service.md, Fetch Orchestration: `trigger_on_demand_fetch()` >
+# Transactional Preparation, Callers and Ordering; Transaction Ownership)
+# ---------------------------------------------------------------------------
+
+NO_ELIGIBLE_SOURCE_EVENT: Final = "cve_fetch_no_eligible_source"
+"""INFO: an automatic freshness preparation found no enabled refetchable
+source, so no publication was registered."""
+
+PUBLICATION_UNCONFIRMED_EVENT: Final = "cve_fetch_publication_unconfirmed"
+"""WARNING: at least one on-demand publication attempt raised; broker
+acceptance of those sources is unconfirmed."""
+
+
+class OnDemandFetchTrigger(StrEnum):
+    """The workflow that prepared an on-demand fetch, carried by its logs."""
+
+    REFETCH = "refetch"
+    TICKET_CREATE = "ticket_create"
+    CVE_ASSOCIATE = "cve_associate"
+
+
+class _PreparationMode(StrEnum):
+    """The two modes of the one preparation boundary.
+
+    `CONSUMER` is the manual refetch: it evaluates CVE accessibility from
+    the locked-current roots. `AUTOMATIC` is the create/associate freshness
+    refresh: its caller already holds both roots and made its own
+    locked-current decision (or created the Ticket), so the roots are
+    re-locked without a second accessibility evaluation.
+    """
+
+    CONSUMER = "consumer"
+    AUTOMATIC = "automatic"
+
+
+type DispatchSource = tuple[str, str, str | None]
+"""One prepared enabled source: `(fetcher name, canonical source, queue)`."""
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedFetch:
+    """The primitive values handed to database-free publication.
+
+    Both tuples are in ascending canonical-source code-point order. An empty
+    `dispatch_sources` is the no-eligible-source outcome.
+    """
+
+    cve_id: str
+    dispatch_sources: tuple[DispatchSource, ...]
+    disabled_sources: tuple[str, ...]
+
+
+async def _prepare_on_demand_fetch(
+    db: AsyncSession,
+    cve_id: str,
+    *,
+    mode: _PreparationMode,
+    source: str | None = None,
+    caller: TicketCaller | None = None,
+) -> _PreparedFetch:
+    """The transactional preparation boundary of an on-demand fetch.
+
+    Runs in the session it receives and never commits or rolls back; it
+    creates no row or audit event and never calls `ensure_ticket_operable()`.
+
+    (1) Input-only CVE-ID format guard. (2) Locks the CVE `FOR NO KEY
+    UPDATE`, then its optional associated Ticket `FOR UPDATE` (a
+    same-transaction no-op for the automatic callers). Only key columns are
+    selected, so caller-loaded ORM state is never refreshed. (3) `CONSUMER`
+    only: evaluates CVE accessibility for `caller` in a separate statement
+    after both locks. (4) Only then reads the fetch-single registry and the
+    `FetcherConfig` rows of the applicable fetchers. (5) Classifies the
+    explicit `source` or the broadcast roster. (6) Projects the enabled
+    sources in canonical-source order.
+
+    Raises `CVEIdFormatError` (malformed), `CVENotFoundError` (missing, or
+    inaccessible in `CONSUMER` mode), `CVEInvalidSourceError` (explicit
+    source not registered as refetchable), `CVESourceDisabledError`
+    (explicit source disabled), and `FetcherConfigMissingError` (bootstrap
+    invariant). Database exceptions propagate unchanged.
+    """
+    if (mode is _PreparationMode.CONSUMER) != (caller is not None):
+        raise ValueError("a caller is required exactly for consumer preparation")
+    if mode is _PreparationMode.AUTOMATIC and source is not None:
+        raise ValueError("automatic preparation always broadcasts")
+    if not is_valid_cve_id(cve_id):
+        raise CVEIdFormatError()
+
+    cve_pk = (
+        await db.execute(
+            select(CVE.id).where(CVE.cve_id == cve_id).with_for_update(key_share=True)
+        )
+    ).scalar_one_or_none()
+    if cve_pk is None:
+        raise CVENotFoundError()
+    ticket_pk = (
+        await db.execute(
+            select(Ticket.id).where(Ticket.cve_id == cve_pk).with_for_update()
+        )
+    ).scalar_one_or_none()
+    if caller is not None and ticket_pk is not None:
+        accessible = (
+            await db.execute(
+                select(ticket_visibility_condition(caller))
+                .select_from(Ticket)
+                .where(Ticket.id == ticket_pk)
+            )
+        ).scalar_one()
+        if not accessible:
+            raise CVENotFoundError()
+
+    registry = base_cve_fetcher.get_fetch_single_fetchers()
+    if source is not None:
+        if source not in registry:
+            raise CVEInvalidSourceError()
+        registry = {source: registry[source]}
+    enabled_by_name = await _fetcher_enabled_states(
+        db, [fetcher_cls.name for fetcher_cls in registry.values()]
+    )
+
+    dispatch: list[DispatchSource] = []
+    disabled: list[str] = []
+    for canonical_source in sorted(registry):
+        fetcher_cls = registry[canonical_source]
+        if enabled_by_name[fetcher_cls.name]:
+            dispatch.append((fetcher_cls.name, canonical_source, fetcher_cls.queue))
+        else:
+            disabled.append(canonical_source)
+    if source is not None and disabled:
+        raise CVESourceDisabledError()
+    return _PreparedFetch(
+        cve_id=cve_id,
+        dispatch_sources=tuple(dispatch),
+        disabled_sources=tuple(disabled),
+    )
+
+
+async def _fetcher_enabled_states(
+    db: AsyncSession, fetcher_names: Sequence[str]
+) -> dict[str, bool]:
+    """`FetcherConfig.enabled` of every named registered fetcher, from one
+    statement. A missing row raises `FetcherConfigMissingError`."""
+    if not fetcher_names:
+        return {}
+    rows = (
+        await db.execute(
+            select(FetcherConfig.fetcher_name, FetcherConfig.enabled).where(
+                FetcherConfig.fetcher_name.in_(fetcher_names)
+            )
+        )
+    ).all()
+    states = {row.fetcher_name: row.enabled for row in rows}
+    for fetcher_name in sorted(fetcher_names):
+        if fetcher_name not in states:
+            raise FetcherConfigMissingError(
+                f"No FetcherConfig row for registered fetcher '{fetcher_name}'"
+            )
+    return states
+
+
+async def _publish_prepared(
+    prepared: _PreparedFetch, trigger: OnDemandFetchTrigger
+) -> FetchDispatchResult:
+    """Database-free publication of prepared values, logging a non-empty
+    `sources_failed` once (canonical CVE-ID and sources only)."""
+    result = await trigger_on_demand_fetch(
+        prepared.cve_id, prepared.dispatch_sources, prepared.disabled_sources
+    )
+    if result.sources_failed:
+        logger.warning(
+            PUBLICATION_UNCONFIRMED_EVENT,
+            cve_id=prepared.cve_id,
+            sources_failed=result.sources_failed,
+            trigger=trigger.value,
+        )
+    return result
+
+
+async def refetch_cve(
+    *,
+    cve_id: str,
+    source: str | None,
+    caller: TicketCaller,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> FetchDispatchResult:
+    """Manually refetch one CVE from one or every refetchable source.
+
+    Service-owned orchestration boundary of `POST
+    /api/v1/cves/{cve_id}/refetch` (cve-service.md, Callers and Ordering;
+    Transaction Ownership; cve-tracking.md, Re-fetch Endpoint). Dispatch
+    only: creates no audit event, changes no CVE, Ticket, source status, or
+    configuration, and never calls `ensure_ticket_operable()`.
+
+    Q1: `cve_id` is the raw path value; `source` the optional raw query
+    value; `caller` the request-resolved caller information;
+    `session_factory` opens the one short preparation session.
+
+    Q2: the API has authenticated the caller and verified `triage_ticket`
+    before any lookup. The preparation transaction locks the CVE, then the
+    optional Ticket, and performs no network I/O while holding them.
+
+    Q3: (1) a malformed `cve_id` is not found before any I/O. (2) Runs the
+    consumer preparation in one session, commits, and closes it, releasing
+    the locks. (3) With no transaction or lock open, publishes through
+    `trigger_on_demand_fetch()` and logs a non-empty `sources_failed` once.
+    Registers no post-commit callback.
+
+    Q4: the `FetchDispatchResult`. Mapping an all-unconfirmed result to
+    `503 CELERY_UNAVAILABLE` is the endpoint's response contract.
+
+    Q5: safe to repeat; the pending marker coalesces current work.
+
+    Q6: `CVENotFoundError` (malformed, missing, inaccessible),
+    `CVEInvalidSourceError`, `CVESourceDisabledError`, and
+    `CVEFetchFailedError` (no enabled refetchable broadcast source), each
+    with zero Redis and Celery I/O. `FetcherConfigMissingError`, database,
+    and commit exceptions propagate with no publication.
+    """
+    if not is_valid_cve_id(cve_id):
+        raise CVENotFoundError()
+    async with session_factory() as session:
+        prepared = await _prepare_on_demand_fetch(
+            session,
+            cve_id,
+            mode=_PreparationMode.CONSUMER,
+            source=source,
+            caller=caller,
+        )
+        if not prepared.dispatch_sources:
+            raise CVEFetchFailedError()
+        await session.commit()
+    return await _publish_prepared(prepared, OnDemandFetchTrigger.REFETCH)
+
+
+async def prepare_freshness_refresh(
+    db: AsyncSession, *, cve_id: str, trigger: OnDemandFetchTrigger
+) -> None:
+    """Prepare and register the all-source freshness refresh of a manual
+    create-with-CVE or CVE association.
+
+    Category A step of `ticket_service.create_ticket()` (step 11) and
+    `associate_cve()` (step 14), called last, after every creation,
+    association, CVSS, Product, reconciliation, and audit write
+    (cve-service.md, Transactional Preparation, Callers and Ordering).
+
+    Q1: `cve_id` is the canonical CVE-ID of the CVE root the caller holds;
+    `trigger` names the calling workflow for the logs.
+
+    Q2: runs in the caller-owned API transaction, which already holds the
+    CVE `FOR NO KEY UPDATE` and the Ticket `FOR UPDATE`; the re-locks are
+    same-transaction no-ops and accessibility is not re-evaluated. Never
+    commits, rolls back, or performs network I/O.
+
+    Q3: on the no-eligible-source outcome (empty fetch-single registry or
+    every source disabled) logs one `cve_fetch_no_eligible_source` INFO and
+    registers nothing. Otherwise registers one database-free effect through
+    `register_post_commit_callback()`; `get_db()` runs it only after its
+    commit, and never after a rollback.
+
+    Q6: `FetcherConfigMissingError` and database exceptions propagate and
+    roll back the caller's mutation. After commit, publication failure is
+    best effort: the effect logs a non-empty `sources_failed` once.
+    """
+    if trigger is OnDemandFetchTrigger.REFETCH:
+        raise ValueError("the refetch trigger uses refetch_cve()")
+    prepared = await _prepare_on_demand_fetch(
+        db, cve_id, mode=_PreparationMode.AUTOMATIC
+    )
+    if not prepared.dispatch_sources:
+        logger.info(NO_ELIGIBLE_SOURCE_EVENT, cve_id=cve_id, trigger=trigger.value)
+        return
+
+    async def _publish() -> None:
+        await _publish_prepared(prepared, trigger)
+
+    register_post_commit_callback(db, _publish)

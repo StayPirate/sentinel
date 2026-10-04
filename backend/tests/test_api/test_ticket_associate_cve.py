@@ -22,8 +22,8 @@ The service-level association matrix (every event combination, lock order,
 races, and every rollback position) lives in
 tests/test_services/test_associate_cve*.py; these tests cover the HTTP
 boundary. Step 14 of the service specification (the CVE freshness refresh)
-is deferred and is neither tested nor expected here. Expected values are
-transcribed from the specifications.
+is covered by tests/test_api/test_ticket_freshness_refresh.py. Expected
+values are transcribed from the specifications.
 """
 
 from __future__ import annotations

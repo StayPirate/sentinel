@@ -13,7 +13,10 @@ Owning specifications:
 - docs/features/tickets/ticket-audit-log.md (Cross-Event Ordering, Locking,
   and Rollback; Testing Requirements 7 and 23).
 - docs/features/platform/testing-strategy.md (Concurrency Testing; Audit
-  Trail Testing).
+  Trail Testing; On-Demand CVE Refetch).
+- docs/features/tickets/cve-service.md (Fetch Orchestration: Transactional
+  Preparation, Callers and Ordering), for the freshness registration that
+  the ATR 7 race re-asserts with an enabled refetchable source.
 
 Committed rows are deleted explicitly at teardown (testing-strategy.md,
 Concurrency Testing). Expected values are transcribed from the
@@ -29,12 +32,13 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pytest
-from sqlalchemy import Select, false, func, or_, select, text
+from sqlalchemy import Select, delete, false, func, or_, select, text
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.enums import Role, Severity, TicketAuditEventType
+from app.core.enums import CVESourceType, Role, Severity, TicketAuditEventType
 from app.models.cve import CVE
+from app.models.fetcher_config import FetcherConfig
 from app.models.ticket import Ticket
 from app.models.ticket_audit_event import TicketAuditEvent
 from app.models.user import User
@@ -46,6 +50,8 @@ from app.services.ticket_service import (
     TicketCVEConflictError,
     create_ticket,
 )
+from tests.support.cve_catch_up import define_cve_fetcher
+from tests.support.cve_source_status import clear_fetcher_registries
 from tests.support.database import assert_lock_wait
 from tests.support.suse_cvss_races import CommittedWorld
 from tests.support.ticket_creation import creation_events
@@ -65,11 +71,22 @@ class _CreationWorld(CommittedWorld):
     ) -> None:
         super().__init__(factory, session)
         self.cve_id_strings: list[str] = []
+        self.fetcher_names: list[str] = []
 
     def new_cve_id(self) -> str:
         cve_id = f"CVE-2099-{uuid.uuid4().int % 10**8:08d}"
         self.cve_id_strings.append(cve_id)
         return cve_id
+
+    async def refetchable_source(self) -> None:
+        """Exactly one registered refetchable CVE fetcher with a committed
+        enabled `FetcherConfig` row, so a manual create-with-CVE registers
+        its freshness effect (ticket-service.md, `create_ticket` step 11).
+        The test isolates and empties the registries."""
+        name = define_cve_fetcher(source=CVESourceType.NVD).name
+        self.fetcher_names.append(name)
+        self.session.add(FetcherConfig(fetcher_name=name, enabled=True))
+        await self.session.commit()
 
     async def cleanup(self) -> None:
         await self._release()
@@ -97,7 +114,15 @@ class _CreationWorld(CommittedWorld):
         ).all()
         self.ticket_ids.extend(set(ticket_ids) - set(self.ticket_ids))
         await self.session.rollback()
-        await super().cleanup()
+        try:
+            await super().cleanup()
+        finally:
+            await self.session.execute(
+                delete(FetcherConfig).where(
+                    FetcherConfig.fetcher_name.in_(self.fetcher_names)
+                )
+            )
+            await self.session.commit()
 
 
 @pytest.fixture
@@ -109,6 +134,12 @@ async def world(
         yield created
     finally:
         await created.cleanup()
+
+
+def _freshness_effects(session: AsyncSession) -> int:
+    """The number of post-commit callbacks registered on `session`; only
+    the freshness preparation registers one in these service calls."""
+    return len(session.info.get("post_commit_callbacks", []))
 
 
 async def _manual(db: AsyncSession, creator: User, **kwargs: Any) -> Ticket:
@@ -260,13 +291,26 @@ class TestEnsureRace:
 @pytest.mark.integration
 class TestCreationRace:
     @pytest.mark.parametrize(
-        "existing", [True, False], ids=["existing-cve", "placeholder"]
+        ("existing", "refetchable"),
+        [
+            pytest.param(True, False, id="existing-cve"),
+            pytest.param(False, False, id="placeholder"),
+            pytest.param(False, True, id="placeholder-refetchable"),
+        ],
     )
+    @pytest.mark.usefixtures("isolated_fetcher_registries")
     async def test_second_creator_waits_then_observes_the_committed_association(
-        self, world: _CreationWorld, existing: bool
+        self, world: _CreationWorld, existing: bool, refetchable: bool
     ) -> None:
         """ATR 7: one Ticket, one success, one `TicketCVEConflictError`
-        carrying the winner's identifier."""
+        carrying the winner's identifier. With an enabled refetchable source
+        the winner registers exactly one freshness effect and the loser none
+        (ticket-service.md, `create_ticket` step 11). The registries start
+        empty, so the non-refetchable cases never depend on the production
+        fetch-single roster."""
+        clear_fetcher_registries()
+        if refetchable:
+            await world.refetchable_source()
         first = await world.user(role=Role.VULNERABILITY_ANALYST)
         second = await world.user(role=Role.RESTRICTED_ANALYST)
         cve_id = (await world.cve()).cve_id if existing else world.new_cve_id()
@@ -283,6 +327,8 @@ class TestCreationRace:
             await asyncio.wait_for(task, timeout=5)
         await b.rollback()
 
+        assert _freshness_effects(a) == (1 if refetchable else 0)
+        assert _freshness_effects(b) == 0
         assert raised.value.existing_ticket_id == await _sntl(world.session, winner.id)
         assert await _tickets_for(world.session, cve_id) == [winner.id]
         assert len(await _cve_rows(world.session, cve_id)) == 1
