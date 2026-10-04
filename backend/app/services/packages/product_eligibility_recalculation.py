@@ -23,11 +23,12 @@ argument validation, the candidate selection, and the per-Ticket units:
 4. One completion log carries the candidate, successful, skipped, no-op,
    changed-record, and failed-Ticket counts.
 
-The post-commit Ticket convergence drain (Sub-task step 3 and the drain
-sentence of step 4) is not implemented yet: a `Resolved` regression's
-registered effect is discarded when its Ticket transaction ends
-(`app/services/ticket_convergence_registry.py`; implementation roadmap
-dispatch D1).
+After each Ticket commits and its session closes, the Ticket convergence
+effect registered by its reconciliation (a `Resolved` regression) is
+drained before the next Ticket (Sub-task step 3): a broker operational
+error is absorbed by the automatic policy (`ticket_convergence_publication`);
+any other drain exception propagates as a task failure without
+reclassifying the committed Ticket or entering the rollback path.
 """
 
 from __future__ import annotations
@@ -54,6 +55,7 @@ from app.services.package_service import (
     ProductRecalculationReason,
     recalculate_product_eligibility_for_ticket,
 )
+from app.services.ticket_convergence_publication import drain_ticket_convergence
 
 logger = structlog.get_logger(__name__)
 
@@ -187,9 +189,10 @@ async def re_evaluate_product_eligibility(
     Ticket row lock taken by the delegated service.
 
     Q3: one UTC `evaluation_date`; read-only candidate selection; per
-    Ticket a fresh session, the service call (which flushes), commit, and
-    close. A pre-commit failure rolls back that Ticket, is logged, and the
-    run continues. No Celery retry, progress row, or `FetcherRun`.
+    Ticket a fresh session, the service call (which flushes), commit,
+    close, and the Ticket convergence drain. A pre-commit failure rolls
+    back that Ticket, is logged, and the run continues. No Celery retry,
+    progress row, or `FetcherRun`.
 
     Q4: returns the completion counts, also logged once.
 
@@ -197,8 +200,9 @@ async def re_evaluate_product_eligibility(
     Tickets are no-ops. No candidate is a successful no-op.
 
     Q6: a candidate-selection error, a commit exception or ambiguous commit
-    outcome, a rollback error, `SoftTimeLimitExceeded`, `MemoryError`, and
-    cancellation propagate; earlier committed Tickets remain committed.
+    outcome, a rollback error, a non-operational post-commit drain
+    exception, `SoftTimeLimitExceeded`, `MemoryError`, and cancellation
+    propagate; earlier committed Tickets remain committed.
     """
     evaluation_date = _utc_today()
 
@@ -238,6 +242,8 @@ async def re_evaluate_product_eligibility(
         elif result.changed == 0:
             no_op += 1
         changed_records += result.changed
+        # Step 3: drain after commit and close, before the next Ticket.
+        await drain_ticket_convergence(session)
 
     summary = ProductEligibilityRecalculationSummary(
         candidates=len(ticket_ids),
