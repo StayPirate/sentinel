@@ -30,7 +30,11 @@ an `AsyncMock` (`AsyncEngine.dispose` is read-only on the real engine),
 and defaults the session factory to one that fails when called, proving
 that paths without database work open no session. Test-only fetchers are
 direct `BaseFetcher` subclasses with a custom `catch_up()` override,
-registered under the shared `isolated_fetcher_registries` fixture.
+registered under the shared `isolated_fetcher_registries` fixture; the
+resolution cases also use a `BaseCVEFetcher` subclass keeping the default
+`catch_up()` (`tests/support/cve_catch_up.py`, which also provides the
+wrapper doubles). The default CVE `catch_up()` contract itself is covered
+by `tests/test_services/test_cve_fetcher_catch_up.py`.
 
 The structured `celery_task_id` field comes from the task correlation
 context; one test binds it and merges context variables into the
@@ -65,9 +69,16 @@ import app.services.base_fetcher as base_fetcher_module
 from app.models.fetcher_config import FetcherConfig
 from app.models.fetcher_run import FetcherRun
 from app.services.base_cve_fetcher import CVENotInSource
-from app.services.base_fetcher import BaseFetcher
+from app.services.base_fetcher import FETCHER_REGISTRY, BaseFetcher
 from app.services.fetcher_execution import FetcherConfigMissingError
 from app.tasks import fetchers
+from tests.support.cve_catch_up import (
+    FakeEngine,
+    FakeHttpClient,
+    FakeTask,
+    RetryRequested,
+    define_cve_fetcher,
+)
 
 pytestmark = pytest.mark.usefixtures("isolated_fetcher_registries")
 
@@ -77,14 +88,6 @@ LogEntry = MutableMapping[str, Any]
 # ---------------------------------------------------------------------------
 # Test doubles and helpers
 # ---------------------------------------------------------------------------
-
-
-class _FakeEngine:
-    """Substitute for the module-level `engine` singleton (mirrors
-    `tests/test_tasks/test_fetchers.py`)."""
-
-    def __init__(self) -> None:
-        self.dispose = AsyncMock()
 
 
 class _SessionContext:
@@ -98,26 +101,6 @@ class _SessionContext:
 
     async def __aexit__(self, *exc_info: object) -> bool:
         return False
-
-
-class _RetryRequested(Exception):  # noqa: N818 — mirrors celery's `Retry`
-    """Stand-in for the `celery.exceptions.Retry` that `Task.retry()`
-    produces; the wrapper raises whatever `self.retry()` returns."""
-
-
-class _FakeTask:
-    """Minimal stand-in for the bound Celery Task instance (`self`),
-    carrying only what `_run_catch_up_sync` reads: `request.retries` and
-    `retry()`."""
-
-    def __init__(self, retries: int = 0) -> None:
-        self.request = SimpleNamespace(retries=retries)
-        self.retry = MagicMock(return_value=_RetryRequested())
-
-
-class _FakeHttpClient:
-    def __init__(self, aclose: AsyncMock) -> None:
-        self.aclose = aclose
 
 
 @dataclass
@@ -218,8 +201,8 @@ _MALFORMED_TICKET_IDS = [
 
 
 @pytest.fixture(autouse=True)
-def fake_engine(monkeypatch: pytest.MonkeyPatch) -> _FakeEngine:
-    engine = _FakeEngine()
+def fake_engine(monkeypatch: pytest.MonkeyPatch) -> FakeEngine:
+    engine = FakeEngine()
     monkeypatch.setattr(fetchers, "engine", engine)
     return engine
 
@@ -318,7 +301,7 @@ class TestRunCatchUpAsyncWithoutDatabase:
     async def test_malformed_ticket_id_logs_one_error_and_raises(
         self,
         ticket_id: object,
-        fake_engine: _FakeEngine,
+        fake_engine: FakeEngine,
         forbidden_session_factory: MagicMock,
     ) -> None:
         probe = _define_catch_up_fetcher()
@@ -355,7 +338,7 @@ class TestRunCatchUpAsyncWithoutDatabase:
         forbidden_session_factory.assert_not_called()
 
     async def test_unknown_fetcher_logs_error_and_returns(
-        self, fake_engine: _FakeEngine, forbidden_session_factory: MagicMock
+        self, fake_engine: FakeEngine, forbidden_session_factory: MagicMock
     ) -> None:
         ticket_id = _ticket_id()
 
@@ -374,7 +357,7 @@ class TestRunCatchUpAsyncWithoutDatabase:
 @pytest.mark.integration
 class TestRunCatchUpAsyncResolution:
     async def test_disabled_fetcher_logs_info_and_skips_catch_up(
-        self, catch_up_database: _CatchUpDatabase, fake_engine: _FakeEngine
+        self, catch_up_database: _CatchUpDatabase, fake_engine: FakeEngine
     ) -> None:
         probe = _define_catch_up_fetcher()
         await catch_up_database.seed_config(probe.name, enabled=False)
@@ -393,8 +376,49 @@ class TestRunCatchUpAsyncResolution:
         fake_engine.dispose.assert_awaited_once_with()
         assert await catch_up_database.run_count(probe.name) == 0
 
+    async def test_disabled_cve_fetcher_skips_the_default_catch_up(
+        self, catch_up_database: _CatchUpDatabase, fake_engine: FakeEngine
+    ) -> None:
+        """A registered disabled CVE fetcher is skipped before its default
+        `catch_up()` reads the Ticket or calls `fetch_single()`."""
+        probe = define_cve_fetcher()
+        await catch_up_database.seed_config(probe.name, enabled=False)
+        ticket_id = _ticket_id()
+
+        with capture_logs() as logs:
+            await fetchers.run_catch_up_async(probe.name, ticket_id)
+
+        skipped = _events(logs, "run_catch_up_fetcher_disabled")
+        assert [(e["fetcher_name"], e["ticket_id"]) for e in skipped] == [
+            (probe.name, ticket_id)
+        ]
+        assert _errors(logs) == []
+        assert probe.fetched == []
+        assert probe.events == []
+        fake_engine.dispose.assert_awaited_once_with()
+        assert await catch_up_database.run_count(probe.name) == 0
+
+    async def test_deregistered_cve_fetcher_logs_error_and_returns(
+        self, fake_engine: FakeEngine, forbidden_session_factory: MagicMock
+    ) -> None:
+        """A CVE fetcher removed from `FETCHER_REGISTRY` between enqueue and
+        execution is an unknown fetcher: no session, no `fetch_single()`."""
+        probe = define_cve_fetcher()
+        del FETCHER_REGISTRY[probe.name]
+        ticket_id = _ticket_id()
+
+        with capture_logs() as logs:
+            await fetchers.run_catch_up_async(probe.name, ticket_id)
+
+        assert [(e["event"], e["fetcher_name"]) for e in _errors(logs)] == [
+            ("run_catch_up_unknown_fetcher", probe.name)
+        ]
+        forbidden_session_factory.assert_not_called()
+        assert probe.fetched == []
+        fake_engine.dispose.assert_awaited_once_with()
+
     async def test_missing_fetcher_config_raises_without_invoking_catch_up(
-        self, catch_up_database: _CatchUpDatabase, fake_engine: _FakeEngine
+        self, catch_up_database: _CatchUpDatabase, fake_engine: FakeEngine
     ) -> None:
         probe = _define_catch_up_fetcher()
 
@@ -406,7 +430,7 @@ class TestRunCatchUpAsyncResolution:
         assert await catch_up_database.run_count(probe.name) == 0
 
     async def test_enabled_fetcher_invokes_catch_up_once_with_session(
-        self, catch_up_database: _CatchUpDatabase, fake_engine: _FakeEngine
+        self, catch_up_database: _CatchUpDatabase, fake_engine: FakeEngine
     ) -> None:
         probe = _define_catch_up_fetcher()
         await catch_up_database.seed_config(probe.name, enabled=True)
@@ -450,7 +474,7 @@ class TestRunCatchUpAsyncExceptions:
         self,
         make_error: Callable[[], Exception],
         catch_up_database: _CatchUpDatabase,
-        fake_engine: _FakeEngine,
+        fake_engine: FakeEngine,
     ) -> None:
         error = make_error()
         probe = _define_catch_up_fetcher(raises=error)
@@ -469,7 +493,7 @@ class TestRunCatchUpAsyncExceptions:
         self,
         make_error: Callable[[], Exception],
         catch_up_database: _CatchUpDatabase,
-        fake_engine: _FakeEngine,
+        fake_engine: FakeEngine,
     ) -> None:
         error = make_error()
         probe = _define_catch_up_fetcher(raises=error)
@@ -492,7 +516,7 @@ class TestRunCatchUpAsyncExceptions:
         self,
         make_signal: Callable[[], BaseException],
         catch_up_database: _CatchUpDatabase,
-        fake_engine: _FakeEngine,
+        fake_engine: FakeEngine,
     ) -> None:
         signal = make_signal()
         probe = _define_catch_up_fetcher(raises=signal)
@@ -515,11 +539,11 @@ class TestRunCatchUpAsyncCleanup:
     async def test_http_client_closed_before_engine_disposal_on_success(
         self,
         catch_up_database: _CatchUpDatabase,
-        fake_engine: _FakeEngine,
+        fake_engine: FakeEngine,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         order: list[str] = []
-        client = _FakeHttpClient(AsyncMock(side_effect=lambda: order.append("aclose")))
+        client = FakeHttpClient(AsyncMock(side_effect=lambda: order.append("aclose")))
         fake_engine.dispose.side_effect = lambda: order.append("dispose")
         monkeypatch.setattr(
             base_fetcher_module, "create_http_client", lambda **_: client
@@ -537,10 +561,10 @@ class TestRunCatchUpAsyncCleanup:
     async def test_http_client_closed_and_reset_on_exception(
         self,
         catch_up_database: _CatchUpDatabase,
-        fake_engine: _FakeEngine,
+        fake_engine: FakeEngine,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        client = _FakeHttpClient(AsyncMock())
+        client = FakeHttpClient(AsyncMock())
         monkeypatch.setattr(
             base_fetcher_module, "create_http_client", lambda **_: client
         )
@@ -559,10 +583,10 @@ class TestRunCatchUpAsyncCleanup:
     async def test_failing_http_client_close_does_not_mask_primary_exception(
         self,
         catch_up_database: _CatchUpDatabase,
-        fake_engine: _FakeEngine,
+        fake_engine: FakeEngine,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        client = _FakeHttpClient(AsyncMock(side_effect=RuntimeError("close failed")))
+        client = FakeHttpClient(AsyncMock(side_effect=RuntimeError("close failed")))
         monkeypatch.setattr(
             base_fetcher_module, "create_http_client", lambda **_: client
         )
@@ -602,7 +626,7 @@ class TestRunCatchUpAsyncCleanup:
 @pytest.mark.unit
 class TestRunCatchUpAsyncEngineDisposalFailure:
     async def test_dispose_failure_does_not_mask_primary_exception(
-        self, fake_engine: _FakeEngine
+        self, fake_engine: FakeEngine
     ) -> None:
         fake_engine.dispose.side_effect = RuntimeError("dispose failed")
 
@@ -618,7 +642,7 @@ class TestRunCatchUpAsyncEngineDisposalFailure:
         assert warnings[0]["log_level"] == "warning"
 
     async def test_dispose_failure_on_successful_path_propagates(
-        self, fake_engine: _FakeEngine
+        self, fake_engine: FakeEngine
     ) -> None:
         fake_engine.dispose.side_effect = RuntimeError("dispose failed")
 
@@ -639,10 +663,10 @@ class TestRunCatchUpSyncWrapper:
         self,
         stub_database: AsyncMock,
         asyncio_run_spy: MagicMock,
-        fake_engine: _FakeEngine,
+        fake_engine: FakeEngine,
     ) -> None:
         probe = _define_catch_up_fetcher()
-        task = _FakeTask()
+        task = FakeTask()
         ticket_id = _ticket_id()
 
         with capture_logs() as logs:
@@ -660,11 +684,11 @@ class TestRunCatchUpSyncWrapper:
         self,
         ticket_id: object,
         asyncio_run_spy: MagicMock,
-        fake_engine: _FakeEngine,
+        fake_engine: FakeEngine,
         forbidden_session_factory: MagicMock,
     ) -> None:
         probe = _define_catch_up_fetcher()
-        task = _FakeTask()
+        task = FakeTask()
 
         with (
             capture_logs() as logs,
@@ -683,9 +707,9 @@ class TestRunCatchUpSyncWrapper:
         fake_engine.dispose.assert_awaited_once_with()
 
     def test_unknown_fetcher_returns_without_retry(
-        self, asyncio_run_spy: MagicMock, fake_engine: _FakeEngine
+        self, asyncio_run_spy: MagicMock, fake_engine: FakeEngine
     ) -> None:
-        task = _FakeTask()
+        task = FakeTask()
 
         with capture_logs() as logs:
             fetchers._run_catch_up_sync(task, "ghost_catch_up_fetcher", _ticket_id())
@@ -713,13 +737,13 @@ class TestRunCatchUpSyncWrapper:
         countdown: int,
         stub_database: AsyncMock,
         asyncio_run_spy: MagicMock,
-        fake_engine: _FakeEngine,
+        fake_engine: FakeEngine,
     ) -> None:
         error = make_error()
         probe = _define_catch_up_fetcher(raises=error)
-        task = _FakeTask(retries=retries)
+        task = FakeTask(retries=retries)
 
-        with capture_logs() as logs, pytest.raises(_RetryRequested):
+        with capture_logs() as logs, pytest.raises(RetryRequested):
             fetchers._run_catch_up_sync(task, probe.name, _ticket_id())
 
         task.retry.assert_called_once_with(exc=error, countdown=countdown)
@@ -734,11 +758,11 @@ class TestRunCatchUpSyncWrapper:
         make_error: Callable[[], Exception],
         stub_database: AsyncMock,
         asyncio_run_spy: MagicMock,
-        fake_engine: _FakeEngine,
+        fake_engine: FakeEngine,
     ) -> None:
         error = make_error()
         probe = _define_catch_up_fetcher(raises=error)
-        task = _FakeTask(retries=3)
+        task = FakeTask(retries=3)
         ticket_id = _ticket_id()
 
         with capture_logs() as logs, pytest.raises(type(error)) as exc_info:
@@ -762,11 +786,11 @@ class TestRunCatchUpSyncWrapper:
         make_error: Callable[[], Exception],
         stub_database: AsyncMock,
         asyncio_run_spy: MagicMock,
-        fake_engine: _FakeEngine,
+        fake_engine: FakeEngine,
     ) -> None:
         error = make_error()
         probe = _define_catch_up_fetcher(raises=error)
-        task = _FakeTask()
+        task = FakeTask()
         ticket_id = _ticket_id()
 
         with capture_logs() as logs, pytest.raises(type(error)) as exc_info:
@@ -797,9 +821,9 @@ class TestRunCatchUpSyncWrapper:
         try:
             with capture_logs(processors=[merge_contextvars]) as logs:
                 with pytest.raises(ValueError, match="unparsable payload"):
-                    fetchers._run_catch_up_sync(_FakeTask(), probe.name, _ticket_id())
+                    fetchers._run_catch_up_sync(FakeTask(), probe.name, _ticket_id())
                 with pytest.raises(fetchers.CatchUpTicketIdError):
-                    fetchers._run_catch_up_sync(_FakeTask(), probe.name, "not-a-uuid")
+                    fetchers._run_catch_up_sync(FakeTask(), probe.name, "not-a-uuid")
         finally:
             unbind_contextvars("celery_task_id")
 
@@ -816,10 +840,10 @@ class TestRunCatchUpSyncWrapper:
         make_error: Callable[[], Exception],
         stub_database: AsyncMock,
         asyncio_run_spy: MagicMock,
-        fake_engine: _FakeEngine,
+        fake_engine: FakeEngine,
     ) -> None:
         probe = _define_catch_up_fetcher(raises=make_error())
-        task = _FakeTask()
+        task = FakeTask()
 
         with capture_logs() as logs:
             fetchers._run_catch_up_sync(task, probe.name, _ticket_id())
@@ -837,11 +861,11 @@ class TestRunCatchUpSyncWrapper:
         make_signal: Callable[[], BaseException],
         stub_database: AsyncMock,
         asyncio_run_spy: MagicMock,
-        fake_engine: _FakeEngine,
+        fake_engine: FakeEngine,
     ) -> None:
         signal = make_signal()
         probe = _define_catch_up_fetcher(raises=signal)
-        task = _FakeTask()
+        task = FakeTask()
 
         # `asyncio.run()` re-creates a `CancelledError` when the task ends
         # cancelled, so only the exception type is asserted.
@@ -858,7 +882,7 @@ class TestRunCatchUpSyncWrapper:
 def test_sync_missing_fetcher_config_fails_terminally_without_retry(
     cli_session_factory: async_sessionmaker[AsyncSession],
     asyncio_run_spy: MagicMock,
-    fake_engine: _FakeEngine,
+    fake_engine: FakeEngine,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A registered fetcher without its `FetcherConfig` row is a
@@ -868,7 +892,7 @@ def test_sync_missing_fetcher_config_fails_terminally_without_retry(
     event loop; no row is written, so no cleanup is needed."""
     monkeypatch.setattr(fetchers, "async_session_factory", cli_session_factory)
     probe = _define_catch_up_fetcher()
-    task = _FakeTask()
+    task = FakeTask()
     ticket_id = _ticket_id()
 
     with capture_logs() as logs, pytest.raises(FetcherConfigMissingError):

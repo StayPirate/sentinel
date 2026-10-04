@@ -2,8 +2,9 @@
 
 See `docs/features/platform/fetcher-infrastructure.md` for the full
 specification this module implements: the `run()` lifecycle (logging
-context, per-run state reset, settings validation, cursor load, execution,
-finalization, HTTP teardown, exception propagation), import-time class
+context, per-run state reset, settings validation, cursor load, execution
+under the automatic periodic context, finalization, HTTP teardown,
+exception propagation), import-time class
 validation (`__init_subclass__`), the custom Settings schema, error
 message sanitization, and the BaseFetcher HTTP client integration.
 
@@ -372,6 +373,10 @@ class BaseFetcher:
         self._previous_cursor: dict[str, Any] | None = None
         self._settings_instance: BaseModel | None = None
         self.config: FetcherRunConfig | None = None
+        # Automatic periodic context (lifecycle step 5): `True` only while
+        # `run()` is executing `execute()`. Never caller-controlled; read
+        # only by the CVE per-item finalizer.
+        self._periodic_context = False
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
@@ -542,11 +547,16 @@ class BaseFetcher:
             return exc
 
         async with async_session_factory() as session:
+            # Scoped to this invocation's execution and always cleared when
+            # execution leaves, including on an escaping control signal.
+            self._periodic_context = True
             try:
                 await self.execute(session)
             except Exception as exc:
                 await session.rollback()
                 return exc
+            finally:
+                self._periodic_context = False
         return None
 
     async def _load_previous_cursor(self, fetcher_name: str) -> dict[str, Any] | None:

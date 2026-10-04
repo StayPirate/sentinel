@@ -20,6 +20,7 @@ is enforced by `tests/test_architecture/test_layer_dependencies.py`.
 from __future__ import annotations
 
 import ast
+import json
 import os
 import subprocess
 import sys
@@ -32,7 +33,7 @@ from celery.exceptions import OperationalError
 
 from app.celery_app import celery_app
 from app.services import task_publication
-from app.services.task_publication import publish_task
+from app.services.task_publication import JSONValue, publish_task
 from tests.support.module_imports import APP_ROOT, imported_modules
 
 _MODULE_PATH: Final = APP_ROOT / "services" / "task_publication.py"
@@ -152,6 +153,47 @@ class TestPublishTask:
         assert type(sent) is dict
         assert sent == kwargs
         assert sent is not kwargs
+
+    async def test_nested_json_compatible_kwargs_reach_send_task_unchanged(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Issue #798: detached JSON-compatible values (lists of objects
+        with booleans and `None`, nested lists, numbers) are accepted and
+        passed through as the task's `kwargs`."""
+        recorder = _SendTaskRecorder()
+        monkeypatch.setattr(celery_app, "send_task", recorder)
+        kwargs: dict[str, JSONValue] = {
+            "ticket_id": "example-id",
+            "cpe_matches": [
+                {
+                    "criteria": "cpe:2.3:a:example_vendor:example_product:1.0",
+                    "vulnerable": True,
+                    "match_criteria_id": None,
+                },
+                {
+                    "criteria": "cpe:2.3:a:example_vendor:other_product:2.0",
+                    "vulnerable": False,
+                    "match_criteria_id": "example-match-id",
+                },
+            ],
+            "vendor_products": [["example_vendor", "example_product"], []],
+            "resolved_packages": [],
+            "attempt": 1,
+            "ratio": 0.5,
+        }
+        expected = json.loads(json.dumps(kwargs))
+
+        await publish_task("example_registered_task", kwargs=kwargs)
+
+        assert recorder.calls == [
+            (
+                ("example_registered_task",),
+                {"kwargs": expected, "ignore_result": True},
+            )
+        ]
+        sent = recorder.calls[0][1]["kwargs"]
+        assert type(sent) is dict
+        assert json.loads(json.dumps(sent)) == expected
 
     async def test_publication_runs_off_the_event_loop_thread(
         self, monkeypatch: pytest.MonkeyPatch

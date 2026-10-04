@@ -3,9 +3,9 @@
 - `resolve_ticket_packages`: post-ingest CVE package resolution, see
   `docs/features/packages/package-service.md` (Post-ingest CVE package
   resolution) and `docs/features/tickets/cve-tracking.md` (Non-fetcher
-  Celery sub-operations). Its publisher is the CVE fetcher finalization
-  (`commit_and_dispatch()`), which projects `PostIngestTasks` into the five
-  primitive arguments.
+  Celery sub-operations). It is published by the CVE fetcher finalization
+  `BaseCVEFetcher.commit_and_dispatch()`, which projects `PostIngestTasks`
+  into the five primitive arguments after the per-CVE commit.
 
 This module is the thin boundary only: the explicit task name, the single
 `asyncio.run()` per invocation, and the engine disposal
