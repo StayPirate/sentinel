@@ -1488,6 +1488,7 @@ class TestPackageServiceModuleBoundary:
             "add_package_records",
             "add_package_to_ticket",
             "run_ticket_convergence",
+            "run_post_ingest_package_resolution",
         }
 
     def test_uses_no_private_ticket_mutations_helper(self) -> None:
