@@ -19,12 +19,13 @@ from typing import Annotated, Any
 from uuid import UUID
 
 import pytest
-from fastapi import Body, Depends, FastAPI, Query
+from fastapi import Body, Depends, FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from httpx import ASGITransport, AsyncClient
 from pydantic import BaseModel
 
+from app.core.query_limits import enforce_query_parameter_length_limit
 from app.core.request_nul import _body_nul_errors, reject_nul_in_request_input
 
 _NUL_POSITIONS = [
@@ -113,6 +114,32 @@ async def nul_client() -> AsyncGenerator[AsyncClient]:
         transport=ASGITransport(app=_build_test_app()), base_url="http://test"
     ) as client:
         yield client
+
+
+@pytest.mark.unit
+class TestRequestWithoutMatchedRoute:
+    """Both shared request input dependencies are no-ops when the scope
+    carries no matched `APIRoute`: there are no declared parameters to
+    inspect, so even a U+0000 in the query string is not examined and no
+    `RequestValidationError` is raised."""
+
+    @staticmethod
+    def _request() -> Request:
+        return Request(
+            {
+                "type": "http",
+                "method": "GET",
+                "path": "/",
+                "headers": [],
+                "query_string": b"q=%00",
+            }
+        )
+
+    async def test_nul_check_is_a_no_op(self) -> None:
+        await reject_nul_in_request_input(self._request())
+
+    async def test_query_length_limit_is_a_no_op(self) -> None:
+        await enforce_query_parameter_length_limit(self._request())
 
 
 @pytest.mark.unit
