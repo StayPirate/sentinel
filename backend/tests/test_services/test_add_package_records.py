@@ -85,6 +85,7 @@ from app.services.package_service import (
 from app.services.product_eligibility import evaluate_product_eligibility
 from app.services.ticket_convergence_registry import (
     TicketConvergenceEffect,
+    detach_ticket_convergence_effects,
     pending_ticket_convergence_effects,
 )
 from tests.support.cvss_chain import (
@@ -1445,8 +1446,9 @@ class TestGatesAndAssignment:
         `Resolved`. A new eligible (7.0 against the implicit `0.0`)
         unreleased Product beneath it breaks resolution completeness:
         `Resolved -> Analyzed` and exactly one Ticket convergence effect,
-        discarded when the transaction ends (ticket-mutations.md,
-        `reconcile_ticket_status()` step 5)."""
+        detachable once by the owner after commit (ticket-mutations.md,
+        `reconcile_ticket_status()` step 5; Transaction-Local Ticket
+        Convergence Registration, step 4)."""
         actor = await va_user()
         cve = await cve_with(Assessment("7.0"), severity=Severity.HIGH)
         ticket = await ticket_factory(
@@ -1479,6 +1481,9 @@ class TestGatesAndAssignment:
         )
         await db_session.commit()
         assert pending_ticket_convergence_effects(db_session) == ()
+        assert detach_ticket_convergence_effects(db_session) == (
+            TicketConvergenceEffect(ticket.id),
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -12,8 +12,8 @@ Owning specifications:
   5: a concurrent mutation is serialized by the Ticket row lock and the
   service reevaluates current persisted state after acquiring it).
 - docs/features/tickets/ticket-mutations.md (Concurrency Control;
-  Transaction-Local Ticket Convergence Registration step 3: the effects of
-  an ended transaction are discarded; consumption does not exist yet).
+  Transaction-Local Ticket Convergence Registration steps 3-4: a committed
+  transaction's effects are detachable once by its owner).
 - docs/features/tickets/ticket-audit-log.md (Testing Requirement 23: every
   event uses the true locked pre-state).
 - docs/features/platform/testing-strategy.md (Concurrency Testing,
@@ -73,6 +73,7 @@ from app.services.package_service import (
 )
 from app.services.ticket_convergence_registry import (
     TicketConvergenceEffect,
+    detach_ticket_convergence_effects,
     pending_ticket_convergence_effects,
 )
 from app.services.ticket_visibility import TicketCaller
@@ -331,8 +332,8 @@ class TestTrackExclusionRace:
         convergence effect, and keeps its transaction open. B excludes the
         `AFFECTED` track while holding a stale `Resolved` copy: it takes
         its acting User `FOR SHARE` and is proven blocked on the Ticket
-        lock. After A commits, A's effect is discarded (no consumer
-        exists yet) and B's reconciliation resolves the Ticket from the
+        lock. After A commits, A's effect is left detachable exactly once
+        for its owner and B's reconciliation resolves the Ticket from the
         winner's `Analyzed`, never from the stale `Resolved`."""
         actor, ticket = await _ticket(world, RESOLVED)
         await _path(
@@ -361,6 +362,9 @@ class TestTrackExclusionRace:
         await exclusion.commit()
 
         assert result == _result(RESOLVED, ANALYZED)
+        assert detach_ticket_convergence_effects(lifecycle) == (
+            TicketConvergenceEffect(ticket.id),
+        )
         assert lifecycle.info == {}
         assert pending_ticket_convergence_effects(lifecycle) == ()
         assert (excluded.target.actionable, excluded.target.non_actionable_reason) == (

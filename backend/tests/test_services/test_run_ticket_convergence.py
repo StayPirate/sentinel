@@ -82,6 +82,7 @@ from app.services.base_fetcher import FETCHER_REGISTRY, BaseFetcher
 from app.services.package_service import (
     TICKET_CONVERGENCE_HTTP_CLIENT_NAME,
     PackageAddedComment,
+    TicketConvergencePhase,
     restore_ticket_package,
     run_ticket_convergence,
     ticket_convergence_failure_phase,
@@ -1514,3 +1515,18 @@ async def _product_id(world: CommittedWorld, occurrence_id: uuid.UUID) -> uuid.U
     ).scalar_one()
     await world.session.commit()
     return product_id
+
+
+@pytest.mark.unit
+class TestFailurePhase:
+    def test_unmarked_exception_reports_unknown(self) -> None:
+        assert ticket_convergence_failure_phase(RuntimeError("x")) == "unknown"
+
+    def test_first_recorded_phase_is_kept(self) -> None:
+        """An exception keeps the phase where it first escaped, even if an
+        outer layer marks it again."""
+        error = RuntimeError("x")
+        package_service._mark_phase(error, TicketConvergencePhase.DRAIN)
+        package_service._mark_phase(error, TicketConvergencePhase.CATCH_UP_DISPATCH)
+
+        assert ticket_convergence_failure_phase(error) == "package_convergence_drain"

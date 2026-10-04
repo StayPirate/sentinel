@@ -52,6 +52,7 @@ from structlog.testing import capture_logs
 
 from app.api.v1 import tickets as route
 from app.core.enums import Capability, Role, TicketStatus
+from app.core.exceptions import TicketNotFoundError
 from app.core.permissions import get_capabilities
 from app.main import app
 from app.models.ticket import Ticket
@@ -399,6 +400,31 @@ class TestTicketNotFound:
         assert await _state(world, hidden.id) == before
         assert await _events(world, hidden.id) == 0
 
+    async def test_locked_denial_after_preliminary_access_is_the_identical_404(
+        self,
+        committed_app: tuple[CommittedApp, AsyncClient],
+        publish: _Publish,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The preliminary SNTL resolution passes, then the service's
+        locked-current check denies (the independent-session races are
+        proven by the service tests): the handler maps that denial to the
+        same `404 TICKET_NOT_FOUND` body."""
+        world, client = committed_app
+        _, headers = await world.va_headers()
+        ticket = await _ticket(world, TicketStatus.ANALYSIS)
+        dispatch = AsyncMock(side_effect=TicketNotFoundError())
+        monkeypatch.setattr(ticket_service, "dispatch_ticket_convergence", dispatch)
+
+        response = await client.post(_url(ticket), headers=headers)
+
+        assert response.status_code == 404
+        assert response.content == NOT_FOUND
+        dispatch.assert_awaited_once()
+        assert dispatch.await_args is not None
+        assert dispatch.await_args.kwargs["ticket_id"] == ticket.id
+        assert publish.calls == []
+
 
 # ---------------------------------------------------------------------------
 # Service error mappings
@@ -536,3 +562,12 @@ class TestOpenApiContract:
         assert set(body["properties"]) == {"ticket_id", "task_id"}
         assert sorted(body["required"]) == ["task_id", "ticket_id"]
         assert {p["type"] for p in body["properties"].values()} == {"string"}
+
+
+@pytest.mark.unit
+def test_session_factory_provider_returns_the_production_factory() -> None:
+    """Without an override the dispatch uses the production session
+    factory (no I/O at resolution)."""
+    from app.database import async_session_factory
+
+    assert route.get_ticket_convergence_session_factory() is async_session_factory
