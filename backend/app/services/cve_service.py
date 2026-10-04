@@ -36,7 +36,7 @@ Reads are Category B: they create no row or audit event, acquire no lock,
 never flush, commit, or roll back, and perform no network or Redis I/O.
 Each read selects its rows (and any total) in one SQL statement, so they
 derive from one coherent PostgreSQL observation. `get_cve_source_status()`
-is the one deliberate exception to the caller-owned session: it opens and
+is a deliberate exception to the caller-owned session: it opens and
 closes its own short-lived read session, then performs one best-effort
 read-only Redis pending-overlay lookup after that session is closed
 (cve-service.md, CVE Source Status; Transaction Ownership). Unexpected
