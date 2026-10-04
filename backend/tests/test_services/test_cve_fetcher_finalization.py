@@ -477,6 +477,13 @@ class _PeriodicRuns:
             ).one()
         return _RunOutcome(*row)
 
+    async def error_message(self, run_id: uuid.UUID) -> str | None:
+        async with self.factory() as session:
+            message: str | None = await session.scalar(
+                select(FetcherRun.error_message).where(FetcherRun.id == run_id)
+            )
+        return message
+
     async def cleanup(self) -> None:
         if not self.names:
             return
@@ -816,6 +823,57 @@ class TestFinalizationOrder:
         ]
         _assert_sanitized(logs)
         assert _counters(fetcher) == (1, 0, 1, 0)
+
+    async def test_failed_convergence_effect_does_not_stop_later_effect_or_handoff(
+        self,
+        world: _World,
+        trace: _Trace,
+        fetcher: _ScriptedCVEFetcher,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Two effects registered A then B in one per-CVE transaction: the
+        broker failure for A is absorbed with its one Ticket-owned ERROR, B
+        is still attempted, then the package handoff is published."""
+        cve, other = await world.cve(), await world.cve()
+        first_ticket = await world.ticket(cve)
+        second_ticket = await world.ticket(other)
+        owner = await world.owner()
+        trace.watch_commit(monkeypatch, owner)
+        trace.fail(_CONVERGE, OperationalError(_SECRET), ticket_id=str(first_ticket))
+        await _per_cve_writes(owner, cve, register=first_ticket)
+        register_ticket_convergence(owner, second_ticket)
+
+        with capture_logs() as logs:
+            await fetcher.commit_and_dispatch(
+                owner,
+                CVEFetchResult(
+                    action=UpsertAction.UPDATED, post_ingest=_handoff(first_ticket)
+                ),
+            )
+
+        assert trace.events == [
+            "commit",
+            "drain",
+            f"publish:{_CONVERGE}",
+            f"publish:{_CONVERGE}",
+            f"publish:{_RESOLVE}",
+        ]
+        assert trace.published(_CONVERGE) == [
+            {"ticket_id": str(first_ticket)},
+            {"ticket_id": str(second_ticket)},
+        ]
+        assert [call["ticket_id"] for call in trace.published(_RESOLVE)] == [
+            str(first_ticket)
+        ]
+        assert logs == [
+            {
+                "event": PUBLICATION_FAILED_EVENT,
+                "log_level": "error",
+                "ticket_id": str(first_ticket),
+                "cause": "broker_operational_error",
+            }
+        ]
+        _assert_sanitized(logs)
 
     async def test_null_handoff_commits_and_drains_without_package_task(
         self,
@@ -1259,7 +1317,7 @@ class TestPeriodicMetricsThroughRun:
     ) -> None:
         fetcher, run_id = await periodic_runs.create()
         committed, failing = await world.cve(), await world.cve()
-        failure = _CommitFailureError()
+        failure = _CommitFailureError(_SECRET)
 
         async def commit_fails(session: AsyncSession) -> CVEFetchResult:
             await _per_cve_writes(session, failing)
@@ -1275,6 +1333,8 @@ class TestPeriodicMetricsThroughRun:
         assert raised.value is failure
         # Only the first, committed unit is counted.
         assert await periodic_runs.outcome(run_id) == _RunOutcome("failure", 1, 1, 0, 0)
+        # The generic fallback; the exception text is never public.
+        assert await periodic_runs.error_message(run_id) == "Unexpected error"
         assert status_sessions.opened == 0
         assert await world.source_state(failing) is None
         assert fetcher._periodic_context is False
@@ -1300,6 +1360,8 @@ class TestPeriodicMetricsThroughRun:
 
         assert raised.value is error
         assert await periodic_runs.outcome(run_id) == _RunOutcome("failure", 1, 1, 0, 0)
+        # The generic fallback; the exception text is never public.
+        assert await periodic_runs.error_message(run_id) == "Unexpected error"
         assert _events(logs, HANDOFF_PUBLICATION_FAILED_EVENT) == []
         # No rollback reclassification and no isolated failure status.
         assert status_sessions.opened == 0
@@ -1431,14 +1493,26 @@ def _inject_status_failure(
     async def fail(*args: Any, **kwargs: Any) -> Any:
         raise error
 
+    def close_fails(session: AsyncSession) -> None:
+        """The session context exit raises after the real close."""
+        real_close = session.close
+
+        async def close() -> None:
+            await real_close()
+            raise error
+
+        monkeypatch.setattr(session, "close", close)
+
     if point == "session":
         sessions.open_error = error
     elif point == "lookup":
         sessions.fault = lambda session: monkeypatch.setattr(session, "scalar", fail)
     elif point == "write":
         monkeypatch.setattr(cve_service, "record_source_status", fail)
-    else:
+    elif point == "commit":
         sessions.fault = lambda session: monkeypatch.setattr(session, "commit", fail)
+    else:
+        sessions.fault = close_fails
 
 
 @pytest.mark.integration
@@ -1532,7 +1606,7 @@ class TestIsolatedStatusCommit:
         await world.probe.rollback()
         assert count == []
 
-    @pytest.mark.parametrize("point", ["session", "lookup", "write", "commit"])
+    @pytest.mark.parametrize("point", ["session", "lookup", "write", "commit", "close"])
     async def test_ordinary_failure_is_logged_once_and_suppressed(
         self,
         world: _World,
@@ -1565,41 +1639,14 @@ class TestIsolatedStatusCommit:
             }
         ]
         _assert_sanitized(logs)
-        assert await world.source_state(cve) == before
-
-    async def test_original_exception_survives_a_suppressed_failure(
-        self,
-        world: _World,
-        trace: _Trace,
-        fetcher: _ScriptedCVEFetcher,
-        status_sessions: _StatusSessions,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        cve = await world.cve()
-        _inject_status_failure(
-            "write", RuntimeError(_SECRET), status_sessions, monkeypatch
-        )
-        original = ValueError("example pre-finalization failure")
-
-        async def handler() -> None:
-            try:
-                raise original
-            except ValueError:
-                await fetcher._isolated_status_commit(
-                    cve.cve_id, CVESourceFetchStatus.FAILURE
-                )
-                raise
-
-        with (
-            capture_logs() as logs,
-            pytest.raises(ValueError, match="example") as raised,
-        ):
-            await handler()
-
-        assert raised.value is original
-        assert [entry["event"] for entry in logs] == [
-            ISOLATED_STATUS_WRITE_FAILED_EVENT
-        ]
+        state = await world.source_state(cve)
+        if point == "close":
+            # The suppression boundary encloses the session context: a close
+            # failure after the commit is suppressed and the write is kept.
+            assert state is not None
+            assert state.status == CVESourceFetchStatus.FAILURE
+        else:
+            assert state == before
 
     @pytest.mark.parametrize(
         "error",

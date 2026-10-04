@@ -31,6 +31,10 @@ Two layers are exercised against real PostgreSQL:
   `asyncio.run()` calls on the same factory.
 
 The module-level `engine` is a fake whose `dispose` is an `AsyncMock`.
+Wrapper-generic resource cleanup (HTTP client teardown, one `asyncio.run()`,
+one engine disposal) does not depend on the fetcher class and is proven by
+`tests/test_tasks/test_run_catch_up.py`; `TestSyncWrapper` asserts the
+per-attempt event-loop and disposal counts of the default catch-up.
 Committed CVE, Ticket, and `FetcherConfig` rows are deleted explicitly at
 teardown (`CVESource` and references follow by cascade). Test-only fetchers
 keep the inherited default `catch_up()`; their scripted `fetch_single()`
@@ -50,7 +54,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mutabl
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import httpx
 import pytest
@@ -62,12 +66,15 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from structlog.testing import capture_logs
 
 import app.services.base_cve_fetcher as base_cve_fetcher_module
-import app.services.base_fetcher as base_fetcher_module
 from app.core.enums import CVESourceFetchStatus, CVESourceType, TicketStatus
 from app.models.cve import CVE
 from app.models.ticket import Ticket
 from app.services import cve_service, package_service, task_publication
-from app.services.base_cve_fetcher import CVEFetchResult, CVENotInSource
+from app.services.base_cve_fetcher import (
+    ISOLATED_STATUS_WRITE_FAILED_EVENT,
+    CVEFetchResult,
+    CVENotInSource,
+)
 from app.services.base_fetcher import FETCHER_REGISTRY, get_catch_up_fetchers
 from app.services.cve_ingest import PostIngestTasks, UpsertAction
 from app.services.ticket_convergence_registry import register_ticket_convergence
@@ -80,7 +87,6 @@ from tests.support.cve_catch_up import (
     CatchUpHarness,
     CVEProbe,
     FakeEngine,
-    FakeHttpClient,
     FakeTask,
     Publications,
     RecordingSessions,
@@ -287,7 +293,6 @@ class TestNoOpAndIntegrity:
         assert harness.status.opened == []
         assert harness.published.calls == []
         assert _errors(logs) == []
-        harness.engine.dispose.assert_awaited_once_with()
 
     async def test_unresolvable_cve_reference_raises_before_any_fetch(
         self, world: CommittedWorld, harness: CatchUpHarness
@@ -304,7 +309,6 @@ class TestNoOpAndIntegrity:
         assert harness.events == []
         assert harness.status.opened == []
         assert harness.published.calls == []
-        harness.engine.dispose.assert_awaited_once_with()
 
 
 # ---------------------------------------------------------------------------
@@ -392,7 +396,6 @@ class TestSuccess:
         assert state is not None
         assert state.status == CVESourceFetchStatus.SUCCESS
         assert await _description(harness.factory, target.cve.id) == _DESCRIPTION
-        harness.engine.dispose.assert_awaited_once_with()
 
 
 # ---------------------------------------------------------------------------
@@ -423,25 +426,31 @@ class TestOutcomes:
         assert harness.published.calls == []
         # Handled inside catch_up(): never the wrapper's defensive path.
         assert _errors(logs) == []
-        harness.engine.dispose.assert_awaited_once_with()
 
     @pytest.mark.parametrize(
-        "make_step",
+        ("make_step", "error_type", "events"),
         [
             pytest.param(
                 lambda ticket: _raises(
                     ValueError("example parse failure"), register=ticket
                 ),
+                ValueError,
+                ["fetch_single", "rollback", "status:commit"],
                 id="value-error",
             ),
             pytest.param(
                 lambda ticket: _raises(
                     httpx.ConnectError("connection refused"), register=ticket
                 ),
+                httpx.ConnectError,
+                ["fetch_single", "rollback", "status:commit"],
                 id="connect-error",
             ),
             pytest.param(
-                lambda ticket: _flush_fails(register=ticket), id="flush-failure"
+                lambda ticket: _flush_fails(register=ticket),
+                IntegrityError,
+                ["fetch_single", "flush", "rollback", "status:commit"],
+                id="flush-failure",
             ),
         ],
     )
@@ -450,28 +459,23 @@ class TestOutcomes:
         world: CommittedWorld,
         harness: CatchUpHarness,
         make_step: Callable[[uuid.UUID], Step],
+        error_type: type[Exception],
+        events: list[str],
     ) -> None:
         target = await _target(world)
         probe = await harness.fetcher()
         probe.step = make_step(target.ticket.id)
 
-        with pytest.raises((IntegrityError, ValueError, httpx.ConnectError)) as raised:
+        with pytest.raises(error_type):
             await fetchers.run_catch_up_async(probe.name, str(target.ticket.id))
 
-        flush_failed = isinstance(raised.value, IntegrityError)
-        assert harness.events == [
-            "fetch_single",
-            *(["flush"] if flush_failed else []),
-            "rollback",
-            "status:commit",
-        ]
+        assert harness.events == events
         state = await source_state(harness.factory, target.cve.id)
         assert state is not None
         assert state.status == CVESourceFetchStatus.FAILURE
         assert state.first_failed_at == state.fetched_at
         assert await _description(harness.factory, target.cve.id) is None
         assert harness.published.calls == []
-        harness.engine.dispose.assert_awaited_once_with()
 
     async def test_commit_failure_propagates_without_isolated_status_or_publication(
         self, world: CommittedWorld, harness: CatchUpHarness
@@ -498,7 +502,6 @@ class TestOutcomes:
         assert harness.published.calls == []
         assert await source_state(harness.factory, target.cve.id) is None
         assert await _description(harness.factory, target.cve.id) is None
-        harness.engine.dispose.assert_awaited_once_with()
 
     @pytest.mark.parametrize("make_signal", _SIGNALS)
     async def test_control_signal_propagates_without_status_handling(
@@ -520,54 +523,15 @@ class TestOutcomes:
         assert harness.status.opened == []
         assert harness.published.calls == []
         assert await source_state(harness.factory, target.cve.id) is None
-        harness.engine.dispose.assert_awaited_once_with()
 
 
 # ---------------------------------------------------------------------------
-# HTTP teardown, FetcherRun, and fetch_pending keys
+# FetcherRun and fetch_pending keys
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.integration
 class TestResources:
-    @pytest.mark.parametrize("fails", [False, True], ids=["success", "failure"])
-    async def test_http_client_closed_before_engine_disposal(
-        self,
-        world: CommittedWorld,
-        harness: CatchUpHarness,
-        monkeypatch: pytest.MonkeyPatch,
-        fails: bool,
-    ) -> None:
-        target = await _target(world)
-        probe = await harness.fetcher()
-        order: list[str] = []
-        client = FakeHttpClient(AsyncMock(side_effect=lambda: order.append("aclose")))
-        harness.engine.dispose.side_effect = lambda: order.append("dispose")
-        monkeypatch.setattr(
-            base_fetcher_module, "create_http_client", lambda **_: client
-        )
-        touched: list[object] = []
-        inner = (
-            _raises(httpx.ConnectError("connection refused")) if fails else _succeeds()
-        )
-
-        async def step(cve_id: str, session: AsyncSession) -> CVEFetchResult:
-            touched.append(probe.fetcher.http_client)
-            return await inner(cve_id, session)
-
-        probe.step = step
-
-        if fails:
-            with pytest.raises(httpx.ConnectError):
-                await fetchers.run_catch_up_async(probe.name, str(target.ticket.id))
-        else:
-            await fetchers.run_catch_up_async(probe.name, str(target.ticket.id))
-
-        assert touched == [client]
-        client.aclose.assert_awaited_once_with()
-        assert probe.fetcher._http_client is None
-        assert order == ["aclose", "dispose"]
-
     @pytest.mark.parametrize("outcome", ["success", "missing", "failure"])
     async def test_creates_no_fetcher_run_or_fetch_pending_key(
         self,
@@ -863,35 +827,42 @@ class TestSyncWrapper:
         assert sync_world.asyncio_run.call_count == 1
         sync_world.engine.dispose.assert_awaited_once_with()
 
-    def test_success_uses_one_event_loop_one_disposal_and_closes_http_client(
-        self, sync_world: _SyncWorld, monkeypatch: pytest.MonkeyPatch
+    def test_failed_isolated_failure_write_keeps_original_retryable_exception(
+        self, sync_world: _SyncWorld
     ) -> None:
+        """An ordinary failure of the isolated `failure` write is logged once
+        and suppressed; the original pre-finalization exception leaves
+        `catch_up()` and reaches retry classification unchanged, and the
+        previous latest source state is kept."""
         target = sync_world.target()
         probe = sync_world.fetcher()
-        client = FakeHttpClient(AsyncMock())
-        monkeypatch.setattr(
-            base_fetcher_module, "create_http_client", lambda **_: client
+
+        async def seed() -> None:
+            async with sync_world.factory() as session:
+                await cve_service.record_source_status(
+                    session, target.cve_id, SOURCE, CVESourceFetchStatus.SUCCESS
+                )
+                await session.commit()
+
+        asyncio.run(seed())
+        before = sync_world.state(target)
+        original = httpx.ConnectError("connection refused")
+        probe.step = _raises(original)
+        sync_world.status.failures["commit"] = RuntimeError(
+            "example status write failure"
         )
-        inner = _succeeds()
-        touched: list[object] = []
-
-        async def step(cve_id: str, session: AsyncSession) -> CVEFetchResult:
-            touched.append(probe.fetcher.http_client)
-            return await inner(cve_id, session)
-
-        probe.step = step
         task = FakeTask()
 
-        with capture_logs() as logs:
+        with capture_logs() as logs, pytest.raises(RetryRequested):
             fetchers._run_catch_up_sync(task, probe.name, target.ticket_id)
 
-        task.retry.assert_not_called()
-        assert _errors(logs) == []
-        assert touched == [client]
-        client.aclose.assert_awaited_once_with()
-        assert probe.fetcher._http_client is None
-        state = sync_world.state(target)
-        assert state is not None
-        assert state.status == CVESourceFetchStatus.SUCCESS
-        assert sync_world.asyncio_run.call_count == 1
-        sync_world.engine.dispose.assert_awaited_once_with()
+        task.retry.assert_called_once_with(exc=original, countdown=5)
+        suppressed = _events(logs, ISOLATED_STATUS_WRITE_FAILED_EVENT)
+        assert len(suppressed) == 1
+        assert suppressed[0]["cve_id"] == target.cve
+        assert suppressed[0]["status"] == CVESourceFetchStatus.FAILURE.value
+        assert suppressed[0]["cause"] == "RuntimeError"
+        assert _events(logs, "run_catch_up_failed") == []
+        assert len(sync_world.status.opened) == 1
+        assert before is not None
+        assert sync_world.state(target) == before

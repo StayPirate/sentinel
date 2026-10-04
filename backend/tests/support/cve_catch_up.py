@@ -3,8 +3,8 @@
 
 Consumers:
 
-- `tests/test_tasks/test_run_catch_up.py` (the generic wrapper contract,
-  including CVE-class resolution cases);
+- `tests/test_tasks/test_run_catch_up.py` (the generic wrapper contract;
+  wrapper doubles only);
 - `tests/test_services/test_cve_fetcher_catch_up.py` (the default
   `BaseCVEFetcher.catch_up()` contract through `run_catch_up_async` and the
   synchronous `_run_catch_up_sync` wrapper);

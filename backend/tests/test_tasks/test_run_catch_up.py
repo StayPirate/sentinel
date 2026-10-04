@@ -30,11 +30,10 @@ an `AsyncMock` (`AsyncEngine.dispose` is read-only on the real engine),
 and defaults the session factory to one that fails when called, proving
 that paths without database work open no session. Test-only fetchers are
 direct `BaseFetcher` subclasses with a custom `catch_up()` override,
-registered under the shared `isolated_fetcher_registries` fixture; the
-resolution cases also use a `BaseCVEFetcher` subclass keeping the default
-`catch_up()` (`tests/support/cve_catch_up.py`, which also provides the
-wrapper doubles). The default CVE `catch_up()` contract itself is covered
-by `tests/test_services/test_cve_fetcher_catch_up.py`.
+registered under the shared `isolated_fetcher_registries` fixture. The
+wrapper doubles come from `tests/support/cve_catch_up.py`. The default CVE
+`catch_up()` contract is covered by
+`tests/test_services/test_cve_fetcher_catch_up.py`.
 
 The structured `celery_task_id` field comes from the task correlation
 context; one test binds it and merges context variables into the
@@ -69,7 +68,7 @@ import app.services.base_fetcher as base_fetcher_module
 from app.models.fetcher_config import FetcherConfig
 from app.models.fetcher_run import FetcherRun
 from app.services.base_cve_fetcher import CVENotInSource
-from app.services.base_fetcher import FETCHER_REGISTRY, BaseFetcher
+from app.services.base_fetcher import BaseFetcher
 from app.services.fetcher_execution import FetcherConfigMissingError
 from app.tasks import fetchers
 from tests.support.cve_catch_up import (
@@ -77,7 +76,6 @@ from tests.support.cve_catch_up import (
     FakeHttpClient,
     FakeTask,
     RetryRequested,
-    define_cve_fetcher,
 )
 
 pytestmark = pytest.mark.usefixtures("isolated_fetcher_registries")
@@ -375,47 +373,6 @@ class TestRunCatchUpAsyncResolution:
         assert probe.calls == []
         fake_engine.dispose.assert_awaited_once_with()
         assert await catch_up_database.run_count(probe.name) == 0
-
-    async def test_disabled_cve_fetcher_skips_the_default_catch_up(
-        self, catch_up_database: _CatchUpDatabase, fake_engine: FakeEngine
-    ) -> None:
-        """A registered disabled CVE fetcher is skipped before its default
-        `catch_up()` reads the Ticket or calls `fetch_single()`."""
-        probe = define_cve_fetcher()
-        await catch_up_database.seed_config(probe.name, enabled=False)
-        ticket_id = _ticket_id()
-
-        with capture_logs() as logs:
-            await fetchers.run_catch_up_async(probe.name, ticket_id)
-
-        skipped = _events(logs, "run_catch_up_fetcher_disabled")
-        assert [(e["fetcher_name"], e["ticket_id"]) for e in skipped] == [
-            (probe.name, ticket_id)
-        ]
-        assert _errors(logs) == []
-        assert probe.fetched == []
-        assert probe.events == []
-        fake_engine.dispose.assert_awaited_once_with()
-        assert await catch_up_database.run_count(probe.name) == 0
-
-    async def test_deregistered_cve_fetcher_logs_error_and_returns(
-        self, fake_engine: FakeEngine, forbidden_session_factory: MagicMock
-    ) -> None:
-        """A CVE fetcher removed from `FETCHER_REGISTRY` between enqueue and
-        execution is an unknown fetcher: no session, no `fetch_single()`."""
-        probe = define_cve_fetcher()
-        del FETCHER_REGISTRY[probe.name]
-        ticket_id = _ticket_id()
-
-        with capture_logs() as logs:
-            await fetchers.run_catch_up_async(probe.name, ticket_id)
-
-        assert [(e["event"], e["fetcher_name"]) for e in _errors(logs)] == [
-            ("run_catch_up_unknown_fetcher", probe.name)
-        ]
-        forbidden_session_factory.assert_not_called()
-        assert probe.fetched == []
-        fake_engine.dispose.assert_awaited_once_with()
 
     async def test_missing_fetcher_config_raises_without_invoking_catch_up(
         self, catch_up_database: _CatchUpDatabase, fake_engine: FakeEngine

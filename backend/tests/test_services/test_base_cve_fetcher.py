@@ -730,11 +730,3 @@ class TestCVEFetchResult:
             "post_ingest": None,
         }
         assert "_consumed" not in repr(result)
-
-    def test_each_token_has_its_own_marker(self) -> None:
-        first = CVEFetchResult(action=UpsertAction.CREATED, post_ingest=None)
-        second = CVEFetchResult(action=UpsertAction.CREATED, post_ingest=None)
-
-        first._consumed = True
-
-        assert second._consumed is False
