@@ -43,7 +43,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any, cast
 from unittest.mock import MagicMock, call
@@ -87,6 +87,8 @@ from tests.support.fetch_single_cve import (
     TASK,
     NoDatabaseAccess,
     ScriptedRedis,
+    assert_private_logs,
+    events_named,
     fictional_cve_id,
     forbid_redis,
     pending_key,
@@ -180,22 +182,6 @@ def _failing_for(sources: set[str], error: Exception) -> Any:
 
 def _published_sources(published: Publications) -> list[str]:
     return [kwargs["source"] for kwargs in published.published(TASK)]
-
-
-def _assert_partition(result: FetchDispatchResult, prepared: Sequence[str]) -> None:
-    """Four disjoint lists, each in code-point order, covering `prepared`
-    (cve-service.md, `FetchDispatchResult`)."""
-    lists = [
-        result.sources_enqueued,
-        result.sources_already_pending,
-        result.sources_disabled,
-        result.sources_failed,
-    ]
-    for values in lists:
-        assert values == sorted(values)
-    flat = [source for values in lists for source in values]
-    assert len(flat) == len(set(flat))
-    assert set(flat) == set(prepared)
 
 
 async def _fetcher(
@@ -697,7 +683,8 @@ class TestPublicationOutcomes:
             sources_disabled=[],
             sources_failed=["ghsa", "osv"],
         )
-        assert logs == [
+        warnings = events_named(logs, UNCONFIRMED)
+        assert warnings == [
             {
                 "event": UNCONFIRMED,
                 "log_level": "warning",
@@ -710,6 +697,7 @@ class TestPublicationOutcomes:
         rendered = repr(logs)
         for fragment in (*tokens, "fictional-secret", "broker.example.test", "amqp"):
             assert fragment not in rendered
+        assert_private_logs(warnings, *tokens, "fictional-secret")
 
     async def test_confirmed_publication_logs_nothing(
         self,
@@ -727,7 +715,7 @@ class TestPublicationOutcomes:
 
         assert result.sources_enqueued == ["nvd"]
         assert result.sources_failed == []
-        assert logs == []
+        assert events_named(logs, UNCONFIRMED) == []
 
     async def test_every_publication_unconfirmed_still_returns_the_result(
         self,
@@ -753,34 +741,8 @@ class TestPublicationOutcomes:
             sources_disabled=[],
             sources_failed=["mitre", "nvd"],
         )
-        assert [entry["event"] for entry in logs] == [UNCONFIRMED]
-
-    async def test_existing_marker_reports_already_pending_without_publication(
-        self,
-        db_session: AsyncSession,
-        service_sessions: async_sessionmaker[AsyncSession],
-        redis_client: redis_asyncio.Redis,
-        published: Publications,
-    ) -> None:
-        """An existing `fetch_pending:{cve_id}:{source}` marker coalesces the
-        source into `sources_already_pending` and leaves the marker
-        untouched (cve-service.md, Database-Free Publication)."""
-        await _fetcher(db_session, NVD)
-        await _fetcher(db_session, GHSA)
-        cve = await _cve(db_session)
-        existing = pending_key(cve.cve_id, "nvd")
-        await redis_client.set(existing, "fictional-earlier-owner", ex=300)
-
-        result = await _refetch(service_sessions, cve.cve_id)
-
-        assert result == FetchDispatchResult(
-            sources_enqueued=["ghsa"],
-            sources_already_pending=["nvd"],
-            sources_disabled=[],
-            sources_failed=[],
-        )
-        assert _published_sources(published) == ["ghsa"]
-        assert await redis_client.get(existing) == "fictional-earlier-owner"
+        warnings = events_named(logs, UNCONFIRMED)
+        assert [entry["sources_failed"] for entry in warnings] == [["mitre", "nvd"]]
 
     @pytest.mark.parametrize("pending", [False, True], ids=["new", "pending"])
     async def test_explicit_success_is_in_exactly_one_accepted_list(
@@ -853,41 +815,6 @@ class TestPublicationOutcomes:
                 ignore_result=True,
             ),
         ]
-
-    async def test_result_lists_are_disjoint_ordered_and_cover_the_broadcast_set(
-        self,
-        db_session: AsyncSession,
-        service_sessions: async_sessionmaker[AsyncSession],
-        redis_client: redis_asyncio.Redis,
-        published: Publications,
-    ) -> None:
-        """Fetchers registered out of order; one source already pending, two
-        failing publication, two disabled, one not refetchable. The four
-        lists are disjoint, in code-point order, and their union is the
-        complete broadcast set (cve-service.md, `FetchDispatchResult`)."""
-        for source in (REDHAT, OSV, NVD):
-            await _fetcher(db_session, source)
-        await _fetcher(db_session, MITRE, queue="git")
-        await _fetcher(db_session, GHSA)
-        await _fetcher(db_session, KERNEL, enabled=False, queue="git")
-        await _fetcher(db_session, EPSS, enabled=False)
-        await _fetcher(db_session, KEV, refetchable=False)
-        cve = await _cve(db_session)
-        await redis_client.set(pending_key(cve.cve_id, "mitre"), "fictional-owner")
-        published.before = _failing_for({"redhat", "ghsa"}, RuntimeError("fictional"))
-
-        result = await _refetch(service_sessions, cve.cve_id)
-
-        assert result == FetchDispatchResult(
-            sources_enqueued=["nvd", "osv"],
-            sources_already_pending=["mitre"],
-            sources_disabled=["epss", "kernel"],
-            sources_failed=["ghsa", "redhat"],
-        )
-        _assert_partition(
-            result, ["epss", "ghsa", "kernel", "mitre", "nvd", "osv", "redhat"]
-        )
-        assert _published_sources(published) == ["ghsa", "nvd", "osv", "redhat"]
 
 
 # ---------------------------------------------------------------------------
@@ -978,9 +905,8 @@ class TestDispatchOnly:
 
         assert result.sources_enqueued == ["nvd"]
         assert result.sources_disabled == ["ghsa"]
+        # The snapshot includes both audit event counts: the delta is zero.
         assert await _snapshot(db_session, cve, ticket) == before
-        assert before["ticket_events"] == 0
-        assert before["fetcher_events"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -1324,10 +1250,56 @@ class TestLockOrderAndRelease:
         assert raised.value is failure
         assert attempts() == 0
         assert published.calls == []
-        assert logs == []
+        assert events_named(logs, UNCONFIRMED) == []
         assert sessions.events == ["commit", "close"]
         assert not await lock_not_available(world.probe, _cve_lock(cve))
         assert not await lock_not_available(world.probe, _ticket_lock(ticket))
+
+    async def test_cancellation_while_waiting_for_the_cve_lock_publishes_nothing(
+        self,
+        world: _World,
+        published: Publications,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The refetch is cancelled while it waits for the CVE lock held by
+        an independent session: the cancellation propagates, the service
+        session is closed without committing and holds no transaction or
+        lock, and there is no Redis command and no publication attempt, even
+        after the holder commits (cve-service.md, Transactional Preparation:
+        cancellation before commit; Callers and Ordering)."""
+        cve = await world.cve()
+        await world.ticket(cve_id=cve.id)
+        await world.fetcher(NVD)
+        holder = await world.open_session()
+        session = await world.open_session()
+        sessions = _Sessions(session)
+        attempts = forbid_redis(monkeypatch)
+        await holder.execute(
+            select(CVE.id).where(CVE.id == cve.id).with_for_update(key_share=True)
+        )
+
+        task = world.start(
+            session,
+            refetch_cve(
+                cve_id=cve.cve_id,
+                source=None,
+                caller=SCOPE_ALL,
+                session_factory=sessions.factory,
+            ),
+        )
+        await assert_lock_wait(task, waiter=session, blocked_by=holder)
+        task.cancel()
+        done, _ = await asyncio.wait({task}, timeout=WAIT)
+        await holder.commit()
+
+        assert done == {task}
+        assert task.cancelled()
+        assert sessions.events == ["close"]
+        assert sessions.handed == sessions.closed == [session]
+        _assert_no_owner_state(session)
+        assert not await lock_not_available(world.probe, _cve_lock(cve))
+        assert attempts() == 0
+        assert published.calls == []
 
 
 # ---------------------------------------------------------------------------

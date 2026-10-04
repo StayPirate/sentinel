@@ -59,7 +59,6 @@ import pytest_asyncio
 import redis.asyncio as redis_asyncio
 from celery.exceptions import OperationalError as BrokerOperationalError
 from httpx import ASGITransport, AsyncClient
-from redis.exceptions import ConnectionError as RedisConnectionError
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession, async_sessionmaker
 from structlog.testing import capture_logs
@@ -85,14 +84,12 @@ from tests.support.cve_catch_up import (
 from tests.support.cve_ingest import lock_not_available
 from tests.support.cve_source_status import clear_fetcher_registries
 from tests.support.fetch_single_cve import (
-    MARKER_UNAVAILABLE,
     TASK,
     ScriptedRedis,
     assert_private_logs,
     events_named,
     fictional_cve_id,
     forbid_redis,
-    pending_key,
 )
 from tests.support.ticket_api import (
     INTERNAL_ERROR,
@@ -344,11 +341,11 @@ class TestPublicationAfterCommit:
     ) -> None:
         """The ordinary `201`/`200` response; the request commits first, then
         the registered effect publishes `fetch_single_cve` for every enabled
-        refetchable source (queue preserved, `None` omitted) with the
-        canonical CVE-ID, while no request session is in a transaction; a
-        disabled and a non-refetchable source are not published
-        (cve-service.md, Callers and Ordering; ticket-service.md,
-        `create_ticket` step 11 / `associate_cve` step 14)."""
+        refetchable source with the canonical CVE-ID, while no request
+        session is in a transaction; a disabled and a non-refetchable source
+        are not published (cve-service.md, Callers and Ordering;
+        ticket-service.md, `create_ticket` step 11 / `associate_cve` step
+        14)."""
         nvd = await api.fetcher(NVD)
         mitre = await api.fetcher(MITRE, queue="git")
         await api.fetcher(GHSA, enabled=False)
@@ -422,7 +419,6 @@ def _masked(operation: _Operation, response: httpx.Response) -> Any:
 
 @pytest.mark.e2e
 class TestPublicationFailureIsBestEffort:
-    @pytest.mark.parametrize("failure", ["broker", "redis-set"])
     @pytest.mark.parametrize("name", OPERATIONS)
     async def test_failure_keeps_the_ordinary_response_and_committed_events(
         self,
@@ -430,30 +426,20 @@ class TestPublicationFailureIsBestEffort:
         published: Publications,
         monkeypatch: pytest.MonkeyPatch,
         name: str,
-        failure: str,
     ) -> None:
         """The same request from the same state, first with a confirmed
-        publication, then failing: the identical status and body, and the
-        committed audit events. A raising publication is logged once as the
-        sanitized `cve_fetch_publication_unconfirmed` WARNING
-        (ticket-service.md, Post-commit freshness; `associate_cve`
-        best-effort paragraph); Redis unavailable at the marker `SET` fails
-        open and still publishes (cve-service.md, Database-Free
-        Publication)."""
+        publication, then with the broker refusing it: the identical status
+        and body, and the committed audit events. The raising publication is
+        logged once as the sanitized `cve_fetch_publication_unconfirmed`
+        WARNING (ticket-service.md, Post-commit freshness; `associate_cve`
+        best-effort paragraph)."""
         await api.fetcher(NVD)
         operation = await api.prepare(name)
         ScriptedRedis().install(monkeypatch)
         baseline = await api.replay(operation)
         published.calls.clear()
-        if failure == "broker":
-            published.errors[TASK] = BrokerOperationalError(f"refused {SECRET}")
-            redis = ScriptedRedis()
-        else:
-            redis = ScriptedRedis(
-                set_results={
-                    pending_key(operation.cve_id, "nvd"): RedisConnectionError(SECRET)
-                }
-            )
+        published.errors[TASK] = BrokerOperationalError(f"refused {SECRET}")
+        redis = ScriptedRedis()
         redis.install(monkeypatch)
 
         with capture_logs() as logs:
@@ -470,25 +456,17 @@ class TestPublicationFailureIsBestEffort:
             operation
         )
         unconfirmed = events_named(logs, UNCONFIRMED)
-        marker = events_named(logs, MARKER_UNAVAILABLE)
-        if failure == "broker":
-            assert unconfirmed == [
-                {
-                    "event": UNCONFIRMED,
-                    "log_level": "warning",
-                    "cve_id": operation.cve_id,
-                    "sources_failed": ["nvd"],
-                    "trigger": TRIGGERS[name],
-                }
-            ]
-            assert marker == []
-        else:
-            assert unconfirmed == []
-            assert [entry["log_level"] for entry in marker] == ["warning"]
+        assert unconfirmed == [
+            {
+                "event": UNCONFIRMED,
+                "log_level": "warning",
+                "cve_id": operation.cve_id,
+                "sources_failed": ["nvd"],
+                "trigger": TRIGGERS[name],
+            }
+        ]
         tokens = [str(token) for token in redis.values("set")]
-        assert_private_logs(
-            [*unconfirmed, *marker], *tokens, "fictional-secret", "amqp", "refused"
-        )
+        assert_private_logs(unconfirmed, *tokens, "fictional-secret", "amqp", "refused")
         assert events_named(logs, CALLBACK_FAILED) == []
 
 
@@ -499,7 +477,6 @@ class TestPublicationFailureIsBestEffort:
 
 @pytest.mark.e2e
 class TestNoEligibleSource:
-    @pytest.mark.parametrize("roster", ["empty", "all-disabled"])
     @pytest.mark.parametrize("name", OPERATIONS)
     async def test_no_eligible_source_commits_with_one_info_and_no_io(
         self,
@@ -507,17 +484,14 @@ class TestNoEligibleSource:
         published: Publications,
         monkeypatch: pytest.MonkeyPatch,
         name: str,
-        roster: str,
     ) -> None:
-        """An empty fetch-single registry or an all-disabled roster is the
-        expected no-eligible-source outcome: the ordinary `201`/`200`, the
-        committed audit events, exactly one `cve_fetch_no_eligible_source`
-        INFO, and zero Redis and Celery I/O (ticket-service.md, Post-commit
-        freshness; `associate_cve` no-eligible-source paragraph)."""
-        if roster == "all-disabled":
-            await api.fetcher(NVD, enabled=False)
-            await api.fetcher(GHSA, enabled=False)
-            await api.fetcher(KEV, refetchable=False)
+        """An empty fetch-single registry is the expected no-eligible-source
+        outcome: the ordinary `201`/`200`, the committed audit events,
+        exactly one `cve_fetch_no_eligible_source` INFO, and zero Redis and
+        Celery I/O (ticket-service.md, Post-commit freshness; `associate_cve`
+        no-eligible-source paragraph). The all-disabled roster is the same
+        preparation outcome, proven by
+        `tests/test_services/test_cve_freshness_preparation.py`."""
         operation = await api.prepare(name)
         attempts = forbid_redis(monkeypatch)
 

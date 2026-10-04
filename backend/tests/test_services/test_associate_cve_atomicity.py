@@ -23,7 +23,9 @@ The single-session behavior of `associate_cve()` is covered by
 needs independent sessions or an independent committed observer. Step 14 of
 the specification (the CVE freshness refresh) is covered by
 `tests/test_services/test_ticket_freshness_composition.py` and
-`tests/test_api/test_ticket_freshness_refresh.py`.
+`tests/test_api/test_ticket_freshness_refresh.py`; the ATR 9 race here runs
+with one enabled refetchable source and re-asserts that the association
+registers exactly one freshness effect.
 
 Not reachable, hence not tested: the converse self-loss case of Architectural
 Test Requirement 15 (an authorized association that itself removes the
@@ -59,6 +61,7 @@ from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.enums import (
+    CVESourceType,
     Role,
     Scope,
     Severity,
@@ -67,6 +70,7 @@ from app.core.enums import (
 )
 from app.core.exceptions import TicketNotFoundError
 from app.models.cve import CVE
+from app.models.fetcher_config import FetcherConfig
 from app.models.system_setting import SystemSetting
 from app.models.ticket import Ticket
 from app.models.ticket_access_grant import TicketAccessGrant
@@ -93,6 +97,8 @@ from app.services.ticket_service import (
     resolve_ticket_locator,
 )
 from app.services.ticket_visibility import TicketCaller
+from tests.support.cve_catch_up import define_cve_fetcher
+from tests.support.cve_source_status import clear_fetcher_registries
 from tests.support.cvss_chain import (
     DEFAULT_VERSION,
     cve_severity,
@@ -174,6 +180,7 @@ class _World(CommittedWorld):
     def __init__(self, factory: Factory, session: AsyncSession) -> None:
         super().__init__(factory, session)
         self.cve_id_strings: list[str] = []
+        self.fetcher_names: list[str] = []
         self._owns_setting = False
 
     def new_cve_id(self) -> str:
@@ -189,6 +196,17 @@ class _World(CommittedWorld):
             self._owns_setting = True
         await self.session.commit()
 
+    async def refetchable_source(self) -> None:
+        """Exactly one registered refetchable CVE fetcher with a committed
+        enabled `FetcherConfig` row, so an association registers its
+        freshness effect (ticket-service.md, `associate_cve` step 14). The
+        test isolates the registries."""
+        clear_fetcher_registries()
+        name = define_cve_fetcher(source=CVESourceType.NVD).name
+        self.fetcher_names.append(name)
+        self.session.add(FetcherConfig(fetcher_name=name, enabled=True))
+        await self.session.commit()
+
     async def cleanup(self) -> None:
         await self._release()
         await self.session.rollback()
@@ -200,6 +218,12 @@ class _World(CommittedWorld):
         self.cve_ids.extend(set(found) - set(self.cve_ids))
         await self.session.rollback()
         await super().cleanup()
+        await self.session.execute(
+            delete(FetcherConfig).where(
+                FetcherConfig.fetcher_name.in_(self.fetcher_names)
+            )
+        )
+        await self.session.commit()
         if self._owns_setting:
             await self.session.execute(
                 delete(SystemSetting).where(SystemSetting.key == "default_cvss_version")
@@ -563,10 +587,14 @@ class TestAssociationAndCVSSRace:
     both orderings. Two different acting VAs use independent sessions; the
     first mutation holds its User -> CVE (-> Ticket) locks uncommitted, the
     second must block on the CVE lock and, once the first commits, work from
-    the committed state (ticket-service.md, `associate_cve` Locking)."""
+    the committed state (ticket-service.md, `associate_cve` Locking). One
+    enabled refetchable source is registered, so the association also
+    prepares its freshness refresh (step 14): it registers exactly one
+    effect and its audit events are unchanged."""
 
     @pytest.mark.parametrize("manual_kind", ["handover-changes", "handover-equal"])
     @pytest.mark.parametrize("race", [pytest.param(r, id=r.id) for r in RACES])
+    @pytest.mark.usefixtures("isolated_fetcher_registries")
     async def test_serialized_outcome_of_both_orderings(
         self,
         world: _World,
@@ -574,6 +602,7 @@ class TestAssociationAndCVSSRace:
         race: _Race,
         manual_kind: str,
     ) -> None:
+        await world.refetchable_source()
         va1 = await world.user(role=Role.VULNERABILITY_ANALYST)  # associates
         va2 = await world.user(role=Role.VULNERABILITY_ANALYST)  # mutates CVSS
         cve = (
@@ -645,6 +674,11 @@ class TestAssociationAndCVSSRace:
                 await a.commit()
                 cvss_result = await asyncio.wait_for(mutation_task, timeout=5)
                 await b.commit()
+
+        # The association registered exactly one freshness effect; the CVSS
+        # mutation registers none.
+        assert len(a.info.get("post_commit_callbacks", [])) == 1
+        assert b.info.get("post_commit_callbacks", []) == []
 
         # User -> CVE -> Ticket on both manual paths; the first Ticket
         # statement is its `FOR UPDATE` lock.

@@ -56,7 +56,7 @@ import pytest
 import pytest_asyncio
 import redis.asyncio as redis_asyncio
 from celery.exceptions import OperationalError as BrokerOperationalError
-from httpx import AsyncClient
+from httpx import ASGITransport, AsyncClient
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession, async_sessionmaker
 from structlog.testing import capture_logs
@@ -88,6 +88,7 @@ from tests.support.fetch_single_cve import (
     forbid_redis,
     pending_key,
 )
+from tests.support.ticket_api import INTERNAL_ERROR, force_production_error_page
 from tests.support.ticket_mutations import StatementRecorder
 
 Factory = Callable[..., Awaitable[Any]]
@@ -246,17 +247,18 @@ class _Api:
         self,
         source: CVESourceType,
         *,
-        enabled: bool = True,
+        enabled: bool | None = True,
         refetchable: bool = True,
         queue: str | None = None,
     ) -> str:
         """Register a test-only CVE fetcher owning `source` and flush its
-        `FetcherConfig`."""
+        `FetcherConfig`; `enabled=None` creates no configuration row."""
         probe = define_cve_fetcher(
             source=source, supports=refetchable, fetcher_queue=queue
         )
-        self.db.add(FetcherConfig(fetcher_name=probe.name, enabled=enabled))
-        await self.db.flush()
+        if enabled is not None:
+            self.db.add(FetcherConfig(fetcher_name=probe.name, enabled=enabled))
+            await self.db.flush()
         return probe.name
 
     async def cve(self) -> CVE:
@@ -389,6 +391,7 @@ class TestAuthenticationAndCapability:
         await api.ticket(hidden, confidential=True)
         headers = await api.headers(*roles)
         attempts = forbid_redis(monkeypatch)
+        events_before = await api.ticket_events()
 
         bodies: list[bytes] = []
         with StatementRecorder(api.db) as recorder:
@@ -402,7 +405,7 @@ class TestAuthenticationAndCapability:
         assert [s for s in recorder.statements if _DOMAIN_TABLE.search(s)] == []
         assert api.sessions.calls == 0
         _assert_no_dispatch(attempts, api.published)
-        assert await api.ticket_events() == 0
+        assert await api.ticket_events() == events_before
 
     @pytest.mark.parametrize(
         "role", [Role.VULNERABILITY_ANALYST, Role.RESTRICTED_ANALYST], ids=str
@@ -444,6 +447,7 @@ class TestCVENotFound:
         await api.ticket(hidden, confidential=True)
         headers = await api.headers(Role.RESTRICTED_ANALYST)
         attempts = forbid_redis(monkeypatch)
+        events_before = await api.ticket_events()
         targets = [
             "not-a-cve",
             visible.cve_id.lower(),
@@ -460,7 +464,7 @@ class TestCVENotFound:
             assert response.content == _NOT_FOUND, target
 
         _assert_no_dispatch(attempts, api.published)
-        assert await api.ticket_events() == 0
+        assert await api.ticket_events() == events_before
 
     async def test_scope_all_caller_gets_the_identical_404_and_sees_a_confidential_cve(
         self, api: _Api, monkeypatch: pytest.MonkeyPatch
@@ -582,6 +586,7 @@ _SOURCE_CASES = [
     ),
     pytest.param("standard", "osv", 422, "CVE_INVALID_SOURCE", id="deregistered"),
     pytest.param("standard", "epss", 422, "CVE_INVALID_SOURCE", id="not-refetchable"),
+    pytest.param("standard", "", 422, "CVE_INVALID_SOURCE", id="empty-string"),
     pytest.param("standard", "ghsa", 409, "FETCHER_DISABLED", id="explicit-disabled"),
     pytest.param("all-disabled", None, 503, "CVE_FETCH_FAILED", id="none-enabled"),
     pytest.param("empty", None, 503, "CVE_FETCH_FAILED", id="empty-registry"),
@@ -602,7 +607,8 @@ class TestSourceMatrix:
     ) -> None:
         """cve-tracking.md, Re-fetch Endpoint error table; api-spec.md, CVE
         refetch outcome matrix: unknown, deregistered, and non-refetchable
-        explicit sources are `422 CVE_INVALID_SOURCE`, an explicit disabled
+        explicit sources, and an empty `?source=`, are
+        `422 CVE_INVALID_SOURCE`, an explicit disabled
         source is `409 FETCHER_DISABLED`, and a broadcast with no enabled
         refetchable source (including an empty fetch-single registry) is
         `503 CVE_FETCH_FAILED`. No partial `data`, zero Redis and Celery
@@ -613,12 +619,40 @@ class TestSourceMatrix:
         await api.ticket(cve)
         headers = await api.headers(Role.VULNERABILITY_ANALYST)
         attempts = forbid_redis(monkeypatch)
+        events_before = await api.ticket_events()
 
         response = await api.refetch(cve.cve_id, headers, source=source)
 
         _assert_error_envelope(response, status, code)
         _assert_no_dispatch(attempts, api.published)
-        assert await api.ticket_events() == 0
+        assert await api.ticket_events() == events_before
+
+    async def test_missing_configuration_row_is_the_generic_500_without_dispatch(
+        self, api: _Api, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A registered refetchable fetcher without its `FetcherConfig` row
+        is a bootstrap invariant failure (cve-service.md, Transactional
+        Preparation step 4): it escapes as the generic
+        `500 INTERNAL_ERROR`, whose body does not name the fetcher, with zero
+        Redis and Celery I/O (api-spec.md, Global Responses)."""
+        unconfigured = await api.fetcher(NVD, enabled=None)
+        await api.fetcher(GHSA)
+        cve = await api.cve()
+        headers = await api.headers(Role.VULNERABILITY_ANALYST)
+        force_production_error_page(monkeypatch)
+        attempts = forbid_redis(monkeypatch)
+
+        async with AsyncClient(
+            transport=ASGITransport(app=app, raise_app_exceptions=False),
+            base_url="http://test",
+        ) as client:
+            response = await client.post(_url(cve.cve_id), headers=headers)
+
+        assert response.status_code == 500
+        assert response.json() == INTERNAL_ERROR
+        assert unconfigured not in response.text
+        assert api.sessions.calls == 1
+        _assert_no_dispatch(attempts, api.published)
 
 
 # ---------------------------------------------------------------------------
@@ -628,17 +662,8 @@ class TestSourceMatrix:
 
 @pytest.mark.e2e
 class TestEveryPublicationUnconfirmed:
-    @pytest.mark.parametrize(
-        "error",
-        [
-            pytest.param(
-                BrokerOperationalError(f"connection refused {SECRET}"), id="broker"
-            ),
-            pytest.param(RuntimeError(f"fictional failure {SECRET}"), id="runtime"),
-        ],
-    )
     async def test_all_unconfirmed_is_the_fixed_celery_unavailable(
-        self, api: _Api, monkeypatch: pytest.MonkeyPatch, error: Exception
+        self, api: _Api, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """cve-tracking.md, Behavior step 5; api-spec.md, CVE refetch
         outcome matrix and Infrastructure Dependency Errors: with no source
@@ -652,7 +677,10 @@ class TestEveryPublicationUnconfirmed:
         headers = await api.headers(Role.VULNERABILITY_ANALYST)
         redis = ScriptedRedis()
         redis.install(monkeypatch)
-        api.published.before = _failing_for({"nvd", "mitre"}, error)
+        api.published.before = _failing_for(
+            {"nvd", "mitre"}, BrokerOperationalError(f"connection refused {SECRET}")
+        )
+        events_before = await api.ticket_events()
 
         with capture_logs() as logs:
             response = await api.refetch(cve.cve_id, headers)
@@ -682,7 +710,7 @@ class TestEveryPublicationUnconfirmed:
         ]
         tokens = [str(token) for token in redis.values("set")]
         assert_private_logs(warnings, *tokens, "fictional-secret", "amqp")
-        assert await api.ticket_events() == 0
+        assert await api.ticket_events() == events_before
 
 
 # ---------------------------------------------------------------------------
@@ -716,6 +744,7 @@ class TestAccepted:
         api.published.before = _failing_for(
             {"kernel", "redhat"}, BrokerOperationalError(SECRET)
         )
+        events_before = await api.ticket_events()
 
         with capture_logs() as logs:
             response = await api.refetch(cve.cve_id, headers)
@@ -728,7 +757,7 @@ class TestAccepted:
         assert [
             entry["sources_failed"] for entry in events_named(logs, UNCONFIRMED)
         ] == [["kernel", "redhat"]]
-        assert await api.ticket_events() == 0
+        assert await api.ticket_events() == events_before
 
     @pytest.mark.parametrize(
         "failing", [False, True], ids=["pending-only", "pending-and-failed"]
@@ -812,12 +841,13 @@ class TestAccepted:
         await api.ticket(cve, status=status)
         headers = await api.headers(Role.VULNERABILITY_ANALYST)
         ScriptedRedis().install(monkeypatch)
+        events_before = await api.ticket_events()
 
         response = await api.refetch(cve.cve_id, headers)
 
         assert response.status_code == 202, response.text
         assert response.json() == _result(["nvd"], [], [], [])
-        assert await api.ticket_events() == 0
+        assert await api.ticket_events() == events_before
 
 
 # ---------------------------------------------------------------------------

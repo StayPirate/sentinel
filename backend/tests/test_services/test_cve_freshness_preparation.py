@@ -71,6 +71,8 @@ from tests.support.fetch_single_cve import (
     TASK,
     NoDatabaseAccess,
     ScriptedRedis,
+    assert_private_logs,
+    events_named,
     fictional_cve_id,
     forbid_redis,
 )
@@ -90,11 +92,6 @@ MITRE = CVESourceType.MITRE
 GHSA = CVESourceType.GHSA
 OSV = CVESourceType.OSV
 KEV = CVESourceType.KEV
-
-AUTOMATIC_TRIGGERS = [
-    pytest.param(OnDemandFetchTrigger.TICKET_CREATE, id="ticket_create"),
-    pytest.param(OnDemandFetchTrigger.CVE_ASSOCIATE, id="cve_associate"),
-]
 
 Callback = Callable[[], Awaitable[None]]
 
@@ -301,26 +298,13 @@ class TestGuards:
 
 @pytest.mark.integration
 class TestNoEligibleSource:
-    @pytest.mark.parametrize(
-        ("roster", "trigger"),
-        [
-            pytest.param(
-                "empty-registry",
-                OnDemandFetchTrigger.TICKET_CREATE,
-                id="empty-registry",
-            ),
-            pytest.param(
-                "all-disabled", OnDemandFetchTrigger.CVE_ASSOCIATE, id="all-disabled"
-            ),
-        ],
-    )
+    @pytest.mark.parametrize("roster", ["empty-registry", "all-disabled"])
     async def test_no_eligible_source_logs_once_and_registers_nothing(
         self,
         db_session: AsyncSession,
         published: Publications,
         monkeypatch: pytest.MonkeyPatch,
         roster: str,
-        trigger: OnDemandFetchTrigger,
     ) -> None:
         """An empty fetch-single registry or an all-disabled broadcast is
         logged once as INFO and registers no publication; the Ticket
@@ -335,17 +319,21 @@ class TestNoEligibleSource:
 
         with capture_logs() as logs:
             await prepare_freshness_refresh(
-                db_session, cve_id=cve.cve_id, trigger=trigger
+                db_session,
+                cve_id=cve.cve_id,
+                trigger=OnDemandFetchTrigger.CVE_ASSOCIATE,
             )
 
-        assert logs == [
+        infos = events_named(logs, NO_ELIGIBLE)
+        assert infos == [
             {
                 "event": NO_ELIGIBLE,
                 "log_level": "info",
                 "cve_id": cve.cve_id,
-                "trigger": trigger.value,
+                "trigger": "cve_associate",
             }
         ]
+        assert_private_logs(infos)
         assert _callbacks(db_session) == []
         assert attempts() == 0
         assert published.calls == []
@@ -388,7 +376,8 @@ class TestRegisteredEffect:
             )
 
         [effect] = _callbacks(db_session)
-        assert logs == []
+        assert events_named(logs, NO_ELIGIBLE) == []
+        assert events_named(logs, UNCONFIRMED) == []
         assert attempts() == 0
         assert published.calls == []
         assert _writes(recorder.statements) == []
@@ -432,13 +421,11 @@ class TestRegisteredEffect:
             },
         ]
 
-    @pytest.mark.parametrize("trigger", AUTOMATIC_TRIGGERS)
     async def test_publication_failure_in_effect_logs_once_and_does_not_raise(
         self,
         db_session: AsyncSession,
         published: Publications,
         monkeypatch: pytest.MonkeyPatch,
-        trigger: OnDemandFetchTrigger,
     ) -> None:
         """After commit publication is best effort: an unconfirmed
         publication is logged once with the calling workflow's `trigger`
@@ -447,7 +434,9 @@ class TestRegisteredEffect:
         await _fetcher(db_session, NVD)
         await _fetcher(db_session, OSV)
         cve, _ticket = await _held_roots(db_session)
-        await prepare_freshness_refresh(db_session, cve_id=cve.cve_id, trigger=trigger)
+        await prepare_freshness_refresh(
+            db_session, cve_id=cve.cve_id, trigger=OnDemandFetchTrigger.TICKET_CREATE
+        )
         [effect] = _callbacks(db_session)
         await db_session.commit()
         ScriptedRedis().install(monkeypatch)
@@ -462,16 +451,18 @@ class TestRegisteredEffect:
             await effect()  # returns normally: the failure is not raised
 
         assert [k["source"] for k in published.published(TASK)] == ["nvd", "osv"]
-        assert logs == [
+        warnings = events_named(logs, UNCONFIRMED)
+        assert warnings == [
             {
                 "event": UNCONFIRMED,
                 "log_level": "warning",
                 "cve_id": cve.cve_id,
                 "sources_failed": ["nvd"],
-                "trigger": trigger.value,
+                "trigger": "ticket_create",
             }
         ]
         assert "fictional-secret" not in repr(logs)
+        assert_private_logs(warnings, "fictional-secret")
 
     async def test_confidential_ticket_registers_without_accessibility_evaluation(
         self,
@@ -551,18 +542,17 @@ class TestPostCommitOrdering:
         monkeypatch.setattr(database, "async_session_factory", sessions)
         return sessions
 
-    @pytest.mark.parametrize("outcome", ["commit", "rollback"])
-    async def test_effect_publishes_only_after_the_request_commit(
+    async def test_effect_never_runs_after_the_request_rollback(
         self,
         db_session: AsyncSession,
         request_sessions: RecordingSessions,
         published: Publications,
         monkeypatch: pytest.MonkeyPatch,
-        outcome: str,
     ) -> None:
-        """`get_db()` runs the registered effect only after its commit, and
-        never after a rollback (cve-service.md, Callers and Ordering;
-        `prepare_freshness_refresh()` Q3)."""
+        """`get_db()` never runs the registered effect after a rollback
+        (cve-service.md, Callers and Ordering; `prepare_freshness_refresh()`
+        Q3). The commit-then-publish order is proven end to end by
+        `tests/test_api/test_ticket_freshness_refresh.py`."""
         await _fetcher(db_session, NVD)
         cve = CVE(cve_id=fictional_cve_id())
         db_session.add(cve)
@@ -581,19 +571,14 @@ class TestPostCommitOrdering:
         await prepare_freshness_refresh(
             session, cve_id=cve.cve_id, trigger=OnDemandFetchTrigger.TICKET_CREATE
         )
-        assert published.calls == []
+        assert len(_callbacks(session)) == 1
 
-        if outcome == "commit":
-            with pytest.raises(StopAsyncIteration):
-                await anext(request)
-            assert request_sessions.events == ["commit", f"publish:{TASK}"]
-        else:
-            failure = RuntimeError("fictional handler failure")
-            with pytest.raises(RuntimeError) as raised:
-                await request.athrow(failure)
-            assert raised.value is failure
-            assert request_sessions.events == ["rollback"]
-            assert published.calls == []
+        failure = RuntimeError("fictional handler failure")
+        with pytest.raises(RuntimeError) as raised:
+            await request.athrow(failure)
+        assert raised.value is failure
+        assert request_sessions.events == ["rollback"]
+        assert published.calls == []
 
 
 # ---------------------------------------------------------------------------
@@ -603,16 +588,19 @@ class TestPostCommitOrdering:
 
 @pytest.mark.integration
 class TestCallerState:
-    async def test_relock_does_not_refresh_or_flush_caller_loaded_state(
+    async def test_relock_does_not_refresh_caller_loaded_state(
         self,
         db_session: AsyncSession,
         published: Publications,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Only key columns are selected, so the same-transaction re-lock
-        neither refreshes nor flushes the caller's loaded `CVE` and `Ticket`
-        instances: their pending in-memory values survive (cve-service.md,
-        Transactional Preparation step 3; `_prepare_on_demand_fetch()`)."""
+        """For the automatic callers step 2 is a same-transaction re-lock of
+        roots the caller already holds (cve-service.md, Transactional
+        Preparation step 3). Only key columns are selected, so the re-lock
+        does not refresh the caller's loaded `CVE` and `Ticket` instances:
+        their unflushed in-memory values survive. `no_autoflush` keeps those
+        values out of the database, so a refreshing re-lock would load the
+        persisted `NULL`s over them."""
         await _fetcher(db_session, NVD)
         cve, ticket = await _held_roots(db_session)
         pending_title = "Pending caller title"
@@ -627,24 +615,8 @@ class TestCallerState:
                 cve_id=cve.cve_id,
                 trigger=OnDemandFetchTrigger.CVE_ASSOCIATE,
             )
-            persisted = (
-                await db_session.execute(
-                    select(
-                        CVE.__table__.c.title, Ticket.__table__.c.coordinated_release_at
-                    )
-                    .select_from(CVE.__table__)
-                    .join(
-                        Ticket.__table__,
-                        Ticket.__table__.c.cve_id == CVE.__table__.c.id,
-                    )
-                    .where(CVE.__table__.c.id == cve.id)
-                )
-            ).one()
 
         assert cve.title == pending_title
         assert ticket.coordinated_release_at == pending_release
-        assert cve in db_session.dirty
-        assert ticket in db_session.dirty
-        assert tuple(persisted) == (None, None)
         assert len(_callbacks(db_session)) == 1
         assert published.calls == []

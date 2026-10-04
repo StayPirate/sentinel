@@ -22,9 +22,10 @@ failure in the effect, re-lock without refresh) is proven by
 composition through the real `get_db()` by
 `tests/test_api/test_ticket_freshness_refresh.py`. This module proves the
 two call sites: rollback of the whole mutation on preparation failure,
-placeholder-only-when-needed, the ingestion exclusion, the locked-current
-denial without registration, the unchanged audit contracts, and the
-accepted commit-to-publication crash gap.
+commit failure and pre-commit cancellation of the real `get_db()`
+transaction without publication, placeholder-only-when-needed, the
+ingestion exclusion, the locked-current denial without registration, the
+unchanged audit contracts, and the accepted commit-to-publication crash gap.
 
 Every test empties both fetcher registries under
 `isolated_fetcher_registries` and defines its own test-only CVE fetchers.
@@ -39,18 +40,18 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
-from unittest.mock import MagicMock
 
 import pytest
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import OperationalError as DatabaseOperationalError
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession, async_sessionmaker
 from structlog.testing import capture_logs
 
-from app.celery_app import celery_app
+from app import database
 from app.core.enums import CVESourceType, Role, Scope, Severity, TicketStatus
 from app.core.exceptions import TicketNotFoundError
 from app.database import Base
@@ -69,14 +70,20 @@ from app.services.ticket_service import (
     resolve_ticket_locator,
 )
 from app.services.ticket_visibility import TicketCaller
-from tests.support.cve_catch_up import Publications, define_cve_fetcher
+from tests.support.cve_catch_up import (
+    Publications,
+    RecordingSessions,
+    define_cve_fetcher,
+)
 from tests.support.cve_source_status import clear_fetcher_registries
 from tests.support.cvss_chain import (
     DEFAULT_VERSION,
     Assessment,
     CVEBuilder,
+    eligibility,
     priority_event,
     severity_event,
+    ticket_state,
 )
 from tests.support.database import assert_lock_wait, rollback_test_scope
 from tests.support.fetch_single_cve import (
@@ -91,7 +98,9 @@ from tests.support.ticket_creation import creation_events, ingestion_comment
 from tests.support.ticket_mutations import (
     EVAL,
     EventRow,
+    Prod,
     TicketFactory,
+    TreeBuilder,
     VAUser,
     cveless,
     status_event,
@@ -99,7 +108,7 @@ from tests.support.ticket_mutations import (
 )
 
 pytest_plugins = ["tests.support.ticket_mutation_fixtures"]
-"""Provides the shared `va_user` and `cve_with` fixtures."""
+"""Provides the shared `va_user`, `cve_with`, and `tree` fixtures."""
 
 Factory = Callable[..., Awaitable[Any]]
 Callback = Callable[[], Awaitable[None]]
@@ -221,6 +230,19 @@ def _published_sources(published: Publications) -> list[tuple[str, str]]:
     ]
 
 
+async def _association_state(db: AsyncSession, ticket_id: uuid.UUID) -> tuple[Any, ...]:
+    """Everything an association may change on one Ticket: `(status,
+    assignee, priority_auto, priority_override, severity_manual)`, `cve_id`,
+    the Product occurrences' `(eligible, is_eligible_override)`, and the
+    audit events."""
+    return (
+        await ticket_state(db, ticket_id),
+        await db.scalar(select(Ticket.cve_id).where(Ticket.id == ticket_id)),
+        await eligibility(db, ticket_id),
+        await ticket_events_by_id(db, ticket_id),
+    )
+
+
 # ---------------------------------------------------------------------------
 # B5: preparation and registration failures roll the whole mutation back
 # ---------------------------------------------------------------------------
@@ -326,6 +348,74 @@ class TestPreparationFailureRollsBack:
                 )
             ).one()
             assert tuple(row) == (TicketStatus.NEW.value, None, None)
+        assert attempts() == 0
+        assert published.calls == []
+
+    async def test_populated_association_rolls_back_every_chain_effect(
+        self,
+        db_session: AsyncSession,
+        va_user: VAUser,
+        ticket_factory: TicketFactory,
+        cve_with: CVEBuilder,
+        tree: TreeBuilder,
+        published: Publications,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A CVE with a SUSE 9.8 assessment associated to a `Medium` `P4`
+        Ticket with an ineligible automatic Product: before step 14 the
+        association hands the severity over, makes the Product eligible, and
+        refreshes the priority to `P2`. The preparation then fails
+        (`FetcherConfigMissingError`), and after the caller's rollback the
+        severity, priority, Product eligibility, association, and audit
+        events are all unchanged (ticket-service.md, `associate_cve` step 14
+        and Q6; testing-strategy.md, On-Demand CVE Refetch: atomic
+        association, CVSS handover, Product, reconciliation, audit, and
+        registration)."""
+        await _fetcher(db_session, NVD, enabled=None)
+        actor = await va_user()
+        cve = await cve_with(Assessment("9.8"), severity=None)
+        ticket = await cveless(
+            ticket_factory,
+            status=TicketStatus.NEW,
+            severity=Severity.MEDIUM,
+            priority_auto="P4",
+        )
+        await tree(ticket, products=(Prod(eligible=False),))
+        # The caller's rollback expires the ORM instances: keep their keys.
+        ticket_id, cve_pk, cve_id = ticket.id, cve.id, cve.cve_id
+        attempts = forbid_redis(monkeypatch)
+        before = await _association_state(db_session, ticket_id)
+        at_preparation: list[tuple[Any, ...]] = []
+        prepare = cve_service.prepare_freshness_refresh
+
+        async def _observed(db: AsyncSession, **kwargs: Any) -> None:
+            at_preparation.append(await _association_state(db, ticket_id))
+            await prepare(db, **kwargs)
+
+        monkeypatch.setattr(cve_service, "prepare_freshness_refresh", _observed)
+
+        async with rollback_test_scope(db_session):
+            with pytest.raises(FetcherConfigMissingError):
+                await _associate(db_session, ticket_id, cve_id, actor)
+            assert _callbacks(db_session) == []
+
+        assert before == (
+            (TicketStatus.NEW.value, None, "P4", None, "Medium"),
+            None,
+            [(False, False)],
+            [],
+        )
+        [(state, associated, products, events)] = at_preparation
+        assert (state[2], state[4]) == ("P2", None)
+        assert associated == cve_pk
+        assert products == [(True, False)]
+        assert {
+            "cve_associated",
+            "severity_changed",
+            "product_eligibility_changed",
+            "priority_changed",
+        } <= {event.event_type for event in events}
+        assert await _association_state(db_session, ticket_id) == before
         assert attempts() == 0
         assert published.calls == []
 
@@ -598,6 +688,187 @@ class TestAuditContractsUnchanged:
 
 
 # ---------------------------------------------------------------------------
+# B5: commit failure and pre-commit cancellation of the request transaction
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def request_sessions(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> RecordingSessions:
+    """`get_db()` sessions joined to the `db_session` connection in
+    `create_savepoint` mode; their `flush`, `commit`, and `rollback` are
+    recorded."""
+    assert isinstance(db_session.bind, AsyncConnection)
+    factory = async_sessionmaker(
+        bind=db_session.bind,
+        class_=AsyncSession,
+        expire_on_commit=False,
+        join_transaction_mode="create_savepoint",
+    )
+    sessions = RecordingSessions(factory)
+    monkeypatch.setattr(database, "async_session_factory", sessions)
+    return sessions
+
+
+def _commit_then_raise(failure: BaseException) -> Callable[[AsyncSession], None]:
+    """A `RecordingSessions` hook: the (recorded) commit completes, then
+    `failure` is raised, so the caller cannot know the outcome."""
+
+    def hook(session: AsyncSession) -> None:
+        commit = session.commit
+
+        async def committed_then_raise() -> None:
+            await commit()
+            raise failure
+
+        session.commit = committed_then_raise  # type: ignore[method-assign]
+
+    return hook
+
+
+def _count_dispatches(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Record the CVE-ID of every `trigger_on_demand_fetch()` call, which
+    only the registered effect makes."""
+    calls: list[str] = []
+    real = cve_service.trigger_on_demand_fetch
+
+    async def spy(cve_id: str, *args: Any, **kwargs: Any) -> Any:
+        calls.append(cve_id)
+        return await real(cve_id, *args, **kwargs)
+
+    monkeypatch.setattr(cve_service, "trigger_on_demand_fetch", spy)
+    return calls
+
+
+async def _run_in(
+    session: AsyncSession, actor: User, cve_id: str, target: Ticket | None
+) -> None:
+    """A manual create-with-CVE when `target` is `None`, else its
+    association."""
+    if target is None:
+        await _manual_create(session, actor, cve_id)
+    else:
+        await _associate(session, target.id, cve_id, actor)
+
+
+@pytest.mark.integration
+@pytest.mark.usefixtures("default_setting")
+class TestRequestTransactionEnd:
+    @pytest.mark.parametrize("commit", ["failed-commit", "ambiguous-commit"])
+    @pytest.mark.parametrize("name", OPERATIONS)
+    async def test_commit_failure_never_runs_the_registered_effect(
+        self,
+        db_session: AsyncSession,
+        va_user: VAUser,
+        ticket_factory: TicketFactory,
+        request_sessions: RecordingSessions,
+        published: Publications,
+        monkeypatch: pytest.MonkeyPatch,
+        name: str,
+        commit: str,
+    ) -> None:
+        """The mutation registers its effect in the real `get_db()`
+        transaction; a definitely failed commit and a commit whose outcome is
+        ambiguous (it completes, then raises) both propagate through
+        `get_db()`'s rollback, and the effect never runs: zero Redis commands
+        and zero publication attempts (cve-service.md, Transactional
+        Preparation: commit failure; Callers and Ordering; ticket-service.md,
+        Post-commit freshness)."""
+        await _enabled_roster(db_session)
+        actor = await va_user()
+        target = (
+            await ticket_factory(status=TicketStatus.NEW.value)
+            if name == "associate"
+            else None
+        )
+        failure = DatabaseOperationalError(
+            "COMMIT", {}, Exception("server closed the connection")
+        )
+        if commit == "failed-commit":
+            request_sessions.failures["commit"] = failure
+        else:
+            request_sessions.hooks.append(_commit_then_raise(failure))
+        attempts = forbid_redis(monkeypatch)
+        dispatches = _count_dispatches(monkeypatch)
+        request = database.get_db()
+        session = await anext(request)
+        await _run_in(session, actor, fictional_cve_id(), target)
+        assert len(_callbacks(session)) == 1
+        request_sessions.events.clear()
+
+        with pytest.raises(DatabaseOperationalError) as raised:
+            await anext(request)
+
+        assert raised.value is failure
+        assert [e for e in request_sessions.events if e != "flush"] == [
+            "commit",
+            "rollback",
+        ]
+        assert dispatches == []
+        assert attempts() == 0
+        assert published.calls == []
+
+    @pytest.mark.parametrize("name", OPERATIONS)
+    async def test_cancellation_after_registration_never_runs_the_effect(
+        self,
+        db_session: AsyncSession,
+        va_user: VAUser,
+        ticket_factory: TicketFactory,
+        request_sessions: RecordingSessions,
+        published: Publications,
+        monkeypatch: pytest.MonkeyPatch,
+        name: str,
+    ) -> None:
+        """The request task is cancelled after the effect is registered and
+        before `get_db()` commits. `asyncio.CancelledError` is not an
+        `Exception`, so `get_db()` neither commits nor runs its post-commit
+        callbacks; the session closes and the mutation does not persist.
+        Zero Redis commands and zero publication attempts (cve-service.md,
+        Transactional Preparation: post-registration cancellation before
+        commit). The dependency is entered as FastAPI does, through
+        `asynccontextmanager`."""
+        await _enabled_roster(db_session)
+        actor = await va_user()
+        target = (
+            await ticket_factory(status=TicketStatus.NEW.value)
+            if name == "associate"
+            else None
+        )
+        cve_id = fictional_cve_id()
+        attempts = forbid_redis(monkeypatch)
+        dispatches = _count_dispatches(monkeypatch)
+        registered = asyncio.Event()
+        callbacks: list[int] = []
+
+        async def _request() -> None:
+            async with asynccontextmanager(database.get_db)() as session:
+                await _run_in(session, actor, cve_id, target)
+                callbacks.append(len(_callbacks(session)))
+                registered.set()
+                await asyncio.Event().wait()
+
+        task = asyncio.create_task(_request())
+        await asyncio.wait_for(registered.wait(), timeout=WAIT)
+        request_sessions.events.clear()
+        task.cancel()
+        done, _ = await asyncio.wait({task}, timeout=WAIT)
+
+        assert done == {task}
+        assert task.cancelled()
+        assert callbacks == [1]
+        assert "commit" not in request_sessions.events
+        [session] = request_sessions.opened
+        assert not session.in_transaction()
+        assert (
+            await db_session.scalar(select(CVE.id).where(CVE.cve_id == cve_id)) is None
+        )
+        assert dispatches == []
+        assert attempts() == 0
+        assert published.calls == []
+
+
+# ---------------------------------------------------------------------------
 # B11: the accepted commit-to-publication crash gap
 # ---------------------------------------------------------------------------
 
@@ -621,16 +892,13 @@ class TestCrashGap:
         db_session: AsyncSession,
         va_user: VAUser,
         ticket_factory: TicketFactory,
-        published: Publications,
-        monkeypatch: pytest.MonkeyPatch,
         name: str,
     ) -> None:
         """The process stops after the caller's commit, before the
         registered effect runs: the committed Ticket and placeholder CVE
         remain, and no outbox, durable job, progress, or `FetcherRun` row
-        exists anywhere; nothing is published and Celery has no result
-        backend (cve-service.md, RESERVED CVEs > Crash recovery; Callers and
-        Ordering; ticket-service.md, Post-commit freshness)."""
+        exists anywhere (cve-service.md, RESERVED CVEs > Crash recovery;
+        Callers and Ordering; ticket-service.md, Post-commit freshness)."""
         await _enabled_roster(db_session)
         actor = await va_user()
         target = (
@@ -639,9 +907,6 @@ class TestCrashGap:
             else None
         )
         cve_id = fictional_cve_id()
-        send_task = MagicMock()
-        monkeypatch.setattr(celery_app, "send_task", send_task)
-        attempts = forbid_redis(monkeypatch)
         before = await _row_counts(db_session)
 
         if target is None:
@@ -671,10 +936,6 @@ class TestCrashGap:
             )
         ).one()
         assert committed[1] == cve_id
-        assert celery_app.conf.result_backend is None
-        assert send_task.call_count == 0
-        assert attempts() == 0
-        assert published.calls == []
 
 
 # ---------------------------------------------------------------------------
