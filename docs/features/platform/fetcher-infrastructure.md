@@ -1986,8 +1986,8 @@ dependency on a result backend.
 
 The Celery application imports task modules explicitly after constructing the
 singleton app so decorators register against that instance. The
-`resolve_ticket_packages` sub-operation is registered from
-`backend/app/tasks/cve_tasks.py`; it is not added to `FETCHER_REGISTRY`,
+`resolve_ticket_packages` and `fetch_single_cve` sub-operations are registered
+from `backend/app/tasks/cve_tasks.py`; neither is added to `FETCHER_REGISTRY`,
 `fetcher_discovery.py`, RedBeat, or `beat_schedule`.
 
 ## Celery Beat Schedule Synchronization
