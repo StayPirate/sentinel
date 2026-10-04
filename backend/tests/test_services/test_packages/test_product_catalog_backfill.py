@@ -1500,43 +1500,100 @@ class TestOverlappingInvocations:
 
 
 # ---------------------------------------------------------------------------
-# Failed-pair rollback (Product Catalog Backfill pair outcome table: failed)
+# Failed-pair rollback (Product Catalog Backfill pair outcome table: failed;
+# whole-run signals)
 # ---------------------------------------------------------------------------
 
 
-class _RollbackSession:
-    """Stands in for a pair session whose rollback raises `error`."""
+def _rollback_raises(error: BaseException) -> Callable[[AsyncSession], None]:
+    """Hook making the session's explicit rollback raise `error`; the session
+    is still closed (and its transaction discarded) by its context manager."""
 
-    def __init__(self, error: BaseException) -> None:
-        self.error = error
-        self.rollbacks = 0
+    def _install(session: AsyncSession) -> None:
+        async def _rollback() -> None:
+            raise error
 
-    async def rollback(self) -> None:
-        self.rollbacks += 1
-        raise self.error
+        setattr(session, "rollback", _rollback)  # noqa: B010
+
+    return _install
 
 
-@pytest.mark.unit
+@pytest.mark.integration
 class TestFailedPairRollback:
-    async def test_a_failing_rollback_belongs_to_the_already_failed_pair(
+    async def test_a_failing_rollback_keeps_the_original_pair_failure(
         self,
+        world: CommittedWorld,
+        sessions: _Sessions,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """A rollback error after a pair failure is absorbed: the pair is
-        already counted as failed and its session is closed by its context
-        manager."""
-        session = _RollbackSession(OperationalError("ROLLBACK", None, Exception()))
+        """The first pair fails with `PackageNotFoundInSmeltError` and its
+        rollback then raises a driver error: the pair is still counted and
+        logged with its original cause, and the next pair commits."""
+        ticket = await _ticket(world)
+        product = await _current_product(world)
+        a, b = _names("a", "b")
+        await _package(world, ticket, a)
+        await _package(world, ticket, b)
+        smelt = _Smelt(
+            {
+                a: _Answer(reply(404, not_found(a))),
+                b: _resolves(codestream(IBS_REF, "SLE_15", product.cpe)),
+            }
+        )
+        smelt.install(monkeypatch)
+        sessions.hooks[1] = _rollback_raises(_database_failure())
 
-        await product_catalog_backfill._rollback(cast(AsyncSession, session))
+        with capture_logs() as logs:
+            summary = await _backfill(sessions)
 
-        assert session.rollbacks == 1
+        assert _backfill_logs(logs) == [
+            _pair_failed(ticket.id, a, "PackageNotFoundInSmeltError"),
+            _completed(candidates=2, record_creating=1, failed=1),
+        ]
+        assert summary == ProductCatalogBackfillSummary(2, 1, 0, 0, 0, 1)
+        assert MARKER not in repr(logs)
+        assert await _committed(world, ticket.id, a, b) == _Committed(
+            (ANALYSIS, None),
+            [package_added_event(b, None, BACKFILL)],
+            {a: EMPTY_TREE, b: _created(product)},
+            [],
+        )
 
     @pytest.mark.parametrize(
-        "signal", [SoftTimeLimitExceeded(), MemoryError()], ids=type
+        "make_signal",
+        [
+            pytest.param(SoftTimeLimitExceeded, id="soft-time-limit"),
+            pytest.param(MemoryError, id="memory-error"),
+        ],
     )
     async def test_a_whole_run_signal_during_rollback_propagates(
-        self, signal: BaseException
+        self,
+        world: CommittedWorld,
+        sessions: _Sessions,
+        monkeypatch: pytest.MonkeyPatch,
+        make_signal: Callable[[], BaseException],
     ) -> None:
-        session = _RollbackSession(signal)
+        """A whole-run signal raised by the failed pair's rollback is never
+        absorbed: it propagates, no later pair runs, and no completion line
+        is logged."""
+        ticket = await _ticket(world)
+        product = await _current_product(world)
+        a, b = _names("a", "b")
+        await _package(world, ticket, a)
+        await _package(world, ticket, b)
+        smelt = _Smelt(
+            {
+                a: _Answer(reply(404, not_found(a))),
+                b: _resolves(codestream(IBS_REF, "SLE_15", product.cpe)),
+            }
+        )
+        smelt.install(monkeypatch)
+        signal = make_signal()
+        sessions.hooks[1] = _rollback_raises(signal)
 
-        with pytest.raises(type(signal)):
-            await product_catalog_backfill._rollback(cast(AsyncSession, session))
+        with capture_logs() as logs, pytest.raises(type(signal)):
+            await _backfill(sessions)
+
+        assert _backfill_logs(logs) == []
+        assert smelt.requests == [("maintained", a)]
+        assert [c.is_closed for c in smelt.fake.clients] == [True]

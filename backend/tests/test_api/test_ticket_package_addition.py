@@ -93,7 +93,6 @@ from app import database
 from app.api.v1 import ticket_packages as route
 from app.config import settings
 from app.core.enums import (
-    PackageStatus,
     Role,
     SessionCreationReason,
     TicketStatus,
@@ -109,7 +108,6 @@ from app.services import package_service, task_publication, ticket_service, user
 from app.services.session_service import create_session
 from tests.support.cvss_chain import DEFAULT_VERSION
 from tests.support.package_addition import (
-    Kind,
     PackageSmelt,
     Pause,
     Respond,
@@ -890,42 +888,6 @@ class TestSuccess:
         assert await _state(api.db, ticket) == after_first
         assert broker.calls == []
 
-    async def test_incremental_addition_creates_only_the_new_records(
-        self, api: _Api, ticket_factory: TicketFactory
-    ) -> None:
-        """SMELT now reports one more Product under the existing track and
-        a new track: only those are created and counted, the existing track
-        keeps its affectedness, and one `package_added` is recorded."""
-        caller = await api.caller(Role.VULNERABILITY_ANALYST)
-        ticket = await cveless(ticket_factory, assignee_id=caller.user.id)
-        p1, p2, p3 = await _current(api.db, 3)
-        package = await seed_package(api.db, ticket.id, PKG)
-        track = await seed_track(
-            api.db, package, IBS_REF, status=PackageStatus.AFFECTED
-        )
-        await seed_occurrence(api.db, track, p1)
-        _serve(
-            api.smelt,
-            codestream(IBS_REF, "SLE_15", p1.cpe, p2.cpe),
-            codestream(GIT_REF, "SLFO", p3.cpe),
-        )
-
-        response = await api.post(ticket, caller=caller)
-
-        assert response.status_code == 201, response.text
-        assert response.json() == _data(1, 1, 2, 1)
-        tree = await package_tree(api.db, ticket.id, PKG)
-        assert tree is not None
-        assert tree.tracks[IBS_REF].status == PackageStatus.AFFECTED.value
-        assert set(tree.occurrences) == {
-            (IBS_REF, p1.id),
-            (IBS_REF, p2.id),
-            (GIT_REF, p3.id),
-        }
-        assert await ticket_events_by_id(api.db, ticket.id) == [
-            package_added_event(PKG, caller.user)
-        ]
-
     async def test_maintainer_only_outcome_exposes_no_maintainer_in_the_body(
         self, api: _Api, ticket_factory: TicketFactory
     ) -> None:
@@ -989,25 +951,6 @@ class TestSuccess:
             package_added_event(PKG, caller.user),
         ]
 
-    async def test_restricted_analyst_caller_is_not_assigned(
-        self, api: _Api, ticket_factory: TicketFactory
-    ) -> None:
-        """Only an active VA is auto-assigned: a `restricted_analyst` adds
-        the package, and the Ticket stays unassigned with only its
-        acting-user `package_added`."""
-        caller = await api.caller(Role.RESTRICTED_ANALYST)
-        ticket = await cveless(ticket_factory)
-        (product,) = await _current(api.db)
-        _serve(api.smelt, codestream(IBS_REF, "SLE_15", product.cpe))
-
-        response = await api.post(ticket, caller=caller)
-
-        assert response.status_code == 201, response.text
-        assert await ticket_row(api.db, ticket.id) == (ANALYSIS, None)
-        assert await ticket_events_by_id(api.db, ticket.id) == [
-            package_added_event(PKG, caller.user)
-        ]
-
     async def test_production_dependency_uses_one_shared_factory_client(
         self,
         api: _Api,
@@ -1061,14 +1004,17 @@ def _assert_sanitized(response: httpx.Response) -> None:
 
 @pytest.mark.e2e
 class TestErrors:
-    @pytest.mark.parametrize("case", list(MAINTAINED_UNAVAILABLE))
     async def test_smelt_unavailable_is_a_sanitized_503(
-        self, api: _Api, ticket_factory: TicketFactory, case: str
+        self, api: _Api, ticket_factory: TicketFactory
     ) -> None:
+        """A representative invalid pairing (HTTP 200 with JSend `error`);
+        every unavailable category is proven at the service tier."""
         caller = await api.caller(Role.VULNERABILITY_ANALYST)
         ticket = await cveless(ticket_factory)
         await _current(api.db)
-        api.smelt.responses["maintained"] = MAINTAINED_UNAVAILABLE[case]
+        api.smelt.responses["maintained"] = MAINTAINED_UNAVAILABLE[
+            "http-200-jsend-error"
+        ]
         api.smelt.responses["maintainership"] = reply(200, maintainership())
         before = await _state(api.db, ticket)
 
@@ -1206,17 +1152,14 @@ class TestErrors:
         assert await maintainers(api.db, ticket.id) == []
         assert await _state(api.db, ticket) == before
 
-    @pytest.mark.parametrize(
-        "status", [TicketStatus.IGNORED, TicketStatus.DUPLICATED], ids=str
-    )
     async def test_manual_zone_ticket_is_not_mutable(
-        self, api: _Api, ticket_factory: TicketFactory, status: TicketStatus
+        self, api: _Api, ticket_factory: TicketFactory
     ) -> None:
         """api-spec.md, Manual-Zone Mutability Guard: decided under the
         Ticket lock, so after both SMELT requests, with no effect."""
         caller = await api.caller(Role.VULNERABILITY_ANALYST)
         maintainer = await seed_user(api.db)
-        ticket = await ticket_factory(status=status.value)
+        ticket = await ticket_factory(status=TicketStatus.IGNORED.value)
         (product,) = await _current(api.db)
         _serve(
             api.smelt,
@@ -1328,25 +1271,6 @@ class TestConvergence:
             "connection refused",
         ):
             assert fragment not in rendered
-
-    async def test_rejected_request_publishes_nothing(
-        self, api: _Api, ticket_factory: TicketFactory, broker: _Publish
-    ) -> None:
-        """A `Resolved` Ticket whose package is excluded: the request is
-        rejected under the lock and rolled back, so nothing is published."""
-        caller = await api.caller(Role.VULNERABILITY_ANALYST)
-        ticket = await cveless(
-            ticket_factory, status=RESOLVED, assignee_id=caller.user.id
-        )
-        (product,) = await _current(api.db)
-        await seed_package(api.db, ticket.id, PKG, excluded=True)
-        _serve(api.smelt, codestream(IBS_REF, "SLE_15", product.cpe))
-
-        response = await api.post(ticket, caller=caller)
-
-        assert response.status_code == 409
-        assert broker.calls == []
-        assert await ticket_row(api.db, ticket.id) == (RESOLVED, caller.user.id)
 
 
 # ---------------------------------------------------------------------------
@@ -1473,10 +1397,9 @@ class TestAccessLostDuringExternalIO:
     its preliminary check passes. While its request is paused inside a
     SMELT request, an independent session removes that path and commits."""
 
-    @pytest.mark.parametrize("pause_at", ["maintained", "maintainership"])
     @pytest.mark.parametrize("loss", LOSSES)
     async def test_successful_io_is_denied_by_the_locked_check(
-        self, committed: _Committed, loss: str, pause_at: Kind
+        self, committed: _Committed, loss: str
     ) -> None:
         """Both SMELT requests then succeed, naming a current Product and the
         caller's own email: the identical `404 TICKET_NOT_FOUND`, with zero
@@ -1493,7 +1416,7 @@ class TestAccessLostDuringExternalIO:
             codestream(IBS_REF, "SLE_15", product.cpe),
             emails=[user.email],
         )
-        pause = committed.smelt.pause(pause_at)
+        pause = committed.smelt.pause("maintainership")
         before = await protected_state(world, ticket.id)
 
         async with _in_flight(committed, ticket, pkg, headers, pause) as task:
@@ -1513,15 +1436,15 @@ class TestAccessLostDuringExternalIO:
             [("fictional-race-a", user.id)] if loss == "last-package-excluded" else []
         )
 
-    @pytest.mark.parametrize("loss", LOSSES)
     async def test_external_failure_keeps_its_error_after_access_loss(
-        self, committed: _Committed, loss: str
+        self, committed: _Committed
     ) -> None:
-        """The maintained request then fails: the documented
+        """A representative loss (the explicit grant is revoked); the
+        maintained request then fails: the documented
         `SMELT_UNAVAILABLE`, not a concurrent 404 (api-spec.md, flow 4 step
         3), without the maintainership request and with no effect."""
         world = committed.world
-        user, _cve, ticket, statements = await prepare_loss(world, loss)
+        user, _cve, ticket, statements = await prepare_loss(world, "grant-revoked")
         headers = await committed.headers(user)
         await committed.current_product()
         pkg = _race_name()

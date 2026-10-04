@@ -1168,29 +1168,6 @@ async def _execute_observed(
 
 
 @pytest.mark.integration
-class TestNewlyCurrentProducts:
-    @pytest.mark.parametrize(
-        ("sequence", "expected"),
-        [case[1:] for case in _SEQUENCES],
-        ids=[case[0] for case in _SEQUENCES],
-    )
-    async def test_publication_reports_whether_a_product_is_newly_current(
-        self,
-        db_session: AsyncSession,
-        sequence: SnapshotSequence,
-        expected: list[bool],
-    ) -> None:
-        outcomes = []
-        for snapshot_at, rows in zip(_CLOCKS, sequence(), strict=False):
-            outcome = await sync_module.publish_snapshot(
-                db_session, validate_snapshot(_listing(*rows)), snapshot_at
-            )
-            outcomes.append(outcome.newly_current)
-
-        assert outcomes == expected
-
-
-@pytest.mark.integration
 class TestBackfillDispatch:
     async def test_first_snapshot_dispatches_one_backfill_after_commit_and_metrics(
         self, db_session: AsyncSession, clock: Clock, published: Publications

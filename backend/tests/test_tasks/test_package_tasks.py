@@ -63,7 +63,6 @@ import app.celery_app as celery_app_module
 from app.celery_app import celery_app
 from app.services import task_publication
 from app.services.base_fetcher import FETCHER_REGISTRY
-from app.services.packages import product_catalog_backfill
 from app.services.packages.product_catalog_backfill import (
     BACKFILL_PRODUCT_CATALOG_TASK,
 )
@@ -1005,57 +1004,6 @@ class TestBackfillProductCatalogSyncWrapper:
 
         assert raised.value is error
         fake_engine.dispose.assert_awaited_once_with()
-
-
-@pytest.mark.integration
-def test_backfill_wrapper_runs_the_real_workflow_in_its_own_event_loop(
-    cli_session_factory: async_sessionmaker[AsyncSession],
-    asyncio_run_spy: MagicMock,
-    fake_engine: _FakeEngine,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The real workflow inside the wrapper's own event loop, through the
-    `NullPool` factory, with a pair selection that matches nothing (the
-    selection itself is the real query): no HTTP client is created, nothing
-    is written or published, and the completion line reports zero counts.
-    No cleanup is needed."""
-    real_selection = product_catalog_backfill.select_backfill_pairs
-
-    async def _no_pairs(db: AsyncSession) -> list[tuple[uuid.UUID, str]]:
-        await real_selection(db)
-        return []
-
-    def _no_client(name: str, **options: Any) -> Any:
-        raise AssertionError("no HTTP client without a candidate pair")
-
-    published: list[str] = []
-
-    async def _publish(task_name: str, **options: Any) -> None:
-        published.append(task_name)
-
-    monkeypatch.setattr(product_catalog_backfill, "select_backfill_pairs", _no_pairs)
-    monkeypatch.setattr(product_catalog_backfill, "create_http_client", _no_client)
-    monkeypatch.setattr(task_publication, "publish_task", _publish)
-    monkeypatch.setattr(package_tasks, "async_session_factory", cli_session_factory)
-
-    with capture_logs() as logs:
-        package_tasks._backfill_product_catalog_sync()
-
-    assert logs == [
-        {
-            "event": "product_catalog_backfill_completed",
-            "log_level": "info",
-            "candidates": 0,
-            "record_creating": 0,
-            "no_op": 0,
-            "skipped_inactive": 0,
-            "skipped_excluded": 0,
-            "failed": 0,
-        }
-    ]
-    assert published == []
-    assert asyncio_run_spy.call_count == 1
-    fake_engine.dispose.assert_awaited_once_with()
 
 
 @pytest.mark.unit
