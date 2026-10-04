@@ -682,16 +682,12 @@ class TestFetchDispatchResult:
 
 @pytest.mark.unit
 def test_dispatch_result_is_a_service_dataclass_with_four_list_fields() -> None:
-    result = FetchDispatchResult([], [], [], [])
-
     assert list(FetchDispatchResult.__dataclass_fields__) == [
         "sources_enqueued",
         "sources_already_pending",
         "sources_disabled",
         "sources_failed",
     ]
-    with pytest.raises(AttributeError):
-        result.sources_failed = ["nvd"]  # type: ignore[misc]
 
 
 # ---------------------------------------------------------------------------

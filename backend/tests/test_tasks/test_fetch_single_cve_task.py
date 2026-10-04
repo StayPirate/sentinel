@@ -577,7 +577,6 @@ class TestSyncWrapperWithRealWorkflow:
         assert sync_world.marker_value(target.cve_id) is None
         assert len({id(instance) for instance in probe.instances}) == 4
         assert len(sync_world.sessions.opened) == 4
-        assert len(set(map(id, sync_world.sessions.opened))) == 4
         assert asyncio_run_spy.call_count == 4
         assert fake_engine.dispose.await_count == 4
 

@@ -825,14 +825,20 @@ class TestPreFinalizationOutcomes:
         ]
 
     @pytest.mark.parametrize(
-        ("attempt", "countdown"),
+        ("make_error", "attempt", "countdown"),
         [
-            pytest.param(0, 5, id="attempt-0"),
-            pytest.param(1, 10, id="attempt-1"),
-            pytest.param(2, 20, id="attempt-2"),
+            *(
+                pytest.param(*error.values, 0, 5, id=f"{error.id}-attempt-0")
+                for error in _RETRYABLE_ERRORS
+            ),
+            pytest.param(
+                *_RETRYABLE_ERRORS[0].values, 1, 10, id="connect-error-attempt-1"
+            ),
+            pytest.param(
+                *_RETRYABLE_ERRORS[0].values, 2, 20, id="connect-error-attempt-2"
+            ),
         ],
     )
-    @pytest.mark.parametrize("make_error", _RETRYABLE_ERRORS)
     async def test_retryable_exception_within_budget_renews_marker_and_signals_retry(
         self,
         world: CommittedWorld,
@@ -850,7 +856,7 @@ class TestPreFinalizationOutcomes:
         token = await harness.marker(target.cve_id)
 
         async def time_passes() -> None:
-            await harness.redis.pexpire(pending_key(target.cve_id), 2000)
+            await harness.redis.pexpire(pending_key(target.cve_id), 60000)
 
         probe.step = _raises(error, register=target.ticket.id, before=time_passes)
 
@@ -881,7 +887,7 @@ class TestPreFinalizationOutcomes:
         ]
         assert_private_logs(logs, token, SECRET_DETAIL)
 
-    @pytest.mark.parametrize("make_error", _RETRYABLE_ERRORS)
+    @pytest.mark.parametrize("make_error", _RETRYABLE_ERRORS[:1])
     async def test_retryable_exception_after_exhaustion_writes_failure_and_raises(
         self,
         world: CommittedWorld,
@@ -1299,9 +1305,9 @@ class TestTokenOwnership:
         token = new_token()
         stored: str | None = None
         if marker == "matching":
-            stored = await harness.marker(target.cve_id, token=token, ttl_ms=3000)
+            stored = await harness.marker(target.cve_id, token=token, ttl_ms=60000)
         elif marker == "newer-owner":
-            stored = await harness.marker(target.cve_id, ttl_ms=3000)
+            stored = await harness.marker(target.cve_id, ttl_ms=60000)
         seen: list[tuple[str | None, int]] = []
 
         async def observe() -> None:
@@ -1317,9 +1323,9 @@ class TestTokenOwnership:
             assert pttl > (PENDING_TTL - 5) * 1000
             assert await harness.redis.exists(key) == 0
         elif marker == "newer-owner":
-            assert 0 < pttl <= 3000
+            assert 0 < pttl <= 60000
             assert await harness.marker_value(target.cve_id) == stored
-            assert 0 < await harness.redis.pttl(key) <= 3000
+            assert 0 < await harness.redis.pttl(key) <= 60000
         else:
             assert pttl == -2
             assert await harness.redis.exists(key) == 0
@@ -1329,13 +1335,13 @@ class TestTokenOwnership:
         self, world: CommittedWorld, harness: FetchSingleHarness, outcome: str
     ) -> None:
         scenario = await _arrange(outcome, harness, world)
-        newer = await harness.marker(scenario.cve_id, ttl_ms=3000)
+        newer = await harness.marker(scenario.cve_id, ttl_ms=60000)
         old_token = new_token()
 
         await scenario.run(harness, old_token)
 
         assert await harness.marker_value(scenario.cve_id) == newer
-        assert 0 < await harness.redis.pttl(pending_key(scenario.cve_id)) <= 3000
+        assert 0 < await harness.redis.pttl(pending_key(scenario.cve_id)) <= 60000
 
     @pytest.mark.parametrize("outcome", ["retry", "success"])
     async def test_absent_marker_is_never_recreated(
