@@ -1147,9 +1147,8 @@ descendants or maintainers beneath an excluded package without clearing any
 marker. Product catalog backfill selects only included package markers and
 treats a `PackageAlreadyExcludedError` from an exclusion committed after its
 selection as an expected excluded skip (`product-catalog.md`, Product Catalog
-Backfill). The
-concrete caller-context parameter is an implementation choice; the API handler
-does not perform the package lookup.
+Backfill). The concrete caller-context parameter is an implementation choice;
+the API handler does not perform the package lookup.
 
 **Idempotency**: every invocation repeats the maintained-package validation
 request. It requests maintainership only after package-target resolution
