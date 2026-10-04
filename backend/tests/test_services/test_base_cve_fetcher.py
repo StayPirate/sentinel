@@ -5,7 +5,10 @@ See `docs/features/platform/cve-fetcher-infrastructure.md` (BaseCVEFetcher
 Class; `CVEFetchResult`; CVE-ID Format Validation Helper;
 `__init_subclass__` Validation, including Atomic cross-registry
 registration and Test isolation; `CVENotInSource` Signal; CVE Source Type
-Identity and both registry accessors) for the contract under test, and
+Identity and both registry accessors; Class Attributes, the
+`participates_in_catch_up` auto-derivation and rule 5) for the contract
+under test, `docs/features/platform/fetcher-infrastructure.md`
+(Import-time validation, rules 7-8), and
 `docs/features/platform/testing-strategy.md` (CVE Fetcher Infrastructure —
 Atomic registration and isolation).
 
@@ -15,15 +18,16 @@ fixture, which snapshots and restores both `FETCHER_REGISTRY` and
 `_CVE_SOURCE_TYPE_MAP`. Classes are built with `type()` so each failing
 definition is a single statement inside `pytest.raises`.
 
-Out of scope (owned by later work items): the default `catch_up()`, the
-`participates_in_catch_up` auto-derivation and its rule 5,
-`commit_and_dispatch()`, and the isolated status helper.
+Out of scope: `commit_and_dispatch()` and `_isolated_status_commit()`
+(real PostgreSQL, `tests/test_services/test_cve_fetcher_finalization.py`)
+and the default `catch_up()` workflow.
 """
 
 from __future__ import annotations
 
 import dataclasses
 import typing
+import warnings
 from collections.abc import Callable
 from enum import StrEnum
 from types import MappingProxyType
@@ -43,7 +47,12 @@ from app.services.base_cve_fetcher import (
     get_all_cve_source_types,
     get_fetch_single_fetchers,
 )
-from app.services.base_fetcher import FETCHER_REGISTRY, BaseFetcher, FetcherError
+from app.services.base_fetcher import (
+    FETCHER_REGISTRY,
+    BaseFetcher,
+    FetcherError,
+    get_catch_up_fetchers,
+)
 from app.services.cve_ingest import PostIngestTasks, UpsertAction
 
 pytestmark = [pytest.mark.unit, pytest.mark.usefixtures("isolated_fetcher_registries")]
@@ -483,20 +492,182 @@ class TestBaseFetchSingle:
         )
 
 
+async def _custom_catch_up(
+    self: BaseCVEFetcher, ticket_id: str, session: AsyncSession
+) -> None:
+    return None
+
+
 class TestCatchUpParticipation:
-    def test_concrete_cve_fetcher_keeps_inherited_participation_false(
-        self,
-    ) -> None:
-        # The `participates_in_catch_up` auto-derivation from
-        # `supports_fetch_single` is deferred to a later work item; until
-        # then a concrete CVE fetcher inherits BaseFetcher's `False`.
+    def test_base_cve_fetcher_declares_participation_true(self) -> None:
+        assert BaseCVEFetcher.participates_in_catch_up is True
+        assert BaseFetcher.participates_in_catch_up is False
+
+    def test_supports_fetch_single_true_derives_participation_true(self) -> None:
         concrete = _define(
-            "ParticipationFetcher",
+            "DerivedParticipatingFetcher",
             cve_source_type=CVESourceType.NVD,
             fetch_single=_fetch_single_stub,
         )
 
+        assert concrete.supports_fetch_single is True
+        assert concrete.participates_in_catch_up is True
+
+    def test_supports_fetch_single_false_derives_participation_false(self) -> None:
+        concrete = _define(
+            "DerivedNonParticipatingFetcher",
+            cve_source_type=CVESourceType.KEV,
+            supports_fetch_single=False,
+        )
+
         assert concrete.participates_in_catch_up is False
+
+    def test_explicit_true_overrides_derivation_with_custom_catch_up(
+        self,
+    ) -> None:
+        concrete = _define(
+            "ExplicitParticipatingFetcher",
+            cve_source_type=CVESourceType.KEV,
+            supports_fetch_single=False,
+            participates_in_catch_up=True,
+            catch_up=_custom_catch_up,
+        )
+
+        assert concrete.participates_in_catch_up is True
+        assert _CVE_SOURCE_TYPE_MAP[CVESourceType.KEV] is concrete
+        assert FETCHER_REGISTRY[concrete.name] is concrete
+
+    def test_explicit_false_overrides_derivation(self) -> None:
+        concrete = _define(
+            "ExplicitNonParticipatingFetcher",
+            cve_source_type=CVESourceType.NVD,
+            fetch_single=_fetch_single_stub,
+            participates_in_catch_up=False,
+        )
+
+        assert concrete.supports_fetch_single is True
+        assert concrete.participates_in_catch_up is False
+        assert concrete.name not in get_catch_up_fetchers()
+
+    def test_derivation_follows_an_inherited_supports_fetch_single(self) -> None:
+        """The derivation reads the resolved capability, including one
+        inherited from an abstract intermediate class."""
+        intermediate = _define(
+            "CatalogIntermediate", abstract=True, supports_fetch_single=False
+        )
+
+        concrete = _define(
+            "InheritedCatalogFetcher",
+            base=intermediate,
+            cve_source_type=CVESourceType.EPSS,
+        )
+
+        assert concrete.participates_in_catch_up is False
+
+
+class TestCatchUpCapabilityValidation:
+    """Rule 5: catch-up participation without fetch-single support needs a
+    custom `catch_up()`."""
+
+    def test_participation_without_fetch_single_or_override_raises(self) -> None:
+        error = _assert_rejected_atomically(
+            lambda: _define(
+                "UnsupportedCatchUpFetcher",
+                cve_source_type=CVESourceType.KEV,
+                supports_fetch_single=False,
+                participates_in_catch_up=True,
+            ),
+            match="does not override catch_up",
+        )
+
+        assert str(error) == (
+            "UnsupportedCatchUpFetcher sets participates_in_catch_up=True with "
+            "supports_fetch_single=False but does not override catch_up()"
+        )
+
+    def test_participation_without_fetch_single_with_override_registers(
+        self,
+    ) -> None:
+        before_fetchers, before_sources = _snapshot()
+
+        concrete = _define(
+            "CustomCatchUpFetcher",
+            cve_source_type=CVESourceType.KEV,
+            supports_fetch_single=False,
+            participates_in_catch_up=True,
+            catch_up=_custom_catch_up,
+        )
+
+        assert concrete.catch_up is not BaseCVEFetcher.catch_up
+        assert _snapshot() == (
+            {**before_fetchers, concrete.name: concrete},
+            {**before_sources, CVESourceType.KEV: concrete},
+        )
+
+    def test_participating_fetch_single_fetcher_keeps_default_catch_up(
+        self,
+    ) -> None:
+        concrete = _define(
+            "DefaultCatchUpFetcher",
+            cve_source_type=CVESourceType.NVD,
+            fetch_single=_fetch_single_stub,
+        )
+
+        assert concrete.catch_up is BaseCVEFetcher.catch_up
+        assert FETCHER_REGISTRY[concrete.name] is concrete
+
+
+class TestCatchUpRoster:
+    def test_roster_includes_derived_true_and_excludes_derived_false(
+        self,
+    ) -> None:
+        participating = _define(
+            "RosterParticipatingFetcher",
+            cve_source_type=CVESourceType.NVD,
+            fetch_single=_fetch_single_stub,
+        )
+        catalog = _define(
+            "RosterCatalogFetcher",
+            cve_source_type=CVESourceType.KEV,
+            supports_fetch_single=False,
+        )
+
+        roster = get_catch_up_fetchers()
+
+        assert roster[participating.name] is participating
+        assert catalog.name not in roster
+
+
+class TestCatchUpFlagMismatchWarning:
+    """Rule 8 is unchanged: it evaluates the derived participation flag."""
+
+    def test_derived_false_with_catch_up_in_body_warns(self) -> None:
+        with pytest.warns(UserWarning, match="participates_in_catch_up is False"):
+            concrete = _define(
+                "SilentlyExcludedFetcher",
+                cve_source_type=CVESourceType.KEV,
+                supports_fetch_single=False,
+                catch_up=_custom_catch_up,
+            )
+
+        assert concrete.participates_in_catch_up is False
+        assert FETCHER_REGISTRY[concrete.name] is concrete
+        assert concrete.name not in get_catch_up_fetchers()
+
+    def test_participating_fetcher_with_custom_catch_up_does_not_warn(
+        self,
+    ) -> None:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            concrete = _define(
+                "ParticipatingCustomFetcher",
+                cve_source_type=CVESourceType.NVD,
+                fetch_single=_fetch_single_stub,
+                catch_up=_custom_catch_up,
+            )
+
+        assert concrete.participates_in_catch_up is True
+        assert get_catch_up_fetchers()[concrete.name] is concrete
 
 
 # ---------------------------------------------------------------------------
@@ -545,3 +716,17 @@ class TestCVEFetchResult:
         assert with_handoff.post_ingest is handoff
         assert without_handoff.action is UpsertAction.UNCHANGED
         assert without_handoff.post_ingest is None
+
+    def test_fresh_token_is_not_consumed_and_marker_is_not_a_field(self) -> None:
+        """The one-shot marker is private state: a fresh token is not
+        consumed, and the marker is neither a dataclass field nor part of
+        the token's representation or field projection."""
+        result = CVEFetchResult(action=UpsertAction.UPDATED, post_ingest=None)
+
+        assert result._consumed is False
+        assert len(dataclasses.fields(CVEFetchResult)) == 2
+        assert dataclasses.asdict(result) == {
+            "action": UpsertAction.UPDATED,
+            "post_ingest": None,
+        }
+        assert "_consumed" not in repr(result)

@@ -30,11 +30,16 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping
 
+type JSONValue = (
+    str | int | float | bool | list[JSONValue] | dict[str, JSONValue] | None
+)
+"""A detached JSON-compatible task argument value."""
+
 
 async def publish_task(
     task_name: str,
     *,
-    kwargs: Mapping[str, str],
+    kwargs: Mapping[str, JSONValue],
     task_id: str | None = None,
     queue: str | None = None,
 ) -> None:
@@ -43,7 +48,9 @@ async def publish_task(
     Category C (external broker I/O only; no database or Redis key access).
 
     Q1: `task_name` is the explicit registered task name; `kwargs` holds
-    only detached primitive (string) arguments. `task_id` is an optional
+    only detached JSON-compatible arguments (strings, numbers, booleans,
+    `None`, and lists or string-keyed dicts of these) — never an ORM
+    instance, session, or dataclass. `task_id` is an optional
     caller-allocated Celery task ID; `queue` an optional explicit queue.
 
     Q3: submits exactly one message through `send_task()` without waiting
