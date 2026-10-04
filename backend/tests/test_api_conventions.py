@@ -43,6 +43,7 @@ from fastapi.routing import APIRoute
 from pydantic import BaseModel, Field, Strict
 from pydantic.fields import FieldInfo
 
+from app.api.dependencies import drain_ticket_convergence_after_commit
 from app.database import get_db
 from app.main import app
 
@@ -448,3 +449,32 @@ class TestTransactionDependencyScope:
                         "independent transaction for the same request"
                     )
         assert not violations, "\n".join(violations)
+
+
+@pytest.mark.unit
+class TestTicketConvergenceDrain:
+    """Every route that uses the API transaction session also drains its
+    Ticket convergence effects after commit.
+
+    See `docs/features/tickets/ticket-service.md` (Ticket Convergence >
+    Publication policies): the API transaction dependency is an automatic
+    transaction owner, so every request transaction that can register a
+    convergence effect must detach and attempt it after `get_db()`
+    commits. The drain is mounted on every `/api/v1` router in
+    `app/main.py`; this test guards against a router added without it.
+    """
+
+    def test_every_get_db_route_has_the_drain_dependency(self) -> None:
+        missing = [
+            info.path
+            for info in _api_routes()
+            if any(n.call is get_db for n in _iter_dependants(info.dependant))
+            and not any(
+                n.call is drain_ticket_convergence_after_commit
+                for n in _iter_dependants(info.dependant)
+            )
+        ]
+        assert not missing, (
+            "Routes using 'get_db' without 'drain_ticket_convergence_after_commit': "
+            f"{missing}"
+        )

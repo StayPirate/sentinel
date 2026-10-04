@@ -9,7 +9,8 @@ CVE for the later association (`associate_cve`), Assign Ticket
 (`docs/features/tickets/ticket-priority.md`, `set_priority_override()`),
 Ignore Ticket (`ignore_ticket`), Mark Ticket as Duplicate
 (`mark_as_duplicate`), Reopen Ticket (`reopen_from_ignored`), Revert
-Duplicate Status (`revert_duplicate`), Set Confidentiality
+Duplicate Status (`revert_duplicate`), Rerun Ticket Convergence
+(`dispatch_ticket_convergence`), Set Confidentiality
 (`set_confidentiality`), Set Coordinated Release Date
 (`set_coordinated_release_date`), Access Grant Management
 (`grant_access`, `revoke_access`, `list_access_grants`), and Set Severity
@@ -33,6 +34,7 @@ from datetime import UTC, datetime
 from typing import Annotated, Final
 
 from fastapi import APIRouter, Depends, Path, Query, Response, status
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.api.dependencies import (
     AuthenticatedPrincipal,
@@ -43,6 +45,7 @@ from app.api.dependencies import (
     cve_invalid_format_error,
     insufficient_permission_error,
     require_accessible_ticket,
+    require_any_capability,
     require_capability,
     ticket_cve_already_set_error,
     ticket_cve_conflict_error,
@@ -70,9 +73,9 @@ from app.core.exceptions import (
     TicketNotMutableError,
     UserNotFoundError,
 )
-from app.core.identifiers import is_valid_cve_id
+from app.core.identifiers import format_ticket_id, is_valid_cve_id
 from app.core.permissions import get_capabilities
-from app.database import DatabaseSession
+from app.database import DatabaseSession, async_session_factory
 from app.schemas.common import PaginationMeta, UserReference
 from app.schemas.cve import (
     CVESummary,
@@ -86,6 +89,8 @@ from app.schemas.ticket import (
     TicketAssigneeUpdateRequest,
     TicketAssociateCVERequest,
     TicketConfidentialityUpdateRequest,
+    TicketConvergenceDispatchDataResponse,
+    TicketConvergenceDispatchResponse,
     TicketCoordinatedReleaseDateUpdateRequest,
     TicketCreateRequest,
     TicketDetail,
@@ -100,6 +105,7 @@ from app.schemas.ticket import (
 from app.services import ticket_mutations, ticket_service
 from app.services.cve_service import CVEIdFormatError
 from app.services.ticket_service import (
+    TICKET_CONVERGENCE_DISPATCH_FAILED_MESSAGE,
     AccessGrantAction,
     AssigneeInactiveError,
     AssigneeNotVAError,
@@ -107,6 +113,7 @@ from app.services.ticket_service import (
     DuplicateTargetIsDuplicatedError,
     ResolvedTicket,
     SelfDuplicateError,
+    TicketConvergenceDispatchError,
     TicketCreationSource,
     TicketCVEAlreadySetError,
     TicketCVEConflictError,
@@ -1257,6 +1264,115 @@ async def revert_ticket_duplicate(
         db, ticket_id=ticket.id, evaluation_date=evaluation_date
     )
     return TicketDetailResponse(data=serialize_ticket_detail(detail))
+
+
+def get_ticket_convergence_session_factory() -> async_sessionmaker[AsyncSession]:
+    """Provide the session factory of `dispatch_ticket_convergence()`.
+
+    Performs no I/O — returns the production `async_session_factory`.
+    The dispatch is a service-owned orchestration boundary
+    (`docs/features/tickets/ticket-service.md`,
+    `dispatch_ticket_convergence()`): it locks and validates the Ticket in
+    its own short transaction, commits and closes it, and only then
+    publishes, with no lock held (`docs/conventions.md`, Caller-Owned
+    Service Transactions; Transaction Hygiene Rules). The request-scoped
+    `DatabaseSession` serves only the authentication and preliminary
+    SNTL resolution and holds no row lock. Overridable via
+    `app.dependency_overrides` so tests can point it at the test engine,
+    mirroring `get_fetcher_trigger_session_factory`.
+    """
+    return async_session_factory
+
+
+def _celery_unavailable_error() -> AppError:
+    return AppError(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        code=ErrorCode.CELERY_UNAVAILABLE,
+        detail=TICKET_CONVERGENCE_DISPATCH_FAILED_MESSAGE,
+    )
+
+
+@router.post(
+    "/tickets/{ticket_id}/rerun-reactivation",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=TicketConvergenceDispatchDataResponse,
+    summary="Rerun Ticket Convergence",
+    description=(
+        "Publishes the complete asynchronous Ticket convergence workflow "
+        "again: re-resolution of every persisted package marker (including "
+        "excluded ones, without restoring them), then the per-Ticket "
+        "catch-up of every participating fetcher. A recovery action for a "
+        "failed or lost convergence; it does not change Ticket status "
+        "directly. No request body. The Ticket must be `analysis`, "
+        "`analyzed`, or `resolved`. Returns the transient root task ID, "
+        "which is correlation data only (no status or progress endpoint). "
+        "Repeated requests are accepted and each publishes a complete "
+        "workflow. Requires `triage_ticket` or `manage_fetchers`."
+    ),
+    responses={
+        404: {
+            "model": ErrorResponse,
+            "description": (
+                "`TICKET_NOT_FOUND`: Ticket identifier is malformed, does not "
+                "exist, or identifies a Ticket inaccessible to the caller."
+            ),
+        },
+        409: {
+            "model": ErrorResponse,
+            "description": (
+                "`TICKET_INVALID_TRANSITION`: the Ticket is `new`, `ignored`, "
+                "or `duplicated`."
+            ),
+        },
+        503: {
+            "model": ErrorResponse,
+            "description": (
+                "`CELERY_UNAVAILABLE`: the task broker did not confirm the "
+                "publication; the detail is fixed. The task may still run."
+            ),
+        },
+    },
+)
+async def rerun_ticket_convergence(
+    ticket_id: TicketIdPath,
+    principal: Annotated[
+        AuthenticatedPrincipal,
+        Depends(
+            require_any_capability(Capability.TRIAGE_TICKET, Capability.MANAGE_FETCHERS)
+        ),
+    ],
+    caller: AuthenticatedTicketCaller,
+    ticket: Annotated[ResolvedTicket, Depends(require_accessible_ticket)],
+    session_factory: Annotated[
+        async_sessionmaker[AsyncSession],
+        Depends(get_ticket_convergence_session_factory),
+    ],
+) -> TicketConvergenceDispatchDataResponse:
+    """Rerun Ticket Convergence — see `docs/features/tickets/tickets.md`.
+
+    Authorization follows `docs/api-spec.md` (Authorization Chain
+    Evaluation Order, alternative capabilities): authentication, then
+    `triage_ticket` OR `manage_fetchers` before any Ticket lookup, then
+    the delegated preliminary SNTL resolution. `dispatch_ticket_convergence()`
+    revalidates accessibility and status under the Ticket lock, commits
+    and closes its transaction, and publishes with no lock held. Registers
+    no post-commit callback and creates no audit event.
+    """
+    try:
+        task_id = await ticket_service.dispatch_ticket_convergence(
+            ticket_id=ticket.id, caller=caller, session_factory=session_factory
+        )
+    except TicketNotFoundError:
+        raise ticket_not_found_error() from None
+    except InvalidTransitionError:
+        raise _invalid_transition_error() from None
+    except TicketConvergenceDispatchError:
+        raise _celery_unavailable_error() from None
+    return TicketConvergenceDispatchDataResponse(
+        data=TicketConvergenceDispatchResponse(
+            ticket_id=format_ticket_id(ticket.sequence_id), task_id=task_id
+        )
+    )
 
 
 def _ticket_not_confidential_error() -> AppError:

@@ -14,6 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.api import health
+from app.api.dependencies import drain_ticket_convergence_after_commit
 from app.api.v1 import (
     api_keys,
     auth,
@@ -158,16 +159,25 @@ async def _unhandled_exception_handler(
 
 
 app.include_router(health.router)
-app.include_router(auth.router)
-app.include_router(api_keys.router)
-app.include_router(users.router)
-app.include_router(identity_audit.router)
-app.include_router(settings_api.router)
-app.include_router(fetchers.router)
-app.include_router(ticket_audit.router)
-app.include_router(tickets.router)
-app.include_router(ticket_packages.router)
-app.include_router(ticket_references.router)
-app.include_router(cves.router)
-app.include_router(products.router)
-app.include_router(maintainer.router)
+
+# Every `/api/v1` route drains the Ticket convergence effects registered in
+# its request transaction after `get_db()` commits
+# (`drain_ticket_convergence_after_commit`; enforced for every route using
+# `get_db` by `tests/test_api_conventions.py`).
+_API_V1_DEPENDENCIES = [Depends(drain_ticket_convergence_after_commit)]
+for _router in (
+    auth.router,
+    api_keys.router,
+    users.router,
+    identity_audit.router,
+    settings_api.router,
+    fetchers.router,
+    ticket_audit.router,
+    tickets.router,
+    ticket_packages.router,
+    ticket_references.router,
+    cves.router,
+    products.router,
+    maintainer.router,
+):
+    app.include_router(_router, dependencies=_API_V1_DEPENDENCIES)

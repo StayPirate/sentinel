@@ -17,12 +17,15 @@ compose the package-owned eligibility convergence with one final
 reconciliation, and the Confidentiality Management operations
 `set_confidentiality()`, `set_coordinated_release_date()`, and the
 explicit access grants (`grant_access()`, `revoke_access()`,
-`list_access_grants()`); the remaining operations are added by their
-owning work items.
+`list_access_grants()`), and the explicit operator Ticket convergence
+dispatch (`dispatch_ticket_convergence()`); the remaining operations are
+added by their owning work items.
 
 Every operation accepts the caller's `AsyncSession` and never commits or
 rolls back; database exceptions propagate unchanged (Transaction
-ownership).
+ownership). The one exception is the orchestration boundary
+`dispatch_ticket_convergence()`, which owns one short session from a
+factory and publishes only after its commit.
 
 Ticket detail. Both modes run one SQL statement, and therefore observe
 one PostgreSQL snapshot, that selects the Ticket root, its resolved
@@ -57,6 +60,8 @@ from enum import StrEnum
 from typing import Any, Final
 from uuid import UUID
 
+import structlog
+from celery.exceptions import OperationalError  # kombu.exceptions.OperationalError
 from sqlalchemy import (
     ColumnElement,
     DateTime,
@@ -77,7 +82,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import aggregate_order_by
 from sqlalchemy.engine import Row
 from sqlalchemy.exc import DBAPIError
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import aliased, joinedload, selectinload
 
 from app.core.enums import (
@@ -123,6 +128,11 @@ from app.services.ticket_audit_log import (
     MANUAL_TICKET_CREATED_COMMENT,
     TicketAuditLog,
 )
+from app.services.ticket_convergence_publication import (
+    BROKER_OPERATIONAL_ERROR,
+    allocate_task_id,
+    publish_ticket_convergence,
+)
 from app.services.ticket_deadline_expressions import (
     TicketDueDateExpressions,
     ticket_due_date_expressions,
@@ -146,6 +156,8 @@ from app.services.ticket_severity import (
 )
 from app.services.ticket_visibility import TicketCaller, ticket_visibility_condition
 from app.services.user_service import user_identifier_condition
+
+logger = structlog.get_logger(__name__)
 
 _CODE_POINT_COLLATION: Final = "C"
 
@@ -2237,6 +2249,95 @@ async def revert_duplicate(
         evaluation_date=evaluation_date,
     )
     return ticket
+
+
+# ---------------------------------------------------------------------------
+# Explicit Ticket convergence dispatch (ticket-service.md, Ticket Convergence,
+# `dispatch_ticket_convergence()`; tickets.md, Rerun Ticket Convergence)
+# ---------------------------------------------------------------------------
+
+TICKET_CONVERGENCE_DISPATCH_FAILED_MESSAGE: Final = (
+    "Ticket convergence could not be dispatched to the task broker"
+)
+"""Fixed message of `TicketConvergenceDispatchError` and the 503 detail."""
+
+_CONVERGENCE_DISPATCH_STATUSES: Final = frozenset(
+    {TicketStatus.ANALYSIS, TicketStatus.ANALYZED, TicketStatus.RESOLVED}
+)
+
+
+class TicketConvergenceDispatchError(TicketServiceError):
+    """The explicit rerun's initial publication raised the broker
+    operational error (`acceptance_unconfirmed`). Maps to
+    `503 CELERY_UNAVAILABLE`. The message is fixed and never contains the
+    broker exception text."""
+
+    def __init__(self) -> None:
+        super().__init__(TICKET_CONVERGENCE_DISPATCH_FAILED_MESSAGE)
+
+
+async def dispatch_ticket_convergence(
+    *,
+    ticket_id: UUID,
+    caller: TicketCaller,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> str:
+    """Publish one complete Ticket convergence workflow on operator request.
+
+    Service-owned orchestration boundary of
+    `POST /api/v1/tickets/{ticket_id}/rerun-reactivation`; publication is
+    the requested operation, so it does not use the automatic drain.
+
+    Q1: `ticket_id` is the internal Ticket UUID (the API resolves the
+    public `SNTL-{n}` locator first); `caller` is the request-resolved
+    caller information for the canonical visibility predicate;
+    `session_factory` opens the one short preparation session.
+
+    Q2: the API has authenticated the caller and verified `triage_ticket`
+    or `manage_fetchers` before any lookup. The preparation transaction
+    locks the Ticket `FOR UPDATE` as its first database operation and
+    performs no I/O while holding it. `ensure_ticket_operable()` is not
+    called.
+
+    Q3: (1) locks the Ticket, revalidates accessibility from
+    locked-current state, then requires status `Analysis`, `Analyzed`, or
+    `Resolved`; (2) allocates the transient root task ID; (3) commits and
+    closes the session, releasing the lock; (4) performs one initial
+    publication attempt with no lock held. Registers no effect or
+    post-commit callback and creates no Ticket mutation, audit event,
+    durable run, progress resource, or compensation row.
+
+    Q4: on `submitted`, returns the allocated root task ID.
+
+    Q5: not idempotent by design: every accepted call publishes another
+    complete workflow; concurrent calls serialize only the locked check.
+
+    Q6: `TicketNotFoundError` (missing or inaccessible) and
+    `InvalidTransitionError` (`New`, `Ignored`, `Duplicated`) before any
+    publication. A commit exception or ambiguous commit outcome propagates
+    with no publication. On `acceptance_unconfirmed`, emits exactly one
+    sanitized `ticket_convergence_dispatch_failed` ERROR (`ticket_id`,
+    `cause`, and the bound `request_id`) and raises
+    `TicketConvergenceDispatchError`. Every non-operational publication
+    exception propagates unchanged.
+    """
+    async with session_factory() as session:
+        ticket = await lock_accessible_ticket(session, ticket_id, caller)
+        if TicketStatus(ticket.status) not in _CONVERGENCE_DISPATCH_STATUSES:
+            raise InvalidTransitionError()
+        task_id = allocate_task_id()
+        await session.commit()
+
+    try:
+        await publish_ticket_convergence(ticket_id=ticket_id, task_id=task_id)
+    except OperationalError:
+        logger.error(
+            "ticket_convergence_dispatch_failed",
+            ticket_id=str(ticket_id),
+            cause=BROKER_OPERATIONAL_ERROR,
+        )
+        raise TicketConvergenceDispatchError() from None
+    return task_id
 
 
 # ---------------------------------------------------------------------------

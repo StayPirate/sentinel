@@ -5,10 +5,16 @@ Owning specifications:
 
 - docs/features/packages/product-lifecycle-transitions.md (Sub-task:
   `re_evaluate_product_eligibility`: argument validation, steps 1-5, no
-  automatic Celery retry). The post-commit convergence drain of step 3 and
-  the drain sentence of step 4 are not implemented yet: a registered
-  effect is discarded when its Ticket transaction ends and nothing is
-  published.
+  automatic Celery retry), including the post-commit Ticket convergence
+  drain of step 3 and the drain sentence of step 4.
+- docs/features/tickets/ticket-service.md (Ticket Convergence >
+  Publication policies; Publication failure logging) and
+  docs/features/platform/testing-strategy.md (Ticket Convergence
+  Publication Handoff) for the Product/threshold owner: publication after
+  each Ticket's commit and close and before the next Ticket, broker
+  operational absorption with unchanged counts, non-operational drain
+  exceptions as task failures, and no attempt after a commit or pre-commit
+  failure. The broker call `task_publication.publish_task` is substituted.
 - docs/features/platform/fetcher-infrastructure.md (Celery Integration,
   Result handling: a non-fetcher sub-operation creates no `FetcherRun`).
 - docs/features/platform/testing-strategy.md (Concurrency Testing:
@@ -40,10 +46,17 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable, MutableMapping
-from dataclasses import dataclass
+from collections.abc import (
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Mapping,
+    MutableMapping,
+    Sequence,
+)
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
-from typing import Any, cast
+from typing import Any, Final, cast
 from unittest.mock import Mock
 
 import pytest
@@ -81,6 +94,10 @@ from app.services.packages.product_eligibility_recalculation import (
     parse_recalculation_arguments,
     re_evaluate_product_eligibility,
     select_candidate_ticket_ids,
+)
+from app.services.ticket_convergence_publication import (
+    PUBLICATION_FAILED_EVENT,
+    RUN_TICKET_CONVERGENCE_TASK,
 )
 from app.services.ticket_convergence_registry import (
     TicketConvergenceEffect,
@@ -595,12 +612,14 @@ async def _committed_reasons(world: CommittedWorld, ticket: Ticket) -> list[Any]
 class _RecordingFactory:
     """Session factory passed to the workflow: delegates to the real
     factory, records every session it opens (index 0 is the candidate
-    selection, then one per Ticket), and optionally makes the commit of
-    one session fail."""
+    selection, then one per Ticket) and, in `closed`, every completed
+    `close()` of one, and optionally makes the commit of one session
+    fail."""
 
     def __init__(self, factory: async_sessionmaker[AsyncSession]) -> None:
         self._factory = factory
         self.sessions: list[AsyncSession] = []
+        self.closed: list[AsyncSession] = []
         self.failing_commit: tuple[int, BaseException] | None = None
 
     def __call__(self) -> AsyncSession:
@@ -613,6 +632,13 @@ class _RecordingFactory:
                     raise error
 
                 event.listen(session.sync_session, "before_commit", _fail)
+        close = session.close
+
+        async def _recording_close() -> None:
+            await close()
+            self.closed.append(session)
+
+        session.close = _recording_close  # type: ignore[method-assign]
         self.sessions.append(session)
         return session
 
@@ -684,6 +710,61 @@ class _ServiceSpy:
 @pytest.fixture
 def service(monkeypatch: pytest.MonkeyPatch) -> _ServiceSpy:
     return _ServiceSpy(monkeypatch)
+
+
+@dataclass
+class _Publish:
+    """Substitute for `task_publication.publish_task` recording each call.
+
+    `on_call` runs inside the publication attempt, before `error` (if
+    set) is raised."""
+
+    error: BaseException | None = None
+    calls: list[dict[str, Any]] = field(default_factory=list)
+    on_call: Callable[[dict[str, Any]], Awaitable[None]] | None = None
+
+    async def __call__(self, task_name: str, **options: Any) -> None:
+        call = {"task_name": task_name, **options}
+        self.calls.append(call)
+        if self.on_call is not None:
+            await self.on_call(call)
+        if self.error is not None:
+            raise self.error
+
+
+@pytest.fixture
+def publication(monkeypatch: pytest.MonkeyPatch) -> _Publish:
+    """Substitute the broker publication call of the convergence drain."""
+    recorder = _Publish()
+    monkeypatch.setattr(task_publication, "publish_task", recorder)
+    return recorder
+
+
+def _published(calls: Sequence[Mapping[str, Any]]) -> list[uuid.UUID]:
+    """The Ticket UUIDs of the recorded publications, in order, after
+    checking that each is one root Ticket convergence task with only the
+    Ticket ID argument and an allocated UUID task ID."""
+    published = []
+    for call in calls:
+        assert call.keys() == {"task_name", "kwargs", "task_id"}
+        assert call["task_name"] == RUN_TICKET_CONVERGENCE_TASK
+        assert call["kwargs"].keys() == {"ticket_id"}
+        assert str(uuid.UUID(call["task_id"])) == call["task_id"]
+        published.append(uuid.UUID(call["kwargs"]["ticket_id"]))
+    return published
+
+
+BROKER_FAILURE: Final = (
+    "redis://sentinel:fictional-secret@broker.example.test:6379/1 unreachable"
+)
+"""Fictional broker error text with credentials; never logged."""
+
+_PUBLICATION_OUTCOMES = [
+    pytest.param(None, id="submitted"),
+    pytest.param(
+        lambda: KombuOperationalError(BROKER_FAILURE), id="acceptance-unconfirmed"
+    ),
+]
 
 
 async def _three_changing_tickets(
@@ -886,6 +967,7 @@ class TestWorkflowFailures:
         world: CommittedWorld,
         sessions: _RecordingFactory,
         service: _ServiceSpy,
+        publication: _Publish,
     ) -> None:
         """The middle Ticket fails after its writes were flushed: only it is
         rolled back, one WARNING carries exactly the Ticket ID, Product ID,
@@ -916,6 +998,7 @@ class TestWorkflowFailures:
             _completed(product.id, "threshold", expected),
         ]
         assert "fictional secret detail" not in repr(logs)
+        assert publication.calls == []
         assert await _committed(world, first) == CHANGED_ONCE
         assert await _committed(world, middle) == UNCHANGED
         assert await _committed(world, last) == CHANGED_ONCE
@@ -960,6 +1043,7 @@ class TestWorkflowFailures:
         world: CommittedWorld,
         sessions: _RecordingFactory,
         service: _ServiceSpy,
+        publication: _Publish,
     ) -> None:
         """A commit exception of the middle Ticket terminates the run: it
         is neither logged nor counted as an isolated failure, the later
@@ -978,6 +1062,7 @@ class TestWorkflowFailures:
         assert service.ticket_ids == [first.id, middle.id]
         assert service.results[middle.id].changed == 1
         assert logs == []
+        assert publication.calls == []
         assert await _committed(world, first) == CHANGED_ONCE
         assert await _committed(world, middle) == UNCHANGED
         assert await _committed(world, last) == UNCHANGED
@@ -1044,34 +1129,97 @@ class TestWorkflowFailures:
 
 
 # ---------------------------------------------------------------------------
-# Workflow: Ticket convergence (Sub-task step 3; drain deferred)
+# Workflow: Ticket convergence drain (Sub-task steps 3-4)
 # ---------------------------------------------------------------------------
+
+
+REGRESSED = _Committed(
+    TicketStatus.ANALYSIS,
+    [(True, False)],
+    [CHANGED, ("status_change", "Resolved", "Analysis")],
+)
+"""A `Resolved` Ticket without severity whose `AFFECTED` occurrence
+became eligible: regressed to `Analysis` (registers a convergence effect)."""
+
+NOT_REGRESSED = _Committed(TicketStatus.RESOLVED, [(False, False)], [])
+
+
+async def _regressing(world: CommittedWorld, product: Product, actor: User) -> Ticket:
+    ticket = await _ticket(
+        world, status=TicketStatus.RESOLVED, assignee=actor, severity=None
+    )
+    await _occurrences(world, ticket, product, False, status=PackageStatus.AFFECTED)
+    return ticket
+
+
+async def _regression_between(
+    world: CommittedWorld, product: Product
+) -> tuple[Ticket, Ticket, Ticket]:
+    """Three candidates in Ticket ID order: a changing Analysis Ticket, a
+    `Resolved` regression (the only one that registers an effect), and a
+    later changing Analysis Ticket."""
+    actor = await world.user(role=Role.VULNERABILITY_ANALYST)
+    first = await _ticket(world, assignee=actor)
+    regressing = await _regressing(world, product, actor)
+    last = await _ticket(world, assignee=actor)
+    await _occurrences(world, first, product, False)
+    await _occurrences(world, last, product, False)
+    ordered = [first.id, regressing.id, last.id]
+    assert ordered == sorted(ordered)
+    return first, regressing, last
+
+
+async def _locked_committed(world: CommittedWorld, ticket_id: uuid.UUID) -> _Committed:
+    """Like `_committed()`, but the independent probe first takes the
+    Ticket row lock with `NOWAIT`: it raises while any other transaction
+    still holds that lock."""
+    probe = await world.open_session()
+    await probe.execute(
+        select(Ticket.id).where(Ticket.id == ticket_id).with_for_update(nowait=True)
+    )
+    committed = _Committed(
+        (await ticket_state(probe, ticket_id))[0],
+        await eligibility(probe, ticket_id),
+        _changes(await ticket_events_by_id(probe, ticket_id)),
+    )
+    await probe.rollback()
+    return committed
 
 
 @pytest.mark.integration
 class TestWorkflowConvergence:
-    async def test_resolved_regression_effect_is_discarded_unpublished(
+    async def test_resolved_regression_is_published_after_commit_and_close(
         self,
         world: CommittedWorld,
         sessions: _RecordingFactory,
         service: _ServiceSpy,
+        publication: _Publish,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """A `Resolved` Ticket without severity whose `AFFECTED` occurrence
-        becomes eligible regresses to `Analysis` and registers one
-        convergence effect in its transaction. Until the drain exists, the
-        effect is discarded when that transaction ends and nothing is
-        published through Celery."""
+        """The regression registers one convergence effect in its
+        transaction; after the commit and close, the drain detaches it and
+        publishes exactly one root task with the Ticket UUID through the
+        substituted broker call (no direct Celery call). Inside the
+        attempt, an independent session takes the Ticket row lock with
+        `NOWAIT` and reads the committed regression."""
         send_task = Mock(side_effect=AssertionError("must not publish"))
         apply_async = Mock(side_effect=AssertionError("must not publish"))
         monkeypatch.setattr(celery_app, "send_task", send_task)
         monkeypatch.setattr(Task, "apply_async", apply_async)
         actor = await world.user(role=Role.VULNERABILITY_ANALYST)
         product = await _product(world)
-        ticket = await _ticket(
-            world, status=TicketStatus.RESOLVED, assignee=actor, severity=None
-        )
-        await _occurrences(world, ticket, product, False, status=PackageStatus.AFFECTED)
+        ticket = await _regressing(world, product, actor)
+        observed: list[tuple[_Committed, bool]] = []
+
+        async def observe(call: dict[str, Any]) -> None:
+            observed.append(
+                (
+                    await _locked_committed(world, ticket.id),
+                    sessions.sessions[-1] in sessions.closed,
+                )
+            )
+
+        publication.on_call = observe
 
         summary = await re_evaluate_product_eligibility(
             product.id, "threshold", session_factory=sessions.maker()
@@ -1080,13 +1228,173 @@ class TestWorkflowConvergence:
         assert summary == _summary(candidates=1, successful=1, changed_records=1)
         assert service.effects[ticket.id] == (TicketConvergenceEffect(ticket.id),)
         assert pending_ticket_convergence_effects(service.calls[0].session) == ()
+        assert _published(publication.calls) == [ticket.id]
+        assert observed == [(REGRESSED, True)]
         send_task.assert_not_called()
         apply_async.assert_not_called()
-        assert await _committed(world, ticket) == _Committed(
-            TicketStatus.ANALYSIS,
-            [(True, False)],
-            [CHANGED, ("status_change", "Resolved", "Analysis")],
+        assert await _committed(world, ticket) == REGRESSED
+
+    @pytest.mark.parametrize("make_error", _PUBLICATION_OUTCOMES)
+    async def test_publication_precedes_the_next_ticket_and_keeps_counts(
+        self,
+        world: CommittedWorld,
+        sessions: _RecordingFactory,
+        service: _ServiceSpy,
+        publication: _Publish,
+        make_error: Callable[[], BaseException] | None,
+    ) -> None:
+        """Only the regressing Ticket publishes, after its session closed
+        and before the later Ticket's session or service call. `submitted`
+        and `acceptance_unconfirmed` return identical counts and
+        completion log; the broker operational error adds exactly one
+        sanitized ERROR, is absorbed, and the later Ticket commits."""
+        product = await _product(world)
+        first, regressing, last = await _regression_between(world, product)
+        observed: list[tuple[_Committed, bool, list[uuid.UUID], int]] = []
+
+        async def observe(call: dict[str, Any]) -> None:
+            observed.append(
+                (
+                    await _locked_committed(
+                        world, uuid.UUID(call["kwargs"]["ticket_id"])
+                    ),
+                    sessions.sessions[-1] in sessions.closed,
+                    list(service.ticket_ids),
+                    len(sessions.sessions),
+                )
+            )
+
+        publication.on_call = observe
+        publication.error = None if make_error is None else make_error()
+
+        with capture_logs() as logs:
+            summary = await re_evaluate_product_eligibility(
+                product.id, "threshold", session_factory=sessions.maker()
+            )
+
+        expected = _summary(candidates=3, successful=3, changed_records=3)
+        assert summary == expected
+        assert _published(publication.calls) == [regressing.id]
+        assert observed == [(REGRESSED, True, [first.id, regressing.id], 3)]
+        assert service.ticket_ids == [first.id, regressing.id, last.id]
+        failed = (
+            []
+            if make_error is None
+            else [
+                {
+                    "event": PUBLICATION_FAILED_EVENT,
+                    "log_level": "error",
+                    "ticket_id": str(regressing.id),
+                    "cause": "broker_operational_error",
+                }
+            ]
         )
+        assert logs == [*failed, _completed(product.id, "threshold", expected)]
+        assert "fictional-secret" not in repr(logs)
+        assert "broker.example.test" not in repr(logs)
+        assert await _committed(world, first) == CHANGED_ONCE
+        assert await _committed(world, regressing) == REGRESSED
+        assert await _committed(world, last) == CHANGED_ONCE
+
+    @pytest.mark.parametrize(
+        "make_error",
+        [
+            pytest.param(
+                lambda: RuntimeError("fictional programming error"),
+                id="programming-error",
+            ),
+            pytest.param(SoftTimeLimitExceeded, id="soft-time-limit"),
+            pytest.param(asyncio.CancelledError, id="cancelled"),
+        ],
+    )
+    async def test_non_operational_drain_exception_is_a_task_failure(
+        self,
+        world: CommittedWorld,
+        sessions: _RecordingFactory,
+        service: _ServiceSpy,
+        publication: _Publish,
+        make_error: Callable[[], BaseException],
+    ) -> None:
+        """The exception propagates after the regressing Ticket's commit:
+        that Ticket and its audit events stay committed, it is not logged
+        as an isolated failure, no publication-failure event or completion
+        log is emitted, and the later Ticket is untouched."""
+        product = await _product(world)
+        first, regressing, last = await _regression_between(world, product)
+        error = make_error()
+        publication.error = error
+
+        with capture_logs() as logs, pytest.raises(type(error)) as exc_info:
+            await re_evaluate_product_eligibility(
+                product.id, "threshold", session_factory=sessions.maker()
+            )
+
+        assert exc_info.value is error
+        assert _published(publication.calls) == [regressing.id]
+        assert service.ticket_ids == [first.id, regressing.id]
+        assert len(sessions.sessions) == 3
+        assert logs == []
+        assert await _committed(world, first) == CHANGED_ONCE
+        assert await _committed(world, regressing) == REGRESSED
+        assert await _committed(world, last) == UNCHANGED
+
+    async def test_commit_failure_of_a_regression_publishes_nothing(
+        self,
+        world: CommittedWorld,
+        sessions: _RecordingFactory,
+        service: _ServiceSpy,
+        publication: _Publish,
+    ) -> None:
+        """The regression registered its effect, but its commit fails: the
+        exception propagates with zero publication attempts."""
+        product = await _product(world)
+        first, regressing, last = await _regression_between(world, product)
+        error = OperationalError("COMMIT", None, Exception("fictional reset"))
+        sessions.failing_commit = (2, error)
+
+        with capture_logs() as logs, pytest.raises(OperationalError) as exc_info:
+            await re_evaluate_product_eligibility(
+                product.id, "threshold", session_factory=sessions.maker()
+            )
+
+        assert exc_info.value is error
+        assert service.effects[regressing.id] == (
+            TicketConvergenceEffect(regressing.id),
+        )
+        assert publication.calls == []
+        assert service.ticket_ids == [first.id, regressing.id]
+        assert logs == []
+        assert await _committed(world, regressing) == NOT_REGRESSED
+        assert await _committed(world, last) == UNCHANGED
+
+    async def test_pre_commit_failure_of_a_regression_publishes_nothing(
+        self,
+        world: CommittedWorld,
+        sessions: _RecordingFactory,
+        service: _ServiceSpy,
+        publication: _Publish,
+    ) -> None:
+        """The regression fails after registering its effect: the rolled
+        back Ticket publishes nothing, is an isolated failure, and the
+        later Ticket commits."""
+        product = await _product(world)
+        first, regressing, last = await _regression_between(world, product)
+        service.fail_after[regressing.id] = RuntimeError("example failure")
+
+        summary = await re_evaluate_product_eligibility(
+            product.id, "threshold", session_factory=sessions.maker()
+        )
+
+        assert summary == _summary(
+            candidates=3, successful=2, changed_records=2, failed=1
+        )
+        assert service.effects[regressing.id] == (
+            TicketConvergenceEffect(regressing.id),
+        )
+        assert publication.calls == []
+        assert await _committed(world, first) == CHANGED_ONCE
+        assert await _committed(world, regressing) == NOT_REGRESSED
+        assert await _committed(world, last) == CHANGED_ONCE
 
 
 # ---------------------------------------------------------------------------

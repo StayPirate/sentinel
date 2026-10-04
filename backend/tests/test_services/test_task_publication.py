@@ -98,6 +98,47 @@ class TestPublishTask:
             )
         ]
 
+    async def test_task_id_and_queue_are_passed_only_when_given(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Issue #784 (D3): the optional caller-allocated task ID and
+        explicit queue reach `send_task()`; an omitted queue keeps the
+        default route."""
+        recorder = _SendTaskRecorder()
+        monkeypatch.setattr(celery_app, "send_task", recorder)
+
+        await publish_task(
+            "example_registered_task",
+            kwargs={"ticket_id": "example-id"},
+            task_id="example-task-id",
+            queue="git",
+        )
+        await publish_task(
+            "example_registered_task",
+            kwargs={"ticket_id": "example-id"},
+            task_id="other-task-id",
+        )
+
+        assert recorder.calls == [
+            (
+                ("example_registered_task",),
+                {
+                    "kwargs": {"ticket_id": "example-id"},
+                    "ignore_result": True,
+                    "task_id": "example-task-id",
+                    "queue": "git",
+                },
+            ),
+            (
+                ("example_registered_task",),
+                {
+                    "kwargs": {"ticket_id": "example-id"},
+                    "ignore_result": True,
+                    "task_id": "other-task-id",
+                },
+            ),
+        ]
+
     async def test_kwargs_are_a_detached_plain_dict_copy(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

@@ -3,18 +3,17 @@
 Owning specifications:
 
 - docs/features/tickets/ticket-mutations.md (Transaction-Local Ticket
-  Convergence Registration, steps 1-3: registration, deduplication and
-  order, discard).
+  Convergence Registration, steps 1-5: registration, deduplication and
+  order, discard, detach and consume, interruption gap).
 - docs/features/platform/testing-strategy.md (Ticket Convergence
   Publication Handoff > Transaction-local lifecycle): registration carries
-  only the Ticket UUID and performs no query or I/O; rollback, a failed
-  commit, and pre-commit cancellation discard; a reused session starts its
-  next transaction empty. These tests use real PostgreSQL with independent
-  sessions and deterministic ordering.
-
-Consumption (owner detach, publisher, publication policies) does not exist
-yet: every effect is discarded when its transaction ends, including after a
-successful commit, and nothing is ever published (roadmap dispatch D1).
+  only the Ticket UUID and performs no query or I/O; rollback, a failed or
+  ambiguous commit, and pre-commit cancellation leave nothing to detach;
+  a successful commit leaves the complete sequence detachable exactly
+  once; a reused session neither replays nor inherits an effect. These
+  tests use real PostgreSQL with independent sessions and deterministic
+  ordering. The publication policies built on the detach are covered in
+  `test_ticket_convergence_publication.py`.
 """
 
 from __future__ import annotations
@@ -36,7 +35,9 @@ from app.models.ticket import Ticket
 from app.models.ticket_audit_event import TicketAuditEvent
 from app.services.ticket_convergence_registry import (
     TicketConvergenceEffect,
-    _discard_on_transaction_end,
+    _drop_undetached_on_new_transaction,
+    _finish_on_transaction_end,
+    detach_ticket_convergence_effects,
     pending_ticket_convergence_effects,
     register_ticket_convergence,
 )
@@ -174,25 +175,97 @@ async def _exit_manual_zone(session: AsyncSession, ticket_id: uuid.UUID) -> None
 
 @pytest.mark.integration
 class TestTransactionLifecycle:
-    async def test_successful_commit_discards_without_publication(
+    async def test_successful_commit_detaches_complete_sequence_once(
+        self, world: _World, db_session_factory: SessionFactory
+    ) -> None:
+        first_id = await world.ticket()
+        second_id = await world.ticket()
+        owner = await db_session_factory()
+        await _exit_manual_zone(owner, second_id)
+        await _exit_manual_zone(owner, first_id)
+        await _exit_manual_zone(owner, second_id)
+        assert pending_ticket_convergence_effects(owner) == (
+            TicketConvergenceEffect(second_id),
+            TicketConvergenceEffect(first_id),
+        )
+
+        await owner.commit()
+
+        assert detach_ticket_convergence_effects(owner) == (
+            TicketConvergenceEffect(second_id),
+            TicketConvergenceEffect(first_id),
+        )
+        # Consumed exactly once: nothing is left to replay.
+        assert detach_ticket_convergence_effects(owner) == ()
+        assert owner.info == {}
+        await owner.execute(select(1))
+        assert pending_ticket_convergence_effects(owner) == ()
+        await owner.rollback()
+        assert detach_ticket_convergence_effects(owner) == ()
+        assert await world.event_count(first_id) == 1
+
+    async def test_detach_after_session_close(
+        self, world: _World, db_session_factory: SessionFactory
+    ) -> None:
+        ticket_id = await world.ticket()
+        owner = await db_session_factory()
+        async with owner:
+            await _exit_manual_zone(owner, ticket_id)
+            await owner.commit()
+
+        assert detach_ticket_convergence_effects(owner) == (
+            TicketConvergenceEffect(ticket_id),
+        )
+
+    async def test_detach_performs_no_database_io(
         self, world: _World, db_session_factory: SessionFactory
     ) -> None:
         ticket_id = await world.ticket()
         owner = await db_session_factory()
         await _exit_manual_zone(owner, ticket_id)
-        assert pending_ticket_convergence_effects(owner) == (
-            TicketConvergenceEffect(ticket_id),
-        )
+        await owner.commit()
+        engine = owner.get_bind().engine
+        statements: list[str] = []
 
+        def record(*args: Any) -> None:
+            statements.append(args[2])
+
+        event.listen(engine, "before_cursor_execute", record)
+        try:
+            effects = detach_ticket_convergence_effects(owner)
+        finally:
+            event.remove(engine, "before_cursor_execute", record)
+
+        assert effects == (TicketConvergenceEffect(ticket_id),)
+        assert statements == []
+
+    async def test_commit_without_registration_detaches_nothing(
+        self, db_session_factory: SessionFactory
+    ) -> None:
+        owner = await db_session_factory()
+        await owner.execute(select(1))
         await owner.commit()
 
-        # No effect survives and nothing (e.g. a post-commit callback) was
-        # registered for publication.
+        assert detach_ticket_convergence_effects(owner) == ()
         assert owner.info == {}
+
+    async def test_next_transaction_never_inherits_an_undetached_sequence(
+        self, world: _World, db_session_factory: SessionFactory
+    ) -> None:
+        stale_id = await world.ticket()
+        owner = await db_session_factory()
+        await _exit_manual_zone(owner, stale_id)
+        await owner.commit()
+
+        # The owner never drained; a new transaction begins on the session.
         await owner.execute(select(1))
-        assert pending_ticket_convergence_effects(owner) == ()
-        await owner.rollback()
-        assert await world.event_count(ticket_id) == 1
+        fresh = uuid.uuid7()
+        register_ticket_convergence(owner, fresh)
+        await owner.commit()
+
+        assert detach_ticket_convergence_effects(owner) == (
+            TicketConvergenceEffect(fresh),
+        )
 
     async def test_rollback_discards_and_next_transaction_starts_empty(
         self, world: _World, db_session_factory: SessionFactory
@@ -203,6 +276,7 @@ class TestTransactionLifecycle:
 
         await owner.rollback()
 
+        assert detach_ticket_convergence_effects(owner) == ()
         assert pending_ticket_convergence_effects(owner) == ()
         other_id = uuid.uuid7()
         await owner.execute(select(1))
@@ -211,6 +285,7 @@ class TestTransactionLifecycle:
             TicketConvergenceEffect(other_id),
         )
         await owner.rollback()
+        assert detach_ticket_convergence_effects(owner) == ()
         assert await world.event_count(ticket_id) == 0
 
     async def test_failed_commit_discards(
@@ -225,9 +300,36 @@ class TestTransactionLifecycle:
             await owner.commit()
         await owner.rollback()
 
-        assert pending_ticket_convergence_effects(owner) == ()
+        assert detach_ticket_convergence_effects(owner) == ()
         assert owner.info == {}
         assert await world.event_count(ticket_id) == 0
+
+    async def test_ambiguous_commit_outcome_discards(
+        self, world: _World, db_session_factory: SessionFactory
+    ) -> None:
+        """An exception raised at the connection's COMMIT boundary leaves
+        the outcome unknown to the owner: nothing becomes detachable."""
+        ticket_id = await world.ticket()
+        owner = await db_session_factory()
+        await _exit_manual_zone(owner, ticket_id)
+        connection = await owner.connection()
+
+        def fail_commit(conn: Any) -> None:
+            raise ConnectionResetError("commit outcome unknown")
+
+        event.listen(connection.sync_connection, "commit", fail_commit)
+        try:
+            with pytest.raises(ConnectionResetError):
+                await owner.commit()
+        finally:
+            event.remove(connection.sync_connection, "commit", fail_commit)
+        # The owner terminates: the connection with the unknown outcome is
+        # discarded (its server-side transaction ends with it).
+        await connection.invalidate()
+        await owner.close()
+
+        assert detach_ticket_convergence_effects(owner) == ()
+        assert owner.info == {}
 
     async def test_pre_commit_cancellation_discards(
         self, world: _World, db_session_factory: SessionFactory
@@ -253,18 +355,43 @@ class TestTransactionLifecycle:
             await task
 
         assert owner.info == {}
-        assert pending_ticket_convergence_effects(owner) == ()
+        assert detach_ticket_convergence_effects(owner) == ()
         assert await world.status(ticket_id) == TicketStatus.ANALYSIS
         assert await world.event_count(ticket_id) == 0
+
+    async def test_savepoint_boundaries_do_not_decide(
+        self, db_session_factory: SessionFactory
+    ) -> None:
+        owner = await db_session_factory()
+        kept, released = uuid.uuid7(), uuid.uuid7()
+        await owner.execute(select(1))
+
+        savepoint = await owner.begin_nested()
+        register_ticket_convergence(owner, kept)
+        await savepoint.rollback()
+        savepoint = await owner.begin_nested()
+        register_ticket_convergence(owner, released)
+        await savepoint.commit()
+
+        # A savepoint release is not the owner's commit.
+        assert detach_ticket_convergence_effects(owner) == ()
+        await owner.commit()
+        assert detach_ticket_convergence_effects(owner) == (
+            TicketConvergenceEffect(kept),
+            TicketConvergenceEffect(released),
+        )
 
     async def test_binding_is_to_the_transaction_not_the_session(
         self, db_session_factory: SessionFactory
     ) -> None:
-        """Even if the end-of-transaction discard never ran, a later
+        """Even if neither end-of-transaction listener ran, a later
         transaction of the same reused session inherits nothing."""
         owner = await db_session_factory()
         stale, fresh = uuid.uuid7(), uuid.uuid7()
-        event.remove(Session, "after_transaction_end", _discard_on_transaction_end)
+        event.remove(Session, "after_transaction_end", _finish_on_transaction_end)
+        event.remove(
+            Session, "after_transaction_create", _drop_undetached_on_new_transaction
+        )
         try:
             await owner.execute(select(1))
             register_ticket_convergence(owner, stale)
@@ -278,7 +405,12 @@ class TestTransactionLifecycle:
                 TicketConvergenceEffect(fresh),
             )
         finally:
-            event.listen(Session, "after_transaction_end", _discard_on_transaction_end)
+            event.listen(Session, "after_transaction_end", _finish_on_transaction_end)
+            event.listen(
+                Session,
+                "after_transaction_create",
+                _drop_undetached_on_new_transaction,
+            )
             await owner.rollback()
 
     async def test_concurrent_transactions_have_independent_registries(
@@ -299,7 +431,8 @@ class TestTransactionLifecycle:
             TicketConvergenceEffect(second_id),
         )
         await first.rollback()
-        assert pending_ticket_convergence_effects(second) == (
+        await second.commit()
+        assert detach_ticket_convergence_effects(first) == ()
+        assert detach_ticket_convergence_effects(second) == (
             TicketConvergenceEffect(second_id),
         )
-        await second.rollback()

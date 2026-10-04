@@ -566,3 +566,29 @@ class TicketAccessGrantListResponse(BaseModel):
     """
 
     data: list[TicketAccessGrantResponse]
+
+
+class TicketConvergenceDispatchResponse(BaseModel):
+    """The accepted Ticket convergence rerun
+    (`docs/features/tickets/tickets.md`, TicketConvergenceDispatchResponse).
+
+    `task_id` is correlation data only: not a durable run resource, with
+    no status or progress endpoint, and not a `FetcherRun` identifier.
+    """
+
+    ticket_id: str = Field(
+        description="Canonical external identity of the accessible Ticket.",
+        examples=["SNTL-42"],
+    )
+    task_id: str = Field(
+        description=(
+            "Transient Celery ID of the newly published root convergence task."
+        ),
+        examples=["01994c20-7c00-7000-8000-000000000002"],
+    )
+
+
+class TicketConvergenceDispatchDataResponse(BaseModel):
+    """Response body of `POST /api/v1/tickets/{ticket_id}/rerun-reactivation`."""
+
+    data: TicketConvergenceDispatchResponse

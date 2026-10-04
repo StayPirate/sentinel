@@ -56,6 +56,16 @@ REVIEWED_INVENTORY: dict[tuple[str, str], str] = {
         "asyncio.run() — see docs/conventions.md, Cross-loop pooled connection "
         "lifecycle, and product-lifecycle-transitions.md, Sub-task."
     ),
+    ("package_tasks.py", "_run_ticket_convergence_sync"): (
+        "Repeated per-invocation task wrapper (run_ticket_convergence), "
+        "including every Celery retry attempt. Its async workflow "
+        "(run_ticket_convergence_async) awaits engine.dispose() exactly once "
+        "on every return and exception path before returning control to "
+        "asyncio.run(); argument validation happens before asyncio.run() and "
+        "opens no connection — see docs/conventions.md, Cross-loop pooled "
+        "connection lifecycle, and package-service.md, "
+        "run_ticket_convergence() workflow."
+    ),
     ("session_cleanup.py", "_cleanup_sessions_sync"): (
         "Repeated per-invocation task wrapper (cleanup_sessions). Its "
         "async workflow (run_cleanup_sessions) awaits engine.dispose() "

@@ -24,7 +24,7 @@ Owning specifications:
   Trail Testing; Rollback Within a Test).
 
 Independent-session lock serialization (audit Testing Requirement 23) and
-the discard of a committed transaction's convergence effect are covered by
+the owner detach of a committed transaction's convergence effect are covered by
 `tests/test_services/test_reconcile_lifecycle_actionability_atomicity.py`;
 the candidate-discovery parity by
 `tests/test_services/test_lifecycle_gate_parity.py`.

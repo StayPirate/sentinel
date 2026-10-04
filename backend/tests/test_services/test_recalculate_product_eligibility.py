@@ -72,6 +72,7 @@ from app.services.settings import RequiredSystemSettingMissingError
 from app.services.ticket_audit_log import TicketAuditLog
 from app.services.ticket_convergence_registry import (
     TicketConvergenceEffect,
+    detach_ticket_convergence_effects,
     pending_ticket_convergence_effects,
 )
 from tests.support.cvss_chain import (
@@ -955,8 +956,10 @@ class TestAutomaticRecalculation:
         """package-service.md, Preconditions (including `Resolved` lets
         threshold and lifecycle corrections invalidate resolution). A
         `Resolved` regression registers one transaction-local convergence
-        effect before the transaction ends; ending the transaction, by
-        commit or rollback, discards it (no consumer exists yet)."""
+        effect before the transaction ends; a commit leaves it detachable
+        exactly once for the owner, a rollback discards it
+        (ticket-mutations.md, Transaction-Local Ticket Convergence
+        Registration, steps 3-4)."""
         assignee = await va_user()
         ticket = await cveless(
             ticket_factory,
@@ -994,6 +997,11 @@ class TestAutomaticRecalculation:
             await db_session.rollback()
 
         assert pending_ticket_convergence_effects(db_session) == ()
+        assert detach_ticket_convergence_effects(db_session) == (
+            (TicketConvergenceEffect(ticket.id),)
+            if registered and end == "commit"
+            else ()
+        )
 
     async def test_converged_ticket_is_a_no_op(
         self,

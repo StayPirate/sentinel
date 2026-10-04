@@ -1720,6 +1720,7 @@ class TestTicketServiceQueryBoundary:
             "reopen_from_ignored",
             "reopen_from_ignored_as_system",
             "revert_duplicate",
+            "dispatch_ticket_convergence",
             "set_confidentiality",
             "set_coordinated_release_date",
             "grant_access",

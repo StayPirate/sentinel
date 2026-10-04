@@ -5,7 +5,8 @@ Authentication Dependencies: `get_current_user`,
 `get_optional_current_user`, API key validation, Session-Only
 Authentication Dependency) and `docs/features/identity/rbac.md`
 (`require_capability()` Dependency) for the authoritative contracts
-this module implements.
+this module implements. Also hosts the API transaction's Ticket
+convergence drain (`drain_ticket_convergence_after_commit`).
 """
 
 from __future__ import annotations
@@ -30,11 +31,16 @@ from app.core.errors import AppError, ErrorCode
 from app.core.exceptions import CVENotFoundError, TicketNotFoundError
 from app.core.jwt import InvalidTokenError, decode_and_validate, refresh_token
 from app.core.permissions import get_capabilities, get_effective_scope
-from app.database import DatabaseSession, async_session_factory
+from app.database import (
+    DatabaseSession,
+    async_session_factory,
+    register_post_commit_callback,
+)
 from app.models.user import User
 from app.services import api_key_service, cve_service, ticket_service, user_service
 from app.services.cve_service import ResolvedCVE
 from app.services.session_service import is_session_active
+from app.services.ticket_convergence_publication import drain_ticket_convergence
 from app.services.ticket_service import ResolvedTicket
 from app.services.ticket_visibility import ANONYMOUS_CALLER, TicketCaller
 
@@ -831,3 +837,26 @@ async def require_accessible_cve(
         return await cve_service.resolve_cve_locator(db, cve_id, caller)
     except CVENotFoundError:
         raise cve_not_found_error() from None
+
+
+# ---------------------------------------------------------------------------
+# API Ticket convergence drain
+# ---------------------------------------------------------------------------
+
+
+async def drain_ticket_convergence_after_commit(db: DatabaseSession) -> None:
+    """Drain the request transaction's Ticket convergence effects after commit.
+
+    The API transaction dependency is an automatic transaction owner
+    (`docs/features/tickets/ticket-service.md`, Ticket Convergence >
+    Publication policies): every effect registered by a mutation in the
+    request transaction is detached and attempted once, in registered
+    order, after `get_db()` commits and releases its row locks and before
+    the response is transmitted. Mounted on every `/api/v1` router in
+    `app/main.py`; `get_db()` and its generic post-commit callback
+    contract are unchanged. A broker operational error is absorbed with
+    one `ticket_convergence_publication_failed` ERROR, so no mutation
+    response changes; any other exception follows the generic callback
+    log. A rolled back request runs no callback and publishes nothing.
+    """
+    register_post_commit_callback(db, lambda: drain_ticket_convergence(db))

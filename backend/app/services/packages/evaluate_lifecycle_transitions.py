@@ -29,11 +29,16 @@ the first dispatch and the first Ticket unit.
 mismatch, delegates one reconciliation to an independent committed
 session; it never recalculates Product eligibility.
 
-The post-commit Ticket convergence drains (Algorithm step 5; the Catch-Up
-detach-and-attempt step) are not implemented yet: a `Resolved`
-regression's registered effect is discarded when its Ticket transaction
-ends (`app/services/ticket_convergence_registry.py`; implementation
-roadmap dispatch D1).
+After each Ticket unit commits and its session closes, its metrics are
+recorded and then the Ticket convergence effect registered by the
+delegated reconciliation (a `Resolved` regression) is drained before the
+next Ticket (Algorithm step 5): a broker operational error is absorbed by
+the automatic policy (`ticket_convergence_publication`), while any other
+drain exception terminates the run with the committed Ticket's success
+and update metrics preserved and `items_failed` unchanged. `catch_up()`
+drains the same way after its independent reconciliation commits and
+closes; a non-operational drain exception escapes to `run_catch_up`
+without rollback or reclassification.
 """
 
 from __future__ import annotations
@@ -62,6 +67,7 @@ from app.services.packages.product_eligibility_mismatch import (
 from app.services.packages.product_eligibility_recalculation import (
     dispatch_product_eligibility_recalculation,
 )
+from app.services.ticket_convergence_publication import drain_ticket_convergence
 from app.services.ticket_mutations import gate_status_expression
 
 logger = structlog.get_logger(__name__)
@@ -182,6 +188,8 @@ class EvaluateLifecycleTransitions(BaseFetcher):
             if result.changed:
                 changed += 1
                 self.record_updated()
+            # Step 5: drain after commit and close, before the next Ticket.
+            await drain_ticket_convergence(unit)
 
         logger.info(
             "lifecycle_transitions_evaluated",
@@ -203,7 +211,10 @@ class EvaluateLifecycleTransitions(BaseFetcher):
         `reconcile_lifecycle_actionability_for_ticket()` with the same
         `evaluation_date`, then commits and closes. Product eligibility is
         never recalculated. A pre-commit failure and a commit exception
-        propagate to `run_catch_up` unchanged.
+        propagate to `run_catch_up` unchanged. After the commit and close,
+        the registered Ticket convergence effect is drained; a broker
+        operational error is absorbed and any other drain exception
+        propagates without rollback or reclassification.
         """
         evaluation_date = _utc_today()
         ticket_uuid = uuid.UUID(ticket_id)
@@ -228,6 +239,7 @@ class EvaluateLifecycleTransitions(BaseFetcher):
                 unit, ticket_uuid, evaluation_date
             )
             await unit.commit()
+        await drain_ticket_convergence(unit)
         logger.info(
             "lifecycle_catch_up_reconciled",
             ticket_id=ticket_id,
