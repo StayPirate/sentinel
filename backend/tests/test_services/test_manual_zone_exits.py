@@ -33,9 +33,11 @@ boundary's own statements are proven once in
 `tests/test_services/test_manual_zone_exit_eligibility.py`; this module
 proves only the composition around them. Independent-session races (the
 CVSS race of ATR 10 and the locked-current accessibility races of ATR 15)
-and the HTTP contract belong to other modules. Publication of registered
-effects is not implemented yet (ticket_convergence_registry.py), so the
-publication parts of ATR 11 are not covered here.
+and the HTTP contract belong to other modules. The publication parts of
+ATR 11 (publication after commit, the absorbed broker operational failure
+with its one sanitized log, and the preserved success response) are covered
+by `tests/test_api/test_ticket_convergence_api_drain.py` and
+`tests/test_services/test_ticket_convergence_publication.py`.
 
 Expected values are transcribed from the specifications, never computed
 with the module under test.

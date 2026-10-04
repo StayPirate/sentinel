@@ -54,6 +54,14 @@ including a different function — is still detected:
   row lock held (`docs/conventions.md`, Transaction Hygiene Rules). See
   `docs/features/platform/fetcher-operations.md` (`trigger_fetcher`).
 
+- `app/api/v1/tickets.py`, function
+  `get_ticket_convergence_session_factory`:
+  `dispatch_ticket_convergence()` (the `POST .../rerun-reactivation`
+  service function) is a service-owned orchestration boundary: it locks
+  and validates the Ticket in its own short transaction, commits and
+  closes it, and only then publishes to Celery with no lock held. See
+  `docs/features/tickets/ticket-service.md` (`dispatch_ticket_convergence()`).
+
 - `app/api/v1/cves.py`, function
   `get_cve_source_status_session_factory`: `get_cve_source_status()` is
   the service-owned read orchestration of
@@ -92,6 +100,7 @@ _AUTHORIZED_QUALNAMES: dict[Path, set[str]] = {
     },
     Path("v1/fetchers.py"): {"get_fetcher_trigger_session_factory"},
     Path("v1/cves.py"): {"get_cve_source_status_session_factory"},
+    Path("v1/tickets.py"): {"get_ticket_convergence_session_factory"},
 }
 
 _FORBIDDEN_NAMES = {"async_session_factory"}
