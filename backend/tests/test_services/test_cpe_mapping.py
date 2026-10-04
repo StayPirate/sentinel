@@ -940,17 +940,21 @@ class TestModuleBoundaries:
             if any(m == p or m.startswith(f"{p}.") for p in forbidden_prefixes)
         } == set()
 
-    def test_generic_worker_startup_neither_imports_nor_loads_the_mapping(
+    def test_generic_worker_startup_neither_loads_nor_validates_the_mapping(
         self,
     ) -> None:
+        """Worker startup imports the post-ingest consumer
+        (`package_service`, `app.tasks.cve_tasks`) and therefore this module
+        transitively, but never reads or validates the mapping data: the
+        lazy loader has not been called (Loading; Operational semantics)."""
         script = (
-            "import sys\n"
             "import app.celery_app\n"
             "import app.tasks.worker_startup\n"
             "import app.tasks.beat_startup\n"
-            "assert 'app.services.cpe_mapping' not in sys.modules, 'imported'\n"
             "import app.services.cpe_mapping as m\n"
-            "assert m._load_mapping.cache_info().currsize == 0, 'loaded on import'\n"
+            "info = m._load_mapping.cache_info()\n"
+            "assert info.currsize == 0, 'loaded on import'\n"
+            "assert info.hits == info.misses == 0, 'looked up on import'\n"
             "print('CPE-STARTUP-OK')\n"
         )
         env = {

@@ -32,6 +32,18 @@ _TASKS_DIR = Path(__file__).resolve().parents[2] / "app" / "tasks"
 # name). Each value is the reviewed rationale for why this call site's
 # event-loop lifecycle is safe.
 REVIEWED_INVENTORY: dict[tuple[str, str], str] = {
+    ("cve_tasks.py", "_resolve_ticket_packages_sync"): (
+        "Repeated per-invocation task wrapper (resolve_ticket_packages), "
+        "without automatic retry, in a long-lived worker child. Its async "
+        "workflow (resolve_ticket_packages_async) validates the arguments, "
+        "runs the complete post-ingest resolution, which closes its HTTP "
+        "client and every package session, then awaits engine.dispose() "
+        "exactly once on every return and exception path, including "
+        "validation failure and cancellation, before returning control to "
+        "asyncio.run() — see docs/conventions.md, Cross-loop pooled "
+        "connection lifecycle, and package-service.md, Post-ingest CVE "
+        "package resolution (Resource lifecycle)."
+    ),
     ("fetchers.py", "_run_fetcher_sync"): (
         "Repeated per-invocation task wrapper (run_fetcher). Its async "
         "workflow (run_fetcher_async) awaits engine.dispose() in a "

@@ -120,6 +120,7 @@ from app.services.cve_ingest import (
     UpsertAction,
     UpsertResult,
     affected_version_content,
+    is_post_ingest_package_name_candidate,
     normalize_affected_version_operations,
     normalize_cwe_classifications,
     normalize_external_identifiers,
@@ -1400,10 +1401,6 @@ received-length limit of cvss-scoring.md (Input Rules, rule 1)."""
 INVALID_PROVIDER_REASON: Final = "invalid_provider"
 INVALID_VECTOR_REASON: Final = "invalid_vector"
 
-POST_INGEST_PACKAGE_NAME_MAX_LENGTH: Final = 50
-"""Heuristic filter bound of a package-name candidate
-(cve-service.md, `build_post_ingest_tasks()`)."""
-
 _NULLABLE_GLOBAL_FIELDS: Final[tuple[str, ...]] = (
     "title",
     "description",
@@ -1881,16 +1878,6 @@ async def upsert_cve(
     return UpsertResult(cve=cve, ticket=ticket, action=action)
 
 
-def _is_package_name_candidate(value: str) -> bool:
-    """The `build_post_ingest_tasks()` package-name heuristic: non-empty, at
-    most 50 characters, no `/`, `:`, or whitespace."""
-    return (
-        bool(value)
-        and len(value) <= POST_INGEST_PACKAGE_NAME_MAX_LENGTH
-        and not any(c in "/:" or c.isspace() for c in value)
-    )
-
-
 def build_post_ingest_tasks(
     result: UpsertResult,
     payload: CVEIngestPayload,
@@ -1939,7 +1926,7 @@ def build_post_ingest_tasks(
                 *(payload.resolved_packages or ()),
                 *(e.package_name for e in entries if e.package_name is not None),
             ]
-            if _is_package_name_candidate(name)
+            if is_post_ingest_package_name_candidate(name)
         }
     )
     if not (cpe_matches or affected_cpes or vendor_products or resolved_packages):

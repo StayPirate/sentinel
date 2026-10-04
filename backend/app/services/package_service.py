@@ -27,7 +27,9 @@ resolution, the Product catalog readiness gate, and best-effort
 maintainership acquisition before the locked delegation), and the Ticket
 convergence workflow `run_ticket_convergence()` that re-resolves every
 persisted package marker in independent units and dispatches the
-per-Ticket catch-up roster; the remaining
+per-Ticket catch-up roster, and the post-ingest CVE package resolution
+workflow `run_post_ingest_package_resolution()` with its task argument
+validation (`parse_post_ingest_arguments()`); the remaining
 mutation and orchestration operations are added by their owning work
 items. This module
 never imports `ticket_service`; it consumes the `ticket_mutations`
@@ -35,8 +37,9 @@ primitives, which never import it back.
 
 Every operation accepts the caller's `AsyncSession` and never commits or
 rolls back; database exceptions propagate unchanged (Transaction
-ownership). The one exception is the orchestration boundary
-`run_ticket_convergence()`, which owns its sessions from a factory.
+ownership). The exceptions are the orchestration boundaries
+`run_ticket_convergence()` and `run_post_ingest_package_resolution()`,
+which own their sessions from a factory.
 
 Composed mode. The complete tree is exposed as one correlated scalar
 column (`ticket_package_tree_column()`) that aggregates packages, tracks,
@@ -59,13 +62,14 @@ collections, come from one observation.
 
 from __future__ import annotations
 
+import re
 import uuid
 from collections.abc import Collection, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from enum import Enum, StrEnum
-from typing import Any, Final, Literal, get_args
+from typing import Any, Final, Literal, TypeGuard, cast, get_args
 
 import httpx
 import structlog
@@ -117,6 +121,8 @@ from app.models.user import User
 from app.services import settings as settings_service
 from app.services import task_publication
 from app.services.base_fetcher import get_catch_up_fetchers
+from app.services.cpe_mapping import resolve_cpe_packages, resolve_vendor_product
+from app.services.cve_ingest import is_post_ingest_package_name_candidate
 from app.services.cvss import EligibilityResolution, resolve_eligibility_score
 from app.services.http_client import create_http_client
 from app.services.package_actionability import (
@@ -3233,6 +3239,508 @@ async def _resolve_targets(
             unmatched_cpes=list(unmatched),
         )
     return tracks
+
+
+# ---------------------------------------------------------------------------
+# Post-ingest CVE package resolution (package-service.md, Post-ingest CVE
+# package resolution; cpe-package-mapping.md, Consumers)
+# ---------------------------------------------------------------------------
+
+RESOLVE_TICKET_PACKAGES_TASK: Final = "resolve_ticket_packages"
+"""Explicit registered name of the post-ingest Celery sub-operation."""
+
+CVE_PACKAGE_RESOLUTION_COMMENT: Final[PackageAddedComment] = "CVE package resolution"
+"""Canonical `package_added` comment of a post-ingest package unit."""
+
+POST_INGEST_HTTP_CLIENT_NAME: Final = "resolve_ticket_packages"
+"""Shared-factory HTTP client name of one post-ingest invocation."""
+
+POST_INGEST_CPE_MAX_LENGTH: Final = 2048
+"""Producer bound of a transported CPE (`CPEMatchEntry.criteria`,
+`AffectedVersionEntry.cpe`)."""
+
+POST_INGEST_VENDOR_MAX_LENGTH: Final = 512
+"""Producer bound of a transported vendor (`AffectedVersionEntry.vendor`)."""
+
+PACKAGE_NAME_GRAMMAR: Final = re.compile(
+    r"[a-zA-Z0-9][a-zA-Z0-9._+\-]{0,253}[a-zA-Z0-9]"
+)
+"""The public package-name grammar, matched with `fullmatch()` (2 to 255
+ASCII characters); the same pattern as the API request schema."""
+
+RESOLUTION_EMPTY_EVENT: Final = "ticket_package_resolution_empty"
+RESOLUTION_NO_MATCH_EVENT: Final = "ticket_package_resolution_no_match"
+RESOLUTION_EXCLUDED_EVENT: Final = "ticket_package_resolution_excluded"
+RESOLUTION_INACTIVE_EVENT: Final = "ticket_package_resolution_inactive"
+RESOLUTION_PACKAGE_FAILED_EVENT: Final = "ticket_package_resolution_package_failed"
+RESOLUTION_PARTIAL_EVENT: Final = "ticket_package_resolution_partial"
+RESOLUTION_COMPLETED_EVENT: Final = "ticket_package_resolution_completed"
+RESOLUTION_FAILED_EVENT: Final = "ticket_package_resolution_failed"
+
+_POST_INGEST_ISOLATED_FAILURES: Final = (
+    PackageTargetsUnresolvedError,
+    ProductCatalogNotReadyError,
+    SmeltUnavailableError,
+)
+"""Isolated package failures of the post-ingest outcome table."""
+
+
+class PostIngestArgumentError(ValueError):
+    """A malformed `resolve_ticket_packages` argument.
+
+    A non-retryable caller-contract failure. The message names only the
+    argument, never a received value.
+    """
+
+    def __init__(self, argument: str) -> None:
+        super().__init__(f"invalid resolve_ticket_packages argument: {argument}")
+        self.argument = argument
+
+
+@dataclass(frozen=True, slots=True)
+class ValidatedCPEMatch:
+    """One validated transported NVD CPE match (never reinterpreted)."""
+
+    criteria: str
+    vulnerable: bool
+    match_criteria_id: uuid.UUID | None
+
+
+@dataclass(frozen=True, slots=True)
+class PostIngestArguments:
+    """The validated, typed `resolve_ticket_packages` arguments."""
+
+    ticket_id: uuid.UUID
+    cpe_matches: tuple[ValidatedCPEMatch, ...]
+    affected_cpes: tuple[str, ...]
+    vendor_products: tuple[tuple[str, str], ...]
+    resolved_packages: tuple[str, ...]
+
+
+_CPE_MATCH_KEYS: Final = frozenset({"criteria", "vulnerable", "match_criteria_id"})
+
+
+def _canonical_uuid(value: object) -> uuid.UUID | None:
+    """The UUID of a canonical (lowercase, hyphenated) UUID string."""
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = uuid.UUID(value)
+    except ValueError:
+        return None
+    return parsed if str(parsed) == value else None
+
+
+def _bounded_string(value: object, max_length: int | None) -> TypeGuard[str]:
+    """A `str` without U+0000 and within its code-point bound."""
+    return (
+        isinstance(value, str)
+        and "\x00" not in value
+        and (max_length is None or len(value) <= max_length)
+    )
+
+
+def _validated_cpe_match(item: object) -> ValidatedCPEMatch:
+    if not isinstance(item, dict) or item.keys() != _CPE_MATCH_KEYS:
+        raise PostIngestArgumentError("cpe_matches")
+    criteria = item["criteria"]
+    vulnerable = item["vulnerable"]
+    raw_match_criteria_id = item["match_criteria_id"]
+    match_criteria_id = (
+        None
+        if raw_match_criteria_id is None
+        else _canonical_uuid(raw_match_criteria_id)
+    )
+    if (
+        not _bounded_string(criteria, POST_INGEST_CPE_MAX_LENGTH)
+        or type(vulnerable) is not bool
+        or (raw_match_criteria_id is not None and match_criteria_id is None)
+    ):
+        raise PostIngestArgumentError("cpe_matches")
+    return ValidatedCPEMatch(
+        criteria=criteria,
+        vulnerable=vulnerable,
+        match_criteria_id=match_criteria_id,
+    )
+
+
+def _validated_list(value: object, argument: str) -> list[object]:
+    if not isinstance(value, list):
+        raise PostIngestArgumentError(argument)
+    return value
+
+
+def _validated_strings(
+    value: object, argument: str, max_length: int | None
+) -> tuple[str, ...]:
+    items = _validated_list(value, argument)
+    if not all(_bounded_string(item, max_length) for item in items):
+        raise PostIngestArgumentError(argument)
+    return tuple(cast(list[str], items))
+
+
+def _validated_vendor_product(item: object) -> tuple[str, str]:
+    if (
+        not isinstance(item, list)
+        or len(item) != 2
+        or not _bounded_string(item[0], POST_INGEST_VENDOR_MAX_LENGTH)
+        or not _bounded_string(item[1], None)
+    ):
+        raise PostIngestArgumentError("vendor_products")
+    return (item[0], item[1])
+
+
+def _validated_package_candidate(item: object) -> str:
+    if not _bounded_string(item, None):
+        raise PostIngestArgumentError("resolved_packages")
+    if not is_post_ingest_package_name_candidate(item):
+        raise PostIngestArgumentError("resolved_packages")
+    return item
+
+
+def parse_post_ingest_arguments(
+    ticket_id: object,
+    cpe_matches: object,
+    affected_cpes: object,
+    vendor_products: object,
+    resolved_packages: object,
+) -> PostIngestArguments:
+    """Validate the five primitive `resolve_ticket_packages` arguments.
+
+    Pure; performs no resolver, database, HTTP, or SMELT work
+    (package-service.md, Task boundary and arguments). Every container is
+    a JSON array; `ticket_id` and a non-null `match_criteria_id` are
+    canonical UUID strings; a CPE match has exactly `criteria` (at most
+    2048 code points), JSON boolean `vulnerable`, and `match_criteria_id`;
+    an affected CPE has at most 2048 code points; a vendor/product pair is
+    a two-string array with a vendor of at most 512 code points; a direct
+    package-name candidate satisfies the producer heuristic. No string
+    contains U+0000 (cve-service.md, CVEIngestPayload Schema). No value is
+    trimmed, case-normalized, coerced, or dropped.
+
+    Raises `PostIngestArgumentError` (a `ValueError`) for the first
+    malformed argument after one `ticket_package_resolution_failed` ERROR,
+    which omits `ticket_id` when that argument is itself invalid.
+    """
+    parsed_ticket_id = _canonical_uuid(ticket_id)
+    try:
+        if parsed_ticket_id is None:
+            raise PostIngestArgumentError("ticket_id")
+        arguments = PostIngestArguments(
+            ticket_id=parsed_ticket_id,
+            cpe_matches=tuple(
+                _validated_cpe_match(item)
+                for item in _validated_list(cpe_matches, "cpe_matches")
+            ),
+            affected_cpes=_validated_strings(
+                affected_cpes, "affected_cpes", POST_INGEST_CPE_MAX_LENGTH
+            ),
+            vendor_products=tuple(
+                _validated_vendor_product(item)
+                for item in _validated_list(vendor_products, "vendor_products")
+            ),
+            resolved_packages=tuple(
+                _validated_package_candidate(item)
+                for item in _validated_list(resolved_packages, "resolved_packages")
+            ),
+        )
+    except PostIngestArgumentError as exc:
+        fields: dict[str, str] = {
+            "phase": "validation",
+            "cause": type(exc).__name__,
+            "argument": exc.argument,
+        }
+        if parsed_ticket_id is not None:
+            fields["ticket_id"] = str(parsed_ticket_id)
+        logger.error(RESOLUTION_FAILED_EVENT, **fields)
+        raise
+    return arguments
+
+
+def resolve_post_ingest_candidates(
+    *,
+    cpe_matches: Sequence[ValidatedCPEMatch],
+    affected_cpes: Sequence[str],
+    vendor_products: Sequence[tuple[str, str]],
+    resolved_packages: Sequence[str],
+) -> list[str]:
+    """Deterministic candidate resolution; the final package names in order.
+
+    Exact-deduplicates every transported CPE across both sources and calls
+    `resolve_cpe_packages()` once per distinct CPE in code-point order,
+    then `resolve_vendor_product()` once per distinct pair ordered by
+    vendor then product; combines the results with the direct names
+    preserving case; retains only names matching the public package-name
+    grammar; returns them in ascending code-point order. NVD metadata
+    (`vulnerable`, `match_criteria_id`) is never reinterpreted. Propagates
+    `CPEMappingLoadError` and any unexpected resolver exception.
+    """
+    cpes = sorted({match.criteria for match in cpe_matches} | set(affected_cpes))
+    candidates: set[str] = set(resolved_packages)
+    for cpe in cpes:
+        candidates |= resolve_cpe_packages(cpe)
+    for vendor, product in sorted(set(vendor_products)):
+        candidates |= resolve_vendor_product(vendor, product)
+    return sorted(name for name in candidates if PACKAGE_NAME_GRAMMAR.fullmatch(name))
+
+
+@dataclass(slots=True)
+class _PostIngestCounts:
+    """Aggregate outcome counts of one post-ingest invocation."""
+
+    packages: int = 0
+    package_tree_changed: int = 0
+    package_tree_no_op: int = 0
+    maintainer_only: int = 0
+    no_match: int = 0
+    excluded: int = 0
+    package_failed: int = 0
+    not_attempted: int = 0
+
+    def fields(self) -> dict[str, int]:
+        return {
+            "packages": self.packages,
+            "package_tree_changed": self.package_tree_changed,
+            "package_tree_no_op": self.package_tree_no_op,
+            "maintainer_only": self.maintainer_only,
+            "no_match": self.no_match,
+            "excluded": self.excluded,
+            "package_failed": self.package_failed,
+            "not_attempted": self.not_attempted,
+        }
+
+
+class _PostIngestExpected(Enum):
+    """Expected per-package skips of the outcome table."""
+
+    NO_MATCH = "no_match"
+    EXCLUDED = "excluded"
+
+
+async def _rollback_after_failure(session: AsyncSession) -> None:
+    """Roll back a unit whose primary exception is already propagating.
+
+    A failing rollback never masks that primary exception; the session is
+    closed by its context manager either way.
+    """
+    try:
+        await session.rollback()
+    except SoftTimeLimitExceeded, MemoryError:
+        raise
+    except Exception:  # nosec B110 -- the primary failure propagates
+        pass
+
+
+async def _post_ingest_package_unit(
+    session_factory: async_sessionmaker[AsyncSession],
+    http_client: httpx.AsyncClient,
+    *,
+    ticket_id: uuid.UUID,
+    package_name: str,
+) -> PackageRecordsOutcome | _PostIngestExpected | PackageServiceError:
+    """One independent package unit in a fresh session, closed on exit.
+
+    Returns the committed semantic outcome, an expected skip, or the
+    isolated package failure, each after its rollback. A locked inactive
+    Ticket is rolled back with nothing committed. Every other exception
+    propagates after a best-effort rollback; a rollback failure while
+    handling an expected or isolated outcome propagates as a database
+    failure.
+    """
+    async with session_factory() as session:
+        try:
+            result = await add_package_to_ticket(
+                session,
+                ticket_id=ticket_id,
+                package_name=package_name,
+                acting_user_id=None,
+                caller=SYSTEM_INVOCATION,
+                audit_comment=CVE_PACKAGE_RESOLUTION_COMMENT,
+                active_ticket_only=True,
+                allow_excluded_reresolution=False,
+                http_client=http_client,
+            )
+        except SoftTimeLimitExceeded, MemoryError:
+            raise
+        except PackageAlreadyExcludedError:
+            await session.rollback()
+            return _PostIngestExpected.EXCLUDED
+        except PackageNotFoundInSmeltError:
+            await session.rollback()
+            return _PostIngestExpected.NO_MATCH
+        except _POST_INGEST_ISOLATED_FAILURES as exc:
+            await session.rollback()
+            return exc
+        except Exception:
+            await _rollback_after_failure(session)
+            raise
+        if result.outcome is PackageRecordsOutcome.ACTIVE_TICKET_ONLY_SKIPPED:
+            await session.rollback()
+            return result.outcome
+        try:
+            await session.commit()
+        except SoftTimeLimitExceeded, MemoryError:
+            raise
+        except Exception:
+            await _rollback_after_failure(session)
+            raise
+    return result.outcome
+
+
+def _log_package_resolution_failed(
+    ticket_id: uuid.UUID, counts: _PostIngestCounts, phase: str, exc: BaseException
+) -> None:
+    logger.error(
+        RESOLUTION_FAILED_EVENT,
+        ticket_id=str(ticket_id),
+        phase=phase,
+        cause=type(exc).__name__,
+        **counts.fields(),
+    )
+
+
+async def run_post_ingest_package_resolution(
+    *,
+    ticket_id: uuid.UUID,
+    cpe_matches: Sequence[ValidatedCPEMatch],
+    affected_cpes: Sequence[str],
+    vendor_products: Sequence[tuple[str, str]],
+    resolved_packages: Sequence[str],
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Resolve post-ingest package candidates into the Ticket's package tree.
+
+    Orchestration boundary owning one independent transaction per package
+    (package-service.md, Post-ingest CVE package resolution), executed by
+    the `resolve_ticket_packages` task with already validated arguments.
+
+    Q1: the validated, typed task arguments; `session_factory` opens every
+    package session of the invocation.
+
+    Q2: holds no lock itself; each unit serializes on the Ticket lock of
+    the delegated `add_package_records()`, taken after its SMELT I/O.
+    There is no unlocked Ticket-status precheck.
+
+    Q3: (1) resolves the final package names before any session
+    (`resolve_post_ingest_candidates()`); an empty set logs
+    `ticket_package_resolution_empty` and returns without a session,
+    HTTP client, or SMELT request; (2) opens one shared-factory HTTP
+    client and, per name in code-point order, calls
+    `add_package_to_ticket()` in a fresh session as a system invocation
+    with the `CVE package resolution` comment, `active_ticket_only` true,
+    and the excluded-package guard, then commits and closes; (3) an
+    excluded package or a SMELT no-match is an expected skip, a
+    targets-unresolved, catalog-not-ready, or SMELT-unavailable outcome an
+    isolated package failure, each rolled back and logged; (4) a locked
+    inactive Ticket commits nothing and stops before any further SMELT
+    request (`ticket_package_resolution_inactive`); (5) otherwise logs
+    `ticket_package_resolution_completed`, or `..._partial` after an
+    isolated failure. Creates no audit event of its own (delegated
+    `package_added` and `package_maintainer_added` only), no `FetcherRun`,
+    progress row, Redis key, or task publication. A unit cannot register a
+    Ticket convergence effect (it mutates only `New`, `Analysis`, or
+    `Analyzed` Tickets, while registration needs an `Ignored`,
+    `Duplicated`, or `Resolved` source), so nothing is detached or
+    published; the package-add IBS request catch-up (step 4) belongs to
+    the IBS submission-tracking workflow.
+
+    Q4: returns `None`.
+
+    Q5: idempotent with respect to current persisted state; duplicate,
+    concurrent, and reordered invocations converge through the Ticket
+    lock, uniqueness, and insert-if-missing record creation.
+
+    Q6: a resolver failure (`CPEMappingLoadError` or any unexpected
+    exception) before any session, and any other unit exception
+    (database, commit, audit, delegated-service, or programming error)
+    after that unit's rollback, log `ticket_package_resolution_failed`
+    and propagate; earlier committed units stay committed.
+    Cancellation, `SoftTimeLimitExceeded`, and `MemoryError` propagate
+    after closing the current session and the client, without an event.
+    """
+    counts = _PostIngestCounts()
+    try:
+        package_names = resolve_post_ingest_candidates(
+            cpe_matches=cpe_matches,
+            affected_cpes=affected_cpes,
+            vendor_products=vendor_products,
+            resolved_packages=resolved_packages,
+        )
+    except SoftTimeLimitExceeded, MemoryError:
+        raise
+    except Exception as exc:
+        _log_package_resolution_failed(ticket_id, counts, "resolution", exc)
+        raise
+    if not package_names:
+        logger.info(RESOLUTION_EMPTY_EVENT, ticket_id=str(ticket_id))
+        return
+
+    counts.packages = len(package_names)
+    attempted = 0
+    inactive = False
+    try:
+        async with create_http_client(POST_INGEST_HTTP_CLIENT_NAME) as client:
+            for package_name in package_names:
+                attempted += 1
+                outcome = await _post_ingest_package_unit(
+                    session_factory,
+                    client,
+                    ticket_id=ticket_id,
+                    package_name=package_name,
+                )
+                if outcome is PackageRecordsOutcome.ACTIVE_TICKET_ONLY_SKIPPED:
+                    inactive = True
+                    break
+                _count_post_ingest_outcome(ticket_id, counts, outcome)
+    except SoftTimeLimitExceeded, MemoryError:
+        raise
+    except Exception as exc:
+        counts.not_attempted = counts.packages - attempted
+        _log_package_resolution_failed(ticket_id, counts, "package", exc)
+        raise
+    counts.not_attempted = counts.packages - attempted
+
+    if inactive:
+        logger.info(
+            RESOLUTION_INACTIVE_EVENT, ticket_id=str(ticket_id), **counts.fields()
+        )
+    elif counts.package_failed:
+        logger.warning(
+            RESOLUTION_PARTIAL_EVENT, ticket_id=str(ticket_id), **counts.fields()
+        )
+    else:
+        logger.info(
+            RESOLUTION_COMPLETED_EVENT, ticket_id=str(ticket_id), **counts.fields()
+        )
+
+
+def _count_post_ingest_outcome(
+    ticket_id: uuid.UUID,
+    counts: _PostIngestCounts,
+    outcome: PackageRecordsOutcome | _PostIngestExpected | PackageServiceError,
+) -> None:
+    """Count one attempted unit and emit its per-package event, if any."""
+    if outcome is _PostIngestExpected.NO_MATCH:
+        counts.no_match += 1
+        logger.info(RESOLUTION_NO_MATCH_EVENT, ticket_id=str(ticket_id))
+    elif outcome is _PostIngestExpected.EXCLUDED:
+        counts.excluded += 1
+        logger.info(RESOLUTION_EXCLUDED_EVENT, ticket_id=str(ticket_id))
+    elif isinstance(outcome, PackageServiceError):
+        counts.package_failed += 1
+        fields: dict[str, str] = {
+            "ticket_id": str(ticket_id),
+            "cause": type(outcome).__name__,
+        }
+        if isinstance(outcome, SmeltUnavailableError):
+            fields["category"] = outcome.category
+        logger.warning(RESOLUTION_PACKAGE_FAILED_EVENT, **fields)
+    elif outcome is PackageRecordsOutcome.PACKAGE_TREE_CHANGED:
+        counts.package_tree_changed += 1
+    elif outcome is PackageRecordsOutcome.MAINTAINER_ONLY:
+        counts.maintainer_only += 1
+    else:
+        counts.package_tree_no_op += 1
 
 
 # ---------------------------------------------------------------------------

@@ -9,8 +9,8 @@ consumed by the post-ingest package-resolution workflow.
 The resolvers create no audit event, touch no database, and call no
 external service. The only I/O is the first read of the package-relative
 mapping resource, performed when a lookup first has concrete vendor and
-product values. Importing this module never reads or validates the file,
-and generic worker startup does not import it.
+product values. Importing this module, including transitively at
+generic worker startup, never reads or validates the file.
 """
 
 from __future__ import annotations

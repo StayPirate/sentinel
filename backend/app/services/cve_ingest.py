@@ -422,3 +422,22 @@ class PostIngestTasks:
     affected_cpes: list[str]
     vendor_products: list[list[str]]
     resolved_packages: list[str]
+
+
+POST_INGEST_PACKAGE_NAME_MAX_LENGTH: Final = 50
+"""Heuristic filter bound of a package-name candidate
+(cve-service.md, `build_post_ingest_tasks()`)."""
+
+
+def is_post_ingest_package_name_candidate(value: str) -> bool:
+    """The `build_post_ingest_tasks()` package-name heuristic: non-empty, at
+    most 50 characters, no `/`, `:`, or whitespace.
+
+    Shared by the producer filter and the `resolve_ticket_packages` task
+    argument validation (package-service.md, Task boundary and arguments).
+    """
+    return (
+        bool(value)
+        and len(value) <= POST_INGEST_PACKAGE_NAME_MAX_LENGTH
+        and not any(c in "/:" or c.isspace() for c in value)
+    )

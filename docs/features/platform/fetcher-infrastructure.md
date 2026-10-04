@@ -2876,7 +2876,7 @@ Beat registration mechanism.
 - Run the bootstrap shared with Beat and API
 - Read `FetcherConfig` during task execution
 
-Generic worker startup does not import, load, or validate domain data.
+Generic worker startup does not read, load, or validate domain data.
 In particular, CPE mapping is loaded only by a package-resolution
 consumer; see `docs/features/packages/cpe-package-mapping.md`.
 

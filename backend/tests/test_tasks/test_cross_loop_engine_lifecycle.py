@@ -27,6 +27,7 @@ process.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from types import SimpleNamespace
@@ -65,8 +66,8 @@ from app.services.packages import (
     product_catalog_backfill,
     product_eligibility_recalculation,
 )
+from app.tasks import cve_tasks, package_tasks, session_cleanup
 from app.tasks import fetchers as fetchers_module
-from app.tasks import package_tasks, session_cleanup
 
 
 @pytest.mark.integration
@@ -705,3 +706,147 @@ def test_backfill_product_catalog_wrapper_survives_two_consecutive_event_loops(
     assert [pair for pair in probed if pair[0] == ticket_id] == [
         (ticket_id, package_name)
     ] * 2
+
+
+class _CountingEngine:
+    """Delegates `dispose()` to a real engine and counts the awaits."""
+
+    def __init__(self, engine: AsyncEngine) -> None:
+        self._engine = engine
+        self.disposals = 0
+
+    async def dispose(self) -> None:
+        self.disposals += 1
+        await self._engine.dispose()
+
+
+def _resolve_ticket_packages_probe(
+    monkeypatch: pytest.MonkeyPatch,
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    fail_first: BaseException | None,
+) -> list[tuple[UUID, str]]:
+    """Replace only the innermost domain operation of each package unit,
+    `add_package_to_ticket()`, by a trivial query on the unit session
+    (raising `fail_first` once, after the query, if given); the shared HTTP
+    client is an in-process transport that is never called."""
+    probed: list[tuple[UUID, str]] = []
+    pending = [fail_first] if fail_first is not None else []
+
+    async def _trivial_addition(db: AsyncSession, **kwargs: object) -> object:
+        await db.execute(text("SELECT 1"))
+        ticket_id = kwargs["ticket_id"]
+        assert isinstance(ticket_id, UUID)
+        probed.append((ticket_id, str(kwargs["package_name"])))
+        if pending:
+            raise pending.pop()
+        return SimpleNamespace(outcome=PackageRecordsOutcome.PACKAGE_TREE_NO_OP)
+
+    def _unused_client(name: str, **options: object) -> httpx.AsyncClient:
+        def _refuse(request: httpx.Request) -> httpx.Response:
+            raise AssertionError("the trivial addition performs no request")
+
+        return httpx.AsyncClient(transport=httpx.MockTransport(_refuse))
+
+    monkeypatch.setattr(cve_tasks, "async_session_factory", factory)
+    monkeypatch.setattr(package_service, "add_package_to_ticket", _trivial_addition)
+    monkeypatch.setattr(package_service, "create_http_client", _unused_client)
+    return probed
+
+
+@pytest.mark.integration
+def test_resolve_ticket_packages_wrapper_survives_two_consecutive_event_loops(
+    _engine: AsyncEngine,  # noqa: PT019 — value used below (.url), not just for setup
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two sequential invocations of the real `resolve_ticket_packages`
+    synchronous wrapper — each its own `asyncio.run()` event loop — both
+    succeed against one shared, pooled engine and return `None`.
+
+    Each invocation validates its primitive arguments, resolves two direct
+    package names, and opens one package session per name through the
+    module-level `async_session_factory` reference in
+    `app/tasks/cve_tasks.py`. The trivial addition and the unit commit
+    check real connections out of the dedicated pool. Nothing is written,
+    so no cleanup is needed beyond disposing the engine. The engine is
+    disposed exactly once per invocation.
+    """
+    ticket_id = uuid4()
+    names = sorted(f"fictional-resolve-{uuid4().hex[:10]}" for _ in range(2))
+    dedicated_engine = create_async_engine(
+        _engine.url.render_as_string(hide_password=False), echo=False
+    )
+    dedicated_factory = async_sessionmaker(
+        dedicated_engine, class_=AsyncSession, expire_on_commit=False
+    )
+    counting = _CountingEngine(dedicated_engine)
+    monkeypatch.setattr(cve_tasks, "engine", counting)
+    probed = _resolve_ticket_packages_probe(
+        monkeypatch, dedicated_factory, fail_first=None
+    )
+    resolve: Callable[..., object] = cve_tasks._resolve_ticket_packages_sync
+
+    try:
+        # First invocation: its own event loop; disposes the pool before
+        # the loop closes.
+        first = resolve(str(ticket_id), [], [], [], list(names))
+        assert counting.disposals == 1
+
+        # Second invocation: a brand-new event loop. Without disposal the
+        # pool would hand out a connection bound to the first (closed)
+        # loop.
+        second = resolve(str(ticket_id), [], [], [], list(names))
+        assert counting.disposals == 2
+    finally:
+        asyncio.run(dedicated_engine.dispose())
+
+    assert (first, second) == (None, None)
+    assert probed == [(ticket_id, name) for name in names] * 2
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    "make_error",
+    [
+        pytest.param(lambda: RuntimeError("fictional unit failure"), id="runtime"),
+        pytest.param(SoftTimeLimitExceeded, id="soft-time-limit"),
+    ],
+)
+def test_resolve_ticket_packages_wrapper_survives_a_failed_event_loop(
+    _engine: AsyncEngine,  # noqa: PT019 — value used below (.url), not just for setup
+    monkeypatch: pytest.MonkeyPatch,
+    make_error: Callable[[], BaseException],
+) -> None:
+    """A first invocation whose package unit fails after using a pooled
+    connection still disposes the pool exactly once and propagates the
+    same exception object, so the next invocation in a new event loop
+    succeeds."""
+    error = make_error()
+    ticket_id = uuid4()
+    name = f"fictional-resolve-{uuid4().hex[:10]}"
+    dedicated_engine = create_async_engine(
+        _engine.url.render_as_string(hide_password=False), echo=False
+    )
+    dedicated_factory = async_sessionmaker(
+        dedicated_engine, class_=AsyncSession, expire_on_commit=False
+    )
+    counting = _CountingEngine(dedicated_engine)
+    monkeypatch.setattr(cve_tasks, "engine", counting)
+    probed = _resolve_ticket_packages_probe(
+        monkeypatch, dedicated_factory, fail_first=error
+    )
+    resolve: Callable[..., object] = cve_tasks._resolve_ticket_packages_sync
+
+    try:
+        with pytest.raises(type(error)) as raised:
+            cve_tasks._resolve_ticket_packages_sync(str(ticket_id), [], [], [], [name])
+        assert raised.value is error
+        assert counting.disposals == 1
+
+        result = resolve(str(ticket_id), [], [], [], [name])
+        assert counting.disposals == 2
+    finally:
+        asyncio.run(dedicated_engine.dispose())
+
+    assert result is None
+    assert probed == [(ticket_id, name)] * 2

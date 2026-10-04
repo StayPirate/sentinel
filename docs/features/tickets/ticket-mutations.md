@@ -400,7 +400,8 @@ Its lifecycle is:
    owner workflow; it is never treated as a committed unit eligible for a later
    attempt from that session. An owner whose transactions cannot register an
    effect keeps the commit-failure contract of its owning specification (for
-   example Product catalog backfill in `product-catalog.md`).
+   example Product catalog backfill in `product-catalog.md` and post-ingest
+   CVE package resolution in `package-service.md`).
 4. **Detach and consume**: after the caller's commit succeeds, the transaction
    owner atomically detaches the complete effect sequence before the first
    publication attempt. A detached effect is consumed exactly once even when
