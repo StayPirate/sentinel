@@ -1348,8 +1348,8 @@ mutates only a `New`, `Analysis`, or `Analyzed` Ticket, while registration
 requires an `Ignored`, `Duplicated`, or `Resolved` source status
 (`ticket-mutations.md`, `reconcile_ticket_status()` step 5). The workflow
 therefore detaches and publishes no convergence effect, and a commit failure,
-including one with an ambiguous outcome, follows the terminal-failure row
-below.
+including one with an ambiguous outcome, follows the unexpected-error row of
+the table below.
 
 Each isolated exception outcome rolls back and closes the current package
 session before the workflow either continues or raises:

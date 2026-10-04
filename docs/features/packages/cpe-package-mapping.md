@@ -376,14 +376,13 @@ Generic worker startup never reads, loads, or validates CPE mapping data.
 Startup may import this module transitively, for example through the
 post-ingest consumer's task module, because importing it performs no
 mapping lookup. A corrupt non-empty file therefore fails the first task
-that requires a
-concrete mapping lookup, while unrelated generic worker tasks remain
-operational. Any future eager check may run only in a process or task
-role dedicated to a real mapping consumer. No eager check is currently
-required. If one is introduced, its reusable contract belongs to the
-mapping module and its invocation belongs to the consuming workflow. Such
-a check belongs in the Service or Task layer, never in `app/core`, because
-Core cannot import Service code.
+that requires a concrete mapping lookup, while unrelated generic worker
+tasks remain operational. Any future eager check may run only in a process
+or task role dedicated to a real mapping consumer. No eager check is
+currently required. If one is introduced, its reusable contract belongs to
+the mapping module and its invocation belongs to the consuming workflow.
+Such a check belongs in the Service or Task layer, never in `app/core`,
+because Core cannot import Service code.
 
 **Location**: `backend/app/services/cpe_mapping.py`
 
