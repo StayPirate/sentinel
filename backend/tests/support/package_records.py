@@ -25,6 +25,9 @@ Consumers:
   contract, guards and their order, whole-invocation rollback);
 - `tests/test_services/test_add_package_records_atomicity.py` (the
   independent-session races);
+- `tests/support/package_records_races.py` and
+  `tests/test_services/test_add_package_to_ticket_races.py` (the committed
+  worlds and expected trees of the orchestrator races);
 - `tests/test_services/test_new_to_analysis_promotion.py` (the
   `add_package_records()` path of Architectural Test Requirement 4, with
   `add_records()`, `catalog_product()`, and `target()`).

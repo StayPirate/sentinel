@@ -10,19 +10,23 @@ Architectural Invariant). The paths are `assign_ticket()` (explicit
 assignment) and every existing consumer mutation that reaches
 `auto_assign_actor()`, including the six package-tree exclusion and
 restoration operations (package-service.md, Exclusion and restoration
-operations, step 7) and a user-attributed, record-creating
+operations, step 7), a user-attributed, record-creating
 `add_package_records()` call (package-service.md, `add_package_records()`
-step 9). For the manual-zone entries `ignore_ticket()` and
-`mark_as_duplicate()`, the acting-user entry transition (`Analysis ->
-Ignored` or `Analysis -> Duplicated`) follows the promotion (tickets.md,
+step 9), and a consumer `add_package_to_ticket()` call by an active VA,
+which reaches the assignment through that delegated boundary
+(package-service.md, Auto-Assignment Rule). For the manual-zone entries
+`ignore_ticket()` and `mark_as_duplicate()`, the acting-user entry
+transition (`Analysis -> Ignored` or `Analysis -> Duplicated`) follows the
+promotion (tickets.md,
 Auto-Assignment on Unassigned Tickets), so the promotion is the only
 system `status_change` and precedes that entry transition.
 
 This module is a thin guard over the path list only: every other property
 of each path (complete event sequences, reconciliation, rollback, races)
 is proven in the path's owning module. Package addition is covered here at
-the `add_package_records()` level; the `add_package_to_ticket()` path is
-deferred to M3.4, since that function does not exist yet.
+both the `add_package_records()` and the `add_package_to_ticket()` level;
+the orchestrator call resolves its package through the in-process SMELT fake
+of `tests/support/package_addition.py`.
 
 Expected values are transcribed from the specifications, never computed
 with the module under test.
@@ -36,6 +40,7 @@ from typing import Any
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.core.enums import (
     PackageStatus,
     Scope,
@@ -55,10 +60,12 @@ from app.services.ticket_service import (
 )
 from app.services.ticket_visibility import TicketCaller
 from tests.support.cvss_chain import DEFAULT_VERSION
+from tests.support.package_addition import PackageSmelt, add, codestream, publish
 from tests.support.package_exclusion import Direction, Level, change, gate_world
 from tests.support.package_records import add_records, catalog_product
 from tests.support.package_records import target as resolved_track
 from tests.support.product_eligibility import only_occurrence
+from tests.support.smelt import SMELT_TEST_API_URL
 from tests.support.suse_cvss import V31_CRITICAL, delete_assessment, upsert
 from tests.support.ticket_mutations import (
     EVAL,
@@ -95,6 +102,7 @@ PATHS = [
     "restore_ticket_package_track",
     "restore_ticket_package_product",
     "add_package_records",
+    "add_package_to_ticket",
 ]
 
 MARKER_PATHS = {
@@ -119,6 +127,7 @@ async def test_assignment_of_a_new_ticket_is_followed_by_one_promotion(
     system_setting_factory: Factory,
     va_user: VAUser,
     tree: TreeBuilder,
+    monkeypatch: pytest.MonkeyPatch,
     path: str,
 ) -> None:
     actor = await va_user()
@@ -300,6 +309,27 @@ async def test_assignment_of_a_new_ticket_is_followed_by_one_promotion(
                 ticket.id,
                 "fictional-libexample",
                 [resolved_track("Fictional:Product:15-SP7:Update", product)],
+                actor=actor,
+            )
+        case "add_package_to_ticket":
+            # The same world as `add_package_records`, with the package
+            # resolved through SMELT and the Product in the current catalog
+            # snapshot; a system call of the same function never assigns
+            # (tests/test_services/test_add_package_to_ticket.py).
+            monkeypatch.setattr(settings, "smelt_api_url", SMELT_TEST_API_URL)
+            await system_setting_factory(
+                key="default_cvss_version", value=DEFAULT_VERSION
+            )
+            ticket = await ticket_factory(status=TicketStatus.NEW.value)
+            product = await catalog_product(db_session)
+            await publish(db_session, product)
+            await add(
+                db_session,
+                ticket.id,
+                "fictional-libexample",
+                PackageSmelt.ok(
+                    codestream("Fictional:Product:15-SP7:Update", "SLE_15", product.cpe)
+                ),
                 actor=actor,
             )
         case _:

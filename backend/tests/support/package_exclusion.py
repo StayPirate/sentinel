@@ -21,6 +21,11 @@ Consumers:
   independent-session races, with `CommittedPath`, `committed_path()`,
   `add_maintainer()`, `path_call()`, `path_event()`, and
   `markers_by_id()`);
+- `tests/test_services/test_add_package_records_atomicity.py`,
+  `tests/test_services/test_add_package_to_ticket_races.py`, and
+  `tests/support/package_records_races.py` (public add racing with
+  exclusion or restore, with `committed_path()`, `path_call()`,
+  `path_event()`, `markers_by_id()`, and `with_target()`);
 - `tests/test_api/test_ticket_package_exclusion.py` (the endpoint e2e
   tier, with `Level`, `Direction`, `markers()`, `with_target()`, and
   `marker_event()`);
