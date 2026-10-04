@@ -1422,8 +1422,8 @@ as returned.
 6. For each record:
    a. Look up the Product by exact `Product.cpe` match among the Products of
       the current catalog snapshot (those whose `catalog_last_seen_at` equals
-      the snapshot timestamp defined in `product-catalog.md`, Catalog
-      Readiness and Freshness). A retained historical Product does not match.
+      the applied snapshot timestamp defined in `product-catalog.md`, Product
+      Sync). A retained historical Product does not match.
       If no current Product matches, ignore this triple and continue.
    b. Create or find a `TicketPackageTrack` with `reference =
       codestream.name` and the determined `workflow_type` (if one does not
@@ -1435,14 +1435,14 @@ as returned.
    returned codestreams were skipped as unsupported or unclassified, fail with
    `PackageTargetsUnresolvedError`; no package-tree record is created.
 
-When at least one Product CPE has no local match in an otherwise successful
-resolution, log a WARNING-level `package_target_resolution_partial` event with
-the package name and unmatched CPEs. This accepted partial result does not
+When at least one Product CPE has no current Product match in an otherwise
+successful resolution, log a WARNING-level `package_target_resolution_partial`
+event with the package name and unmatched CPEs. This accepted partial result does not
 change the API response shape.
 
 For a package tree that is created partially, a newly introduced Product may
-be omitted until the Product catalog sync adds the corresponding `Product` row
-and invokes Product catalog backfill. A zero-resolution failure creates no
+be omitted until the Product catalog sync makes the corresponding Product
+current and invokes Product catalog backfill. A zero-resolution failure creates no
 `TicketPackage` and therefore cannot be discovered by backfill; recovery
 requires a later manual or automatic invocation. A CPE that remains absent
 from the current Product catalog snapshot is intentionally ignored on every

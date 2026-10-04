@@ -360,8 +360,8 @@ invocation (`package-service.md`, `add_package_to_ticket()` step 1) is the
 only database work that may precede it. This ordering preserves the
 I/O-then-Lock invariant (`package-service.md`, Module invariant: I/O-then-Lock
 pattern; `docs/conventions.md`, Transaction Hygiene Rules): no row lock is
-held during the external network I/O. If no
-complete snapshot exists, resolution raises `ProductCatalogNotReadyError`; it
+held during the external network I/O. If no complete snapshot exists,
+resolution raises `ProductCatalogNotReadyError`; it
 MUST NOT report `PackageNotFoundInSmeltError` or
 `PackageTargetsUnresolvedError`. Readiness failure takes precedence over both
 the zero-track and zero-resolved-Product outcomes because neither can be

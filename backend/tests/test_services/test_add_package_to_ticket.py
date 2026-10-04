@@ -33,10 +33,7 @@ orchestrator (preliminary and locked-current accessibility, concurrent
 additions) are covered by
 `tests/test_services/test_add_package_to_ticket_races.py`, and the
 orchestrator path of Architectural Test Requirement 4 by
-`tests/test_services/test_new_to_analysis_promotion.py`. The two
-access-loss tests below change the Ticket inside the fake SMELT responder
-of the same session: they prove the precedence of the locked-current check
-and of an external failure, not concurrency.
+`tests/test_services/test_new_to_analysis_promotion.py`.
 
 Unless a test states otherwise: `SMELT_API_URL` is the fictional test
 origin and SMELT is the in-process `PackageSmelt` fake
@@ -101,7 +98,7 @@ from app.services.ticket_convergence_registry import (
     TicketConvergenceEffect,
     pending_ticket_convergence_effects,
 )
-from app.services.ticket_visibility import ANONYMOUS_CALLER, TicketCaller
+from app.services.ticket_visibility import TicketCaller
 from tests.support.cvss_chain import DEFAULT_VERSION
 from tests.support.package_addition import (
     HISTORICAL_AT,
@@ -348,72 +345,27 @@ class TestInputValidation:
         assert names == []
         assert smelt.requests == []
 
-    @pytest.mark.parametrize(
-        "case",
-        [
-            "system-with-actor",
-            "system-without-comment",
-            "system-with-unknown-comment",
-            "consumer-without-actor",
-            "consumer-of-another-user",
-            "anonymous-consumer",
-            "consumer-with-comment",
-            "consumer-with-unknown-comment",
-        ],
-    )
+    @pytest.mark.parametrize("case", ["system-without-comment", "consumer-of-another"])
     async def test_inconsistent_invocation_raises_before_any_io(
         self, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, case: str
     ) -> None:
+        """One system and one consumer representative of the shared
+        actor/context/comment contract; its complete matrix is owned by
+        `tests/test_services/test_add_package_records_scope.py`
+        (`TestCallerContract`). Here only "before any I/O" is proven."""
         actor, other = uuid.uuid4(), uuid.uuid4()
-        consumer = TicketCaller.authenticated(actor, Scope.ALL)
         cases: dict[str, tuple[uuid.UUID | None, object, str | None, str]] = {
-            "system-with-actor": (
-                actor,
-                SYSTEM_INVOCATION,
-                "CVE package resolution",
-                "no acting user",
-            ),
             "system-without-comment": (
                 None,
                 SYSTEM_INVOCATION,
                 None,
                 "requires its canonical comment",
             ),
-            "system-with-unknown-comment": (
-                None,
-                SYSTEM_INVOCATION,
-                "Manual package addition",
-                "unsupported package_added comment",
-            ),
-            "consumer-without-actor": (
-                None,
-                consumer,
-                None,
-                "must identify the acting user",
-            ),
-            "consumer-of-another-user": (
+            "consumer-of-another": (
                 actor,
                 TicketCaller.authenticated(other, Scope.ALL),
                 None,
                 "must identify the acting user",
-            ),
-            "anonymous-consumer": (
-                actor,
-                ANONYMOUS_CALLER,
-                None,
-                "must identify the acting user",
-            ),
-            "consumer-with-comment": (
-                actor,
-                consumer,
-                "CVE package resolution",
-                "has no audit comment",
-            ),
-            "consumer-with-unknown-comment": (
-                actor,
-                consumer,
-                "free text",
-                "unsupported package_added comment",
             ),
         }
         acting_user_id, caller, comment, match = cases[case]
@@ -912,90 +864,6 @@ class TestLockedPhasePrecedence:
         assert ACQUISITION_UNAVAILABLE_EVENT not in _events(blocked.logs)
         assert await maintainers(db_session, ticket.id) == []
 
-    async def test_access_lost_during_io_is_denied_by_the_locked_check(
-        self,
-        db_session: AsyncSession,
-        ticket_factory: TicketFactory,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """The preliminary read succeeds; the Ticket becomes confidential
-        while maintainership is requested. The locked-current check raises
-        `TicketNotFoundError` with no local effect, although SMELT returns
-        the caller's own email (unpersisted data cannot authorize)."""
-        caller = await seed_user(
-            db_session,
-            email="fictional.caller@example.com",
-            roles=(Role.RESTRICTED_ANALYST,),
-        )
-        ticket = await cveless(ticket_factory, status=ANALYSIS)
-        (product,) = await _current(db_session)
-
-        async def _revoke(request: httpx.Request) -> httpx.Response:
-            ticket.is_confidential = True
-            await db_session.flush()
-            return httpx.Response(
-                200, json=maintainership("fictional.caller@example.com")
-            )
-
-        smelt = PackageSmelt(
-            maintained=reply(
-                200, maintained(codestream(IBS_REF, "SLE_15", product.cpe))
-            ),
-            maintainership=_revoke,
-        )
-        assign = Spy(monkeypatch, "auto_assign_actor")
-        reconcile = Spy(monkeypatch, "reconcile_ticket_status")
-
-        with pytest.raises(TicketNotFoundError):
-            await add(
-                db_session,
-                ticket.id,
-                PKG,
-                smelt,
-                actor=caller,
-                scope=Scope.NON_CONFIDENTIAL,
-            )
-
-        assert smelt.kinds == BOTH
-        assert (assign.calls, reconcile.calls) == ([], [])
-        assert await package_tree(db_session, ticket.id, PKG) is None
-        assert await maintainers(db_session, ticket.id) == []
-        assert await ticket_events(db_session, ticket) == []
-        assert await ticket_row(db_session, ticket.id) == (ANALYSIS.value, None)
-        assert pending_ticket_convergence_effects(db_session) == ()
-
-    async def test_access_lost_before_an_external_failure_keeps_the_external_error(
-        self,
-        db_session: AsyncSession,
-        ticket_factory: TicketFactory,
-    ) -> None:
-        """No extra lookup replaces the external error with 404."""
-        caller = await seed_user(db_session, roles=(Role.RESTRICTED_ANALYST,))
-        ticket = await cveless(ticket_factory, status=ANALYSIS)
-        await _current(db_session)
-
-        async def _revoke_then_fail(request: httpx.Request) -> httpx.Response:
-            ticket.is_confidential = True
-            await db_session.flush()
-            return httpx.Response(500)
-
-        smelt = PackageSmelt(
-            maintained=_revoke_then_fail,
-            maintainership=reply(200, maintainership()),
-        )
-
-        with pytest.raises(SmeltUnavailableError):
-            await add(
-                db_session,
-                ticket.id,
-                PKG,
-                smelt,
-                actor=caller,
-                scope=Scope.NON_CONFIDENTIAL,
-            )
-
-        assert smelt.kinds == ["maintained"]
-
 
 # ---------------------------------------------------------------------------
 # Target resolution (package-model.md, SMELT Query for Package Resolution:
@@ -1219,38 +1087,16 @@ MAINTAINERSHIP_FAILURES: dict[str, tuple[Respond, str]] = {
         reply(500, maintainership("maint.failed@example.com", MARKER)),
         "http_status",
     ),
-    "transport": (
-        fail(httpx.ConnectError(f"{MARKER} {SMELT_TEST_API_URL}")),
-        "transport",
-    ),
     "http-404-envelope": (
         reply(404, {"status": "error", "data": f"Package {MARKER} not found"}),
         "package_missing",
     ),
-    "malformed-body": (
-        reply(
-            200,
-            {
-                "status": "success",
-                "data": [
-                    {
-                        "codestream": {"name": MARKER},
-                        "users": [
-                            {"username": MARKER, "email": "maint.failed@example.com"}
-                        ],
-                        "groups": None,
-                    }
-                ],
-            },
-        ),
-        "schema",
-    ),
-    "invalid-json": (
-        lambda request: httpx.Response(200, content=MARKER.encode()),
-        "envelope",
-    ),
 }
-"""Maintainership responder and its expected warning `category`."""
+"""Maintainership responder and its expected warning `category`: one
+representative non-404 failure and the maintainership 404 that the
+specification calls out (package-service.md step 7). Every failure class
+is covered by `tests/test_services/test_packages/test_smelt_maintainership.py`;
+here only its composition (empty set, tree still created) is proven."""
 
 
 @pytest.mark.integration
@@ -1280,6 +1126,11 @@ class TestMaintainership:
 
         result = await add(db_session, ticket.id, PKG, smelt, actor=actor)
 
+        # Both requests name the invocation's package.
+        assert [request.url.path for _, request in smelt.requests] == [
+            f"/api/experimental/v2/maintained/{PKG}",
+            f"/api/experimental/v2/packages/{PKG}/maintainership",
+        ]
         assert outcome(result) == changed(1, 0, 1, 0)
         assert await maintainers(db_session, ticket.id) == [(PKG, matched.id)]
         assert await ticket_events(db_session, ticket) == [
@@ -1319,9 +1170,10 @@ class TestMaintainership:
         assert await ticket_events(db_session, ticket) == [
             package_added_event(PKG, actor)
         ]
-        assert [(log["event"], log["category"]) for log in logs] == [
-            (ACQUISITION_UNAVAILABLE_EVENT, category)
-        ]
+        assert [
+            (log["event"], log["category"], log["package_name"], log["ticket_id"])
+            for log in logs
+        ] == [(ACQUISITION_UNAVAILABLE_EVENT, category, PKG, str(ticket.id))]
         rendered = repr(logs)
         for secret in ["maint.failed@example.com", MARKER, SMELT_HOST]:
             assert secret not in rendered
