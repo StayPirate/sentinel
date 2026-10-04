@@ -3452,9 +3452,11 @@ async def run_ticket_convergence(
     Q5: idempotent with respect to current persisted state; repeats SMELT
     requests and catch-up publications by design.
 
-    Q6: an enumeration failure, a database or infrastructure failure
-    before or during a unit's commit, a non-operational drain exception,
-    and the catch-up dispatch aggregate escape, marked with their phase
+    Q6: an enumeration failure, any unit failure that is neither
+    package-specific nor the stale `TicketNotMutableError` (database or
+    driver errors before or during commit, audit, delegated-service, or
+    programming errors), a non-operational drain exception, and the
+    catch-up dispatch aggregate escape, marked with their phase
     (`ticket_convergence_failure_phase()`); committed units stay committed.
     Cancellation, `SoftTimeLimitExceeded`, and `MemoryError` propagate.
     """

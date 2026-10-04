@@ -982,11 +982,12 @@ long-lived process* and is therefore subject to the Cross-loop pooled
 connection lifecycle rule (`docs/conventions.md`) — currently
 `run_fetcher`, `run_catch_up`, `cleanup_sessions`,
 `re_evaluate_product_eligibility`, `run_ticket_convergence`,
-`resolve_ticket_packages`, and `recalculate_cvss_derived_state` — MUST have a regression test that
-proves it does not leak a pooled connection across its own event-loop
-boundary. The test invokes the real synchronous wrapper (or its
-extracted async workflow via two separate `asyncio.run()` calls) twice
-in the same test process against the shared pooled production-style
+`resolve_ticket_packages`, and `recalculate_cvss_derived_state` — MUST
+have a regression test that proves it does not leak a pooled connection
+across its own event-loop boundary. The test invokes the real
+synchronous wrapper (or its extracted async workflow via two separate
+`asyncio.run()` calls) twice in the same test process against the shared
+pooled production-style
 engine, with only the innermost domain operation replaced by a trivial
 query (e.g. `SELECT 1`) or a minimal no-op domain object (e.g. a
 test-only `BaseFetcher` subclass). Both invocations MUST succeed;
