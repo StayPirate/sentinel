@@ -679,10 +679,12 @@ class TestRunTicketConvergenceSyncWrapper:
         ticket_id = str(uuid.uuid7())
         task = _FakeTask(retries=retries)
 
-        with capture_logs() as logs, pytest.raises(_RetryRequested):
+        with capture_logs() as logs, pytest.raises(_RetryRequested) as raised:
             package_tasks._run_ticket_convergence_sync(task, ticket_id)
 
-        task.retry.assert_called_once_with(exc=error, countdown=countdown)
+        # No `exc=`: Celery's retry log never renders the exception text.
+        task.retry.assert_called_once_with(countdown=countdown)
+        assert raised.value.__cause__ is error
         assert logs == [
             {
                 "event": RETRYING,
@@ -711,7 +713,7 @@ class TestRunTicketConvergenceSyncWrapper:
         with capture_logs() as logs, pytest.raises(_RetryRequested):
             package_tasks._run_ticket_convergence_sync(task, ticket_id)
 
-        task.retry.assert_called_once_with(exc=error, countdown=5)
+        task.retry.assert_called_once_with(countdown=5)
         assert [(e["event"], e["phase"], e["cause"]) for e in logs] == [
             (RETRYING, "unknown", "RuntimeError")
         ]

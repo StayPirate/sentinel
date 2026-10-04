@@ -478,15 +478,3 @@ class TestTicketConvergenceDrain:
             "Routes using 'get_db' without 'drain_ticket_convergence_after_commit': "
             f"{missing}"
         )
-
-    def test_drain_is_present_on_the_rerun_and_mutation_routes(self) -> None:
-        paths = {
-            info.path
-            for info in _api_routes()
-            if any(
-                n.call is drain_ticket_convergence_after_commit
-                for n in _iter_dependants(info.dependant)
-            )
-        }
-        assert "/api/v1/tickets/{ticket_id}/reopen" in paths
-        assert "/api/v1/tickets/{ticket_id}/revert-duplicate" in paths

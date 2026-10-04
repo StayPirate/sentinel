@@ -48,6 +48,7 @@ from celery.exceptions import OperationalError as BrokerOperationalError
 from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from structlog.contextvars import merge_contextvars
 from structlog.testing import capture_logs
 
 from app.api.v1 import tickets as route
@@ -469,7 +470,7 @@ class TestErrorMappings:
         before = await _state(world, ticket.id)
         publish.error = BrokerOperationalError(f"{_BROKER_URL} timed out")
 
-        with capture_logs() as logs:
+        with capture_logs(processors=[merge_contextvars]) as logs:
             response = await client.post(_url(ticket), headers=headers)
 
         assert response.status_code == 503
@@ -501,6 +502,7 @@ class TestErrorMappings:
                 "log_level": "error",
                 "ticket_id": str(ticket.id),
                 "cause": "broker_operational_error",
+                "request_id": response.headers["X-Request-ID"],
             }
         ]
         assert "fictional-secret" not in repr(logs)

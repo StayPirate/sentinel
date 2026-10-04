@@ -178,7 +178,9 @@ def _run_ticket_convergence_sync(
                 retries=attempt,
                 countdown=countdown,
             )
-            raise self.retry(exc=exc, countdown=countdown) from exc
+            # No `exc=`: Celery's own retry log would otherwise render the
+            # exception text, which may carry broker hosts or SQL details.
+            raise self.retry(countdown=countdown) from exc
         logger.error(
             "ticket_convergence_failed",
             ticket_id=str(ticket_uuid),

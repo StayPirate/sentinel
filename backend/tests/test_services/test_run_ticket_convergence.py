@@ -51,9 +51,11 @@ import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, MutableMapping
 from dataclasses import dataclass, field
 from typing import Any, cast
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
+import structlog
 from celery import Celery
 from celery.exceptions import OperationalError as BrokerOperationalError
 from celery.exceptions import SoftTimeLimitExceeded
@@ -62,6 +64,7 @@ from sqlalchemy import event, func, select, update
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import Session
+from structlog.contextvars import merge_contextvars
 from structlog.testing import capture_logs
 
 from app.config import settings
@@ -932,6 +935,70 @@ class TestUnitIsolation:
             {a: EMPTY_TREE, b: EMPTY_TREE},
             [],
         )
+
+    async def test_internal_value_error_escapes_instead_of_being_isolated(
+        self,
+        world: CommittedWorld,
+        sessions: _Sessions,
+        published: _Publish,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Only the package-input `ValueError` (a persisted name that cannot
+        form one path segment) is isolated; a `ValueError` raised inside a
+        valid unit is an internal contract failure that escapes to the
+        wrapper retry with the `package_resolution` phase."""
+        (fetcher,) = _roster_names("only")
+        _participant(fetcher, None)
+        ticket = await _ticket(world)
+        (a,) = _names("a")
+        await _package(world, ticket, a)
+        error = ValueError("fictional internal invariant")
+        monkeypatch.setattr(
+            package_service, "add_package_to_ticket", AsyncMock(side_effect=error)
+        )
+
+        with (
+            capture_logs() as logs,
+            pytest.raises(ValueError, match="internal") as raised,
+        ):
+            await run_ticket_convergence(
+                ticket_id=ticket.id, session_factory=sessions.maker()
+            )
+
+        assert raised.value is error
+        assert ticket_convergence_failure_phase(error) == "package_resolution"
+        assert _convergence_logs(logs) == []
+        assert published.calls == []
+
+    async def test_package_failure_log_carries_the_bound_task_correlation(
+        self,
+        world: CommittedWorld,
+        sessions: _Sessions,
+        published: _Publish,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The per-package failure WARNING carries the `celery_task_id`
+        bound to the execution context by the worker signals."""
+        ticket = await _ticket(world)
+        await _package(world, ticket, "..")
+        task_id = str(uuid.uuid7())
+
+        structlog.contextvars.bind_contextvars(celery_task_id=task_id)
+        try:
+            with capture_logs(processors=[merge_contextvars]) as logs:
+                await run_ticket_convergence(
+                    ticket_id=ticket.id, session_factory=sessions.maker()
+                )
+        finally:
+            structlog.contextvars.unbind_contextvars("celery_task_id")
+
+        failed = [e for e in logs if e["event"] == "ticket_convergence_package_failed"]
+        assert failed == [
+            {
+                **_package_failed(ticket.id, "..", "ValueError"),
+                "celery_task_id": task_id,
+            }
+        ]
 
     @pytest.mark.parametrize("point", ["before-commit", "during-commit"])
     async def test_database_failure_escapes_without_undoing_earlier_units(

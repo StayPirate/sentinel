@@ -58,6 +58,7 @@ from celery.exceptions import OperationalError as BrokerOperationalError
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession, async_sessionmaker
+from structlog.contextvars import merge_contextvars
 from structlog.testing import capture_logs
 
 from app import database
@@ -427,7 +428,7 @@ class TestApiDrainPublication:
         with capture_logs() as submitted_logs:
             submitted = await api.replay(request)
         publish.error = BrokerOperationalError(f"{BROKER_URL} connection refused")
-        with capture_logs() as failed_logs:
+        with capture_logs(processors=[merge_contextvars]) as failed_logs:
             failed = await api.send(request)
 
         assert submitted.status_code == request.status_code, submitted.text
@@ -441,7 +442,12 @@ class TestApiDrainPublication:
         )
         assert await api.status(request.ticket_id) == request.final.value
         assert _feature_logs(submitted_logs) == []
-        assert _feature_logs(failed_logs) == [_publication_failed(request.ticket_id)]
+        assert _feature_logs(failed_logs) == [
+            {
+                **_publication_failed(request.ticket_id),
+                "request_id": failed.headers["X-Request-ID"],
+            }
+        ]
         rendered = repr(failed_logs) + failed.text
         for fragment in (
             "fictional-secret",
@@ -450,20 +456,20 @@ class TestApiDrainPublication:
         ):
             assert fragment not in rendered
 
-    @pytest.mark.parametrize("name", SCENARIOS)
     async def test_non_operational_exception_follows_the_generic_callback_contract(
         self,
         api: _Api,
         scenarios: dict[str, Callable[[], Awaitable[_Request]]],
         publish: _Publish,
-        name: str,
     ) -> None:
         """A programming error escaping the adapter is not converted into
         `acceptance_unconfirmed`: `get_db()` logs its unchanged generic
         `post_commit_callback_failed`, the committed mutation and its
         success response are unchanged, and no publication-failure event
-        is emitted."""
-        request = await scenarios[name]()
+        is emitted. The drain is route-independent, so one representative
+        endpoint suffices (the adapter's propagation is proven in
+        `test_ticket_convergence_publication.py`)."""
+        request = await scenarios["reopen"]()
 
         submitted = await api.replay(request)
         publish.error = RuntimeError("fictional programming error")

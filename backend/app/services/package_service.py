@@ -3255,10 +3255,11 @@ _ISOLATED_PACKAGE_FAILURES: Final = (
     PackageNotFoundInSmeltError,
     PackageTargetsUnresolvedError,
     ProductCatalogNotReadyError,
-    ValueError,
 )
-"""Package-specific resolution or validation failures isolated per unit
-(package-service.md, `run_ticket_convergence()` workflow; #781 K10 (b))."""
+"""Package-specific resolution failures isolated per unit (package-service.md,
+`run_ticket_convergence()` workflow; #781 K10 (b)). The package-input
+`ValueError` is isolated separately by validating the persisted name before
+the unit, so an internal `ValueError` still escapes."""
 
 
 class TicketConvergencePhase(StrEnum):
@@ -3307,6 +3308,18 @@ async def _persisted_package_names(
         return list((await session.execute(statement)).scalars())
 
 
+def _log_package_failure(
+    ticket_id: uuid.UUID, package_name: str, exc: Exception
+) -> None:
+    """One sanitized WARNING per isolated package failure (type name only)."""
+    logger.warning(
+        "ticket_convergence_package_failed",
+        ticket_id=str(ticket_id),
+        package_name=package_name,
+        cause=type(exc).__name__,
+    )
+
+
 async def _converge_package(
     session_factory: async_sessionmaker[AsyncSession],
     http_client: httpx.AsyncClient,
@@ -3316,11 +3329,19 @@ async def _converge_package(
 ) -> Literal["converged", "failed", "stale"]:
     """One independent package unit: re-resolve, flush, commit, close, drain.
 
-    Package-specific failures roll back the unit and are logged; a
-    manual-zone re-entry is a stale no-op. Every other exception escapes
-    with the unit uncommitted; a drain exception escapes after the unit
-    committed.
+    A persisted name that cannot form a package path segment (the
+    package-input `ValueError`) and package-specific resolution failures
+    roll back the unit and are logged; a manual-zone re-entry is a stale
+    no-op. Every other exception escapes with the unit not committed or
+    its commit outcome unconfirmed; a drain exception escapes after the
+    unit committed.
     """
+    try:
+        validate_package_name(package_name)
+    except ValueError as exc:
+        _log_package_failure(ticket_id, package_name, exc)
+        return "failed"
+
     async with session_factory() as session:
         try:
             await add_package_to_ticket(
@@ -3336,12 +3357,7 @@ async def _converge_package(
             await session.flush()
         except _ISOLATED_PACKAGE_FAILURES as exc:
             await session.rollback()
-            logger.warning(
-                "ticket_convergence_package_failed",
-                ticket_id=str(ticket_id),
-                package_name=package_name,
-                cause=type(exc).__name__,
-            )
+            _log_package_failure(ticket_id, package_name, exc)
             return "failed"
         except TicketNotMutableError:
             await session.rollback()
