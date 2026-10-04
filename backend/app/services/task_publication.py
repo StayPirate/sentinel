@@ -31,17 +31,25 @@ import asyncio
 from collections.abc import Mapping
 
 
-async def publish_task(task_name: str, *, kwargs: Mapping[str, str]) -> None:
+async def publish_task(
+    task_name: str,
+    *,
+    kwargs: Mapping[str, str],
+    task_id: str | None = None,
+    queue: str | None = None,
+) -> None:
     """Enqueue the registered Celery task `task_name` with `kwargs`.
 
     Category C (external broker I/O only; no database or Redis key access).
 
     Q1: `task_name` is the explicit registered task name; `kwargs` holds
-    only detached primitive (string) arguments.
+    only detached primitive (string) arguments. `task_id` is an optional
+    caller-allocated Celery task ID; `queue` an optional explicit queue.
 
-    Q3: submits exactly one message through `send_task()` on the default
-    route without waiting for execution, in a worker thread so the event
-    loop is not blocked. Adds no retry beyond Celery's configured
+    Q3: submits exactly one message through `send_task()` without waiting
+    for execution, in a worker thread so the event loop is not blocked.
+    `task_id` and `queue` are passed only when given, so an omitted queue
+    keeps the default route. Adds no retry beyond Celery's configured
     publication retry policy.
 
     Q4: returns `None` once the publication call returns without raising.
@@ -51,6 +59,15 @@ async def publish_task(task_name: str, *, kwargs: Mapping[str, str]) -> None:
     # Deferred: `app.celery_app` imports every fetcher module at load time.
     from app.celery_app import celery_app
 
+    options: dict[str, str] = {}
+    if task_id is not None:
+        options["task_id"] = task_id
+    if queue is not None:
+        options["queue"] = queue
     await asyncio.to_thread(
-        celery_app.send_task, task_name, kwargs=dict(kwargs), ignore_result=True
+        celery_app.send_task,
+        task_name,
+        kwargs=dict(kwargs),
+        ignore_result=True,
+        **options,
     )
