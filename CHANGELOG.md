@@ -1,5 +1,38 @@
 # Changelog
 
+## [0.7.0](https://github.com/StayPirate/sentinel/compare/v0.6.0...v0.7.0) (2026-10-04)
+
+
+### Features
+
+* add AIMAAS threshold sync and Product eligibility recalculation ([#770](https://github.com/StayPirate/sentinel/issues/770)) ([5b1222d](https://github.com/StayPirate/sentinel/commit/5b1222d6d0ac4ba36255d7acfac558724d50c735))
+* add automatic Ticket reference ingestion ([#754](https://github.com/StayPirate/sentinel/issues/754)) ([477a0b7](https://github.com/StayPirate/sentinel/commit/477a0b7b4bc3d31b581b5b76760f92576ed2dc77))
+* add CVE fetcher per-CVE finalization and the default CVE catch-up ([#801](https://github.com/StayPirate/sentinel/issues/801)) ([1a9329f](https://github.com/StayPirate/sentinel/commit/1a9329f7088f8ca5d7f2e849fa4d6ca7527ffcfa))
+* add CVE fetcher registry, source status, and catch-up task ([#760](https://github.com/StayPirate/sentinel/issues/760)) ([342a232](https://github.com/StayPirate/sentinel/commit/342a232e86ab52e76c44f42626e2a17e8f9aae10))
+* add CVE list, CVE detail, and CVE source listing endpoints ([#752](https://github.com/StayPirate/sentinel/issues/752)) ([6272db6](https://github.com/StayPirate/sentinel/commit/6272db68d86643f990958db3de545a18acb57af8))
+* add CVE refetch endpoint and create/associate freshness refresh ([#804](https://github.com/StayPirate/sentinel/issues/804)) ([e88f462](https://github.com/StayPirate/sentinel/commit/e88f462e3820cc3caec3050635c2620fb23720b5))
+* add on-demand CVE fetch publication and the fetch_single_cve task ([#803](https://github.com/StayPirate/sentinel/issues/803)) ([f3b8f5c](https://github.com/StayPirate/sentinel/commit/f3b8f5cf08d0ecf3cb7dd52eb5edc471a5fa9703))
+* add post-ingest CVE package resolution ([#796](https://github.com/StayPirate/sentinel/issues/796)) ([97419b6](https://github.com/StayPirate/sentinel/commit/97419b66a8fb4b8ad9a085f7acd2e7f9f64740d3))
+* add source-neutral CVE upsert with Ticket composition ([#759](https://github.com/StayPirate/sentinel/issues/759)) ([3c2b79c](https://github.com/StayPirate/sentinel/commit/3c2b79c5589724e185f76ca9ebeb5b46100edf16))
+* add the AIMAAS Product lifecycle synchronization fetcher ([#769](https://github.com/StayPirate/sentinel/issues/769)) ([c457503](https://github.com/StayPirate/sentinel/commit/c457503d5d8c3fde61ee81489f0901c7e7ac3283))
+* add the lifecycle transition evaluator and reconciliation ([#771](https://github.com/StayPirate/sentinel/issues/771)) ([01f91c4](https://github.com/StayPirate/sentinel/commit/01f91c4727e9494e8afb77ee1dfa8a9913ba1d9b))
+* add the maintainer workbench queries and endpoints ([#776](https://github.com/StayPirate/sentinel/issues/776)) ([c9ee9e4](https://github.com/StayPirate/sentinel/commit/c9ee9e4409243e554784d45921f10e1c5a163082))
+* add the package addition endpoint and Product catalog backfill ([#795](https://github.com/StayPirate/sentinel/issues/795)) ([03e9a10](https://github.com/StayPirate/sentinel/commit/03e9a106391003dd1829702d81447c7c6c542d8e))
+* add the package addition orchestration ([#792](https://github.com/StayPirate/sentinel/issues/792)) ([5889754](https://github.com/StayPirate/sentinel/commit/5889754db1887a2662395c8205324587afc6f2e5))
+* add the package-record creation boundary ([#777](https://github.com/StayPirate/sentinel/issues/777)) ([142e1cd](https://github.com/StayPirate/sentinel/commit/142e1cde3ac5402fda2e4801dce1a42ee75b6951)), closes [#774](https://github.com/StayPirate/sentinel/issues/774)
+* add the Product catalog list query and endpoint ([#767](https://github.com/StayPirate/sentinel/issues/767)) ([5f2abd7](https://github.com/StayPirate/sentinel/commit/5f2abd768d3d2c1fa5db42ff40228cbdf9942959))
+* add the SMELT maintained-package client ([#788](https://github.com/StayPirate/sentinel/issues/788)) ([b007667](https://github.com/StayPirate/sentinel/commit/b00766701c6571c52d358f6ce6e52b408da60e61))
+* add the SMELT package maintainership client ([#778](https://github.com/StayPirate/sentinel/issues/778)) ([d637811](https://github.com/StayPirate/sentinel/commit/d637811176ec6f39094b0cb75b83c72bfe647417))
+* add the SMELT Product catalog synchronization fetcher ([#768](https://github.com/StayPirate/sentinel/issues/768)) ([7ad3069](https://github.com/StayPirate/sentinel/commit/7ad30695d113d2dfffca92e9d71452307f3c3890))
+* add Ticket convergence publication, drains, and operator rerun ([#794](https://github.com/StayPirate/sentinel/issues/794)) ([6c5fcd4](https://github.com/StayPirate/sentinel/commit/6c5fcd4ae02b81e5d77b99d167dcf198c5a59112))
+* add trusted-external CVSS batch and CVE-rejection boundary ([#756](https://github.com/StayPirate/sentinel/issues/756)) ([288d446](https://github.com/StayPirate/sentinel/commit/288d4464928cc5c6d31ac61b0dac1dc83f8ed8e7)), closes [#749](https://github.com/StayPirate/sentinel/issues/749)
+
+
+### Bug Fixes
+
+* reject NUL characters in consumer-supplied API input ([#791](https://github.com/StayPirate/sentinel/issues/791)) ([c6869c7](https://github.com/StayPirate/sentinel/commit/c6869c7f036695e3b62c5c54c47c0f49a53b18b4))
+* reject NUL characters in persisted external strings ([#790](https://github.com/StayPirate/sentinel/issues/790)) ([2c1696b](https://github.com/StayPirate/sentinel/commit/2c1696b4bc58280e0022f557fa9d909596764004))
+
 ## [0.6.0](https://github.com/StayPirate/sentinel/compare/v0.5.1...v0.6.0) (2026-10-01)
 
 
