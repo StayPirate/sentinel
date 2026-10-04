@@ -1,32 +1,34 @@
 """Tests for the `sync_smelt_products` fetcher.
 
 Contract under test: docs/features/packages/product-catalog.md (SMELT
-Integration > Product Sync, steps 1-5 and 7, retained rows, and failure
-behavior; Catalog Readiness and Freshness; Fetcher: `sync_smelt_products`,
-properties, Error Handling, and Metrics), docs/features/platform/
-fetcher-infrastructure.md (BaseFetcher Base Class: execution-session
-transaction contract, Finalization, Outcome and effect accounting; Error
-Message Sanitization; Naming Convention; Registry), docs/features/platform/
+Integration > Product Sync, steps 1-8, retained rows, failure behavior, and
+the best-effort backfill enqueue paragraph; Catalog Readiness and Freshness;
+Fetcher: `sync_smelt_products`, properties, Error Handling, and Metrics),
+docs/features/platform/fetcher-infrastructure.md (BaseFetcher Base Class:
+execution-session transaction contract, Finalization, Outcome and effect
+accounting; Error Message Sanitization; Naming Convention; Registry;
+`SoftTimeLimitExceeded` handling convention), docs/features/platform/
 testing-strategy.md (Mandatory Test Scenarios, Fetcher Outcome and Effect
 Accounting), and docs/features/tickets/ticket-audit-log.md (Canonical
 Mutation and No-Event Matrix row "Product catalog source mutation or
 workflow-only dispatch/checkpoint outcome"; Testing Requirement 12).
-Product Sync steps 6 and 8 (newly-current retention and the post-commit
-backfill enqueue) are deferred and not covered here.
 
 `validate_snapshot()` and the fetcher properties are unit tests. Publication
 tests call `execute(db_session)`: its commit releases a savepoint of the
 per-test outer transaction, so every row is rolled back at teardown. The
-two `run()` lifecycle tests commit through `real_session_factory` and
-delete every row they create. SMELT is the fake server of
-`tests/support/smelt.py`, injected as the fetcher's HTTP client; the
-snapshot clock is the `_utc_now` seam.
+`run()` lifecycle tests commit through `real_session_factory` and delete
+every row they create. SMELT is the fake server of `tests/support/smelt.py`,
+injected as the fetcher's HTTP client; the snapshot clock is the `_utc_now`
+seam. The step-8 broker call `task_publication.publish_task` is replaced in
+every test by an autouse recorder, so no broker is reached.
 """
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
@@ -34,6 +36,8 @@ from typing import Any, Final
 
 import httpx
 import pytest
+from celery.exceptions import OperationalError as BrokerOperationalError
+from celery.exceptions import SoftTimeLimitExceeded
 from sqlalchemy import String, delete, event, func, select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -52,6 +56,7 @@ from app.models.ticket_audit_event import TicketAuditEvent
 from app.models.ticket_package import TicketPackage
 from app.models.ticket_package_product import TicketPackageProduct
 from app.models.ticket_package_track import TicketPackageTrack
+from app.services import task_publication
 from app.services.base_fetcher import (
     FETCHER_REGISTRY,
     FetcherError,
@@ -162,6 +167,31 @@ def clock(monkeypatch: pytest.MonkeyPatch) -> Clock:
 def _fictional_origin(monkeypatch: pytest.MonkeyPatch) -> None:
     """Point the fetcher at the fictional SMELT origin."""
     monkeypatch.setattr(settings, "smelt_api_url", SMELT_TEST_API_URL)
+
+
+@dataclass
+class Publications:
+    """Substitute for `task_publication.publish_task` recording each call as
+    `{"task_name": ..., **options}`. `on_call` observes the state at the
+    publication; `fail` is raised after it."""
+
+    on_call: Callable[[], Awaitable[None]] | None = None
+    fail: BaseException | None = None
+    calls: list[dict[str, Any]] = field(default_factory=list)
+
+    async def __call__(self, task_name: str, **options: Any) -> None:
+        self.calls.append({"task_name": task_name, **options})
+        if self.on_call is not None:
+            await self.on_call()
+        if self.fail is not None:
+            raise self.fail
+
+
+@pytest.fixture(autouse=True)
+def published(monkeypatch: pytest.MonkeyPatch) -> Publications:
+    recorder = Publications()
+    monkeypatch.setattr(task_publication, "publish_task", recorder)
+    return recorder
 
 
 def _fetcher(server: SmeltServer) -> SyncSmeltProducts:
@@ -1054,6 +1084,317 @@ class TestNoTicketAuditEvent:
 
 
 # ---------------------------------------------------------------------------
+# Newly current Products and the post-commit backfill dispatch (steps 6 and
+# 8; best-effort enqueue paragraph; Error Handling; Metrics)
+# ---------------------------------------------------------------------------
+
+BACKFILL_DISPATCH: Final = {"task_name": "backfill_product_catalog", "kwargs": {}}
+"""The one step-8 publication: the registered name, no task arguments, and
+no explicit queue or task ID (the default route)."""
+
+DISPATCH_FAILED: Final = "smelt_product_catalog_backfill_dispatch_failed"
+
+
+def _renamed(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The same CPEs with a descriptive change and a changed repository set."""
+    return [
+        {
+            **row,
+            "friendly_name": f"{row['friendly_name']} Renamed",
+            "repos": [*row["repos"], f"EXAMPLE:Updates:Extra{index}:1:x86_64"],
+        }
+        for index, row in enumerate(rows)
+    ]
+
+
+def _third_snapshot() -> list[dict[str, Any]]:
+    """After `_second_snapshot()`: A and C re-observed, historical F back."""
+    return [
+        product_row(1, cpe="cpe:/o:example:a:1", repos=_repos("A", "x86_64", "s390x")),
+        product_row(3, cpe="cpe:/o:example:c:1", repos=_repos("C", "c2", "c3")),
+        product_row(6, cpe="cpe:/o:example:f:1", repos=_repos("F", "f1", "f2")),
+    ]
+
+
+SnapshotSequence = Callable[[], list[list[dict[str, Any]]]]
+
+_SEQUENCES: Final[list[tuple[str, SnapshotSequence, list[bool]]]] = [
+    ("first", lambda: [_first_snapshot()], [True]),
+    ("new-cpe", lambda: [_first_snapshot(), _second_snapshot()], [True, True]),
+    (
+        "historical-re-enters",
+        lambda: [_first_snapshot(), _second_snapshot(), _third_snapshot()],
+        [True, True, True],
+    ),
+    ("identical", lambda: [_first_snapshot(), _first_snapshot()], [True, False]),
+    (
+        "descriptive-and-repository-changes",
+        lambda: [_first_snapshot(), _renamed(_first_snapshot())],
+        [True, False],
+    ),
+    ("decreased", lambda: [_first_snapshot(), _first_snapshot()[:3]], [True, False]),
+    (
+        "historical-stays-absent",
+        lambda: [_first_snapshot(), _second_snapshot(), _second_snapshot()],
+        [True, True, False],
+    ),
+]
+"""Consecutive complete snapshots and, per publication, whether at least one
+incoming CPE was not in the previous snapshot (product-catalog.md, Product
+Sync step 6: the first snapshot, a new CPE, and a historical Product
+re-entering count; re-observation, descriptive or repository changes, and a
+decreased snapshot do not)."""
+
+_CLOCKS: Final = (T1, T2, T3)
+
+
+async def _execute_observed(
+    db: AsyncSession, server: SmeltServer, published: Publications
+) -> tuple[SyncSmeltProducts, list[tuple[bool, Metrics]]]:
+    """Execute once; at each publication, record whether the execution
+    session still has a transaction open and the metrics recorded so far."""
+    fetcher = _fetcher(server)
+    observed: list[tuple[bool, Metrics]] = []
+
+    async def observe() -> None:
+        observed.append((db.in_transaction(), _metrics(fetcher)))
+
+    published.on_call = observe
+    try:
+        await fetcher.execute(db)
+    finally:
+        await fetcher._teardown_http_client()
+    return fetcher, observed
+
+
+@pytest.mark.integration
+class TestBackfillDispatch:
+    async def test_first_snapshot_dispatches_one_backfill_after_commit_and_metrics(
+        self, db_session: AsyncSession, clock: Clock, published: Publications
+    ) -> None:
+        """The publication happens once, with no task argument and the
+        default route, after the publication transaction ended and after
+        the terminal metrics were recorded."""
+        _fetcher_used, observed = await _execute_observed(
+            db_session, SmeltServer.for_rows(_first_snapshot()), published
+        )
+
+        assert published.calls == [BACKFILL_DISPATCH]
+        assert observed == [(False, (6, 6, 0, 0))]
+        assert await _applied_snapshot(db_session) == T1
+
+    @pytest.mark.parametrize(
+        ("sequence", "expected"),
+        [case[1:] for case in _SEQUENCES],
+        ids=[case[0] for case in _SEQUENCES],
+    )
+    async def test_backfill_is_dispatched_only_for_a_newly_current_product(
+        self,
+        db_session: AsyncSession,
+        clock: Clock,
+        published: Publications,
+        sequence: SnapshotSequence,
+        expected: list[bool],
+    ) -> None:
+        dispatched: list[int] = []
+        for snapshot_at, rows in zip(_CLOCKS, sequence(), strict=False):
+            clock.now = snapshot_at
+            published.calls.clear()
+            await _publish(db_session, rows)
+            assert published.calls in ([], [BACKFILL_DISPATCH])
+            dispatched.append(len(published.calls))
+
+        assert dispatched == [int(newly_current) for newly_current in expected]
+
+    @pytest.mark.parametrize(
+        ("break_server", "message", "cause"),
+        [case[1:] for case in _RUN_FAILURES],
+        ids=[case[0] for case in _RUN_FAILURES],
+    )
+    async def test_failure_before_publication_dispatches_nothing(
+        self,
+        db_session: AsyncSession,
+        clock: Clock,
+        published: Publications,
+        break_server: Callable[[SmeltServer], None],
+        message: str,
+        cause: type[BaseException],
+    ) -> None:
+        """The failing snapshot (250 new CPEs) would make Products newly
+        current, but nothing is published and nothing is dispatched."""
+        await _publish(db_session, _first_snapshot())
+        published.calls.clear()
+        clock.now = T2
+        server = SmeltServer.for_rows(make_rows(250))
+        break_server(server)
+
+        error, _fetcher_used = await _execute_failing(db_session, server)
+
+        assert str(error) == message
+        assert published.calls == []
+        assert await _applied_snapshot(db_session) == T1
+
+    @pytest.mark.parametrize("stage", ["associations", "commit"])
+    async def test_publication_database_failure_dispatches_nothing(
+        self,
+        db_session: AsyncSession,
+        clock: Clock,
+        published: Publications,
+        monkeypatch: pytest.MonkeyPatch,
+        stage: str,
+    ) -> None:
+        await _publish(db_session, _first_snapshot())
+        published.calls.clear()
+        clock.now = T2
+        failure = OperationalError("INSERT", {}, Exception("connection lost"))
+
+        async def failing_upsert(*args: Any, **kwargs: Any) -> None:
+            raise failure
+
+        async def failing_commit() -> None:
+            raise failure
+
+        if stage == "associations":
+            monkeypatch.setattr(sync_module, "_upsert_associations", failing_upsert)
+        else:
+            monkeypatch.setattr(db_session, "commit", failing_commit)
+
+        error, fetcher = await _execute_failing(
+            db_session, SmeltServer.for_rows(_second_snapshot())
+        )
+        await db_session.rollback()
+
+        assert str(error) == PUBLICATION_FAILED
+        assert published.calls == []
+        assert _metrics(fetcher) == (0, 0, 0, 0)
+        assert await _applied_snapshot(db_session) == T1
+
+    @pytest.mark.parametrize(
+        "make_error",
+        [
+            pytest.param(lambda: None, id="dispatched"),
+            pytest.param(
+                lambda: BrokerOperationalError(
+                    f"amqp://{MARKER}@broker.example.test:5672 unreachable"
+                ),
+                id="broker-operational-error",
+            ),
+            pytest.param(lambda: RuntimeError(MARKER), id="runtime-error"),
+            pytest.param(lambda: TypeError(MARKER), id="serialization-error"),
+        ],
+    )
+    async def test_dispatch_failure_keeps_the_catalog_and_every_metric(
+        self,
+        db_session: AsyncSession,
+        clock: Clock,
+        published: Publications,
+        make_error: Callable[[], Exception | None],
+    ) -> None:
+        """Best-effort backfill dispatch failure without an item failure
+        (product-catalog.md, Metrics): the run returns normally with the
+        committed second snapshot and exactly the metrics of the successful
+        dispatch (`test_second_snapshot_counts_each_product_once`); a
+        failure adds exactly one WARNING carrying only the exception class."""
+        await _publish(db_session, _first_snapshot())
+        published.calls.clear()
+        clock.now = T2
+        error = make_error()
+        published.fail = error
+
+        with capture_logs() as logs:
+            fetcher = await _execute(
+                db_session, SmeltServer.for_rows(_second_snapshot())
+            )
+
+        assert published.calls == [BACKFILL_DISPATCH]
+        assert _metrics(fetcher) == (7, 1, 4, 0)
+        assert await _applied_snapshot(db_session) == T2
+        products = await _products(db_session)
+        assert {cpe for cpe, state in products.items() if state[3] == T2} == {
+            row["cpe"] for row in _second_snapshot()
+        }
+        expected_logs: list[dict[str, Any]] = [
+            {
+                "event": "smelt_product_catalog_published",
+                "log_level": "info",
+                "products": 6,
+                "selected": 7,
+                "created": 1,
+                "updated": 4,
+                "newly_current": True,
+            }
+        ]
+        if error is not None:
+            expected_logs.append(
+                {
+                    "event": DISPATCH_FAILED,
+                    "log_level": "warning",
+                    "cause": type(error).__name__,
+                }
+            )
+        assert logs == expected_logs
+        assert MARKER not in repr(logs)
+        assert "broker.example.test" not in repr(logs)
+
+    async def test_re_observation_logs_that_no_product_is_newly_current(
+        self, db_session: AsyncSession, clock: Clock, published: Publications
+    ) -> None:
+        rows = _first_snapshot()
+        await _publish(db_session, rows)
+        published.calls.clear()
+        clock.now = T2
+
+        with capture_logs() as logs:
+            await _publish(db_session, rows)
+
+        assert published.calls == []
+        assert logs == [
+            {
+                "event": "smelt_product_catalog_published",
+                "log_level": "info",
+                "products": 6,
+                "selected": 6,
+                "created": 0,
+                "updated": 0,
+                "newly_current": False,
+            }
+        ]
+
+    @pytest.mark.parametrize(
+        "make_signal",
+        [
+            pytest.param(SoftTimeLimitExceeded, id="soft-time-limit"),
+            pytest.param(MemoryError, id="memory-error"),
+            pytest.param(asyncio.CancelledError, id="cancelled"),
+        ],
+    )
+    async def test_whole_run_signal_from_the_dispatch_propagates(
+        self,
+        db_session: AsyncSession,
+        clock: Clock,
+        published: Publications,
+        make_signal: Callable[[], BaseException],
+    ) -> None:
+        """The signal escapes `execute()` unchanged and is not logged as a
+        dispatch failure; the committed catalog remains published."""
+        signal = make_signal()
+        published.fail = signal
+        fetcher = _fetcher(SmeltServer.for_rows(_first_snapshot()))
+
+        try:
+            with capture_logs() as logs, pytest.raises(type(signal)) as raised:
+                await fetcher.execute(db_session)
+        finally:
+            await fetcher._teardown_http_client()
+
+        assert raised.value is signal
+        assert published.calls == [BACKFILL_DISPATCH]
+        assert [e for e in logs if e["event"] == DISPATCH_FAILED] == []
+        assert await _applied_snapshot(db_session) == T1
+        assert len(await _products(db_session)) == 6
+
+
+# ---------------------------------------------------------------------------
 # Catalog readiness and coherence with the Product query service
 # ---------------------------------------------------------------------------
 
@@ -1256,6 +1597,78 @@ class TestRunLifecycle:
         ) == (0, 0, 0, 0)
         async with real_session_factory() as session:
             assert await _products(session) == {}
+
+    async def test_backfill_is_dispatched_after_the_catalog_is_durable(
+        self,
+        committed_run: RunSetup,
+        real_session_factory: async_sessionmaker[AsyncSession],
+        clock: Clock,
+        published: Publications,
+    ) -> None:
+        """At the step-8 publication an independent session already reads
+        the complete committed snapshot."""
+        rows = make_rows(3, start=9201)
+        run_id = await committed_run(SmeltServer.for_rows(rows))
+        visible: list[ProductState] = []
+
+        async def observe() -> None:
+            async with real_session_factory() as session:
+                visible.append(await _products(session))
+
+        published.on_call = observe
+
+        await SyncSmeltProducts().run(run_id=run_id, config=_run_config())
+
+        assert published.calls == [BACKFILL_DISPATCH]
+        assert visible == [
+            {
+                row["cpe"]: (row["name"], row["version"], row["friendly_name"], T1)
+                for row in rows
+            }
+        ]
+        run = await _finalized(real_session_factory, run_id)
+        assert run.status == "success"
+
+    async def test_dispatch_failure_finalizes_a_successful_run_without_item_failure(
+        self,
+        committed_run: RunSetup,
+        real_session_factory: async_sessionmaker[AsyncSession],
+        clock: Clock,
+        published: Publications,
+    ) -> None:
+        """Best-effort backfill dispatch failure without an item failure: the
+        finalized run keeps the success status and the counters of the
+        successful dispatch, and the committed catalog stays published."""
+        rows = make_rows(3, start=9301)
+        run_id = await committed_run(SmeltServer.for_rows(rows))
+        published.fail = BrokerOperationalError(f"fictional broker outage {MARKER}")
+
+        with capture_logs() as logs:
+            await SyncSmeltProducts().run(run_id=run_id, config=_run_config())
+
+        run = await _finalized(real_session_factory, run_id)
+        assert run.status == "success"
+        assert (
+            run.items_succeeded,
+            run.items_created,
+            run.items_updated,
+            run.items_failed,
+        ) == (3, 3, 0, 0)
+        assert (run.error_message, run.error_detail, run.error_traceback) == (
+            None,
+            None,
+            None,
+        )
+        assert [e for e in logs if e["event"] == DISPATCH_FAILED] == [
+            {
+                "event": DISPATCH_FAILED,
+                "log_level": "warning",
+                "cause": "OperationalError",
+            }
+        ]
+        assert MARKER not in repr(logs)
+        async with real_session_factory() as session:
+            assert set(await _products(session)) == {row["cpe"] for row in rows}
 
 
 # ---------------------------------------------------------------------------

@@ -1,6 +1,7 @@
 """Tests for the package-domain Celery task boundaries
-(backend/app/tasks/package_tasks.py): `re_evaluate_product_eligibility` and
-the root Ticket convergence task `run_ticket_convergence`.
+(backend/app/tasks/package_tasks.py): `re_evaluate_product_eligibility`,
+the root Ticket convergence task `run_ticket_convergence`, and the Product
+catalog backfill task `backfill_product_catalog`.
 
 See `docs/features/packages/product-lifecycle-transitions.md` (Sub-task:
 `re_evaluate_product_eligibility`: validation before any session, one
@@ -16,10 +17,15 @@ workflow: the bound wrapper validates `ticket_id`, runs exactly one
 complete workflow at 5, 10, and 20 seconds, logs terminal failure, and
 returns `None`) with `docs/features/platform/testing-strategy.md` (Sync
 Entry-Point Tests; Cross-Loop Engine Lifecycle) for the convergence task.
+The backfill task follows `docs/features/packages/product-catalog.md`
+(Product Catalog Backfill: registered name, no arguments, no automatic
+retry, no `FetcherRun`, exactly one `asyncio.run()`, and `engine.dispose()`
+exactly once on success, failure, and cancellation paths).
 
 The workflows themselves are tested in
-`tests/test_services/test_packages/test_product_eligibility_recalculation.py`
-and `tests/test_services/test_run_ticket_convergence.py`, and the real
+`tests/test_services/test_packages/test_product_eligibility_recalculation.py`,
+`tests/test_services/test_run_ticket_convergence.py`, and
+`tests/test_services/test_packages/test_product_catalog_backfill.py`, and the real
 two-invocation cross-loop regressions in
 `tests/test_tasks/test_cross_loop_engine_lifecycle.py`. Every test here
 rebinds the module-level `engine` to a fake whose `dispose` is an
@@ -57,6 +63,9 @@ import app.celery_app as celery_app_module
 from app.celery_app import celery_app
 from app.services import task_publication
 from app.services.base_fetcher import FETCHER_REGISTRY
+from app.services.packages.product_catalog_backfill import (
+    BACKFILL_PRODUCT_CATALOG_TASK,
+)
 from app.services.packages.product_eligibility_recalculation import (
     RE_EVALUATE_PRODUCT_ELIGIBILITY_TASK,
 )
@@ -854,3 +863,217 @@ class TestRunTicketConvergenceTaskRegistration:
 
     def test_is_a_sub_operation_not_a_fetcher(self) -> None:
         assert CONVERGENCE_TASK not in FETCHER_REGISTRY
+
+
+# ===========================================================================
+# Product catalog backfill task (product-catalog.md, Product Catalog
+# Backfill: no arguments, no automatic retry, no `FetcherRun`, exactly one
+# `asyncio.run()`, `engine.dispose()` once on every path)
+# ===========================================================================
+
+BACKFILL_TASK = "backfill_product_catalog"
+BACKFILL_DISPOSE_FAILED = "product_catalog_backfill_engine_dispose_failed"
+
+
+@pytest.fixture
+def backfill(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
+    """Stand-in for the Product catalog backfill workflow."""
+    mock = AsyncMock(return_value=None)
+    monkeypatch.setattr(package_tasks, "run_product_catalog_backfill", mock)
+    return mock
+
+
+@pytest.mark.unit
+class TestBackfillProductCatalogAsync:
+    async def test_success_delegates_then_disposes_once(
+        self,
+        backfill: AsyncMock,
+        fake_engine: _FakeEngine,
+        forbidden_session_factory: MagicMock,
+    ) -> None:
+        order: list[str] = []
+        backfill.side_effect = lambda **kwargs: order.append("workflow")
+        fake_engine.dispose.side_effect = lambda: order.append("dispose")
+
+        await package_tasks.backfill_product_catalog_async()
+
+        backfill.assert_awaited_once_with(session_factory=forbidden_session_factory)
+        fake_engine.dispose.assert_awaited_once_with()
+        assert order == ["workflow", "dispose"]
+
+    @pytest.mark.parametrize("make_error", _WORKFLOW_FAILURES)
+    async def test_workflow_failure_propagates_after_one_disposal(
+        self,
+        make_error: Callable[[], BaseException],
+        backfill: AsyncMock,
+        fake_engine: _FakeEngine,
+    ) -> None:
+        error = make_error()
+        backfill.side_effect = error
+
+        with capture_logs() as logs, pytest.raises(type(error)) as exc_info:
+            await package_tasks.backfill_product_catalog_async()
+
+        assert exc_info.value is error
+        backfill.assert_awaited_once()
+        fake_engine.dispose.assert_awaited_once_with()
+        assert logs == []
+
+    async def test_dispose_failure_after_success_propagates(
+        self, backfill: AsyncMock, fake_engine: _FakeEngine
+    ) -> None:
+        error = RuntimeError("fictional dispose failure")
+        fake_engine.dispose.side_effect = error
+
+        with capture_logs() as logs, pytest.raises(RuntimeError) as exc_info:
+            await package_tasks.backfill_product_catalog_async()
+
+        assert exc_info.value is error
+        backfill.assert_awaited_once()
+        fake_engine.dispose.assert_awaited_once_with()
+        assert logs == []
+
+    @pytest.mark.parametrize("make_error", _WORKFLOW_FAILURES)
+    async def test_dispose_failure_does_not_mask_workflow_failure(
+        self,
+        make_error: Callable[[], BaseException],
+        backfill: AsyncMock,
+        fake_engine: _FakeEngine,
+    ) -> None:
+        error = make_error()
+        backfill.side_effect = error
+        fake_engine.dispose.side_effect = RuntimeError("fictional dispose failure")
+
+        with capture_logs() as logs, pytest.raises(type(error)) as exc_info:
+            await package_tasks.backfill_product_catalog_async()
+
+        assert exc_info.value is error
+        fake_engine.dispose.assert_awaited_once_with()
+        assert logs == [{"event": BACKFILL_DISPOSE_FAILED, "log_level": "warning"}]
+
+
+@pytest.mark.unit
+class TestBackfillProductCatalogSyncWrapper:
+    def test_success_runs_workflow_and_disposes_in_one_event_loop(
+        self,
+        backfill: AsyncMock,
+        asyncio_run_spy: MagicMock,
+        fake_engine: _FakeEngine,
+        forbidden_session_factory: MagicMock,
+    ) -> None:
+        package_tasks._backfill_product_catalog_sync()
+
+        assert asyncio_run_spy.call_count == 1
+        backfill.assert_awaited_once_with(session_factory=forbidden_session_factory)
+        fake_engine.dispose.assert_awaited_once_with()
+
+    @pytest.mark.parametrize("make_error", _WORKFLOW_FAILURES)
+    def test_workflow_failure_propagates_without_retry(
+        self,
+        make_error: Callable[[], BaseException],
+        backfill: AsyncMock,
+        asyncio_run_spy: MagicMock,
+        fake_engine: _FakeEngine,
+    ) -> None:
+        error = make_error()
+        backfill.side_effect = error
+
+        # `asyncio.run()` re-creates a `CancelledError` when the task ends
+        # cancelled, so only the exception type is asserted.
+        with capture_logs() as logs, pytest.raises(type(error)):
+            package_tasks._backfill_product_catalog_sync()
+
+        assert logs == []
+        assert asyncio_run_spy.call_count == 1
+        backfill.assert_awaited_once()
+        fake_engine.dispose.assert_awaited_once_with()
+
+    def test_non_signal_failure_is_the_same_exception_object(
+        self,
+        backfill: AsyncMock,
+        asyncio_run_spy: MagicMock,
+        fake_engine: _FakeEngine,
+    ) -> None:
+        error = OperationalError(
+            "fictional statement", None, Exception("fictional-secret-detail")
+        )
+        backfill.side_effect = error
+
+        with pytest.raises(OperationalError) as raised:
+            package_tasks._backfill_product_catalog_sync()
+
+        assert raised.value is error
+        fake_engine.dispose.assert_awaited_once_with()
+
+
+@pytest.mark.unit
+class TestBackfillProductCatalogTaskRegistration:
+    def test_registered_under_exact_name_without_arguments(self) -> None:
+        task = celery_app.tasks[BACKFILL_TASK]
+
+        assert task.name == BACKFILL_TASK
+        assert BACKFILL_PRODUCT_CATALOG_TASK == BACKFILL_TASK
+        assert package_tasks.backfill_product_catalog_task.name == BACKFILL_TASK
+        assert task.run is package_tasks._backfill_product_catalog_sync
+        tree = ast.parse(
+            (APP_ROOT / "tasks" / "package_tasks.py").read_text(encoding="utf-8")
+        )
+        (wrapper,) = [
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "_backfill_product_catalog_sync"
+        ]
+        arguments = wrapper.args
+        assert arguments.args == []
+        assert arguments.kwonlyargs == []
+        assert arguments.vararg is None
+        assert arguments.kwarg is None
+
+    def test_no_automatic_retry_is_configured(self) -> None:
+        """No `autoretry_for`, retry options, or non-default `max_retries`;
+        the task is unbound, so its wrapper cannot call `self.retry()`.
+        Only the backfill wrapper, its async workflow, and its
+        registration are inspected."""
+        task = celery_app.tasks[BACKFILL_TASK]
+
+        assert not getattr(task, "autoretry_for", None)
+        assert not getattr(task, "retry_kwargs", None)
+        assert not getattr(task, "retry_backoff", None)
+        assert task.max_retries == Task.max_retries
+        tree = ast.parse(
+            (APP_ROOT / "tasks" / "package_tasks.py").read_text(encoding="utf-8")
+        )
+        owned = [
+            node
+            for node in tree.body
+            if (
+                isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+                and node.name
+                in {"_backfill_product_catalog_sync", "backfill_product_catalog_async"}
+            )
+            or (
+                isinstance(node, ast.Assign)
+                and any(
+                    isinstance(t, ast.Name) and t.id == "backfill_product_catalog_task"
+                    for t in node.targets
+                )
+            )
+        ]
+        assert len(owned) == 3
+        calls = [
+            node
+            for owner in owned
+            for node in ast.walk(owner)
+            if isinstance(node, ast.Call)
+        ]
+        assert not [
+            c
+            for c in calls
+            if isinstance(c.func, ast.Attribute) and c.func.attr == "retry"
+        ]
+        assert not [k for c in calls for k in c.keywords if k.arg == "bind"]
+        assert not [k for c in calls for k in c.keywords if "retr" in (k.arg or "")]
+
+    def test_is_a_sub_operation_not_a_fetcher(self) -> None:
+        assert BACKFILL_TASK not in FETCHER_REGISTRY

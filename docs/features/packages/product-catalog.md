@@ -341,7 +341,13 @@ successfully committed catalog. It does not roll back publication and no
 durable retry state is introduced. The omitted Products remain recoverable by
 a later `add_package_to_ticket()` invocation or a future backfill trigger. It
 also does not change any Product work unit from succeeded to failed or
-increment `record_failed()`.
+increment `record_failed()`. Every exception raised by the step-8 publication
+call is such a failure, except the whole-run signals `asyncio.CancelledError`,
+`SoftTimeLimitExceeded`, and `MemoryError`
+(`docs/features/platform/fetcher-infrastructure.md`, `SoftTimeLimitExceeded`
+handling convention): it is logged exactly once with the exception class only,
+never its text, and absorbed. A whole-run signal propagates unchanged and fails
+the run, while the committed catalog remains published.
 
 ### Catalog Readiness and Freshness
 
@@ -387,14 +393,18 @@ snapshot). A newly current Product may now match CPEs returned by the SMELT
 v2 maintained-package endpoint for packages already tracked by active tickets;
 backfill re-runs resolution to pick up these previously unresolvable matches.
 
-After dispatch, it:
+The task takes no arguments. After dispatch, it:
 
 1. Selects every distinct `(ticket_id, package_name)` whose Ticket is active
    (`New`, `Analysis`, or `Analyzed`) and whose `TicketPackage` has
-   `deleted_at IS NULL`.
-2. Processes each pair independently by calling `add_package_to_ticket()`
-   in active-ticket-only mode, with `acting_user_id = None` and the system
-   audit comment `Product catalog backfill`. The mutation boundary re-checks
+   `deleted_at IS NULL`, in one read-only transaction that is closed before
+   the first external request. Pairs are processed in a deterministic order:
+   ascending Ticket UUID, then package name in Unicode code-point order.
+2. Processes each pair independently, in a fresh session and transaction, by
+   calling `add_package_to_ticket()` in active-ticket-only mode, with
+   `acting_user_id = None`, the system audit comment `Product catalog
+   backfill`, and `allow_excluded_reresolution = false`. Every pair shares the
+   invocation's single HTTP client. The mutation boundary re-checks
    the Ticket status while holding its row lock; if the Ticket is no longer
    active, the pair is skipped without database mutation or post-commit
    effects. The already completed external requests remain diagnostic work only.
@@ -405,9 +415,43 @@ After dispatch, it:
    in `package-model.md` when applicable. Because resolution precedes the
    Ticket lock, this warning may also be emitted for a pair subsequently
    skipped after the active-status re-check.
-4. Commits each pair separately. A failure rolls back that pair, logs a
-   warning, and continues with the next pair; successful earlier pairs are not
-   rolled back.
+4. Commits each pair separately and closes its session. Successful earlier
+   pairs are never rolled back by a later pair. Each pair has exactly one
+   outcome:
+
+   | Pair outcome | Behavior | Completion count |
+   |---|---|---|
+   | At least one package-tree record created | Commit | record-creating |
+   | Package-tree no-op, with or without new maintainer associations | Commit | no-op |
+   | Locked-current Ticket no longer active | Nothing to commit | skipped-inactive |
+   | `PackageAlreadyExcludedError` from a package exclusion committed after selection | Roll back; expected skip without a failure warning | skipped-excluded |
+   | Any other exception, including a SMELT, catalog, target-resolution, database, audit, or commit failure | Roll back that pair, log one sanitized warning, continue with the next pair | failed |
+   | `asyncio.CancelledError`, `SoftTimeLimitExceeded`, or `MemoryError` | Roll back and close the current pair, release the invocation's resources, and propagate | none; no completion line |
+
+A backfill pair never registers a Ticket convergence effect: its locked
+mutation proceeds only for an active Ticket, while registration requires an
+`Ignored`, `Duplicated`, or `Resolved` source status (`ticket-mutations.md`,
+`reconcile_ticket_status()` step 5). The backfill therefore has no convergence
+effect to detach or publish. A commit exception, including one whose database
+outcome is ambiguous, is an isolated failed pair rather than an
+owner-terminating outcome under `ticket-mutations.md` (Transaction-Local
+Ticket Convergence Registration). If an ambiguous commit actually succeeded,
+its pair is still reported as failed; the count is diagnostic only and every
+later invocation is idempotent.
+
+A failure while selecting pairs or opening the invocation's HTTP client is not
+a pair failure: it escapes as a task failure before any pair is processed and
+emits no completion line.
+
+The task, registered under the explicit Celery name
+`backfill_product_catalog`, is a non-`BaseFetcher` sub-operation with no task
+result, `FetcherRun`, or automatic task retry. Its synchronous wrapper invokes the
+async workflow through exactly one `asyncio.run()` call. The workflow creates
+the HTTP client on that event loop and closes it and every pair session on
+every outcome; afterwards it awaits the shared pooled `engine.dispose()`
+exactly once on success, failure, and cancellation paths before control
+returns to `asyncio.run()` (`docs/conventions.md`, Cross-Loop Pooled
+Connection Lifecycle).
 
 The workflow is idempotent. Existing package-tree records are skipped, and a
 completely no-op pair creates no `package_added` event. Existing tracks retain
@@ -442,16 +486,22 @@ serialized by the Ticket row lock; duplicate external work is accepted. The
 task has no task-level retry after process loss. Recovery remains the next
 qualifying backfill trigger or a later package-addition invocation.
 
-Log one structured completion line at the end of the task invocation, mirroring
-the equivalent requirement on `re_evaluate_product_eligibility`: candidate
-pair count, record-creating pair count, no-op pair count, skipped-inactive
-count, and failed count. Record-creating and no-op counts distinguish pairs
+Log one structured completion line at the end of a normally returning task
+invocation, mirroring the equivalent requirement on
+`re_evaluate_product_eligibility`: candidate pair count, record-creating pair
+count, no-op pair count, skipped-inactive count, skipped-excluded count, and
+failed count. Record-creating and no-op counts distinguish pairs
 that added at least one package-tree record from pairs where every record
 already existed, so an operator can tell whether a run actually progressed
 stuck packages. If the process is lost before this line is logged, the run's
 partial progress has no other observability signal, and the next qualifying
 trigger or a later `add_package_to_ticket()` invocation remains the only
 recovery path.
+
+A failed-pair warning contains only the Ticket UUID, the package name, the
+exception class, and, for SMELT unavailability, its bounded failure category.
+No backfill log contains a SMELT response body, maintainer email or username,
+URL, or raw exception text.
 
 The backfill is intentionally triggered by a newly current Product, not by a
 change to SMELT's per-package track topology. Sentinel does not periodically
@@ -932,8 +982,11 @@ response-schema, or snapshot-validation failure aborts the run without
 publication or backfill. A publication failure rolls back the complete
 snapshot. The last committed snapshot remains usable, and recovery is a later
 scheduled or operator-triggered full run. A failure to dispatch the one
-post-commit Product catalog backfill task is logged and does not roll back the
-committed catalog or change its terminal outcome metrics.
+post-commit Product catalog backfill task is logged once and absorbed; it does
+not roll back the committed catalog or change its terminal outcome metrics.
+Only the whole-run signals `asyncio.CancelledError`, `SoftTimeLimitExceeded`,
+and `MemoryError` raised by that dispatch propagate (see
+[Product Sync](#product-sync)).
 
 The fetcher raises `FetcherError` with these sanitized messages for failures
 that abort the run:

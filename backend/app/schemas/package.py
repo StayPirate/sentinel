@@ -536,6 +536,56 @@ class ProductExclusionResponse(BaseModel):
     data: ProductExclusionProduct
 
 
+# Package addition (package-model.md, Add Package to Ticket).
+
+PACKAGE_NAME_PATTERN = r"^[a-zA-Z0-9][a-zA-Z0-9._+\-]{0,253}[a-zA-Z0-9]$"
+"""The public source-package-name grammar (2 to 255 ASCII characters)."""
+
+
+class PackageAdditionRequest(BaseModel):
+    """Request body of `POST /api/v1/tickets/{ticket_id}/packages`.
+
+    A missing, non-string, too short, too long, or pattern-violating
+    `package_name` fails with the global `422 VALIDATION_ERROR` before any
+    SMELT request.
+    """
+
+    package_name: str = Field(
+        max_length=255,
+        pattern=PACKAGE_NAME_PATTERN,
+        description=(
+            "Source package name: 2 to 255 characters, starting and ending "
+            "with an ASCII letter or digit; only letters, digits, `.`, `_`, "
+            "`+`, and `-` are allowed. Required."
+        ),
+        examples=["openssl-3"],
+    )
+
+
+class PackageAdditionResult(BaseModel):
+    """Creation and skip counts of one package addition."""
+
+    package_name: str = Field(description="Source package name as requested.")
+    tracks_created: int = Field(description="Tracks created by this request.")
+    tracks_skipped: int = Field(
+        description="Resolved tracks that already existed (included or excluded)."
+    )
+    products_created: int = Field(
+        description="Product occurrences created by this request."
+    )
+    products_skipped: int = Field(
+        description=(
+            "Resolved Product occurrences that already existed (included or excluded)."
+        )
+    )
+
+
+class PackageAdditionResponse(BaseModel):
+    """Response body of `POST /api/v1/tickets/{ticket_id}/packages`."""
+
+    data: PackageAdditionResult
+
+
 # Cross-Ticket package search (package-model.md, Search Packages Across
 # Tickets; Response Schema: PackageListItem).
 

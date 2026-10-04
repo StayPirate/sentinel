@@ -29,8 +29,10 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
+from types import SimpleNamespace
 from uuid import UUID, uuid4
 
+import httpx
 import pytest
 from celery.exceptions import SoftTimeLimitExceeded
 from sqlalchemy import delete, select, text
@@ -55,10 +57,14 @@ from app.models.ticket_package_track import TicketPackageTrack
 from app.services import package_service, task_publication
 from app.services.base_fetcher import FETCHER_REGISTRY, BaseFetcher
 from app.services.package_service import (
+    PackageRecordsOutcome,
     ProductEligibilityRecalculationResult,
     ProductRecalculationReason,
 )
-from app.services.packages import product_eligibility_recalculation
+from app.services.packages import (
+    product_catalog_backfill,
+    product_eligibility_recalculation,
+)
 from app.tasks import fetchers as fetchers_module
 from app.tasks import package_tasks, session_cleanup
 
@@ -608,3 +614,94 @@ def test_run_ticket_convergence_wrapper_survives_two_consecutive_event_loops(
         ]
         * 2
     )
+
+
+@pytest.mark.integration
+def test_backfill_product_catalog_wrapper_survives_two_consecutive_event_loops(
+    _engine: AsyncEngine,  # noqa: PT019 — value used below (.url), not just for setup
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two sequential invocations of the real `backfill_product_catalog`
+    synchronous wrapper — each its own `asyncio.run()` event loop — both
+    succeed against one shared, pooled engine.
+
+    Each invocation opens the read-only pair-selection session and one
+    per-pair session through the module-level `async_session_factory`
+    reference in `app/tasks/package_tasks.py`. One committed active Ticket
+    with an included package marker makes the real selection return a
+    pair; only the innermost domain operation, `add_package_to_ticket()`,
+    is replaced by a trivial query on the pair session, so both sessions
+    check real connections out of the dedicated pool. The shared HTTP
+    client is an in-process transport that is never called. The seeded
+    rows are deleted explicitly on their own event loop.
+    """
+    package_name = f"fictional-backfill-{uuid4().hex[:10]}"
+    probed: list[tuple[UUID, str]] = []
+
+    async def _trivial_addition(db: AsyncSession, **kwargs: object) -> object:
+        await db.execute(text("SELECT 1"))
+        ticket_id = kwargs["ticket_id"]
+        assert isinstance(ticket_id, UUID)
+        probed.append((ticket_id, str(kwargs["package_name"])))
+        return SimpleNamespace(outcome=PackageRecordsOutcome.PACKAGE_TREE_NO_OP)
+
+    def _unused_client(name: str, **options: object) -> httpx.AsyncClient:
+        def _refuse(request: httpx.Request) -> httpx.Response:
+            raise AssertionError("the trivial addition performs no request")
+
+        return httpx.AsyncClient(transport=httpx.MockTransport(_refuse))
+
+    dedicated_engine = create_async_engine(
+        _engine.url.render_as_string(hide_password=False), echo=False
+    )
+    dedicated_factory = async_sessionmaker(
+        dedicated_engine, class_=AsyncSession, expire_on_commit=False
+    )
+
+    async def _seed_and_drain() -> UUID:
+        async with dedicated_factory() as session:
+            ticket = Ticket(
+                status=TicketStatus.ANALYSIS.value, severity_manual=Severity.HIGH.value
+            )
+            session.add(ticket)
+            await session.flush()
+            session.add(TicketPackage(ticket_id=ticket.id, package_name=package_name))
+            await session.commit()
+            ticket_id = ticket.id
+        # Drain the seeding connection so the first real invocation does
+        # not receive a connection bound to this setup loop.
+        await dedicated_engine.dispose()
+        return ticket_id
+
+    async def _cleanup(ticket_id: UUID) -> None:
+        async with dedicated_factory() as session:
+            await session.execute(
+                delete(TicketPackage).where(TicketPackage.ticket_id == ticket_id)
+            )
+            await session.execute(delete(Ticket).where(Ticket.id == ticket_id))
+            await session.commit()
+        await dedicated_engine.dispose()
+
+    monkeypatch.setattr(package_tasks, "engine", dedicated_engine)
+    monkeypatch.setattr(package_tasks, "async_session_factory", dedicated_factory)
+    monkeypatch.setattr(
+        product_catalog_backfill, "add_package_to_ticket", _trivial_addition
+    )
+    monkeypatch.setattr(product_catalog_backfill, "create_http_client", _unused_client)
+
+    ticket_id = asyncio.run(_seed_and_drain())
+    try:
+        # First invocation: its own event loop; disposes the pool before
+        # the loop closes.
+        package_tasks._backfill_product_catalog_sync()
+
+        # Second invocation: a brand-new event loop. Without disposal the
+        # pool would hand out a connection bound to the first (closed)
+        # loop.
+        package_tasks._backfill_product_catalog_sync()
+    finally:
+        asyncio.run(_cleanup(ticket_id))
+
+    assert [pair for pair in probed if pair[0] == ticket_id] == [
+        (ticket_id, package_name)
+    ] * 2
