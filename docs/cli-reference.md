@@ -44,6 +44,10 @@ User lifecycle management. These commands create, modify, and
 deactivate local user accounts. Requires direct shell access; there
 are no unauthenticated HTTP endpoints for user management.
 
+`--username` identifies the target by its username only (trimmed and
+lowercased); unlike the API, the CLI does not accept a user's UUID in its
+place (see `docs/conventions.md`, Command Design).
+
 Full specification:
 [user-management](features/identity/user-management.md#cli-commands)
 
@@ -216,6 +220,8 @@ Lists all API keys (active, revoked, and expired) for a user.
 ```
 sentinel api-key list --username <username>
 ```
+
+`--username` is matched by username only; a user's UUID is not accepted.
 
 **Idempotency**: Idempotent (read-only).
 

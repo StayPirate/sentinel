@@ -53,7 +53,7 @@ explicit per-command opt-in.
 | Console script | `sentinel`, registered via `[project.scripts]` in `backend/pyproject.toml` (`sentinel = "app.cli:main"`) |
 | Module invocation | `python -m app.cli ...`, backed by `backend/app/cli/__main__.py` delegating to the same `main()` entry point |
 | Code location | `backend/app/cli/` (subpackage under `backend/app/`) |
-| Group assembly | `backend/app/cli/__init__.py` defines a root Click group (`cli`) and registers each command group (`manage-user`, `fetcher`, `api-key`, and any future group) via `cli.add_command(...)`; the exported `main()` wrapper performs eager-option handling, fail-fast bootstrap, signal setup, and invokes `cli.main(standalone_mode=False)` |
+| Group assembly | `backend/app/cli/__init__.py` defines a root Click group (`cli`) and registers each command group (`manage-user`, `fetcher`, `api-key`, and any future group) via `cli.add_command(...)`; the exported `main()` wrapper performs eager-option handling, fail-fast bootstrap, signal setup, the argument-encoding check (Root Command Group & Bootstrap), and invokes `cli.main(standalone_mode=False)` |
 
 Each command group (`manage-user`, `fetcher`, `api-key`) is implemented as
 its own Click `Group` in a dedicated module under `backend/app/cli/`
@@ -100,16 +100,31 @@ dispatching to the invoked subcommand:
    bound in this context.
 5. Dispatch to the invoked subcommand.
 
+**Argument encoding**: right after installing the signal handlers (step 3)
+and before Click parses any argument — therefore before eager
+`--help`/`--version` (step 1), `Settings` loading, logging configuration, and
+dispatch — the `main()` entry point rejects a command-line argument that is
+not valid UTF-8. On
+POSIX, Python decodes undecodable argument bytes into lone surrogate code
+points, which are not valid UTF-8 and would otherwise reach PostgreSQL and
+fail there as a system error. The entry point prints
+`Error: Command-line arguments must be valid UTF-8.` to stderr, without
+echoing the argument, and exits with code 1 (user error), without loading
+`Settings` or opening any connection. Valid non-ASCII UTF-8 arguments are
+unaffected.
+
 **Q1 (inputs)**: global CLI arguments (`--version`, `--help`, and the
 subcommand path) — standard Click argument parsing, no custom semantics
 beyond what is described above.
 
-**Q2 (guards)**: `Settings` validation failure aborts before any subcommand
-executes (exit 2). No other root-level guard exists — per-command guards
-(e.g., configuration guards, see below) are evaluated by each subcommand.
+**Q2 (guards)**: an argument that is not valid UTF-8 aborts before argument
+parsing (exit 1, Argument encoding above). `Settings` validation failure
+aborts before any subcommand executes (exit 2). No other root-level guard
+exists — per-command guards (e.g., configuration guards, see below) are
+evaluated by each subcommand.
 
-**Q3 (behavior)**: as enumerated in the five steps above; no other root
-group behavior exists.
+**Q3 (behavior)**: as enumerated in the five steps above, plus the Argument
+encoding check; no other root group behavior exists.
 
 **Q6 (exceptions)**: `Settings` validation exceptions are caught at this
 level and converted to the exit-2 path described in step 2. All other
@@ -159,7 +174,7 @@ per-command path selection.
   ```python
   async def deactivate_flow(session_factory, username):
       async with session_factory() as db:
-          user = await user_service.get_user(db, username)
+          user = await user_service.get_user_by_username(db, username)
           impact = await user_service.get_deactivation_impact(
               db, user.id, acting_user_id=None
           )
@@ -321,6 +336,7 @@ untouched, never reaching this mapper.
 | `click.Abort` (raised by Click when an interactive prompt, e.g. `click.confirm()` or a hidden password prompt, receives EOF/Ctrl+D — and, in non-standalone mode, also the exception type Click internally converts `KeyboardInterrupt` into during prompt handling) | 0 | The mapper prints `Aborted.` to stdout and exits 0. This is the same code path whether `Abort` originates from an explicit prompt decline (in which case the command's own code, per Database Session Management, has already printed its own cancellation message before returning/re-raising, so the mapper's `Aborted.` fallback is not what the operator sees) or from EOF bypassing the command's own code entirely (in which case the mapper's `Aborted.` is the only message printed). Treated as an operator-initiated cancellation, not an error, consistent with the Exit Codes table. TTY detection (Interactive Input Helpers) is expected to reject non-interactive invocations before a prompt is reached in the first place. |
 | A `ServiceError` subclass (or any shared exception per `docs/conventions.md`, Service Exception Conventions) raised by a delegated service call | 1 | The exception's message is formatted as `Error: {message}` and printed to stderr. The specific message text is determined by the command's own spec (see each command spec's "Behavior" section for the exact error strings), not by this mechanism. |
 | A validation failure raised directly by the CLI command's own input parsing (e.g., invalid username format, password length) — i.e., a guard documented in the command's own spec, not a service exception | 1 | Same formatting as above; message text owned by the command spec. |
+| A command-line argument that is not valid UTF-8 (Root Command Group & Bootstrap, Argument encoding) | 1 | Checked by `main()` before the mapped Click invocation; prints `Error: Command-line arguments must be valid UTF-8.` to stderr without echoing the argument. |
 | SQLAlchemy `OperationalError`/`DBAPIError` (or another connection-related `SQLAlchemyError` subset, e.g. database unreachable), or `RedisError` (per `docs/conventions.md`, Redis Error Handling) surfacing from a command that touches Redis | 2 | Printed to stderr as `Error: {message}`. This is the exit code that `docs/features/platform/testing-strategy.md` (Mandatory Test Scenarios → CLI Commands) requires the harness to simulate. This category is intentionally narrow: generic `OSError`/`ConnectionError` are NOT caught here. Broken-pipe scenarios are already handled by Click's own EPIPE handling before the mapper is reached (see above); other unrelated `OSError` subclasses (`FileNotFoundError`, `PermissionError`, etc.) fall through to the catch-all row below, which prints an accurate generic message rather than a misleading "database unreachable" one. |
 | Any other unhandled exception | 2 | Log the exception at ERROR with exception context under `logging.md`'s secrets/PII discipline, then print `Error: {message}` to stderr. If `str(exception)` is empty, use the exception class name as `{message}`. Reserved as the catch-all "system error" path per the Exit Codes table in `docs/conventions.md`. |
 | `KeyboardInterrupt` (operator sends SIGINT, e.g., Ctrl+C) | 130 | Not caught by this mapper (it is a `BaseException` subclass, and — for the direct SIGINT case — is intercepted at the OS signal level before it can even be raised as a Python exception). See Signal Handling below. |
@@ -429,9 +445,9 @@ these helpers:
 
 | Helper | Behavior | Example consumers |
 |---|---|---|
-| Hidden password prompt with confirmation | Prompts twice via a hidden (non-echoed) input (Click's `hide_input=True`), compares the two entries. If they differ, the calling command receives a mismatch signal and is responsible for its own error message and exit code (per that command's own spec — this helper does not print the error itself, to preserve each command's exact wording). | `manage-user create`, `manage-user set-password` |
+| Hidden password prompt with confirmation | Prompts twice via a hidden (non-echoed) input (Click's `hide_input=True`), compares the two entries. If they differ, the calling command receives a mismatch signal and is responsible for its own error message and exit code (per that command's own spec — this helper does not print the error itself, to preserve each command's exact wording). An entry that is not valid UTF-8 (Input encoding below) yields a distinct invalid-encoding signal as soon as it is read, before the comparison; the calling command owns that message and exit code as well. | `manage-user create`, `manage-user set-password` |
 | TTY detection | Checks `sys.stdin.isatty()` before invoking a prompt (password entry or confirmation). If no TTY is detected, returns a signal the calling command uses to print its own "requires an interactive terminal" error (exact wording owned by the command spec) and exit 1. | `manage-user create`, `manage-user set-password` (before password prompt), `manage-user deactivate` (before confirmation prompt) |
-| Confirmation prompt | A yes/no prompt (Click's `confirm()`) for destructive operations. Exact prompt text and default answer are owned by the calling command's own spec. | `manage-user deactivate` |
+| Confirmation prompt | A yes/no prompt (Click's `confirm()`) for destructive operations. Exact prompt text and default answer are owned by the calling command's own spec. An answer that is not valid UTF-8 is an unrecognized answer (Input encoding below). | `manage-user deactivate` |
 
 These are implementation-shared utility functions (e.g.,
 `backend/app/cli/_prompts.py`), not new behavioral contracts — the
@@ -439,12 +455,27 @@ behaviors themselves are already fully specified in
 `user-management.md`. This section exists so the shared implementation
 has one canonical home instead of being duplicated per command.
 
-**Q1/Q3/Q6**: N/A beyond the table above — these are Category B (no side
-effects beyond terminal I/O) helper functions whose complete behavior is
-the table itself; they raise no exceptions of their own (a non-matching
-password or non-TTY condition is communicated via return value, not by
-raising, so each calling command retains full control over its own exact
-error message per its own spec).
+**Input encoding**: terminal input that is not valid UTF-8 never escapes a
+helper, neither as an exception nor as a returned value. Depending on the
+locale, such input arrives either as a decoding error (strict decoding) or
+as lone surrogate code points (`surrogateescape`); a helper handles both
+forms, discards the entry without echoing it, and does not let the decoding
+error reach the shared exception mapper, whose catch-all path would exit 2
+and print and log the offending byte. The hidden password prompt returns
+its invalid-encoding signal; the confirmation prompt treats such an answer
+as an unrecognized answer and prompts again — Click does so natively for
+lone surrogates, while a strict-decoding failure, which occurs before Click
+receives any answer, is caught by the helper, which then repeats the prompt.
+EOF still ends the prompt through Click's `click.Abort`. This complements the
+argument check in Root Command Group & Bootstrap (Argument encoding).
+
+**Q1/Q3/Q6**: N/A beyond the table above and Input encoding — these are
+Category B (no side effects beyond terminal I/O) helper functions whose
+complete behavior is the table itself; they raise no exceptions of their own
+(a non-matching password, an entry that is not valid UTF-8, or a non-TTY
+condition is communicated via return value, not by raising, so each calling
+command retains full control over its own exact error message per its own
+spec).
 
 ## Testing
 

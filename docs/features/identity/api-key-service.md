@@ -327,7 +327,9 @@ async def list_user_keys_for_cli(
 ) -> ApiKeyCliList
 ```
 
-Trims and lowercases the username, resolves the user, and returns all their
+Trims and lowercases the username, resolves the user by exact match on the
+normalized username — never as a UUID (`docs/conventions.md`, Command Design —
+Username normalization and resolution) — and returns all their
 keys ordered by `id DESC`. `id` is a UUIDv7 value, so this is equivalent to
 `created_at DESC` with a deterministic tiebreak, in a single column. Unknown
 user raises `UserNotFoundError`. The result's `evaluated_at` is the

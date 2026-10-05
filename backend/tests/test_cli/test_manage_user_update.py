@@ -170,9 +170,11 @@ async def _create_user(
     active: bool = True,
     external: bool = False,
     roles: list[tuple[Role, str]] | None = None,
+    user_id: UUID | None = None,
 ) -> User:
     """Insert and commit a `User` with optional roles, bypassing
-    `user_service` (setup only)."""
+    `user_service` (setup only). `user_id`, when given, overrides the
+    generated primary key."""
     async with factory() as db:
         user = User(
             username=username,
@@ -182,6 +184,8 @@ async def _create_user(
             external_id=uuid4() if external else None,
             password_hash=None if external else "$2b$12$" + "a" * 53,
         )
+        if user_id is not None:
+            user.id = user_id
         db.add(user)
         await db.flush()
         for role, group_name in roles or []:
@@ -389,7 +393,7 @@ def fake_factory(monkeypatch: pytest.MonkeyPatch) -> _FakeSessionFactory:
 def fake_services(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     """Replace the lookup and every mutating `user_service` operation."""
     services = SimpleNamespace(
-        get_user=AsyncMock(
+        get_user_by_username=AsyncMock(
             return_value=SimpleNamespace(id=_FAKE_USER_ID, external_id=None)
         ),
         update_user=AsyncMock(
@@ -411,7 +415,7 @@ def fake_services(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
         reset_password=AsyncMock(),
         unlock_user=AsyncMock(),
     )
-    for name in ("get_user", *_MUTATING_SERVICES):
+    for name in ("get_user_by_username", *_MUTATING_SERVICES):
         monkeypatch.setattr(user_service_module, name, getattr(services, name))
     return services
 
@@ -450,7 +454,7 @@ def test_lookup_uses_normalized_username(
     result = _invoke(["--username", "  Alice.Example  ", "--reactivate"])
 
     assert result.exit_code == 0, result.output
-    fake_services.get_user.assert_awaited_once_with(
+    fake_services.get_user_by_username.assert_awaited_once_with(
         fake_factory.sessions[0], "alice.example"
     )
 
@@ -772,7 +776,7 @@ def test_database_unreachable_exits_two_through_main(
 ) -> None:
     monkeypatch.setattr(
         user_service_module,
-        "get_user",
+        "get_user_by_username",
         AsyncMock(
             side_effect=OperationalError(
                 "SELECT 1", {}, Exception("connection refused")
@@ -852,6 +856,69 @@ def test_unknown_username_reported_before_mode_rejections(
     result = _invoke(["--username", username, *args])
 
     _assert_error(result, _not_found(username))
+
+
+def _letter_leading_uuid() -> UUID:
+    """A random UUID whose canonical text starts with a letter, so it is
+    also a format-valid username (docs/conventions.md, Username Format)."""
+    return UUID("a" + uuid4().hex[1:])
+
+
+@pytest.mark.integration
+def test_uuid_shaped_username_resolves_by_username_not_by_id(
+    monkeypatch: pytest.MonkeyPatch,
+    cli_session_factory: async_sessionmaker[AsyncSession],
+    cleanup_users_by_username: Callable[..., None],
+) -> None:
+    """docs/conventions.md (Command Design — Username normalization and
+    resolution): the value is both one user's username and another user's
+    ID, and only the username owner is updated."""
+    _inject_session_factory(monkeypatch, cli_session_factory)
+    shared = _letter_leading_uuid()
+    username_owner = str(shared)
+    id_owner = _username("alice.idowner")
+    cleanup_users_by_username(username_owner, id_owner)
+    other = asyncio.run(
+        _create_user(cli_session_factory, username=id_owner, user_id=shared)
+    )
+    target = asyncio.run(_create_user(cli_session_factory, username=username_owner))
+
+    result = _invoke(["--username", username_owner, "--full-name", "Alice Example"])
+
+    _assert_success(result, f"Updated user '{username_owner}': full name.")
+    assert asyncio.run(_fetch_user(cli_session_factory, target.id)).full_name == (
+        "Alice Example"
+    )
+    assert asyncio.run(_fetch_user(cli_session_factory, other.id)).full_name is None
+
+
+@pytest.mark.integration
+def test_existing_user_uuid_is_reported_as_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+    cli_session_factory: async_sessionmaker[AsyncSession],
+    cleanup_users_by_username: Callable[..., None],
+) -> None:
+    """A user's UUID that passes username validation matches no username;
+    nothing is changed and no mutating session opens."""
+    username = _username("alice.byuuid")
+    cleanup_users_by_username(username)
+    user = asyncio.run(
+        _create_user(
+            cli_session_factory,
+            username=username,
+            active=False,
+            user_id=_letter_leading_uuid(),
+        )
+    )
+    before = _snapshot(cli_session_factory, user.id)
+    factory = _CountingSessionFactory(cli_session_factory)
+    _inject_session_factory(monkeypatch, factory)
+
+    result = _invoke(["--username", str(user.id), "--reactivate"])
+
+    _assert_error(result, _not_found(str(user.id)))
+    assert factory.calls == 1
+    assert _snapshot(cli_session_factory, user.id) == before
 
 
 @pytest.mark.integration
@@ -1147,6 +1214,55 @@ def test_profile_invalid_email_rejected_without_mutating_session(
     _assert_error(result, "Error: Invalid email format 'not-an-email'.")
     assert factory.calls == 1
     assert _snapshot(cli_session_factory, user.id) == before
+
+
+@pytest.mark.integration
+def test_profile_full_name_at_bound_is_stored(
+    monkeypatch: pytest.MonkeyPatch,
+    cli_session_factory: async_sessionmaker[AsyncSession],
+    cleanup_users_by_username: Callable[..., None],
+) -> None:
+    """Exactly 255 characters — counted as Unicode code points, the column
+    bound — is accepted and stored verbatim."""
+    _inject_session_factory(monkeypatch, cli_session_factory)
+    username = _username("alice.name255")
+    cleanup_users_by_username(username)
+    user = asyncio.run(_create_user(cli_session_factory, username=username))
+    full_name = "é" * 255
+
+    result = _invoke(["--username", username, "--full-name", full_name])
+
+    _assert_success(result, f"Updated user '{username}': full name.")
+    refreshed = asyncio.run(_fetch_user(cli_session_factory, user.id))
+    assert refreshed.full_name == full_name
+
+
+@pytest.mark.integration
+def test_profile_full_name_over_bound_rejected_without_mutating_session(
+    monkeypatch: pytest.MonkeyPatch,
+    cli_session_factory: async_sessionmaker[AsyncSession],
+    cleanup_users_by_username: Callable[..., None],
+) -> None:
+    """256 characters is a documented user error, never a database error
+    with SQL text: only the read-only lookup session opens and nothing is
+    committed or audited."""
+    username = _username("alice.name256")
+    cleanup_users_by_username(username)
+    user = asyncio.run(
+        _create_user(cli_session_factory, username=username, full_name="Alice Example")
+    )
+    before = _snapshot(cli_session_factory, user.id)
+    factory = _CountingSessionFactory(cli_session_factory)
+    _inject_session_factory(monkeypatch, factory)
+    commits = _count_commits(monkeypatch)
+
+    result = _invoke(["--username", username, "--full-name", "A" * 256])
+
+    _assert_error(result, "Error: Full name must be at most 255 characters.")
+    assert factory.calls == 1
+    assert commits["n"] == 0
+    assert _snapshot(cli_session_factory, user.id) == before
+    assert asyncio.run(_fetch_identity_events(cli_session_factory, user.id)) == []
 
 
 @pytest.mark.integration

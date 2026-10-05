@@ -7,6 +7,7 @@ authoritative contract exercised here.
 
 from __future__ import annotations
 
+import os
 import select
 import signal
 import subprocess
@@ -522,6 +523,82 @@ def test_main_maps_unhandled_exception_with_empty_message_to_class_name(
         assert captured.err.strip() == "Error: _EmptyMessageError"
     finally:
         del cli.commands["_raises-empty-message"]
+
+
+# ---------------------------------------------------------------------------
+# main(): argument encoding (Root Command Group & Bootstrap, Argument encoding)
+# ---------------------------------------------------------------------------
+
+_NON_UTF8_ERROR = "Error: Command-line arguments must be valid UTF-8.\n"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "args",
+    [
+        pytest.param(["fetcher", "config", "Jos\udce9"], id="lookup-argument"),
+        pytest.param(
+            ["manage-user", "show", "--username", "jdo\udce9"], id="username-option"
+        ),
+        pytest.param(["fetcher", "config", "Jos\udce9", "--help"], id="before-help"),
+    ],
+)
+def test_main_rejects_non_utf8_argument_before_parsing(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    args: list[str],
+) -> None:
+    """A lone surrogate is how Python represents undecodable argument
+    bytes; it is rejected with exit 1 before Click parses anything (even
+    an eager `--help`), without bootstrap and without echoing the value."""
+    _forbid_bootstrap(monkeypatch)
+
+    code = _invoke_main(monkeypatch, args)
+
+    assert code == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == _NON_UTF8_ERROR
+
+
+@pytest.mark.unit
+def test_main_accepts_non_ascii_utf8_argument(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    @cli.command("_echo-argument")
+    @click.argument("value", help="Value to echo.")
+    def _echo_argument(value: str) -> None:
+        click.echo(value)
+
+    monkeypatch.setattr(sys, "argv", ["sentinel", "_echo-argument", "José Ñoño"])
+    try:
+        main()
+        captured = capsys.readouterr()
+        assert captured.out == "José Ñoño\n"
+        assert captured.err == ""
+    finally:
+        del cli.commands["_echo-argument"]
+
+
+@pytest.mark.unit
+def test_non_utf8_argument_bytes_are_rejected_by_the_real_process() -> None:
+    """End to end with real undecodable bytes under a UTF-8 locale: the
+    interpreter decodes them into lone surrogates, and the entry point
+    rejects them with exit 1 before bootstrap — without the check, the
+    command would proceed to settings and the database and exit 2."""
+    env = {**os.environ, "LC_ALL": "C.UTF-8"}
+    completed = subprocess.run(
+        [sys.executable, "-m", "app.cli", "fetcher", "config", b"Jos\xe9"],
+        cwd=str(_BACKEND_DIR),
+        env=env,
+        capture_output=True,
+        timeout=60,
+        check=False,
+    )
+
+    assert completed.returncode == 1
+    assert completed.stdout == b""
+    assert completed.stderr == _NON_UTF8_ERROR.encode()
 
 
 # ---------------------------------------------------------------------------

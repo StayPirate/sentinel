@@ -12,7 +12,8 @@ scope and are added when their owning work item is implemented.
 `resolve_user_identifier()`
 and `get_user_roles()` back the shared authentication/authorization
 dependencies. `list_users()` and `get_user()` provide the paginated
-directory and full profile reads.
+directory and full profile reads; `get_user_by_username()` is the
+username-only profile read used by CLI commands.
 
 Module-level defaults (`docs/conventions.md`, Function Specification
 Completeness): every mutating function in this module participates in the
@@ -510,6 +511,33 @@ async def get_user(session: AsyncSession, identifier: str) -> User:
     """
     user = await resolve_user_identifier(session, identifier)
     return await _load_user_profile(session, user.id)
+
+
+async def get_user_by_username(session: AsyncSession, username: str) -> User:
+    """Return the complete profile for a username, never resolving a UUID.
+
+    Q1: `username` is the raw value an operator supplied to a CLI command
+    (`docs/conventions.md`, CLI Conventions — Username normalization and
+    resolution). It is trimmed and lowercased here; no format validation
+    is applied, so a value that cannot be a stored username matches no row.
+
+    Q3: looks up the `User` whose stored `username` equals the normalized
+    value exactly and returns it with `roles` and `manager` eagerly loaded,
+    the same profile as `get_user()`. The value is never parsed as a UUID:
+    a valid username shaped like a UUID resolves by username, and a user's
+    UUID matches no row (`docs/features/identity/user-service.md`,
+    `get_user_by_username()`).
+
+    Q6: raises `UserNotFoundError` when no user has that username.
+    Propagates any underlying database exception.
+    """
+    normalized = username.strip().lower()
+    user_id = (
+        await session.execute(select(User.id).where(User.username == normalized))
+    ).scalar_one_or_none()
+    if user_id is None:
+        raise UserNotFoundError()
+    return await _load_user_profile(session, user_id)
 
 
 def _normalize_username(username: str) -> str:

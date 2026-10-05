@@ -59,6 +59,7 @@ from app.services.user_service import (
     create_user,
     get_user,
     get_user_by_id,
+    get_user_by_username,
     get_user_roles,
     list_users,
     reactivate_user,
@@ -3449,3 +3450,67 @@ class TestGetUser:
     ) -> None:
         with pytest.raises(UserNotFoundError):
             await get_user(db_session, "no-such-user")
+
+
+def _letter_leading_uuid() -> uuid.UUID:
+    """A random UUID whose canonical text starts with a letter, so it is
+    also a format-valid username (docs/conventions.md, Username Format)."""
+    return uuid.UUID("a" + uuid.uuid4().hex[1:])
+
+
+@pytest.mark.integration
+class TestGetUserByUsername:
+    """docs/features/identity/user-service.md (`get_user_by_username()`):
+    exact normalized-username match, never a UUID lookup."""
+
+    async def test_normalizes_and_loads_roles_and_manager(
+        self,
+        db_session: AsyncSession,
+        user_factory: Callable[..., Awaitable[User]],
+        user_role_factory: Callable[..., Awaitable[UserRole]],
+    ) -> None:
+        manager = await user_factory(username="bynamemanager")
+        user = await user_factory(username="byname.target", manager_id=manager.id)
+        await user_role_factory(user_id=user.id)
+
+        result = await get_user_by_username(db_session, "  ByName.Target  ")
+
+        assert result.id == user.id
+        assert result.manager is not None
+        assert result.manager.id == manager.id
+        assert len(result.roles) == 1
+
+    async def test_uuid_shaped_username_resolves_by_username_not_by_id(
+        self,
+        db_session: AsyncSession,
+        user_factory: Callable[..., Awaitable[User]],
+    ) -> None:
+        shared = _letter_leading_uuid()
+        await user_factory(username="byname.idowner", id=shared)
+        username_owner = await user_factory(username=str(shared))
+
+        result = await get_user_by_username(db_session, str(shared).upper())
+
+        assert result.id == username_owner.id
+
+    @pytest.mark.parametrize("letter_leading_id", [True, False])
+    async def test_existing_user_uuid_raises_not_found(
+        self,
+        db_session: AsyncSession,
+        user_factory: Callable[..., Awaitable[User]],
+        letter_leading_id: bool,
+    ) -> None:
+        overrides = {"id": _letter_leading_uuid()} if letter_leading_id else {}
+        user = await user_factory(username="byname.byuuid", **overrides)
+
+        with pytest.raises(UserNotFoundError):
+            await get_user_by_username(db_session, str(user.id))
+
+    @pytest.mark.parametrize("value", ["no-such-user", "1bad", ""])
+    async def test_unknown_or_unstorable_value_raises_not_found(
+        self, db_session: AsyncSession, value: str
+    ) -> None:
+        """No format validation: a value that cannot be a stored username
+        simply matches no row."""
+        with pytest.raises(UserNotFoundError):
+            await get_user_by_username(db_session, value)

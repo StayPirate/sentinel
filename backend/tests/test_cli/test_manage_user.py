@@ -15,11 +15,13 @@ rather than through `db_session`-based factories.
 from __future__ import annotations
 
 import asyncio
+import signal
+import sys
 from collections.abc import Callable
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID, uuid4
 
 import click
@@ -30,8 +32,9 @@ from redis.exceptions import RedisError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+import app.cli as cli_package
 import app.cli.manage_user as manage_user_module
-from app.cli import cli
+from app.cli import cli, main
 from app.core.enums import IdentityAuditEventType, Role
 from app.core.passwords import verify_password
 from app.core.permissions import role_to_wire
@@ -61,7 +64,7 @@ class _FailingRedisClient:
         return None
 
 
-def _invoke(args: list[str], input: str | None = None, **extra: Any) -> Result:
+def _invoke(args: list[str], input: str | bytes | None = None, **extra: Any) -> Result:
     """Invoke the raw `cli` group with `standalone_mode=False`, mirroring
     exactly how production's `main()` invokes it — see the identical
     helper docstring in `test_main.py`."""
@@ -120,11 +123,13 @@ async def _create_user_directly(
     manager_id: UUID | None = None,
     last_login_at: datetime | None = None,
     roles: list[tuple[Role, str]] | None = None,
+    user_id: UUID | None = None,
 ) -> User:
     """Insert and commit a `User` (with optional roles) directly through
     `cli_session_factory`, bypassing `user_service` entirely — used to set
     up fixtures for `list`/`show` tests, which run in a separate
     connection from `db_session`-backed factories (see module docstring).
+    `user_id`, when given, overrides the generated primary key.
     """
     async with factory() as db:
         user = User(
@@ -137,6 +142,8 @@ async def _create_user_directly(
             password_hash=None if external_id is not None else "$2b$12$" + "a" * 53,
             last_login_at=last_login_at,
         )
+        if user_id is not None:
+            user.id = user_id
         db.add(user)
         await db.flush()
         for role, group_name in roles or []:
@@ -582,6 +589,79 @@ def test_create_persists_full_name(
 
 
 @pytest.mark.integration
+@pytest.mark.parametrize(
+    ("tag", "full_name"),
+    [("ascii", "A" * 255), ("multibyte", "é" * 255)],
+)
+def test_create_full_name_at_bound_is_stored(
+    monkeypatch: pytest.MonkeyPatch,
+    cli_session_factory: async_sessionmaker[AsyncSession],
+    cleanup_users_by_username: Callable[..., None],
+    tag: str,
+    full_name: str,
+) -> None:
+    """Exactly 255 characters (Unicode code points, the column bound) is
+    accepted and stored verbatim."""
+    _inject_session_factory(monkeypatch, cli_session_factory)
+    _allow_tty(monkeypatch)
+    username = f"clicreatefullname255{tag}"
+    cleanup_users_by_username(username)
+
+    result = _invoke(
+        [
+            "manage-user",
+            "create",
+            "--username",
+            username,
+            "--email",
+            f"{username}@example.com",
+            "--full-name",
+            full_name,
+        ],
+        input=_PASSWORD_INPUT,
+    )
+
+    assert result.exit_code == 0, result.output
+    user = asyncio.run(_fetch_user(cli_session_factory, username))
+    assert user is not None
+    assert user.full_name == full_name
+
+
+@pytest.mark.integration
+def test_create_full_name_over_bound_exits_one_before_tty_and_database(
+    monkeypatch: pytest.MonkeyPatch,
+    cli_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """256 characters is rejected with the documented message before the
+    TTY check (TTY is deliberately not allowed), the password prompt, and
+    any database access — never as a database error with SQL text."""
+
+    def _forbidden_factory() -> async_sessionmaker[AsyncSession]:
+        raise AssertionError("the command must not access the database")
+
+    monkeypatch.setattr(manage_user_module, "get_session_factory", _forbidden_factory)
+    username = "clicreatefullname256"
+
+    result = _invoke(
+        [
+            "manage-user",
+            "create",
+            "--username",
+            username,
+            "--email",
+            f"{username}@example.com",
+            "--full-name",
+            "A" * 256,
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    assert result.stderr == "Error: Full name must be at most 255 characters.\n"
+    assert asyncio.run(_fetch_user(cli_session_factory, username)) is None
+
+
+@pytest.mark.integration
 def test_create_success_with_roles_persists_user_roles_and_audit(
     monkeypatch: pytest.MonkeyPatch,
     cli_session_factory: async_sessionmaker[AsyncSession],
@@ -789,6 +869,125 @@ def test_create_password_mismatch_exits_one(
     )
     assert result.exit_code == 1
     assert result.stderr.strip() == "Error: Passwords do not match."
+
+
+_INVALID_UTF8_PASSWORD_ERROR = "Error: Password must be valid UTF-8.\n"
+
+
+def _assert_no_entry_leak(result: Result) -> None:
+    """Neither the decoder message (which names the byte and its position)
+    nor any part of the entry appears in the command output."""
+    for fragment in ("decode", "0xe9", "secr", "position"):
+        assert fragment not in result.output
+
+
+@pytest.mark.integration
+def test_create_undecodable_password_exits_one_before_length_check(
+    monkeypatch: pytest.MonkeyPatch,
+    cli_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The short entry would otherwise fail the 16-character policy: the
+    encoding check comes first, and no user is created."""
+    _inject_session_factory(monkeypatch, cli_session_factory)
+    _allow_tty(monkeypatch)
+    username = "clicreateinvalidutf8"
+
+    result = _invoke(
+        [
+            "manage-user",
+            "create",
+            "--username",
+            username,
+            "--email",
+            f"{username}@example.com",
+        ],
+        input=b"secr\xe9t\nsecr\xe9t\n",
+    )
+
+    assert result.exit_code == 1
+    assert result.stderr == _INVALID_UTF8_PASSWORD_ERROR
+    _assert_no_entry_leak(result)
+    assert asyncio.run(_fetch_user(cli_session_factory, username)) is None
+
+
+@pytest.mark.unit
+def test_create_undecodable_password_through_main_exits_one_without_logging(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Through the real `main()` mapper: a strict-decoding failure inside
+    the hidden prompt no longer reaches the catch-all path, which would log
+    it and exit 2 (cli-infrastructure.md, Interactive Input Helpers —
+    Input encoding)."""
+
+    def _undecodable_prompt(*args: object, **kwargs: object) -> str:
+        return b"secr\xe9t".decode("utf-8")
+
+    _allow_tty(monkeypatch)
+    monkeypatch.setattr(click, "prompt", _undecodable_prompt)
+    mapper_logger = MagicMock()
+    monkeypatch.setattr(cli_package, "logger", mapper_logger)
+    monkeypatch.setattr(
+        manage_user_module,
+        "get_session_factory",
+        lambda: pytest.fail("the command must not access the database"),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "sentinel",
+            "manage-user",
+            "create",
+            "--username",
+            "clicreatemainutf8",
+            "--email",
+            "clicreatemainutf8@example.com",
+        ],
+    )
+    previous_handlers = {
+        signum: signal.getsignal(signum) for signum in (signal.SIGINT, signal.SIGTERM)
+    }
+
+    try:
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+    finally:
+        for signum, handler in previous_handlers.items():
+            if handler is not None:
+                signal.signal(signum, handler)
+
+    assert exc_info.value.code == 1
+    captured = capsys.readouterr()
+    assert captured.err == _INVALID_UTF8_PASSWORD_ERROR
+    assert "decode" not in captured.out
+    mapper_logger.error.assert_not_called()
+
+
+@pytest.mark.integration
+def test_create_undecodable_confirmation_entry_exits_one(
+    monkeypatch: pytest.MonkeyPatch,
+    cli_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    _inject_session_factory(monkeypatch, cli_session_factory)
+    _allow_tty(monkeypatch)
+    username = "clicreateinvalidutf8confirm"
+
+    result = _invoke(
+        [
+            "manage-user",
+            "create",
+            "--username",
+            username,
+            "--email",
+            f"{username}@example.com",
+        ],
+        input=f"{_STRONG_PASSWORD}\n".encode() + b"secr\xe9t-password-123\n",
+    )
+
+    assert result.exit_code == 1
+    assert result.stderr == _INVALID_UTF8_PASSWORD_ERROR
+    _assert_no_entry_leak(result)
+    assert asyncio.run(_fetch_user(cli_session_factory, username)) is None
 
 
 @pytest.mark.integration
@@ -1405,6 +1604,55 @@ def test_set_password_mismatch_exits_one(
     assert result.exit_code == 1
     assert result.stderr.strip() == "Error: Passwords do not match."
 
+    refreshed = asyncio.run(_fetch_user(cli_session_factory, username))
+    assert refreshed is not None
+    assert refreshed.password_hash == user.password_hash
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("form", ["strict", "surrogateescape"])
+def test_set_password_invalid_utf8_entry_exits_one_without_change(
+    monkeypatch: pytest.MonkeyPatch,
+    cli_session_factory: async_sessionmaker[AsyncSession],
+    cleanup_users_by_username: Callable[..., None],
+    form: str,
+) -> None:
+    """Both forms in which non-UTF-8 terminal input arrives (cli-infrastructure.md,
+    Interactive Input Helpers — Input encoding): undecodable bytes under
+    strict decoding (scripted stdin, decoded strictly by `CliRunner`) and
+    lone surrogates under `surrogateescape`. The password is unchanged and
+    no mutating session opens."""
+    username = f"clisetpwdutf8{form.replace('escape', '')}"
+    cleanup_users_by_username(username)
+    user = asyncio.run(_create_user_directly(cli_session_factory, username=username))
+    sessions = {"n": 0}
+
+    def _counting_factory() -> AsyncSession:
+        sessions["n"] += 1
+        return cli_session_factory()
+
+    monkeypatch.setattr(
+        manage_user_module, "get_session_factory", lambda: _counting_factory
+    )
+    _allow_tty(monkeypatch)
+    if form == "strict":
+        password_input: bytes | None = (
+            b"secr\xe9t-password-123\nsecr\xe9t-password-123\n"
+        )
+    else:
+        password_input = None
+        monkeypatch.setattr(
+            click, "prompt", lambda *args, **kwargs: "secr\udce9t-password-123"
+        )
+
+    result = _invoke(
+        ["manage-user", "set-password", "--username", username], input=password_input
+    )
+
+    assert result.exit_code == 1
+    assert result.stderr == _INVALID_UTF8_PASSWORD_ERROR
+    _assert_no_entry_leak(result)
+    assert sessions["n"] == 1
     refreshed = asyncio.run(_fetch_user(cli_session_factory, username))
     assert refreshed is not None
     assert refreshed.password_hash == user.password_hash
@@ -2044,3 +2292,177 @@ def test_unlock_issues_no_database_commit(
     # own teardown runs its own real commit — fixture teardown order is
     # not guaranteed to happen after monkeypatch's own automatic undo.
     monkeypatch.setattr(AsyncSession, "commit", original_commit)
+
+
+# ---------------------------------------------------------------------------
+# Integration: username-only resolution
+# ---------------------------------------------------------------------------
+#
+# docs/conventions.md (Command Design — Username normalization and
+# resolution): every `--username` is matched by exact normalized username,
+# never by the API's UUID-or-username resolution. A letter-leading UUID is
+# also a format-valid username, so it reaches the lookup of every command,
+# including the ones that validate the username format first.
+
+
+def _letter_leading_uuid() -> UUID:
+    """A random UUID whose canonical text starts with a letter, so it is
+    also a format-valid username (docs/conventions.md, Username Format)."""
+    return UUID("a" + uuid4().hex[1:])
+
+
+@pytest.mark.integration
+def test_show_uuid_shaped_username_resolves_by_username_not_by_id(
+    monkeypatch: pytest.MonkeyPatch,
+    cli_session_factory: async_sessionmaker[AsyncSession],
+    cleanup_users_by_username: Callable[..., None],
+) -> None:
+    """The value is both one user's username and another user's ID: the
+    command shows the username owner."""
+    _inject_session_factory(monkeypatch, cli_session_factory)
+    shared = _letter_leading_uuid()
+    username_owner = str(shared)
+    id_owner = "clishowidowner"
+    cleanup_users_by_username(username_owner, id_owner)
+    asyncio.run(
+        _create_user_directly(cli_session_factory, username=id_owner, user_id=shared)
+    )
+    asyncio.run(
+        _create_user_directly(
+            cli_session_factory, username=username_owner, full_name="Username Owner"
+        )
+    )
+
+    result = _invoke(["manage-user", "show", "--username", username_owner.upper()])
+
+    assert result.exit_code == 0, result.output
+    assert f"Username:     {username_owner}" in result.stdout
+    assert "Full name:    Username Owner" in result.stdout
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    "letter_leading_id", [True, False], ids=["letter-id", "uuid7-id"]
+)
+def test_show_rejects_existing_user_uuid_as_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+    cli_session_factory: async_sessionmaker[AsyncSession],
+    cleanup_users_by_username: Callable[..., None],
+    letter_leading_id: bool,
+) -> None:
+    """`show` performs no format validation, so any user UUID — including
+    the generated digit-leading UUIDv7 — reaches the lookup and matches no
+    username."""
+    _inject_session_factory(monkeypatch, cli_session_factory)
+    username = f"clishowbyuuid{'letter' if letter_leading_id else 'uuid7'}"
+    cleanup_users_by_username(username)
+    user = asyncio.run(
+        _create_user_directly(
+            cli_session_factory,
+            username=username,
+            user_id=_letter_leading_uuid() if letter_leading_id else None,
+        )
+    )
+
+    result = _invoke(["manage-user", "show", "--username", str(user.id)])
+
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    assert result.stderr == f"Error: User '{user.id}' not found.\n"
+
+
+@pytest.mark.integration
+@pytest.mark.usefixtures("redis_client")
+def test_set_password_uuid_shaped_username_resolves_by_username(
+    monkeypatch: pytest.MonkeyPatch,
+    cli_session_factory: async_sessionmaker[AsyncSession],
+    cleanup_users_by_username: Callable[..., None],
+) -> None:
+    _inject_session_factory(monkeypatch, cli_session_factory)
+    _allow_tty(monkeypatch)
+    username = str(_letter_leading_uuid())
+    cleanup_users_by_username(username)
+    asyncio.run(_create_user_directly(cli_session_factory, username=username))
+
+    result = _invoke(
+        ["manage-user", "set-password", "--username", username],
+        input=_NEW_PASSWORD_INPUT,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert (
+        result.stdout.strip().splitlines()[-1]
+        == f"Password updated for user '{username}'. All active sessions invalidated."
+    )
+    refreshed = asyncio.run(_fetch_user(cli_session_factory, username))
+    assert refreshed is not None
+    assert refreshed.password_hash is not None
+    assert verify_password(_NEW_STRONG_PASSWORD, refreshed.password_hash)
+
+
+@pytest.mark.integration
+def test_set_password_rejects_existing_user_uuid_as_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+    cli_session_factory: async_sessionmaker[AsyncSession],
+    cleanup_users_by_username: Callable[..., None],
+) -> None:
+    """Reported before the password prompt; nothing is changed."""
+    _inject_session_factory(monkeypatch, cli_session_factory)
+    _allow_tty(monkeypatch)
+    username = "clisetpwdbyuuid"
+    cleanup_users_by_username(username)
+    user = asyncio.run(
+        _create_user_directly(
+            cli_session_factory, username=username, user_id=_letter_leading_uuid()
+        )
+    )
+
+    result = _invoke(["manage-user", "set-password", "--username", str(user.id)])
+
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    assert result.stderr == f"Error: User '{user.id}' not found.\n"
+    refreshed = asyncio.run(_fetch_user(cli_session_factory, username))
+    assert refreshed is not None
+    assert refreshed.password_hash == user.password_hash
+
+
+@pytest.mark.integration
+@pytest.mark.usefixtures("redis_client")
+def test_unlock_uuid_shaped_username_resolves_by_username(
+    monkeypatch: pytest.MonkeyPatch,
+    cli_session_factory: async_sessionmaker[AsyncSession],
+    cleanup_users_by_username: Callable[..., None],
+) -> None:
+    _inject_session_factory(monkeypatch, cli_session_factory)
+    username = str(_letter_leading_uuid())
+    cleanup_users_by_username(username)
+    asyncio.run(_create_user_directly(cli_session_factory, username=username))
+
+    result = _invoke(["manage-user", "unlock", "--username", username])
+
+    assert result.exit_code == 0, result.output
+    assert result.stderr == ""
+    assert result.stdout.strip() == f"Unlocked user '{username}'."
+
+
+@pytest.mark.integration
+def test_unlock_rejects_existing_user_uuid_as_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+    cli_session_factory: async_sessionmaker[AsyncSession],
+    cleanup_users_by_username: Callable[..., None],
+) -> None:
+    _inject_session_factory(monkeypatch, cli_session_factory)
+    username = "cliunlockbyuuid"
+    cleanup_users_by_username(username)
+    user = asyncio.run(
+        _create_user_directly(
+            cli_session_factory, username=username, user_id=_letter_leading_uuid()
+        )
+    )
+
+    result = _invoke(["manage-user", "unlock", "--username", str(user.id)])
+
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    assert result.stderr == f"Error: User '{user.id}' not found.\n"

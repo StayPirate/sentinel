@@ -1228,9 +1228,14 @@ handling, signal handling) backing the contract defined in this section.
   logic — the result includes resources matching ANY of the provided
   values. This is consistent with the multi-value query parameter
   semantics defined in `docs/api-spec.md`
-- **Username normalization**: all CLI commands that accept a username
-  argument MUST normalize it (trim whitespace, lowercase) before lookup.
-  See Username Format for the full format specification
+- **Username normalization and resolution**: all CLI commands that accept
+  a username argument MUST normalize it (trim whitespace, lowercase) before
+  lookup and MUST resolve the user exclusively by exact match on the
+  normalized username. The CLI does not apply the API's UUID-or-username
+  resolution (`docs/api-spec.md`, User Identifier Resolution): a valid
+  username shaped like a UUID is an ordinary username, and a user's UUID
+  is never accepted in place of a username. See Username Format for the
+  full format specification
 - **Thin command boundary**: follow `docs/architecture.md` (Backend Layer
   Architecture) for service delegation and the narrowly scoped read-only query
   exception

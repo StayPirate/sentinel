@@ -257,7 +257,26 @@ no ORM query or filtering themselves.
 
 Resolves the UUID or username through `resolve_user_identifier()` and returns
 the complete profile data defined by `user-management.md` (Get User), including
-roles and manager. Unknown users raise `UserNotFoundError`.
+roles and manager. Unknown users raise `UserNotFoundError`. This is the API
+identifier contract; CLI commands use `get_user_by_username()` instead.
+
+#### `get_user_by_username(session, username)`
+
+Accepts `session: AsyncSession` and `username: str`, the raw value an operator
+supplied. Trim leading and trailing whitespace and lowercase the value, then
+look up the User whose stored `username` equals it exactly. The value is never
+parsed as a UUID: a valid username shaped like a UUID resolves by username,
+and a user's UUID matches no row. Return the same complete profile as
+`get_user()`, including roles and manager. Raise `UserNotFoundError` when no
+row matches. The function performs no format validation; a value that cannot
+be a stored username simply matches no row. It is read-only, acquires no lock,
+and is deterministic for a fixed database snapshot.
+
+This is the username-only resolution required for CLI commands by
+`docs/conventions.md` (CLI Conventions, Command Design — Username
+normalization and resolution). It is a separate CLI boundary, not a second
+API identifier policy: API consumers keep `resolve_user_identifier()` and its
+composable form.
 
 #### `get_user_roles(session, user_id)`
 
@@ -1655,7 +1674,7 @@ synchronization, which have no such boundary in front of the service.
 | `docs/features/identity/authentication.md` | Defines the session model and `session_service`. `deactivate_user` calls `session_service.invalidate_user_sessions()`. `reset_password` calls the same. |
 | `docs/features/identity/identity-provisioning.md` | External sync process calls `create_user`, `update_user`, `sync_role_mapping`, `deactivate_user`, `reactivate_user`. Role mapping CRUD endpoints call `sync_role_mapping` and `delete_role_mapping_roles` |
 | `docs/features/identity/rbac.md` | Admin API endpoints delegate to `update_roles`, `deactivate_user`, `reactivate_user` |
-| `docs/features/identity/user-management.md` | CLI commands delegate to `create_user`, `update_user`, `update_roles`, `deactivate_user`, `reactivate_user` |
+| `docs/features/identity/user-management.md` | CLI commands resolve their target through `get_user_by_username` and delegate to `create_user`, `update_user`, `update_roles`, `deactivate_user`, `reactivate_user` |
 | `docs/features/identity/local-authentication.md` | Defines password management. `create_user` accepts an optional password. CLI `set-password` and admin endpoint delegate to `reset_password` |
 | `docs/features/tickets/ticket-audit-log.md` | `deactivate_user` creates TicketAuditEvents per the `assignment` event type contract |
 | `docs/features/identity/identity-audit-log.md` | All identity mutations create IdentityAuditEvents per the event type contract |

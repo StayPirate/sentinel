@@ -10,8 +10,20 @@ message, output channel, and exit code.
 from __future__ import annotations
 
 import sys
+from enum import Enum
 
 import click
+
+
+class PasswordPromptFailure(Enum):
+    """Why `prompt_password_with_confirmation()` returned no password."""
+
+    MISMATCH = "mismatch"
+    """The two entries differ."""
+
+    INVALID_ENCODING = "invalid_encoding"
+    """An entry is not valid UTF-8 (Interactive Input Helpers — Input
+    encoding)."""
 
 
 def is_interactive_terminal() -> bool:
@@ -24,17 +36,46 @@ def is_interactive_terminal() -> bool:
     return sys.stdin.isatty()
 
 
+def _prompt_hidden_utf8(prompt: str) -> str | None:
+    """Read one hidden entry, or return `None` when it is not valid UTF-8.
+
+    Such input arrives either as a `UnicodeDecodeError` (strict decoding)
+    or as lone surrogates (`surrogateescape`). Both are discarded here:
+    neither the entry nor the decoder message, which names the offending
+    byte, may reach the caller or the shared exception mapper.
+    """
+    try:
+        entry = str(click.prompt(prompt, hide_input=True))
+    except UnicodeDecodeError:
+        # The interrupted hidden read never echoed its line break; end the
+        # prompt line as Click itself does when a hidden prompt is aborted.
+        click.echo()
+        return None
+    try:
+        entry.encode("utf-8")
+    except UnicodeEncodeError:
+        return None
+    return entry
+
+
 def prompt_password_with_confirmation(
     prompt: str = "Password", confirm_prompt: str = "Confirm password"
-) -> str | None:
+) -> str | PasswordPromptFailure:
     """Prompt twice via hidden (non-echoed) input and compare the entries.
 
-    Returns the entered password when both entries match, or `None` when
-    they differ. Never prints an error itself — the calling command
-    prints its own exact mismatch message and chooses its own exit code.
+    Returns the entered password when both entries are valid UTF-8 and
+    match. Returns `PasswordPromptFailure.INVALID_ENCODING` as soon as an
+    entry is not valid UTF-8 (without prompting further), and
+    `PasswordPromptFailure.MISMATCH` when the entries differ. Never prints
+    an error itself — the calling command prints its own exact message and
+    chooses its own exit code.
     """
-    password = click.prompt(prompt, hide_input=True)
-    confirmation = click.prompt(confirm_prompt, hide_input=True)
+    password = _prompt_hidden_utf8(prompt)
+    if password is None:
+        return PasswordPromptFailure.INVALID_ENCODING
+    confirmation = _prompt_hidden_utf8(confirm_prompt)
+    if confirmation is None:
+        return PasswordPromptFailure.INVALID_ENCODING
     if password != confirmation:
-        return None
-    return str(password)
+        return PasswordPromptFailure.MISMATCH
+    return password
