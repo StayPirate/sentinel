@@ -96,8 +96,8 @@ dispatching to the invoked subcommand:
    level `WARNING` or above. This ensures DEBUG/INFO messages from shared
    service code invoked by CLI commands do not pollute stdout, which
    remains reserved exclusively for the CLI Output Contract. No
-   correlation IDs (`request_id`, `celery_task_id`, `fetcher_run_id`) are
-   bound in this context.
+   correlation IDs (`request_id`, `celery_task_id`, `fetcher_run_id`,
+   `ibs_event_id`) are bound in this context.
 5. Dispatch to the invoked subcommand.
 
 **Argument encoding**: right after installing the signal handlers (step 3)
