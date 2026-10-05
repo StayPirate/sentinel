@@ -708,7 +708,9 @@ class TestCreateKey:
             # Keep the active User instance cached in create_session, then
             # change the persisted state while deactivation_session holds the
             # owner lock (FOR NO KEY UPDATE, matching the mode
-            # deactivate_user() will use — see api-key-service.md).
+            # deactivate_user() uses — see api-key-service.md; the race with
+            # the real deactivate_user() is covered in
+            # test_deactivate_user_atomicity.py).
             # create_key() must refresh the cached instance after acquiring
             # that lock rather than trusting stale identity-map data.
             assert user.active is True

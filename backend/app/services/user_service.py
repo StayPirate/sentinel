@@ -7,9 +7,10 @@ lifecycle service. `reset_password()` and `unlock_user()` provide password
 reset and lockout-counter clearing. `update_roles()` owns manual
 (`_manual`) role mutation, with the identity-owned Ticket unassignment
 helpers it composes on final `vulnerability_analyst` origin loss.
-`deactivate_user()` and the bulk role-mapping operations remain out of
-scope and are added when their owning work item is implemented.
-`resolve_user_identifier()`
+`deactivate_user()` revokes API keys, invalidates Sessions, marks the User
+inactive, and unassigns active Tickets in one caller-owned transaction.
+The bulk role-mapping operations remain out of scope and are added when
+their owning work item is implemented. `resolve_user_identifier()`
 and `get_user_roles()` back the shared authentication/authorization
 dependencies. `list_users()` and `get_user()` provide the paginated
 directory and full profile reads; `get_user_by_username()` is the
@@ -66,6 +67,7 @@ from app.core.permissions import role_to_wire
 from app.models.ticket import Ticket
 from app.models.user import User
 from app.models.user_role import UserRole
+from app.services.api_key_service import revoke_all_user_keys
 from app.services.identity_audit_log import IdentityAuditLog
 from app.services.local_auth_service import clear_login_attempts
 from app.services.session_service import invalidate_user_sessions
@@ -208,7 +210,8 @@ class ExternalUserFieldReadOnlyError(UserServiceError):
 
 
 class ExternalUserStatusReadOnlyError(UserServiceError):
-    """A human caller attempted to reactivate an external user.
+    """A human caller attempted to change an external user's active status:
+    any reactivation, or the deactivation of an active external user.
 
     See `docs/features/identity/user-service.md` (External Active Status
     Ownership).
@@ -233,6 +236,18 @@ class SelfRoleRemovalError(UserServiceError):
         super().__init__("Cannot remove your own final admin role.")
 
 
+class SelfDeactivationError(UserServiceError):
+    """An authenticated actor attempted to deactivate their own active
+    account.
+
+    See `docs/features/identity/user-service.md` (`deactivate_user()`,
+    Guard and no-op ordering). The message never echoes request input.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("Cannot deactivate your own account.")
+
+
 class _MissingType:
     """Sentinel type for an omitted optional `update_user()` parameter.
 
@@ -247,6 +262,24 @@ class _MissingType:
 
 
 _MISSING: Final = _MissingType()
+
+
+@dataclass(frozen=True)
+class DeactivationResult:
+    """Data returned by `deactivate_user()`.
+
+    See `docs/features/identity/user-service.md` (Mutation Result Types).
+    `deactivated` is `true` only when the invocation performed the effective
+    `active → inactive` transition and `false` for an already-inactive or
+    concurrent-loser no-op. `invalidated_session_ids` is empty on a no-op and
+    otherwise carries the identifiers for the post-commit
+    `session_service.purge_session_cache()`. The flag is a service result
+    field only; the HTTP payload does not expose it.
+    """
+
+    user: User
+    deactivated: bool
+    invalidated_session_ids: list[UUID]
 
 
 @dataclass(frozen=True)
@@ -1352,6 +1385,111 @@ async def update_roles(
         user=await _load_user_profile(session, user.id),
         added_roles=insertions,
         removed_roles=deletions,
+    )
+
+
+async def deactivate_user(
+    session: AsyncSession,
+    user_id: UUID,
+    *,
+    acting_user_id: UUID | None,
+    reason: str,
+) -> DeactivationResult:
+    """Deactivate a User and apply every deactivation side effect.
+
+    Q1: `user_id` identifies the target; `acting_user_id` is the audit actor
+    (`None` for CLI/external-sync system callers, which are exempt from the
+    external-status and self guards); `reason` is identity-lifecycle context
+    stored in `user_deactivated.detail` and never copied into Ticket audit
+    comments.
+
+    Q2 (classified from the locked-current row, in this order): a missing
+    target raises `UserNotFoundError`; an already-inactive target, local or
+    external, is a no-op without evaluating the guards below; an active
+    external target with an actor UUID raises
+    `ExternalUserStatusReadOnlyError`; an active self-target raises
+    `SelfDeactivationError`.
+
+    Q3: acquires `FOR NO KEY UPDATE` on the User as the first database
+    operation, so no pre-read is authoritative. For an active eligible
+    target, in this fixed order: revokes every non-revoked API key,
+    including expired keys (`api_key_service.revoke_all_user_keys()`);
+    invalidates every active Session (`session_service`, reason
+    `deactivation`); sets `User.active = False`; unassigns active-status
+    Tickets via `_unassign_active_tickets(..., "user deactivated")`; creates
+    `user_deactivated`; flushes. Never mutates a `TicketAccessGrant` or
+    `TicketPackageMaintainer` row, commits, rolls back, or performs Redis
+    I/O — the workflow owner purges the session cache after its commit.
+
+    Q4: the delegated `api_key_revoked` events, then one system
+    `assignment` event per effective Ticket clear, then one
+    `user_deactivated` event (`old_value = "active"`,
+    `new_value = "inactive"`). Its `detail` always carries `reason` and adds
+    `source = "external_sync"` exactly when the actor is `None` and the
+    target is external (user-service.md, Audit attribution). No grant or
+    maintainer event.
+
+    Q5: conditionally idempotent. A repeated or concurrent-loser invocation
+    observes the committed inactive state and returns
+    `DeactivationResult(user, False, [])` with no mutation or event.
+
+    Q6: propagates `UserNotFoundError`, `ExternalUserStatusReadOnlyError`,
+    `SelfDeactivationError`, and any database, lock-timeout, audit, or flush
+    exception unchanged; the caller's rollback then discards every effect.
+
+    Q7: returns `DeactivationResult(user, deactivated,
+    invalidated_session_ids)` with the profile's `roles` and `manager`
+    loaded.
+    """
+    user = (
+        await session.execute(
+            select(User)
+            .where(User.id == user_id)
+            .with_for_update(key_share=True)
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+    if user is None:
+        raise UserNotFoundError()
+
+    if not user.active:
+        return DeactivationResult(
+            user=await _load_user_profile(session, user.id),
+            deactivated=False,
+            invalidated_session_ids=[],
+        )
+
+    is_external = user.external_id is not None
+    if is_external and acting_user_id is not None:
+        raise ExternalUserStatusReadOnlyError()
+    if acting_user_id is not None and acting_user_id == user.id:
+        raise SelfDeactivationError()
+
+    await revoke_all_user_keys(session, user.id, acting_user_id=acting_user_id)
+    invalidated_session_ids = await invalidate_user_sessions(
+        session, user.id, SessionInvalidationReason.DEACTIVATION
+    )
+    user.active = False
+    await _unassign_active_tickets(session, user, "user deactivated")
+
+    detail: dict[str, str] = {"reason": reason}
+    if acting_user_id is None and is_external:
+        detail["source"] = "external_sync"
+    await IdentityAuditLog.log_event(
+        session,
+        event_type=IdentityAuditEventType.USER_DEACTIVATED,
+        user_id=acting_user_id,
+        target_user_id=user.id,
+        old_value="active",
+        new_value="inactive",
+        detail=detail,
+    )
+    await session.flush()
+
+    return DeactivationResult(
+        user=await _load_user_profile(session, user.id),
+        deactivated=True,
+        invalidated_session_ids=invalidated_session_ids,
     )
 
 

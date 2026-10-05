@@ -594,9 +594,10 @@ class TestCreateSessionLockSerialization:
     """Deterministic two-session proofs of the User-root lock protocol
     that serializes Session creation with deactivation (see
     authentication.md, Session creation; user-service.md, Session
-    creation concurrent with deactivation). The absent `deactivate_user()`
-    workflow is intentionally not implemented; a controlled conflicting
-    database operation stands in for it."""
+    creation concurrent with deactivation). A controlled conflicting
+    database operation stands in for the deactivation so that these proofs
+    isolate the lock protocol; the races with the real `deactivate_user()`
+    are covered in `tests/test_services/test_deactivate_user_atomicity.py`."""
 
     async def test_deactivation_committed_first_returns_none(
         self,

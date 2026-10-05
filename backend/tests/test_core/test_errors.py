@@ -228,3 +228,8 @@ class TestErrorCode:
         """See docs/features/identity/user-management.md (Set User Roles,
         Error responses)."""
         assert ErrorCode.USER_SELF_ROLE_REMOVAL == "USER_SELF_ROLE_REMOVAL"
+
+    def test_self_deactivation_is_registered(self) -> None:
+        """See docs/features/identity/user-management.md (Deactivate User,
+        Error responses)."""
+        assert ErrorCode.USER_SELF_DEACTIVATION == "USER_SELF_DEACTIVATION"

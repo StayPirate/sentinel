@@ -9,8 +9,8 @@ Owning specifications:
   `list_access_grants`; Architectural Test Requirements 8, 14 (race
   parts), 15 (grant part), and 16 (visibility lost before selection)).
 - docs/features/identity/user-service.md (`update_user()`;
-  `reactivate_user()`; Access grant concurrent with user lifecycle or
-  rename).
+  `deactivate_user()`; `reactivate_user()`; Access grant concurrent with
+  user lifecycle or rename).
 - docs/features/tickets/ticket-audit-log.md (Event Type Contract:
   `access_grant_added`, `access_grant_removed`, `confidentiality_changed`;
   Testing Requirement 23).
@@ -28,6 +28,11 @@ needs independent sessions:
   violation, so its transaction stays usable;
 - grant then revoke, no-op revoke then grant, and revoke/revoke;
 - confidentiality/grant and confidentiality/revoke in both orders;
+- deactivation/grant in both orders, with the real
+  `user_service.deactivate_user()`: deactivation first rejects an absent
+  grant with `InactiveUserError` (`USER_INACTIVE`) and keeps an existing
+  grant as `already_exists`; grant first creates one row and one event,
+  which the later deactivation retains with an inactive current projection;
 - reactivation/grant in both orders, with the real
   `user_service.reactivate_user()`;
 - rename/grant and rename/revoke in both orders, with the real
@@ -41,18 +46,18 @@ needs independent sessions:
 Every race serializes a winner that keeps its locks in an open transaction
 and a waiter proven blocked (`assert_lock_wait`) on a named lock: the target
 User `FOR NO KEY UPDATE` when the winner holds that User (another grant or
-revoke of the same target, a reactivation, or a rename, which lock it `FOR
-UPDATE`), or the Ticket `FOR UPDATE` when the winner holds only the Ticket
-(`set_confidentiality()`, or an accessibility-loss writer). A lifecycle or
-rename waiter is proven blocked on its own User `FOR UPDATE`. Waiters hold
+revoke of the same target or a deactivation, which lock it the same way, or
+a reactivation or a rename, which lock it `FOR UPDATE`), or the Ticket `FOR
+UPDATE` when the winner holds only the Ticket (`set_confidentiality()`, or
+an accessibility-loss writer). A reactivation or rename waiter is proven
+blocked on its own User `FOR UPDATE`, a deactivation waiter on its User
+`FOR NO KEY UPDATE`. Waiters hold
 stale identity-map copies of the Ticket (and, for the lifecycle races, of
 the target User), so their results prove classification from the state
 observed after the winner commits.
 
 Not applicable or deferred, hence not tested here:
 
-- the deactivation/grant race: `user_service.deactivate_user()` does not
-  exist yet; it is deferred to M4.1;
 - the `association-changed` visibility loss of
   `tests.support.suse_cvss_races.VISIBILITY_LOSSES`: it is a CVE-path loss
   (testing-strategy.md, Locked mutations: "changing the CVE-to-Ticket
@@ -111,7 +116,7 @@ from app.services.ticket_service import (
     set_confidentiality,
 )
 from app.services.ticket_visibility import TicketCaller
-from app.services.user_service import reactivate_user, update_user
+from app.services.user_service import deactivate_user, reactivate_user, update_user
 from tests.support.database import assert_lock_wait
 from tests.support.suse_cvss_races import (
     CommittedWorld,
@@ -141,11 +146,14 @@ WAIT = 5
 """Upper bound, in seconds, of every wait that is expected to finish."""
 
 TARGET = "target"
-"""The target User `FOR NO KEY UPDATE` of a grant or revoke."""
+"""The target User `FOR NO KEY UPDATE` of a grant or revoke, and the User
+`FOR NO KEY UPDATE` of `deactivate_user()`."""
 USER = "user"
 """The User `FOR UPDATE` of `reactivate_user()` and `update_user()`."""
 TICKET = "ticket"
 """The Ticket `FOR UPDATE`."""
+
+DEACTIVATION_REASON = "fictional offboarding"
 
 
 # ---------------------------------------------------------------------------
@@ -155,7 +163,8 @@ TICKET = "ticket"
 
 class _World(CommittedWorld):
     """`CommittedWorld` whose cleanup also deletes the `IdentityAuditEvent`
-    rows committed by `reactivate_user()` and `update_user()`: they
+    rows committed by `deactivate_user()`, `reactivate_user()`, and
+    `update_user()`: they
     reference the world's Users (`ON DELETE RESTRICT`), and the shared
     cleanup does not know them."""
 
@@ -270,6 +279,15 @@ def _declassifying(ticket: Ticket, actor: User) -> Call:
             is_confidential=False,
             acting_user_id=actor.id,
             caller=_caller(actor, Scope.ALL),
+        )
+
+    return call
+
+
+def _deactivating(user: User, actor: User) -> Call:
+    def call(db: AsyncSession) -> Awaitable[Any]:
+        return deactivate_user(
+            db, user.id, acting_user_id=actor.id, reason=DEACTIVATION_REASON
         )
 
     return call
@@ -711,6 +729,142 @@ class TestConfidentialityRaces:
             False,
             [],
             [_removed(revoker, target.username), _declassified(declassifier)],
+        )
+
+
+# ---------------------------------------------------------------------------
+# Deactivation/grant (`grant_access`, Concurrency; user-service.md, Access
+# grant concurrent with user lifecycle or rename)
+# ---------------------------------------------------------------------------
+
+
+DEACTIVATED = ("user_deactivated", "active", "inactive")
+"""The `user_deactivated` event type and old/new values."""
+
+
+@pytest.mark.integration
+class TestDeactivationRaces:
+    """An active target on a confidential Ticket. Deactivation and grant
+    both lock the target User `FOR NO KEY UPDATE` first, so the waiter is
+    blocked on that lock before any other statement."""
+
+    async def test_deactivation_first_rejects_an_absent_grant(
+        self, world: CommittedWorld, probe: AsyncSession
+    ) -> None:
+        """The waiter holds a stale active copy of the target and decides
+        from the deactivated row: `InactiveUserError` (`USER_INACTIVE`)
+        without any write; no grant row or Ticket event exists."""
+        admin = await _analyst(world)
+        granter = await _analyst(world)
+        target = await _person(world)
+        ticket = await world.ticket(cve_id=None, is_confidential=True)
+
+        race = await _serialize(
+            world,
+            ticket,
+            _deactivating(target, admin),
+            _rejected(_granting(ticket, str(target.id), granter), InactiveUserError),
+            blocked_on=[TARGET],
+            stale=target,
+        )
+
+        assert race.winner_result.deactivated is True
+        assert race.task.result() is None
+        await race.waiter.rollback()
+        assert await _committed(probe, ticket) == (True, [], [])
+        event_type, old, new = DEACTIVATED
+        assert await _identity(probe, target) == (
+            target.username,
+            [(event_type, admin.id, old, new)],
+        )
+
+    async def test_deactivation_first_keeps_an_existing_grant(
+        self, world: CommittedWorld, probe: AsyncSession
+    ) -> None:
+        """An existing grant needs no activity check: the waiter returns it
+        as `already_exists` with its original provenance and an inactive
+        current target projection, without any write or event."""
+        admin = await _analyst(world)
+        original = await _analyst(world)
+        granter = await _analyst(world)
+        target = await _person(world)
+        ticket = await world.ticket(cve_id=None, is_confidential=True)
+        await _grant_row(world, ticket, target, original)
+
+        race = await _serialize(
+            world,
+            ticket,
+            _deactivating(target, admin),
+            _granting(ticket, str(target.id), granter),
+            blocked_on=[TARGET],
+            stale=target,
+        )
+
+        assert race.winner_result.deactivated is True
+        result = race.task.result()
+        assert result.action is AccessGrantAction.ALREADY_EXISTS
+        assert (
+            result.grant.user_id,
+            result.grant.granted_by_id,
+            result.grant.granted_at,
+        ) == (target.id, original.id, PAST)
+        assert result.projection.user.active is False
+        assert result.projection.granted_by.id == original.id
+        assert race.recorder.writes() == []
+        await race.waiter.commit()
+        assert await _committed(probe, ticket) == (
+            True,
+            [(target.id, original.id, PAST)],
+            [],
+        )
+        event_type, old, new = DEACTIVATED
+        assert await _identity(probe, target) == (
+            target.username,
+            [(event_type, admin.id, old, new)],
+        )
+
+    async def test_grant_first_is_retained_by_the_later_deactivation(
+        self, world: CommittedWorld, probe: AsyncSession
+    ) -> None:
+        """The grant commits one row and one `access_grant_added`; the
+        deactivation, blocked on its User `FOR NO KEY UPDATE`, then writes
+        no grant row and creates no Ticket event, and the listing projects
+        the retained grant's target as inactive."""
+        admin = await _analyst(world)
+        granter = await _analyst(world)
+        target = await _person(world)
+        ticket = await world.ticket(cve_id=None, is_confidential=True)
+
+        race = await _serialize(
+            world,
+            ticket,
+            _granting(ticket, str(target.id), granter),
+            _deactivating(target, admin),
+            blocked_on=[TARGET],
+        )
+
+        assert race.winner_result.action is AccessGrantAction.CREATED
+        assert race.task.result().deactivated is True
+        assert [w for w in race.recorder.writes() if "ticket" in w] == []
+        await race.waiter.commit()
+        assert await _committed(probe, ticket) == (
+            True,
+            [(target.id, granter.id, race.winner_now)],
+            [_added(granter, target.username)],
+        )
+        event_type, old, new = DEACTIVATED
+        assert await _identity(probe, target) == (
+            target.username,
+            [(event_type, admin.id, old, new)],
+        )
+        (listed,) = await list_access_grants(
+            probe, ticket_id=ticket.id, caller=_caller(admin, Scope.ALL)
+        )
+        await probe.rollback()
+        assert (listed.user.id, listed.user.active) == (target.id, False)
+        assert (listed.granted_by.id, listed.granted_at) == (
+            granter.id,
+            race.winner_now,
         )
 
 

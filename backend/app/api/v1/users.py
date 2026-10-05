@@ -55,6 +55,7 @@ from app.services.user_service import (
     ExternalUserFieldReadOnlyError,
     ExternalUserPasswordError,
     ExternalUserStatusReadOnlyError,
+    SelfDeactivationError,
     SelfRoleRemovalError,
     UserConflictError,
 )
@@ -739,6 +740,82 @@ async def reset_user_password_admin(
             detail="Password updated. All active sessions have been invalidated."
         )
     )
+
+
+@router.post(
+    "/admin/users/{user}/deactivate",
+    response_model=UserResponse,
+    summary="Deactivate user (admin)",
+    description=(
+        "Deactivates a user: revokes every non-revoked API key, invalidates "
+        "every active session, and unassigns active-status tickets. Explicit "
+        "ticket grants and package-maintainer associations are retained. "
+        "Idempotent for an already-inactive user. Requires the "
+        "'manage_users' capability."
+    ),
+    responses={
+        404: {
+            "model": ErrorResponse,
+            "description": "No user found matching the given UUID or username.",
+        },
+        409: {
+            "model": ErrorResponse,
+            "description": (
+                "Target is an active external user, or the authenticated "
+                "administrator's own account."
+            ),
+        },
+    },
+)
+async def deactivate_user_admin(
+    user: str,
+    principal: Annotated[
+        AuthenticatedPrincipal,
+        Depends(require_capability(Capability.MANAGE_USERS)),
+    ],
+    db: DatabaseSession,
+) -> UserResponse:
+    """Deactivate user (admin) — see
+    `docs/features/identity/user-management.md` (Deactivate User).
+
+    The session-liveness purge runs only after the commit and only for an
+    effective deactivation; it never raises, so a Redis failure still
+    returns the committed profile."""
+    try:
+        target_user = await user_service.resolve_user_identifier(db, user)
+    except UserNotFoundError:
+        raise user_not_found_error() from None
+
+    try:
+        result = await user_service.deactivate_user(
+            db,
+            target_user.id,
+            acting_user_id=principal.user.id,
+            reason="deactivated by admin via API",
+        )
+    except ExternalUserStatusReadOnlyError:
+        raise AppError(
+            status_code=status.HTTP_409_CONFLICT,
+            code=ErrorCode.USER_EXTERNAL_STATUS_READONLY,
+            detail="Cannot deactivate external users.",
+        ) from None
+    except SelfDeactivationError:
+        raise AppError(
+            status_code=status.HTTP_409_CONFLICT,
+            code=ErrorCode.USER_SELF_DEACTIVATION,
+            detail="Cannot deactivate your own account.",
+        ) from None
+    except UserNotFoundError:
+        raise user_not_found_error() from None
+
+    if result.deactivated:
+
+        async def _purge_sessions() -> None:
+            await purge_session_cache(result.invalidated_session_ids)
+
+        register_post_commit_callback(db, _purge_sessions)
+
+    return UserResponse(data=_serialize_user(result.user))
 
 
 @router.post(
