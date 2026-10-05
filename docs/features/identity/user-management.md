@@ -290,7 +290,10 @@ so an unknown username is reported first.
    role summary uses the form
    `roles: added 'admin'; removed 'vulnerability_analyst'`, lists added
    roles before removed roles, orders each side by wire-format role value,
-   and omits a side with no effective change
+   and omits a side with no effective change. Each role is single-quoted,
+   and several roles on one side are separated by `, `, for example
+   `roles: added 'admin', 'restricted_analyst'; removed
+   'vulnerability_analyst'`
 
 **Reactivation mode behavior**:
 
