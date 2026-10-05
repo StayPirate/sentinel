@@ -1,5 +1,5 @@
 """Public user directory, profile, and current-user endpoints, plus the
-ticket-independent admin user mutation endpoints.
+admin user mutation endpoints.
 
 See `docs/features/identity/user-management.md` (List Users, Get User,
 Admin API endpoints) and `docs/features/identity/authentication.md`
@@ -46,6 +46,7 @@ from app.schemas.user import (
     UserManagerData,
     UserResponse,
     UserRoleAssignmentData,
+    UserRolesUpdateRequest,
 )
 from app.services import user_service
 from app.services.local_auth_service import clear_login_attempts
@@ -54,6 +55,7 @@ from app.services.user_service import (
     ExternalUserFieldReadOnlyError,
     ExternalUserPasswordError,
     ExternalUserStatusReadOnlyError,
+    SelfRoleRemovalError,
     UserConflictError,
 )
 
@@ -570,6 +572,78 @@ async def reactivate_user_admin(
             status_code=status.HTTP_409_CONFLICT,
             code=ErrorCode.USER_EXTERNAL_STATUS_READONLY,
             detail="Cannot reactivate external users.",
+        ) from None
+    except UserNotFoundError:
+        raise user_not_found_error() from None
+
+    return UserResponse(data=_serialize_user(result.user))
+
+
+@router.post(
+    "/admin/users/{user}/roles",
+    response_model=UserResponse,
+    summary="Set user roles (admin)",
+    description=(
+        "Adds and removes manual ('_manual') roles of a user. Roles granted "
+        "through external origins are never changed. Already-present "
+        "additions and missing removals are no-ops. Returns the complete "
+        "profile with every role origin. Requires the 'manage_users' "
+        "capability."
+    ),
+    responses={
+        404: {
+            "model": ErrorResponse,
+            "description": "No user found matching the given UUID or username.",
+        },
+        409: {
+            "model": ErrorResponse,
+            "description": (
+                "The request would remove the authenticated administrator's "
+                "final admin role origin."
+            ),
+        },
+        422: {
+            "model": ErrorResponse,
+            "description": (
+                "Explicit null, unknown or repeated role values, wrong types, or "
+                "a role present in both 'add' and 'remove'."
+            ),
+        },
+    },
+)
+async def set_user_roles_admin(
+    user: str,
+    principal: Annotated[
+        AuthenticatedPrincipal,
+        Depends(require_capability(Capability.MANAGE_USERS)),
+    ],
+    db: DatabaseSession,
+    body: UserRolesUpdateRequest | None = None,
+) -> UserResponse:
+    """Set user roles (admin) — see
+    `docs/features/identity/user-management.md` (Set User Roles).
+
+    An absent body is equivalent to `{}`; a literal JSON `null` body is
+    treated the same way (delegated decision recorded on issue #808)."""
+    request = body if body is not None else UserRolesUpdateRequest()
+    try:
+        target_user = await user_service.resolve_user_identifier(db, user)
+    except UserNotFoundError:
+        raise user_not_found_error() from None
+
+    try:
+        result = await user_service.update_roles(
+            db,
+            target_user.id,
+            add=[role_from_wire(value) for value in request.add],
+            remove=[role_from_wire(value) for value in request.remove],
+            acting_user_id=principal.user.id,
+        )
+    except SelfRoleRemovalError:
+        raise AppError(
+            status_code=status.HTTP_409_CONFLICT,
+            code=ErrorCode.USER_SELF_ROLE_REMOVAL,
+            detail="Cannot remove your own final admin role.",
         ) from None
     except UserNotFoundError:
         raise user_not_found_error() from None

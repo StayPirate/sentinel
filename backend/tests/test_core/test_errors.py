@@ -223,3 +223,8 @@ class TestErrorCode:
         assert (
             ErrorCode.USER_PASSWORD_POLICY_VIOLATION == "USER_PASSWORD_POLICY_VIOLATION"
         )
+
+    def test_self_role_removal_is_registered(self) -> None:
+        """See docs/features/identity/user-management.md (Set User Roles,
+        Error responses)."""
+        assert ErrorCode.USER_SELF_ROLE_REMOVAL == "USER_SELF_ROLE_REMOVAL"

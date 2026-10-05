@@ -1,5 +1,5 @@
 """Request/response/query schemas for the public user directory/profile
-endpoints and the ticket-independent admin user mutation endpoints.
+endpoints and the admin user mutation endpoints.
 
 See `docs/features/identity/user-management.md` (List Users, Get User,
 Admin API endpoints) for the authoritative request/response contract
@@ -155,6 +155,20 @@ def _normalize_email_field(value: Any) -> Any:
     return normalized
 
 
+def _validate_role_list(value: list[str]) -> list[str]:
+    """Reject unknown wire-format role values and repeated values within
+    one list. Raises `ValueError`, which Pydantic renders as the global 422
+    `VALIDATION_ERROR` response."""
+    if len(value) != len(set(value)):
+        raise ValueError("Duplicate role values are not allowed.")
+    for item in value:
+        try:
+            role_from_wire(item)
+        except ValueError as exc:
+            raise ValueError(f"Unknown role value: {item!r}") from exc
+    return value
+
+
 class AdminUserCreateRequest(BaseModel):
     """Request body for `POST /api/v1/admin/users`
     (`user-management.md`, Create User (Admin)).
@@ -187,14 +201,7 @@ class AdminUserCreateRequest(BaseModel):
     @field_validator("roles")
     @classmethod
     def _validate_roles(cls, value: list[str]) -> list[str]:
-        if len(value) != len(set(value)):
-            raise ValueError("Duplicate role values are not allowed.")
-        for item in value:
-            try:
-                role_from_wire(item)
-            except ValueError as exc:
-                raise ValueError(f"Unknown role value: {item!r}") from exc
-        return value
+        return _validate_role_list(value)
 
 
 class AdminUserUpdateRequest(BaseModel):
@@ -239,6 +246,32 @@ class AdminPasswordResetRequest(BaseModel):
     """
 
     password: str = Field(repr=False)
+
+
+class UserRolesUpdateRequest(BaseModel):
+    """Request body for `POST /api/v1/admin/users/{user}/roles`
+    (`user-management.md`, Set User Roles).
+
+    Validation is strict, unlike `user_service.update_roles()`'s permissive
+    set normalization: an omitted field means `[]`, but explicit `null`, a
+    non-array, a non-string element, an unknown role value, a role repeated
+    within one list, and a role present in both lists are rejected. An
+    absent body is handled by the route as `{}`.
+    """
+
+    add: list[str] = Field(default_factory=list)
+    remove: list[str] = Field(default_factory=list)
+
+    @field_validator("add", "remove")
+    @classmethod
+    def _validate_roles(cls, value: list[str]) -> list[str]:
+        return _validate_role_list(value)
+
+    @model_validator(mode="after")
+    def _reject_overlap(self) -> UserRolesUpdateRequest:
+        if set(self.add) & set(self.remove):
+            raise ValueError("A role cannot be both added and removed.")
+        return self
 
 
 class UserActionDetailData(BaseModel):

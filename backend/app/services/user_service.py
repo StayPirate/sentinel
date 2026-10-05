@@ -4,9 +4,12 @@ See `docs/features/identity/user-service.md` for the authoritative contract
 this module implements. `create_user()`, `update_user()`, and
 `reactivate_user()` are the ticket-independent core of the centralized user
 lifecycle service. `reset_password()` and `unlock_user()` provide password
-reset and lockout-counter clearing. `update_roles()`, `deactivate_user()`,
-and the bulk role-mapping operations remain out of scope and are added
-when their owning work item is implemented. `resolve_user_identifier()`
+reset and lockout-counter clearing. `update_roles()` owns manual
+(`_manual`) role mutation, with the identity-owned Ticket unassignment
+helpers it composes on final `vulnerability_analyst` origin loss.
+`deactivate_user()` and the bulk role-mapping operations remain out of
+scope and are added when their owning work item is implemented.
+`resolve_user_identifier()`
 and `get_user_roles()` back the shared authentication/authorization
 dependencies. `list_users()` and `get_user()` provide the paginated
 directory and full profile reads.
@@ -32,7 +35,16 @@ from uuid import UUID
 
 import structlog
 from email_validator import EmailNotValidError, validate_email
-from sqlalchemy import ColumnElement, exists, func, nullslast, or_, select
+from sqlalchemy import (
+    ColumnElement,
+    Select,
+    delete,
+    exists,
+    func,
+    nullslast,
+    or_,
+    select,
+)
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -42,17 +54,21 @@ from app.core.enums import (
     Role,
     SessionInvalidationReason,
     SortOrder,
+    TicketAuditEventType,
+    TicketStatus,
     UserSortField,
     UserType,
 )
 from app.core.exceptions import ServiceError, UserNotFoundError
 from app.core.passwords import PasswordValidationError, hash_password, validate_password
 from app.core.permissions import role_to_wire
+from app.models.ticket import Ticket
 from app.models.user import User
 from app.models.user_role import UserRole
 from app.services.identity_audit_log import IdentityAuditLog
 from app.services.local_auth_service import clear_login_attempts
 from app.services.session_service import invalidate_user_sessions
+from app.services.ticket_audit_log import TicketAuditLog
 
 # Re-exported as this service's composable matching form (see
 # `docs/features/identity/user-service.md`, `resolve_user_identifier()`).
@@ -85,6 +101,41 @@ _CONFLICT_MESSAGES: Final[dict[ConflictField, str]] = {
     "email": "Email already exists.",
     "external_id": "External ID already exists.",
 }
+
+_MANUAL_GROUP: Final = "_manual"
+"""`UserRole.group_name` of manual role assignments
+(`docs/features/identity/rbac.md`, Role Origins and Coexistence)."""
+
+# Identity-owned system unassignment reasons (user-service.md, Private
+# Helpers; ticket-audit-log.md, Canonical Automatic Comment Vocabulary).
+# The reconciliation-only `inactive assignee` reason is deliberately absent.
+UnassignmentReason = Literal[
+    "user deactivated",
+    "vulnerability_analyst role removed",
+    "vulnerability_analyst role removed by external sync",
+    "vulnerability_analyst role removed after role mapping deletion",
+]
+VARoleLossReason = Literal[
+    "vulnerability_analyst role removed",
+    "vulnerability_analyst role removed by external sync",
+    "vulnerability_analyst role removed after role mapping deletion",
+]
+_VA_ROLE_LOSS_REASONS: Final[frozenset[str]] = frozenset(
+    {
+        "vulnerability_analyst role removed",
+        "vulnerability_analyst role removed by external sync",
+        "vulnerability_analyst role removed after role mapping deletion",
+    }
+)
+_UNASSIGNMENT_REASONS: Final[frozenset[str]] = _VA_ROLE_LOSS_REASONS | {
+    "user deactivated"
+}
+
+_UNASSIGNABLE_STATUSES: Final = frozenset(
+    {TicketStatus.NEW.value, TicketStatus.ANALYSIS.value, TicketStatus.ANALYZED.value}
+)
+"""Statuses whose assignment the identity batch clears; `Resolved`,
+`Ignored`, and `Duplicated` keep their assignee."""
 
 
 class UserServiceError(ServiceError):
@@ -169,6 +220,18 @@ class ExternalUserStatusReadOnlyError(UserServiceError):
         )
 
 
+class SelfRoleRemovalError(UserServiceError):
+    """An authenticated actor's own role request would effectively delete
+    their final Admin origin.
+
+    See `docs/features/identity/user-service.md` (`update_roles()`,
+    Business Rule 2). The message never echoes request input.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("Cannot remove your own final admin role.")
+
+
 class _MissingType:
     """Sentinel type for an omitted optional `update_user()` parameter.
 
@@ -226,6 +289,22 @@ class ReactivationResult:
 
     user: User
     reactivated: bool
+
+
+@dataclass(frozen=True)
+class RoleUpdateResult:
+    """Data returned by `update_roles()`.
+
+    See `docs/features/identity/user-service.md` (Mutation Result Types).
+    `added_roles` and `removed_roles` list exactly the `_manual` `UserRole`
+    rows inserted and deleted by one invocation, each ordered by wire-format
+    role value — not the difference of effective roles across all origins.
+    Both are empty for a no-op.
+    """
+
+    user: User
+    added_roles: list[Role]
+    removed_roles: list[Role]
 
 
 @dataclass(frozen=True)
@@ -538,16 +617,26 @@ async def _resolve_username(session: AsyncSession, user_id: UUID | None) -> str 
     return result.scalar_one_or_none()
 
 
-async def _load_user_profile(session: AsyncSession, user_id: UUID) -> User:
-    """Load one `User` with `roles` and `manager` eagerly populated, for
-    API profile serialization after a lifecycle mutation (see
-    `docs/features/identity/user-service.md`, Mutation Result Types)."""
-    result = await session.execute(
+def _user_profile_query(user_id: UUID) -> Select[User]:
+    """Select one `User` with `roles` and `manager` eagerly populated.
+
+    `populate_existing` refreshes an identity-map copy and its loaded
+    collections, so a profile read after a flushed role mutation never
+    serves a stale `roles` collection. Callers flush before loading.
+    """
+    return (
         select(User)
         .where(User.id == user_id)
         .options(selectinload(User.roles), selectinload(User.manager))
+        .execution_options(populate_existing=True)
     )
-    return result.scalar_one()
+
+
+async def _load_user_profile(session: AsyncSession, user_id: UUID) -> User:
+    """Load one existing `User` with `roles` and `manager` eagerly
+    populated, for API profile serialization after a lifecycle mutation (see
+    `docs/features/identity/user-service.md`, Mutation Result Types)."""
+    return (await session.execute(_user_profile_query(user_id))).scalar_one()
 
 
 async def create_user(
@@ -955,6 +1044,286 @@ async def update_user(
     return UserUpdateResult(
         user=await _load_user_profile(session, user.id),
         changed_fields=changed_fields,
+    )
+
+
+async def _unassign_active_tickets(
+    db: AsyncSession, user: User, reason: UnassignmentReason
+) -> None:
+    """Clear the User's active-status Ticket assignments.
+
+    Category A helper (user-service.md, Private Helpers,
+    `_unassign_active_tickets()`).
+
+    Q1: `user` is already locked `FOR NO KEY UPDATE` by the caller; its `id`
+    and `username` are the authoritative target and audit snapshot. `reason`
+    is one of the four identity-owned unassignment reasons.
+
+    Q2: the caller holds the User lock. This helper never acquires or
+    upgrades it, and applies no role or active-status guard.
+
+    Q3: selects the IDs of every Ticket whose current `assignee_id` is the
+    User, without a status prefilter, then locks exactly those Tickets
+    `FOR UPDATE` in ascending UUID order and revalidates each from the
+    locked-current row. The candidate set can only shrink after selection:
+    every path that could assign a Ticket to this User holds the User
+    `FOR SHARE`, which conflicts with the caller's lock. A Ticket no longer
+    assigned to the User, or in `Resolved`, `Ignored`, or `Duplicated`, is
+    preserved without an event. A Ticket in `New`, `Analysis`, or `Analyzed`
+    still assigned to the User gets `assignee_id = NULL` only. Flushes;
+    never changes status, reconciles, assigns a replacement, commits, or
+    rolls back.
+
+    Q4: one system `assignment` event per effective clear, in Ticket UUID
+    order: `old_value` = the locked username, `new_value = NULL`,
+    `comment = "Unassigned from {username}: {reason}"`, `detail = NULL`.
+
+    Q5: conditionally idempotent; already-cleared, reassigned, and
+    inactive-status candidates create no event.
+
+    Q6: raises `ValueError` for any other `reason` before any query.
+    Database, lock-timeout, cancellation, audit, and flush exceptions
+    propagate unchanged.
+    """
+    if reason not in _UNASSIGNMENT_REASONS:
+        raise ValueError("reason is not an identity-owned unassignment reason.")
+
+    candidate_ids = list(
+        (
+            await db.execute(
+                select(Ticket.id)
+                .where(Ticket.assignee_id == user.id)
+                .order_by(Ticket.id)
+            )
+        ).scalars()
+    )
+    if not candidate_ids:
+        return
+
+    locked = (
+        (
+            await db.execute(
+                select(Ticket)
+                .where(Ticket.id.in_(candidate_ids))
+                .order_by(Ticket.id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    username = user.username
+    for ticket in locked:
+        if ticket.assignee_id != user.id or ticket.status not in _UNASSIGNABLE_STATUSES:
+            continue
+        ticket.assignee_id = None
+        await TicketAuditLog.log_event(
+            db,
+            ticket_id=ticket.id,
+            event_type=TicketAuditEventType.ASSIGNMENT,
+            user_id=None,
+            old_value=username,
+            new_value=None,
+            comment=f"Unassigned from {username}: {reason}",
+        )
+    await db.flush()
+
+
+async def _unassign_tickets_on_va_role_loss(
+    db: AsyncSession, user: User, reason: VARoleLossReason
+) -> None:
+    """Unassign the User's active Tickets when no VA origin remains.
+
+    Category A helper (user-service.md, Private Helpers,
+    `_unassign_tickets_on_va_role_loss()`).
+
+    Q1: `user` is already locked `FOR NO KEY UPDATE` by the caller, which
+    has applied its `UserRole` deletions in this transaction. `reason` is
+    one of the three role-loss reasons.
+
+    Q3: when any transaction-visible `vulnerability_analyst` `UserRole`
+    remains for the User, from any `group_name`, returns without effect;
+    otherwise delegates to `_unassign_active_tickets()`. Never acquires or
+    upgrades the User lock.
+
+    Q5: idempotent; a re-invocation after final loss finds no active
+    assignment to clear.
+
+    Q6: raises `ValueError` for any other `reason` before any query.
+    Database and delegated exceptions propagate unchanged.
+    """
+    if reason not in _VA_ROLE_LOSS_REASONS:
+        raise ValueError("reason is not a vulnerability_analyst role-loss reason.")
+
+    remaining = (
+        await db.execute(
+            select(
+                exists().where(
+                    UserRole.user_id == user.id,
+                    UserRole.role == Role.VULNERABILITY_ANALYST.value,
+                )
+            )
+        )
+    ).scalar_one()
+    if remaining:
+        return
+    await _unassign_active_tickets(db, user, reason)
+
+
+async def update_roles(
+    session: AsyncSession,
+    user_id: UUID,
+    *,
+    add: list[Role] | None = None,
+    remove: list[Role] | None = None,
+    acting_user_id: UUID | None,
+) -> RoleUpdateResult:
+    """Add or remove manual (`_manual`) role assignments of a User.
+
+    Q1: `user_id` identifies the target; `add`/`remove` are Role values
+    (`None` is an empty collection); `acting_user_id` is the audit actor
+    (`None` for CLI/system callers, which are exempt from the self-Admin
+    guard). Inactive targets are accepted like active ones.
+
+    Q2 (guards, in this order): a missing target raises `UserNotFoundError`;
+    an actor removing their own `_manual` Admin row while no other Admin
+    origin remains raises `SelfRoleRemovalError` before any write.
+
+    Q3: deduplicates both lists and cancels their intersection in memory,
+    before any persistent access. When both resolved sets are empty, loads
+    the profile without a lock and returns. Otherwise acquires
+    `FOR NO KEY UPDATE` on the User as the first database operation and
+    classifies against the locked-current `UserRole` rows: an effective
+    insertion is a resolved addition without a `_manual` row, an effective
+    deletion a resolved removal with one. Rows of any other `group_name` are
+    only observed. Applies the self-Admin guard, inserts the `_manual` rows
+    (`assigned_by = acting_user_id`), then deletes the `_manual` rows, each
+    in ascending wire-format order. After the deletions, an effective
+    `vulnerability_analyst` deletion calls
+    `_unassign_tickets_on_va_role_loss()`, which unassigns active Tickets
+    only when no VA origin remains. Then creates the Identity events and
+    flushes. A UNIQUE violation from a non-conforming writer propagates.
+
+    Q4: one `role_added` per effective insertion, then one `role_removed`
+    per effective deletion, each group in wire-format order, with
+    `user_id = acting_user_id`, the wire-format role as `new_value` or
+    `old_value`, and `detail = NULL`. Final VA-origin loss additionally
+    creates the system `assignment` events of the helper.
+
+    Q5: conditionally idempotent; a repeated invocation returns empty
+    result lists and creates no row, event, or Ticket change.
+
+    Q6: propagates `UserNotFoundError`, `SelfRoleRemovalError`, and any
+    database, lock-timeout, audit, or flush exception unchanged.
+
+    Q7: returns `RoleUpdateResult(user, added_roles, removed_roles)` with the
+    profile's `roles` and `manager` loaded and both lists wire-ordered.
+    """
+    add_set = set(add or ())
+    remove_set = set(remove or ())
+    resolved_add = add_set - remove_set
+    resolved_remove = remove_set - add_set
+
+    if not resolved_add and not resolved_remove:
+        profile = (
+            await session.execute(_user_profile_query(user_id))
+        ).scalar_one_or_none()
+        if profile is None:
+            raise UserNotFoundError()
+        return RoleUpdateResult(user=profile, added_roles=[], removed_roles=[])
+
+    user = (
+        await session.execute(
+            select(User)
+            .where(User.id == user_id)
+            .with_for_update(key_share=True)
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+    if user is None:
+        raise UserNotFoundError()
+
+    origins = (
+        await session.execute(
+            select(UserRole.role, UserRole.group_name).where(
+                UserRole.user_id == user.id
+            )
+        )
+    ).all()
+    manual_roles = {
+        Role(row.role) for row in origins if row.group_name == _MANUAL_GROUP
+    }
+    insertions = sorted(
+        (role for role in resolved_add if role not in manual_roles), key=role_to_wire
+    )
+    deletions = sorted(
+        (role for role in resolved_remove if role in manual_roles), key=role_to_wire
+    )
+
+    if (
+        acting_user_id is not None
+        and acting_user_id == user.id
+        and Role.ADMIN in deletions
+        and not any(
+            row.role == Role.ADMIN.value and row.group_name != _MANUAL_GROUP
+            for row in origins
+        )
+    ):
+        raise SelfRoleRemovalError()
+
+    for role in insertions:
+        session.add(
+            UserRole(
+                user_id=user.id,
+                role=role.value,
+                group_name=_MANUAL_GROUP,
+                assigned_by=acting_user_id,
+            )
+        )
+    if insertions:
+        await session.flush()
+
+    for role in deletions:
+        await session.execute(
+            delete(UserRole).where(
+                UserRole.user_id == user.id,
+                UserRole.role == role.value,
+                UserRole.group_name == _MANUAL_GROUP,
+            )
+        )
+
+    if Role.VULNERABILITY_ANALYST in deletions:
+        await _unassign_tickets_on_va_role_loss(
+            session, user, "vulnerability_analyst role removed"
+        )
+
+    for role in insertions:
+        await IdentityAuditLog.log_event(
+            session,
+            event_type=IdentityAuditEventType.ROLE_ADDED,
+            user_id=acting_user_id,
+            target_user_id=user.id,
+            old_value=None,
+            new_value=role_to_wire(role),
+            detail=None,
+        )
+    for role in deletions:
+        await IdentityAuditLog.log_event(
+            session,
+            event_type=IdentityAuditEventType.ROLE_REMOVED,
+            user_id=acting_user_id,
+            target_user_id=user.id,
+            old_value=role_to_wire(role),
+            new_value=None,
+            detail=None,
+        )
+    await session.flush()
+
+    return RoleUpdateResult(
+        user=await _load_user_profile(session, user.id),
+        added_roles=insertions,
+        removed_roles=deletions,
     )
 
 
