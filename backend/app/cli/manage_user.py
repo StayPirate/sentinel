@@ -46,6 +46,11 @@ if TYPE_CHECKING:
 # `_USERNAME_PATTERN`, since that name is internal to the service module.
 _USERNAME_PATTERN = re.compile(r"^[a-z][a-z0-9._-]{0,63}$")
 
+# `--full-name` bound (docs/features/identity/user-management.md, `create`
+# and `update`): the `User.full_name` column length, which the API schemas
+# also enforce. A structural test pins all three values together.
+_FULL_NAME_MAX_LENGTH = 255
+
 # Fixed label-column width for `manage-user show`'s detail output — every
 # label (including its trailing colon) is left-padded to this width before
 # the value, matching the alignment in the command's spec example.
@@ -114,6 +119,17 @@ def _normalize_email_or_exit(email: str) -> str:
     return normalized
 
 
+def _check_full_name_length_or_exit(full_name: str | None) -> None:
+    """Exit 1 when a provided `full_name` exceeds `_FULL_NAME_MAX_LENGTH`
+    characters, before any session could fail on the column bound."""
+    if full_name is not None and len(full_name) > _FULL_NAME_MAX_LENGTH:
+        click.echo(
+            f"Error: Full name must be at most {_FULL_NAME_MAX_LENGTH} characters.",
+            err=True,
+        )
+        raise SystemExit(1)
+
+
 # ---------------------------------------------------------------------------
 # create
 # ---------------------------------------------------------------------------
@@ -144,6 +160,7 @@ def create(
     normalized_username = _normalize_username_or_exit(username)
     parsed_roles = _parse_roles_or_exit(roles)
     normalized_email = _normalize_email_or_exit(email)
+    _check_full_name_length_or_exit(full_name)
 
     if not is_interactive_terminal():
         click.echo(
@@ -349,7 +366,7 @@ async def _update_flow(
 
     async with session_factory() as db:
         try:
-            user = await user_service.get_user(db, username)
+            user = await user_service.get_user_by_username(db, username)
         except UserNotFoundError:
             click.echo(f"Error: User '{username}' not found.", err=True)
             raise SystemExit(1) from None
@@ -412,8 +429,9 @@ async def _update_profile(
     full_name: str | None,
     clear_full_name: bool,
 ) -> None:
-    """Profile mode: external guard, email validation, then one
-    `user_service.update_user()` call in its own transaction."""
+    """Profile mode: external guard, email validation, full-name length
+    bound, then one `user_service.update_user()` call in its own
+    transaction."""
     from app.core.exceptions import UserNotFoundError
     from app.services import user_service
     from app.services.user_service import (
@@ -425,6 +443,7 @@ async def _update_profile(
         click.echo(_external_user_profile_error_message(username), err=True)
         raise SystemExit(1)
     normalized_email = _normalize_email_or_exit(email) if email is not None else None
+    _check_full_name_length_or_exit(full_name)
     # `--clear-full-name` sends an explicit `None`; `--full-name ""` is an
     # ordinary provided value.
     full_name_provided = clear_full_name or full_name is not None
@@ -724,10 +743,11 @@ def show(username: str) -> None:
 async def _show_flow(
     session_factory: async_sessionmaker[AsyncSession], username: str
 ) -> User:
-    """Look up `username` via `user_service.get_user()`.
+    """Look up `username` via `user_service.get_user_by_username()`.
 
-    Read-only: opens a session, delegates the lookup, and issues no
-    commit. Translates `UserNotFoundError` into the command's exact
+    Read-only: opens a session, delegates the username-only lookup (a
+    user's UUID is never accepted in place of the username), and issues
+    no commit. Translates `UserNotFoundError` into the command's exact
     not-found message and exit code.
     """
     from app.core.exceptions import UserNotFoundError
@@ -735,7 +755,7 @@ async def _show_flow(
 
     async with session_factory() as db:
         try:
-            return await user_service.get_user(db, username)
+            return await user_service.get_user_by_username(db, username)
         except UserNotFoundError:
             click.echo(f"Error: User '{username}' not found.", err=True)
             raise SystemExit(1) from None
@@ -861,7 +881,7 @@ async def _set_password_flow(
 
     async with session_factory() as db:
         try:
-            user = await user_service.get_user(db, username)
+            user = await user_service.get_user_by_username(db, username)
         except UserNotFoundError:
             click.echo(f"Error: User '{username}' not found.", err=True)
             raise SystemExit(1) from None
@@ -954,7 +974,7 @@ async def _unlock_flow(
 
     async with session_factory() as db:
         try:
-            user = await user_service.get_user(db, username)
+            user = await user_service.get_user_by_username(db, username)
         except UserNotFoundError:
             click.echo(f"Error: User '{username}' not found.", err=True)
             raise SystemExit(1) from None

@@ -65,7 +65,7 @@ sentinel manage-user create \
 |----------------|----------|------------|--------------------------------------------|
 | `--username`   | Yes      | No         | Unique username for the account             |
 | `--email`      | Yes      | No         | Unique email address                        |
-| `--full-name`  | No       | No         | Display name                                |
+| `--full-name`  | No       | No         | Display name, at most 255 characters        |
 | `--role`       | No       | Yes        | Role to assign: `admin`, `vulnerability_analyst`, `restricted_analyst` |
 
 The password is collected interactively via a hidden prompt (input is not
@@ -93,24 +93,29 @@ interactive terminal (password input).` and exits with code 1.
     `"Error: Invalid email format '{value}'."`
    The CLI trims and lowercases the email before validation and passes the
    normalized value to the service
-4. Validates password per the policy in
+4. If `--full-name` is provided and longer than 255 characters (Unicode code
+   points, the `User.full_name` column bound), exits with error:
+   `"Error: Full name must be at most 255 characters."` — before the TTY
+   check, the password prompt, and any database access. The value is
+   otherwise passed through verbatim
+5. Validates password per the policy in
    `docs/features/identity/local-authentication.md` § Password Validation
    (16–128 characters). If too short, exits with error:
    `"Error: Password must be at least 16 characters."` If too long,
    exits with error:
    `"Error: Password must be at most 128 characters."`
-5. Delegates to `user_service.create_user()` with:
+6. Delegates to `user_service.create_user()` with:
    - `external_id = None` (local user)
    - `active = True`
    - `password` = provided password (service handles hashing)
    - `roles = [(role, '_manual') for role in provided_roles]`
    - `acting_user_id = None` (CLI action)
    - See `docs/features/identity/user-service.md` for the service contract
-6. If the service raises `UserConflictError` (duplicate username or
+7. If the service raises `UserConflictError` (duplicate username or
    email), exits with error:
    `"Error: A user with username '{username}' already exists."` or
    `"Error: A user with email '{email}' already exists."`
-7. Prints confirmation:
+8. Prints confirmation:
    `"Created user '{username}' ({email}) with roles: {roles}."`
    or `"Created user '{username}' ({email}) with no roles."` if no roles
    were specified
@@ -119,7 +124,8 @@ interactive terminal (password input).` and exits with code 1.
 new password interactively; the operation inherently changes state.
 
 **Exit codes**: 0 on success, 1 on validation error (duplicate user,
-invalid role, missing flag), 2 on system error (database unreachable).
+invalid role, full name too long, missing flag), 2 on system error
+(database unreachable).
 
 **Output channels**: confirmation message to stdout, all `"Error: ..."`
 messages to stderr.
@@ -172,7 +178,7 @@ sentinel manage-user update \
 |------------------|----------|------------|--------------------------------------------|
 | `--username`     | Yes      | No         | Username of the user to update (identifier) |
 | `--email`        | No       | No         | New email address                           |
-| `--full-name`    | No       | No         | New display name                            |
+| `--full-name`    | No       | No         | New display name, at most 255 characters    |
 | `--clear-full-name` | No    | No         | Clear the display name (`full_name = NULL`); mutually exclusive with `--full-name` |
 | `--add-role`     | No       | Yes        | Role to add: `admin`, `vulnerability_analyst`, `restricted_analyst` |
 | `--remove-role`  | No       | Yes        | Role to remove: `admin`, `vulnerability_analyst`, `restricted_analyst` |
@@ -210,8 +216,9 @@ so an unknown username is reported first.
    start with a letter, and contain only lowercase letters, numbers, dots,
    hyphens, and underscores."` (exit code 1, stderr) — before any database
    access
-3. Look up the user by normalized username — if not found, exit with
-   error: `"Error: User '{username}' not found."`
+3. Open a read-only session and resolve the user through
+   `user_service.get_user_by_username()` using the normalized username — if
+   not found, exit with error: `"Error: User '{username}' not found."`
 4. If no modification flags are provided (`--email`, `--full-name`,
    `--clear-full-name`, `--add-role`, `--remove-role`, `--reactivate` are
    all absent), print:
@@ -240,7 +247,11 @@ so an unknown username is reported first.
    value's format, and pass the normalized value to the service. If the
    format is invalid, exit with error:
    `"Error: Invalid email format '{value}'."`
-3. Delegate once to `user_service.update_user()` with
+3. If `--full-name` is provided and longer than 255 characters (Unicode code
+   points, the `User.full_name` column bound), exit with error:
+   `"Error: Full name must be at most 255 characters."` (exit code 1) —
+   before the mutating session is opened
+4. Delegate once to `user_service.update_user()` with
    `acting_user_id = None`, passing `--email`, `--full-name`, or
    `--clear-full-name` (`full_name = None`) together in the same call when
    more than one is provided. An empty `--full-name ""` carries no special
@@ -248,7 +259,7 @@ so an unknown username is reported first.
    verbatim; clearing the display name requires `--clear-full-name`. If the
    service raises `UserConflictError` (duplicate email), exit with error:
    `"Error: A user with email '{email}' already exists."`
-4. Report exclusively from the returned `UserUpdateResult.changed_fields`:
+5. Report exclusively from the returned `UserUpdateResult.changed_fields`:
    an empty sequence prints
    `"No changes applied to user '{username}'."` and exits with code 0;
    otherwise print
@@ -357,8 +368,9 @@ sentinel manage-user deactivate \
    hyphens, and underscores."` (exit code 1, stderr) — before any database
    access
 3. Open a read-only session and resolve the user through
-   `user_service.get_user()` using the normalized username. If not found,
-   exit with error: `"Error: User '{username}' not found."` (exit code 1)
+   `user_service.get_user_by_username()` using the normalized username. If
+   not found, exit with error: `"Error: User '{username}' not found."` (exit
+   code 1)
 4. Delegate the complete preview to
    `user_service.get_deactivation_impact(db, user.id, acting_user_id=None)`
    inside the same read-only session. The command performs no API-key,
@@ -519,8 +531,9 @@ sentinel manage-user set-password \
    interactive terminal (password input).` and exit with code 1 — before
    any database access.
 3. Open a read-only session and resolve the user through
-   `user_service.get_user()` using the normalized username. If not found,
-   exit with error: `"Error: User '{username}' not found."` (exit code 1).
+   `user_service.get_user_by_username()` using the normalized username. If
+   not found, exit with error: `"Error: User '{username}' not found."` (exit
+   code 1).
 4. If the resolved user is an external user (`external_id IS NOT NULL`),
    exit with error: `"Error: Cannot set password for external user
    '{username}'. External users authenticate via SSO."` (exit code 1).
@@ -594,9 +607,8 @@ sentinel manage-user unlock \
    characters, start with a letter, and contain only lowercase letters,
    numbers, dots, hyphens, and underscores."` (exit code 1) — before any
    database access.
-2. Resolve the user through `user_service.get_user()` using the normalized
-   username — if not
-   found, exit with error:
+2. Resolve the user through `user_service.get_user_by_username()` using the
+   normalized username — if not found, exit with error:
    `"Error: User '{username}' not found."` (exit code 1)
 3. If the user is inactive, print a warning to stderr:
    `"Warning: User '{username}' is inactive. Unlock has no practical
@@ -711,9 +723,11 @@ sentinel manage-user show \
 **Behavior**:
 
 1. Normalize the username (trim whitespace, lowercase)
-2. Delegate the lookup to `user_service.get_user()` using the normalized
-   username — if not found, exit with
-   error: `"Error: User '{username}' not found."` (exit code 1)
+2. Delegate the lookup to `user_service.get_user_by_username()` using the
+   normalized username — if not found, exit with
+   error: `"Error: User '{username}' not found."` (exit code 1). A user's
+   UUID is not accepted in place of the username: it matches no user and
+   produces this same error
 3. Print detailed user information to stdout:
 
 ```

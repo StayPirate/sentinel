@@ -861,6 +861,7 @@ shape.
 | API route conventions | `backend/tests/test_api_conventions.py` | Over every registered FastAPI route (excluding the documented `/health` and `/ready` exemption, `docs/features/platform/health-endpoints.md`): path starts with `/api/v1/` (`docs/api-spec.md`, Base URL); the HTTP method is one of `GET`/`POST`/`PATCH`/`DELETE` — the only methods the documented mutation patterns (`docs/api-spec.md`, Mutation Patterns) and the application's own CORS configuration allow; OpenAPI documentation (`summary` or `description`) is present (`docs/conventions.md`, FastAPI Conventions); a path referencing audit trails ends with the `/audit-log` suffix (`docs/api-spec.md`, Audit Trail Endpoint Naming); a `response_model` is declared, unless the route returns `204 No Content` (`docs/conventions.md`, FastAPI Conventions); the response schema has a top-level `data` property, i.e. the standard envelope, checked via the generated OpenAPI schema (`docs/api-spec.md`, Response Format) — the `/health`/`/ready` exemption also applies to this last check, since those endpoints are outside the envelope contract by design. Also walks every route's *effective* dependency graph (including dependencies nested at any depth, e.g. under authentication) and asserts every occurrence of the `get_db` dependency declares `scope="function"` with caching enabled (`docs/conventions.md`, API Transaction Dependency Scope) — this is the mechanism that guarantees a commit (or its failure) completes before the response is transmitted to the client. Also walks every route's JSON request-body model, including nested models, and asserts every `bool`, `int`, or `float` it contains is strict — through `Field(strict=True)` on the field, or a `Strict()` annotation on the item type inside a collection (`docs/conventions.md`, Pydantic Conventions; `docs/api-spec.md`, JSON Request Body Scalar Types). This test passes vacuously when no routes are registered yet — it starts enforcing automatically as soon as the first endpoint is added, with no further action required |
 | API session ownership | `backend/tests/test_architecture/test_api_session_ownership.py` | Over every module in `app/api/` (excluding `app/api/health.py`, whose readiness probe never uses the `get_db` yield-dependency at all — it opens its own read-only, no-commit session directly for its `SELECT 1` check, so the `scope="function"` rule does not apply to it): no direct reference to `async_session_factory` and no direct `.commit()`/`.rollback()` call — both would bypass the `DatabaseSession` dependency and its `scope="function"` ordering guarantee (`docs/conventions.md`, API Transaction Dependency Scope) invisibly to the route-dependency-graph check above |
 | `asyncio.run()` boundary inventory | `backend/tests/test_architecture/test_asyncio_run_inventory.py` | Every direct `asyncio.run(...)` call site in `backend/app/tasks/` (by module and enclosing function) is enumerated via AST and compared against a reviewed inventory maintained in the test module. A new, unclassified call site fails the test — not because direct `asyncio.run()` is forbidden, but because a long-lived Celery process repeating it needs an explicit lifecycle classification (disposes the shared pooled engine before returning; a documented one-shot or independently safe lifecycle) per `docs/conventions.md` (Cross-loop pooled connection lifecycle). Adding the new call site to the inventory with its classification is the required action, not a workaround |
+| CLI user resolution and input bounds | `backend/tests/test_architecture/test_cli_user_resolution.py` | Over every module in `app/cli/`: no reference (import, attribute access, or name) to `get_user`, `resolve_user_identifier`, or `user_identifier_condition` — the API's UUID-or-username resolution — so every CLI username lookup uses the username-only read (`docs/conventions.md`, Command Design — Username normalization and resolution). Also asserts that the CLI `--full-name` length bound equals both the `User.full_name` column length and the API profile schemas' `full_name` `max_length`, so the three bounds cannot drift apart |
 | OpenCode command discovery | `backend/tests/test_opencode_agent_permissions.py` | Every project command definition is a direct child of `.opencode/commands/`. OpenCode recursively registers Markdown files below that directory, so nested reference documents would become unintended slash commands |
 
 ### Excluded Invariant
@@ -3312,6 +3313,10 @@ or identity audit validation are affected, tests MUST cover:
   ID raises `UserConflictError` with the matching `conflict_field`
 - username, email, password, role, missing-field, explicit-NULL, duplicate-role,
   and password 15/16/128/129 boundaries produce the documented outcomes
+- CLI `--full-name` in `manage-user create` and `manage-user update`: exactly
+  255 characters is accepted and stored, 256 is rejected with the documented
+  message on stderr and exit 1, with no mutating session, no commit, and no
+  SQL text in the output
 - audit old/new values accept exactly 512 Unicode code points and truncate
   longer ASCII and multibyte values to the first 512 code points without an
   ellipsis
@@ -3373,6 +3378,10 @@ or identity audit validation are affected, tests MUST cover:
 - every API accepting a user identifier exercises both UUID and username, and
   route handlers delegate user reads to `user_service` rather than executing
   ORM queries directly
+- `get_user_by_username()` matches the exact normalized username with the
+  profile relationships loaded: a valid username shaped like a UUID resolves
+  by username, while a user's UUID and an unknown username raise
+  `UserNotFoundError`
 
 **Manual role mutation service:**
 
@@ -4157,6 +4166,15 @@ CLI commands MUST be tested against the Output Contract in
   walking the registered command tree so that future commands are covered
   without per-command tests; a command with positional arguments lists them
   with their help under `Positional arguments` in its `--help` output
+- Every command that accepts `--username` resolves a valid username shaped
+  like a UUID by username, and never resolves an existing user by its UUID:
+  a UUID that passes the command's username validation is reported as an
+  unknown user with exit 1 (`docs/conventions.md`, Command Design — Username
+  normalization and resolution)
+- An argument that is not valid UTF-8 is rejected before argument parsing
+  with the documented message on stderr, without echoing the argument, with
+  exit 1 and without loading application settings; a valid non-ASCII UTF-8
+  argument is accepted
 
 The image suite verifies only CLI artifact risks: the installed `sentinel`
 entry point is on `PATH`, package version metadata is readable, and

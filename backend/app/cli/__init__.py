@@ -62,17 +62,39 @@ cli.add_command(api_key_group)
 cli.add_command(fetcher_group)
 
 
+def _arguments_are_utf8(arguments: list[str]) -> bool:
+    """Whether every argument encodes as UTF-8.
+
+    On POSIX, Python decodes undecodable argument bytes into lone
+    surrogates (`surrogateescape`), which UTF-8 cannot encode; such a
+    value would otherwise fail only at PostgreSQL as a system error.
+    """
+    try:
+        for argument in arguments:
+            argument.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 def main() -> None:
     """Console-script entry point (`sentinel = "app.cli:main"`).
 
-    Installs the `SIGINT`/`SIGTERM` handlers, then invokes the root
-    group with `standalone_mode=False` so this function has full and
-    exclusive control over exit codes and message formatting for every
-    condition except Click's own broken-pipe handling — see
+    Installs the `SIGINT`/`SIGTERM` handlers and rejects arguments that
+    are not valid UTF-8 (exit 1, value not echoed; see
+    `docs/features/platform/cli-infrastructure.md`, Root Command Group &
+    Bootstrap — Argument encoding), then invokes the root group with
+    `standalone_mode=False` so this function has full and exclusive
+    control over exit codes and message formatting for every condition
+    except Click's own broken-pipe handling — see
     `docs/features/platform/cli-infrastructure.md` (Error Handling &
     Exit Code Mapping).
     """
     install_signal_handlers()
+
+    if not _arguments_are_utf8(sys.argv[1:]):
+        click.echo("Error: Command-line arguments must be valid UTF-8.", err=True)
+        sys.exit(1)
 
     try:
         cli.main(standalone_mode=False)

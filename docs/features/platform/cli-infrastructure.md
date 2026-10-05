@@ -100,13 +100,26 @@ dispatching to the invoked subcommand:
    bound in this context.
 5. Dispatch to the invoked subcommand.
 
+**Argument encoding**: before Click parses any argument — and therefore
+before the steps above, including eager `--help`/`--version` — the `main()`
+entry point rejects a command-line argument that is not valid UTF-8. On
+POSIX, Python decodes undecodable argument bytes into lone surrogate code
+points, which are not valid UTF-8 and would otherwise reach PostgreSQL and
+fail there as a system error. The entry point prints
+`Error: Command-line arguments must be valid UTF-8.` to stderr, without
+echoing the argument, and exits with code 1 (user error), without loading
+`Settings` or opening any connection. Valid non-ASCII UTF-8 arguments are
+unaffected.
+
 **Q1 (inputs)**: global CLI arguments (`--version`, `--help`, and the
 subcommand path) — standard Click argument parsing, no custom semantics
 beyond what is described above.
 
-**Q2 (guards)**: `Settings` validation failure aborts before any subcommand
-executes (exit 2). No other root-level guard exists — per-command guards
-(e.g., configuration guards, see below) are evaluated by each subcommand.
+**Q2 (guards)**: an argument that is not valid UTF-8 aborts before argument
+parsing (exit 1, Argument encoding above). `Settings` validation failure
+aborts before any subcommand executes (exit 2). No other root-level guard
+exists — per-command guards (e.g., configuration guards, see below) are
+evaluated by each subcommand.
 
 **Q3 (behavior)**: as enumerated in the five steps above; no other root
 group behavior exists.
@@ -159,7 +172,7 @@ per-command path selection.
   ```python
   async def deactivate_flow(session_factory, username):
       async with session_factory() as db:
-          user = await user_service.get_user(db, username)
+          user = await user_service.get_user_by_username(db, username)
           impact = await user_service.get_deactivation_impact(
               db, user.id, acting_user_id=None
           )
@@ -321,6 +334,7 @@ untouched, never reaching this mapper.
 | `click.Abort` (raised by Click when an interactive prompt, e.g. `click.confirm()` or a hidden password prompt, receives EOF/Ctrl+D — and, in non-standalone mode, also the exception type Click internally converts `KeyboardInterrupt` into during prompt handling) | 0 | The mapper prints `Aborted.` to stdout and exits 0. This is the same code path whether `Abort` originates from an explicit prompt decline (in which case the command's own code, per Database Session Management, has already printed its own cancellation message before returning/re-raising, so the mapper's `Aborted.` fallback is not what the operator sees) or from EOF bypassing the command's own code entirely (in which case the mapper's `Aborted.` is the only message printed). Treated as an operator-initiated cancellation, not an error, consistent with the Exit Codes table. TTY detection (Interactive Input Helpers) is expected to reject non-interactive invocations before a prompt is reached in the first place. |
 | A `ServiceError` subclass (or any shared exception per `docs/conventions.md`, Service Exception Conventions) raised by a delegated service call | 1 | The exception's message is formatted as `Error: {message}` and printed to stderr. The specific message text is determined by the command's own spec (see each command spec's "Behavior" section for the exact error strings), not by this mechanism. |
 | A validation failure raised directly by the CLI command's own input parsing (e.g., invalid username format, password length) — i.e., a guard documented in the command's own spec, not a service exception | 1 | Same formatting as above; message text owned by the command spec. |
+| A command-line argument that is not valid UTF-8 (Root Command Group & Bootstrap, Argument encoding) | 1 | Checked by `main()` before the mapped Click invocation; prints `Error: Command-line arguments must be valid UTF-8.` to stderr without echoing the argument. |
 | SQLAlchemy `OperationalError`/`DBAPIError` (or another connection-related `SQLAlchemyError` subset, e.g. database unreachable), or `RedisError` (per `docs/conventions.md`, Redis Error Handling) surfacing from a command that touches Redis | 2 | Printed to stderr as `Error: {message}`. This is the exit code that `docs/features/platform/testing-strategy.md` (Mandatory Test Scenarios → CLI Commands) requires the harness to simulate. This category is intentionally narrow: generic `OSError`/`ConnectionError` are NOT caught here. Broken-pipe scenarios are already handled by Click's own EPIPE handling before the mapper is reached (see above); other unrelated `OSError` subclasses (`FileNotFoundError`, `PermissionError`, etc.) fall through to the catch-all row below, which prints an accurate generic message rather than a misleading "database unreachable" one. |
 | Any other unhandled exception | 2 | Log the exception at ERROR with exception context under `logging.md`'s secrets/PII discipline, then print `Error: {message}` to stderr. If `str(exception)` is empty, use the exception class name as `{message}`. Reserved as the catch-all "system error" path per the Exit Codes table in `docs/conventions.md`. |
 | `KeyboardInterrupt` (operator sends SIGINT, e.g., Ctrl+C) | 130 | Not caught by this mapper (it is a `BaseException` subclass, and — for the direct SIGINT case — is intercepted at the OS signal level before it can even be raised as a Python exception). See Signal Handling below. |

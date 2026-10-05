@@ -54,9 +54,11 @@ async def _create_user_directly(
     *,
     username: str,
     active: bool = True,
+    user_id: UUID | None = None,
 ) -> User:
     """Insert and commit a `User` directly through `cli_session_factory`,
-    bypassing `user_service` entirely."""
+    bypassing `user_service` entirely. `user_id`, when given, overrides the
+    generated primary key."""
     async with factory() as db:
         user = User(
             username=username,
@@ -64,6 +66,8 @@ async def _create_user_directly(
             active=active,
             password_hash="$2b$12$" + "a" * 53,
         )
+        if user_id is not None:
+            user.id = user_id
         db.add(user)
         await db.commit()
         return user
@@ -260,6 +264,58 @@ def test_list_keys_username_normalized(
 
     result = _invoke(["api-key", "list", "--username", f"  {username.upper()}  "])
     assert result.exit_code == 0, result.output
+
+
+def _letter_leading_uuid() -> UUID:
+    """A random UUID whose canonical text starts with a letter, so it is
+    also a format-valid username (docs/conventions.md, Username Format)."""
+    return UUID("a" + uuid4().hex[1:])
+
+
+@pytest.mark.integration
+def test_list_keys_uuid_shaped_username_resolves_by_username(
+    monkeypatch: pytest.MonkeyPatch,
+    cli_session_factory: async_sessionmaker[AsyncSession],
+    cleanup_users_by_username: Callable[..., None],
+) -> None:
+    """docs/conventions.md (Command Design — Username normalization and
+    resolution): a valid username shaped like a UUID is an ordinary
+    username."""
+    _inject_session_factory(monkeypatch, cli_session_factory)
+    username = str(_letter_leading_uuid())
+    cleanup_users_by_username(username)
+    user = asyncio.run(_create_user_directly(cli_session_factory, username=username))
+    api_key = asyncio.run(
+        _create_api_key_directly(cli_session_factory, user_id=user.id, name="uuid-key")
+    )
+
+    result = _invoke(["api-key", "list", "--username", username])
+
+    assert result.exit_code == 0, result.output
+    assert str(api_key.id) in result.stdout
+
+
+@pytest.mark.integration
+def test_list_keys_rejects_existing_user_uuid_as_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+    cli_session_factory: async_sessionmaker[AsyncSession],
+    cleanup_users_by_username: Callable[..., None],
+) -> None:
+    """A user's UUID is never accepted in place of the username."""
+    _inject_session_factory(monkeypatch, cli_session_factory)
+    username = "cliapikeylistbyuuid"
+    cleanup_users_by_username(username)
+    user = asyncio.run(
+        _create_user_directly(
+            cli_session_factory, username=username, user_id=_letter_leading_uuid()
+        )
+    )
+
+    result = _invoke(["api-key", "list", "--username", str(user.id)])
+
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    assert result.stderr.strip() == f"Error: User '{user.id}' not found."
 
 
 @pytest.mark.integration
