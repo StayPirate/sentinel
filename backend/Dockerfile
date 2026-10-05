@@ -17,8 +17,11 @@ ARG PYTHON_BASE_DIGEST=sha256:51dafde81dbdb6ebde285137a295cf18a47ca95234fe388a34
 FROM python:${PYTHON_VERSION}-slim@${PYTHON_BASE_DIGEST} AS builder
 
 # Pin the uv version used to build this image (keep in sync with the
-# `version:` input of astral-sh/setup-uv in .github/workflows/ci.yml)
-COPY --from=ghcr.io/astral-sh/uv:0.12.23 /uv /bin/uv
+# `version:` input of astral-sh/setup-uv in .github/workflows/ci.yml).
+# The tag documents the version; the digest guarantees immutability (see
+# docs/deployment.md, Container Build Conventions → uv image pinning).
+# Renovate updates tag and digest together.
+COPY --from=ghcr.io/astral-sh/uv:0.12.23@sha256:61d393e44e249f2e4b526b6c7ddcecce245946826e608e11c93ad4f5bba55b21 /uv /bin/uv
 
 # Use the Python interpreter already present in this base image instead
 # of letting uv download its own managed interpreter
