@@ -285,7 +285,7 @@ def test_backend_tests_hand_coverage_report_to_upload_job() -> None:
 
 
 @pytest.mark.unit
-def test_coverage_upload_job_fails_on_error_with_pinned_cli() -> None:
+def test_coverage_upload_job_fails_on_pull_request_error_with_pinned_cli() -> None:
     job = _ci_job("coverage-upload")
 
     assert "name: Coverage Upload" in job

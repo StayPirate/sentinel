@@ -404,11 +404,11 @@ configuration is required for either pinning style. A `version:` input the
 manager does not support (such as `codecov/codecov-action`'s) is tracked by
 a `renovate.jsonc` custom manager matching a
 `# renovate: datasource=<datasource> depName=<name>` hint comment placed
-directly above it. Dependency updates
-are managed by the hosted Mend Renovate GitHub App reading `renovate.jsonc`
-from the repository root; no workflow in this repository runs the hosted bot
-or creates its dependency-update PRs. The separate advisory validation
-workflow is described below.
+directly above it. Dependency updates are managed by the hosted Mend
+Renovate GitHub App reading `renovate.jsonc` from the repository root; no
+workflow in this repository runs the hosted bot or creates its
+dependency-update PRs. The separate advisory validation workflow is
+described below.
 
 `renovate-validation.yml` is a separate, advisory repository check. It runs
 on every pull request rather than maintaining a whitelist of Renovate-managed
@@ -541,10 +541,11 @@ as a seven-day workflow artifact and never receives `CODECOV_TOKEN`. A
 separate `Coverage Upload` job uploads only that report to Codecov with a
 pinned Codecov CLI version (tracked by a `renovate.jsonc` custom manager).
 On a pull request a failed upload fails the job, which can be re-run on its
-own while the artifact is retained. On a push to `master` a failed upload
-does not fail the run, because `release-please.yml` and `build-images.yml`
-start only after a successful CI run on `master` and a Codecov outage must
-not withhold a release or image publication. The repository `codecov.yml`
+own while the artifact is retained. On any other run (a push to `master` or
+a manual run) a failed upload does not fail the run, because
+`release-please.yml` and `build-images.yml` start only after a successful
+CI run on `master` and a Codecov outage must not withhold a release or
+image publication. The repository `codecov.yml`
 makes the resulting `codecov/project` and `codecov/patch` statuses
 informational — they always pass and are never a coverage gate (see
 `docs/features/platform/testing-strategy.md`, Coverage Policy) — and has
