@@ -235,16 +235,6 @@ def no_last_used_write(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
-@pytest.fixture
-def authenticated_user_and_client(
-    _authenticated_user_and_client: tuple[User, AsyncClient],
-) -> tuple[User, AsyncClient]:
-    """Non-underscore-prefixed alias for `conftest.py`'s
-    `_authenticated_user_and_client`, mirroring
-    `tests/test_api/test_admin_user_roles.py`."""
-    return _authenticated_user_and_client
-
-
 @pytest_asyncio.fixture
 async def admin_user_and_client(
     _authenticated_user_and_client: tuple[User, AsyncClient],
