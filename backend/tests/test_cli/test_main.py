@@ -87,6 +87,8 @@ def test_group_help_exits_zero_without_bootstrap(
     result = _invoke(["manage-user", "--help"])
     assert result.exit_code == 0
     assert "create" in result.output
+    assert "update" in result.output
+    assert "deactivate" in result.output
     assert "list" in result.output
     assert "show" in result.output
     assert "set-password" in result.output
@@ -142,7 +144,8 @@ def test_fetcher_config_missing_argument_exits_one_without_bootstrap(
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
-    "command", ["create", "list", "show", "set-password", "unlock"]
+    "command",
+    ["create", "update", "deactivate", "list", "show", "set-password", "unlock"],
 )
 def test_command_help_exits_zero_without_bootstrap(
     monkeypatch: pytest.MonkeyPatch, command: str

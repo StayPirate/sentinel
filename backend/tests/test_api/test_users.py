@@ -1826,13 +1826,13 @@ class TestUnlockUserAdmin:
 
 
 # ---------------------------------------------------------------------------
-# OpenAPI surface — no out-of-scope admin mutation endpoints
+# OpenAPI surface — exactly the eight admin user endpoints
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
 class TestAdminUserEndpointsOpenAPISurface:
-    def test_exactly_seven_admin_mutation_endpoints_are_registered(self) -> None:
+    def test_exactly_eight_admin_user_endpoints_are_registered(self) -> None:
         from app.main import app as fastapi_app
 
         openapi_paths = fastapi_app.openapi()["paths"]
@@ -1849,10 +1849,5 @@ class TestAdminUserEndpointsOpenAPISurface:
             "/api/v1/admin/users/{user}/unlock": {"post"},
             "/api/v1/admin/users/{user}/roles": {"post"},
             "/api/v1/admin/users/{user}/deactivate": {"post"},
+            "/api/v1/admin/users/{user}/deactivation-impact": {"get"},
         }
-
-    def test_out_of_scope_endpoints_are_absent(self) -> None:
-        from app.main import app as fastapi_app
-
-        openapi_paths = fastapi_app.openapi()["paths"]
-        assert "/api/v1/admin/users/{user}/deactivation-impact" not in openapi_paths

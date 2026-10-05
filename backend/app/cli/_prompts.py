@@ -9,6 +9,7 @@ message, output channel, and exit code.
 
 from __future__ import annotations
 
+import io
 import sys
 from enum import Enum
 
@@ -79,3 +80,55 @@ def prompt_password_with_confirmation(
     if password != confirmation:
         return PasswordPromptFailure.MISMATCH
     return password
+
+
+def confirm(text: str, *, default: bool) -> bool:
+    """Ask a yes/no question through Click's native `click.confirm()`.
+
+    The calling command owns `text` and `default`. An unrecognized answer
+    repeats the prompt after Click's `Error: invalid input` feedback on
+    stdout. An answer that is not valid UTF-8 is an unrecognized answer
+    (Interactive Input Helpers — Input encoding): Click itself rejects lone
+    surrogates (`surrogateescape`), while a strict-decoding failure, raised
+    before Click receives any answer, is caught here and answered with the
+    same feedback. The answer is never echoed, and the decoder message,
+    which names the offending byte, never reaches the shared exception
+    mapper. EOF still ends the prompt through `click.Abort`, after ending
+    the prompt line: EOF echoes no line break, so without it the mapper's
+    `Aborted.` would follow the prompt on the same line (Click does the
+    same for hidden prompts).
+    """
+    while True:
+        try:
+            return click.confirm(text, default=default)
+        except UnicodeDecodeError:
+            _discard_pending_terminal_input()
+            click.echo("Error: invalid input")
+        except click.Abort:
+            click.echo()
+            raise
+
+
+def _discard_pending_terminal_input() -> None:
+    """Give a terminal stdin a fresh decoder after a strict-decoding failure.
+
+    When stdin is not read through the interpreter's line editor (for
+    example because stdout is redirected), `input()` reads through the
+    `sys.stdin` text wrapper, whose incremental decoder keeps an incomplete
+    multibyte sequence after raising. Every later answer, and EOF, would
+    then fail again. The rejected line has already been consumed, so the
+    wrapper is replaced by one with the same settings over the same
+    terminal buffer. A non-terminal stream is left untouched: its wrapper
+    may hold read-ahead input that a new wrapper would lose.
+    """
+    stream = sys.stdin
+    if not isinstance(stream, io.TextIOWrapper) or not stream.isatty():
+        return
+    encoding, errors = stream.encoding, stream.errors
+    line_buffering = stream.line_buffering
+    sys.stdin = io.TextIOWrapper(
+        stream.detach(),
+        encoding=encoding,
+        errors=errors,
+        line_buffering=line_buffering,
+    )

@@ -1,5 +1,5 @@
-"""`sentinel manage-user` command group: create, update, list, show,
-set-password, and unlock.
+"""`sentinel manage-user` command group: create, update, deactivate, list,
+show, set-password, and unlock.
 
 See `docs/features/identity/user-management.md` for the authoritative
 per-command contract (parameters, exact messages, exit codes) this module
@@ -27,6 +27,7 @@ from email_validator import EmailNotValidError, validate_email
 
 from app.cli._prompts import (
     PasswordPromptFailure,
+    confirm,
     is_interactive_terminal,
     prompt_password_with_confirmation,
 )
@@ -601,6 +602,116 @@ async def _reactivate(
         click.echo(f"Reactivated user '{username}'.")
     else:
         click.echo(f"No changes applied to user '{username}'.")
+
+
+# ---------------------------------------------------------------------------
+# deactivate
+# ---------------------------------------------------------------------------
+
+_DEACTIVATION_REASON = "deactivated via CLI (manage-user deactivate)"
+
+_LAST_ACTIVE_ADMIN_WARNING = (
+    "Warning: this is the last active user with Admin role.\n"
+    "After deactivation, assign Admin to another user via:\n"
+    "  sentinel manage-user update --username <user> --add-role admin"
+)
+
+
+@manage_user_group.command("deactivate")
+@click.option("--username", required=True, help="Username of the user to deactivate.")
+def deactivate(username: str) -> None:
+    """Deactivate a user account after an impact summary and confirmation.
+
+    See `docs/features/identity/user-management.md`
+    (`sentinel manage-user deactivate`) for the full behavioral contract.
+    """
+    bootstrap()
+
+    normalized_username = _normalize_username_or_exit(username)
+
+    asyncio.run(_deactivate_flow(get_session_factory(), username=normalized_username))
+
+
+async def _deactivate_flow(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    username: str,
+) -> None:
+    """Preview, confirm, then delegate the deactivation.
+
+    Single async workflow (`docs/features/platform/cli-infrastructure.md`,
+    Database Session Management): a read-only session resolves the user
+    and delegates the complete preview to
+    `user_service.get_deactivation_impact()`, which classifies an
+    already-inactive target as a no-op. The command then applies its own
+    manual-surface guard against active external users (the service guard
+    does not apply to `acting_user_id = None`), prints the advisory
+    summary, and closes the session before the TTY check and the prompt —
+    no terminal input runs while a session is open. After confirmation a
+    fresh session delegates to `user_service.deactivate_user()`, which
+    revalidates locked-current state, and commits exactly once; the
+    session-cache purge runs after the commit. The outcome message derives
+    only from `DeactivationResult.deactivated`, never from the preview.
+    """
+    from app.core.exceptions import UserNotFoundError
+    from app.services import session_service, user_service
+
+    async with session_factory() as db:
+        try:
+            user = await user_service.get_user_by_username(db, username)
+        except UserNotFoundError:
+            click.echo(f"Error: User '{username}' not found.", err=True)
+            raise SystemExit(1) from None
+        impact = await user_service.get_deactivation_impact(
+            db, user.id, acting_user_id=None
+        )
+        if impact.already_inactive:
+            click.echo(f"User '{username}' is already inactive.")
+            return
+        if user.external_id is not None:
+            click.echo("Error: Cannot deactivate external users.", err=True)
+            raise SystemExit(1)
+        user_id = user.id
+        click.echo(
+            f"About to deactivate user '{username}':\n"
+            f"  - {impact.api_keys_count} non-revoked API keys will be revoked\n"
+            f"  - {impact.sessions_count} active sessions will be invalidated\n"
+            f"  - {impact.tickets_count} active tickets will be unassigned"
+        )
+        if impact.is_last_active_admin:
+            click.echo(_LAST_ACTIVE_ADMIN_WARNING, err=True)
+
+    if not is_interactive_terminal():
+        click.echo(
+            "Error: This command requires an interactive terminal "
+            "(confirmation required).",
+            err=True,
+        )
+        raise SystemExit(1)
+    if not confirm("Proceed?", default=False):
+        click.echo("Aborted.")
+        return
+
+    async with session_factory() as db:
+        try:
+            result = await user_service.deactivate_user(
+                db, user_id, acting_user_id=None, reason=_DEACTIVATION_REASON
+            )
+            await db.commit()
+        except UserNotFoundError:
+            await db.rollback()
+            click.echo(f"Error: User '{username}' not found.", err=True)
+            raise SystemExit(1) from None
+        except BaseException:
+            await db.rollback()
+            raise
+
+    await session_service.purge_session_cache(result.invalidated_session_ids)
+
+    if result.deactivated:
+        click.echo(f"Deactivated user '{username}'.")
+    else:
+        click.echo(f"User '{username}' is already inactive.")
 
 
 # ---------------------------------------------------------------------------
