@@ -472,7 +472,7 @@ it does not know (for example, a token in a URL query string or in a
 third-party token format), configured secrets transformed before
 logging, short configured values outside a URI, or userinfo containing
 characters that RFC 3986 requires to be percent-encoded (such as
-whitespace, quotes, or `\ ^ { } | [ ] < >`). It never raises: if
+whitespace, double quotes, or `\ ^ { } | [ ] < >`). It never raises: if
 redacting a value fails, the whole value is replaced with `***` and the
 record is still emitted. Messages emitted before the pipeline is
 configured (see "Bootstrap constraint") and Alembic's independent
