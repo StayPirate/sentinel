@@ -28,6 +28,7 @@ from app.schemas.user import (
     UserManagerData,
     UserResponse,
     UserRoleAssignmentData,
+    UserRolesUpdateRequest,
 )
 
 
@@ -405,6 +406,70 @@ class TestAdminPasswordResetRequest:
         `user_service.reset_password()`."""
         request = AdminPasswordResetRequest(password="short")
         assert request.password == "short"
+
+
+@pytest.mark.unit
+class TestUserRolesUpdateRequest:
+    """`user-management.md` (Set User Roles): strict request validation."""
+
+    def test_omitted_fields_default_to_empty_lists(self) -> None:
+        request = UserRolesUpdateRequest()
+        assert request.add == []
+        assert request.remove == []
+
+    def test_empty_lists_are_accepted(self) -> None:
+        request = UserRolesUpdateRequest.model_validate({"add": [], "remove": []})
+        assert request.add == []
+        assert request.remove == []
+
+    def test_every_wire_value_is_accepted_in_input_order(self) -> None:
+        request = UserRolesUpdateRequest.model_validate(
+            {
+                "add": ["vulnerability_analyst", "admin"],
+                "remove": ["restricted_analyst"],
+            }
+        )
+        assert request.add == ["vulnerability_analyst", "admin"]
+        assert request.remove == ["restricted_analyst"]
+
+    def test_json_input_is_accepted(self) -> None:
+        request = UserRolesUpdateRequest.model_validate_json('{"remove": ["admin"]}')
+        assert request.add == []
+        assert request.remove == ["admin"]
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            pytest.param({"add": None}, id="null-add"),
+            pytest.param({"remove": None}, id="null-remove"),
+            pytest.param({"add": ["superuser"]}, id="unknown-value"),
+            pytest.param({"remove": ["Admin"]}, id="stored-enum-value"),
+            pytest.param({"add": ["Vulnerability Analyst"]}, id="stored-enum-va"),
+            pytest.param({"add": ["ADMIN"]}, id="uppercase-wire"),
+            pytest.param({"add": ["admin", "admin"]}, id="duplicate-add"),
+            pytest.param(
+                {"remove": ["restricted_analyst", "restricted_analyst"]},
+                id="duplicate-remove",
+            ),
+            pytest.param({"add": ["admin"], "remove": ["admin"]}, id="overlap"),
+            pytest.param({"add": "admin"}, id="string-field"),
+            pytest.param({"remove": {"role": "admin"}}, id="object-field"),
+            pytest.param({"add": [1]}, id="integer-element"),
+            pytest.param({"add": [None]}, id="null-element"),
+            pytest.param({"remove": [True]}, id="boolean-element"),
+        ],
+    )
+    def test_invalid_payload_is_rejected(self, payload: dict[str, object]) -> None:
+        with pytest.raises(ValidationError):
+            UserRolesUpdateRequest.model_validate(payload)
+
+    @pytest.mark.parametrize(
+        "raw",
+        ['{"add": [1]}', '{"add": [0]}', '{"remove": [2.5]}'],
+    )
+    def test_numbers_are_not_coerced_to_strings(self, raw: str) -> None:
+        with pytest.raises(ValidationError):
+            UserRolesUpdateRequest.model_validate_json(raw)
 
 
 @pytest.mark.unit
