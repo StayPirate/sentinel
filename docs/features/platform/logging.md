@@ -117,7 +117,9 @@ action: the operator explicitly requests maximum verbosity and accepts
 the consequences. See "Secrets and PII Discipline" below and
 `docs/deployment.md` (Log Aggregation) for the corresponding
 operational guidance. No code-level safety mechanism restricts
-`LOG_LEVEL` — the protection is operational, not architectural.
+`LOG_LEVEL` — the protection is operational, not architectural. The
+Redaction Processor (see "Secrets and PII Discipline") masks only known
+credential material; it does not make `DEBUG` output safe.
 
 **Log level changes require a process restart.** `LOG_LEVEL` is read
 once at process startup. Runtime log level modification without
@@ -328,8 +330,10 @@ format (not JSON, not colorized console), and sets the level to WARNING
 or above — so that DEBUG/INFO messages from service code do not pollute
 CLI output. Correlation IDs (`request_id`, `celery_task_id`,
 `fetcher_run_id`, `ibs_event_id`) are not bound in CLI processes and are
-omitted from log records. stdout remains reserved exclusively for CLI
-Output Contract output (`docs/conventions.md`).
+omitted from log records. The configuration applies the same Redaction
+Processor as the runtime pipeline (see Secrets and PII Discipline).
+stdout remains reserved exclusively for CLI Output Contract output
+(`docs/conventions.md`).
 
 Alembic keeps its own independent logging configuration
 (`alembic.ini`, `fileConfig`), because it is a one-shot migration tool
@@ -411,13 +415,68 @@ embed credentials, at `DEBUG`) — from emitting sensitive data when
 setting `LOG_LEVEL=DEBUG` is a deliberate request for maximum
 verbosity, and the operator accepts the PII/credential exposure risk.
 See `docs/deployment.md` (Log Aggregation) for the corresponding
-operational note.
+operational note. The Redaction Processor (below) masks known
+credential material in these records, but it does not remove personal
+data or SQL bound parameters, so this operator-choice rule still
+applies.
 
-The future redaction processor, when implemented, MUST operate at the
-root/handler level of the pipeline (not only on application-issued log
-records) so it also covers records captured from third-party loggers —
-providing defense-in-depth for environments where maximum verbosity is
-needed but credential leakage must still be mitigated.
+### Redaction Processor
+
+Every handler configured by this specification — the runtime pipeline
+and the minimal CLI configuration (see "Scope of this pipeline") —
+applies a best-effort redaction processor. It is defense-in-depth
+against credential material that reaches the log stream outside the
+application's own log statements: records captured from third-party
+loggers, exception messages, and rendered tracebacks (for example,
+broker, Redis, or PostgreSQL connection errors). It does not relax the
+discipline above — application log statements MUST still never include
+secrets — and it is not a PII control.
+
+**Position.** The processor runs at the handler level, in the
+formatter, after the shared processors (including exception and stack
+rendering) and immediately before the renderer. It therefore applies
+identically to structlog-originated records and to records captured
+from third-party loggers through the stdlib bridge, in both the `json`
+and `console` formats.
+
+**Coverage.** It examines every top-level string value of the event
+dict, including `event`, `exception`, and `stack`. Non-string values and
+values nested inside containers are not inspected; application code
+keeps them free of secrets per the discipline above.
+
+**Masked content.** Each match is replaced with the placeholder `***`:
+
+- **Configured secret values** — exact occurrences of each configured
+  secret value at least 12 characters long: the value of every
+  `SecretStr` setting and the percent-decoded password component of
+  every credential-bearing URL setting (the `str` fields declared with
+  `repr=False` per `docs/conventions.md`, Secret Field Typing). The set
+  is derived from `Settings` when the pipeline is configured, so a new
+  field classified per that convention is covered without further
+  changes. Empty or unset values are never matched. Shorter values are
+  not matched by exact value, because a short value (such as a
+  development database password) would also mask ordinary words,
+  identifiers, and paths that coincide with it; they remain masked
+  when they appear as URI userinfo.
+- **URI userinfo** — the userinfo component of any URI with an
+  authority, for any scheme: `scheme://userinfo@host` becomes
+  `scheme://***@host`. URIs without userinfo are unchanged.
+- **Authorization header values** — the credential following an
+  `Authorization` or `Proxy-Authorization` header name
+  (case-insensitive, `:` or `=` separator, optional quotes), preserving
+  the authentication scheme when present:
+  `Authorization: Bearer ***`.
+
+**Best-effort semantics.** The processor cannot recognize credentials
+it does not know (for example, a token in a URL query string or in a
+third-party token format), configured secrets transformed before
+logging, short configured values outside a URI, or userinfo containing
+characters that RFC 3986 requires to be percent-encoded (such as
+whitespace, double quotes, or `\ ^ { } | [ ] < >`). It never raises: if
+redacting a value fails, the whole value is replaced with `***` and the
+record is still emitted. Messages emitted before the pipeline is
+configured (see "Bootstrap constraint") and Alembic's independent
+logging configuration are not covered.
 
 ## Configuration
 
@@ -474,6 +533,14 @@ are expected to be tested as follows:
   by a subsequent, unrelated unit of work in the same process (relevant
   for Celery prefork workers), and that `ibs_event_id` is reset after
   every delivery outcome and cancellation path.
+- **Redaction**: unit tests verifying each masked category of the
+  Redaction Processor on application records, on records captured from
+  a third-party stdlib logger, and in rendered exception text; that
+  records without sensitive content (CVE IDs, UUIDs, correlation IDs,
+  ordinary URLs) are unchanged; that empty and short configured values
+  are never matched by exact value; that a redaction failure still
+  emits the record; and that the CLI configuration applies the same
+  processor.
 - Application-level log assertions (e.g., "a WARNING is logged when
   X occurs", prescribed by individual feature specs) use `caplog`
   (pytest) or `structlog.testing.capture_logs` as appropriate.
