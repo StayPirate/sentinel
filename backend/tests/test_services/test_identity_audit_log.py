@@ -1501,7 +1501,8 @@ class TestListEvents:
 
         assert {event.user_id for event in by_actor.items} == expected
         assert {event.target_user_id for event in by_target.items} == expected
-        assert by_actor.total == by_target.total == len(expected)
+        assert len(by_actor.items) == by_actor.total == len(expected)
+        assert len(by_target.items) == by_target.total == len(expected)
 
     async def test_date_range_is_inclusive(
         self,
