@@ -53,7 +53,7 @@ explicit per-command opt-in.
 | Console script | `sentinel`, registered via `[project.scripts]` in `backend/pyproject.toml` (`sentinel = "app.cli:main"`) |
 | Module invocation | `python -m app.cli ...`, backed by `backend/app/cli/__main__.py` delegating to the same `main()` entry point |
 | Code location | `backend/app/cli/` (subpackage under `backend/app/`) |
-| Group assembly | `backend/app/cli/__init__.py` defines a root Click group (`cli`) and registers each command group (`manage-user`, `fetcher`, `api-key`, and any future group) via `cli.add_command(...)`; the exported `main()` wrapper performs eager-option handling, fail-fast bootstrap, signal setup, and invokes `cli.main(standalone_mode=False)` |
+| Group assembly | `backend/app/cli/__init__.py` defines a root Click group (`cli`) and registers each command group (`manage-user`, `fetcher`, `api-key`, and any future group) via `cli.add_command(...)`; the exported `main()` wrapper performs eager-option handling, fail-fast bootstrap, signal setup, the argument-encoding check (Root Command Group & Bootstrap), and invokes `cli.main(standalone_mode=False)` |
 
 Each command group (`manage-user`, `fetcher`, `api-key`) is implemented as
 its own Click `Group` in a dedicated module under `backend/app/cli/`
@@ -100,9 +100,11 @@ dispatching to the invoked subcommand:
    bound in this context.
 5. Dispatch to the invoked subcommand.
 
-**Argument encoding**: before Click parses any argument — and therefore
-before the steps above, including eager `--help`/`--version` — the `main()`
-entry point rejects a command-line argument that is not valid UTF-8. On
+**Argument encoding**: right after installing the signal handlers (step 3)
+and before Click parses any argument — therefore before eager
+`--help`/`--version` (step 1), `Settings` loading, logging configuration, and
+dispatch — the `main()` entry point rejects a command-line argument that is
+not valid UTF-8. On
 POSIX, Python decodes undecodable argument bytes into lone surrogate code
 points, which are not valid UTF-8 and would otherwise reach PostgreSQL and
 fail there as a system error. The entry point prints
@@ -121,8 +123,8 @@ aborts before any subcommand executes (exit 2). No other root-level guard
 exists — per-command guards (e.g., configuration guards, see below) are
 evaluated by each subcommand.
 
-**Q3 (behavior)**: as enumerated in the five steps above; no other root
-group behavior exists.
+**Q3 (behavior)**: as enumerated in the five steps above, plus the Argument
+encoding check; no other root group behavior exists.
 
 **Q6 (exceptions)**: `Settings` validation exceptions are caught at this
 level and converted to the exit-2 path described in step 2. All other
