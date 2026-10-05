@@ -447,7 +447,7 @@ these helpers:
 |---|---|---|
 | Hidden password prompt with confirmation | Prompts twice via a hidden (non-echoed) input (Click's `hide_input=True`), compares the two entries. If they differ, the calling command receives a mismatch signal and is responsible for its own error message and exit code (per that command's own spec — this helper does not print the error itself, to preserve each command's exact wording). An entry that is not valid UTF-8 (Input encoding below) yields a distinct invalid-encoding signal as soon as it is read, before the comparison; the calling command owns that message and exit code as well. | `manage-user create`, `manage-user set-password` |
 | TTY detection | Checks `sys.stdin.isatty()` before invoking a prompt (password entry or confirmation). If no TTY is detected, returns a signal the calling command uses to print its own "requires an interactive terminal" error (exact wording owned by the command spec) and exit 1. | `manage-user create`, `manage-user set-password` (before password prompt), `manage-user deactivate` (before confirmation prompt) |
-| Confirmation prompt | A yes/no prompt (Click's `confirm()`) for destructive operations. Exact prompt text and default answer are owned by the calling command's own spec. | `manage-user deactivate` |
+| Confirmation prompt | A yes/no prompt (Click's `confirm()`) for destructive operations. Exact prompt text and default answer are owned by the calling command's own spec. An answer that is not valid UTF-8 is an unrecognized answer (Input encoding below). | `manage-user deactivate` |
 
 These are implementation-shared utility functions (e.g.,
 `backend/app/cli/_prompts.py`), not new behavioral contracts — the
@@ -463,7 +463,10 @@ forms, discards the entry without echoing it, and does not let the decoding
 error reach the shared exception mapper, whose catch-all path would exit 2
 and print and log the offending byte. The hidden password prompt returns
 its invalid-encoding signal; the confirmation prompt treats such an answer
-as an unrecognized answer, so Click prompts again. This complements the
+as an unrecognized answer and prompts again — Click does so natively for
+lone surrogates, while a strict-decoding failure, which occurs before Click
+receives any answer, is caught by the helper, which then repeats the prompt.
+EOF still ends the prompt through Click's `click.Abort`. This complements the
 argument check in Root Command Group & Bootstrap (Argument encoding).
 
 **Q1/Q3/Q6**: N/A beyond the table above and Input encoding — these are
