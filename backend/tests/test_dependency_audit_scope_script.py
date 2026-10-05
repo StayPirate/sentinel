@@ -11,6 +11,11 @@ Each test builds a throwaway Git repository in a temporary directory (never
 this repository) that mirrors the CI checkout shape: a pull request is a
 merge commit whose first parent is the base branch tip, and a push is a
 commit compared against the pushed ``before`` SHA.
+
+The Git hooks run this file inside a real commit or push, so every Git and
+script subprocess receives an environment without inherited ``GIT_*``
+variables (see `docs/features/platform/testing-strategy.md`, Tier 1 — Unit
+Tests).
 """
 
 from __future__ import annotations
@@ -35,11 +40,25 @@ _GIT_ENV = {
 }
 
 
+def _git_env() -> dict[str, str]:
+    """The current environment without any inherited Git variable.
+
+    Git hooks export the invoking repository's location (`GIT_DIR`,
+    `GIT_INDEX_FILE`, ...) and `git -c` options (`GIT_CONFIG_PARAMETERS`);
+    left in place, they would redirect the throwaway repository's commands
+    to the repository whose hook runs this file.
+    """
+    inherited = {
+        name: value for name, value in os.environ.items() if not name.startswith("GIT_")
+    }
+    return inherited | _GIT_ENV
+
+
 def _git(repo: Path, *args: str) -> str:
     result = subprocess.run(
         ["git", *args],
         cwd=repo,
-        env=os.environ | _GIT_ENV,
+        env=_git_env(),
         capture_output=True,
         text=True,
         check=True,
@@ -61,10 +80,8 @@ def _commit(repo: Path, message: str, files: dict[str, str]) -> str:
     return _git(repo, "rev-parse", "HEAD")
 
 
-@pytest.fixture
-def repo(tmp_path: Path) -> Path:
-    """Repository with a base commit containing both dependency files."""
-    repository = tmp_path / "repo"
+def _init_repository(repository: Path) -> Path:
+    """Create a repository with a base commit containing both dependency files."""
     repository.mkdir()
     _git(repository, "init", "--quiet", "--initial-branch=master")
     _commit(
@@ -78,6 +95,12 @@ def repo(tmp_path: Path) -> Path:
         },
     )
     return repository
+
+
+@pytest.fixture
+def repo(tmp_path: Path) -> Path:
+    """Repository with a base commit containing both dependency files."""
+    return _init_repository(tmp_path / "repo")
 
 
 def _pull_request_merge(repo: Path, files: dict[str, str]) -> None:
@@ -102,7 +125,7 @@ def _run_scope_with_env(
     output.unlink(missing_ok=True)
     run_env = {
         key: value
-        for key, value in (os.environ | _GIT_ENV).items()
+        for key, value in _git_env().items()
         if key not in {"EVENT_NAME", "HEAD_REF", "PUSH_BEFORE"}
     }
     run_env |= {"GITHUB_OUTPUT": str(output), **env}
@@ -250,6 +273,7 @@ def test_push_fetches_missing_before_commit_from_origin(
         subprocess.run(
             ["git", "cat-file", "-e", f"{before}^{{commit}}"],
             cwd=clone,
+            env=_git_env(),
             capture_output=True,
             check=False,
         ).returncode
@@ -333,3 +357,56 @@ def test_missing_event_name_fails(repo: Path, tmp_path: Path) -> None:
     assert result.returncode != 0
     assert values == {}
     assert "EVENT_NAME" in result.stderr
+
+
+def _snapshot(directory: Path) -> dict[str, bytes]:
+    return {
+        str(path.relative_to(directory)): path.read_bytes()
+        for path in sorted(directory.rglob("*"))
+        if path.is_file()
+    }
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "hook_variables",
+    [
+        # `git commit -a` and `git commit <path>` export an absolute index.
+        pytest.param({"GIT_INDEX_FILE": "{git_dir}/index"}, id="index-file"),
+        # A hook running in a linked worktree receives an absolute GIT_DIR.
+        pytest.param(
+            {
+                "GIT_DIR": "{git_dir}",
+                "GIT_WORK_TREE": "{work_tree}",
+                "GIT_INDEX_FILE": "{git_dir}/index",
+                "GIT_OBJECT_DIRECTORY": "{git_dir}/objects",
+            },
+            id="repository-location",
+        ),
+    ],
+)
+def test_inherited_hook_environment_does_not_reach_the_invoking_repository(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hook_variables: dict[str, str]
+) -> None:
+    # The pre-commit and pre-push hooks run this file inside a real Git
+    # command, which exports the invoking repository's location.
+    invoking = tmp_path / "invoking"
+    invoking.mkdir()
+    _git(invoking, "init", "--quiet", "--initial-branch=master")
+    _commit(invoking, "invoking", {"readme.md": "invoking\n"})
+    git_dir = invoking / ".git"
+    before = _snapshot(git_dir)
+
+    with monkeypatch.context() as patch:
+        for name, value in hook_variables.items():
+            patch.setenv(name, value.format(git_dir=git_dir, work_tree=invoking))
+        repository = _init_repository(tmp_path / "repo")
+        _pull_request_merge(repository, {"backend/uv.lock": "changed\n"})
+        result, values = _run_scope(
+            repository, tmp_path, EVENT_NAME="pull_request", HEAD_REF="topic"
+        )
+
+    assert _snapshot(git_dir) == before
+    assert result.returncode == 0, result.stderr
+    assert values == {"required": "true"}
+    assert "dependency files changed: backend/uv.lock" in result.stdout

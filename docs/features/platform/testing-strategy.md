@@ -24,6 +24,11 @@ characteristics and isolation rules.
 The unit, integration, and end-to-end tiers form the **default in-process
 suite**. `pytest` without a marker filter runs this suite; "default" describes
 its normal invocation, not a claim that it includes every test boundary.
+"In-process" distinguishes it from the two suites below: it starts no
+long-lived application process and no application container, and the
+application code it measures runs inside the pytest process. An individual
+test may still start a short-lived local subprocess under the isolation rules
+of its tier (see Tier 1 — Unit Tests).
 
 Two further suites sit outside the pyramid and are excluded from an unadorned
 `pytest` run:
@@ -41,17 +46,39 @@ forming fourth and fifth functional tiers.
 
 ### Tier 1 — Unit Tests
 
-Fast, isolated tests for pure logic. No external dependencies.
+Fast, isolated tests. No database, Redis, or network dependencies.
 
 | Property | Value |
 |----------|-------|
 | Marker | `@pytest.mark.unit` |
-| Isolation | In-process only. No database, no Redis, no network I/O |
-| Typical subjects | Resolution cascades, parsers, validators, status evaluators, enum logic, Pydantic schema validation, utility functions |
+| Isolation | No database, no Redis, no network I/O. In-process, or in hermetic short-lived local subprocesses (see below) |
+| Typical subjects | Resolution cascades, parsers, validators, status evaluators, enum logic, Pydantic schema validation, utility functions, repository scripts, Git hooks, and workflow shell logic |
 
 A test that requires a database session, Redis connection, or HTTP
 client is NOT a unit test — even if it tests a single function. Use
 the `integration` marker instead.
+
+A unit test may start short-lived local subprocesses — a repository script
+or Git hook, shell logic extracted from a workflow, `git`, or a Python
+interpreter that checks import or process behavior — when every such
+subprocess is hermetic:
+
+- it uses no database, Redis, or network, and has exited when the test ends;
+- it changes no tracked file and no state of the invoking repository; its
+  working state is temporary (for example under `tmp_path`); and
+- a subprocess that runs Git against a temporary repository, directly or
+  through a script under test, receives no inherited `GIT_*` variable and no
+  user or system Git configuration. The pre-commit and pre-push hooks run the
+  suite inside a real Git command, which exports variables such as
+  `GIT_INDEX_FILE` (absolute for `git commit -a` and `git commit <path>`),
+  `GIT_DIR` (in a linked worktree), and `GIT_CONFIG_PARAMETERS` (for `git -c`
+  options) to every child process; inherited, they would redirect the
+  temporary repository's commands to the invoking repository.
+
+A read-only Git command that deliberately inspects the checkout itself, such
+as the `git ls-files` of the documentation-link test (see Structural Tests),
+keeps the inherited environment, so it observes the candidate index of a
+running commit.
 
 ### Tier 2 — Integration Tests
 
@@ -836,8 +863,8 @@ directly, instead of relying on a reviewer agent to notice a violation
 on every pull request.
 
 Structural tests are a Tier 1 (unit) test, not a separate tier — they
-run in-process, require no database or network I/O, and are part of the
-unit suite executed by the pre-commit fast gate.
+follow the Tier 1 isolation rules, require no database or network I/O, and
+are part of the unit suite executed by the pre-commit fast gate.
 
 **Governing principle**: a structural test may read code; it must never
 impose a format on a specification. If verifying a rule would require a
@@ -1152,9 +1179,10 @@ per-repository via `core.hooksPath` (see activation steps below):
   containers (`pytest -m unit -n auto --maxprocesses 8
   --max-worker-restart 0`, see Parallel Execution) + `gitleaks git
   --staged` (secret scan on staged changes). The gate stays fast because
-  it selects only unit tests, which are in-process by definition; no
-  wall-clock limit is specified, because duration depends on the host and
-  grows with the suite. Tool invocations use `uv run --locked`, so the
+  it selects only unit tests, which need no database, Redis, network, or
+  test container by definition (see Tier 1 — Unit Tests); no wall-clock
+  limit is specified, because duration depends on the host and grows with
+  the suite. Tool invocations use `uv run --locked`, so the
   hook never mutates `backend/uv.lock` as a side effect of running a
   check.
 - **pre-push**: full test suite including integration and e2e tests
