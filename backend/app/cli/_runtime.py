@@ -107,9 +107,10 @@ def bootstrap() -> None:
         click.echo(f"Error: {exc}", err=True)
         raise SystemExit(2) from None
 
+    from app.config import settings
     from app.core.logging import configure_cli_logging
 
-    configure_cli_logging()
+    configure_cli_logging(settings)
 
 
 def get_session_factory() -> async_sessionmaker[AsyncSession]:

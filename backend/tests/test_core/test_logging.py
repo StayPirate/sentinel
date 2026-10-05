@@ -8,14 +8,20 @@ from __future__ import annotations
 import io
 import json
 import logging
+import time
 from collections.abc import Iterator
 
 import pytest
 import structlog
+from pydantic import Field, SecretStr
 
 from app.config import Settings
+from app.core import logging as core_logging
 from app.core.logging import (
     _THIRD_PARTY_LOGGERS,
+    REDACTED,
+    _build_redaction_processor,
+    _collect_secret_values,
     configure_cli_logging,
     configure_logging,
     resolve_log_format,
@@ -23,8 +29,9 @@ from app.core.logging import (
 
 
 def _settings(**overrides: str) -> Settings:
-    """Build a Settings instance for logging tests, bypassing env/file
-    sources entirely so tests are hermetic."""
+    """Build a Settings instance for logging tests, bypassing the `.env`
+    file. Environment variables still apply, so a test that depends on a
+    field's value passes it explicitly."""
     defaults = {
         "jwt_secret_key": "a" * 32,
         "app_name": "sentinel-test",
@@ -378,7 +385,7 @@ class TestConfigureCliLogging:
     def test_routes_to_stderr_not_stdout(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        configure_cli_logging()
+        configure_cli_logging(_settings())
 
         logging.getLogger("app.test.cli").warning("cli_warning")
 
@@ -389,7 +396,7 @@ class TestConfigureCliLogging:
     def test_info_below_warning_is_suppressed(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        configure_cli_logging()
+        configure_cli_logging(_settings())
 
         logging.getLogger("app.test.cli.info").info("cli_info_should_not_appear")
 
@@ -399,7 +406,7 @@ class TestConfigureCliLogging:
     def test_output_is_plain_text_not_json(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        configure_cli_logging()
+        configure_cli_logging(_settings())
 
         logging.getLogger("app.test.cli.plain").warning("cli_plain_event")
 
@@ -407,3 +414,327 @@ class TestConfigureCliLogging:
         with pytest.raises(json.JSONDecodeError):
             json.loads(captured.err.strip())
         assert "cli_plain_event" in captured.err
+
+    def test_cli_record_with_configured_secret_is_redacted(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        configure_cli_logging(_settings(nvd_api_key=_NVD_SETTING_VALUE))
+
+        logging.getLogger("app.test.cli.secret").warning(
+            "request rejected for key %s", _NVD_SETTING_VALUE
+        )
+
+        captured = capsys.readouterr()
+        assert _NVD_SETTING_VALUE not in captured.err
+        assert f"request rejected for key {REDACTED}" in captured.err
+
+
+# Fictional credential material used by the redaction tests.
+_NVD_SETTING_VALUE = "fictional-nvd-key-0123456789"
+_BROKER_URL_USERINFO_PART = "fictional-broker-pass-42"
+_BROKER_URL = (
+    f"amqps://svc-sentinel:{_BROKER_URL_USERINFO_PART}@rabbit.example.test:5671/"
+)
+
+
+def _redact(text: str, secret_values: tuple[str, ...] = ()) -> str:
+    """Run a single string through a freshly built redaction processor."""
+    processor = _build_redaction_processor(secret_values)
+    event_dict = processor(None, "info", {"event": text})
+    assert isinstance(event_dict, dict)
+    value = event_dict["event"]
+    assert isinstance(value, str)
+    return value
+
+
+@pytest.mark.unit
+class TestRedactionProcessor:
+    """Each masked category of logging.md (Redaction Processor), applied
+    to a single string value."""
+
+    def test_configured_secret_value_is_masked_everywhere(self) -> None:
+        text = f"invalid key {_NVD_SETTING_VALUE}; retrying with {_NVD_SETTING_VALUE}"
+        assert _redact(text, (_NVD_SETTING_VALUE,)) == (
+            f"invalid key {REDACTED}; retrying with {REDACTED}"
+        )
+
+    def test_longer_secret_containing_shorter_one_is_masked_whole(self) -> None:
+        shorter = "fictional-secret-part"
+        longer = f"{shorter}-and-suffix"
+        assert _redact(f"value={longer}", (shorter, longer)) == f"value={REDACTED}"
+
+    @pytest.mark.parametrize("value", ["", "fict-pass", "a" * 11])
+    def test_empty_or_short_secret_value_is_never_matched(self, value: str) -> None:
+        text = f"connected as fict-pass to db aaaaaaaaaaa {value}"
+        assert _redact(text, (value,)) == text
+
+    def test_secret_value_at_minimum_length_is_masked(self) -> None:
+        value = "fict-pass-12"
+        assert len(value) == 12
+        assert _redact(f"x {value} y", (value,)) == f"x {REDACTED} y"
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            (
+                "postgresql+asyncpg://svc:fict-pass@db.example.test:5432/db",
+                f"postgresql+asyncpg://{REDACTED}@db.example.test:5432/db",
+            ),
+            (
+                "rediss://:fict-pass@cache.example.test:6380/1",
+                f"rediss://{REDACTED}@cache.example.test:6380/1",
+            ),
+            (
+                "amqps://svc:fict@pass@rabbit.example.test//",
+                f"amqps://{REDACTED}@rabbit.example.test//",
+            ),
+            (
+                "Error: 'redis://svc-token@cache.example.test' refused",
+                f"Error: 'redis://{REDACTED}@cache.example.test' refused",
+            ),
+            (
+                "broker_url=x_redis://:fict-pass@cache.example.test",
+                f"broker_url=x_redis://{REDACTED}@cache.example.test",
+            ),
+        ],
+    )
+    def test_uri_userinfo_is_masked_for_any_scheme(
+        self, text: str, expected: str
+    ) -> None:
+        assert _redact(text) == expected
+
+    def test_uri_userinfo_scan_of_scheme_like_run_is_linear(self) -> None:
+        """Regression: a long client-controlled run such as "a.a.a..." (e.g.
+        a request path in the access log) must not be rescanned from every
+        word boundary. The quadratic pattern took ~20 s on this input."""
+        text = "GET /" + "a." * 131072
+        started = time.perf_counter()
+        assert _redact(text) == text
+        assert time.perf_counter() - started < 1.0
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            (
+                "Authorization: Bearer eyJfictional.payload.signature",
+                f"Authorization: Bearer {REDACTED}",
+            ),
+            (
+                "proxy-authorization=Basic ZmljdGlvbmFsOnBhc3M=",
+                f"proxy-authorization=Basic {REDACTED}",
+            ),
+            (
+                "{'authorization': b'Basic ZmljdGlvbmFsOnBhc3M=', 'accept': 'x'}",
+                f"{{'authorization': b'Basic {REDACTED}', 'accept': 'x'}}",
+            ),
+            (
+                '"Authorization": "fictional-raw-token"',
+                f'"Authorization": "{REDACTED}"',
+            ),
+        ],
+    )
+    def test_authorization_header_credential_is_masked(
+        self, text: str, expected: str
+    ) -> None:
+        assert _redact(text) == expected
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "CVE-2024-12345 affects package example-lib",
+            "fetcher run 018f6c3e-8a4b-7c1d-9e2f-0123456789ab finished",
+            "request_id=req-123 celery_task_id=0f4c1a2b-0000-4000-8000-000000000001",
+            "GET https://nvd.example.test/rest/json/cves/2.0?cveId=CVE-2024-12345",
+            "Error 111 connecting to cache.example.test:6379. Connection refused.",
+            "contact owner@example.test or mailto:owner@example.test",
+            '"http://host.example.test:80","owner@example.test"',
+            "https://lists.example.test/archives?from=owner@example.test",
+            "authorization failed for user fict-user",
+        ],
+    )
+    def test_text_without_sensitive_content_is_unchanged(self, text: str) -> None:
+        assert _redact(text, (_NVD_SETTING_VALUE,)) == text
+
+    def test_non_string_values_are_left_untouched(self) -> None:
+        processor = _build_redaction_processor((_NVD_SETTING_VALUE,))
+        nested = {"key": _NVD_SETTING_VALUE}
+        event_dict = processor(None, "info", {"event": "x", "count": 3, "d": nested})
+        assert isinstance(event_dict, dict)
+        assert event_dict["count"] == 3
+        assert event_dict["d"] is nested
+
+    def test_redaction_failure_masks_value_and_keeps_record(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        class _FailingPattern:
+            def sub(self, repl: str, string: str) -> str:
+                raise RuntimeError("simulated redaction failure")
+
+        monkeypatch.setattr(core_logging, "_URI_USERINFO_PATTERN", _FailingPattern())
+        processor = _build_redaction_processor(())
+
+        event_dict = processor(None, "info", {"event": "some text", "level": "info"})
+
+        assert event_dict == {"event": REDACTED, "level": REDACTED}
+
+
+@pytest.mark.unit
+class TestCollectSecretValues:
+    """The exact-value set is derived from the Settings classification
+    (docs/conventions.md, Secret Field Typing)."""
+
+    def test_collects_secretstr_values_and_url_passwords(self) -> None:
+        settings = _settings(
+            jwt_secret_key="j" * 32,
+            nvd_api_key=_NVD_SETTING_VALUE,
+            ibs_password="fictional-ibs-password",
+            database_url="postgresql+asyncpg://svc:fictional-db-pass@db.example.test/db",
+            redis_url="redis://:fictional-redis-pass@cache.example.test:6379/0",
+            celery_broker_url=_BROKER_URL,
+        )
+
+        values = _collect_secret_values(settings)
+
+        assert set(values) == {
+            "j" * 32,
+            _NVD_SETTING_VALUE,
+            "fictional-ibs-password",
+            "fictional-db-pass",
+            "fictional-redis-pass",
+            _BROKER_URL_USERINFO_PART,
+        }
+
+    def test_values_are_derived_from_field_classification(self) -> None:
+        """A new field classified per Secret Field Typing is covered
+        without changes to the logging module."""
+
+        class _ExtendedSettings(Settings):
+            extra_token: SecretStr = SecretStr("fictional-extra-token-0001")
+            extra_url: str = Field(
+                default="amqps://svc:fictional-extra-pass@mq.example.test/",
+                repr=False,
+            )
+            extra_public_url: str = "https://svc:public-userinfo@docs.example.test/"
+
+        settings = _ExtendedSettings(_env_file=None, jwt_secret_key="a" * 32)
+
+        values = _collect_secret_values(settings)
+
+        assert "fictional-extra-token-0001" in values
+        assert "fictional-extra-pass" in values
+        assert "public-userinfo" not in values
+
+    def test_url_password_is_percent_decoded(self) -> None:
+        settings = _settings(
+            database_url="postgresql+asyncpg://svc:fictional%40db%2Fpass@db.example.test/db"
+        )
+        assert "fictional@db/pass" in _collect_secret_values(settings)
+
+    def test_empty_values_and_urls_without_password_are_skipped(self) -> None:
+        settings = _settings(
+            nvd_api_key="",
+            ibs_password="",
+            database_url="postgresql+asyncpg://svc@db.example.test/db",
+            redis_url="redis://cache.example.test:6379/0",
+            celery_broker_url="redis://cache.example.test:6379/1",
+        )
+        assert _collect_secret_values(settings) == ["a" * 32]
+
+    def test_malformed_url_is_skipped(self) -> None:
+        settings = _settings(redis_url="redis://svc:fict-pass@[::1/0")
+        assert "fict-pass" not in _collect_secret_values(settings)
+
+
+@pytest.mark.unit
+class TestConfigureLoggingRedaction:
+    """The redaction processor is wired into the runtime pipeline for
+    application records, stdlib-bridged records, and rendered tracebacks."""
+
+    def _configure(self, log_format: str = "json") -> _FakeStream:
+        stream = _FakeStream(isatty=False)
+        settings = _settings(
+            log_format=log_format,
+            nvd_api_key=_NVD_SETTING_VALUE,
+            celery_broker_url=_BROKER_URL,
+        )
+        configure_logging(settings, stream=stream)
+        return stream
+
+    def test_application_record_is_redacted(self) -> None:
+        stream = self._configure()
+
+        structlog.get_logger("app.test.redact").warning(
+            "nvd_request_rejected", detail=f"key {_NVD_SETTING_VALUE} rejected"
+        )
+
+        record = json.loads(stream.getvalue().strip())
+        assert record["detail"] == f"key {REDACTED} rejected"
+        assert record["event"] == "nvd_request_rejected"
+
+    def test_third_party_record_is_redacted(self) -> None:
+        stream = self._configure()
+
+        logging.getLogger("celery").error("consumer: cannot connect to %s", _BROKER_URL)
+
+        output = stream.getvalue()
+        record = json.loads(output.strip())
+        assert _BROKER_URL_USERINFO_PART not in output
+        assert record["logger"] == "celery"
+        assert record["event"] == (
+            f"consumer: cannot connect to amqps://{REDACTED}@rabbit.example.test:5671/"
+        )
+
+    def test_third_party_exception_traceback_is_redacted(self) -> None:
+        stream = self._configure()
+
+        try:
+            raise ConnectionError(f"[Errno 111] password={_BROKER_URL_USERINFO_PART}")
+        except ConnectionError:
+            logging.getLogger("celery").exception("task publication failed")
+
+        output = stream.getvalue()
+        record = json.loads(output.strip())
+        assert _BROKER_URL_USERINFO_PART not in output
+        assert (
+            f"ConnectionError: [Errno 111] password={REDACTED}" in record["exception"]
+        )
+
+    def test_application_exception_traceback_is_redacted(self) -> None:
+        stream = self._configure()
+
+        try:
+            raise ValueError(f"cannot reach {_BROKER_URL}")
+        except ValueError:
+            structlog.get_logger("app.test.redact.exc").exception("dispatch_failed")
+
+        output = stream.getvalue()
+        record = json.loads(output.strip())
+        assert _BROKER_URL_USERINFO_PART not in output
+        assert "amqps://***@rabbit.example.test" in record["exception"]
+
+    def test_console_output_is_redacted(self) -> None:
+        stream = self._configure(log_format="console")
+
+        structlog.get_logger("app.test.redact.console").warning(
+            "nvd_request_rejected", detail=_NVD_SETTING_VALUE
+        )
+
+        assert _NVD_SETTING_VALUE not in stream.getvalue()
+        assert REDACTED in stream.getvalue()
+
+    def test_default_short_database_password_does_not_mask_app_name(self) -> None:
+        """Regression: the development/CI database password `sentinel`
+        coincides with APP_NAME; the length threshold keeps the app field
+        and ordinary text intact."""
+        stream = _FakeStream(isatty=False)
+        settings = _settings(
+            app_name="sentinel",
+            database_url="postgresql+asyncpg://sentinel:sentinel@db.example.test/db",
+        )
+        configure_logging(settings, stream=stream)
+
+        structlog.get_logger("app.test.redact.default").info("sentinel_started")
+
+        record = json.loads(stream.getvalue().strip())
+        assert record["app"] == "sentinel"
+        assert record["event"] == "sentinel_started"
