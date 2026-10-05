@@ -351,7 +351,7 @@ they feed in [Environments](#environments).
 
 | Workflow | Trigger | Purpose | Blocking |
 |----------|---------|---------|----------|
-| `ci.yml` | Push to `master`, pull request, manual | Backend quality gates — see `docs/features/platform/testing-strategy.md` (CI Pipeline) for the authoritative gate composition — and the Codecov coverage upload (see Workflow Conventions, Coverage reporting) | Yes |
+| `ci.yml` | Push to `master`, pull request, manual | Backend quality gates (see `docs/features/platform/testing-strategy.md`, CI Pipeline, for the authoritative gate composition) and the non-gating Codecov coverage upload (see Workflow Conventions, Coverage reporting) | Yes |
 | `pr-metadata.yml` | Pull request opened, edited, reopened, or synchronized | Validates PR title format/length and issue linkage per `docs/conventions.md` (Pull Request Requirements) | Yes |
 | `release-please.yml` | `workflow_run` after a successful CI run on `master` | Creates and updates the Release PR; on merge creates the version tag and GitHub Release | Yes (release path) |
 | `build-images.yml` | `workflow_run` after a successful CI run on `master`; push of a `v*` tag | Builds the backend image once, runs the image smoke and SBOM gates, and publishes the same digest to `ghcr.io`; version-tag runs also publish release SBOM and provenance attestations | Yes (publish gate) |
@@ -400,7 +400,11 @@ SHA-pinned actions and opens a PR bumping both the SHA and the
 trailing version comment when a new release is published. It also
 tracks `with:` version inputs of commonly used community-maintained
 actions (e.g. `astral-sh/setup-uv`'s `version:` input) — no additional
-configuration is required for either pinning style. Dependency updates
+configuration is required for either pinning style. A `version:` input the
+manager does not support (such as `codecov/codecov-action`'s) is tracked by
+a `renovate.jsonc` custom manager matching a
+`# renovate: datasource=<datasource> depName=<name>` hint comment placed
+directly above it. Dependency updates
 are managed by the hosted Mend Renovate GitHub App reading `renovate.jsonc`
 from the repository root; no workflow in this repository runs the hosted bot
 or creates its dependency-update PRs. The separate advisory validation
@@ -533,13 +537,16 @@ This harness choice does not change the deployment-agnostic OCI image contract.
 
 **Coverage reporting.** The `backend-test` job of `ci.yml` measures
 coverage and enforces the coverage gate; it retains the resulting report
-as a short-lived workflow artifact and never receives `CODECOV_TOKEN`. A
-separate `Coverage Upload` job uploads that report to Codecov with
-`fail_ci_if_error: true` and a pinned Codecov CLI version (tracked by a
-`renovate.jsonc` custom manager), so a failed upload is a visible red job
-that can be re-run on its own. The repository `codecov.yml` makes the
-resulting `codecov/project` and `codecov/patch` statuses informational —
-they always pass and are never a coverage gate (see
+as a seven-day workflow artifact and never receives `CODECOV_TOKEN`. A
+separate `Coverage Upload` job uploads only that report to Codecov with a
+pinned Codecov CLI version (tracked by a `renovate.jsonc` custom manager).
+On a pull request a failed upload fails the job, which can be re-run on its
+own while the artifact is retained. On a push to `master` a failed upload
+does not fail the run, because `release-please.yml` and `build-images.yml`
+start only after a successful CI run on `master` and a Codecov outage must
+not withhold a release or image publication. The repository `codecov.yml`
+makes the resulting `codecov/project` and `codecov/patch` statuses
+informational — they always pass and are never a coverage gate (see
 `docs/features/platform/testing-strategy.md`, Coverage Policy) — and has
 Codecov publish them as soon as the upload is processed rather than
 waiting for, or failing because of, other checks. Both statuses are
@@ -1030,8 +1037,8 @@ be used because tags created by it do not trigger downstream workflows
 
 The `ci.yml` workflow requires a repository secret named
 `CODECOV_TOKEN` for uploading test coverage reports to Codecov. Only the
-`Coverage Upload` job references it, and that job fails when the upload
-fails (see Workflow Conventions, Coverage reporting). Obtain the token from
+`Coverage Upload` job references it (see Workflow Conventions, Coverage
+reporting). Obtain the token from
 [codecov.io](https://codecov.io) after linking the repository.
 
 ---

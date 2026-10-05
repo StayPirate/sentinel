@@ -295,7 +295,11 @@ def test_coverage_upload_job_fails_on_error_with_pinned_cli() -> None:
     assert "name: backend-coverage" in job
     assert "uses: codecov/codecov-action@" in job
     assert "files: backend/coverage.xml" in job
-    assert "fail_ci_if_error: true" in job
+    assert "disable_search: true" in job
+    # Fails only where the required Codecov statuses gate a merge; a push to
+    # master must not turn the CI run that gates release-please and
+    # build-images red because of Codecov.
+    assert "fail_ci_if_error: ${{ github.event_name == 'pull_request' }}" in job
     # The CLI version is an exact release, never "latest", and carries the
     # hint comment the renovate.jsonc custom manager matches.
     assert re.search(

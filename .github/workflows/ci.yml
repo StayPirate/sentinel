@@ -151,7 +151,7 @@ jobs:
           name: backend-coverage
           path: backend/coverage.xml
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 7
       - name: Check Alembic migration drift
         run: |
           uv run alembic upgrade head
@@ -161,8 +161,11 @@ jobs:
 
   # Uploads the coverage report produced by backend-test. The resulting
   # codecov/project and codecov/patch statuses are required merge checks
-  # but informational (codecov.yml), so a failed upload blocks the merge
-  # through a missing status and this red job, which can be re-run alone.
+  # but informational (codecov.yml). On a pull request a failed upload
+  # fails this job, which can be re-run alone, and the missing statuses
+  # block the merge. On other events it never fails the run, so a Codecov
+  # outage cannot withhold release-please or image publication, which
+  # require a successful CI run on master.
   # See docs/deployment.md (Workflow Conventions, Coverage reporting).
   coverage-upload:
     name: Coverage Upload
@@ -184,8 +187,9 @@ jobs:
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           files: backend/coverage.xml
+          disable_search: true
           flags: backend
-          fail_ci_if_error: true
+          fail_ci_if_error: ${{ github.event_name == 'pull_request' }}
           # renovate: datasource=github-releases depName=codecov/codecov-cli
           version: "v11.3.1"
         env:
