@@ -4,8 +4,6 @@ description: >
   required by feature specs, including CLI- or task-driven operations. Use
   after changing consumer-facing operations or endpoints. Read-only.
 mode: subagent
-model: anthropic/claude-sonnet-5-5
-variant: high
 permission:
   edit: deny
   bash:

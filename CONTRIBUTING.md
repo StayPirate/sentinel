@@ -303,6 +303,12 @@ They are invoked automatically by the primary agents when their trigger conditio
 
 See [`.opencode/README.md`](.opencode/README.md) for the full inventory of agents, their triggers, and model tiering.
 
+### Choosing models
+
+The repository pins no model for any agent, so OpenCode works with whichever providers your client has.
+To choose the models and reasoning-effort variants per agent, copy [`.opencode/opencode.example.jsonc`](.opencode/opencode.example.jsonc) to `.opencode/opencode.jsonc` (ignored by Git), adjust it, and restart OpenCode.
+Without that file, primary agents use your default model and reviewers inherit the model of the agent that invokes them.
+
 ## License
 
 By contributing to Sentinel, you agree that your contributions will be licensed under the [Apache License 2.0](LICENSE).

@@ -4,8 +4,6 @@ description: >
   Use after significant API, feature-spec, model, service-contract,
   architecture, integration, or multi-document changes. Read-only.
 mode: subagent
-model: anthropic/claude-sonnet-5-5
-variant: high
 permission:
   edit: deny
   bash:

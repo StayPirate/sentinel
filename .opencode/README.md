@@ -128,11 +128,30 @@ Trigger Matrix and mirrored in `.opencode/prompts/code.md` and
 
 ### Model Tiering
 
-The `plan`, `spec`, and `code` primary agents use `anthropic/claude-opus-5-5`
-at the `high` reasoning-effort variant. All reviewer subagents are pinned to
-`anthropic/claude-sonnet-5-5` at the `high` variant. A single reviewer tier
-keeps review costs predictable while ensuring reviews do not inherit the
-invoking primary agent's model.
+Tracked agent definitions pin no `model` or `variant`, because the providers
+and models available differ between contributors. Each contributor selects
+them in `.opencode/opencode.jsonc`, which Git ignores. OpenCode merges that file
+over the global configuration and `opencode.json`, so its per-agent values
+override any per-agent model in `~/.config/opencode/opencode.json`. Changes
+take effect after an OpenCode restart. The file belongs to one checkout, so
+copy it into every worktree that should use it.
+
+`opencode.example.jsonc` is the project's recommended starting point. Copy it to
+`.opencode/opencode.jsonc` and adjust the values. It groups the agents into
+three tiers:
+
+| Tier | Agents | Example model |
+|------|--------|---------------|
+| Primary | `plan`, `spec`, `code` | `anthropic/claude-opus-5-5`, `high` |
+| Tier 1 | `@security-reviewer`, `@spec-coherence-reviewer`, `@spec-gap-analyzer` | `anthropic/claude-opus-5-5`, `high` |
+| Tier 2 | All other reviewer subagents | `anthropic/claude-sonnet-5-5`, `high` |
+
+Tier 1 reviewers rely most on adversarial reasoning and long cross-document
+synthesis, so they benefit most from a stronger model.
+
+Without a local file, primary agents use the user's default model and every
+subagent inherits the model of the agent that invokes it. A reviewer listed
+in the local file runs on its own model regardless of the invoking agent.
 
 ## Commands
 
@@ -159,6 +178,8 @@ their description.
 │   ├── spec.md       # Spec agent instructions
 │   └── code.md       # Code agent instructions
 ├── skills/           # Multi-step workflow definitions
+├── opencode.example.jsonc  # Example local model selection (see Model Tiering)
+├── opencode.jsonc    # Local model selection (untracked, per contributor)
 ├── package.json      # Plugin dependency (@opencode-ai/plugin)
 └── README.md         # This file
 ```

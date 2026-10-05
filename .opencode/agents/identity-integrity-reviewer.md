@@ -4,8 +4,6 @@ description: >
   and centralized User, UserRole, API-key, and RoleMapping ownership. Use
   after changing identity mutation code or specs. Read-only.
 mode: subagent
-model: anthropic/claude-sonnet-5-5
-variant: high
 permission:
   edit: deny
   bash:
