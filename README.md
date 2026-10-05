@@ -54,20 +54,6 @@ services.
 - Provision user identities (deferred to external identity provider)
 - Provide a web UI (frontend will be developed in a separate repository)
 
-### Key concepts
-
-- **Ticket** (`SNTL-n`) — the workflow unit that tracks the triage, analysis,
-  and resolution of one security issue, with or without an associated CVE.
-- **Track** — a maintained line of a package: an IBS codestream or a Git
-  branch (SLFO).
-- **Product** — a SUSE product that receives updates through its own
-  repositories; eligibility is evaluated per product.
-- **Three orthogonal dimensions** — *affectedness* (is the code vulnerable,
-  per track), *eligibility* (does the product qualify for a fix, by CVSS
-  threshold and lifecycle), and *delivery* (how far the fix has progressed
-  through the maintenance pipeline). See the
-  [Package Model](docs/features/packages/package-model.md#three-orthogonal-dimensions).
-
 ## Architecture
 
 ```mermaid
