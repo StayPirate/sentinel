@@ -46,7 +46,7 @@ forming fourth and fifth functional tiers.
 
 ### Tier 1 — Unit Tests
 
-Fast, isolated tests for pure logic. No external dependencies.
+Fast, isolated tests. No database, Redis, or network dependencies.
 
 | Property | Value |
 |----------|-------|
@@ -69,9 +69,10 @@ subprocess is hermetic:
 - a subprocess that runs Git against a temporary repository, directly or
   through a script under test, receives no inherited `GIT_*` variable and no
   user or system Git configuration. The pre-commit and pre-push hooks run the
-  suite inside a real Git command, which exports the invoking repository's
-  location (`GIT_DIR`, `GIT_INDEX_FILE`, and related variables) and its
-  `git -c` options to every child process; inherited, they would redirect the
+  suite inside a real Git command, which exports variables such as
+  `GIT_INDEX_FILE` (absolute for `git commit -a` and `git commit <path>`),
+  `GIT_DIR` (in a linked worktree), and `GIT_CONFIG_PARAMETERS` (for `git -c`
+  options) to every child process; inherited, they would redirect the
   temporary repository's commands to the invoking repository.
 
 A read-only Git command that deliberately inspects the checkout itself, such
@@ -1179,9 +1180,9 @@ per-repository via `core.hooksPath` (see activation steps below):
   --max-worker-restart 0`, see Parallel Execution) + `gitleaks git
   --staged` (secret scan on staged changes). The gate stays fast because
   it selects only unit tests, which need no database, Redis, network, or
-  test container by definition (see Tier 1 — Unit Tests); no
-  wall-clock limit is specified, because duration depends on the host and
-  grows with the suite. Tool invocations use `uv run --locked`, so the
+  test container by definition (see Tier 1 — Unit Tests); no wall-clock
+  limit is specified, because duration depends on the host and grows with
+  the suite. Tool invocations use `uv run --locked`, so the
   hook never mutates `backend/uv.lock` as a side effect of running a
   check.
 - **pre-push**: full test suite including integration and e2e tests
