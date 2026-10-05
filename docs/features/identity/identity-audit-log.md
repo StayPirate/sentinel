@@ -235,6 +235,16 @@ entries are always displayed in reverse chronological order).
 | `from_date` | string | -- | ISO 8601 date/datetime. Include events from this date onwards (inclusive) |
 | `to_date` | string | -- | ISO 8601 date/datetime. Include events up to this date (inclusive) |
 
+The `actor` and `target_user` filters both follow User Identifier Resolution
+(`docs/api-spec.md`) through the single user-domain matching policy
+(`docs/features/identity/user-service.md`, `resolve_user_identifier()`,
+composable form) and never duplicate its matching rules. `actor` applies it
+through `BaseAuditLog.filter_by_actor()`, which also maps the literal `system`
+to `user_id IS NULL` (see
+`docs/features/platform/audit-trail-infrastructure.md`); `target_user` applies
+it to `target_user_id`. A value that matches no user yields an empty page, not
+`404 USER_NOT_FOUND`.
+
 **`Capability: manage_users`**
 
 For non-admin users, a self-scoped
@@ -440,7 +450,8 @@ that `actor` is always a string rather than a User object, and that events with
 - `docs/conventions.md` — Audit Trail
 - `docs/api-spec.md` — global API conventions
 - `docs/features/identity/user-service.md` — service operations that
-  produce identity audit events
+  produce identity audit events; the single user identifier matching
+  policy used by the `actor` and `target_user` filters
 - `docs/features/identity/user-management.md` — admin password reset
   and audit trail summary references
 - `docs/features/identity/identity-provisioning.md` — External sync operations that

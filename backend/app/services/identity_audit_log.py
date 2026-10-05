@@ -25,6 +25,10 @@ from app.models.identity_audit_event import IdentityAuditEvent
 from app.models.user import User
 from app.services.base_audit_log import BaseAuditLog
 
+# Imported from the leaf module rather than its `user_service` re-export:
+# `user_service` imports this module, so the re-export would be a cycle.
+from app.services.user_identifier import user_identifier_condition
+
 # `old_value`/`new_value` truncation limit, in Unicode code points (not
 # bytes/graphemes). Python `str` indexing already operates on code
 # points, so `value[:_MAX_VALUE_CODEPOINTS]` satisfies the "no Unicode
@@ -419,25 +423,6 @@ class IdentityAuditEventPage:
     per_page: int
 
 
-async def _resolve_target_user_id(
-    session: AsyncSession, target_user: str
-) -> uuid.UUID | None:
-    """Resolve an admin audit log `target_user` filter value to a `User.id`.
-
-    A UUID-shaped value is used directly as the filter — a
-    non-existent user ID naturally matches zero rows. A non-UUID value
-    is resolved via an exact, case-sensitive `username` lookup; `None`
-    is returned when it matches no user, which the caller renders as an
-    empty page rather than an unfiltered one.
-    """
-    try:
-        return uuid.UUID(target_user)
-    except ValueError:
-        pass
-    result = await session.execute(select(User.id).where(User.username == target_user))
-    return result.scalar_one_or_none()
-
-
 async def list_events(
     session: AsyncSession,
     *,
@@ -455,9 +440,12 @@ async def list_events(
     (OR). `actor` follows the shared User Identifier Resolution
     contract plus the reserved literal `"system"` for `user_id IS NULL`
     (see `BaseAuditLog.filter_by_actor()`); an unmatched username or
-    UUID yields an empty page, never an error. `target_user` follows
-    the same UUID-or-username contract for `target_user_id`; an
-    unmatched value yields an empty page. `from_date`/`to_date` are
+    UUID yields an empty page, never an error. `target_user` selects
+    `target_user_id` through the same single user-domain matching
+    condition (`user_identifier_condition()`, see
+    `docs/features/identity/user-service.md`), embedded in both the
+    count and the data statement; an unmatched value yields an empty
+    page. `from_date`/`to_date` are
     inclusive bounds, already parsed by the API layer.
     `page`/`per_page` have already passed API schema validation.
 
@@ -486,12 +474,14 @@ async def list_events(
     count_query = IdentityAuditLog.filter_by_actor(count_query, actor)
 
     if target_user is not None:
-        target_user_id = await _resolve_target_user_id(session, target_user)
-        if target_user_id is None:
-            return IdentityAuditEventPage(
-                items=[], total=0, page=page, per_page=per_page
-            )
-        target_filter = IdentityAuditEvent.target_user_id == target_user_id
+        # Uncorrelated and join-free, like `filter_by_actor()`: it never
+        # binds to an outer `User` and never multiplies rows.
+        matching_user_ids = (
+            select(User.id)
+            .where(user_identifier_condition(target_user))
+            .correlate(None)
+        )
+        target_filter = IdentityAuditEvent.target_user_id.in_(matching_user_ids)
         query = query.where(target_filter)
         count_query = count_query.where(target_filter)
 
