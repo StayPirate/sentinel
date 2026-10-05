@@ -1,5 +1,5 @@
-"""`sentinel manage-user` command group: create, list, show, set-password,
-and unlock.
+"""`sentinel manage-user` command group: create, update, list, show,
+set-password, and unlock.
 
 See `docs/features/identity/user-management.md` for the authoritative
 per-command contract (parameters, exact messages, exit codes) this module
@@ -32,10 +32,13 @@ from app.core.passwords import MAX_PASSWORD_LENGTH, MIN_PASSWORD_LENGTH
 from app.core.permissions import role_from_wire, role_to_wire
 
 if TYPE_CHECKING:
+    from uuid import UUID
+
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
     from app.models.user import User
     from app.models.user_role import UserRole
+    from app.services.user_service import RoleUpdateResult
 
 # Username Format (docs/conventions.md): 1-64 characters, starts with a
 # letter, lowercase letters/numbers/dots/hyphens/underscores only. Mirrors
@@ -235,6 +238,335 @@ async def _create_flow(
         click.echo(f"Created user '{username}' ({email}) with roles: {role_list}.")
     else:
         click.echo(f"Created user '{username}' ({email}) with no roles.")
+
+
+# ---------------------------------------------------------------------------
+# update
+# ---------------------------------------------------------------------------
+
+
+def _external_user_profile_error_message(username: str) -> str:
+    """Exact profile-mode error text shared by the command's own external
+    guard and the defensive mapping of `ExternalUserFieldReadOnlyError`."""
+    return (
+        f"Error: User '{username}' is managed by an external identity "
+        "provider. Identity fields cannot be modified manually."
+    )
+
+
+_EXTERNAL_USER_REACTIVATION_ERROR = "Error: Cannot reactivate external users."
+
+
+@manage_user_group.command("update")
+@click.option("--username", required=True, help="Username of the user to update.")
+@click.option("--email", default=None, help="New email address (profile mode).")
+@click.option("--full-name", default=None, help="New display name (profile mode).")
+@click.option(
+    "--clear-full-name",
+    is_flag=True,
+    help="Clear the display name (profile mode); excludes --full-name.",
+)
+@click.option(
+    "--add-role",
+    "add_roles",
+    multiple=True,
+    help=(
+        "Manual role to add: admin, vulnerability_analyst, restricted_analyst. "
+        "Repeatable."
+    ),
+)
+@click.option(
+    "--remove-role",
+    "remove_roles",
+    multiple=True,
+    help=(
+        "Manual role to remove: admin, vulnerability_analyst, "
+        "restricted_analyst. Repeatable."
+    ),
+)
+@click.option(
+    "--reactivate", is_flag=True, help="Reactivate a previously deactivated user."
+)
+def update(
+    username: str,
+    email: str | None,
+    full_name: str | None,
+    clear_full_name: bool,
+    add_roles: tuple[str, ...],
+    remove_roles: tuple[str, ...],
+    reactivate: bool,
+) -> None:
+    """Update a user's profile, manual roles, or active status (one mode per
+    invocation).
+
+    See `docs/features/identity/user-management.md`
+    (`sentinel manage-user update`) for the full behavioral contract.
+    """
+    bootstrap()
+
+    normalized_username = _normalize_username_or_exit(username)
+
+    asyncio.run(
+        _update_flow(
+            get_session_factory(),
+            username=normalized_username,
+            email=email,
+            full_name=full_name,
+            clear_full_name=clear_full_name,
+            add_roles=add_roles,
+            remove_roles=remove_roles,
+            reactivate=reactivate,
+        )
+    )
+
+
+async def _update_flow(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    username: str,
+    email: str | None,
+    full_name: str | None,
+    clear_full_name: bool,
+    add_roles: tuple[str, ...],
+    remove_roles: tuple[str, ...],
+    reactivate: bool,
+) -> None:
+    """Resolve the user, select the single mode, and delegate it.
+
+    Single async workflow (`docs/features/platform/cli-infrastructure.md`,
+    Database Session Management): a read-only session resolves the user
+    and closes before anything else runs, so an unknown username is
+    reported before the no-modification message and the mode-selection
+    rejections. Each mode's guards then run without a session, and only a
+    selected, guarded mode opens the mutating session, which delegates to
+    exactly one `user_service` operation with `acting_user_id = None`.
+
+    The read-only lookup serves only resolution and the command-owned
+    external guards; every outcome message derives from the service result.
+    """
+    from app.core.exceptions import UserNotFoundError
+    from app.services import user_service
+
+    async with session_factory() as db:
+        try:
+            user = await user_service.get_user(db, username)
+        except UserNotFoundError:
+            click.echo(f"Error: User '{username}' not found.", err=True)
+            raise SystemExit(1) from None
+        user_id = user.id
+        is_external = user.external_id is not None
+
+    profile_mode = email is not None or full_name is not None or clear_full_name
+    role_mode = bool(add_roles or remove_roles)
+    if not (profile_mode or role_mode or reactivate):
+        click.echo(f"No changes specified for user '{username}'.")
+        return
+    if profile_mode + role_mode + reactivate > 1:
+        click.echo(
+            "Error: Profile updates, role updates, and --reactivate cannot be "
+            "combined.",
+            err=True,
+        )
+        raise SystemExit(1)
+    if full_name is not None and clear_full_name:
+        click.echo(
+            "Error: --full-name and --clear-full-name cannot be used together.",
+            err=True,
+        )
+        raise SystemExit(1)
+
+    if profile_mode:
+        await _update_profile(
+            session_factory,
+            user_id=user_id,
+            username=username,
+            is_external=is_external,
+            email=email,
+            full_name=full_name,
+            clear_full_name=clear_full_name,
+        )
+    elif role_mode:
+        await _update_roles(
+            session_factory,
+            user_id=user_id,
+            username=username,
+            add_roles=add_roles,
+            remove_roles=remove_roles,
+        )
+    else:
+        await _reactivate(
+            session_factory,
+            user_id=user_id,
+            username=username,
+            is_external=is_external,
+        )
+
+
+async def _update_profile(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    user_id: UUID,
+    username: str,
+    is_external: bool,
+    email: str | None,
+    full_name: str | None,
+    clear_full_name: bool,
+) -> None:
+    """Profile mode: external guard, email validation, then one
+    `user_service.update_user()` call in its own transaction."""
+    from app.core.exceptions import UserNotFoundError
+    from app.services import user_service
+    from app.services.user_service import (
+        ExternalUserFieldReadOnlyError,
+        UserConflictError,
+    )
+
+    if is_external:
+        click.echo(_external_user_profile_error_message(username), err=True)
+        raise SystemExit(1)
+    normalized_email = _normalize_email_or_exit(email) if email is not None else None
+    # `--clear-full-name` sends an explicit `None`; `--full-name ""` is an
+    # ordinary provided value.
+    full_name_provided = clear_full_name or full_name is not None
+
+    async with session_factory() as db:
+        try:
+            if normalized_email is not None and full_name_provided:
+                result = await user_service.update_user(
+                    db,
+                    user_id,
+                    acting_user_id=None,
+                    email=normalized_email,
+                    full_name=full_name,
+                )
+            elif normalized_email is not None:
+                result = await user_service.update_user(
+                    db, user_id, acting_user_id=None, email=normalized_email
+                )
+            else:
+                result = await user_service.update_user(
+                    db, user_id, acting_user_id=None, full_name=full_name
+                )
+            await db.commit()
+        except UserConflictError:
+            await db.rollback()
+            click.echo(
+                f"Error: A user with email '{normalized_email}' already exists.",
+                err=True,
+            )
+            raise SystemExit(1) from None
+        except UserNotFoundError:
+            await db.rollback()
+            click.echo(f"Error: User '{username}' not found.", err=True)
+            raise SystemExit(1) from None
+        except ExternalUserFieldReadOnlyError:
+            await db.rollback()
+            click.echo(_external_user_profile_error_message(username), err=True)
+            raise SystemExit(1) from None
+        except BaseException:
+            await db.rollback()
+            raise
+
+    if not result.changed_fields:
+        click.echo(f"No changes applied to user '{username}'.")
+        return
+    changed = ", ".join(field.replace("_", " ") for field in result.changed_fields)
+    click.echo(f"Updated user '{username}': {changed}.")
+
+
+async def _update_roles(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    user_id: UUID,
+    username: str,
+    add_roles: tuple[str, ...],
+    remove_roles: tuple[str, ...],
+) -> None:
+    """Role mode: role validation, deduplication, silent overlap
+    cancellation, then one `user_service.update_roles()` call in its own
+    transaction. Reports only the returned effective `_manual` changes."""
+    from app.core.exceptions import UserNotFoundError
+    from app.services import user_service
+
+    requested_add = set(_parse_roles_or_exit(add_roles))
+    requested_remove = set(_parse_roles_or_exit(remove_roles))
+    add = sorted(requested_add - requested_remove, key=role_to_wire)
+    remove = sorted(requested_remove - requested_add, key=role_to_wire)
+
+    async with session_factory() as db:
+        try:
+            result = await user_service.update_roles(
+                db, user_id, add=add, remove=remove, acting_user_id=None
+            )
+            await db.commit()
+        except UserNotFoundError:
+            await db.rollback()
+            click.echo(f"Error: User '{username}' not found.", err=True)
+            raise SystemExit(1) from None
+        except BaseException:
+            await db.rollback()
+            raise
+
+    if not result.added_roles and not result.removed_roles:
+        click.echo(f"No changes applied to user '{username}'.")
+        return
+    click.echo(f"Updated user '{username}': {_render_role_summary(result)}.")
+
+
+def _render_role_summary(result: RoleUpdateResult) -> str:
+    """Render `roles: added 'a', 'b'; removed 'c'` from the effective
+    `_manual` changes: added before removed, each side in the service's
+    wire-format order, and a side without a change omitted."""
+    sides = []
+    for label, roles in (
+        ("added", result.added_roles),
+        ("removed", result.removed_roles),
+    ):
+        if roles:
+            quoted = ", ".join(f"'{role_to_wire(role)}'" for role in roles)
+            sides.append(f"{label} {quoted}")
+    return f"roles: {'; '.join(sides)}"
+
+
+async def _reactivate(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    user_id: UUID,
+    username: str,
+    is_external: bool,
+) -> None:
+    """Reactivation mode: external guard, then one
+    `user_service.reactivate_user()` call in its own transaction."""
+    from app.core.exceptions import UserNotFoundError
+    from app.services import user_service
+    from app.services.user_service import ExternalUserStatusReadOnlyError
+
+    if is_external:
+        click.echo(_EXTERNAL_USER_REACTIVATION_ERROR, err=True)
+        raise SystemExit(1)
+
+    async with session_factory() as db:
+        try:
+            result = await user_service.reactivate_user(
+                db, user_id, acting_user_id=None
+            )
+            await db.commit()
+        except UserNotFoundError:
+            await db.rollback()
+            click.echo(f"Error: User '{username}' not found.", err=True)
+            raise SystemExit(1) from None
+        except ExternalUserStatusReadOnlyError:
+            await db.rollback()
+            click.echo(_EXTERNAL_USER_REACTIVATION_ERROR, err=True)
+            raise SystemExit(1) from None
+        except BaseException:
+            await db.rollback()
+            raise
+
+    if result.reactivated:
+        click.echo(f"Reactivated user '{username}'.")
+    else:
+        click.echo(f"No changes applied to user '{username}'.")
 
 
 # ---------------------------------------------------------------------------
