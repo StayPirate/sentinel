@@ -445,7 +445,7 @@ these helpers:
 
 | Helper | Behavior | Example consumers |
 |---|---|---|
-| Hidden password prompt with confirmation | Prompts twice via a hidden (non-echoed) input (Click's `hide_input=True`), compares the two entries. If they differ, the calling command receives a mismatch signal and is responsible for its own error message and exit code (per that command's own spec — this helper does not print the error itself, to preserve each command's exact wording). | `manage-user create`, `manage-user set-password` |
+| Hidden password prompt with confirmation | Prompts twice via a hidden (non-echoed) input (Click's `hide_input=True`), compares the two entries. If they differ, the calling command receives a mismatch signal and is responsible for its own error message and exit code (per that command's own spec — this helper does not print the error itself, to preserve each command's exact wording). An entry that is not valid UTF-8 (Input encoding below) yields a distinct invalid-encoding signal as soon as it is read, before the comparison; the calling command owns that message and exit code as well. | `manage-user create`, `manage-user set-password` |
 | TTY detection | Checks `sys.stdin.isatty()` before invoking a prompt (password entry or confirmation). If no TTY is detected, returns a signal the calling command uses to print its own "requires an interactive terminal" error (exact wording owned by the command spec) and exit 1. | `manage-user create`, `manage-user set-password` (before password prompt), `manage-user deactivate` (before confirmation prompt) |
 | Confirmation prompt | A yes/no prompt (Click's `confirm()`) for destructive operations. Exact prompt text and default answer are owned by the calling command's own spec. | `manage-user deactivate` |
 
@@ -455,12 +455,24 @@ behaviors themselves are already fully specified in
 `user-management.md`. This section exists so the shared implementation
 has one canonical home instead of being duplicated per command.
 
-**Q1/Q3/Q6**: N/A beyond the table above — these are Category B (no side
-effects beyond terminal I/O) helper functions whose complete behavior is
-the table itself; they raise no exceptions of their own (a non-matching
-password or non-TTY condition is communicated via return value, not by
-raising, so each calling command retains full control over its own exact
-error message per its own spec).
+**Input encoding**: terminal input that is not valid UTF-8 never escapes a
+helper, neither as an exception nor as a returned value. Depending on the
+locale, such input arrives either as a decoding error (strict decoding) or
+as lone surrogate code points (`surrogateescape`); a helper handles both
+forms, discards the entry without echoing it, and does not let the decoding
+error reach the shared exception mapper, whose catch-all path would exit 2
+and print and log the offending byte. The hidden password prompt returns
+its invalid-encoding signal; the confirmation prompt treats such an answer
+as an unrecognized answer, so Click prompts again. This complements the
+argument check in Root Command Group & Bootstrap (Argument encoding).
+
+**Q1/Q3/Q6**: N/A beyond the table above and Input encoding — these are
+Category B (no side effects beyond terminal I/O) helper functions whose
+complete behavior is the table itself; they raise no exceptions of their own
+(a non-matching password, an entry that is not valid UTF-8, or a non-TTY
+condition is communicated via return value, not by raising, so each calling
+command retains full control over its own exact error message per its own
+spec).
 
 ## Testing
 

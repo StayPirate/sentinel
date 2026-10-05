@@ -4159,6 +4159,12 @@ CLI commands MUST be tested against the Output Contract in
   audit event
 - TTY commands verify hidden input, non-TTY rejection, and prompt behavior
   without exposing password material
+- A hidden entry that is not valid UTF-8 — undecodable bytes under strict
+  decoding and lone surrogates under `surrogateescape`, in either the first
+  or the confirmation entry — is rejected with the command's documented
+  message and exit 1, without echoing or logging the entry and without any
+  mutation (`docs/features/platform/cli-infrastructure.md`, Interactive
+  Input Helpers — Input encoding)
 - `--help` at the root, group, and command levels and root `--version` exit 0
   without loading application settings or opening database/Redis connections
 - Every parameter of every registered command declares non-empty help text

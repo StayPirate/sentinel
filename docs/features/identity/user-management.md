@@ -70,7 +70,11 @@ sentinel manage-user create \
 
 The password is collected interactively via a hidden prompt (input is not
 echoed to the terminal, like `sudo`). The prompt asks for the password
-twice for confirmation. If the two entries do not match, the command exits
+twice for confirmation. If an entry is not valid UTF-8, the command exits
+with error: `"Error: Password must be valid UTF-8."` (exit code 1), without
+echoing the entry and before the entries are compared (see
+`docs/features/platform/cli-infrastructure.md`, Interactive Input Helpers —
+Input encoding). If the two entries do not match, the command exits
 with error: `"Error: Passwords do not match."` (exit code 1). This
 command cannot be used non-interactively — a TTY is required. If no TTY
 is detected, prints to stderr `Error: This command requires an
@@ -124,8 +128,8 @@ interactive terminal (password input).` and exits with code 1.
 new password interactively; the operation inherently changes state.
 
 **Exit codes**: 0 on success, 1 on validation error (duplicate user,
-invalid role, full name too long, missing flag), 2 on system error
-(database unreachable).
+invalid role, full name too long, password not valid UTF-8, missing flag),
+2 on system error (database unreachable).
 
 **Output channels**: confirmation message to stdout, all `"Error: ..."`
 messages to stderr.
@@ -547,8 +551,11 @@ sentinel manage-user set-password \
    Management).
 6. Collect the new password interactively via a hidden prompt (input not
    echoed to the terminal, like `sudo`), asking twice for confirmation. If
-   the two entries do not match, exit with error: `"Error: Passwords do
-   not match."` (exit code 1).
+   an entry is not valid UTF-8, exit with error: `"Error: Password must be
+   valid UTF-8."` (exit code 1), without echoing the entry and before the
+   entries are compared (see `docs/features/platform/cli-infrastructure.md`,
+   Interactive Input Helpers — Input encoding). If the two entries do not
+   match, exit with error: `"Error: Passwords do not match."` (exit code 1).
 7. Validate the password length (16-128 characters). If it violates the
    policy, exit with the same exact messages `create` uses for each
    boundary: `"Error: Password must be at least 16 characters."` or
@@ -577,8 +584,9 @@ Helpers): `Password` and `Confirm password`.
 new password interactively; the operation inherently changes state.
 
 **Exit codes**: 0 on success, 1 on validation error (invalid username
-format, user not found, external user, passwords don't match, password
-policy violation), 2 on system error (database unreachable).
+format, user not found, external user, password not valid UTF-8, passwords
+don't match, password policy violation), 2 on system error (database
+unreachable).
 
 **Output channels**: confirmation message to stdout. All `"Error: ..."`
 messages to stderr.

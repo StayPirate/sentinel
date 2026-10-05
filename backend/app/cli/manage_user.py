@@ -25,7 +25,11 @@ from typing import TYPE_CHECKING
 import click
 from email_validator import EmailNotValidError, validate_email
 
-from app.cli._prompts import is_interactive_terminal, prompt_password_with_confirmation
+from app.cli._prompts import (
+    PasswordPromptFailure,
+    is_interactive_terminal,
+    prompt_password_with_confirmation,
+)
 from app.cli._runtime import bootstrap, get_session_factory
 from app.core.enums import Role, UserType
 from app.core.passwords import MAX_PASSWORD_LENGTH, MIN_PASSWORD_LENGTH
@@ -119,6 +123,20 @@ def _normalize_email_or_exit(email: str) -> str:
     return normalized
 
 
+def _prompt_password_or_exit() -> str:
+    """Collect the confirmed password, or exit 1 with the message `create`
+    and `set-password` share for an entry that is not valid UTF-8 or for
+    entries that differ. The entry itself is never echoed."""
+    password = prompt_password_with_confirmation()
+    if password is PasswordPromptFailure.INVALID_ENCODING:
+        click.echo("Error: Password must be valid UTF-8.", err=True)
+        raise SystemExit(1)
+    if password is PasswordPromptFailure.MISMATCH:
+        click.echo("Error: Passwords do not match.", err=True)
+        raise SystemExit(1)
+    return password
+
+
 def _check_full_name_length_or_exit(full_name: str | None) -> None:
     """Exit 1 when a provided `full_name` exceeds `_FULL_NAME_MAX_LENGTH`
     characters, before any session could fail on the column bound."""
@@ -169,10 +187,7 @@ def create(
         )
         raise SystemExit(1)
 
-    password = prompt_password_with_confirmation()
-    if password is None:
-        click.echo("Error: Passwords do not match.", err=True)
-        raise SystemExit(1)
+    password = _prompt_password_or_exit()
 
     if len(password) < MIN_PASSWORD_LENGTH:
         click.echo(
@@ -889,10 +904,7 @@ async def _set_password_flow(
             click.echo(_external_user_password_error_message(username), err=True)
             raise SystemExit(1)
 
-    password = prompt_password_with_confirmation()
-    if password is None:
-        click.echo("Error: Passwords do not match.", err=True)
-        raise SystemExit(1)
+    password = _prompt_password_or_exit()
 
     if len(password) < MIN_PASSWORD_LENGTH:
         click.echo(

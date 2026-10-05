@@ -15,11 +15,13 @@ rather than through `db_session`-based factories.
 from __future__ import annotations
 
 import asyncio
+import signal
+import sys
 from collections.abc import Callable
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID, uuid4
 
 import click
@@ -30,8 +32,9 @@ from redis.exceptions import RedisError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+import app.cli as cli_package
 import app.cli.manage_user as manage_user_module
-from app.cli import cli
+from app.cli import cli, main
 from app.core.enums import IdentityAuditEventType, Role
 from app.core.passwords import verify_password
 from app.core.permissions import role_to_wire
@@ -61,7 +64,7 @@ class _FailingRedisClient:
         return None
 
 
-def _invoke(args: list[str], input: str | None = None, **extra: Any) -> Result:
+def _invoke(args: list[str], input: str | bytes | None = None, **extra: Any) -> Result:
     """Invoke the raw `cli` group with `standalone_mode=False`, mirroring
     exactly how production's `main()` invokes it — see the identical
     helper docstring in `test_main.py`."""
@@ -868,6 +871,125 @@ def test_create_password_mismatch_exits_one(
     assert result.stderr.strip() == "Error: Passwords do not match."
 
 
+_INVALID_UTF8_PASSWORD_ERROR = "Error: Password must be valid UTF-8.\n"
+
+
+def _assert_no_entry_leak(result: Result) -> None:
+    """Neither the decoder message (which names the byte and its position)
+    nor any part of the entry appears in the command output."""
+    for fragment in ("decode", "0xe9", "secr", "position"):
+        assert fragment not in result.output
+
+
+@pytest.mark.integration
+def test_create_undecodable_password_exits_one_before_length_check(
+    monkeypatch: pytest.MonkeyPatch,
+    cli_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The short entry would otherwise fail the 16-character policy: the
+    encoding check comes first, and no user is created."""
+    _inject_session_factory(monkeypatch, cli_session_factory)
+    _allow_tty(monkeypatch)
+    username = "clicreateinvalidutf8"
+
+    result = _invoke(
+        [
+            "manage-user",
+            "create",
+            "--username",
+            username,
+            "--email",
+            f"{username}@example.com",
+        ],
+        input=b"secr\xe9t\nsecr\xe9t\n",
+    )
+
+    assert result.exit_code == 1
+    assert result.stderr == _INVALID_UTF8_PASSWORD_ERROR
+    _assert_no_entry_leak(result)
+    assert asyncio.run(_fetch_user(cli_session_factory, username)) is None
+
+
+@pytest.mark.unit
+def test_create_undecodable_password_through_main_exits_one_without_logging(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Through the real `main()` mapper: a strict-decoding failure inside
+    the hidden prompt no longer reaches the catch-all path, which would log
+    it and exit 2 (cli-infrastructure.md, Interactive Input Helpers —
+    Input encoding)."""
+
+    def _undecodable_prompt(*args: object, **kwargs: object) -> str:
+        return b"secr\xe9t".decode("utf-8")
+
+    _allow_tty(monkeypatch)
+    monkeypatch.setattr(click, "prompt", _undecodable_prompt)
+    mapper_logger = MagicMock()
+    monkeypatch.setattr(cli_package, "logger", mapper_logger)
+    monkeypatch.setattr(
+        manage_user_module,
+        "get_session_factory",
+        lambda: pytest.fail("the command must not access the database"),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "sentinel",
+            "manage-user",
+            "create",
+            "--username",
+            "clicreatemainutf8",
+            "--email",
+            "clicreatemainutf8@example.com",
+        ],
+    )
+    previous_handlers = {
+        signum: signal.getsignal(signum) for signum in (signal.SIGINT, signal.SIGTERM)
+    }
+
+    try:
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+    finally:
+        for signum, handler in previous_handlers.items():
+            if handler is not None:
+                signal.signal(signum, handler)
+
+    assert exc_info.value.code == 1
+    captured = capsys.readouterr()
+    assert captured.err == _INVALID_UTF8_PASSWORD_ERROR
+    assert "decode" not in captured.out
+    mapper_logger.error.assert_not_called()
+
+
+@pytest.mark.integration
+def test_create_undecodable_confirmation_entry_exits_one(
+    monkeypatch: pytest.MonkeyPatch,
+    cli_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    _inject_session_factory(monkeypatch, cli_session_factory)
+    _allow_tty(monkeypatch)
+    username = "clicreateinvalidutf8confirm"
+
+    result = _invoke(
+        [
+            "manage-user",
+            "create",
+            "--username",
+            username,
+            "--email",
+            f"{username}@example.com",
+        ],
+        input=f"{_STRONG_PASSWORD}\n".encode() + b"secr\xe9t-password-123\n",
+    )
+
+    assert result.exit_code == 1
+    assert result.stderr == _INVALID_UTF8_PASSWORD_ERROR
+    _assert_no_entry_leak(result)
+    assert asyncio.run(_fetch_user(cli_session_factory, username)) is None
+
+
 @pytest.mark.integration
 @pytest.mark.parametrize(
     ("password", "expected_message"),
@@ -1482,6 +1604,55 @@ def test_set_password_mismatch_exits_one(
     assert result.exit_code == 1
     assert result.stderr.strip() == "Error: Passwords do not match."
 
+    refreshed = asyncio.run(_fetch_user(cli_session_factory, username))
+    assert refreshed is not None
+    assert refreshed.password_hash == user.password_hash
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("form", ["strict", "surrogateescape"])
+def test_set_password_invalid_utf8_entry_exits_one_without_change(
+    monkeypatch: pytest.MonkeyPatch,
+    cli_session_factory: async_sessionmaker[AsyncSession],
+    cleanup_users_by_username: Callable[..., None],
+    form: str,
+) -> None:
+    """Both forms in which non-UTF-8 terminal input arrives (cli-infrastructure.md,
+    Interactive Input Helpers — Input encoding): undecodable bytes under
+    strict decoding (scripted stdin, decoded strictly by `CliRunner`) and
+    lone surrogates under `surrogateescape`. The password is unchanged and
+    no mutating session opens."""
+    username = f"clisetpwdutf8{form.replace('escape', '')}"
+    cleanup_users_by_username(username)
+    user = asyncio.run(_create_user_directly(cli_session_factory, username=username))
+    sessions = {"n": 0}
+
+    def _counting_factory() -> AsyncSession:
+        sessions["n"] += 1
+        return cli_session_factory()
+
+    monkeypatch.setattr(
+        manage_user_module, "get_session_factory", lambda: _counting_factory
+    )
+    _allow_tty(monkeypatch)
+    if form == "strict":
+        password_input: bytes | None = (
+            b"secr\xe9t-password-123\nsecr\xe9t-password-123\n"
+        )
+    else:
+        password_input = None
+        monkeypatch.setattr(
+            click, "prompt", lambda *args, **kwargs: "secr\udce9t-password-123"
+        )
+
+    result = _invoke(
+        ["manage-user", "set-password", "--username", username], input=password_input
+    )
+
+    assert result.exit_code == 1
+    assert result.stderr == _INVALID_UTF8_PASSWORD_ERROR
+    _assert_no_entry_leak(result)
+    assert sessions["n"] == 1
     refreshed = asyncio.run(_fetch_user(cli_session_factory, username))
     assert refreshed is not None
     assert refreshed.password_hash == user.password_hash
