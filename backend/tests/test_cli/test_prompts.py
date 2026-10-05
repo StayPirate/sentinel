@@ -209,8 +209,15 @@ def test_confirm_unrecognized_answer_reprompts_with_feedback_on_stdout() -> None
 @pytest.mark.unit
 @pytest.mark.parametrize("answers", ["", "maybe\n"], ids=["immediate", "after-retry"])
 def test_confirm_eof_raises_click_abort(answers: str) -> None:
-    with CliRunner().isolation(input=answers), pytest.raises(click.Abort):
-        confirm("Proceed?", default=False)
+    """EOF echoes no line break, so the helper ends the prompt line before
+    `click.Abort` reaches the mapper's `Aborted.`."""
+    with CliRunner().isolation(input=answers) as outstreams:
+        with pytest.raises(click.Abort):
+            confirm("Proceed?", default=False)
+        sys.stdout.flush()
+        output = outstreams[0].getvalue().decode()
+
+    assert output.endswith(f"{_PROMPT_NO_DEFAULT}\n")
 
 
 # Input encoding (cli-infrastructure.md, Interactive Input Helpers): an
@@ -261,7 +268,7 @@ def test_confirm_repeated_invalid_utf8_answers_then_eof_raise_click_abort(
     assert not isinstance(exc_info.value.__context__, UnicodeDecodeError)
     captured = capsys.readouterr()
     assert captured.out == (f"{_PROMPT_NO_DEFAULT}{_RETRY_FEEDBACK}" * 2) + (
-        _PROMPT_NO_DEFAULT
+        f"{_PROMPT_NO_DEFAULT}\n"
     )
     assert captured.err == ""
     for leaked in ("\udce9", "\xe9", "secr", "decode", "0xe9"):
@@ -327,6 +334,6 @@ def test_confirm_incomplete_sequence_then_eof_raises_click_abort(
 
     captured = capsys.readouterr()
     assert captured.out == (
-        f"{_PROMPT_NO_DEFAULT}{_RETRY_FEEDBACK}{_PROMPT_NO_DEFAULT}"
+        f"{_PROMPT_NO_DEFAULT}{_RETRY_FEEDBACK}{_PROMPT_NO_DEFAULT}\n"
     )
     assert "\xe2" not in captured.out

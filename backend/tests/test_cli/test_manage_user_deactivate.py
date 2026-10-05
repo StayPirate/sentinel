@@ -566,8 +566,9 @@ def test_eof_at_prompt_reaches_shared_mapper_as_aborted(
     fake_services: SimpleNamespace,
 ) -> None:
     """Through the real `main()` with `CliRunner`'s scripted stdin: EOF
-    raises `click.Abort`, which the shared mapper reports as `Aborted.`
-    with exit 0, without reaching the mapper's catch-all logger."""
+    raises `click.Abort`, which the shared mapper reports as `Aborted.` on
+    its own line (the helper ends the prompt line) with exit 0, without
+    reaching the mapper's catch-all logger."""
     _allow_tty(monkeypatch)
     mapper_logger = MagicMock()
     monkeypatch.setattr(cli_package, "logger", mapper_logger)
@@ -581,7 +582,8 @@ def test_eof_at_prompt_reaches_shared_mapper_as_aborted(
 
     assert code == 0
     assert (
-        stdout == (_summary("alice.example", 7, 5, 3) + _PROMPT + "Aborted.\n").encode()
+        stdout
+        == (_summary("alice.example", 7, 5, 3) + _PROMPT + "\nAborted.\n").encode()
     )
     assert stderr == b""
     mapper_logger.error.assert_not_called()
@@ -1584,7 +1586,7 @@ def test_repeated_invalid_utf8_answers_then_eof_abort_without_mutation(
         _summary(username, 0, 0, 0)
         + f"{_PROMPT}{_RETRY_FEEDBACK}" * 2
         + _PROMPT
-        + "Aborted.\n"
+        + "\nAborted.\n"
     )
     assert captured.err == ""
     mapper_logger.error.assert_not_called()

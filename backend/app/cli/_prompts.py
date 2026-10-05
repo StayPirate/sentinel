@@ -93,7 +93,10 @@ def confirm(text: str, *, default: bool) -> bool:
     before Click receives any answer, is caught here and answered with the
     same feedback. The answer is never echoed, and the decoder message,
     which names the offending byte, never reaches the shared exception
-    mapper. EOF still ends the prompt through `click.Abort`.
+    mapper. EOF still ends the prompt through `click.Abort`, after ending
+    the prompt line: EOF echoes no line break, so without it the mapper's
+    `Aborted.` would follow the prompt on the same line (Click does the
+    same for hidden prompts).
     """
     while True:
         try:
@@ -101,6 +104,9 @@ def confirm(text: str, *, default: bool) -> bool:
         except UnicodeDecodeError:
             _discard_pending_terminal_input()
             click.echo("Error: invalid input")
+        except click.Abort:
+            click.echo()
+            raise
 
 
 def _discard_pending_terminal_input() -> None:
