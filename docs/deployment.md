@@ -576,6 +576,17 @@ Base image freshness against known vulnerabilities is monitored
 separately by the weekly Trivy scan — see Image Vulnerability
 Monitoring below.
 
+**uv image pinning.** The `builder` stage copies the `uv` binary from
+`ghcr.io/astral-sh/uv`, referenced by both tag and image-index digest
+(`ghcr.io/astral-sh/uv:<version>@sha256:...`) for the same reason as the
+base image: `uv` installs every package that reaches the runtime
+virtual environment, so a moved tag must not change the build input.
+The tag MUST match the `version:` input of every `astral-sh/setup-uv`
+step in the workflows. Renovate's `dockerfile`
+manager updates the tag and digest together, and a `packageRule` in
+`renovate.jsonc` groups that update with the workflow `version:` inputs
+into a single PR so CI and the image never diverge.
+
 **Test code exclusion.** The runtime image MUST NOT contain test code.
 `backend/tests/` is excluded by `.dockerignore` and is never copied
 into any Dockerfile stage. No runtime environment variable, alternate
