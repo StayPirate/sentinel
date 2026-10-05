@@ -561,8 +561,8 @@ class TestTicketLockRevalidation:
         other_va = await identity_world.identity_user(
             manual=[Role.VULNERABILITY_ANALYST], prefix="carol.va"
         )
-        # Session B holds the first candidate in UUID order, so A blocks on
-        # it before locking the second.
+        # Session B holds the first candidate in UUID order; A's single
+        # ordered `FOR UPDATE` over both candidates blocks on it.
         held_id, other_id = sorted(uuid.uuid4() for _ in range(2))
         held = await _assigned_ticket_with_id(identity_world, held_id, target)
         other = await _assigned_ticket_with_id(identity_world, other_id, target)
