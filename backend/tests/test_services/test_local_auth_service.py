@@ -625,8 +625,11 @@ class TestAuthenticateLocalUser:
         but before the locked revalidation: the module's
         `create_session` reference is wrapped so the conflicting
         active-status update happens, then the real locked revalidation
-        runs. No `deactivate_user()` workflow is implemented (it is out of
-        scope), so a controlled database operation stands in for it."""
+        runs. A controlled same-transaction database operation stands in
+        for the deactivation so that these single-session tests isolate the
+        login mapping; the real `deactivate_user()` committed in an
+        independent session is covered in
+        `tests/test_services/test_deactivate_user_atomicity.py`."""
         real_create = session_service.create_session
 
         async def _create_after_deactivation(

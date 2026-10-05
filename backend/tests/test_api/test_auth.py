@@ -400,11 +400,14 @@ class TestLogin:
         local_user_factory: Callable[..., Awaitable[tuple[User, str]]],
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """A valid password whose Session creation observes a committed
-        deactivation (after the step-7 pre-check) returns the same generic
-        401 body as every other failure and leaves the lockout counter in
-        place — no successful-login clear is registered (see
-        local-authentication.md, step 11)."""
+        """A valid password whose Session creation observes a deactivation
+        (after the step-7 pre-check) returns the same generic 401 body as
+        every other failure and leaves the lockout counter in place — no
+        successful-login clear is registered (see local-authentication.md,
+        step 11). A same-transaction active-status update stands in for the
+        deactivation; the real `deactivate_user()` committed in an
+        independent session is covered in
+        `tests/test_services/test_deactivate_user_atomicity.py`."""
         user, password = await local_user_factory()
         username = user.username
         real_create = session_service.create_session

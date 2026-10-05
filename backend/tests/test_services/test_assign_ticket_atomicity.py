@@ -19,8 +19,11 @@ Owning specifications:
 The single-session behavior of `assign_ticket()` is covered by
 `tests/test_services/test_assign_ticket.py`; this module adds only what
 needs independent sessions. The target-User lifecycle writer is simulated
-by its documented `FOR NO KEY UPDATE` lock on the User row: the race with
-the real `deactivate_user()` is deferred to M4.1 and is not exercised here.
+by its documented `FOR NO KEY UPDATE` lock on the User row, so these tests
+remain proofs of the assignment side of the lock protocol. The races of the
+real `deactivate_user()` with its identity-local counterparts are covered
+in `tests/test_services/test_deactivate_user_atomicity.py`; the assignment
+race is not repeated there with the real writer.
 
 Committed rows are deleted explicitly at teardown (testing-strategy.md,
 Concurrency Testing). Expected values are transcribed from the

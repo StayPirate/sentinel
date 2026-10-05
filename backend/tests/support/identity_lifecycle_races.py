@@ -3,14 +3,15 @@ tests (manual role mutation in `test_update_roles_atomicity.py`, and the
 lifecycle-writer race matrices built on it).
 
 `IdentityWorld` extends `CommittedWorld` with Users whose role origins are
-chosen per origin, and deletes the Identity audit events that the real
-lifecycle writers commit before its own teardown, which their
-`ON DELETE RESTRICT` foreign keys to `user` would otherwise block
-(testing-strategy.md, Concurrency Testing). `origins()` and
+chosen per origin, and deletes the Identity audit events, Sessions, and API
+keys that the real lifecycle writers commit before its own teardown, which
+their foreign keys to `user` would otherwise block (testing-strategy.md,
+Concurrency Testing). `origins()` and
 `identity_events()` read the role origins and the Identity trail of one
 target User. `add_roles()` and
 `remove_roles()` run the real `update_roles()` in one racing session, so a
-consumer can use the real final VA-origin loss as its lifecycle writer.
+consumer can use the real final VA-origin loss as its lifecycle writer;
+`deactivate()` likewise runs the real `deactivate_user()`.
 
 Expected values in the consumers are transcribed from the specifications;
 nothing here computes an expectation with the module under test.
@@ -26,10 +27,17 @@ from sqlalchemy import delete, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.enums import Role
+from app.models.api_key import ApiKey
 from app.models.identity_audit_event import IdentityAuditEvent
+from app.models.session import Session
 from app.models.user import User
 from app.models.user_role import UserRole
-from app.services.user_service import RoleUpdateResult, update_roles
+from app.services.user_service import (
+    DeactivationResult,
+    RoleUpdateResult,
+    deactivate_user,
+    update_roles,
+)
 from tests.support.suse_cvss_races import CommittedWorld
 
 MANUAL = "_manual"
@@ -42,6 +50,10 @@ EXTERNAL_GROUP = "Example Security Group"
 VA_ROLE_REMOVED = "vulnerability_analyst role removed"
 """The unassignment reason of a manual final VA-origin loss
 (ticket-audit-log.md, Canonical Automatic Comment Vocabulary)."""
+
+USER_DEACTIVATED = "user deactivated"
+"""The unassignment reason of a deactivation (ticket-audit-log.md, Canonical
+Automatic Comment Vocabulary)."""
 
 IdentityEventRow = tuple[
     str, uuid.UUID | None, uuid.UUID | None, str | None, str | None, Any
@@ -106,6 +118,17 @@ class IdentityWorld(CommittedWorld):
                 )
             )
         )
+        await self.session.execute(
+            delete(Session).where(Session.user_id.in_(self.user_ids))
+        )
+        await self.session.execute(
+            delete(ApiKey).where(
+                or_(
+                    ApiKey.user_id.in_(self.user_ids),
+                    ApiKey.revoked_by.in_(self.user_ids),
+                )
+            )
+        )
         await self.session.commit()
         await super().cleanup()
 
@@ -160,6 +183,24 @@ def role_removed(actor: User | None, target: User, wire: str) -> IdentityEventRo
     )
 
 
+def user_deactivated(
+    actor: User | None, target: User, reason: str, source: str | None = None
+) -> IdentityEventRow:
+    """identity-audit-log.md, Event types and detail JSONB Schema Contract:
+    `user_deactivated` (`source` only for external synchronization)."""
+    detail = {"reason": reason}
+    if source is not None:
+        detail["source"] = source
+    return (
+        "user_deactivated",
+        actor.id if actor is not None else None,
+        target.id,
+        "active",
+        "inactive",
+        detail,
+    )
+
+
 async def add_roles(
     session: AsyncSession,
     user: User,
@@ -190,4 +231,20 @@ async def remove_roles(
         user.id,
         remove=list(roles),
         acting_user_id=actor.id if actor is not None else None,
+    )
+
+
+async def deactivate(
+    session: AsyncSession,
+    user: User,
+    reason: str,
+    actor: User | None = None,
+) -> DeactivationResult:
+    """The real `deactivate_user()` for `user` in `session`, left
+    uncommitted."""
+    return await deactivate_user(
+        session,
+        user.id,
+        acting_user_id=actor.id if actor is not None else None,
+        reason=reason,
     )
