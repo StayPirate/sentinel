@@ -439,7 +439,7 @@ class TestAnchorResolution:
         broken = _check(
             tmp_path,
             {
-                "a.md": "[x](b.md#comment) [y](b.md#name)\n",
+                "a.md": "[x](b.md#comment) [y](b.md#name) [z](b.md#real)\n",
                 "b.md": "---\n# name\n---\n# Real\n\n```bash\n# comment\n```\n",
             },
         )
