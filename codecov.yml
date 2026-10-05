@@ -1,0 +1,28 @@
+# Codecov repository configuration. See docs/deployment.md (CI Pipeline,
+# Workflow Conventions, Coverage reporting) for the contract.
+#
+# The codecov/project and codecov/patch statuses are required merge
+# checks on master so that a pull request is not mergeable before its
+# coverage report is visible. They are informational: they always pass,
+# and the only coverage gate remains --cov-fail-under in ci.yml
+# (docs/features/platform/testing-strategy.md, Coverage Policy).
+codecov:
+  # Publish statuses as soon as the upload is processed instead of
+  # waiting for, or failing because of, the other CI checks. With the
+  # defaults, a failing advisory workflow (e.g. renovate-validation.yml)
+  # would turn the required Codecov statuses into errors.
+  require_ci_to_pass: false
+  notify:
+    wait_for_ci: false
+    # Replace the pull request comment with an explicit error when an
+    # upload fails to process, instead of staying silent.
+    notify_error: true
+
+coverage:
+  status:
+    project:
+      default:
+        informational: true
+    patch:
+      default:
+        informational: true

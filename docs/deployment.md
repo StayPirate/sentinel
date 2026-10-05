@@ -351,7 +351,7 @@ they feed in [Environments](#environments).
 
 | Workflow | Trigger | Purpose | Blocking |
 |----------|---------|---------|----------|
-| `ci.yml` | Push to `master`, pull request, manual | Backend quality gates — see `docs/features/platform/testing-strategy.md` (CI Pipeline) for the authoritative gate composition | Yes |
+| `ci.yml` | Push to `master`, pull request, manual | Backend quality gates — see `docs/features/platform/testing-strategy.md` (CI Pipeline) for the authoritative gate composition — and the Codecov coverage upload (see Workflow Conventions, Coverage reporting) | Yes |
 | `pr-metadata.yml` | Pull request opened, edited, reopened, or synchronized | Validates PR title format/length and issue linkage per `docs/conventions.md` (Pull Request Requirements) | Yes |
 | `release-please.yml` | `workflow_run` after a successful CI run on `master` | Creates and updates the Release PR; on merge creates the version tag and GitHub Release | Yes (release path) |
 | `build-images.yml` | `workflow_run` after a successful CI run on `master`; push of a `v*` tag | Builds the backend image once, runs the image smoke and SBOM gates, and publishes the same digest to `ghcr.io`; version-tag runs also publish release SBOM and provenance attestations | Yes (publish gate) |
@@ -530,6 +530,22 @@ supplies its own stack through `docker-compose.smoke.yml` so that the container
 under test reaches its dependencies exactly as it would at runtime — see
 `docs/features/platform/testing-strategy.md` (Image / Container Smoke Testing).
 This harness choice does not change the deployment-agnostic OCI image contract.
+
+**Coverage reporting.** The `backend-test` job of `ci.yml` measures
+coverage and enforces the coverage gate; it retains the resulting report
+as a short-lived workflow artifact and never receives `CODECOV_TOKEN`. A
+separate `Coverage Upload` job uploads that report to Codecov with
+`fail_ci_if_error: true` and a pinned Codecov CLI version (tracked by a
+`renovate.jsonc` custom manager), so a failed upload is a visible red job
+that can be re-run on its own. The repository `codecov.yml` makes the
+resulting `codecov/project` and `codecov/patch` statuses informational —
+they always pass and are never a coverage gate (see
+`docs/features/platform/testing-strategy.md`, Coverage Policy) — and has
+Codecov publish them as soon as the upload is processed rather than
+waiting for, or failing because of, other checks. Both statuses are
+required checks on `master`, so a pull request is not mergeable before its
+coverage report is visible; while Codecov cannot process uploads, merges
+wait until it recovers.
 
 **Shell inside workflows.** Shell embedded in `run:` steps follows the
 Shell Scripting rules in `docs/conventions.md` — including `actionlint`
@@ -1012,11 +1028,10 @@ GitHub App token) with `contents: write`, `issues: write`, and
 be used because tags created by it do not trigger downstream workflows
 (a GitHub Actions limitation to prevent recursive runs).
 
-The `ci.yml` workflow optionally uses a repository secret named
-`CODECOV_TOKEN` for uploading test coverage reports to Codecov. The
-upload step is non-blocking (`fail_ci_if_error: false`) — if the
-secret is not configured, coverage will silently not be uploaded but
-CI will still pass. Obtain the token from
+The `ci.yml` workflow requires a repository secret named
+`CODECOV_TOKEN` for uploading test coverage reports to Codecov. Only the
+`Coverage Upload` job references it, and that job fails when the upload
+fails (see Workflow Conventions, Coverage reporting). Obtain the token from
 [codecov.io](https://codecov.io) after linking the repository.
 
 ---

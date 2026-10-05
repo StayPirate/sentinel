@@ -709,6 +709,9 @@ pass; neither substitutes for the other:
    **95%** (`--cov-fail-under=95`). This prevents untested code from
    entering the codebase silently.
 
+Codecov statuses are informational reports, not a third gate (see CI
+Pipeline below).
+
 ### Why 95%, Not 100%
 
 - Coverage measures **quantity** (lines executed), not **quality**
@@ -1299,6 +1302,13 @@ through the following required gates:
 The advisory `renovate-validation.yml` workflow is documented in
 `docs/deployment.md` (Workflow Inventory and Workflow Conventions). It is
 separate from the required `ci.yml` gates and is not a required merge check.
+
+Uploading the coverage report to Codecov is not a quality gate. The
+`Coverage Upload` job and the informational `codecov/project` and
+`codecov/patch` statuses it produces make the report visible before a pull
+request becomes mergeable; they never pass or fail on coverage values. Their
+contract is owned by `docs/deployment.md` (Workflow Conventions, Coverage
+reporting).
 
 The test execution environment MUST provide PostgreSQL 18 and Redis 8
 instances, exposed to the test harness via `TEST_DATABASE_URL` and

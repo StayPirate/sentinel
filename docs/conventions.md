@@ -1558,7 +1558,9 @@ the implementation branch — unless the combined-PR exception in
 `AGENTS.md` (Guardrail 25) applies.
 
 **No direct pushes to `master`**: all changes arrive via squash merge
-of a reviewed PR. The pre-push hook enforces this locally.
+of a reviewed PR. The pre-push hook enforces this locally; server-side,
+the `master` branch protection requires a pull request with passing
+required status checks and applies to administrators as well.
 
 **No force pushes**: never rewrite published branch history.
 

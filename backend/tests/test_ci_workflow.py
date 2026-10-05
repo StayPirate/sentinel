@@ -16,6 +16,7 @@ each mismatch case.
 
 from __future__ import annotations
 
+import re
 import subprocess
 import textwrap
 from pathlib import Path
@@ -255,6 +256,78 @@ def test_pip_audit_runs_only_when_audit_scope_requires_it() -> None:
     # Untrusted context values reach the script only through env, never by
     # interpolation into the shell command.
     assert "${{" not in scope_step.split("run:", 1)[1]
+
+
+CODECOV_CONFIG_PATH = Path(__file__).resolve().parents[2] / "codecov.yml"
+
+
+def _ci_job(job_id: str) -> str:
+    """Return the text of one top-level job of ci.yml."""
+    workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+    job = workflow.split(f"\n  {job_id}:\n", 1)[1]
+    return re.split(r"\n  [a-z][a-z0-9-]*:\n", job, maxsplit=1)[0]
+
+
+@pytest.mark.unit
+def test_backend_tests_hand_coverage_report_to_upload_job() -> None:
+    # docs/deployment.md (Workflow Conventions, Coverage reporting); issue #823.
+    job = _ci_job("backend-test")
+    retain_step = job.split("- name: Retain coverage report", 1)[1].split("- name:", 1)[
+        0
+    ]
+
+    assert "codecov/codecov-action" not in job
+    assert "if: ${{ !cancelled() }}" in retain_step
+    assert "uses: actions/upload-artifact@" in retain_step
+    assert "name: backend-coverage" in retain_step
+    assert "path: backend/coverage.xml" in retain_step
+    assert "if-no-files-found: error" in retain_step
+
+
+@pytest.mark.unit
+def test_coverage_upload_job_fails_on_error_with_pinned_cli() -> None:
+    job = _ci_job("coverage-upload")
+
+    assert "name: Coverage Upload" in job
+    assert "needs: backend-test" in job
+    assert "if: ${{ !cancelled() }}" in job
+    assert "persist-credentials: false" in job
+    assert "name: backend-coverage" in job
+    assert "uses: codecov/codecov-action@" in job
+    assert "files: backend/coverage.xml" in job
+    assert "fail_ci_if_error: true" in job
+    # The CLI version is an exact release, never "latest", and carries the
+    # hint comment the renovate.jsonc custom manager matches.
+    assert re.search(
+        r"# renovate: datasource=github-releases depName=codecov/codecov-cli\n"
+        r"\s+version: \"v\d+\.\d+\.\d+\"\n",
+        job,
+    )
+
+
+@pytest.mark.unit
+def test_codecov_token_is_scoped_to_coverage_upload_job() -> None:
+    workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+
+    assert workflow.count("secrets.CODECOV_TOKEN") == 1
+    assert "secrets.CODECOV_TOKEN" in _ci_job("coverage-upload")
+
+
+@pytest.mark.unit
+def test_codecov_statuses_are_informational_and_do_not_wait_for_ci() -> None:
+    # Required merge checks must never fail on coverage values nor wait on,
+    # or fail because of, other (possibly advisory) CI checks.
+    config = CODECOV_CONFIG_PATH.read_text(encoding="utf-8")
+    codecov_section = config.split("\ncodecov:\n", 1)[1].split("\ncoverage:\n", 1)[0]
+    status_section = config.split("\ncoverage:\n", 1)[1]
+    project = status_section.split("    project:\n", 1)[1].split("    patch:\n", 1)[0]
+    patch = status_section.split("    patch:\n", 1)[1]
+
+    assert "\n  require_ci_to_pass: false\n" in codecov_section
+    assert "\n    wait_for_ci: false\n" in codecov_section
+    assert "\n    notify_error: true\n" in codecov_section
+    assert "      default:\n        informational: true\n" in project
+    assert "      default:\n        informational: true\n" in patch
 
 
 @pytest.mark.unit
