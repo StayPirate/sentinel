@@ -84,6 +84,14 @@
       ],
       "datasourceTemplate": "docker",
       "depNameTemplate": "renovate/renovate"
+    },
+    {
+      "customType": "regex",
+      "description": "Codecov CLI version pinned through the version: input of codecov/codecov-action, which the github-actions manager does not track",
+      "managerFilePatterns": ["/.github/workflows/ci\\.yml$/"],
+      "matchStrings": [
+        "#\\s*renovate:\\s*datasource=(?<datasource>[a-z-]+)\\s+depName=(?<depName>\\S+)\\s+version:\\s*\"(?<currentValue>[^\"]+)\""
+      ]
     }
   ],
   "packageRules": [
@@ -108,6 +116,11 @@
     {
       "description": "GitHub Actions updates, including with: version inputs (e.g. astral-sh/setup-uv, aquasecurity/trivy-action)",
       "matchManagers": ["github-actions"],
+      "commitMessagePrefix": "ci(deps):"
+    },
+    {
+      "description": "Codecov CLI version used by the ci.yml coverage-upload job",
+      "matchPackageNames": ["codecov/codecov-cli"],
       "commitMessagePrefix": "ci(deps):"
     },
     {

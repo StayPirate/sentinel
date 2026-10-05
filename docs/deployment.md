@@ -351,7 +351,7 @@ they feed in [Environments](#environments).
 
 | Workflow | Trigger | Purpose | Blocking |
 |----------|---------|---------|----------|
-| `ci.yml` | Push to `master`, pull request, manual | Backend quality gates — see `docs/features/platform/testing-strategy.md` (CI Pipeline) for the authoritative gate composition | Yes |
+| `ci.yml` | Push to `master`, pull request, manual | Backend quality gates (see `docs/features/platform/testing-strategy.md`, CI Pipeline, for the authoritative gate composition) and the non-gating Codecov coverage upload (see Workflow Conventions, Coverage reporting) | Yes |
 | `pr-metadata.yml` | Pull request opened, edited, reopened, or synchronized | Validates PR title format/length and issue linkage per `docs/conventions.md` (Pull Request Requirements) | Yes |
 | `release-please.yml` | `workflow_run` after a successful CI run on `master` | Creates and updates the Release PR; on merge creates the version tag and GitHub Release | Yes (release path) |
 | `build-images.yml` | `workflow_run` after a successful CI run on `master`; push of a `v*` tag | Builds the backend image once, runs the image smoke and SBOM gates, and publishes the same digest to `ghcr.io`; version-tag runs also publish release SBOM and provenance attestations | Yes (publish gate) |
@@ -400,11 +400,15 @@ SHA-pinned actions and opens a PR bumping both the SHA and the
 trailing version comment when a new release is published. It also
 tracks `with:` version inputs of commonly used community-maintained
 actions (e.g. `astral-sh/setup-uv`'s `version:` input) — no additional
-configuration is required for either pinning style. Dependency updates
-are managed by the hosted Mend Renovate GitHub App reading `renovate.jsonc`
-from the repository root; no workflow in this repository runs the hosted bot
-or creates its dependency-update PRs. The separate advisory validation
-workflow is described below.
+configuration is required for either pinning style. A `version:` input the
+manager does not support (such as `codecov/codecov-action`'s) is tracked by
+a `renovate.jsonc` custom manager matching a
+`# renovate: datasource=<datasource> depName=<name>` hint comment placed
+directly above it. Dependency updates are managed by the hosted Mend
+Renovate GitHub App reading `renovate.jsonc` from the repository root; no
+workflow in this repository runs the hosted bot or creates its
+dependency-update PRs. The separate advisory validation workflow is
+described below.
 
 `renovate-validation.yml` is a separate, advisory repository check. It runs
 on every pull request rather than maintaining a whitelist of Renovate-managed
@@ -530,6 +534,26 @@ supplies its own stack through `docker-compose.smoke.yml` so that the container
 under test reaches its dependencies exactly as it would at runtime — see
 `docs/features/platform/testing-strategy.md` (Image / Container Smoke Testing).
 This harness choice does not change the deployment-agnostic OCI image contract.
+
+**Coverage reporting.** The `backend-test` job of `ci.yml` measures
+coverage and enforces the coverage gate; it retains the resulting report
+as a seven-day workflow artifact and never receives `CODECOV_TOKEN`. A
+separate `Coverage Upload` job uploads only that report to Codecov with a
+pinned Codecov CLI version (tracked by a `renovate.jsonc` custom manager).
+On a pull request a failed upload fails the job, which can be re-run on its
+own while the artifact is retained. On any other run (a push to `master` or
+a manual run) a failed upload does not fail the run, because
+`release-please.yml` and `build-images.yml` start only after a successful
+CI run on `master` and a Codecov outage must not withhold a release or
+image publication. The repository `codecov.yml`
+makes the resulting `codecov/project` and `codecov/patch` statuses
+informational — they always pass and are never a coverage gate (see
+`docs/features/platform/testing-strategy.md`, Coverage Policy) — and has
+Codecov publish them as soon as the upload is processed rather than
+waiting for, or failing because of, other checks. Both statuses are
+required checks on `master`, so a pull request is not mergeable before its
+coverage report is visible; while Codecov cannot process uploads, merges
+wait until it recovers.
 
 **Shell inside workflows.** Shell embedded in `run:` steps follows the
 Shell Scripting rules in `docs/conventions.md` — including `actionlint`
@@ -1012,11 +1036,10 @@ GitHub App token) with `contents: write`, `issues: write`, and
 be used because tags created by it do not trigger downstream workflows
 (a GitHub Actions limitation to prevent recursive runs).
 
-The `ci.yml` workflow optionally uses a repository secret named
-`CODECOV_TOKEN` for uploading test coverage reports to Codecov. The
-upload step is non-blocking (`fail_ci_if_error: false`) — if the
-secret is not configured, coverage will silently not be uploaded but
-CI will still pass. Obtain the token from
+The `ci.yml` workflow requires a repository secret named
+`CODECOV_TOKEN` for uploading test coverage reports to Codecov. Only the
+`Coverage Upload` job references it (see Workflow Conventions, Coverage
+reporting). Obtain the token from
 [codecov.io](https://codecov.io) after linking the repository.
 
 ---
