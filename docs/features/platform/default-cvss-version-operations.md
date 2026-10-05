@@ -529,11 +529,10 @@ Projection rules:
     projected automatic eligibility change, the projected gate result is the
     highest valid gate-zone status that the exact Analyzed and Resolved
     predicates of `tickets.md` yield, evaluated with the projected CVE
-    severity and the projected effective
-    Product eligibility: the projected automatic result where no manual
-    override applies, and the preserved persisted `eligible` value where
-    `is_eligible_override = true`. Every other gate input is the observed
-    persisted value.
+    severity and the projected effective Product eligibility: the projected
+    automatic result where no manual override applies, and the preserved
+    persisted `eligible` value where `is_eligible_override = true`. Every
+    other gate input is the observed persisted value.
   - Otherwise the projected gate result is the observed persisted status,
     even when the predicates would yield a different result for reasons
     unrelated to the default version.

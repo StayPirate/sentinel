@@ -905,9 +905,11 @@ class TestNoSideEffects:
         tree: TreeBuilder,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """No reconciliation can run without a write or a lock, so the
-        statement assertions also exclude `reconcile_ticket_status()`; the
-        import boundary below keeps it unreachable."""
+        """No write, lock, audit event, assignment, or convergence effect.
+        `reconcile_ticket_status()` is excluded structurally instead of by a
+        spy: the preview module imports no Ticket mutation module
+        (tests/test_architecture/test_cvss_impact_preview_boundaries.py), so
+        a spy on `ticket_mutations` would never be reachable."""
         for status in (NEW, ANALYSIS, RESOLVED, IGNORED):
             await _regressing(cve_with, ticket_factory, tree, status)
         before = await _snapshot(db_session)
