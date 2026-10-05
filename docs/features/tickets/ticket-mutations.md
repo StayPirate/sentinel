@@ -1215,10 +1215,10 @@ acquire a mutation lock, and does not participate in the runner's execution.
   post-commit effect.
 - It does not project Ticket priority; no preview count reflects a priority
   change.
-- A currently `Resolved` Ticket whose projected gate result is `Analyzed` or
-  `Analysis` contributes one regression count. Promotions, demotions of
-  `Analysis` or `Analyzed` Tickets, and no-change evaluations are not separate
-  preview categories, and the preview returns no Ticket-scoped detail.
+- The projected gate result and the regression count follow
+  [default-cvss-version-operations.md](../platform/default-cvss-version-operations.md#projected-impact),
+  which mirrors this function's default-version reconciliation condition. The
+  preview returns no Ticket-scoped detail.
 - Projected Product eligibility uses the current persisted inputs and the
   shared package-model evaluator. A projected boolean is never persisted, and
   an occurrence with `is_eligible_override = true` is reported as a skip

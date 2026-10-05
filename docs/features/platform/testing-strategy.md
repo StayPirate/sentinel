@@ -3789,8 +3789,14 @@ MUST cover the contract in
 
 - a ticketless-CVE population projects severity only
 - every associated Ticket status, with `New` projecting no gate result,
-  gate-zone statuses projecting severity, eligibility, and the highest valid
-  gate result, and `Ignored`/`Duplicated` projecting severity only
+  gate-zone statuses projecting severity, eligibility, and the projected gate
+  result (`default-cvss-version-operations.md`, Projected Impact), and
+  `Ignored`/`Duplicated` projecting severity only
+- unconverged gate-zone Tickets: a `Resolved` Ticket whose gate is already
+  unmet and that has no projected severity or automatic eligibility change
+  projects its persisted status and counts no regression; with such a change
+  it projects the predicate result and counts one regression; an `Analysis` or
+  `Analyzed` Ticket without such a change keeps its persisted status
 - multiple Product occurrences per CVE and per Ticket
 - excluded, EOL, and otherwise non-actionable Products still evaluated for the
   automatic eligibility projection
@@ -3846,7 +3852,9 @@ MUST cover the contract in
 - the preview no-op remains distinct from the manual recalculation operation
 - preview/execution parity owned by `cvss-scoring.md` (Required Tests) for
   the shared resolutions, extended here to effective eligibility, override
-  skips, and the highest valid gate result: for the same persisted inputs,
+  skips, and the projected gate result (`default-cvss-version-operations.md`,
+  Projected Impact), including unconverged gate-zone Tickets: for the same
+  persisted inputs,
   the preview's projection equals the outcomes an effective default-version
   recalculation applies, with no assessment or `CVE.severity` modification
 

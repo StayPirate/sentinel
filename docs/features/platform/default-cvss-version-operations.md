@@ -462,7 +462,7 @@ package, track, Product, or occurrence identifier and no detail collection.
 | `cve_severity_changes` | integer | Evaluated CVEs whose projected unified severity differs from the observed persisted `CVE.severity` |
 | `product_eligibility_changes` | integer | `TicketPackageProduct` occurrences whose projected automatic `eligible` boolean differs from the observed persisted value |
 | `product_eligibility_override_skips` | integer | Applicable occurrences with `is_eligible_override = true` that execution would preserve |
-| `resolved_ticket_regressions` | integer | Tickets observed as `Resolved` whose projected highest valid gate result is `Analysis` or `Analyzed` |
+| `resolved_ticket_regressions` | integer | Tickets observed as `Resolved` whose projected gate result is `Analysis` or `Analyzed`, as defined in [Projected Impact](#projected-impact) |
 
 - The count unit for eligibility is the `TicketPackageProduct` occurrence,
   never the catalog Product. One CVE may produce changes in multiple
@@ -521,13 +521,27 @@ Projection rules:
 - Product threshold and lifecycle inputs follow the authoritative
   package-model evaluator, including its Reactive Support, `NULL`-threshold,
   and `NULL`-lifecycle rules; this contract defines none of them.
-- Gate projection reuses the exact Analyzed and Resolved predicates of
-  `tickets.md`, substituting projected effective Product eligibility for the
-  persisted boolean: the projected automatic result where no manual override
-  applies, and the preserved persisted `eligible` value where
-  `is_eligible_override = true`. It never calls `reconcile_ticket_status()`,
-  never changes a status, and never registers a transaction-local Ticket
-  convergence effect.
+- Gate projection applies only to a Ticket observed as `Analysis`, `Analyzed`,
+  or `Resolved`, and mirrors when execution performs its final reconciliation
+  (`ticket-mutations.md`, `recalculate_cvss_chain()` default-version mode):
+  - When the unit has a projected CVE severity change or at least one
+    projected automatic eligibility change, the projected gate result is the
+    result of the exact Analyzed and Resolved predicates of `tickets.md`,
+    evaluated with the projected CVE severity and the projected effective
+    Product eligibility: the projected automatic result where no manual
+    override applies, and the preserved persisted `eligible` value where
+    `is_eligible_override = true`. Every other gate input is the observed
+    persisted value.
+  - Otherwise the projected gate result is the observed persisted status,
+    even when the predicates would yield a different result for reasons
+    unrelated to the default version.
+  - `resolved_ticket_regressions` counts the Tickets observed as `Resolved`
+    whose projected gate result is `Analysis` or `Analyzed`. Promotions,
+    demotions of `Analysis` or `Analyzed` Tickets, and unchanged results are
+    not separate response categories.
+
+  Gate projection never calls `reconcile_ticket_status()`, never changes a
+  status, and never registers a transaction-local Ticket convergence effect.
 - The preview reads the setting once for the observed value. The proposed
   version is passed explicitly to the pure severity and eligibility
   resolutions; the preview does not read the setting again per unit.
