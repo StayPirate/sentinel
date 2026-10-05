@@ -1,5 +1,5 @@
 """Public user directory, profile, and current-user endpoints, plus the
-admin user mutation endpoints.
+admin user mutation endpoints and the deactivation impact preview.
 
 See `docs/features/identity/user-management.md` (List Users, Get User,
 Admin API endpoints) and `docs/features/identity/authentication.md`
@@ -38,6 +38,8 @@ from app.schemas.user import (
     AdminPasswordResetRequest,
     AdminUserCreateRequest,
     AdminUserUpdateRequest,
+    DeactivationImpactData,
+    DeactivationImpactResponse,
     UserActionDetailData,
     UserActionDetailResponse,
     UserData,
@@ -354,7 +356,7 @@ async def get_user(
 
 
 # ---------------------------------------------------------------------------
-# Admin mutation endpoints
+# Admin mutation endpoints and the deactivation impact preview
 #
 # See `docs/features/identity/user-management.md` (Admin API endpoints):
 # every endpoint requires `manage_users`; every `{user}` path parameter
@@ -816,6 +818,77 @@ async def deactivate_user_admin(
         register_post_commit_callback(db, _purge_sessions)
 
     return UserResponse(data=_serialize_user(result.user))
+
+
+@router.get(
+    "/admin/users/{user}/deactivation-impact",
+    response_model=DeactivationImpactResponse,
+    summary="Get deactivation impact (admin)",
+    description=(
+        "Previews what deactivating a user would affect: non-revoked API "
+        "keys (including expired keys), active sessions, and active-status "
+        "assigned tickets, plus whether the user is the last active admin. "
+        "The values are advisory point-in-time observations. An "
+        "already-inactive user returns zeroed values. Requires the "
+        "'manage_users' capability."
+    ),
+    responses={
+        404: {
+            "model": ErrorResponse,
+            "description": "No user found matching the given UUID or username.",
+        },
+        409: {
+            "model": ErrorResponse,
+            "description": (
+                "Target is an active external user, or the authenticated "
+                "administrator's own account."
+            ),
+        },
+    },
+)
+async def get_deactivation_impact_admin(
+    user: str,
+    principal: Annotated[
+        AuthenticatedPrincipal,
+        Depends(require_capability(Capability.MANAGE_USERS)),
+    ],
+    db: DatabaseSession,
+) -> DeactivationImpactResponse:
+    """Get deactivation impact (admin) — see
+    `docs/features/identity/user-management.md` (Get Deactivation Impact)."""
+    try:
+        target_user = await user_service.resolve_user_identifier(db, user)
+    except UserNotFoundError:
+        raise user_not_found_error() from None
+
+    try:
+        impact = await user_service.get_deactivation_impact(
+            db, target_user.id, acting_user_id=principal.user.id
+        )
+    except ExternalUserStatusReadOnlyError:
+        raise AppError(
+            status_code=status.HTTP_409_CONFLICT,
+            code=ErrorCode.USER_EXTERNAL_STATUS_READONLY,
+            detail="Cannot deactivate external users.",
+        ) from None
+    except SelfDeactivationError:
+        raise AppError(
+            status_code=status.HTTP_409_CONFLICT,
+            code=ErrorCode.USER_SELF_DEACTIVATION,
+            detail="Cannot preview deactivation impact for your own account.",
+        ) from None
+    except UserNotFoundError:
+        raise user_not_found_error() from None
+
+    return DeactivationImpactResponse(
+        data=DeactivationImpactData(
+            already_inactive=impact.already_inactive,
+            is_last_active_admin=impact.is_last_active_admin,
+            api_keys_count=impact.api_keys_count,
+            sessions_count=impact.sessions_count,
+            tickets_count=impact.tickets_count,
+        )
+    )
 
 
 @router.post(

@@ -1240,6 +1240,9 @@ contain `ticket` but which are not Ticket identities: they remain UUIDs
 Endpoints)."""
 _EMBEDDED_TICKET_REFERENCES = {"ticket"}
 """Property names of embedded Ticket reference objects."""
+_TICKET_COUNT_FIELDS = {"tickets_count"}
+"""Integer counts whose names contain `ticket` but which are not Ticket
+identities (user-management.md, Get Deactivation Impact)."""
 _EMBEDDED_TICKET_REFERENCE_SCHEMAS = {
     "TicketPackageRef": {"ticket_id", "status", "severity"},
     "CVEAssociatedTicket": {"ticket_id"},
@@ -1367,7 +1370,12 @@ class TestOpenApiContract:
         _walk_properties(spec, found)
 
         ticket_fields = {name for name, _ in found if "ticket" in name.lower()}
-        assert ticket_fields == _TICKET_IDENTITY_FIELDS | _EMBEDDED_TICKET_REFERENCES
+        assert ticket_fields == (
+            _TICKET_IDENTITY_FIELDS | _EMBEDDED_TICKET_REFERENCES | _TICKET_COUNT_FIELDS
+        )
+        for name, schema in found:
+            if name in _TICKET_COUNT_FIELDS:
+                assert schema["type"] == "integer", name
         for name, schema in found:
             if name in _EMBEDDED_TICKET_REFERENCES:
                 refs = [

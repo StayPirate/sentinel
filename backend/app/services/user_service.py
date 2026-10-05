@@ -8,9 +8,10 @@ reset and lockout-counter clearing. `update_roles()` owns manual
 (`_manual`) role mutation, with the identity-owned Ticket unassignment
 helpers it composes on final `vulnerability_analyst` origin loss.
 `deactivate_user()` revokes API keys, invalidates Sessions, marks the User
-inactive, and unassigns active Tickets in one caller-owned transaction.
-The bulk role-mapping operations remain out of scope and are added when
-their owning work item is implemented. `resolve_user_identifier()`
+inactive, and unassigns active Tickets in one caller-owned transaction;
+`get_deactivation_impact()` is its read-only advisory preview. The bulk
+role-mapping operations remain out of scope and are added when their
+owning work item is implemented. `resolve_user_identifier()`
 and `get_user_roles()` back the shared authentication/authorization
 dependencies. `list_users()` and `get_user()` provide the paginated
 directory and full profile reads; `get_user_by_username()` is the
@@ -64,10 +65,11 @@ from app.core.enums import (
 from app.core.exceptions import ServiceError, UserNotFoundError
 from app.core.passwords import PasswordValidationError, hash_password, validate_password
 from app.core.permissions import role_to_wire
+from app.models.session import Session
 from app.models.ticket import Ticket
 from app.models.user import User
 from app.models.user_role import UserRole
-from app.services.api_key_service import revoke_all_user_keys
+from app.services.api_key_service import count_non_revoked_keys, revoke_all_user_keys
 from app.services.identity_audit_log import IdentityAuditLog
 from app.services.local_auth_service import clear_login_attempts
 from app.services.session_service import invalidate_user_sessions
@@ -280,6 +282,24 @@ class DeactivationResult:
     user: User
     deactivated: bool
     invalidated_session_ids: list[UUID]
+
+
+@dataclass(frozen=True)
+class DeactivationImpact:
+    """Data returned by `get_deactivation_impact()`.
+
+    See `docs/features/identity/user-service.md`
+    (`get_deactivation_impact()`). When `already_inactive` is true every
+    other field is zeroed. The counts are what a deactivation would affect
+    at observation time: non-revoked API keys (including expired ones),
+    active Sessions, and active-status assigned Tickets.
+    """
+
+    already_inactive: bool
+    is_last_active_admin: bool
+    api_keys_count: int
+    sessions_count: int
+    tickets_count: int
 
 
 @dataclass(frozen=True)
@@ -571,6 +591,116 @@ async def get_user_by_username(session: AsyncSession, username: str) -> User:
     if user_id is None:
         raise UserNotFoundError()
     return await _load_user_profile(session, user_id)
+
+
+async def get_deactivation_impact(
+    session: AsyncSession,
+    user_id: UUID,
+    *,
+    acting_user_id: UUID | None,
+) -> DeactivationImpact:
+    """Preview what `deactivate_user()` would affect for one User.
+
+    Q1: `user_id` identifies the target; `acting_user_id` is the
+    authenticated administrator for API callers and `None` for CLI and
+    other system callers, which are exempt from the external-status and
+    self guards.
+
+    Q2 (classified in the same order as `deactivate_user()`): a missing
+    target raises `UserNotFoundError`; an already-inactive target, local or
+    external, returns the zeroed result without evaluating the guards below
+    or reading any counted resource; an active external target with an
+    actor UUID raises `ExternalUserStatusReadOnlyError`; an active
+    self-target raises `SelfDeactivationError`.
+
+    Q3: reads the target without a lock, then observes, each in its own
+    query: non-revoked API keys including expired ones
+    (`api_key_service.count_non_revoked_keys()`), active Sessions, Tickets
+    in `New`, `Analysis`, or `Analyzed` assigned to the target, and whether
+    the target holds Admin through any origin while no other active User
+    does. The values are independent advisory observations, not one
+    snapshot (user-service.md, `get_deactivation_impact()`, Advisory
+    consistency). Explicit Ticket grants and package-maintainer rows are
+    never observed: deactivation retains them.
+
+    Q4: none — no audit event, database mutation, reservation, or Redis
+    operation.
+
+    Q5: read-only and repeatable; nothing is remembered between calls.
+
+    Q6: propagates `UserNotFoundError`, `ExternalUserStatusReadOnlyError`,
+    `SelfDeactivationError`, and any database or
+    `count_non_revoked_keys()` exception unchanged.
+    """
+    user = (
+        await session.execute(
+            select(User)
+            .where(User.id == user_id)
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+    if user is None:
+        raise UserNotFoundError()
+
+    if not user.active:
+        return DeactivationImpact(
+            already_inactive=True,
+            is_last_active_admin=False,
+            api_keys_count=0,
+            sessions_count=0,
+            tickets_count=0,
+        )
+
+    if user.external_id is not None and acting_user_id is not None:
+        raise ExternalUserStatusReadOnlyError()
+    if acting_user_id is not None and acting_user_id == user.id:
+        raise SelfDeactivationError()
+
+    api_keys_count = await count_non_revoked_keys(session, user.id)
+    sessions_count = (
+        await session.execute(
+            select(func.count())
+            .select_from(Session)
+            .where(Session.user_id == user.id, Session.is_active.is_(True))
+        )
+    ).scalar_one()
+    tickets_count = (
+        await session.execute(
+            select(func.count())
+            .select_from(Ticket)
+            .where(
+                Ticket.assignee_id == user.id,
+                Ticket.status.in_(sorted(_UNASSIGNABLE_STATUSES)),
+            )
+        )
+    ).scalar_one()
+    other_active_admin = (
+        select(UserRole.user_id)
+        .join(User, User.id == UserRole.user_id)
+        .where(
+            UserRole.role == Role.ADMIN.value,
+            UserRole.user_id != user.id,
+            User.active.is_(True),
+        )
+    )
+    is_last_active_admin = (
+        await session.execute(
+            select(
+                exists().where(
+                    UserRole.user_id == user.id, UserRole.role == Role.ADMIN.value
+                )
+                & ~exists(other_active_admin)
+            )
+        )
+    ).scalar_one()
+
+    return DeactivationImpact(
+        already_inactive=False,
+        is_last_active_admin=is_last_active_admin,
+        api_keys_count=api_keys_count,
+        sessions_count=sessions_count,
+        tickets_count=tickets_count,
+    )
 
 
 def _normalize_username(username: str) -> str:

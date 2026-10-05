@@ -289,3 +289,22 @@ class UserActionDetailResponse(BaseModel):
     `POST /api/v1/admin/users/{user}/unlock`."""
 
     data: UserActionDetailData
+
+
+class DeactivationImpactData(BaseModel):
+    """The deactivation preview (`user-management.md`, Get Deactivation
+    Impact): the five fields of `user_service.DeactivationImpact`. Explicit
+    Ticket grants and package-maintainer associations are intentionally
+    absent because deactivation retains them."""
+
+    already_inactive: bool
+    is_last_active_admin: bool
+    api_keys_count: int
+    sessions_count: int
+    tickets_count: int
+
+
+class DeactivationImpactResponse(BaseModel):
+    """Response body for `GET /api/v1/admin/users/{user}/deactivation-impact`."""
+
+    data: DeactivationImpactData

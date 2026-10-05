@@ -79,3 +79,23 @@ def prompt_password_with_confirmation(
     if password != confirmation:
         return PasswordPromptFailure.MISMATCH
     return password
+
+
+def confirm(text: str, *, default: bool) -> bool:
+    """Ask a yes/no question through Click's native `click.confirm()`.
+
+    The calling command owns `text` and `default`. An unrecognized answer
+    repeats the prompt after Click's `Error: invalid input` feedback on
+    stdout. An answer that is not valid UTF-8 is an unrecognized answer
+    (Interactive Input Helpers — Input encoding): Click itself rejects lone
+    surrogates (`surrogateescape`), while a strict-decoding failure, raised
+    before Click receives any answer, is caught here and answered with the
+    same feedback. The answer is never echoed, and the decoder message,
+    which names the offending byte, never reaches the shared exception
+    mapper. EOF still ends the prompt through `click.Abort`.
+    """
+    while True:
+        try:
+            return click.confirm(text, default=default)
+        except UnicodeDecodeError:
+            click.echo("Error: invalid input")
