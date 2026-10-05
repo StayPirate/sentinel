@@ -26,9 +26,15 @@ from typing import Any
 TerminalEntry = bytes | signal.Signals
 
 
+_MAX_READS_AT_EOF = 5
+"""A prompt that ends at EOF reads it once or twice; a prompt that keeps
+reading is stuck, so the test fails instead of hanging."""
+
+
 class _CanonicalModeTerminal(io.RawIOBase):
     def __init__(self, entries: tuple[TerminalEntry, ...]) -> None:
         self._entries = deque(entries)
+        self._reads_at_eof = 0
 
     def readable(self) -> bool:
         return True
@@ -38,6 +44,9 @@ class _CanonicalModeTerminal(io.RawIOBase):
 
     def readinto(self, buffer: Any) -> int:
         if not self._entries:
+            self._reads_at_eof += 1
+            if self._reads_at_eof > _MAX_READS_AT_EOF:
+                raise AssertionError("the prompt keeps reading after EOF")
             return 0
         entry = self._entries.popleft()
         if isinstance(entry, signal.Signals):
