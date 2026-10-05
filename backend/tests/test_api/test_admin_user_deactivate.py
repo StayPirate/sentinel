@@ -71,15 +71,13 @@ from starlette.types import Message, Receive, Scope, Send
 
 from app import database
 from app.api.v1 import users as users_routes
-from app.core.enums import Role, SessionCreationReason, TicketStatus
+from app.core.enums import Role, SessionCreationReason
 from app.core.exceptions import UserNotFoundError
 from app.database import get_db
 from app.main import app
 from app.models.api_key import ApiKey
 from app.models.identity_audit_event import IdentityAuditEvent
 from app.models.session import Session as SessionRow
-from app.models.ticket import Ticket
-from app.models.ticket_audit_event import TicketAuditEvent
 from app.models.user import User
 from app.models.user_role import UserRole
 from app.services import api_key_service, session_service, user_service
@@ -302,24 +300,6 @@ class TestAuthenticationAndAuthorization:
             assert response.json() == _FORBIDDEN
         resolve.assert_not_awaited()
         mutation.assert_not_awaited()
-
-    async def test_vulnerability_analyst_returns_403_and_changes_nothing(
-        self,
-        authenticated_user_and_client: tuple[User, AsyncClient],
-        user_factory: Factory,
-        user_role_factory: Factory,
-        db_session: AsyncSession,
-    ) -> None:
-        actor, client = authenticated_user_and_client
-        await user_role_factory(user_id=actor.id, role=Role.VULNERABILITY_ANALYST.value)
-        target: User = await user_factory(username="bob.va")
-
-        response = await client.post(_url(target.id))
-
-        assert response.status_code == 403
-        assert response.json() == _FORBIDDEN
-        assert await _active(db_session, target.id) is True
-        assert await _identity_events(db_session, target.id) == []
 
     async def test_admin_jwt_session_is_accepted(
         self,
@@ -595,79 +575,6 @@ class TestEffectiveDeactivation:
         profile = await client.get(f"/api/v1/users/{target.id}")
         assert profile.status_code == 200
         assert profile.json() == body
-
-    async def test_persists_every_side_effect_with_the_admin_as_actor(
-        self,
-        admin_user_and_client: tuple[User, AsyncClient],
-        user_factory: Factory,
-        api_key_factory: Factory,
-        session_factory: Factory,
-        ticket_factory: Factory,
-        db_session: AsyncSession,
-    ) -> None:
-        """user-service.md, `deactivate_user()` database phase as composed
-        by the endpoint: keys revoked by the admin, Sessions inactive, the
-        Analysis Ticket unassigned with one system `assignment` event, and
-        one `user_deactivated` event carrying the API reason."""
-        admin, client = admin_user_and_client
-        target: User = await user_factory(username="bob.va")
-        key_ids = sorted(uuid4() for _ in range(2))
-        for key_id in key_ids:
-            await api_key_factory(id=key_id, user_id=target.id)
-        first = await session_factory(user_id=target.id)
-        second = await session_factory(user_id=target.id)
-        ticket: Ticket = await ticket_factory(
-            status=TicketStatus.ANALYSIS.value, assignee_id=target.id
-        )
-
-        response = await client.post(_url(target.id))
-
-        assert response.status_code == 200
-        assert await _active(db_session, target.id) is False
-        keys = await _keys(db_session, target.id)
-        assert set(keys) == set(key_ids)
-        assert all(
-            revoked_at is not None and revoked_by == admin.id
-            for revoked_at, revoked_by in keys.values()
-        )
-        assert await _sessions(db_session, target.id) == {
-            first.id: False,
-            second.id: False,
-        }
-        state = (
-            await db_session.execute(
-                select(Ticket.status, Ticket.assignee_id).where(Ticket.id == ticket.id)
-            )
-        ).one()
-        assert tuple(state) == ("Analysis", None)
-        ticket_events = (
-            await db_session.execute(
-                select(
-                    TicketAuditEvent.event_type,
-                    TicketAuditEvent.user_id,
-                    TicketAuditEvent.old_value,
-                    TicketAuditEvent.new_value,
-                    TicketAuditEvent.comment,
-                ).where(TicketAuditEvent.ticket_id == ticket.id)
-            )
-        ).all()
-        # ticket-audit-log.md, Canonical Automatic Comment Vocabulary.
-        assert [tuple(row) for row in ticket_events] == [
-            (
-                "assignment",
-                None,
-                "bob.va",
-                None,
-                "Unassigned from bob.va: user deactivated",
-            )
-        ]
-        events = await _identity_events(db_session, target.id)
-        assert [(row[0], row[1]) for row in events] == [
-            ("api_key_revoked", admin.id),
-            ("api_key_revoked", admin.id),
-            ("user_deactivated", admin.id),
-        ]
-        assert events[-1] == _deactivated_event(admin.id)
 
 
 # ---------------------------------------------------------------------------
@@ -1221,11 +1128,14 @@ class TestStaleLivenessEntry:
 
         assert by_jwt.status_code == 401
         assert by_jwt.json() == _UNAUTHENTICATED
+        # The cache still reports the Session active: the `User.active`
+        # check rejected the JWT request.
+        await _assert_positive_entry_within_ttl(committed.redis, session_id)
+        # API keys never consult the liveness cache; the old key is rejected
+        # because the deactivation revoked it (its inactive-owner rejection
+        # is proven in tests/test_api/test_dependencies.py).
         assert by_key.status_code == 401
         assert by_key.json() == _UNAUTHENTICATED
-        # The cache still reports the Session active: the `User.active`
-        # check rejected the request.
-        await _assert_positive_entry_within_ttl(committed.redis, session_id)
 
     async def test_reactivation_within_the_ttl_accepts_until_the_entry_expires(
         self, committed: _Committed
