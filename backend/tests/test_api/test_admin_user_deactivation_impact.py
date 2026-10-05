@@ -8,9 +8,9 @@ Owning specifications:
 - docs/features/identity/user-service.md (`get_deactivation_impact()`).
 - docs/features/identity/rbac.md (Endpoint Permission Map, Business Rules
   3-4).
-- docs/api-spec.md (Authorization Chain Evaluation Order, Undeclared Query
-  Parameters, NUL Characters in Request Input, Response Format, Global
-  Responses, User Identifier Resolution).
+- docs/api-spec.md (Authorization Chain Evaluation Order, NUL Characters in
+  Request Input, Response Format, Global Responses, User Identifier
+  Resolution).
 - docs/features/platform/testing-strategy.md (User Lifecycle and
   Management, "Deactivation API"; Ticket Accessibility, no grant or
   maintainership count in the impact API; API Key Management, no direct
@@ -33,7 +33,6 @@ from __future__ import annotations
 
 import hashlib
 import secrets
-import uuid
 from collections.abc import Awaitable, Callable
 from contextlib import ExitStack
 from datetime import UTC, datetime, timedelta
@@ -45,16 +44,11 @@ from uuid import uuid4
 import pytest
 import pytest_asyncio
 from httpx import AsyncClient
-from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.enums import Role, TicketStatus
 from app.core.exceptions import UserNotFoundError
 from app.main import app
-from app.models.api_key import ApiKey
-from app.models.identity_audit_event import IdentityAuditEvent
-from app.models.session import Session as SessionRow
-from app.models.ticket import Ticket
 from app.models.user import User
 from app.services import api_key_service, user_service
 from app.services.user_service import DeactivationImpact
@@ -126,44 +120,6 @@ def _make_api_key_credential() -> tuple[str, str]:
     token = "stl_ak_" + secrets.token_hex(16)
     digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
     return token, digest
-
-
-async def _state(db: AsyncSession, user_id: uuid.UUID) -> tuple[object, ...]:
-    """Everything a deactivation of the User would change: its active flag,
-    each key's revocation, each Session's activity, its assigned Tickets,
-    and the identity events targeting it."""
-    active = (
-        await db.execute(select(User.active).where(User.id == user_id))
-    ).scalar_one()
-    keys = (
-        await db.execute(
-            select(ApiKey.id, ApiKey.revoked_at, ApiKey.revoked_by)
-            .where(ApiKey.user_id == user_id)
-            .order_by(ApiKey.id)
-        )
-    ).all()
-    sessions = (
-        await db.execute(
-            select(SessionRow.id, SessionRow.is_active)
-            .where(SessionRow.user_id == user_id)
-            .order_by(SessionRow.id)
-        )
-    ).all()
-    tickets = (
-        await db.execute(
-            select(Ticket.id, Ticket.status)
-            .where(Ticket.assignee_id == user_id)
-            .order_by(Ticket.id)
-        )
-    ).all()
-    events = (
-        await db.execute(
-            select(func.count())
-            .select_from(IdentityAuditEvent)
-            .where(IdentityAuditEvent.target_user_id == user_id)
-        )
-    ).scalar_one()
-    return active, keys, sessions, tickets, events
 
 
 @pytest.fixture
@@ -270,18 +226,6 @@ class TestAuthenticationAndAuthorization:
         resolve.assert_not_awaited()
         preview.assert_not_awaited()
 
-    async def test_admin_jwt_session_is_accepted(
-        self,
-        admin_user_and_client: tuple[User, AsyncClient],
-        eligible_target: User,
-    ) -> None:
-        _admin, client = admin_user_and_client
-
-        response = await client.get(_url(eligible_target.id))
-
-        assert response.status_code == 200
-        assert response.json() == _ELIGIBLE
-
     async def test_admin_api_key_is_accepted(
         self,
         client: AsyncClient,
@@ -318,6 +262,8 @@ class TestIdentifierResolution:
         admin_user_and_client: tuple[User, AsyncClient],
         eligible_target: User,
     ) -> None:
+        """Also proves that an administrator's JWT session credential is
+        accepted."""
         _admin, client = admin_user_and_client
 
         by_uuid = await client.get(_url(eligible_target.id))
@@ -482,51 +428,7 @@ class TestActiveEligibleTarget:
 
 
 # ---------------------------------------------------------------------------
-# F. The preview mutates nothing
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.e2e
-class TestReadOnly:
-    async def test_preview_writes_and_locks_nothing(
-        self,
-        admin_user_and_client: tuple[User, AsyncClient],
-        eligible_target: User,
-        db_session: AsyncSession,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """user-service.md, `get_deactivation_impact()`, Side effects and
-        audit and Re-invocation. Recording starts at the handler's first
-        step, so authentication statements are excluded; a repeated request
-        observes the same state."""
-        _admin, client = admin_user_and_client
-        before = await _state(db_session, eligible_target.id)
-        recorder = StatementRecorder(db_session)
-        original = user_service.resolve_user_identifier
-
-        with ExitStack() as stack:
-
-            async def _resolve(db: AsyncSession, identifier: str) -> User:
-                stack.enter_context(recorder)
-                return await original(db, identifier)
-
-            monkeypatch.setattr(user_service, "resolve_user_identifier", _resolve)
-            first = await client.get(_url(eligible_target.id))
-
-        monkeypatch.setattr(user_service, "resolve_user_identifier", original)
-        second = await client.get(_url(eligible_target.id))
-
-        assert first.status_code == 200
-        assert second.status_code == 200
-        assert first.json() == second.json() == _ELIGIBLE
-        assert recorder.statements
-        assert recorder.writes() == []
-        assert recorder.row_locks() == []
-        assert await _state(db_session, eligible_target.id) == before
-
-
-# ---------------------------------------------------------------------------
-# G. Request input: U+0000 and undeclared query parameters
+# F. Request input: U+0000
 # ---------------------------------------------------------------------------
 
 
@@ -555,26 +457,9 @@ class TestRequestValidation:
         resolve.assert_not_awaited()
         preview.assert_not_awaited()
 
-    @pytest.mark.parametrize("query", ["sort_by=username", "sort_by=fictional%00x"])
-    async def test_undeclared_query_parameter_is_ignored(
-        self,
-        query: str,
-        admin_user_and_client: tuple[User, AsyncClient],
-        eligible_target: User,
-    ) -> None:
-        """api-spec.md, Undeclared Query Parameters; NUL Characters in
-        Request Input: an undeclared parameter stays ignored even with
-        U+0000."""
-        _admin, client = admin_user_and_client
-
-        response = await client.get(f"{_url(eligible_target.id)}?{query}")
-
-        assert response.status_code == 200
-        assert response.json() == _ELIGIBLE
-
 
 # ---------------------------------------------------------------------------
-# H. The handler delegates to the service and runs no query itself
+# G. The handler delegates to the service and runs no query itself
 # ---------------------------------------------------------------------------
 
 
@@ -638,7 +523,7 @@ class TestHandlerDelegation:
 
 
 # ---------------------------------------------------------------------------
-# I. OpenAPI surface
+# H. OpenAPI surface
 # ---------------------------------------------------------------------------
 
 

@@ -7,7 +7,8 @@ built here behaves like a TTY in canonical mode: every read returns at
 most one scripted line, decoded with the requested error handler
 (`strict` raises `UnicodeDecodeError` for that line only; `surrogateescape`
 yields lone surrogates — docs/features/platform/cli-infrastructure.md,
-Interactive Input Helpers — Input encoding). Exhausted input reads as EOF.
+Interactive Input Helpers — Input encoding), and it reports itself as a
+terminal (`isatty()`). Exhausted input reads as EOF.
 A `signal.Signals` entry raises that signal from the pending read, as an
 operator's Ctrl+C or a process manager would while the prompt waits.
 
@@ -30,6 +31,9 @@ class _CanonicalModeTerminal(io.RawIOBase):
         self._entries = deque(entries)
 
     def readable(self) -> bool:
+        return True
+
+    def isatty(self) -> bool:
         return True
 
     def readinto(self, buffer: Any) -> int:

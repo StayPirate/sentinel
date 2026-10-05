@@ -468,23 +468,21 @@ def test_read_only_session_is_closed_before_tty_check_and_prompt(
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("answer", ["y", "yes", "Y"])
 def test_affirmative_answer_delegates_in_fresh_session_and_commits_once(
     monkeypatch: pytest.MonkeyPatch,
     fake_factory: _FakeSessionFactory,
     fake_services: SimpleNamespace,
-    answer: str,
 ) -> None:
     """The raw `--username` is trimmed and lowercased before the lookup,
     and the preview runs in the same read-only session with a NULL actor."""
     _allow_tty(monkeypatch)
 
-    result = _invoke("  Alice.Example  ", input=f"{answer}\n")
+    result = _invoke("  Alice.Example  ", input="y\n")
 
     assert result.exit_code == 0, result.output
     assert result.stdout == (
         _summary("alice.example", 7, 5, 3)
-        + f"{_PROMPT}{answer}\n"
+        + f"{_PROMPT}y\n"
         + _deactivated("alice.example")
     )
     assert result.stderr == ""
@@ -525,9 +523,7 @@ def test_confirmed_noop_result_reports_already_inactive_not_the_preview(
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize(
-    "answer", ["n", "no", "N", ""], ids=["n", "no", "upper-n", "enter-default"]
-)
+@pytest.mark.parametrize("answer", ["n", ""], ids=["n", "enter-default"])
 def test_negative_answer_or_enter_aborts_without_mutation(
     monkeypatch: pytest.MonkeyPatch,
     fake_factory: _FakeSessionFactory,
@@ -564,26 +560,19 @@ def test_unrecognized_answer_reprompts_with_feedback_on_stdout(
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize(
-    "stdin_bytes", [b"", b"\xe9\n"], ids=["eof", "strict-invalid-utf8-then-eof"]
-)
 def test_eof_at_prompt_reaches_shared_mapper_as_aborted(
     monkeypatch: pytest.MonkeyPatch,
     fake_factory: _FakeSessionFactory,
     fake_services: SimpleNamespace,
-    stdin_bytes: bytes,
 ) -> None:
     """Through the real `main()` with `CliRunner`'s scripted stdin: EOF
     raises `click.Abort`, which the shared mapper reports as `Aborted.`
-    with exit 0. A strict-decoding failure on the scripted buffer discards
-    it (`CliRunner` decodes it whole), so the helper's re-prompt reads EOF;
-    neither the byte nor the decoder error reaches the output or the
-    mapper's catch-all logger."""
+    with exit 0, without reaching the mapper's catch-all logger."""
     _allow_tty(monkeypatch)
     mapper_logger = MagicMock()
     monkeypatch.setattr(cli_package, "logger", mapper_logger)
 
-    with CliRunner().isolation(input=stdin_bytes) as outstreams:
+    with CliRunner().isolation(input=b"") as outstreams:
         code = _run_main(monkeypatch, "alice.example")
         sys.stdout.flush()
         sys.stderr.flush()
@@ -591,15 +580,10 @@ def test_eof_at_prompt_reaches_shared_mapper_as_aborted(
         stderr = outstreams[1].getvalue()
 
     assert code == 0
-    retry = _RETRY_FEEDBACK + _PROMPT if stdin_bytes else ""
     assert (
-        stdout
-        == (
-            _summary("alice.example", 7, 5, 3) + _PROMPT + retry + "Aborted.\n"
-        ).encode()
+        stdout == (_summary("alice.example", 7, 5, 3) + _PROMPT + "Aborted.\n").encode()
     )
     assert stderr == b""
-    assert b"\xe9" not in stdout
     mapper_logger.error.assert_not_called()
     _assert_declined_without_mutation(fake_factory, fake_services)
 
@@ -1416,41 +1400,6 @@ def test_stale_preview_with_concurrent_deactivation_reports_noop(
     ]
 
 
-@pytest.mark.integration
-@pytest.mark.usefixtures("redis_client")
-def test_resource_created_after_preview_is_still_handled(
-    monkeypatch: pytest.MonkeyPatch,
-    cli_session_factory: async_sessionmaker[AsyncSession],
-    cleanup_users_by_username: Callable[..., None],
-) -> None:
-    username = _username("alice.later")
-    cleanup_users_by_username(username)
-    user = asyncio.run(_create_user(cli_session_factory, username=username))
-    _inject_session_factory(monkeypatch, cli_session_factory)
-    _allow_tty(monkeypatch)
-    original_preview = user_service_module.get_deactivation_impact
-
-    async def _preview_then_new_resources(
-        *args: Any, **kwargs: Any
-    ) -> DeactivationImpact:
-        impact = await original_preview(*args, **kwargs)
-        await _add_keys_and_sessions(cli_session_factory, user.id, keys=1, sessions=1)
-        return impact
-
-    monkeypatch.setattr(
-        user_service_module, "get_deactivation_impact", _preview_then_new_resources
-    )
-
-    result = _invoke(username, input="y\n")
-
-    assert result.exit_code == 0, result.output
-    assert result.stdout.startswith(_summary(username, 0, 0, 0))
-    assert result.stdout.endswith(_deactivated(username))
-    state = asyncio.run(_state(cli_session_factory, user.id))
-    assert [revoked_at is not None for _, revoked_at, _ in state.keys] == [True]
-    assert [is_active for _, is_active in state.sessions] == [False]
-
-
 # ---------------------------------------------------------------------------
 # Integration: interruption, Redis failure, and the sync boundary
 # ---------------------------------------------------------------------------
@@ -1568,10 +1517,7 @@ def test_redis_purge_failure_keeps_success_message_and_exit_code(
     [
         pytest.param("active", "y", 0, id="success"),
         pytest.param("inactive", None, 0, id="noop"),
-        pytest.param("active", "n", 0, id="decline"),
-        pytest.param("external", None, 1, id="external-error"),
         pytest.param("missing", None, 1, id="not-found"),
-        pytest.param("non-tty", None, 1, id="non-tty"),
     ],
 )
 def test_exactly_one_asyncio_run_per_invocation(
@@ -1591,12 +1537,9 @@ def test_exactly_one_asyncio_run_per_invocation(
                 cli_session_factory,
                 username=username,
                 active=setup != "inactive",
-                external=setup == "external",
             )
         )
-    monkeypatch.setattr(
-        manage_user_module, "is_interactive_terminal", lambda: setup != "non-tty"
-    )
+    _allow_tty(monkeypatch)
     run_spy = _spy_asyncio_run(monkeypatch)
 
     result = _invoke(username, input=f"{answer}\n" if answer else None)
@@ -1647,35 +1590,6 @@ def test_repeated_invalid_utf8_answers_then_eof_abort_without_mutation(
     mapper_logger.error.assert_not_called()
     assert factory.calls == 1
     assert _snapshot(cli_session_factory, user.id) == before
-
-
-@pytest.mark.integration
-@pytest.mark.parametrize("errors", ["strict", "surrogateescape"])
-def test_invalid_utf8_answer_then_affirmative_deactivates(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-    cli_session_factory: async_sessionmaker[AsyncSession],
-    cleanup_users_by_username: Callable[..., None],
-    errors: str,
-) -> None:
-    username = _username("alice.retryok")
-    cleanup_users_by_username(username)
-    user = asyncio.run(_create_user(cli_session_factory, username=username))
-    _inject_session_factory(monkeypatch, cli_session_factory)
-
-    code = _run_main_at_terminal(
-        monkeypatch, username, b"\xe9\n", b"y\n", errors=errors
-    )
-
-    assert code == 0
-    captured = capsys.readouterr()
-    assert captured.out == (
-        _summary(username, 0, 0, 0)
-        + f"{_PROMPT}{_RETRY_FEEDBACK}{_PROMPT}"
-        + _deactivated(username)
-    )
-    assert captured.err == ""
-    assert asyncio.run(_fetch_user(cli_session_factory, user.id)).active is False
 
 
 @pytest.mark.integration

@@ -9,6 +9,7 @@ message, output channel, and exit code.
 
 from __future__ import annotations
 
+import io
 import sys
 from enum import Enum
 
@@ -98,4 +99,30 @@ def confirm(text: str, *, default: bool) -> bool:
         try:
             return click.confirm(text, default=default)
         except UnicodeDecodeError:
+            _discard_pending_terminal_input()
             click.echo("Error: invalid input")
+
+
+def _discard_pending_terminal_input() -> None:
+    """Give a terminal stdin a fresh decoder after a strict-decoding failure.
+
+    When stdin is not read through the interpreter's line editor (for
+    example because stdout is redirected), `input()` reads through the
+    `sys.stdin` text wrapper, whose incremental decoder keeps an incomplete
+    multibyte sequence after raising. Every later answer, and EOF, would
+    then fail again. The rejected line has already been consumed, so the
+    wrapper is replaced by one with the same settings over the same
+    terminal buffer. A non-terminal stream is left untouched: its wrapper
+    may hold read-ahead input that a new wrapper would lose.
+    """
+    stream = sys.stdin
+    if not isinstance(stream, io.TextIOWrapper) or not stream.isatty():
+        return
+    encoding, errors = stream.encoding, stream.errors
+    line_buffering = stream.line_buffering
+    sys.stdin = io.TextIOWrapper(
+        stream.detach(),
+        encoding=encoding,
+        errors=errors,
+        line_buffering=line_buffering,
+    )

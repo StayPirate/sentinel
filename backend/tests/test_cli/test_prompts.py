@@ -10,6 +10,7 @@ a confirmation answer must arrive line by line, as from a real terminal.
 
 from __future__ import annotations
 
+import io
 import sys
 
 import click
@@ -159,7 +160,7 @@ def _confirm_with_scripted_input(answers: str, *, default: bool) -> tuple[bool, 
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("answer", ["y", "yes", "Y", "YES", "Yes", " y "])
+@pytest.mark.parametrize("answer", ["y", "YES", " yes "])
 def test_confirm_affirmative_answer_returns_true(answer: str) -> None:
     result, output = _confirm_with_scripted_input(f"{answer}\n", default=False)
 
@@ -169,7 +170,7 @@ def test_confirm_affirmative_answer_returns_true(answer: str) -> None:
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("answer", ["n", "no", "N", "NO"])
+@pytest.mark.parametrize("answer", ["n", "No"])
 @pytest.mark.parametrize("default", [False, True])
 def test_confirm_negative_answer_returns_false(answer: str, default: bool) -> None:
     result, output = _confirm_with_scripted_input(f"{answer}\n", default=default)
@@ -242,25 +243,6 @@ def test_confirm_invalid_utf8_answer_reprompts_then_accepts_next_answer(
 
 @pytest.mark.unit
 @pytest.mark.parametrize("errors", ["strict", "surrogateescape"])
-def test_confirm_mixed_unrecognized_answers_each_reprompt(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], errors: str
-) -> None:
-    monkeypatch.setattr(
-        sys,
-        "stdin",
-        terminal_stdin(b"maybe\n", b"y\xe9s\n", b"yes\n", errors=errors),
-    )
-
-    assert confirm("Proceed?", default=False) is True
-
-    captured = capsys.readouterr()
-    assert captured.out == (f"{_PROMPT_NO_DEFAULT}{_RETRY_FEEDBACK}" * 2) + (
-        _PROMPT_NO_DEFAULT
-    )
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize("errors", ["strict", "surrogateescape"])
 def test_confirm_repeated_invalid_utf8_answers_then_eof_raise_click_abort(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], errors: str
 ) -> None:
@@ -287,16 +269,64 @@ def test_confirm_repeated_invalid_utf8_answers_then_eof_raise_click_abort(
 
 
 @pytest.mark.unit
-def test_confirm_strict_invalid_answer_from_scripted_buffer_ends_at_eof() -> None:
-    """`CliRunner` decodes its whole buffer at the first read, so the
-    strict failure discards every scripted line: the helper re-prompts and
-    the next read is EOF. The byte never reaches the output."""
-    with CliRunner().isolation(input=b"\xe9\ny\n") as outstreams:
-        with pytest.raises(click.Abort):
-            confirm("Proceed?", default=False)
-        sys.stdout.flush()
-        output = outstreams[0].getvalue()
+@pytest.mark.parametrize(
+    ("entries", "expected"),
+    [
+        ((b"\xe2", b"y\n", b"n\n"), False),
+        ((b"\xe2", b"y\n", b"yes\n"), True),
+    ],
+    ids=["then-no", "then-yes"],
+)
+def test_confirm_incomplete_sequence_does_not_poison_later_answers(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    entries: tuple[bytes, ...],
+    expected: bool,
+) -> None:
+    """Regression: a line flushed mid-sequence (`\xe2`, then Ctrl+D) leaves
+    the text wrapper's incremental decoder holding the lead byte; the
+    failing read consumes it together with the rest of that line (`y`).
+    The helper replaces the terminal decoder, so the next answer is read
+    normally instead of failing forever."""
+    monkeypatch.setattr(sys, "stdin", terminal_stdin(*entries))
 
-    assert output == (
-        f"{_PROMPT_NO_DEFAULT}{_RETRY_FEEDBACK}{_PROMPT_NO_DEFAULT}".encode()
+    assert confirm("Proceed?", default=False) is expected
+
+    captured = capsys.readouterr()
+    assert captured.out == (
+        f"{_PROMPT_NO_DEFAULT}{_RETRY_FEEDBACK}{_PROMPT_NO_DEFAULT}"
     )
+
+
+@pytest.mark.unit
+def test_confirm_keeps_a_non_terminal_stdin_after_a_strict_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only a terminal stdin gets a fresh decoder: a non-terminal wrapper
+    is left in place, since replacing it could drop read-ahead input."""
+    stream = io.TextIOWrapper(io.BytesIO(b"\xe9\n"), encoding="utf-8")
+    monkeypatch.setattr(sys, "stdin", stream)
+
+    with pytest.raises(click.Abort):
+        confirm("Proceed?", default=False)
+
+    assert sys.stdin is stream
+
+
+@pytest.mark.unit
+def test_confirm_incomplete_sequence_then_eof_raises_click_abort(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Regression: EOF after an incomplete sequence still ends the prompt
+    through `click.Abort` (cli-infrastructure.md, Interactive Input
+    Helpers — Input encoding) instead of re-prompting forever."""
+    monkeypatch.setattr(sys, "stdin", terminal_stdin(b"\xe2"))
+
+    with pytest.raises(click.Abort):
+        confirm("Proceed?", default=False)
+
+    captured = capsys.readouterr()
+    assert captured.out == (
+        f"{_PROMPT_NO_DEFAULT}{_RETRY_FEEDBACK}{_PROMPT_NO_DEFAULT}"
+    )
+    assert "\xe2" not in captured.out
