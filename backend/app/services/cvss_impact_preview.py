@@ -364,9 +364,13 @@ def _page_statement(
         .scalar_subquery()
     )
     evaluated = Ticket.status.in_([status.value for status in _EVALUATED_STATUSES])
-    bounds: list[ColumnElement[bool]] = [CVE.id <= mark]
-    if last_id is not None:
-        bounds.append(CVE.id > last_id)
+
+    def _bounds(column: Any) -> list[ColumnElement[bool]]:
+        bounds: list[ColumnElement[bool]] = [column <= mark]
+        if last_id is not None:
+            bounds.append(column > last_id)
+        return bounds
+
     return (
         select(
             CVE.id,
@@ -376,8 +380,11 @@ def _page_statement(
             case((evaluated, tracks), else_=None).label("tracks"),
             case((evaluated, occurrences), else_=None).label("occurrences"),
         )
-        .outerjoin(Ticket, Ticket.cve_id == CVE.id)
-        .where(and_(*bounds))
+        # The page bounds are repeated on the Ticket join, so a merge join
+        # starts at the page instead of at the beginning of the
+        # `ticket.cve_id` index; the joined rows are unchanged.
+        .outerjoin(Ticket, and_(Ticket.cve_id == CVE.id, *_bounds(Ticket.cve_id)))
+        .where(and_(*_bounds(CVE.id)))
         .order_by(CVE.id)
         .limit(_PAGE_SIZE)
     )
