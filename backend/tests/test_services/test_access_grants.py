@@ -17,11 +17,12 @@ Owning specifications:
   table; Canonical Mutation and No-Event Matrix: "Confidentiality toggle
   or manual access grant/revoke" and "User deactivation or reactivation
   with retained Ticket grants"; Testing Requirements 1-7, 12
-  (reactivation grant retention), and 23 (single-session part: true
+  (deactivation and reactivation grant retention), and 23 (single-session part: true
   locked pre-state values)).
 - docs/features/identity/user-service.md (`resolve_user_identifier()`;
-  `reactivate_user()`; Access grant concurrent with user lifecycle or
-  rename).
+  Inactive User Management Principle, Deactivation and management;
+  `deactivate_user()`; `reactivate_user()`; Access grant concurrent with
+  user lifecycle or rename).
 - docs/features/platform/testing-strategy.md (Tier Responsibility and
   Proportionality; Ticket Accessibility > Locked mutations and
   Confidentiality and explicit access grants; Audit Trail Testing).
@@ -36,8 +37,12 @@ tier. The model-level duplicate-key backstop is proven by
 target lock mode (`FOR SHARE`, shared private helper) remains asserted by
 `tests/test_services/test_assign_ticket.py::TestLockOrder`.
 
-Deactivation cases (grant retention across `deactivate_user()`) are not
-covered here: that operation does not exist yet.
+Deactivation is covered here only on the grant side: no grant write or
+grant event, and the listing projection of a deactivated grantee and
+grantor. The row snapshot of grants and maintainerships retained across
+deactivation and reactivation is owned by
+`tests/test_services/test_deactivate_user.py::TestDeactivateUserRetention`,
+and the deactivation/grant races by `test_access_grants_atomicity.py`.
 
 Expected values are transcribed from the specifications, never computed
 with the module under test.
@@ -84,7 +89,7 @@ from app.services.ticket_service import (
     set_confidentiality,
 )
 from app.services.ticket_visibility import TicketCaller
-from app.services.user_service import reactivate_user
+from app.services.user_service import deactivate_user, reactivate_user
 from tests.support.database import rollback_test_scope
 from tests.support.ticket_mutations import (
     EventRow,
@@ -1268,3 +1273,93 @@ class TestReactivationRetention:
             _changed(actor, "true", "false"),
             _changed(actor, "false", "true"),
         ]
+
+
+# ---------------------------------------------------------------------------
+# Deactivation retains grants (audit Testing Requirement 12)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+class TestDeactivationRetention:
+    async def test_deactivation_writes_no_grant_and_lists_inactive_profiles(
+        self,
+        db_session: AsyncSession,
+        ticket_factory: TicketFactory,
+        ticket_access_grant_factory: GrantFactory,
+        user_factory: UserFactory,
+        va_user: VAUser,
+    ) -> None:
+        """user-service.md, `deactivate_user()` database phase: no grant row
+        is inserted, updated, or deleted and no grant event is created
+        (ticket-audit-log.md, No-Event Matrix "User deactivation or
+        reactivation with retained Ticket grants"). tickets.md, List Access
+        Grants, and testing-strategy.md: the retained grants then list the
+        deactivated grantee and the deactivated grantor complete, with
+        `active = False`, in the unchanged `granted_at ASC, user_id ASC`
+        order; an active grantee of the same grantor stays active."""
+        admin = await va_user()
+        grantee = await _person(user_factory, "grantee-n", full_name="Grantee N")
+        granter = await _person(user_factory, "granter-n", full_name="Granter N")
+        bystander = await _person(user_factory, "grantee-o")
+        ticket = await ticket_factory(is_confidential=True)
+        await ticket_access_grant_factory(
+            ticket_id=ticket.id,
+            user_id=bystander.id,
+            granted_by_id=granter.id,
+            granted_at=PAST,
+        )
+        await ticket_access_grant_factory(
+            ticket_id=ticket.id,
+            user_id=grantee.id,
+            granted_by_id=granter.id,
+            granted_at=EARLIER,
+        )
+
+        def listed(*, deactivated: bool) -> list[AccessGrantProjection]:
+            by = _profile(
+                granter,
+                username="granter-n",
+                full_name="Granter N",
+                active=not deactivated,
+            )
+            return [
+                AccessGrantProjection(
+                    user=_profile(
+                        grantee,
+                        username="grantee-n",
+                        full_name="Grantee N",
+                        active=not deactivated,
+                    ),
+                    granted_at=EARLIER,
+                    granted_by=by,
+                ),
+                AccessGrantProjection(
+                    user=_profile(
+                        bystander, username="grantee-o", full_name=None, active=True
+                    ),
+                    granted_at=PAST,
+                    granted_by=by,
+                ),
+            ]
+
+        assert await _list(db_session, ticket.id, admin) == listed(deactivated=False)
+
+        with StatementRecorder(db_session) as recorder:
+            for user in (grantee, granter):
+                result = await deactivate_user(
+                    db_session,
+                    user.id,
+                    acting_user_id=admin.id,
+                    reason="fictional offboarding",
+                )
+                assert result.deactivated is True
+
+        assert [w for w in recorder.writes() if "ticket_access_grant" in w] == []
+        assert [s for s in recorder.statements if "ticket_audit_event" in s] == []
+        assert await _grants(db_session, ticket.id) == {
+            (grantee.id, granter.id, EARLIER),
+            (bystander.id, granter.id, PAST),
+        }
+        assert await ticket_events_by_id(db_session, ticket.id) == []
+        assert await _list(db_session, ticket.id, admin) == listed(deactivated=True)

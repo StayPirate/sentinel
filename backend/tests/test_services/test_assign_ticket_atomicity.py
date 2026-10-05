@@ -22,8 +22,13 @@ needs independent sessions. The target-User lifecycle writer is simulated
 by its documented `FOR NO KEY UPDATE` lock on the User row, so these tests
 remain proofs of the assignment side of the lock protocol. The races of the
 real `deactivate_user()` with its identity-local counterparts are covered
-in `tests/test_services/test_deactivate_user_atomicity.py`; the assignment
-race is not repeated there with the real writer.
+in `tests/test_services/test_deactivate_user_atomicity.py`. The
+real-writer assignment races, in both commit orders and for one
+representative of every assignment category, are covered against
+`deactivate_user()` in
+`tests/test_services/test_deactivation_assignment_races.py` and against
+the final manual VA-origin loss (`update_roles()`) in
+`tests/test_services/test_va_role_loss_assignment_races.py`.
 
 Committed rows are deleted explicitly at teardown (testing-strategy.md,
 Concurrency Testing). Expected values are transcribed from the
