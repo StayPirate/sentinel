@@ -172,7 +172,7 @@ uv run pytest -m "not image" -n auto --maxprocesses 8 --max-worker-restart 0
 uv run pytest --cov
 
 # Run specific test file
-uv run pytest tests/api/v1/test_health.py
+uv run pytest tests/test_health.py
 
 # Run tests matching a pattern
 uv run pytest -k "test_create_user"
@@ -200,7 +200,13 @@ their discretion.
 @pytest.mark.unit          # Fast, isolated (no DB, no Redis)
 @pytest.mark.integration   # Tests with real PostgreSQL
 @pytest.mark.e2e           # Full HTTP request/response cycle
+@pytest.mark.system        # Local process system tests (spawn worker/Beat)
+@pytest.mark.image         # OCI artifact tests (require Docker and Compose)
 ```
+
+`system` and `image` tests are excluded from the default `uv run pytest` run.
+The `-m "not image"` invocation in [Running Tests](#running-tests) adds the
+`system` suite; run the `image` suite with `make smoke`.
 
 See [Testing Strategy](docs/features/platform/testing-strategy.md) for the full testing conventions.
 

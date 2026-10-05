@@ -1,4 +1,9 @@
-<p align="center"><img src=".github/assets/banner.svg" alt="Sentinel — Linux Vulnerability Management" width="500"></p>
+<p align="center">
+<picture>
+<source media="(prefers-color-scheme: dark)" srcset=".github/assets/banner-dark.svg">
+<img src=".github/assets/banner.svg" alt="Sentinel — Linux Vulnerability Management" width="500">
+</picture>
+</p>
 
 <p align="center">
 <a href="https://github.com/StayPirate/sentinel/actions/workflows/ci.yml"><img src="https://github.com/StayPirate/sentinel/actions/workflows/ci.yml/badge.svg?branch=master" alt="CI"></a>
@@ -21,18 +26,24 @@
 
 Security update management platform for SUSE and openSUSE-based Linux
 distributions. Sentinel automates CVE tracking, impact analysis, and
-update coordination across multiple maintained distribution versions.
+update coordination across multiple maintained distribution versions,
+following the SUSE maintenance workflow and integrating with SUSE-internal
+services.
 
 ## Overview
 
 ### What Sentinel does
 
-- Ingests CVE data from multiple public and internal sources (NVD, MITRE,
-  Red Hat, GHSA, OSV, CISA KEV, EPSS, Linux Kernel CNA)
+- Ingests CVE data from public sources (NVD, MITRE, Red Hat, GHSA, OSV,
+  CISA KEV, EPSS, Linux Kernel CNA)
 - Creates and manages security tickets from CVE detections
 - Tracks which packages, codestreams, and products are affected
+- Synchronizes the product catalog, lifecycle dates, and CVSS thresholds
+  from SUSE-internal services (SMELT, AIMAAS), and resolves each package's
+  codestreams, products, and maintainers through SMELT
 - Evaluates product eligibility based on CVSS thresholds and lifecycle
-- Detects when security fixes are released via IBS
+- Detects when security fixes are released via IBS, the SUSE-internal build
+  service
 - Provides a REST API for vulnerability analysts, team leads, and automation
 - Offers a CLI for administrative operations
 
@@ -48,18 +59,19 @@ update coordination across multiple maintained distribution versions.
 ```mermaid
 graph TB
     subgraph External Sources
-        NVD[NVD / NIST]
-        MITRE[MITRE cvelistV5]
-        RHSA[Red Hat Security]
-        GHSA[GitHub Advisories]
-        IBS[IBS / OBS]
+        CVE[CVE APIs and feeds<br/>NVD, Red Hat, GHSA, OSV,<br/>CISA KEV, EPSS]
+        GIT[CVE Git repositories<br/>MITRE cvelistV5, Linux Kernel CNA]
+        IBS[IBS]
+        RMQ[IBS RabbitMQ]
         SMELT[SMELT / AIMAAS]
     end
 
     subgraph Sentinel
         API[FastAPI<br/>REST API]
-        Worker[Celery Workers<br/>Fetchers & Tasks]
+        Worker[Celery Worker<br/>Fetchers & Tasks]
+        GitWorker[Git Worker<br/>Git-based Fetchers]
         Beat[Celery Beat<br/>Scheduler]
+        Consumer[IBS RabbitMQ<br/>Consumer]
         CLI[CLI<br/>Admin Commands]
     end
 
@@ -68,26 +80,27 @@ graph TB
         Redis[(Redis 8)]
     end
 
-    NVD & MITRE & RHSA & GHSA --> Worker
-    IBS & SMELT --> Worker
-    Worker --> PG
-    API --> PG
-    CLI --> PG
-    Beat --> Redis
-    Worker --> Redis
-    API --> Redis
+    CVE & IBS & SMELT --> Worker
+    GIT --> GitWorker
+    RMQ & IBS --> Consumer
+    Worker & GitWorker & Consumer & API & CLI --> PG
+    Beat & Worker & GitWorker & Consumer & API & CLI --> Redis
 ```
 
-All runtime processes (API server, Celery worker, git worker, Celery Beat)
-run from a single Docker image with different entrypoints. See
-[docs/architecture.md](docs/architecture.md) for full architectural details.
+All runtime processes (API server, Celery worker, Git worker, Celery Beat,
+and IBS RabbitMQ consumer) run from a single OCI image with different
+entrypoints. See [docs/architecture.md](docs/architecture.md) for the
+architectural decisions and [docs/system-map.md](docs/system-map.md) for
+detailed component and data-flow diagrams.
 
 ## Project Status
 
-![Open Issues](https://img.shields.io/github/issues/StayPirate/sentinel?label=issues%20open&color=orange)
-![Closed Issues](https://img.shields.io/github/issues-closed/StayPirate/sentinel?label=issues%20closed&color=green)
-![Open PRs](https://img.shields.io/github/issues-pr/StayPirate/sentinel?label=PRs%20open&color=orange)
-![Closed PRs](https://img.shields.io/github/issues-pr-closed/StayPirate/sentinel?label=PRs%20closed&color=green)
+<p align="center">
+<img src="https://img.shields.io/github/issues/StayPirate/sentinel?label=issues%20open&color=orange" alt="Open Issues">
+<img src="https://img.shields.io/github/issues-closed/StayPirate/sentinel?label=issues%20closed&color=green" alt="Closed Issues">
+<img src="https://img.shields.io/github/issues-pr/StayPirate/sentinel?label=PRs%20open&color=orange" alt="Open PRs">
+<img src="https://img.shields.io/github/issues-pr-closed/StayPirate/sentinel?label=PRs%20closed&color=green" alt="Closed PRs">
+</p>
 
 Sentinel is in **active pre-1.0 development**.
 The API is not yet considered stable — breaking changes may occur in minor
@@ -95,24 +108,8 @@ version bumps, but `1.0.0` is never selected automatically by a breaking
 commit. Graduation is intentional after the documented criteria are verified.
 See the [Release Process](docs/deployment.md#release-process).
 
-### Feature progress
-
-- [x] **Identity & Access Management** — authentication, RBAC, user
-  management, API keys, identity audit trail
-- [x] **Platform Infrastructure** — health endpoints, logging, HTTP client,
-  system settings, CLI framework, audit trail base
-- [x] **Fetcher Infrastructure** — BaseFetcher lifecycle, registry,
-  bootstrap, generic run_fetcher task; BaseCVEFetcher and BaseGitFetcher pending
-- [ ] **Tickets & CVE Tracking** — ticket lifecycle, CVE ingestion from 8
-  sources, CVSS scoring, severity resolution
-- [ ] **Package Tracking** — product catalog, package model, three orthogonal
-  dimensions, release detection
-- [ ] **External Integrations** — IBS REST client, IBS RabbitMQ consumer
-- [ ] **SSO Authentication** *(deferred)* — OIDC integration
-- [ ] **External Identity Provisioning** *(deferred)* — directory sync
-
-See the [implementation milestones](https://github.com/StayPirate/sentinel/milestones)
-for detailed progress tracking.
+Implementation progress is tracked in the
+[milestones](https://github.com/StayPirate/sentinel/milestones).
 
 ## Verifying Releases
 
@@ -129,13 +126,14 @@ commands.
 | Component | Technology |
 |-----------|------------|
 | Language | Python 3.14 |
-| API Framework | FastAPI |
-| ORM | SQLAlchemy 2.0 (async, asyncpg) |
+| Package Manager | uv |
+| API Framework | FastAPI on uvicorn |
+| ORM | SQLAlchemy (async, asyncpg) |
 | Database | PostgreSQL 18 |
 | Task Queue | Celery with Redis broker |
 | Cache / Coordination | Redis 8 |
 | Migrations | Alembic |
-| Validation | Pydantic v2 |
+| Validation | Pydantic |
 | CLI | Click |
 | HTTP Client | httpx |
 
@@ -144,6 +142,7 @@ commands.
 | Document | Description |
 |----------|-------------|
 | [Architecture](docs/architecture.md) | System design and architectural decisions |
+| [System Map](docs/system-map.md) | Visual overview of components, data model, and data flows |
 | [API Specification](docs/api-spec.md) | REST API conventions, envelope format, errors |
 | [Data Model](docs/data-model.md) | Database schema and relationships |
 | [Configuration](docs/configuration.md) | Environment variables reference |
