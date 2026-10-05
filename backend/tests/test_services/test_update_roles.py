@@ -16,6 +16,7 @@ computes an expectation with the module under test.
 
 from __future__ import annotations
 
+import re
 import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -53,6 +54,7 @@ _ADMIN = "Admin"
 _VA = "Vulnerability Analyst"
 _RA = "Restricted Analyst"
 _ROLE_LOSS_COMMENT = "Unassigned from bob.va: vulnerability_analyst role removed"
+_TICKET_STATEMENT = re.compile(r"\b(?:FROM|JOIN|INTO|UPDATE) ticket\b")
 
 
 def _ordered_ids(count: int) -> list[uuid.UUID]:
@@ -833,6 +835,45 @@ class TestUpdateRolesVaOriginLoss:
         }
         assert await _ticket_events(db_session, [ticket.id]) == []
 
+    @pytest.mark.parametrize(
+        ("role", "stored"),
+        [(Role.ADMIN, _ADMIN), (Role.RESTRICTED_ANALYST, _RA)],
+        ids=["admin", "restricted_analyst"],
+    )
+    async def test_non_va_removal_issues_no_ticket_statement(
+        self,
+        db_session: AsyncSession,
+        user_factory: UserFactory,
+        user_role_factory: UserRoleFactory,
+        ticket_factory: TicketFactory,
+        role: Role,
+        stored: str,
+    ) -> None:
+        """user-service.md, `update_roles()` step 7: only an effective
+        `vulnerability_analyst` deletion reaches the role-loss helper, so
+        removing another manual role from an assigned VA touches no
+        Ticket."""
+        admin = await user_factory(username="alice.admin")
+        target = await user_factory(username="bob.va")
+        await user_role_factory(user_id=target.id, role=_VA)
+        await user_role_factory(user_id=target.id, role=stored)
+        ticket = await ticket_factory(
+            status=TicketStatus.ANALYSIS.value, assignee_id=target.id
+        )
+
+        with StatementRecorder(db_session) as recorder:
+            result = await update_roles(
+                db_session, target.id, remove=[role], acting_user_id=admin.id
+            )
+
+        assert result.removed_roles == [role]
+        assert not any(_TICKET_STATEMENT.search(s) for s in recorder.statements)
+        assert await _origins(db_session, target.id) == {(_VA, _MANUAL)}
+        assert await _states(db_session, [ticket.id]) == {
+            ticket.id: ("Analysis", target.id)
+        }
+        assert await _ticket_events(db_session, [ticket.id]) == []
+
     async def test_final_va_removal_unassigns_only_active_status_tickets(
         self,
         db_session: AsyncSession,
@@ -1014,14 +1055,6 @@ class TestUpdateRolesSelfAdminGuard:
         }
         assert await _ticket_events(db_session, [ticket.id]) == []
 
-    async def test_self_removal_error_does_not_echo_input(self) -> None:
-        """user-service.md, Service Exceptions: `SelfRoleRemovalError`
-        inherits `UserServiceError`; its message is the fixed sanitized
-        detail and echoes no request input."""
-        error = SelfRoleRemovalError()
-        assert isinstance(error, UserServiceError)
-        assert str(error) == "Cannot remove your own final admin role."
-
     async def test_system_actor_may_remove_the_final_admin_origin(
         self,
         db_session: AsyncSession,
@@ -1061,6 +1094,17 @@ class TestUpdateRolesSelfAdminGuard:
         assert await _identity_events(db_session, target.id) == [
             _removed(actor.id, target.id, "admin")
         ]
+
+
+@pytest.mark.unit
+class TestSelfRoleRemovalError:
+    def test_self_role_removal_error_carries_fixed_message(self) -> None:
+        """user-service.md, Service Exceptions: `SelfRoleRemovalError`
+        inherits `UserServiceError`; its message is the fixed sanitized
+        detail."""
+        error = SelfRoleRemovalError()
+        assert isinstance(error, UserServiceError)
+        assert str(error) == "Cannot remove your own final admin role."
 
 
 # ---------------------------------------------------------------------------

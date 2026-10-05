@@ -532,16 +532,35 @@ class TestUnassignActiveTicketsBoundaries:
                 id=ticket_id, status=TicketStatus.ANALYSIS.value, assignee_id=user_id
             )
 
-        async def _boom(*args: object, **kwargs: object) -> None:
-            raise ValueError("simulated audit failure")
+        ids = [first_id, second_id]
+        calls = 0
+        partial: list[object] = []
+        original = TicketAuditLog.log_event
 
-        monkeypatch.setattr(TicketAuditLog, "log_event", _boom)
+        async def _fail_second(*args: Any, **kwargs: Any) -> None:
+            # The first clear and its event are flushed; the second event
+            # fails, so a partial batch exists when the failure propagates.
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                session = cast(AsyncSession, args[0])
+                with session.no_autoflush:
+                    partial.append(await _states(session, ids))
+                    partial.append(await _events(session, ids))
+                raise ValueError("simulated audit failure")
+            await original(*args, **kwargs)
+
+        monkeypatch.setattr(TicketAuditLog, "log_event", _fail_second)
 
         with pytest.raises(ValueError, match="simulated audit failure"):
             async with rollback_test_scope(db_session):
                 await _lock_and_unassign(db_session, user_id)
 
-        ids = [first_id, second_id]
+        assert calls == 2
+        assert partial == [
+            {first_id: ("Analysis", None), second_id: ("Analysis", user_id)},
+            [_clear_event(first_id, "bob.va", "user deactivated")],
+        ]
         assert await _states(db_session, ids) == {
             first_id: ("Analysis", user_id),
             second_id: ("Analysis", user_id),

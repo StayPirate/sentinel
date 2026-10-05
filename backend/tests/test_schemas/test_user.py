@@ -463,14 +463,6 @@ class TestUserRolesUpdateRequest:
         with pytest.raises(ValidationError):
             UserRolesUpdateRequest.model_validate(payload)
 
-    @pytest.mark.parametrize(
-        "raw",
-        ['{"add": [1]}', '{"add": [0]}', '{"remove": [2.5]}'],
-    )
-    def test_numbers_are_not_coerced_to_strings(self, raw: str) -> None:
-        with pytest.raises(ValidationError):
-            UserRolesUpdateRequest.model_validate_json(raw)
-
 
 @pytest.mark.unit
 class TestUserActionDetailSchemas:

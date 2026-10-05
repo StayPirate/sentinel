@@ -18,7 +18,10 @@ The single-session behavior of `update_roles()` is covered by
 needs independent sessions. Each race holds the winner's uncommitted
 `update_roles()` in session A, proves that the loser in session B waits on
 A's User lock, commits A, and lets B classify from the locked-current
-state. The races against assignment-capable paths and against
+state. The Ticket lock phase of the final VA-origin loss is proven the
+other way round: a concurrent Ticket writer in session B holds one
+candidate, and the removal in session A waits on it and revalidates the
+locked-current row. The races against assignment-capable paths and against
 deactivation are covered elsewhere.
 
 Committed rows are deleted explicitly at teardown (testing-strategy.md,
@@ -35,7 +38,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -73,6 +76,7 @@ _VA = "Vulnerability Analyst"
 _RA = "Restricted Analyst"
 
 TICKET_STATEMENT = re.compile(r"\b(?:FROM|JOIN|INTO|UPDATE) ticket\b")
+TICKET_LOCK = re.compile(r"\bFROM ticket\b.*\bFOR UPDATE\s*$", re.DOTALL)
 
 
 @pytest.fixture
@@ -91,6 +95,10 @@ async def identity_world(db_session_factory: Factory) -> AsyncIterator[IdentityW
 
 def _is_user_lock(statement: str) -> bool:
     return 'FROM "user"' in statement and "FOR NO KEY UPDATE" in statement
+
+
+def _is_ticket_lock(statement: str) -> bool:
+    return bool(TICKET_LOCK.search(statement))
 
 
 def _touches_ticket(statements: list[str]) -> bool:
@@ -164,6 +172,24 @@ async def _assigned_ticket(
     world: IdentityWorld, user: User, status: TicketStatus = TicketStatus.ANALYSIS
 ) -> Ticket:
     return await world.ticket(cve_id=None, assignee_id=user.id, status=status)
+
+
+async def _assigned_ticket_with_id(
+    world: IdentityWorld, ticket_id: uuid.UUID, user: User
+) -> Ticket:
+    """A committed CVE-less `Analysis` Ticket with a chosen UUID, assigned to
+    `user` and registered for teardown like `CommittedWorld.ticket()`."""
+    ticket = Ticket(
+        id=ticket_id,
+        status=TicketStatus.ANALYSIS.value,
+        cve_id=None,
+        assignee_id=user.id,
+    )
+    world.session.add(ticket)
+    await world.session.flush()
+    world.ticket_ids.append(ticket.id)
+    await world.session.commit()
+    return ticket
 
 
 def _actor(world: IdentityWorld) -> Awaitable[User]:
@@ -511,34 +537,78 @@ class TestFinalVaOriginLoss:
             ticket.id: [unassigned_event(target.username, VA_ROLE_REMOVED)]
         }
 
-    async def test_addition_after_committed_final_loss_restores_no_assignment(
-        self, identity_world: IdentityWorld
+
+# ---------------------------------------------------------------------------
+# Ticket lock phase of the final VA-origin loss
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+class TestTicketLockRevalidation:
+    """user-service.md, Concurrent role removal and deactivation: the final
+    VA-origin loss locks the User, then the candidate Tickets in ascending
+    UUID order, and revalidates each from its locked-current row; a
+    candidate changed by a concurrent writer gets no clear and no event
+    (testing-strategy.md, User Lifecycle and Management: stale candidates,
+    reassignment winners)."""
+
+    @pytest.mark.parametrize("change", ["reassigned", "resolved", "cleared"])
+    async def test_waits_on_the_ticket_lock_and_revalidates_the_locked_row(
+        self, identity_world: IdentityWorld, change: str
     ) -> None:
-        """testing-strategy.md, Manual role mutation concurrency: a manual
-        role addition after a committed final VA-origin loss does not
-        restore any previously cleared assignment."""
+        admin = await _actor(identity_world)
         target = await identity_world.identity_user(manual=[Role.VULNERABILITY_ANALYST])
-        ticket = await _assigned_ticket(identity_world, target)
+        other_va = await identity_world.identity_user(
+            manual=[Role.VULNERABILITY_ANALYST], prefix="carol.va"
+        )
+        # Session B holds the first candidate in UUID order, so A blocks on
+        # it before locking the second.
+        held_id, other_id = sorted(uuid.uuid4() for _ in range(2))
+        held = await _assigned_ticket_with_id(identity_world, held_id, target)
+        other = await _assigned_ticket_with_id(identity_world, other_id, target)
+        changes: dict[str, tuple[dict[str, object], tuple[str, uuid.UUID | None]]] = {
+            "reassigned": (
+                {"assignee_id": other_va.id},
+                (TicketStatus.ANALYSIS, other_va.id),
+            ),
+            "resolved": (
+                {"status": TicketStatus.RESOLVED.value},
+                (TicketStatus.RESOLVED, target.id),
+            ),
+            # A concurrent sanitation clear.
+            "cleared": ({"assignee_id": None}, (TicketStatus.ANALYSIS, None)),
+        }
+        values, held_state = changes[change]
         a = await identity_world.open_session()
         b = await identity_world.open_session()
 
-        await remove_roles(a, target, [Role.VULNERABILITY_ANALYST])
+        await b.execute(select(Ticket.id).where(Ticket.id == held_id).with_for_update())
+        await b.execute(update(Ticket).where(Ticket.id == held_id).values(**values))
+        with SessionStatementRecorder(a) as recorder:
+            task = identity_world.start(
+                a, remove_roles(a, target, [Role.VULNERABILITY_ANALYST], admin)
+            )
+            await assert_lock_wait(task, waiter=a, blocked_by=b)
+            waiting = list(recorder.statements)
+            await b.commit()
+            result = await asyncio.wait_for(task, timeout=5)
         await a.commit()
-        with SessionStatementRecorder(b) as recorder:
-            result = await add_roles(b, target, [Role.VULNERABILITY_ANALYST])
-        await b.commit()
 
-        assert result.added_roles == [Role.VULNERABILITY_ANALYST]
-        assert not _touches_ticket(recorder.statements)
-        committed = await _committed(identity_world, target, (ticket,))
-        assert committed.origins == {(_VA, MANUAL)}
+        assert _is_user_lock(waiting[0])
+        assert _is_ticket_lock(waiting[-1])
+        assert result.removed_roles == [Role.VULNERABILITY_ANALYST]
+        committed = await _committed(identity_world, target, (held, other))
+        assert committed.origins == set()
         assert committed.identity == [
-            role_removed(None, target, "vulnerability_analyst"),
-            role_added(None, target, "vulnerability_analyst"),
+            role_removed(admin, target, "vulnerability_analyst")
         ]
-        assert committed.tickets == {ticket.id: (TicketStatus.ANALYSIS, None)}
+        assert committed.tickets == {
+            held_id: held_state,
+            other_id: (TicketStatus.ANALYSIS, None),
+        }
         assert committed.ticket_events == {
-            ticket.id: [unassigned_event(target.username, VA_ROLE_REMOVED)]
+            held_id: [],
+            other_id: [unassigned_event(target.username, VA_ROLE_REMOVED)],
         }
 
 

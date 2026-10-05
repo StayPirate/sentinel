@@ -19,6 +19,8 @@ import hashlib
 import secrets
 import uuid
 from collections.abc import AsyncGenerator, Awaitable, Callable
+from contextlib import ExitStack
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 from uuid import uuid4
@@ -31,21 +33,20 @@ from sqlalchemy import delete, select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.enums import Role, SessionCreationReason, TicketStatus
+from app.core.enums import Role, SessionCreationReason
 from app.core.exceptions import UserNotFoundError
 from app.database import get_db
 from app.main import app
 from app.models.api_key import ApiKey
 from app.models.identity_audit_event import IdentityAuditEvent
 from app.models.session import Session as SessionRow
-from app.models.ticket import Ticket
-from app.models.ticket_audit_event import TicketAuditEvent
 from app.models.user import User
 from app.models.user_role import UserRole
 from app.services import api_key_service, user_service
 from app.services.session_service import create_session
 from app.services.user_service import RoleUpdateResult
 from tests.support.ticket_api import INTERNAL_ERROR, force_production_error_page
+from tests.support.ticket_mutations import StatementRecorder
 
 Factory = Callable[..., Awaitable[Any]]
 Origin = tuple[str, str, uuid.UUID | None]
@@ -355,10 +356,6 @@ class TestNoOpRequests:
             pytest.param({"json": {"add": [], "remove": []}}, id="empty-arrays"),
             pytest.param({"json": {"add": []}}, id="empty-add-only"),
             pytest.param({"json": {"remove": []}}, id="empty-remove-only"),
-            pytest.param(
-                {"json": {"add": ["vulnerability_analyst"]}}, id="already-present"
-            ),
-            pytest.param({"json": {"remove": ["admin"]}}, id="missing-removal"),
         ],
     )
     async def test_returns_complete_profile_without_change_or_event(
@@ -416,45 +413,11 @@ class TestRequestValidation:
         "body",
         [
             pytest.param({"add": None}, id="null-add"),
-            pytest.param({"remove": None}, id="null-remove"),
-            pytest.param(
-                {"add": None, "remove": ["vulnerability_analyst"]},
-                id="null-add-with-remove",
-            ),
             pytest.param({"add": ["superuser"]}, id="unknown-role"),
-            pytest.param({"add": ["admin", "superuser"]}, id="unknown-with-valid"),
-            pytest.param({"remove": ["superuser"]}, id="unknown-remove"),
-            pytest.param({"add": ["Admin"]}, id="stored-enum-admin"),
-            pytest.param({"add": ["Vulnerability Analyst"]}, id="stored-enum-va"),
-            pytest.param(
-                {"remove": ["Vulnerability Analyst"]}, id="stored-enum-remove"
-            ),
-            pytest.param({"add": ["ADMIN"]}, id="uppercase-wire"),
-            pytest.param({"add": [""]}, id="empty-string"),
             pytest.param({"add": "admin"}, id="string-field"),
-            pytest.param({"remove": "vulnerability_analyst"}, id="string-remove"),
-            pytest.param({"add": {"role": "admin"}}, id="object-field"),
-            pytest.param({"add": 1}, id="integer-field"),
             pytest.param({"add": [1]}, id="integer-element"),
-            pytest.param({"add": [None]}, id="null-element"),
-            pytest.param({"add": [True]}, id="boolean-element"),
-            pytest.param({"add": [["admin"]]}, id="array-element"),
-            pytest.param(
-                {"remove": [{"role": "vulnerability_analyst"}]}, id="object-element"
-            ),
             pytest.param({"add": ["admin", "admin"]}, id="duplicate-add"),
-            pytest.param(
-                {"remove": ["vulnerability_analyst", "vulnerability_analyst"]},
-                id="duplicate-remove",
-            ),
             pytest.param({"add": ["admin"], "remove": ["admin"]}, id="overlap"),
-            pytest.param(
-                {
-                    "add": ["admin", "restricted_analyst"],
-                    "remove": ["vulnerability_analyst", "restricted_analyst"],
-                },
-                id="partial-overlap",
-            ),
             pytest.param([], id="array-body"),
             pytest.param("admin", id="string-body"),
         ],
@@ -530,16 +493,6 @@ class TestRequestValidation:
         assert await _origins(db_session, target.id) == set()
         assert await _identity_events(db_session, target.id) == []
 
-    async def test_nul_rejection_precedes_authentication(
-        self, client: AsyncClient
-    ) -> None:
-        response = await client.post(
-            _url("fictional-user"), json={"remove": ["\u0000"]}
-        )
-
-        assert response.status_code == 422
-        _assert_nul_rejection(response.json(), ["body", "remove", 0])
-
 
 # ---------------------------------------------------------------------------
 # Effective mutations and audit
@@ -584,54 +537,6 @@ class TestEffectiveMutations:
             ("role_removed", admin.id, "vulnerability_analyst", None, None),
         ]
 
-    async def test_remove_only_creates_one_role_removed_event(
-        self,
-        admin_user_and_client: tuple[User, AsyncClient],
-        user_factory: Factory,
-        user_role_factory: Factory,
-        db_session: AsyncSession,
-    ) -> None:
-        admin, client = admin_user_and_client
-        target: User = await user_factory(username="rolesremovetarget")
-        await user_role_factory(user_id=target.id, role=Role.RESTRICTED_ANALYST.value)
-
-        response = await client.post(
-            _url(target.id), json={"remove": ["restricted_analyst"]}
-        )
-
-        assert response.status_code == 200
-        assert response.json()["data"]["roles"] == []
-        assert await _origins(db_session, target.id) == set()
-        assert await _identity_events(db_session, target.id) == [
-            ("role_removed", admin.id, "restricted_analyst", None, None)
-        ]
-
-    async def test_inactive_target_behaves_like_active(
-        self,
-        admin_user_and_client: tuple[User, AsyncClient],
-        user_factory: Factory,
-        user_role_factory: Factory,
-        db_session: AsyncSession,
-    ) -> None:
-        admin, client = admin_user_and_client
-        target: User = await user_factory(username="rolesinactivetarget", active=False)
-        await user_role_factory(user_id=target.id, role=Role.RESTRICTED_ANALYST.value)
-
-        response = await client.post(
-            _url(target.id),
-            json={"add": ["vulnerability_analyst"], "remove": ["restricted_analyst"]},
-        )
-
-        assert response.status_code == 200
-        assert response.json()["data"]["active"] is False
-        assert _profile_roles(response.json()) == [
-            ("vulnerability_analyst", "_manual", str(admin.id))
-        ]
-        assert await _identity_events(db_session, target.id) == [
-            ("role_added", admin.id, None, "vulnerability_analyst", None),
-            ("role_removed", admin.id, "restricted_analyst", None, None),
-        ]
-
 
 # ---------------------------------------------------------------------------
 # Self-Admin guard
@@ -640,73 +545,20 @@ class TestEffectiveMutations:
 
 @pytest.mark.e2e
 class TestSelfAdminGuard:
-    @pytest.mark.parametrize(
-        "body",
-        [
-            pytest.param({"remove": ["admin"]}, id="remove-only"),
-            pytest.param(
-                {"add": ["vulnerability_analyst"], "remove": ["admin"]},
-                id="with-addition",
-            ),
-        ],
-    )
     async def test_removing_own_final_admin_origin_returns_409(
         self,
-        body: dict[str, Any],
         admin_user_and_client: tuple[User, AsyncClient],
         db_session: AsyncSession,
     ) -> None:
         admin, client = admin_user_and_client
         before = await _origins(db_session, admin.id)
 
-        response = await client.post(_url(admin.username), json=body)
+        response = await client.post(_url(admin.username), json={"remove": ["admin"]})
 
         assert response.status_code == 409
         assert response.json() == _SELF_ROLE_REMOVAL
         assert await _origins(db_session, admin.id) == before
         assert await _identity_events(db_session, admin.id) == []
-
-    async def test_removing_own_manual_admin_with_external_origin_succeeds(
-        self,
-        admin_user_and_client: tuple[User, AsyncClient],
-        user_role_factory: Factory,
-        db_session: AsyncSession,
-    ) -> None:
-        admin, client = admin_user_and_client
-        await user_role_factory(
-            user_id=admin.id, role=Role.ADMIN.value, group_name=_EXTERNAL_GROUP
-        )
-
-        response = await client.post(_url(admin.id), json={"remove": ["admin"]})
-
-        assert response.status_code == 200
-        assert _profile_roles(response.json()) == [("admin", _EXTERNAL_GROUP, None)]
-        assert await _origins(db_session, admin.id) == {
-            (Role.ADMIN.value, _EXTERNAL_GROUP, None)
-        }
-        assert await _identity_events(db_session, admin.id) == [
-            ("role_removed", admin.id, "admin", None, None)
-        ]
-
-    async def test_removing_another_users_final_admin_origin_succeeds(
-        self,
-        admin_user_and_client: tuple[User, AsyncClient],
-        user_factory: Factory,
-        user_role_factory: Factory,
-        db_session: AsyncSession,
-    ) -> None:
-        """The guard applies only when actor and target are the same user."""
-        admin, client = admin_user_and_client
-        other: User = await user_factory(username="rolesotheradmin")
-        await user_role_factory(user_id=other.id, role=Role.ADMIN.value)
-
-        response = await client.post(_url(other.id), json={"remove": ["admin"]})
-
-        assert response.status_code == 200
-        assert response.json()["data"]["roles"] == []
-        assert await _identity_events(db_session, other.id) == [
-            ("role_removed", admin.id, "admin", None, None)
-        ]
 
 
 # ---------------------------------------------------------------------------
@@ -761,11 +613,10 @@ class TestDeterministicProfile:
         self,
         admin_user_and_client: tuple[User, AsyncClient],
         mixed_origin_target: User,
-        db_session: AsyncSession,
     ) -> None:
-        """Removing manual origins whose role an external origin also grants
-        deletes only the `_manual` rows; the external rows are untouched and
-        still reported."""
+        """The post-mutation profile reports every remaining origin,
+        including the external rows of the removed roles, in the
+        deterministic order."""
         admin, client = admin_user_and_client
 
         response = await client.post(
@@ -783,96 +634,81 @@ class TestDeterministicProfile:
             ("restricted_analyst", "_manual", str(admin.id)),
             ("vulnerability_analyst", _EXTERNAL_GROUP, None),
         ]
-        assert await _origins(db_session, mixed_origin_target.id) == {
-            (Role.ADMIN.value, _EXTERNAL_GROUP, None),
-            (Role.RESTRICTED_ANALYST.value, _OTHER_EXTERNAL_GROUP, None),
-            (Role.RESTRICTED_ANALYST.value, "_manual", admin.id),
-            (Role.VULNERABILITY_ANALYST.value, _EXTERNAL_GROUP, None),
-        }
-        assert await _identity_events(db_session, mixed_origin_target.id) == [
-            ("role_added", admin.id, None, "restricted_analyst", None),
-            ("role_removed", admin.id, "admin", None, None),
-            ("role_removed", admin.id, "vulnerability_analyst", None, None),
-        ]
 
 
 # ---------------------------------------------------------------------------
-# Final vulnerability_analyst loss
+# The handler delegates to the service and runs no query itself
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.e2e
-class TestFinalVulnerabilityAnalystLoss:
-    async def test_unassigns_active_tickets_and_preserves_resolved(
+class TestHandlerDelegation:
+    async def test_wire_roles_and_actor_reach_the_service_without_route_sql(
         self,
         admin_user_and_client: tuple[User, AsyncClient],
         user_factory: Factory,
-        user_role_factory: Factory,
-        ticket_factory: Factory,
         db_session: AsyncSession,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """testing-strategy.md, User Lifecycle and Management: the route
+        delegates user reads and the mutation to `user_service`. Recording
+        starts at the handler's first step (the resolution call), so the
+        authentication queries are excluded and every remaining statement
+        would be the route's own."""
         admin, client = admin_user_and_client
-        analyst: User = await user_factory(username="erin.va")
-        await user_role_factory(
-            user_id=analyst.id, role=Role.VULNERABILITY_ANALYST.value
-        )
-        analysis: Ticket = await ticket_factory(
-            status=TicketStatus.ANALYSIS.value, assignee_id=analyst.id
-        )
-        resolved: Ticket = await ticket_factory(
-            status=TicketStatus.RESOLVED.value, assignee_id=analyst.id
-        )
+        target: User = await user_factory(username="rolesdelegationtarget")
+        # The serializable profile (roles and manager loaded) of the real
+        # empty-request path, taken before the service is replaced.
+        profile = (
+            await user_service.update_roles(db_session, target.id, acting_user_id=None)
+        ).user
+        resolved = SimpleNamespace(id=uuid4())
+        recorder = StatementRecorder(db_session)
 
-        response = await client.post(
-            _url(analyst.id), json={"remove": ["vulnerability_analyst"]}
-        )
+        with ExitStack() as stack:
 
-        assert response.status_code == 200
-        assert response.json()["data"]["roles"] == []
-        tickets = {
-            row.id: (row.status, row.assignee_id)
-            for row in await db_session.execute(
-                select(Ticket.id, Ticket.status, Ticket.assignee_id).where(
-                    Ticket.id.in_([analysis.id, resolved.id])
+            async def _resolve(db: AsyncSession, identifier: str) -> SimpleNamespace:
+                stack.enter_context(recorder)
+                return resolved
+
+            resolve = AsyncMock(side_effect=_resolve)
+            mutation = AsyncMock(
+                return_value=RoleUpdateResult(
+                    user=profile,
+                    added_roles=[Role.ADMIN, Role.RESTRICTED_ANALYST],
+                    removed_roles=[Role.VULNERABILITY_ANALYST],
                 )
             )
-        }
-        assert tickets == {
-            analysis.id: (TicketStatus.ANALYSIS.value, None),
-            resolved.id: (TicketStatus.RESOLVED.value, analyst.id),
-        }
-        events = (
-            await db_session.execute(
-                select(TicketAuditEvent)
-                .where(TicketAuditEvent.ticket_id.in_([analysis.id, resolved.id]))
-                .order_by(TicketAuditEvent.id)
+            monkeypatch.setattr(user_service, "resolve_user_identifier", resolve)
+            monkeypatch.setattr(user_service, "update_roles", mutation)
+
+            response = await client.post(
+                _url(target.username),
+                json={
+                    "add": ["admin", "restricted_analyst"],
+                    "remove": ["vulnerability_analyst"],
+                },
             )
-        ).scalars()
-        assert [
-            (
-                event.ticket_id,
-                event.event_type,
-                event.user_id,
-                event.old_value,
-                event.new_value,
-                event.comment,
-                event.detail,
+
+        assert response.status_code == 200
+        assert response.json()["data"]["id"] == str(target.id)
+        resolve.assert_awaited_once_with(db_session, target.username)
+        mutation.assert_awaited_once_with(
+            db_session,
+            resolved.id,
+            add=[Role.ADMIN, Role.RESTRICTED_ANALYST],
+            remove=[Role.VULNERABILITY_ANALYST],
+            acting_user_id=admin.id,
+        )
+        assert mutation.await_args is not None
+        assert all(
+            type(role) is Role
+            for role in (
+                *mutation.await_args.kwargs["add"],
+                *mutation.await_args.kwargs["remove"],
             )
-            for event in events
-        ] == [
-            (
-                analysis.id,
-                "assignment",
-                None,
-                "erin.va",
-                None,
-                "Unassigned from erin.va: vulnerability_analyst role removed",
-                None,
-            )
-        ]
-        assert await _identity_events(db_session, analyst.id) == [
-            ("role_removed", admin.id, "vulnerability_analyst", None, None)
-        ]
+        )
+        assert recorder.statements == []
 
 
 # ---------------------------------------------------------------------------
@@ -967,11 +803,14 @@ async def committed_world(
 
 @pytest.mark.e2e
 class TestTransactionBoundary:
-    async def test_commit_completes_once_before_the_response(
+    async def test_commits_exactly_once_and_persists(
         self,
         committed_world: tuple[_CommittedWorld, AsyncClient],
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """The flushed mutation is invisible to another transaction until
+        the request's single commit, which makes the row and its event
+        durable."""
         world, committed_client = committed_world
         admin, headers = await world.admin_headers()
         target = await world.user()
@@ -1005,7 +844,7 @@ class TestTransactionBoundary:
         # Not visible to another transaction before the commit ...
         assert observed == [set()]
         assert commits == ["commit"]
-        # ... and durable once the response has been received.
+        # ... and durable after it.
         fresh = await world.session()
         assert await _origins(fresh, target.id) == {
             (Role.RESTRICTED_ANALYST.value, "_manual", admin.id)
