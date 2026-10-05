@@ -1443,6 +1443,67 @@ class TestListEvents:
         assert page.items == []
         assert page.total == 0
 
+    @pytest.mark.parametrize(
+        ("identifier_key", "expected_owner"),
+        [
+            ("shared_uuid", "id_owner"),
+            ("shared_uuid_upper", "id_owner"),
+            ("plain_uuid", "plain"),
+            ("plain_username", "plain"),
+            ("plain_username_upper", None),
+            ("unknown_uuid", None),
+            ("unknown_username", None),
+        ],
+    )
+    async def test_target_user_and_actor_share_identifier_matching(
+        self,
+        db_session: AsyncSession,
+        user_factory: Callable[..., Awaitable[User]],
+        identity_audit_event_factory: Callable[..., Awaitable[IdentityAuditEvent]],
+        identifier_key: str,
+        expected_owner: str | None,
+    ) -> None:
+        """Both filters apply the single user-domain matching policy
+        (`docs/features/identity/user-service.md`,
+        `resolve_user_identifier()`): a username shaped like another
+        user's ID selects that ID owner, because a UUID-parsable value is
+        always matched by `User.id`."""
+        # Letter-leading, so its text is also a format-valid username.
+        shared = uuid.UUID("a" + uuid.uuid4().hex[1:])
+        users = {
+            "id_owner": await user_factory(id=shared, username="parity.idowner"),
+            "name_owner": await user_factory(username=str(shared)),
+            "plain": await user_factory(username="parity.plain"),
+        }
+        bystander = await user_factory()
+        for user in users.values():
+            await identity_audit_event_factory(
+                event_type="role_added", user_id=user.id, target_user_id=bystander.id
+            )
+            await identity_audit_event_factory(
+                event_type="role_added", user_id=None, target_user_id=user.id
+            )
+        identifier = {
+            "shared_uuid": str(shared),
+            "shared_uuid_upper": str(shared).upper(),
+            "plain_uuid": str(users["plain"].id),
+            "plain_username": "parity.plain",
+            "plain_username_upper": "PARITY.PLAIN",
+            "unknown_uuid": str(uuid.uuid4()),
+            "unknown_username": "no-such-user",
+        }[identifier_key]
+        expected: set[uuid.UUID] = (
+            set() if expected_owner is None else {users[expected_owner].id}
+        )
+
+        by_actor = await list_events(db_session, actor=identifier)
+        by_target = await list_events(db_session, target_user=identifier)
+
+        assert {event.user_id for event in by_actor.items} == expected
+        assert {event.target_user_id for event in by_target.items} == expected
+        assert len(by_actor.items) == by_actor.total == len(expected)
+        assert len(by_target.items) == by_target.total == len(expected)
+
     async def test_date_range_is_inclusive(
         self,
         db_session: AsyncSession,
