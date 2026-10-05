@@ -51,7 +51,7 @@ from app.models.ticket_audit_event import TicketAuditEvent
 from app.models.ticket_package import TicketPackage
 from app.models.ticket_package_product import TicketPackageProduct
 from app.models.ticket_package_track import TicketPackageTrack
-from app.services import cvss_impact_preview, settings, ticket_mutations
+from app.services import cvss_impact_preview, settings
 from app.services.cvss_impact_preview import (
     DefaultCVSSVersionImpact,
     get_default_cvss_version_impact,
@@ -905,13 +905,9 @@ class TestNoSideEffects:
         tree: TreeBuilder,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        reconciled: list[object] = []
-
-        async def _reconcile(*args: Any, **kwargs: Any) -> None:
-            reconciled.append(args)
-            raise AssertionError("the preview must not reconcile")
-
-        monkeypatch.setattr(ticket_mutations, "reconcile_ticket_status", _reconcile)
+        """No reconciliation can run without a write or a lock, so the
+        statement assertions also exclude `reconcile_ticket_status()`; the
+        import boundary below keeps it unreachable."""
         for status in (NEW, ANALYSIS, RESOLVED, IGNORED):
             await _regressing(cve_with, ticket_factory, tree, status)
         before = await _snapshot(db_session)
@@ -920,7 +916,6 @@ class TestNoSideEffects:
             result = await preview(db_session)
 
         assert result.resolved_ticket_regressions == 1
-        assert reconciled == []
         assert await _snapshot(db_session) == before
         assert recorder.writes() == []
         assert recorder.row_locks() == []

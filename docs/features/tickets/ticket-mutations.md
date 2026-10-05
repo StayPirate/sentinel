@@ -1217,8 +1217,8 @@ acquire a mutation lock, and does not participate in the runner's execution.
   change.
 - The projected gate result and the regression count follow
   [default-cvss-version-operations.md](../platform/default-cvss-version-operations.md#projected-impact),
-  which mirrors this function's default-version reconciliation condition. The
-  preview returns no Ticket-scoped detail.
+  which mirrors the default-version reconciliation condition of
+  `recalculate_cvss_chain()`. The preview returns no Ticket-scoped detail.
 - Projected Product eligibility uses the current persisted inputs and the
   shared package-model evaluator. A projected boolean is never persisted, and
   an occurrence with `is_eligible_override = true` is reported as a skip

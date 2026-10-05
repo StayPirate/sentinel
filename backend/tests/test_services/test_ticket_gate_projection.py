@@ -135,6 +135,7 @@ async def _sql_status(
 
 
 class TestCuratedCases:
+    @pytest.mark.unit
     @_CASES
     def test_pure_projection_matches_specification(self, case: GateCase) -> None:
         assert _project(case) is case.expected
@@ -174,6 +175,7 @@ class TestGridParity:
         }
 
 
+@pytest.mark.unit
 class TestModuleBoundary:
     def test_imports_only_core_enums_and_pure_actionability(self) -> None:
         modules = imported_modules(

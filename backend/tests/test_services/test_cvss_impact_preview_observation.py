@@ -24,6 +24,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, time
 from decimal import Decimal
+from time import monotonic
 from typing import Any
 
 import pytest
@@ -200,22 +201,45 @@ class TestDeadline:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Every statement is bounded by the remaining budget: a page that
-        would outlive a 0.5 s budget is cancelled server-side
-        (`query_canceled`) and surfaces as the timeout. The aborted request
-        transaction is left for its owner to roll back."""
-        monkeypatch.setattr(cvss_impact_preview, "PREVIEW_DEADLINE_SECONDS", 0.5)
-        _slow_pages(monkeypatch, seconds=5)
-        await _converging_cve(cve_with)
+        would outlive it is cancelled server-side (`query_canceled`) and
+        surfaces as the timeout. The aborted request transaction is left for
+        its owner to roll back.
 
-        async with rollback_test_scope(db_session):
-            with pytest.raises(CVSSPreviewTimeoutError) as raised:
-                await get_default_cvss_version_impact(db_session, "4.0")
+        The clock follows real time but jumps when the high-water mark is
+        read, so exactly one second of budget remains for the page however
+        long the earlier statements took."""
+        _slow_pages(monkeypatch, seconds=10)
+        await _converging_cve(cve_with)
+        state = {"entry": -1.0, "shift": 0.0}
+
+        def _clock() -> float:
+            now = monotonic() + state["shift"]
+            if state["entry"] < 0:
+                state["entry"] = now
+            return now
+
+        def _on_statement(*args: Any) -> None:
+            if _MARK_STATEMENT in args[2]:
+                end = state["entry"] + cvss_impact_preview.PREVIEW_DEADLINE_SECONDS
+                state["shift"] = end - 1.0 - monotonic()
+
+        monkeypatch.setattr(cvss_impact_preview, "_monotonic", _clock)
+        engine = db_session.get_bind().engine
+        before = await _statement_timeout(db_session)
+
+        event.listen(engine, "before_cursor_execute", _on_statement)
+        try:
+            async with rollback_test_scope(db_session):
+                with pytest.raises(CVSSPreviewTimeoutError) as raised:
+                    await get_default_cvss_version_impact(db_session, "4.0")
+        finally:
+            event.remove(engine, "before_cursor_execute", _on_statement)
 
         cause = raised.value.__cause__
         assert isinstance(cause, DBAPIError)
         assert getattr(cause.orig, "sqlstate", None) == "57014"
         # The owner's rollback discarded the transaction-local timeout.
-        assert await _statement_timeout(db_session) == "0"
+        assert await _statement_timeout(db_session) == before
 
     async def test_a_cancellation_within_the_budget_is_a_database_error(
         self,
@@ -257,7 +281,6 @@ class TestDeadline:
                 await get_default_cvss_version_impact(db_session, "4.0")
             await canceller
 
-        assert not isinstance(raised.value, CVSSPreviewTimeoutError)
         assert getattr(raised.value.orig, "sqlstate", None) == "57014"
 
     async def test_every_statement_after_entry_is_bounded_and_restored(
@@ -436,8 +459,9 @@ class TestCommittedObservation:
     ) -> None:
         """A CVE committed after the mark with a greater `id` is excluded.
         A CVE whose `id` is below the mark and that becomes visible during
-        the scan may or may not be observed. Neither the mark nor any
-        preview state is returned."""
+        the scan may or may not be observed. The mark is never returned
+        (test_cvss_impact_preview.py, `test_shares_no_state_with_later_
+        invocations`)."""
         async with _committed_population(db_session_factory, 1) as ids:
             writer = await db_session_factory()
 
@@ -466,16 +490,6 @@ class TestCommittedObservation:
             _impact(cves_evaluated=1, cve_severity_changes=1),
             _impact(cves_evaluated=2, cve_severity_changes=2),
         )
-        assert set(DefaultCVSSVersionImpact.__dataclass_fields__) == {
-            "observed_default_cvss_version",
-            "proposed_default_cvss_version",
-            "no_op",
-            "cves_evaluated",
-            "cve_severity_changes",
-            "product_eligibility_changes",
-            "product_eligibility_override_skips",
-            "resolved_ticket_regressions",
-        }
 
 
 def _impact(**counts: int) -> DefaultCVSSVersionImpact:

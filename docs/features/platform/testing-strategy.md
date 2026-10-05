@@ -3772,10 +3772,10 @@ MUST cover the contract in
 - projected gate results `Resolved → Analyzed` and `Resolved → Analysis`
   reusing the exact Analyzed and Resolved predicates
 - a projected gate that preserves a manual override: a `Resolved` Ticket
-  whose only applicable occurrence has `is_eligible_override = true` keeps
-  its persisted `eligible` value, the hypothetical automatic result is not
-  substituted, and no regression is counted when the preserved value keeps
-  the gate true
+  with a projected severity change, so that the gate is evaluated, whose only
+  applicable occurrence has `is_eligible_override = true` keeps its persisted
+  `eligible` value, the hypothetical automatic result is not substituted, and
+  no regression is counted when the preserved value keeps the gate true
 - overlapping categories from one CVE (severity change, several Product
   occurrences, several override skips, one `Resolved` regression) and
   unchanged effects receiving no count
@@ -3854,9 +3854,9 @@ MUST cover the contract in
   the shared resolutions, extended here to effective eligibility, override
   skips, and the projected gate result (`default-cvss-version-operations.md`,
   Projected Impact), including unconverged gate-zone Tickets: for the same
-  persisted inputs,
-  the preview's projection equals the outcomes an effective default-version
-  recalculation applies, with no assessment or `CVE.severity` modification
+  persisted inputs, the preview's projection equals the outcomes an effective
+  default-version recalculation applies, with no assessment or `CVE.severity`
+  modification
 
 **Pre-release verification:**
 

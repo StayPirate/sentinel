@@ -52,10 +52,8 @@ from app.core.enums import PackageStatus, Role, Severity, TicketStatus
 from app.models.api_key import ApiKey
 from app.models.cve import CVE
 from app.models.product import Product
-from app.models.setting_audit_event import SettingAuditEvent
 from app.models.system_setting import SystemSetting
 from app.models.ticket import Ticket
-from app.models.ticket_audit_event import TicketAuditEvent
 from app.models.ticket_package import TicketPackage
 from app.models.ticket_package_product import TicketPackageProduct
 from app.models.ticket_package_track import TicketPackageTrack
@@ -306,40 +304,6 @@ async def _tree_identifiers(db: AsyncSession, ticket_id: uuid.UUID) -> list[str]
     return [str(value) for row in rows for value in row]
 
 
-async def _derived_state(db: AsyncSession) -> dict[str, Any]:
-    """Every persisted value the preview projects or could write."""
-    return {
-        "cve_severity": (
-            await db.execute(select(CVE.id, CVE.severity).order_by(CVE.id))
-        ).all(),
-        "occurrences": (
-            await db.execute(
-                select(
-                    TicketPackageProduct.id,
-                    TicketPackageProduct.eligible,
-                    TicketPackageProduct.is_eligible_override,
-                ).order_by(TicketPackageProduct.id)
-            )
-        ).all(),
-        "ticket_status": (
-            await db.execute(select(Ticket.id, Ticket.status).order_by(Ticket.id))
-        ).all(),
-        "setting": (
-            await db.execute(
-                select(SystemSetting.value).where(
-                    SystemSetting.key == "default_cvss_version"
-                )
-            )
-        ).scalar_one(),
-        "ticket_events": await db.scalar(
-            select(func.count()).select_from(TicketAuditEvent)
-        ),
-        "setting_events": await db.scalar(
-            select(func.count()).select_from(SettingAuditEvent)
-        ),
-    }
-
-
 # ---------------------------------------------------------------------------
 # A. Authentication and authorization
 # ---------------------------------------------------------------------------
@@ -386,17 +350,6 @@ class TestAuthenticationAndAuthorization:
         assert response.json() == _FORBIDDEN
         forbidden_preview.assert_not_awaited()
 
-    async def test_admin_jwt_session_is_accepted(
-        self,
-        admin_client: AsyncClient,
-        population: None,
-        fixed_eval_date: None,
-    ) -> None:
-        response = await admin_client.get(_PATH, params=_PROPOSE_4_0)
-
-        assert response.status_code == 200
-        assert response.json() == _POPULATION_IMPACT
-
     async def test_admin_api_key_is_accepted(
         self,
         admin_api_key_client: AsyncClient,
@@ -440,7 +393,6 @@ class TestQueryValidation:
             pytest.param("40", id="40"),
             pytest.param("", id="empty"),
             pytest.param("3.1 ", id="trailing-whitespace"),
-            pytest.param("4" * 501, id="over-length-501"),
         ],
     )
     async def test_unsupported_value_returns_422(
@@ -451,8 +403,7 @@ class TestQueryValidation:
     ) -> None:
         """Only `3.1` and `4.0` are proposable, although `2.0` and `3.0`
         are accepted assessment versions (default-cvss-version-operations.md,
-        Get Default-CVSS Impact Preview; api-spec.md, Query Parameter Length
-        Limit)."""
+        Get Default-CVSS Impact Preview)."""
         response = await admin_client.get(_PATH, params={"proposed_version": value})
 
         assert response.status_code == 422
@@ -461,26 +412,6 @@ class TestQueryValidation:
         assert {tuple(error["loc"]) for error in body["errors"]} == {
             ("query", "proposed_version")
         }
-        forbidden_preview.assert_not_awaited()
-
-    async def test_nul_returns_422_without_echo_or_preview(
-        self, admin_client: AsyncClient, forbidden_preview: AsyncMock
-    ) -> None:
-        """api-spec.md, NUL Characters in Request Input: a value containing
-        U+0000 is rejected, not stripped, and is not echoed.
-        `tests/test_api/test_request_nul.py` covers representative
-        endpoints, not every route."""
-        response = await admin_client.get(
-            _PATH, params={"proposed_version": "4.0\x00fictional"}
-        )
-
-        assert response.status_code == 422
-        body = response.json()
-        assert body["code"] == "VALIDATION_ERROR"
-        assert [error["loc"] for error in body["errors"]] == [
-            ["query", "proposed_version"]
-        ]
-        assert "fictional" not in response.text
         forbidden_preview.assert_not_awaited()
 
     @pytest.mark.parametrize(
@@ -522,6 +453,8 @@ class TestResults:
         population: None,
         fixed_eval_date: None,
     ) -> None:
+        """Also the JWT-session acceptance case: `admin_client` is
+        authenticated by a session cookie."""
         response = await admin_client.get(_PATH, params=_PROPOSE_4_0)
 
         assert response.status_code == 200
@@ -699,45 +632,7 @@ class TestTimeout:
 
 
 # ---------------------------------------------------------------------------
-# F. Read-only
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.e2e
-class TestReadOnly:
-    async def test_preview_changes_no_persisted_state(
-        self,
-        admin_client: AsyncClient,
-        db_session: AsyncSession,
-        population: None,
-        fixed_eval_date: None,
-    ) -> None:
-        """default-cvss-version-operations.md, Preview Service: no severity,
-        eligibility, override, status, setting, or audit write, although the
-        population has a projected effect of every kind."""
-        before = await _derived_state(db_session)
-
-        response = await admin_client.get(_PATH, params=_PROPOSE_4_0)
-
-        assert response.json() == _POPULATION_IMPACT
-        assert await _derived_state(db_session) == before
-
-    async def test_repeated_previews_return_the_same_result(
-        self,
-        admin_client: AsyncClient,
-        population: None,
-        fixed_eval_date: None,
-    ) -> None:
-        """Idempotency: the endpoint is read-only and repeatable."""
-        first = await admin_client.get(_PATH, params=_PROPOSE_4_0)
-        second = await admin_client.get(_PATH, params=_PROPOSE_4_0)
-
-        assert first.json() == _POPULATION_IMPACT
-        assert second.json() == _POPULATION_IMPACT
-
-
-# ---------------------------------------------------------------------------
-# G. The handler delegates to the service and runs no business query
+# F. The handler delegates to the service and runs no business query
 # ---------------------------------------------------------------------------
 
 

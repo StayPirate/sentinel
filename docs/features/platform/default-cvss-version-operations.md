@@ -503,8 +503,9 @@ the no-op result without scanning the population:
 The preview projects the default-version mode of
 `ticket_mutations.recalculate_cvss_chain()` as defined by the authoritative
 state matrix and classification in `docs/features/tickets/ticket-mutations.md`,
-substituting projected values for persistence. It does not restate or alter that
-matrix.
+substituting projected values for persistence. It does not alter that matrix;
+the gate rule below restates only its reconciliation condition in projected
+terms.
 
 Projection rules:
 
@@ -526,8 +527,9 @@ Projection rules:
   (`ticket-mutations.md`, `recalculate_cvss_chain()` default-version mode):
   - When the unit has a projected CVE severity change or at least one
     projected automatic eligibility change, the projected gate result is the
-    result of the exact Analyzed and Resolved predicates of `tickets.md`,
-    evaluated with the projected CVE severity and the projected effective
+    highest valid gate-zone status that the exact Analyzed and Resolved
+    predicates of `tickets.md` yield, evaluated with the projected CVE
+    severity and the projected effective
     Product eligibility: the projected automatic result where no manual
     override applies, and the preserved persisted `eligible` value where
     `is_eligible_override = true`. Every other gate input is the observed
