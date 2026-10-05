@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!-- Created with Inkscape (http://www.inkscape.org/) -->
+
+<svg
+   version="1.1"
+   id="svg1"
+   width="1018.9205"
+   height="321.54526"
+   viewBox="0 0 1018.9205 321.54526"
+   xmlns:xlink="http://www.w3.org/1999/xlink"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg">
+  <defs
+     id="defs1">
+    <rect
+       x="459.61942"
+       y="72.124893"
+       width="1238.8511"
+       height="329.51175"
+       id="rect13" />
+    <linearGradient
+       id="swatch13">
+      <stop
+         style="stop-color:#6b9be6;stop-opacity:1;"
+         offset="0"
+         id="stop13" />
+    </linearGradient>
+    <linearGradient
+       xlink:href="#swatch13"
+       id="linearGradient13"
+       x1="50.826176"
+       y1="229.45605"
+       x2="209.30273"
+       y2="229.45605"
+       gradientUnits="userSpaceOnUse"
+       gradientTransform="matrix(0.84054164,0,0,0.84054164,605.10466,5.088693)" />
+  </defs>
+  <g
+     id="g1"
+     transform="translate(-647.82616,-37.183594)">
+    <path
+       id="path7"
+       style="display:inline;opacity:1;mix-blend-mode:normal;fill:url(#linearGradient13);fill-opacity:1;stroke-width:0.840542"
+       d="M 781.03232,37.183594 741.78789,47.343969 V 74.884845 L 701.60442,85.650994 V 57.744028 L 649.68127,71.65565 c -3.86689,46.85768 -1.44449,86.29445 5.00221,119.43407 l 126.34884,33.85478 v -52.92949 l -78.81883,-21.11861 0.0164,-0.005 h -0.11328 V 134.81945 L 781.0323,113.67293 Z M 662.03823,221.02088 c 34.33611,114.13622 118.99409,137.70765 118.99409,137.70765 l -0.004,-53.74049 c 0,0 -41.85799,-22.31047 -62.45126,-68.54027 -0.0468,-0.10519 -0.0935,-0.20927 -0.13955,-0.31355 z" />
+    <path
+       id="path8"
+       style="display:inline;opacity:1;mix-blend-mode:normal;fill:#4777c4;fill-opacity:1;stroke-width:0.840542"
+       d="m 781.03725,37.183594 0.007,76.489286 c 26.94337,7.06561 53.9614,14.3826 80.91363,21.60454 0,0 0.53555,11.68102 -1.0868,29.12509 l 48.87291,13.09571 c 4.6227,-30.19447 5.99621,-65.23086 2.64474,-105.842589 L 860.46502,57.744028 V 85.650994 L 820.28154,74.884845 V 47.343969 Z m 0,134.833056 v 52.9295 l 60.62078,16.2428 -0.55982,0.5943 c -1.9e-4,4.3e-4 2e-4,8.4e-4 0,0.002 -11.71575,25.00075 -29.93249,48.39325 -58.21899,62.32645 -0.62292,0.30683 -1.23688,0.59925 -1.84197,0.87666 v 53.74049 c 0,0 92.44669,-25.74138 123.31008,-153.67137 z" />
+    <text
+       xml:space="preserve"
+       id="text13"
+       style="font-size:146.667px;writing-mode:lr-tb;direction:ltr;white-space:pre;shape-inside:url(#rect13);opacity:1;fill:#9ea7b3;fill-opacity:0.431373"
+       transform="translate(486,36)"><tspan
+         x="459.61914"
+         y="204.23596"
+         id="tspan2"><tspan
+            style="font-weight:bold;font-family:'Liberation Sans','Helvetica Neue',Helvetica,Arial,sans-serif;-inkscape-font-specification:'Liberation Sans Bold';fill-opacity:1"
+           id="tspan1">SENTINEL</tspan></tspan></text>
+    <text
+       xml:space="preserve"
+       style="font-style:normal;font-variant:normal;font-weight:bold;font-stretch:normal;font-size:38.6667px;font-family:'Hack Nerd Font';-inkscape-font-specification:'Hack Nerd Font Bold';writing-mode:lr-tb;direction:ltr;opacity:1;fill:#16284c;fill-opacity:1"
+       x="955"
+       y="284"
+       id="text14"><tspan
+         id="tspan14"
+         x="955"
+         y="284"
+         style="font-style:normal;font-variant:normal;font-weight:normal;font-stretch:normal;font-size:38.6667px;font-family:'Liberation Sans','Helvetica Neue',Helvetica,Arial,sans-serif;-inkscape-font-specification:'Liberation Sans';fill:#c9d1d9;fill-opacity:1">LINUX VULNERABILITY MANAGEMENT</tspan></text>
+  </g>
+</svg>
