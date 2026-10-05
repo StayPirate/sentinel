@@ -4,8 +4,6 @@ description: >
   error, pagination, envelope, and permission-map conventions. Use after a
   feature spec adds or changes endpoints. Read-only.
 mode: subagent
-model: anthropic/claude-sonnet-5-5
-variant: high
 permission:
   edit: deny
   bash:

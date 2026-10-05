@@ -4,8 +4,6 @@ description: >
   flows, and inconsistent terminology. Use after cross-feature or
   cross-cutting contract changes. Read-only.
 mode: subagent
-model: anthropic/claude-sonnet-5-5
-variant: high
 permission:
   edit: deny
   bash:

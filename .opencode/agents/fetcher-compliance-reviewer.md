@@ -4,8 +4,6 @@ description: >
   BaseGitFetcher lifecycle, metrics, registry, and task integration. Use after
   creating or changing a fetcher. Read-only.
 mode: subagent
-model: anthropic/claude-sonnet-5-5
-variant: high
 permission:
   edit: deny
   bash:

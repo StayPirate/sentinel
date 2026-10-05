@@ -74,3 +74,7 @@ backend/alembic/versions/__pycache__/
 
 # Local-only docs
 docs/system-map.md
+
+# OpenCode local agent models (see .opencode/README.md, Model Tiering)
+.opencode/opencode.json
+.opencode/opencode.jsonc

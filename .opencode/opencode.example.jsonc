@@ -1,0 +1,40 @@
+// Example local model selection for the Sentinel OpenCode agents.
+//
+// Copy this file to .opencode/opencode.jsonc (ignored by Git) and adjust the
+// models and variants to the providers available in your client. OpenCode
+// merges it over your global and the project configuration, so the values
+// below win over any per-agent model in ~/.config/opencode/opencode.json.
+// Restart OpenCode after editing it. See .opencode/README.md (Model Tiering).
+{
+  "$schema": "https://opencode.ai/config.json",
+  "agent": {
+    // Primary agents
+    "plan": { "model": "anthropic/claude-opus-5-5", "variant": "high" },
+    "spec": { "model": "anthropic/claude-opus-5-5", "variant": "high" },
+    "code": { "model": "anthropic/claude-opus-5-5", "variant": "high" },
+
+    // Tier 1 reviewers: adversarial reasoning and cross-document synthesis
+    "security-reviewer": { "model": "anthropic/claude-opus-5-5", "variant": "high" },
+    "spec-coherence-reviewer": { "model": "anthropic/claude-opus-5-5", "variant": "high" },
+    "spec-gap-analyzer": { "model": "anthropic/claude-opus-5-5", "variant": "high" },
+
+    // Tier 2 reviewers
+    "api-convention-reviewer": { "model": "anthropic/claude-sonnet-5-5", "variant": "high" },
+    "api-parity-reviewer": { "model": "anthropic/claude-sonnet-5-5", "variant": "high" },
+    "cicd-reviewer": { "model": "anthropic/claude-sonnet-5-5", "variant": "high" },
+    "data-model-reviewer": { "model": "anthropic/claude-sonnet-5-5", "variant": "high" },
+    "design-reviewer": { "model": "anthropic/claude-sonnet-5-5", "variant": "high" },
+    "docs-placement-reviewer": { "model": "anthropic/claude-sonnet-5-5", "variant": "high" },
+    "docs-reviewer": { "model": "anthropic/claude-sonnet-5-5", "variant": "high" },
+    "external-contract-verifier": { "model": "anthropic/claude-sonnet-5-5", "variant": "high" },
+    "fetcher-compliance-reviewer": { "model": "anthropic/claude-sonnet-5-5", "variant": "high" },
+    "identity-integrity-reviewer": { "model": "anthropic/claude-sonnet-5-5", "variant": "high" },
+    "spec-conformance-reviewer": { "model": "anthropic/claude-sonnet-5-5", "variant": "high" },
+    "test-reviewer": { "model": "anthropic/claude-sonnet-5-5", "variant": "high" },
+    "ticket-integrity-reviewer": { "model": "anthropic/claude-sonnet-5-5", "variant": "high" }
+
+    // Optional: built-in subagents otherwise inherit the invoking agent's model.
+    // "general": { "model": "anthropic/claude-sonnet-5-5", "variant": "high" },
+    // "explore": { "model": "anthropic/claude-haiku-4-5" }
+  }
+}

@@ -4,8 +4,6 @@ description: >
   contracts against recorded or read-only live evidence. Use after changing
   fetchers, HTTP clients, or parsers. Read-only.
 mode: subagent
-model: anthropic/claude-sonnet-5-5
-variant: high
 permission:
   edit: deny
   bash:

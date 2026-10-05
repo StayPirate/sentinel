@@ -4,8 +4,6 @@ description: >
   coverage. Use after changing SQLAlchemy models, Alembic migrations, or
   `docs/data-model.md`. Read-only.
 mode: subagent
-model: anthropic/claude-sonnet-5-5
-variant: high
 permission:
   edit: deny
   bash:

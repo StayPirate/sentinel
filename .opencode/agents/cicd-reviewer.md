@@ -4,8 +4,6 @@ description: >
   and release configuration for pipeline correctness and convention drift.
   Use after changing CI/CD artifacts. Read-only.
 mode: subagent
-model: anthropic/claude-sonnet-5-5
-variant: high
 permission:
   edit: deny
   bash:

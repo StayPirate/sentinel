@@ -5,14 +5,8 @@
     "build": {
       "disable": true
     },
-    "plan": {
-      "model": "anthropic/claude-opus-5-5",
-      "variant": "high"
-    },
     "spec": {
       "description": "Writes and maintains specifications, project policy, and OpenCode configuration. Cannot modify implementation code.",
-      "model": "anthropic/claude-opus-5-5",
-      "variant": "high",
       "mode": "primary",
       "color": "warning",
       "prompt": "{file:./.opencode/prompts/spec.md}",
@@ -29,8 +23,6 @@
     },
     "code": {
       "description": "Implements features from specifications. Signals unresolved behavioral or contract gaps while choosing compliant internal technical mechanisms.",
-      "model": "anthropic/claude-opus-5-5",
-      "variant": "high",
       "mode": "primary",
       "color": "error",
       "prompt": "{file:./.opencode/prompts/code.md}",

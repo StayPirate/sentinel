@@ -4,8 +4,6 @@ description: >
   unjustified complexity and proposing smaller alternatives. Use after
   creating or substantially changing a feature spec. Read-only.
 mode: subagent
-model: anthropic/claude-sonnet-5-5
-variant: high
 permission:
   edit: deny
   bash:
