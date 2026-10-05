@@ -1,32 +1,44 @@
-"""System settings read and audit log endpoints.
+"""System settings read and audit log endpoints and the default-CVSS
+impact preview.
 
 See `docs/features/platform/system-settings.md` (Get System Settings,
-List Settings Audit Events) for the authoritative endpoint contracts
+List Settings Audit Events) and
+`docs/features/platform/default-cvss-version-operations.md` (Get
+Default-CVSS Impact Preview) for the authoritative endpoint contracts
 this module implements. Handlers stay thin: they validate, delegate to
-`app.services.settings`, and map the result to the documented response
-— no business logic or database query lives here.
+`app.services.settings` or `app.services.cvss_impact_preview`, and map
+the result to the documented response — no business logic or database
+query lives here.
 """
 
 from __future__ import annotations
 
-from typing import Annotated
+from dataclasses import asdict
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Query
 
 from app.api.dependencies import AuthenticatedPrincipal, require_capability
 from app.core.dates import parse_date_range_bound, validate_date_range_order
 from app.core.enums import Capability, SettingAuditEventType
+from app.core.errors import AppError, ErrorCode
 from app.database import DatabaseSession
 from app.models.setting_audit_event import SettingAuditEvent
 from app.schemas.common import PaginationMeta, UserReference
+from app.schemas.errors import ErrorResponse
 from app.schemas.settings import (
+    DefaultCVSSVersionImpactData,
+    DefaultCVSSVersionImpactResponse,
     SettingAuditEventData,
     SettingAuditListResponse,
     SettingAuditQuery,
     SystemSettingsData,
     SystemSettingsResponse,
 )
+from app.services import cvss_impact_preview
 from app.services import settings as settings_service
+
+_PREVIEW_TIMEOUT_DETAIL = "The impact preview did not complete within its deadline."
 
 router = APIRouter(prefix="/api/v1/admin", tags=["System Settings"])
 
@@ -152,6 +164,63 @@ async def get_system_settings(
     default_cvss_version = await settings_service.get_default_cvss_version(db)
     return SystemSettingsResponse(
         data=SystemSettingsData(default_cvss_version=default_cvss_version)
+    )
+
+
+@router.get(
+    "/settings/default-cvss-version/impact",
+    response_model=DefaultCVSSVersionImpactResponse,
+    summary="Preview the impact of a default CVSS version change",
+    description=(
+        "Returns a read-only, fixed-size aggregate of the severity, Product "
+        "eligibility, override-skip, and Resolved-regression effects that "
+        "applying the proposed default CVSS version would have on the "
+        "persisted CVE population. Advisory and non-binding; it is not a "
+        "prerequisite for changing the setting. Requires the "
+        "manage_settings capability."
+    ),
+    responses={
+        503: {
+            "model": ErrorResponse,
+            "description": (
+                "`CVSS_PREVIEW_TIMEOUT`: the preview deadline expired before "
+                "a complete result was available; no partial result is "
+                "returned."
+            ),
+        },
+    },
+)
+async def get_default_cvss_version_impact(
+    principal: Annotated[
+        AuthenticatedPrincipal,
+        Depends(require_capability(Capability.MANAGE_SETTINGS)),
+    ],
+    db: DatabaseSession,
+    proposed_version: Annotated[
+        Literal["3.1", "4.0"],
+        Query(description="Proposed default CVSS version; exactly 3.1 or 4.0."),
+    ],
+) -> DefaultCVSSVersionImpactResponse:
+    """Get the default-CVSS impact preview — see
+    `docs/features/platform/default-cvss-version-operations.md` (Get
+    Default-CVSS Impact Preview).
+
+    `CVSSPreviewTimeoutError` maps to `503 CVSS_PREVIEW_TIMEOUT` with a
+    fixed detail. A missing required setting propagates as the global
+    `500 INTERNAL_ERROR`.
+    """
+    try:
+        impact = await cvss_impact_preview.get_default_cvss_version_impact(
+            db, proposed_version
+        )
+    except cvss_impact_preview.CVSSPreviewTimeoutError:
+        raise AppError(
+            status_code=503,
+            code=ErrorCode.CVSS_PREVIEW_TIMEOUT,
+            detail=_PREVIEW_TIMEOUT_DETAIL,
+        ) from None
+    return DefaultCVSSVersionImpactResponse(
+        data=DefaultCVSSVersionImpactData(**asdict(impact))
     )
 
 

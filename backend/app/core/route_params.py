@@ -17,8 +17,9 @@ def is_string_like(annotation: Any) -> bool:
     """Whether `annotation` denotes a string-shaped parameter.
 
     Covers `str`, `str | None`, `StrEnum` subclasses (which are `str`
-    subclasses), and `list[X]`/`list[X] | None` where `X` itself is
-    string-shaped. A repeatable filter (e.g. `role: list[str]`,
+    subclasses), a `Literal` whose values are all strings, and
+    `list[X]`/`list[X] | None` where `X` itself is string-shaped. A
+    repeatable filter (e.g. `role: list[str]`,
     `event_type: list[IdentityAuditEventType]`) is declared as a
     `list[...]` annotation by FastAPI's `Query()` mechanism; callers check
     each raw occurrence individually via `request.query_params.getlist()`.
@@ -34,6 +35,9 @@ def is_string_like(annotation: Any) -> bool:
     if origin is list:
         args = get_args(annotation)
         return bool(args) and is_string_like(args[0])
+    if origin is Literal:
+        values = get_args(annotation)
+        return bool(values) and all(isinstance(value, str) for value in values)
     return isinstance(annotation, type) and issubclass(annotation, str)
 
 

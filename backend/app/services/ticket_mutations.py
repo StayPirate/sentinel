@@ -465,7 +465,9 @@ def gate_status_expression(evaluation_date: date) -> ColumnElement[str]:
     Analysis → Analyzed, Gate: Analyzed → Resolved; package-model.md, Gate
     Participation), correlated to the `Ticket` of the enclosing statement
     so a set-based gate-mismatch query applies exactly the reconciliation
-    gates (implementation roadmap umbrella #761, H7).
+    gates (implementation roadmap umbrella #761, H7). Its read-only twin
+    over supplied inputs is `ticket_gate_projection.project_gate_status()`;
+    both must agree (shared matrix: `tests/support/gate_matrix.py`).
 
     Q1: `evaluation_date` is the one UTC date used by every lifecycle and
     actionability predicate.

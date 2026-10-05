@@ -1,9 +1,11 @@
 """Request/response/query schemas for the system settings read and audit
-log endpoints.
+log endpoints and the default-CVSS impact preview.
 
 See `docs/features/platform/system-settings.md` (Get System Settings,
-List Settings Audit Events) for the authoritative request/response
-contract these schemas implement.
+List Settings Audit Events) and
+`docs/features/platform/default-cvss-version-operations.md` (Get
+Default-CVSS Impact Preview) for the authoritative request/response
+contracts these schemas implement.
 """
 
 from __future__ import annotations
@@ -26,6 +28,30 @@ class SystemSettingsResponse(BaseModel):
     """Response body for `GET /api/v1/admin/settings`."""
 
     data: SystemSettingsData
+
+
+class DefaultCVSSVersionImpactData(BaseModel):
+    """The aggregate returned by
+    `GET /api/v1/admin/settings/default-cvss-version/impact`.
+
+    See `docs/features/platform/default-cvss-version-operations.md`
+    (Result and Count Units); no identifier or detail collection.
+    """
+
+    observed_default_cvss_version: str
+    proposed_default_cvss_version: str
+    no_op: bool
+    cves_evaluated: int
+    cve_severity_changes: int
+    product_eligibility_changes: int
+    product_eligibility_override_skips: int
+    resolved_ticket_regressions: int
+
+
+class DefaultCVSSVersionImpactResponse(BaseModel):
+    """Response body for the default-CVSS impact preview (no `meta`)."""
+
+    data: DefaultCVSSVersionImpactData
 
 
 class SettingAuditQuery(BaseModel):
