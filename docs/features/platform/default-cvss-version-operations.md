@@ -1124,8 +1124,8 @@ mapping.
 A delivered task begins no CVE transaction until it has proven ownership. The
 synchronous wrapper validates both inputs before the asynchronous workflow,
 `target_version` first and then the task ID, so a delivery with both inputs
-invalid is the `target_version` input-contract failure and emits no event. The
-task:
+invalid is the `target_version` input-contract failure and emits no run or
+coordination event. The task:
 
 1. arrives with a wrapper-validated canonical `celery_task_id`; an absent or
    malformed ID has already produced only the `task_id_invalid` adoption
@@ -1320,8 +1320,8 @@ feature event.
 | `cvss_recalculation_publication_unconfirmed` | ERROR | The publication call raised a broker operational error; the lease is retained |
 | `cvss_recalculation_adopted` | INFO | A task acquired the fence and confirmed exact owner/target before its first unit |
 | `cvss_recalculation_adoption_rejected` | WARNING | Before the run workflow starts, the wrapper or task could not validate the task ID, acquire the fence, or confirm exact owner/target; carries the closed `reason` category `task_id_invalid`, `fence_busy`, `lease_absent`, `lease_mismatch`, or `redis_error` |
-| `cvss_recalculation_renewal_failed` | WARNING | A checkpoint compare-and-renew returned `mismatch` or `absent`, raised `RedisError`, or was uncertain; the next unit is blocked |
-| `cvss_recalculation_cleanup_failed` | WARNING | Owner-safe compare-and-delete or explicit fence release failed or was uncertain |
+| `cvss_recalculation_renewal_failed` | WARNING | A checkpoint compare-and-renew returned `mismatch` or `absent`, raised `RedisError`, or was uncertain; the next unit is blocked; carries the closed `reason` category `lease_absent`, `lease_mismatch`, or `redis_error` |
+| `cvss_recalculation_cleanup_failed` | WARNING | Owner-safe compare-and-delete or explicit fence release failed or was uncertain; carries the closed `reason` category `redis_error` (compare-and-delete) or `fence_release_failed` (explicit release) |
 
 The terminal event table above owns `cvss_recalculation_ownership_lost` and the
 other terminal outcomes. A `cvss_recalculation_admission_rejected` that repeats
