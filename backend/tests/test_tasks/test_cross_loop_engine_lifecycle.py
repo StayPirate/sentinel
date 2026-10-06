@@ -36,17 +36,20 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
+import redis.asyncio as redis_asyncio
 from celery.exceptions import SoftTimeLimitExceeded
-from sqlalchemy import delete, select, text
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
     async_sessionmaker,
     create_async_engine,
 )
+from structlog.typing import EventDict
 
 import app.services.base_cve_fetcher as base_cve_fetcher_module
 import app.services.base_fetcher as base_fetcher_module
+from app.celery_app import celery_app
 from app.core.enums import CVESourceType, PackageStatus, Severity, TicketStatus
 from app.models.cve import CVE
 from app.models.fetcher_config import FetcherConfig
@@ -58,7 +61,7 @@ from app.models.ticket_audit_event import TicketAuditEvent
 from app.models.ticket_package import TicketPackage
 from app.models.ticket_package_product import TicketPackageProduct
 from app.models.ticket_package_track import TicketPackageTrack
-from app.services import package_service, task_publication
+from app.services import package_service, task_publication, ticket_mutations
 from app.services.base_cve_fetcher import (
     _CVE_SOURCE_TYPE_MAP,
     BaseCVEFetcher,
@@ -66,6 +69,12 @@ from app.services.base_cve_fetcher import (
 )
 from app.services.base_fetcher import FETCHER_REGISTRY, BaseFetcher
 from app.services.cve_ingest import UpsertAction
+from app.services.cvss_recalculation import (
+    COMPLETED_EVENT,
+    FAILED_EVENT,
+    RECALCULATE_CVSS_DERIVED_STATE_TASK,
+)
+from app.services.cvss_recalculation_coordination import LEASE_KEY
 from app.services.package_service import (
     PackageRecordsOutcome,
     ProductEligibilityRecalculationResult,
@@ -75,9 +84,10 @@ from app.services.packages import (
     product_catalog_backfill,
     product_eligibility_recalculation,
 )
-from app.tasks import cve_tasks, package_tasks, session_cleanup
+from app.tasks import cve_tasks, cvss_tasks, package_tasks, session_cleanup
 from app.tasks import fetchers as fetchers_module
 from tests.support.cve_catch_up import FakeTask, RetryRequested
+from tests.support.cvss_recalculation import admit_lease, capture_events, runner_events
 
 
 @pytest.mark.integration
@@ -1035,3 +1045,285 @@ def test_fetch_single_cve_wrapper_survives_a_retried_event_loop(
 
     assert result is None
     assert fetched == [seed.cve_id] * 2
+
+
+@dataclass(frozen=True, slots=True)
+class _RecalculationSeed:
+    """Committed rows of the `recalculate_cvss_derived_state` regressions."""
+
+    cve_uuid: UUID
+    setting_original: str | None
+
+
+async def _seed_recalculation(
+    factory: async_sessionmaker[AsyncSession],
+) -> _RecalculationSeed:
+    """Persist `default_cvss_version = 3.1` (remembering a previous value)
+    and commit one CVE, so each delivery adopts, passes the stale check,
+    and runs one unit. The runner visits every persisted CVE, so the worker
+    database must hold no other committed CVE."""
+    async with factory() as session:
+        population = select(func.count()).select_from(CVE)
+        assert (await session.execute(population)).scalar_one() == 0, (
+            "the worker database holds CVEs"
+        )
+        setting = await session.get(SystemSetting, "default_cvss_version")
+        original = setting.value if setting is not None else None
+        if setting is None:
+            session.add(SystemSetting(key="default_cvss_version", value="3.1"))
+        else:
+            setting.value = "3.1"
+        cve = CVE(cve_id=f"CVE-2099-{uuid4().int % 10**8:08d}")
+        session.add(cve)
+        await session.commit()
+        return _RecalculationSeed(cve.id, original)
+
+
+async def _cleanup_recalculation(
+    factory: async_sessionmaker[AsyncSession], seed: _RecalculationSeed
+) -> None:
+    async with factory() as session:
+        await session.execute(delete(CVE).where(CVE.id == seed.cve_uuid))
+        if seed.setting_original is None:
+            await session.execute(
+                delete(SystemSetting).where(SystemSetting.key == "default_cvss_version")
+            )
+        else:
+            setting = await session.get(SystemSetting, "default_cvss_version")
+            assert setting is not None
+            setting.value = seed.setting_original
+        await session.commit()
+
+
+def _admit_recalculation(redis_url: str) -> str:
+    """Acquire the lease for a fresh canonical task ID on its own event
+    loop, as the manual admission does."""
+
+    async def _admit() -> str:
+        client = redis_asyncio.Redis.from_url(redis_url, decode_responses=True)
+        try:
+            return await admit_lease(client)
+        finally:
+            await client.aclose()
+
+    return asyncio.run(_admit())
+
+
+def _recalculation_lease(redis_url: str) -> str | None:
+    async def _read() -> str | None:
+        client = redis_asyncio.Redis.from_url(redis_url, decode_responses=True)
+        try:
+            value: str | None = await client.get(LEASE_KEY)
+            return value
+        finally:
+            await client.aclose()
+
+    return asyncio.run(_read())
+
+
+class _DisposalSpy:
+    """Counts `dispose()` awaits of one engine, in the order of the
+    captured events; the workflow disposes its factory's bind, so the
+    engine itself (not a module reference) is observed."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, engine: AsyncEngine) -> None:
+        self.order: list[str] = []
+        dispose = AsyncEngine.dispose
+
+        async def _dispose(self_: AsyncEngine, close: bool = True) -> None:
+            if self_ is engine:
+                self.order.append("dispose")
+            await dispose(self_, close)
+
+        monkeypatch.setattr(AsyncEngine, "dispose", _dispose)
+
+    @property
+    def disposals(self) -> int:
+        return self.order.count("dispose")
+
+    def record(self, logger: object, method: str, event_dict: EventDict) -> EventDict:
+        """A structlog processor interleaving events with disposals."""
+        self.order.append(str(event_dict["event"]))
+        return event_dict
+
+
+def _recalculation_probe(
+    monkeypatch: pytest.MonkeyPatch, *, fail_first: BaseException | None
+) -> list[UUID]:
+    """Replace only the innermost domain operation of each unit,
+    `ticket_mutations.recalculate_cvss_chain()`, by a trivial query on the
+    unit session (raising `fail_first` once, after the query, if given)
+    that classifies the unit `unchanged`. Nothing is registered, so the
+    drain publishes nothing."""
+    probed: list[UUID] = []
+    pending = [fail_first] if fail_first is not None else []
+
+    async def _trivial_chain(db: AsyncSession, **kwargs: object) -> object:
+        await db.execute(text("SELECT 1"))
+        cve_id = kwargs["cve_id"]
+        assert isinstance(cve_id, UUID)
+        probed.append(cve_id)
+        if pending:
+            raise pending.pop()
+        return SimpleNamespace(
+            classification=ticket_mutations.CVSSChainClassification.UNCHANGED
+        )
+
+    async def _refuse(task_name: str, **options: object) -> None:
+        raise AssertionError("the trivial unit registers no convergence effect")
+
+    monkeypatch.setattr(ticket_mutations, "recalculate_cvss_chain", _trivial_chain)
+    monkeypatch.setattr(task_publication, "publish_task", _refuse)
+    return probed
+
+
+def _recalculation_dedicated_engine(
+    _engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> tuple[AsyncEngine, async_sessionmaker[AsyncSession], _RecalculationSeed]:
+    """Point the wrapper's module-level `async_session_factory` at a
+    dedicated pooled engine, then commit the seed and drain the seeding
+    connection so the first real delivery does not receive a connection
+    bound to this setup loop."""
+    dedicated_engine = create_async_engine(
+        _engine.url.render_as_string(hide_password=False), echo=False
+    )
+    dedicated_factory = async_sessionmaker(
+        dedicated_engine, class_=AsyncSession, expire_on_commit=False
+    )
+    monkeypatch.setattr(cvss_tasks, "async_session_factory", dedicated_factory)
+
+    async def _seed_and_drain() -> _RecalculationSeed:
+        seed = await _seed_recalculation(dedicated_factory)
+        await dedicated_engine.dispose()
+        return seed
+
+    return dedicated_engine, dedicated_factory, asyncio.run(_seed_and_drain())
+
+
+def _finish_recalculation(
+    engine: AsyncEngine,
+    factory: async_sessionmaker[AsyncSession],
+    seed: _RecalculationSeed,
+) -> None:
+    async def _cleanup() -> None:
+        await _cleanup_recalculation(factory, seed)
+        await engine.dispose()
+
+    asyncio.run(_cleanup())
+
+
+def _deliver_recalculation(task_id: str) -> object:
+    """One delivery of the real registered task with `task_id` as
+    `task.request.id`, through Celery's eager tracer (which sends the real
+    `task_prerun`/`task_postrun` correlation signals)."""
+    task = celery_app.tasks[RECALCULATE_CVSS_DERIVED_STATE_TASK]
+    return task.apply(args=["3.1"], task_id=task_id, throw=True).result
+
+
+def _terminal_events(logs: list[EventDict]) -> list[tuple[str, str | None]]:
+    return [
+        (str(entry["event"]), entry.get("celery_task_id"))
+        for entry in runner_events(logs)
+        if entry["event"] in {COMPLETED_EVENT, FAILED_EVENT}
+    ]
+
+
+@pytest.mark.integration
+@pytest.mark.usefixtures("redis_client")
+def test_recalculate_cvss_derived_state_wrapper_survives_two_consecutive_event_loops(
+    _engine: AsyncEngine,  # noqa: PT019 — value used below (.url), not just for setup
+    _redis_test_url: str,  # noqa: PT019 — value used below (lease admission)
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two sequential deliveries of the real `recalculate_cvss_derived_state`
+    synchronous wrapper — each its own `asyncio.run()` event loop — both
+    complete against one shared, pooled engine and return `None`.
+
+    Each delivery's lease is admitted on its own loop with a fresh UUIDv4
+    task ID. The workflow derives its fenced connection from the factory's
+    bind (the dedicated pooled engine): the fence, the setting read, the
+    watermark and page reads, and the trivial unit query check real
+    connections out of the dedicated pool. The workflow, not the wrapper,
+    awaits `engine.dispose()` exactly once per delivery, after its terminal
+    event (issue #836 U4)."""
+    probed = _recalculation_probe(monkeypatch, fail_first=None)
+    dedicated_engine, dedicated_factory, seed = _recalculation_dedicated_engine(
+        _engine, monkeypatch
+    )
+    disposal = _DisposalSpy(monkeypatch, dedicated_engine)
+    first_id = _admit_recalculation(_redis_test_url)
+
+    try:
+        with capture_events(disposal.record) as logs:
+            # First invocation: its own event loop; the workflow disposes
+            # the pool before the loop closes.
+            first = _deliver_recalculation(first_id)
+            assert disposal.disposals == 1
+            second_id = _admit_recalculation(_redis_test_url)
+
+            # Second invocation: a brand-new event loop. Without disposal
+            # the pool would hand out a connection bound to the first
+            # (closed) loop.
+            second = _deliver_recalculation(second_id)
+            assert disposal.disposals == 2
+        delivered = list(disposal.order)
+    finally:
+        _finish_recalculation(dedicated_engine, dedicated_factory, seed)
+
+    assert (first, second) == (None, None)
+    assert probed == [seed.cve_uuid] * 2
+    assert _terminal_events(logs) == [
+        (COMPLETED_EVENT, first_id),
+        (COMPLETED_EVENT, second_id),
+    ]
+    assert [step for step in delivered if step in {COMPLETED_EVENT, "dispose"}] == [
+        COMPLETED_EVENT,
+        "dispose",
+    ] * 2
+    assert _recalculation_lease(_redis_test_url) is None
+
+
+@pytest.mark.integration
+@pytest.mark.usefixtures("redis_client")
+def test_recalculate_cvss_derived_state_wrapper_survives_a_failed_event_loop(
+    _engine: AsyncEngine,  # noqa: PT019 — value used below (.url), not just for setup
+    _redis_test_url: str,  # noqa: PT019 — value used below (lease admission)
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A first delivery whose unit fails after using a pooled connection
+    (the trivial chain raises `TypeError` after its query) terminates
+    `failed`, still disposes the pool exactly once, and the wrapper
+    propagates the same exception object; the next delivery, a new event
+    loop in the same process, completes."""
+    error = TypeError("fictional unit failure")
+    probed = _recalculation_probe(monkeypatch, fail_first=error)
+    dedicated_engine, dedicated_factory, seed = _recalculation_dedicated_engine(
+        _engine, monkeypatch
+    )
+    disposal = _DisposalSpy(monkeypatch, dedicated_engine)
+    first_id = _admit_recalculation(_redis_test_url)
+
+    try:
+        with capture_events(disposal.record) as logs:
+            with pytest.raises(TypeError) as raised:
+                _deliver_recalculation(first_id)
+            assert raised.value is error
+            assert disposal.disposals == 1
+            second_id = _admit_recalculation(_redis_test_url)
+
+            result = _deliver_recalculation(second_id)
+            assert disposal.disposals == 2
+        delivered = list(disposal.order)
+    finally:
+        _finish_recalculation(dedicated_engine, dedicated_factory, seed)
+
+    assert result is None
+    assert probed == [seed.cve_uuid] * 2
+    assert _terminal_events(logs) == [
+        (FAILED_EVENT, first_id),
+        (COMPLETED_EVENT, second_id),
+    ]
+    assert [
+        step for step in delivered if step in {FAILED_EVENT, COMPLETED_EVENT, "dispose"}
+    ] == [FAILED_EVENT, "dispose", COMPLETED_EVENT, "dispose"]
+    assert _recalculation_lease(_redis_test_url) is None
