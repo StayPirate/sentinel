@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.8.0](https://github.com/StayPirate/sentinel/compare/v0.7.0...v0.8.0) (2026-10-06)
+
+
+### Features
+
+* add deactivation impact preview and manage-user deactivate ([#828](https://github.com/StayPirate/sentinel/issues/828)) ([4aed0d5](https://github.com/StayPirate/sentinel/commit/4aed0d5ef033d1dfa70a3815873464020abb2c58))
+* add log redaction processor for secrets and credential URIs ([#839](https://github.com/StayPirate/sentinel/issues/839)) ([6fe691f](https://github.com/StayPirate/sentinel/commit/6fe691f0126998f4c5d5dc8029f7af01ad05f8d5)), closes [#802](https://github.com/StayPirate/sentinel/issues/802)
+* add manual role management and final-VA-loss unassignment ([#812](https://github.com/StayPirate/sentinel/issues/812)) ([258fc35](https://github.com/StayPirate/sentinel/commit/258fc355c2769c0aae07f601e65a98b90fbd3875))
+* add the all-CVE default-version CVSS recalculation runner ([#842](https://github.com/StayPirate/sentinel/issues/842)) ([72c6042](https://github.com/StayPirate/sentinel/commit/72c60428f76088911462a33018a8fa19b3ac1b78))
+* add the CVSS recalculation lease operations and execution fence ([#841](https://github.com/StayPirate/sentinel/issues/841)) ([654a23f](https://github.com/StayPirate/sentinel/commit/654a23f92d46986c27b41a37d0250465389f9896))
+* add the default CVSS version setting mutation and PATCH endpoint ([#844](https://github.com/StayPirate/sentinel/issues/844)) ([9ea11a1](https://github.com/StayPirate/sentinel/commit/9ea11a1401b50c5b7f60ca6715f3dba127b05978))
+* add the default-CVSS impact preview and its endpoint ([#840](https://github.com/StayPirate/sentinel/issues/840)) ([40b947a](https://github.com/StayPirate/sentinel/commit/40b947acd2df72020662816be28c3323f456683f))
+* add the manage-user update command ([#816](https://github.com/StayPirate/sentinel/issues/816)) ([cd1d2b9](https://github.com/StayPirate/sentinel/commit/cd1d2b945993f8603f439b5fa2b63cdd92b3ab1f))
+* add the manual CVSS recalculation admission and its endpoint ([#843](https://github.com/StayPirate/sentinel/issues/843)) ([e7391c3](https://github.com/StayPirate/sentinel/commit/e7391c3207f0407ce0a764537d5859116328818c))
+* add user deactivation and the deactivate endpoint ([#822](https://github.com/StayPirate/sentinel/issues/822)) ([bbfb050](https://github.com/StayPirate/sentinel/commit/bbfb050d401c6d4a356919174a05eba51dac7ab8))
+
+
+### Bug Fixes
+
+* resolve CLI users by username only and bound CLI input ([#818](https://github.com/StayPirate/sentinel/issues/818)) ([dbfa2e6](https://github.com/StayPirate/sentinel/commit/dbfa2e64f07dbebee8b06d16f14c4e46905f31df))
+
 ## [0.7.0](https://github.com/StayPirate/sentinel/compare/v0.6.0...v0.7.0) (2026-10-04)
 
 
