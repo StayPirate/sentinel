@@ -20,9 +20,11 @@ Owning specifications:
   run identity); umbrella #833 P9 and P11.
 
 The admission runs on the borrowed fenced connection of the shared
-recalculation harness (tests/support/cvss_recalculation.py), supplied
-through the `get_cvss_admission_bind()` patch point; the owned path uses a
-dedicated one-connection pooled engine. The lease lives in the worker Redis
+recalculation harness (tests/support/cvss_recalculation.py), observed by
+the shared `AdmissionSpy` (tests/support/cvss_recalculation_admission.py)
+and supplied through the `get_cvss_admission_bind()` patch point; the
+owned path uses a dedicated one-connection pooled engine. The lease lives
+in the worker Redis
 database (`redis_client` redirects the lease URL provider). The broker call
 `task_publication.publish_task` is replaced by the spy's recorder. Failures
 are injected through the real helpers wherever feasible: a backend
@@ -38,9 +40,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
-from contextlib import contextmanager
-from dataclasses import dataclass
+from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 import pytest
@@ -67,9 +67,7 @@ from app.models.identity_audit_event import IdentityAuditEvent
 from app.models.setting_audit_event import SettingAuditEvent
 from app.models.ticket_audit_event import TicketAuditEvent
 from app.services import cvss_recalculation_admission as admission
-from app.services import cvss_recalculation_coordination as coordination
 from app.services import settings as settings_service
-from app.services import task_publication
 from app.services.cvss_recalculation import RECALCULATE_CVSS_DERIVED_STATE_TASK
 from app.services.cvss_recalculation_admission import (
     ADMISSION_REJECTED_EVENT,
@@ -103,7 +101,6 @@ from app.services.settings import (
     RequiredSystemSettingMissingError,
     SettingsServiceError,
 )
-from app.services.task_publication import JSONValue
 from tests.support.cvss_recalculation import (
     LEAK_MARKER,
     TARGET,
@@ -116,9 +113,7 @@ from tests.support.cvss_recalculation import (
     terminate_backend,
     wait_until_fence_free,
 )
-
-Hook = Callable[[AsyncConnection], Awaitable[None]]
-"""An awaited hook receiving the admission's fenced connection."""
+from tests.support.cvss_recalculation_admission import AdmissionSpy, Publication
 
 REQUEST_ID = "req-fictional-0837"
 """A fictional bound `request_id`: the admission events' only correlation."""
@@ -135,170 +130,6 @@ _ADMISSION_EVENTS = {
 }
 
 _UNLOCK = select(func.pg_advisory_unlock(literal(EXECUTION_FENCE_ID, BigInteger)))
-
-
-# ---------------------------------------------------------------------------
-# Spy
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class Publication:
-    """One recorded broker publication call."""
-
-    task_name: str
-    kwargs: dict[str, JSONValue]
-    task_id: str | None
-    queue: str | None
-
-
-@contextmanager
-def _failing_execute(target: AsyncConnection, error: BaseException) -> Iterator[None]:
-    """Make `target.execute()` raise `error` inside a real helper, so the
-    helper's own invalidate-and-propagate path runs; every other connection
-    is unaffected."""
-    original = AsyncConnection.execute
-
-    async def _execute(self: AsyncConnection, *args: Any, **kwargs: Any) -> Any:
-        if self is target:
-            raise error
-        return await original(self, *args, **kwargs)
-
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(AsyncConnection, "execute", _execute)
-        yield
-
-
-class AdmissionSpy:
-    """Wraps every coordination step the admission calls through its
-    module (and the settings read and the publisher through theirs),
-    recording the step sequence and delegating to the real operation.
-
-    Injection points: `fence_error`, `setting_error`, and `release_error`
-    make the real helper's statement fail; `lease_error` replaces the
-    acquire (or follows the real write when `lease_error_after_write`);
-    `delete_error` replaces the compare-and-delete; `after_lease` and
-    `before_release` run around the real calls; `publish_error` is raised
-    by the recorder after recording."""
-
-    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        self.sequence: list[str] = []
-        self.task_ids: list[str] = []
-        self.fence_pids: list[int] = []
-        self.release_raised: list[BaseException] = []
-        self.published: list[Publication] = []
-        self.clients = 0
-        self.fence_error: BaseException | None = None
-        self.setting_error: BaseException | None = None
-        self.lease_error: BaseException | None = None
-        self.lease_error_after_write = False
-        self.after_lease: Callable[[], Awaitable[None]] | None = None
-        self.before_release: Hook | None = None
-        self.release_error: BaseException | None = None
-        self.delete_error: BaseException | None = None
-        self.on_publish: Callable[[Publication], Awaitable[None]] | None = None
-        self.publish_error: BaseException | None = None
-        self._connection: AsyncConnection | None = None
-        self._install(monkeypatch)
-
-    def _install(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        fence = coordination.try_acquire_execution_fence
-        setting = settings_service.get_default_cvss_version
-        client_factory = coordination.new_cvss_recalculation_redis_client
-        lease = coordination.acquire_lease
-        release = coordination.release_execution_fence
-        delete = coordination.compare_and_delete_lease
-
-        async def _fence(connection: AsyncConnection) -> FenceAcquireOutcome:
-            self.sequence.append("fence")
-            self._connection = connection
-            self.fence_pids.append(connection_pid(connection))
-            if self.fence_error is not None:
-                with _failing_execute(connection, self.fence_error):
-                    return await fence(connection)
-            return await fence(connection)
-
-        async def _setting(session: AsyncSession) -> str:
-            self.sequence.append("setting")
-            if self.setting_error is not None:
-                raise self.setting_error
-            return await setting(session)
-
-        def _client() -> redis_asyncio.Redis:
-            self.clients += 1
-            return client_factory()
-
-        async def _lease(
-            client: redis_asyncio.Redis, *, task_id: str, target_version: str
-        ) -> Any:
-            self.sequence.append("lease")
-            self.task_ids.append(task_id)
-            if self.lease_error is not None and not self.lease_error_after_write:
-                raise self.lease_error
-            outcome = await lease(
-                client, task_id=task_id, target_version=target_version
-            )
-            if self.lease_error is not None:
-                raise self.lease_error
-            if self.after_lease is not None:
-                await self.after_lease()
-            return outcome
-
-        async def _release(connection: AsyncConnection) -> FenceReleaseOutcome:
-            self.sequence.append("release")
-            try:
-                if self.before_release is not None:
-                    await self.before_release(connection)
-                if self.release_error is not None:
-                    with _failing_execute(connection, self.release_error):
-                        return await release(connection)
-                return await release(connection)
-            except BaseException as exc:
-                self.release_raised.append(exc)
-                raise
-
-        async def _delete(
-            client: redis_asyncio.Redis, *, task_id: str, target_version: str
-        ) -> LeaseDeleteOutcome:
-            self.sequence.append("delete")
-            if self.delete_error is not None:
-                raise self.delete_error
-            return await delete(client, task_id=task_id, target_version=target_version)
-
-        async def _publish(
-            task_name: str,
-            *,
-            kwargs: Mapping[str, JSONValue],
-            task_id: str | None = None,
-            queue: str | None = None,
-        ) -> None:
-            self.sequence.append("publish")
-            call = Publication(task_name, dict(kwargs), task_id, queue)
-            self.published.append(call)
-            if self.on_publish is not None:
-                await self.on_publish(call)
-            if self.publish_error is not None:
-                raise self.publish_error
-
-        monkeypatch.setattr(admission, "try_acquire_execution_fence", _fence)
-        monkeypatch.setattr(settings_service, "get_default_cvss_version", _setting)
-        monkeypatch.setattr(admission, "new_cvss_recalculation_redis_client", _client)
-        monkeypatch.setattr(admission, "acquire_lease", _lease)
-        monkeypatch.setattr(admission, "release_execution_fence", _release)
-        monkeypatch.setattr(admission, "compare_and_delete_lease", _delete)
-        monkeypatch.setattr(task_publication, "publish_task", _publish)
-
-    @property
-    def task_id(self) -> str:
-        """The single task ID this test's admission allocated."""
-        assert len(self.task_ids) == 1
-        return self.task_ids[0]
-
-    @property
-    def connection(self) -> AsyncConnection:
-        """The admission's fenced connection."""
-        assert self._connection is not None
-        return self._connection
 
 
 # ---------------------------------------------------------------------------
@@ -685,6 +516,35 @@ class TestPreLeaseFailures:
         assert excinfo.value is error
         assert spy.sequence == ["fence", "setting", "release"]
         assert spy.clients == 0
+        assert spy.published == []
+        assert await h.lease() is None
+        assert await h.fence_holders() == []
+        _assert_borrowed_intact(h)
+        assert runner_events(logs) == []
+
+    async def test_redis_client_creation_error_propagates_and_releases_the_fence(
+        self,
+        h: RecalculationHarness,
+        spy: AdmissionSpy,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Step 3: a failure to create the lease client, after the fenced
+        setting read and before any lease attempt, releases the fence and
+        propagates unchanged; nothing is acquired or published."""
+        error = RuntimeError(LEAK_MARKER)
+
+        def _client() -> redis_asyncio.Redis:
+            spy.sequence.append("client")
+            raise error
+
+        monkeypatch.setattr(admission, "new_cvss_recalculation_redis_client", _client)
+
+        with capture_events() as logs, pytest.raises(RuntimeError) as excinfo:
+            await admit_cvss_recalculation()
+
+        assert excinfo.value is error
+        assert spy.sequence == ["fence", "setting", "client", "release"]
+        assert spy.task_ids == []
         assert spy.published == []
         assert await h.lease() is None
         assert await h.fence_holders() == []
