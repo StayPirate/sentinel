@@ -334,6 +334,10 @@ async def try_acquire_execution_fence(
     to the pool: the pool reset only rolls back, and a session-level lock
     survives it. Only `release_execution_fence()` returning `RELEASED`,
     invalidation, backend termination, or process exit releases the fence.
+
+    Call it at most once per connection. A session-level advisory lock is
+    re-entrant: a session that already holds the fence acquires it again
+    (`ACQUIRED`, never `BUSY`) and then needs one release per acquisition.
     """
     _require_no_transaction(connection)
     try:
@@ -361,7 +365,8 @@ async def release_execution_fence(
     transaction.
 
     Returns `RELEASED` only when the unlock result is `true`; only then may
-    the caller close the connection back to the pool. A definitive `false`
+    the caller close the connection back to the pool, provided the fence
+    was acquired once on it (see `try_acquire_execution_fence()`). A definitive `false`
     invalidates the connection and returns `NOT_CONFIRMED`. Any exception
     during the release (a database error, a timeout, `CancelledError`)
     invalidates the connection and propagates unchanged. Invalidation

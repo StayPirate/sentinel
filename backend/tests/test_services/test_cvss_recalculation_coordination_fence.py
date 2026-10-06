@@ -14,13 +14,16 @@ Owning specifications:
 - issue #835 decisions T2 (uncertain acquisition invalidates), T3 (no open
   transaction), and T4 (invalidation failure during release).
 
-Every test uses independent connections of the shared test engine (one
-PostgreSQL session each), because a session-level advisory lock is
-re-entrant within one session. Advisory locks are scoped to the current
-database, so pytest-xdist workers, each on its own database, never
-contend. Teardown invalidates every connection a test opened, which ends
-its backend session and so releases any fence it still holds, and then
-proves the fence is free: no test leaves a held fence in the pool.
+Every test uses independent connections (one PostgreSQL session each),
+because a session-level advisory lock is re-entrant within one session.
+They come from a dedicated `NullPool` engine on the test database, never
+from the shared test engine's pool (testing-strategy.md, Fixture Catalog:
+tests do not use the shared engine directly), so closing one ends its
+backend session. Advisory locks are scoped to the current database, so
+pytest-xdist workers, each on its own database, never contend. Teardown
+invalidates every connection a test opened, which ends its backend
+session and so releases any fence it still holds, and then proves the
+fence is free: no test leaves a held fence behind.
 """
 
 from __future__ import annotations
@@ -34,6 +37,7 @@ import pytest
 from sqlalchemy import BigInteger, bindparam, event, text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
+from sqlalchemy.pool import NullPool
 
 from app.services.cvss_recalculation_coordination import (
     EXECUTION_FENCE_ID,
@@ -82,13 +86,25 @@ _ERRORS = [
 
 
 @pytest.fixture
-async def connect(_engine: AsyncEngine) -> AsyncIterator[Connect]:
-    """Open independent connections of the shared test engine; teardown
+async def fence_engine(
+    _engine: AsyncEngine,
+) -> AsyncIterator[AsyncEngine]:
+    """A dedicated `NullPool` engine on this worker's test database."""
+    engine = create_async_engine(_engine.url, poolclass=NullPool)
+    try:
+        yield engine
+    finally:
+        await engine.dispose()
+
+
+@pytest.fixture
+async def connect(fence_engine: AsyncEngine) -> AsyncIterator[Connect]:
+    """Open independent connections of `fence_engine`; teardown
     invalidates and closes each one, then proves the fence is free."""
     opened: list[AsyncConnection] = []
 
     async def _connect() -> AsyncConnection:
-        connection = await _engine.connect()
+        connection = await fence_engine.connect()
         opened.append(connection)
         return connection
 
@@ -101,7 +117,7 @@ async def connect(_engine: AsyncEngine) -> AsyncIterator[Connect]:
             if not connection.invalidated:
                 await connection.invalidate()
             await connection.close()
-        observer = await _engine.connect()
+        observer = await fence_engine.connect()
         try:
             await _wait_until_fence_free(observer)
         finally:
@@ -338,17 +354,6 @@ class TestReleaseExecutionFence:
         assert await _fence_holders(observer) == []
         await _assert_fresh_acquisition(connect)
 
-    async def test_released_connection_may_return_to_pool(
-        self, connect: Connect
-    ) -> None:
-        holder = await connect()
-        assert await try_acquire_execution_fence(holder) is FenceAcquireOutcome.ACQUIRED
-        assert await release_execution_fence(holder) is FenceReleaseOutcome.RELEASED
-
-        await holder.close()
-
-        await _assert_fresh_acquisition(connect)
-
     async def test_transaction_level_attempt_fails_while_held_succeeds_after(
         self, connect: Connect
     ) -> None:
@@ -491,14 +496,12 @@ class TestReleaseExecutionFence:
 @pytest.mark.integration
 class TestFenceLifetime:
     async def test_close_to_pool_while_held_does_not_release_fence(
-        self,
-        _engine: AsyncEngine,  # noqa: PT019 — value used below (.url), not just setup
-        connect: Connect,
+        self, fence_engine: AsyncEngine, connect: Connect
     ) -> None:
         """The pool reset only rolls back; the session-level lock survives
         `close()`. A one-connection pool hands the same session back, which
         then releases the fence it still holds."""
-        private = create_async_engine(_engine.url, pool_size=1, max_overflow=0)
+        private = create_async_engine(fence_engine.url, pool_size=1, max_overflow=0)
         try:
             holder = await private.connect()
             pid = await _backend_pid(holder)

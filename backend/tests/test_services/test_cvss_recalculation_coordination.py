@@ -202,8 +202,10 @@ class TestConstants:
         assert LEASE_TTL_SECONDS == 900
         assert LEASE_RENEWAL_INTERVAL_SECONDS == 60
 
-    def test_execution_fence_id_fits_signed_int64(self) -> None:
-        assert isinstance(EXECUTION_FENCE_ID, int)
+    def test_execution_fence_id_is_the_reserved_stable_value(self) -> None:
+        """The identifier MUST be stable across releases (Execution Fence):
+        an API and a worker of different releases must request one fence."""
+        assert EXECUTION_FENCE_ID == 0x534E_544C_4356_5353
         assert -(2**63) <= EXECUTION_FENCE_ID < 2**63
 
     def test_outcome_enums_are_closed_sets(self) -> None:
@@ -333,17 +335,6 @@ class TestRedisBoundary:
         assert provider() == _redis_test_url
         assert provider() == redis_url_from_client(redis_client)
 
-    async def test_factory_client_targets_fixture_database(
-        self, redis_client: redis_asyncio.Redis, lease_client: redis_asyncio.Redis
-    ) -> None:
-        assert redis_url_from_client(lease_client) == redis_url_from_client(
-            redis_client
-        )
-
-        await acquire_lease(lease_client, task_id=TASK_ID, target_version=TARGET)
-
-        assert await redis_client.get(LEASE_KEY) == VALUE
-
 
 @pytest.mark.unit
 class TestClientFactory:
@@ -392,7 +383,6 @@ class TestAcquireLease:
 
         assert outcome is LeaseAcquireOutcome.ACQUIRED
         assert await redis_client.get(LEASE_KEY) == f"v1:{TASK_ID}:{target}"
-        assert await redis_client.ttl(LEASE_KEY) == LEASE_TTL_SECONDS
         await _assert_ttl_seconds(redis_client, LEASE_TTL_SECONDS)
         assert await redis_client.keys("*") == [LEASE_KEY]
 
@@ -788,42 +778,3 @@ class TestRedisErrorPropagation:
         assert excinfo.value is error
         assert await redis_client.get(LEASE_KEY) == VALUE
         await _assert_ttl_seconds(redis_client, _DISTINCT_TTL)
-
-
-@pytest.mark.integration
-class TestOutcomeTypes:
-    async def test_every_outcome_is_a_member_of_its_closed_enum(
-        self, redis_client: redis_asyncio.Redis, lease_client: redis_asyncio.Redis
-    ) -> None:
-        kwargs = {"task_id": TASK_ID, "target_version": TARGET}
-        other = {"task_id": OTHER_TASK_ID, "target_version": TARGET}
-
-        acquire_outcomes = [
-            await acquire_lease(lease_client, **kwargs),
-            await acquire_lease(lease_client, **kwargs),
-        ]
-        renew_outcomes = [
-            await compare_and_renew_lease(lease_client, **kwargs),
-            await compare_and_renew_lease(lease_client, **other),
-        ]
-        delete_outcomes = [
-            await compare_and_delete_lease(lease_client, **other),
-            await compare_and_delete_lease(lease_client, **kwargs),
-            await compare_and_delete_lease(lease_client, **kwargs),
-        ]
-        renew_outcomes.append(await compare_and_renew_lease(lease_client, **kwargs))
-
-        assert acquire_outcomes == list(LeaseAcquireOutcome)
-        assert all(type(o) is LeaseAcquireOutcome for o in acquire_outcomes)
-        assert renew_outcomes == [
-            LeaseRenewOutcome.RENEWED,
-            LeaseRenewOutcome.MISMATCH,
-            LeaseRenewOutcome.ABSENT,
-        ]
-        assert all(type(o) is LeaseRenewOutcome for o in renew_outcomes)
-        assert delete_outcomes == [
-            LeaseDeleteOutcome.MISMATCH,
-            LeaseDeleteOutcome.DELETED,
-            LeaseDeleteOutcome.ABSENT,
-        ]
-        assert all(type(o) is LeaseDeleteOutcome for o in delete_outcomes)

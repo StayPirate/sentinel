@@ -28,7 +28,6 @@ from typing import Protocol
 
 import pytest
 import redis.asyncio as redis_asyncio
-from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import RedisError
 from redis.exceptions import TimeoutError as RedisTimeoutError
 
@@ -131,14 +130,18 @@ class TestRestartAndFlush:
             await client.aclose()
         assert await observer.exists(LEASE_KEY) == 0
 
-    async def test_renew_on_client_reused_across_restart_raises_redis_error_first(
+    async def test_renew_on_client_reused_across_restart_never_confirms_ownership(
         self,
         dedicated_redis: DedicatedRedisContainer,
     ) -> None:
-        """Retries are disabled (decision T7): the first command on the
-        reused connection fails instead of being resent, which is the
-        conservative outcome; the next command reconnects and observes the
-        lost lease."""
+        """A client reused across the restart never reports `RENEWED`.
+
+        Whether its first command raises `RedisError` (the stale connection
+        is used and fails; retries are disabled, decision T7) or returns
+        `ABSENT` (the client noticed the closed socket and reconnected)
+        depends on whether the event loop observed the server's close
+        before the command; both are conservative. The next command
+        observes the lost lease."""
         client = _lease_client()
         try:
             assert (
@@ -148,10 +151,14 @@ class TestRestartAndFlush:
 
             dedicated_redis.restart()
 
-            with pytest.raises(RedisConnectionError):
-                await compare_and_renew_lease(
+            try:
+                first = await compare_and_renew_lease(
                     client, task_id=TASK_ID, target_version=TARGET
                 )
+            except RedisError:
+                pass
+            else:
+                assert first is LeaseRenewOutcome.ABSENT
             assert (
                 await compare_and_renew_lease(
                     client, task_id=TASK_ID, target_version=TARGET
