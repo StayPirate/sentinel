@@ -103,6 +103,8 @@ SECRET: Final = "Example-Secret-Upstream-Value"
 """An upstream value that must never reach an exception message."""
 
 INGESTION_COMMENT: Final = "CVE ingested from FIRST.org EPSS"
+TODAY: Final = date(2026, 10, 6)
+"""The batch-level `date` of every live fixture."""
 
 
 # ---------------------------------------------------------------------------
@@ -634,16 +636,33 @@ class TestResultPassThrough:
 
 @pytest.mark.integration
 class TestPayload:
+    @pytest.mark.parametrize(
+        ("name", "expected"),
+        [
+            ("scored", EPSSEntry(score=0.99506, percentile=0.99945, assessed_at=TODAY)),
+            (
+                "scored_percentile_one",
+                EPSSEntry(score=0.99999, percentile=1.0, assessed_at=TODAY),
+            ),
+            (
+                "scored_low",
+                EPSSEntry(score=0.00169, percentile=0.05594, assessed_at=TODAY),
+            ),
+        ],
+        ids=lambda value: value if isinstance(value, str) else "",
+    )
     async def test_payload_sets_only_the_converted_epss_score(
         self,
+        name: str,
+        expected: EPSSEntry,
         db_session: AsyncSession,
         target: Target,
         fetcher: SyncEpssScores,
         server: EpssServer,
         ingestion: Ingestion,
     ) -> None:
-        # The live `scored` entry, served under a fictional CVE-ID.
-        server.entries[target.cve_id] = {**scored_entry(), "cve": target.cve_id}
+        # The live entry, served under a fictional CVE-ID.
+        server.entries[target.cve_id] = {**scored_entry(name), "cve": target.cve_id}
 
         await fetcher.fetch_single(target.cve_id, db_session)
 
@@ -651,9 +670,7 @@ class TestPayload:
         assert cve_id == target.cve_id
         assert source is CVESourceType.EPSS
         assert payload.model_fields_set == {"epss_score"}
-        assert payload.epss_score == EPSSEntry(
-            score=0.99506, percentile=0.99945, assessed_at=date(2026, 10, 6)
-        )
+        assert payload.epss_score == expected
         assert payload.cvss_assessments is None
         assert payload.kev_data is None
         assert payload.resolved_packages is None
@@ -877,8 +894,12 @@ class TestTicketEffects:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.integration
+@pytest.mark.unit
 class TestExternalStringAdmissibility:
+    """The per-CVE outcome at the `execute()` granularity (isolated
+    `failure`, stored score untouched) is in
+    `test_sync_epss_scores_execute.py::TestItemFailure`."""
+
     @pytest.mark.parametrize(
         "fields",
         [
@@ -898,23 +919,20 @@ class TestExternalStringAdmissibility:
             "date_middle",
         ],
     )
-    async def test_nul_is_a_data_quality_failure_without_writes(
+    async def test_nul_is_a_data_quality_failure_before_any_database_work(
         self,
         fields: dict[str, str],
-        db_session: AsyncSession,
-        target: Target,
         fetcher: SyncEpssScores,
         server: EpssServer,
         ingestion: Ingestion,
     ) -> None:
-        server.entries[target.cve_id] = {**entry_for(target.cve_id), **fields}
-        before = await _row_counts(db_session, target.cve)
+        cve_id = fictional_cve_id()
+        server.entries[cve_id] = {**entry_for(cve_id), **fields}
 
         with capture_logs() as logs, pytest.raises(ValidationError) as raised:
-            await fetcher.fetch_single(target.cve_id, db_session)
+            await fetcher.fetch_single(cve_id, NO_SESSION)
 
         assert ingestion.calls == []
-        assert await _row_counts(db_session, target.cve) == before == (0, 0)
         assert "\\x00" not in str(raised.value)
         assert not is_retryable_condition(raised.value)
         assert not is_infrastructure_failure(raised.value)

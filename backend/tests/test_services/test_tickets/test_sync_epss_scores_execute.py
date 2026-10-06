@@ -811,20 +811,58 @@ class TestItemFailure:
     async def test_flush_failure_is_an_isolated_item_failure(
         self, env: Env, batch: Batch, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        cve = await env.updated_cve()
+        first, second = sorted(
+            [await env.updated_cve(), await env.updated_cve()],
+            key=lambda cve: cve.cve_id,
+        )
+        real_fetch = batch.fetcher.fetch_single
+        real_finalize = batch.fetcher.commit_and_dispatch
         real_flush = batch.session.flush
+        inside_fetch = [False]
+        own_flushes: list[str] = []
+        finalized: list[str] = []
+        current: list[str] = []
+
+        async def fetch_single(cve_id: str, session: AsyncSession) -> Any:
+            current[:] = [cve_id]
+            inside_fetch[0] = True
+            try:
+                return await real_fetch(cve_id, session)
+            finally:
+                inside_fetch[0] = False
+
+        async def commit_and_dispatch(session: AsyncSession, result: Any) -> None:
+            finalized.extend(current)
+            await real_finalize(session, result)
 
         async def flush(*args: Any, **kwargs: Any) -> None:
             await real_flush(*args, **kwargs)
-            raise RuntimeError(FAILURE_TEXT)
+            # Only the template's own per-item flush of the first CVE fails;
+            # the delegates' flushes inside fetch_single() succeed.
+            if not inside_fetch[0]:
+                own_flushes.extend(current)
+                if current == [first.cve_id]:
+                    raise RuntimeError(FAILURE_TEXT)
 
+        monkeypatch.setattr(batch.fetcher, "fetch_single", fetch_single)
+        monkeypatch.setattr(batch.fetcher, "commit_and_dispatch", commit_and_dispatch)
         monkeypatch.setattr(batch.session, "flush", flush)
 
-        await batch.execute()
+        with capture_logs() as logs:
+            await batch.execute()
 
-        assert await env.source_status(cve) == CVESourceFetchStatus.FAILURE
-        assert await env.score(cve) is None
-        assert counters(batch.fetcher) == Counters(0, 0, 0, 1)
+        assert own_flushes == [first.cve_id, second.cve_id]
+        assert finalized == [second.cve_id]
+        assert await env.source_status(first) == CVESourceFetchStatus.FAILURE
+        assert await env.score(first) is None
+        assert await env.source_status(second) == CVESourceFetchStatus.SUCCESS
+        assert await env.score(second) is not None
+        assert [
+            (entry["cve_id"], entry["cause"])
+            for entry in _events(logs, CVE_FETCH_ITEM_FAILED_EVENT)
+        ] == [(first.cve_id, "RuntimeError")]
+        assert counters(batch.fetcher) == Counters(1, 0, 1, 1)
+        _assert_private(logs)
 
 
 # ---------------------------------------------------------------------------
