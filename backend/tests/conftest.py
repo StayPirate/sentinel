@@ -9,7 +9,6 @@ import asyncio
 import atexit
 import itertools
 import os
-import warnings
 from collections.abc import AsyncGenerator, Awaitable, Callable, Iterator
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -369,25 +368,14 @@ def celery_test_app(
     exclusively by the explicit `Settings` constructed below (mirrors
     `test_celery_app.py`, `test_broker_url_propagated_from_settings`).
 
-    Pre-warms `app.redbeat_conf` (via `ensure_conf`) under a local
-    warning suppression: redbeat's `RedBeatConfig.__init__` emits a
-    one-time `DeprecationWarning` when `redbeat_redis_url` is not
-    explicitly set — Sentinel's deliberate, tested configuration (see
-    `docs/features/platform/fetcher-infrastructure.md`, Redbeat
-    Configuration, and `test_celery_app.py`,
-    `test_no_redbeat_redis_url_override`). Every project pytest run
-    turns warnings into errors (`filterwarnings = ["error"]` in
-    `pyproject.toml`), so this expected, benign, already-accepted
-    library warning would otherwise fail the first redbeat operation
-    in every test. `ensure_conf` caches the config on the app instance,
-    so pre-warming it here means the warning never resurfaces for the
-    rest of the test.
+    Pre-warms `app.redbeat_conf` (via `ensure_conf`) because tests
+    call `RedBeatSchedulerEntry.generate_key()` directly, and
+    celery-redbeat 2.4.2 reads `app.redbeat_conf` there without
+    initializing it (see `fetcher_schedule.fetcher_entry_key`).
     """
     monkeypatch.delenv("CELERY_BROKER_URL", raising=False)
     celery_test_app = _create_celery_test_app(_redis_test_url)
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", DeprecationWarning)
-        ensure_conf(celery_test_app)
+    ensure_conf(celery_test_app)
     return celery_test_app
 
 
@@ -403,12 +391,6 @@ def uninitialized_celery_test_app(
     `celery_test_app` and run the code under test with this app.
     Requesting `celery_test_app` composes its Redis isolation and
     `CELERY_BROKER_URL` handling.
-
-    Unlike `celery_test_app`, nothing pre-warms the config here, so the
-    code under test emits redbeat's one-time `DeprecationWarning` (see
-    `celery_test_app`). Each test using this fixture allows it with a
-    local `filterwarnings` mark: pytest resets warning filters between
-    the setup and call phases, so the fixture cannot suppress it.
     """
     return _create_celery_test_app(_redis_test_url)
 

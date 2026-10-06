@@ -20,6 +20,7 @@ RedBeat schedule reconciliation itself
 from __future__ import annotations
 
 import logging
+import warnings
 from collections.abc import Iterator
 
 import pytest
@@ -33,6 +34,7 @@ from celery.signals import (
     task_postrun,
     task_prerun,
 )
+from redbeat.schedulers import ensure_conf
 
 from app.celery_app import (
     _CORRELATION_KEYS,
@@ -176,14 +178,40 @@ class TestCreateCeleryAppDefaults:
 
 
 @pytest.mark.unit
-class TestNoExplicitRedbeatUrlOverride:
-    """No separate redbeat Redis URL is configured — redbeat follows
-    the broker instance (see docs/features/platform/
+class TestRedbeatRedisUrl:
+    """`redbeat_redis_url` is set explicitly to the configured broker
+    URL, so RedBeat follows the broker instance without relying on its
+    deprecated `broker_url` fallback (see docs/features/platform/
     fetcher-infrastructure.md, Redbeat Configuration)."""
 
-    def test_no_redbeat_redis_url_override(self) -> None:
-        app = create_celery_app(_settings())
-        assert app.conf.get("redbeat_redis_url") is None
+    def test_redbeat_redis_url_is_the_configured_broker_url(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A diverging `CELERY_BROKER_URL` in the environment does not
+        # change the value: the fallback this setting replaces read the
+        # configured broker URL, not the environment variable.
+        monkeypatch.setenv("CELERY_BROKER_URL", "redis://env.example.invalid:6379/5")
+        app = create_celery_app(
+            _settings(celery_broker_url="redis://example.invalid:6380/2")
+        )
+        assert app.conf.redbeat_redis_url == "redis://example.invalid:6380/2"
+
+    def test_redbeat_config_initializes_without_fallback_deprecation(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        app = create_celery_app(
+            _settings(celery_broker_url="redis://example.invalid:6380/2")
+        )
+        with (
+            warnings.catch_warnings(record=True) as caught,
+            caplog.at_level(logging.WARNING, logger="celery.beat"),
+        ):
+            warnings.simplefilter("always")
+            conf = ensure_conf(app)
+
+        assert conf.redis_url == "redis://example.invalid:6380/2"
+        assert [w for w in caught if issubclass(w.category, DeprecationWarning)] == []
+        assert not [r for r in caplog.records if "stop falling back" in r.getMessage()]
 
 
 @pytest.mark.unit

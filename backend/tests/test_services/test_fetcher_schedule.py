@@ -328,9 +328,6 @@ class TestPropagateConfigUpdate:
         )
         # No exception — delete is a no-op on a missing entry.
 
-    @pytest.mark.filterwarnings(
-        "ignore:RedBeat will stop falling back to broker_url:DeprecationWarning"
-    )
     def test_delete_action_before_redbeat_config_initialized_removes_the_entry(
         self, celery_test_app: Celery, uninitialized_celery_test_app: Celery
     ) -> None:

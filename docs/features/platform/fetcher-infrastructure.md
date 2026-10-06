@@ -2037,7 +2037,7 @@ Redbeat uses the following configuration:
 
 | Setting | Value | Source |
 |---------|-------|--------|
-| `redbeat_redis_url` | Not configured explicitly | Defaults to `CELERY_BROKER_URL` (redbeat's standard behavior). A separate variable is unnecessary because Sentinel already configures the Celery broker as Redis. |
+| `redbeat_redis_url` | The configured broker URL (`Settings.celery_broker_url`, from `CELERY_BROKER_URL`) | Set explicitly in the Celery application settings, because celery-redbeat deprecates its fallback to `broker_url`. A separate variable is unnecessary because Sentinel already configures the Celery broker as Redis. |
 | `redbeat_key_prefix` | `redbeat:` | Default. All redbeat entries are stored under this prefix. |
 | `redbeat_redis_options` | `{socket_connect_timeout: 2, socket_timeout: 2}` | Explicit connect and read timeouts (seconds), passed through by redbeat to the underlying Redis client it constructs internally. Prevents a hung (blackholed/firewalled) connection from blocking a caller indefinitely — see "API endpoint failure handling" below. Mirrors the 2-second timeout used by the application's own Redis clients (`local_auth_service`, `session_service`). |
 | Scheduler class | `redbeat.RedBeatScheduler` | Configured in the Celery app settings (`beat_scheduler`), not via CLI flag. |
