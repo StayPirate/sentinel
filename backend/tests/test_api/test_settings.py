@@ -1,5 +1,6 @@
 """End-to-end tests for system settings read and audit log endpoints
-(`backend/app/api/v1/settings.py`).
+(`backend/app/api/v1/settings.py`). The update endpoint is tested in
+`tests/test_api/test_settings_update.py`.
 
 See `docs/features/platform/system-settings.md` (Get System Settings,
 List Settings Audit Events) for the authoritative endpoint contracts
@@ -166,17 +167,6 @@ class TestGetSystemSettings:
         in `tests/test_main.py`."""
         with pytest.raises(RequiredSystemSettingMissingError):
             await admin_client.get("/api/v1/admin/settings")
-
-    async def test_no_patch_endpoint_is_exposed(
-        self, admin_client: AsyncClient
-    ) -> None:
-        """PATCH /api/v1/admin/settings is out of scope for this work
-        item (system-settings.md, Update System Settings — tracked
-        separately)."""
-        response = await admin_client.patch(
-            "/api/v1/admin/settings", json={"default_cvss_version": "4.0"}
-        )
-        assert response.status_code == 405
 
 
 # ---------------------------------------------------------------------------
@@ -536,9 +526,38 @@ class TestSettingsOpenAPISurface:
         assert audit_get["summary"]
         assert audit_get["description"]
 
-    def test_no_patch_endpoint_is_present(self) -> None:
-        openapi_paths = app.openapi()["paths"]
-        assert "patch" not in openapi_paths.get("/api/v1/admin/settings", {})
+    def test_update_operation_is_documented(self) -> None:
+        """system-settings.md, Update System Settings: a JSON body with
+        the single required `default_cvss_version` (exactly `3.1` or
+        `4.0`, no other declared member), `200` with the settings envelope,
+        and the `409` error envelope. The HTTP contract is tested in
+        `tests/test_api/test_settings_update.py`."""
+        openapi = app.openapi()
+        path_item = openapi["paths"]["/api/v1/admin/settings"]
+        assert set(path_item) == {"get", "patch"}
+        operation = path_item["patch"]
+
+        assert operation["summary"]
+        assert operation["description"]
+        assert operation.get("parameters", []) == []
+        body = operation["requestBody"]
+        assert body["required"] is True
+        assert body["content"]["application/json"]["schema"] == {
+            "$ref": "#/components/schemas/UpdateSystemSettingsRequest"
+        }
+        request_schema = openapi["components"]["schemas"]["UpdateSystemSettingsRequest"]
+        assert set(request_schema["properties"]) == {"default_cvss_version"}
+        assert request_schema["required"] == ["default_cvss_version"]
+        field = request_schema["properties"]["default_cvss_version"]
+        assert field["type"] == "string"
+        assert field["enum"] == ["3.1", "4.0"]
+        assert {"200", "409", "422"} <= set(operation["responses"])
+        assert operation["responses"]["200"]["content"]["application/json"][
+            "schema"
+        ] == {"$ref": "#/components/schemas/SystemSettingsResponse"}
+        assert operation["responses"]["409"]["content"]["application/json"][
+            "schema"
+        ] == {"$ref": "#/components/schemas/ErrorResponse"}
 
     def test_recalculate_operation_is_documented(self) -> None:
         """default-cvss-version-operations.md, Trigger CVSS Recalculation:

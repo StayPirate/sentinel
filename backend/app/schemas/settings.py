@@ -1,9 +1,9 @@
-"""Request/response/query schemas for the system settings read and audit
-log endpoints, the default-CVSS impact preview, and the manual CVSS
-recalculation trigger.
+"""Request/response/query schemas for the system settings read, update,
+and audit log endpoints, the default-CVSS impact preview, and the manual
+CVSS recalculation trigger.
 
 See `docs/features/platform/system-settings.md` (Get System Settings,
-List Settings Audit Events) and
+Update System Settings, List Settings Audit Events) and
 `docs/features/platform/default-cvss-version-operations.md` (Get
 Default-CVSS Impact Preview, Trigger CVSS Recalculation) for the
 authoritative request/response contracts these schemas implement.
@@ -21,15 +21,30 @@ from app.schemas.common import PaginationMeta, UserReference
 
 
 class SystemSettingsData(BaseModel):
-    """The settings object returned by `GET /api/v1/admin/settings`."""
+    """The settings object returned by `GET` and `PATCH
+    /api/v1/admin/settings`."""
 
     default_cvss_version: str
 
 
 class SystemSettingsResponse(BaseModel):
-    """Response body for `GET /api/v1/admin/settings`."""
+    """Response body for `GET` and `PATCH /api/v1/admin/settings`."""
 
     data: SystemSettingsData
+
+
+class UpdateSystemSettingsRequest(BaseModel):
+    """Request body for `PATCH /api/v1/admin/settings`.
+
+    The single field is required (single-field PATCH, `docs/api-spec.md`
+    Partial Update Semantics): a missing field, `null`, or any value other
+    than exactly `"3.1"` or `"4.0"` is the global `422 VALIDATION_ERROR`.
+    No preview count, high-water mark, or token is accepted.
+    """
+
+    default_cvss_version: Literal["3.1", "4.0"] = Field(
+        description="New default CVSS version; exactly 3.1 or 4.0."
+    )
 
 
 class DefaultCVSSVersionImpactData(BaseModel):

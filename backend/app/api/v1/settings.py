@@ -1,8 +1,8 @@
-"""System settings read and audit log endpoints, the default-CVSS impact
-preview, and the manual CVSS recalculation trigger.
+"""System settings read, update, and audit log endpoints, the default-CVSS
+impact preview, and the manual CVSS recalculation trigger.
 
 See `docs/features/platform/system-settings.md` (Get System Settings,
-List Settings Audit Events) and
+Update System Settings, List Settings Audit Events) and
 `docs/features/platform/default-cvss-version-operations.md` (Get
 Default-CVSS Impact Preview, Trigger CVSS Recalculation) for the
 authoritative endpoint contracts this module implements. Handlers stay
@@ -37,6 +37,7 @@ from app.schemas.settings import (
     SettingAuditQuery,
     SystemSettingsData,
     SystemSettingsResponse,
+    UpdateSystemSettingsRequest,
 )
 from app.services import cvss_impact_preview, cvss_recalculation_admission
 from app.services import settings as settings_service
@@ -165,6 +166,60 @@ async def get_system_settings(
     value is returned.
     """
     default_cvss_version = await settings_service.get_default_cvss_version(db)
+    return SystemSettingsResponse(
+        data=SystemSettingsData(default_cvss_version=default_cvss_version)
+    )
+
+
+@router.patch(
+    "/settings",
+    response_model=SystemSettingsResponse,
+    summary="Update system settings",
+    description=(
+        "Changes the default CVSS version and records one setting audit "
+        "event, or returns the persisted value unchanged when it already "
+        "equals the request. Does not recalculate derived state, schedule, "
+        "or publish anything: the separate manual recalculation endpoint "
+        "converges existing state. Requires the manage_settings capability."
+    ),
+    responses={
+        409: {
+            "model": ErrorResponse,
+            "description": (
+                "`CVSS_RECALC_ALREADY_IN_PROGRESS`: an effective change is "
+                "blocked because the recalculation execution fence is held; "
+                "nothing is committed."
+            ),
+        },
+    },
+)
+async def update_system_settings(
+    principal: Annotated[
+        AuthenticatedPrincipal,
+        Depends(require_capability(Capability.MANAGE_SETTINGS)),
+    ],
+    db: DatabaseSession,
+    body: UpdateSystemSettingsRequest,
+) -> SystemSettingsResponse:
+    """Update system settings — see
+    `docs/features/platform/system-settings.md` (Update System Settings).
+
+    `CVSSRecalculationAlreadyInProgressError` maps to `409
+    CVSS_RECALC_ALREADY_IN_PROGRESS` with a fixed detail. A missing
+    required setting propagates as the global `500 INTERNAL_ERROR`.
+    """
+    try:
+        default_cvss_version = await settings_service.update_default_cvss_version(
+            db,
+            new_version=body.default_cvss_version,
+            acting_user_id=principal.user.id,
+        )
+    except settings_service.CVSSRecalculationAlreadyInProgressError:
+        raise AppError(
+            status_code=409,
+            code=ErrorCode.CVSS_RECALC_ALREADY_IN_PROGRESS,
+            detail=settings_service.CVSS_RECALCULATION_IN_PROGRESS_MESSAGE,
+        ) from None
     return SystemSettingsResponse(
         data=SystemSettingsData(default_cvss_version=default_cvss_version)
     )
