@@ -99,6 +99,7 @@ Sentinel requires outbound access to:
 | AIMAAS | `aimaas.suse.de` | 443 | Product lifecycle, CVSS thresholds |
 | NVD | `services.nvd.nist.gov` | 443 | CVE data |
 | Red Hat Security Data API | `access.redhat.com` | 443 | CVE enrichment (CVSS, CWE, references, package names) |
+| FIRST.org EPSS API | `api.first.org` | 443 | EPSS scores (CVE exploitation likelihood) |
 | GitHub | `github.com` | 443 | MITRE cvelistV5 repository clone/fetch |
 | git.kernel.org | `git.kernel.org` | 443 | Linux kernel vulnerability repo clone/fetch |
 

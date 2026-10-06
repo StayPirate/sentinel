@@ -1,39 +1,41 @@
-"""Tests for the periodic batch `SyncRedhatCves.execute()` and its `run()`
-metrics (backend/app/services/tickets/sync_redhat_cves.py).
+"""Tests for the periodic batch `SyncEpssScores.execute()` and its `run()`
+metrics (backend/app/services/tickets/sync_epss_scores.py).
 
 Owning specifications:
 
-- docs/features/tickets/cve-sync-redhat.md (Algorithm; `fetch_single`
-  method class structure; Error Handling, `execute()` table, consecutive
-  failure counter, sanitized messages; Metrics).
+- docs/features/tickets/cve-sync-epss.md (Algorithm: scope snapshot,
+  staleness validation, consecutive failure abort; `fetch_single` method
+  class structure; Error Handling, `execute()` table and sanitized
+  messages; Metrics).
 - docs/features/platform/cve-fetcher-infrastructure.md (Per-CVE
-  Finalization; Session Lifecycle for API-based CVE Fetchers, template 1,
-  Scope snapshot, Isolated status commit, Metric placement; Batch Error
-  Handling, Per-item failure event and Consecutive failure abort; Metric
-  Definitions).
+  Finalization; Session Lifecycle for API-based CVE Fetchers, template 1;
+  Batch Error Handling, Per-item failure event and Consecutive failure
+  abort; Metric Definitions).
 - docs/features/tickets/cve-service.md (Active-Ticket CVE Scope).
 - docs/features/platform/fetcher-infrastructure.md (Outcome and effect
   accounting; Error Message Sanitization; `SoftTimeLimitExceeded` handling
   convention) and docs/features/platform/logging.md (Secrets and PII
-  Discipline; Correlation IDs, Fetcher run binding detail).
+  Discipline).
 - docs/features/platform/testing-strategy.md (CVE Fetcher Infrastructure:
   One-shot finalization, Periodic metrics, Isolated statuses; Fetcher
-  Outcome and Effect Accounting, the `sync_redhat_cves` mapping).
+  Outcome and Effect Accounting, the `sync_epss_scores` mapping; External
+  String Admissibility).
 
 Every test commits real rows: CVEs with active Tickets of an
-`IngestionWorld` (deleted with their children, references, and Ticket
-events at teardown), the isolated status sessions
-(`base_cve_fetcher.async_session_factory`) on `real_session_factory`, and,
-for `run()`, a committed `FetcherConfig`/`FetcherRun` pair under a
-test-only name, deleted at teardown. `execute()` tests use an independent
-`db_session_factory` session with real commits and set the automatic
-periodic context that `run()` establishes, so the finalizer records
-metrics. The scope query is the real `cve_service.get_active_ticket_cve_ids()`
-wrapped by a spy that restricts the snapshot to this test's CVEs, so rows
-committed by no other test can enter it. HTTP is the in-process
-`RedhatServer`; the broker call is the recorded `task_publication.publish_task`;
-the inter-CVE delay is recorded instead of slept. All identifiers and texts
-are fictional.
+`IngestionWorld` (deleted with their children, including `cve_epss_score`
+and `cve_source`, and their Ticket events at teardown), the isolated status
+sessions (`base_cve_fetcher.async_session_factory`) on
+`real_session_factory`, and, for `run()`, a committed
+`FetcherConfig`/`FetcherRun` pair under a test-only name, deleted at
+teardown. `execute()` tests use an independent `db_session_factory` session
+with real commits and set the automatic periodic context that `run()`
+establishes, so the finalizer records metrics. The scope query is the real
+`cve_service.get_active_ticket_cve_ids()` wrapped by a spy that restricts
+the snapshot to this test's CVEs, so rows committed by no other test can
+enter it. HTTP is the in-process `EpssServer`; the broker call is the
+recorded `task_publication.publish_task`; the inter-CVE delay is recorded
+instead of slept; "today (UTC)" is the fixed `TODAY`. All identifiers and
+texts are fictional.
 """
 
 from __future__ import annotations
@@ -42,15 +44,13 @@ import asyncio
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from types import SimpleNamespace
 from typing import Any, Final, NamedTuple
 
 import httpx
 import pytest
-from celery.exceptions import OperationalError as BrokerOperationalError
 from celery.exceptions import SoftTimeLimitExceeded
-from kombu.exceptions import EncodeError  # type: ignore[import-untyped]
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from structlog.contextvars import merge_contextvars
@@ -60,52 +60,58 @@ import app.services.base_cve_fetcher as base_cve_fetcher_module
 import app.services.base_fetcher as base_fetcher_module
 from app.core.enums import CVESourceFetchStatus, TicketStatus
 from app.models.cve import CVE
-from app.models.cve_cvss_assessment import CVECVSSAssessment
+from app.models.cve_epss_score import CVEEPSSScore
 from app.models.cve_source import CVESource
 from app.models.fetcher_config import FetcherConfig
 from app.models.fetcher_run import FetcherRun
 from app.services import (
     cve_service,
-    package_service,
-    reference_service,
     task_publication,
+    ticket_convergence_publication,
 )
-from app.services.base_cve_fetcher import HANDOFF_PUBLICATION_FAILED_EVENT
 from app.services.base_fetcher import FetcherError, FetcherRunConfig
-from app.services.tickets import sync_redhat_cves as sync_module
-from app.services.tickets.sync_redhat_cves import (
+from app.services.tickets import sync_epss_scores as sync_module
+from app.services.tickets.sync_epss_scores import (
     CVE_FETCH_ITEM_FAILED_EVENT,
-    SyncRedhatCves,
+    EPSS_DATA_STALE_EVENT,
+    EPSS_STALENESS_CHECK_FAILED_EVENT,
+    SyncEpssScores,
 )
 from tests.support.cve_ingest import IngestionWorld
-from tests.support.redhat import RedhatServer, raising
+from tests.support.epss import (
+    EpssServer,
+    Responder,
+    body,
+    entry_for,
+    envelope,
+    raising,
+    status,
+)
 
 SessionFactory = Callable[[], Awaitable[AsyncSession]]
 
-NAME: Final = "sync_redhat_cves"
-RESOLVE: Final = package_service.RESOLVE_TICKET_PACKAGES_TASK
-V31: Final = "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"
-URL_1: Final = "https://advisory.example.invalid/upstream/1"
+NAME: Final = "sync_epss_scores"
 ABORT_MESSAGE: Final = (
-    "sync_redhat_cves: source unreachable — aborted after 3 consecutive failures"
+    "sync_epss_scores: source unreachable — aborted after 3 consecutive failures"
 )
+TODAY: Final = date(2026, 10, 6)
+"""The patched current UTC date (`sync_epss_scores._utc_today()`)."""
+
+SCORED: Final = {
+    "epss": "0.500000000",
+    "percentile": "0.500000000",
+    "date": "2026-10-06",
+}
+"""The served fields of every scored CVE unless a test overrides them."""
+
 PERSONAL_TEXT: Final = "Reported by Alice Example <alice.example@example.invalid>"
 SECRET_VALUE: Final = "api_token=Example-Secret-Token-0123456789"
 FAILURE_TEXT: Final = f"{PERSONAL_TEXT}; {SECRET_VALUE}"
-"""Exception text that must appear in no log field."""
+"""Exception or upstream text that must appear in no log field."""
 
 FAILED_EVENT_KEYS: Final = frozenset(
     {"event", "log_level", "cve_id", "fetcher_name", "cause"}
 )
-
-UPDATED_BODY: Final = {
-    "cvss3": {"cvss3_scoring_vector": V31},
-    "package_state": [{"package_name": "example"}],
-}
-"""HTTP 200 body whose ingestion is `updated` with a package handoff."""
-
-UNCHANGED_BODY: Final = {"references": [URL_1]}
-"""HTTP 200 body whose ingestion is `unchanged` without a handoff."""
 
 
 class Counters(NamedTuple):
@@ -115,7 +121,7 @@ class Counters(NamedTuple):
     failed: int
 
 
-def counters(fetcher: SyncRedhatCves) -> Counters:
+def counters(fetcher: SyncEpssScores) -> Counters:
     return Counters(
         fetcher._succeeded, fetcher._created, fetcher._updated, fetcher._failed
     )
@@ -125,6 +131,15 @@ def _events(logs: Iterable[Mapping[str, Any]], name: str) -> list[Mapping[str, A
     return [entry for entry in logs if entry["event"] == name]
 
 
+def _assert_private(logs: Iterable[Mapping[str, Any]]) -> None:
+    for entry in logs:
+        rendered = repr(dict(entry))
+        for fragment in (FAILURE_TEXT, PERSONAL_TEXT, SECRET_VALUE, "Alice"):
+            assert fragment not in rendered, entry
+        assert "Example-Secret-Token" not in rendered, entry
+        assert "\\x00" not in rendered, entry
+
+
 # ---------------------------------------------------------------------------
 # Harness
 # ---------------------------------------------------------------------------
@@ -132,78 +147,103 @@ def _events(logs: Iterable[Mapping[str, Any]], name: str) -> list[Mapping[str, A
 
 @dataclass
 class Publications:
-    """Substitute for `task_publication.publish_task`; `errors` maps a task
-    name to the exception its publication raises."""
+    """Substitute for `task_publication.publish_task`."""
 
     calls: list[dict[str, Any]] = field(default_factory=list)
-    errors: dict[str, BaseException] = field(default_factory=dict)
 
     async def __call__(self, task_name: str, **options: Any) -> None:
         self.calls.append({"task_name": task_name, **options})
-        if task_name in self.errors:
-            raise self.errors[task_name]
-
-    def published(self, task_name: str) -> list[Any]:
-        return [call["kwargs"] for call in self.calls if call["task_name"] == task_name]
 
 
 @dataclass
 class Env:
     world: IngestionWorld
     factory: async_sessionmaker[AsyncSession]
-    server: RedhatServer
+    server: EpssServer
     published: Publications
     scope_calls: list[list[str]] = field(default_factory=list)
+    requests_at_scope: list[int] = field(default_factory=list)
     sleeps: list[float] = field(default_factory=list)
     status_opened: list[int] = field(default_factory=lambda: [0])
     run_names: list[str] = field(default_factory=list)
     cve_ids: list[str] = field(default_factory=list)
 
-    async def active_cve(
-        self, body: Any = None, *, status: TicketStatus = TicketStatus.ANALYSIS
-    ) -> CVE:
-        """A committed CVE with a Ticket in `status`; `body` is served with
-        HTTP 200 when given (otherwise the CVE is answered with 404)."""
+    async def active_cve(self, *, status: TicketStatus = TicketStatus.ANALYSIS) -> CVE:
+        """A committed CVE with a Ticket in `status`, admitted to the scope
+        spy; EPSS answers it as unscored until a test serves an entry."""
         cve = await self.world.cve_in()
         await self.world.ticket(cve_id=cve.id, status=status)
         self.cve_ids.append(cve.cve_id)
-        if body is not None:
-            self.server.bodies[cve.cve_id] = body
         return cve
 
-    def respond(self, cve: CVE, responder: Any) -> None:
+    def serve(self, cve: CVE, **fields: str) -> None:
+        self.server.entries[cve.cve_id] = entry_for(cve.cve_id, **{**SCORED, **fields})
+
+    def respond(self, cve: CVE, responder: Responder) -> None:
         self.server.responses[cve.cve_id] = responder
 
-    def status(self, cve: CVE, code: int) -> None:
-        self.respond(cve, lambda request: httpx.Response(code))
+    async def seed_score(self, cve: CVE) -> None:
+        """Commit the `CVEEPSSScore` equal to the default served entry."""
+        self.world.session.add(
+            CVEEPSSScore(
+                cve_id=cve.id, score=0.5, percentile=0.5, assessed_at=date(2026, 10, 6)
+            )
+        )
+        await self.world.session.commit()
 
-    def fetcher(self) -> SyncRedhatCves:
-        instance = SyncRedhatCves()
+    async def updated_cve(self, **fields: str) -> CVE:
+        """An active CVE whose ingestion creates its score (`updated`)."""
+        cve = await self.active_cve()
+        self.serve(cve, **fields)
+        return cve
+
+    async def unchanged_cve(self) -> CVE:
+        """An active CVE whose served score equals the stored one."""
+        cve = await self.active_cve()
+        await self.seed_score(cve)
+        self.serve(cve)
+        return cve
+
+    def fetcher(self) -> SyncEpssScores:
+        instance = SyncEpssScores()
         instance._http_client = self.server.client()
         return instance
 
     async def source_status(self, cve: CVE) -> str | None:
         async with self.factory() as session:
-            status: str | None = await session.scalar(
+            value: str | None = await session.scalar(
                 select(CVESource.status).where(
-                    CVESource.cve_id == cve.id, CVESource.source == "redhat"
+                    CVESource.cve_id == cve.id, CVESource.source == "epss"
                 )
             )
-        return status
+        return value
 
-    async def assessment_count(self, cve: CVE) -> int:
+    async def score(self, cve: CVE) -> tuple[float, float, date] | None:
+        async with self.factory() as session:
+            row = (
+                await session.execute(
+                    select(
+                        CVEEPSSScore.score,
+                        CVEEPSSScore.percentile,
+                        CVEEPSSScore.assessed_at,
+                    ).where(CVEEPSSScore.cve_id == cve.id)
+                )
+            ).one_or_none()
+        return None if row is None else (row[0], row[1], row[2])
+
+    async def score_count(self, cve: CVE) -> int:
         async with self.factory() as session:
             count = await session.scalar(
                 select(func.count())
-                .select_from(CVECVSSAssessment)
-                .where(CVECVSSAssessment.cve_id == cve.id)
+                .select_from(CVEEPSSScore)
+                .where(CVEEPSSScore.cve_id == cve.id)
             )
         return int(count or 0)
 
-    async def run_row(self) -> tuple[SyncRedhatCves, uuid.UUID]:
+    async def run_row(self) -> tuple[SyncEpssScores, uuid.UUID]:
         """A committed `running` FetcherRun under a test-only configuration
         name, as the atomic acquisition leaves it before `run()`."""
-        name = f"test_redhat_run_{uuid.uuid4().hex[:12]}"
+        name = f"test_epss_run_{uuid.uuid4().hex[:12]}"
         async with self.factory() as session:
             session.add(
                 FetcherConfig(
@@ -260,7 +300,7 @@ async def env(
     created = Env(
         world=world,
         factory=real_session_factory,
-        server=RedhatServer(),
+        server=EpssServer(),
         published=Publications(),
     )
 
@@ -271,6 +311,7 @@ async def env(
     real_scope = cve_service.get_active_ticket_cve_ids
 
     async def scope(session: AsyncSession) -> list[str]:
+        created.requests_at_scope.append(len(created.server.requests))
         selected = await real_scope(session)
         created.scope_calls.append(selected)
         return [cve_id for cve_id in selected if cve_id in created.cve_ids]
@@ -287,8 +328,8 @@ async def env(
     monkeypatch.setattr(task_publication, "publish_task", created.published)
     monkeypatch.setattr(cve_service, "get_active_ticket_cve_ids", scope)
     monkeypatch.setattr(sync_module, "asyncio", SimpleNamespace(sleep=sleep))
+    monkeypatch.setattr(sync_module, "_utc_today", lambda: TODAY)
     try:
-        await world.ensure_default_setting()
         yield created
     finally:
         await created.cleanup()
@@ -296,14 +337,16 @@ async def env(
 
 @dataclass
 class Batch:
-    """One `execute()` invocation on a reusable session with real commits,
+    """`execute()` invocations on a reusable session with real commits,
     under the automatic periodic context that `run()` establishes."""
 
     env: Env
-    fetcher: SyncRedhatCves
+    fetcher: SyncEpssScores
     session: AsyncSession
 
     async def execute(self) -> None:
+        if self.fetcher._http_client is None:
+            self.fetcher._http_client = self.env.server.client()
         try:
             await self.fetcher.execute(self.session)
         finally:
@@ -320,21 +363,66 @@ async def batch(env: Env) -> Batch:
     return Batch(env, fetcher, await env.world.open_session())
 
 
-def _fail_references_for(
+def _fail_upsert_for(
     monkeypatch: pytest.MonkeyPatch, cve_ids: set[str], error: BaseException
 ) -> None:
-    """Make `upsert_references()` raise `error` for `cve_ids`, after
-    `upsert_cve()` has written that CVE's data in the same transaction."""
-    real = reference_service.upsert_references
+    """Make `upsert_cve()` raise `error` for `cve_ids` after it has written
+    that CVE's score and success status in the same transaction."""
+    real = cve_service.upsert_cve
 
-    async def upsert_references(
-        session: AsyncSession, ticket_id: Any, cve_id: str, *args: Any
-    ) -> None:
+    async def upsert_cve(
+        session: AsyncSession, cve_id: str, source: Any, payload: Any
+    ) -> Any:
+        result = await real(session, cve_id, source, payload)
         if cve_id in cve_ids:
             raise error
-        await real(session, ticket_id, cve_id, *args)
+        return result
 
-    monkeypatch.setattr(reference_service, "upsert_references", upsert_references)
+    monkeypatch.setattr(cve_service, "upsert_cve", upsert_cve)
+
+
+def _spy_staleness(
+    monkeypatch: pytest.MonkeyPatch, fetcher: SyncEpssScores
+) -> list[date]:
+    """Record every `_check_staleness()` argument; calls through."""
+    calls: list[date] = []
+    real = fetcher._check_staleness
+
+    def check(assessed_at: date) -> None:
+        calls.append(assessed_at)
+        real(assessed_at)
+
+    monkeypatch.setattr(fetcher, "_check_staleness", check)
+    return calls
+
+
+Plan = list[str]
+"""Per-CVE outcome codes, in request order."""
+
+
+async def _planned(env: Env, plan: Plan) -> list[CVE]:
+    """Committed CVEs whose responses follow `plan` in request order."""
+    cves = [await env.active_cve() for _ in plan]
+    ordered = sorted(cves, key=lambda cve: cve.cve_id)
+    for cve, outcome in zip(ordered, plan, strict=True):
+        if outcome == "ok":
+            await env.seed_score(cve)
+            env.serve(cve)
+        elif outcome == "updated":
+            env.serve(cve)
+        elif outcome == "missing":
+            pass
+        elif outcome == "connect":
+            env.respond(cve, raising(httpx.ConnectError("refused")))
+        elif outcome == "timeout":
+            env.respond(cve, raising(httpx.ReadTimeout("timed out")))
+        elif outcome == "json":
+            env.respond(cve, status(200, b"{"))
+        elif outcome == "schema":
+            env.respond(cve, body(envelope(entry_for(cve.cve_id, epss="2.0"))))
+        else:
+            env.respond(cve, status(int(outcome)))
+    return ordered
 
 
 # ---------------------------------------------------------------------------
@@ -344,21 +432,28 @@ def _fail_references_for(
 
 @pytest.mark.integration
 class TestScope:
-    async def test_one_snapshot_selects_active_cves_in_code_point_order(
+    async def test_one_snapshot_at_entry_selects_only_active_ticket_cves(
         self, env: Env, batch: Batch, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        active = [
-            await env.active_cve(UNCHANGED_BODY, status=status)
-            for status in (
-                TicketStatus.NEW,
-                TicketStatus.ANALYSIS,
-                TicketStatus.ANALYZED,
-            )
-        ]
-        inactive = [
-            await env.active_cve(UNCHANGED_BODY, status=status)
-            for status in (TicketStatus.RESOLVED, TicketStatus.IGNORED)
-        ]
+        active = []
+        for ticket_status in (
+            TicketStatus.NEW,
+            TicketStatus.ANALYSIS,
+            TicketStatus.ANALYZED,
+        ):
+            cve = await env.active_cve(status=ticket_status)
+            env.serve(cve)
+            active.append(cve)
+        inactive = []
+        for ticket_status in (TicketStatus.RESOLVED, TicketStatus.IGNORED):
+            cve = await env.active_cve(status=ticket_status)
+            env.serve(cve)
+            inactive.append(cve)
+        # A ticketless CVE, admitted by the spy, and a CVE-less active Ticket.
+        ticketless = await env.world.cve_in()
+        env.cve_ids.append(ticketless.cve_id)
+        env.serve(ticketless)
+        await env.world.ticket(cve_id=None, status=TicketStatus.ANALYSIS)
         private_calls: list[None] = []
         real_private = batch.fetcher._get_active_ticket_cve_ids
 
@@ -372,22 +467,28 @@ class TestScope:
 
         assert len(private_calls) == 1
         assert len(env.scope_calls) == 1
+        assert env.requests_at_scope == [0]
         expected = sorted(cve.cve_id for cve in active)
         assert env.server.requested_cve_ids == expected
-        assert not {cve.cve_id for cve in inactive} & set(env.scope_calls[0])
-        assert counters(batch.fetcher) == Counters(3, 0, 0, 0)
+        excluded = {cve.cve_id for cve in inactive} | {ticketless.cve_id}
+        assert not excluded & set(env.scope_calls[0])
+        # Pre-scope exclusions contribute no terminal or effect metric.
+        assert counters(batch.fetcher) == Counters(3, 0, 3, 0)
+        for cve in [*inactive, ticketless]:
+            assert await env.source_status(cve) is None
+            assert await env.score(cve) is None
 
     async def test_ticket_created_mid_run_is_not_added_to_the_snapshot(
         self, env: Env, batch: Batch, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        first = await env.active_cve(UNCHANGED_BODY)
+        first = await env.unchanged_cve()
         late: list[CVE] = []
         real_flush = batch.session.flush
 
         async def flush(*args: Any, **kwargs: Any) -> None:
             await real_flush(*args, **kwargs)
             if not late:
-                late.append(await env.active_cve(UNCHANGED_BODY))
+                late.append(await env.unchanged_cve())
 
         monkeypatch.setattr(batch.session, "flush", flush)
 
@@ -395,28 +496,33 @@ class TestScope:
 
         assert late
         assert env.server.requested_cve_ids == [first.cve_id]
+        assert counters(batch.fetcher) == Counters(1, 0, 0, 0)
 
-    async def test_empty_scope_requests_nothing(self, env: Env, batch: Batch) -> None:
-        await batch.execute()
+    async def test_empty_scope_requests_nothing_and_succeeds(
+        self, env: Env, batch: Batch
+    ) -> None:
+        with capture_logs() as logs:
+            await batch.execute()
 
         assert env.server.requests == []
         assert env.sleeps == []
         assert counters(batch.fetcher) == Counters(0, 0, 0, 0)
+        assert logs == []
 
 
 @pytest.mark.integration
 class TestFinalization:
-    async def test_flush_precedes_finalization_outside_the_item_catch(
+    async def test_flush_precedes_finalization_and_effects_follow_commit(
         self, env: Env, batch: Batch, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        cve = await env.active_cve(UPDATED_BODY)
+        cve = await env.updated_cve(epss="0.120000000", date="2026-10-05")
         events: list[str] = []
         pending_at_finalization: list[bool] = []
+        at_commit: list[Counters] = []
         real_fetch = batch.fetcher.fetch_single
         real_finalize = batch.fetcher.commit_and_dispatch
         real_flush = batch.session.flush
         real_commit = batch.session.commit
-
         inside_fetch = [False]
 
         async def fetch_single(cve_id: str, session: AsyncSession) -> Any:
@@ -442,6 +548,7 @@ class TestFinalization:
 
         async def commit() -> None:
             events.append("commit")
+            at_commit.append(counters(batch.fetcher))
             await real_commit()
 
         monkeypatch.setattr(batch.fetcher, "fetch_single", fetch_single)
@@ -453,36 +560,34 @@ class TestFinalization:
 
         assert events == ["fetch_single", "flush", "commit_and_dispatch", "commit"]
         assert pending_at_finalization == [False]
-        assert await env.source_status(cve) == CVESourceFetchStatus.SUCCESS
-        assert await env.assessment_count(cve) == 1
-        assert env.published.published(RESOLVE) == [
-            {
-                "ticket_id": str(env.world.ticket_ids[-1]),
-                "cpe_matches": [],
-                "affected_cpes": [],
-                "vendor_products": [],
-                "resolved_packages": ["example"],
-            }
-        ]
+        # The effect and the success are absent until the commit.
+        assert at_commit == [Counters(0, 0, 0, 0)]
         assert counters(batch.fetcher) == Counters(1, 0, 1, 0)
+        assert await env.source_status(cve) == CVESourceFetchStatus.SUCCESS
+        assert await env.score(cve) == (0.12, 0.5, date(2026, 10, 5))
+        # No package handoff: post_ingest is None.
+        assert env.published.calls == []
         assert env.status_opened == [0]
+        assert env.sleeps == [0.25]
 
     async def test_unchanged_records_success_without_effect(
         self, env: Env, batch: Batch
     ) -> None:
-        cve = await env.active_cve(UNCHANGED_BODY)
+        cve = await env.unchanged_cve()
 
-        await batch.execute()
+        with capture_logs() as logs:
+            await batch.execute()
 
         assert await env.source_status(cve) == CVESourceFetchStatus.SUCCESS
         assert counters(batch.fetcher) == Counters(1, 0, 0, 0)
-        assert env.published.published(RESOLVE) == []
+        assert _events(logs, CVE_FETCH_ITEM_FAILED_EVENT) == []
+        assert env.published.calls == []
 
     async def test_commit_failure_terminates_without_status_warning_or_metric(
         self, env: Env, batch: Batch, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        first = await env.active_cve(UPDATED_BODY)
-        second = await env.active_cve(UPDATED_BODY)
+        first = await env.updated_cve()
+        second = await env.updated_cve()
         error = RuntimeError(FAILURE_TEXT)
 
         async def commit() -> None:
@@ -500,12 +605,13 @@ class TestFinalization:
         assert env.status_opened == [0]
         assert _events(logs, CVE_FETCH_ITEM_FAILED_EVENT) == []
         assert await env.source_status(ordered[0]) is None
-        assert env.published.calls == []
+        assert await env.score(ordered[0]) is None
+        assert env.sleeps == []
 
     async def test_ambiguous_commit_terminates_without_isolated_status_or_metric(
         self, env: Env, batch: Batch, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        cve = await env.active_cve(UPDATED_BODY)
+        cve = await env.updated_cve()
         real_commit = batch.session.commit
         error = ConnectionResetError("commit outcome unknown")
 
@@ -523,17 +629,22 @@ class TestFinalization:
         assert _events(logs, CVE_FETCH_ITEM_FAILED_EVENT) == []
         # The durable commit is never reclassified as an isolated failure.
         assert await env.source_status(cve) == CVESourceFetchStatus.SUCCESS
-        assert env.published.calls == []
 
     async def test_non_operational_post_commit_error_aborts_and_keeps_success(
-        self, env: Env, batch: Batch
+        self, env: Env, batch: Batch, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        cves = [await env.active_cve(UPDATED_BODY), await env.active_cve(UPDATED_BODY)]
+        cves = [await env.updated_cve(), await env.updated_cve()]
         ordered = sorted(cves, key=lambda cve: cve.cve_id)
-        error = EncodeError(FAILURE_TEXT)
-        env.published.errors[RESOLVE] = error
+        error = RuntimeError(FAILURE_TEXT)
 
-        with capture_logs() as logs, pytest.raises(EncodeError) as raised:
+        async def drain(session: AsyncSession) -> None:
+            raise error
+
+        monkeypatch.setattr(
+            ticket_convergence_publication, "drain_ticket_convergence", drain
+        )
+
+        with capture_logs() as logs, pytest.raises(RuntimeError) as raised:
             await batch.execute()
 
         assert raised.value is error
@@ -543,23 +654,9 @@ class TestFinalization:
         assert env.status_opened == [0]
         assert _events(logs, CVE_FETCH_ITEM_FAILED_EVENT) == []
         assert await env.source_status(ordered[0]) == CVESourceFetchStatus.SUCCESS
+        assert await env.score_count(ordered[0]) == 1
         assert await env.source_status(ordered[1]) is None
         assert env.sleeps == []
-
-    async def test_broker_operational_handoff_failure_keeps_success(
-        self, env: Env, batch: Batch
-    ) -> None:
-        cve = await env.active_cve(UPDATED_BODY)
-        env.published.errors[RESOLVE] = BrokerOperationalError(FAILURE_TEXT)
-
-        with capture_logs() as logs:
-            await batch.execute()
-
-        assert counters(batch.fetcher) == Counters(1, 0, 1, 0)
-        assert await env.source_status(cve) == CVESourceFetchStatus.SUCCESS
-        assert len(_events(logs, HANDOFF_PUBLICATION_FAILED_EVENT)) == 1
-        assert _events(logs, CVE_FETCH_ITEM_FAILED_EVENT) == []
-        assert FAILURE_TEXT not in repr(logs)
 
 
 # ---------------------------------------------------------------------------
@@ -569,23 +666,31 @@ class TestFinalization:
 
 @pytest.mark.integration
 class TestMissing:
-    @pytest.mark.parametrize(
-        "body", [None, {}], ids=["http_404", "no_extractable_data"]
-    )
-    async def test_missing_is_an_isolated_status_and_success(
-        self, body: Any, env: Env, batch: Batch
+    async def test_empty_data_is_an_isolated_missing_status_and_success(
+        self, env: Env, batch: Batch
     ) -> None:
-        cve = await env.active_cve(body)
+        cve = await env.active_cve()
 
         with capture_logs() as logs:
             await batch.execute()
 
+        assert env.server.requested_cve_ids == [cve.cve_id]
         assert await env.source_status(cve) == CVESourceFetchStatus.MISSING
+        assert await env.score(cve) is None
         assert env.status_opened == [1]
         assert counters(batch.fetcher) == Counters(1, 0, 0, 0)
-        assert _events(logs, CVE_FETCH_ITEM_FAILED_EVENT) == []
+        assert logs == []
         assert env.published.calls == []
         assert env.sleeps == [0.25]
+
+    async def test_missing_retains_a_stored_score(self, env: Env, batch: Batch) -> None:
+        cve = await env.active_cve()
+        await env.seed_score(cve)
+
+        await batch.execute()
+
+        assert await env.source_status(cve) == CVESourceFetchStatus.MISSING
+        assert await env.score(cve) == (0.5, 0.5, date(2026, 10, 6))
 
 
 @pytest.mark.integration
@@ -593,16 +698,16 @@ class TestItemFailure:
     async def test_failure_rolls_back_writes_isolated_failure_and_one_event(
         self, env: Env, batch: Batch, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        failing = await env.active_cve(UPDATED_BODY)
-        other = await env.active_cve(UNCHANGED_BODY)
-        _fail_references_for(monkeypatch, {failing.cve_id}, RuntimeError(FAILURE_TEXT))
+        failing = await env.updated_cve()
+        other = await env.unchanged_cve()
+        _fail_upsert_for(monkeypatch, {failing.cve_id}, RuntimeError(FAILURE_TEXT))
 
         with capture_logs(processors=[merge_contextvars]) as logs:
             await batch.execute()
 
-        # upsert_cve() wrote the assessment and success status; rollback
+        # upsert_cve() wrote the score and success status; rollback
         # discarded both before the isolated failure status.
-        assert await env.assessment_count(failing) == 0
+        assert await env.score(failing) is None
         assert await env.source_status(failing) == CVESourceFetchStatus.FAILURE
         assert await env.source_status(other) == CVESourceFetchStatus.SUCCESS
         assert env.status_opened == [1]
@@ -616,26 +721,50 @@ class TestItemFailure:
             }
         ]
         assert counters(batch.fetcher) == Counters(1, 0, 0, 1)
-        assert env.published.published(RESOLVE) == []
-        for entry in logs:
-            rendered = repr(dict(entry))
-            for fragment in (FAILURE_TEXT, PERSONAL_TEXT, SECRET_VALUE, "Alice"):
-                assert fragment not in rendered, entry
-            assert "Example-Secret-Token" not in rendered, entry
+        assert env.published.calls == []
+        _assert_private(logs)
 
     @pytest.mark.parametrize(
         ("responder", "cause"),
         [
-            (lambda request: httpx.Response(403), "HTTPStatusError"),
-            (lambda request: httpx.Response(200, content=b"{"), "JSONDecodeError"),
-            (lambda request: httpx.Response(200, json=[1]), "ValidationError"),
-            (lambda request: httpx.Response(204), "RedhatResponseError"),
+            (status(403, FAILURE_TEXT.encode()), "HTTPStatusError"),
+            (status(429, FAILURE_TEXT.encode()), "HTTPStatusError"),
+            (status(503, FAILURE_TEXT.encode()), "HTTPStatusError"),
+            (status(200, f"{{{FAILURE_TEXT}".encode()), "JSONDecodeError"),
+            (
+                body(envelope(entry_for("CVE-2099-48001", percentile=FAILURE_TEXT))),
+                "ValidationError",
+            ),
+            (
+                body(envelope(entry_for("CVE-2099-48001", epss="1.000000001"))),
+                "ValidationError",
+            ),
+            (
+                body(
+                    envelope(
+                        entry_for("CVE-2099-48001"),
+                        entry_for("CVE-2099-48002", date=FAILURE_TEXT),
+                    )
+                ),
+                "ValidationError",
+            ),
+            (body([FAILURE_TEXT]), "ValidationError"),
             (raising(httpx.ConnectError(FAILURE_TEXT)), "ConnectError"),
         ],
-        ids=["forbidden", "json", "schema", "unexpected_2xx", "connect"],
+        ids=[
+            "forbidden",
+            "rate_limited",
+            "server_error",
+            "json",
+            "schema",
+            "out_of_range",
+            "two_entries",
+            "array_root",
+            "connect",
+        ],
     )
     async def test_event_names_only_the_exception_class(
-        self, responder: Any, cause: str, env: Env, batch: Batch
+        self, responder: Responder, cause: str, env: Env, batch: Batch
     ) -> None:
         cve = await env.active_cve()
         env.respond(cve, responder)
@@ -653,35 +782,37 @@ class TestItemFailure:
             }
         ]
         assert set(_events(logs, CVE_FETCH_ITEM_FAILED_EVENT)[0]) == FAILED_EVENT_KEYS
-        assert FAILURE_TEXT not in repr(logs)
+        _assert_private(logs)
         assert await env.source_status(cve) == CVESourceFetchStatus.FAILURE
+        assert await env.score(cve) is None
         assert counters(batch.fetcher) == Counters(0, 0, 0, 1)
+        assert env.sleeps == [0.25]
 
-    async def test_payload_failure_is_an_isolated_item_failure(
-        self, env: Env, batch: Batch
+    @pytest.mark.parametrize("member", ["epss", "percentile", "date"])
+    async def test_nul_in_a_consumed_field_is_an_isolated_failure(
+        self, member: str, env: Env, batch: Batch
     ) -> None:
-        cve = await env.active_cve(
-            {
-                "cvss3": {"cvss3_scoring_vector": V31},
-                "package_state": [{"package_name": f"{PERSONAL_TEXT}\x00"}],
-            }
-        )
+        cve = await env.active_cve()
+        await env.seed_score(cve)
+        env.serve(cve, **{member: f"{SCORED[member]}\x00"})
 
         with capture_logs() as logs:
             await batch.execute()
 
         assert await env.source_status(cve) == CVESourceFetchStatus.FAILURE
-        assert await env.assessment_count(cve) == 0
+        # The stored score is untouched; no database error occurred.
+        assert await env.score(cve) == (0.5, 0.5, date(2026, 10, 6))
         assert [
             entry["cause"] for entry in _events(logs, CVE_FETCH_ITEM_FAILED_EVENT)
         ] == ["ValidationError"]
-        assert PERSONAL_TEXT not in repr(logs)
+        assert counters(batch.fetcher) == Counters(0, 0, 0, 1)
+        _assert_private(logs)
 
     async def test_flush_failure_is_an_isolated_item_failure(
         self, env: Env, batch: Batch, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         first, second = sorted(
-            [await env.active_cve(UPDATED_BODY), await env.active_cve(UPDATED_BODY)],
+            [await env.updated_cve(), await env.updated_cve()],
             key=lambda cve: cve.cve_id,
         )
         real_fetch = batch.fetcher.fetch_single
@@ -723,44 +854,20 @@ class TestItemFailure:
         assert own_flushes == [first.cve_id, second.cve_id]
         assert finalized == [second.cve_id]
         assert await env.source_status(first) == CVESourceFetchStatus.FAILURE
-        assert await env.assessment_count(first) == 0
+        assert await env.score(first) is None
         assert await env.source_status(second) == CVESourceFetchStatus.SUCCESS
-        assert await env.assessment_count(second) == 1
+        assert await env.score(second) is not None
         assert [
             (entry["cve_id"], entry["cause"])
             for entry in _events(logs, CVE_FETCH_ITEM_FAILED_EVENT)
         ] == [(first.cve_id, "RuntimeError")]
         assert counters(batch.fetcher) == Counters(1, 0, 1, 1)
-        assert PERSONAL_TEXT not in repr(logs)
+        _assert_private(logs)
 
 
 # ---------------------------------------------------------------------------
 # Consecutive infrastructure failures
 # ---------------------------------------------------------------------------
-
-
-Plan = list[str]
-"""Per-CVE outcome codes, in request order."""
-
-
-async def _planned(env: Env, plan: Plan) -> list[CVE]:
-    """Committed CVEs whose responses follow `plan` in request order."""
-    cves = [await env.active_cve() for _ in plan]
-    ordered = sorted(cves, key=lambda cve: cve.cve_id)
-    for cve, outcome in zip(ordered, plan, strict=True):
-        if outcome == "ok":
-            env.server.bodies[cve.cve_id] = UNCHANGED_BODY
-        elif outcome == "missing":
-            pass
-        elif outcome == "connect":
-            env.respond(cve, raising(httpx.ConnectError("refused")))
-        elif outcome == "timeout":
-            env.respond(cve, raising(httpx.ReadTimeout("timed out")))
-        elif outcome == "json":
-            env.respond(cve, lambda request: httpx.Response(200, content=b"{"))
-        else:
-            env.status(cve, int(outcome))
-    return ordered
 
 
 @pytest.mark.integration
@@ -787,6 +894,7 @@ class TestConsecutiveFailures:
         assert counters(batch.fetcher) == Counters(0, 0, 0, 3)
         for cve in ordered[:3]:
             assert await env.source_status(cve) == CVESourceFetchStatus.FAILURE
+        assert await env.source_status(ordered[3]) is None
         assert env.sleeps == [0.25, 0.25]
 
     async def test_abort_chains_the_triggering_exception(
@@ -794,7 +902,6 @@ class TestConsecutiveFailures:
     ) -> None:
         ordered = await _planned(env, ["503", "503", "ok"])
         error = httpx.ConnectError("refused")
-        del env.server.bodies[ordered[2].cve_id]
         env.respond(ordered[2], raising(error))
 
         with pytest.raises(FetcherError) as raised:
@@ -806,12 +913,22 @@ class TestConsecutiveFailures:
         "plan",
         [
             ["503", "503", "ok", "503", "503"],
+            ["503", "503", "updated", "503", "503"],
             ["503", "503", "missing", "503", "503"],
-            ["503", "503", "403", "503", "503"],
             ["503", "503", "429", "503", "503"],
+            ["503", "503", "403", "503", "503"],
+            ["503", "503", "schema", "503", "503"],
             ["503", "503", "json", "503", "503"],
         ],
-        ids=["success", "missing", "http_403", "http_429", "unparseable"],
+        ids=[
+            "unchanged",
+            "updated",
+            "missing",
+            "http_429",
+            "http_403",
+            "data_quality",
+            "unparseable",
+        ],
     )
     async def test_reachability_resets_the_counter(
         self, plan: Plan, env: Env, batch: Batch
@@ -821,19 +938,20 @@ class TestConsecutiveFailures:
         await batch.execute()
 
         assert env.server.requested_cve_ids == [cve.cve_id for cve in ordered]
-        failed = sum(outcome not in {"ok", "missing"} for outcome in plan)
+        failed = sum(outcome not in {"ok", "updated", "missing"} for outcome in plan)
         succeeded = len(plan) - failed
-        assert counters(batch.fetcher) == Counters(succeeded, 0, 0, failed)
+        updated = plan.count("updated")
+        assert counters(batch.fetcher) == Counters(succeeded, 0, updated, failed)
 
     async def test_non_infrastructure_failures_never_abort(
         self, env: Env, batch: Batch
     ) -> None:
-        ordered = await _planned(env, ["403", "429", "json", "401"])
+        ordered = await _planned(env, ["403", "429", "json", "schema", "401"])
 
         await batch.execute()
 
         assert env.server.requested_cve_ids == [cve.cve_id for cve in ordered]
-        assert counters(batch.fetcher) == Counters(0, 0, 0, 4)
+        assert counters(batch.fetcher) == Counters(0, 0, 0, 5)
 
 
 # ---------------------------------------------------------------------------
@@ -851,13 +969,13 @@ class TestWholeRunSignals:
     async def test_signal_propagates_without_item_handling(
         self, signal: BaseException, env: Env, batch: Batch
     ) -> None:
-        await env.active_cve(UNCHANGED_BODY)
-        await env.active_cve(UNCHANGED_BODY)
+        await env.updated_cve()
+        await env.updated_cve()
 
         def respond(request: httpx.Request) -> httpx.Response:
             raise signal
 
-        env.server.responses.update(dict.fromkeys(env.server.bodies, respond))
+        env.server.responses.update(dict.fromkeys(env.server.entries, respond))
 
         with capture_logs() as logs, pytest.raises(type(signal)) as raised:
             await batch.execute()
@@ -872,20 +990,20 @@ class TestWholeRunSignals:
 
 @pytest.mark.integration
 class TestRequestDelay:
-    async def test_configured_delay_follows_every_cve(
+    async def test_configured_delay_follows_every_selected_cve(
         self, env: Env, batch: Batch
     ) -> None:
-        ordered = await _planned(env, ["ok", "missing", "403"])
+        ordered = await _planned(env, ["ok", "missing", "403", "503"])
 
         await batch.execute()
 
         assert env.server.requested_cve_ids == [cve.cve_id for cve in ordered]
-        assert env.sleeps == [0.25, 0.25, 0.25]
+        assert env.sleeps == [0.25, 0.25, 0.25, 0.25]
 
     async def test_missing_configuration_snapshot_uses_no_delay(
         self, env: Env, batch: Batch
     ) -> None:
-        await env.active_cve(UNCHANGED_BODY)
+        await env.unchanged_cve()
         batch.fetcher.config = None
 
         await batch.execute()
@@ -894,7 +1012,208 @@ class TestRequestDelay:
 
 
 # ---------------------------------------------------------------------------
-# run(): the sync_redhat_cves metric mapping on a finalized FetcherRun
+# Diagnostic staleness check
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+class TestStaleness:
+    @pytest.mark.parametrize(
+        "assessed", ["2026-10-05", "2026-10-06", "2026-10-07"], ids=str
+    )
+    async def test_today_minus_one_or_later_is_not_stale(
+        self, assessed: str, env: Env, batch: Batch, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        await env.updated_cve(date=assessed)
+        checks = _spy_staleness(monkeypatch, batch.fetcher)
+
+        with capture_logs() as logs:
+            await batch.execute()
+
+        assert checks == [date.fromisoformat(assessed)]
+        assert logs == []
+
+    async def test_today_minus_two_logs_one_bounded_warning(
+        self, env: Env, batch: Batch
+    ) -> None:
+        cve = await env.updated_cve(
+            epss="0.987650000", percentile="0.123450000", date="2026-10-04"
+        )
+
+        with capture_logs() as logs:
+            await batch.execute()
+
+        assert logs == [
+            {
+                "event": EPSS_DATA_STALE_EVENT,
+                "log_level": "warning",
+                "fetcher_name": NAME,
+                "assessed_at": "2026-10-04",
+                "expected": "2026-10-06",
+            }
+        ]
+        # Stale data is still ingested.
+        assert await env.score(cve) == (0.98765, 0.12345, date(2026, 10, 4))
+        assert counters(batch.fetcher) == Counters(1, 0, 1, 0)
+
+    async def test_evaluated_once_with_the_first_parsed_date(
+        self, env: Env, batch: Batch, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cves = [await env.active_cve() for _ in range(4)]
+        ordered = sorted(cves, key=lambda cve: cve.cve_id)
+        env.respond(ordered[0], status(503))
+        env.serve(ordered[1], date="2026-10-01")
+        env.serve(ordered[2], date="2026-10-02")
+        env.serve(ordered[3], date="2026-10-03")
+        checks = _spy_staleness(monkeypatch, batch.fetcher)
+
+        with capture_logs() as logs:
+            await batch.execute()
+
+        assert checks == [date(2026, 10, 1)]
+        assert [
+            entry["assessed_at"] for entry in _events(logs, EPSS_DATA_STALE_EVENT)
+        ] == ["2026-10-01"]
+
+    async def test_first_parse_is_evaluated_when_its_ingestion_fails(
+        self, env: Env, batch: Batch, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The assessment date is cached by the first successful parse
+        # (Algorithm, Staleness validation), before upsert_cve().
+        first, second = sorted(
+            [await env.updated_cve(date="2026-10-01"), await env.updated_cve()],
+            key=lambda cve: cve.cve_id,
+        )
+        env.serve(first, date="2026-10-01")
+        env.serve(second, date="2026-10-06")
+        _fail_upsert_for(monkeypatch, {first.cve_id}, RuntimeError(FAILURE_TEXT))
+        checks = _spy_staleness(monkeypatch, batch.fetcher)
+
+        with capture_logs() as logs:
+            await batch.execute()
+
+        assert checks == [date(2026, 10, 1)]
+        assert len(_events(logs, EPSS_DATA_STALE_EVENT)) == 1
+        assert counters(batch.fetcher) == Counters(1, 0, 1, 1)
+
+    async def test_no_successful_parse_skips_the_check(
+        self, env: Env, batch: Batch, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        await _planned(env, ["missing", "schema", "429"])
+        checks = _spy_staleness(monkeypatch, batch.fetcher)
+
+        await batch.execute()
+
+        assert checks == []
+
+    async def test_ordinary_check_exception_is_swallowed_without_effect(
+        self, env: Env, batch: Batch, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A first success then two infrastructure failures: counting the
+        # swallowed exception as a failure would abort the run.
+        ordered = await _planned(env, ["ok", "503", "503"])
+        calls: list[date] = []
+
+        def check(assessed_at: date) -> None:
+            calls.append(assessed_at)
+            raise RuntimeError(FAILURE_TEXT)
+
+        monkeypatch.setattr(batch.fetcher, "_check_staleness", check)
+
+        with capture_logs() as logs:
+            await batch.execute()
+
+        assert calls == [date(2026, 10, 6)]
+        assert _events(logs, EPSS_STALENESS_CHECK_FAILED_EVENT) == [
+            {
+                "event": EPSS_STALENESS_CHECK_FAILED_EVENT,
+                "log_level": "debug",
+                "fetcher_name": NAME,
+                "cause": "RuntimeError",
+            }
+        ]
+        assert counters(batch.fetcher) == Counters(1, 0, 0, 2)
+        assert await env.source_status(ordered[0]) == CVESourceFetchStatus.SUCCESS
+        assert [
+            entry["cve_id"] for entry in _events(logs, CVE_FETCH_ITEM_FAILED_EVENT)
+        ] == [ordered[1].cve_id, ordered[2].cve_id]
+        assert env.server.requested_cve_ids == [cve.cve_id for cve in ordered]
+        _assert_private(logs)
+
+    @pytest.mark.parametrize(
+        "signal",
+        [asyncio.CancelledError(), SoftTimeLimitExceeded(), MemoryError()],
+        ids=lambda signal: type(signal).__name__,
+    )
+    async def test_whole_run_signal_in_the_check_propagates(
+        self,
+        signal: BaseException,
+        env: Env,
+        batch: Batch,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        ordered = await _planned(env, ["updated", "updated"])
+
+        def check(assessed_at: date) -> None:
+            raise signal
+
+        monkeypatch.setattr(batch.fetcher, "_check_staleness", check)
+
+        with capture_logs() as logs, pytest.raises(type(signal)) as raised:
+            await batch.execute()
+
+        assert raised.value is signal
+        assert env.server.requested_cve_ids == [ordered[0].cve_id]
+        assert await env.source_status(ordered[0]) == CVESourceFetchStatus.SUCCESS
+        assert counters(batch.fetcher) == Counters(1, 0, 1, 0)
+        assert logs == []
+        assert env.sleeps == []
+
+    @pytest.mark.parametrize("second", ["missing", "fresh"])
+    async def test_reused_instance_never_evaluates_a_previous_run_date(
+        self, second: str, env: Env, batch: Batch, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cve = await env.updated_cve(date="2026-09-01")
+        checks = _spy_staleness(monkeypatch, batch.fetcher)
+        with capture_logs() as first_logs:
+            await batch.execute()
+        assert len(_events(first_logs, EPSS_DATA_STALE_EVENT)) == 1
+        if second == "missing":
+            del env.server.entries[cve.cve_id]
+        else:
+            env.serve(cve, date="2026-10-06")
+
+        with capture_logs() as second_logs:
+            await batch.execute()
+
+        assert _events(second_logs, EPSS_DATA_STALE_EVENT) == []
+        if second == "missing":
+            assert checks == [date(2026, 9, 1)]
+        else:
+            assert checks == [date(2026, 9, 1), date(2026, 10, 6)]
+
+    async def test_a_prior_on_demand_parse_is_not_evaluated(
+        self, env: Env, batch: Batch, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cve = await env.updated_cve(date="2026-09-01")
+        checks = _spy_staleness(monkeypatch, batch.fetcher)
+        assert batch.fetcher._http_client is not None
+        with capture_logs() as on_demand_logs:
+            await batch.fetcher.fetch_single(cve.cve_id, batch.session)
+        await batch.session.rollback()
+        assert checks == []
+        assert on_demand_logs == []
+        del env.server.entries[cve.cve_id]
+
+        with capture_logs() as logs:
+            await batch.execute()
+
+        assert checks == []
+        assert _events(logs, EPSS_DATA_STALE_EVENT) == []
+
+
+# ---------------------------------------------------------------------------
+# run(): the sync_epss_scores metric mapping on a finalized FetcherRun
 # ---------------------------------------------------------------------------
 
 _RUN_CONFIG: Final = FetcherRunConfig(
@@ -912,25 +1231,36 @@ def _outcome(run: FetcherRun) -> tuple[str, int, int, int, int]:
     )
 
 
+def _forbid_record_created(
+    monkeypatch: pytest.MonkeyPatch, fetcher: SyncEpssScores
+) -> list[int]:
+    calls: list[int] = []
+    monkeypatch.setattr(fetcher, "record_created", calls.append)
+    return calls
+
+
 @pytest.mark.integration
 class TestRunMetrics:
     async def test_success_run_maps_updated_unchanged_and_missing(
-        self, env: Env
+        self, env: Env, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        await env.active_cve(UPDATED_BODY)
-        await env.active_cve(UNCHANGED_BODY)
-        await env.active_cve()  # HTTP 404: missing
+        await env.updated_cve()
+        await env.unchanged_cve()
+        await env.active_cve()  # data: [] -> missing
         fetcher, run_id = await env.run_row()
+        created = _forbid_record_created(monkeypatch, fetcher)
 
         await fetcher.run(run_id=run_id, config=_RUN_CONFIG)
 
         run = await env.run_outcome(run_id)
-        # Never `record_created`: Red Hat only enriches existing CVEs.
+        # Never `record_created`: EPSS only enriches existing CVEs.
         assert _outcome(run) == ("success", 3, 0, 1, 0)
         assert run.error_message is None
+        assert created == []
+        assert env.sleeps == [0, 0, 0]
 
     async def test_repeat_run_is_unchanged(self, env: Env) -> None:
-        await env.active_cve(UPDATED_BODY)
+        await env.updated_cve()
         fetcher, first = await env.run_row()
         await fetcher.run(run_id=first, config=_RUN_CONFIG)
         fetcher, second = await env.run_row()
@@ -940,18 +1270,28 @@ class TestRunMetrics:
         assert _outcome(await env.run_outcome(first)) == ("success", 1, 0, 1, 0)
         assert _outcome(await env.run_outcome(second)) == ("success", 1, 0, 0, 0)
 
-    async def test_success_plus_failure_is_partial(
+    async def test_empty_run_is_success(self, env: Env) -> None:
+        fetcher, run_id = await env.run_row()
+
+        await fetcher.run(run_id=run_id, config=_RUN_CONFIG)
+
+        assert _outcome(await env.run_outcome(run_id)) == ("success", 0, 0, 0, 0)
+        assert env.server.requests == []
+
+    async def test_unchanged_success_plus_failure_is_partial(
         self, env: Env, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        await env.active_cve(UPDATED_BODY)
-        failing = await env.active_cve(UNCHANGED_BODY)
-        _fail_references_for(monkeypatch, {failing.cve_id}, RuntimeError(FAILURE_TEXT))
+        await env.unchanged_cve()
+        failing = await env.active_cve()
+        env.respond(failing, body(envelope(entry_for(failing.cve_id, epss="7"))))
         fetcher, run_id = await env.run_row()
+        created = _forbid_record_created(monkeypatch, fetcher)
 
         with capture_logs(processors=[merge_contextvars]) as logs:
             await fetcher.run(run_id=run_id, config=_RUN_CONFIG)
 
-        assert _outcome(await env.run_outcome(run_id)) == ("partial", 1, 0, 1, 1)
+        assert _outcome(await env.run_outcome(run_id)) == ("partial", 1, 0, 0, 1)
+        assert created == []
         # The per-item event binds to the run's correlation context.
         assert _events(logs, CVE_FETCH_ITEM_FAILED_EVENT) == [
             {
@@ -959,60 +1299,49 @@ class TestRunMetrics:
                 "log_level": "warning",
                 "cve_id": failing.cve_id,
                 "fetcher_name": NAME,
-                "cause": "RuntimeError",
+                "cause": "ValidationError",
                 "fetcher_run_id": str(run_id),
             }
         ]
-        assert FAILURE_TEXT not in repr(logs)
 
     async def test_all_failed_is_failure(self, env: Env) -> None:
-        await _planned(env, ["403", "json"])
+        await _planned(env, ["403", "json", "schema"])
         fetcher, run_id = await env.run_row()
 
         await fetcher.run(run_id=run_id, config=_RUN_CONFIG)
 
         run = await env.run_outcome(run_id)
-        assert _outcome(run) == ("failure", 0, 0, 0, 2)
-        assert run.error_message == "All 2 items failed"
+        assert _outcome(run) == ("failure", 0, 0, 0, 3)
+        assert run.error_message == "All 3 items failed"
 
     async def test_abort_is_a_failure_with_the_sanitized_message(
         self, env: Env
     ) -> None:
-        await _planned(env, ["503", "503", "503"])
+        await _planned(env, ["updated", "503", "503", "503"])
         fetcher, run_id = await env.run_row()
 
         with pytest.raises(FetcherError):
             await fetcher.run(run_id=run_id, config=_RUN_CONFIG)
 
         run = await env.run_outcome(run_id)
-        assert _outcome(run) == ("failure", 0, 0, 0, 3)
+        assert _outcome(run) == ("failure", 1, 0, 1, 3)
         assert run.error_message == ABORT_MESSAGE
         assert run.error_detail is not None
 
-    async def test_handoff_broker_failure_keeps_the_run_success(self, env: Env) -> None:
-        cve = await env.active_cve(UPDATED_BODY)
-        env.published.errors[RESOLVE] = BrokerOperationalError(FAILURE_TEXT)
-        fetcher, run_id = await env.run_row()
-
-        with capture_logs(processors=[merge_contextvars]) as logs:
-            await fetcher.run(run_id=run_id, config=_RUN_CONFIG)
-
-        assert _outcome(await env.run_outcome(run_id)) == ("success", 1, 0, 1, 0)
-        assert await env.source_status(cve) == CVESourceFetchStatus.SUCCESS
-        [event] = _events(logs, HANDOFF_PUBLICATION_FAILED_EVENT)
-        assert event["fetcher_name"] == NAME
-        assert event["cause"] == "OperationalError"
-        assert event["fetcher_run_id"] == str(run_id)
-        assert FAILURE_TEXT not in repr(logs)
-
     async def test_post_commit_error_fails_the_run_and_keeps_success_metrics(
-        self, env: Env
+        self, env: Env, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        cve = await env.active_cve(UPDATED_BODY)
-        env.published.errors[RESOLVE] = EncodeError(FAILURE_TEXT)
+        cve = await env.updated_cve()
         fetcher, run_id = await env.run_row()
 
-        with pytest.raises(EncodeError):
+        async def drain(session: AsyncSession) -> None:
+            raise RuntimeError(FAILURE_TEXT)
+
+        monkeypatch.setattr(
+            ticket_convergence_publication, "drain_ticket_convergence", drain
+        )
+
+        with pytest.raises(RuntimeError):
             await fetcher.run(run_id=run_id, config=_RUN_CONFIG)
 
         run = await env.run_outcome(run_id)
@@ -1024,7 +1353,7 @@ class TestRunMetrics:
     async def test_commit_failure_fails_the_run_without_unit_metrics(
         self, env: Env, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        cve = await env.active_cve(UPDATED_BODY)
+        cve = await env.updated_cve()
         fetcher, run_id = await env.run_row()
         error = RuntimeError(FAILURE_TEXT)
         real_factory = env.factory
@@ -1041,8 +1370,8 @@ class TestRunMetrics:
         calls = [0]
 
         def factory() -> AsyncSession:
-            # Settings/cursor load, then the execution session, then
-            # finalization: only the execution session fails to commit.
+            # Cursor load, then the execution session, then finalization:
+            # only the execution session fails to commit.
             calls[0] += 1
             return execution_sessions() if calls[0] == 2 else real_factory()
 
@@ -1055,4 +1384,5 @@ class TestRunMetrics:
         assert _outcome(run) == ("failure", 0, 0, 0, 0)
         assert run.error_message == "Unexpected error"
         assert await env.source_status(cve) is None
+        assert await env.score(cve) is None
         assert env.status_opened == [0]
