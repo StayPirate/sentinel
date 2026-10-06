@@ -64,7 +64,10 @@ from app.services.fetcher_execution import (
     mark_run_stale,
     resolve_effective_hard_limit,
 )
-from app.services.fetcher_schedule import effective_task_time_limits
+from app.services.fetcher_schedule import (
+    effective_task_time_limits,
+    fetcher_entry_key,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -581,7 +584,7 @@ async def _resolve_fallback_run_timeout(db: AsyncSession, fetcher_name: str) -> 
 def _read_due_times(celery_app: Celery, names: list[str]) -> dict[str, datetime | None]:
     """Synchronous batch read of each `name`'s RedBeat `due_at`.
 
-    Uses `RedBeatSchedulerEntry.generate_key()` + `.from_key()`
+    Uses `fetcher_entry_key()` + `RedBeatSchedulerEntry.from_key()`
     exclusively — no raw Redis key is ever constructed (see
     `docs/conventions.md`, Redis Key Conventions). A missing entry
     (`KeyError`) yields `None` for that name only. Any `RedisError`
@@ -593,7 +596,7 @@ def _read_due_times(celery_app: Celery, names: list[str]) -> dict[str, datetime 
     """
     result: dict[str, datetime | None] = {}
     for name in names:
-        key = RedBeatSchedulerEntry.generate_key(celery_app, name)
+        key = fetcher_entry_key(celery_app, name)
         try:
             entry = RedBeatSchedulerEntry.from_key(key, app=celery_app)
         except KeyError:

@@ -611,6 +611,49 @@ class TestListFetchersNextRunAt:
         assert items[0].next_run_at is not None
         assert abs((items[0].next_run_at - expected_due_at).total_seconds()) < 5
 
+    @pytest.mark.filterwarnings(
+        "ignore:RedBeat will stop falling back to broker_url:DeprecationWarning"
+    )
+    async def test_reads_due_at_before_redbeat_config_initialized(
+        self,
+        db_session: AsyncSession,
+        celery_test_app: Celery,
+        uninitialized_celery_test_app: Celery,
+        fetcher_config_factory: FetcherConfigFactory,
+    ) -> None:
+        """The fetcher list can be the first RedBeat call of a freshly
+        started API or CLI process, before anything has initialized
+        `redbeat_conf`."""
+        _register(_NoSettingsFetcher)
+        await fetcher_config_factory(fetcher_name=_NoSettingsFetcher.name, enabled=True)
+        entry = RedBeatSchedulerEntry(
+            name=_NoSettingsFetcher.name,
+            task="run_fetcher",
+            schedule=crontab.from_string(_NoSettingsFetcher.default_schedule),
+            args=[],
+            kwargs={
+                "fetcher_name": _NoSettingsFetcher.name,
+                "triggered_by": "schedule",
+            },
+            app=celery_test_app,
+        )
+        entry.save()
+        entry.reschedule(datetime.now(UTC))
+        expected_due_at = RedBeatSchedulerEntry.from_key(
+            entry.key, app=celery_test_app
+        ).due_at
+        assert not hasattr(uninitialized_celery_test_app, "redbeat_conf")
+
+        items = await list_fetchers(
+            db_session,
+            has_manage_fetchers=False,
+            celery_app=uninitialized_celery_test_app,
+        )
+
+        # Near-equality for the same reason as the test above.
+        assert items[0].next_run_at is not None
+        assert abs((items[0].next_run_at - expected_due_at).total_seconds()) < 5
+
     async def test_no_entry_is_null(
         self,
         db_session: AsyncSession,

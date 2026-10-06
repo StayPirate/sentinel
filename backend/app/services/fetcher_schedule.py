@@ -206,6 +206,23 @@ def upsert_fetcher_entry(
     entry.reschedule(datetime.now(UTC))
 
 
+def fetcher_entry_key(celery_app: Celery, fetcher_name: str) -> str:
+    """Return the redbeat key of `fetcher_name`'s canonical entry.
+
+    Calls `ensure_conf()` first because
+    `RedBeatSchedulerEntry.generate_key()` reads `app.redbeat_conf`
+    without initializing it, unlike the library's other entry points.
+    It raises `AttributeError` in a process where no earlier redbeat call
+    has run, such as a freshly started API or CLI process (see
+    https://github.com/sibson/redbeat/issues/345). Performs no Redis I/O.
+
+    Also used by `app.services.fetcher_operations` to read `next_run_at`.
+    """
+    ensure_conf(celery_app)
+    key: str = RedBeatSchedulerEntry.generate_key(celery_app, fetcher_name)
+    return key
+
+
 def delete_fetcher_entry(celery_app: Celery, fetcher_name: str) -> bool:
     """Delete `fetcher_name`'s canonical redbeat entry if it exists.
 
@@ -216,7 +233,7 @@ def delete_fetcher_entry(celery_app: Celery, fetcher_name: str) -> bool:
     silently no-ops on a missing key (its underlying `zrem`/`delete`
     Redis calls are idempotent). Propagates any `RedisError` uncaught.
     """
-    key = RedBeatSchedulerEntry.generate_key(celery_app, fetcher_name)
+    key = fetcher_entry_key(celery_app, fetcher_name)
     try:
         RedBeatSchedulerEntry.from_key(key, app=celery_app)
     except KeyError:

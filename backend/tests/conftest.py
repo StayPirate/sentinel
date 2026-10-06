@@ -384,21 +384,49 @@ def celery_test_app(
     rest of the test.
     """
     monkeypatch.delenv("CELERY_BROKER_URL", raising=False)
+    celery_test_app = _create_celery_test_app(_redis_test_url)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        ensure_conf(celery_test_app)
+    return celery_test_app
+
+
+@pytest.fixture
+def uninitialized_celery_test_app(
+    celery_test_app: Celery, _redis_test_url: str
+) -> Celery:
+    """A second Celery app on `celery_test_app`'s Redis database whose
+    `redbeat_conf` has never been initialized.
+
+    This is the state of a freshly started API or CLI process, where no
+    RedBeat call has run yet. Tests prepare RedBeat entries through
+    `celery_test_app` and run the code under test with this app.
+    Requesting `celery_test_app` composes its Redis isolation and
+    `CELERY_BROKER_URL` handling.
+
+    Unlike `celery_test_app`, nothing pre-warms the config here, so the
+    code under test emits redbeat's one-time `DeprecationWarning` (see
+    `celery_test_app`). Each test using this fixture allows it with a
+    local `filterwarnings` mark: pytest resets warning filters between
+    the setup and call phases, so the fixture cannot suppress it.
+    """
+    return _create_celery_test_app(_redis_test_url)
+
+
+def _create_celery_test_app(redis_url: str) -> Celery:
+    """Build a Sentinel Celery app whose broker and RedBeat use
+    `redis_url`, without initializing `redbeat_conf`."""
     settings = Settings(
         _env_file=None,
         jwt_secret_key="a" * 32,
         app_name="sentinel-test",
         log_level="INFO",
         log_format="json",
-        celery_broker_url=_redis_test_url,
+        celery_broker_url=redis_url,
         celery_timezone="UTC",
         celery_enable_utc=True,
     )
-    celery_test_app = create_celery_app(settings)
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", DeprecationWarning)
-        ensure_conf(celery_test_app)
-    return celery_test_app
+    return create_celery_app(settings)
 
 
 @pytest_asyncio.fixture(scope="session", loop_scope="session")
