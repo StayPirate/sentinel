@@ -16,10 +16,11 @@ capability.
 System-setting persistence, bootstrap, reads, and audit logging are implemented
 in `backend/app/services/settings.py`. The setting mutation contract
 (`update_default_cvss_version()` and its PATCH endpoint) is specified in this
-document but not yet implemented. The impact preview, all-CVE recalculation
-runner, manual admission, and publication contracts are specified in
-`docs/features/platform/default-cvss-version-operations.md` and are not yet
-implemented.
+document but not yet implemented. The impact preview is specified in
+`docs/features/platform/default-cvss-version-operations.md` and implemented in
+`backend/app/services/cvss_impact_preview.py`. The all-CVE recalculation
+runner, manual admission, and publication contracts are specified in the same
+document and are not yet implemented.
 
 ## Settings
 

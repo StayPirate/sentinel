@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
 import pytest
@@ -59,6 +59,17 @@ class TestIsStringLike:
 
     def test_list_int_is_not_string_like(self) -> None:
         assert is_string_like(list[int]) is False
+
+    def test_string_literal_is_string_like(self) -> None:
+        """A `Literal` of strings (for example the preview's
+        `proposed_version`) is inspected like `str`, so the shared NUL and
+        length checks run before authentication and endpoint validation."""
+        assert is_string_like(Literal["3.1", "4.0"]) is True
+        assert is_string_like(Literal["3.1", "4.0"] | None) is True
+
+    def test_non_string_literal_is_not_string_like(self) -> None:
+        assert is_string_like(Literal[1, 2]) is False
+        assert is_string_like(Literal["one", 2]) is False
 
     def test_bare_list_is_not_string_like(self) -> None:
         """A bare, unparameterized `list` has no element type to

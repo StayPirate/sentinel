@@ -6,7 +6,9 @@ List Settings Audit Events) for the authoritative endpoint contracts
 under test. Filter/date/ordering combination coverage for the
 underlying query lives in `tests/test_services/test_settings.py` —
 these tests focus on the HTTP/route contract (status codes, envelopes,
-error mapping, authentication/authorization).
+error mapping, authentication/authorization). The OpenAPI surface below
+also covers the default-CVSS impact preview route, whose HTTP contract is
+tested in `tests/test_api/test_settings_impact_preview.py`.
 """
 
 from __future__ import annotations
@@ -558,6 +560,36 @@ class TestSettingsOpenAPISurface:
         )
         assert "sort_by" not in param_names
         assert "sort_order" not in param_names
+
+    def test_impact_preview_operation_is_documented(self) -> None:
+        """default-cvss-version-operations.md, Get Default-CVSS Impact
+        Preview: one required `proposed_version` query parameter, exactly
+        `3.1` or `4.0`, and the `503 CVSS_PREVIEW_TIMEOUT` response. The
+        HTTP contract is tested in
+        `tests/test_api/test_settings_impact_preview.py`."""
+        openapi_paths = app.openapi()["paths"]
+        path_item = openapi_paths["/api/v1/admin/settings/default-cvss-version/impact"]
+        assert set(path_item) == {"get"}
+        operation = path_item["get"]
+
+        assert operation["summary"]
+        assert operation["description"]
+        assert "requestBody" not in operation
+        assert [(p["name"], p["in"]) for p in operation["parameters"]] == [
+            ("proposed_version", "query")
+        ]
+        proposed_version = operation["parameters"][0]
+        assert proposed_version["required"] is True
+        assert proposed_version["schema"]["type"] == "string"
+        assert proposed_version["schema"]["enum"] == ["3.1", "4.0"]
+        # Undeclared query parameters are absent from the OpenAPI contract
+        # (api-spec.md, Undeclared Query Parameters).
+        param_names = {p["name"] for p in operation["parameters"]}
+        assert not {"page", "per_page", "sort_by", "sort_order"} & param_names
+        assert {"200", "422", "503"} <= set(operation["responses"])
+        assert operation["responses"]["503"]["content"]["application/json"][
+            "schema"
+        ] == {"$ref": "#/components/schemas/ErrorResponse"}
 
     def test_event_type_parameter_is_repeatable(self) -> None:
         openapi_paths = app.openapi()["paths"]

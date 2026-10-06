@@ -497,19 +497,15 @@ The default-CVSS impact preview in
 `docs/features/platform/default-cvss-version-operations.md` evaluates the
 Analyzed and Resolved predicates above read-only for a hypothetical proposed
 default version. It reuses the exact same predicates, sets, and clause
-semantics, substituting projected effective Product eligibility for the
-persisted boolean without writing it: the projected automatic result where no
-manual override applies, and the preserved persisted `eligible` value where
-`is_eligible_override = true`.
+semantics without writing any input. When the projection evaluates these
+predicates, which projected inputs it substitutes, and which Tickets
+contribute a regression count are defined in
+[default-cvss-version-operations.md](../platform/default-cvss-version-operations.md#projected-impact).
 
 - The projection invokes no mutation function. It does not call
   `reconcile_ticket_status()`, acquire the Ticket lock, change a status,
   create a `status_change` event, or register a transaction-local Ticket
   convergence effect.
-- Only a currently `Resolved` Ticket whose projected highest valid gate
-  result is `Analysis` or `Analyzed` contributes a regression count.
-  Promotions, demotions of `Analysis` or `Analyzed` Tickets, and no-change
-  evaluations are not separate response categories.
 - `Ignored` and `Duplicated` Tickets remain outside gate projection, exactly
   as they remain outside `reconcile_ticket_status()` and ordinary gate
   evaluation.

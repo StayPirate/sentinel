@@ -164,6 +164,12 @@ class TestErrorCode:
         Assessment)."""
         assert ErrorCode.CVSS_ASSESSMENT_NOT_FOUND == "CVSS_ASSESSMENT_NOT_FOUND"
 
+    def test_cvss_preview_timeout_is_registered(self) -> None:
+        """See docs/api-spec.md (Error Code Categories) and
+        docs/features/platform/default-cvss-version-operations.md (Preview
+        Service Exception)."""
+        assert ErrorCode.CVSS_PREVIEW_TIMEOUT == "CVSS_PREVIEW_TIMEOUT"
+
     def test_package_exclusion_error_codes_are_registered(self) -> None:
         """See docs/api-spec.md (Error Code Categories, `PACKAGE_*`) and
         docs/features/packages/package-service.md (Service Exceptions:

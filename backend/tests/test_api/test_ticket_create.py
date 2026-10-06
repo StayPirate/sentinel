@@ -1240,9 +1240,10 @@ contain `ticket` but which are not Ticket identities: they remain UUIDs
 Endpoints)."""
 _EMBEDDED_TICKET_REFERENCES = {"ticket"}
 """Property names of embedded Ticket reference objects."""
-_TICKET_COUNT_FIELDS = {"tickets_count"}
+_TICKET_COUNT_FIELDS = {"tickets_count", "resolved_ticket_regressions"}
 """Integer counts whose names contain `ticket` but which are not Ticket
-identities (user-management.md, Get Deactivation Impact)."""
+identities (user-management.md, Get Deactivation Impact;
+default-cvss-version-operations.md, Result and Count Units)."""
 _EMBEDDED_TICKET_REFERENCE_SCHEMAS = {
     "TicketPackageRef": {"ticket_id", "status", "severity"},
     "CVEAssociatedTicket": {"ticket_id"},

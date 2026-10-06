@@ -3,6 +3,11 @@
 See `docs/features/platform/system-settings.md` for the full
 specification: `bootstrap_system_settings()`, `get_default_cvss_version()`,
 the `SettingAuditLog` audit trail, and `list_setting_audit_events()`.
+
+The default-CVSS impact preview, whose `CVSSPreviewTimeoutError` belongs to
+this module's `SettingsServiceError` hierarchy, lives in
+`app.services.cvss_impact_preview` (see
+`docs/features/platform/default-cvss-version-operations.md`).
 """
 
 from __future__ import annotations
