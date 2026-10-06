@@ -33,7 +33,6 @@ teardown. All identifiers are fictional.
 from __future__ import annotations
 
 import inspect
-import json
 from collections.abc import AsyncIterator, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Final, cast
@@ -74,7 +73,6 @@ from app.services.http_client import (
     is_retryable_condition,
 )
 from app.services.reference_service import AutomaticReferenceInput
-from app.services.tickets import redhat_cve_record
 from app.services.tickets.sync_redhat_cves import (
     CVE_FETCH_CANDIDATE_SKIPPED_EVENT,
     RedhatResponseError,
@@ -433,7 +431,6 @@ class TestErrorPropagation:
         )
 
         assert type(error) is httpx.HTTPStatusError
-        assert isinstance(error, httpx.HTTPStatusError)
         assert error.response.status_code == status
         assert not is_retryable_condition(error)
         assert not is_infrastructure_failure(error)
@@ -1326,7 +1323,7 @@ class TestConcreteCompliance:
         assert SyncRedhatCves.queue is None
         assert SyncRedhatCves.http_client_options == {}
 
-    def test_capability_flags(self) -> None:
+    def test_capability_flags_are_inherited_and_enabled(self) -> None:
         assert SyncRedhatCves.supports_fetch_single is True
         assert SyncRedhatCves.participates_in_catch_up is True
         assert "supports_fetch_single" not in SyncRedhatCves.__dict__
@@ -1366,12 +1363,3 @@ class TestConcreteCompliance:
 
     def test_no_base_cve_fetcher_member_is_added(self) -> None:
         assert not hasattr(BaseCVEFetcher, "_get_active_ticket_cve_ids")
-
-    def test_payload_constants_are_the_red_hat_provider(self) -> None:
-        assert redhat_cve_record.PROVIDER_NAME == "Red Hat"
-
-    def test_fixture_bodies_round_trip_as_json(self) -> None:
-        """The fake server serves every fixture as served live."""
-        body = _fixture("cve_full_v3")
-
-        assert json.loads(httpx.Response(200, json=body).content) == body

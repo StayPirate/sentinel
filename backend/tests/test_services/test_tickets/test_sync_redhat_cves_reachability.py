@@ -27,6 +27,12 @@ creates is the in-process `RedhatServer`. The committed `sync_redhat_cves`
 `FetcherConfig` row, CVEs, Tickets, and their children are deleted at
 teardown. Bootstrap and reconciliation run on `db_session`, rolled back at
 teardown, and the worker Redis database. All CVE-IDs are fictional.
+
+These tests prove only that the production class is reachable through each
+workflow. The generic task terminal matrix (missing, retry, and failure) is
+owned by `test_fetch_single_cve_workflow.py` and
+`test_cve_fetcher_catch_up.py`, and Red Hat's exception classification by
+`test_sync_redhat_cves.py`.
 """
 
 from __future__ import annotations
@@ -47,7 +53,6 @@ import app.services.fetcher_discovery  # noqa: F401
 from app.core.enums import CVESourceFetchStatus, CVESourceType
 from app.models.cve import CVE
 from app.models.fetcher_config import FetcherConfig
-from app.services.cve_service import FetchSingleRetry
 from app.services.fetcher_bootstrap import bootstrap_fetcher_configs
 from app.services.fetcher_schedule import reconcile_beat_schedule
 from app.services.tickets.sync_redhat_cves import SyncRedhatCves
@@ -183,59 +188,6 @@ class TestOnDemandFetch:
         # The workflow closed the client it created.
         assert all(client.is_closed for client in server.clients)
 
-    async def test_404_writes_missing(
-        self,
-        world: IngestionWorld,
-        on_demand: FetchSingleHarness,
-        server: ClientServer,
-    ) -> None:
-        cve, _ = await _active_cve(world)
-        token = await on_demand.marker(cve.cve_id, REDHAT.value)
-
-        outcome = await on_demand.run(NAME, cve.cve_id, REDHAT.value, token)
-
-        assert outcome is None
-        state = await source_state(on_demand.factory, cve.id, REDHAT)
-        assert state is not None
-        assert state.status == CVESourceFetchStatus.MISSING
-        assert on_demand.published.calls == []
-
-    @pytest.mark.parametrize("status", [429, 503])
-    async def test_retryable_status_schedules_a_retry(
-        self,
-        status: int,
-        world: IngestionWorld,
-        on_demand: FetchSingleHarness,
-        server: ClientServer,
-    ) -> None:
-        cve, _ = await _active_cve(world)
-        server.responses[cve.cve_id] = lambda request: httpx.Response(status)
-        token = await on_demand.marker(cve.cve_id, REDHAT.value)
-
-        outcome = await on_demand.run(NAME, cve.cve_id, REDHAT.value, token)
-
-        assert isinstance(outcome, FetchSingleRetry)
-        assert isinstance(outcome.cause, httpx.HTTPStatusError)
-        assert outcome.cause.response.status_code == status
-        assert await source_state(on_demand.factory, cve.id, REDHAT) is None
-
-    async def test_forbidden_is_a_non_retryable_failure(
-        self,
-        world: IngestionWorld,
-        on_demand: FetchSingleHarness,
-        server: ClientServer,
-    ) -> None:
-        cve, _ = await _active_cve(world)
-        server.responses[cve.cve_id] = lambda request: httpx.Response(403)
-        token = await on_demand.marker(cve.cve_id, REDHAT.value)
-
-        with pytest.raises(httpx.HTTPStatusError):
-            await on_demand.run(NAME, cve.cve_id, REDHAT.value, token)
-
-        state = await source_state(on_demand.factory, cve.id, REDHAT)
-        assert state is not None
-        assert state.status == CVESourceFetchStatus.FAILURE
-
 
 # ---------------------------------------------------------------------------
 # Catch-up through the inherited default
@@ -286,21 +238,6 @@ class TestCatchUp:
         assert await fetcher_run_count(catch_up.factory, NAME) == 0
         catch_up.engine.dispose.assert_awaited_once()
         assert all(client.is_closed for client in server.clients)
-
-    async def test_missing_writes_an_isolated_missing_status(
-        self,
-        world: IngestionWorld,
-        catch_up: CatchUpHarness,
-        server: ClientServer,
-    ) -> None:
-        cve, ticket = await _active_cve(world)
-
-        await fetchers.run_catch_up_async(NAME, str(ticket.id))
-
-        state = await source_state(catch_up.factory, cve.id, REDHAT)
-        assert state is not None
-        assert state.status == CVESourceFetchStatus.MISSING
-        assert catch_up.published.published(RESOLVE) == []
 
 
 # ---------------------------------------------------------------------------

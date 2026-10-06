@@ -37,7 +37,11 @@ CVE-ID is answered with the live 404 body. Tests register raw `responses`
 (status codes, undecodable bodies, transport errors) and inspect
 `requests`.
 
-Consumers: `tests/test_services/test_tickets/test_redhat_cve_contract.py`.
+Consumers, all under `tests/test_services/test_tickets/`: the fixture
+loaders by `test_redhat_cve_contract.py` and `test_redhat_cve_record.py`;
+`RedhatServer` by `test_sync_redhat_cves.py`,
+`test_sync_redhat_cves_execute.py`, and
+`test_sync_redhat_cves_reachability.py`.
 """
 
 from __future__ import annotations

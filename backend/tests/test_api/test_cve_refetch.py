@@ -165,11 +165,12 @@ def _failing_for(sources: set[str], error: Exception) -> Any:
 def _assert_error_envelope(response: httpx.Response, status: int, code: str) -> None:
     """The standard error envelope only: `code` and `detail`, no `data`
     (cve-tracking.md: "All errors use the standard error envelope and
-    return no partial `data` payload")."""
-    assert response.status_code == status, response.text
+    return no partial `data` payload"). The request URL, which carries any
+    `source` parameter, is in each failure message."""
+    assert response.status_code == status, (response.request.url, response.text)
     body = response.json()
     assert set(body) == {"code", "detail"}
-    assert body["code"] == code
+    assert body["code"] == code, response.request.url
     assert isinstance(body["detail"], str)
 
 
@@ -954,7 +955,6 @@ class TestProductionReachability:
 
         for source in sorted(production_registry):
             response = await api.refetch(cve.cve_id, headers, source=source)
-            assert response.status_code == 409, source
             _assert_error_envelope(response, 409, "FETCHER_DISABLED")
 
         _assert_no_dispatch(attempts, api.published)
@@ -980,7 +980,6 @@ class TestProductionReachability:
 
         for source in outside:
             response = await api.refetch(cve.cve_id, headers, source=source)
-            assert response.status_code == 422, source
             _assert_error_envelope(response, 422, "CVE_INVALID_SOURCE")
 
         _assert_no_dispatch(attempts, api.published)

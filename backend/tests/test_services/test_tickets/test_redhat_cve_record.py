@@ -175,14 +175,14 @@ class TestResponseValidation:
 
 @pytest.mark.unit
 class TestCvss:
-    def test_v3_only(self) -> None:
+    def test_v3_only_record_yields_the_v3_vector(self) -> None:
         extraction = extract(parse_response(load_cve_fixture("cve_full_v3")))
 
         assert extraction.cvss_vectors == (
             "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:H",
         )
 
-    def test_v2_only(self) -> None:
+    def test_v2_only_record_yields_the_v2_vector(self) -> None:
         extraction = extract(parse_response(load_cve_fixture("cve_v2_only")))
 
         assert extraction.cvss_vectors == ("AV:N/AC:L/Au:N/C:P/I:N/A:N",)
@@ -195,7 +195,9 @@ class TestCvss:
             "AV:L/AC:M/Au:N/C:C/I:C/A:C",
         )
 
-    def test_neither(self, parser: ParserSpy) -> None:
+    def test_record_without_cvss_yields_no_vector_without_parser_call(
+        self, parser: ParserSpy
+    ) -> None:
         extraction = extract(parse_response(load_cve_fixture("cve_no_cvss")))
 
         assert extraction.cvss_vectors == ()
@@ -328,7 +330,7 @@ class TestCvss:
 
 @pytest.mark.unit
 class TestCwe:
-    @pytest.mark.parametrize("cwe", ["CWE-1", "CWE-200", "CWE-1395"])
+    @pytest.mark.parametrize("cwe", ["CWE-1", "CWE-200", "CWE-1395", "CWE-" + "1" * 16])
     def test_valid_identifier_is_kept(self, cwe: str) -> None:
         extraction = _extract(cwe=cwe)
 
