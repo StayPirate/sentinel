@@ -7,8 +7,10 @@ under test. Filter/date/ordering combination coverage for the
 underlying query lives in `tests/test_services/test_settings.py` —
 these tests focus on the HTTP/route contract (status codes, envelopes,
 error mapping, authentication/authorization). The OpenAPI surface below
-also covers the default-CVSS impact preview route, whose HTTP contract is
-tested in `tests/test_api/test_settings_impact_preview.py`.
+also covers the default-CVSS impact preview route and the manual
+recalculation trigger, whose HTTP contracts are tested in
+`tests/test_api/test_settings_impact_preview.py` and
+`tests/test_api/test_settings_recalculate.py`.
 """
 
 from __future__ import annotations
@@ -175,14 +177,6 @@ class TestGetSystemSettings:
             "/api/v1/admin/settings", json={"default_cvss_version": "4.0"}
         )
         assert response.status_code == 405
-
-    async def test_no_recalculate_endpoint_is_exposed(
-        self, admin_client: AsyncClient
-    ) -> None:
-        response = await admin_client.post(
-            "/api/v1/admin/settings/default-cvss-version/recalculate"
-        )
-        assert response.status_code == 404
 
 
 # ---------------------------------------------------------------------------
@@ -542,13 +536,36 @@ class TestSettingsOpenAPISurface:
         assert audit_get["summary"]
         assert audit_get["description"]
 
-    def test_no_patch_or_recalculate_endpoints_are_present(self) -> None:
+    def test_no_patch_endpoint_is_present(self) -> None:
         openapi_paths = app.openapi()["paths"]
         assert "patch" not in openapi_paths.get("/api/v1/admin/settings", {})
-        assert (
+
+    def test_recalculate_operation_is_documented(self) -> None:
+        """default-cvss-version-operations.md, Trigger CVSS Recalculation:
+        a body-less, parameter-less POST answering `202` with the
+        documented body and the `409`/`503` error envelopes. The HTTP
+        contract is tested in `tests/test_api/test_settings_recalculate.py`."""
+        openapi_paths = app.openapi()["paths"]
+        path_item = openapi_paths[
             "/api/v1/admin/settings/default-cvss-version/recalculate"
-            not in openapi_paths
-        )
+        ]
+        assert set(path_item) == {"post"}
+        operation = path_item["post"]
+
+        assert operation["summary"]
+        assert operation["description"]
+        assert "requestBody" not in operation
+        assert operation.get("parameters", []) == []
+        assert {"202", "409", "503"} <= set(operation["responses"])
+        assert "200" not in operation["responses"]
+        for status in ("409", "503"):
+            assert operation["responses"][status]["content"]["application/json"][
+                "schema"
+            ] == {"$ref": "#/components/schemas/ErrorResponse"}
+        accepted = operation["responses"]["202"]["content"]["application/json"]
+        assert accepted["schema"] == {
+            "$ref": "#/components/schemas/CVSSRecalculationTriggerResponse"
+        }
 
     def test_audit_log_query_parameters_are_declared(self) -> None:
         openapi_paths = app.openapi()["paths"]

@@ -1,14 +1,15 @@
-"""System settings read and audit log endpoints and the default-CVSS
-impact preview.
+"""System settings read and audit log endpoints, the default-CVSS impact
+preview, and the manual CVSS recalculation trigger.
 
 See `docs/features/platform/system-settings.md` (Get System Settings,
 List Settings Audit Events) and
 `docs/features/platform/default-cvss-version-operations.md` (Get
-Default-CVSS Impact Preview) for the authoritative endpoint contracts
-this module implements. Handlers stay thin: they validate, delegate to
-`app.services.settings` or `app.services.cvss_impact_preview`, and map
-the result to the documented response — no business logic or database
-query lives here.
+Default-CVSS Impact Preview, Trigger CVSS Recalculation) for the
+authoritative endpoint contracts this module implements. Handlers stay
+thin: they validate, delegate to `app.services.settings`,
+`app.services.cvss_impact_preview`, or
+`app.services.cvss_recalculation_admission`, and map the result to the
+documented response — no business logic or database query lives here.
 """
 
 from __future__ import annotations
@@ -27,6 +28,8 @@ from app.models.setting_audit_event import SettingAuditEvent
 from app.schemas.common import PaginationMeta, UserReference
 from app.schemas.errors import ErrorResponse
 from app.schemas.settings import (
+    CVSSRecalculationTriggerData,
+    CVSSRecalculationTriggerResponse,
     DefaultCVSSVersionImpactData,
     DefaultCVSSVersionImpactResponse,
     SettingAuditEventData,
@@ -35,7 +38,7 @@ from app.schemas.settings import (
     SystemSettingsData,
     SystemSettingsResponse,
 )
-from app.services import cvss_impact_preview
+from app.services import cvss_impact_preview, cvss_recalculation_admission
 from app.services import settings as settings_service
 
 _PREVIEW_TIMEOUT_DETAIL = "The impact preview did not complete within its deadline."
@@ -221,6 +224,82 @@ async def get_default_cvss_version_impact(
         ) from None
     return DefaultCVSSVersionImpactResponse(
         data=DefaultCVSSVersionImpactData(**asdict(impact))
+    )
+
+
+@router.post(
+    "/settings/default-cvss-version/recalculate",
+    response_model=CVSSRecalculationTriggerResponse,
+    status_code=202,
+    summary="Trigger the all-CVE CVSS recalculation",
+    description=(
+        "Admits and enqueues one complete recalculation of every persisted "
+        "CVE for the currently persisted default CVSS version. Takes no "
+        "request body and accepts no version. Changes no setting and "
+        "creates no audit event. Repeatable: it is the explicit refresh and "
+        "recovery surface after a setting change or an interrupted run. "
+        "Requires the manage_settings capability."
+    ),
+    responses={
+        409: {
+            "model": ErrorResponse,
+            "description": (
+                "`CVSS_RECALC_ALREADY_IN_PROGRESS`: the execution fence or "
+                "the admission lease is already held; nothing is published."
+            ),
+        },
+        503: {
+            "model": ErrorResponse,
+            "description": (
+                "`REDIS_UNAVAILABLE`: lease acquisition failed or was "
+                "uncertain; nothing is published. `CELERY_UNAVAILABLE`: task "
+                "publication could not be confirmed; the admission lease is "
+                "retained until the task adopts it or it expires."
+            ),
+        },
+    },
+)
+async def trigger_cvss_recalculation(
+    principal: Annotated[
+        AuthenticatedPrincipal,
+        Depends(require_capability(Capability.MANAGE_SETTINGS)),
+    ],
+) -> CVSSRecalculationTriggerResponse:
+    """Trigger CVSS recalculation — see
+    `docs/features/platform/default-cvss-version-operations.md` (Trigger
+    CVSS Recalculation).
+
+    Each admission exception maps to its single status and code with a
+    fixed detail. Every other exception, including a fence-release
+    failure before publisher invocation, propagates to the global
+    `500 INTERNAL_ERROR`.
+    """
+    try:
+        admission = await cvss_recalculation_admission.admit_cvss_recalculation()
+    except settings_service.CVSSRecalculationAlreadyInProgressError:
+        raise AppError(
+            status_code=409,
+            code=ErrorCode.CVSS_RECALC_ALREADY_IN_PROGRESS,
+            detail=settings_service.CVSS_RECALCULATION_IN_PROGRESS_MESSAGE,
+        ) from None
+    except cvss_recalculation_admission.CVSSRecalculationRedisUnavailableError:
+        raise AppError(
+            status_code=503,
+            code=ErrorCode.REDIS_UNAVAILABLE,
+            detail=cvss_recalculation_admission.REDIS_UNAVAILABLE_MESSAGE,
+        ) from None
+    except cvss_recalculation_admission.CVSSRecalculationBrokerUnavailableError:
+        raise AppError(
+            status_code=503,
+            code=ErrorCode.CELERY_UNAVAILABLE,
+            detail=cvss_recalculation_admission.BROKER_UNAVAILABLE_MESSAGE,
+        ) from None
+    return CVSSRecalculationTriggerResponse(
+        data=CVSSRecalculationTriggerData(
+            message="Recalculation batch enqueued",
+            default_cvss_version=admission.target_version,
+            scope="all_cves",
+        )
     )
 
 
