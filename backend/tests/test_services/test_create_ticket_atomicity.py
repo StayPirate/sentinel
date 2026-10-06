@@ -57,6 +57,11 @@ from tests.support.suse_cvss_races import CommittedWorld
 from tests.support.ticket_creation import creation_events
 from tests.support.ticket_mutations import StatementRecorder, ticket_events_by_id
 
+pytestmark = pytest.mark.usefixtures("no_fetch_single_sources")
+"""An empty fetch-single registry: the freshness refresh takes its
+no-eligible-source branch unless a test registers its own refetchable
+source (`_CreationWorld.refetchable_source()`)."""
+
 CRD = datetime(2026, 10, 6, 14, 0, tzinfo=UTC)
 CRD_VALUE = "2026-10-06T14:00:00Z"
 

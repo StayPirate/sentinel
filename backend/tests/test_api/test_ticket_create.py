@@ -58,6 +58,11 @@ from tests.support.ticket_mutations import (
     ticket_events_by_id,
 )
 
+pytestmark = pytest.mark.usefixtures("no_fetch_single_sources")
+"""An empty fetch-single registry: the freshness refresh of a creation with
+a CVE takes its no-eligible-source branch
+(`tests/test_api/test_ticket_freshness_refresh.py` owns that refresh)."""
+
 Factory = Callable[..., Awaitable[Any]]
 
 _PATH = "/api/v1/tickets"

@@ -30,9 +30,12 @@ pointed here at sessions joined to the `db_session` connection in
 
 Every test except the production-reachability class empties both fetcher
 registries under `isolated_fetcher_registries` and defines its own test-only
-CVE fetchers. The broker is never reached (`task_publication.publish_task`
-is a recorder) and the pending-marker client is either `ScriptedRedis` or
-forbidden; "zero Redis commands" refers to that client (authentication's
+CVE fetchers. The production-reachability class keeps the production
+registration state and derives every expectation from
+`get_fetch_single_fetchers()` and `CVESourceType`. The broker is never
+reached (`task_publication.publish_task` is a recorder) and the
+pending-marker client is either `ScriptedRedis` or forbidden; "zero Redis
+commands" refers to that client (authentication's
 session cache is a separate Redis boundary isolated by `redis_client`).
 
 Capability premise (rbac.md, Predefined Roles): `vulnerability_analyst`
@@ -76,6 +79,7 @@ from app.models.fetcher_config import FetcherConfig
 from app.models.ticket import Ticket
 from app.models.ticket_audit_event import TicketAuditEvent
 from app.services import base_cve_fetcher, task_publication
+from app.services.base_cve_fetcher import BaseCVEFetcher
 from app.services.session_service import create_session
 from tests.support.cve_catch_up import Publications, define_cve_fetcher
 from tests.support.cve_source_status import clear_fetcher_registries
@@ -260,6 +264,14 @@ class _Api:
             self.db.add(FetcherConfig(fetcher_name=probe.name, enabled=enabled))
             await self.db.flush()
         return probe.name
+
+    async def configure(
+        self, registry: dict[str, type[BaseCVEFetcher]], *, enabled: bool
+    ) -> None:
+        """Flush one `FetcherConfig` row per fetcher of `registry`."""
+        for fetcher_cls in registry.values():
+            self.db.add(FetcherConfig(fetcher_name=fetcher_cls.name, enabled=enabled))
+        await self.db.flush()
 
     async def cve(self) -> CVE:
         cve = CVE(cve_id=fictional_cve_id())
@@ -856,35 +868,148 @@ class TestAccepted:
 
 
 @pytest.fixture
-def production_registry() -> None:
-    """Premise: the production build registers no fetch-single CVE source
-    yet, so every refetch must take the empty-registry branch."""
-    assert base_cve_fetcher.get_fetch_single_fetchers() == {}
+def production_registry() -> dict[str, type[BaseCVEFetcher]]:
+    """The production fetch-single registry, which `_registries` keeps.
+
+    Every expectation below is derived from it and from `CVESourceType`,
+    never from a fixed roster, so a later production registration needs no
+    edit here. Premise: at least one production CVE source is refetchable.
+    """
+    registry = base_cve_fetcher.get_fetch_single_fetchers()
+    assert registry, "no production fetch-single CVE source is registered"
+    return registry
 
 
 @pytest.mark.e2e
-@pytest.mark.usefixtures("production_registry")
 class TestProductionReachability:
-    async def test_empty_production_registry_outcomes(
-        self, api: _Api, monkeypatch: pytest.MonkeyPatch
+    """The refetch outcomes with the production registration state and
+    test-scoped `FetcherConfig` rows (cve-tracking.md, Re-fetch Endpoint
+    error table and Behavior; api-spec.md, CVE refetch outcome matrix)."""
+
+    async def test_broadcast_with_every_source_enabled_publishes_each_source(
+        self,
+        api: _Api,
+        monkeypatch: pytest.MonkeyPatch,
+        production_registry: dict[str, type[BaseCVEFetcher]],
     ) -> None:
-        """With the production (empty) fetch-single registry: broadcast is
-        `503 CVE_FETCH_FAILED`, explicit `nvd` is `422 CVE_INVALID_SOURCE`,
-        and a missing CVE is still the identical 404, each without dispatch
-        (cve-tracking.md, error table; api-spec.md, CVE refetch outcome
-        matrix)."""
+        """`202` with every fetch-single source in `sources_enqueued`, in
+        canonical source order, and one `fetch_single_cve` publication per
+        source with the class's identity and `queue` (cve-service.md,
+        Database-Free Publication)."""
+        await api.configure(production_registry, enabled=True)
+        cve = await api.cve()
+        headers = await api.headers(Role.VULNERABILITY_ANALYST)
+        redis = ScriptedRedis()
+        redis.install(monkeypatch)
+        sources = sorted(production_registry)
+
+        response = await api.refetch(cve.cve_id, headers)
+
+        assert response.status_code == 202, response.text
+        assert response.json() == _result(sources, [], [], [])
+        assert api.published.calls == [
+            {
+                "task_name": TASK,
+                "kwargs": {
+                    "fetcher_name": production_registry[source].name,
+                    "cve_id": cve.cve_id,
+                    "source": source,
+                    "token": token,
+                },
+                "queue": production_registry[source].queue,
+            }
+            for source, token in zip(sources, redis.values("set"), strict=True)
+        ]
+
+    async def test_broadcast_with_every_source_disabled_is_cve_fetch_failed(
+        self,
+        api: _Api,
+        monkeypatch: pytest.MonkeyPatch,
+        production_registry: dict[str, type[BaseCVEFetcher]],
+    ) -> None:
+        """No enabled refetchable source: `503 CVE_FETCH_FAILED` without
+        dispatch."""
+        await api.configure(production_registry, enabled=False)
         cve = await api.cve()
         headers = await api.headers(Role.VULNERABILITY_ANALYST)
         attempts = forbid_redis(monkeypatch)
 
-        broadcast = await api.refetch(cve.cve_id, headers)
-        explicit = await api.refetch(cve.cve_id, headers, source="nvd")
-        missing = await api.refetch(fictional_cve_id(), headers)
+        response = await api.refetch(cve.cve_id, headers)
 
-        _assert_error_envelope(broadcast, 503, "CVE_FETCH_FAILED")
-        _assert_error_envelope(explicit, 422, "CVE_INVALID_SOURCE")
-        assert missing.status_code == 404
-        assert missing.content == _NOT_FOUND
+        _assert_error_envelope(response, 503, "CVE_FETCH_FAILED")
+        _assert_no_dispatch(attempts, api.published)
+
+    async def test_explicit_disabled_source_is_fetcher_disabled(
+        self,
+        api: _Api,
+        monkeypatch: pytest.MonkeyPatch,
+        production_registry: dict[str, type[BaseCVEFetcher]],
+    ) -> None:
+        """Each registered refetchable source, named explicitly while
+        disabled, is `409 FETCHER_DISABLED` without dispatch."""
+        await api.configure(production_registry, enabled=False)
+        cve = await api.cve()
+        headers = await api.headers(Role.VULNERABILITY_ANALYST)
+        attempts = forbid_redis(monkeypatch)
+
+        for source in sorted(production_registry):
+            response = await api.refetch(cve.cve_id, headers, source=source)
+            assert response.status_code == 409, source
+            _assert_error_envelope(response, 409, "FETCHER_DISABLED")
+
+        _assert_no_dispatch(attempts, api.published)
+
+    async def test_source_outside_the_registry_is_cve_invalid_source(
+        self,
+        api: _Api,
+        monkeypatch: pytest.MonkeyPatch,
+        production_registry: dict[str, type[BaseCVEFetcher]],
+    ) -> None:
+        """Every `CVESourceType` value that is not a registered fetch-single
+        source is `422 CVE_INVALID_SOURCE` without dispatch, while every
+        refetchable source is enabled. The catalog-based KEV source never
+        supports single-CVE fetch (cve-fetcher-infrastructure.md, Registry
+        accessor: `get_fetch_single_fetchers()`), so the set is never
+        empty."""
+        outside = [m.value for m in CVESourceType if m.value not in production_registry]
+        assert CVESourceType.KEV.value in outside
+        await api.configure(production_registry, enabled=True)
+        cve = await api.cve()
+        headers = await api.headers(Role.VULNERABILITY_ANALYST)
+        attempts = forbid_redis(monkeypatch)
+
+        for source in outside:
+            response = await api.refetch(cve.cve_id, headers, source=source)
+            assert response.status_code == 422, source
+            _assert_error_envelope(response, 422, "CVE_INVALID_SOURCE")
+
+        _assert_no_dispatch(attempts, api.published)
+
+    async def test_missing_cve_is_the_identical_404_before_configuration(
+        self,
+        api: _Api,
+        monkeypatch: pytest.MonkeyPatch,
+        production_registry: dict[str, type[BaseCVEFetcher]],
+    ) -> None:
+        """A missing CVE is the identical 404 for a broadcast and for each
+        explicit source, decided before the registry and configuration are
+        read: no `FetcherConfig` row exists, which would otherwise be a
+        bootstrap invariant failure (cve-service.md, Transactional
+        Preparation steps 3-4)."""
+        names = [fetcher_cls.name for fetcher_cls in production_registry.values()]
+        assert not await api.db.scalar(
+            select(func.count())
+            .select_from(FetcherConfig)
+            .where(FetcherConfig.fetcher_name.in_(names))
+        )
+        headers = await api.headers(Role.VULNERABILITY_ANALYST)
+        attempts = forbid_redis(monkeypatch)
+
+        for source in [None, *sorted(production_registry)]:
+            response = await api.refetch(fictional_cve_id(), headers, source=source)
+            assert response.status_code == 404, source
+            assert response.content == _NOT_FOUND, source
+
         _assert_no_dispatch(attempts, api.published)
 
 

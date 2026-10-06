@@ -641,6 +641,23 @@ def isolated_fetcher_registries() -> Iterator[None]:
 
 
 @pytest.fixture
+def no_fetch_single_sources(isolated_fetcher_registries: None) -> None:
+    """Empty `_CVE_SOURCE_TYPE_MAP` under `isolated_fetcher_registries`, so
+    `get_fetch_single_fetchers()` is empty for the test.
+
+    Manual create-with-CVE and associate-CVE prepare a freshness refresh
+    from the fetch-single registry, which reads a `FetcherConfig` row for
+    every registered source. Suites that do not test that refresh apply
+    this fixture so the preparation takes its no-eligible-source branch
+    whatever production CVE fetchers are registered (cve-service.md, Fetch
+    Orchestration: `trigger_on_demand_fetch()`, Transactional Preparation
+    step 5). `FETCHER_REGISTRY` is left untouched. A test may still define
+    its own CVE fetchers afterwards; teardown restores both registries.
+    """
+    _CVE_SOURCE_TYPE_MAP.clear()
+
+
+@pytest.fixture
 async def client(db_session: AsyncSession) -> AsyncGenerator[AsyncClient]:
     """Provide an async HTTP test client with DB session override.
 

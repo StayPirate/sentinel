@@ -132,6 +132,11 @@ from tests.support.ticket_mutations import (
     ticket_events_by_id,
 )
 
+pytestmark = pytest.mark.usefixtures("no_fetch_single_sources")
+"""An empty fetch-single registry: the freshness refresh takes its
+no-eligible-source branch unless a test registers its own refetchable
+source (`_World.refetchable_source()`)."""
+
 Factory = Callable[[], Awaitable[AsyncSession]]
 
 EVAL_CVSS = EVAL + timedelta(days=1)

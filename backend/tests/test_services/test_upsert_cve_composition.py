@@ -171,6 +171,10 @@ pytest_plugins = [
 ]
 """Provides the shared `va_user`, `tree`, and `no_outbound` fixtures."""
 
+pytestmark = pytest.mark.usefixtures("no_fetch_single_sources")
+"""An empty fetch-single registry: the freshness refresh of a manual
+creation or association takes its no-eligible-source branch."""
+
 Factory = Callable[..., Awaitable[Any]]
 CVETicket = Callable[..., Awaitable[tuple[CVE, Ticket | None]]]
 

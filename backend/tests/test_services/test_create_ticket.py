@@ -74,6 +74,12 @@ from tests.support.ticket_mutations import (
 pytest_plugins = ["tests.support.ticket_mutation_fixtures"]
 """Provides the shared `va_user` fixture."""
 
+pytestmark = pytest.mark.usefixtures("no_fetch_single_sources")
+"""An empty fetch-single registry: the freshness refresh of a manual
+creation with a CVE takes its no-eligible-source branch
+(`tests/test_services/test_ticket_freshness_composition.py` owns that
+refresh)."""
+
 Factory = Callable[..., Awaitable[Any]]
 
 MANUAL = TicketCreationSource.MANUAL
