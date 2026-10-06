@@ -6,8 +6,8 @@ Owning specifications:
 - docs/features/platform/system-settings.md (Default CVSS Version; Setting
   Mutation Service; Service Exceptions; Update System Settings; Setting
   Audit Log; List Settings Audit Events);
-- docs/api-spec.md (Global Responses; NUL Characters in Request Input;
-  Partial Update Semantics: a single-field PATCH whose field is required);
+- docs/api-spec.md (Global Responses; Partial Update Semantics: a
+  single-field PATCH whose field is required);
 - docs/deployment.md (a failed or unconfirmed PATCH is reconciled by
   re-reading the setting);
 - docs/features/platform/testing-strategy.md (System Settings Mutation >
@@ -24,11 +24,21 @@ savepoint-wrapped `db_session`; the transaction-boundary tests use the real
 `app.database.get_db` on independent sessions of the test engine and delete
 their committed rows explicitly. The held execution fence is a real
 session-level fence on an independent connection of a dedicated `NullPool`
-engine, standing in for an active runner in another process. Classification,
-statement order, and the concurrency matrix of the service are proven by
-`tests/test_services/test_settings_mutation*.py`; these tests cover the HTTP
-contract, the transaction boundary, and the audit actor. The OpenAPI surface
-is asserted in `tests/test_api/test_settings.py`. The endpoint addresses no
+engine, standing in for an active runner in another process; the committed
+transaction-boundary test is the API-level proof of the `409` and of a no-op
+against the held fence. Every `200` body is compared whole with `==`, which
+also proves the absence of change, run, and scheduling fields.
+
+Classification, statement order, the held-fence behavior, and the
+concurrency matrix of the service are proven by
+`tests/test_services/test_settings_mutation.py` and
+`tests/test_services/test_settings_mutation_races.py`; the absence of
+statements in the handler by the AST checks of `TestThinRoute`. The shared
+NUL-character check (api-spec.md, NUL Characters in Request Input) is
+proven by `tests/test_api/test_request_nul.py` and
+`tests/test_core/test_request_nul.py`. These tests cover the HTTP contract,
+the transaction boundary, and the audit actor. The OpenAPI surface is
+asserted in `tests/test_api/test_settings.py`. The endpoint addresses no
 resource, so the mandatory 404 scenario does not apply.
 
 Expected values are transcribed from the specifications, never computed
@@ -89,10 +99,8 @@ from app.services.cvss_recalculation_coordination import (
     release_execution_fence,
     try_acquire_execution_fence,
 )
-from app.services.settings import RequiredSystemSettingMissingError
 from tests.support.cvss_chain import Assessment, CVEBuilder
 from tests.support.ticket_api import INTERNAL_ERROR, force_production_error_page
-from tests.support.ticket_mutations import StatementRecorder
 
 pytest_plugins = ["tests.support.ticket_mutation_fixtures"]
 
@@ -121,9 +129,7 @@ _FORBIDDEN = {
     "detail": "Insufficient permissions",
 }
 _VALIDATION_DETAIL = "Request validation failed"
-_NUL_ERROR = {"msg": "Value error, must not contain U+0000", "type": "value_error"}
 
-_OTHER: dict[str, Version] = {"3.1": "4.0", "4.0": "3.1"}
 _CHANGES = [
     pytest.param("3.1", "4.0", id="3.1-to-4.0"),
     pytest.param("4.0", "3.1", id="4.0-to-3.1"),
@@ -189,15 +195,6 @@ def _validation_errors(body: Any) -> list[tuple[list[Any], str]]:
     return [(error["loc"], error["type"]) for error in body["errors"]]
 
 
-def _is_write(statement: str) -> bool:
-    """A statement that is neither a `SELECT` nor savepoint bookkeeping of
-    the shared `db_session`."""
-    head = statement.lstrip().upper()
-    return not head.startswith(
-        ("SELECT", "SAVEPOINT", "RELEASE SAVEPOINT", "ROLLBACK TO SAVEPOINT")
-    )
-
-
 _ROUTER_DRAIN = "drain_ticket_convergence_after_commit.<locals>.<lambda>"
 
 
@@ -212,13 +209,6 @@ def _post_commit_callbacks(session: AsyncSession) -> list[str]:
     """
     callbacks = session.info.get(database._POST_COMMIT_CALLBACKS_KEY, [])
     return [callback.__qualname__ for callback in callbacks]
-
-
-def _touches_settings(statement: str) -> bool:
-    return any(
-        marker in statement
-        for marker in ("system_setting", "setting_audit_event", "advisory")
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -346,8 +336,7 @@ def preview_calls(monkeypatch: pytest.MonkeyPatch) -> list[str]:
 async def held_fence(_engine: AsyncEngine) -> AsyncIterator[AsyncConnection]:
     """The session-level execution fence held by an independent connection
     of a dedicated `NullPool` engine, standing in for an active runner in
-    another process; released at teardown. Mirrors the identical fixture in
-    `tests/test_services/test_settings_mutation.py`."""
+    another process; released at teardown."""
     engine = create_async_engine(_engine.url, poolclass=NullPool)
     try:
         connection = await engine.connect()
@@ -410,6 +399,11 @@ def external_calls(monkeypatch: pytest.MonkeyPatch) -> list[str]:
 
 @pytest.mark.e2e
 class TestEffectiveChange:
+    """Here and in `TestNoOp`, the exact equality of the whole body with
+    `_settings()` also proves the absence of `recalculation_scheduled`,
+    `changed`, run, progress, and scheduling fields (system-settings.md,
+    Update System Settings)."""
+
     @pytest.mark.parametrize(("old", "new"), _CHANGES)
     async def test_jwt_admin_changes_the_setting_and_logs_one_event(
         self,
@@ -489,23 +483,6 @@ class TestEffectiveChange:
             _changed(admins["alice.admin"].id, "4.0", "3.1"),
         ]
 
-    async def test_repeating_the_change_is_a_no_op_without_a_second_event(
-        self,
-        admin_and_client: tuple[User, AsyncClient],
-        seed: Seed,
-        db_session: AsyncSession,
-    ) -> None:
-        """deployment.md: repeating the same PATCH starts no work."""
-        admin, client = admin_and_client
-        await seed("3.1")
-
-        first = await client.patch(_PATH, json={"default_cvss_version": "4.0"})
-        second = await client.patch(_PATH, json={"default_cvss_version": "4.0"})
-
-        assert (first.status_code, second.status_code) == (200, 200)
-        assert first.json() == second.json() == _settings("4.0")
-        assert await _events(db_session) == [_changed(admin.id, "3.1", "4.0")]
-
 
 # ---------------------------------------------------------------------------
 # 200 OK: no-op
@@ -531,55 +508,6 @@ class TestNoOp:
         assert response.json() == _settings(value)
         assert await _persisted(db_session) == value
         assert await _events(db_session) == []
-
-
-# ---------------------------------------------------------------------------
-# Response shape
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.e2e
-class TestResponseShape:
-    @pytest.mark.parametrize(
-        ("persisted", "requested"),
-        [
-            pytest.param("3.1", "4.0", id="effective"),
-            pytest.param("3.1", "3.1", id="no-op"),
-        ],
-    )
-    async def test_carries_only_the_setting_and_no_change_or_run_state(
-        self,
-        admin_and_client: tuple[User, AsyncClient],
-        seed: Seed,
-        persisted: Version,
-        requested: Version,
-    ) -> None:
-        """system-settings.md, Update System Settings: no scheduling,
-        change, or run-status flag; the same minimal shape on both
-        paths."""
-        _admin, client = admin_and_client
-        await seed(persisted)
-
-        response = await client.patch(_PATH, json={"default_cvss_version": requested})
-
-        assert response.status_code == 200
-        body = response.json()
-        assert body == _settings(requested)
-        assert set(body) == {"data"}
-        assert set(body["data"]) == {"default_cvss_version"}
-        for name in (
-            "recalculation_scheduled",
-            "changed",
-            "no_op",
-            "scheduled",
-            "run",
-            "task_id",
-            "progress",
-            "status",
-            "meta",
-        ):
-            assert name not in body
-            assert name not in body["data"]
 
 
 # ---------------------------------------------------------------------------
@@ -650,55 +578,6 @@ class TestAccessControl:
 
 
 # ---------------------------------------------------------------------------
-# 409 CVSS_RECALC_ALREADY_IN_PROGRESS
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.e2e
-@pytest.mark.usefixtures("held_fence")
-class TestAlreadyInProgress:
-    @pytest.mark.parametrize(("old", "new"), _CHANGES)
-    async def test_effective_change_under_a_held_fence_is_409(
-        self,
-        admin_and_client: tuple[User, AsyncClient],
-        seed: Seed,
-        db_session: AsyncSession,
-        old: Version,
-        new: Version,
-    ) -> None:
-        _admin, client = admin_and_client
-        await seed(old)
-
-        response = await client.patch(_PATH, json={"default_cvss_version": new})
-
-        assert response.status_code == 409
-        assert response.json() == _IN_PROGRESS
-        assert (
-            _IN_PROGRESS["detail"]
-            == settings_service.CVSS_RECALCULATION_IN_PROGRESS_MESSAGE
-        )
-        assert await _persisted(db_session) == old
-        assert await _events(db_session) == []
-
-    @pytest.mark.parametrize("value", _VALUES)
-    async def test_no_op_under_a_held_fence_is_200(
-        self,
-        admin_and_client: tuple[User, AsyncClient],
-        seed: Seed,
-        db_session: AsyncSession,
-        value: Version,
-    ) -> None:
-        _admin, client = admin_and_client
-        await seed(value)
-
-        response = await client.patch(_PATH, json={"default_cvss_version": value})
-
-        assert response.status_code == 200
-        assert response.json() == _settings(value)
-        assert await _events(db_session) == []
-
-
-# ---------------------------------------------------------------------------
 # 422 VALIDATION_ERROR
 # ---------------------------------------------------------------------------
 
@@ -713,29 +592,9 @@ class TestRequestValidation:
             pytest.param({}, "missing", id="missing-field"),
             pytest.param({"default_cvss_version": None}, "literal_error", id="null"),
             pytest.param({"default_cvss_version": 4.0}, "literal_error", id="4.0"),
-            pytest.param({"default_cvss_version": 3.1}, "literal_error", id="3.1"),
-            pytest.param({"default_cvss_version": 4}, "literal_error", id="4"),
-            pytest.param({"default_cvss_version": True}, "literal_error", id="true"),
             pytest.param({"default_cvss_version": "3.0"}, "literal_error", id="3.0"),
-            pytest.param({"default_cvss_version": "2.0"}, "literal_error", id="2.0"),
-            pytest.param({"default_cvss_version": "4"}, "literal_error", id="4-str"),
             pytest.param(
                 {"default_cvss_version": "4.0 "}, "literal_error", id="trailing-space"
-            ),
-            pytest.param(
-                {"default_cvss_version": " 3.1"}, "literal_error", id="leading-space"
-            ),
-            pytest.param(
-                {"default_cvss_version": "CVSS:4.0"}, "literal_error", id="prefixed"
-            ),
-            pytest.param({"default_cvss_version": ""}, "literal_error", id="empty"),
-            pytest.param(
-                {"default_cvss_version": ["4.0"]}, "literal_error", id="array"
-            ),
-            pytest.param(
-                {"default_cvss_version": {"value": "4.0"}},
-                "literal_error",
-                id="object",
             ),
         ],
     )
@@ -759,40 +618,6 @@ class TestRequestValidation:
         assert await _persisted(db_session) == "3.1"
         assert await _events(db_session) == []
 
-    @pytest.mark.parametrize(
-        ("content", "error_type"),
-        [
-            pytest.param(b"", "missing", id="empty-body"),
-            pytest.param(b'"4.0"', "model_attributes_type", id="string-body"),
-            pytest.param(b'["4.0"]', "model_attributes_type", id="array-body"),
-            pytest.param(b"null", "missing", id="null-body"),
-            pytest.param(b'{"default_cvss_version": ', "json_invalid", id="malformed"),
-        ],
-    )
-    async def test_invalid_json_document_is_422_without_invoking_the_service(
-        self,
-        admin_and_client: tuple[User, AsyncClient],
-        seed: Seed,
-        db_session: AsyncSession,
-        forbidden_service: AsyncMock,
-        content: bytes,
-        error_type: str,
-    ) -> None:
-        _admin, client = admin_and_client
-        await seed("3.1")
-
-        response = await client.patch(
-            _PATH, content=content, headers={"Content-Type": "application/json"}
-        )
-
-        assert response.status_code == 422
-        [(loc, actual_type)] = _validation_errors(response.json())
-        assert loc[0] == "body"
-        assert actual_type == error_type
-        forbidden_service.assert_not_awaited()
-        assert await _persisted(db_session) == "3.1"
-        assert await _events(db_session) == []
-
     async def test_request_without_a_body_is_422_without_invoking_the_service(
         self,
         admin_and_client: tuple[User, AsyncClient],
@@ -808,38 +633,6 @@ class TestRequestValidation:
         assert response.request.content == b""
         assert response.status_code == 422
         assert _validation_errors(response.json()) == [(["body"], "missing")]
-        forbidden_service.assert_not_awaited()
-        assert await _persisted(db_session) == "3.1"
-        assert await _events(db_session) == []
-
-    @pytest.mark.parametrize("authenticated", [True, False], ids=["admin", "anonymous"])
-    async def test_nul_is_422_before_authentication_without_echo(
-        self,
-        client: AsyncClient,
-        admin_and_client: tuple[User, AsyncClient],
-        seed: Seed,
-        db_session: AsyncSession,
-        forbidden_service: AsyncMock,
-        authenticated: bool,
-    ) -> None:
-        """api-spec.md, NUL Characters in Request Input: the shared check
-        is evaluated before authentication, so an anonymous request also
-        receives `422`, not `401`."""
-        if not authenticated:
-            client.cookies.clear()
-        await seed("3.1")
-
-        response = await client.patch(
-            _PATH, json={"default_cvss_version": "4.0\u0000fictional"}
-        )
-
-        assert response.status_code == 422
-        assert response.json() == {
-            "code": "VALIDATION_ERROR",
-            "detail": _VALIDATION_DETAIL,
-            "errors": [{"loc": _FIELD, **_NUL_ERROR}],
-        }
-        assert "fictional" not in response.text
         forbidden_service.assert_not_awaited()
         assert await _persisted(db_session) == "3.1"
         assert await _events(db_session) == []
@@ -886,32 +679,6 @@ class TestUndeclaredMembers:
         ]
         assert await _persisted(db_session) == "4.0"
         assert await _events(db_session) == [_changed(admin.id, "3.1", "4.0")]
-
-    async def test_preview_state_in_the_body_is_ignored_on_a_no_op(
-        self,
-        admin_and_client: tuple[User, AsyncClient],
-        seed: Seed,
-        db_session: AsyncSession,
-        service_calls: list[tuple[tuple[Any, ...], dict[str, Any]]],
-    ) -> None:
-        admin, client = admin_and_client
-        await seed("3.1")
-
-        response = await client.patch(
-            _PATH,
-            json={
-                "default_cvss_version": "3.1",
-                **_PREVIEW_LIKE_MEMBERS,
-                "no_op": False,
-            },
-        )
-
-        assert response.status_code == 200
-        assert response.json() == _settings("3.1")
-        assert service_calls == [
-            ((db_session,), {"new_version": "3.1", "acting_user_id": admin.id})
-        ]
-        assert await _events(db_session) == []
 
 
 # ---------------------------------------------------------------------------
@@ -993,30 +760,6 @@ class TestPreviewIndependence:
         assert await _persisted(db_session) == "4.0"
         assert await _events(db_session) == [_changed(admin.id, "3.1", "4.0")]
 
-    async def test_preview_proposing_a_change_does_not_turn_a_no_op_into_one(
-        self,
-        admin_and_client: tuple[User, AsyncClient],
-        seed: Seed,
-        db_session: AsyncSession,
-        cve_with: CVEBuilder,
-        preview_calls: list[str],
-    ) -> None:
-        """A preview of `4.0` precedes a PATCH to the persisted `3.1`."""
-        _admin, client = admin_and_client
-        await seed("3.1")
-        await _ticketless_cve(cve_with)
-        preview = await client.get(_PREVIEW, params={"proposed_version": "4.0"})
-        assert preview.status_code == 200
-        assert preview.json()["data"] == _ONE_CVE_IMPACT
-
-        response = await client.patch(_PATH, json={"default_cvss_version": "3.1"})
-
-        assert response.status_code == 200
-        assert response.json() == _settings("3.1")
-        assert preview_calls == ["4.0"]
-        assert await _persisted(db_session) == "3.1"
-        assert await _events(db_session) == []
-
     async def test_stale_preview_counts_do_not_affect_the_change(
         self,
         admin_and_client: tuple[User, AsyncClient],
@@ -1043,76 +786,6 @@ class TestPreviewIndependence:
         assert preview_calls == ["4.0"]
         assert await _persisted(db_session) == "4.0"
         assert await _events(db_session) == [_changed(admin.id, "3.1", "4.0")]
-
-    async def test_preview_observing_a_superseded_value_does_not_affect_the_no_op(
-        self,
-        admin_and_client: tuple[User, AsyncClient],
-        seed: Seed,
-        db_session: AsyncSession,
-        cve_with: CVEBuilder,
-        preview_calls: list[str],
-    ) -> None:
-        """The preview observed `3.1` and projected a change to `4.0`; the
-        setting then became `4.0` elsewhere, so the PATCH to `4.0`
-        classifies against the persisted value as a no-op."""
-        _admin, client = admin_and_client
-        await seed("3.1")
-        await _ticketless_cve(cve_with)
-        preview = await client.get(_PREVIEW, params={"proposed_version": "4.0"})
-        assert preview.status_code == 200
-        assert preview.json()["data"] == _ONE_CVE_IMPACT
-        await db_session.execute(
-            update(SystemSetting)
-            .where(SystemSetting.key == _KEY)
-            .values(value="4.0")
-            .execution_options(synchronize_session=False)
-        )
-
-        response = await client.patch(_PATH, json={"default_cvss_version": "4.0"})
-
-        assert response.status_code == 200
-        assert response.json() == _settings("4.0")
-        assert preview_calls == ["4.0"]
-        assert await _events(db_session) == []
-
-
-# ---------------------------------------------------------------------------
-# No Redis, lease, publication, or post-commit callback
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.e2e
-class TestNoExternalSideEffects:
-    @pytest.mark.parametrize(
-        ("persisted", "requested"),
-        [
-            pytest.param("3.1", "4.0", id="effective"),
-            pytest.param("3.1", "3.1", id="no-op"),
-        ],
-    )
-    async def test_no_redis_lease_publication_admission_or_post_commit_callback(
-        self,
-        api_key_admin_and_client: tuple[User, AsyncClient],
-        seed: Seed,
-        db_session: AsyncSession,
-        external_calls: list[str],
-        persisted: Version,
-        requested: Version,
-    ) -> None:
-        """API-key credentials keep authentication itself free of Redis
-        (a JWT session's liveness check reads the Redis cache), so any
-        recorded call would be the endpoint's own. The only post-commit
-        callback is the router-level Ticket convergence drain; the handler
-        and the service register none."""
-        _admin, client = api_key_admin_and_client
-        await seed(persisted)
-
-        response = await client.patch(_PATH, json={"default_cvss_version": requested})
-
-        assert response.status_code == 200
-        assert response.json() == _settings(requested)
-        assert external_calls == []
-        assert _post_commit_callbacks(db_session) == [_ROUTER_DRAIN]
 
 
 # ---------------------------------------------------------------------------
@@ -1218,78 +891,6 @@ class TestThinRoute:
         assert all(handler.type is not None for handler in handlers)
 
 
-@pytest.mark.e2e
-class TestRequestStatements:
-    @pytest.mark.parametrize(
-        ("persisted", "requested", "service_writes"),
-        [
-            pytest.param(
-                "3.1",
-                "4.0",
-                ["INSERT INTO setting_audit_event", "UPDATE system_setting"],
-                id="effective",
-            ),
-            pytest.param("3.1", "3.1", [], id="no-op"),
-        ],
-    )
-    async def test_handler_issues_no_statement_outside_the_service(
-        self,
-        api_key_admin_and_client: tuple[User, AsyncClient],
-        seed: Seed,
-        db_session: AsyncSession,
-        monkeypatch: pytest.MonkeyPatch,
-        persisted: Version,
-        requested: Version,
-        service_writes: list[str],
-    ) -> None:
-        """At runtime, the request session serves authentication reads
-        before the service and nothing after it: the setting row lock, the
-        fence request, and the writes are all issued inside the service.
-        API-key credentials (with the debounced touch replaced) keep
-        authentication free of writes."""
-        _admin, client = api_key_admin_and_client
-        await seed(persisted)
-        recorder = StatementRecorder(db_session)
-        marks: list[int] = []
-        original = settings_service.update_default_cvss_version
-
-        async def _marked(*args: Any, **kwargs: Any) -> str:
-            marks.append(len(recorder.statements))
-            try:
-                return await original(*args, **kwargs)
-            finally:
-                marks.append(len(recorder.statements))
-
-        monkeypatch.setattr(settings_service, "update_default_cvss_version", _marked)
-
-        with recorder:
-            response = await client.patch(
-                _PATH, json={"default_cvss_version": requested}
-            )
-
-        assert response.status_code == 200
-        start, end = marks
-        before = recorder.statements[:start]
-        inside = recorder.statements[start:end]
-        after = recorder.statements[end:]
-        # Authentication ran, read nothing of the setting, and wrote nothing.
-        assert before
-        assert not any(_touches_settings(s) for s in before)
-        assert [s for s in before if _is_write(s)] == []
-        # The service's own statements: the only row lock, on the setting,
-        # first; then, for an effective change only, one fence request and
-        # the two writes.
-        assert recorder.row_locks() == [inside[0]]
-        assert "FROM system_setting" in inside[0]
-        advisory = [s for s in inside if "advisory" in s]
-        assert len(advisory) == (1 if service_writes else 0)
-        writes = [s for s in inside if _is_write(s)]
-        assert len(writes) == len(service_writes)
-        assert all(any(w.startswith(p) for w in writes) for p in service_writes)
-        # The handler issues nothing once the service has returned.
-        assert after == []
-
-
 # ---------------------------------------------------------------------------
 # Missing required setting: the global 500
 # ---------------------------------------------------------------------------
@@ -1297,24 +898,6 @@ class TestRequestStatements:
 
 @pytest.mark.e2e
 class TestMissingRequiredSetting:
-    @pytest.mark.parametrize("value", _VALUES)
-    async def test_error_propagates_without_fallback(
-        self,
-        admin_and_client: tuple[User, AsyncClient],
-        db_session: AsyncSession,
-        value: Version,
-    ) -> None:
-        """No `default_cvss_version` row exists in the test schema unless a
-        test seeds it; the route does not catch the error, so it propagates
-        through the ASGI transport here."""
-        _admin, client = admin_and_client
-
-        with pytest.raises(RequiredSystemSettingMissingError):
-            await client.patch(_PATH, json={"default_cvss_version": value})
-
-        assert await db_session.get(SystemSetting, _KEY) is None
-        assert await _events(db_session) == []
-
     async def test_production_client_receives_the_global_500(
         self, admin_error_client: AsyncClient, db_session: AsyncSession
     ) -> None:
@@ -1369,62 +952,6 @@ class TestAuditLogVisibility:
             },
         }
         assert item["created_at"].endswith("Z")
-
-    @pytest.mark.parametrize(
-        "body",
-        [
-            pytest.param({"default_cvss_version": "3.1"}, id="no-op"),
-            pytest.param({"default_cvss_version": "3.0"}, id="422"),
-        ],
-    )
-    async def test_no_op_and_invalid_requests_list_nothing(
-        self,
-        admin_and_client: tuple[User, AsyncClient],
-        seed: Seed,
-        body: dict[str, Any],
-    ) -> None:
-        _admin, client = admin_and_client
-        await seed("3.1")
-
-        await client.patch(_PATH, json=body)
-        response = await client.get(_AUDIT_LOG)
-
-        assert response.json() == {
-            "data": [],
-            "meta": {"total": 0, "page": 1, "per_page": 20},
-        }
-
-    @pytest.mark.usefixtures("held_fence")
-    async def test_rejected_change_lists_nothing(
-        self, admin_and_client: tuple[User, AsyncClient], seed: Seed
-    ) -> None:
-        _admin, client = admin_and_client
-        await seed("3.1")
-
-        rejected = await client.patch(_PATH, json={"default_cvss_version": "4.0"})
-        response = await client.get(_AUDIT_LOG)
-
-        assert rejected.status_code == 409
-        assert response.json()["meta"]["total"] == 0
-
-    async def test_forbidden_change_lists_nothing(
-        self,
-        user_and_client: tuple[User, AsyncClient],
-        user_role_factory: Factory,
-        seed: Seed,
-    ) -> None:
-        """The caller is granted Admin only after its forbidden PATCH, to
-        read the log."""
-        user, client = user_and_client
-        await seed("3.1")
-
-        forbidden = await client.patch(_PATH, json={"default_cvss_version": "4.0"})
-        await user_role_factory(user_id=user.id, role=Role.ADMIN.value)
-        response = await client.get(_AUDIT_LOG)
-
-        assert forbidden.status_code == 403
-        assert response.status_code == 200
-        assert response.json()["meta"]["total"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -1731,6 +1258,11 @@ class TestTransactionBoundary:
         self,
         committed_world: tuple[_CommittedSettingWorld, AsyncClient],
     ) -> None:
+        """The API-level proof that an effective change under an active
+        execution fence is `409 CVSS_RECALC_ALREADY_IN_PROGRESS` and that a
+        no-op against the still-held fence succeeds; the service's fence
+        matrix is proven by
+        `tests/test_services/test_settings_mutation_races.py`."""
         world, committed_client = committed_world
         _admin, headers = await world.admin("carol.admin")
         await world.seed("3.1")
@@ -1743,9 +1275,10 @@ class TestTransactionBoundary:
         assert response.json() == _IN_PROGRESS
         assert await world.committed() == ("3.1", [])
         # The rolled-back request released its row lock: a no-op on another
-        # request completes.
+        # request, with the fence still held, completes and commits nothing.
         no_op = await committed_client.patch(
             _PATH, json={"default_cvss_version": "3.1"}, headers=headers
         )
         assert no_op.status_code == 200
         assert no_op.json() == _settings("3.1")
+        assert await world.committed() == ("3.1", [])

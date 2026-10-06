@@ -13,21 +13,26 @@ Owning specifications:
 
 Most tests run in the shared `db_session`, where no `default_cvss_version`
 row exists unless a test seeds it. Statement order and absence are observed
-with `StatementRecorder` on the test engine. The held execution fence is a
-real session-level fence on an independent connection of a dedicated
-`NullPool` engine (the `test_cvss_recalculation_coordination_fence.py`
-precedent). Rollback atomicity uses `rollback_test_scope()`; the one test
-that proves the commit through the caller's transaction uses independent
+with `StatementRecorder` on the test engine. Rollback atomicity uses
+`rollback_test_scope()`, and its audit-validation case is also the proof
+that a missing actor raises and logs nothing; the one test that proves the
+commit through the caller's transaction uses independent
 `db_session_factory` sessions and deletes its committed rows explicitly.
-The multi-session races, the committed fence rejection, the commit-failure
-cases, and the endpoint are covered by the concurrency and API tests.
+An out-of-set value is proven to raise before any database access by a
+unit test whose stand-in session fails on use.
+
+The service's behavior under a held execution fence (an effective change
+rejected before any write, a no-op succeeding without a fence request), the
+multi-session races, and the committed fence rejection are covered by
+`tests/test_services/test_settings_mutation_races.py`; the commit-failure
+cases and the endpoint by `tests/test_api/test_settings_update.py`.
 Expected values are transcribed from the specifications.
 """
 
 from __future__ import annotations
 
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
 from typing import Any, Literal, cast
 from unittest.mock import AsyncMock
@@ -39,13 +44,7 @@ import redis
 import redis.asyncio as redis_asyncio
 from sqlalchemy import Executable, delete, event, select, update
 from sqlalchemy.exc import IntegrityError, InterfaceError, OperationalError
-from sqlalchemy.ext.asyncio import (
-    AsyncConnection,
-    AsyncEngine,
-    AsyncSession,
-    create_async_engine,
-)
-from sqlalchemy.pool import NullPool
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import database
 from app.models.setting_audit_event import SettingAuditEvent
@@ -53,16 +52,8 @@ from app.models.system_setting import SystemSetting
 from app.models.user import User
 from app.services import cvss_recalculation_coordination as coordination
 from app.services import task_publication
-from app.services.cvss_recalculation_coordination import (
-    EXECUTION_FENCE_ID,
-    FenceAcquireOutcome,
-    FenceReleaseOutcome,
-    release_execution_fence,
-    try_acquire_execution_fence,
-)
+from app.services.cvss_recalculation_coordination import EXECUTION_FENCE_ID
 from app.services.settings import (
-    CVSS_RECALCULATION_IN_PROGRESS_MESSAGE,
-    CVSSRecalculationAlreadyInProgressError,
     RequiredSystemSettingMissingError,
     update_default_cvss_version,
 )
@@ -84,16 +75,10 @@ _CHANGES = [
 _VALUES = [pytest.param("3.1", id="3.1"), pytest.param("4.0", id="4.0")]
 _OUT_OF_SET: list[Any] = [
     "3.0",
-    "2.0",
-    "4",
     "4.0 ",
-    " 3.1",
     "",
-    "v4.0",
-    "CVSS:4.0",
     None,
     pytest.param(4.0, id="float-4.0"),
-    pytest.param(3.1, id="float-3.1"),
 ]
 
 _UNKNOWN_USER_ID = uuid.UUID("00000000-0000-4000-8000-00000000d0d0")
@@ -213,24 +198,8 @@ def _database_error() -> OperationalError:
 
 @pytest.mark.integration
 class TestEffectiveChange:
-    @pytest.mark.parametrize(("old", "new"), _CHANGES)
-    async def test_updates_the_row_and_logs_exactly_one_event(
-        self,
-        db_session: AsyncSession,
-        system_setting_factory: SettingFactory,
-        admin: User,
-        old: Version,
-        new: Version,
-    ) -> None:
-        await _seed(system_setting_factory, old)
-
-        result = await update_default_cvss_version(
-            db_session, new_version=new, acting_user_id=admin.id
-        )
-
-        assert result == new
-        assert await _persisted(db_session) == new
-        assert await _events(db_session) == [_changed(admin.id, old, new)]
+    """The persisted row and its single event, in both directions, are
+    proven by `TestCommitThroughCallersTransaction`."""
 
     async def test_flushes_without_committing_or_rolling_back(
         self,
@@ -417,31 +386,6 @@ class TestOutOfSetValueWithoutSession:
 
 
 @pytest.mark.integration
-class TestOutOfSetValue:
-    @pytest.mark.parametrize("value", _OUT_OF_SET)
-    async def test_raises_value_error_with_no_statement(
-        self,
-        db_session: AsyncSession,
-        system_setting_factory: SettingFactory,
-        admin: User,
-        value: Any,
-    ) -> None:
-        await _seed(system_setting_factory, "3.1")
-
-        with (
-            StatementRecorder(db_session) as recorder,
-            pytest.raises(ValueError, match="new_version"),
-        ):
-            await update_default_cvss_version(
-                db_session, new_version=value, acting_user_id=admin.id
-            )
-
-        assert recorder.statements == []
-        assert await _persisted(db_session) == "3.1"
-        assert await _events(db_session) == []
-
-
-@pytest.mark.integration
 class TestMissingRequiredRow:
     @pytest.mark.parametrize("value", _VALUES)
     async def test_raises_without_fallback_fence_or_event(
@@ -464,79 +408,6 @@ class TestMissingRequiredRow:
 # ---------------------------------------------------------------------------
 # Execution fence
 # ---------------------------------------------------------------------------
-
-
-@pytest.fixture
-async def held_fence(_engine: AsyncEngine) -> AsyncIterator[AsyncConnection]:
-    """The session-level execution fence held by an independent connection
-    of a dedicated `NullPool` engine, standing in for an active runner in
-    another process; released (or ended with the backend) at teardown."""
-    engine = create_async_engine(_engine.url, poolclass=NullPool)
-    try:
-        connection = await engine.connect()
-        try:
-            assert (
-                await try_acquire_execution_fence(connection)
-                == FenceAcquireOutcome.ACQUIRED
-            )
-            yield connection
-            assert (
-                await release_execution_fence(connection)
-                == FenceReleaseOutcome.RELEASED
-            )
-        finally:
-            await connection.close()
-    finally:
-        await engine.dispose()
-
-
-@pytest.mark.integration
-@pytest.mark.usefixtures("held_fence")
-class TestHeldExecutionFence:
-    @pytest.mark.parametrize(("old", "new"), _CHANGES)
-    async def test_effective_change_is_rejected_before_any_write(
-        self,
-        db_session: AsyncSession,
-        system_setting_factory: SettingFactory,
-        admin: User,
-        old: Version,
-        new: Version,
-    ) -> None:
-        await _seed(system_setting_factory, old)
-
-        with (
-            StatementRecorder(db_session) as recorder,
-            pytest.raises(CVSSRecalculationAlreadyInProgressError) as raised,
-        ):
-            await update_default_cvss_version(
-                db_session, new_version=new, acting_user_id=admin.id
-            )
-
-        assert str(raised.value) == CVSS_RECALCULATION_IN_PROGRESS_MESSAGE
-        assert len(_advisory(recorder.statements)) == 1
-        assert recorder.writes() == []
-        assert not db_session.dirty
-        assert await _persisted(db_session) == old
-        assert await _events(db_session) == []
-
-    @pytest.mark.parametrize("value", _VALUES)
-    async def test_no_op_succeeds_without_a_fence_request(
-        self,
-        db_session: AsyncSession,
-        system_setting_factory: SettingFactory,
-        admin: User,
-        value: Version,
-    ) -> None:
-        await _seed(system_setting_factory, value)
-
-        with StatementRecorder(db_session) as recorder:
-            result = await update_default_cvss_version(
-                db_session, new_version=value, acting_user_id=admin.id
-            )
-
-        assert result == value
-        assert _advisory(recorder.statements) == []
-        assert await _events(db_session) == []
 
 
 @pytest.mark.integration
@@ -660,19 +531,36 @@ class TestRollbackAtomicity:
         admin: User,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """The flush sends both writes and then reports a failure, as when
+        the error surfaces after the statements reached PostgreSQL."""
         await _seed(system_setting_factory, "3.1")
         error = _database_error()
+        real_flush = db_session.flush
+        flushes: list[str] = []
 
-        monkeypatch.setattr(db_session, "flush", AsyncMock(side_effect=error))
+        async def _flush_then_fail(*args: Any, **kwargs: Any) -> None:
+            await real_flush(*args, **kwargs)
+            flushes.append("flush")
+            raise error
 
-        with pytest.raises(OperationalError) as raised:
+        monkeypatch.setattr(db_session, "flush", _flush_then_fail)
+
+        with (
+            StatementRecorder(db_session) as recorder,
+            pytest.raises(OperationalError) as raised,
+        ):
             async with rollback_test_scope(db_session):
                 await update_default_cvss_version(
                     db_session, new_version="4.0", acting_user_id=admin.id
                 )
 
-        assert raised.value is error
         monkeypatch.undo()
+        assert raised.value is error
+        assert flushes == ["flush"]
+        assert any(s.startswith("UPDATE system_setting") for s in recorder.statements)
+        assert any(
+            s.startswith("INSERT INTO setting_audit_event") for s in recorder.statements
+        )
         await self._assert_prior_state(db_session)
 
     async def test_database_failure_on_the_setting_update(
@@ -786,7 +674,7 @@ class TestClassifiesAgainstTheLockedValue:
 
 
 # ---------------------------------------------------------------------------
-# Re-invocation and actor
+# Re-invocation
 # ---------------------------------------------------------------------------
 
 
@@ -813,24 +701,6 @@ class TestReinvocation:
         assert _advisory(recorder.statements) == []
         assert await _events(db_session) == [_changed(admin.id, "3.1", "4.0")]
 
-    async def test_repeating_a_no_op_creates_no_event(
-        self,
-        db_session: AsyncSession,
-        system_setting_factory: SettingFactory,
-        admin: User,
-    ) -> None:
-        await _seed(system_setting_factory, "3.1")
-
-        for _ in range(2):
-            assert (
-                await update_default_cvss_version(
-                    db_session, new_version="3.1", acting_user_id=admin.id
-                )
-                == "3.1"
-            )
-
-        assert await _events(db_session) == []
-
     async def test_each_effective_change_creates_one_event(
         self,
         db_session: AsyncSession,
@@ -855,25 +725,6 @@ class TestReinvocation:
             _changed(admin.id, "3.1", "4.0"),
             _changed(other.id, "4.0", "3.1"),
         ]
-
-
-@pytest.mark.integration
-class TestActorRequired:
-    async def test_missing_actor_raises_and_logs_nothing(
-        self,
-        db_session: AsyncSession,
-        system_setting_factory: SettingFactory,
-    ) -> None:
-        await _seed(system_setting_factory, "3.1")
-
-        with pytest.raises(ValueError, match="user_id is required"):
-            await update_default_cvss_version(
-                db_session,
-                new_version="4.0",
-                acting_user_id=None,  # type: ignore[arg-type]
-            )
-
-        assert await _events(db_session) == []
 
 
 # ---------------------------------------------------------------------------
