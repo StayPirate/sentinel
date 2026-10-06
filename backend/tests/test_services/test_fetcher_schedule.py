@@ -328,6 +328,28 @@ class TestPropagateConfigUpdate:
         )
         # No exception — delete is a no-op on a missing entry.
 
+    @pytest.mark.filterwarnings(
+        "ignore:RedBeat will stop falling back to broker_url:DeprecationWarning"
+    )
+    def test_delete_action_before_redbeat_config_initialized_removes_the_entry(
+        self, celery_test_app: Celery, uninitialized_celery_test_app: Celery
+    ) -> None:
+        """A disable PATCH can be the first RedBeat call of a freshly
+        started API process, before anything has initialized
+        `redbeat_conf`."""
+        _register(_NoQueueFetcher)
+        config = _make_config(fetcher_name=_NoQueueFetcher.name)
+        upsert_fetcher_entry(celery_test_app, _NoQueueFetcher, config)
+        assert not hasattr(uninitialized_celery_test_app, "redbeat_conf")
+
+        propagate_config_update(
+            uninitialized_celery_test_app,
+            fetcher_name=_NoQueueFetcher.name,
+            action="delete",
+        )
+
+        assert not _entry_exists(celery_test_app, _NoQueueFetcher.name)
+
     def test_upsert_action_creates_entry_using_caller_supplied_values(
         self, celery_test_app: Celery
     ) -> None:
