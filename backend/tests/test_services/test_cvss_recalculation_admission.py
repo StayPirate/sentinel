@@ -62,6 +62,7 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.pool import QueuePool
 from structlog.contextvars import bound_contextvars
 
+from app import database
 from app.models.fetcher_audit_event import FetcherAuditEvent
 from app.models.identity_audit_event import IdentityAuditEvent
 from app.models.setting_audit_event import SettingAuditEvent
@@ -90,6 +91,7 @@ from app.services.cvss_recalculation_coordination import (
     FenceAcquireOutcome,
     FenceReleaseOutcome,
     LeaseDeleteOutcome,
+    acquire_lease,
     compare_and_delete_lease,
     is_canonical_task_id,
     release_execution_fence,
@@ -717,6 +719,133 @@ class TestReleaseFailure:
         ]
 
 
+@pytest.mark.integration
+class TestReleaseFailureOnRejection:
+    """A fence release that fails on a 409/503 branch, or while an earlier
+    error propagates (issue #837 V4): `cleanup_failed` is emitted, an
+    ordinary release failure leaves the rejection or the original error
+    standing, and a control signal raised by the release propagates
+    instead of a 409/503 but never replaces an original error."""
+
+    @pytest.mark.parametrize(
+        "arm",
+        [
+            pytest.param("database-error", id="database-error"),
+            pytest.param("not-confirmed", id="not-confirmed"),
+        ],
+    )
+    async def test_held_lease_rejection_stands_after_a_failed_release(
+        self, h: RecalculationHarness, spy: AdmissionSpy, arm: str
+    ) -> None:
+        other = str(uuid.uuid4())
+        await acquire_lease(h.redis, task_id=other, target_version=TARGET)
+        if arm == "database-error":
+            spy.release_error = database_error()
+        else:
+            spy.before_release = _unlock_once
+
+        with (
+            capture_events() as logs,
+            pytest.raises(CVSSRecalculationAlreadyInProgressError),
+        ):
+            await admit_cvss_recalculation()
+
+        assert spy.sequence == ["fence", "setting", "lease", "release"]
+        assert spy.published == []
+        assert await h.lease() == f"v1:{other}:{TARGET}"
+        # The helper invalidated the connection on the failed release.
+        assert h.connection.invalidated is True
+        await wait_until_fence_free(h.engine)
+        events = runner_events(logs)
+        assert events == [
+            _cleanup_failed("fence_release_failed"),
+            _rejected("lease_held"),
+        ]
+        _assert_private(events, spy.task_id, other)
+
+    async def test_control_signal_from_a_rejection_release_propagates(
+        self, h: RecalculationHarness, spy: AdmissionSpy
+    ) -> None:
+        other = str(uuid.uuid4())
+        await acquire_lease(h.redis, task_id=other, target_version=TARGET)
+        signal = asyncio.CancelledError()
+        spy.release_error = signal
+
+        with capture_events() as logs, pytest.raises(asyncio.CancelledError) as excinfo:
+            await admit_cvss_recalculation()
+
+        assert excinfo.value is signal
+        assert spy.published == []
+        assert await h.lease() == f"v1:{other}:{TARGET}"
+        await wait_until_fence_free(h.engine)
+        assert runner_events(logs) == [_cleanup_failed("fence_release_failed")]
+
+    async def test_original_error_keeps_precedence_over_a_release_signal(
+        self, h: RecalculationHarness, spy: AdmissionSpy
+    ) -> None:
+        """A missing setting propagates even when the release then raises a
+        control signal; the cleanup event carries no target version, since
+        none was read."""
+        await h.world.delete_setting()
+        spy.release_error = asyncio.CancelledError()
+
+        with capture_events() as logs, pytest.raises(RequiredSystemSettingMissingError):
+            await admit_cvss_recalculation()
+
+        assert spy.sequence == ["fence", "setting", "release"]
+        assert spy.clients == 0
+        assert await h.lease() is None
+        await wait_until_fence_free(h.engine)
+        assert runner_events(logs) == [
+            _event(CLEANUP_FAILED_EVENT, "warning", reason="fence_release_failed")
+        ]
+
+    async def test_lost_connection_during_the_setting_read_is_never_reused(
+        self, h: RecalculationHarness, spy: AdmissionSpy
+    ) -> None:
+        """A backend terminated before the fenced setting read invalidates
+        the connection; the admission propagates the read's error, issues
+        no release statement on the invalidated connection (which would
+        silently reconnect), and the closed backend has freed the fence."""
+
+        async def _terminate() -> None:
+            await terminate_backend(h.observer, connection_pid(spy.connection))
+
+        spy.before_setting = _terminate
+
+        with capture_events() as logs:
+            raised = await _admission_error()
+
+        assert not isinstance(raised, SettingsServiceError)
+        assert spy.sequence == ["fence", "setting"]
+        assert spy.clients == 0
+        assert h.connection.invalidated is True
+        assert await h.lease() is None
+        await wait_until_fence_free(h.engine)
+        assert runner_events(logs) == []
+
+    async def test_control_signal_during_lease_acquire_never_removes_the_lease(
+        self, h: RecalculationHarness, spy: AdmissionSpy
+    ) -> None:
+        """A non-Redis signal during the acquire (completion unknown)
+        releases the fence and propagates unchanged; no owner-safe removal
+        is attempted and no admission event is emitted."""
+        signal = asyncio.CancelledError()
+        spy.lease_error = signal
+        spy.lease_error_after_write = True
+
+        with capture_events() as logs, pytest.raises(asyncio.CancelledError) as excinfo:
+            await admit_cvss_recalculation()
+
+        assert excinfo.value is signal
+        assert spy.sequence == ["fence", "setting", "lease", "release"]
+        assert spy.published == []
+        assert await h.lease() == f"v1:{spy.task_id}:{TARGET}"
+        assert await h.fence_holders() == []
+        _assert_borrowed_intact(h)
+        assert runner_events(logs) == []
+
+
 # ---------------------------------------------------------------------------
 # Publication classification (step 5)
 # ---------------------------------------------------------------------------
@@ -903,6 +1032,11 @@ class TestOwnedConnection:
 
 @pytest.mark.unit
 class TestBind:
+    def test_production_bind_is_the_shared_engine(self) -> None:
+        """The accessor returns the process engine, so production
+        admissions own their connection (issue #837 V2)."""
+        assert admission.get_cvss_admission_bind() is database.engine
+
     async def test_unsupported_bind_raises_type_error_before_any_io(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
