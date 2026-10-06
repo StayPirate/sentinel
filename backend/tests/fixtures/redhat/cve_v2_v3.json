@@ -1,0 +1,58 @@
+{
+  "threat_severity": "Important",
+  "public_date": "2016-10-19T00:00:00Z",
+  "bugzilla": {
+    "description": "kernel: mm: privilege escalation via MAP_PRIVATE COW breakage",
+    "id": "1384344",
+    "url": "https://bugzilla.redhat.com/show_bug.cgi?id=1384344"
+  },
+  "cvss": {
+    "cvss_base_score": "6.9",
+    "cvss_scoring_vector": "AV:L/AC:M/Au:N/C:C/I:C/A:C",
+    "status": "verified"
+  },
+  "cvss3": {
+    "cvss3_base_score": "7.8",
+    "cvss3_scoring_vector": "CVSS:3.0/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+    "status": "verified"
+  },
+  "details": [
+    "Fictional flaw description retained for the contract fixture.",
+    "Fictional flaw description retained for the contract fixture."
+  ],
+  "statement": "Fictional Red Hat statement retained for the contract fixture.",
+  "acknowledgement": "Red Hat would like to thank Example Researcher (Example Org) for reporting this issue.",
+  "affected_release": [
+    {
+      "product_name": "Red Hat Enterprise Linux 5",
+      "release_date": "2016-10-28T00:00:00Z",
+      "advisory": "RHSA-2016:2124",
+      "cpe": "cpe:/o:redhat:enterprise_linux:5",
+      "package": "kernel-0:2.6.18-416.el5"
+    },
+    {
+      "product_name": "Red Hat Enterprise Linux 5.6 Long Life",
+      "release_date": "2016-10-31T00:00:00Z",
+      "advisory": "RHSA-2016:2127",
+      "cpe": "cpe:/o:redhat:rhel_mission_critical:5.6",
+      "package": "kernel-0:2.6.18-238.57.1.el5"
+    }
+  ],
+  "package_state": [
+    {
+      "product_name": "Red Hat Enterprise Linux 4",
+      "fix_state": "Not affected",
+      "package_name": "kernel",
+      "cpe": "cpe:/o:redhat:enterprise_linux:4"
+    }
+  ],
+  "references": [
+    "https://www.cve.org/CVERecord?id=CVE-2016-5195\nhttps://nvd.nist.gov/vuln/detail/CVE-2016-5195\nhttps://www.cisa.gov/known-exploited-vulnerabilities-catalog"
+  ],
+  "csaw": true,
+  "name": "CVE-2016-5195",
+  "mitigation": {
+    "value": "Fictional mitigation retained for the contract fixture.",
+    "lang": "en:us"
+  }
+}

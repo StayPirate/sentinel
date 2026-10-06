@@ -1,0 +1,86 @@
+{
+  "threat_severity": "Important",
+  "public_date": "2014-04-07T00:00:00Z",
+  "bugzilla": {
+    "description": "openssl: information disclosure in handling of TLS heartbeat extension packets",
+    "id": "1084875",
+    "url": "https://bugzilla.redhat.com/show_bug.cgi?id=1084875"
+  },
+  "cvss": {
+    "cvss_base_score": "5.0",
+    "cvss_scoring_vector": "AV:N/AC:L/Au:N/C:P/I:N/A:N",
+    "status": "verified"
+  },
+  "cwe": "CWE-805",
+  "details": [
+    "Fictional flaw description retained for the contract fixture.",
+    "Fictional flaw description retained for the contract fixture."
+  ],
+  "statement": "Fictional Red Hat statement retained for the contract fixture.",
+  "acknowledgement": "Red Hat would like to thank Example Researcher (Example Org) for reporting this issue.",
+  "affected_release": [
+    {
+      "product_name": "Red Hat Enterprise Linux 6",
+      "release_date": "2014-04-08T00:00:00Z",
+      "advisory": "RHSA-2014:0376",
+      "cpe": "cpe:/o:redhat:enterprise_linux:6",
+      "package": "openssl-0:1.0.1e-16.el6_5.7"
+    },
+    {
+      "product_name": "Red Hat Storage 2.1",
+      "release_date": "2014-04-08T00:00:00Z",
+      "advisory": "RHSA-2014:0377",
+      "cpe": "cpe:/a:redhat:storage:2.1:server:el6",
+      "package": "openssl-0:1.0.1e-16.el6_5.7"
+    }
+  ],
+  "package_state": [
+    {
+      "product_name": "Red Hat Enterprise Linux 5",
+      "fix_state": "Not affected",
+      "package_name": "openssl",
+      "cpe": "cpe:/o:redhat:enterprise_linux:5"
+    },
+    {
+      "product_name": "Red Hat Enterprise Linux 5",
+      "fix_state": "Not affected",
+      "package_name": "openssl097a",
+      "cpe": "cpe:/o:redhat:enterprise_linux:5"
+    },
+    {
+      "product_name": "Red Hat Enterprise Linux 6",
+      "fix_state": "Not affected",
+      "package_name": "openssl098e",
+      "cpe": "cpe:/o:redhat:enterprise_linux:6"
+    },
+    {
+      "product_name": "Red Hat Enterprise Linux 7",
+      "fix_state": "Not affected",
+      "package_name": "openssl",
+      "cpe": "cpe:/o:redhat:enterprise_linux:7"
+    },
+    {
+      "product_name": "Red Hat Enterprise Linux 7",
+      "fix_state": "Not affected",
+      "package_name": "openssl098e",
+      "cpe": "cpe:/o:redhat:enterprise_linux:7"
+    },
+    {
+      "product_name": "Red Hat JBoss Enterprise Application Platform 5",
+      "fix_state": "Not affected",
+      "package_name": "openssl",
+      "cpe": "cpe:/a:redhat:jboss_enterprise_application_platform:5"
+    },
+    {
+      "product_name": "Red Hat JBoss Enterprise Application Platform 6",
+      "fix_state": "Not affected",
+      "package_name": "openssl",
+      "cpe": "cpe:/a:redhat:jboss_enterprise_application_platform:6"
+    }
+  ],
+  "references": [
+    "https://www.cve.org/CVERecord?id=CVE-2014-0160\nhttps://nvd.nist.gov/vuln/detail/CVE-2014-0160\nhttps://advisory.example.invalid/upstream/1\nhttps://www.cisa.gov/known-exploited-vulnerabilities-catalog"
+  ],
+  "name": "CVE-2014-0160",
+  "csaw": false
+}
