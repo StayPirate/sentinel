@@ -2812,7 +2812,7 @@ session close, and publication boundaries.
   non-operational exception escape the automatic adapter without an ordinary
   publication-failure event. For CVE/fetcher and per-item task owners, inject
   them after commit and assert they bypass rollback, isolated source failure,
-  `record_failed()`, per-item raw-exception logs, and any second terminal
+  `record_failed()`, per-item failure logs, and any second terminal
   outcome; committed status and success/effect metrics remain intact while the
   outer workflow fails or retries. The automatic API path follows the unchanged
   generic callback contract;
