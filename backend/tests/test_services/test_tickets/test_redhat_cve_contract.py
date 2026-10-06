@@ -8,8 +8,8 @@ through Sentinel's production HTTP client
 (`create_http_client(name="sync_redhat_cves")`, its standard User-Agent;
 docs/conventions.md, External Integration Contract Verification). Every
 consumed field is asserted for name, nesting, type, and nullability
-through a strict test-local typed model; the production parser does not
-exist yet.
+through a strict test-local typed model, independent of the production
+parser (`app/services/tickets/redhat_cve_record.py`).
 
 Live verification on 2026-10-06:
 
