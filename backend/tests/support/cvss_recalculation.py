@@ -6,7 +6,11 @@ Consumers:
 
 - `tests/test_services/test_cvss_recalculation.py` (pagination,
   coordination, transactions, publication handoff, errors, counters, and
-  connection ownership).
+  connection ownership);
+- `tests/test_services/test_cvss_recalculation_races.py` (concurrency and
+  races against independent holder transactions);
+- `tests/test_services/test_cvss_recalculation_domain.py` (the
+  default-version domain matrix through the runner).
 
 The runner visits every persisted CVE, so a consumer commits its complete
 population and deletes it explicitly (testing-strategy.md, Concurrency
@@ -195,6 +199,48 @@ def runner_events(logs: Sequence[EventDict]) -> list[dict[str, Any]]:
         dict(entry)
         for entry in logs
         if str(entry["event"]).startswith("cvss_recalculation_")
+    ]
+
+
+def counters(
+    changed: int = 0, unchanged: int = 0, skipped: int = 0, failed: int = 0
+) -> dict[str, int]:
+    """The six run counters, with the specified derivations
+    `succeeded = changed + unchanged` and
+    `processed = succeeded + skipped + failed` (Outcome Classification)."""
+    succeeded = changed + unchanged
+    return {
+        "changed": changed,
+        "unchanged": unchanged,
+        "skipped": skipped,
+        "failed": failed,
+        "succeeded": succeeded,
+        "processed": succeeded + skipped + failed,
+    }
+
+
+def completed_run(
+    task_id: str, watermark: uuid.UUID, **counts: int
+) -> list[dict[str, Any]]:
+    """The exact runner event sequence of a delivery that adopted, started
+    at `watermark`, and terminated `completed` with `counts` (Logging;
+    Coordination Logging)."""
+    correlation = {"celery_task_id": task_id, "target_version": TARGET}
+    run = {**correlation, "watermark": str(watermark)}
+    return [
+        {"event": cvss_recalculation.ADOPTED_EVENT, "log_level": "info", **correlation},
+        {
+            "event": cvss_recalculation.STARTED_EVENT,
+            "log_level": "info",
+            **run,
+            **counters(),
+        },
+        {
+            "event": cvss_recalculation.COMPLETED_EVENT,
+            "log_level": "info",
+            **run,
+            **counters(**counts),
+        },
     ]
 
 
