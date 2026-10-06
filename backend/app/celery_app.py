@@ -238,6 +238,7 @@ import app.services.fetcher_discovery  # noqa: E402,F401
 from app.tasks import (  # noqa: E402,F401
     beat_startup,
     cve_tasks,
+    cvss_tasks,
     fetchers,
     package_tasks,
     session_cleanup,

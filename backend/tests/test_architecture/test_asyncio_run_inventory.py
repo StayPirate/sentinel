@@ -56,6 +56,17 @@ REVIEWED_INVENTORY: dict[tuple[str, str], str] = {
         "Cross-loop pooled connection lifecycle, and cve-service.md, "
         "On-Demand Fetch: fetch_single_cve (Orchestrator Behavior)."
     ),
+    ("cvss_tasks.py", "_recalculate_cvss_derived_state_sync"): (
+        "Repeated per-invocation task wrapper (recalculate_cvss_derived_state), "
+        "without automatic retry, in a long-lived worker child. Its async "
+        "service workflow (run_cvss_derived_state_recalculation) owns its "
+        "fenced connection, closes or invalidates it, then awaits the shared "
+        "pooled engine's disposal exactly once on every return and exception "
+        "path before returning control to asyncio.run(); input validation "
+        "happens before asyncio.run() and opens no connection — see "
+        "docs/conventions.md, Cross-loop pooled connection lifecycle, and "
+        "default-cvss-version-operations.md, Task Identity and Workflow."
+    ),
     ("fetchers.py", "_run_fetcher_sync"): (
         "Repeated per-invocation task wrapper (run_fetcher). Its async "
         "workflow (run_fetcher_async) awaits engine.dispose() in a "
