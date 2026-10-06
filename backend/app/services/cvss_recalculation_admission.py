@@ -189,7 +189,11 @@ class _Admission:
             raise
 
         # 3-5. Lease, confirmed release, publication.
-        client = new_cvss_recalculation_redis_client()
+        try:
+            client = new_cvss_recalculation_redis_client()
+        except BaseException:
+            await self._release_after_failure(target_version)
+            raise
         try:
             return await self._lease_and_publish(client, target_version)
         finally:
