@@ -13,7 +13,8 @@ shares the `CVEDetail` projection of `cve_projection` with the Ticket
 detail. `resolve_cve_locator()` is the preliminary `{cve_id}` resolution
 of the CVE mutation paths, whose locked mutation in `ticket_mutations`
 makes the authoritative accessibility decision; `ticket_mutations` never
-imports this module.
+imports this module. `get_active_ticket_cve_ids()` is the identifier-only
+active-Ticket CVE scope of the per-CVE API fetchers (Red Hat, EPSS, OSV).
 
 `upsert_cve()`, `record_source_status()`, and `build_post_ingest_tasks()`
 implement source-neutral ingestion. `upsert_cve()` composes
@@ -1103,6 +1104,61 @@ async def list_cve_sources(
         page=page,
         per_page=per_page,
     )
+
+
+# ---------------------------------------------------------------------------
+# Active-Ticket CVE scope of the per-CVE API fetchers
+# (cve-fetcher-infrastructure.md, Session Lifecycle for API-based CVE
+# Fetchers)
+# ---------------------------------------------------------------------------
+
+_ACTIVE_TICKET_STATUSES: Final[tuple[str, ...]] = (
+    TicketStatus.NEW.value,
+    TicketStatus.ANALYSIS.value,
+    TicketStatus.ANALYZED.value,
+)
+"""The active Ticket statuses (tickets.md, Status Categories)."""
+
+
+async def get_active_ticket_cve_ids(session: AsyncSession) -> list[str]:
+    """Return the CVE-IDs of the CVEs referenced by an active Ticket.
+
+    The scope snapshot that the `execute()` template of a per-CVE API
+    fetcher queries once at the start of a run (cve-fetcher-infrastructure.md,
+    Session Lifecycle for API-based CVE Fetchers; the Scope of
+    cve-sync-redhat.md, cve-sync-epss.md, and cve-sync-osv.md). Fetchers
+    reach it through a thin private `_get_active_ticket_cve_ids()`;
+    `BaseCVEFetcher` gains no member.
+
+    Q1: `session` is the caller-owned session.
+
+    Q3: one SQL statement, and therefore one PostgreSQL observation,
+    selects every `CVE` for which a Ticket with status `New`, `Analysis`,
+    or `Analyzed` references it through `Ticket.cve_id`. CVE-less Tickets,
+    inactive Tickets, and ticketless CVEs contribute nothing. Creates no
+    row or event, acquires no lock, and never flushes (autoflush of the
+    caller's pending state is suspended), commits, or rolls back.
+
+    Q4: the canonical `CVE.cve_id` strings, each once, in ascending code
+    point order; empty when no active Ticket references a CVE.
+
+    Q6: no domain exception. Database exceptions propagate unchanged.
+    """
+    active_ticket = (
+        select(Ticket.id)
+        .where(
+            Ticket.cve_id == CVE.id,
+            Ticket.status.in_(_ACTIVE_TICKET_STATUSES),
+        )
+        .exists()
+    )
+    statement = (
+        select(CVE.cve_id)
+        .where(active_ticket)
+        .order_by(CVE.cve_id.collate(CODE_POINT_COLLATION))
+    )
+    with session.no_autoflush:
+        return list((await session.scalars(statement)).all())
 
 
 # ---------------------------------------------------------------------------
