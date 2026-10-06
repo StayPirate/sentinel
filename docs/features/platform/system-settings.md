@@ -19,8 +19,10 @@ in `backend/app/services/settings.py`. The setting mutation contract
 document but not yet implemented. The impact preview is specified in
 `docs/features/platform/default-cvss-version-operations.md` and implemented in
 `backend/app/services/cvss_impact_preview.py`. The all-CVE recalculation
-runner, manual admission, and publication contracts are specified in the same
-document and are not yet implemented.
+runner is specified in the same document and implemented in
+`backend/app/services/cvss_recalculation.py`, with its Celery task in
+`backend/app/tasks/cvss_tasks.py`. The manual admission and publication
+contracts are specified in the same document and are not yet implemented.
 
 ## Settings
 
