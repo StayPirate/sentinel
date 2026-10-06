@@ -1352,9 +1352,11 @@ class TestTransactions:
         chain: ChainSpy,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        await h.world.bulk_cves(3)
+        for _ in range(3):
+            await h.world.scored_cve(SUSE_31_CRITICAL, severity=Severity.LOW)
         sequence: list[str] = []
         after_commit: list[bool] = []
+        unflushed_at_commit: list[bool] = []
         sync_connection = h.connection.sync_connection
         assert sync_connection is not None
         listeners = {
@@ -1364,6 +1366,8 @@ class TestTransactions:
         commit = AsyncSession.commit
 
         async def _commit(self: AsyncSession) -> None:
+            # Step 5: every mutation is flushed before finalization.
+            unflushed_at_commit.append(bool(self.new or self.dirty or self.deleted))
             await commit(self)
             after_commit.append(h.connection.in_transaction())
 
@@ -1402,6 +1406,10 @@ class TestTransactions:
         ]
         assert len({id(session) for session in chain.sessions}) == 3
         assert after_commit == [False] * 3
+        assert unflushed_at_commit == [False] * 3
+        assert [await _severity(h, cve_id) for cve_id in chain.cve_ids] == [
+            "Critical"
+        ] * 3
 
     async def test_committed_sibling_survives_a_later_failure(
         self, h: RecalculationHarness, chain: ChainSpy

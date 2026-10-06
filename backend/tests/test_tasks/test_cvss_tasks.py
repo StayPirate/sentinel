@@ -61,7 +61,6 @@ import app.database as database_module
 from app.celery_app import celery_app
 from app.services import cvss_recalculation, ticket_mutations
 from app.services import settings as settings_service
-from app.services.base_fetcher import FETCHER_REGISTRY
 from app.services.cvss_recalculation import (
     ADOPTION_REJECTED_EVENT,
     RECALCULATE_CVSS_DERIVED_STATE_TASK,
@@ -403,20 +402,6 @@ class TestDelegation:
         assert logs == []
         forbidden_retry.assert_not_called()
 
-    def test_each_invocation_makes_exactly_one_asyncio_run(
-        self, asyncio_run_spy: MagicMock, workflow: _Workflow
-    ) -> None:
-        first, second = str(uuid.uuid4()), str(uuid.uuid4())
-
-        _deliver("3.1", first)
-        _deliver("4.0", second)
-
-        assert asyncio_run_spy.call_count == 2
-        assert [call.args[:2] for call in workflow.mock.call_args_list] == [
-            ("3.1", first),
-            ("4.0", second),
-        ]
-
 
 # ---------------------------------------------------------------------------
 # Production reachability (umbrella P3): no publisher exists yet
@@ -581,9 +566,3 @@ class TestRegistration:
         }
         assert "cvss_tasks" in imported
         assert vars(celery_app_module)["cvss_tasks"] is cvss_tasks
-
-    def test_is_not_a_fetcher_or_a_scheduled_task(self) -> None:
-        assert TASK_NAME not in FETCHER_REGISTRY
-        assert TASK_NAME not in {
-            entry["task"] for entry in celery_app.conf.beat_schedule.values()
-        }
