@@ -186,7 +186,7 @@ CVSS measures severity, EPSS measures likelihood of exploitation.
   1000 req/min (public, unauthenticated)
 - **Integration status**: **Active**
 - **Documentation**: https://www.first.org/epss/,
-  https://www.first.org/epss/api
+  https://api.first.org/epss/
 
 > See [cve-sync-epss.md](features/tickets/cve-sync-epss.md) for the full
 > fetcher specification.

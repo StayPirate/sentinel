@@ -69,7 +69,7 @@ Index of all feature specification domains.
 - [cve-sync-osv.md](tickets/cve-sync-osv.md) — OSV enrichment fetcher specification
 - [cve-sync-redhat.md](tickets/cve-sync-redhat.md) — Red Hat Security Data fetcher specification
 - [cve-sync-kev.md](tickets/cve-sync-kev.md) — CISA KEV fetcher (planned)
-- [cve-sync-epss.md](tickets/cve-sync-epss.md) — EPSS fetcher (planned)
+- [cve-sync-epss.md](tickets/cve-sync-epss.md) — EPSS score fetcher specification
 - [cvss-scoring.md](tickets/cvss-scoring.md) — Multi-provider CVSS assessments, severity resolution
 - [ticket-priority.md](tickets/ticket-priority.md) — Ticket priority (P1–P4) from severity and exploitation evidence, manual override
 - [ticket-audit-log.md](tickets/ticket-audit-log.md) — TicketAuditEvent audit trail, event type contract
