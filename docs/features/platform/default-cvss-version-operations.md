@@ -299,6 +299,16 @@ when every one of the following holds for the failure:
 - the connection is not invalidated; and
 - the runner can reliably start and process the next candidate.
 
+The isolable set is closed: the only isolable failure is a
+`sqlalchemy.exc.DBAPIError` whose SQLSTATE is `40P01` (`deadlock_detected`),
+raised before the unit's commit, with `connection_invalidated` false, followed
+by a successful rollback and session close on the still-valid connection. Every
+other exception, including `IntegrityError`, `DataError`, and `ValueError`, is
+a whole-run condition: a unit writes no contended unique or foreign key, so
+those errors signal a code, contract, or persisted-data integrity defect rather
+than a transient per-CVE condition. The per-unit cause category `domain`
+therefore currently has no producer; the vocabulary is closed, not exhaustive.
+
 An isolable failure increments `failed`, emits one
 `cvss_recalculation_cve_failed` warning, and never rolls back a committed
 sibling. The increment and warning occur only after rollback and session cleanup
@@ -1112,6 +1122,9 @@ mapping.
 ### Task Adoption
 
 A delivered task begins no CVE transaction until it has proven ownership. The
+synchronous wrapper validates both inputs before the asynchronous workflow,
+`target_version` first and then the task ID, so a delivery with both inputs
+invalid is the `target_version` input-contract failure and emits no event. The
 task:
 
 1. arrives with a wrapper-validated canonical `celery_task_id`; an absent or
