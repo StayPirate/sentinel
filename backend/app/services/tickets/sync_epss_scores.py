@@ -67,6 +67,16 @@ _STALENESS_TOLERANCE: Final = timedelta(days=1)
 """Stale when the assessment date is earlier than today (UTC) minus this."""
 
 
+class EpssResponseError(Exception):
+    """An HTTP 2xx status other than 200: neither a response envelope nor
+    an HTTP error. Non-retryable under the Error Categorization catch-all
+    (cve-fetcher-infrastructure.md); the fixed message carries no upstream
+    data."""
+
+    def __init__(self) -> None:
+        super().__init__("FIRST.org EPSS API returned an unexpected status")
+
+
 def _utc_today() -> date:
     """The current UTC date (the staleness reference)."""
     return datetime.now(UTC).date()
@@ -113,7 +123,8 @@ class SyncEpssScores(BaseCVEFetcher):
 
         Q6: HTTP 200 with an empty `data` array raises `CVENotInSource`
         before any database work. An HTTP error status raises its original
-        `httpx.HTTPStatusError`; transport errors, JSON decoding errors,
+        `httpx.HTTPStatusError` (`EpssResponseError` for another 2xx);
+        transport errors, JSON decoding errors,
         `pydantic.ValidationError` (schema mismatch, more than one entry,
         an out-of-range or unparseable value, or U+0000), and delegate
         exceptions propagate unchanged.
@@ -133,7 +144,9 @@ class SyncEpssScores(BaseCVEFetcher):
     async def _fetch_epss(self, cve_id: str) -> Any:
         """Request one CVE and decode the body; no database work."""
         response = await self.http_client.get(EPSS_URL, params={"cve": cve_id})
-        response.raise_for_status()
+        if response.status_code != 200:
+            response.raise_for_status()
+            raise EpssResponseError()
         return response.json()
 
     def _extract_entry(self, body: object) -> EPSSEntry | None:
