@@ -7,8 +7,8 @@ anonymously on 2026-10-06 through Sentinel's production HTTP client
 (`create_http_client(name="sync_epss_scores")`, its standard User-Agent;
 docs/conventions.md, External Integration Contract Verification). Every
 consumed field is asserted for name, nesting, type, and encoding through
-a strict test-local typed model; the production parser does not exist
-yet.
+a strict test-local typed model, independent of the production parser
+(`app/services/tickets/epss_score_record.py`).
 
 Live verification on 2026-10-06 (`GET /data/v1/epss?cve={CVE-ID}`):
 
