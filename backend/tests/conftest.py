@@ -94,7 +94,12 @@ from app.models import (
     User,
     UserRole,
 )
-from app.services import cve_service, local_auth_service, session_service
+from app.services import (
+    cve_service,
+    cvss_recalculation_coordination,
+    local_auth_service,
+    session_service,
+)
 from app.services.base_cve_fetcher import _CVE_SOURCE_TYPE_MAP
 from app.services.base_fetcher import FETCHER_REGISTRY
 from app.services.session_service import create_session
@@ -670,9 +675,10 @@ async def redis_client(
     `get_readiness_redis_urls` (readiness checks),
     `session_service.get_session_redis_url` (session liveness cache,
     invalidation purge), `local_auth_service.get_lockout_redis_url`
-    (login lockout counter), and `cve_service.get_fetch_pending_redis_url`
-    (per-CVE source-status pending overlay) — so they observe this same
-    instance during
+    (login lockout counter), `cve_service.get_fetch_pending_redis_url`
+    (per-CVE source-status pending overlay), and
+    `cvss_recalculation_coordination.get_cvss_recalculation_redis_url`
+    (CVSS recalculation lease) — so they observe this same instance during
     the test. Teardown restores every override, flushes again, and
     closes the client. Cleanup/provisioning failures fail the test
     rather than skip.
@@ -689,6 +695,11 @@ async def redis_client(
     )
     monkeypatch.setattr(
         cve_service, "get_fetch_pending_redis_url", lambda: _redis_test_url
+    )
+    monkeypatch.setattr(
+        cvss_recalculation_coordination,
+        "get_cvss_recalculation_redis_url",
+        lambda: _redis_test_url,
     )
     try:
         yield client
