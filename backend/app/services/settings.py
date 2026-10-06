@@ -2,7 +2,8 @@
 
 See `docs/features/platform/system-settings.md` for the full
 specification: `bootstrap_system_settings()`, `get_default_cvss_version()`,
-the `SettingAuditLog` audit trail, and `list_setting_audit_events()`.
+the setting mutation `update_default_cvss_version()`, the
+`SettingAuditLog` audit trail, and `list_setting_audit_events()`.
 
 The default-CVSS impact preview, whose `CVSSPreviewTimeoutError` belongs to
 this module's `SettingsServiceError` hierarchy, lives in
@@ -19,9 +20,9 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Final
+from typing import Final, Literal
 
-from sqlalchemy import Select, func, select
+from sqlalchemy import BigInteger, Select, func, literal, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -31,6 +32,8 @@ from app.core.exceptions import ServiceError
 from app.models.setting_audit_event import SettingAuditEvent
 from app.models.system_setting import SystemSetting
 from app.services.base_audit_log import BaseAuditLog
+from app.services.cvss import DEFAULT_CVSS_VERSIONS
+from app.services.cvss_recalculation_coordination import EXECUTION_FENCE_ID
 
 _DEFAULT_CVSS_VERSION_KEY = "default_cvss_version"
 _DEFAULT_CVSS_VERSION_INITIAL_VALUE = "3.1"
@@ -132,6 +135,70 @@ async def get_default_cvss_version(session: AsyncSession) -> str:
     if value is None:
         raise RequiredSystemSettingMissingError()
     return value
+
+
+async def update_default_cvss_version(
+    session: AsyncSession,
+    *,
+    new_version: Literal["3.1", "4.0"],
+    acting_user_id: uuid.UUID,
+) -> str:
+    """Change `default_cvss_version` in the caller's transaction.
+
+    See `docs/features/platform/system-settings.md` (Setting Mutation
+    Service). Validates `new_version` against the closed set before any
+    database access (`ValueError`), then locks the required row `FOR
+    UPDATE` as the first database operation
+    (`RequiredSystemSettingMissingError` when absent). The lock refreshes
+    the identity map, so classification never uses a value read before
+    the lock.
+
+    A request equal to the locked-current value is a no-op: it returns
+    that value with no advisory-lock request, update, or audit event.
+    Otherwise the execution fence identifier is requested in
+    transaction-level, non-blocking form; a definitive "not acquired"
+    raises `CVSSRecalculationAlreadyInProgressError`, and a database or
+    session error propagates unchanged. The row is then updated and
+    exactly one `setting_changed` event is logged with the locked-current
+    `old_value`, both flushed. Returns the persisted value.
+
+    Never commits or rolls back; the transaction-level lock ends with the
+    caller's transaction. Performs no Redis command, lease, publication,
+    or post-commit registration.
+    """
+    if new_version not in DEFAULT_CVSS_VERSIONS:
+        raise ValueError("new_version must be '3.1' or '4.0'")
+
+    result = await session.execute(
+        select(SystemSetting)
+        .where(SystemSetting.key == _DEFAULT_CVSS_VERSION_KEY)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    setting = result.scalar_one_or_none()
+    if setting is None:
+        raise RequiredSystemSettingMissingError()
+
+    current = setting.value
+    if current == new_version:
+        return current
+
+    fence = await session.execute(
+        select(func.pg_try_advisory_xact_lock(literal(EXECUTION_FENCE_ID, BigInteger)))
+    )
+    if fence.scalar_one() is not True:
+        raise CVSSRecalculationAlreadyInProgressError()
+
+    setting.value = new_version
+    await SettingAuditLog.log_event(
+        session,
+        event_type=SettingAuditEventType.SETTING_CHANGED,
+        setting_key=_DEFAULT_CVSS_VERSION_KEY,
+        user_id=acting_user_id,
+        old_value=current,
+        new_value=new_version,
+    )
+    return new_version
 
 
 class SettingAuditLog(BaseAuditLog):
