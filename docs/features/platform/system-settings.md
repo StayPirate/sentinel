@@ -22,7 +22,8 @@ document but not yet implemented. The impact preview is specified in
 runner is specified in the same document and implemented in
 `backend/app/services/cvss_recalculation.py`, with its Celery task in
 `backend/app/tasks/cvss_tasks.py`. The manual admission and publication
-contracts are specified in the same document and are not yet implemented.
+contracts are specified in the same document and implemented in
+`backend/app/services/cvss_recalculation_admission.py`.
 
 ## Settings
 

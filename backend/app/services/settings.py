@@ -7,7 +7,11 @@ the `SettingAuditLog` audit trail, and `list_setting_audit_events()`.
 The default-CVSS impact preview, whose `CVSSPreviewTimeoutError` belongs to
 this module's `SettingsServiceError` hierarchy, lives in
 `app.services.cvss_impact_preview` (see
-`docs/features/platform/default-cvss-version-operations.md`).
+`docs/features/platform/default-cvss-version-operations.md`). The manual
+recalculation admission lives in `app.services.cvss_recalculation_admission`;
+it raises `CVSSRecalculationAlreadyInProgressError`, which this module owns
+(system-settings.md, Service Exceptions), and defines the remaining
+admission exceptions of the same hierarchy.
 """
 
 from __future__ import annotations
@@ -15,6 +19,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from datetime import date, datetime
+from typing import Final
 
 from sqlalchemy import Select, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -30,9 +35,29 @@ from app.services.base_audit_log import BaseAuditLog
 _DEFAULT_CVSS_VERSION_KEY = "default_cvss_version"
 _DEFAULT_CVSS_VERSION_INITIAL_VALUE = "3.1"
 
+CVSS_RECALCULATION_IN_PROGRESS_MESSAGE: Final = (
+    "A CVSS recalculation is already in progress."
+)
+"""Fixed message of `CVSSRecalculationAlreadyInProgressError` and the 409
+detail."""
+
 
 class SettingsServiceError(ServiceError):
     """Base class for all exceptions raised by the settings service."""
+
+
+class CVSSRecalculationAlreadyInProgressError(SettingsServiceError):
+    """The recalculation execution fence or the admission lease is held.
+
+    Maps to `409 CVSS_RECALC_ALREADY_IN_PROGRESS` with a fixed message
+    (system-settings.md, Service Exceptions). Raised by the manual
+    recalculation admission when the fence or the lease is already held,
+    and by an effective setting change while the fence is held; nothing
+    is admitted, published, or committed.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(CVSS_RECALCULATION_IN_PROGRESS_MESSAGE)
 
 
 class RequiredSystemSettingMissingError(SettingsServiceError):

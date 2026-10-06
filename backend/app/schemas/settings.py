@@ -1,16 +1,18 @@
 """Request/response/query schemas for the system settings read and audit
-log endpoints and the default-CVSS impact preview.
+log endpoints, the default-CVSS impact preview, and the manual CVSS
+recalculation trigger.
 
 See `docs/features/platform/system-settings.md` (Get System Settings,
 List Settings Audit Events) and
 `docs/features/platform/default-cvss-version-operations.md` (Get
-Default-CVSS Impact Preview) for the authoritative request/response
-contracts these schemas implement.
+Default-CVSS Impact Preview, Trigger CVSS Recalculation) for the
+authoritative request/response contracts these schemas implement.
 """
 
 from __future__ import annotations
 
 from datetime import date, datetime
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field
@@ -52,6 +54,25 @@ class DefaultCVSSVersionImpactResponse(BaseModel):
     """Response body for the default-CVSS impact preview (no `meta`)."""
 
     data: DefaultCVSSVersionImpactData
+
+
+class CVSSRecalculationTriggerData(BaseModel):
+    """The body of a `202 Accepted` from
+    `POST /api/v1/admin/settings/default-cvss-version/recalculate`.
+
+    See `docs/features/platform/default-cvss-version-operations.md`
+    (Trigger CVSS Recalculation); the run's task ID is never returned.
+    """
+
+    message: Literal["Recalculation batch enqueued"]
+    default_cvss_version: str
+    scope: Literal["all_cves"]
+
+
+class CVSSRecalculationTriggerResponse(BaseModel):
+    """Response body for the manual CVSS recalculation trigger."""
+
+    data: CVSSRecalculationTriggerData
 
 
 class SettingAuditQuery(BaseModel):

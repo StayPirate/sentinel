@@ -14,7 +14,7 @@ Owning specifications:
 - docs/features/platform/logging.md (Correlation IDs: `task_prerun`
   binding);
 - issue #836 decisions U4 (disposal belongs to the workflow) and U7
-  (correlation), umbrella #833 P3 (production reachability), P7
+  (correlation), umbrella #833 P3 (unadmitted delivery), P7
   (validation order), and P18 (no `acks_late` or `reject_on_worker_lost`).
 
 The registered task is executed through Celery's eager tracer
@@ -404,7 +404,9 @@ class TestDelegation:
 
 
 # ---------------------------------------------------------------------------
-# Production reachability (umbrella P3): no publisher exists yet
+# Unadmitted delivery: a delivery with no admitted lease (umbrella P3; the
+# manual admission of #837 is the only publisher, and it acquires the lease
+# before publishing)
 # ---------------------------------------------------------------------------
 
 
