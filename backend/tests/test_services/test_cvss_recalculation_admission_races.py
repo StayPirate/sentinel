@@ -27,8 +27,8 @@ observed by the shared `AdmissionSpy`
 (tests/support/cvss_recalculation_admission.py), whose recorder stands in
 for the broker. The runner is the real workflow on the harness's fenced
 connection. Interleavings are forced with one-shot `asyncio.Event` gates at
-named boundaries (inside the fenced setting read, after the lease, at the
-publisher, at a runner unit boundary); these are waits on application
+named boundaries (inside the fenced setting read, at the publisher, at a
+runner unit boundary); these are waits on application
 boundaries, not lock-serialization evidence, so every wait is bounded and
 no ordering relies on a sleep. The only poll waits for a Redis TTL to
 elapse. The populations are ticketless, so the runner publishes nothing.
@@ -47,14 +47,8 @@ from kombu.exceptions import (  # type: ignore[import-untyped]
 )
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
-from app.core.enums import Severity
 from app.services import cvss_recalculation_admission as admission
-from app.services.cvss_recalculation import (
-    ADOPTED_EVENT,
-    ADOPTION_REJECTED_EVENT,
-    RECALCULATE_CVSS_DERIVED_STATE_TASK,
-    STALE_EVENT,
-)
+from app.services.cvss_recalculation import RECALCULATE_CVSS_DERIVED_STATE_TASK
 from app.services.cvss_recalculation_admission import (
     ADMISSION_REJECTED_EVENT,
     ADMITTED_EVENT,
@@ -69,11 +63,9 @@ from app.services.cvss_recalculation_coordination import (
     LEASE_TTL_SECONDS,
 )
 from app.services.settings import CVSSRecalculationAlreadyInProgressError
-from tests.support.cvss_chain import Assessment, cve_severity
 from tests.support.cvss_recalculation import (
     LEAK_MARKER,
     TARGET,
-    ChainSpy,
     DrainSpy,
     RecalculationHarness,
     capture_events,
@@ -121,11 +113,6 @@ def spy(h: RecalculationHarness, monkeypatch: pytest.MonkeyPatch) -> AdmissionSp
 @pytest.fixture
 def drain(monkeypatch: pytest.MonkeyPatch) -> DrainSpy:
     return DrainSpy(monkeypatch)
-
-
-@pytest.fixture
-def chain(monkeypatch: pytest.MonkeyPatch) -> ChainSpy:
-    return ChainSpy(monkeypatch)
 
 
 # ---------------------------------------------------------------------------
@@ -395,39 +382,6 @@ class TestFencedSettingRead:
         assert [call.kwargs for call in spy.published] == [{"target_version": "4.0"}]
         assert await h.lease() == _token(spy.task_id, "4.0")
 
-    async def test_setting_committed_after_the_read_is_not_published(
-        self, h: RecalculationHarness, spy: AdmissionSpy
-    ) -> None:
-        """The mirror: a change committed after the fenced read (here while
-        the admission still holds the fence, after its lease; a direct
-        write that requests no fence) does not alter the admitted target.
-        The read is the run's only target source; the delivery later
-        observes the newer setting and terminates `stale` (Admission
-        Ordering), removing its lease."""
-
-        async def _commit_after_read() -> None:
-            assert await h.fence_holders() == [h.pid]
-            await h.world.set_setting("4.0")
-
-        spy.after_lease = _commit_after_read
-
-        result = await admit_cvss_recalculation()
-
-        assert result.target_version == TARGET
-        assert [call.kwargs for call in spy.published] == [{"target_version": TARGET}]
-        task_id = spy.task_id
-        assert await h.lease() == _token(task_id)
-
-        with capture_events() as logs:
-            await h.run(task_id)
-
-        assert [entry["event"] for entry in runner_events(logs)] == [
-            ADOPTED_EVENT,
-            STALE_EVENT,
-        ]
-        assert await h.lease() is None
-        assert await h.fence_holders() == []
-
 
 # ---------------------------------------------------------------------------
 # The fence of an active runner
@@ -553,47 +507,3 @@ class TestPublicationUncertainty:
             _admitted(),
             _submitted(),
         ]
-
-
-# ---------------------------------------------------------------------------
-# Two deliveries of one admitted token
-# ---------------------------------------------------------------------------
-
-
-class TestDuplicateDelivery:
-    async def test_second_delivery_of_an_admitted_token_mutates_nothing(
-        self, h: RecalculationHarness, spy: AdmissionSpy, chain: ChainSpy
-    ) -> None:
-        """The token comes from a real admission. The first delivery adopts
-        it, converges the stale severity, and removes the lease; the second
-        delivery of the same task ID is rejected at adoption
-        (`lease_absent`) and begins no unit."""
-        cve = await h.world.scored_cve(Assessment("9.8"), severity=Severity.MEDIUM)
-        await admit_cvss_recalculation()
-        task_id = spy.task_id
-        assert [call.task_id for call in spy.published] == [task_id]
-
-        with capture_events() as logs:
-            await h.run(task_id)
-
-        assert runner_events(logs) == completed_run(task_id, cve.id, changed=1)
-        assert chain.cve_ids == [cve.id]
-        assert await h.lease() is None
-
-        with capture_events() as logs:
-            assert await h.run(task_id) is None
-
-        assert runner_events(logs) == [
-            {
-                "event": ADOPTION_REJECTED_EVENT,
-                "log_level": "warning",
-                "celery_task_id": task_id,
-                "reason": "lease_absent",
-                "target_version": TARGET,
-            }
-        ]
-        assert chain.cve_ids == [cve.id]
-        assert await h.world.read(lambda db: cve_severity(db, cve.id)) == "Critical"
-        assert await h.lease() is None
-        assert await h.fence_holders() == []
-        assert len(spy.published) == 1

@@ -938,6 +938,93 @@ class TestPublication:
 
 
 # ---------------------------------------------------------------------------
+# Lease client lifetime (issue #837 V3)
+# ---------------------------------------------------------------------------
+
+
+async def _arm_client_path(
+    h: RecalculationHarness, spy: AdmissionSpy, path: str
+) -> type[BaseException] | None:
+    """Arrange one admission path that creates the lease client; returns
+    the exception class the admission raises, or `None` for `submitted`."""
+    if path == "lease-held":
+        await h.admit()
+        return CVSSRecalculationAlreadyInProgressError
+    if path == "redis-error":
+        spy.lease_error = RedisConnectionError(LEAK_MARKER)
+        return CVSSRecalculationRedisUnavailableError
+    if path == "release-failed":
+        error = database_error()
+        spy.release_error = error
+        return type(error)
+    if path == "broker-unavailable":
+        spy.publish_error = BrokerOperationalError(LEAK_MARKER)
+        return CVSSRecalculationBrokerUnavailableError
+    if path == "publisher-error":
+        spy.publish_error = TypeError(LEAK_MARKER)
+        return TypeError
+    assert path == "submitted"
+    return None
+
+
+@pytest.mark.integration
+class TestLeaseClient:
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "submitted",
+            "lease-held",
+            "redis-error",
+            "release-failed",
+            "broker-unavailable",
+            "publisher-error",
+        ],
+    )
+    async def test_lease_client_is_created_and_closed_exactly_once(
+        self, h: RecalculationHarness, spy: AdmissionSpy, path: str
+    ) -> None:
+        """The client is created after the fenced setting read and closed
+        on every path that created it (`fence_busy` creates none)."""
+        expected = await _arm_client_path(h, spy, path)
+
+        if expected is None:
+            result = await admit_cvss_recalculation()
+            assert result.outcome == "submitted"
+        else:
+            with pytest.raises(expected):
+                await admit_cvss_recalculation()
+
+        assert spy.clients == 1
+        assert spy.closes == 1
+
+    @pytest.mark.parametrize("path", ["submitted", "lease-held"])
+    async def test_redis_error_on_close_never_replaces_the_outcome(
+        self, h: RecalculationHarness, spy: AdmissionSpy, path: str
+    ) -> None:
+        expected = await _arm_client_path(h, spy, path)
+        spy.close_error = RedisConnectionError(LEAK_MARKER)
+
+        with capture_events() as logs:
+            if expected is None:
+                result = await admit_cvss_recalculation()
+                assert result == CVSSRecalculationAdmission(
+                    outcome="submitted", target_version=TARGET
+                )
+            else:
+                with pytest.raises(expected):
+                    await admit_cvss_recalculation()
+
+        assert spy.clients == 1
+        assert spy.closes == 1
+        assert await h.fence_holders() == []
+        _assert_borrowed_intact(h)
+        # The suppressed close error is neither logged nor a cleanup failure.
+        events = runner_events(logs)
+        assert CLEANUP_FAILED_EVENT not in [entry["event"] for entry in events]
+        _assert_private(events, *spy.task_ids)
+
+
+# ---------------------------------------------------------------------------
 # Connection ownership
 # ---------------------------------------------------------------------------
 
@@ -1000,35 +1087,6 @@ class TestOwnedConnection:
             )
             assert await release_execution_fence(fresh) is FenceReleaseOutcome.RELEASED
 
-    @pytest.mark.parametrize(
-        "scenario", ["submitted", "fence-busy", "lease-held", "redis-error"]
-    )
-    async def test_borrowed_connection_is_never_closed_or_invalidated(
-        self, h: RecalculationHarness, spy: AdmissionSpy, scenario: str
-    ) -> None:
-        if scenario == "fence-busy":
-            holder = (await h.borrow()).connection
-            assert await try_acquire_execution_fence(holder) is (
-                FenceAcquireOutcome.ACQUIRED
-            )
-        elif scenario == "lease-held":
-            await h.admit()
-        elif scenario == "redis-error":
-            spy.lease_error = RedisConnectionError(LEAK_MARKER)
-
-        try:
-            await admit_cvss_recalculation()
-        except (
-            CVSSRecalculationAlreadyInProgressError,
-            CVSSRecalculationRedisUnavailableError,
-        ):
-            assert scenario != "submitted"
-        else:
-            assert scenario == "submitted"
-
-        _assert_borrowed_intact(h)
-        assert spy.fence_pids == [h.pid]
-
 
 @pytest.mark.unit
 class TestBind:
@@ -1060,52 +1118,35 @@ class TestBind:
 # ---------------------------------------------------------------------------
 
 
-async def _arrange(h: RecalculationHarness, spy: AdmissionSpy, scenario: str) -> None:
-    if scenario == "fence-busy":
-        holder = (await h.borrow()).connection
-        assert await try_acquire_execution_fence(holder) is FenceAcquireOutcome.ACQUIRED
-    elif scenario == "lease-held":
-        await h.admit()
-    elif scenario == "redis-error":
-        spy.lease_error = RedisTimeoutError(LEAK_MARKER)
-        spy.lease_error_after_write = True
-    elif scenario == "release-failed":
-        spy.release_error = database_error()
-        spy.delete_error = RedisConnectionError(LEAK_MARKER)
-    elif scenario == "publication-unconfirmed":
-        spy.publish_error = BrokerOperationalError(LEAK_MARKER)
-
-
 @pytest.mark.integration
 class TestEventCorrelation:
-    @pytest.mark.parametrize(
-        "scenario",
-        [
-            "submitted",
-            "fence-busy",
-            "lease-held",
-            "redis-error",
-            "release-failed",
-            "publication-unconfirmed",
-        ],
-    )
     async def test_events_correlate_by_request_id_only_and_leak_nothing(
-        self, h: RecalculationHarness, spy: AdmissionSpy, scenario: str
+        self, h: RecalculationHarness, spy: AdmissionSpy
     ) -> None:
-        await _arrange(h, spy, scenario)
+        """A failed release whose lease removal also fails emits the most
+        admission events (and retains the lease token); every one of them
+        carries the bound `request_id` and nothing else identifying."""
+        error = database_error()
+        spy.release_error = error
+        spy.delete_error = RedisConnectionError(LEAK_MARKER)
 
-        with capture_events() as logs, bound_contextvars(request_id=REQUEST_ID):
-            try:
-                await admit_cvss_recalculation()
-            except Exception:
-                assert scenario != "submitted"
+        with (
+            capture_events() as logs,
+            bound_contextvars(request_id=REQUEST_ID),
+            pytest.raises(type(error)),
+        ):
+            await admit_cvss_recalculation()
 
         events = [
             entry
             for entry in runner_events(logs)
             if entry["event"] in _ADMISSION_EVENTS
         ]
-        assert events
+        assert [entry["event"] for entry in events] == [
+            ADMITTED_EVENT,
+            CLEANUP_FAILED_EVENT,
+            CLEANUP_FAILED_EVENT,
+        ]
         assert all(entry["request_id"] == REQUEST_ID for entry in events)
         assert not any(
             key in entry

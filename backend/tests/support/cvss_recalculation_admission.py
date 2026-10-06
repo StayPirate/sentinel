@@ -125,7 +125,11 @@ class AdmissionSpy:
     before the real setting read, `after_lease` after the real acquire, and
     `before_release` before the real release; `on_publish` runs after a
     publication is recorded, and `publish_error` is raised by the recorder
-    after recording.
+    after recording; `close_error` is raised by the lease client's
+    `aclose()` after the real close.
+
+    `clients` counts lease-client creations and `closes` the `aclose()`
+    calls on those clients; neither is part of `sequence`.
 
     The settings read is wrapped module-wide, so a runner's own setting
     read is recorded (and hooked) as well."""
@@ -137,6 +141,8 @@ class AdmissionSpy:
         self.release_raised: list[BaseException] = []
         self.published: list[Publication] = []
         self.clients = 0
+        self.closes = 0
+        self.close_error: BaseException | None = None
         self.fence_error: BaseException | None = None
         self.before_setting: Callable[[], Awaitable[None]] | None = None
         self.setting_error: BaseException | None = None
@@ -178,7 +184,17 @@ class AdmissionSpy:
 
         def _client() -> redis_asyncio.Redis:
             self.clients += 1
-            return client_factory()
+            client = client_factory()
+            close = client.aclose
+
+            async def _aclose(*args: Any, **kwargs: Any) -> None:
+                self.closes += 1
+                await close(*args, **kwargs)
+                if self.close_error is not None:
+                    raise self.close_error
+
+            client.aclose = _aclose  # type: ignore[method-assign]
+            return client
 
         async def _lease(
             client: redis_asyncio.Redis, *, task_id: str, target_version: str

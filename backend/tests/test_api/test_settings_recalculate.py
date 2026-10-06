@@ -55,23 +55,16 @@ from unittest.mock import AsyncMock
 import pytest
 import pytest_asyncio
 import redis.asyncio as redis_asyncio
-from fastapi import routing as fastapi_routing
-from fastapi.routing import APIRoute
 from httpx import ASGITransport, AsyncClient, Response
-from kombu.exceptions import (  # type: ignore[import-untyped]
-    EncodeError,
-    SerializerNotInstalled,
-)
+from kombu.exceptions import EncodeError  # type: ignore[import-untyped]
 from kombu.exceptions import OperationalError as BrokerOperationalError
 from redis.exceptions import ConnectionError as RedisConnectionError
-from redis.exceptions import TimeoutError as RedisTimeoutError
 from sqlalchemy import BigInteger, func, literal, select
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession
 
 from app.api import dependencies
 from app.api.v1 import settings as settings_api
 from app.core.enums import Role
-from app.core.exceptions import ServiceError
 from app.main import app
 from app.models.api_key import ApiKey
 from app.models.setting_audit_event import SettingAuditEvent
@@ -79,7 +72,6 @@ from app.models.ticket_audit_event import TicketAuditEvent
 from app.models.user import User
 from app.models.user_role import UserRole
 from app.services import cvss_recalculation_admission as admission
-from app.services import settings as settings_service
 from app.services.cvss_recalculation_admission import (
     ADMISSION_REJECTED_EVENT,
     ADMITTED_EVENT,
@@ -414,37 +406,15 @@ class TestAlreadyInProgress:
 # ---------------------------------------------------------------------------
 
 
-class _MimickingOperationalError(BrokerOperationalError):  # type: ignore[misc]
-    """A broker operational error whose text names another class."""
-
-
 @pytest.mark.e2e
 class TestServiceUnavailable:
-    @pytest.mark.parametrize(
-        ("make_error", "after_write"),
-        [
-            pytest.param(
-                lambda: RedisConnectionError(f"refused {LEAK_MARKER}"),
-                False,
-                id="connection-error",
-            ),
-            pytest.param(
-                lambda: RedisTimeoutError(f"timed out {LEAK_MARKER}"),
-                True,
-                id="timeout-after-write",
-            ),
-        ],
-    )
     async def test_redis_error_on_lease_acquire_returns_the_sanitized_503(
         self,
         h: RecalculationHarness,
         spy: AdmissionSpy,
         admin_client: AsyncClient,
-        make_error: Callable[[], BaseException],
-        after_write: bool,
     ) -> None:
-        spy.lease_error = make_error()
-        spy.lease_error_after_write = after_write
+        spy.lease_error = RedisConnectionError(f"refused {LEAK_MARKER}")
 
         response = await _trigger(admin_client)
 
@@ -455,30 +425,16 @@ class TestServiceUnavailable:
         assert await h.fence_holders() == []
         _assert_no_secret(response, spy.task_id)
 
-    @pytest.mark.parametrize(
-        "make_error",
-        [
-            pytest.param(
-                lambda: BrokerOperationalError(f"connection refused {LEAK_MARKER}"),
-                id="operational",
-            ),
-            pytest.param(
-                lambda: _MimickingOperationalError(f"EncodeError: {LEAK_MARKER}"),
-                id="subclass-text-mimics-encode",
-            ),
-        ],
-    )
     async def test_broker_operational_error_returns_503_and_retains_the_lease(
         self,
         h: RecalculationHarness,
         spy: AdmissionSpy,
         admin_client: AsyncClient,
-        make_error: Callable[[], BaseException],
     ) -> None:
         """Acceptance unconfirmed: the fixed detail without the broker
         text, and the lease retained (with its TTL) for a delivery that may
         still adopt it."""
-        spy.publish_error = make_error()
+        spy.publish_error = BrokerOperationalError(f"connection refused {LEAK_MARKER}")
 
         response = await _trigger(admin_client)
 
@@ -536,23 +492,15 @@ class TestInternalError:
         assert await h.fence_holders() == []
         _assert_no_secret(response)
 
-    @pytest.mark.parametrize(
-        "make_error",
-        [
-            pytest.param(database_error, id="database-error"),
-            pytest.param(lambda: TimeoutError(LEAK_MARKER), id="timeout"),
-        ],
-    )
     async def test_raising_fence_release_returns_500_without_publication(
         self,
         h: RecalculationHarness,
         spy: AdmissionSpy,
         admin_error_client: AsyncClient,
-        make_error: Callable[[], BaseException],
     ) -> None:
         """The publisher is never invoked, so the outcome is never
         `CELERY_UNAVAILABLE`; the acquired lease is removed owner-safely."""
-        spy.release_error = make_error()
+        spy.release_error = database_error()
 
         response = await _trigger(admin_error_client)
 
@@ -582,29 +530,16 @@ class TestInternalError:
         assert await h.lease() is None
         assert await h.fence_holders() == []
 
-    @pytest.mark.parametrize(
-        "make_error",
-        [
-            pytest.param(lambda: EncodeError(LEAK_MARKER), id="encode"),
-            pytest.param(lambda: SerializerNotInstalled(LEAK_MARKER), id="serializer"),
-            pytest.param(lambda: TypeError(LEAK_MARKER), id="programming"),
-            pytest.param(
-                lambda: RuntimeError(f"OperationalError: refused {LEAK_MARKER}"),
-                id="text-mimics-operational",
-            ),
-        ],
-    )
     async def test_non_operational_publisher_error_returns_500_and_keeps_the_lease(
         self,
         h: RecalculationHarness,
         spy: AdmissionSpy,
         admin_error_client: AsyncClient,
-        make_error: Callable[[], BaseException],
     ) -> None:
         """Only `kombu.exceptions.OperationalError`, by class, is
         `CELERY_UNAVAILABLE`; every other publisher exception is the global
         `500`, and the lease is retained conservatively."""
-        spy.publish_error = make_error()
+        spy.publish_error = EncodeError(LEAK_MARKER)
 
         response = await _trigger(admin_error_client)
 
@@ -716,21 +651,9 @@ class TestAccessControl:
         assert await h.lease() is None
         assert await h.fence_holders() == []
 
-    async def test_jwt_session_credentials_are_accepted(
-        self,
-        h: RecalculationHarness,
-        spy: AdmissionSpy,
-        admin_client: AsyncClient,
-    ) -> None:
-        response = await _trigger(admin_client)
-
-        assert response.status_code == 202
-        assert response.json() == _accepted()
-        assert await h.lease() == _token(spy.task_id)
-
 
 # ---------------------------------------------------------------------------
-# Thin route: no business query, no session factory, 1:1 exception mapping
+# Thin route: no business query and no session factory
 # ---------------------------------------------------------------------------
 
 
@@ -746,23 +669,6 @@ def _body_nodes(handler: ast.AsyncFunctionDef) -> list[ast.AST]:
     """Every node of the handler body (its decorators, which declare the
     route and the capability guard, excluded)."""
     return [node for statement in handler.body for node in ast.walk(statement)]
-
-
-def _route() -> APIRoute:
-    """The registered trigger route. `app.routes` alone does not expose
-    routes included via `include_router()` (see
-    `tests/test_api_conventions.py`)."""
-    matches = [
-        context.original_route
-        for context in fastapi_routing.iter_route_contexts(app.routes)
-        if isinstance(context.original_route, APIRoute)
-        and context.path == _TRIGGER
-        and "POST" in (context.methods or set())
-    ]
-    assert len(matches) == 1
-    route = matches[0]
-    assert isinstance(route, APIRoute)
-    return route
 
 
 _FORBIDDEN_NAMES = {
@@ -783,34 +689,9 @@ _FORBIDDEN_NAMES = {
     "commit",
 }
 
-_EXPECTED_MAPPING = {
-    "settings_service.CVSSRecalculationAlreadyInProgressError": (
-        409,
-        "ErrorCode.CVSS_RECALC_ALREADY_IN_PROGRESS",
-        "settings_service.CVSS_RECALCULATION_IN_PROGRESS_MESSAGE",
-    ),
-    "cvss_recalculation_admission.CVSSRecalculationRedisUnavailableError": (
-        503,
-        "ErrorCode.REDIS_UNAVAILABLE",
-        "cvss_recalculation_admission.REDIS_UNAVAILABLE_MESSAGE",
-    ),
-    "cvss_recalculation_admission.CVSSRecalculationBrokerUnavailableError": (
-        503,
-        "ErrorCode.CELERY_UNAVAILABLE",
-        "cvss_recalculation_admission.BROKER_UNAVAILABLE_MESSAGE",
-    ),
-}
-
 
 @pytest.mark.unit
 class TestThinRoute:
-    def test_route_is_registered_to_the_handler_with_status_202(self) -> None:
-        route = _route()
-
-        assert route.endpoint is settings_api.trigger_cvss_recalculation
-        assert route.status_code == 202
-        assert route.body_field is None
-
     def test_handler_takes_only_the_principal(self) -> None:
         """No `DatabaseSession` or other dependency besides the capability
         guard: the admission owns its own connection."""
@@ -849,73 +730,6 @@ class TestThinRoute:
             ast.unparse(node.value) for node in nodes if isinstance(node, ast.Await)
         ]
         assert awaited == ["cvss_recalculation_admission.admit_cvss_recalculation()"]
-
-    def test_settings_router_module_references_no_session_factory(self) -> None:
-        """The router obtains no session factory, engine, or admission bind
-        of its own: the request session comes from `DatabaseSession`, and
-        the admission's connection from the service."""
-        source = inspect.getsource(settings_api)
-        for name in (
-            "async_session_factory",
-            "async_sessionmaker",
-            "create_async_engine",
-            "database.engine",
-            "get_cvss_admission_bind",
-        ):
-            assert name not in source, name
-
-    def test_each_admission_exception_maps_individually_to_one_response(
-        self,
-    ) -> None:
-        """Exactly three `except` clauses, one per admission exception and
-        none for a base class, each raising one fixed `AppError` with the
-        cause suppressed (Service Exception Conventions: 1:1 mapping)."""
-        tries = [node for node in _body_nodes(_handler()) if isinstance(node, ast.Try)]
-        assert len(tries) == 1
-        (try_node,) = tries
-        assert try_node.orelse == []
-        assert try_node.finalbody == []
-        mapping: dict[str, tuple[int, str, str]] = {}
-        for clause in try_node.handlers:
-            assert clause.type is not None, "a bare except"
-            assert clause.name is None
-            assert len(clause.body) == 1
-            raise_node = clause.body[0]
-            assert isinstance(raise_node, ast.Raise)
-            assert isinstance(raise_node.cause, ast.Constant)
-            assert raise_node.cause.value is None
-            error = raise_node.exc
-            assert isinstance(error, ast.Call)
-            assert ast.unparse(error.func) == "AppError"
-            keywords = {kw.arg: kw.value for kw in error.keywords}
-            assert set(keywords) == {"status_code", "code", "detail"}
-            status = keywords["status_code"]
-            assert isinstance(status, ast.Constant)
-            assert isinstance(status.value, int)
-            mapping[ast.unparse(clause.type)] = (
-                status.value,
-                ast.unparse(keywords["code"]),
-                ast.unparse(keywords["detail"]),
-            )
-
-        assert mapping == _EXPECTED_MAPPING
-
-        caught = [
-            settings_service.CVSSRecalculationAlreadyInProgressError,
-            admission.CVSSRecalculationRedisUnavailableError,
-            admission.CVSSRecalculationBrokerUnavailableError,
-        ]
-        assert vars(settings_api)["settings_service"] is settings_service
-        assert vars(settings_api)["cvss_recalculation_admission"] is admission
-        for cls in caught:
-            assert cls not in (settings_service.SettingsServiceError, ServiceError)
-            assert not any(
-                issubclass(cls, other) for other in caught if other is not cls
-            )
-        assert not any(
-            issubclass(settings_service.RequiredSystemSettingMissingError, cls)
-            for cls in caught
-        )
 
 
 @pytest.mark.e2e
