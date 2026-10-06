@@ -558,7 +558,15 @@ class _Run:
     async def _release_fence(self) -> None:
         """Explicitly release the fence; a failure emits `cleanup_failed`
         (the helper has invalidated the connection) and is absorbed, except
-        a signal, which propagates after the state is recorded."""
+        a signal, which propagates after the state is recorded.
+
+        An invalidated connection is never used again: a statement on it
+        would silently reconnect to a new backend, and its closure has
+        already released the fence (Cleanup and Recovery Matrix, fenced
+        connection loss)."""
+        if self.connection.invalidated:
+            self.fence = _FenceState.LOST
+            return
         try:
             released = await release_execution_fence(self.connection)
         except Exception:
