@@ -32,7 +32,7 @@ relevant feature specifications in `docs/features/`.
 | SUSEID (Authentik) | Internal | Centralized identity provisioning via SCIM push | Planned |
 | SUSE Bugzilla | Internal | Bug tracking, security issues | Reference only |
 | CISA KEV | Public | Known exploited vulnerabilities catalog | Specified |
-| EPSS | Public | Exploit probability scores | Specified |
+| EPSS | Public | Exploit probability scores | Active |
 | GHSA | Public | Security advisories, CVSS, CWE | Specified |
 | Linux Kernel CVE | Public | Kernel CVE data, fix/introduce commits | Specified |
 | OSV | Public | Aggregated vulnerability data | Specified |
@@ -184,7 +184,7 @@ CVSS measures severity, EPSS measures likelihood of exploitation.
   filtering for incremental sync. No authentication required. Also
   available as a bulk CSV download (~15MB compressed). Rate limit:
   1000 req/min (public, unauthenticated)
-- **Integration status**: **Specified**
+- **Integration status**: **Active**
 - **Documentation**: https://www.first.org/epss/,
   https://www.first.org/epss/api
 
