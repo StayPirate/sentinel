@@ -150,6 +150,10 @@ from tests.support.ticket_mutations import (
     ticket_events_by_id,
 )
 
+pytestmark = pytest.mark.usefixtures("no_fetch_single_sources")
+"""An empty fetch-single registry: the freshness refresh of a racing
+manual association takes its no-eligible-source branch."""
+
 SessionFactory = Callable[[], Awaitable[AsyncSession]]
 
 NVD = CVESourceType.NVD

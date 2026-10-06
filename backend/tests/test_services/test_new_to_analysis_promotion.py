@@ -80,6 +80,10 @@ from tests.support.ticket_mutations import (
 pytest_plugins = ["tests.support.ticket_mutation_fixtures"]
 """Provides the shared `va_user` and `tree` fixtures."""
 
+pytestmark = pytest.mark.usefixtures("no_fetch_single_sources")
+"""An empty fetch-single registry: the freshness refresh of
+`associate_cve()` takes its no-eligible-source branch."""
+
 Factory = Callable[..., Awaitable[Any]]
 
 PROMOTION = status_event(TicketStatus.NEW.value, TicketStatus.ANALYSIS.value)

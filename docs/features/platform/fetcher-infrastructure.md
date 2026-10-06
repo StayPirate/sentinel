@@ -1001,9 +1001,21 @@ for item in items:
     except Exception as e:
         session.rollback()
         self.record_failed()
-        logger.warning("Failed to process %s: %s", item, e)
+        logger.warning(
+            "fetcher_item_failed",
+            item=item.id,  # bounded identifier, never raw upstream text
+            fetcher_name=self.name,
+            cause=type(e).__name__,
+        )
         continue
 ```
+
+The per-item WARNING carries a bounded item identifier, the fetcher name, and
+the exception class name. It never carries exception text, a traceback, or
+other upstream values, which can echo personal data (see
+[logging.md](logging.md#secrets-and-pii-discipline)). CVE fetchers use the
+specialized `cve_fetch_item_failed` event defined in
+[cve-fetcher-infrastructure.md](cve-fetcher-infrastructure.md#batch-error-handling).
 
 Concrete fetchers do NOT need to catch these signals at the `execute()` level.
 `CancelledError` propagates to the task boundary, and `run()` provides the

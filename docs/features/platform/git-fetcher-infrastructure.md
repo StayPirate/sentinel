@@ -878,9 +878,11 @@ above.
        finalization: call `session.rollback()`, extract
        CVE-ID via `cve_id = self._extract_item_id(path)`, call
        `await self._isolated_status_commit(cve_id,
-       CVESourceFetchStatus.FAILURE)`, log
-       WARNING (`logger.warning("Failed to process item %s: %s",
-       cve_id, e)`), call `record_failed()`, continue to next item
+       CVESourceFetchStatus.FAILURE)`, log the WARNING
+       `cve_fetch_item_failed` with `cve_id`, `fetcher_name`, and `cause`
+       (the exception class name), never exception text (see
+       `cve-fetcher-infrastructure.md`, "Batch Error Handling"), call
+       `record_failed()`, continue to next item
     f. When steps 10a-10c and the flush return normally, call
        `self.commit_and_dispatch(session, result)` outside the per-item
        exception catch. The shared finalizer commits and, because the template

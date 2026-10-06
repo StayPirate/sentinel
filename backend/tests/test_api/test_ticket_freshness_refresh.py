@@ -34,10 +34,13 @@ failure are compared. One representative test (associate) instead commits
 for real on independent connections to prove that commit and CVE/Ticket
 lock release precede publication.
 
-Every test empties both fetcher registries under
-`isolated_fetcher_registries` and defines its own test-only CVE fetchers.
-The broker is never reached (`task_publication.publish_task` is a recorder)
-and the pending-marker client is `ScriptedRedis` or forbidden. The
+Every test except the production-registry class empties both fetcher
+registries under `isolated_fetcher_registries` and defines its own test-only
+CVE fetchers. The production-registry class keeps the production
+registration state, including the real `SyncRedhatCves`, and derives its
+expectations from `get_fetch_single_fetchers()`. The broker is never
+reached (`task_publication.publish_task` is a recorder) and the
+pending-marker client is `ScriptedRedis` or forbidden. The
 service-level preparation matrix lives in
 `tests/test_services/test_cve_freshness_preparation.py` and
 `tests/test_services/test_ticket_freshness_composition.py`.
@@ -75,7 +78,10 @@ from app.models.ticket import Ticket
 from app.models.ticket_audit_event import TicketAuditEvent
 from app.models.user import User
 from app.services import task_publication
+from app.services.base_cve_fetcher import BaseCVEFetcher, get_fetch_single_fetchers
+from app.services.fetcher_execution import FetcherConfigMissingError
 from app.services.session_service import create_session
+from app.services.tickets.sync_redhat_cves import SyncRedhatCves
 from tests.support.cve_catch_up import (
     Publications,
     RecordingSessions,
@@ -121,9 +127,27 @@ TRIGGERS = {"create": "ticket_create", "associate": "cve_associate"}
 
 
 @pytest.fixture(autouse=True)
-def _exact_registry(isolated_fetcher_registries: None) -> None:
-    """Both registries empty; `isolated_fetcher_registries` restores them."""
-    clear_fetcher_registries()
+def _exact_registry(
+    request: pytest.FixtureRequest, isolated_fetcher_registries: None
+) -> None:
+    """Both registries empty, except for the production-registry tests,
+    which keep the production registration state.
+    `isolated_fetcher_registries` restores both registries."""
+    if "production_registry" not in request.fixturenames:
+        clear_fetcher_registries()
+
+
+@pytest.fixture
+def production_registry() -> dict[str, type[BaseCVEFetcher]]:
+    """The production fetch-single registry, which `_exact_registry` keeps.
+
+    Expectations are derived from it, never from a fixed roster, so a later
+    production registration needs no edit here. Premise: the real Red Hat
+    class is one of its sources.
+    """
+    registry = get_fetch_single_fetchers()
+    assert registry[CVESourceType.REDHAT.value] is SyncRedhatCves
+    return registry
 
 
 @pytest.fixture
@@ -196,6 +220,14 @@ class _Api:
             self.db.add(FetcherConfig(fetcher_name=probe.name, enabled=enabled))
             await self.db.flush()
         return probe.name
+
+    async def configure(
+        self, registry: dict[str, type[BaseCVEFetcher]], *, enabled: bool
+    ) -> None:
+        """Flush one `FetcherConfig` row per fetcher of `registry`."""
+        for fetcher_cls in registry.values():
+            self.db.add(FetcherConfig(fetcher_name=fetcher_cls.name, enabled=enabled))
+        await self.db.flush()
 
     async def prepare(self, name: str) -> _Operation:
         """A new CVE-ID (a placeholder is created) and, for `associate`, an
@@ -550,6 +582,164 @@ class TestBootstrapInvariantFailure:
 
         assert response.status_code == 500
         assert response.json() == INTERNAL_ERROR
+        assert _lifecycle(api.events) == ["rollback"]
+        assert await api.counts() == before
+        assert (
+            await api.db.scalar(select(CVE.id).where(CVE.cve_id == operation.cve_id))
+            is None
+        )
+        if operation.ticket_id is not None:
+            ticket = (
+                await api.db.execute(
+                    select(Ticket.status, Ticket.assignee_id, Ticket.cve_id).where(
+                        Ticket.id == operation.ticket_id
+                    )
+                )
+            ).one()
+            assert tuple(ticket) == (TicketStatus.NEW.value, None, None)
+        assert attempts() == 0
+        assert published.calls == []
+
+
+# ---------------------------------------------------------------------------
+# B6: the production fetch-single registry (real registered classes)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.e2e
+class TestProductionRegistry:
+    """The freshness refresh with the production registration state, among
+    them the real `SyncRedhatCves`, and savepoint-scoped `FetcherConfig`
+    rows (issue #847, Q3)."""
+
+    @pytest.mark.parametrize("name", OPERATIONS)
+    async def test_every_source_disabled_keeps_the_mutation_with_one_info(
+        self,
+        api: _Api,
+        published: Publications,
+        monkeypatch: pytest.MonkeyPatch,
+        production_registry: dict[str, type[BaseCVEFetcher]],
+        name: str,
+    ) -> None:
+        """A disabled row for every fetch-single fetcher is the
+        no-eligible-source outcome: the ordinary `201`/`200`, the committed
+        audit events, exactly one `cve_fetch_no_eligible_source` INFO, and
+        zero Redis and Celery I/O."""
+        await api.configure(production_registry, enabled=False)
+        operation = await api.prepare(name)
+        attempts = forbid_redis(monkeypatch)
+
+        with capture_logs() as logs:
+            response = await api.send(operation)
+
+        assert response.status_code == operation.expected_status, response.text
+        assert _lifecycle(api.events) == ["commit"]
+        ticket_id = await api.ticket_uuid(operation, response)
+        assert await ticket_events_by_id(api.db, ticket_id) == api.expected_events(
+            operation
+        )
+        assert events_named(logs, NO_ELIGIBLE) == [
+            {
+                "event": NO_ELIGIBLE,
+                "log_level": "info",
+                "cve_id": operation.cve_id,
+                "trigger": TRIGGERS[name],
+            }
+        ]
+        assert attempts() == 0
+        assert published.calls == []
+
+    @pytest.mark.parametrize("name", OPERATIONS)
+    async def test_every_enabled_source_is_published_once_after_the_commit(
+        self,
+        api: _Api,
+        published: Publications,
+        monkeypatch: pytest.MonkeyPatch,
+        production_registry: dict[str, type[BaseCVEFetcher]],
+        name: str,
+    ) -> None:
+        """An enabled row for every fetch-single fetcher: after the commit,
+        exactly one `fetch_single_cve` per source in canonical source order
+        with the class's identity and `queue`, so Red Hat is published as
+        `redhat` without a queue (cve-service.md, Database-Free
+        Publication)."""
+        await api.configure(production_registry, enabled=True)
+        operation = await api.prepare(name)
+        redis = ScriptedRedis()
+        redis.install(monkeypatch)
+        sources = sorted(production_registry)
+        in_transaction: list[bool] = []
+
+        async def _at_publication(call: dict[str, Any]) -> None:
+            in_transaction.append(api.any_in_transaction())
+
+        published.before = _at_publication
+
+        with capture_logs() as logs:
+            response = await api.send(operation)
+
+        assert response.status_code == operation.expected_status, response.text
+        assert _lifecycle(api.events) == ["commit"] + [f"publish:{TASK}"] * len(sources)
+        assert published.calls == [
+            {
+                "task_name": TASK,
+                "kwargs": {
+                    "fetcher_name": production_registry[source].name,
+                    "cve_id": operation.cve_id,
+                    "source": source,
+                    "token": token,
+                },
+                "queue": production_registry[source].queue,
+            }
+            for source, token in zip(sources, redis.values("set"), strict=True)
+        ]
+        [redhat] = [
+            call
+            for call in published.calls
+            if call["kwargs"]["source"] == CVESourceType.REDHAT.value
+        ]
+        assert redhat["kwargs"]["fetcher_name"] == SyncRedhatCves.name
+        assert redhat["queue"] is None
+        assert in_transaction == [False] * len(sources)
+        ticket_id = await api.ticket_uuid(operation, response)
+        assert await ticket_events_by_id(api.db, ticket_id) == api.expected_events(
+            operation
+        )
+        assert events_named(logs, NO_ELIGIBLE) == []
+        assert events_named(logs, UNCONFIRMED) == []
+        assert events_named(logs, CALLBACK_FAILED) == []
+
+    @pytest.mark.parametrize("name", OPERATIONS)
+    async def test_missing_configuration_row_rolls_back_the_mutation(
+        self,
+        api: _Api,
+        published: Publications,
+        monkeypatch: pytest.MonkeyPatch,
+        production_registry: dict[str, type[BaseCVEFetcher]],
+        name: str,
+    ) -> None:
+        """No `FetcherConfig` row for the registered production fetchers:
+        `FetcherConfigMissingError` escapes as the generic `500`, and
+        `get_db()` rolls back the Ticket, the placeholder CVE, the
+        association, and every audit event; nothing is published."""
+        names = [fetcher_cls.name for fetcher_cls in production_registry.values()]
+        assert not await api.db.scalar(
+            select(func.count())
+            .select_from(FetcherConfig)
+            .where(FetcherConfig.fetcher_name.in_(names))
+        )
+        operation = await api.prepare(name)
+        force_production_error_page(monkeypatch)
+        attempts = forbid_redis(monkeypatch)
+        before = await api.counts()
+
+        with capture_logs() as logs:
+            response = await api.send(operation)
+
+        assert response.status_code == 500
+        assert response.json() == INTERNAL_ERROR
+        [unhandled] = events_named(logs, "unhandled_exception")
+        assert isinstance(unhandled["exc_info"], FetcherConfigMissingError)
         assert _lifecycle(api.events) == ["rollback"]
         assert await api.counts() == before
         assert (

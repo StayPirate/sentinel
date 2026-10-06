@@ -15,8 +15,11 @@ Atomic registration and isolation).
 Every test is a pure unit test: test-only fetcher classes are defined
 inside the test body under the shared `isolated_fetcher_registries`
 fixture, which snapshots and restores both `FETCHER_REGISTRY` and
-`_CVE_SOURCE_TYPE_MAP`. Classes are built with `type()` so each failing
-definition is a single statement inside `pytest.raises`.
+`_CVE_SOURCE_TYPE_MAP`. After that snapshot, the module's
+`_unowned_source_types` fixture releases every `CVESourceType` owner, so the
+test-only classes never collide with registered production owners. Classes
+are built with `type()` so each failing definition is a single statement
+inside `pytest.raises`.
 
 Out of scope: `commit_and_dispatch()` and `_isolated_status_commit()`
 (real PostgreSQL, `tests/test_services/test_cve_fetcher_finalization.py`)
@@ -56,6 +59,27 @@ from app.services.base_fetcher import (
 from app.services.cve_ingest import PostIngestTasks, UpsertAction
 
 pytestmark = [pytest.mark.unit, pytest.mark.usefixtures("isolated_fetcher_registries")]
+
+
+def _release_source_type_owners() -> None:
+    """Unregister every `CVESourceType` owner from both registries, keeping
+    them one coherent registration unit."""
+    owners = set(_CVE_SOURCE_TYPE_MAP.values())
+    _CVE_SOURCE_TYPE_MAP.clear()
+    for name in [name for name, cls in FETCHER_REGISTRY.items() if cls in owners]:
+        del FETCHER_REGISTRY[name]
+
+
+@pytest.fixture(autouse=True)
+def _unowned_source_types(isolated_fetcher_registries: None) -> None:
+    """Every `CVESourceType` member starts unowned, after
+    `isolated_fetcher_registries` has snapshotted both registries.
+
+    The test-only classes below declare production-owned members; without
+    this, a registered production owner would make their definitions fail
+    rule 3 (uniqueness). Teardown restores the production owners.
+    """
+    _release_source_type_owners()
 
 
 # ---------------------------------------------------------------------------
@@ -369,7 +393,6 @@ class TestAtomicRegistration:
 
 class TestRegistryAccessors:
     def test_accessors_key_by_enum_value_strings_and_map_to_classes(self) -> None:
-        _CVE_SOURCE_TYPE_MAP.clear()
         nvd = _define(
             "AccessorNvdFetcher",
             cve_source_type=CVESourceType.NVD,
@@ -382,7 +405,6 @@ class TestRegistryAccessors:
             assert all(type(key) is str for key in result)
 
     def test_accessors_return_fresh_plain_dicts(self) -> None:
-        _CVE_SOURCE_TYPE_MAP.clear()
         nvd = _define(
             "FreshDictFetcher",
             cve_source_type=CVESourceType.NVD,
@@ -405,7 +427,6 @@ class TestRegistryAccessors:
     def test_fetch_single_fetchers_is_strict_subset_of_all_source_types(
         self,
     ) -> None:
-        _CVE_SOURCE_TYPE_MAP.clear()
         nvd = _define(
             "SubsetNvdFetcher",
             cve_source_type=CVESourceType.NVD,
@@ -425,10 +446,53 @@ class TestRegistryAccessors:
         assert fetch_single.items() < all_sources.items()
 
     def test_empty_registry_returns_empty_dicts(self) -> None:
-        _CVE_SOURCE_TYPE_MAP.clear()
-
         assert get_fetch_single_fetchers() == {}
         assert get_all_cve_source_types() == {}
+
+
+# ---------------------------------------------------------------------------
+# Module isolation: every source type starts unowned
+# ---------------------------------------------------------------------------
+
+
+class TestUnownedSourceTypes:
+    def test_no_cve_fetcher_is_registered_at_test_start(self) -> None:
+        """Production CVE fetchers registered for the session are released
+        from both registries before each test."""
+        assert _CVE_SOURCE_TYPE_MAP == {}
+        assert not [
+            cls for cls in FETCHER_REGISTRY.values() if issubclass(cls, BaseCVEFetcher)
+        ]
+
+    def test_release_frees_every_member_from_simulated_production_owners(
+        self,
+    ) -> None:
+        """An owner of every member, standing in for the complete production
+        registration, is released from both registries, after which each
+        member can be declared again without a rule-3 collision."""
+        plain = _define_plain("UnrelatedPlainFetcher")
+        owners = {
+            member: _define(
+                f"SimulatedOwner{member.name}",
+                cve_source_type=member,
+                supports_fetch_single=False,
+            )
+            for member in CVESourceType
+        }
+        assert dict(_CVE_SOURCE_TYPE_MAP) == owners
+
+        _release_source_type_owners()
+
+        assert _CVE_SOURCE_TYPE_MAP == {}
+        assert not set(owners.values()) & set(FETCHER_REGISTRY.values())
+        assert FETCHER_REGISTRY[plain.name] is plain
+        for member in CVESourceType:
+            redeclared = _define(
+                f"Redeclared{member.name}",
+                cve_source_type=member,
+                supports_fetch_single=False,
+            )
+            assert _CVE_SOURCE_TYPE_MAP[member] is redeclared
 
 
 # ---------------------------------------------------------------------------

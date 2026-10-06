@@ -98,6 +98,7 @@ Sentinel requires outbound access to:
 | SMELT | `smelt.suse.de` | 443 | Product/package data |
 | AIMAAS | `aimaas.suse.de` | 443 | Product lifecycle, CVSS thresholds |
 | NVD | `services.nvd.nist.gov` | 443 | CVE data |
+| Red Hat Security Data API | `access.redhat.com` | 443 | CVE enrichment (CVSS, CWE, references, package names) |
 | GitHub | `github.com` | 443 | MITRE cvelistV5 repository clone/fetch |
 | git.kernel.org | `git.kernel.org` | 443 | Linux kernel vulnerability repo clone/fetch |
 

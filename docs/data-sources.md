@@ -18,7 +18,7 @@ relevant feature specifications in `docs/features/`.
 |---|---|---|---|
 | NVD | Public | CVE data, CVSS scores, CPE matches | Specified |
 | MITRE CVE Services | Public | Early CVE assignments | Specified |
-| Red Hat Security Data | Public | CVSS assessments | Specified |
+| Red Hat Security Data | Public | CVSS assessments | Active |
 | SUSE CSAF VEX | Public | SUSE CVSS assessments per CVE | Not integrated |
 | IBS | Internal | Source packages, builds, repos, declarative product channels | Active |
 | OBS | Public | Source packages, builds, repos (openSUSE) | Not planned |
@@ -106,7 +106,7 @@ provide a useful secondary perspective when evaluating vulnerabilities.
 - **Access**: REST API at
   `access.redhat.com/hydra/rest/securitydata/cve/{CVE-ID}.json`. Public
   access, no authentication required. Rate limits undocumented
-- **Integration status**: **Specified**
+- **Integration status**: **Active**
 - **Documentation**:
   https://docs.redhat.com/en/documentation/red_hat_security_data_api/1.0/html-single/red_hat_security_data_api/index
 
