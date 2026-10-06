@@ -45,12 +45,12 @@ def redis_url_from_client(client: redis_asyncio.Redis) -> str:
 def unused_tcp_port() -> int:
     """A TCP port that was free when this function returned.
 
-    The kernel picks the port for a socket bound to port 0; the socket is
-    closed again, so the caller can bind the port itself (or have Docker
-    bind it) shortly afterward.
+    The kernel picks the port for a loopback socket bound to port 0; the
+    socket is closed again, so the caller can bind the port itself (or have
+    Docker bind it) shortly afterward.
     """
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-        probe.bind(("", 0))
+        probe.bind(("127.0.0.1", 0))
         port: int = probe.getsockname()[1]
     return port
 
