@@ -1,0 +1,176 @@
+{
+  "id": "SUSE-SU-2021:4096-1",
+  "summary": "Fictional summary of SUSE-SU-2021:4096-1.",
+  "details": "Fictional details of SUSE-SU-2021:4096-1.",
+  "modified": "2026-02-04T03:44:58.517555Z",
+  "published": "2021-12-15T10:31:48Z",
+  "related": [
+    "CVE-2021-4104",
+    "CVE-2021-44228"
+  ],
+  "upstream": [
+    "CVE-2021-4104",
+    "CVE-2021-44228"
+  ],
+  "references": [
+    {
+      "type": "ADVISORY",
+      "url": "https://www.suse.com/support/update/announcement/2021/suse-su-20214096-1/"
+    },
+    {
+      "type": "REPORT",
+      "url": "https://bugzilla.suse.com/1193611"
+    },
+    {
+      "type": "REPORT",
+      "url": "https://bugzilla.suse.com/1193641"
+    },
+    {
+      "type": "REPORT",
+      "url": "https://bugzilla.suse.com/1193662"
+    },
+    {
+      "type": "WEB",
+      "url": "https://www.suse.com/security/cve/CVE-2021-4104"
+    },
+    {
+      "type": "WEB",
+      "url": "https://www.suse.com/security/cve/CVE-2021-44228"
+    }
+  ],
+  "affected": [
+    {
+      "package": {
+        "name": "storm",
+        "ecosystem": "SUSE:HPE Helion OpenStack 8",
+        "purl": "pkg:rpm/suse/storm&distro=HPE%20Helion%20OpenStack%208"
+      },
+      "ranges": [
+        {
+          "type": "ECOSYSTEM",
+          "events": [
+            {
+              "introduced": "0"
+            },
+            {
+              "fixed": "1.2.3-3.8.2"
+            }
+          ]
+        }
+      ],
+      "ecosystem_specific": {
+        "binaries": [
+          {
+            "storm": "1.2.3-3.8.2",
+            "venv-openstack-monasca-x86_64": "2.2.2~dev1-11.32.1",
+            "storm-nimbus": "1.2.3-3.8.2",
+            "storm-supervisor": "1.2.3-3.8.2"
+          }
+        ]
+      },
+      "database_specific": {
+        "source": "https://ftp.suse.com/pub/projects/security/osv/SUSE-SU-2021:4096-1.json"
+      }
+    },
+    {
+      "package": {
+        "name": "venv-openstack-monasca",
+        "ecosystem": "SUSE:HPE Helion OpenStack 8",
+        "purl": "pkg:rpm/suse/venv-openstack-monasca&distro=HPE%20Helion%20OpenStack%208"
+      },
+      "ranges": [
+        {
+          "type": "ECOSYSTEM",
+          "events": [
+            {
+              "introduced": "0"
+            },
+            {
+              "fixed": "2.2.2~dev1-11.32.1"
+            }
+          ]
+        }
+      ],
+      "ecosystem_specific": {
+        "binaries": [
+          {
+            "storm-nimbus": "1.2.3-3.8.2",
+            "storm-supervisor": "1.2.3-3.8.2",
+            "storm": "1.2.3-3.8.2",
+            "venv-openstack-monasca-x86_64": "2.2.2~dev1-11.32.1"
+          }
+        ]
+      },
+      "database_specific": {
+        "source": "https://ftp.suse.com/pub/projects/security/osv/SUSE-SU-2021:4096-1.json"
+      }
+    },
+    {
+      "package": {
+        "name": "storm",
+        "ecosystem": "SUSE:OpenStack Cloud 8",
+        "purl": "pkg:rpm/suse/storm&distro=SUSE%20OpenStack%20Cloud%208"
+      },
+      "ranges": [
+        {
+          "type": "ECOSYSTEM",
+          "events": [
+            {
+              "introduced": "0"
+            },
+            {
+              "fixed": "1.2.3-3.8.2"
+            }
+          ]
+        }
+      ],
+      "ecosystem_specific": {
+        "binaries": [
+          {
+            "storm-nimbus": "1.2.3-3.8.2",
+            "storm-supervisor": "1.2.3-3.8.2",
+            "storm": "1.2.3-3.8.2",
+            "venv-openstack-monasca-x86_64": "2.2.2~dev1-11.32.1"
+          }
+        ]
+      },
+      "database_specific": {
+        "source": "https://ftp.suse.com/pub/projects/security/osv/SUSE-SU-2021:4096-1.json"
+      }
+    },
+    {
+      "package": {
+        "name": "venv-openstack-monasca",
+        "ecosystem": "SUSE:OpenStack Cloud 8",
+        "purl": "pkg:rpm/suse/venv-openstack-monasca&distro=SUSE%20OpenStack%20Cloud%208"
+      },
+      "ranges": [
+        {
+          "type": "ECOSYSTEM",
+          "events": [
+            {
+              "introduced": "0"
+            },
+            {
+              "fixed": "2.2.2~dev1-11.32.1"
+            }
+          ]
+        }
+      ],
+      "ecosystem_specific": {
+        "binaries": [
+          {
+            "venv-openstack-monasca-x86_64": "2.2.2~dev1-11.32.1",
+            "storm-nimbus": "1.2.3-3.8.2",
+            "storm-supervisor": "1.2.3-3.8.2",
+            "storm": "1.2.3-3.8.2"
+          }
+        ]
+      },
+      "database_specific": {
+        "source": "https://ftp.suse.com/pub/projects/security/osv/SUSE-SU-2021:4096-1.json"
+      }
+    }
+  ],
+  "schema_version": "1.7.3"
+}

@@ -1,0 +1,107 @@
+{
+  "id": "CURL-CVE-2023-38545",
+  "summary": "Fictional summary of CURL-CVE-2023-38545.",
+  "details": "Fictional details of CURL-CVE-2023-38545.",
+  "aliases": [
+    "CVE-2023-38545"
+  ],
+  "modified": "2026-05-27T02:29:01.130458Z",
+  "published": "2023-10-11T08:00:00Z",
+  "database_specific": {
+    "last_affected": "8.3.0",
+    "severity": "High",
+    "CWE": {
+      "desc": "Heap-based Buffer Overflow",
+      "id": "CWE-122"
+    },
+    "award": {
+      "amount": "4660",
+      "currency": "USD"
+    },
+    "issue": "https://advisory.example.invalid/upstream/1",
+    "package": "curl",
+    "www": "https://curl.se/docs/CVE-2023-38545.html",
+    "URL": "https://curl.se/docs/CVE-2023-38545.json",
+    "affects": "both"
+  },
+  "affected": [
+    {
+      "ranges": [
+        {
+          "type": "SEMVER",
+          "events": [
+            {
+              "introduced": "7.69.0"
+            },
+            {
+              "fixed": "8.4.0"
+            }
+          ]
+        },
+        {
+          "type": "GIT",
+          "repo": "https://github.com/curl/curl.git",
+          "events": [
+            {
+              "introduced": "4a4b63daaa01ef59b131d91e8e6e6dfe275c0f08"
+            },
+            {
+              "fixed": "fb4415d8aee6c1045be932a34fe6107c2f5ed147"
+            }
+          ]
+        }
+      ],
+      "versions": [
+        "8.3.0",
+        "8.2.1",
+        "8.2.0"
+      ],
+      "database_specific": {
+        "source": "https://curl.se/docs/CURL-CVE-2023-38545.json",
+        "vanir_signatures_modified": "2026-05-27T02:29:01Z",
+        "vanir_signatures": [
+          {
+            "signature_version": "v1",
+            "source": "https://github.com/curl/curl.git/commit/fb4415d8aee6c1045be932a34fe6107c2f5ed147",
+            "target": {
+              "file": "lib/socks.c"
+            },
+            "deprecated": false,
+            "digest": {
+              "line_hashes": [
+                "312460549901445267928349847414673385881",
+                "275074174645245181067402918537199669107",
+                "36586585150953595056584450650776892379"
+              ],
+              "threshold": 0.9
+            },
+            "id": "CURL-CVE-2023-38545-ba35533b",
+            "signature_type": "Line"
+          },
+          {
+            "id": "CURL-CVE-2023-38545-da844016",
+            "signature_type": "Function",
+            "signature_version": "v1",
+            "source": "https://github.com/curl/curl.git/commit/fb4415d8aee6c1045be932a34fe6107c2f5ed147",
+            "target": {
+              "file": "lib/socks.c",
+              "function": "do_SOCKS5"
+            },
+            "deprecated": false,
+            "digest": {
+              "function_hash": "78686540855549523366077688098291190878",
+              "length": 10901
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "schema_version": "1.7.5",
+  "credits": [
+    {
+      "name": "Example Researcher",
+      "type": "FINDER"
+    }
+  ]
+}

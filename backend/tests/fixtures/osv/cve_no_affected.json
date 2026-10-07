@@ -1,0 +1,43 @@
+{
+  "id": "CVE-2023-45288",
+  "details": "Fictional details of CVE-2023-45288.",
+  "aliases": [
+    "BIT-golang-2023-45288",
+    "GHSA-4v7x-pqxf-cx7m",
+    "GO-2024-2687"
+  ],
+  "modified": "2026-07-24T18:29:55.172922794Z",
+  "published": "2024-04-04T21:15:16Z",
+  "related": [
+    "ALSA-2024:1962",
+    "ALSA-2024:1963",
+    "ALSA-2024:2079"
+  ],
+  "references": [
+    {
+      "type": "ADVISORY",
+      "url": "https://security.netapp.com/advisory/ntap-20240419-0009/"
+    },
+    {
+      "type": "WEB",
+      "url": "https://advisory.example.invalid/upstream/1"
+    },
+    {
+      "type": "WEB",
+      "url": "https://advisory.example.invalid/upstream/2"
+    },
+    {
+      "type": "WEB",
+      "url": "https://go.dev/cl/576155"
+    },
+    {
+      "type": "WEB",
+      "url": "https://go.dev/issue/65051"
+    },
+    {
+      "type": "WEB",
+      "url": "https://advisory.example.invalid/upstream/3"
+    }
+  ],
+  "schema_version": "1.7.5"
+}

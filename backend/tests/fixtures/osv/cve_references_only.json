@@ -1,0 +1,44 @@
+{
+  "id": "CVE-2014-0160",
+  "details": "Fictional details of CVE-2014-0160.",
+  "modified": "2026-04-16T06:17:18.968553483Z",
+  "published": "2014-04-07T22:55:03Z",
+  "related": [
+    "SUSE-FU-2022:0445-1",
+    "SUSE-RU-2015:0769-1",
+    "SUSE-SU-2015:0546-1"
+  ],
+  "references": [
+    {
+      "type": "ADVISORY",
+      "url": "https://advisory.example.invalid/upstream/1"
+    },
+    {
+      "type": "ARTICLE",
+      "url": "https://advisory.example.invalid/upstream/2"
+    },
+    {
+      "type": "EVIDENCE",
+      "url": "https://advisory.example.invalid/upstream/3"
+    },
+    {
+      "type": "FIX",
+      "url": "https://advisory.example.invalid/upstream/4"
+    },
+    {
+      "type": "REPORT",
+      "url": "https://advisory.example.invalid/upstream/5"
+    },
+    {
+      "type": "WEB",
+      "url": "https://advisory.example.invalid/upstream/6"
+    }
+  ],
+  "schema_version": "1.7.5",
+  "severity": [
+    {
+      "type": "CVSS_V3",
+      "score": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N"
+    }
+  ]
+}
