@@ -644,6 +644,7 @@ class TestMissingBeforeMutation:
             {"affected": None, "references": None, "aliases": None},
             {"references": [], "aliases": []},
             {"related": [RELATED, OTHER_CVE], "upstream": [OTHER_CVE]},
+            {"aliases": [OTHER_CVE, OTHER_CVE_2], "related": [RELATED]},
             {"withdrawn": "2026-01-01T00:00:00Z", "details": PERSONAL},
         ],
         ids=[
@@ -652,6 +653,7 @@ class TestMissingBeforeMutation:
             "null_fields",
             "empty_arrays",
             "only_related",
+            "only_cve_aliases",
             "withdrawn",
         ],
     )
