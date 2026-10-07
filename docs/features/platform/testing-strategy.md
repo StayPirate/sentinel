@@ -2228,9 +2228,13 @@ API, and integration tests MUST cover this complete matrix.
   `success` with `fetched_at = CVEKEVEntry.updated_at` and null
   `first_failed_at`.
 - No entry and no successful `sync_cisa_kev` run yielding `not_attempted`; a
-  fully successful run whose `finished_at` precedes the CVE yielding
-  `not_attempted`; a later fully successful run yielding `missing` with the run
-  `finished_at`.
+  fully successful run that started before the CVE was created yielding
+  `not_attempted`, including a CVE created between the run's `started_at` and
+  `finished_at`; a fully successful run that started at or after the CVE's
+  creation yielding `missing` with the run `finished_at`.
+- A CVE listed in the catalog but created after the real fetcher examined its
+  entry, during a fully successful run, yielding `not_attempted` rather than
+  `missing`.
 - `partial`, `failure`, `queued`, and `running` runs never proving absence, and
   the `finished_at DESC, id DESC` tie-breaker selecting the latest successful
   run.

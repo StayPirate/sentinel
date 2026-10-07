@@ -79,6 +79,7 @@ _ITEM_FIELDS: Final = {
 
 CREATED: Final = datetime(2099, 3, 1, 9, 0, tzinfo=UTC)
 LEGACY_FETCHED: Final = datetime(2099, 3, 1, 12, 0, tzinfo=UTC)
+KEV_RUN_STARTED: Final = datetime(2099, 6, 28, 3, 55, tzinfo=UTC)
 KEV_RUN_FINISHED: Final = datetime(2099, 6, 28, 4, 0, tzinfo=UTC)
 MITRE_FETCHED: Final = datetime(2099, 6, 28, 8, 0, tzinfo=UTC)
 MITRE_FIRST_FAILED: Final = datetime(2099, 6, 20, 8, 0, tzinfo=UTC)
@@ -167,7 +168,10 @@ async def _arrange_roster(
     await fetcher_config_factory(fetcher_name=KEV_FETCHER_NAME)
     await fetcher_config_factory(fetcher_name=osv.name, enabled=False)
     await fetcher_run_factory(
-        fetcher_name=KEV_FETCHER_NAME, status="success", finished_at=KEV_RUN_FINISHED
+        fetcher_name=KEV_FETCHER_NAME,
+        status="success",
+        started_at=KEV_RUN_STARTED,
+        finished_at=KEV_RUN_FINISHED,
     )
     cve: CVE = await cve_factory(cve_id=_random_cve_id(), created_at=CREATED)
     for source, status, fetched_at, first_failed_at in (

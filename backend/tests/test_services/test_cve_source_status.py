@@ -88,6 +88,7 @@ FETCHED: Final = datetime(2099, 3, 5, 8, 30, tzinfo=UTC)
 FIRST_FAILED: Final = datetime(2099, 3, 2, 6, 15, tzinfo=UTC)
 KEV_UPDATED: Final = datetime(2099, 3, 4, 10, 0, tzinfo=UTC)
 ONE_US: Final = timedelta(microseconds=1)
+RUN_DURATION: Final = timedelta(minutes=5)
 ROW_LOCKS: Final = ("FOR UPDATE", "FOR NO KEY UPDATE", "FOR SHARE", "FOR KEY SHARE")
 OVERLAY_WARNING: Final = "cve_source_pending_overlay_unavailable"
 _ROW: Final[dict[str, Any]] = {"status": "success", "fetched_at": FETCHED}
@@ -1017,6 +1018,7 @@ class TestRedisDegradation:
         await fetcher_run_factory(
             fetcher_name=KEV_FETCHER_NAME,
             status="success",
+            started_at=CREATED + timedelta(days=1) - RUN_DURATION,
             finished_at=CREATED + timedelta(days=1),
         )
         cve: CVE = await cve_factory(cve_id=_random_cve_id(), created_at=CREATED)
@@ -1204,7 +1206,10 @@ class TestCoherentReadOnlyObservation:
         await fetcher_config_factory(fetcher_name=nvd.name, enabled=False)
         await fetcher_config_factory(fetcher_name=KEV_FETCHER_NAME, enabled=False)
         await fetcher_run_factory(
-            fetcher_name=KEV_FETCHER_NAME, status="success", finished_at=FETCHED
+            fetcher_name=KEV_FETCHER_NAME,
+            status="success",
+            started_at=FETCHED - RUN_DURATION,
+            finished_at=FETCHED,
         )
         cve: CVE = await cve_factory(cve_id=_random_cve_id(), created_at=CREATED)
         await ticket_factory(cve_id=cve.id, is_confidential=True)
@@ -1333,28 +1338,46 @@ class TestKEVProjection:
         assert result.entries == (_entry("kev", NOT_ATTEMPTED, refetchable=False),)
 
     @pytest.mark.parametrize(
-        ("offset", "expected"),
+        ("started", "finished", "expected"),
         [
-            pytest.param(-ONE_US, NOT_ATTEMPTED, id="before-creation"),
-            pytest.param(timedelta(0), MISSING, id="at-creation"),
-            pytest.param(ONE_US, MISSING, id="after-creation"),
+            pytest.param(
+                -2 * RUN_DURATION,
+                -RUN_DURATION,
+                NOT_ATTEMPTED,
+                id="run-before-creation",
+            ),
+            pytest.param(
+                -RUN_DURATION, RUN_DURATION, NOT_ATTEMPTED, id="created-mid-run"
+            ),
+            pytest.param(
+                -ONE_US, RUN_DURATION, NOT_ATTEMPTED, id="started-just-before-creation"
+            ),
+            pytest.param(timedelta(0), RUN_DURATION, MISSING, id="started-at-creation"),
+            pytest.param(ONE_US, RUN_DURATION, MISSING, id="started-after-creation"),
         ],
     )
-    async def test_successful_run_boundary_against_cve_creation(
+    async def test_successful_run_start_boundary_against_cve_creation(
         self,
         service: _Service,
         registry: _Registry,
         cve_factory: Factory,
         fetcher_config_factory: Factory,
         fetcher_run_factory: Factory,
-        offset: timedelta,
+        started: timedelta,
+        finished: timedelta,
         expected: CVESourceDerivedStatus,
     ) -> None:
+        """Only a run that started at or after the CVE's creation proves
+        absence; a CVE created while the run was in progress is not
+        `missing` even though the run finished after it."""
         registry.kev()
         await fetcher_config_factory(fetcher_name=KEV_FETCHER_NAME)
-        finished_at = CREATED + offset
+        finished_at = CREATED + finished
         await fetcher_run_factory(
-            fetcher_name=KEV_FETCHER_NAME, status="success", finished_at=finished_at
+            fetcher_name=KEV_FETCHER_NAME,
+            status="success",
+            started_at=CREATED + started,
+            finished_at=finished_at,
         )
         cve: CVE = await cve_factory(cve_id=_random_cve_id(), created_at=CREATED)
 
@@ -1390,6 +1413,7 @@ class TestKEVProjection:
         await fetcher_run_factory(
             fetcher_name=KEV_FETCHER_NAME,
             status=status.value,
+            started_at=CREATED + timedelta(days=1),
             finished_at=CREATED + timedelta(days=2),
         )
         alone: CVE = await cve_factory(cve_id=_random_cve_id(), created_at=CREATED)
@@ -1401,6 +1425,7 @@ class TestKEVProjection:
         await fetcher_run_factory(
             fetcher_name=KEV_FETCHER_NAME,
             status="success",
+            started_at=CREATED - timedelta(days=1) - RUN_DURATION,
             finished_at=CREATED - timedelta(days=1),
         )
         assert (await service.status(alone.cve_id)).entries == (
@@ -1417,10 +1442,9 @@ class TestKEVProjection:
         fetcher_run_factory: Factory,
     ) -> None:
         """The latest `finished_at` wins over a larger id and over insertion
-        order; two successful runs sharing the latest `finished_at` (distinct
-        ids) select that instant deterministically. The `id DESC`
-        tie-breaker itself is not observable here: only the run's
-        `finished_at` reaches the response."""
+        order; between two successful runs sharing the latest `finished_at`,
+        `id DESC` selects the larger id, observable through the selected
+        run's `started_at`."""
         registry.kev()
         await fetcher_config_factory(fetcher_name=KEV_FETCHER_NAME)
         latest = CREATED + timedelta(days=3)
@@ -1429,12 +1453,14 @@ class TestKEVProjection:
             id=larger_id,
             fetcher_name=KEV_FETCHER_NAME,
             status="success",
+            started_at=CREATED - timedelta(days=1) - RUN_DURATION,
             finished_at=CREATED - timedelta(days=1),
         )
         await fetcher_run_factory(
             id=smaller_id,
             fetcher_name=KEV_FETCHER_NAME,
             status="success",
+            started_at=latest - RUN_DURATION,
             finished_at=latest,
         )
         cve: CVE = await cve_factory(cve_id=_random_cve_id(), created_at=CREATED)
@@ -1443,11 +1469,18 @@ class TestKEVProjection:
             _entry("kev", MISSING, latest, refetchable=False),
         )
 
-        for run_id in sorted((uuid.uuid4(), uuid.uuid4())):
+        # Inserted smaller id first: only the larger id's run, which started
+        # before the CVE existed, yields `not_attempted`.
+        tied_smaller_id, tied_larger_id = sorted((uuid.uuid4(), uuid.uuid4()))
+        for run_id, started_at in (
+            (tied_smaller_id, CREATED),
+            (tied_larger_id, CREATED - ONE_US),
+        ):
             await fetcher_run_factory(
                 id=run_id,
                 fetcher_name=KEV_FETCHER_NAME,
                 status="success",
+                started_at=started_at,
                 finished_at=latest + timedelta(hours=1),
             )
         tied = (
@@ -1461,7 +1494,7 @@ class TestKEVProjection:
         assert tied == 2
 
         assert (await service.status(cve.cve_id)).entries == (
-            _entry("kev", MISSING, latest + timedelta(hours=1), refetchable=False),
+            _entry("kev", NOT_ATTEMPTED, refetchable=False),
         )
 
     @pytest.mark.parametrize("evidence", ["entry", "run"])
@@ -1478,7 +1511,10 @@ class TestKEVProjection:
         registry.kev()
         await fetcher_config_factory(fetcher_name=KEV_FETCHER_NAME, enabled=False)
         await fetcher_run_factory(
-            fetcher_name=KEV_FETCHER_NAME, status="success", finished_at=FETCHED
+            fetcher_name=KEV_FETCHER_NAME,
+            status="success",
+            started_at=FETCHED - RUN_DURATION,
+            finished_at=FETCHED,
         )
         cve: CVE = await cve_factory(cve_id=_random_cve_id(), created_at=CREATED)
         if evidence == "entry":
@@ -1511,6 +1547,7 @@ class TestKEVProjection:
         await fetcher_run_factory(
             fetcher_name=KEV_FETCHER_NAME,
             status="success",
+            started_at=KEV_UPDATED + timedelta(days=30) - RUN_DURATION,
             finished_at=KEV_UPDATED + timedelta(days=30),
         )
 

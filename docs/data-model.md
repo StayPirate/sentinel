@@ -538,7 +538,7 @@ statuses are derived at read time from other data. KEV is the
 current example: `success` derives from `CVEKEVEntry` presence, while
 `missing` and `not_attempted` derive from the latest fully successful
 `sync_cisa_kev` `FetcherRun` (`finished_at DESC, id DESC`; only a run whose
-`finished_at >= CVE.created_at` proves `missing`). See
+`started_at >= CVE.created_at` proves `missing`). See
 `docs/features/tickets/cve-service.md` (KEV status derivation) for the
 complete logic.
 
