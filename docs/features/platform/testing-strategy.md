@@ -2210,8 +2210,9 @@ this complete matrix.
 - A CVE without entries returning `{"data": []}`; several scopes grouped with
   every persisted row in exactly one non-empty group; an emptied or removed
   scope absent; a rejected CVE still returning its preserved entries.
-- Group order by `source_container` code point and entry order by the conflict
-  key fields, including absent values after present ones, the empty string
+- Group order by `source_container` code point and entry order by the
+  documented conflict-key field sequence (package coordinates first), including
+  absent values after present ones, the empty string
   before other present values, and code-point rather than collation or version
   order.
 - Every persisted entry content field projected as stored, including
