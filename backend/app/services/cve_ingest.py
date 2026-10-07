@@ -228,8 +228,8 @@ def affected_version_content(values: Any) -> AffectedVersionContent:
 
 def _affected_version_key(entry: AffectedVersionEntry) -> tuple[Any, ...]:
     """The entry conflict key: absent `vendor`/`product` differ from an empty
-    string, absent `version_type`/`version`/`version_end`/`package_name`
-    equal one."""
+    string, absent `version_type`/`version`/`version_end`/`package_name`/
+    `ecosystem` equal one."""
     return (
         entry.vendor,
         entry.product,
@@ -237,6 +237,7 @@ def _affected_version_key(entry: AffectedVersionEntry) -> tuple[Any, ...]:
         entry.version or "",
         entry.version_end or "",
         entry.package_name or "",
+        entry.ecosystem or "",
     )
 
 
