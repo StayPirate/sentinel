@@ -28,12 +28,12 @@ one short session from the overridable `get_cve_refetch_session_factory`,
 pointed here at sessions joined to the `db_session` connection in
 `create_savepoint` mode (the per-test rollback discards everything).
 
-Every test except the production-reachability class empties both fetcher
-registries under `isolated_fetcher_registries` and defines its own test-only
-CVE fetchers. The production-reachability class keeps the production
-registration state and derives every expectation from
-`get_fetch_single_fetchers()` and `CVESourceType`. The broker is never
-reached (`task_publication.publish_task` is a recorder) and the
+Every test except the production-reachability and KEV classes empties both
+fetcher registries under `isolated_fetcher_registries` and defines its own
+test-only CVE fetchers. Those two classes keep the production registration
+state and derive every expectation from `get_fetch_single_fetchers()` and
+`CVESourceType`; the KEV class also enables the real `SyncCisaKev`. The
+broker is never reached (`task_publication.publish_task` is a recorder) and the
 pending-marker client is either `ScriptedRedis` or forbidden; "zero Redis
 commands" refers to that client (authentication's
 session cache is a separate Redis boundary isolated by `redis_client`).
@@ -81,6 +81,7 @@ from app.models.ticket_audit_event import TicketAuditEvent
 from app.services import base_cve_fetcher, task_publication
 from app.services.base_cve_fetcher import BaseCVEFetcher
 from app.services.session_service import create_session
+from app.services.tickets.sync_cisa_kev import SyncCisaKev
 from tests.support.cve_catch_up import Publications, define_cve_fetcher
 from tests.support.cve_source_status import clear_fetcher_registries
 from tests.support.fetch_single_cve import (
@@ -126,6 +127,7 @@ REDHAT = CVESourceType.REDHAT
 GHSA = CVESourceType.GHSA
 OSV = CVESourceType.OSV
 EPSS = CVESourceType.EPSS
+KEV = CVESourceType.KEV
 
 # A statement reading or writing a CVE- or Ticket-domain table.
 _DOMAIN_TABLE = re.compile(r'\b(?:FROM|INTO|UPDATE|JOIN)\s+"?(?:ticket|cve)\w*"?\b')
@@ -1010,6 +1012,63 @@ class TestProductionReachability:
             assert response.content == _NOT_FOUND, source
 
         _assert_no_dispatch(attempts, api.published)
+
+
+@pytest.mark.e2e
+class TestKevNotRefetchable:
+    """The real `SyncCisaKev` is registered with an enabled `FetcherConfig`,
+    as bootstrap leaves it, and is still never refetched: the exclusion
+    follows `supports_fetch_single = False`, not the configuration
+    (cve-sync-kev.md, Fetcher Definition; cve-fetcher-infrastructure.md,
+    On-demand Single-Item Fetch)."""
+
+    @staticmethod
+    async def _configure_with_kev(
+        api: _Api, production_registry: dict[str, type[BaseCVEFetcher]]
+    ) -> None:
+        assert base_cve_fetcher.get_all_cve_source_types()[KEV.value] is SyncCisaKev
+        assert KEV.value not in production_registry
+        await api.configure(
+            {**production_registry, KEV.value: SyncCisaKev}, enabled=True
+        )
+
+    async def test_explicit_kev_source_is_cve_invalid_source(
+        self,
+        api: _Api,
+        monkeypatch: pytest.MonkeyPatch,
+        production_registry: dict[str, type[BaseCVEFetcher]],
+    ) -> None:
+        await self._configure_with_kev(api, production_registry)
+        cve = await api.cve()
+        headers = await api.headers(Role.VULNERABILITY_ANALYST)
+        attempts = forbid_redis(monkeypatch)
+
+        response = await api.refetch(cve.cve_id, headers, source=KEV.value)
+
+        _assert_error_envelope(response, 422, "CVE_INVALID_SOURCE")
+        _assert_no_dispatch(attempts, api.published)
+
+    async def test_broadcast_never_publishes_kev(
+        self,
+        api: _Api,
+        monkeypatch: pytest.MonkeyPatch,
+        production_registry: dict[str, type[BaseCVEFetcher]],
+    ) -> None:
+        await self._configure_with_kev(api, production_registry)
+        cve = await api.cve()
+        headers = await api.headers(Role.VULNERABILITY_ANALYST)
+        redis = ScriptedRedis()
+        redis.install(monkeypatch)
+
+        response = await api.refetch(cve.cve_id, headers)
+
+        assert response.status_code == 202, response.text
+        assert response.json() == _result(sorted(production_registry), [], [], [])
+        published = [call["kwargs"] for call in api.published.calls]
+        assert len(published) == len(production_registry)
+        assert KEV.value not in {kwargs["source"] for kwargs in published}
+        assert SyncCisaKev.name not in {kwargs["fetcher_name"] for kwargs in published}
+        assert not [key for _, key, _ in redis.commands if KEV.value in str(key)]
 
 
 # ---------------------------------------------------------------------------

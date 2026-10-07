@@ -31,7 +31,7 @@ relevant feature specifications in `docs/features/`.
 | SUSE OpenLDAP | Internal | Employee identity, POSIX accounts | Not integrated |
 | SUSEID (Authentik) | Internal | Centralized identity provisioning via SCIM push | Planned |
 | SUSE Bugzilla | Internal | Bug tracking, security issues | Reference only |
-| CISA KEV | Public | Known exploited vulnerabilities catalog | Specified |
+| CISA KEV | Public | Known exploited vulnerabilities catalog | Active |
 | EPSS | Public | Exploit probability scores | Active |
 | GHSA | Public | Security advisories, CVSS, CWE | Specified |
 | Linux Kernel CVE | Public | Kernel CVE data, fix/introduce commits | Specified |
@@ -152,17 +152,17 @@ CNA; for CVEs assigned by another CNA, neither carries it.
 The CISA Known Exploited Vulnerabilities catalog is a curated list of CVEs
 with confirmed active exploitation in the wild, maintained by the
 Cybersecurity and Infrastructure Security Agency (US). The catalog contains
-approximately 1,200 CVEs and is updated almost daily. Presence in the KEV
-catalog is a strong signal for prioritization — it indicates that the
-vulnerability is being actively used by threat actors.
+approximately 1,700 CVEs (1,734 on 2026-10-07) and is updated almost daily.
+Presence in the KEV catalog is a strong signal for prioritization — it
+indicates that the vulnerability is being actively used by threat actors.
 
 - **Relevant data**: CVE ID, date added to the KEV catalog, CWE
   classifications; reference URL constructed per-CVE
 - **Access**: JSON feed at
   `https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json`.
   No authentication required, no significant rate limits. Single file
-  (~1.5MB), complete download each sync
-- **Integration status**: **Specified**
+  (~1.8MB), complete download each sync
+- **Integration status**: **Active**
 - **Documentation**:
   https://www.cisa.gov/known-exploited-vulnerabilities-catalog
 
