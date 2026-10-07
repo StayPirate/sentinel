@@ -3707,8 +3707,8 @@ The bootstrap routine:
   `run_timeout >= 60`). When a `FetcherConfig` record is auto-created
   for a newly registered fetcher, `run_timeout` is initialized from the
   fetcher's `default_run_timeout` class attribute (default: 3600 seconds,
-  1 hour). Like `default_request_delay`, it is used only at first
-  registration; operator overrides survive redeployments. A fetcher whose
+  1 hour). Like `default_request_delay`, it seeds `FetcherConfig` only at
+  first registration; operator overrides survive redeployments. A fetcher whose
   owning specification projects a regular run longer than the default
   soft limit (for example a stateless fetcher that reprocesses its whole
   scope every run) MUST declare a `default_run_timeout` that covers the
@@ -3733,11 +3733,11 @@ The bootstrap routine:
   single `FetcherRun` status update, with the hard limit as backstop.
 - `request_delay` is initialized from the fetcher's
   `default_request_delay` class attribute (default: 0) at auto-creation
-  time. This per-fetcher initial value is only used at first registration
-  — the `INSERT ... ON CONFLICT DO NOTHING` semantics preserve operator
-  overrides across redeployments. Fetchers that target external APIs with
-  rate limits MUST declare a non-zero `default_request_delay` to ensure
-  safe behavior on a fresh deployment without manual operator
+  time. This per-fetcher initial value seeds `FetcherConfig` only at first
+  registration — the `INSERT ... ON CONFLICT DO NOTHING` semantics preserve
+  operator overrides across redeployments. Fetchers that target external
+  APIs with rate limits MUST declare a non-zero `default_request_delay` to
+  ensure safe behavior on a fresh deployment without manual operator
   intervention.
 
 ### FetcherAuditEvent
