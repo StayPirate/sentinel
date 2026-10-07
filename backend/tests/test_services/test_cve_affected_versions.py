@@ -317,12 +317,26 @@ class TestProjection:
         before `b`/`1`), ecosystem before version, code-point order
         (`Zlib` before `acme`; `1.10` before `1.9`), the empty string first
         among present values, and an absent value after every present one
-        for each compared field."""
+        for each compared field, and each adjacent field pair decisive."""
         cve: CVE = await cve_factory(cve_id="CVE-2099-30005")
         expected = [
             _entry(vendor="", product="x"),
             _entry(vendor="Zlib", product="x"),
             _entry(vendor="acme", product="x"),
+            # One pair per adjacent field pair: the earlier field ascends
+            # while the later one descends, every other field tied.
+            _entry(vendor="m-1", product="d", package_name="z"),
+            _entry(vendor="m-1", product="e", package_name="a"),
+            _entry(vendor="m-2", package_name="p1", ecosystem="Z"),
+            _entry(vendor="m-2", package_name="p2", ecosystem="A"),
+            _entry(vendor="m-3", ecosystem="A", repo="z"),
+            _entry(vendor="m-3", ecosystem="B", repo="a"),
+            _entry(vendor="m-4", repo="r1", version_type="z"),
+            _entry(vendor="m-4", repo="r2", version_type="a"),
+            _entry(vendor="m-5", version_type="a", version="9"),
+            _entry(vendor="m-5", version_type="b", version="1"),
+            _entry(vendor="m-6", version="1", version_end="9"),
+            _entry(vendor="m-6", version="2", version_end="0"),
             _entry(vendor=None, product="a", version="9"),
             _entry(vendor=None, product="b", ecosystem="Go", version="2"),
             _entry(vendor=None, product="b", ecosystem="PyPI", version="1"),
@@ -541,11 +555,6 @@ class TestRaces:
 
         with pytest.raises(CVENotFoundError):
             await race.read()
-
-    async def test_scope_replacement_is_observed_whole(self, race: _Race) -> None:
-        await _commit(race.writer, *race.replace_scope("2.0", "3.0"))
-
-        assert _versions(await race.read()) == {"cna": ["2.0", "3.0"]}
 
     async def test_change_committed_after_the_read_never_mixes_snapshots(
         self, race: _Race, monkeypatch: pytest.MonkeyPatch

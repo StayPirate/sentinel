@@ -233,10 +233,22 @@ class CVEAffectedVersionEntry(BaseModel):
 
     vendor: str | None = Field(description="Vendor name.")
     product: str | None = Field(description="Product or package name.")
-    package_url: str | None = Field(description="Package URL (PURL).")
-    collection_url: str | None = Field(description="Package registry URL.")
+    package_url: str | None = Field(
+        description="Package URL (PURL); an unvalidated upstream string."
+    )
+    collection_url: str | None = Field(
+        description=(
+            "Package registry URL; an unvalidated upstream string, not "
+            "guaranteed to be `http` or `https`."
+        )
+    )
     package_name: str | None = Field(description="Source or registry package name.")
-    repo: str | None = Field(description="Source code repository URL.")
+    repo: str | None = Field(
+        description=(
+            "Source code repository URL; an unvalidated upstream string, not "
+            "guaranteed to be `http` or `https`."
+        )
+    )
     version: str | None = Field(
         description=(
             "Single version or range start; for `version_type = git`, the "
