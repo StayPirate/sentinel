@@ -1,8 +1,9 @@
 """CVE endpoints.
 
-See `docs/features/tickets/cve-tracking.md` (List CVEs, Get CVE,
-Re-fetch Endpoint), `docs/features/tickets/cve-service.md` (Service Read
-Contracts; Global CVE Source Listing; Fetch Orchestration), and
+See `docs/features/tickets/cve-tracking.md` (List CVEs, Get CVE, Get CVE
+Affected Versions, Re-fetch Endpoint),
+`docs/features/tickets/cve-service.md` (Service Read Contracts; Global CVE
+Source Listing; Fetch Orchestration), and
 `docs/features/tickets/cvss-scoring.md` (Get CVSS Assessments for a CVE,
 Set or Update SUSE CVSS Assessment, Delete SUSE CVSS Assessment, Shared
 Assessment Item) for the authoritative
@@ -63,6 +64,9 @@ from app.core.exceptions import CVENotFoundError, TicketNotMutableError
 from app.database import DatabaseSession, async_session_factory
 from app.schemas.common import PaginationMeta
 from app.schemas.cve import (
+    CVEAffectedVersionEntry,
+    CVEAffectedVersionGroup,
+    CVEAffectedVersionsResponse,
     CVEAssociatedTicket,
     CVEDetail,
     CVEEPSSResponse,
@@ -94,6 +98,7 @@ from app.schemas.errors import ErrorResponse
 from app.services import cve_service, ticket_mutations
 from app.services.cve_projection import CVEDetailProjection
 from app.services.cve_service import (
+    CVEAffectedVersionsResult,
     CVEDetailResult,
     CVEFetchFailedError,
     CVEInvalidSourceError,
@@ -335,6 +340,43 @@ def serialize_cve_resource_detail(result: CVEDetailResult) -> CVEResourceDetail:
             "ticket": _ticket(result.ticket_id),
         }
     )
+
+
+def serialize_cve_affected_versions(
+    result: CVEAffectedVersionsResult,
+) -> list[CVEAffectedVersionGroup]:
+    """Map the grouped service result to its response groups, keeping the
+    service-defined group and entry order."""
+    return [
+        CVEAffectedVersionGroup(
+            source_container=group.source_container,
+            entries=[
+                CVEAffectedVersionEntry(
+                    vendor=entry.vendor,
+                    product=entry.product,
+                    package_url=entry.package_url,
+                    collection_url=entry.collection_url,
+                    package_name=entry.package_name,
+                    repo=entry.repo,
+                    version=entry.version,
+                    version_type=entry.version_type,
+                    version_end=entry.version_end,
+                    version_end_inclusive=entry.version_end_inclusive,
+                    program_files=(
+                        list(entry.program_files)
+                        if entry.program_files is not None
+                        else None
+                    ),
+                    cpe=entry.cpe,
+                    ecosystem=entry.ecosystem,
+                    status=entry.status,
+                    default_status=entry.default_status,
+                )
+                for entry in group.entries
+            ],
+        )
+        for group in result.groups
+    ]
 
 
 def serialize_cve_source_list_item(
@@ -593,7 +635,8 @@ async def list_cves(
         "Returns one CVE, identified by its CVE-ID, with its persisted "
         "exploitation (KEV, EPSS, SSVC) and weakness (CWE) evidence, its "
         "external identifiers, and the associated Ticket identity. Evidence "
-        "only: no priority and no CVSS assessments (see `/cvss`). Public; "
+        "only: no priority, no CVSS assessments (see `/cvss`), and no "
+        "affected versions (see `/affected-versions`). Public; "
         "optional authentication determines access to CVEs associated with "
         "confidential Tickets."
     ),
@@ -622,6 +665,50 @@ async def get_cve(
     except CVENotFoundError:
         raise cve_not_found_error() from None
     return CVEResourceDetailResponse(data=serialize_cve_resource_detail(result))
+
+
+@router.get(
+    "/cves/{cve_id}/affected-versions",
+    response_model=CVEAffectedVersionsResponse,
+    summary="Get CVE affected versions",
+    description=(
+        "Returns the persisted affected-product and affected-version entries "
+        "of one CVE, identified by its CVE-ID, grouped by provenance scope "
+        "(`source_container`). Informational evidence only: not used for "
+        "package resolution or affectedness. Not paginated, filtered, or "
+        "sortable: each scope is a complete snapshot in one fixed order "
+        "(groups by `source_container`, entries by package coordinates then "
+        "version fields, Unicode code-point order with absent values last). "
+        "A CVE without entries returns an empty list. Public; optional "
+        "authentication determines access to CVEs associated with "
+        "confidential Tickets."
+    ),
+    responses={
+        404: {
+            "model": ErrorResponse,
+            "description": (
+                "CVE-ID is malformed, does not exist, or identifies a CVE "
+                "associated with a Ticket inaccessible to the caller."
+            ),
+        },
+    },
+)
+async def get_cve_affected_versions(
+    cve_id: CVEIdPath,
+    db: DatabaseSession,
+    caller: OptionalTicketCaller,
+) -> CVEAffectedVersionsResponse:
+    """Get CVE Affected Versions — see `docs/features/tickets/cve-tracking.md`.
+
+    The service applies CVE accessibility in the same statement that
+    selects the entries, and groups and orders them; the handler only maps
+    the outcome.
+    """
+    try:
+        result = await cve_service.get_cve_affected_versions(db, caller, cve_id)
+    except CVENotFoundError:
+        raise cve_not_found_error() from None
+    return CVEAffectedVersionsResponse(data=serialize_cve_affected_versions(result))
 
 
 @router.get(

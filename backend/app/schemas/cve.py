@@ -4,7 +4,8 @@ See `docs/features/tickets/tickets.md` (Response Schemas > Shared
 Sub-Schemas: CVESummary, CVEDetail, CVEKEVResponse, CVEEPSSResponse,
 CVESSVCResponse, CVEWeaknessResponse, CVEExternalIdentifierResponse) for
 the shared contracts, `docs/features/tickets/cve-tracking.md` (List CVEs:
-CVEListItem; Get CVE: CVEResourceDetail), and
+CVEListItem; Get CVE: CVEResourceDetail; Get CVE Affected Versions:
+CVEAffectedVersionGroup, CVEAffectedVersionEntry), and
 `docs/features/tickets/cve-service.md` (Global CVE Source Listing) for
 the endpoint schemas, and (CVE Source Status) for the per-CVE source
 status. `CVEDetail` exposes persisted evidence only:
@@ -221,6 +222,84 @@ class CVEResourceDetailResponse(BaseModel):
     """Response body for `GET /api/v1/cves/{cve_id}`."""
 
     data: CVEResourceDetail
+
+
+class CVEAffectedVersionEntry(BaseModel):
+    """The persisted content of one affected-version entry, as stored by
+    ingestion (cve-tracking.md, Get CVE Affected Versions >
+    CVEAffectedVersionEntry; field meanings in `docs/data-model.md`,
+    CVEAffectedVersion). Values are not case- or format-normalized; the
+    internal row identifier and creation time are deliberately absent."""
+
+    vendor: str | None = Field(description="Vendor name.")
+    product: str | None = Field(description="Product or package name.")
+    package_url: str | None = Field(description="Package URL (PURL).")
+    collection_url: str | None = Field(description="Package registry URL.")
+    package_name: str | None = Field(description="Source or registry package name.")
+    repo: str | None = Field(description="Source code repository URL.")
+    version: str | None = Field(
+        description=(
+            "Single version or range start; for `version_type = git`, the "
+            "introducing commit."
+        )
+    )
+    version_type: str | None = Field(
+        description=(
+            "Version scheme recorded by ingestion (e.g. `semver`, `git`, "
+            "`exact`, `custom`), or `null` when none is recorded."
+        )
+    )
+    version_end: str | None = Field(
+        description=(
+            "Range end; for `version_type = git`, the closing commit, whose "
+            "inclusivity `version_end_inclusive` gives."
+        )
+    )
+    version_end_inclusive: bool | None = Field(
+        description=(
+            "`true` when `version_end` is inclusive, `false` when exclusive, "
+            "`null` without a range end."
+        )
+    )
+    program_files: list[str] | None = Field(description="Affected source files.")
+    cpe: str | None = Field(description="CPE supplied with the entry.")
+    ecosystem: str | None = Field(description="OSSF canonical ecosystem identifier.")
+    status: str | None = Field(
+        description=(
+            "Upstream version-level status (known values `affected`, "
+            "`unaffected`, `unknown`), stored without validation."
+        )
+    )
+    default_status: str | None = Field(
+        description=(
+            "Upstream entry-level baseline status, same value set as `status`."
+        )
+    )
+
+
+class CVEAffectedVersionGroup(BaseModel):
+    """The entries of one provenance scope (cve-tracking.md, Get CVE
+    Affected Versions > CVEAffectedVersionGroup)."""
+
+    source_container: str = Field(
+        description="Provenance scope (e.g. `cna`, `adp:CISA-ADP`, `ghsa`, `osv`)."
+    )
+    entries: list[CVEAffectedVersionEntry] = Field(
+        description=(
+            "The scope's entries, never empty, ordered by `vendor`, `product`, "
+            "`package_name`, `ecosystem`, `repo`, `version_type`, `version`, "
+            "then `version_end`, each by ascending Unicode code point with "
+            "absent values last."
+        )
+    )
+
+
+class CVEAffectedVersionsResponse(BaseModel):
+    """Response body for `GET /api/v1/cves/{cve_id}/affected-versions`
+    (unpaginated, groups in ascending `source_container` code-point
+    order)."""
+
+    data: list[CVEAffectedVersionGroup]
 
 
 class CVESourceListItem(BaseModel):
