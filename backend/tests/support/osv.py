@@ -88,7 +88,8 @@ raw `responses` (status codes, undecodable bodies, transport errors) and
 inspect `requests` in order.
 
 Consumers, all under `tests/test_services/test_tickets/`: the fixture
-loaders by `test_osv_vulnerability_contract.py`.
+loaders by `test_osv_vulnerability_contract.py` and
+`test_osv_vulnerability_record.py`.
 """
 
 from __future__ import annotations
