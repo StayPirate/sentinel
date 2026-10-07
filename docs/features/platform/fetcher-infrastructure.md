@@ -358,7 +358,6 @@ class SyncExampleData(BaseFetcher):
     description: str = "Human-readable description"
     default_schedule: str = "0 */6 * * *"  # cron expression (every 6h)
     default_request_delay: float = 0  # Optional: initial request_delay at auto-registration
-    default_run_timeout: int = 3600  # Optional: initial run_timeout at auto-registration
     queue: str | None = None  # Optional: Celery queue name (default = default queue)
     participates_in_catch_up: bool = False  # Optional: set True for per-ticket catch-up participation
 
@@ -1198,9 +1197,7 @@ the invalid field.
    import time. This matches the operational range enforced by the
    PATCH endpoint's Pydantic validation, ensuring that a freshly
    registered fetcher cannot create a `FetcherConfig` record with an
-   out-of-range `request_delay` default. Likewise, `default_run_timeout`
-   MUST be an integer (not a `bool`) in the range `60` to `604800`
-   (inclusive), the operational range of `FetcherConfig.run_timeout`.
+   out-of-range `request_delay` default.
 10. `description` MUST be a non-empty string. A fetcher without a
     description cannot be meaningfully presented in the dashboard or
     CLI.
@@ -3338,9 +3335,8 @@ hard time limit persisted on the `FetcherRun` row at adoption time (see
 constant (not configurable). It ensures that the hard time limit has had
 time to terminate the process before a new run is started — guaranteeing
 the single-instance invariant even if the soft time limit was not
-honored. The default `run_timeout` is 3600 (1 hour, unless the fetcher
-declares another `default_run_timeout`), yielding a typical threshold of
-3660 seconds. The minimum allowed `run_timeout` is 60
+honored. The default `run_timeout` is 3600 (1 hour), yielding a typical
+threshold of 3660 seconds. The minimum allowed `run_timeout` is 60
 seconds (threshold: 120s); the maximum is 604800 seconds (7 days,
 threshold: 604860s).
 
@@ -3644,9 +3640,8 @@ The bootstrap routine:
   during FastAPI startup event, before serving requests; worker: first
   step in the `celeryd_after_setup` handler — see Worker Startup Handler)
 - Creates records with column defaults (`enabled = true`,
-  `custom_settings = '{}'`), `request_delay` from `default_request_delay`,
-  and `run_timeout` from `default_run_timeout` (3600 unless the fetcher
-  declares another value)
+  `run_timeout = 3600`, `request_delay` from `default_request_delay`,
+  `custom_settings = '{}'`)
 - Never modifies existing records (`DO NOTHING` on conflict)
 - Is concurrency-safe: multiple processes running it simultaneously
   produce no conflicts — the first insert succeeds, concurrent
@@ -3704,15 +3699,9 @@ The bootstrap routine:
       is the *source* of the dispatched value, not the value read at
       stale-evaluation time.
   All three mechanisms are always active (API validation guarantees
-  `run_timeout >= 60`). When a `FetcherConfig` record is auto-created
-  for a newly registered fetcher, `run_timeout` is initialized from the
-  fetcher's `default_run_timeout` class attribute (default: 3600 seconds,
-  1 hour). Like `default_request_delay`, it seeds `FetcherConfig` only at
-  first registration; operator overrides survive redeployments. A fetcher whose
-  owning specification projects a regular run longer than the default
-  soft limit (for example a stateless fetcher that reprocesses its whole
-  scope every run) MUST declare a `default_run_timeout` that covers the
-  projection. The maximum allowed value is 604800 seconds (7 days),
+  `run_timeout >= 60`). The default of 3600 seconds (1 hour) applies
+  when a `FetcherConfig` record is auto-created for a newly registered
+  fetcher. The maximum allowed value is 604800 seconds (7 days),
   providing ample headroom for long-running operations while ensuring
   eventual recovery from stuck processes.
 
@@ -3735,9 +3724,11 @@ The bootstrap routine:
   `default_request_delay` class attribute (default: 0) at auto-creation
   time. This per-fetcher initial value seeds `FetcherConfig` only at first
   registration — the `INSERT ... ON CONFLICT DO NOTHING` semantics preserve
-  operator overrides across redeployments. Fetchers that target external
-  APIs with rate limits MUST declare a non-zero `default_request_delay` to
-  ensure safe behavior on a fresh deployment without manual operator
+  operator overrides across redeployments. An owning fetcher specification
+  may also use the class value as its delay outside a run, where no runtime
+  configuration snapshot exists. Fetchers that target external APIs with
+  rate limits MUST declare a non-zero `default_request_delay` to ensure
+  safe behavior on a fresh deployment without manual operator
   intervention.
 
 ### FetcherAuditEvent

@@ -1402,8 +1402,7 @@ with a caller-owned transaction.
   parseable at Beat startup
 - `run_timeout`: must be an integer between 60 and 604800 (1 minute
   to 7 days). Controls Celery hard/soft time limits and the stale run
-  detection threshold. Default: the fetcher's `default_run_timeout`
-  (3600 seconds unless the fetcher declares another value)
+  detection threshold. Default: 3600 (1 hour)
 - `request_delay`: must be a float >= 0 and <= 300
 - `custom_settings`: each key must exist in the fetcher's `Settings`
   model. Unknown keys → 422 `FETCHER_SETTING_UNKNOWN`. Partial merge:

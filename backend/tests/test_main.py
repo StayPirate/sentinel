@@ -240,12 +240,11 @@ async def _delete_default_cvss_version_setting(
 
 
 class _StubBootstrapFetcher:
-    """Minimal `FETCHER_REGISTRY` entry stub — exposes only the three
+    """Minimal `FETCHER_REGISTRY` entry stub — exposes only the two
     class attributes `bootstrap_fetcher_configs()` reads."""
 
     name = "test_lifespan_bootstrap_fetcher"
     default_request_delay = 1.25
-    default_run_timeout = 3600
 
 
 @pytest.fixture

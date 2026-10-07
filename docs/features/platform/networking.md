@@ -128,7 +128,7 @@ Timeout hierarchy (independent concerns):
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│ FetcherConfig.run_timeout (default_run_timeout)     │  ← Celery task level
+│ FetcherConfig.run_timeout (default: 3600s)          │  ← Celery task level
 │ Hard ceiling: task killed at this limit             │     (per entire run)
 │                                                     │
 │  ┌───────────────────────────────────────────────┐  │
