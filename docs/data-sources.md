@@ -153,9 +153,8 @@ The CISA Known Exploited Vulnerabilities catalog is a curated list of CVEs
 with confirmed active exploitation in the wild, maintained by the
 Cybersecurity and Infrastructure Security Agency (US). The catalog contains
 approximately 1,700 CVEs (1,734 on 2026-10-07) and is updated almost daily.
-Presence in the KEV
-catalog is a strong signal for prioritization — it indicates that the
-vulnerability is being actively used by threat actors.
+Presence in the KEV catalog is a strong signal for prioritization — it
+indicates that the vulnerability is being actively used by threat actors.
 
 - **Relevant data**: CVE ID, date added to the KEV catalog, CWE
   classifications; reference URL constructed per-CVE

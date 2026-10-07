@@ -489,20 +489,22 @@ class Env:
         return run
 
     async def cleanup(self) -> None:
-        await self.world.cleanup()
-        if self.run_names:
-            async with self.factory() as session:
-                await session.execute(
-                    delete(FetcherRun).where(
-                        FetcherRun.fetcher_name.in_(self.run_names)
+        try:
+            await self.world.cleanup()
+        finally:
+            if self.run_names:
+                async with self.factory() as session:
+                    await session.execute(
+                        delete(FetcherRun).where(
+                            FetcherRun.fetcher_name.in_(self.run_names)
+                        )
                     )
-                )
-                await session.execute(
-                    delete(FetcherConfig).where(
-                        FetcherConfig.fetcher_name.in_(self.run_names)
+                    await session.execute(
+                        delete(FetcherConfig).where(
+                            FetcherConfig.fetcher_name.in_(self.run_names)
+                        )
                     )
-                )
-                await session.commit()
+                    await session.commit()
 
 
 @pytest.fixture
@@ -780,6 +782,18 @@ _FATAL_CASES: Final[
         "CISA KEV feed returned unparseable response",
         json.JSONDecodeError,
     ),
+    (
+        status(200, b"not gzip", content_encoding="gzip"),
+        None,
+        "CISA KEV feed returned unparseable response",
+        httpx.DecodingError,
+    ),
+    (
+        raw_body(b"[" * 100_000 + b"]" * 100_000),
+        None,
+        "CISA KEV feed returned unparseable response",
+        RecursionError,
+    ),
     (None, [], "CISA KEV feed has unexpected structure", KevCatalogStructureError),
     (
         None,
@@ -843,6 +857,8 @@ _FATAL_IDS: Final = [
     "html",
     "non_utf8",
     "empty_body",
+    "undecodable_content_encoding",
+    "too_deeply_nested",
     "root_empty_list",
     "root_list",
     "root_string",
@@ -1122,6 +1138,8 @@ class TestEntrySuccess:
         assert trace.ingested == [1]
         assert len(trace.statements_of(0)) == 1
         assert trace.statements_of(0)[0].lstrip().startswith("SELECT cve.id")
+        # Lock-free: the CVE lock is `upsert_cve()`'s.
+        assert "FOR " not in trace.statements_of(0)[0].upper()
         assert [cve_id for cve_id, _, _ in upserts] == [known.cve_id]
         assert [entry["event"] for entry in logs] == [CISA_KEV_CATALOG_RECEIVED_EVENT]
         # The known entry is the only selected unit.

@@ -111,6 +111,10 @@ class SyncCisaKev(BaseCVEFetcher):
         """Algorithm steps 1-2: one `GET`, no database work."""
         try:
             response = await self.http_client.get(CISA_KEV_URL)
+        except httpx.DecodingError as e:
+            # An undecodable content encoding is a response, not a transport
+            # failure.
+            raise FetcherError("CISA KEV feed returned unparseable response") from e
         except httpx.TransportError as e:
             raise FetcherError("Failed to connect to CISA KEV feed") from e
         if response.status_code != 200:
@@ -122,7 +126,7 @@ class SyncCisaKev(BaseCVEFetcher):
             raise FetcherError(message)
         try:
             document = response.json()
-        except ValueError as e:
+        except (ValueError, RecursionError) as e:
             raise FetcherError("CISA KEV feed returned unparseable response") from e
         try:
             return cisa_kev_catalog.parse_catalog(document)
