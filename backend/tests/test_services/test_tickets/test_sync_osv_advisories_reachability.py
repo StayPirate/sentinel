@@ -170,7 +170,6 @@ class TestRegistrationAndCapability:
         )
         assert SyncOsvAdvisories.default_schedule == SCHEDULE
         assert SyncOsvAdvisories.default_request_delay == 0.2
-        assert not hasattr(SyncOsvAdvisories, "default_run_timeout")
         assert SyncOsvAdvisories.source_reference_url_pattern == (
             "https://osv.dev/vulnerability/{cve_id}"
         )

@@ -304,13 +304,13 @@ simple REST API that supports queries by CVE ID. The OSV fetcher is an
 **enrichment fetcher** — it enriches CVEs already tracked by Sentinel with
 additional metadata from ecosystem-specific advisory databases.
 
-- **Relevant data**: GIT fix/introduce commit SHAs, ecosystem-specific
-  affected version ranges (PyPI, npm, Go, crates.io, Maven, etc.),
-  reference links with type tags (FIX, ADVISORY, REPORT, ARTICLE),
-  and package-name candidates for the post-ingest handoff and external
-  identifiers (GHSA, PYSEC, RUSTSEC) via the alias records that describe the
-  same CVE. `related` records (downstream distribution and container
-  advisories) are not consumed
+- **Relevant data**: GIT fix/introduce commit SHAs and reference links with
+  type tags (FIX, ADVISORY, REPORT, ARTICLE) from the CVE record; from the
+  alias records that describe the same CVE, ecosystem-specific affected
+  version ranges (PyPI, npm, Go, crates.io, Maven, etc.), package-name
+  candidates for the post-ingest handoff, external identifiers (GHSA, PYSEC,
+  RUSTSEC), and their references. `related` records (downstream
+  distribution and container advisories) are not consumed
 - **Access**: REST API at `https://api.osv.dev/v1/vulns/{id}`. No
   authentication required. No rate limits (confirmed in OSV docs/FAQ)
 - **Volume**: one request for the CVE record plus one per non-CVE alias;
