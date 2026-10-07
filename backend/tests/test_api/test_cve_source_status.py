@@ -14,7 +14,10 @@ Redis I/O placement matrix lives in
 tests/test_services/test_cve_source_status.py; these tests cover the HTTP
 contract: wire format, optional authentication, anti-enumeration, the
 status-reporting exception for Redis failures, handler delegation, and
-OpenAPI. The service-owned session factory dependency is overridden with a
+OpenAPI. `TestCVESourceStatus` clears the registries and defines test-only
+fetchers; `TestProductionKevSource` instead reads the `kev` entry of the
+real production `SyncCisaKev`. The service-owned session factory dependency
+is overridden with a
 factory joined to the `db_session` connection, so the service observes the
 test's rows and the per-test rollback still discards them.
 """
@@ -42,12 +45,14 @@ from app.models.cve import CVE
 from app.models.ticket import Ticket
 from app.models.user import User
 from app.services import cve_service
+from app.services.base_cve_fetcher import get_all_cve_source_types
 from app.services.cve_service import (
     KEV_FETCHER_NAME,
     CVESourceStatusResult,
     fetch_pending_key,
 )
 from app.services.ticket_visibility import ANONYMOUS_CALLER, TicketCaller
+from app.services.tickets.sync_cisa_kev import SyncCisaKev
 from tests.support.cve_source_status import (
     clear_fetcher_registries,
     define_cve_fetcher,
@@ -369,6 +374,38 @@ class TestCVESourceStatus:
         }
         failing.mget.assert_awaited_once()
         failing.aclose.assert_awaited_once()
+
+
+@pytest.mark.e2e
+@pytest.mark.usefixtures("status_sessions", "redis_client")
+class TestProductionKevSource:
+    """The real `SyncCisaKev` in the production registry (no registry is
+    cleared): `kev` is registered and never refetchable, and `enabled` is
+    its `FetcherConfig.enabled` (cve-service.md, Resolution algorithm steps
+    2-3). `redis_client` isolates the overlay of the other production
+    sources."""
+
+    @pytest.mark.parametrize("enabled", [True, False])
+    async def test_kev_entry_reflects_registration_and_configuration(
+        self,
+        client: AsyncClient,
+        cve_factory: Factory,
+        fetcher_config_factory: Factory,
+        enabled: bool,
+    ) -> None:
+        registry = get_all_cve_source_types()
+        assert registry[CVESourceType.KEV.value] is SyncCisaKev
+        await fetcher_config_factory(fetcher_name=SyncCisaKev.name, enabled=enabled)
+        cve: CVE = await cve_factory(cve_id=_random_cve_id())
+
+        response = await client.get(_url(cve.cve_id))
+
+        assert response.status_code == 200
+        body = response.json()["data"]
+        assert [item["source"] for item in body] == sorted(registry)
+        [kev] = [item for item in body if item["source"] == "kev"]
+        # No entry and no successful sync_cisa_kev run: not attempted.
+        assert kev == _item("kev", "not_attempted", refetchable=False, enabled=enabled)
 
 
 @pytest.mark.e2e

@@ -37,8 +37,8 @@ lock release precede publication.
 Every test except the production-registry class empties both fetcher
 registries under `isolated_fetcher_registries` and defines its own test-only
 CVE fetchers. The production-registry class keeps the production
-registration state, including the real `SyncRedhatCves`, and derives its
-expectations from `get_fetch_single_fetchers()`. The broker is never
+registration state, including the real `SyncRedhatCves` and `SyncCisaKev`,
+and derives its expectations from `get_fetch_single_fetchers()`. The broker is never
 reached (`task_publication.publish_task` is a recorder) and the
 pending-marker client is `ScriptedRedis` or forbidden. The
 service-level preparation matrix lives in
@@ -78,9 +78,14 @@ from app.models.ticket import Ticket
 from app.models.ticket_audit_event import TicketAuditEvent
 from app.models.user import User
 from app.services import task_publication
-from app.services.base_cve_fetcher import BaseCVEFetcher, get_fetch_single_fetchers
+from app.services.base_cve_fetcher import (
+    BaseCVEFetcher,
+    get_all_cve_source_types,
+    get_fetch_single_fetchers,
+)
 from app.services.fetcher_execution import FetcherConfigMissingError
 from app.services.session_service import create_session
+from app.services.tickets.sync_cisa_kev import SyncCisaKev
 from app.services.tickets.sync_redhat_cves import SyncRedhatCves
 from tests.support.cve_catch_up import (
     Publications,
@@ -609,8 +614,8 @@ class TestBootstrapInvariantFailure:
 @pytest.mark.e2e
 class TestProductionRegistry:
     """The freshness refresh with the production registration state, among
-    them the real `SyncRedhatCves`, and savepoint-scoped `FetcherConfig`
-    rows (issue #847, Q3)."""
+    them the real `SyncRedhatCves` and `SyncCisaKev`, and savepoint-scoped
+    `FetcherConfig` rows (issue #847, Q3)."""
 
     @pytest.mark.parametrize("name", OPERATIONS)
     async def test_every_source_disabled_keeps_the_mutation_with_one_info(
@@ -757,6 +762,38 @@ class TestProductionRegistry:
             assert tuple(ticket) == (TicketStatus.NEW.value, None, None)
         assert attempts() == 0
         assert published.calls == []
+
+    @pytest.mark.parametrize("name", OPERATIONS)
+    async def test_enabled_real_kev_fetcher_is_never_published(
+        self,
+        api: _Api,
+        published: Publications,
+        monkeypatch: pytest.MonkeyPatch,
+        production_registry: dict[str, type[BaseCVEFetcher]],
+        name: str,
+    ) -> None:
+        """The real `SyncCisaKev` with an enabled `FetcherConfig`, as
+        bootstrap leaves it, is never prepared or published: the eligible
+        roster is the fetch-single registry (cve-sync-kev.md, Fetcher
+        Definition)."""
+        assert get_all_cve_source_types()[KEV.value] is SyncCisaKev
+        assert KEV.value not in production_registry
+        await api.configure(
+            {**production_registry, KEV.value: SyncCisaKev}, enabled=True
+        )
+        operation = await api.prepare(name)
+        redis = ScriptedRedis()
+        redis.install(monkeypatch)
+
+        response = await api.send(operation)
+
+        assert response.status_code == operation.expected_status, response.text
+        calls = [call["kwargs"] for call in published.calls]
+        assert sorted(kwargs["source"] for kwargs in calls) == sorted(
+            production_registry
+        )
+        assert SyncCisaKev.name not in {kwargs["fetcher_name"] for kwargs in calls}
+        assert not [key for _, key, _ in redis.commands if KEV.value in str(key)]
 
 
 # ---------------------------------------------------------------------------
