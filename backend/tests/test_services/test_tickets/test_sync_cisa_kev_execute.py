@@ -697,6 +697,20 @@ def _outcome(run: FetcherRun) -> tuple[str, int, int, int, int]:
 # Download and fatal feed errors
 # ---------------------------------------------------------------------------
 
+
+class _TooDeeplyNestedResponse(httpx.Response):
+    """A body whose decoding exhausts the recursion limit. The depth at
+    which CPython's JSON decoder raises `RecursionError` depends on the
+    interpreter build and stack size, so the outcome is forced here."""
+
+    def json(self, **kwargs: Any) -> Any:
+        raise RecursionError("maximum recursion depth exceeded")
+
+
+def _too_deeply_nested(request: httpx.Request) -> httpx.Response:
+    return _TooDeeplyNestedResponse(200, content=b"[[[]]]", request=request)
+
+
 _FATAL_CASES: Final[
     list[tuple[Responder | None, Any, str, type[BaseException] | None]]
 ] = [
@@ -789,7 +803,7 @@ _FATAL_CASES: Final[
         httpx.DecodingError,
     ),
     (
-        raw_body(b"[" * 100_000 + b"]" * 100_000),
+        _too_deeply_nested,
         None,
         "CISA KEV feed returned unparseable response",
         RecursionError,
