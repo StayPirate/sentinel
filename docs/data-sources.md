@@ -35,7 +35,7 @@ relevant feature specifications in `docs/features/`.
 | EPSS | Public | Exploit probability scores | Active |
 | GHSA | Public | Security advisories, CVSS, CWE | Specified |
 | Linux Kernel CVE | Public | Kernel CVE data, fix/introduce commits | Specified |
-| OSV | Public | Aggregated vulnerability data | Specified |
+| OSV | Public | Aggregated vulnerability data | Active |
 | SMASH | Internal | Security update management (predecessor to Sentinel) | Not planned |
 | PackTrack | Internal | Patch submission tracking for maintainers | Not integrated |
 | embedded-code-wg-data | Internal | Embedded third-party library tracking per SUSE/openSUSE package | Not integrated |
@@ -312,7 +312,10 @@ additional metadata from ecosystem-specific advisory databases.
   identifiers (including SUSE-SU when available)
 - **Access**: REST API at `https://api.osv.dev/v1/vulns/{id}`. No
   authentication required. No rate limits (confirmed in OSV docs/FAQ)
-- **Integration status**: **Specified**
+- **Volume**: one request for the CVE record plus one per alias and per
+  related record; about 27 requests per CVE on average in a 2026-10 live
+  sample (median 15, above 100 for widely packaged CVEs)
+- **Integration status**: **Active**
 - **Documentation**: https://osv.dev/,
   https://google.github.io/osv.dev/api/
 
