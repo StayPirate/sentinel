@@ -307,14 +307,14 @@ additional metadata from ecosystem-specific advisory databases.
 - **Relevant data**: GIT fix/introduce commit SHAs, ecosystem-specific
   affected version ranges (PyPI, npm, Go, crates.io, Maven, etc.),
   reference links with type tags (FIX, ADVISORY, REPORT, ARTICLE),
-  package-name candidates for the post-ingest handoff, external identifiers
-  (GHSA, PYSEC, RUSTSEC) via alias records, and related advisory
-  identifiers (including SUSE-SU when available)
+  and package-name candidates for the post-ingest handoff and external
+  identifiers (GHSA, PYSEC, RUSTSEC) via the alias records that describe the
+  same CVE. `related` records (downstream distribution and container
+  advisories) are not consumed
 - **Access**: REST API at `https://api.osv.dev/v1/vulns/{id}`. No
   authentication required. No rate limits (confirmed in OSV docs/FAQ)
-- **Volume**: one request for the CVE record plus one per alias and per
-  related record; about 27 requests per CVE on average in a 2026-10 live
-  sample (median 15, above 100 for widely packaged CVEs)
+- **Volume**: one request for the CVE record plus one per non-CVE alias;
+  about 2.5 requests per CVE on average in a 2026-10 live sample
 - **Integration status**: **Active**
 - **Documentation**: https://osv.dev/,
   https://google.github.io/osv.dev/api/
