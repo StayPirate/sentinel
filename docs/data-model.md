@@ -735,7 +735,9 @@ and enrichment). When `version_type = "git"`, the `version` field
 contains the introducing commit SHA and `version_end` contains the
 fixing commit SHA — making kernel commit tracking a natural subset of
 the general affected version model. See
-`docs/features/tickets/cve-service.md`.
+`docs/features/tickets/cve-service.md`. The persisted entries are
+informational and are read through `GET /api/v1/cves/{cve_id}/affected-versions`
+(`docs/features/tickets/cve-tracking.md`, Get CVE Affected Versions).
 
 | Column | Type | Constraints | Description |
 |--------|------|-------------|-------------|

@@ -2149,9 +2149,10 @@ task-wrapper, and e2e tests MUST cover:
 
 ### CVE and Source Reads
 
-When the CVE list, the CVE detail read, the per-CVE source-status read, or the
-global persisted-source listing is implemented or changed, focused service,
-API, and integration tests MUST cover this complete matrix.
+When the CVE list, the CVE detail read, the per-CVE affected-versions read, the
+per-CVE source-status read, or the global persisted-source listing is
+implemented or changed, focused service, API, and integration tests MUST cover
+this complete matrix.
 
 **CVE detail:**
 
@@ -2199,6 +2200,24 @@ API, and integration tests MUST cover this complete matrix.
 - Items and `meta.total` deriving from one coherent observation, proven by
   failing an implementation that counts broadly and removes rows in Python or
   post-filters after pagination.
+
+**Per-CVE affected versions:**
+
+- Malformed, missing, and inaccessible CVE paths producing identical
+  `404 CVE_NOT_FOUND` bodies for anonymous and authenticated callers, including
+  independent-session loss of access before the protected selection; ticketless
+  CVEs always visible.
+- A CVE without entries returning `{"data": []}`; several scopes grouped with
+  every persisted row in exactly one non-empty group; an emptied or removed
+  scope absent; a rejected CVE still returning its preserved entries.
+- Group order by `source_container` code point and entry order by the conflict
+  key fields, including absent values after present ones, the empty string
+  before other present values, and code-point rather than collation or version
+  order.
+- Every persisted entry content field projected as stored, including
+  `program_files` and `version_end_inclusive`; no row identifier, internal
+  UUID, `created_at`, or protected Ticket content in the response.
+- Accessibility and every projected row deriving from one coherent observation.
 
 **Per-CVE source status:**
 

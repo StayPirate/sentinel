@@ -476,7 +476,8 @@ resolution) and is not duplicated here.
   NVD configuration data. This specification neither includes nor
   excludes `vulnerable=false` entries
 - **Version data is informational only**: version ranges from
-  `CVEAffectedVersion` records are stored and displayed to VAs but
+  `CVEAffectedVersion` records are stored and displayed to VAs (see
+  [Get CVE Affected Versions](../tickets/cve-tracking.md#get-cve-affected-versions)) but
   are NOT used for package resolution or affectedness determination.
   SUSE backport practices make upstream version information unreliable
   for determining whether a specific track is affected. The VA

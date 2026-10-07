@@ -1299,7 +1299,9 @@ Ticket priority and the exploitation classification that consumes this evidence
 are defined in [ticket-priority.md](ticket-priority.md).
 
 Source status is available via `GET /api/v1/cves/{cve_id}/sources` — see
-`docs/features/tickets/cve-service.md`.
+`docs/features/tickets/cve-service.md`. Affected product and version entries
+are available via `GET /api/v1/cves/{cve_id}/affected-versions` — see
+[cve-tracking.md](cve-tracking.md#get-cve-affected-versions).
 
 **CVEKEVResponse**:
 
