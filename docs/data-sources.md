@@ -314,7 +314,7 @@ additional metadata from ecosystem-specific advisory databases.
 - **Access**: REST API at `https://api.osv.dev/v1/vulns/{id}`. No
   authentication required. No rate limits (confirmed in OSV docs/FAQ)
 - **Volume**: one request for the CVE record plus one per non-CVE alias;
-  about 2.5 requests per CVE on average in a 2026-10 live sample
+  about 3 requests per CVE on average in a 2026-10 live sample
 - **Integration status**: **Active**
 - **Documentation**: https://osv.dev/,
   https://google.github.io/osv.dev/api/
