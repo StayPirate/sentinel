@@ -89,7 +89,10 @@ inspect `requests` in order.
 
 Consumers, all under `tests/test_services/test_tickets/`: the fixture
 loaders by `test_osv_vulnerability_contract.py` and
-`test_osv_vulnerability_record.py`.
+`test_osv_vulnerability_record.py`; `OsvServer`, the loaders, and the
+responders by `test_sync_osv_advisories.py`,
+`test_sync_osv_advisories_execute.py`, and
+`test_sync_osv_advisories_reachability.py`.
 """
 
 from __future__ import annotations
