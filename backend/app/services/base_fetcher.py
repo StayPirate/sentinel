@@ -56,6 +56,8 @@ _NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 _SNAKE_CASE_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 _SCALAR_TYPES: tuple[type, ...] = (int, float, str, bool)
 _MAX_REQUEST_DELAY = 300
+_MIN_RUN_TIMEOUT = 60
+_MAX_RUN_TIMEOUT = 604800
 
 
 # ---------------------------------------------------------------------------
@@ -166,6 +168,17 @@ def _validate_request_delay(cls: type[BaseFetcher]) -> None:
         raise TypeError(
             f"{cls.__name__}.default_request_delay must be between 0 and "
             f"{_MAX_REQUEST_DELAY}, got {delay!r}"
+        )
+
+
+def _validate_run_timeout(cls: type[BaseFetcher]) -> None:
+    timeout = cls.default_run_timeout
+    if isinstance(timeout, bool) or not isinstance(timeout, int):
+        raise TypeError(f"{cls.__name__}.default_run_timeout must be an int")
+    if not (_MIN_RUN_TIMEOUT <= timeout <= _MAX_RUN_TIMEOUT):
+        raise TypeError(
+            f"{cls.__name__}.default_run_timeout must be between "
+            f"{_MIN_RUN_TIMEOUT} and {_MAX_RUN_TIMEOUT}, got {timeout!r}"
         )
 
 
@@ -358,6 +371,7 @@ class BaseFetcher:
     description: ClassVar[str]
     default_schedule: ClassVar[str]
     default_request_delay: ClassVar[float] = 0
+    default_run_timeout: ClassVar[int] = 3600
     queue: ClassVar[str | None] = None
     participates_in_catch_up: ClassVar[bool] = False
     http_client_options: ClassVar[dict[str, Any]] = {}
@@ -388,6 +402,7 @@ class BaseFetcher:
         _validate_description(cls)
         _validate_schedule(cls)
         _validate_request_delay(cls)
+        _validate_run_timeout(cls)
         _validate_queue(cls)
         _validate_execute_override(cls)
         _validate_settings_class(cls)

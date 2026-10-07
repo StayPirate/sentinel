@@ -492,6 +492,58 @@ class TestRequestDelayValidation:
 
 
 @pytest.mark.unit
+class TestRunTimeoutValidation:
+    """`default_run_timeout` is an int in the `FetcherConfig.run_timeout`
+    range (fetcher-infrastructure.md, Import-time validation, rule 9)."""
+
+    def test_default_is_one_hour(self) -> None:
+        assert BaseFetcher.default_run_timeout == 3600
+
+    @pytest.mark.parametrize("timeout", [60, 3600, 14400, 604800])
+    def test_valid_timeout_registers(self, timeout: int) -> None:
+        class ValidTimeout(BaseFetcher):
+            name = f"sync_valid_timeout_{timeout}"
+            description = "x"
+            default_schedule = "0 * * * *"
+            default_run_timeout = timeout
+
+            async def execute(self, session: AsyncSession) -> None:
+                pass
+
+        assert FETCHER_REGISTRY[ValidTimeout.name] is ValidTimeout
+
+    @pytest.mark.parametrize("timeout", [59, 0, -1, 604801])
+    def test_out_of_range_timeout_raises_without_registering(
+        self, timeout: int
+    ) -> None:
+        with pytest.raises(TypeError, match="default_run_timeout must be between"):
+
+            class BadTimeout(BaseFetcher):
+                name = "sync_bad_timeout_case"
+                description = "x"
+                default_schedule = "0 * * * *"
+                default_run_timeout = timeout
+
+                async def execute(self, session: AsyncSession) -> None:
+                    pass
+
+        assert "sync_bad_timeout_case" not in FETCHER_REGISTRY
+
+    @pytest.mark.parametrize("timeout", [True, 3600.0, "3600", None])
+    def test_non_int_timeout_raises(self, timeout: object) -> None:
+        with pytest.raises(TypeError, match="default_run_timeout must be an int"):
+
+            class NonIntTimeout(BaseFetcher):
+                name = "sync_non_int_timeout"
+                description = "x"
+                default_schedule = "0 * * * *"
+                default_run_timeout = timeout  # type: ignore[assignment]
+
+                async def execute(self, session: AsyncSession) -> None:
+                    pass
+
+
+@pytest.mark.unit
 class TestQueueValidation:
     def test_none_queue_registers(self) -> None:
         class NoneQueue(BaseFetcher):

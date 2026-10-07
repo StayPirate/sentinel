@@ -27,16 +27,18 @@ from app.services.fetcher_bootstrap import bootstrap_fetcher_configs
 
 
 class _StubFetcherOne:
-    """Minimal `FETCHER_REGISTRY` entry stub — exposes only the two
+    """Minimal `FETCHER_REGISTRY` entry stub — exposes only the three
     class attributes `bootstrap_fetcher_configs()` reads."""
 
     name = "test_bootstrap_fetcher_one"
     default_request_delay = 0.5
+    default_run_timeout = 3600
 
 
 class _StubFetcherTwo:
     name = "test_bootstrap_fetcher_two"
     default_request_delay = 2.5
+    default_run_timeout = 14400
 
 
 @pytest.fixture(autouse=True)
@@ -85,6 +87,20 @@ class TestBootstrapFetcherConfigsCreation:
         assert two is not None
         assert two.request_delay == 2.5
 
+    async def test_uses_each_fetchers_own_default_run_timeout(
+        self, db_session: AsyncSession
+    ) -> None:
+        _register(_StubFetcherOne, _StubFetcherTwo)
+
+        await bootstrap_fetcher_configs(db_session)
+
+        one = await db_session.get(FetcherConfig, _StubFetcherOne.name)
+        two = await db_session.get(FetcherConfig, _StubFetcherTwo.name)
+        assert one is not None
+        assert one.run_timeout == 3600
+        assert two is not None
+        assert two.run_timeout == 14400
+
     async def test_applies_column_defaults_for_every_other_field(
         self, db_session: AsyncSession
     ) -> None:
@@ -96,7 +112,6 @@ class TestBootstrapFetcherConfigsCreation:
         assert config is not None
         assert config.enabled is True
         assert config.schedule_override is None
-        assert config.run_timeout == 3600
         assert config.custom_settings == {}
 
     async def test_does_not_overwrite_an_existing_config(

@@ -22,8 +22,8 @@ async def bootstrap_fetcher_configs(db: AsyncSession) -> None:
 
     Executes a single batch `INSERT ... ON CONFLICT (fetcher_name) DO
     NOTHING` for every fetcher currently in `FETCHER_REGISTRY`, using
-    each fetcher's own `default_request_delay` and the column defaults
-    for every other field. Never modifies an existing row — an
+    each fetcher's own `default_request_delay` and `default_run_timeout`
+    and the column defaults for every other field. Never modifies an existing row — an
     administrator-modified `FetcherConfig` (schedule override,
     disabled, custom run_timeout/request_delay/custom_settings) is
     always preserved. Flushes so database errors surface at this
@@ -52,8 +52,8 @@ async def bootstrap_fetcher_configs(db: AsyncSession) -> None:
         await db.flush()
         return
 
-    # Only `fetcher_name` and `request_delay` are set explicitly — every
-    # other column (`enabled`, `schedule_override`, `run_timeout`,
+    # Only `fetcher_name`, `request_delay`, and `run_timeout` are set
+    # explicitly — every other column (`enabled`, `schedule_override`,
     # `custom_settings`) is left for SQLAlchemy's Column-level defaults
     # to populate. This is a Core-level mechanism (not ORM-specific) that
     # applies correctly to a multi-row VALUES insert: each omitted column
@@ -66,6 +66,7 @@ async def bootstrap_fetcher_configs(db: AsyncSession) -> None:
                 {
                     "fetcher_name": fetcher.name,
                     "request_delay": fetcher.default_request_delay,
+                    "run_timeout": fetcher.default_run_timeout,
                 }
                 for fetcher in FETCHER_REGISTRY.values()
             ]
