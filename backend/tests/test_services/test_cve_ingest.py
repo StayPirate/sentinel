@@ -303,8 +303,8 @@ class TestModelConfiguration:
             _payload_with_operations(
                 _replace(
                     "cna",
-                    _entry(vendor="v", product="p", ecosystem="a"),
-                    _entry(vendor="v", product="p", ecosystem=marker),
+                    _entry(vendor="v", product="p", program_files=["a"]),
+                    _entry(vendor="v", product="p", program_files=[marker]),
                 )
             )
 
@@ -775,7 +775,6 @@ class TestEntryConflictKey:
     @pytest.mark.parametrize(
         ("field", "first", "second"),
         [
-            ("ecosystem", "PyPI", "npm"),
             ("status", "affected", "unaffected"),
             ("default_status", "affected", "unknown"),
             ("cpe", _CPE, None),
@@ -783,7 +782,6 @@ class TestEntryConflictKey:
             ("program_files", ["bin/a"], None),
             ("package_url", "pkg:generic/widget", None),
             ("collection_url", "https://example.test/a", "https://example.test/b"),
-            ("repo", "https://example.test/repo.git", None),
             ("version_end_inclusive", True, False),
         ],
     )
@@ -802,13 +800,21 @@ class TestEntryConflictKey:
     def test_absent_vendor_or_product_differs_from_empty_string(
         self, field: str
     ) -> None:
-        absent = _entry(**{**_KEY_ONLY, field: None}, ecosystem="PyPI")
-        empty = _entry(**{**_KEY_ONLY, field: ""}, ecosystem="npm")
+        absent = _entry(**{**_KEY_ONLY, field: None}, status="affected")
+        empty = _entry(**{**_KEY_ONLY, field: ""}, status="unaffected")
 
         assert _entries_of(absent, empty) == (absent, empty)
 
     @pytest.mark.parametrize(
-        "field", ["version_type", "version", "version_end", "package_name"]
+        "field",
+        [
+            "version_type",
+            "version",
+            "version_end",
+            "package_name",
+            "ecosystem",
+            "repo",
+        ],
     )
     def test_absent_coalesced_field_equals_empty_string_in_the_key(
         self, field: str
@@ -826,7 +832,15 @@ class TestEntryConflictKey:
             _entries_of(empty, absent)
 
     @pytest.mark.parametrize(
-        "field", ["version_type", "version", "version_end", "package_name"]
+        "field",
+        [
+            "version_type",
+            "version",
+            "version_end",
+            "package_name",
+            "ecosystem",
+            "repo",
+        ],
     )
     def test_differing_key_field_values_are_distinct_entries(self, field: str) -> None:
         first = _entry(**_KEY_ONLY, **{field: "one"}, status="affected")
@@ -835,8 +849,8 @@ class TestEntryConflictKey:
         assert _entries_of(first, second) == (first, second)
 
     def test_entries_in_different_scopes_never_conflict(self) -> None:
-        first = _entry(**_KEY_ONLY, ecosystem="PyPI")
-        second = _entry(**_KEY_ONLY, ecosystem="npm")
+        first = _entry(**_KEY_ONLY, status="affected")
+        second = _entry(**_KEY_ONLY, status="unaffected")
 
         normalized = normalize_affected_version_operations(
             [_replace("cna", first), _replace("adp:EXAMPLE", second)]

@@ -1,0 +1,141 @@
+{
+  "id": "CVE-2024-26581",
+  "summary": "Fictional summary of CVE-2024-26581.",
+  "details": "Fictional details of CVE-2024-26581.",
+  "modified": "2026-08-12T03:51:10.531040536Z",
+  "published": "2024-02-20T12:52:57.398Z",
+  "related": [
+    "ALSA-2024:5928",
+    "SUSE-SU-2024:2010-1"
+  ],
+  "database_specific": {
+    "cna_assigner": "Linux",
+    "osv_generated_from": "https://github.com/CVEProject/cvelistV5/tree/main/cves/2024/26xxx/CVE-2024-26581.json"
+  },
+  "references": [
+    {
+      "type": "WEB",
+      "url": "https://git.kernel.org/stable/c/10e9cb39313627f2eae4cd70c4b742074e998fd8"
+    },
+    {
+      "type": "WEB",
+      "url": "https://git.kernel.org/stable/c/1296c110c5a0b45a8fcf58e7d18bc5da61a565cb"
+    },
+    {
+      "type": "ADVISORY",
+      "url": "https://github.com/CVEProject/cvelistV5/tree/main/cves/2024/26xxx/CVE-2024-26581.json"
+    },
+    {
+      "type": "PACKAGE",
+      "url": "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git"
+    }
+  ],
+  "affected": [
+    {
+      "ranges": [
+        {
+          "type": "GIT",
+          "repo": "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git",
+          "events": [
+            {
+              "introduced": "8284a79136c384059e85e278da2210b809730287"
+            },
+            {
+              "fixed": "c60d252949caf9aba537525195edae6bbabc35eb"
+            }
+          ]
+        },
+        {
+          "type": "GIT",
+          "repo": "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git",
+          "events": [
+            {
+              "introduced": "f718863aca469a109895cb855e6b81fff4827d71"
+            },
+            {
+              "fixed": "b734f7a47aeb32a5ba298e4ccc16bb0c52b6dbf7"
+            },
+            {
+              "fixed": "6eb14441f10602fa1cf691da9d685718b68b78a9"
+            },
+            {
+              "fixed": "60c0c230c6f046da536d3df8b39a20b9a9fd6af0"
+            }
+          ]
+        },
+        {
+          "type": "GIT",
+          "repo": "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git",
+          "events": [
+            {
+              "introduced": "0"
+            },
+            {
+              "last_affected": "cd66733932399475fe933cb3ec03e687ed401462"
+            }
+          ]
+        },
+        {
+          "type": "GIT",
+          "repo": "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git",
+          "events": [
+            {
+              "introduced": "5.4.262"
+            },
+            {
+              "fixed": "5.4.269"
+            }
+          ]
+        }
+      ],
+      "versions": [
+        "v5.4.268",
+        "v5.4.267",
+        "v5.4.266"
+      ],
+      "database_specific": {
+        "source": "https://storage.googleapis.com/cve-osv-conversion/osv-output/CVE-2024-26581.json"
+      }
+    },
+    {
+      "package": {
+        "name": "Kernel",
+        "ecosystem": "Linux"
+      },
+      "ranges": [
+        {
+          "type": "ECOSYSTEM",
+          "events": [
+            {
+              "introduced": "0"
+            },
+            {
+              "fixed": "5.4.269"
+            }
+          ]
+        },
+        {
+          "type": "ECOSYSTEM",
+          "events": [
+            {
+              "introduced": "5.5.0"
+            },
+            {
+              "fixed": "5.10.210"
+            }
+          ]
+        }
+      ],
+      "database_specific": {
+        "source": "https://storage.googleapis.com/cve-osv-conversion/osv-output/CVE-2024-26581.json"
+      }
+    }
+  ],
+  "schema_version": "1.9.0",
+  "severity": [
+    {
+      "type": "CVSS_V3",
+      "score": "CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H"
+    }
+  ]
+}

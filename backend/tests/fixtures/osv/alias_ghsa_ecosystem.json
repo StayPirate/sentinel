@@ -1,0 +1,121 @@
+{
+  "id": "GHSA-jfh8-c2jp-5v3q",
+  "summary": "Fictional summary of GHSA-jfh8-c2jp-5v3q.",
+  "details": "Fictional details of GHSA-jfh8-c2jp-5v3q.",
+  "aliases": [
+    "CVE-2021-44228"
+  ],
+  "modified": "2025-10-22T19:37:02.616807Z",
+  "published": "2021-12-10T00:40:56Z",
+  "database_specific": {
+    "nvd_published_at": "2021-12-10T10:15:00Z",
+    "cwe_ids": [
+      "CWE-20",
+      "CWE-400",
+      "CWE-502"
+    ],
+    "severity": "CRITICAL",
+    "github_reviewed": true,
+    "github_reviewed_at": "2021-12-10T00:40:41Z"
+  },
+  "references": [
+    {
+      "type": "ADVISORY",
+      "url": "https://nvd.nist.gov/vuln/detail/CVE-2021-44228"
+    },
+    {
+      "type": "WEB",
+      "url": "https://github.com/apache/logging-log4j2/pull/608"
+    },
+    {
+      "type": "WEB",
+      "url": "https://github.com/github/advisory-database/pull/5501"
+    },
+    {
+      "type": "WEB",
+      "url": "https://cert-portal.siemens.com/productcert/pdf/ssa-397453.pdf"
+    },
+    {
+      "type": "PACKAGE",
+      "url": "https://github.com/apache/logging-log4j2"
+    }
+  ],
+  "affected": [
+    {
+      "package": {
+        "name": "org.apache.logging.log4j:log4j-core",
+        "ecosystem": "Maven",
+        "purl": "pkg:maven/org.apache.logging.log4j/log4j-core"
+      },
+      "ranges": [
+        {
+          "type": "ECOSYSTEM",
+          "events": [
+            {
+              "introduced": "2.13.0"
+            },
+            {
+              "fixed": "2.15.0"
+            }
+          ]
+        }
+      ],
+      "versions": [
+        "2.13.0",
+        "2.13.1",
+        "2.13.2"
+      ],
+      "database_specific": {
+        "source": "https://github.com/github/advisory-database/blob/main/advisories/github-reviewed/2021/12/GHSA-jfh8-c2jp-5v3q/GHSA-jfh8-c2jp-5v3q.json"
+      }
+    },
+    {
+      "package": {
+        "name": "com.guicedee.services:log4j-core",
+        "ecosystem": "Maven",
+        "purl": "pkg:maven/com.guicedee.services/log4j-core"
+      },
+      "ranges": [
+        {
+          "type": "ECOSYSTEM",
+          "events": [
+            {
+              "introduced": "0"
+            },
+            {
+              "last_affected": "1.2.1.2-jre17"
+            }
+          ]
+        }
+      ],
+      "versions": [
+        "1.0.10.0",
+        "1.0.10.0-jre13",
+        "1.0.10.0-jre14"
+      ],
+      "database_specific": {
+        "source": "https://github.com/github/advisory-database/blob/main/advisories/github-reviewed/2021/12/GHSA-jfh8-c2jp-5v3q/GHSA-jfh8-c2jp-5v3q.json"
+      }
+    },
+    {
+      "package": {
+        "name": "org.xbib.elasticsearch:log4j",
+        "ecosystem": "Maven",
+        "purl": "pkg:maven/org.xbib.elasticsearch/log4j"
+      },
+      "versions": [
+        "6.3.2.1"
+      ],
+      "database_specific": {
+        "source": "https://github.com/github/advisory-database/blob/main/advisories/github-reviewed/2021/12/GHSA-jfh8-c2jp-5v3q/GHSA-jfh8-c2jp-5v3q.json"
+      }
+    }
+  ],
+  "schema_version": "1.9.0",
+  "severity": [
+    {
+      "type": "CVSS_V3",
+      "score": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H/E:H"
+    }
+  ]
+}

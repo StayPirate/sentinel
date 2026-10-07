@@ -809,8 +809,8 @@ PostgreSQL B-tree index entry size limit.
 
 Within one `(cve_id, source_container)` scope, identical normalized entries
 collapse, and two entries that share the entry conflict key but differ in any
-other persisted field — including `ecosystem`, `status`, and `default_status`,
-which are semantic content rather than identity — are contradictory and
+other persisted field — including `status` and `default_status`, which are
+semantic content rather than identity — are contradictory and
 invalidate the payload before writes. Different `source_container` values
 independently own their own set of rows: OSV writes `"osv"` and GHSA writes
 `"ghsa"`, so equivalent packages from those sources occupy separate scopes and

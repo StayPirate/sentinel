@@ -1,0 +1,163 @@
+{
+  "id": "CVE-2021-44228",
+  "details": "Fictional details of CVE-2021-44228.",
+  "aliases": [
+    "GHSA-jfh8-c2jp-5v3q"
+  ],
+  "modified": "2026-08-13T04:01:09.237466383Z",
+  "published": "2021-12-10T10:15:09.143Z",
+  "related": [
+    "SUSE-SU-2021:4096-1",
+    "openSUSE-SU-2021:1577-1",
+    "openSUSE-SU-2024:11666-1"
+  ],
+  "database_specific": {
+    "unresolved_ranges": [
+      {
+        "cpes": [
+          "cpe:2.3:a:apple:xcode:*:*:*:*:*:*:*:*"
+        ],
+        "extracted_events": [
+          {
+            "fixed": "13.3"
+          }
+        ],
+        "source": "CPE_RANGE",
+        "vendor_product": "apple:xcode"
+      },
+      {
+        "source": "CPE_RANGE",
+        "vendor_product": "bentley:synchro",
+        "cpes": [
+          "cpe:2.3:a:bentley:synchro:*:*:*:*:pro:*:*:*"
+        ],
+        "extracted_events": [
+          {
+            "introduced": "6.1"
+          },
+          {
+            "fixed": "6.2.4.2"
+          }
+        ]
+      },
+      {
+        "extracted_events": [
+          {
+            "fixed": "6.4.3.2"
+          }
+        ],
+        "source": "CPE_RANGE",
+        "vendor_product": "bentley:synchro_4d",
+        "cpes": [
+          "cpe:2.3:a:bentley:synchro_4d:*:*:*:*:pro:*:*:*"
+        ]
+      }
+    ]
+  },
+  "references": [
+    {
+      "type": "WEB",
+      "url": "https://advisory.example.invalid/upstream/1"
+    },
+    {
+      "type": "ADVISORY",
+      "url": "https://advisory.example.invalid/upstream/2"
+    },
+    {
+      "type": "ADVISORY",
+      "url": "https://advisory.example.invalid/upstream/3"
+    },
+    {
+      "type": "ADVISORY",
+      "url": "https://advisory.example.invalid/upstream/4"
+    },
+    {
+      "type": "ADVISORY",
+      "url": "https://advisory.example.invalid/upstream/5"
+    },
+    {
+      "type": "ADVISORY",
+      "url": "https://advisory.example.invalid/upstream/6"
+    },
+    {
+      "type": "FIX",
+      "url": "https://advisory.example.invalid/upstream/7"
+    },
+    {
+      "type": "EVIDENCE",
+      "url": "https://advisory.example.invalid/upstream/8"
+    }
+  ],
+  "affected": [
+    {
+      "ranges": [
+        {
+          "type": "GIT",
+          "repo": "https://github.com/apache/logging-log4j2",
+          "events": [
+            {
+              "introduced": "6b788facd3479dfe9052b3a5e13f6603dce8c16f"
+            },
+            {
+              "fixed": "38513a7d57343881f7bf58f37e67d6a87e0a47c5"
+            },
+            {
+              "introduced": "0"
+            },
+            {
+              "fixed": "ad361d2e517e765f69db464d9407ac2dd80bc93e"
+            },
+            {
+              "introduced": "9dcb1823a0a0192f2016daf7c1445ddfb3435fbf"
+            },
+            {
+              "fixed": "c30a1398a6697fb832c650870c44284d0052103e"
+            },
+            {
+              "introduced": "8d9204a4b4c6016fa6b36513a46502689d6a45c1"
+            },
+            {
+              "last_affected": "8d9204a4b4c6016fa6b36513a46502689d6a45c1"
+            }
+          ],
+          "database_specific": {
+            "extracted_events": [
+              {
+                "introduced": "2.0.1"
+              },
+              {
+                "fixed": "2.3.1"
+              },
+              {
+                "introduced": "2.4.0"
+              }
+            ],
+            "source": [
+              "CPE_RANGE",
+              "CPE_STRING"
+            ],
+            "cpe": [
+              "cpe:2.3:a:apache:log4j:*:*:*:*:*:*:*:*",
+              "cpe:2.3:a:apache:log4j:2.0:-:*:*:*:*:*:*"
+            ]
+          }
+        }
+      ],
+      "versions": [
+        "2.0-NA",
+        "rel/2.3",
+        "log4j-2.3"
+      ],
+      "database_specific": {
+        "source": "https://storage.googleapis.com/cve-osv-conversion/osv-output/CVE-2021-44228.json"
+      }
+    }
+  ],
+  "schema_version": "1.9.0",
+  "severity": [
+    {
+      "type": "CVSS_V3",
+      "score": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H"
+    }
+  ]
+}

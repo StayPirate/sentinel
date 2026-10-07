@@ -3722,9 +3722,11 @@ The bootstrap routine:
   single `FetcherRun` status update, with the hard limit as backstop.
 - `request_delay` is initialized from the fetcher's
   `default_request_delay` class attribute (default: 0) at auto-creation
-  time. This per-fetcher initial value is only used at first registration
-  — the `INSERT ... ON CONFLICT DO NOTHING` semantics preserve operator
-  overrides across redeployments. Fetchers that target external APIs with
+  time. This per-fetcher initial value seeds `FetcherConfig` only at first
+  registration — the `INSERT ... ON CONFLICT DO NOTHING` semantics preserve
+  operator overrides across redeployments. An owning fetcher specification
+  may also use the class value as its delay outside a run, where no runtime
+  configuration snapshot exists. Fetchers that target external APIs with
   rate limits MUST declare a non-zero `default_request_delay` to ensure
   safe behavior on a fresh deployment without manual operator
   intervention.

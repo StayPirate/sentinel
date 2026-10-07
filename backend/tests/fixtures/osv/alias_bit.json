@@ -1,0 +1,74 @@
+{
+  "id": "BIT-golang-2023-45288",
+  "summary": "Fictional summary of BIT-golang-2023-45288.",
+  "details": "Fictional details of BIT-golang-2023-45288.",
+  "aliases": [
+    "CVE-2023-45288",
+    "GHSA-4v7x-pqxf-cx7m",
+    "GO-2024-2687"
+  ],
+  "modified": "2026-01-28T03:41:07.760588Z",
+  "published": "2024-04-06T18:19:39.789Z",
+  "database_specific": {
+    "cpes": [
+      "cpe:2.3:a:golang:go:*:*:*:*:*:*:*:*"
+    ],
+    "severity": "High"
+  },
+  "references": [
+    {
+      "type": "WEB",
+      "url": "https://go.dev/cl/576155"
+    },
+    {
+      "type": "WEB",
+      "url": "https://go.dev/issue/65051"
+    },
+    {
+      "type": "WEB",
+      "url": "https://advisory.example.invalid/upstream/1"
+    },
+    {
+      "type": "WEB",
+      "url": "https://pkg.go.dev/vuln/GO-2024-2687"
+    }
+  ],
+  "affected": [
+    {
+      "package": {
+        "name": "golang",
+        "ecosystem": "Bitnami",
+        "purl": "pkg:bitnami/golang"
+      },
+      "ranges": [
+        {
+          "type": "SEMVER",
+          "events": [
+            {
+              "introduced": "0"
+            },
+            {
+              "fixed": "1.21.9"
+            },
+            {
+              "introduced": "1.22.0-0"
+            },
+            {
+              "fixed": "1.22.2"
+            }
+          ]
+        }
+      ],
+      "database_specific": {
+        "source": "https://advisory.example.invalid/upstream/2"
+      },
+      "severity": [
+        {
+          "type": "CVSS_V3",
+          "score": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H"
+        }
+      ]
+    }
+  ],
+  "schema_version": "1.7.3"
+}

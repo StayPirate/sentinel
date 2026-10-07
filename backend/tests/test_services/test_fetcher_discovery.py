@@ -126,3 +126,4 @@ class TestFetcherDiscoveryDriftProtection:
         assert "app.services.packages.sync_smelt_products" in fetcher_modules
         assert "app.services.tickets.sync_redhat_cves" in fetcher_modules
         assert "app.services.tickets.sync_cisa_kev" in fetcher_modules
+        assert "app.services.tickets.sync_osv_advisories" in fetcher_modules

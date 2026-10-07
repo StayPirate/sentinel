@@ -1,0 +1,163 @@
+{
+  "id": "CVE-2023-4863",
+  "details": "Fictional details of CVE-2023-4863.",
+  "aliases": [
+    "A-299477569",
+    "ASB-A-299477569",
+    "CVE-2023-5129",
+    "GHSA-j7hp-h8jx-5ppr",
+    "PYSEC-2026-1794",
+    "RUSTSEC-2023-0060",
+    "RUSTSEC-2023-0061"
+  ],
+  "modified": "2026-10-05T10:26:50.057731451Z",
+  "published": "2023-09-12T14:24:59.275Z",
+  "related": [
+    "ALSA-2023:5184",
+    "ALSA-2023:5200",
+    "ALSA-2023:5201"
+  ],
+  "database_specific": {
+    "cna_assigner": "Chrome",
+    "osv_generated_from": "https://github.com/CVEProject/cvelistV5/tree/main/cves/2023/4xxx/CVE-2023-4863.json",
+    "unresolved_ranges": [
+      {
+        "extracted_events": [
+          {
+            "introduced": "116.0.5845.187"
+          },
+          {
+            "last_affected": "116.0.5845.187"
+          }
+        ],
+        "source": "AFFECTED_FIELD"
+      }
+    ]
+  },
+  "references": [
+    {
+      "type": "WEB",
+      "url": "https://advisory.example.invalid/upstream/1"
+    },
+    {
+      "type": "ADVISORY",
+      "url": "https://github.com/CVEProject/cvelistV5/tree/main/cves/2023/4xxx/CVE-2023-4863.json"
+    },
+    {
+      "type": "REPORT",
+      "url": "https://bugzilla.suse.com/show_bug.cgi?id=1215231"
+    },
+    {
+      "type": "FIX",
+      "url": "https://github.com/webmproject/libwebp/commit/902bc9190331343b2017211debcec8d2ab87e17a"
+    }
+  ],
+  "affected": [
+    {
+      "ranges": [
+        {
+          "type": "GIT",
+          "repo": "https://github.com/webmproject/libwebp",
+          "events": [
+            {
+              "introduced": "0"
+            },
+            {
+              "fixed": "ca332209cb5567c9b249c86788cb2dbf8847e760"
+            },
+            {
+              "fixed": "902bc9190331343b2017211debcec8d2ab87e17a"
+            }
+          ],
+          "database_specific": {
+            "extracted_events": [
+              {
+                "introduced": "0"
+              },
+              {
+                "fixed": "1.3.2"
+              }
+            ],
+            "source": [
+              "CPE_RANGE",
+              "REFERENCES"
+            ],
+            "cpe": "cpe:2.3:a:webmproject:libwebp:*:*:*:*:*:*:*:*"
+          }
+        }
+      ],
+      "versions": [
+        "1.3.2",
+        "v1.3.1-rc2",
+        "v1.3.1"
+      ],
+      "database_specific": {
+        "source": "https://storage.googleapis.com/cve-osv-conversion/osv-output/CVE-2023-4863.json",
+        "vanir_signatures_modified": "2026-08-12T13:32:46Z",
+        "vanir_signatures": [
+          {
+            "signature_type": "Line",
+            "signature_version": "v1",
+            "source": "https://github.com/webmproject/libwebp/commit/902bc9190331343b2017211debcec8d2ab87e17a",
+            "target": {
+              "file": "src/dec/vp8li_dec.h"
+            },
+            "deprecated": false,
+            "digest": {
+              "line_hashes": [
+                "20134740730605791402509200455302630941",
+                "136648906070994206943738037015888819806",
+                "232356828012318700083917498119399758794"
+              ],
+              "threshold": 0.9
+            },
+            "id": "CVE-2023-4863-3703e29f"
+          },
+          {
+            "source": "https://github.com/webmproject/libwebp/commit/902bc9190331343b2017211debcec8d2ab87e17a",
+            "target": {
+              "file": "src/utils/huffman_utils.h"
+            },
+            "deprecated": false,
+            "digest": {
+              "line_hashes": [
+                "210680425751445647392974712312166516434",
+                "31176131428327197556084923347153299803",
+                "91413042216609002235528185241791249822"
+              ],
+              "threshold": 0.9
+            },
+            "id": "CVE-2023-4863-903fc9e4",
+            "signature_type": "Line",
+            "signature_version": "v1"
+          },
+          {
+            "signature_type": "Line",
+            "signature_version": "v1",
+            "source": "https://github.com/webmproject/libwebp/commit/902bc9190331343b2017211debcec8d2ab87e17a",
+            "target": {
+              "file": "src/dec/vp8l_dec.c"
+            },
+            "deprecated": false,
+            "digest": {
+              "threshold": 0.9,
+              "line_hashes": [
+                "271948026291282679915020711765944277644",
+                "262252171417285278396190219750969423297",
+                "148769860740082019780466540147402480452"
+              ]
+            },
+            "id": "CVE-2023-4863-ccb3931c"
+          }
+        ]
+      }
+    }
+  ],
+  "schema_version": "1.9.0",
+  "severity": [
+    {
+      "type": "CVSS_V3",
+      "score": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H"
+    }
+  ]
+}
