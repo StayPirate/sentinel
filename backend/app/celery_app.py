@@ -148,6 +148,14 @@ def create_celery_app(app_settings: Settings) -> Celery:
         worker_hijack_root_logger=False,
         beat_scheduler="redbeat.RedBeatScheduler",
         beat_max_loop_interval=_BEAT_MAX_LOOP_INTERVAL,
+        # RedBeat stores the schedule on the broker Redis instance. Set
+        # explicitly because celery-redbeat deprecates its `broker_url`
+        # fallback. Taken from `Settings`, not from the `broker_url`
+        # property above, because the fallback read the configured value
+        # and not `CELERY_BROKER_URL` — see
+        # docs/features/platform/fetcher-infrastructure.md (Redbeat
+        # Configuration).
+        redbeat_redis_url=app_settings.celery_broker_url,
         redbeat_lock_key=_REDBEAT_LOCK_KEY,
         redbeat_lock_timeout=_REDBEAT_LOCK_TIMEOUT,
         redbeat_redis_options={

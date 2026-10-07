@@ -138,7 +138,8 @@ specifications. See
 ### Redbeat Scheduler
 
 `celery-redbeat` (the dynamic Beat scheduler) uses the same Redis
-instance as the Celery broker (`CELERY_BROKER_URL`) by default. No
+instance as the Celery broker (`CELERY_BROKER_URL`): the Celery
+application sets `redbeat_redis_url` explicitly to the broker URL. No
 separate `redbeat_redis_url` environment variable is needed or
 supported. The scheduler class is configured in the Celery application
 settings (`beat_scheduler = 'redbeat.RedBeatScheduler'`). Redbeat stores

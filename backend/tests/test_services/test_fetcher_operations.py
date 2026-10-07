@@ -611,9 +611,6 @@ class TestListFetchersNextRunAt:
         assert items[0].next_run_at is not None
         assert abs((items[0].next_run_at - expected_due_at).total_seconds()) < 5
 
-    @pytest.mark.filterwarnings(
-        "ignore:RedBeat will stop falling back to broker_url:DeprecationWarning"
-    )
     async def test_reads_due_at_before_redbeat_config_initialized(
         self,
         db_session: AsyncSession,
