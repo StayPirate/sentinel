@@ -733,9 +733,13 @@ Stores affected product/version information from CVE JSON 5.x
 `affected[]` arrays. Populated by multiple fetchers (both discovery
 and enrichment). When `version_type = "git"`, the `version` field
 contains the introducing commit SHA and `version_end` contains the
-fixing commit SHA — making kernel commit tracking a natural subset of
-the general affected version model. See
-`docs/features/tickets/cve-service.md`.
+closing commit SHA, whose inclusivity `version_end_inclusive` gives (not
+affected when `false`, last affected when `true`) — making kernel commit
+tracking a natural subset of the general affected version model. See
+`docs/features/tickets/cve-service.md`. The persisted entries are
+informational and are read through
+`GET /api/v1/cves/{cve_id}/affected-versions`
+(`docs/features/tickets/cve-tracking.md`, Get CVE Affected Versions).
 
 | Column | Type | Constraints | Description |
 |--------|------|-------------|-------------|

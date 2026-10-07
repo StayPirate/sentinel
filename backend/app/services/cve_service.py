@@ -7,8 +7,9 @@ Fetch: `ensure_cve_exists()`; CVE Upsert Serialization; Caller Validation
 Responsibility; Service Read Contracts; Exceptions) for the module
 contract, and `docs/features/tickets/cvss-scoring.md` (Get CVSS
 Assessments for a CVE) for the CVSS read implemented here. `list_cves()`,
-`get_cve_detail()`, and `list_cve_sources()` implement the CVE List, CVE
-Detail, and Global CVE Source Listing read contracts; the CVE detail
+`get_cve_detail()`, `get_cve_affected_versions()`, and
+`list_cve_sources()` implement the CVE List, CVE Detail, CVE Affected
+Versions, and Global CVE Source Listing read contracts; the CVE detail
 shares the `CVEDetail` projection of `cve_projection` with the Ticket
 detail. `resolve_cve_locator()` is the preliminary `{cve_id}` resolution
 of the CVE mutation paths, whose locked mutation in `ticket_mutations`
@@ -959,6 +960,148 @@ async def get_cve_detail(
     if row is None or cve is None:
         raise CVENotFoundError()
     return CVEDetailResult(cve=cve, ticket_id=_sntl(row.ticket_sequence_id))
+
+
+@dataclass(frozen=True, slots=True)
+class CVEAffectedVersionEntryProjection:
+    """The persisted content of one `CVEAffectedVersion` row, as stored.
+
+    The row identifier, the CVE UUID, and `created_at` are deliberately
+    absent: a replaced scope may be physically reinserted, so none of them
+    is a stable property of an entry.
+    """
+
+    vendor: str | None
+    product: str | None
+    package_url: str | None
+    collection_url: str | None
+    package_name: str | None
+    repo: str | None
+    version: str | None
+    version_type: str | None
+    version_end: str | None
+    version_end_inclusive: bool | None
+    program_files: tuple[str, ...] | None
+    cpe: str | None
+    ecosystem: str | None
+    status: str | None
+    default_status: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class CVEAffectedVersionGroupProjection:
+    """The non-empty, ordered entries of one `source_container` scope."""
+
+    source_container: str
+    entries: tuple[CVEAffectedVersionEntryProjection, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class CVEAffectedVersionsResult:
+    """The groups of one accessible CVE, in ascending `source_container`
+    code-point order; empty when the CVE has no entries."""
+
+    groups: tuple[CVEAffectedVersionGroupProjection, ...]
+
+
+_AFFECTED_VERSION_ORDER: Final = (
+    "vendor",
+    "product",
+    "package_name",
+    "ecosystem",
+    "repo",
+    "version_type",
+    "version",
+    "version_end",
+)
+"""The entry conflict-key fields in response order: package coordinates
+first (cve-tracking.md, Get CVE Affected Versions)."""
+
+
+def _affected_version_order(
+    entry: CVEAffectedVersionEntryProjection,
+) -> tuple[tuple[bool, str], ...]:
+    """Code-point order per field (Python `str` comparison), an absent
+    value after every present one, including the empty string."""
+    values = (getattr(entry, name) for name in _AFFECTED_VERSION_ORDER)
+    return tuple((value is None, value or "") for value in values)
+
+
+def _affected_version_entry(row: Row[Any]) -> CVEAffectedVersionEntryProjection:
+    values = {name: getattr(row, name) for name in AFFECTED_VERSION_FIELDS}
+    program_files = values["program_files"]
+    if program_files is not None:
+        values["program_files"] = tuple(program_files)
+    return CVEAffectedVersionEntryProjection(**values)
+
+
+async def get_cve_affected_versions(
+    db: AsyncSession, caller: TicketCaller, cve_id: str
+) -> CVEAffectedVersionsResult:
+    """Return the affected-version entries of one accessible CVE, grouped
+    by `source_container`.
+
+    Category B read (cve-service.md, Service Read Contracts > CVE Affected
+    Versions; cve-tracking.md, Get CVE Affected Versions). Performs the
+    `require_accessible_cve` boundary role of
+    `GET /api/v1/cves/{cve_id}/affected-versions` directly in its
+    selection.
+
+    Q1: `cve_id` is the raw path value; `caller` is the request-resolved
+    caller information.
+
+    Q3: (1) a value rejected by `core.identifiers.is_valid_cve_id()` runs
+    no query. (2) One SQL statement, and therefore one PostgreSQL
+    observation, selects the CVE by the unique `CVE.cve_id`, outer-joined
+    to its at most one Ticket and constrained by the CVE accessibility
+    projection of the canonical Ticket predicate, outer-joined to every
+    `CVEAffectedVersion` row; a concurrent scope replacement is observed
+    entirely before or after it. (3) Groups every row under its
+    `source_container`, so no group is empty, and orders groups and
+    entries by Unicode code point in Python, independent of database
+    collation. (4) Projects the fifteen persisted content fields as
+    stored. Creates no row or event, acquires no lock, and never
+    flushes, commits, or rolls back.
+
+    Q4: returns the `CVEAffectedVersionsResult`; no groups when the CVE
+    has no entries.
+
+    Q6: raises `CVENotFoundError` for a malformed, missing, or
+    inaccessible CVE without distinguishing the causes. Database
+    exceptions propagate unchanged.
+    """
+    if not is_valid_cve_id(cve_id):
+        raise CVENotFoundError()
+    statement = (
+        select(
+            CVEAffectedVersion.source_container,
+            *(getattr(CVEAffectedVersion, name) for name in AFFECTED_VERSION_FIELDS),
+        )
+        .select_from(CVE)
+        .outerjoin(Ticket, Ticket.cve_id == CVE.id)
+        .outerjoin(CVEAffectedVersion, CVEAffectedVersion.cve_id == CVE.id)
+        .where(CVE.cve_id == cve_id, _cve_accessibility_condition(caller))
+    )
+    rows = (await db.execute(statement)).all()
+    if not rows:
+        raise CVENotFoundError()
+    scopes: dict[str, list[CVEAffectedVersionEntryProjection]] = {}
+    for row in rows:
+        if row.source_container is not None:
+            scopes.setdefault(row.source_container, []).append(
+                _affected_version_entry(row)
+            )
+    return CVEAffectedVersionsResult(
+        groups=tuple(
+            CVEAffectedVersionGroupProjection(
+                source_container=source_container,
+                entries=tuple(
+                    sorted(scopes[source_container], key=_affected_version_order)
+                ),
+            )
+            for source_container in sorted(scopes)
+        )
+    )
 
 
 def _stalled_condition() -> ColumnElement[bool]:

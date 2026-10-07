@@ -522,6 +522,7 @@ here with the required authorization level and a link to the owning spec.
 | GET | `/api/v1/cves` | Public (optional auth) | [cve-tracking](../tickets/cve-tracking.md#list-cves) |
 | GET | `/api/v1/cves/{cve_id}` | Public (optional auth) | [cve-tracking](../tickets/cve-tracking.md#get-cve) |
 | GET | `/api/v1/cves/{cve_id}/cvss` | Public (optional auth) | [cvss-scoring](../tickets/cvss-scoring.md#get-cvss-assessments-for-a-cve) |
+| GET | `/api/v1/cves/{cve_id}/affected-versions` | Public (optional auth) | [cve-tracking](../tickets/cve-tracking.md#get-cve-affected-versions) |
 | GET | `/api/v1/cves/{cve_id}/sources` | Public (optional auth) | [cve-service](../tickets/cve-service.md#cve-source-status) |
 | POST | `/api/v1/cves/{cve_id}/cvss/suse` | `manage_cvss` | [cvss-scoring](../tickets/cvss-scoring.md#set-or-update-suse-cvss-assessment) |
 | DELETE | `/api/v1/cves/{cve_id}/cvss/suse/{cvss_version}` | `manage_cvss` | [cvss-scoring](../tickets/cvss-scoring.md#delete-suse-cvss-assessment) |
