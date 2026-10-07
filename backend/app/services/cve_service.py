@@ -1246,6 +1246,7 @@ class _DurableSourceProjection:
     config_names: frozenset[str]
     disabled_names: frozenset[str]
     kev_updated_at: datetime | None
+    kev_run_started_at: datetime | None
     kev_run_finished_at: datetime | None
 
 
@@ -1259,15 +1260,15 @@ def _durable_source_status_statement(cve_id: str, caller: TicketCaller) -> Selec
             FetcherConfig.enabled.is_(false())
         )
     ).scalar_subquery()
-    kev_run_finished_at = (
-        select(FetcherRun.finished_at)
+    kev_run = (
+        select(FetcherRun.started_at, FetcherRun.finished_at)
         .where(
             FetcherRun.fetcher_name == KEV_FETCHER_NAME,
             FetcherRun.status == FetcherRunStatus.SUCCESS.value,
         )
         .order_by(FetcherRun.finished_at.desc().nulls_last(), FetcherRun.id.desc())
         .limit(1)
-        .scalar_subquery()
+        .lateral("kev_run")
     )
     return (
         select(
@@ -1275,7 +1276,8 @@ def _durable_source_status_statement(cve_id: str, caller: TicketCaller) -> Selec
             config_names.label("config_names"),
             disabled_names.label("disabled_names"),
             CVEKEVEntry.updated_at.label("kev_updated_at"),
-            kev_run_finished_at.label("kev_run_finished_at"),
+            kev_run.c.started_at.label("kev_run_started_at"),
+            kev_run.c.finished_at.label("kev_run_finished_at"),
             CVESource.source.label("source"),
             CVESource.status.label("status"),
             CVESource.fetched_at.label("fetched_at"),
@@ -1284,6 +1286,7 @@ def _durable_source_status_statement(cve_id: str, caller: TicketCaller) -> Selec
         .select_from(CVE)
         .outerjoin(Ticket, Ticket.cve_id == CVE.id)
         .outerjoin(CVEKEVEntry, CVEKEVEntry.cve_id == CVE.id)
+        .outerjoin(kev_run, true())
         .outerjoin(CVESource, CVESource.cve_id == CVE.id)
         .where(CVE.cve_id == cve_id, _cve_accessibility_condition(caller))
     )
@@ -1317,6 +1320,7 @@ async def _read_durable_source_projection(
         config_names=frozenset(first.config_names or ()),
         disabled_names=frozenset(first.disabled_names or ()),
         kev_updated_at=first.kev_updated_at,
+        kev_run_started_at=first.kev_run_started_at,
         kev_run_finished_at=first.kev_run_finished_at,
     )
 
@@ -1355,15 +1359,21 @@ def _kev_entry(
     projection: _DurableSourceProjection, *, refetchable: bool, enabled: bool
 ) -> CVESourceStatusEntry:
     """KEV status from `CVEKEVEntry` presence and the latest fully
-    successful `sync_cisa_kev` run; independent of `enabled`."""
+    successful `sync_cisa_kev` run; independent of `enabled`.
+
+    Only a run that started at or after the CVE's creation proves absence:
+    a CVE created mid-run may be listed in a catalog entry the run had
+    already examined. `fetched_at` of `missing` is the run's
+    `finished_at`, when the absence was established."""
     status = CVESourceDerivedStatus.NOT_ATTEMPTED
     fetched_at: datetime | None = None
     if projection.kev_updated_at is not None:
         status = CVESourceDerivedStatus.SUCCESS
         fetched_at = projection.kev_updated_at
     elif (
-        projection.kev_run_finished_at is not None
-        and projection.kev_run_finished_at >= projection.cve_created_at
+        projection.kev_run_started_at is not None
+        and projection.kev_run_finished_at is not None
+        and projection.kev_run_started_at >= projection.cve_created_at
     ):
         status = CVESourceDerivedStatus.MISSING
         fetched_at = projection.kev_run_finished_at
@@ -1428,8 +1438,9 @@ async def get_cve_source_status(
        selects the CVE under the CVE accessibility projection of the
        canonical Ticket predicate together with its `CVESource` rows, the
        `FetcherConfig` names and disabled names, `CVEKEVEntry.updated_at`,
-       and the latest successful `sync_cisa_kev` run (`finished_at DESC,
-       id DESC`). The session closes before any registry or Redis access;
+       and the `started_at`/`finished_at` of the latest successful
+       `sync_cisa_kev` run (`finished_at DESC, id DESC`). The session
+       closes before any registry or Redis access;
     2. loads the in-memory registry (`get_all_cve_source_types()`);
     3. `enabled` is the materialized `FetcherConfig.enabled` of the
        source's fetcher, `true` when the row is absent; `refetchable` is

@@ -441,6 +441,23 @@ class Projection:
         await self.world.ticket(cve_id=cve.id)
         return cve
 
+    async def cve_named(self, cve_id: str) -> CVE:
+        """Like `cve()`, under a CVE-ID from `world.new_cve_id()`."""
+        cve = CVE(cve_id=cve_id)
+        self.world.session.add(cve)
+        await self.world.session.flush()
+        self.world.cve_ids.append(cve.id)
+        await self.world.session.commit()
+        await self.world.ticket(cve_id=cve.id)
+        return cve
+
+    async def created_at(self, cve: CVE) -> datetime:
+        async with self.factory() as session:
+            value: datetime = (
+                await session.execute(select(CVE.created_at).where(CVE.id == cve.id))
+            ).scalar_one()
+        return value
+
     def serve(self, *entries: dict[str, Any]) -> None:
         self.server.catalog = catalog_of(*entries)
 
@@ -652,6 +669,50 @@ class TestKevProjection:
         )
         # The fully successful run postdates the CVE and did not list it.
         assert await projection.status(unlisted) == _kev_entry(MISSING, run.finished_at)
+
+    async def test_cve_created_after_its_entry_was_examined_is_not_missing(
+        self, projection: Projection, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A listed CVE ingested mid-run, after the run looked up and
+        skipped its entry, is not proven absent although the fully
+        successful run finished after the CVE existed; the next run
+        records its evidence. A CVE that existed when the run started
+        still turns `missing`."""
+        unlisted = await projection.cve()
+        late_id = projection.world.new_cve_id()
+        projection.serve(entry_for(late_id))
+        real_cve_exists = SyncCisaKev._cve_exists
+        created: list[CVE] = []
+
+        async def cve_exists(
+            fetcher: SyncCisaKev, session: AsyncSession, cve_id: str
+        ) -> bool:
+            exists = await real_cve_exists(fetcher, session, cve_id)
+            if cve_id == late_id and not created:
+                assert not exists
+                created.append(await projection.cve_named(late_id))
+            return exists
+
+        monkeypatch.setattr(SyncCisaKev, "_cve_exists", cve_exists)
+
+        run = await projection.run()
+
+        # The skipped entry counts neither success nor failure.
+        assert _outcome(run) == ("success", 0, 0, 0, 0)
+        [late] = created
+        assert run.started_at is not None
+        assert run.finished_at is not None
+        assert await projection.created_at(unlisted) <= run.started_at
+        assert run.started_at < await projection.created_at(late) < run.finished_at
+        assert await projection.status(late) == _kev_entry(NOT_ATTEMPTED, None)
+        assert await projection.status(unlisted) == _kev_entry(MISSING, run.finished_at)
+
+        second = await projection.run()
+
+        assert _outcome(second) == ("success", 1, 0, 1, 0)
+        assert await projection.status(late) == _kev_entry(
+            SUCCESS, await projection.kev_updated_at(late)
+        )
 
     async def test_partial_run_never_proves_absence(
         self, projection: Projection
