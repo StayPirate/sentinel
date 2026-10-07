@@ -4,7 +4,9 @@ The files under `backend/tests/fixtures/osv/` are live
 `GET https://api.osv.dev/v1/vulns/{id}` responses captured anonymously on
 2026-10-07 through Sentinel's production HTTP client
 (`create_http_client(name="sync_osv_advisories")`, its standard User-Agent,
-redirects not followed). Phase 1 CVE records:
+redirects not followed). Several records carry `related` IDs, which are
+not consumed (docs/features/tickets/cve-sync-osv.md, Explicitly Ignored
+Fields). Phase 1 CVE records:
 
 - `cve_git_ranges.json` (CVE-2021-44228): one `GIT` range with four pairs,
   `introduced: "0"` in the middle, and a closing `last_affected`; one
@@ -25,7 +27,8 @@ redirects not followed). Phase 1 CVE records:
 - `cve_references_only.json` (CVE-2014-0160): no `affected` and no
   `aliases`; only `references` and `related`;
 - `cve_multi_cve_aliases.json` (CVE-2023-4863): `A`, `ASB`, `CVE`,
-  `GHSA`, `PYSEC`, and two `RUSTSEC` aliases.
+  `GHSA`, `PYSEC`, and two `RUSTSEC` aliases; the `CVE` alias is never
+  requested.
 
 Phase 2 alias records:
 
@@ -35,7 +38,7 @@ Phase 2 alias records:
 - `alias_ghsa_semver.json` (GHSA-8hfj-j24r-96c4): an npm `SEMVER` range
   and a NuGet `ECOSYSTEM` range with `versions[]`;
 - `alias_ghsa_multi_cve.json` (GHSA-j7hp-h8jx-5ppr): `aliases` naming two
-  CVEs; crates.io and npm `SEMVER` ranges;
+  CVEs, so it applies to neither; crates.io and npm `SEMVER` ranges;
 - `alias_pysec.json` (PYSEC-2025-49): a `GIT` and an `ECOSYSTEM` range and
   `versions[]`; one CVE alias;
 - `alias_rustsec.json` (RUSTSEC-2023-0034): one crates.io `SEMVER` range;
@@ -46,15 +49,10 @@ Phase 2 alias records:
   entry without `package` (a `SEMVER` and a `GIT` range) and no
   `references`;
 - `alias_asb_no_purl.json` (ASB-A-299477569): Android packages without
-  `purl`.
+  `purl`, and two CVE aliases.
 
-Phase 3 related records:
-
-- `related_suse.json` (SUSE-SU-2021:4096-1): four `affected[]` entries
-  naming two distinct packages, and `upstream`;
-- `related_opensuse_reference_without_url.json`
-  (openSUSE-SU-2024:11666-1): a reference object without `url`, and
-  `upstream`.
+The related-record fixtures captured in the same session were removed when
+related records stopped being consumed (issue #850, decision G6).
 
 HTTP 404 bodies, stored byte-for-byte as served with
 `Content-Type: application/json` and no trailing newline:
@@ -135,10 +133,7 @@ ALIAS_FIXTURES = (
 )
 """Sanitized live HTTP 200 Phase 2 alias records, by fixture name."""
 
-RELATED_FIXTURES = ("related_suse", "related_opensuse_reference_without_url")
-"""Sanitized live HTTP 200 Phase 3 related records, by fixture name."""
-
-RECORD_FIXTURES = (*CVE_FIXTURES, *ALIAS_FIXTURES, *RELATED_FIXTURES)
+RECORD_FIXTURES = (*CVE_FIXTURES, *ALIAS_FIXTURES)
 
 NOT_FOUND_FIXTURE = "not_found"
 """The live HTTP 404 body for an unknown CVE-ID, stored as served."""
@@ -164,8 +159,6 @@ FIXTURE_RECORD_IDS: Mapping[str, str] = {
     "alias_go": "GO-2024-2687",
     "alias_curl_no_package": "CURL-CVE-2023-38545",
     "alias_asb_no_purl": "ASB-A-299477569",
-    "related_suse": "SUSE-SU-2021:4096-1",
-    "related_opensuse_reference_without_url": "openSUSE-SU-2024:11666-1",
 }
 """The requested ID of every HTTP 200 fixture."""
 

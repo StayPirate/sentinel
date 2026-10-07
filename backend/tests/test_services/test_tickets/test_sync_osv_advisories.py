@@ -3,11 +3,13 @@
 
 Owning specifications:
 
-- docs/features/tickets/cve-sync-osv.md (Algorithm steps 1-17; Field
-  Mapping; GIT Range Event Parsing; Response Validation, including External
-  String Admissibility; OSV Reference Type Mapping; External Identifier
-  Policy; `fetch_single` Method; Error Handling, `fetch_single()` table,
-  data preservation; Post-Ingest Package Candidates; `CompletenessGuardError`).
+- docs/features/tickets/cve-sync-osv.md (Role, same-vulnerability boundary
+  and `related` records; Algorithm steps 1-14; Field Mapping; GIT Range
+  Event Parsing; Response Validation, including External String
+  Admissibility; OSV Reference Type Mapping; External Identifier Policy;
+  Explicitly Ignored Fields; `fetch_single` Method; Error Handling,
+  `fetch_single()` table, data preservation; Post-Ingest Package
+  Candidates; `CompletenessGuardError`).
 - docs/features/platform/cve-fetcher-infrastructure.md (Automatic Reference
   Caller Contract; `CVEFetchResult`; `fetch_single` Signaling Convention;
   Retry Policy and Error Categorization; Canonical Payload Producer
@@ -24,21 +26,23 @@ Owning specifications:
 HTTP is the in-process `OsvServer` of `tests/support/osv.py`, injected as the
 fetcher's HTTP client, serving the sanitized live fixtures under their
 requested IDs (Phase 1 records under fictional CVE-IDs, alias records with
-their CVE alias retargeted where the External Identifier Policy guard is
-exercised) or minimal fictional bodies. The throttle sleep is recorded,
-never slept. Outcome tests that end before any database work use a session
-that fails on any use, and spies on `cve_service.upsert_cve()` and
-`reference_service.upsert_references()` prove no mutation was attempted;
-they are unit tests. Ingestion tests run the real `upsert_cve()` and
-`upsert_references()` on `db_session`, rolled back at teardown. All
-identifiers and texts are fictional.
+their CVE alias retargeted to the processed CVE where they must apply,
+Algorithm step 6) or minimal fictional bodies. The throttle sleep is
+recorded, never slept. Every test also asserts that no `CVE-*` ID is ever
+requested as a sub-request (step 5). Outcome tests that end before any
+database work use a session that fails on any use, and spies on
+`cve_service.upsert_cve()` and `reference_service.upsert_references()`
+prove no mutation was attempted; they are unit tests. Ingestion tests run
+the real `upsert_cve()` and `upsert_references()` on `db_session`, rolled
+back at teardown. All identifiers and texts are fictional, except the
+public advisory and CVE identifiers of the live fixtures.
 """
 
 from __future__ import annotations
 
 import asyncio
 import copy
-from collections.abc import AsyncIterator, Iterable, Mapping
+from collections.abc import AsyncIterator, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Any, Final, cast
@@ -119,8 +123,13 @@ INGESTION_COMMENT: Final = "CVE ingested from OSV"
 
 ALIAS: Final = "GHSA-fict-0001-aaaa"
 ALIAS_2: Final = "GHSA-fict-0002-bbbb"
+ALIAS_3: Final = "PYSEC-2099-0003"
+ALIAS_4: Final = "RUSTSEC-2099-0004"
 RELATED: Final = "SUSE-SU-2099:0001-1"
-RELATED_2: Final = "openSUSE-SU-2099:0002-1"
+"""A `related` ID: never requested (§ Explicitly Ignored Fields)."""
+OTHER_CVE: Final = "CVE-2099-990000001"
+OTHER_CVE_2: Final = "CVE-2099-990000002"
+"""Other CVE-IDs listed as aliases: never requested (Algorithm step 5)."""
 
 SKIP_KEYS: Final = frozenset(
     {
@@ -128,7 +137,6 @@ SKIP_KEYS: Final = frozenset(
         "log_level",
         "cve_id",
         "fetcher_name",
-        "record_kind",
         "record_id",
         "reason",
         "status_code",
@@ -209,7 +217,7 @@ def server() -> OsvServer:
 
 @dataclass
 class Throttle:
-    """The recorded step-16 sleeps: each delay, and how many requests the
+    """The recorded step-13 sleeps: each delay, and how many requests the
     server had received when it was requested."""
 
     server: OsvServer
@@ -226,6 +234,29 @@ def throttle(server: OsvServer, monkeypatch: pytest.MonkeyPatch) -> Throttle:
     recorder = Throttle(server)
     monkeypatch.setattr(sync_module, "asyncio", SimpleNamespace(sleep=recorder.sleep))
     return recorder
+
+
+@pytest.fixture(autouse=True)
+def no_cve_sub_request(
+    server: OsvServer, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[None]:
+    """Algorithm step 5: a `CVE-*` ID is requested only as a Phase 1 record,
+    the first request of its `fetch_single()` call, never as an alias."""
+    sub_requested: list[str] = []
+    real_get = sync_module._ThrottledRequests.get
+
+    async def get(self: Any, record_id: str) -> httpx.Response:
+        if self._requested:
+            sub_requested.append(record_id)
+        return await real_get(self, record_id)
+
+    monkeypatch.setattr(sync_module._ThrottledRequests, "get", get)
+    yield
+    assert [r for r in sub_requested if r.startswith("CVE-")] == []
+    phase1 = [
+        r for r in server.requested_ids if r is not None and r not in sub_requested
+    ]
+    assert all(r.startswith("CVE-") for r in phase1)
 
 
 @pytest.fixture
@@ -432,7 +463,6 @@ def _skip(
     cve_id: str,
     reason: str,
     *,
-    record_kind: str = "alias",
     record_id: str | None = ALIAS,
     status_code: int | None = None,
 ) -> dict[str, Any]:
@@ -442,7 +472,6 @@ def _skip(
         "log_level": "warning",
         "cve_id": cve_id,
         "fetcher_name": NAME,
-        "record_kind": record_kind,
         "reason": reason,
     }
     if record_id is not None:
@@ -503,7 +532,7 @@ FAILED_RESPONSES: Final[list[tuple[Any, str, int | None]]] = [
         200,
     ),
 ]
-"""Every failed-sub-request response kind (step 11), its WARNING reason,
+"""Every failed-sub-request response kind (step 8), its WARNING reason,
 and the status it carries."""
 
 FAILED_IDS: Final = [
@@ -612,11 +641,19 @@ class TestMissingBeforeMutation:
         [
             {},
             {"id": "CVE-2099-0001", "summary": SECRET, "severity": [], "credits": []},
-            {"affected": None, "references": None, "aliases": None, "related": None},
-            {"references": [], "aliases": [], "related": []},
+            {"affected": None, "references": None, "aliases": None},
+            {"references": [], "aliases": []},
+            {"related": [RELATED, OTHER_CVE], "upstream": [OTHER_CVE]},
             {"withdrawn": "2026-01-01T00:00:00Z", "details": PERSONAL},
         ],
-        ids=["empty", "unconsumed_only", "null_fields", "empty_arrays", "withdrawn"],
+        ids=[
+            "empty",
+            "unconsumed_only",
+            "null_fields",
+            "empty_arrays",
+            "only_related",
+            "withdrawn",
+        ],
     )
     async def test_200_without_extractable_data_is_missing_without_sub_requests(
         self,
@@ -771,7 +808,7 @@ class TestPhase1ErrorPropagation:
             [{"aliases": [ALIAS]}],
             SECRET,
             {"aliases": SECRET},
-            {"related": [1]},
+            {"aliases": [1]},
             {"references": [{"url": [SECRET]}]},
             {"affected": [{"ranges": [{"type": "GIT", "events": [{SECRET: "x"}]}]}]},
             {"affected": [{"ranges": [{"type": "GIT", "repo": [SECRET]}]}]},
@@ -780,7 +817,7 @@ class TestPhase1ErrorPropagation:
             "array_root",
             "string_root",
             "aliases_string",
-            "related_integer",
+            "alias_integer",
             "reference_url_list",
             "unknown_event",
             "repo_list",
@@ -817,22 +854,21 @@ class TestPhase1ErrorPropagation:
 # ---------------------------------------------------------------------------
 
 
-def _listing(server: OsvServer, *, aliases: list[str], related: list[str]) -> str:
-    """Serve a Phase 1 record listing only `aliases` and `related`."""
+def _listing(server: OsvServer, aliases: list[str]) -> str:
+    """Serve a Phase 1 record listing only `aliases` (and an unconsumed
+    `related` ID)."""
     cve_id = fictional_cve_id()
-    server.bodies[cve_id] = {"aliases": aliases, "related": related}
+    server.bodies[cve_id] = {"aliases": aliases, "related": [RELATED]}
     return cve_id
 
 
 @pytest.mark.unit
 class TestFailedSubRequests:
-    @pytest.mark.parametrize("record_kind", ["alias", "related"])
     @pytest.mark.parametrize(
         ("responder", "reason", "code"), FAILED_RESPONSES, ids=FAILED_IDS
     )
     async def test_each_failure_kind_is_one_bounded_skip_and_triggers_the_guard(
         self,
-        record_kind: str,
         responder: Any,
         reason: str,
         code: int | None,
@@ -840,46 +876,34 @@ class TestFailedSubRequests:
         server: OsvServer,
         ingestion: Ingestion,
     ) -> None:
-        listed = {"aliases": [ALIAS], "related": []}
-        if record_kind == "related":
-            listed = {"aliases": [], "related": [ALIAS]}
-        cve_id = _listing(server, **listed)
+        cve_id = _listing(server, [ALIAS])
         server.responses[ALIAS] = responder
 
         with capture_logs() as logs, pytest.raises(CompletenessGuardError):
             await fetcher.fetch_single(cve_id, NO_SESSION)
 
         assert server.requested_ids == [cve_id, ALIAS]
-        assert logs == [
-            _skip(cve_id, reason, record_kind=record_kind, status_code=code)
-        ]
+        assert logs == [_skip(cve_id, reason, status_code=code)]
         _assert_no_raw_value(logs, SECRET)
         assert ingestion.calls == 0
 
-    @pytest.mark.parametrize("record_kind", ["alias", "related"])
     @pytest.mark.parametrize("record_id", UNSAFE_IDS)
     async def test_unsafe_id_is_never_requested_nor_logged(
         self,
-        record_kind: str,
         record_id: str,
         fetcher: SyncOsvAdvisories,
         server: OsvServer,
         ingestion: Ingestion,
         throttle: Throttle,
     ) -> None:
-        listed = {"aliases": [record_id], "related": []}
-        if record_kind == "related":
-            listed = {"aliases": [], "related": [record_id]}
-        cve_id = _listing(server, **listed)
+        cve_id = _listing(server, [record_id])
 
         with capture_logs() as logs, pytest.raises(CompletenessGuardError):
             await fetcher.fetch_single(cve_id, NO_SESSION)
 
         assert server.requested_ids == [cve_id]
         assert throttle.delays == []
-        assert logs == [
-            _skip(cve_id, "unsafe_id", record_kind=record_kind, record_id=None)
-        ]
+        assert logs == [_skip(cve_id, "unsafe_id", record_id=None)]
         if record_id:
             _assert_no_raw_value(logs, record_id)
         assert ingestion.calls == 0
@@ -888,9 +912,7 @@ class TestFailedSubRequests:
         self, fetcher: SyncOsvAdvisories, server: OsvServer
     ) -> None:
         safe = ["GHSA-fict-0003-cccc", "PYSEC-2099-1", "SUSE-SU-2099:0003-1", "A.b_c"]
-        cve_id = _listing(
-            server, aliases=[*UNSAFE_IDS[:6], *safe[:2]], related=[*UNSAFE_IDS, *safe]
-        )
+        cve_id = _listing(server, [*UNSAFE_IDS[:6], *safe[:2], *UNSAFE_IDS, *safe])
         for record_id in safe:
             server.responses[record_id] = status(503)
 
@@ -909,15 +931,15 @@ class TestFailedSubRequests:
         server: OsvServer,
         ingestion: Ingestion,
     ) -> None:
-        cve_id = _listing(server, aliases=[ALIAS, "..", ALIAS_2], related=[RELATED])
+        cve_id = _listing(server, [ALIAS, "..", ALIAS_2, OTHER_CVE, ALIAS_3])
         server.responses[ALIAS] = status(503)
         server.responses[ALIAS_2] = raising(httpx.ConnectError("refused"))
-        server.responses[RELATED] = status(200, b"{")
+        server.responses[ALIAS_3] = status(200, b"{")
 
         with capture_logs() as logs, pytest.raises(CompletenessGuardError) as raised:
             await fetcher.fetch_single(cve_id, NO_SESSION)
 
-        assert server.requested_ids == [cve_id, ALIAS, ALIAS_2, RELATED]
+        assert server.requested_ids == [cve_id, ALIAS, ALIAS_2, ALIAS_3]
         assert [entry["reason"] for entry in logs] == [
             "http_status",
             "unsafe_id",
@@ -925,7 +947,7 @@ class TestFailedSubRequests:
             "invalid_body",
         ]
         assert ingestion.calls == 0
-        assert str(raised.value) == "Every OSV alias and related sub-request failed"
+        assert str(raised.value) == "Every OSV alias sub-request failed"
         assert not is_retryable_condition(raised.value)
         assert not is_infrastructure_failure(raised.value)
 
@@ -934,19 +956,14 @@ class TestFailedSubRequests:
         [asyncio.CancelledError(), SoftTimeLimitExceeded(), MemoryError()],
         ids=lambda signal: type(signal).__name__,
     )
-    @pytest.mark.parametrize("record_kind", ["alias", "related"])
     async def test_whole_run_signal_in_a_sub_request_is_never_absorbed(
         self,
-        record_kind: str,
         signal: BaseException,
         fetcher: SyncOsvAdvisories,
         server: OsvServer,
         ingestion: Ingestion,
     ) -> None:
-        listed = {"aliases": [ALIAS, ALIAS_2], "related": []}
-        if record_kind == "related":
-            listed = {"aliases": [], "related": [ALIAS, ALIAS_2]}
-        cve_id = _listing(server, **listed)
+        cve_id = _listing(server, [ALIAS, ALIAS_2])
 
         def respond(request: httpx.Request) -> httpx.Response:
             raise signal
@@ -968,7 +985,7 @@ class TestFailedSubRequests:
         ingestion: Ingestion,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        cve_id = _listing(server, aliases=[ALIAS], related=[])
+        cve_id = _listing(server, [ALIAS])
         server.bodies[ALIAS] = _alias_body(cve_id)
         error = RuntimeError(SECRET)
 
@@ -986,7 +1003,48 @@ class TestFailedSubRequests:
 
 
 # ---------------------------------------------------------------------------
-# Throttle (Algorithm step 16)
+# CVE-* aliases and related IDs are never requested (Algorithm step 5;
+# Explicitly Ignored Fields)
+# ---------------------------------------------------------------------------
+
+CVE_ALIASES: Final = [OTHER_CVE, OTHER_CVE_2, "CVE-x/../y", "CVE-\x00" + SECRET]
+"""`CVE-*` aliases, including ones that would fail the step-5 ID check: the
+`CVE-` prefix is checked first, so none is requested or logged."""
+
+
+@pytest.mark.unit
+class TestSkippedIds:
+    async def test_cve_aliases_and_related_ids_are_not_sub_requests(
+        self,
+        fetcher: SyncOsvAdvisories,
+        server: OsvServer,
+        ingestion: Ingestion,
+        throttle: Throttle,
+    ) -> None:
+        """With a failing alias, the `CVE-*` aliases and `related` IDs (each
+        served with a record) neither count as observed nor are requested:
+        the guard triggers after exactly one sub-request."""
+        cve_id = fictional_cve_id()
+        server.bodies[cve_id] = {
+            "aliases": [*CVE_ALIASES[:2], ALIAS, *CVE_ALIASES[2:], cve_id],
+            "related": [RELATED, OTHER_CVE],
+        }
+        for record_id in (OTHER_CVE, OTHER_CVE_2, RELATED):
+            server.bodies[record_id] = _alias_body(cve_id, _package("example"))
+        server.responses[ALIAS] = status(503)
+
+        with capture_logs() as logs, pytest.raises(CompletenessGuardError):
+            await fetcher.fetch_single(cve_id, NO_SESSION)
+
+        assert server.requested_ids == [cve_id, ALIAS]
+        assert throttle.after == [1]
+        assert logs == [_skip(cve_id, "http_status", status_code=503)]
+        _assert_no_raw_value(logs, SECRET, OTHER_CVE, OTHER_CVE_2, RELATED)
+        assert ingestion.calls == 0
+
+
+# ---------------------------------------------------------------------------
+# Throttle (Algorithm step 13)
 # ---------------------------------------------------------------------------
 
 
@@ -998,16 +1056,17 @@ class TestThrottle:
         server: OsvServer,
         throttle: Throttle,
     ) -> None:
-        cve_id = _listing(server, aliases=[ALIAS, "..", ALIAS_2], related=[RELATED])
-        for record_id in (ALIAS, ALIAS_2, RELATED):
+        cve_id = _listing(server, [ALIAS, "..", OTHER_CVE, ALIAS_2, ALIAS_3])
+        for record_id in (ALIAS, ALIAS_2, ALIAS_3):
             server.responses[record_id] = status(503)
         assert fetcher.config is None
 
         with pytest.raises(CompletenessGuardError):
             await fetcher.fetch_single(cve_id, NO_SESSION)
 
-        assert server.requested_ids == [cve_id, ALIAS, ALIAS_2, RELATED]
-        # One delay between each consecutive pair; none for the unsafe ID.
+        assert server.requested_ids == [cve_id, ALIAS, ALIAS_2, ALIAS_3]
+        # One delay between each consecutive pair; none for the unsafe ID,
+        # the CVE alias, or the related ID.
         assert throttle.after == [1, 2, 3]
         assert throttle.delays == [0.2, 0.2, 0.2]
         assert SyncOsvAdvisories.default_request_delay == 0.2
@@ -1018,8 +1077,8 @@ class TestThrottle:
         server: OsvServer,
         throttle: Throttle,
     ) -> None:
-        cve_id = _listing(server, aliases=[ALIAS], related=[RELATED, RELATED_2])
-        for record_id in (ALIAS, RELATED, RELATED_2):
+        cve_id = _listing(server, [ALIAS, ALIAS_2, ALIAS_3])
+        for record_id in (ALIAS, ALIAS_2, ALIAS_3):
             server.responses[record_id] = raising(httpx.ConnectError("refused"))
         fetcher.config = FetcherRunConfig(
             hard_time_limit_seconds=3600, request_delay=0.75, custom_settings={}
@@ -1037,11 +1096,12 @@ class TestThrottle:
         server: OsvServer,
         throttle: Throttle,
     ) -> None:
-        cve_id = _listing(server, aliases=["a/b"], related=[])
+        cve_id = _listing(server, ["a/b", *CVE_ALIASES])
 
         with pytest.raises(CompletenessGuardError):
             await fetcher.fetch_single(cve_id, NO_SESSION)
 
+        assert server.requested_ids == [cve_id]
         assert throttle.delays == []
 
 
@@ -1116,7 +1176,7 @@ class TestExternalStringAdmissibility:
         server: OsvServer,
         ingestion: Ingestion,
     ) -> None:
-        cve_id = _listing(server, aliases=[ALIAS], related=[])
+        cve_id = _listing(server, [ALIAS])
         server.bodies[ALIAS] = _alias_body(cve_id, affected)
 
         with capture_logs() as logs, pytest.raises(ValidationError) as raised:
@@ -1127,22 +1187,6 @@ class TestExternalStringAdmissibility:
         assert ingestion.calls == 0
         assert SECRET not in str(raised.value)
         assert not is_retryable_condition(raised.value)
-
-    async def test_nul_in_a_related_package_name_fails_the_cve_before_any_write(
-        self,
-        fetcher: SyncOsvAdvisories,
-        server: OsvServer,
-        ingestion: Ingestion,
-    ) -> None:
-        cve_id = _listing(server, aliases=[], related=[RELATED])
-        server.bodies[RELATED] = {"affected": [{"package": {"name": NUL}}]}
-
-        with capture_logs() as logs, pytest.raises(ValidationError) as raised:
-            await fetcher.fetch_single(cve_id, NO_SESSION)
-
-        assert logs == []
-        assert ingestion.calls == 0
-        assert SECRET not in str(raised.value)
 
     @pytest.mark.parametrize(
         "affected",
@@ -1160,7 +1204,7 @@ class TestExternalStringAdmissibility:
         server: OsvServer,
         ingestion: Ingestion,
     ) -> None:
-        cve_id = _listing(server, aliases=[ALIAS], related=[])
+        cve_id = _listing(server, [ALIAS])
         server.bodies[ALIAS] = _alias_body(cve_id, affected)
 
         with capture_logs() as logs, pytest.raises(ValidationError):
@@ -1271,12 +1315,13 @@ class TestCompletenessGuard:
         references = await _references(db_session, target.ticket)
         server.bodies[target.cve_id] = {
             "affected": [],
-            "aliases": [ALIAS, "a/b"],
+            "aliases": [ALIAS, "a/b", OTHER_CVE, ALIAS_2],
             "related": [RELATED],
             "references": [{"url": URL_4}],
         }
+        server.bodies[OTHER_CVE] = {"affected": []}
         server.responses[ALIAS] = status(500)
-        server.responses[RELATED] = status(403)
+        server.responses[ALIAS_2] = status(403)
         calls = ingestion.calls
 
         with pytest.raises(CompletenessGuardError):
@@ -1287,11 +1332,11 @@ class TestCompletenessGuard:
         assert await _identifiers(db_session, target.cve) == {SEEDED_IDENTIFIER}
         assert await _references(db_session, target.ticket) == references
 
-    @pytest.mark.parametrize("survivor", ["alias", "related"])
-    @pytest.mark.parametrize("outcome", ["success", "not_found"])
+    @pytest.mark.parametrize(
+        "outcome", ["applicable", "not_applicable", "no_extractable_data", "not_found"]
+    )
     async def test_one_success_or_404_prevents_the_guard(
         self,
-        survivor: str,
         outcome: str,
         db_session: AsyncSession,
         target: Target,
@@ -1299,23 +1344,26 @@ class TestCompletenessGuard:
         server: OsvServer,
         ingestion: Ingestion,
     ) -> None:
-        survivor_id = ALIAS_2 if survivor == "alias" else RELATED_2
-        server.bodies[target.cve_id] = {
-            "aliases": [ALIAS, *([ALIAS_2] if survivor == "alias" else [])],
-            "related": [RELATED, *([RELATED_2] if survivor == "related" else [])],
-        }
+        """A succeeded sub-request counts as observed whether or not its
+        record applies (step 8)."""
+        server.bodies[target.cve_id] = {"aliases": [ALIAS, OTHER_CVE, ALIAS_2]}
         server.responses[ALIAS] = status(503)
-        server.responses[RELATED] = raising(httpx.ReadTimeout("timed out"))
-        if outcome == "success":
-            server.bodies[survivor_id] = {}
+        if outcome == "applicable":
+            server.bodies[ALIAS_2] = _alias_body(target.cve_id)
+        elif outcome == "not_applicable":
+            server.bodies[ALIAS_2] = _alias_body(OTHER_CVE, _package("other"))
+        elif outcome == "no_extractable_data":
+            server.bodies[ALIAS_2] = {}
 
         with capture_logs() as logs:
             result = await fetcher.fetch_single(target.cve_id, db_session)
 
         assert isinstance(result, CVEFetchResult)
+        assert server.requested_ids == [target.cve_id, ALIAS, ALIAS_2]
         [payload] = ingestion.payloads
         # A failed alias leaves the scope unobserved.
         assert "affected_version_operations" not in payload.model_fields_set
+        assert "resolved_packages" not in payload.model_fields_set
         reasons = [entry["reason"] for entry in _skips(logs)]
         assert reasons.count("not_found") == (outcome == "not_found")
 
@@ -1438,22 +1486,17 @@ class TestScopeCompleteness:
         ingestion: Ingestion,
     ) -> None:
         await _seed(db_session, target, fetcher, server)
-        server.bodies[target.cve_id] = {
-            "affected": [],
-            "aliases": [ALIAS_2, ALIAS],
-            "related": [RELATED],
-        }
+        server.bodies[target.cve_id] = {"affected": [], "aliases": [ALIAS_2, ALIAS]}
         server.bodies[ALIAS_2] = _alias_body(target.cve_id, _package("other"))
         server.responses[ALIAS] = responder
-        server.bodies[RELATED] = {"affected": [{"package": {"name": "related-pkg"}}]}
 
         with capture_logs() as logs:
             result = await fetcher.fetch_single(target.cve_id, db_session)
 
         payload = ingestion.payloads[-1]
         assert "affected_version_operations" not in payload.model_fields_set
-        # The succeeded records still contribute their additive data.
-        assert payload.resolved_packages == ["other", "related-pkg"]
+        # The succeeded applicable record still contributes its additive data.
+        assert payload.resolved_packages == ["other"]
         assert await _osv_rows(db_session, target.cve) == SEEDED_ROWS
         assert await _identifiers(db_session, target.cve) == {
             SEEDED_IDENTIFIER,
@@ -1509,29 +1552,99 @@ class TestScopeCompleteness:
         assert result.action is UpsertAction.UNCHANGED
 
     @pytest.mark.parametrize(
-        ("responder", "reason", "code"), FAILED_RESPONSES[:3], ids=FAILED_IDS[:3]
+        "aliases",
+        [[], [OTHER_CVE], [OTHER_CVE, OTHER_CVE_2]],
+        ids=["self", "self_and_other_cve", "self_and_two_other_cves"],
     )
-    async def test_related_failure_does_not_affect_the_scope(
+    async def test_only_cve_aliases_replace_the_scope_with_the_phase1_entries(
         self,
-        responder: Any,
-        reason: str,
-        code: int | None,
+        aliases: list[str],
+        db_session: AsyncSession,
+        target: Target,
+        fetcher: SyncOsvAdvisories,
+        server: OsvServer,
+        ingestion: Ingestion,
+        throttle: Throttle,
+    ) -> None:
+        """Step 9: with no alias sub-request, Phase 1 is the complete
+        dataset, even when it lists `CVE-*` aliases (served here with
+        records that would contribute if requested) and `related` IDs."""
+        await _seed(db_session, target, fetcher, server)
+        throttle.delays.clear()
+        server.bodies[target.cve_id] = {
+            "affected": [{"ranges": [_git(("introduced", "a1"), ("fixed", "b1"))]}],
+            "aliases": [*aliases, target.cve_id],
+            "related": [RELATED],
+        }
+        for record_id in (*aliases, RELATED):
+            server.bodies[record_id] = _alias_body(
+                target.cve_id,
+                _package("cve-alias-pkg"),
+                references=[{"type": "FIX", "url": URL_3}],
+            )
+
+        with capture_logs() as logs:
+            result = await fetcher.fetch_single(target.cve_id, db_session)
+
+        assert result.action is UpsertAction.UPDATED
+        assert server.requested_ids == [target.cve_id]
+        assert throttle.delays == []
+        assert logs == []
+        [*_, payload] = ingestion.payloads
+        assert payload.model_fields_set == {"affected_version_operations"}
+        assert await _osv_rows(db_session, target.cve) == {_git_row("a1", "b1", False)}
+        assert ingestion.references[-1]["upstream"] == []
+
+    async def test_cve_aliases_beside_a_404_alias_replace_the_scope(
+        self,
         db_session: AsyncSession,
         target: Target,
         fetcher: SyncOsvAdvisories,
         server: OsvServer,
     ) -> None:
         await _seed(db_session, target, fetcher, server)
+        server.bodies[target.cve_id] = {"aliases": [OTHER_CVE, ALIAS_2, OTHER_CVE_2]}
+
+        with capture_logs() as logs:
+            result = await fetcher.fetch_single(target.cve_id, db_session)
+
+        assert result.action is UpsertAction.UPDATED
+        assert server.requested_ids == [target.cve_id, ALIAS_2]
+        assert _skips(logs) == [
+            _skip(target.cve_id, "not_found", record_id=ALIAS_2, status_code=404)
+        ]
+        assert await _osv_rows(db_session, target.cve) == set()
+
+    async def test_related_ids_are_never_requested_and_contribute_nothing(
+        self,
+        db_session: AsyncSession,
+        target: Target,
+        fetcher: SyncOsvAdvisories,
+        server: OsvServer,
+        ingestion: Ingestion,
+    ) -> None:
+        related = [RELATED, "openSUSE-SU-2099:0002-1", "CGA-fict-0001", "a/b"]
         server.bodies[target.cve_id] = {
             "affected": [],
             "aliases": [ALIAS_2],
-            "related": [RELATED, "a/b"],
+            "related": related,
         }
         server.bodies[ALIAS_2] = _alias_body(target.cve_id, _package("other"))
-        server.responses[RELATED] = responder
+        for record_id in related[:3]:
+            server.bodies[record_id] = _alias_body(
+                target.cve_id,
+                _package("related-pkg"),
+                references=[{"type": "ADVISORY", "url": URL_3}],
+            )
 
-        await fetcher.fetch_single(target.cve_id, db_session)
+        with capture_logs() as logs:
+            await fetcher.fetch_single(target.cve_id, db_session)
 
+        assert server.requested_ids == [target.cve_id, ALIAS_2]
+        assert logs == []
+        [payload] = ingestion.payloads
+        assert payload.resolved_packages == ["other"]
+        assert ingestion.references[0]["upstream"] == []
         assert await _osv_rows(db_session, target.cve) == {_package_row("other")}
 
     async def test_equal_replacement_is_unchanged(
@@ -1582,13 +1695,13 @@ class TestConflictKey:
         fetcher: SyncOsvAdvisories,
         server: OsvServer,
     ) -> None:
-        body = load_record_fixture("cve_git_mirror_repos")
-        body["related"] = []
-        server.bodies[target.cve_id] = body
+        server.bodies[target.cve_id] = load_record_fixture("cve_git_mirror_repos")
 
         result = await fetcher.fetch_single(target.cve_id, db_session)
 
         assert result.action is UpsertAction.UPDATED
+        # The record's `related` IDs are never requested.
+        assert server.requested_ids == [target.cve_id]
         rows = await _osv_rows(db_session, target.cve)
         assert {row[4] for row in rows} == {
             "https://git.example.invalid/mirror/4",
@@ -1730,7 +1843,7 @@ class TestExternalIdentifiers:
             ("RUSTSEC", rustsec, f"https://rustsec.org/advisories/{rustsec}"),
         }
 
-    async def test_excluded_records_are_not_emitted_but_their_data_is_used(
+    async def test_excluded_prefixes_are_not_emitted_but_their_data_is_used(
         self,
         db_session: AsyncSession,
         target: Target,
@@ -1738,35 +1851,14 @@ class TestExternalIdentifiers:
         server: OsvServer,
         ingestion: Ingestion,
     ) -> None:
-        mismatched = "GHSA-jfh8-c2jp-5v3q"
-        multi = "GHSA-j7hp-h8jx-5ppr"
-        cve_alias = fictional_cve_id()
-        aliases = [
-            mismatched,
-            multi,
-            "GO-2024-2687",
-            "BIT-golang-2023-45288",
-            "CURL-CVE-2023-38545",
-            cve_alias,
-        ]
+        aliases = ["GO-2024-2687", "BIT-golang-2023-45288", "CURL-CVE-2023-38545"]
         server.bodies[target.cve_id] = {"aliases": aliases}
-        # The single CVE alias names another CVE: the guard excludes it.
-        server.bodies[mismatched] = load_record_fixture("alias_ghsa_ecosystem")
-        # Two CVE aliases after retargeting one: the guard excludes it.
-        server.bodies[multi] = _retargeted(
-            "alias_ghsa_multi_cve", "CVE-2023-4863", target.cve_id
-        )
-        for record_id, name in (
-            ("GO-2024-2687", "alias_go"),
-            ("BIT-golang-2023-45288", "alias_bit"),
+        for record_id, name, real in (
+            ("GO-2024-2687", "alias_go", "CVE-2023-45288"),
+            ("BIT-golang-2023-45288", "alias_bit", "CVE-2023-45288"),
+            ("CURL-CVE-2023-38545", "alias_curl_no_package", "CVE-2023-38545"),
         ):
-            server.bodies[record_id] = _retargeted(
-                name, "CVE-2023-45288", target.cve_id
-            )
-        server.bodies["CURL-CVE-2023-38545"] = _retargeted(
-            "alias_curl_no_package", "CVE-2023-38545", target.cve_id
-        )
-        server.bodies[cve_alias] = _alias_body(target.cve_id, _package("cve-pkg"))
+            server.bodies[record_id] = _retargeted(name, real, target.cve_id)
 
         result = await fetcher.fetch_single(target.cve_id, db_session)
 
@@ -1774,17 +1866,7 @@ class TestExternalIdentifiers:
         [payload] = ingestion.payloads
         assert "external_identifiers" not in payload.model_fields_set
         assert await _identifiers(db_session, target.cve) == set()
-        assert payload.resolved_packages == [
-            "org.apache.logging.log4j:log4j-core",
-            "com.guicedee.services:log4j-core",
-            "org.xbib.elasticsearch:log4j",
-            "libwebp-sys2",
-            "electron",
-            "stdlib",
-            "golang.org/x/net",
-            "golang",
-            "cve-pkg",
-        ]
+        assert payload.resolved_packages == ["stdlib", "golang.org/x/net", "golang"]
         rows = await _osv_rows(db_session, target.cve)
         assert {row[1] for row in rows} == {
             *payload.resolved_packages,
@@ -1876,13 +1958,165 @@ class TestExternalIdentifiers:
 
 
 # ---------------------------------------------------------------------------
+# Applicability (Algorithm step 6)
+# ---------------------------------------------------------------------------
+
+GHSA_35JH_CVES: Final = ["CVE-2021-23337", "CVE-2026-4800"]
+"""The CVE aliases OSV serves for `GHSA-35jh-r3h4-6jhm`, which GitHub
+assigns to CVE-2021-23337 only."""
+
+
+def _non_applicable_body(aliases: list[str]) -> dict[str, Any]:
+    """An alias record listing `aliases` that would contribute every kind of
+    data if it applied, including values that would fail the payload."""
+    return {
+        "aliases": aliases,
+        "affected": [
+            _package("non-applicable", versions=["2.0"]),
+            _package("e" * 2049, "E" * 51, f"pkg:pypi/{SECRET}\x00"),
+        ],
+        "references": [{"type": "FIX", "url": URL_3}],
+    }
+
+
+@pytest.mark.integration
+class TestApplicability:
+    async def test_applicable_alias_contributes_every_kind_of_data(
+        self,
+        db_session: AsyncSession,
+        target: Target,
+        fetcher: SyncOsvAdvisories,
+        server: OsvServer,
+        ingestion: Ingestion,
+    ) -> None:
+        server.bodies[target.cve_id] = {"aliases": [ALIAS]}
+        server.bodies[ALIAS] = _alias_body(
+            target.cve_id,
+            _package("example"),
+            references=[{"type": "FIX", "url": URL_3}],
+        )
+        server.bodies[ALIAS]["aliases"] += [ALIAS_2, "CURL-CVE-2099-0001"]
+
+        await fetcher.fetch_single(target.cve_id, db_session)
+
+        [payload] = ingestion.payloads
+        assert payload.resolved_packages == ["example"]
+        assert ingestion.references[0]["upstream"] == [
+            AutomaticReferenceInput(url=URL_3, explicit_type=ReferenceType.PATCH)
+        ]
+        assert await _osv_rows(db_session, target.cve) == {_package_row("example")}
+        assert await _identifiers(db_session, target.cve) == {SEEDED_IDENTIFIER}
+
+    @pytest.mark.parametrize(
+        "aliases",
+        [
+            None,
+            [],
+            [ALIAS_2, "CURL-CVE-2099-0001"],
+            [OTHER_CVE],
+            ["target", OTHER_CVE],
+            [OTHER_CVE, "target"],
+            ["target", "target"],
+            GHSA_35JH_CVES,
+        ],
+        ids=[
+            "absent",
+            "empty",
+            "no_cve",
+            "other_cve",
+            "two_cves",
+            "two_cves_reversed",
+            "repeated_cve",
+            "ghsa_35jh_shape",
+        ],
+    )
+    async def test_non_applicable_alias_is_observed_but_contributes_nothing(
+        self,
+        aliases: list[str] | None,
+        db_session: AsyncSession,
+        target: Target,
+        fetcher: SyncOsvAdvisories,
+        server: OsvServer,
+        ingestion: Ingestion,
+    ) -> None:
+        """The record is a succeeded sub-request: no guard and no WARNING,
+        and the `osv` replacement carries only the Phase 1 entries. Its
+        inadmissible values fail nothing because they are never used."""
+        await _seed(db_session, target, fetcher, server)
+        listed = [target.cve_id if a == "target" else a for a in aliases or ()]
+        server.bodies[target.cve_id] = {
+            "affected": [{"ranges": [_git(*GIT_BODY_EVENTS)]}],
+            "aliases": [ALIAS],
+            "references": [{"type": "WEB", "url": URL_4}],
+        }
+        server.bodies[ALIAS] = _non_applicable_body(listed)
+        if aliases is None:
+            del server.bodies[ALIAS]["aliases"]
+
+        with capture_logs() as logs:
+            result = await fetcher.fetch_single(target.cve_id, db_session)
+
+        assert result.action is UpsertAction.UPDATED
+        assert server.requested_ids == [target.cve_id, ALIAS]
+        assert logs == []
+        payload = ingestion.payloads[-1]
+        assert payload.model_fields_set == {"affected_version_operations"}
+        assert ingestion.references[-1]["upstream"] == [
+            AutomaticReferenceInput(url=URL_4)
+        ]
+        # The seeded alias row is replaced by the Phase 1 entries only.
+        assert await _osv_rows(db_session, target.cve) == {_git_row(None, "c1", False)}
+        assert await _identifiers(db_session, target.cve) == {SEEDED_IDENTIFIER}
+        persisted = await _references(db_session, target.ticket)
+        assert URL_3 not in persisted
+
+    async def test_live_multi_cve_records_contribute_nothing(
+        self,
+        db_session: AsyncSession,
+        target: Target,
+        fetcher: SyncOsvAdvisories,
+        server: OsvServer,
+        ingestion: Ingestion,
+    ) -> None:
+        """CVE-2023-4863: its GHSA and ASB records list two CVEs even after
+        retargeting one to the processed CVE; its `CVE-2023-5129` alias is
+        never requested; the other aliases have no record (HTTP 404)."""
+        cve_body = load_record_fixture("cve_multi_cve_aliases")
+        server.bodies[target.cve_id] = cve_body
+        for record_id, name in (
+            ("GHSA-j7hp-h8jx-5ppr", "alias_ghsa_multi_cve"),
+            ("ASB-A-299477569", "alias_asb_no_purl"),
+        ):
+            server.bodies[record_id] = _retargeted(name, "CVE-2023-4863", target.cve_id)
+
+        with capture_logs() as logs:
+            result = await fetcher.fetch_single(target.cve_id, db_session)
+
+        assert result.action is UpsertAction.UPDATED
+        sub_requests = [a for a in cve_body["aliases"] if not a.startswith("CVE-")]
+        assert server.requested_ids == [target.cve_id, *sub_requests]
+        assert "CVE-2023-5129" in cve_body["aliases"]
+        assert [entry["reason"] for entry in _skips(logs)] == ["not_found"] * 4
+        [payload] = ingestion.payloads
+        assert payload.model_fields_set == {"affected_version_operations"}
+        assert await _identifiers(db_session, target.cve) == set()
+        phase1 = osv_vulnerability_record.parse_cve_record(cve_body)
+        assert [c.url for c in ingestion.references[0]["upstream"]] == [
+            c.url for c in osv_vulnerability_record.reference_candidates(phase1)
+        ]
+        assert {row[4] for row in await _osv_rows(db_session, target.cve)} == {
+            "https://github.com/webmproject/libwebp"
+        }
+
+
+# ---------------------------------------------------------------------------
 # References, package candidates, and results
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.integration
 class TestReferences:
-    async def test_source_then_phase1_alias_and_related_in_declared_order(
+    async def test_source_then_phase1_then_applicable_aliases_in_declared_order(
         self,
         db_session: AsyncSession,
         target: Target,
@@ -1892,8 +2126,8 @@ class TestReferences:
     ) -> None:
         refs = [f"https://advisory.example.invalid/ref/{n}" for n in range(12)]
         server.bodies[target.cve_id] = {
-            "aliases": [ALIAS, "GHSA-fict-0404-dddd", ALIAS_2],
-            "related": [RELATED, "SUSE-SU-2099:0500-1", RELATED_2],
+            "aliases": [ALIAS, "GHSA-fict-0404-dddd", ALIAS_3, ALIAS_2, ALIAS_4],
+            "related": [RELATED],
             "references": [
                 {"type": "FIX", "url": refs[0]},
                 {"type": "WEB", "url": refs[1]},
@@ -1901,13 +2135,16 @@ class TestReferences:
                 {"type": None, "url": refs[2]},
             ],
         }
-        server.responses["SUSE-SU-2099:0500-1"] = status(500)
         server.bodies[ALIAS] = _alias_body(
             target.cve_id,
             references=[
                 {"type": "REPORT", "url": refs[3]},
                 {"type": "INTRODUCED", "url": refs[4]},
             ],
+        )
+        # Not applicable: lists another CVE.
+        server.bodies[ALIAS_3] = _alias_body(
+            OTHER_CVE, references=[{"type": "ADVISORY", "url": refs[10]}]
         )
         server.bodies[ALIAS_2] = _alias_body(
             target.cve_id,
@@ -1916,19 +2153,17 @@ class TestReferences:
                 {"type": "PACKAGE", "url": refs[6]},
             ],
         )
-        server.bodies[RELATED] = {
-            "references": [
-                {"type": "ADVISORY", "url": refs[7]},
-                {"type": "EVIDENCE", "url": refs[8]},
-                {"type": "GIT", "url": refs[9]},
-            ]
-        }
-        server.bodies[RELATED_2] = {
-            "references": [
-                {"type": "DISCUSSION", "url": refs[10]},
-                {"type": "fix", "url": refs[11]},
-            ]
-        }
+        server.bodies[ALIAS_4] = _alias_body(
+            target.cve_id,
+            references=[
+                {"type": "EVIDENCE", "url": refs[7]},
+                {"type": "GIT", "url": refs[8]},
+                {"type": "fix", "url": refs[9]},
+            ],
+        )
+        server.bodies[RELATED] = _alias_body(
+            target.cve_id, references=[{"type": "ADVISORY", "url": refs[11]}]
+        )
 
         await fetcher.fetch_single(target.cve_id, db_session)
 
@@ -1948,11 +2183,9 @@ class TestReferences:
             AutomaticReferenceInput(url=refs[4]),
             AutomaticReferenceInput(url=refs[5], explicit_type=ReferenceType.ARTICLE),
             AutomaticReferenceInput(url=refs[6]),
-            AutomaticReferenceInput(url=refs[7], explicit_type=ReferenceType.ADVISORY),
+            AutomaticReferenceInput(url=refs[7]),
             AutomaticReferenceInput(url=refs[8]),
             AutomaticReferenceInput(url=refs[9]),
-            AutomaticReferenceInput(url=refs[10]),
-            AutomaticReferenceInput(url=refs[11]),
         ]
         assert all(entry.upstream_tags is None for entry in call["upstream"])
         persisted = await _references(db_session, target.ticket)
@@ -1960,8 +2193,7 @@ class TestReferences:
         assert persisted[refs[0]] == (None, "patch", NAME)
         assert persisted[refs[3]] == (None, "issue", NAME)
         assert persisted[refs[5]] == (None, "article", NAME)
-        assert persisted[refs[7]] == (None, "advisory", NAME)
-        assert len(persisted) == 13
+        assert len(persisted) == 11
 
     async def test_live_records_keep_the_documented_order(
         self,
@@ -1971,14 +2203,9 @@ class TestReferences:
         server: OsvServer,
         ingestion: Ingestion,
     ) -> None:
-        cve_body = load_record_fixture("cve_git_ranges")
-        server.bodies[target.cve_id] = cve_body
-        server.bodies["GHSA-jfh8-c2jp-5v3q"] = load_record_fixture(
-            "alias_ghsa_ecosystem"
-        )
-        server.bodies["SUSE-SU-2021:4096-1"] = load_record_fixture("related_suse")
-        server.bodies["openSUSE-SU-2024:11666-1"] = load_record_fixture(
-            "related_opensuse_reference_without_url"
+        server.bodies[target.cve_id] = load_record_fixture("cve_git_ranges")
+        server.bodies["GHSA-jfh8-c2jp-5v3q"] = _retargeted(
+            "alias_ghsa_ecosystem", "CVE-2021-44228", target.cve_id
         )
 
         with capture_logs() as logs:
@@ -1986,26 +2213,13 @@ class TestReferences:
 
         expected = [
             reference["url"]
-            for name in (
-                "cve_git_ranges",
-                "alias_ghsa_ecosystem",
-                "related_suse",
-                "related_opensuse_reference_without_url",
-            )
+            for name in ("cve_git_ranges", "alias_ghsa_ecosystem")
             for reference in load_record_fixture(name)["references"]
-            if reference.get("url") is not None
         ]
         assert [entry.url for entry in ingestion.references[0]["upstream"]] == expected
-        # openSUSE-SU-2021:1577-1 has no fixture: an authoritative 404 skip.
-        assert _skips(logs) == [
-            _skip(
-                target.cve_id,
-                "not_found",
-                record_kind="related",
-                record_id="openSUSE-SU-2021:1577-1",
-                status_code=404,
-            )
-        ]
+        # The record's three `related` IDs are never requested.
+        assert server.requested_ids == [target.cve_id, "GHSA-jfh8-c2jp-5v3q"]
+        assert _skips(logs) == []
 
     async def test_nul_in_a_reference_url_skips_that_candidate_only(
         self,
@@ -2099,7 +2313,7 @@ class TestResults:
         assert calls == [(target.cve_id, CVESourceType.OSV)]
         assert calls[0][1] is CVESourceType.OSV
 
-    async def test_resolved_packages_is_the_deduplicated_alias_then_related_union(
+    async def test_resolved_packages_are_the_deduplicated_applicable_alias_names(
         self,
         db_session: AsyncSession,
         target: Target,
@@ -2108,54 +2322,51 @@ class TestResults:
         ingestion: Ingestion,
     ) -> None:
         server.bodies[target.cve_id] = {
-            "aliases": [ALIAS, ALIAS_2],
-            "related": [RELATED, RELATED_2],
+            "aliases": [ALIAS, ALIAS_3, ALIAS_2],
+            "related": [RELATED],
         }
         server.bodies[ALIAS] = _alias_body(
             target.cve_id, _package("zeta"), _package("alpha", "npm")
         )
+        server.bodies[ALIAS_3] = _alias_body(None, _package("no-cve-pkg"))
         server.bodies[ALIAS_2] = _alias_body(
-            target.cve_id, _package("alpha"), _package(None)
+            target.cve_id, _package("alpha"), _package(None), _package("beta")
         )
-        server.bodies[RELATED] = {
-            "affected": [
-                {"package": {"name": "zeta"}},
-                {"package": {"name": "suse-pkg"}},
-                {},
-            ]
-        }
-        server.bodies[RELATED_2] = {"affected": [{"package": {"name": "alpha"}}]}
+        server.bodies[RELATED] = _alias_body(target.cve_id, _package("related-pkg"))
 
         result = await fetcher.fetch_single(target.cve_id, db_session)
 
-        assert ingestion.payloads[0].resolved_packages == ["zeta", "alpha", "suse-pkg"]
+        assert ingestion.payloads[0].resolved_packages == ["zeta", "alpha", "beta"]
         assert result.post_ingest == PostIngestTasks(
             ticket_id=str(target.ticket.id),  # type: ignore[union-attr]
             cpe_matches=[],
             affected_cpes=[],
             vendor_products=[],
-            resolved_packages=["alpha", "suse-pkg", "zeta"],
+            resolved_packages=["alpha", "beta", "zeta"],
         )
 
-    async def test_related_package_names_alone_give_a_handoff(
+    async def test_related_records_give_no_handoff(
         self,
         db_session: AsyncSession,
         target: Target,
         fetcher: SyncOsvAdvisories,
         server: OsvServer,
+        ingestion: Ingestion,
     ) -> None:
-        server.bodies[target.cve_id] = load_record_fixture("cve_references_only")
-        server.bodies["SUSE-SU-2015:0546-1"] = load_record_fixture("related_suse")
+        body = load_record_fixture("cve_references_only")
+        server.bodies[target.cve_id] = body
+        for record_id in body["related"]:
+            server.bodies[record_id] = {
+                "affected": [{"package": {"name": "suse-example"}}],
+                "related": [target.cve_id],
+            }
 
         result = await fetcher.fetch_single(target.cve_id, db_session)
 
+        assert server.requested_ids == [target.cve_id]
         # An empty replacement of an empty scope changes nothing.
-        assert result.action is UpsertAction.UNCHANGED
-        assert result.post_ingest is not None
-        assert result.post_ingest.resolved_packages == [
-            "storm",
-            "venv-openstack-monasca",
-        ]
+        assert result == CVEFetchResult(UpsertAction.UNCHANGED, None)
+        assert "resolved_packages" not in ingestion.payloads[0].model_fields_set
 
     async def test_no_package_candidate_is_updated_without_handoff(
         self,
@@ -2167,9 +2378,9 @@ class TestResults:
     ) -> None:
         server.bodies[target.cve_id] = {
             "affected": [{"ranges": [_git(*GIT_BODY_EVENTS)]}],
-            "related": [RELATED],
+            "aliases": [ALIAS_3],
         }
-        server.bodies[RELATED] = {"affected": [{}], "references": []}
+        server.bodies[ALIAS_3] = _alias_body(target.cve_id, {}, references=[])
 
         result = await fetcher.fetch_single(target.cve_id, db_session)
 
@@ -2312,8 +2523,15 @@ class TestLogPrivacy:
         server.bodies[target.cve_id] = {
             "summary": SECRET,
             "credits": [{"name": PERSONAL, "contact": [PERSONAL]}],
-            "aliases": [ALIAS, "x/\x00" + SECRET, ALIAS_2],
-            "related": [RELATED, RELATED_2],
+            "aliases": [
+                ALIAS,
+                "x/\x00" + SECRET,
+                f"CVE-{SECRET}",
+                ALIAS_2,
+                ALIAS_3,
+                ALIAS_4,
+            ],
+            "related": [RELATED, SECRET],
         }
         server.bodies[ALIAS] = _alias_body(
             target.cve_id,
@@ -2322,8 +2540,8 @@ class TestLogPrivacy:
             details=SECRET,
         )
         server.responses[ALIAS_2] = status(500, f"{SECRET} {PERSONAL}".encode())
-        server.responses[RELATED] = raising(httpx.ConnectError(f"{SECRET} {PERSONAL}"))
-        server.responses[RELATED_2] = status(
+        server.responses[ALIAS_3] = raising(httpx.ConnectError(f"{SECRET} {PERSONAL}"))
+        server.responses[ALIAS_4] = status(
             200, f'{{"references": [{{"url": ["{PERSONAL}"]}}]}}'.encode()
         )
 
@@ -2333,19 +2551,8 @@ class TestLogPrivacy:
         assert logs == [
             _skip(target.cve_id, "unsafe_id", record_id=None),
             _skip(target.cve_id, "http_status", record_id=ALIAS_2, status_code=500),
-            _skip(
-                target.cve_id,
-                "transport",
-                record_kind="related",
-                record_id=RELATED,
-            ),
-            _skip(
-                target.cve_id,
-                "invalid_body",
-                record_kind="related",
-                record_id=RELATED_2,
-                status_code=200,
-            ),
+            _skip(target.cve_id, "transport", record_id=ALIAS_3),
+            _skip(target.cve_id, "invalid_body", record_id=ALIAS_4, status_code=200),
         ]
         for entry in logs:
             assert set(entry) <= SKIP_KEYS

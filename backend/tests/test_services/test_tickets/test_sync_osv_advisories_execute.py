@@ -31,12 +31,13 @@ with real commits and set the automatic periodic context that `run()`
 establishes, so the finalizer records metrics. The scope query is the real
 `cve_service.get_active_ticket_cve_ids()` wrapped by a spy that restricts
 the snapshot to this test's CVEs, so rows committed by no other test can
-enter it. HTTP is the in-process `OsvServer`; alias and related IDs carry no
+enter it. HTTP is the in-process `OsvServer`; alias IDs carry no
 whitelisted prefix, so no committed run writes a global external
-identifier. The broker call is the recorded `task_publication.publish_task`;
-every `asyncio.sleep` of the module (the step-16 throttle and the inter-CVE
-delay) is recorded instead of slept. All identifiers and texts are
-fictional.
+identifier, and each package-bearing alias record names its own CVE so
+that it applies (Algorithm step 6). The broker call is the recorded
+`task_publication.publish_task`; every `asyncio.sleep` of the module (the
+step-13 throttle and the inter-CVE delay) is recorded instead of slept.
+All identifiers and texts are fictional.
 """
 
 from __future__ import annotations
@@ -91,8 +92,6 @@ NAME: Final = "sync_osv_advisories"
 RESOLVE: Final = package_service.RESOLVE_TICKET_PACKAGES_TASK
 REPO: Final = "https://git.example.invalid/project/example"
 URL_1: Final = "https://advisory.example.invalid/upstream/1"
-RELATED: Final = "EXAMPLE-SA-2099-0001"
-"""A related record naming the package `example`."""
 FAILING: Final = "EXAMPLE-SA-2099-0503"
 """A sub-request that always answers HTTP 503."""
 ABORT_MESSAGE: Final = (
@@ -107,21 +106,21 @@ FAILED_EVENT_KEYS: Final = frozenset(
     {"event", "log_level", "cve_id", "fetcher_name", "cause"}
 )
 
-UPDATED_BODY: Final = {
-    "affected": [
-        {"ranges": [{"type": "GIT", "repo": REPO, "events": [{"fixed": "c1"}]}]}
-    ],
-    "related": [RELATED],
-}
-"""HTTP 200 body whose ingestion is `updated` with a package handoff (two
-requests: the CVE record and `RELATED`)."""
+GIT_AFFECTED: Final = [
+    {"ranges": [{"type": "GIT", "repo": REPO, "events": [{"fixed": "c1"}]}]}
+]
 
 UNCHANGED_BODY: Final = {"references": [{"type": "WEB", "url": URL_1}]}
 """HTTP 200 body whose ingestion is `unchanged` without a handoff (one
 request: the empty `osv` scope is replaced by an empty snapshot)."""
 
-GUARD_BODY: Final = {"affected": [], "aliases": [FAILING], "related": ["x/y"]}
-"""HTTP 200 body whose every sub-request fails: the completeness guard."""
+GUARD_BODY: Final = {
+    "affected": [],
+    "aliases": [FAILING, "CVE-2099-990000001", "x/y"],
+    "related": ["EXAMPLE-SA-2099-0001"],
+}
+"""HTTP 200 body whose every alias sub-request fails (the `CVE-*` alias and
+the `related` ID are not sub-requests): the completeness guard."""
 
 
 class Counters(NamedTuple):
@@ -175,6 +174,7 @@ class Env:
     status_opened: list[int] = field(default_factory=lambda: [0])
     run_names: list[str] = field(default_factory=list)
     cve_ids: list[str] = field(default_factory=list)
+    alias_ids: list[str] = field(default_factory=list)
 
     async def active_cve(
         self, body: Any = None, *, status: TicketStatus = TicketStatus.ANALYSIS
@@ -187,6 +187,30 @@ class Env:
         if body is not None:
             self.server.bodies[cve.cve_id] = body
         return cve
+
+    async def updated_cve(self) -> CVE:
+        """A committed active CVE served by `serve_updated()`."""
+        cve = await self.active_cve()
+        self.serve_updated(cve)
+        return cve
+
+    def serve_updated(
+        self, cve: CVE, package_name: str = "example", **extra: Any
+    ) -> None:
+        """Serve `cve` with one `GIT` entry and one alias record that names
+        it and the package `package_name`: its ingestion is `updated` with
+        a package handoff (two requests). `extra` joins the Phase 1 body."""
+        alias_id = f"EXAMPLE-SA-{cve.cve_id.removeprefix('CVE-')}"
+        self.alias_ids.append(alias_id)
+        self.server.bodies[cve.cve_id] = {
+            "affected": GIT_AFFECTED,
+            "aliases": [alias_id],
+            **extra,
+        }
+        self.server.bodies[alias_id] = {
+            "aliases": [cve.cve_id],
+            "affected": [{"package": {"name": package_name}}],
+        }
 
     async def duplicated_cve(self, body: Any) -> CVE:
         """A committed CVE whose only Ticket is `Duplicated` (of the
@@ -253,7 +277,7 @@ class Env:
                 FetcherConfig(
                     fetcher_name=name,
                     enabled=True,
-                    run_timeout=14400,
+                    run_timeout=3600,
                     request_delay=0,
                     custom_settings={},
                 )
@@ -307,7 +331,6 @@ async def env(
         server=OsvServer(),
         published=Publications(),
     )
-    created.server.bodies[RELATED] = {"affected": [{"package": {"name": "example"}}]}
     created.server.responses[FAILING] = status(503)
 
     def status_sessions() -> AsyncSession:
@@ -359,7 +382,7 @@ class Batch:
 async def batch(env: Env) -> Batch:
     fetcher = env.fetcher()
     fetcher.config = FetcherRunConfig(
-        hard_time_limit_seconds=14400, request_delay=0.25, custom_settings={}
+        hard_time_limit_seconds=3600, request_delay=0.25, custom_settings={}
     )
     fetcher._periodic_context = True
     return Batch(env, fetcher, await env.world.open_session())
@@ -466,7 +489,7 @@ class TestFinalization:
     async def test_flush_precedes_finalization_outside_the_item_catch(
         self, env: Env, batch: Batch, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        cve = await env.active_cve(UPDATED_BODY)
+        cve = await env.updated_cve()
         events: list[str] = []
         pending_at_finalization: list[bool] = []
         real_fetch = batch.fetcher.fetch_single
@@ -538,8 +561,8 @@ class TestFinalization:
     async def test_commit_failure_terminates_without_status_warning_or_metric(
         self, env: Env, batch: Batch, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        first = await env.active_cve(UPDATED_BODY)
-        second = await env.active_cve(UPDATED_BODY)
+        first = await env.updated_cve()
+        second = await env.updated_cve()
         error = RuntimeError(FAILURE_TEXT)
 
         async def commit() -> None:
@@ -563,7 +586,7 @@ class TestFinalization:
     async def test_ambiguous_commit_terminates_without_isolated_status_or_metric(
         self, env: Env, batch: Batch, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        cve = await env.active_cve(UPDATED_BODY)
+        cve = await env.updated_cve()
         real_commit = batch.session.commit
         error = ConnectionResetError("commit outcome unknown")
 
@@ -586,9 +609,7 @@ class TestFinalization:
     async def test_non_operational_post_commit_error_aborts_and_keeps_success(
         self, env: Env, batch: Batch
     ) -> None:
-        ordered = _ordered(
-            [await env.active_cve(UPDATED_BODY), await env.active_cve(UPDATED_BODY)]
-        )
+        ordered = _ordered([await env.updated_cve(), await env.updated_cve()])
         error = EncodeError(FAILURE_TEXT)
         env.published.errors[RESOLVE] = error
 
@@ -603,13 +624,13 @@ class TestFinalization:
         assert _events(logs, CVE_FETCH_ITEM_FAILED_EVENT) == []
         assert await env.source_status(ordered[0]) == CVESourceFetchStatus.SUCCESS
         assert await env.source_status(ordered[1]) is None
-        # Only the step-16 throttle of the first CVE; no inter-CVE delay.
+        # Only the step-13 throttle of the first CVE; no inter-CVE delay.
         assert env.sleeps == [(0.25, 1)]
 
     async def test_broker_operational_handoff_failure_keeps_success(
         self, env: Env, batch: Batch
     ) -> None:
-        cve = await env.active_cve(UPDATED_BODY)
+        cve = await env.updated_cve()
         env.published.errors[RESOLVE] = BrokerOperationalError(FAILURE_TEXT)
 
         with capture_logs() as logs:
@@ -648,11 +669,9 @@ class TestMissing:
         assert env.sleeps == [(0.25, 1)]
 
     async def test_missing_then_success(self, env: Env, batch: Batch) -> None:
-        missing, present = _ordered(
-            [await env.active_cve(), await env.active_cve(UPDATED_BODY)]
-        )
+        missing, present = _ordered([await env.active_cve(), await env.updated_cve()])
         env.server.bodies.pop(missing.cve_id, None)
-        env.server.bodies[present.cve_id] = UPDATED_BODY
+        env.serve_updated(present)
 
         await batch.execute()
 
@@ -666,7 +685,7 @@ class TestItemFailure:
     async def test_failure_rolls_back_writes_isolated_failure_and_one_event(
         self, env: Env, batch: Batch, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        failing = await env.active_cve(UPDATED_BODY)
+        failing = await env.updated_cve()
         other = await env.active_cve(UNCHANGED_BODY)
         _fail_references_for(monkeypatch, {failing.cve_id}, RuntimeError(FAILURE_TEXT))
 
@@ -706,11 +725,7 @@ class TestItemFailure:
             (None, status(204), "OsvResponseError"),
             (None, raising(httpx.ConnectError(FAILURE_TEXT)), "ConnectError"),
             (GUARD_BODY, None, "CompletenessGuardError"),
-            (
-                {"related": [RELATED], "summary": FAILURE_TEXT},
-                None,
-                "ValidationError",
-            ),
+            ({"summary": FAILURE_TEXT}, None, "ValidationError"),
         ],
         ids=[
             "forbidden",
@@ -735,10 +750,9 @@ class TestItemFailure:
         if responder is not None:
             env.respond(cve, responder)
         if cause == "ValidationError" and body is not None:
-            # A related package name containing U+0000 fails the payload.
-            env.server.bodies[RELATED] = {
-                "affected": [{"package": {"name": f"{PERSONAL_TEXT}\x00"}}]
-            }
+            # An applicable alias package name containing U+0000 fails the
+            # payload.
+            env.serve_updated(cve, f"{PERSONAL_TEXT}\x00", **body)
 
         with capture_logs() as logs:
             await batch.execute()
@@ -761,7 +775,7 @@ class TestItemFailure:
     async def test_guard_failure_keeps_previous_data_and_logs_bounded_skips(
         self, env: Env, batch: Batch
     ) -> None:
-        cve = await env.active_cve(UPDATED_BODY)
+        cve = await env.updated_cve()
         await batch.execute()
         assert await env.osv_row_count(cve) == 1
         env.server.bodies[cve.cve_id] = GUARD_BODY
@@ -783,9 +797,7 @@ class TestItemFailure:
     async def test_flush_failure_is_an_isolated_item_failure(
         self, env: Env, batch: Batch, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        first, second = _ordered(
-            [await env.active_cve(UPDATED_BODY), await env.active_cve(UPDATED_BODY)]
-        )
+        first, second = _ordered([await env.updated_cve(), await env.updated_cve()])
         real_fetch = batch.fetcher.fetch_single
         real_finalize = batch.fetcher.commit_and_dispatch
         real_flush = batch.session.flush
@@ -960,8 +972,8 @@ class TestWholeRunSignals:
     async def test_signal_propagates_without_item_handling(
         self, signal: BaseException, phase: str, env: Env, batch: Batch
     ) -> None:
-        await env.active_cve(UPDATED_BODY)
-        await env.active_cve(UPDATED_BODY)
+        await env.updated_cve()
+        await env.updated_cve()
 
         def respond(request: httpx.Request) -> httpx.Response:
             raise signal
@@ -969,7 +981,7 @@ class TestWholeRunSignals:
         if phase == "cve_record":
             env.server.responses.update(dict.fromkeys(env.cve_ids, respond))
         else:
-            env.server.responses[RELATED] = respond
+            env.server.responses.update(dict.fromkeys(env.alias_ids, respond))
 
         with capture_logs() as logs, pytest.raises(type(signal)) as raised:
             await batch.execute()
@@ -997,12 +1009,12 @@ class TestRequestDelay:
     async def test_configured_delay_also_separates_sub_requests(
         self, env: Env, batch: Batch
     ) -> None:
-        await env.active_cve(UPDATED_BODY)
+        await env.updated_cve()
         await env.active_cve(UNCHANGED_BODY)
 
         await batch.execute()
 
-        # Three requests (two CVE records and one related record), each
+        # Three requests (two CVE records and one alias record), each
         # pair separated by one delay, whichever CVE comes first.
         assert len(env.server.requests) == 3
         assert env.sleeps == [(0.25, 1), (0.25, 2), (0.25, 3)]
@@ -1010,7 +1022,7 @@ class TestRequestDelay:
     async def test_missing_configuration_snapshot_uses_the_class_default(
         self, env: Env, batch: Batch
     ) -> None:
-        await env.active_cve(UPDATED_BODY)
+        await env.updated_cve()
         batch.fetcher.config = None
 
         await batch.execute()
@@ -1023,7 +1035,7 @@ class TestRequestDelay:
 # ---------------------------------------------------------------------------
 
 _RUN_CONFIG: Final = FetcherRunConfig(
-    hard_time_limit_seconds=14400, request_delay=0, custom_settings={}
+    hard_time_limit_seconds=3600, request_delay=0, custom_settings={}
 )
 
 
@@ -1055,7 +1067,7 @@ class TestRunMetrics:
     async def test_success_run_maps_updated_unchanged_and_missing(
         self, env: Env, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        await env.active_cve(UPDATED_BODY)
+        await env.updated_cve()
         await env.active_cve(UNCHANGED_BODY)
         await env.active_cve()  # HTTP 404: missing
         await env.active_cve({"withdrawn": "2026-01-01T00:00:00Z"})  # no data
@@ -1072,7 +1084,7 @@ class TestRunMetrics:
         assert created == []
 
     async def test_repeat_run_is_unchanged(self, env: Env) -> None:
-        await env.active_cve(UPDATED_BODY)
+        await env.updated_cve()
         fetcher, first = await env.run_row()
         await fetcher.run(run_id=first, config=_RUN_CONFIG)
         fetcher, second = await env.run_row()
@@ -1090,7 +1102,7 @@ class TestRunMetrics:
         assert _outcome(await env.run_outcome(run_id)) == ("success", 0, 0, 0, 0)
 
     async def test_success_plus_guard_failure_is_partial(self, env: Env) -> None:
-        await env.active_cve(UPDATED_BODY)
+        await env.updated_cve()
         failing = await env.active_cve(GUARD_BODY)
         fetcher, run_id = await env.run_row()
 
@@ -1118,7 +1130,7 @@ class TestRunMetrics:
         self, env: Env, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         await env.active_cve(UNCHANGED_BODY)
-        failing = await env.active_cve(UPDATED_BODY)
+        failing = await env.updated_cve()
         _fail_references_for(monkeypatch, {failing.cve_id}, RuntimeError(FAILURE_TEXT))
         fetcher, run_id = await env.run_row()
 
@@ -1153,7 +1165,7 @@ class TestRunMetrics:
         assert run.error_detail is not None
 
     async def test_handoff_broker_failure_keeps_the_run_success(self, env: Env) -> None:
-        cve = await env.active_cve(UPDATED_BODY)
+        cve = await env.updated_cve()
         env.published.errors[RESOLVE] = BrokerOperationalError(FAILURE_TEXT)
         fetcher, run_id = await env.run_row()
 
@@ -1171,7 +1183,7 @@ class TestRunMetrics:
     async def test_post_commit_error_fails_the_run_and_keeps_success_metrics(
         self, env: Env
     ) -> None:
-        cve = await env.active_cve(UPDATED_BODY)
+        cve = await env.updated_cve()
         env.published.errors[RESOLVE] = EncodeError(FAILURE_TEXT)
         fetcher, run_id = await env.run_row()
 
@@ -1187,7 +1199,7 @@ class TestRunMetrics:
     async def test_commit_failure_fails_the_run_without_unit_metrics(
         self, env: Env, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        cve = await env.active_cve(UPDATED_BODY)
+        cve = await env.updated_cve()
         fetcher, run_id = await env.run_row()
         error = RuntimeError(FAILURE_TEXT)
         real_factory = env.factory

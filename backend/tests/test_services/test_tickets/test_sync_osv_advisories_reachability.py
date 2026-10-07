@@ -8,7 +8,7 @@ Owning specifications:
 
 - docs/features/tickets/cve-sync-osv.md (Fetcher Definition; `fetch_single`
   Method, class structure, on-demand enrichment and catch-up for free;
-  Algorithm step 16; Error Handling, `fetch_single()` table; Custom
+  Algorithm steps 5, 6, and 13; Error Handling, `fetch_single()` table; Custom
   Settings, Operational notes; `CompletenessGuardError`).
 - docs/features/platform/cve-fetcher-infrastructure.md (Class Attributes;
   `__init_subclass__` Validation; Non-Modification Statement; `fetch_single`
@@ -20,9 +20,9 @@ Owning specifications:
   Name Derivation; Fetcher Discovery, Domain Placement; Per-Ticket Catch-Up:
   Celery task wrapper and Registry accessor `get_catch_up_fetchers()`;
   BaseFetcher HTTP Client Integration, HTTP Client Ownership Rule; Data
-  Model, FetcherConfig bootstrap and the `default_request_delay` and
-  `default_run_timeout` seeds; Celery Beat Schedule Synchronization, Redbeat
-  Entry Structure and Time Limits).
+  Model, FetcherConfig bootstrap, the `default_request_delay` seed and the
+  `run_timeout` column default; Celery Beat Schedule Synchronization,
+  Redbeat Entry Structure and Time Limits).
 - docs/features/platform/testing-strategy.md (CVE Fetcher Infrastructure,
   Default catch-up and Concrete compliance; On-Demand CVE Refetch).
 
@@ -33,7 +33,7 @@ The workflows run against real PostgreSQL with the harnesses of
 production class is resolved from the registries filled by fetcher
 discovery; no test-only fetcher is defined, so no registry isolation is
 needed. Every HTTP client the fetcher creates is the in-process `OsvServer`,
-and the step-16 throttle is recorded instead of slept. The committed
+and the step-13 throttle is recorded instead of slept. The committed
 `sync_osv_advisories` `FetcherConfig` row, CVEs, Tickets, and their children
 (including `cve_affected_version`, `cve_external_identifier`, and
 `cve_source`) are deleted at teardown; alias IDs carry no whitelisted
@@ -131,6 +131,9 @@ LAST_ATTEMPT: Final = 3
 
 ALIAS: Final = "EXAMPLE-ALIAS-2099-0001"
 FAILING: Final = "EXAMPLE-ALIAS-2099-0503"
+NOT_APPLICABLE: Final = "EXAMPLE-ALIAS-2099-0002"
+"""An alias record that names another CVE: observed, contributes nothing."""
+OTHER_CVE: Final = "CVE-2099-990000001"
 RELATED: Final = "EXAMPLE-SA-2099-0001"
 REPO: Final = "https://git.example.invalid/project/example"
 
@@ -167,7 +170,7 @@ class TestRegistrationAndCapability:
         )
         assert SyncOsvAdvisories.default_schedule == SCHEDULE
         assert SyncOsvAdvisories.default_request_delay == 0.2
-        assert SyncOsvAdvisories.default_run_timeout == 14400
+        assert not hasattr(SyncOsvAdvisories, "default_run_timeout")
         assert SyncOsvAdvisories.source_reference_url_pattern == (
             "https://osv.dev/vulnerability/{cve_id}"
         )
@@ -185,7 +188,6 @@ class TestRegistrationAndCapability:
             "description",
             "default_schedule",
             "default_request_delay",
-            "default_run_timeout",
             "source_reference_url_pattern",
         }
 
@@ -255,7 +257,7 @@ class TestSignalClasses:
 
         assert is_retryable_condition(error) is False
         assert is_infrastructure_failure(error) is False
-        assert str(error) == "Every OSV alias and related sub-request failed"
+        assert str(error) == "Every OSV alias sub-request failed"
 
     def test_response_error_is_non_retryable_with_a_fixed_message(self) -> None:
         error = OsvResponseError()
@@ -377,7 +379,7 @@ class ClientServer(OsvServer):
 
 @dataclass
 class Sleeps:
-    """The recorded step-16 throttle delays."""
+    """The recorded step-13 throttle delays."""
 
     delays: list[float] = field(default_factory=list)
 
@@ -413,9 +415,10 @@ async def _active_cve(world: IngestionWorld) -> tuple[CVE, Ticket]:
 
 
 def _serve(server: OsvServer, cve: CVE) -> None:
-    """A Phase 1 record with one `GIT` range, one alias, and one related
-    record, each naming a package: four throttled requests are three
-    delays."""
+    """A Phase 1 record with one `GIT` range and four aliases: an applicable
+    record naming a package, a 404, a `CVE-*` alias (never requested), and a
+    record naming another CVE (contributes nothing); its `related` record
+    is never requested. Four throttled requests are three delays."""
     server.bodies[cve.cve_id] = {
         "affected": [
             {
@@ -428,7 +431,7 @@ def _serve(server: OsvServer, cve: CVE) -> None:
                 ]
             }
         ],
-        "aliases": [ALIAS, "EXAMPLE-ALIAS-2099-0404"],
+        "aliases": [ALIAS, "EXAMPLE-ALIAS-2099-0404", OTHER_CVE, NOT_APPLICABLE],
         "related": [RELATED],
     }
     server.bodies[ALIAS] = {
@@ -445,7 +448,11 @@ def _serve(server: OsvServer, cve: CVE) -> None:
             }
         ],
     }
-    server.bodies[RELATED] = {"affected": [{"package": {"name": "suse-example"}}]}
+    for record_id in (OTHER_CVE, RELATED, NOT_APPLICABLE):
+        server.bodies[record_id] = {
+            "aliases": [OTHER_CVE if record_id == NOT_APPLICABLE else cve.cve_id],
+            "affected": [{"package": {"name": "suse-example"}}],
+        }
 
 
 def _guarded(server: OsvServer, cve: CVE) -> None:
@@ -510,7 +517,7 @@ class TestOnDemandFetch:
             cve.cve_id,
             ALIAS,
             "EXAMPLE-ALIAS-2099-0404",
-            RELATED,
+            NOT_APPLICABLE,
         ]
         # Outside a run, the class default separates consecutive requests.
         assert sleeps.delays == [0.2, 0.2, 0.2]
@@ -524,7 +531,7 @@ class TestOnDemandFetch:
                 "cpe_matches": [],
                 "affected_cpes": [],
                 "vendor_products": [],
-                "resolved_packages": ["example", "suse-example"],
+                "resolved_packages": ["example"],
             }
         ]
         assert await on_demand.marker_value(cve.cve_id, OSV.value) is None
@@ -727,7 +734,7 @@ class TestCatchUp:
         assert state.status == CVESourceFetchStatus.SUCCESS
         [handoff] = catch_up.published.published(RESOLVE)
         assert handoff["ticket_id"] == str(ticket.id)
-        assert handoff["resolved_packages"] == ["example", "suse-example"]
+        assert handoff["resolved_packages"] == ["example"]
         assert await fetcher_run_count(catch_up.factory, NAME) == 0
         catch_up.engine.dispose.assert_awaited_once()
         assert all(client.is_closed for client in server.clients)
@@ -789,7 +796,7 @@ class TestCatchUp:
         if kind == "guard":
             _guarded(server, cve)
         else:
-            server.bodies[cve.cve_id] = {"related": [1]}
+            server.bodies[cve.cve_id] = {"aliases": [1]}
 
         with pytest.raises((CompletenessGuardError, ValidationError)) as raised:
             await fetchers.run_catch_up_async(NAME, str(ticket.id))
@@ -823,7 +830,9 @@ class TestBootstrapAndSchedule:
         assert config.enabled is True
         assert config.schedule_override is None
         assert config.request_delay == SyncOsvAdvisories.default_request_delay == 0.2
-        assert config.run_timeout == SyncOsvAdvisories.default_run_timeout == 14400
+        # No per-class seed: the column default (cve-sync-osv.md, Custom
+        # Settings, Operational notes).
+        assert config.run_timeout == 3600
         assert config.custom_settings == {}
 
     async def test_reconciliation_writes_the_entry_from_the_class(
@@ -843,7 +852,7 @@ class TestBootstrapAndSchedule:
         assert entry.schedule.month_of_year == set(range(1, 13))
         assert entry.schedule.day_of_week == set(range(7))
         assert "queue" not in entry.options
-        # The 14400 s run timeout: soft limit 13680 s (cve-sync-osv.md,
+        # The default 3600 s run timeout: soft limit 3420 s (cve-sync-osv.md,
         # Custom Settings, Operational notes).
-        assert entry.options["time_limit"] == 14400
-        assert entry.options["soft_time_limit"] == 13680
+        assert entry.options["time_limit"] == 3600
+        assert entry.options["soft_time_limit"] == 3420
