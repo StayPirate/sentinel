@@ -303,8 +303,8 @@ class TestModelConfiguration:
             _payload_with_operations(
                 _replace(
                     "cna",
-                    _entry(vendor="v", product="p", repo="a"),
-                    _entry(vendor="v", product="p", repo=marker),
+                    _entry(vendor="v", product="p", program_files=["a"]),
+                    _entry(vendor="v", product="p", program_files=[marker]),
                 )
             )
 
@@ -782,7 +782,6 @@ class TestEntryConflictKey:
             ("program_files", ["bin/a"], None),
             ("package_url", "pkg:generic/widget", None),
             ("collection_url", "https://example.test/a", "https://example.test/b"),
-            ("repo", "https://example.test/repo.git", None),
             ("version_end_inclusive", True, False),
         ],
     )
@@ -808,7 +807,14 @@ class TestEntryConflictKey:
 
     @pytest.mark.parametrize(
         "field",
-        ["version_type", "version", "version_end", "package_name", "ecosystem"],
+        [
+            "version_type",
+            "version",
+            "version_end",
+            "package_name",
+            "ecosystem",
+            "repo",
+        ],
     )
     def test_absent_coalesced_field_equals_empty_string_in_the_key(
         self, field: str
@@ -827,7 +833,14 @@ class TestEntryConflictKey:
 
     @pytest.mark.parametrize(
         "field",
-        ["version_type", "version", "version_end", "package_name", "ecosystem"],
+        [
+            "version_type",
+            "version",
+            "version_end",
+            "package_name",
+            "ecosystem",
+            "repo",
+        ],
     )
     def test_differing_key_field_values_are_distinct_entries(self, field: str) -> None:
         first = _entry(**_KEY_ONLY, **{field: "one"}, status="affected")
