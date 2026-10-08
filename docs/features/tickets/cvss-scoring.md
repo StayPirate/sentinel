@@ -132,14 +132,16 @@ manual SUSE CVSS API and every other consumer-supplied input never apply it
    - otherwise the complete candidate is rejected.
 
    Every other token is kept unchanged in its original position.
-4. The prefix and the kept tokens, joined with `/`, are passed to the
-   canonical parser, which applies rules 2 through 7. Its stable parsed result
+4. The prefix (empty for v2.0) followed by the kept tokens joined with `/`
+   is passed to the canonical parser, which applies rules 2 through 7. Its stable parsed result
    is the result of the reduction.
 
-Recognition is version-specific: a non-Base metric or value defined only for
-another version is not recognized and follows the canonical parser (for
-example `MS` is unknown in a v4.0 vector, and `S` is the v3.x Base metric
-Scope but the v4.0 Supplemental metric Safety). No non-Base abbreviation of a
+Recognition is version-specific. A non-Base metric defined only for another
+version is not recognized and follows the canonical parser (for example `MS`
+is unknown in a v4.0 vector, and `S` is the v3.x Base metric Scope but the
+v4.0 Supplemental metric Safety). A value defined only for another version is
+outside its table and rejected in step 3 (for example `E:POC` in a v3.1
+vector). No non-Base abbreviation of a
 version equals one of its Base abbreviations.
 
 **Rejections.** A candidate is rejected, with no partial result, when its
@@ -903,8 +905,9 @@ testing strategy.
   canonical parser's result, and every value the canonical parser rejects is
   still rejected.
 - Rejection of a duplicated non-Base metric; an invalid, empty, or wrong-case
-  value; a missing `:`; a non-Base metric or value of another version; an
-  unknown metric; and an incomplete or empty Base set after reduction.
+  value, including a value of another version; a missing `:`; a non-Base
+  metric of another version; an unknown metric; and an incomplete or empty
+  Base set after reduction.
 - Rejection of an unsupported, missing, or mismatched prefix and of embedded
   whitespace, with no repair of any malformed token.
 - Received lengths of exactly 200 and 201 characters, measured before

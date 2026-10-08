@@ -851,7 +851,8 @@ async def upsert_external_cvss_batch(
 ```
 
 `ParsedExternalCVSSAssessment` carries the non-reserved canonical provider and
-the immutable stable parsed result from `cvss.validate_cvss_vector()`. It is an
+the immutable stable parsed result of the External Base Reduction
+(`cvss.validate_external_cvss_vector()`, `cvss-scoring.md`). It is an
 internal semantic type, not a Pydantic API schema or persisted entity. The
 caller has already skipped individually invalid candidates and rejected
 contradictory same-key candidates before writes under `cve-service.md`.
