@@ -269,7 +269,7 @@ def _caller_payload(name: str) -> CVEIngestPayload:
     kev: KEVEntry | None = None
     for label, container in _containers(record):
         provider = _provider(label, container)
-        if container.get("affected") is not None:
+        if isinstance(container.get("affected"), list):
             operations.append(
                 AffectedVersionScopeOperation(
                     source_container=label,
@@ -1745,7 +1745,7 @@ class TestTitle:
             ("x" * 5000, "x" * 256),
         ],
     )
-    def test_nul_free_title_over_256_characters_is_truncated(
+    def test_nul_free_title_is_truncated_to_256_characters(
         self, title: str, expected: str
     ) -> None:
         assert parse_title({"title": title}) == expected
