@@ -4,7 +4,13 @@ repositories and the real database (backend/app/services/base_git_fetcher.py).
 Consumers:
 
 - `tests/test_services/test_base_git_fetcher_execute.py` (the template
-  `execute()` through the real `BaseFetcher.run()`).
+  `execute()` through the real `BaseFetcher.run()`);
+- `tests/test_services/test_base_git_fetcher_fetch_single.py` (the default
+  `fetch_single()` over real bare clones);
+- `tests/test_services/test_base_git_fetcher_wrappers.py` (the on-demand and
+  catch-up wrappers with a test-only Git fetcher);
+- `tests/test_services/test_base_git_fetcher_registration.py` (the
+  `GitCalls` spy for utility delegation).
 
 The fetcher factory, the item steps, the workspace, and the `git_operations`
 spy carry no run-specific assumption, so the other `BaseGitFetcher` tests
