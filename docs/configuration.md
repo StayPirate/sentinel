@@ -241,7 +241,7 @@ be added if an approved contract requires them.
 
 | Env Var | Type | Default | Description | Defined in |
 |---------|------|---------|-------------|------------|
-| `GIT_CLONE_BASE_DIR` | string (path) | `/var/lib/sentinel/git` | Base directory for persistent bare clones used by git-based fetchers (`sync_mitre_cves`, `sync_kernel_cves`). Must be backed by persistent storage in containerized deployments | `docs/features/platform/git-fetcher-infrastructure.md` |
+| `GIT_CLONE_BASE_DIR` | string (path) | `/var/lib/sentinel/git` | Base directory for persistent bare clones used by git-based fetchers (`sync_mitre_cves`, `sync_kernel_cves`). Must be an absolute path; an empty or relative value, or one containing U+0000, fails startup. Must be backed by persistent storage in containerized deployments | `docs/features/platform/git-fetcher-infrastructure.md` |
 
 ## Standard Environment Variables (Non-Sentinel)
 

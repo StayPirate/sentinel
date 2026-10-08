@@ -195,7 +195,13 @@ it. See "BaseGitFetcher Class" below.
 
 | Env Var | Type | Default | Description |
 |---------|------|---------|-------------|
-| `GIT_CLONE_BASE_DIR` | string (path) | `/var/lib/sentinel/git` | Base directory for all git-based fetcher clones |
+| `GIT_CLONE_BASE_DIR` | string (path) | `/var/lib/sentinel/git` | Base directory for all git-based fetcher clones. Must be an absolute path; an empty or relative value, or one containing U+0000, fails startup |
+
+The value must be absolute because clones are created and recursively
+deleted under it: a relative value would resolve against the working
+directory of whichever process runs the fetcher. Application startup
+rejects an empty, relative, or U+0000-containing value with an error that
+names the variable.
 
 Each fetcher creates a subdirectory named after its repository:
 
@@ -309,9 +315,14 @@ retry exhaustion):
 1. Read-phase operation fails; `git_operations` retries up to 3 times
    with exponential backoff (2s, 4s, 8s)
 2. If failure persists: raise `GitCorruptionError`
-3. `execute()` catches the exception, logs WARNING with error details
+3. `execute()` catches the exception and logs the bounded WARNING
+   `git_clone_corruption_detected` with `fetcher_name` and `cause` (the
+   exception class name) only. It never carries the exception text: git's
+   stderr may contain repository paths or URLs (see
+   `docs/features/platform/logging.md`, Secrets and PII Discipline)
 4. Delete the entire clone directory (via `_delete_if_exists()`)
-5. Raise `FetcherError` to terminate the current run (`status = failure`,
+5. Raise `FetcherError` with the fixed corruption message (see "Error
+   Handling Strategy") to terminate the current run (`status = failure`,
    cursor not advanced)
 6. On the next scheduled run: First-Run Detection finds clone absent
    with cursor present → re-clone + SHA reachability check → normal
@@ -359,9 +370,9 @@ repairs its `HEAD`. This is an accepted residual risk.
 2. Determine boundary SHA:
    `git rev-list -1 --before=<before_date> --end-of-options HEAD`
 3. If no commit exists before `before_date` (empty output — the
-   repository history does not extend that far back): log WARNING
-   ("Recovery boundary not found — treating as first-run"), return
-   empty delta. Cursor advances to HEAD
+   repository history does not extend that far back): log the bounded
+   WARNING `git_recovery_boundary_not_found` (treated as first-run),
+   return empty delta. Cursor advances to HEAD
 4. Compute delta:
    `git diff --name-only -z --no-renames --diff-filter=AM --end-of-options
    <boundary_sha>..<head_sha> -- <recovery_path_prefix>`, where the
@@ -517,7 +528,11 @@ class GitFileError(GitError): ...        # Per-file — continue processing
 | `git clone` / `git fetch` | Any failure (network, auth, timeout, remote `HEAD` not resolvable) | `GitFetchError` | Do NOT delete clone. Raise `FetcherError`. Next cycle retries |
 | Local read: the branch lookup inside `fetch_origin` before its fetch (`git symbolic-ref`), and every read after a successful fetch (`git diff`, `git rev-parse`, `git ls-tree`, `git rev-list`, `git log`) | Persistent failure after retry exhaustion (3 retries with exponential backoff) | `GitCorruptionError` | Delete clone directory. Raise `FetcherError`. Next cycle re-clones + applies recovery strategy |
 | `git show` during delta file processing | Any failure (timeout, corrupt/missing blob in local store) | `GitFileError` | Periodic delta path: fail that selected item. Single-item candidate lookup: local candidate bookkeeping only; try the next candidate and never call `record_failed()` because no `FetcherRun` exists |
-| Directory deletion (recovery/cleanup) | Filesystem rejection (permissions, read-only mount, busy handle) | `OSError` | Log ERROR with distinct message: path, errno, and guidance ("Manual intervention required — check filesystem permissions and mount state"). Raise `FetcherError`. Next cycle re-attempts (permanent until operator resolves filesystem issue) |
+| Directory deletion (recovery/cleanup) | Filesystem rejection (permissions, read-only mount, busy handle) | `OSError` | Log the bounded ERROR `git_clone_delete_failed`: `fetcher_name`, the clone path (`repo_path`), the `errno`, and the fixed `guidance` "Manual intervention required — check filesystem permissions and mount state", never the exception text. Raise `FetcherError`. Next cycle re-attempts (permanent until operator resolves filesystem issue) |
+
+The `FetcherError` raised for each fetcher action carries a fixed public
+message (see "Error Handling Strategy" under "BaseGitFetcher Class"),
+never git's stderr.
 
 **Design rationale**: classification is phase-based. A successful
 `git fetch` proves network connectivity to the remote. A subsequent
@@ -1038,7 +1053,11 @@ per-fetcher properties tables.
 
 The `execute()` method implements the full git-based fetcher state
 machine. Concrete subclasses MUST NOT override `execute()` (they
-implement hooks instead).
+implement hooks instead). `BaseGitFetcher` defines no
+`__init_subclass__` (see "Class Attributes"), so this rule, the fixed
+`queue`, and the required hooks and attributes are enforced for
+production subclasses by a structural test (see
+`docs/features/platform/testing-strategy.md`, Structural Tests).
 
 Implements the First-Run Detection truth table and the recovery
 algorithm ("Recovery" and "Cursor SHA Unreachable") from the sections
@@ -1047,16 +1066,22 @@ above.
 **Behavior**:
 
 1. Resolve repository path from `$GIT_CLONE_BASE_DIR / clone_dir_name`
+   (via `_repo_path()`)
 2. Read last cursor from the previous successful `FetcherRun.cursor`
    (via `BaseFetcher`). Extract `cursor_sha` and `cursor_committed_at`
    from the stored dict. If no prior successful run exists, both are
-   `None`
+   `None`. A stored cursor that is not an object, or whose `sha` is
+   missing or not a string, is treated as absent (`cursor_sha` is
+   `None`): log the bounded ERROR `git_cursor_malformed` (`fetcher_name`
+   only, never the stored value) and continue with the first-run branch,
+   so HEAD is recorded instead of failing every run. A string `sha` that
+   is not a 40-character hexadecimal SHA is not malformed here: Rule 1
+   makes it unreachable at step 7
 3. **First-run branch** — if `cursor_sha` is `None`:
    a. If clone is NOT valid at `repo_path`: delete directory if it
-      exists (if `_delete_if_exists()` raises `OSError`: log ERROR
-      "Cannot delete clone directory at {repo_path}: {e}. Manual
-      intervention required — check filesystem permissions and mount
-      state.", propagate as `FetcherError`), then clone repository
+      exists (if `_delete_if_exists()` raises `OSError`: log the bounded
+      ERROR `git_clone_delete_failed` — see "Error Classification" —
+      and propagate as `FetcherError`), then clone repository
       with configured options
    b. If clone IS valid: skip clone (reuse existing)
    c. Read HEAD SHA from the repository
@@ -1064,23 +1089,28 @@ above.
    e. Set cursor to `{"sha": head_sha, "committed_at": head_date}`
    f. Return — first-run complete, no items processed
 4. **Subsequent-run branch** — `cursor_sha` exists:
-   a. If clone is NOT valid: log WARNING ("Clone invalid but cursor
-      exists — rebuilding"), delete directory if exists (if
-      `_delete_if_exists()` raises `OSError`: log ERROR "Cannot delete
-      clone directory at {repo_path}: {e}. Manual intervention required
-      — check filesystem permissions and mount state.", propagate as
-      `FetcherError`), clone repository
+   a. If clone is NOT valid: log the bounded WARNING
+      `git_clone_invalid_rebuilding` (`fetcher_name`; the clone is
+      invalid but a cursor exists, so it is rebuilt), delete directory if
+      exists (if `_delete_if_exists()` raises `OSError`: log the bounded
+      ERROR `git_clone_delete_failed` and propagate as `FetcherError`),
+      clone repository
    b. If clone IS valid: update the clone's branch from origin via
       `fetch_origin()` (incremental update; see "Fetch Operations")
 5. Read HEAD SHA from the repository
 6. Read HEAD commit date via `get_commit_date(repo_path, "HEAD")`
 7. **SHA reachability check**:
    a. If `cursor_sha` is NOT reachable in the local object store:
-      - If `cursor_committed_at` is `None`: log ERROR ("Cursor SHA
-        unreachable and committed_at absent — cannot compute recovery
-        boundary. Treating as first-run."), set delta to empty list
-      - Otherwise: log WARNING ("Cursor SHA unreachable — applying
-        recovery"), compute recovery delta via
+      - If `cursor_committed_at` is `None`, or is not usable as a
+        recovery boundary (not a string, not an ISO 8601 instant with an
+        explicit offset, or not movable back by one day): log the bounded
+        ERROR `git_cursor_committed_at_unusable` with `fetcher_name` and
+        `reason` (`absent` for a missing or null value, `invalid`
+        otherwise; never the stored value), treat as first-run, and set
+        delta to empty list. An unusable stored value is therefore never
+        a failure that repeats on every run: the cursor advances to HEAD
+      - Otherwise: log the bounded WARNING `git_cursor_sha_unreachable`
+        (`fetcher_name`), compute recovery delta via
         `_compute_recovery_delta(repo_path, head_sha, cursor_committed_at)`
    b. If `cursor_sha` IS reachable: compute normal delta via
       `diff_names(repo_path, cursor_sha, head_sha)` with
@@ -1094,8 +1124,10 @@ above.
     list:
     a. Read file content via `show_file(repo_path, "HEAD", path)`
     b. If content is `None` (file not found at HEAD — file was added
-       then deleted/renamed between cursor and HEAD): log WARNING
-       ("File {path} in delta but not at HEAD — skipping"), call
+       then deleted/renamed between cursor and HEAD): log the bounded
+       WARNING `git_delta_file_missing_at_head` with `fetcher_name` and
+       `cve_id` (`_extract_item_id(path)`, omitted when it is not a valid
+       canonical CVE-ID; the path itself is never logged), call
        `record_succeeded()`, and continue. The selected CVE reached the valid
        stale/inapplicable terminal outcome; it has no created/updated effect
     c. Call `result = process_item(path, content, session)` → returns
@@ -1114,7 +1146,12 @@ above.
        `cve_fetch_item_failed` with `cve_id`, `fetcher_name`, and `cause`
        (the exception class name), never exception text (see
        `cve-fetcher-infrastructure.md`, "Batch Error Handling"), call
-       `record_failed()`, continue to next item
+       `record_failed()`, continue to next item. When `cve_id` is not a
+       valid canonical CVE-ID (`_is_valid_cve_id()` returns `False`), the
+       isolated status write is skipped — no CVE row can exist for that
+       value, and the write would otherwise carry it into its own logs —
+       and the event omits `cve_id`; `record_failed()` is still called
+       once
     f. When steps 10a-10c and the flush return normally, call
        `self.commit_and_dispatch(session, result)` outside the per-item
        exception catch. The shared finalizer commits and, because the template
@@ -1174,21 +1211,28 @@ ensures git-specific exceptions never leak beyond the
 `BaseGitFetcher` boundary:
 
 - **`GitFetchError`** (clone/fetch failures): `execute()` **catches**
-  this exception and raises `FetcherError("External git repository
-  unreachable — {sanitized reason}")`. The clone is intact — next
-  cycle retries.
+  this exception and raises `FetcherError` with the fixed message of the
+  failing call site (clone or fetch; see the table below). The clone is
+  intact — next cycle retries.
 - **`GitCorruptionError`** (read-phase failures after retry
-  exhaustion): `execute()` **catches** this exception, deletes the
+  exhaustion, including the branch lookup inside `fetch_origin`):
+  `execute()` **catches** this exception, logs the bounded WARNING
+  `git_clone_corruption_detected` (see "Recovery"), deletes the
   clone directory via `_delete_if_exists()`, then raises `FetcherError`
   to fail the run. This ensures self-healing: the next cycle finds the
   clone absent, re-clones, and applies recovery. Without this explicit
   deletion, a partial corruption (e.g., corrupt pack file that still
   passes the `is_clone_valid()` check) would loop indefinitely without
-  repair. If `_delete_if_exists()` raises `OSError`: log ERROR
-  ("Cannot delete clone directory at {repo_path}: {e}. Manual
-  intervention required — check filesystem permissions and mount
-  state."), propagate as `FetcherError` (deletion failure is a distinct
-  problem requiring operator intervention).
+  repair. If `_delete_if_exists()` raises `OSError`: log the bounded
+  ERROR `git_clone_delete_failed` (see "Error Classification") and
+  propagate as `FetcherError` with the deletion message (deletion failure
+  is a distinct problem requiring operator intervention).
+
+Every such `FetcherError` carries a fixed public message — never a path,
+URL, or git's stderr — and chains the triggering exception (`from e`), so
+the raw diagnostics remain available only in `error_detail` and
+`error_traceback` (`manage_fetchers`; see "Error Message Sanitization" in
+`fetcher-infrastructure.md`).
 
 On the next scheduled run, the First-Run Detection truth table
 re-evaluates the clone state and applies appropriate recovery
@@ -1199,13 +1243,16 @@ check).
 
 Infrastructure failures and their outcomes:
 
-| Infrastructure failure | Exception | `execute()` action | BaseFetcher behavior |
-|------------------------|-----------|--------------------|---------------------|
-| Clone fails (network) | `GitFetchError` | Catch → raise `FetcherError` (clone intact) | `status = failure`, cursor not advanced |
-| Fetch fails (network) | `GitFetchError` | Catch → raise `FetcherError` (clone intact) | `status = failure`, cursor not advanced |
-| HEAD unreadable (corruption after retries) | `GitCorruptionError` | Delete clone → raise `FetcherError` | `status = failure`, cursor not advanced |
-| Delta computation fails (corruption after retries) | `GitCorruptionError` | Delete clone → raise `FetcherError` | `status = failure`, cursor not advanced |
-| Directory deletion fails (filesystem) | `OSError` | Log ERROR → raise `FetcherError` | `status = failure`, cursor not advanced. Requires operator filesystem intervention |
+| Infrastructure failure | Exception | `execute()` action | Public `error_message` | BaseFetcher behavior |
+|------------------------|-----------|--------------------|------------------------|---------------------|
+| Clone fails (network) | `GitFetchError` | Catch → raise `FetcherError` (clone intact) | `External git repository unreachable — clone failed` | `status = failure`, cursor not advanced |
+| Fetch fails (network) | `GitFetchError` | Catch → raise `FetcherError` (clone intact) | `External git repository unreachable — fetch failed` | `status = failure`, cursor not advanced |
+| HEAD or branch unreadable (corruption after retries) | `GitCorruptionError` | Delete clone → raise `FetcherError` | `Local git clone was damaged and has been removed — it will be re-cloned on the next run` | `status = failure`, cursor not advanced |
+| Reachability, delta, or recovery-boundary computation fails (corruption after retries) | `GitCorruptionError` | Delete clone → raise `FetcherError` | `Local git clone was damaged and has been removed — it will be re-cloned on the next run` | `status = failure`, cursor not advanced |
+| Directory deletion fails (filesystem) | `OSError` | Log ERROR → raise `FetcherError` | `Local git clone directory could not be removed — manual intervention required` | `status = failure`, cursor not advanced. Requires operator filesystem intervention |
+
+When the deletion that follows a `GitCorruptionError` fails, the
+deletion row applies: its message replaces the corruption message.
 
 **Clone availability window**: between the corruption-triggered deletion and
 the next scheduled run's re-clone, this source's `fetch_single()` finds the
@@ -1339,26 +1386,30 @@ Concrete subclasses inherit it automatically (no override needed).
 **Behavior**:
 
 1. Resolve repository path from `$GIT_CLONE_BASE_DIR / clone_dir_name`
+   (via `_repo_path()`)
 2. Check if clone is valid at `repo_path`. If NOT valid: raise
-   `RuntimeError` ("Clone not available at {repo_path} for single-item
-   lookup")
+   `RuntimeError("Git clone not available for single-item lookup")`
 3. Call `_construct_candidate_paths(item_id)` to obtain an ordered list
    of candidate file paths. If the hook raises `ValueError` (malformed
-   `item_id` for this source's format): log ERROR ("Malformed item_id
-   '{item_id}' for {fetcher_name} — format not recognized by
-   _construct_candidate_paths"), raise `CVENotInSource`
+   `item_id` for this source's format): log the bounded ERROR
+   `git_fetch_single_item_id_malformed` with `fetcher_name` and `cve_id`
+   (`item_id`, omitted when it is not a valid canonical CVE-ID; the raw
+   value is never logged), raise `CVENotInSource`
 4. For each `path` in the candidate list:
    a. Read file content via `show_file(repo_path, "HEAD", path)`
-   b. If `show_file` raises `GitFileError`: log WARNING ("File read
-      failed for {path} — skipping candidate"), retain only local candidate
+   b. If `show_file` raises `GitFileError`: log the bounded WARNING
+      `git_fetch_single_candidate_read_failed` with `fetcher_name`,
+      `cve_id` (as in step 3), and `cause` (the exception class name;
+      never the path or git's stderr), retain only local candidate
       failure state, and continue to the next candidate path. Do not call
       `record_failed()`; single-item invocation has no `FetcherRun`
    c. If content is not `None` (file found): return the result of
        `process_item(path, content, session)` (`CVEFetchResult`)
 5. After all candidate paths exhausted:
    a. If at least one candidate raised `GitFileError` (and none
-      returned content): raise `RuntimeError` ("File read failed for
-      all candidate paths for item {item_id}")
+      returned content): raise
+      `RuntimeError("File read failed for all candidate paths")`,
+      chained from the last `GitFileError`
    b. Otherwise (all candidates returned `None`): raise
       `CVENotInSource()`
 
@@ -1376,7 +1427,8 @@ which is idempotent (no-op if data unchanged, update if changed).
 
 - `RuntimeError` — clone not available (step 2), or file read failed
   for all candidate paths (step 5a). Both indicate the source is
-  temporarily not queryable
+  temporarily not queryable. Both messages are fixed and carry no path,
+  item identifier, or git stderr
 - `CVENotInSource` — item not found in any candidate path (step 5b),
   or `item_id` format not recognized by this source (step 3). In the
   latter case, an ERROR is logged before raising — the exception is
@@ -1460,9 +1512,9 @@ operations.
 
 | Method | Purpose |
 |--------|---------|
-| `_get_last_cursor_sha()` | Reads the `"sha"` field from the previous `FetcherRun.cursor` (via `BaseFetcher`). Returns `None` if no prior successful run exists |
-| `_get_last_cursor_committed_at()` | Reads the `"committed_at"` field from the previous `FetcherRun.cursor` (via `BaseFetcher`). Returns `None` if no prior successful run exists or if the field is absent |
-| `_repo_path()` | Returns `Path($GIT_CLONE_BASE_DIR / clone_dir_name)` |
+| `_get_last_cursor_sha()` | Reads the `"sha"` field from the previous `FetcherRun.cursor` (via `BaseFetcher`). Returns `None` if no prior successful run exists, if the stored cursor is not an object, or if the field is missing or not a string (a malformed cursor, see `execute()` step 2) |
+| `_get_last_cursor_committed_at()` | Reads the `"committed_at"` field from the previous `FetcherRun.cursor` (via `BaseFetcher`). Returns `None` if no prior successful run exists, if the stored cursor is not an object, or if the field is absent, null, or not a string |
+| `_repo_path()` | Returns `Path($GIT_CLONE_BASE_DIR / clone_dir_name)`. Raises `ValueError` before any git or filesystem operation when `clone_dir_name` is not a single non-empty path component (it contains a path separator or U+0000, or is `.` or `..`), so no clone or deletion can target a path outside `$GIT_CLONE_BASE_DIR` |
 | `_extract_item_id(path)` | Extracts CVE-ID from a file path for status tracking and logging. Default: `Path(path).stem` (e.g., `cve/published/2024/CVE-2024-50055.json` → `CVE-2024-50055`). Override only if the repository uses non-standard naming |
 | `_clone_repo(path)` | Clones the repository as a bare clone with the configured options (filter, single-branch). Delegates to `git_operations.clone()` |
 | `_fetch_origin(path)` | Updates the clone's branch, and therefore `HEAD`, from origin. Delegates to `git_operations.fetch_origin()` |
@@ -1487,15 +1539,21 @@ occurs).
 
 1. Compute `before_date` as `cursor_committed_at` minus 1 day (the
    1-day margin ensures no items are missed around the boundary —
-   reprocessing is idempotent)
+   reprocessing is idempotent), as an ISO 8601 UTC instant with the
+   `+00:00` offset truncated to whole seconds (truncation only moves the
+   boundary earlier). `cursor_committed_at` must be usable as a recovery
+   boundary (see `execute()` step 7a, which checks it before calling this
+   method); otherwise the method raises `ValueError` before invoking git
 2. Call `rev_list_before(repo_path, before_date)` to find the boundary
    SHA — the most recent commit before `before_date`
 3. If `rev_list_before` returns `None` (no commit exists before
    `before_date` — the repository history does not extend that far
    back):
-   a. Log WARNING: "Recovery boundary not found — repository may have
-      been completely rewritten. Treating as first-run. Cursor reset to
-      HEAD. Use fetch_single() to recover specific items if needed."
+   a. Log the bounded WARNING `git_recovery_boundary_not_found`
+      (`fetcher_name`): the repository may have been completely
+      rewritten, so the run is treated as first-run, the cursor is reset
+      to HEAD, and `fetch_single()` remains available to recover
+      specific items
    b. Return empty list
 4. Call `diff_names(repo_path, boundary_sha, head_sha)` with
    `recovery_path_prefix` as path filter
