@@ -10,6 +10,8 @@ from __future__ import annotations
 import contextlib
 import io
 import logging
+import sys
+import types
 from collections.abc import Callable
 
 import pytest
@@ -90,6 +92,27 @@ class TestPreservedLoggingState:
         with preserved_logging_state():
             reconfigure()
             assert structlog.get_config()["processors"] is not processors
+
+        with capture_logs() as captured:
+            logger.warning("after_scope")
+
+        assert [entry["event"] for entry in captured] == ["after_scope"]
+
+    @pytest.mark.parametrize("reconfigure", _RECONFIGURATIONS)
+    def test_app_logger_first_used_inside_scope_is_capturable_afterwards(
+        self, reconfigure: Callable[[], None], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression: a module-level logger first used while a test's own
+        configuration was active stayed bound to that configuration's
+        processor list, so later `capture_logs()` assertions missed it."""
+        module = types.ModuleType("app._logging_state_probe")
+        logger = structlog.get_logger("tests.logging_state.probe")
+        vars(module)["logger"] = logger
+        monkeypatch.setitem(sys.modules, module.__name__, module)
+
+        with preserved_logging_state():
+            reconfigure()
+            logger.debug("first_use")  # caches the logger on the scope's list
 
         with capture_logs() as captured:
             logger.warning("after_scope")

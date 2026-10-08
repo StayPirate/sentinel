@@ -14,13 +14,37 @@ Independence).
 from __future__ import annotations
 
 import logging
+import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any
 
 import structlog
 
+# NOTE: private structlog module (verified against the pinned
+# `structlog==26.1.0`): the lazy proxy returned by `structlog.get_logger()`
+# is not exported publicly.
+from structlog._config import BoundLoggerLazyProxy
+
 from app.core.logging import _THIRD_PARTY_LOGGERS
+
+
+def _forget_cached_app_loggers() -> None:
+    """Make every module-level logger of the `app` package rebind on its
+    next use, to the processor list configured at that moment.
+
+    A proxy caches its assembled logger, together with the processor list
+    configured at its first use, by setting the instance attribute `bind`;
+    removing that attribute restores the uncached class method. A change
+    in this structlog mechanism fails the regression tests in
+    `tests/test_support/test_logging_state.py`.
+    """
+    for name, module in list(sys.modules.items()):
+        if module is None or not (name == "app" or name.startswith("app.")):
+            continue
+        for value in list(vars(module).values()):
+            if isinstance(value, BoundLoggerLazyProxy):
+                vars(value).pop("bind", None)
 
 
 @contextmanager
@@ -39,9 +63,11 @@ def preserved_logging_state() -> Iterator[None]:
     leave every logger cached before the scope invisible to later
     captures.
 
-    A logger first used while a configuration installed inside the scope
-    is active stays bound to that configuration's list for the rest of
-    the process; restoring the configuration cannot rebind it.
+    When the scope exits with a different processor list configured, a
+    module-level logger first used inside the scope may have cached that
+    list. Every module-level logger of the `app` package therefore
+    forgets its cached list and rebinds to the restored one on its next
+    use.
     """
     root = logging.getLogger()
     root_handlers = list(root.handlers)
@@ -67,5 +93,8 @@ def preserved_logging_state() -> Iterator[None]:
             logger.setLevel(level)
             logger.propagate = propagate
             logger.handlers[:] = handlers
+        replaced = structlog.get_config()["processors"] is not processors
         processors[:] = processor_entries
         structlog.configure(**structlog_config)
+        if replaced:
+            _forget_cached_app_loggers()

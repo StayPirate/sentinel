@@ -976,9 +976,10 @@ handlers and level, the third-party loggers' handlers, levels, and
 propagation, and the structlog processor list. An autouse fixture in
 `backend/tests/conftest.py` restores all of them after every test. It keeps
 the original processor-list object, because loggers cached on first use keep
-referencing it and `structlog.testing.capture_logs()` captures through it. A
-test that changes the logging configuration therefore needs no fixture of its
-own to undo it.
+referencing it and `structlog.testing.capture_logs()` captures through it.
+Module-level application loggers first used while a test's own configuration
+was active are made to rebind to the restored list. A test that changes the
+logging configuration therefore needs no fixture of its own to undo it.
 
 ### Sync Entry-Point Tests
 
