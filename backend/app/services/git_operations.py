@@ -153,11 +153,20 @@ def _signal_group(pid: int, signum: signal.Signals) -> None:
         os.killpg(pid, signum)
 
 
+def _held(held: BaseException | None, new: BaseException) -> BaseException:
+    """The interruption to raise after reaping: the first that is not a
+    cancellation, else the latest cancellation."""
+    if held is None or isinstance(held, asyncio.CancelledError):
+        return new
+    return held
+
+
 async def _terminate(process: asyncio.subprocess.Process) -> None:
     """Terminate the git process group and reap the git process.
 
     A further interruption (cancellation, whole-run signal) while this runs
-    is held until the process is reaped, then raised."""
+    is held until the process is reaped, then raised; the first one that is
+    not a cancellation takes precedence."""
     if process.returncode is not None:
         return
     _signal_group(process.pid, signal.SIGTERM)
@@ -168,7 +177,7 @@ async def _terminate(process: asyncio.subprocess.Process) -> None:
     except TimeoutError:
         pass
     except BaseException as exc:
-        interruption = exc
+        interruption = _held(interruption, exc)
     # Also removes helpers (remote transport, index-pack) that outlive the
     # git process itself.
     _signal_group(process.pid, signal.SIGKILL)
@@ -177,7 +186,7 @@ async def _terminate(process: asyncio.subprocess.Process) -> None:
             await asyncio.shield(process.wait())
             break
         except BaseException as exc:
-            interruption = exc
+            interruption = _held(interruption, exc)
     if interruption is not None:
         raise interruption
 

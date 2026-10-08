@@ -488,10 +488,14 @@ cancelled, or any other exception (including a whole-run signal such as
 process, the module terminates the process group (SIGTERM, so git can
 remove its lock files and a partial clone, then SIGKILL after a short
 grace period) and reaps the `git` process before the timeout
-classification or the original exception propagates, even if a further
-interruption arrives meanwhile. No process started by the module
-outlives the call, except git's own detached automatic maintenance
-(see "Fetch Operations").
+classification or the original exception propagates. A further
+interruption that arrives meanwhile is held until the process is reaped
+and then raised in place of the original exception; when several arrive,
+the first one that is not a cancellation is raised. The reap waits as
+long as the process cannot exit (for example uninterruptible I/O on a
+hung mount), which the Celery hard time limit bounds. No process started
+by the module outlives the call, except git's own detached automatic
+maintenance (see "Fetch Operations").
 
 ## Error Classification
 
@@ -520,7 +524,9 @@ but the presumption accounts for transient I/O faults on networked
 storage (NFS, PVC with remote backend) by retrying before concluding
 corruption. If retries are exhausted and the failure persists, the
 conclusion is firm: the local object store is damaged, and the only
-reliable recovery is deletion + re-clone. No stderr parsing or exit
+reliable recovery is deletion + re-clone. (A `git` binary that cannot be
+started is classified the same way: no git operation can succeed then,
+and the clone is a recoverable cache.) No stderr parsing or exit
 code mapping is needed — the phase plus retry exhaustion is sufficient
 for classification.
 
@@ -859,10 +865,10 @@ Semantics:
   and prints `true`, then
   `git --git-dir=<repo_path> rev-parse --verify --quiet --end-of-options
   HEAD^{commit}` exits 0. Returns `False` if the path does not exist or
-  is not a directory (without invoking git), is not a git repository (including a
-  non-repository directory nested inside another repository, which
-  `--git-dir` never resolves to the enclosing repository), is a non-bare
-  repository, has a `HEAD` that names no commit (for example a clone
+  is not a directory (without invoking git), is not a git repository
+  (including a non-repository directory nested inside another
+  repository, which `--git-dir` never resolves to the enclosing
+  repository), is a non-bare repository, has a `HEAD` that names no commit (for example a clone
   interrupted before its transfer completed, which git leaves without
   the branch), or the check still fails after the read retries (an
   attempt fails when either command does not succeed as stated). NEVER

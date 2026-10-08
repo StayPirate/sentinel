@@ -351,18 +351,34 @@ async def test_cancelled_call_propagates_cancelled_error_and_leaves_no_process(
 
 
 @pytest.mark.parametrize(
-    ("interruptions", "expected"),
+    ("first", "interruptions", "expected"),
     [
-        pytest.param({}, asyncio.CancelledError, id="cancelled-again-during-grace"),
         pytest.param(
+            "cancel", {}, asyncio.CancelledError, id="cancelled-again-during-grace"
+        ),
+        pytest.param(
+            "cancel",
             {1: SoftTimeLimitExceeded()},
             SoftTimeLimitExceeded,
             id="soft-time-limit-during-grace",
         ),
         pytest.param(
+            "cancel",
             {1: SoftTimeLimitExceeded(), 2: MemoryError()},
-            MemoryError,
-            id="memory-error-while-reaping",
+            SoftTimeLimitExceeded,
+            id="first-whole-run-signal-kept-while-reaping",
+        ),
+        pytest.param(
+            "cancel",
+            {1: SoftTimeLimitExceeded(), 2: asyncio.CancelledError()},
+            SoftTimeLimitExceeded,
+            id="cancellation-does-not-replace-whole-run-signal",
+        ),
+        pytest.param(
+            "timeout",
+            {1: SoftTimeLimitExceeded()},
+            SoftTimeLimitExceeded,
+            id="whole-run-signal-after-timeout-is-not-classified",
         ),
     ],
 )
@@ -370,11 +386,14 @@ async def test_further_interruption_while_terminating_reaps_before_propagating(
     fake_git: FakeGitFactory,
     repo: Path,
     monkeypatch: pytest.MonkeyPatch,
+    first: str,
     interruptions: dict[int, BaseException],
     expected: type[BaseException],
 ) -> None:
     fake = fake_git.install({"show": Behavior(hang=True, ignore_term=True)})
     monkeypatch.setattr(git_operations, "_TERMINATION_GRACE_SECONDS", 30)
+    if first == "timeout":
+        monkeypatch.setattr(git_operations, "SHOW_TIMEOUT_SECONDS", _SHORT_TIMEOUT)
     real_shield = asyncio.shield
     shields: list[asyncio.Future[Any]] = []
 
@@ -393,7 +412,8 @@ async def test_further_interruption_while_terminating_reaps_before_propagating(
     task = asyncio.ensure_future(show_file(repo, "HEAD", "README"))
     await _wait_until(lambda: len(fake.grandchild_pids()) == 1)
 
-    task.cancel()
+    if first == "cancel":
+        task.cancel()
     await _wait_until(lambda: len(shields) == 1)
     if not interruptions:
         task.cancel()
