@@ -1444,6 +1444,34 @@ class TestInfrastructureErrors:
         assert not workspace.clone_path(probe).exists()
         _bounded(logs, workspace, "missing-upstream")
 
+    async def test_rebuild_clone_failure_is_public_message_and_keeps_cursor(
+        self, workspace: GitWorkspace, harness: GitRunHarness, git_calls: GitCalls
+    ) -> None:
+        """Row 4 of First-Run Detection with the upstream unreachable: the
+        rebuild's clone failure is the fixed clone message, not a corruption
+        or a generic error, and the stored cursor is kept."""
+        missing = workspace.root / "missing-upstream"
+        probe = await _fetcher(workspace, harness, repo_url=missing.as_uri())
+        cursor = {"sha": "a" * 40, "committed_at": D_CURSOR}
+        await harness.seed_run(probe, cursor)
+
+        with capture_logs() as logs:
+            result = await harness.run(probe, raises=FetcherError)
+
+        assert isinstance(result.raised, FetcherError)
+        assert isinstance(result.raised.__cause__, GitFetchError)
+        assert git_calls.names() == FIRST_RUN_CALLS
+        assert _warnings(logs) == [CLONE_INVALID_REBUILDING_EVENT]
+        assert result.row.status == "failure"
+        assert result.row.metrics == (0, 0, 0, 0)
+        assert result.row.cursor is None
+        assert result.row.error_message == CLONE_FAILED_MESSAGE
+        _public(result.row.error_message, workspace)
+        assert result.row.error_detail is not None
+        assert "missing-upstream" in result.row.error_detail
+        assert not workspace.clone_path(probe).exists()
+        _bounded(logs, workspace, "missing-upstream")
+
     async def test_fetch_failure_keeps_clone_and_cursor(
         self, workspace: GitWorkspace, harness: GitRunHarness, git_calls: GitCalls
     ) -> None:

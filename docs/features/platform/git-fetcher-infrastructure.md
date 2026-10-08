@@ -1570,7 +1570,8 @@ restarts cleanly and `fetch_single()` is available for manual recovery
 of specific items.
 
 **Exceptions**: propagates `GitCorruptionError` from `rev_list_before()`
-(step 2) and `diff_names()` (step 4).
+(step 2) and `diff_names()` (step 4); raises `ValueError` for an
+unusable `cursor_committed_at` before invoking git (step 1).
 
 ## Registry Detection Predicate Update
 
