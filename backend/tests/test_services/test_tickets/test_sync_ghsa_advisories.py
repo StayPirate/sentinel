@@ -1449,17 +1449,30 @@ class TestCvss:
         assert _events(logs, SKIP_EVENT) == []
 
     @pytest.mark.parametrize(
-        ("name", "member", "base"),
+        ("name", "expected"),
         [
             (
                 "advisory_v4_non_base",
-                "cvss_v4",
-                "CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:L/VI:H/VA:N/SC:N/SI:N/SA:N",
+                {
+                    (
+                        "GitHub",
+                        "4.0",
+                        "CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:L/VI:H/VA:N"
+                        "/SC:N/SI:N/SA:N",
+                    )
+                },
             ),
             (
                 "advisory_v3_v4_non_base_ranges",
-                "cvss_v4",
-                "CVSS:4.0/AV:L/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:N/SC:H/SI:H/SA:N",
+                {
+                    ("GitHub", "3.1", "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N"),
+                    (
+                        "GitHub",
+                        "4.0",
+                        "CVSS:4.0/AV:L/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:N"
+                        "/SC:H/SI:H/SA:N",
+                    ),
+                },
             ),
         ],
         ids=["threat_e_p", "supplemental_re_m_u_red"],
@@ -1467,23 +1480,22 @@ class TestCvss:
     async def test_live_non_base_v4_is_persisted_as_its_base_vector(
         self,
         name: str,
-        member: str,
-        base: str,
+        expected: set[tuple[str, str, str]],
         db_session: AsyncSession,
         target: Target,
         fetcher: SyncGhsaAdvisories,
         server: GhsaServer,
     ) -> None:
         advisory = _retargeted(name, target.cve_id)
-        received = advisory["cvss_severities"][member]["vector_string"]
-        assert received != base
+        received = advisory["cvss_severities"]["cvss_v4"]["vector_string"]
+        assert received not in {vector for _, _, vector in expected}
         _serve(server, target.cve_id, advisory)
 
         with capture_logs() as logs:
             result = await fetcher.fetch_single(target.cve_id, db_session)
 
         assert result.action is UpsertAction.UPDATED
-        assert ("GitHub", "4.0", base) in await _assessments(db_session, target.cve)
+        assert await _assessments(db_session, target.cve) == expected
         assert _events(logs, SKIP_EVENT) == []
         _assert_private(logs, received)
 

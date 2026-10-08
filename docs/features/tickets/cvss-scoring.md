@@ -118,10 +118,11 @@ manual SUSE CVSS API and every other consumer-supplied input never apply it
 1. The received value must contain at most 200 characters **before** any
    trimming (the bound of Input Rules rule 1). A longer value is rejected
    without further processing.
-2. Trim leading and trailing whitespace (rule 2) and detect the version from
-   the prefix (rule 4): a value starting with `CVSS:` must carry exactly
-   `CVSS:3.0/`, `CVSS:3.1/`, or `CVSS:4.0/`, otherwise it is rejected; any
-   other value is CVSS v2.0.
+2. Trim leading and trailing whitespace (rule 2). An empty value or one with
+   embedded whitespace is rejected. Detect the version from the prefix
+   (rule 4): a value starting with `CVSS:` must carry exactly `CVSS:3.0/`,
+   `CVSS:3.1/`, or `CVSS:4.0/`, otherwise it is rejected; any other value is
+   CVSS v2.0.
 3. Split the remaining metric section on `/` into tokens. The abbreviation of
    a token is the text before its first `:`, and its value the text after it.
    For each token whose abbreviation is a recognized non-Base metric of the
@@ -133,27 +134,33 @@ manual SUSE CVSS API and every other consumer-supplied input never apply it
 
    Every other token is kept unchanged in its original position.
 4. The prefix (empty for v2.0) followed by the kept tokens joined with `/`
-   is passed to the canonical parser, which applies rules 2 through 7. Its stable parsed result
-   is the result of the reduction.
+   is passed to the canonical parser, which applies rules 2 through 7. Its
+   stable parsed result is the result of the reduction when its version is
+   the version detected in step 2; otherwise the candidate is rejected (for
+   example a v2.0 value whose removed first token was followed by a
+   `CVSS:3.1/` token).
 
 Recognition is version-specific. A non-Base metric defined only for another
 version is not recognized and follows the canonical parser (for example `MS`
 is unknown in a v4.0 vector, and `S` is the v3.x Base metric Scope but the
 v4.0 Supplemental metric Safety). A value defined only for another version is
 outside its table and rejected in step 3 (for example `E:POC` in a v3.1
-vector). No non-Base abbreviation of a
-version equals one of its Base abbreviations.
+vector). No non-Base abbreviation of a version equals one of its Base
+abbreviations.
 
 **Rejections.** A candidate is rejected, with no partial result, when its
-received value exceeds 200 characters; when a recognized non-Base metric has
-no `:`, an empty value, a value outside its table, or a value in another case;
-when a recognized non-Base metric occurs more than once; and whenever the
-canonical parser rejects the reduced vector. The last case includes empty
-input, embedded whitespace, an unsupported or mismatched prefix, case variants
-of the prefix or a Base abbreviation or value, an unknown metric, a duplicate
-or missing Base metric, and an empty Base set after reduction. The reduction
+received value exceeds 200 characters; when it is empty after trimming or
+contains embedded whitespace; when its `CVSS:` prefix is unsupported; when a
+recognized non-Base metric has no `:`, an empty value, a value outside its
+table, or a value in another case; when a recognized non-Base metric occurs
+more than once; when the version of the reduced vector differs from the
+detected version; and whenever the canonical parser rejects the reduced
+vector. The last case includes a mismatched prefix and body, case variants of
+the prefix or a Base abbreviation or value, an unknown metric, a duplicate or
+missing Base metric, and an empty Base set after reduction. The reduction
 never repairs malformed input: it only removes complete, valid non-Base
-tokens.
+tokens, and removing them never changes the outcome of a whitespace or
+version check.
 
 **Result.** The reduction never retains non-Base metrics and never lets them
 affect the score. The persisted canonical vector is the pure Base vector in
@@ -909,7 +916,9 @@ testing strategy.
   metric of another version; an unknown metric; and an incomplete or empty
   Base set after reduction.
 - Rejection of an unsupported, missing, or mismatched prefix and of embedded
-  whitespace, with no repair of any malformed token.
+  whitespace, with no repair of any malformed token: whitespace in a kept
+  Base token next to a removed non-Base token, and a v2.0 non-Base token
+  before a `CVSS:3.x/` or `CVSS:4.0/` token, are still rejected.
 - Received lengths of exactly 200 and 201 characters, measured before
   trimming; a 201-character value is rejected without invoking the canonical
   parser.

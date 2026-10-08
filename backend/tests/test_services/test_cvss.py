@@ -761,6 +761,16 @@ REDUCTION_REJECTIONS: list[tuple[str, str]] = [
     ("trailing-separator", f"{_V31}/E:H/"),
     ("embedded-whitespace", f"{_V31}/E:H\tRL:O"),
     ("nul", f"{_V31}/E:H\x00"),
+    # removing a token never turns embedded whitespace into outer whitespace
+    ("kept-v2-token-trailing-space", f"{_V20} /E:F"),
+    ("kept-v2-token-leading-space", f"E:F/ {_V20}"),
+    ("kept-v31-token-trailing-space", f"{_V31} /E:P"),
+    ("kept-v31-token-trailing-nbsp", f"{_V31}\u00a0/E:P"),
+    ("kept-v31-token-trailing-newline", f"{_V31}\n/E:P"),
+    # removing a v2.0 token never changes the detected version
+    ("v2-token-before-v31-prefix", f"E:F/{_V31}"),
+    ("v2-token-before-v40-prefix", f"E:F/{_V40}"),
+    ("v2-token-before-spaced-v30-prefix", f"RL:OF/ {VALID_VECTORS['3.0']}"),
 ]
 
 
@@ -821,19 +831,13 @@ class TestValidateExternalCvssVectorReduction:
     ) -> None:
         prefix, tokens = _split(VALID_VECTORS[version], version)
 
-        result = validate_external_cvss_vector(_join(prefix, [*tokens, extra]))
+        vector = _join(prefix, [*tokens, extra])
+
+        result = validate_external_cvss_vector(vector)
 
         assert result == validate_cvss_vector(VALID_VECTORS[version])
-
-    @pytest.mark.parametrize(("version", "extra"), _non_base_value_cases())
-    def test_a_leading_non_base_metric_is_removed(
-        self, version: str, extra: str
-    ) -> None:
-        prefix, tokens = _split(VALID_VECTORS[version], version)
-
-        result = validate_external_cvss_vector(_join(prefix, [extra, *tokens]))
-
-        assert result.canonical_vector == VALID_VECTORS[version]
+        with pytest.raises(InvalidCVSSVectorError):
+            validate_cvss_vector(vector)
 
     @pytest.mark.parametrize("version", VERSIONS)
     def test_every_non_base_metric_interleaved_reduces_to_first_order(
@@ -864,13 +868,6 @@ class TestValidateExternalCvssVectorReduction:
     ) -> None:
         with pytest.raises(InvalidCVSSVectorError):
             validate_cvss_vector(received)
-
-    def test_outer_whitespace_is_trimmed_before_reduction(self) -> None:
-        received, base = REDUCTION_EXAMPLES[1]
-
-        assert validate_external_cvss_vector(
-            f" \t{received}\n"
-        ) == validate_cvss_vector(base)
 
 
 @pytest.mark.unit
@@ -922,6 +919,24 @@ class TestValidateExternalCvssVectorRejections:
     def test_invalid_candidate_is_rejected(self, vector: str) -> None:
         with pytest.raises(InvalidCVSSVectorError):
             validate_external_cvss_vector(vector)
+
+    def test_reduction_that_changes_the_version_is_rejected(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The strict parser accepts the reduced `CVSS:3.1/...` value; the
+        rejection comes from the version detected before the reduction."""
+        calls: list[str] = []
+
+        def spy(vector: str) -> ParsedCVSSVector:
+            calls.append(vector)
+            return validate_cvss_vector(vector)
+
+        monkeypatch.setattr(cvss, "validate_cvss_vector", spy)
+
+        with pytest.raises(InvalidCVSSVectorError):
+            validate_external_cvss_vector(f"E:F/{_V31}")
+
+        assert calls == [_V31]
 
     def test_error_message_never_contains_input(self) -> None:
         vector = f"{_V31}/E:SENTINEL-MARKER"

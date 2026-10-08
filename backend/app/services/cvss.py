@@ -574,23 +574,29 @@ def validate_external_cvss_vector(vector_string: str) -> ParsedCVSSVector:
     Only trusted external ingestion calls this function (cvss-scoring.md,
     External Base Reduction); manual input uses `validate_cvss_vector()`.
     A received value over `EXTERNAL_VECTOR_MAX_LENGTH` characters is
-    rejected before trimming. After trimming and version detection, each
-    `/`-separated token whose abbreviation is a recognized non-Base metric
-    of the detected version is removed when it carries `:`, an official
-    value of that metric, and occurs only once; any other such token
-    rejects the vector. Every remaining token is kept unchanged, and the
-    reduced vector is parsed by `validate_cvss_vector()`, whose result is
-    returned. A complete Base vector therefore yields exactly the strict
+    rejected before trimming; after trimming, an empty value or embedded
+    whitespace is rejected before any reduction. After version detection,
+    each `/`-separated token whose abbreviation is a recognized non-Base
+    metric of the detected version is removed when it carries `:`, an
+    official value of that metric, and occurs only once; any other such
+    token rejects the vector. Every remaining token is kept unchanged, and
+    the reduced vector is parsed by `validate_cvss_vector()`, whose result
+    is returned only when it has the version detected before the
+    reduction. A complete Base vector therefore yields exactly the strict
     parser's result, and malformed input is never repaired.
 
     Raises:
-        InvalidCVSSVectorError: The vector is over-long, carries an
-            invalid or duplicate recognized non-Base metric, or its
-            reduction violates the accepted Base-vector contract.
+        InvalidCVSSVectorError: The vector is over-long, empty, contains
+            embedded whitespace, carries an invalid or duplicate recognized
+            non-Base metric, or its reduction violates the accepted
+            Base-vector contract or changes the detected version.
     """
     if len(vector_string) > EXTERNAL_VECTOR_MAX_LENGTH:
         raise InvalidCVSSVectorError
-    version, body = _detect_version(vector_string.strip())
+    candidate = vector_string.strip()
+    if not candidate or any(character.isspace() for character in candidate):
+        raise InvalidCVSSVectorError
+    version, body = _detect_version(candidate)
     non_base = _NON_BASE_METRICS[version]
     kept: list[str] = []
     removed: set[str] = set()
@@ -603,7 +609,10 @@ def validate_external_cvss_vector(vector_string: str) -> ParsedCVSSVector:
         if not separator or value not in values or abbreviation in removed:
             raise InvalidCVSSVectorError
         removed.add(abbreviation)
-    return validate_cvss_vector(_VERSION_SPECS[version].prefix + "/".join(kept))
+    parsed = validate_cvss_vector(_VERSION_SPECS[version].prefix + "/".join(kept))
+    if parsed.version is not version:
+        raise InvalidCVSSVectorError
+    return parsed
 
 
 # ---------------------------------------------------------------------------
