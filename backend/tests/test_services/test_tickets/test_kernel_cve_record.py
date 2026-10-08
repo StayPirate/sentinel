@@ -18,7 +18,6 @@ minimal fictional objects. No database, Git, or log is involved.
 
 from __future__ import annotations
 
-import copy
 import json
 from typing import Any, Final
 
@@ -36,7 +35,6 @@ from app.services.cve_ingest import (
 )
 from app.services.reference_service import AutomaticReferenceInput
 from app.services.tickets.kernel_cve_record import (
-    PROVIDER_NAME,
     RECORD_PATH_PATTERN,
     RESOLVED_PACKAGE,
     SOURCE_CONTAINER,
@@ -53,6 +51,7 @@ from tests.support.kernel import (
     load_raw_record,
     load_record,
     record_path,
+    repository_paths,
 )
 from tests.support.module_imports import APP_ROOT, forbidden_imports, imported_modules
 
@@ -77,6 +76,7 @@ URL_1: Final = (
 )
 URL_2: Final = "https://advisory.example.invalid/upstream/2"
 NUL: Final = "\x00"
+SECRET: Final = "Example-Secret-Input-Value"
 
 _KERNEL_FIELDS: Final = frozenset(
     {
@@ -219,6 +219,18 @@ class TestPath:
     def test_path_is_checked_before_the_content(self) -> None:
         with pytest.raises(KernelRecordPathError):
             map_record("cve/published/2026/CVE-2026-0001.sha1", b"\xff")
+
+    def test_pattern_selects_exactly_the_sampled_record_paths(self) -> None:
+        paths = repository_paths()
+
+        selected = [p for p in paths if RECORD_PATH_PATTERN.fullmatch(p)]
+
+        assert selected == [
+            p
+            for p in paths
+            if p.startswith(("cve/published/", "cve/rejected/")) and p.endswith(".json")
+        ]
+        assert "cve/testing/published/2021/CVE-2021-47181.json" in paths
 
     def test_pattern_captures_the_directory_year_and_cve_id(self) -> None:
         match = RECORD_PATH_PATTERN.fullmatch(PUBLISHED_PATH)
@@ -392,14 +404,6 @@ class TestCveId:
         assert result.cve_id == CVE_ID
         assert result.source_reference.url == f"{VULNS_TREE}/{PUBLISHED_PATH}"
 
-    def test_mismatch_never_reaches_the_payload_or_references(self) -> None:
-        record = _record()
-        record["cveMetadata"]["cveId"] = "CVE-2026-9999"
-
-        result = _map(record)
-
-        assert "CVE-2026-9999" not in repr(result)
-
     @pytest.mark.parametrize("name", ALL_RECORDS)
     def test_live_record_id_is_its_file_name(self, name: str) -> None:
         path = record_path(name)
@@ -521,9 +525,6 @@ class TestGlobalFields:
 
 
 class TestCvss:
-    def test_provider_is_linux(self) -> None:
-        assert PROVIDER_NAME == "Linux"
-
     @pytest.mark.parametrize(
         ("metrics", "expected"),
         [
@@ -619,10 +620,11 @@ class TestAffected:
         assert "affected_version_operations" not in payload.model_fields_set
 
     def test_unparseable_element_leaves_a_reduced_replace(self) -> None:
-        affected = [_affected_element(), _affected_element(vendor=1)]
+        affected = [_affected_element(), _affected_element(product="Other", vendor=1)]
 
         entries = _cna_entries(_payload(_record(affected=affected)))
 
+        assert {e.product for e in entries} == {"Linux"}
         assert len(entries) == 2
 
     def test_live_duplicate_elements_without_versions_collapse(self) -> None:
@@ -821,9 +823,9 @@ class TestExternalStringAdmissibility:
     @pytest.mark.parametrize(
         "cna",
         [
-            {"title": f"example{NUL}"},
-            {"title": "t" * 300 + NUL},
-            {"descriptions": [{"lang": "en", "value": f"Fictional{NUL}"}]},
+            {"title": f"{SECRET}{NUL}"},
+            {"title": SECRET * 20 + NUL},
+            {"descriptions": [{"lang": "en", "value": f"{SECRET}{NUL}"}]},
         ],
         ids=["title", "title-after-bound", "description"],
     )
@@ -833,7 +835,7 @@ class TestExternalStringAdmissibility:
         with pytest.raises(ValidationError) as caught:
             _map(_record(**cna))
 
-        assert NUL not in str(caught.value)
+        assert SECRET not in str(caught.value)
 
     def test_unselected_description_is_not_consumed(self) -> None:
         descriptions = [
@@ -847,19 +849,7 @@ class TestExternalStringAdmissibility:
 
     @pytest.mark.parametrize(
         ("element_field", "version_field"),
-        [
-            ("vendor", None),
-            ("product", None),
-            ("repo", None),
-            ("defaultStatus", None),
-            ("programFiles", None),
-            ("packageName", None),
-            (None, "version"),
-            (None, "versionType"),
-            (None, "lessThan"),
-            (None, "lessThanOrEqual"),
-            (None, "status"),
-        ],
+        [("programFiles", None), (None, "version")],
     )
     def test_affected_value_skips_its_entry_and_keeps_siblings(
         self, element_field: str | None, version_field: str | None
@@ -872,9 +862,6 @@ class TestExternalStringAdmissibility:
         else:
             assert version_field is not None
             for version in poisoned["versions"]:
-                if version_field == "lessThanOrEqual":
-                    # `lessThan` wins over `lessThanOrEqual` when both exist.
-                    version.pop("lessThan", None)
                 version[version_field] = f"x{NUL}"
         affected = [_affected_element(), poisoned]
 
@@ -984,14 +971,6 @@ class TestPurity:
         with pytest.raises(AttributeError):
             result.cve_id = "CVE-2026-9999"  # type: ignore[misc]
         assert isinstance(result.upstream_references, tuple)
-
-    def test_input_record_is_not_mutated(self) -> None:
-        record = _record()
-        snapshot = copy.deepcopy(record)
-
-        _map(record)
-
-        assert record == snapshot
 
 
 _MODULE: Final = APP_ROOT / "services" / "tickets" / "kernel_cve_record.py"

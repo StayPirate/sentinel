@@ -308,7 +308,7 @@ class TestMetadata:
     def test_rejected_directory_record_says_published(self, name: str) -> None:
         assert _record(name).cve_metadata.state == "PUBLISHED"
 
-    def test_rejected_records_are_captured_in_every_shape(self) -> None:
+    def test_rejected_fixture_inventory_is_complete(self) -> None:
         assert set(_REJECTED_RECORDS) == {
             "rejected_cvss_v3_1",
             _WITHOUT_REFERENCES,

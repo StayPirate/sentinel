@@ -287,11 +287,11 @@ vulns.git/cve/
 └── CVE_JSON_*_schema.json      # Schema files (not processed)
 ```
 
-The fetcher processes **only `.json` files** from `cve/published/` and
-`cve/rejected/`, matched from the start of the repository path so that
-`cve/testing/published/` is excluded. All other file types are redundant with
-JSON content and are ignored (see `docs/features/tickets/cve-sync-kernel.md`
-for the full rationale).
+The fetcher processes **only `.json` files** directly in `cve/published/YEAR/`
+and `cve/rejected/YEAR/` (the complete path matches the pattern); the records
+under `cve/testing/published/` are not processed. All other file types are
+redundant with JSON content and are ignored (see
+`docs/features/tickets/cve-sync-kernel.md` for the full rationale).
 
 #### Volume and Publishing Pattern
 
@@ -300,7 +300,8 @@ kernel releases, followed by periods of inactivity. Observed 2026 data
 (measured 2026-10-09):
 
 - Peak: 848 new published records on a single day (2026-08-15)
-- Typical batch: about 135-275 new records per release day (median 199)
+- Typical batch: about 125-275 new records per release day (interquartile
+  range of the 28 days with at least 50; median about 180)
 - Bulk regenerations rewrite thousands of existing `.json` files in one day
   (up to 10,825 on 2026-05-12)
 - Total published `.json` files: 17,327

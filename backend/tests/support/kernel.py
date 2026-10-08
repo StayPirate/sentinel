@@ -50,12 +50,13 @@ CVE, an empty `CVE-YEAR-ID`, `.json`, `.sha1`, `.mbox`, and optional `.dyad`,
 `.vulnerable`, `.reference`, `.cvss`, `.message` (published, 7 files), and
 `.mbox.rejected` (rejected) files, plus `.empty` placeholders; `reserved/`
 (also nested one level deeper, `reserved/2026/x/`) and `returned/` hold no
-`.json`; `review/` holds no CVE file; `testing/published/YEAR/` holds 10
+`.json`; `review/` (`done/`, `done/gsd/`, `proposed/`) holds no CVE file;
+`testing/published/YEAR/` holds 10
 `CVE-YEAR-ID.json` files outside the processed directories; `schema`,
 `README`, `vulnerability.txt`, and two `CVE_JSON_*_schema.json` files sit at
 the top. `repository_paths.txt` keeps one path per directory and file type
-(sorted). The two `review/` names are fictional: the real ones carry
-maintainers' first names.
+(sorted). The two `review/` file names are fictional (their directories are
+real): the real names carry maintainers' first names.
 
 Record fixtures, source path, and purpose:
 

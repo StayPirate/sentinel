@@ -31,8 +31,8 @@ cve/reserved/2026/CVE-2026-98375
 cve/reserved/2026/x/CVE-2026-100000
 cve/returned/.empty
 cve/returned/2019/CVE-2019-25163
-cve/review/gsd-review.00-fromfile-example
-cve/review/v7.2.9-example
+cve/review/done/gsd/gsd-review.00-fromfile-example
+cve/review/proposed/v7.2.9-example
 cve/schema
 cve/testing/published/.empty
 cve/testing/published/2021/CVE-2021-47181
