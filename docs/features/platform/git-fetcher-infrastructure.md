@@ -649,6 +649,14 @@ The marker applies to every positional argument, including SHAs read
 from git output and refs supplied by callers. Rule 1 remains the format
 check for database-sourced SHAs.
 
+An argument containing U+0000 cannot be passed to a process. A function
+given such a value raises `ValueError` before git starts: it is a caller
+error, not a git failure, so it is neither retried nor classified as
+`GitFetchError`, `GitCorruptionError`, or `GitFileError`. Paths returned
+by `diff_names` never contain U+0000, and `check_sha_reachable` and
+`is_clone_valid` return `False` for such a value (Rule 1; a path that is
+not a directory).
+
 **Rule 3 — Subprocess environment:**
 
 Every function that invokes `asyncio.create_subprocess_exec` for a git
