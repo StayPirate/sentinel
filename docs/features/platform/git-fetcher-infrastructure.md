@@ -489,9 +489,11 @@ process, the module terminates the process group (SIGTERM, so git can
 remove its lock files and a partial clone, then SIGKILL after a short
 grace period) and reaps the `git` process before the timeout
 classification or the original exception propagates. A further
-interruption that arrives meanwhile is held until the process is reaped
-and then raised in place of the original exception; when several arrive,
-the first one that is not a cancellation is raised. The reap waits as
+interruption that arrives meanwhile is held until the process is reaped.
+Of the original exception and the further interruptions, the first one
+that is not a cancellation propagates (if all are cancellations, the
+latest one); the module's own timeout classification never outranks a
+further interruption. The reap waits as
 long as the process cannot exit (for example uninterruptible I/O on a
 hung mount), which the Celery hard time limit bounds. No process started
 by the module outlives the call, except git's own detached automatic

@@ -161,16 +161,23 @@ def _held(held: BaseException | None, new: BaseException) -> BaseException:
     return held
 
 
-async def _terminate(process: asyncio.subprocess.Process) -> None:
+async def _terminate(
+    process: asyncio.subprocess.Process, original: BaseException
+) -> None:
     """Terminate the git process group and reap the git process.
 
-    A further interruption (cancellation, whole-run signal) while this runs
-    is held until the process is reaped, then raised; the first one that is
-    not a cancellation takes precedence."""
+    `original` is the exception that interrupted git. A further interruption
+    (cancellation, whole-run signal) while this runs is held until the
+    process is reaped. Of `original` and the further interruptions, the
+    first that is not a cancellation propagates, else the latest
+    cancellation; the module's own timeout never outranks a further
+    interruption. This raises only when the result is not `original`."""
     if process.returncode is not None:
         return
     _signal_group(process.pid, signal.SIGTERM)
-    interruption: BaseException | None = None
+    interruption: BaseException | None = (
+        None if isinstance(original, TimeoutError) else original
+    )
     try:
         async with asyncio.timeout(_TERMINATION_GRACE_SECONDS):
             await asyncio.shield(process.wait())
@@ -187,7 +194,7 @@ async def _terminate(process: asyncio.subprocess.Process) -> None:
             break
         except BaseException as exc:
             interruption = _held(interruption, exc)
-    if interruption is not None:
+    if interruption is not None and interruption is not original:
         raise interruption
 
 
@@ -210,7 +217,7 @@ async def _run(args: tuple[str, ...], *, limit_seconds: float) -> _Completed:
         async with asyncio.timeout(limit_seconds):
             stdout, stderr = await process.communicate()
     except BaseException as exc:
-        await _terminate(process)
+        await _terminate(process, exc)
         if isinstance(exc, TimeoutError):
             raise _AttemptFailedError(
                 f"git timed out after {limit_seconds:g} seconds"

@@ -380,13 +380,25 @@ async def test_cancelled_call_propagates_cancelled_error_and_leaves_no_process(
             SoftTimeLimitExceeded,
             id="whole-run-signal-after-timeout-is-not-classified",
         ),
+        pytest.param(
+            SoftTimeLimitExceeded(),
+            {},
+            SoftTimeLimitExceeded,
+            id="cancellation-does-not-replace-original-whole-run-signal",
+        ),
+        pytest.param(
+            MemoryError(),
+            {1: SoftTimeLimitExceeded()},
+            MemoryError,
+            id="original-whole-run-signal-kept-over-later-one",
+        ),
     ],
 )
 async def test_further_interruption_while_terminating_reaps_before_propagating(
     fake_git: FakeGitFactory,
     repo: Path,
     monkeypatch: pytest.MonkeyPatch,
-    first: str,
+    first: str | BaseException,
     interruptions: dict[int, BaseException],
     expected: type[BaseException],
 ) -> None:
@@ -394,6 +406,18 @@ async def test_further_interruption_while_terminating_reaps_before_propagating(
     monkeypatch.setattr(git_operations, "_TERMINATION_GRACE_SECONDS", 30)
     if first == "timeout":
         monkeypatch.setattr(git_operations, "SHOW_TIMEOUT_SECONDS", _SHORT_TIMEOUT)
+    if isinstance(first, BaseException):
+        real_communicate = asyncio.subprocess.Process.communicate
+        readers: list[asyncio.Future[tuple[bytes, bytes]]] = []
+
+        async def communicate(
+            self: asyncio.subprocess.Process, input: bytes | None = None
+        ) -> tuple[bytes, bytes]:
+            readers.append(asyncio.ensure_future(real_communicate(self, input)))
+            await _wait_until(lambda: len(fake.grandchild_pids()) == 1)
+            raise first
+
+        monkeypatch.setattr(asyncio.subprocess.Process, "communicate", communicate)
     real_shield = asyncio.shield
     shields: list[asyncio.Future[Any]] = []
 
