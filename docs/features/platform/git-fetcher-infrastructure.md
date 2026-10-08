@@ -1513,7 +1513,7 @@ operations.
 | Method | Purpose |
 |--------|---------|
 | `_get_last_cursor_sha()` | Reads the `"sha"` field from the previous `FetcherRun.cursor` (via `BaseFetcher`). Returns `None` if no prior successful run exists, if the stored cursor is not an object, or if the field is missing or not a string (a malformed cursor, see `execute()` step 2) |
-| `_get_last_cursor_committed_at()` | Reads the `"committed_at"` field from the previous `FetcherRun.cursor` (via `BaseFetcher`). Returns `None` if no prior successful run exists, if the stored cursor is not an object, or if the field is absent, null, or not a string |
+| `_get_last_cursor_committed_at()` | Reads the `"committed_at"` field from the previous `FetcherRun.cursor` (via `BaseFetcher`). Returns `None` if no prior successful run exists, if the stored cursor is not an object, or if the field is absent, null, or not a string. The `reason` of `execute()` step 7a is derived from the stored field itself, so a present non-string value is reported as `invalid`, not `absent` |
 | `_repo_path()` | Returns `Path($GIT_CLONE_BASE_DIR / clone_dir_name)`. Raises `ValueError` before any git or filesystem operation when `clone_dir_name` is not a single non-empty path component (it contains a path separator or U+0000, or is `.` or `..`), so no clone or deletion can target a path outside `$GIT_CLONE_BASE_DIR` |
 | `_extract_item_id(path)` | Extracts CVE-ID from a file path for status tracking and logging. Default: `Path(path).stem` (e.g., `cve/published/2024/CVE-2024-50055.json` → `CVE-2024-50055`). Override only if the repository uses non-standard naming |
 | `_clone_repo(path)` | Clones the repository as a bare clone with the configured options (filter, single-branch). Delegates to `git_operations.clone()` |
