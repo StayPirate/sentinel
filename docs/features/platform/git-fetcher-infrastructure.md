@@ -54,29 +54,54 @@ The pattern:
    current fetcher uses it. All blobs are downloaded during `git clone`
    and `git fetch`, making subsequent `show_file()` calls purely local.
    **Validity check**: before deciding "first run vs. subsequent run",
-   verify the directory is a valid bare git repository via
-   `git rev-parse --git-dir`. If the directory exists but the check
-   fails (partially-initialized clone from a previous interrupted
-   attempt), delete the directory and proceed with a fresh clone.
-2. **Fetch** (subsequent runs): `git fetch origin` updates refs and
-   downloads new objects. This is incremental and typically completes in
-   seconds.
-3. **Delta detection**: `git diff --name-only --no-renames
-   --diff-filter=AM <old_sha>..<new_sha>` returns the list of Added and
-   Modified files.    Deleted files are excluded — they do not represent
-   CVE data that needs processing. Rename detection is explicitly
-   disabled (`--no-renames`) so that the diff operates exclusively on
-   local tree/commit objects — no blob content comparison is needed,
-   ensuring deterministic output regardless of clone type. A file rename appears as
-   a separate Delete (old path, excluded) + Add (new path, included);
-   the new path is processed normally.
-4. **File content access**: `git show -- <ref>:<path>` reads a single
-   file's content from the object store without creating a working tree.
-   All blobs are present locally after `git fetch`, so this operation
-   requires no network access.
+   verify the directory is a valid bare git repository whose `HEAD`
+   names a commit, via `is_clone_valid()`
+   (`git --git-dir=<dir> rev-parse --is-bare-repository` prints `true`,
+   and `git --git-dir=<dir> rev-parse --verify --quiet --end-of-options
+   HEAD^{commit}` succeeds). The explicit `--git-dir` disables repository
+   discovery: without it, a non-repository directory nested inside
+   another repository would resolve to that parent repository. If the
+   directory exists but the check fails (partially-initialized clone from
+   a previous interrupted attempt — git records the branch only after the
+   transfer completes — or a non-bare repository), delete the directory
+   and proceed with a fresh clone.
+2. **Fetch** (subsequent runs): read the clone's branch with
+   `git symbolic-ref --end-of-options HEAD` (for example
+   `refs/heads/main`), then
+   `git fetch --end-of-options origin +HEAD:<ref>` updates that branch
+   from the remote's `HEAD` (the upstream default branch), and therefore
+   updates the local `HEAD`, and downloads new objects. The explicit
+   refspec is required: a bare clone has no `remote.origin.fetch`
+   configuration, so fetching `origin` without a refspec updates only
+   `FETCH_HEAD` and `HEAD` never advances. The source is the remote's
+   `HEAD`, not the local branch name, so a change of the upstream
+   default branch (a rename, or a new default branch with the old one
+   frozen) is followed. The refspec is forced (`+`) so an upstream
+   history rewrite is followed rather than rejected. This is incremental
+   and typically completes in seconds.
+3. **Delta detection**: `git diff --name-only -z --no-renames
+   --diff-filter=AM --end-of-options <old_sha>..<new_sha>` returns the
+   list of Added and Modified files. Deleted files are excluded — they
+   do not represent CVE data that needs processing. Rename detection is
+   explicitly disabled (`--no-renames`) so that the diff operates
+   exclusively on local tree/commit objects — no blob content comparison
+   is needed, ensuring deterministic output regardless of clone type. A
+   file rename appears as a separate Delete (old path, excluded) + Add
+   (new path, included); the new path is processed normally.
+4. **File content access**: `git show --end-of-options <ref>:<path>`
+   reads a single file's content from the object store without creating
+   a working tree. All blobs are present locally after `git fetch`, so
+   this operation requires no network access.
 
 No `git merge`, `git checkout`, or working tree manipulation is
-performed at any point.
+performed at any point. Clones are always bare: `git_operations.clone()`
+has no non-bare mode, and every other function addresses the repository
+with `--git-dir` (see "Function Catalog").
+
+Except for the validity check, the commands above are shown without the
+module's common prefix: every repository-scoped command runs as
+`git --git-dir=<repo_path> ...` with the environment of Module
+Invariants Rule 3.
 
 ## Cursor Persistence
 
@@ -140,14 +165,20 @@ the first-run logic:
 
 | Cursor exists? | Clone valid? | Action |
 |---|---|---|
-| No | No (absent or invalid) | If directory exists but is invalid (fails `git rev-parse --git-dir`): delete entirely. Clone repository. Record HEAD without processing |
+| No | No (absent or invalid) | If directory exists but is invalid (`is_clone_valid()` returns `False`): delete entirely. Clone repository. Record HEAD without processing |
 | No | Yes | Skip clone (previous attempt succeeded but cursor was not persisted). Record HEAD without processing |
 | Yes | Yes | Subsequent run: fetch + delta detection from cursor |
 | Yes | No (absent or invalid) | Delete invalid directory if present. Re-clone. Then apply cursor reachability check (see "Recovery" and "Cursor SHA Unreachable" below) |
 
-"Invalid" means: the directory exists but `git rev-parse --git-dir`
-fails (corrupted pack files, incomplete clone from interrupted
-previous attempt, filesystem corruption, etc.).
+"Invalid" means: the directory exists but is not a bare git repository
+at exactly that path whose `HEAD` names a commit — `is_clone_valid()`
+returns `False` (incomplete clone from interrupted previous attempt,
+damaged repository metadata, filesystem corruption, a non-bare
+repository, a non-repository directory nested inside another
+repository, etc.). See `is_clone_valid` in the
+Function Catalog. Damage that this check does not detect (for example a
+corrupt pack file) surfaces later as `GitCorruptionError` (see
+"Recovery").
 
 The cursor-based approach ensures correctness when the first run
 clones successfully but fails before persisting the cursor. In that
@@ -231,9 +262,12 @@ These rules apply to ALL git-based fetchers sharing the same volume:
    sync task. `fetch_single()` MUST NOT run `git fetch` or any
    operation that modifies the object store or refs.
 2. **`fetch_single()` reads from the object store only**: uses
-   `git show -- <ref>:<path>` (via async subprocess) to read committed
-   objects. The Git object store is append-only with atomic file
-   operations — concurrent reads during a `git fetch` are safe.
+   `git show --end-of-options <ref>:<path>` (via `show_file()`) to read
+   committed objects. Concurrent reads during a `git fetch` or git's
+   automatic maintenance are safe: objects reachable from `HEAD` are
+   never removed, new objects and packs are written atomically, and a
+   repack or prune replaces packs atomically and removes only
+   unreachable objects.
 3. **Stale reads are acceptable**: if `fetch_single()` reads HEAD just
    before `git fetch` updates it, a recently-published CVE might not be
    found. This is not an error — `trigger_on_demand_fetch()` dispatches
@@ -258,14 +292,16 @@ These rules apply to ALL git-based fetchers sharing the same volume:
 1. Re-clone the repository (same clone command as first run)
 2. Read the `cursor` from the last `FetcherRun` with
    `status IN ('success', 'partial')` for this fetcher in the database
-3. Check if the stored SHA exists in the new clone
-   (`git cat-file -t -- <sha>`)
+3. Check if the stored SHA resolves to a commit in the new clone
+   (`check_sha_reachable()`: `git rev-parse --verify --quiet
+   --end-of-options <sha>^{commit}`)
 4. If reachable: normal delta processing from stored SHA to HEAD
-5. If not reachable (upstream force-push, branch deletion, or SHA
-   garbage-collected): apply the date-based recovery strategy (see
-   "Cursor SHA Unreachable" below). For `BaseGitFetcher` subclasses
-   this is handled automatically by `execute()` — only
-   `recovery_path_prefix` varies per fetcher
+5. If not reachable (the cursor commit is no longer part of the
+   upstream history that a fresh clone downloads, for example after an
+   upstream force-push or history rewrite): apply the date-based
+   recovery strategy (see "Cursor SHA Unreachable" below). For
+   `BaseGitFetcher` subclasses this is handled automatically by
+   `execute()` — only `recovery_path_prefix` varies per fetcher
 
 **Corrupted clone** (read-phase git operations fail persistently after
 retry exhaustion):
@@ -284,16 +320,36 @@ retry exhaustion):
 ## Cursor SHA Unreachable
 
 When a git-based fetcher's stored cursor SHA is not reachable in the
-local clone (detected via `git cat-file -t -- <sha>` returning non-zero),
+local clone (`check_sha_reachable()` returns `False`: the SHA is
+malformed, absent from the object store, or does not name a commit),
 it applies a date-based recovery strategy using the `committed_at`
 field stored in the cursor. This situation occurs when:
 
-- The clone was rebuilt (row 4 of the First-Run Detection table)
-- The upstream repository was force-pushed or rebased (rare for
-  published CVE/advisory repos)
-- Git garbage collection pruned unreachable objects (should not
-  happen for commits reachable from HEAD, but possible with
-  corrupted state)
+- The clone was rebuilt (row 4 of the First-Run Detection table) after
+  the upstream repository was force-pushed or rebased (rare for
+  published CVE/advisory repos), so the fresh clone no longer contains
+  the cursor commit
+- Git garbage collection pruned the cursor commit after a followed
+  upstream rewrite left it unreachable from the branch
+
+A followed upstream rewrite alone does not make the cursor unreachable:
+`fetch_origin` force-updates the branch, but the old cursor commit
+remains in the bare clone (which keeps no reflog) until garbage
+collection prunes unreachable objects (by default after about two
+weeks). Until then, the reachability check succeeds and the normal tree
+delta `<cursor_sha>..<head_sha>` applies, which compares the two trees
+and is therefore correct across the rewrite. Date-based recovery takes
+over only once the object is pruned or after a re-clone.
+
+A change of the upstream default branch is not a cursor condition
+either: `fetch_origin` fetches the remote's `HEAD` into the clone's own
+branch, so the clone follows the new default branch and the normal tree
+delta from the cursor applies (its size depends on how far the two
+histories' trees differ; reprocessing is idempotent). If the remote's
+`HEAD` cannot be resolved (for example it names a branch that does not
+exist), the fetch fails (`couldn't find remote ref HEAD`) and raises
+`GitFetchError` on every run, with the clone kept, until upstream
+repairs its `HEAD`. This is an accepted residual risk.
 
 **Algorithm**:
 
@@ -301,14 +357,15 @@ field stored in the cursor. This situation occurs when:
    1-day margin ensures no items are missed around the boundary —
    reprocessing is idempotent)
 2. Determine boundary SHA:
-   `git rev-list -1 --before="<before_date>" HEAD`
+   `git rev-list -1 --before=<before_date> --end-of-options HEAD`
 3. If no commit exists before `before_date` (empty output — the
    repository history does not extend that far back): log WARNING
    ("Recovery boundary not found — treating as first-run"), return
    empty delta. Cursor advances to HEAD
 4. Compute delta:
-   `git diff --name-only --no-renames --diff-filter=AM
-   <boundary_sha>..HEAD -- '<recovery_path_prefix>'`
+   `git diff --name-only -z --no-renames --diff-filter=AM --end-of-options
+   <boundary_sha>..<head_sha> -- <recovery_path_prefix>`, where the
+   prefix is a single argument after `--`, never quoted
    (same `--no-renames` flag as normal delta — guarantees local-only
    operation; see "Bare Clone Compatibility")
 5. Apply the fetcher's normal file filtering and per-item processing
@@ -377,7 +434,7 @@ container image of the worker that consumes the `git` queue.
 
 | Dependency | Minimum version | Reason |
 |---|---|---|
-| `git` | 2.25 | Minimum version for protocol v2, improved bare-clone performance, and `--filter` support (retained for future extensibility) |
+| `git` | 2.30 | Minimum version for protocol v2, improved bare-clone performance, `--filter` support (retained for future extensibility), and the `--end-of-options` marker of Module Invariants Rule 2 on every command the module runs (`git rev-parse` accepts it from 2.30) |
 
 The `python:<version>-slim` base image (where `<version>` is the
 project's Python target — see `docs/conventions.md`, Runtime Version) does not include git — it must be added explicitly to the
@@ -409,9 +466,9 @@ timeouts and retry policy per operation category:
 | Operation | Timeout | Retries | Examples |
 |---|---|---|---|
 | Clone | 30 minutes | 0 | Initial bare clone (~2.3 GB download for cvelistV5) |
-| Fetch | 5 minutes | 0 | Incremental `git fetch origin` |
-| Read | 30 seconds | 3 (backoff: 2s, 4s, 8s) | `git diff`, `git rev-parse`, `git ls-tree`, `git cat-file -t`, `git rev-list`, `git log` |
-| Show | 30 seconds | 0 | `git show -- <ref>:<path>` (per-file blob access) |
+| Fetch | 5 minutes | 0 | Incremental `git fetch --end-of-options origin +HEAD:<ref>` |
+| Read | 30 seconds | 3 (backoff: 2s, 4s, 8s) | `git diff`, `git rev-parse`, `git symbolic-ref` (the branch lookup inside `fetch_origin`), `git ls-tree`, `git rev-list`, `git log` |
+| Show | 30 seconds | 0 | `git show --end-of-options <ref>:<path>` (per-file blob access) |
 
 **Read retry policy**: read-phase operations are retried up to 3 times
 (4 attempts total) with exponential backoff (2 seconds, 4 seconds, 8
@@ -423,6 +480,24 @@ timeout and vastly cheaper than a false-positive re-clone of ~2.3 GB). Clone and
 transient network errors through git's own retry logic. Show is not
 retried because per-file failures are already non-fatal (`GitFileError`
 → `record_failed()`, continue to next item).
+
+**Process lifecycle**: every function runs each `git` process it starts
+in its own process group. When the timeout expires, the calling task is
+cancelled, or any other exception (including a whole-run signal such as
+`SoftTimeLimitExceeded` or `MemoryError`) interrupts a running `git`
+process, the module terminates the process group (SIGTERM, so git can
+remove its lock files and a partial clone, then SIGKILL after a short
+grace period) and reaps the `git` process before the timeout
+classification or the original exception propagates. A further
+interruption that arrives meanwhile is held until the process is reaped.
+Of the original exception and the further interruptions, the first one
+that is not a cancellation propagates (if all are cancellations, the
+latest one); the module's own timeout classification never outranks a
+further interruption. The reap waits as
+long as the process cannot exit (for example uninterruptible I/O on a
+hung mount), which the Celery hard time limit bounds. No process started
+by the module outlives the call, except git's own detached automatic
+maintenance (see "Fetch Operations").
 
 ## Error Classification
 
@@ -439,8 +514,8 @@ class GitFileError(GitError): ...        # Per-file — continue processing
 
 | Phase | Failure condition | Exception | Fetcher action |
 |-------|-------------------|-----------|----------------|
-| `git clone` / `git fetch` | Any failure (network, auth, timeout) | `GitFetchError` | Do NOT delete clone. Raise `FetcherError`. Next cycle retries |
-| Read after successful fetch (`git diff`, `git rev-parse`, `git ls-tree`, `git cat-file -t`, `git rev-list`, `git log`) | Persistent failure after retry exhaustion (3 retries with exponential backoff) | `GitCorruptionError` | Delete clone directory. Raise `FetcherError`. Next cycle re-clones + applies recovery strategy |
+| `git clone` / `git fetch` | Any failure (network, auth, timeout, remote `HEAD` not resolvable) | `GitFetchError` | Do NOT delete clone. Raise `FetcherError`. Next cycle retries |
+| Local read: the branch lookup inside `fetch_origin` before its fetch (`git symbolic-ref`), and every read after a successful fetch (`git diff`, `git rev-parse`, `git ls-tree`, `git rev-list`, `git log`) | Persistent failure after retry exhaustion (3 retries with exponential backoff) | `GitCorruptionError` | Delete clone directory. Raise `FetcherError`. Next cycle re-clones + applies recovery strategy |
 | `git show` during delta file processing | Any failure (timeout, corrupt/missing blob in local store) | `GitFileError` | Periodic delta path: fail that selected item. Single-item candidate lookup: local candidate bookkeeping only; try the next candidate and never call `record_failed()` because no `FetcherRun` exists |
 | Directory deletion (recovery/cleanup) | Filesystem rejection (permissions, read-only mount, busy handle) | `OSError` | Log ERROR with distinct message: path, errno, and guidance ("Manual intervention required — check filesystem permissions and mount state"). Raise `FetcherError`. Next cycle re-attempts (permanent until operator resolves filesystem issue) |
 
@@ -451,9 +526,16 @@ but the presumption accounts for transient I/O faults on networked
 storage (NFS, PVC with remote backend) by retrying before concluding
 corruption. If retries are exhausted and the failure persists, the
 conclusion is firm: the local object store is damaged, and the only
-reliable recovery is deletion + re-clone. No stderr parsing or exit
+reliable recovery is deletion + re-clone. (A `git` binary that cannot be
+started is classified the same way: no git operation can succeed then,
+and the clone is a recoverable cache.) No stderr parsing or exit
 code mapping is needed — the phase plus retry exhaustion is sufficient
 for classification.
+
+The branch lookup is local: it reads the clone's own `HEAD` before any
+network access, so its persistent failure (an unreadable `HEAD`, or a
+detached `HEAD` that names no branch) is local damage. Deleting and
+re-cloning is the only repair, because the module never writes `HEAD`.
 
 Note: `diff_names` uses `--no-renames`, ensuring it operates
 exclusively on local tree/commit objects (no blob content needed).
@@ -476,7 +558,10 @@ same corrupt state.
 The shared async subprocess helper for git operations lives at
 `backend/app/services/git_operations.py`. All git-based fetchers
 import from this module — they MUST NOT invoke `subprocess` or
-`asyncio.create_subprocess_exec` for git commands directly.
+`asyncio.create_subprocess_exec` for git commands directly. It is the
+only module in `backend/app/` that starts a process; a structural test
+enforces this (see `docs/features/platform/testing-strategy.md`,
+Structural Tests).
 
 The module exports:
 - Async functions for each git operation category (clone, fetch, read
@@ -510,9 +595,13 @@ blocks.
 ## Responsibility Separation
 
 The utility module is **policy-free** — it executes git commands with
-the parameters it receives. It does not apply domain-specific defaults.
+the parameters it receives. It does not apply domain-specific defaults,
+with one fixed exception: it is **bare-only**. `clone()` always creates
+a bare clone, and every other function addresses `repo_path` as a bare
+repository (see "Bare Clone Compatibility"), so a work-tree clone is not
+a supported mode of the module.
 
-- **Domain defaults** (bare=True, filter=None, single-branch=True)
+- **Domain defaults** (filter=None, single-branch=True)
   live on `BaseGitFetcher` class attributes
 - **`BaseGitFetcher` methods** read `self.*` attributes and pass them as
   explicit parameters to `git_operations` functions
@@ -521,7 +610,7 @@ the parameters it receives. It does not apply domain-specific defaults.
   source requiring deferred blob downloads)
 
 This separation ensures `git_operations.py` remains general-purpose and
-independently usable.
+independently usable by any consumer of bare clones.
 
 ## Function Catalog
 
@@ -536,36 +625,80 @@ Three mandatory rules apply to all functions in this module:
 **Rule 1 — SHA Format Validation:**
 
 Applies ONLY to `check_sha_reachable` (the single entry point for
-database-sourced SHA values). Before invoking `git cat-file`, validate
-the `sha` parameter against regex `^[0-9a-f]{40}$`. If validation fails:
-log WARNING with the invalid value, return `False` immediately (do NOT
-invoke git, do NOT raise an exception). This triggers the natural
-date-based recovery flow (same as unreachable SHA) — no re-clone, cursor
-advances on next successful run.
+database-sourced SHA values). Before invoking git, validate the `sha`
+parameter: the whole value must match `[0-9a-f]{40}` (a full match, so a
+value with a trailing newline or any other extra character is invalid).
+If validation fails: log the bounded WARNING event
+`git_invalid_sha_format`, which carries no field derived from the
+invalid value (see `docs/features/platform/logging.md`, Secrets and PII
+Discipline), and return `False` immediately (do NOT invoke git, do NOT
+raise an exception). This triggers the natural date-based recovery flow
+(same as unreachable SHA) — no re-clone, cursor advances on next
+successful run.
 
-**Rule 2 — End-of-options separator (`--`):**
+**Rule 2 — Argument injection and repository addressing:**
 
-Every git command constructed by this module that accepts positional
-arguments (SHA, ref, object specifiers) MUST insert `--` between
-options/flags and positional arguments to prevent argument injection.
-Applicable commands: `git cat-file -t -- <sha>`,
-`git show -- <ref>:<path>`, `git clone <flags> -- <url> <dest>`.
+Every command is passed to the process as an argument list, never
+through a shell. Every repository-scoped command starts with
+`git --git-dir=<repo_path>`, written as a single argument: git then
+uses exactly that directory as the repository and performs no
+repository discovery, so a directory that is not itself a repository
+can never resolve to an enclosing repository.
 
-Note: `--` is NOT applicable to commands where it has pathspec semantics
-rather than end-of-options semantics (`git log`, `git rev-list`,
-`git diff` revision arguments). For these commands, the defense against
-argument injection is SHA format validation at the entry point
-(`check_sha_reachable`).
+Every repository-scoped command that takes positional revision, ref,
+refspec, or object arguments MUST place the `--end-of-options` marker
+immediately before its first positional argument; git (at the minimum
+version of Runtime Dependencies) then parses no following argument as an
+option, even one beginning with `-`. Applicable commands:
+`git fetch --end-of-options origin <refspec>`,
+`git symbolic-ref --end-of-options HEAD`,
+`git rev-parse --verify [--quiet] --end-of-options <rev>`,
+`git log ... --end-of-options <ref>`,
+`git rev-list ... --end-of-options HEAD`,
+`git diff ... --end-of-options <from>..<to> [-- <path_filter>]`, and
+`git show --end-of-options <ref>:<path>`. A `git rev-parse` given the
+marker MUST also use `--verify`: without it, `rev-parse` echoes the
+marker to its output. `git clone <flags> -- <url> <dest>` uses `--`,
+which ends its options.
+
+`--` is NOT an end-of-options marker for `git show`, `git log`,
+`git rev-list`, or `git diff`: it starts pathspecs. Placed before
+`<ref>:<path>`, it makes `git show` treat the object name as a pathspec
+and exit 0 for an existing and a missing path alike, so it MUST NOT be
+used there. In `diff_names`, `--` is used only in its pathspec meaning, before
+the path filter.
+
+The marker applies to every positional argument, including SHAs read
+from git output and refs supplied by callers. Rule 1 remains the format
+check for database-sourced SHAs.
+
+An argument containing U+0000 cannot be passed to a process. A function
+given such a value raises `ValueError` before git starts: it is a caller
+error, not a git failure, so it is neither retried nor classified as
+`GitFetchError`, `GitCorruptionError`, or `GitFileError`. Paths returned
+by `diff_names` never contain U+0000, and `check_sha_reachable` and
+`is_clone_valid` return `False` for such a value (Rule 1; a path that is
+not a directory).
 
 **Rule 3 — Subprocess environment:**
 
 Every function that invokes `asyncio.create_subprocess_exec` for a git
 command MUST pass `env=_git_subprocess_env()` to guarantee deterministic
-output regardless of the host locale or timezone configuration.
+output regardless of the host locale or timezone configuration, and
+independence from the repository context of the invoking process.
 
 The module defines:
 
 ```python
+_GIT_LOCAL_ENV_VARS: Final[frozenset[str]] = frozenset({
+    # The set printed by `git rev-parse --local-env-vars`.
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR", "GIT_CONFIG",
+    "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS", "GIT_DIR",
+    "GIT_GRAFT_FILE", "GIT_IMPLICIT_WORK_TREE", "GIT_INDEX_FILE",
+    "GIT_NO_REPLACE_OBJECTS", "GIT_OBJECT_DIRECTORY", "GIT_PREFIX",
+    "GIT_REPLACE_REF_BASE", "GIT_SHALLOW_FILE", "GIT_WORK_TREE",
+})
+
 _GIT_ENV_OVERRIDES: Final[dict[str, str]] = {
     "LC_ALL": "C",
     "GIT_TERMINAL_PROMPT": "0",
@@ -573,30 +706,49 @@ _GIT_ENV_OVERRIDES: Final[dict[str, str]] = {
 }
 
 def _git_subprocess_env() -> dict[str, str]:
-    """Merge process environment with git-specific overrides."""
-    return {**os.environ, **_GIT_ENV_OVERRIDES}
+    """Process environment without git's repository-local variables,
+    plus the git-specific overrides."""
+    inherited = {
+        name: value
+        for name, value in os.environ.items()
+        if name not in _GIT_LOCAL_ENV_VARS
+    }
+    return inherited | _GIT_ENV_OVERRIDES
 ```
 
-Rationale for each variable:
+Repository-local variables are removed because an inherited value would
+redirect or reconfigure the target repository. A Git hook exports them
+to every child process (for example `GIT_DIR` in a linked worktree,
+`GIT_INDEX_FILE`, and `GIT_CONFIG_PARAMETERS` for `git -c` options).
+`--git-dir` neutralizes an inherited `GIT_DIR`, but
+`GIT_OBJECT_DIRECTORY` would still redirect object access and
+`GIT_CONFIG_PARAMETERS` would still inject configuration (for example a
+`url.<base>.insteadOf` rewrite honored by `git fetch`). The constant is
+the set printed by `git rev-parse --local-env-vars`; a test asserts that
+it contains every name the installed git prints. Other variables,
+including `GIT_CONFIG_NOSYSTEM` and `GIT_CONFIG_GLOBAL`, are kept.
+
+Rationale for each override:
 
 - `LC_ALL=C` — forces English output from git, ensuring that stderr
-  string parsing (e.g., "does not exist in", "not a valid object name")
-  works correctly regardless of container locale. Without this, error
-  classification in `show_file` and `check_sha_reachable` would break
-  on non-English locales.
+  string matching (e.g., "does not exist in" in `show_file`) works
+  correctly regardless of container locale. Without this, error
+  classification in `show_file` would break on non-English locales.
 - `GIT_TERMINAL_PROMPT=0` — disables interactive prompts (credential
   requests, pager) that would block the async worker indefinitely.
-- `TZ=UTC` — ensures timestamp output (e.g., `--format=%cI`) is
-  directly in UTC without requiring post-hoc conversion in Python.
-  Follows the project's "UTC everywhere" convention.
+- `TZ=UTC` — makes git's interpretation of a date without an explicit
+  offset, and any local-time rendering, UTC. Follows the project's "UTC
+  everywhere" convention. It does not normalize committer dates: the
+  strict ISO 8601 format keeps the committer's own offset regardless of
+  `TZ`, so `get_commit_date` reads the epoch and converts it in Python.
 
-The merge with `os.environ` is required because
+The filtered process environment is required because
 `asyncio.create_subprocess_exec(env=<dict>)` replaces (rather than
-extends) the inherited process environment. Without the merge, essential
-variables like `PATH` (needed to locate the `git` binary) and
-`HOME`/`XDG_CONFIG_HOME` would be absent.
+extends) the inherited process environment. Without the inherited
+variables, essential variables like `PATH` (needed to locate the `git`
+binary) and `HOME`/`XDG_CONFIG_HOME` would be absent.
 
-Adding or removing a git-specific environment variable requires
+Adding or removing a git-specific environment override requires
 changing only the `_GIT_ENV_OVERRIDES` constant — no per-function
 modifications needed.
 
@@ -604,44 +756,84 @@ modifications needed.
 
 | Function | Signature | Returns | Timeout | Raises |
 |----------|-----------|---------|---------|--------|
-| `clone` | `async def clone(url: str, dest: Path, *, bare: bool = False, filter_spec: str \| None = None, single_branch: bool = False) -> None` | `None` | Clone (30 min) | `GitFetchError` |
+| `clone` | `async def clone(url: str, dest: Path, *, filter_spec: str \| None = None, single_branch: bool = False) -> None` | `None` | Clone (30 min) | `GitFetchError` |
 
 **Behavior**:
 
 1. Build the command with all flags before positional arguments,
    separated by `--`:
-   a. Start with `["git", "clone"]`
-   b. If `bare` is `True`: append `--bare`
-   c. If `filter_spec` is not `None`: append `--filter=<filter_spec>`
-   d. If `single_branch` is `True`: append `--single-branch`
-   e. Append `--` (end-of-options separator)
-   f. Append `url` and `str(dest)` as positional arguments
+   a. Start with `["git", "clone", "--bare"]` (always bare — the module
+      has no non-bare mode; see "Responsibility Separation")
+   b. If `filter_spec` is not `None`: append `--filter=<filter_spec>`
+   c. If `single_branch` is `True`: append `--single-branch`
+   d. Append `--` (end-of-options separator)
+   e. Append `url` and `str(dest)` as positional arguments
    Result example: `["git", "clone", "--bare", "--single-branch", "--", url, str(dest)]`
    (if `filter_spec` is set: `["git", "clone", "--bare", "--filter=<value>", "--single-branch", "--", url, str(dest)]`)
 2. Execute the command via `asyncio.create_subprocess_exec` with the
    clone timeout (30 minutes)
-3. If the process exits with non-zero code: raise `GitFetchError` with
-   stderr content
+3. If the process exits with non-zero code or the timeout expires:
+   raise `GitFetchError` with stderr content
 
 ### Fetch Operations
 
 | Function | Signature | Returns | Timeout | Raises |
 |----------|-----------|---------|---------|--------|
-| `fetch_origin` | `async def fetch_origin(repo_path: Path) -> None` | `None` | Fetch (5 min) | `GitFetchError` |
+| `fetch_origin` | `async def fetch_origin(repo_path: Path) -> None` | `None` | Read (30 sec) for the branch lookup; Fetch (5 min) for the fetch | `GitCorruptionError` (branch lookup); `GitFetchError` (fetch) |
 
-Semantics: runs `git fetch origin` in the specified repository.
-Incremental — only new objects are transferred.
+Semantics: updates the clone's own branch, and therefore `HEAD`, from
+`origin`. Incremental — only new objects are transferred.
+
+**Behavior**:
+
+1. **Branch lookup** (Read phase): run
+   `git symbolic-ref --end-of-options HEAD` and take its output as
+   `<ref>`. The lookup succeeds only when it exits 0 and `<ref>` starts
+   with `refs/heads/` (for example `refs/heads/main` for cvelistV5 and
+   `refs/heads/master` for vulns.git). Any other outcome — an unreadable
+   or detached `HEAD`, or the timeout — is a failed read: it follows the
+   read retry policy and then raises `GitCorruptionError`.
+2. **Fetch** (Fetch phase, not retried): run
+   `git fetch --end-of-options origin +HEAD:<ref>` with the fetch
+   timeout. The explicit forced refspec updates the clone's branch from
+   the remote's `HEAD` even though a bare clone has no
+   `remote.origin.fetch` configuration, follows a change of the upstream
+   default branch, and follows an upstream history rewrite (a non-forced
+   refspec would be rejected). Because the source is the remote's `HEAD`,
+   a clone whose local branch name differs from upstream's default
+   branch is still updated. A non-zero exit or the timeout raises
+   `GitFetchError` with stderr content. A remote `HEAD` that cannot be
+   resolved fails here on every run (see "Cursor SHA Unreachable").
+
+**Automatic maintenance**: when its thresholds are met, `git fetch`
+starts git's own automatic repository maintenance
+(`git maintenance run --auto`, including `git gc --auto`), which by git's
+default detaches and may continue after `fetch_origin` returns. The
+module keeps git's default: that maintenance is git's own lock-protected
+housekeeping of the clone (it also prunes unreachable objects; see
+"Cursor SHA Unreachable"), not a process the module manages, and
+concurrent object-store reads remain safe (see "Concurrency Rules"). The
+module's process-lifecycle guarantee (see "Runtime Dependencies") applies
+to the `git` process it starts.
 
 ### Read Operations
 
 All read-phase functions apply the retry policy (3 retries, backoff
 2s/4s/8s) internally before raising `GitCorruptionError`. Callers
 observe a single function call that either succeeds or raises — the
-retry is transparent. Exempt functions: `is_clone_valid` (never
-raises). For `check_sha_reachable`, the retry applies only to the
-code path that raises `GitCorruptionError` (unexpected I/O failures);
-the `return False` path (SHA not found — exit code 1 with "not a valid
-object name") is a definitive negative response and is NOT retried.
+retry is transparent. A failed attempt is a non-zero exit, the read
+timeout, output that does not have the expected form, or git that
+cannot be started (for example a missing binary). Exceptions:
+
+- `is_clone_valid` never raises: it applies the same retries and then
+  returns `False` instead of raising. A `repo_path` that does not exist
+  or is not a directory is a definitive `False` without invoking git
+  and without retry; any other failure to inspect the path is left to
+  the retried git check.
+- For `check_sha_reachable`, the retry applies only to the code path
+  that raises `GitCorruptionError` (unexpected failures); the
+  `return False` paths (malformed SHA, and exit code 1 — absent or not
+  a commit) are definitive negative responses and are NOT retried.
 
 | Function | Signature | Returns | Timeout | Raises |
 |----------|-----------|---------|---------|--------|
@@ -649,51 +841,83 @@ object name") is a definitive negative response and is NOT retried.
 | `get_commit_date` | `async def get_commit_date(repo_path: Path, ref: str) -> str` | ISO 8601 date string in UTC (e.g., `2025-06-01T18:00:00+00:00`) | Read (30 sec) | `GitCorruptionError` |
 | `is_clone_valid` | `async def is_clone_valid(repo_path: Path) -> bool` | `bool` | Read (30 sec) | Never (returns `False` on any failure) |
 | `check_sha_reachable` | `async def check_sha_reachable(repo_path: Path, sha: str) -> bool` | `bool` | Read (30 sec) | `GitCorruptionError` (only for unexpected failures; unreachable SHA returns `False`) |
-| `diff_names` | `async def diff_names(repo_path: Path, from_sha: str, to_sha: str, *, path_filter: str \| None = None) -> list[str]` | List of file paths | Read (30 sec) | `GitCorruptionError` |
+| `diff_names` | `async def diff_names(repo_path: Path, from_sha: str, to_sha: str, *, path_filter: str \| None = None) -> list[str]` | List of file paths | Read (30 sec) | `GitCorruptionError`; `ValueError` (empty `path_filter`, before invoking git) |
 | `rev_list_before` | `async def rev_list_before(repo_path: Path, before_date: str) -> str \| None` | 40-char hex SHA or `None` | Read (30 sec) | `GitCorruptionError` |
 
 Semantics:
 
 - **`get_head_sha`**: returns the commit SHA that HEAD points to
-  (`git rev-parse HEAD`)
+  (`git rev-parse --verify --end-of-options HEAD`). Output other than
+  one 40-character lowercase hexadecimal SHA (for example an unborn
+  `HEAD`) is a failed read
 - **`get_commit_date`**: returns the committer date of the specified ref
-  as an ISO 8601 string normalized to UTC
-  (`git log -1 --format=%cI <ref>`). The subprocess environment includes
-  `TZ=UTC` (via Rule 3), so git produces UTC output directly — no
-  post-hoc conversion needed. Follows the project's "UTC everywhere"
-  convention (`docs/conventions.md`, Timestamps & Timezones). Used to
-  store `committed_at` in the cursor for recovery boundary computation
-- **`is_clone_valid`**: returns `True` if `repo_path` is a valid git
-  repository (`git rev-parse --git-dir` succeeds). Returns `False` if
-  the directory does not exist, is not a git repository, or the check
-  fails for any reason. NEVER raises — used as a guard condition
-- **`check_sha_reachable`**: determines whether a given SHA exists in
-  the local object store as a valid git object
-  (`git cat-file -t -- <sha>`).
+  as an ISO 8601 string in UTC with the `+00:00` offset
+  (`git log -1 --format=%ct --end-of-options <ref>`, whose epoch-seconds
+  output is converted in Python to an aware UTC `datetime` and
+  formatted with `isoformat()`). The committer date is read as an epoch
+  because git's strict ISO 8601 committer-date format keeps the
+  committer's own offset even with `TZ=UTC` (Rule 3). Follows the project's "UTC
+  everywhere" convention (`docs/conventions.md`, Timestamps &
+  Timezones). Output that is not a single integer is a failed read.
+  Used to store `committed_at` in the cursor for recovery boundary
+  computation
+- **`is_clone_valid`**: returns `True` only if `repo_path` is a bare git
+  repository at exactly that path whose `HEAD` names a commit: first
+  `git --git-dir=<repo_path> rev-parse --is-bare-repository` exits 0
+  and prints `true`, then
+  `git --git-dir=<repo_path> rev-parse --verify --quiet --end-of-options
+  HEAD^{commit}` exits 0. Returns `False` if the path does not exist or
+  is not a directory (without invoking git), is not a git repository
+  (including a non-repository directory nested inside another
+  repository, which `--git-dir` never resolves to the enclosing
+  repository), is a non-bare repository, has a `HEAD` that names no commit (for example a clone
+  interrupted before its transfer completed, which git leaves without
+  the branch), or the check still fails after the read retries (an
+  attempt fails when either command does not succeed as stated). NEVER
+  raises — used as a guard condition. Without the `HEAD` condition, an
+  interrupted clone would be treated as valid and its first fetch would
+  have to download the whole repository under the Fetch timeout instead
+  of the Clone timeout
+- **`check_sha_reachable`**: determines whether a given SHA names a
+  commit in the local object store
+  (`git rev-parse --verify --quiet --end-of-options <sha>^{commit}`).
 
   **Behavior**:
 
-  0. Validate `sha` against `^[0-9a-f]{40}$`. If invalid: log WARNING
-     ("Invalid SHA format: {sha} — treating as unreachable"), return
+  0. Validate that the whole `sha` matches `[0-9a-f]{40}` (Rule 1). If
+     invalid: log the bounded WARNING `git_invalid_sha_format`, return
      `False`
-  1. Execute `git cat-file -t -- <sha>` in the repository
-  2. If exit code is 0: return `True` (object exists and is valid)
-  3. If exit code is 1 and stderr indicates "not a valid object name" or
-     similar: return `False` (SHA not reachable — expected condition)
-  4. If exit code indicates a different failure (I/O error, repository
-     corruption): raise `GitCorruptionError`
+  1. Execute `git rev-parse --verify --quiet --end-of-options
+     <sha>^{commit}` in the repository
+  2. If exit code is 0: return `True` (the SHA names a commit)
+  3. If exit code is 1: return `False` (the object is absent, or exists
+     but is not a commit — a definitive negative, not retried)
+  4. Any other outcome (another exit code, the read timeout, or an
+     unexpected failure): retried as a failed read, then raise
+     `GitCorruptionError`
 
 - **`diff_names`**: returns the list of added and modified files
   between two commits
-  (`git diff --name-only --no-renames --diff-filter=AM <from>..<to>`).
+  (`git diff --name-only -z --no-renames --diff-filter=AM
+  --end-of-options <from>..<to>`).
+  `-z` makes git print each path verbatim and NUL-terminated instead of
+  quoting paths that contain unusual characters (`core.quotePath`); each
+  path is decoded with the filesystem encoding, so it can be passed back
+  to `show_file` unchanged.
   Rename detection is disabled (`--no-renames`) to ensure deterministic
   diff output and avoid expensive blob-content similarity computation on
   large repositories. Renames appear as separate delete + add pairs; the
-  `A` is captured by the filter. If `path_filter` is set, appends
-  `-- '<path_filter>'` to restrict results. Deleted files are excluded
+  `A` is captured by the filter. If `path_filter` is not `None`, appends
+  `--` and `path_filter` as two separate arguments (never quoted: the
+  argument list reaches git without a shell, so quotes would become
+  part of the path) to restrict results. An empty `path_filter` raises
+  `ValueError` without invoking git, because git deterministically
+  rejects an empty pathspec and the failure must not be retried into
+  `GitCorruptionError`. Deleted files are excluded
 - **`rev_list_before`**: returns the most recent commit SHA on HEAD
   before the specified date
-  (`git rev-list -1 --before="<before_date>" HEAD`). Returns `None` if
+  (`git rev-list -1 --before=<before_date> --end-of-options HEAD`, with
+  `--before=<before_date>` as a single argument). Returns `None` if
   no commit exists before the specified date (empty output from git).
   Used for recovery boundary detection
 
@@ -705,13 +929,18 @@ Semantics:
 
 **Behavior**:
 
-1. Execute `git show -- <ref>:<file_path>` in the repository
+1. Execute `git show --end-of-options <ref>:<file_path>` in the
+   repository, with `<ref>:<file_path>` as a single argument
 2. If exit code is 0: return stdout as `bytes` (file content)
 3. If exit code is 128 and stderr contains "does not exist in" or
    "path not found": return `None` (file does not exist at this ref —
    expected condition, not an error)
 4. If exit code indicates a different failure (corrupt object, timeout):
    raise `GitFileError` with stderr content
+
+`--` MUST NOT precede the object name: for `git show` it starts
+pathspecs, and the command then exits 0 for an existing and a missing
+path alike (see Module Invariants, Rule 2).
 
 In a plain bare clone, blob content is already present in the local
 object store. Network access is not required. If the blob is
@@ -730,8 +959,11 @@ included in the module for co-location with clone lifecycle management.
 ### Bare Clone Compatibility
 
 All git operations in the function catalog are designed for bare
-repositories (no working tree). Every operation accesses the git object
-store directly:
+repositories (no working tree): `clone()` always creates one, and
+`is_clone_valid()` accepts only a bare repository whose `HEAD` names a
+commit, so a non-bare or incomplete directory is treated as invalid and
+replaced by a fresh bare clone.
+Every operation accesses the git object store directly:
 
 - **Commit/tree operations** (`get_head_sha`, `get_commit_date`,
   `is_clone_valid`, `check_sha_reachable`, `diff_names`,
@@ -785,11 +1017,10 @@ automatically.
 |-----------|------|---------|-------------|
 | `repo_url` | `str` | (required) | Git remote URL |
 | `clone_dir_name` | `str` | (required) | Directory name under `$GIT_CLONE_BASE_DIR` |
-| `clone_bare` | `bool` | `True` | Whether to use `--bare` |
 | `clone_filter` | `str \| None` | `None` | Git `--filter=` value. `None` = plain bare clone (recommended). Set to `"blob:none"` only if the source requires deferred blob downloads for operational reasons. No current fetcher uses a non-None value |
 | `clone_single_branch` | `bool` | `True` | Whether to use `--single-branch` |
-| `recovery_path_prefix` | `str` | (required) | Path prefix for recovery delta (`-- '<prefix>'`) |
-| `delta_path_prefix` | `str` | (required) | Path prefix for normal delta detection |
+| `recovery_path_prefix` | `str` | (required) | Path prefix for recovery delta (passed to `diff_names()` as `path_filter`: the single argument after `--`) |
+| `delta_path_prefix` | `str` | (required) | Path prefix for normal delta detection (passed to `diff_names()` as `path_filter`) |
 
 **Fixed (set by `BaseGitFetcher`, not overridable)**:
 
@@ -839,7 +1070,8 @@ above.
       clone directory at {repo_path}: {e}. Manual intervention required
       — check filesystem permissions and mount state.", propagate as
       `FetcherError`), clone repository
-   b. If clone IS valid: fetch origin (incremental update)
+   b. If clone IS valid: update the clone's branch from origin via
+      `fetch_origin()` (incremental update; see "Fetch Operations")
 5. Read HEAD SHA from the repository
 6. Read HEAD commit date via `get_commit_date(repo_path, "HEAD")`
 7. **SHA reachability check**:
@@ -951,7 +1183,7 @@ ensures git-specific exceptions never leak beyond the
   to fail the run. This ensures self-healing: the next cycle finds the
   clone absent, re-clones, and applies recovery. Without this explicit
   deletion, a partial corruption (e.g., corrupt pack file that still
-  passes `git rev-parse --git-dir`) would loop indefinitely without
+  passes the `is_clone_valid()` check) would loop indefinitely without
   repair. If `_delete_if_exists()` raises `OSError`: log ERROR
   ("Cannot delete clone directory at {repo_path}: {e}. Manual
   intervention required — check filesystem permissions and mount
@@ -1081,7 +1313,8 @@ Returns only the files that should be processed.
 
 The two-level filtering design:
 - **`delta_path_prefix`** (class attribute): coarse path-prefix
-  filtering at the git subprocess level (`-- '<prefix>'`). Reduces the
+  filtering at the git subprocess level (the prefix as the single
+  argument after `--`). Reduces the
   diff output before it reaches Python
 - **`filter_delta_files()`** (hook): fine-grained filtering in Python
   (e.g., regex matching, extension checks, directory logic)
@@ -1231,8 +1464,8 @@ operations.
 | `_get_last_cursor_committed_at()` | Reads the `"committed_at"` field from the previous `FetcherRun.cursor` (via `BaseFetcher`). Returns `None` if no prior successful run exists or if the field is absent |
 | `_repo_path()` | Returns `Path($GIT_CLONE_BASE_DIR / clone_dir_name)` |
 | `_extract_item_id(path)` | Extracts CVE-ID from a file path for status tracking and logging. Default: `Path(path).stem` (e.g., `cve/published/2024/CVE-2024-50055.json` → `CVE-2024-50055`). Override only if the repository uses non-standard naming |
-| `_clone_repo(path)` | Clones the repository with configured options (bare, filter, single-branch). Delegates to `git_operations.clone()` |
-| `_fetch_origin(path)` | Runs `git fetch origin`. Delegates to `git_operations.fetch_origin()` |
+| `_clone_repo(path)` | Clones the repository as a bare clone with the configured options (filter, single-branch). Delegates to `git_operations.clone()` |
+| `_fetch_origin(path)` | Updates the clone's branch, and therefore `HEAD`, from origin. Delegates to `git_operations.fetch_origin()` |
 | `_get_head_sha(path)` | Returns current HEAD SHA. Delegates to `git_operations.get_head_sha()` |
 | `_get_commit_date(path, ref)` | Returns commit date as ISO 8601 string in UTC. Delegates to `git_operations.get_commit_date()` |
 | `_is_clone_valid(path)` | Returns bool. Delegates to `git_operations.is_clone_valid()` |
@@ -1245,8 +1478,8 @@ operations.
 ## `_compute_recovery_delta()`
 
 Computes the file delta using the stored cursor commit date when the
-cursor SHA is unreachable (force-push, history rewrite, or clone
-rebuild).
+cursor SHA is unreachable (see "Cursor SHA Unreachable" for when that
+occurs).
 
 `async def _compute_recovery_delta(repo_path: Path, head_sha: str, cursor_committed_at: str) -> list[str]`
 
@@ -1304,8 +1537,9 @@ fetcher but:
 
 - It requires multi-branch tracking (the template assumes
   single-branch, single HEAD)
-- It uses sparse checkout or non-standard clone strategies not
-  expressible via the class attributes
+- It uses a bare-clone strategy not expressible via the class
+  attributes (for example tracking branches other than the upstream
+  default branch: `fetch_origin` updates only the clone's own branch)
 - Its delta detection is not commit-range based (e.g., full tree scan,
   tag-based comparison)
 - It needs non-linear traversal (e.g., walking merge commits
@@ -1318,15 +1552,23 @@ A non-CVE git-based fetcher inherits from `BaseFetcher` directly
 
 In these cases, `BaseCVEFetcher` (or `BaseFetcher`) +
 `git_operations.py` provides the same subprocess utilities without
-imposing a fixed execution order.
+imposing a fixed execution order. The utility module is bare-only (see
+"Responsibility Separation"): a source that needs a working tree or a
+sparse checkout is served by neither `BaseGitFetcher` nor
+`git_operations.py`, and its clone contract must be specified first.
+Likewise, any capability missing from the Function Catalog (another
+branch, another clone flag, another command) is added to the catalog,
+under Module Invariants, before a fetcher uses it.
 
 **Note**: fetchers that need full tree enumeration (e.g., for initial
 population or full-scan strategies) can use
 `git ls-tree -r --name-only HEAD` on a bare clone to list all files in
 the repository without checkout. This operation is classified as a Read
 operation with a 30-second timeout and 3 retries per the timeout table.
-The `BaseGitFetcher` template method does not invoke `ls-tree` — it is
-available exclusively as a utility for non-template fetchers.
+The `BaseGitFetcher` template method does not invoke `ls-tree`, and the
+Function Catalog has no `ls-tree` function today: the first non-template
+fetcher that needs one adds it to the catalog, under Module Invariants,
+before implementing it.
 
 
 ## Cross-references
