@@ -9,7 +9,6 @@ import io
 import json
 import logging
 import time
-from collections.abc import Iterator
 
 import pytest
 import structlog
@@ -46,53 +45,8 @@ def _settings(**overrides: str) -> Settings:
     return Settings(_env_file=None, **defaults)  # type: ignore[arg-type]
 
 
-@pytest.fixture(autouse=True)
-def _reset_logging_state() -> Iterator[None]:
-    """Save/restore global logging state around every test.
-
-    `configure_logging`/`configure_cli_logging` mutate the root logger
-    and third-party logger objects, and reconfigure structlog globally.
-    Without this fixture, tests would leak state into each other and
-    into the rest of the test suite (which relies on `caplog` and the
-    module-level `configure_logging(settings)` call already performed
-    at `app.main` import time in conftest.py).
-
-    Restores, in addition to root logger handlers/level: third-party
-    logger **handlers** (not just level/propagate — `configure_logging`
-    clears them on every call) and the global structlog configuration
-    (`structlog.configure(...)` mutates process-wide state that
-    `structlog.get_config()`/`structlog.configure(**config)` can
-    snapshot and replay exactly).
-    """
-    root_logger = logging.getLogger()
-    original_handlers = list(root_logger.handlers)
-    original_level = root_logger.level
-
-    original_third_party = {
-        name: (
-            logging.getLogger(name).level,
-            logging.getLogger(name).propagate,
-            list(logging.getLogger(name).handlers),
-        )
-        for name in _THIRD_PARTY_LOGGERS
-    }
-
-    original_structlog_config = structlog.get_config()
-
-    yield
-
-    root_logger.handlers.clear()
-    root_logger.handlers.extend(original_handlers)
-    root_logger.setLevel(original_level)
-
-    for name, (level, propagate, handlers) in original_third_party.items():
-        logger = logging.getLogger(name)
-        logger.setLevel(level)
-        logger.propagate = propagate
-        logger.handlers.clear()
-        logger.handlers.extend(handlers)
-
-    structlog.configure(**original_structlog_config)
+# The logging configuration these tests install is restored after each
+# test by the autouse `_preserve_logging_state` fixture (tests/conftest.py).
 
 
 class _FakeStream(io.StringIO):
@@ -104,59 +58,6 @@ class _FakeStream(io.StringIO):
 
     def isatty(self) -> bool:
         return self._isatty
-
-
-@pytest.mark.unit
-class TestResetLoggingStateFixture:
-    """Regression coverage for the module's own `_reset_logging_state`
-    autouse fixture. Exercises the fixture's generator function
-    directly (bypassing pytest's fixture-resolution machinery) so the
-    save/mutate/restore sequence can be asserted within a single test,
-    proving the two behaviors this fixture is responsible for beyond
-    root logger handlers/level: restoring third-party logger handlers
-    and the global structlog configuration, both of which
-    `configure_logging()` mutates on every call.
-
-    NOTE: `_fixture_function` is pytest's internal attribute (verified
-    against the pinned `pytest==9.1.1`) exposing the raw generator
-    function behind `@pytest.fixture` — calling the decorated object
-    itself is no longer supported directly. A future pytest major
-    upgrade may relocate or remove this attribute, which would surface
-    as an `AttributeError` here rather than silently passing.
-    """
-
-    def test_restores_third_party_logger_handlers(self) -> None:
-        third_party_name = _THIRD_PARTY_LOGGERS[0]
-        third_party_logger = logging.getLogger(third_party_name)
-        pre_existing_handler = logging.NullHandler()
-        third_party_logger.addHandler(pre_existing_handler)
-        try:
-            fixture_gen = _reset_logging_state._fixture_function()
-            next(fixture_gen)  # enter: snapshot taken with the handler present
-
-            configure_logging(_settings(), stream=_FakeStream())
-            assert pre_existing_handler not in third_party_logger.handlers
-
-            with pytest.raises(StopIteration):
-                next(fixture_gen)  # exit: restore
-
-            assert pre_existing_handler in third_party_logger.handlers
-        finally:
-            third_party_logger.removeHandler(pre_existing_handler)
-
-    def test_restores_structlog_global_configuration(self) -> None:
-        original_processors = structlog.get_config()["processors"]
-
-        fixture_gen = _reset_logging_state._fixture_function()
-        next(fixture_gen)  # enter: snapshot taken
-
-        configure_logging(_settings(), stream=_FakeStream())
-        assert structlog.get_config()["processors"] != original_processors
-
-        with pytest.raises(StopIteration):
-            next(fixture_gen)  # exit: restore
-
-        assert structlog.get_config()["processors"] == original_processors
 
 
 @pytest.mark.unit

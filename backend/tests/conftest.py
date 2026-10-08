@@ -104,6 +104,7 @@ from app.services.base_fetcher import FETCHER_REGISTRY
 from app.services.session_service import create_session
 from tests.support.audit_models import SampleAuditEvent
 from tests.support.database import create_database, drop_database
+from tests.support.logging_state import preserved_logging_state
 from tests.support.parallel import (
     ENGINE_MAX_OVERFLOW,
     ENGINE_POOL_SIZE,
@@ -617,6 +618,26 @@ def cleanup_users_by_username(
             await db.commit()
 
     asyncio.run(_cleanup())
+
+
+@pytest.fixture(autouse=True)
+def _preserve_logging_state() -> Iterator[None]:
+    """Restore the process-wide logging configuration after every test.
+
+    CLI commands (through `app.cli._runtime.bootstrap()`), the Celery
+    `setup_logging` signal, and direct calls of `configure_logging()` or
+    `configure_cli_logging()` replace the configuration installed when
+    `app.main` is imported. Left in place, it reaches later tests on the
+    same worker: a root handler bound to an earlier test's stderr (a
+    `capsys` stream closed at its teardown, or a finished `CliRunner`
+    invocation), or a structlog processor list that
+    `structlog.testing.capture_logs()` no longer reaches — see
+    `tests.support.logging_state` and
+    docs/features/platform/testing-strategy.md (Test Independence).
+    Pure in-process state: no database or Redis access.
+    """
+    with preserved_logging_state():
+        yield
 
 
 @pytest.fixture
