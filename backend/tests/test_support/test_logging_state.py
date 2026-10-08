@@ -62,6 +62,9 @@ class TestPreservedLoggingState:
     def test_reconfiguration_inside_scope_restores_root_handlers_and_level(
         self, reconfigure: Callable[[], None]
     ) -> None:
+        """Regression: the root handler left behind by the CLI bootstrap was
+        bound to a closed stderr, so every later record reported
+        `ValueError: I/O operation on closed file`."""
         root = logging.getLogger()
         handlers = list(root.handlers)
         level = root.level
@@ -72,19 +75,6 @@ class TestPreservedLoggingState:
 
         assert root.handlers == handlers
         assert root.level == level
-
-    def test_cli_bootstrap_inside_scope_leaves_no_closed_stream_handler(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        """Regression: a leaked root handler bound to a closed stderr made
-        every later record report `ValueError: I/O operation on closed
-        file` on the current stderr."""
-        with preserved_logging_state():
-            _bootstrap_cli_on_closed_stderr()
-
-        logging.getLogger("tests.logging_state").warning("after_scope")
-
-        assert "Logging error" not in capsys.readouterr().err
 
     @pytest.mark.parametrize("reconfigure", _RECONFIGURATIONS)
     def test_reconfiguration_inside_scope_keeps_cached_logger_capturable(
