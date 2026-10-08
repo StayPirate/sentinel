@@ -1,0 +1,165 @@
+{
+  "dataType": "CVE_RECORD",
+  "dataVersion": "5.2",
+  "cveMetadata": {
+    "cveId": "CVE-2025-9491",
+    "assignerOrgId": "99f1926a-a320-47d8-bbb5-42feb611262e",
+    "state": "PUBLISHED",
+    "assignerShortName": "zdi",
+    "dateReserved": "2025-08-26T16:25:08.823Z",
+    "datePublished": "2025-08-26T16:25:15.179Z",
+    "dateUpdated": "2025-12-05T16:28:39.831Z"
+  },
+  "containers": {
+    "cna": {
+      "providerMetadata": {
+        "orgId": "99f1926a-a320-47d8-bbb5-42feb611262e",
+        "shortName": "zdi",
+        "dateUpdated": "2025-08-26T16:25:15.179Z"
+      },
+      "title": "Fictional title of CVE-2025-9491",
+      "descriptions": [
+        {
+          "lang": "en",
+          "value": "Fictional description of CVE-2025-9491."
+        }
+      ],
+      "affected": [
+        {
+          "vendor": "Microsoft",
+          "product": "Windows",
+          "versions": [
+            {
+              "version": "11 Enterprise 23H2 22631.4169 x64",
+              "status": "affected"
+            }
+          ],
+          "defaultStatus": "unknown"
+        }
+      ],
+      "problemTypes": [
+        {
+          "descriptions": [
+            {
+              "lang": "en",
+              "cweId": "CWE-451",
+              "description": "CWE-451: User Interface (UI) Misrepresentation of Critical Information",
+              "type": "CWE"
+            }
+          ]
+        }
+      ],
+      "references": [
+        {
+          "url": "https://www.zerodayinitiative.com/advisories/ZDI-25-148/",
+          "name": "ZDI-25-148",
+          "tags": [
+            "x_research-advisory"
+          ]
+        }
+      ],
+      "dateAssigned": "2025-08-26T16:25:08.884Z",
+      "datePublic": "2025-03-18T13:51:41.444Z",
+      "metrics": [
+        {
+          "format": "CVSS",
+          "cvssV3_0": {
+            "version": "3.0",
+            "vectorString": "CVSS:3.0/AV:L/AC:H/PR:N/UI:R/S:U/C:H/I:H/A:H",
+            "baseScore": 7,
+            "baseSeverity": "HIGH"
+          }
+        }
+      ]
+    },
+    "adp": [
+      {
+        "descriptions": [
+          {
+            "lang": "en",
+            "value": "Fictional ADP description of CVE-2025-9491."
+          }
+        ],
+        "references": [
+          {
+            "url": "https://msrc.microsoft.com/update-guide/advisory/ADV25258226",
+            "tags": [
+              "vendor-advisory"
+            ]
+          },
+          {
+            "url": "https://www.virustotal.com/gui/file/a55789d49c395a9b16cb56b0544266d9ecee409fa3c5fead8082f28c2aff4e76",
+            "tags": [
+              "exploit"
+            ]
+          }
+        ],
+        "metrics": [
+          {
+            "cvssV3_1": {
+              "scope": "UNCHANGED",
+              "version": "3.1",
+              "baseScore": 3.3,
+              "attackVector": "LOCAL",
+              "baseSeverity": "LOW",
+              "vectorString": "CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:U/C:N/I:L/A:N",
+              "integrityImpact": "LOW",
+              "userInteraction": "REQUIRED",
+              "attackComplexity": "LOW",
+              "availabilityImpact": "NONE",
+              "privilegesRequired": "NONE",
+              "confidentialityImpact": "NONE"
+            }
+          },
+          {
+            "cvssV4_0": {
+              "version": "4.0",
+              "baseScore": 4.6,
+              "attackVector": "LOCAL",
+              "baseSeverity": "MEDIUM",
+              "vectorString": "CVSS:4.0/AV:L/AC:L/AT:N/PR:N/UI:A/VC:N/VI:L/VA:N/SC:N/SI:N/SA:N",
+              "userInteraction": "ACTIVE",
+              "attackComplexity": "LOW",
+              "attackRequirements": "NONE",
+              "privilegesRequired": "NONE",
+              "subIntegrityImpact": "NONE",
+              "vulnIntegrityImpact": "LOW",
+              "subAvailabilityImpact": "NONE",
+              "vulnAvailabilityImpact": "NONE",
+              "subConfidentialityImpact": "NONE",
+              "vulnConfidentialityImpact": "NONE"
+            }
+          },
+          {
+            "other": {
+              "type": "ssvc",
+              "content": {
+                "timestamp": "2025-12-05T16:28:14.614877Z",
+                "id": "CVE-2025-9491",
+                "options": [
+                  {
+                    "Exploitation": "poc"
+                  },
+                  {
+                    "Automatable": "no"
+                  },
+                  {
+                    "Technical Impact": "partial"
+                  }
+                ],
+                "role": "CISA Coordinator",
+                "version": "2.0.3"
+              }
+            }
+          }
+        ],
+        "title": "CISA ADP Vulnrichment",
+        "providerMetadata": {
+          "orgId": "134c704f-9b21-4f2e-91b3-4a467353bcc0",
+          "shortName": "CISA-ADP",
+          "dateUpdated": "2025-12-05T16:28:39.831Z"
+        }
+      }
+    ]
+  }
+}

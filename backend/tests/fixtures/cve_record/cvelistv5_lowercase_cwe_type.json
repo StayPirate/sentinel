@@ -1,0 +1,129 @@
+{
+  "dataType": "CVE_RECORD",
+  "dataVersion": "5.1",
+  "cveMetadata": {
+    "cveId": "CVE-2022-20969",
+    "assignerOrgId": "d1c1063e-7a18-46af-9102-31f8928bc633",
+    "state": "PUBLISHED",
+    "assignerShortName": "cisco",
+    "requesterUserId": "00000000-0000-0000-0000-000000000001",
+    "dateReserved": "2021-11-02T13:28:29.197Z",
+    "dateUpdated": "2024-11-20T14:32:11.608Z",
+    "datePublished": "2022-11-03T19:31:00.307Z"
+  },
+  "containers": {
+    "cna": {
+      "providerMetadata": {
+        "orgId": "d1c1063e-7a18-46af-9102-31f8928bc633",
+        "shortName": "cisco",
+        "dateUpdated": "2024-01-25T16:57:28.457Z"
+      },
+      "descriptions": [
+        {
+          "lang": "en",
+          "value": "Fictional description of CVE-2022-20969. \r\nFictional second paragraph."
+        }
+      ],
+      "affected": [
+        {
+          "vendor": "Cisco",
+          "product": "Cisco Umbrella Dashboard",
+          "versions": [
+            {
+              "version": "N/A",
+              "status": "affected"
+            }
+          ]
+        }
+      ],
+      "problemTypes": [
+        {
+          "descriptions": [
+            {
+              "lang": "en",
+              "description": "Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')",
+              "type": "cwe",
+              "cweId": "CWE-79"
+            }
+          ]
+        }
+      ],
+      "references": [
+        {
+          "url": "https://sec.cloudapps.cisco.com/security/center/content/CiscoSecurityAdvisory/cisco-sa-umbrella-xss-LfeYQV3",
+          "name": "cisco-sa-umbrella-xss-LfeYQV3"
+        }
+      ],
+      "metrics": [
+        {
+          "format": "cvssV3_1",
+          "cvssV3_1": {
+            "version": "3.1",
+            "vectorString": "CVSS:3.1/AV:N/AC:L/PR:H/UI:R/S:C/C:L/I:L/A:N",
+            "baseScore": 4.8,
+            "baseSeverity": "MEDIUM",
+            "attackVector": "NETWORK",
+            "attackComplexity": "LOW",
+            "privilegesRequired": "HIGH",
+            "userInteraction": "REQUIRED",
+            "scope": "CHANGED",
+            "confidentialityImpact": "LOW",
+            "integrityImpact": "LOW",
+            "availabilityImpact": "NONE"
+          }
+        }
+      ]
+    },
+    "adp": [
+      {
+        "providerMetadata": {
+          "orgId": "af854a3a-2127-422b-91ae-364da2661108",
+          "shortName": "CVE",
+          "dateUpdated": "2024-08-03T02:31:58.671Z"
+        },
+        "title": "CVE Program Container",
+        "references": [
+          {
+            "url": "https://sec.cloudapps.cisco.com/security/center/content/CiscoSecurityAdvisory/cisco-sa-umbrella-xss-LfeYQV3",
+            "name": "cisco-sa-umbrella-xss-LfeYQV3",
+            "tags": [
+              "x_transferred"
+            ]
+          }
+        ]
+      },
+      {
+        "metrics": [
+          {
+            "other": {
+              "type": "ssvc",
+              "content": {
+                "timestamp": "2024-01-29T21:16:35.965437Z",
+                "id": "CVE-2022-20969",
+                "options": [
+                  {
+                    "Exploitation": "none"
+                  },
+                  {
+                    "Automatable": "no"
+                  },
+                  {
+                    "Technical Impact": "partial"
+                  }
+                ],
+                "role": "CISA Coordinator",
+                "version": "2.0.3"
+              }
+            }
+          }
+        ],
+        "title": "CISA ADP Vulnrichment",
+        "providerMetadata": {
+          "orgId": "134c704f-9b21-4f2e-91b3-4a467353bcc0",
+          "shortName": "CISA-ADP",
+          "dateUpdated": "2024-11-20T14:32:11.608Z"
+        }
+      }
+    ]
+  }
+}

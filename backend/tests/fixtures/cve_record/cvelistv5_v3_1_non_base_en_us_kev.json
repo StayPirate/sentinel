@@ -1,0 +1,194 @@
+{
+  "containers": {
+    "cna": {
+      "title": "Fictional title of CVE-2013-3900",
+      "datePublic": "2022-01-21T08:00:00.000Z",
+      "affected": [
+        {
+          "vendor": "Microsoft",
+          "product": "Windows 10 Version 1809",
+          "platforms": [
+            "32-bit Systems",
+            "x64-based Systems"
+          ],
+          "versions": [
+            {
+              "version": "N/A",
+              "status": "affected"
+            }
+          ]
+        },
+        {
+          "vendor": "Microsoft",
+          "product": "Windows 10 Version 1809",
+          "platforms": [
+            "ARM64-based Systems"
+          ],
+          "versions": [
+            {
+              "version": "N/A",
+              "status": "affected"
+            }
+          ]
+        },
+        {
+          "vendor": "Microsoft",
+          "product": "Windows Server 2019",
+          "platforms": [
+            "x64-based Systems"
+          ],
+          "versions": [
+            {
+              "version": "N/A",
+              "status": "affected"
+            }
+          ]
+        }
+      ],
+      "descriptions": [
+        {
+          "value": "Fictional description of CVE-2013-3900.",
+          "lang": "en-US"
+        }
+      ],
+      "problemTypes": [
+        {
+          "descriptions": [
+            {
+              "description": "CWE-347: Improper Verification of Cryptographic Signature",
+              "lang": "en-US",
+              "type": "CWE",
+              "cweId": "CWE-347"
+            }
+          ]
+        }
+      ],
+      "providerMetadata": {
+        "orgId": "f38d906d-7342-40ea-92c1-6c4a2c6478c8",
+        "shortName": "microsoft",
+        "dateUpdated": "2025-01-02T18:23:10.081Z"
+      },
+      "references": [
+        {
+          "name": "WinVerifyTrust Signature Validation Vulnerability",
+          "tags": [
+            "vendor-advisory"
+          ],
+          "url": "https://msrc.microsoft.com/update-guide/vulnerability/CVE-2013-3900"
+        }
+      ],
+      "metrics": [
+        {
+          "format": "CVSS",
+          "scenarios": [
+            {
+              "lang": "en-US",
+              "value": "GENERAL"
+            }
+          ],
+          "cvssV3_1": {
+            "version": "3.1",
+            "baseSeverity": "MEDIUM",
+            "baseScore": 5.5,
+            "vectorString": "CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:U/C:N/I:H/A:N/E:U/RL:O/RC:C"
+          }
+        }
+      ]
+    },
+    "adp": [
+      {
+        "providerMetadata": {
+          "orgId": "af854a3a-2127-422b-91ae-364da2661108",
+          "shortName": "CVE",
+          "dateUpdated": "2024-08-06T16:22:01.599Z"
+        },
+        "title": "CVE Program Container",
+        "references": [
+          {
+            "name": "MS13-098",
+            "tags": [
+              "vendor-advisory",
+              "x_refsource_MS",
+              "x_transferred"
+            ],
+            "url": "https://docs.microsoft.com/en-us/security-updates/securitybulletins/2013/ms13-098"
+          },
+          {
+            "tags": [
+              "x_refsource_CONFIRM",
+              "x_transferred"
+            ],
+            "url": "http://blogs.technet.com/b/srd/archive/2013/12/10/ms13-098-update-to-enhance-the-security-of-authenticode.aspx"
+          },
+          {
+            "tags": [
+              "x_refsource_MISC",
+              "x_transferred"
+            ],
+            "url": "https://msrc.microsoft.com/update-guide/vulnerability/CVE-2013-3900"
+          }
+        ]
+      },
+      {
+        "references": [
+          {
+            "url": "https://www.cisa.gov/known-exploited-vulnerabilities-catalog?field_cve=CVE-2013-3900",
+            "tags": [
+              "government-resource"
+            ]
+          }
+        ],
+        "metrics": [
+          {
+            "other": {
+              "type": "ssvc",
+              "content": {
+                "timestamp": "2025-02-10T19:32:34.556748Z",
+                "id": "CVE-2013-3900",
+                "options": [
+                  {
+                    "Exploitation": "active"
+                  },
+                  {
+                    "Automatable": "no"
+                  },
+                  {
+                    "Technical Impact": "partial"
+                  }
+                ],
+                "role": "CISA Coordinator",
+                "version": "2.0.3"
+              }
+            }
+          },
+          {
+            "other": {
+              "type": "kev",
+              "content": {
+                "dateAdded": "2022-01-10",
+                "reference": "https://www.cisa.gov/known-exploited-vulnerabilities-catalog?field_cve=CVE-2013-3900"
+              }
+            }
+          }
+        ],
+        "title": "CISA ADP Vulnrichment",
+        "providerMetadata": {
+          "orgId": "134c704f-9b21-4f2e-91b3-4a467353bcc0",
+          "shortName": "CISA-ADP",
+          "dateUpdated": "2026-10-07T16:41:03.398Z"
+        }
+      }
+    ]
+  },
+  "cveMetadata": {
+    "assignerOrgId": "f38d906d-7342-40ea-92c1-6c4a2c6478c8",
+    "assignerShortName": "microsoft",
+    "cveId": "CVE-2013-3900",
+    "datePublished": "2013-12-11T00:00:00.000Z",
+    "dateReserved": "2013-06-03T00:00:00.000Z",
+    "dateUpdated": "2026-10-07T16:41:03.398Z",
+    "state": "PUBLISHED"
+  },
+  "dataType": "CVE_RECORD",
+  "dataVersion": "5.2"
+}
