@@ -1,0 +1,104 @@
+{
+  "ghsa_id": "GHSA-vc4h-q48j-5hcx",
+  "cve_id": "CVE-2026-105851",
+  "url": "https://api.github.com/advisories/GHSA-vc4h-q48j-5hcx",
+  "html_url": "https://github.com/advisories/GHSA-vc4h-q48j-5hcx",
+  "summary": "Fictional summary of GHSA-vc4h-q48j-5hcx.",
+  "description": "Fictional description of GHSA-vc4h-q48j-5hcx.\n\n### Impact\n\nFictional impact statement.\n\n### Patches\n\nFictional patch note.",
+  "type": "reviewed",
+  "severity": "critical",
+  "repository_advisory_url": "https://api.github.com/repos/payloadcms/payload/security-advisories/GHSA-vc4h-q48j-5hcx",
+  "source_code_location": "https://github.com/payloadcms/payload",
+  "identifiers": [
+    {
+      "value": "GHSA-vc4h-q48j-5hcx",
+      "type": "GHSA"
+    },
+    {
+      "value": "CVE-2026-105851",
+      "type": "CVE"
+    }
+  ],
+  "references": [
+    "https://github.com/payloadcms/payload/security/advisories/GHSA-vc4h-q48j-5hcx",
+    "https://github.com/payloadcms/payload/commit/099ef12e2682f076aa8e8d0ccb790536b4e1027f",
+    "https://github.com/payloadcms/payload/releases/tag/v3.90.0",
+    "https://github.com/advisories/GHSA-vc4h-q48j-5hcx"
+  ],
+  "published_at": "2026-10-06T16:17:23Z",
+  "updated_at": "2026-10-06T16:17:25Z",
+  "github_reviewed_at": "2026-10-06T16:17:23Z",
+  "nvd_published_at": null,
+  "withdrawn_at": null,
+  "vulnerabilities": [
+    {
+      "package": {
+        "ecosystem": "npm",
+        "name": "payload"
+      },
+      "vulnerable_version_range": "> 3.0.0, < 3.90.0",
+      "first_patched_version": "3.90.0",
+      "vulnerable_functions": []
+    },
+    {
+      "package": {
+        "ecosystem": "npm",
+        "name": "payload"
+      },
+      "vulnerable_version_range": "> 4.0.0-canary.0, < 4.0.0-canary.34",
+      "first_patched_version": "4.0.0-canary.34",
+      "vulnerable_functions": []
+    }
+  ],
+  "cvss_severities": {
+    "cvss_v3": {
+      "vector_string": null,
+      "score": 0.0
+    },
+    "cvss_v4": {
+      "vector_string": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:H/VA:N/SC:H/SI:H/SA:N",
+      "score": 9.3
+    }
+  },
+  "cwes": [
+    {
+      "cwe_id": "CWE-284",
+      "name": "Improper Access Control"
+    },
+    {
+      "cwe_id": "CWE-863",
+      "name": "Incorrect Authorization"
+    }
+  ],
+  "credits": [
+    {
+      "user": {
+        "login": "example-researcher",
+        "id": 1000,
+        "node_id": "U_exampleNode0001",
+        "avatar_url": "https://github.example.invalid/avatars/u/1000?v=4",
+        "gravatar_id": "",
+        "url": "https://github.example.invalid/users/example-researcher",
+        "html_url": "https://github.example.invalid/example-researcher",
+        "followers_url": "https://github.example.invalid/users/example-researcher/followers",
+        "following_url": "https://github.example.invalid/users/example-researcher/following{/other_user}",
+        "gists_url": "https://github.example.invalid/users/example-researcher/gists{/gist_id}",
+        "starred_url": "https://github.example.invalid/users/example-researcher/starred{/owner}{/repo}",
+        "subscriptions_url": "https://github.example.invalid/users/example-researcher/subscriptions",
+        "organizations_url": "https://github.example.invalid/users/example-researcher/orgs",
+        "repos_url": "https://github.example.invalid/users/example-researcher/repos",
+        "events_url": "https://github.example.invalid/users/example-researcher/events{/privacy}",
+        "received_events_url": "https://github.example.invalid/users/example-researcher/received_events",
+        "type": "User",
+        "user_view_type": "public",
+        "site_admin": false
+      },
+      "type": "reporter"
+    }
+  ],
+  "comments": 1,
+  "cvss": {
+    "vector_string": null,
+    "score": null
+  }
+}

@@ -1,0 +1,94 @@
+{
+  "ghsa_id": "GHSA-94p4-4cq8-9g67",
+  "cve_id": null,
+  "url": "https://api.github.com/advisories/GHSA-94p4-4cq8-9g67",
+  "html_url": "https://github.com/advisories/GHSA-94p4-4cq8-9g67",
+  "summary": "Fictional summary of GHSA-94p4-4cq8-9g67.",
+  "description": "Fictional description of GHSA-94p4-4cq8-9g67.\n\n### Impact\n\nFictional impact statement.\n\n### Patches\n\nFictional patch note.",
+  "type": "reviewed",
+  "severity": "high",
+  "repository_advisory_url": "https://api.github.com/repos/gitpython-developers/GitPython/security-advisories/GHSA-94p4-4cq8-9g67",
+  "source_code_location": "https://github.com/gitpython-developers/GitPython",
+  "identifiers": [
+    {
+      "value": "GHSA-94p4-4cq8-9g67",
+      "type": "GHSA"
+    }
+  ],
+  "references": [
+    "https://github.com/gitpython-developers/GitPython/security/advisories/GHSA-94p4-4cq8-9g67",
+    "https://github.com/gitpython-developers/GitPython/commit/863417457a0633db7ea5aed4fd01e0b291a41162",
+    "https://github.com/gitpython-developers/GitPython/releases/tag/3.1.55",
+    "https://github.com/gitpython-developers/GitPython/commit/8ac5a30519b6f4af85398b9b9d7064ff4d452da2",
+    "https://github.com/pypa/advisory-database/tree/main/vulns/gitpython/PYSEC-2026-3951.yaml",
+    "https://www.vulncheck.com/advisories/gitpython-before-environment-variable-exfiltration-via-remote-add",
+    "https://github.com/advisories/GHSA-94p4-4cq8-9g67"
+  ],
+  "published_at": "2026-07-24T21:45:16Z",
+  "updated_at": "2026-09-24T14:39:22Z",
+  "github_reviewed_at": "2026-07-24T21:45:16Z",
+  "nvd_published_at": null,
+  "withdrawn_at": null,
+  "vulnerabilities": [
+    {
+      "package": {
+        "ecosystem": "pip",
+        "name": "GitPython"
+      },
+      "vulnerable_version_range": "< 3.1.55",
+      "first_patched_version": "3.1.55",
+      "vulnerable_functions": []
+    }
+  ],
+  "cvss_severities": {
+    "cvss_v3": {
+      "vector_string": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+      "score": 7.5
+    },
+    "cvss_v4": {
+      "vector_string": null,
+      "score": 0.0
+    }
+  },
+  "cwes": [
+    {
+      "cwe_id": "CWE-200",
+      "name": "Exposure of Sensitive Information to an Unauthorized Actor"
+    },
+    {
+      "cwe_id": "CWE-214",
+      "name": "Invocation of Process Using Visible Sensitive Information"
+    }
+  ],
+  "credits": [
+    {
+      "user": {
+        "login": "example-researcher",
+        "id": 1000,
+        "node_id": "U_exampleNode0001",
+        "avatar_url": "https://github.example.invalid/avatars/u/1000?v=4",
+        "gravatar_id": "",
+        "url": "https://github.example.invalid/users/example-researcher",
+        "html_url": "https://github.example.invalid/example-researcher",
+        "followers_url": "https://github.example.invalid/users/example-researcher/followers",
+        "following_url": "https://github.example.invalid/users/example-researcher/following{/other_user}",
+        "gists_url": "https://github.example.invalid/users/example-researcher/gists{/gist_id}",
+        "starred_url": "https://github.example.invalid/users/example-researcher/starred{/owner}{/repo}",
+        "subscriptions_url": "https://github.example.invalid/users/example-researcher/subscriptions",
+        "organizations_url": "https://github.example.invalid/users/example-researcher/orgs",
+        "repos_url": "https://github.example.invalid/users/example-researcher/repos",
+        "events_url": "https://github.example.invalid/users/example-researcher/events{/privacy}",
+        "received_events_url": "https://github.example.invalid/users/example-researcher/received_events",
+        "type": "User",
+        "user_view_type": "public",
+        "site_admin": false
+      },
+      "type": "reporter"
+    }
+  ],
+  "comments": 0,
+  "cvss": {
+    "vector_string": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+    "score": 7.5
+  }
+}

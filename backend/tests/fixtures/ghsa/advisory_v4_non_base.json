@@ -1,0 +1,98 @@
+{
+  "ghsa_id": "GHSA-m2h6-j472-rp4c",
+  "cve_id": "CVE-2026-69248",
+  "url": "https://api.github.com/advisories/GHSA-m2h6-j472-rp4c",
+  "html_url": "https://github.com/advisories/GHSA-m2h6-j472-rp4c",
+  "summary": "Fictional summary of GHSA-m2h6-j472-rp4c.",
+  "description": "Fictional description of GHSA-m2h6-j472-rp4c.\n\n### Impact\n\nFictional impact statement.\n\n### Patches\n\nFictional patch note.",
+  "type": "reviewed",
+  "severity": "medium",
+  "repository_advisory_url": "https://api.github.com/repos/pyca/cryptography/security-advisories/GHSA-m2h6-j472-rp4c",
+  "source_code_location": "https://github.com/pyca/cryptography",
+  "identifiers": [
+    {
+      "value": "GHSA-m2h6-j472-rp4c",
+      "type": "GHSA"
+    },
+    {
+      "value": "CVE-2026-69248",
+      "type": "CVE"
+    }
+  ],
+  "references": [
+    "https://github.com/pyca/cryptography/security/advisories/GHSA-m2h6-j472-rp4c",
+    "https://github.com/pyca/cryptography/pull/14888",
+    "https://github.com/pyca/cryptography/commit/4d035a4225965edeffd312079a510ef25fcfdcb2",
+    "https://nvd.nist.gov/vuln/detail/CVE-2026-69248",
+    "https://github.com/pyca/cryptography/commit/286c89128",
+    "https://github.com/pypa/advisory-database/tree/main/vulns/cryptography/PYSEC-2026-3554.yaml",
+    "https://github.com/advisories/GHSA-m2h6-j472-rp4c"
+  ],
+  "published_at": "2026-08-03T21:26:57Z",
+  "updated_at": "2026-09-24T14:54:18Z",
+  "github_reviewed_at": "2026-08-03T21:26:57Z",
+  "nvd_published_at": "2026-08-03T22:16:52Z",
+  "withdrawn_at": null,
+  "vulnerabilities": [
+    {
+      "package": {
+        "ecosystem": "pip",
+        "name": "cryptography"
+      },
+      "vulnerable_version_range": ">= 45.0.0, < 49.0.0",
+      "first_patched_version": "49.0.0",
+      "vulnerable_functions": []
+    }
+  ],
+  "cvss_severities": {
+    "cvss_v3": {
+      "vector_string": null,
+      "score": 0.0
+    },
+    "cvss_v4": {
+      "vector_string": "CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:L/VI:H/VA:N/SC:N/SI:N/SA:N/E:P",
+      "score": 6.9
+    }
+  },
+  "cwes": [
+    {
+      "cwe_id": "CWE-295",
+      "name": "Improper Certificate Validation"
+    }
+  ],
+  "credits": [
+    {
+      "user": {
+        "login": "example-researcher",
+        "id": 1000,
+        "node_id": "U_exampleNode0001",
+        "avatar_url": "https://github.example.invalid/avatars/u/1000?v=4",
+        "gravatar_id": "",
+        "url": "https://github.example.invalid/users/example-researcher",
+        "html_url": "https://github.example.invalid/example-researcher",
+        "followers_url": "https://github.example.invalid/users/example-researcher/followers",
+        "following_url": "https://github.example.invalid/users/example-researcher/following{/other_user}",
+        "gists_url": "https://github.example.invalid/users/example-researcher/gists{/gist_id}",
+        "starred_url": "https://github.example.invalid/users/example-researcher/starred{/owner}{/repo}",
+        "subscriptions_url": "https://github.example.invalid/users/example-researcher/subscriptions",
+        "organizations_url": "https://github.example.invalid/users/example-researcher/orgs",
+        "repos_url": "https://github.example.invalid/users/example-researcher/repos",
+        "events_url": "https://github.example.invalid/users/example-researcher/events{/privacy}",
+        "received_events_url": "https://github.example.invalid/users/example-researcher/received_events",
+        "type": "User",
+        "user_view_type": "public",
+        "site_admin": false
+      },
+      "type": "reporter"
+    }
+  ],
+  "comments": 6,
+  "cvss": {
+    "vector_string": null,
+    "score": null
+  },
+  "epss": {
+    "percentage": 0.00309,
+    "percentile": 0.21515
+  }
+}
