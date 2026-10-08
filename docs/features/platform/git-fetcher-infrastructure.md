@@ -54,14 +54,17 @@ The pattern:
    current fetcher uses it. All blobs are downloaded during `git clone`
    and `git fetch`, making subsequent `show_file()` calls purely local.
    **Validity check**: before deciding "first run vs. subsequent run",
-   verify the directory is a valid bare git repository via
-   `git --git-dir=<dir> rev-parse --is-bare-repository` (output `true`).
-   The explicit `--git-dir` disables repository discovery: without it, a
-   non-repository directory nested inside another repository would
-   resolve to that parent repository. If the directory exists but the
-   check fails (partially-initialized clone from a previous interrupted
-   attempt, or a non-bare repository), delete the directory and proceed
-   with a fresh clone.
+   verify the directory is a valid bare git repository whose `HEAD`
+   names a commit, via `is_clone_valid()`
+   (`git --git-dir=<dir> rev-parse --is-bare-repository` prints `true`,
+   and `git --git-dir=<dir> rev-parse --verify --quiet --end-of-options
+   HEAD^{commit}` succeeds). The explicit `--git-dir` disables repository
+   discovery: without it, a non-repository directory nested inside
+   another repository would resolve to that parent repository. If the
+   directory exists but the check fails (partially-initialized clone from
+   a previous interrupted attempt — git records the branch only after the
+   transfer completes — or a non-bare repository), delete the directory
+   and proceed with a fresh clone.
 2. **Fetch** (subsequent runs): read the clone's branch with
    `git symbolic-ref --end-of-options HEAD` (for example
    `refs/heads/main`), then
@@ -168,11 +171,11 @@ the first-run logic:
 | Yes | No (absent or invalid) | Delete invalid directory if present. Re-clone. Then apply cursor reachability check (see "Recovery" and "Cursor SHA Unreachable" below) |
 
 "Invalid" means: the directory exists but is not a bare git repository
-at exactly that path — `git --git-dir=<dir> rev-parse
---is-bare-repository` fails or does not print `true` (incomplete clone
-from interrupted previous attempt, damaged repository metadata,
-filesystem corruption, a non-bare repository, a non-repository directory
-nested inside another repository, etc.). See `is_clone_valid` in the
+at exactly that path whose `HEAD` names a commit — `is_clone_valid()`
+returns `False` (incomplete clone from interrupted previous attempt,
+damaged repository metadata, filesystem corruption, a non-bare
+repository, a non-repository directory nested inside another
+repository, etc.). See `is_clone_valid` in the
 Function Catalog. Damage that this check does not detect (for example a
 corrupt pack file) surfaces later as `GitCorruptionError` (see
 "Recovery").
@@ -766,9 +769,8 @@ Semantics: updates the clone's own branch, and therefore `HEAD`, from
    `remote.origin.fetch` configuration, follows a change of the upstream
    default branch, and follows an upstream history rewrite (a non-forced
    refspec would be rejected). Because the source is the remote's `HEAD`,
-   a clone whose local branch name differs from upstream's (for example
-   a clone interrupted before git recorded the upstream default branch)
-   is still updated. A non-zero exit or the timeout raises
+   a clone whose local branch name differs from upstream's default
+   branch is still updated. A non-zero exit or the timeout raises
    `GitFetchError` with stderr content. A remote `HEAD` that cannot be
    resolved fails here on every run (see "Cursor SHA Unreachable").
 
@@ -827,14 +829,22 @@ Semantics:
   Used to store `committed_at` in the cursor for recovery boundary
   computation
 - **`is_clone_valid`**: returns `True` only if `repo_path` is a bare git
-  repository at exactly that path
-  (`git --git-dir=<repo_path> rev-parse --is-bare-repository` exits 0
-  and prints `true`). Returns `False` if the path does not exist (without
-  invoking git), is not a git repository (including a non-repository
-  directory nested inside another repository, which `--git-dir` never
-  resolves to the enclosing repository), is a non-bare repository, or
-  the check still fails after the read retries. NEVER raises — used as
-  a guard condition
+  repository at exactly that path whose `HEAD` names a commit: first
+  `git --git-dir=<repo_path> rev-parse --is-bare-repository` exits 0
+  and prints `true`, then
+  `git --git-dir=<repo_path> rev-parse --verify --quiet --end-of-options
+  HEAD^{commit}` exits 0. Returns `False` if the path does not exist
+  (without invoking git), is not a git repository (including a
+  non-repository directory nested inside another repository, which
+  `--git-dir` never resolves to the enclosing repository), is a non-bare
+  repository, has a `HEAD` that names no commit (for example a clone
+  interrupted before its transfer completed, which git leaves without
+  the branch), or the check still fails after the read retries (an
+  attempt fails when either command does not succeed as stated). NEVER
+  raises — used as a guard condition. Without the `HEAD` condition, an
+  interrupted clone would be treated as valid and its first fetch would
+  have to download the whole repository under the Fetch timeout instead
+  of the Clone timeout
 - **`check_sha_reachable`**: determines whether a given SHA names a
   commit in the local object store
   (`git rev-parse --verify --quiet --end-of-options <sha>^{commit}`).
@@ -912,8 +922,9 @@ included in the module for co-location with clone lifecycle management.
 
 All git operations in the function catalog are designed for bare
 repositories (no working tree): `clone()` always creates one, and
-`is_clone_valid()` accepts only a bare repository, so a non-bare
-directory is treated as invalid and replaced by a fresh bare clone.
+`is_clone_valid()` accepts only a bare repository whose `HEAD` names a
+commit, so a non-bare or incomplete directory is treated as invalid and
+replaced by a fresh bare clone.
 Every operation accesses the git object store directly:
 
 - **Commit/tree operations** (`get_head_sha`, `get_commit_date`,
