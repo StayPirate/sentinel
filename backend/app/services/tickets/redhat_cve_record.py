@@ -23,15 +23,11 @@ from typing import Final
 
 from pydantic import BaseModel, ConfigDict
 
-from app.services.cvss import validate_cvss_vector
+from app.services.cvss import validate_external_cvss_vector
 from app.services.ticket_mutations_errors import InvalidCVSSVectorError
 
 PROVIDER_NAME: Final = "Red Hat"
 """The constant CVSS provider and CWE source of every Red Hat value."""
-
-VECTOR_MAX_LENGTH: Final = 200
-"""Received-length bound of a vector, checked before any parser call
-(cve-service.md, Phase 1 > CVSS assessment ingestion)."""
 
 INVALID_VECTOR_REASON: Final = "invalid_vector"
 INVALID_CWE_REASON: Final = "invalid_cwe"
@@ -91,7 +87,7 @@ class BugzillaLink:
 class RedhatExtraction:
     """The values of one record that passed their own gates.
 
-    `cvss_vectors` holds canonical vectors (v3 before v2); `skipped` holds
+    `cvss_vectors` holds canonical Base vectors (v3 before v2); `skipped` holds
     one closed reason per rejected vector or CWE, in algorithm order.
     """
 
@@ -158,11 +154,11 @@ def extract(record: RedhatCVERecord) -> RedhatExtraction:
 
 
 def _canonical_vector(vector: str) -> str | None:
-    """The canonical parser's output, or `None` for a rejected vector."""
-    if len(vector) > VECTOR_MAX_LENGTH:
-        return None
+    """The canonical Base vector of the External Base Reduction (which
+    also applies the received-length bound), or `None` for a rejected
+    vector."""
     try:
-        return validate_cvss_vector(vector).canonical_vector
+        return validate_external_cvss_vector(vector).canonical_vector
     except InvalidCVSSVectorError:
         return None
 

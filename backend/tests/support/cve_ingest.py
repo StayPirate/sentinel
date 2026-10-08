@@ -69,7 +69,7 @@ from app.services.cve_ingest import (
     AffectedVersionScopeOperation,
     CVSSAssessmentEntry,
 )
-from app.services.cvss import validate_cvss_vector
+from app.services.cvss import validate_external_cvss_vector
 from tests.support.suse_cvss import Vector
 from tests.support.suse_cvss_races import CommittedWorld
 
@@ -295,8 +295,8 @@ class CompositionTimeline:
 
     Records, in a single list of `(kind, detail)` entries, every SQL
     statement on the test engine (`("sql", statement)`), each
-    `cve_service.validate_cvss_vector()` call (`("parse", vector)`), each
-    `cve_service.logger` call (`(level, event)`), and each call of the
+    `cve_service.validate_external_cvss_vector()` call (`("parse", vector)`),
+    each `cve_service.logger` call (`(level, event)`), and each call of the
     delegates `upsert_cve()` composes (`("call", name)`). Delegates are
     wrapped where `cve_service` resolves them (module attributes of
     `ticket_service`, `ticket_mutations`, and `cve_service`), so a nested
@@ -327,9 +327,9 @@ class CompositionTimeline:
 
         def parse(vector: str) -> Any:
             self.entries.append(("parse", vector))
-            return validate_cvss_vector(vector)
+            return validate_external_cvss_vector(vector)
 
-        monkeypatch.setattr(cve_service, "validate_cvss_vector", parse)
+        monkeypatch.setattr(cve_service, "validate_external_cvss_vector", parse)
         monkeypatch.setattr(cve_service, "logger", _RecordingLogger(self.entries))
 
     def _wrap(

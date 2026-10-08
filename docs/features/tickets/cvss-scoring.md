@@ -4,9 +4,9 @@
 
 Manage Common Vulnerability Scoring System (CVSS) Base assessments from
 multiple providers for each CVE. This specification is the central authority
-for accepted vectors, parsing and canonicalization, assessment representation,
-severity and eligibility score resolution, provider ownership, and the CVSS
-API representation.
+for accepted vectors, the Base reduction of external vectors, parsing and
+canonicalization, assessment representation, severity and eligibility score
+resolution, provider ownership, and the CVSS API representation.
 
 Sentinel stores each provider's assessment independently. The vector is the
 only input authority: version, Base score, assessment severity, and expanded
@@ -38,8 +38,16 @@ severity resolution and does not make one version control all severity.
 
 Sentinel accepts exactly complete CVSS Base vectors for versions `2.0`, `3.0`,
 `3.1`, and `4.0`. Temporal, Environmental, Threat, and Supplemental metrics
-are not accepted. A vector with any non-Base metric is invalid even when a
-third-party CVSS library could calculate a Base score from it.
+are not accepted by the canonical parser. A vector with any non-Base metric is
+invalid input to it even when a third-party CVSS library could calculate a
+Base score from it.
+
+Trusted external ingestion alone first applies the
+[External Base Reduction](#external-base-reduction), which removes recognized
+non-Base metrics before the canonical parser. Manual input, including the SUSE
+CVSS API, and every other consumer-supplied vector are never reduced: a
+non-Base metric there remains invalid, and a user-supplied vector is never
+silently altered.
 
 ### Input Rules
 
@@ -85,10 +93,132 @@ The shared parser accepts one string and returns one immutable semantic result:
 
 Callers never supply score, version, severity, or expanded metrics as an
 independent authority. All manual and external ingestion paths use this shared
-parser. A source-neutral CVE record parser extracts candidate vector strings
-and delegates each candidate to this parser; it skips a rejected external
-candidate according to its own per-entry ingestion contract rather than
-reimplementing CVSS semantics.
+parser: manual input directly, trusted external ingestion only through the
+External Base Reduction below. A source-neutral CVE record parser extracts
+candidate vector strings and delegates each candidate to that external entry
+point; it skips a rejected external candidate according to its own per-entry
+ingestion contract rather than reimplementing CVSS semantics.
+
+### External Base Reduction
+
+External providers may publish a complete Base vector together with
+Temporal, Threat, Environmental, or Supplemental metrics. The Base metrics
+alone define the Base score that Sentinel stores (CVSS-B for v4.0), so trusted
+external ingestion keeps such a vector as its Base reduction instead of
+discarding the whole assessment.
+
+**Scope.** The reduction applies only to an external-provider candidate of
+trusted system ingestion: `upsert_cve()` step 2 in `cve-service.md` and a
+fetcher that pre-validates a vector under its own extraction contract. The
+manual SUSE CVSS API and every other consumer-supplied input never apply it
+(see [Accepted Base Vectors](#accepted-base-vectors)).
+
+**Algorithm.** For one received external vector string:
+
+1. The received value must contain at most 200 characters **before** any
+   trimming (the bound of Input Rules rule 1). A longer value is rejected
+   without further processing.
+2. Trim leading and trailing whitespace (rule 2). An empty value or one with
+   embedded whitespace is rejected. Detect the version from the prefix
+   (rule 4): a value starting with `CVSS:` must carry exactly `CVSS:3.0/`,
+   `CVSS:3.1/`, or `CVSS:4.0/`, otherwise it is rejected; any other value is
+   CVSS v2.0.
+3. Split the remaining metric section on `/` into tokens. The abbreviation of
+   a token is the text before its first `:`, and its value the text after it.
+   For each token whose abbreviation is a recognized non-Base metric of the
+   detected version (tables below):
+   - the token is removed when it contains `:`, its value is one of that
+     metric's official values in official case, and the abbreviation occurs
+     only once in the vector;
+   - otherwise the complete candidate is rejected.
+
+   Every other token is kept unchanged in its original position.
+4. The prefix (empty for v2.0) followed by the kept tokens joined with `/`
+   is passed to the canonical parser, which applies rules 2 through 7. Its
+   stable parsed result is the result of the reduction when its version is
+   the version detected in step 2; otherwise the candidate is rejected (for
+   example a v2.0 value whose removed first token was followed by a
+   `CVSS:3.1/` token).
+
+Recognition is version-specific. A non-Base metric defined only for another
+version is not recognized and follows the canonical parser (for example `MS`
+is unknown in a v4.0 vector, and `S` is the v3.x Base metric Scope but the
+v4.0 Supplemental metric Safety). A value defined only for another version is
+outside its table and rejected in step 3 (for example `E:POC` in a v3.1
+vector). No non-Base abbreviation of a version equals one of its Base
+abbreviations.
+
+**Rejections.** A candidate is rejected, with no partial result, when its
+received value exceeds 200 characters; when it is empty after trimming or
+contains embedded whitespace; when its `CVSS:` prefix is unsupported; when a
+recognized non-Base metric has no `:`, an empty value, a value outside its
+table, or a value in another case; when a recognized non-Base metric occurs
+more than once; when the version of the reduced vector differs from the
+detected version; and whenever the canonical parser rejects the reduced
+vector. The last case includes a mismatched prefix and body, case variants of
+the prefix or a Base abbreviation or value, an unknown metric, a duplicate or
+missing Base metric, and an empty Base set after reduction. The reduction
+never repairs malformed input: it only removes complete, valid non-Base
+tokens, and removing them never changes the outcome of a whitespace or
+version check.
+
+**Result.** The reduction never retains non-Base metrics and never lets them
+affect the score. The persisted canonical vector is the pure Base vector in
+FIRST order, and the score is its Base score, which may differ from a
+provider-published Temporal, Threat, or Environmental score. A received value
+that is already a complete Base vector produces exactly the canonical parser's
+result. The successful reduction itself is not logged: the persisted canonical
+vector and its direct audit event already show the result.
+
+#### CVSS v2.0 Non-Base Metrics
+
+| Group | Metric | Official values |
+|---|---|---|
+| Temporal | `E` | `U`, `POC`, `F`, `H`, `ND` |
+| Temporal | `RL` | `OF`, `TF`, `W`, `U`, `ND` |
+| Temporal | `RC` | `UC`, `UR`, `C`, `ND` |
+| Environmental | `CDP` | `N`, `L`, `LM`, `MH`, `H`, `ND` |
+| Environmental | `TD` | `N`, `L`, `M`, `H`, `ND` |
+| Environmental | `CR`, `IR`, `AR` | `L`, `M`, `H`, `ND` |
+
+#### CVSS v3.0 and v3.1 Non-Base Metrics
+
+| Group | Metric | Official values |
+|---|---|---|
+| Temporal | `E` | `X`, `H`, `F`, `P`, `U` |
+| Temporal | `RL` | `X`, `U`, `W`, `T`, `O` |
+| Temporal | `RC` | `X`, `C`, `R`, `U` |
+| Environmental | `CR`, `IR`, `AR` | `X`, `H`, `M`, `L` |
+| Environmental | `MAV` | `X`, `N`, `A`, `L`, `P` |
+| Environmental | `MAC` | `X`, `L`, `H` |
+| Environmental | `MPR` | `X`, `N`, `L`, `H` |
+| Environmental | `MUI` | `X`, `N`, `R` |
+| Environmental | `MS` | `X`, `U`, `C` |
+| Environmental | `MC`, `MI`, `MA` | `X`, `N`, `L`, `H` |
+
+#### CVSS v4.0 Non-Base Metrics
+
+| Group | Metric | Official values |
+|---|---|---|
+| Threat | `E` | `X`, `A`, `P`, `U` |
+| Environmental | `CR`, `IR`, `AR` | `X`, `H`, `M`, `L` |
+| Environmental | `MAV` | `X`, `N`, `A`, `L`, `P` |
+| Environmental | `MAC` | `X`, `L`, `H` |
+| Environmental | `MAT` | `X`, `N`, `P` |
+| Environmental | `MPR` | `X`, `N`, `L`, `H` |
+| Environmental | `MUI` | `X`, `N`, `P`, `A` |
+| Environmental | `MVC`, `MVI`, `MVA`, `MSC` | `X`, `N`, `L`, `H` |
+| Environmental | `MSI`, `MSA` | `X`, `N`, `L`, `H`, `S` |
+| Supplemental | `S` | `X`, `N`, `P` |
+| Supplemental | `AU` | `X`, `N`, `Y` |
+| Supplemental | `R` | `X`, `A`, `U`, `I` |
+| Supplemental | `V` | `X`, `D`, `C` |
+| Supplemental | `RE` | `X`, `L`, `M`, `H` |
+| Supplemental | `U` | `X`, `Clear`, `Green`, `Amber`, `Red` |
+
+The tables are the FIRST vector-string definitions: CVSS v2 Complete
+Documentation Table 13, CVSS v3.0 and v3.1 Specification Table 15, and CVSS
+v4.0 Specification Table 23.
 
 ### Version Precedence
 
@@ -340,14 +470,17 @@ source-owned withdrawal contract exists.
 
 For one canonical ingestion payload, the conflict key is `(cve_id,
 provider_name, derived cvss_version)` after provider normalization and vector
-canonicalization. Identical same-key entries collapse. If same-key entries
+canonicalization, which for external candidates includes the External Base
+Reduction. Identical same-key entries, including entries that reduce to the
+same canonical Base vector, collapse. If same-key entries
 derive different canonical vectors, the canonical payload is contradictory and
 `upsert_cve()` rejects it before any persistent write; payload order does not
 select a winner. A source parser may retain an explicitly documented
 source-format rule before constructing that canonical payload.
 
 An individually malformed, unsupported, incomplete, or reserved-provider
-candidate is instead logged safely and skipped before the database phase. The
+candidate, including one the External Base Reduction rejects, is instead
+logged safely and skipped before the database phase. The
 warning uses the bounded fields and closed reason vocabulary in
 `cve-service.md`; it never includes provider, vector, exception text, or raw
 payload. Other valid candidates in that canonical payload remain eligible for
@@ -503,7 +636,8 @@ behavior in its owning fetcher specification.
 Current provider examples include NVD, CNA organizations, and Red Hat. Their
 source URLs, extraction rules, schedules, provider-name normalization, and
 catch-up behavior remain in their owning fetcher specifications. All of them
-use the common parser, reserved-name rule, and persistence matrix above.
+use the External Base Reduction, the common parser, the reserved-name rule,
+and the persistence matrix above.
 
 ## API Endpoints
 
@@ -639,7 +773,9 @@ POST /api/v1/cves/{cve_id}/cvss/suse
 ```
 
 `vector_string` is a required JSON string with a maximum received length of
-200 characters. The shared parser applies the remaining domain rules. All four
+200 characters. The shared parser applies the remaining domain rules. The
+External Base Reduction never applies here: a vector with any non-Base metric
+is rejected and never stored in reduced form. All four
 accepted versions may be stored for SUSE, and any one canonical SUSE assessment
 in an accepted version satisfies the workflow gate.
 
@@ -652,7 +788,7 @@ version component of the target natural key.
 
 | Status | Code | Condition |
 |---|---|---|
-| 422 | `CVSS_INVALID_VECTOR` | String passes Pydantic shape checks but violates the accepted Base-vector contract |
+| 422 | `CVSS_INVALID_VECTOR` | String passes Pydantic shape checks but violates the accepted Base-vector contract, including a vector with any non-Base metric |
 
 **`Capability: manage_cvss`**
 
@@ -685,13 +821,15 @@ An effective delete returns 204 No Content.
 | Function | Input | Output |
 |---|---|---|
 | `validate_cvss_vector` | received vector string | Stable parsed result or `InvalidCVSSVectorError` |
+| `validate_external_cvss_vector` | received external vector string | Stable parsed result of the External Base Reduction, or `InvalidCVSSVectorError` for every rejection listed there |
 | `resolve_severity_score` | complete assessment set, default version | Stable severity result or absence |
 | `resolve_eligibility_score` | complete assessment set, default version | Stable `{score, source}` result |
 | `calculate_severity` | `Decimal` score | Unified severity label |
 
 The functions are deterministic and side-effect-free. They perform no database
 access and never read settings directly; callers pass the configured default
-version.
+version. Only trusted external ingestion calls `validate_external_cvss_vector`;
+manual input and every consumer-supplied vector use `validate_cvss_vector`.
 
 ### Persistence and Propagation Boundary
 
@@ -761,6 +899,32 @@ testing strategy.
 - Proof that supplied numeric score, version, severity, or metrics cannot enter
   the parsing interface as independent authorities.
 
+### External Base Reduction Unit Tests
+
+- Every recognized non-Base metric of v2.0, v3.0, v3.1, and v4.0 with every
+  official value, including `X` and `ND`, is removed, and the result equals the
+  canonical parser's result for the pure Base vector.
+- Multiple non-Base metrics of several groups together, interleaved with Base
+  metrics in any position, reduce to the canonical Base vector in FIRST order;
+  representative live-shaped vectors (a v3.1 Temporal `E:H`, a v4.0 Threat
+  `E:P`, and v4.0 Supplemental `RE:M/U:Red`) are included.
+- A complete Base vector without non-Base metrics produces exactly the
+  canonical parser's result, and every value the canonical parser rejects is
+  still rejected.
+- Rejection of a duplicated non-Base metric; an invalid, empty, or wrong-case
+  value, including a value of another version; a missing `:`; a non-Base
+  metric of another version; an unknown metric; and an incomplete or empty
+  Base set after reduction.
+- Rejection of an unsupported, missing, or mismatched prefix and of embedded
+  whitespace, with no repair of any malformed token: whitespace in a kept
+  Base token next to a removed non-Base token, and a v2.0 non-Base token
+  before a `CVSS:3.x/` or `CVSS:4.0/` token, are still rejected.
+- Received lengths of exactly 200 and 201 characters, measured before
+  trimming; a 201-character value is rejected without invoking the canonical
+  parser.
+- The strict canonical parser still rejects every non-Base vector accepted by
+  the reduction.
+
 ### Resolution Unit Tests
 
 - Every Severity Resolution Cascade step, absent result, and unified severity
@@ -781,8 +945,14 @@ testing strategy.
 
 - Received lengths of exactly 200 and 201 characters, proving length is checked
   before trimming, at the API request schema (`422 VALIDATION_ERROR`) and at the
-  defensive external-candidate bound of `cve-service.md` (skip as
+  External Base Reduction bound applied by `cve-service.md` (skip as
   `invalid_vector` without invoking the parser).
+- External ingestion of a vector with non-Base metrics persists the canonical
+  Base vector and its Base score with no candidate warning; a vector the
+  reduction rejects still produces exactly one bounded `invalid_vector`
+  warning; and the manual SUSE POST answers `422 CVSS_INVALID_VECTOR` without
+  effect for representative v3.1 Temporal and v4.0 Threat and Supplemental
+  vectors.
 - Manual SUSE create, update, unchanged, and delete, plus external create,
   update, unchanged, retained-on-source-absence behavior, and rejection of
   every reserved-name variant from system ingestion.

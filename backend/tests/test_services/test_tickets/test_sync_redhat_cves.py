@@ -1046,7 +1046,35 @@ class TestPartialExtraction:
         ]
         _assert_no_raw_value(logs, raw, SECRET)
 
-    async def test_non_base_vector_is_skipped(
+    async def test_non_base_vector_is_accepted_as_its_base_vector(
+        self,
+        db_session: AsyncSession,
+        target: Target,
+        fetcher: SyncRedhatCves,
+        server: RedhatServer,
+    ) -> None:
+        """The only data is a vector with non-Base metrics: it counts as
+        extractable data and persists as its canonical Base vector."""
+        _serve(
+            server,
+            target.cve_id,
+            {
+                "cvss3": {"cvss3_scoring_vector": V31 + "/E:P/RL:O"},
+                "cvss": {"cvss_scoring_vector": V2 + "/E:F/RC:C"},
+            },
+        )
+
+        with capture_logs() as logs:
+            result = await fetcher.fetch_single(target.cve_id, db_session)
+
+        assert result.action is UpsertAction.UPDATED
+        assert await _assessments(db_session, target.cve) == {
+            ("Red Hat", "3.1", V31),
+            ("Red Hat", "2.0", V2),
+        }
+        assert logs == []
+
+    async def test_invalid_non_base_vector_is_skipped(
         self,
         db_session: AsyncSession,
         target: Target,
@@ -1056,7 +1084,7 @@ class TestPartialExtraction:
         _serve(
             server,
             target.cve_id,
-            {"cvss3": {"cvss3_scoring_vector": V31 + "/E:P"}, "cwe": "CWE-79"},
+            {"cvss3": {"cvss3_scoring_vector": V31 + "/E:POC"}, "cwe": "CWE-79"},
         )
 
         with capture_logs() as logs:

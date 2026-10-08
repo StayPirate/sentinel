@@ -2010,7 +2010,7 @@ class TestWholeRunSignals:
 
 @pytest.mark.integration
 class TestCvss:
-    async def test_rejected_vectors_are_skipped_and_the_advisories_succeed(
+    async def test_non_base_vectors_persist_as_base_and_rejected_ones_skip(
         self, env: Env, batch: Batch
     ) -> None:
         non_base_v4, temporal_v3, malformed, over_long = [
@@ -2045,8 +2045,7 @@ class TestCvss:
         assert counters(batch.fetcher) == Counters(4, 0, 4, 0)
         skips = _events(logs, SKIP_EVENT)
         assert [(entry["cve_id"], entry["reason"]) for entry in skips] == [
-            (cve.cve_id, "invalid_vector")
-            for cve in (non_base_v4, temporal_v3, malformed, over_long)
+            (cve.cve_id, "invalid_vector") for cve in (malformed, over_long)
         ]
         assert all(set(entry) <= SKIP_EVENT_KEYS for entry in skips)
         assert _events(logs, CVE_FETCH_ITEM_FAILED_EVENT) == []
@@ -2056,8 +2055,17 @@ class TestCvss:
             live_v3["cvss_severities"]["cvss_v3"]["vector_string"],
             long_vector,
         )
-        assert await env.assessments(non_base_v4) == set()
-        assert await env.assessments(temporal_v3) == set()
+        # The live Threat `E:P` (v4) and Temporal `E:H` (v3) vectors are
+        # persisted as their canonical Base vectors (External Base Reduction).
+        assert await env.assessments(non_base_v4) == {
+            (
+                "GitHub",
+                "CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:L/VI:H/VA:N/SC:N/SI:N/SA:N",
+            )
+        }
+        assert await env.assessments(temporal_v3) == {
+            ("GitHub", "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H")
+        }
         for cve in (malformed, over_long):
             assert await env.assessments(cve) == {("GitHub", V40)}
         assert await env.cwes(non_base_v4) == {("CWE-295", "GitHub")}

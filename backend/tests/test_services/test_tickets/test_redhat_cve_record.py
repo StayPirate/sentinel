@@ -4,9 +4,10 @@
 Contract under test: docs/features/tickets/cve-sync-redhat.md (Algorithm
 steps 2-9, Field Mapping, Response Validation including External String
 Admissibility, Explicitly Ignored Fields, and the extractable-data
-determination of Error Handling). The fetcher logs the candidate skip
-events and ingests the result; those parts are tested in
-`test_sync_redhat_cves.py`.
+determination of Error Handling), with vectors accepted through
+docs/features/tickets/cvss-scoring.md (External Base Reduction). The
+fetcher logs the candidate skip events and ingests the result; those parts
+are tested in `test_sync_redhat_cves.py`.
 
 Records are the sanitized live fixtures of `tests/support/redhat.py` or
 minimal fictional objects. No database, HTTP, or log is involved.
@@ -19,8 +20,7 @@ from typing import Any, Final
 import pytest
 from pydantic import ValidationError
 
-from app.services import cve_service
-from app.services.cvss import validate_cvss_vector
+from app.services.cvss import validate_external_cvss_vector
 from app.services.tickets import redhat_cve_record
 from app.services.tickets.redhat_cve_record import (
     BugzillaLink,
@@ -35,6 +35,8 @@ V31: Final = "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"
 V31_REORDERED: Final = "CVSS:3.1/C:H/I:H/A:H/AV:N/AC:L/PR:N/UI:N/S:U"
 V2: Final = "AV:N/AC:L/Au:N/C:P/I:P/A:P"
 NON_BASE_V31: Final = V31 + "/E:P"
+NON_BASE_V2: Final = V2 + "/E:F/RL:OF/CDP:L"
+INVALID_NON_BASE_V31: Final = V31 + "/E:POC"
 URL_1: Final = "https://advisory.example.invalid/upstream/1"
 URL_2: Final = "https://advisory.example.invalid/upstream/2"
 BUGZILLA_URL: Final = "https://bugzilla.example.invalid/show_bug.cgi?id=1"
@@ -58,20 +60,20 @@ def _nothing(**overrides: Any) -> dict[str, Any]:
 
 
 class ParserSpy:
-    """Records every vector passed to the canonical parser."""
+    """Records every vector passed to the External Base Reduction."""
 
     def __init__(self) -> None:
         self.calls: list[str] = []
 
     def __call__(self, vector: str) -> Any:
         self.calls.append(vector)
-        return validate_cvss_vector(vector)
+        return validate_external_cvss_vector(vector)
 
 
 @pytest.fixture
 def parser(monkeypatch: pytest.MonkeyPatch) -> ParserSpy:
     spy = ParserSpy()
-    monkeypatch.setattr(redhat_cve_record, "validate_cvss_vector", spy)
+    monkeypatch.setattr(redhat_cve_record, "validate_external_cvss_vector", spy)
     return spy
 
 
@@ -237,6 +239,19 @@ class TestCvss:
 
         assert extraction.cvss_vectors == (V31, V2)
 
+    def test_non_base_vectors_are_accepted_as_their_base_vectors(
+        self, parser: ParserSpy
+    ) -> None:
+        extraction = _extract(
+            cvss3={"cvss3_scoring_vector": NON_BASE_V31},
+            cvss={"cvss_scoring_vector": NON_BASE_V2},
+        )
+
+        assert extraction.cvss_vectors == (V31, V2)
+        assert extraction.skipped == ()
+        assert extraction.has_extractable_data
+        assert parser.calls == [NON_BASE_V31, NON_BASE_V2]
+
     def test_base_score_is_not_read(self) -> None:
         extraction = _extract(
             cvss3={"cvss3_scoring_vector": V31, "cvss3_base_score": "0.1"}
@@ -248,12 +263,22 @@ class TestCvss:
         "vector",
         [
             "CVSS:3.1/AV:N",
-            NON_BASE_V31,
+            INVALID_NON_BASE_V31,
+            V31 + "/E:P/E:P",
+            "CVSS:3.1/E:P",
             "CVSS:9.9/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
             "cvss:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
             "not a vector",
         ],
-        ids=["incomplete", "non_base", "unknown_prefix", "wrong_case", "garbage"],
+        ids=[
+            "incomplete",
+            "invalid_non_base_value",
+            "duplicate_non_base",
+            "only_non_base",
+            "unknown_prefix",
+            "wrong_case",
+            "garbage",
+        ],
     )
     def test_rejected_vector_is_skipped_once_and_other_data_continues(
         self, vector: str, parser: ParserSpy
@@ -278,31 +303,29 @@ class TestCvss:
         assert extraction.cvss_vectors == ()
         assert extraction.skipped == ("invalid_vector", "invalid_vector")
 
-    def test_vector_longer_than_200_characters_is_rejected_without_parser_call(
+    def test_vector_longer_than_200_characters_is_rejected_by_the_reduction(
         self, parser: ParserSpy
     ) -> None:
-        # Valid after trimming, but the received value exceeds the bound.
-        padded = V31 + " " * (201 - len(V31))
+        # Valid after trimming, but the received value exceeds the bound that
+        # the External Base Reduction applies before trimming.
+        padded = NON_BASE_V31 + " " * (201 - len(NON_BASE_V31))
         assert len(padded) == 201
 
         extraction = _extract(cvss3={"cvss3_scoring_vector": padded})
 
         assert extraction.cvss_vectors == ()
         assert extraction.skipped == ("invalid_vector",)
-        assert parser.calls == []
+        assert parser.calls == [padded]
 
-    def test_vector_of_exactly_200_characters_reaches_the_parser(
+    def test_vector_of_exactly_200_characters_is_accepted(
         self, parser: ParserSpy
     ) -> None:
-        padded = V31 + " " * (200 - len(V31))
+        padded = NON_BASE_V31 + " " * (200 - len(NON_BASE_V31))
 
         extraction = _extract(cvss3={"cvss3_scoring_vector": padded})
 
         assert extraction.cvss_vectors == (V31,)
         assert parser.calls == [padded]
-
-    def test_bound_equals_the_ingestion_received_length_bound(self) -> None:
-        assert redhat_cve_record.VECTOR_MAX_LENGTH == cve_service.CVSS_VECTOR_MAX_LENGTH
 
     @pytest.mark.parametrize("position", ["start", "middle", "end"])
     def test_vector_containing_nul_is_an_invalid_vector(self, position: str) -> None:
@@ -586,7 +609,7 @@ class TestExtractableData:
 
     def test_all_rejected_values_have_no_extractable_data(self) -> None:
         extraction = _extract(
-            cvss3={"cvss3_scoring_vector": NON_BASE_V31},
+            cvss3={"cvss3_scoring_vector": INVALID_NON_BASE_V31},
             cvss={"cvss_scoring_vector": " "},
             cwe="CWE-1, CWE-2",
             references=["\n"],
@@ -601,13 +624,24 @@ class TestExtractableData:
         "fields",
         [
             {"cvss3": {"cvss3_scoring_vector": V31}},
+            {"cvss3": {"cvss3_scoring_vector": NON_BASE_V31}},
             {"cvss": {"cvss_scoring_vector": V2}},
+            {"cvss": {"cvss_scoring_vector": NON_BASE_V2}},
             {"cwe": "CWE-79"},
             {"references": [URL_1]},
             {"bugzilla": {"url": BUGZILLA_URL}},
             {"package_state": [{"package_name": "example"}]},
         ],
-        ids=["v3", "v2", "cwe", "references", "bugzilla", "packages"],
+        ids=[
+            "v3",
+            "v3_non_base",
+            "v2",
+            "v2_non_base",
+            "cwe",
+            "references",
+            "bugzilla",
+            "packages",
+        ],
     )
     def test_each_data_type_alone_is_extractable(self, fields: dict[str, Any]) -> None:
         assert _extract(**fields).has_extractable_data

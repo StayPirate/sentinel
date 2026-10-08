@@ -517,6 +517,12 @@ class TestRequestValidation:
         [
             pytest.param("", id="empty"),
             pytest.param("x" * 200, id="200-characters-invalid"),
+            # Manual input is never reduced to its Base metrics
+            # (cvss-scoring.md, External Base Reduction).
+            pytest.param(f"{V31_CRITICAL}/E:H", id="v31-temporal"),
+            pytest.param(f"{V31_CRITICAL}/E:X/CR:H/MAV:N", id="v31-not-defined-env"),
+            pytest.param(f"{V40_CRITICAL}/E:P", id="v40-threat"),
+            pytest.param(f"{V40_CRITICAL}/RE:M/U:Red", id="v40-supplemental"),
         ],
     )
     async def test_domain_failure_is_cvss_invalid_vector_without_effect(

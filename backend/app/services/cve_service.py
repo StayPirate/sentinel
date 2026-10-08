@@ -175,6 +175,7 @@ from app.services.cvss import (
     resolve_eligibility_score,
     resolve_severity_score,
     validate_cvss_vector,
+    validate_external_cvss_vector,
 )
 from app.services.fetcher_execution import (
     FetcherConfigMissingError,
@@ -1669,11 +1670,6 @@ async def get_cve_source_status(
 # Concurrency; PostIngestTasks)
 # ---------------------------------------------------------------------------
 
-CVSS_VECTOR_MAX_LENGTH: Final = 200
-"""Defensive received-length bound of an external CVSS vector candidate
-(cve-service.md, Phase 1 > CVSS assessment ingestion); equal to the API
-received-length limit of cvss-scoring.md (Input Rules, rule 1)."""
-
 INVALID_PROVIDER_REASON: Final = "invalid_provider"
 INVALID_VECTOR_REASON: Final = "invalid_vector"
 
@@ -1769,9 +1765,11 @@ def _canonical_cvss_candidates(
     """Step 2: classify, parse, and group every CVSS candidate.
 
     In input order, provider before vector: an invalid provider is
-    `invalid_provider`; a non-string vector, one over
-    `CVSS_VECTOR_MAX_LENGTH` received characters, or one the parser
-    rejects is `invalid_vector`. Each skip emits one WARNING carrying only
+    `invalid_provider`; a non-string vector, or one the External Base
+    Reduction (`validate_external_cvss_vector()`, including its received-
+    length bound) rejects, is `invalid_vector`. A vector whose recognized
+    non-Base metrics were removed is accepted as its canonical Base vector
+    without a log. Each skip emits one WARNING carrying only
     the CVE ID, source value, zero-based ordinal, and reason. Valid
     candidates are grouped by `(provider, derived version)`: identical
     canonical vectors collapse; differing ones reject the complete payload
@@ -1788,9 +1786,9 @@ def _canonical_cvss_candidates(
             provider
         ):
             reason = INVALID_PROVIDER_REASON
-        elif isinstance(vector, str) and len(vector) <= CVSS_VECTOR_MAX_LENGTH:
+        elif isinstance(vector, str):
             try:
-                parsed = validate_cvss_vector(vector)
+                parsed = validate_external_cvss_vector(vector)
             except InvalidCVSSVectorError:
                 parsed = None
         if parsed is None or not isinstance(provider, str):

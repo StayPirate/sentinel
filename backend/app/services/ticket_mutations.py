@@ -1923,8 +1923,9 @@ class ParsedExternalCVSSAssessment:
 
     Service-internal semantic type, neither a Pydantic schema nor a
     persisted entity. `provider` is the source's canonical non-reserved
-    provider name; `parsed` is the immutable stable result of
-    `cvss.validate_cvss_vector()` and the only CVSS authority.
+    provider name; `parsed` is the immutable stable result of the External
+    Base Reduction (`cvss.validate_external_cvss_vector()`), the strict
+    parse of its canonical Base vector, and the only CVSS authority.
     """
 
     provider: str
