@@ -1,9 +1,10 @@
 """Unit tests for the pure CVSS module (backend/app/services/cvss.py).
 
-Covers `docs/features/tickets/cvss-scoring.md` (Required Tests: Parser Unit Tests
-and Resolution Unit Tests). The received-length 200/201 tests are
-owned by the CVSS endpoint request schema (Input Rules rule 1 is enforced
-by Pydantic, not by the parser) and are deferred to that work item.
+Covers `docs/features/tickets/cvss-scoring.md` (Required Tests: Parser Unit
+Tests, External Base Reduction Unit Tests, and Resolution Unit Tests). The
+strict parser applies no length bound: its received-length 200/201 tests
+are owned by the CVSS endpoint request schema (Input Rules rule 1 is
+enforced by Pydantic); the external reduction's own bound is tested here.
 
 The expected Base-metric wire values below are transcribed independently
 from the specification tables rather than read back from the module, so a
@@ -45,6 +46,7 @@ from app.services.cvss import (
     resolve_eligibility_score,
     resolve_severity_score,
     validate_cvss_vector,
+    validate_external_cvss_vector,
 )
 from app.services.ticket_mutations_errors import (
     InvalidCVSSVectorError,
@@ -183,6 +185,98 @@ def _duplicate_metric_cases() -> list[tuple[str, str]]:
                 )
             )
     return cases
+
+
+# Vectors the strict parser rejects for reasons other than a non-Base metric;
+# the External Base Reduction must reject every one of them as well.
+EMPTY_AFTER_TRIM_VECTORS: list[str] = ["", " ", "\t\n", "\u00a0 \u2003"]
+
+EMBEDDED_WHITESPACE_VECTORS: list[str] = [
+    "CVSS:3.1/AV:N /AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+    "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/ A:H",
+    "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A: H",
+    "CVSS: 3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+    "AV:N/AC:L/Au:N/C:C/I:C/A:C\tAV:N",
+    "AV:N/AC:L/Au:N/C:C/I:C/\nA:C",
+    "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/\u00a0SA:N",
+]
+
+BAD_PREFIX_VECTORS: list[str] = [
+    # v2.0 must be unprefixed
+    "CVSS:2.0/AV:N/AC:L/Au:N/C:C/I:C/A:C",
+    "CVSS:2/AV:N/AC:L/Au:N/C:C/I:C/A:C",
+    # unsupported versions
+    "CVSS:3.2/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+    "CVSS:3/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+    "CVSS:5.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N",
+    "CVSS:/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+    # prefix without separator or body
+    "CVSS:3.1",
+    "CVSS:3.1/",
+    "CVSS:3.1AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+    # missing v3/v4 prefix
+    "AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+    "AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N",
+    # mismatched prefix and body
+    "CVSS:3.1/AV:N/AC:L/Au:N/C:C/I:C/A:C",
+    "CVSS:4.0/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+    "CVSS:3.1/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N",
+    "CVSS:3.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N",
+    # repeated or surrounding prefix material
+    "CVSS:3.1/CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+    "(AV:N/AC:L/Au:N/C:C/I:C/A:C)",
+    "/CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+]
+
+CASE_VARIANT_VECTORS: list[str] = [
+    # prefix case
+    "cvss:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+    "Cvss:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+    "cvss:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N",
+    # abbreviation case
+    "CVSS:3.1/av:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+    "CVSS:3.1/AV:N/Ac:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+    "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/vc:H/VI:H/VA:H/SC:N/SI:N/SA:N",
+    "AV:N/AC:L/AU:N/C:C/I:C/A:C",
+    "AV:N/AC:L/au:N/C:C/I:C/A:C",
+    "av:N/ac:L/au:N/c:C/i:C/a:C",
+    # value case
+    "CVSS:3.1/AV:n/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+    "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:u/C:H/I:H/A:H",
+    "CVSS:4.0/AV:N/AC:L/AT:n/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N",
+    "AV:N/AC:l/Au:N/C:C/I:C/A:C",
+]
+
+UNKNOWN_METRIC_CASES: list[tuple[str, str]] = [
+    ("2.0", "XX:N"),
+    ("3.1", "XX:N"),
+    ("4.0", "XX:N"),
+    ("2.0", "PR:N"),
+    ("3.1", "Au:N"),
+    ("3.1", "AT:N"),
+    ("4.0", "S:U"),
+    ("4.0", "C:H"),
+]
+
+MALFORMED_TOKEN_VECTORS: list[str] = [
+    # unknown value for a Base metric
+    "CVSS:3.1/AV:X/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+    "CVSS:3.1/AV:N/AC:L/PR:N/UI:P/S:U/C:H/I:H/A:H",
+    "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:R/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N",
+    "AV:P/AC:L/Au:N/C:C/I:C/A:C",
+    "AV:N/AC:L/Au:N/C:H/I:C/A:C",
+    # empty value, missing colon, extra colon
+    "CVSS:3.1/AV:/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+    "CVSS:3.1/AV/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+    "CVSS:3.1/AV:N:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+    # empty tokens
+    "CVSS:3.1//AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+    "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H/",
+    "AV:N/AC:L/Au:N//C:C/I:C/A:C",
+    "/",
+    # other separators
+    "CVSS:3.1/AV:N,AC:L,PR:N,UI:N,S:U,C:H,I:H,A:H",
+]
 
 
 # Representative non-Base metrics appended to a valid vector.
@@ -421,83 +515,24 @@ class TestValidateCvssVectorValid:
 class TestValidateCvssVectorInvalid:
     """Every violation of Input Rules 2-6 raises `InvalidCVSSVectorError`."""
 
-    @pytest.mark.parametrize("vector", ["", " ", "\t\n", "\u00a0 \u2003"])
+    @pytest.mark.parametrize("vector", EMPTY_AFTER_TRIM_VECTORS)
     def test_validate_empty_after_trim_raises(self, vector: str) -> None:
         with pytest.raises(InvalidCVSSVectorError):
             validate_cvss_vector(vector)
 
-    @pytest.mark.parametrize(
-        "vector",
-        [
-            "CVSS:3.1/AV:N /AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
-            "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/ A:H",
-            "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A: H",
-            "CVSS: 3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
-            "AV:N/AC:L/Au:N/C:C/I:C/A:C\tAV:N",
-            "AV:N/AC:L/Au:N/C:C/I:C/\nA:C",
-            "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/\u00a0SA:N",
-        ],
-    )
+    @pytest.mark.parametrize("vector", EMBEDDED_WHITESPACE_VECTORS)
     def test_validate_embedded_whitespace_raises(self, vector: str) -> None:
         with pytest.raises(InvalidCVSSVectorError):
             validate_cvss_vector(vector)
 
-    @pytest.mark.parametrize(
-        "vector",
-        [
-            # v2.0 must be unprefixed
-            "CVSS:2.0/AV:N/AC:L/Au:N/C:C/I:C/A:C",
-            "CVSS:2/AV:N/AC:L/Au:N/C:C/I:C/A:C",
-            # unsupported versions
-            "CVSS:3.2/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
-            "CVSS:3/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
-            "CVSS:5.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N",
-            "CVSS:/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
-            # prefix without separator or body
-            "CVSS:3.1",
-            "CVSS:3.1/",
-            "CVSS:3.1AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
-            # missing v3/v4 prefix
-            "AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
-            "AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N",
-            # mismatched prefix and body
-            "CVSS:3.1/AV:N/AC:L/Au:N/C:C/I:C/A:C",
-            "CVSS:4.0/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
-            "CVSS:3.1/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N",
-            "CVSS:3.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N",
-            # repeated or surrounding prefix material
-            "CVSS:3.1/CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
-            "(AV:N/AC:L/Au:N/C:C/I:C/A:C)",
-            "/CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
-        ],
-    )
+    @pytest.mark.parametrize("vector", BAD_PREFIX_VECTORS)
     def test_validate_unsupported_missing_or_mismatched_prefix_raises(
         self, vector: str
     ) -> None:
         with pytest.raises(InvalidCVSSVectorError):
             validate_cvss_vector(vector)
 
-    @pytest.mark.parametrize(
-        "vector",
-        [
-            # prefix case
-            "cvss:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
-            "Cvss:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
-            "cvss:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N",
-            # abbreviation case
-            "CVSS:3.1/av:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
-            "CVSS:3.1/AV:N/Ac:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
-            "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/vc:H/VI:H/VA:H/SC:N/SI:N/SA:N",
-            "AV:N/AC:L/AU:N/C:C/I:C/A:C",
-            "AV:N/AC:L/au:N/C:C/I:C/A:C",
-            "av:N/ac:L/au:N/c:C/i:C/a:C",
-            # value case
-            "CVSS:3.1/AV:n/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
-            "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:u/C:H/I:H/A:H",
-            "CVSS:4.0/AV:N/AC:L/AT:n/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N",
-            "AV:N/AC:l/Au:N/C:C/I:C/A:C",
-        ],
-    )
+    @pytest.mark.parametrize("vector", CASE_VARIANT_VECTORS)
     def test_validate_case_variants_raise(self, vector: str) -> None:
         with pytest.raises(InvalidCVSSVectorError):
             validate_cvss_vector(vector)
@@ -520,19 +555,7 @@ class TestValidateCvssVectorInvalid:
         with pytest.raises(InvalidCVSSVectorError):
             validate_cvss_vector(vector)
 
-    @pytest.mark.parametrize(
-        ("version", "extra"),
-        [
-            ("2.0", "XX:N"),
-            ("3.1", "XX:N"),
-            ("4.0", "XX:N"),
-            ("2.0", "PR:N"),
-            ("3.1", "Au:N"),
-            ("3.1", "AT:N"),
-            ("4.0", "S:U"),
-            ("4.0", "C:H"),
-        ],
-    )
+    @pytest.mark.parametrize(("version", "extra"), UNKNOWN_METRIC_CASES)
     def test_validate_unknown_metric_raises(self, version: str, extra: str) -> None:
         prefix, tokens = _split(VALID_VECTORS[version], version)
 
@@ -546,28 +569,7 @@ class TestValidateCvssVectorInvalid:
         with pytest.raises(InvalidCVSSVectorError):
             validate_cvss_vector(_join(prefix, [*tokens, extra]))
 
-    @pytest.mark.parametrize(
-        "vector",
-        [
-            # unknown value for a Base metric
-            "CVSS:3.1/AV:X/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
-            "CVSS:3.1/AV:N/AC:L/PR:N/UI:P/S:U/C:H/I:H/A:H",
-            "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:R/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N",
-            "AV:P/AC:L/Au:N/C:C/I:C/A:C",
-            "AV:N/AC:L/Au:N/C:H/I:C/A:C",
-            # empty value, missing colon, extra colon
-            "CVSS:3.1/AV:/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
-            "CVSS:3.1/AV/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
-            "CVSS:3.1/AV:N:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
-            # empty tokens
-            "CVSS:3.1//AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
-            "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H/",
-            "AV:N/AC:L/Au:N//C:C/I:C/A:C",
-            "/",
-            # other separators
-            "CVSS:3.1/AV:N,AC:L,PR:N,UI:N,S:U,C:H,I:H,A:H",
-        ],
-    )
+    @pytest.mark.parametrize("vector", MALFORMED_TOKEN_VECTORS)
     def test_validate_malformed_metric_tokens_raise(self, vector: str) -> None:
         with pytest.raises(InvalidCVSSVectorError):
             validate_cvss_vector(vector)
@@ -597,6 +599,378 @@ class TestValidateCvssVectorInterface:
     ) -> None:
         with pytest.raises(TypeError):
             validate_cvss_vector(VALID_VECTORS["3.1"], **{keyword: "10.0"})
+
+
+# ---------------------------------------------------------------------------
+# External Base Reduction (cvss-scoring.md, External Base Reduction)
+# ---------------------------------------------------------------------------
+
+# version -> {non-Base abbreviation: official values}, transcribed
+# independently from the specification tables (FIRST CVSS v2 Table 13,
+# v3.0/v3.1 Table 15, v4.0 Table 23).
+_V2_REQUIREMENT_VALUES = {"L", "M", "H", "ND"}
+_V3_REQUIREMENT_VALUES = {"X", "H", "M", "L"}
+_V3_IMPACT_VALUES = {"X", "N", "L", "H"}
+_V3_NON_BASE = {
+    "E": {"X", "H", "F", "P", "U"},
+    "RL": {"X", "U", "W", "T", "O"},
+    "RC": {"X", "C", "R", "U"},
+    "CR": _V3_REQUIREMENT_VALUES,
+    "IR": _V3_REQUIREMENT_VALUES,
+    "AR": _V3_REQUIREMENT_VALUES,
+    "MAV": {"X", "N", "A", "L", "P"},
+    "MAC": {"X", "L", "H"},
+    "MPR": {"X", "N", "L", "H"},
+    "MUI": {"X", "N", "R"},
+    "MS": {"X", "U", "C"},
+    "MC": _V3_IMPACT_VALUES,
+    "MI": _V3_IMPACT_VALUES,
+    "MA": _V3_IMPACT_VALUES,
+}
+SPEC_NON_BASE: dict[str, dict[str, set[str]]] = {
+    "2.0": {
+        "E": {"U", "POC", "F", "H", "ND"},
+        "RL": {"OF", "TF", "W", "U", "ND"},
+        "RC": {"UC", "UR", "C", "ND"},
+        "CDP": {"N", "L", "LM", "MH", "H", "ND"},
+        "TD": {"N", "L", "M", "H", "ND"},
+        "CR": _V2_REQUIREMENT_VALUES,
+        "IR": _V2_REQUIREMENT_VALUES,
+        "AR": _V2_REQUIREMENT_VALUES,
+    },
+    "3.0": _V3_NON_BASE,
+    "3.1": _V3_NON_BASE,
+    "4.0": {
+        "E": {"X", "A", "P", "U"},
+        "CR": _V3_REQUIREMENT_VALUES,
+        "IR": _V3_REQUIREMENT_VALUES,
+        "AR": _V3_REQUIREMENT_VALUES,
+        "MAV": {"X", "N", "A", "L", "P"},
+        "MAC": {"X", "L", "H"},
+        "MAT": {"X", "N", "P"},
+        "MPR": {"X", "N", "L", "H"},
+        "MUI": {"X", "N", "P", "A"},
+        "MVC": _V3_IMPACT_VALUES,
+        "MVI": _V3_IMPACT_VALUES,
+        "MVA": _V3_IMPACT_VALUES,
+        "MSC": _V3_IMPACT_VALUES,
+        "MSI": {"X", "N", "L", "H", "S"},
+        "MSA": {"X", "N", "L", "H", "S"},
+        "S": {"X", "N", "P"},
+        "AU": {"X", "N", "Y"},
+        "R": {"X", "A", "U", "I"},
+        "V": {"X", "D", "C"},
+        "RE": {"X", "L", "M", "H"},
+        "U": {"X", "Clear", "Green", "Amber", "Red"},
+    },
+}
+
+# (received external vector, expected canonical Base vector): live-shaped
+# GitHub vectors and the FIRST specification examples.
+REDUCTION_EXAMPLES: list[tuple[str, str]] = [
+    # GitHub v3.1 with the Temporal metric E:H (single-query capture)
+    (
+        "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H/E:H",
+        "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H",
+    ),
+    # GitHub v4.0 with the Threat metric E:P
+    (
+        "CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:L/VI:H/VA:N/SC:N/SI:N/SA:N/E:P",
+        "CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:L/VI:H/VA:N/SC:N/SI:N/SA:N",
+    ),
+    # GitHub v4.0 with the Supplemental metrics RE:M and U:Red
+    (
+        "CVSS:4.0/AV:L/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:N/SC:H/SI:H/SA:N/RE:M/U:Red",
+        "CVSS:4.0/AV:L/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:N/SC:H/SI:H/SA:N",
+    ),
+    # FIRST v4.0 CVSS-BTE with Supplemental example
+    (
+        "CVSS:4.0/AV:N/AC:L/AT:N/PR:H/UI:N/VC:L/VI:L/VA:N/SC:N/SI:N/SA:N/E:U"
+        "/CR:L/IR:X/AR:L/MAV:A/MAC:H/MAT:N/MPR:N/MUI:P/MVC:X/MVI:N/MVA:H"
+        "/MSC:N/MSI:L/MSA:S/S:N/AU:N/R:I/V:C/RE:H/U:Green",
+        "CVSS:4.0/AV:N/AC:L/AT:N/PR:H/UI:N/VC:L/VI:L/VA:N/SC:N/SI:N/SA:N",
+    ),
+    # FIRST v3.1 example with a non-preferred metric order
+    (
+        "CVSS:3.1/S:U/AV:N/AC:L/PR:H/UI:N/C:L/I:L/A:N/E:F/RL:X",
+        "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:L/I:L/A:N",
+    ),
+    # v3.0 with every Temporal and Environmental metric
+    (
+        "CVSS:3.0/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H/E:P/RL:O/RC:C/CR:H/IR:M"
+        "/AR:L/MAV:A/MAC:H/MPR:L/MUI:R/MS:C/MC:L/MI:N/MA:X",
+        "CVSS:3.0/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+    ),
+    # v2.0 with every Temporal and Environmental metric
+    (
+        "AV:N/AC:L/Au:N/C:C/I:C/A:C/E:POC/RL:OF/RC:UR/CDP:MH/TD:H/CR:H/IR:M/AR:ND",
+        "AV:N/AC:L/Au:N/C:C/I:C/A:C",
+    ),
+]
+
+# Vectors rejected by the reduction itself (step 3) or by the canonical
+# parser after reduction; each carries otherwise valid non-Base metrics.
+_V31 = VALID_VECTORS["3.1"]
+_V40 = VALID_VECTORS["4.0"]
+_V20 = VALID_VECTORS["2.0"]
+REDUCTION_REJECTIONS: list[tuple[str, str]] = [
+    # duplicate recognized non-Base metric
+    ("duplicate-same", f"{_V31}/E:H/E:H"),
+    ("duplicate-differing", f"{_V31}/E:H/RL:O/E:P"),
+    ("duplicate-v4-supplemental", f"{_V40}/U:Red/U:Red"),
+    ("duplicate-v2", f"{_V20}/E:F/E:F"),
+    # invalid value of a recognized non-Base metric
+    ("v31-value-of-v2", f"{_V31}/E:POC"),
+    ("v31-value-of-v4", f"{_V31}/E:A"),
+    ("v2-value-of-v3", f"{_V20}/E:X"),
+    ("v4-value-of-v3", f"{_V40}/E:H"),
+    ("v4-s-value-of-v3-scope", f"{_V40}/S:U"),
+    ("unknown-value", f"{_V31}/RL:Z"),
+    ("wrong-case-value", f"{_V31}/E:h"),
+    ("wrong-case-u-value", f"{_V40}/U:red"),
+    ("upper-case-u-value", f"{_V40}/U:RED"),
+    ("empty-value", f"{_V31}/E:"),
+    ("missing-colon", f"{_V31}/E"),
+    ("extra-colon", f"{_V31}/E:H:X"),
+    ("whitespace-in-value", f"{_V31}/E: H"),
+    ("trailing-whitespace-in-value", f"{_V31}/E:H /RL:O"),
+    # non-Base metric of another version, unknown, or wrong case
+    ("v4-ms-is-v3-only", f"{_V40}/MS:U"),
+    ("v4-rl-is-v3-only", f"{_V40}/RL:O"),
+    ("v31-au-is-v4-only", f"{_V31}/AU:Y"),
+    ("v31-mat-is-v4-only", f"{_V31}/MAT:N"),
+    ("v2-mav-is-v3-only", f"{_V20}/MAV:N"),
+    ("v31-u-is-v4-only", f"{_V31}/U:Red"),
+    ("unknown-metric", f"{_V31}/E:H/XX:N"),
+    ("wrong-case-abbreviation", f"{_V31}/e:H"),
+    ("whitespace-before-abbreviation", f"{_V31}/ E:H"),
+    # incomplete or empty Base set after reduction
+    ("incomplete-v31", "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/E:H"),
+    ("incomplete-v40", "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/E:P"),
+    ("incomplete-v2", "AV:N/AC:L/Au:N/C:C/I:C/E:F"),
+    ("only-non-base-v31", "CVSS:3.1/E:H"),
+    ("only-non-base-v40", "CVSS:4.0/E:P/U:Red"),
+    ("only-non-base-v2", "E:F/RL:OF"),
+    # prefix and token structure are never repaired
+    ("lowercase-prefix", f"cvss:3.1/{_V31.removeprefix('CVSS:3.1/')}/E:H"),
+    ("unsupported-prefix", f"CVSS:3.2/{_V31.removeprefix('CVSS:3.1/')}/E:H"),
+    ("v2-prefixed", f"CVSS:2.0/{_V20}/E:F"),
+    ("missing-v3-prefix", f"{_V31.removeprefix('CVSS:3.1/')}/E:H"),
+    ("mismatched-prefix", f"CVSS:4.0/{_V31.removeprefix('CVSS:3.1/')}/E:H"),
+    ("empty-token", f"{_V31}//E:H"),
+    ("trailing-separator", f"{_V31}/E:H/"),
+    ("embedded-whitespace", f"{_V31}/E:H\tRL:O"),
+    ("nul", f"{_V31}/E:H\x00"),
+]
+
+
+def _non_base_value_cases() -> list[tuple[str, str]]:
+    return [
+        (version, f"{abbreviation}:{value}")
+        for version, metrics in SPEC_NON_BASE.items()
+        for abbreviation, values in metrics.items()
+        for value in sorted(values)
+    ]
+
+
+def _with_extra(version: str, extra: str) -> str:
+    prefix, tokens = _split(VALID_VECTORS[version], version)
+    return _join(prefix, [*tokens, extra])
+
+
+def _with_every_non_base_metric(version: str) -> str:
+    """The valid vector with one token per non-Base metric of `version`:
+    the first before every Base token, the others distributed between the
+    Base tokens, which appear in reverse FIRST order."""
+    prefix, tokens = _split(VALID_VECTORS[version], version)
+    extras = [
+        f"{abbreviation}:{sorted(values)[0]}"
+        for abbreviation, values in SPEC_NON_BASE[version].items()
+    ]
+    slots: list[list[str]] = [[] for _ in tokens]
+    for index, extra in enumerate(extras[1:]):
+        slots[index % len(tokens)].append(extra)
+    mixed = [extras[0]]
+    for token, after in zip(reversed(tokens), slots, strict=True):
+        mixed += [token, *after]
+    return _join(prefix, mixed)
+
+
+@pytest.mark.unit
+class TestValidateExternalCvssVectorReduction:
+    """Recognized non-Base metrics are removed before the strict parser."""
+
+    def test_reduction_table_matches_the_specification(self) -> None:
+        tables = {
+            version.value: {
+                abbreviation: set(values) for abbreviation, values in metrics.items()
+            }
+            for version, metrics in cvss._NON_BASE_METRICS.items()
+        }
+
+        assert tables == SPEC_NON_BASE
+
+    def test_no_non_base_abbreviation_equals_a_base_abbreviation(self) -> None:
+        for version, metrics in SPEC_NON_BASE.items():
+            base = {abbreviation for abbreviation, _, _ in SPEC_GRAMMAR[version][1]}
+            assert base.isdisjoint(metrics), version
+
+    @pytest.mark.parametrize(("version", "extra"), _non_base_value_cases())
+    def test_every_official_non_base_value_is_removed(
+        self, version: str, extra: str
+    ) -> None:
+        prefix, tokens = _split(VALID_VECTORS[version], version)
+
+        result = validate_external_cvss_vector(_join(prefix, [*tokens, extra]))
+
+        assert result == validate_cvss_vector(VALID_VECTORS[version])
+
+    @pytest.mark.parametrize(("version", "extra"), _non_base_value_cases())
+    def test_a_leading_non_base_metric_is_removed(
+        self, version: str, extra: str
+    ) -> None:
+        prefix, tokens = _split(VALID_VECTORS[version], version)
+
+        result = validate_external_cvss_vector(_join(prefix, [extra, *tokens]))
+
+        assert result.canonical_vector == VALID_VECTORS[version]
+
+    @pytest.mark.parametrize("version", VERSIONS)
+    def test_every_non_base_metric_interleaved_reduces_to_first_order(
+        self, version: str
+    ) -> None:
+        vector = _with_every_non_base_metric(version)
+        assert len(vector) <= cvss.EXTERNAL_VECTOR_MAX_LENGTH
+        _, tokens = _split(vector, version)
+        assert {token.split(":")[0] for token in tokens} >= set(SPEC_NON_BASE[version])
+
+        result = validate_external_cvss_vector(vector)
+
+        assert result == validate_cvss_vector(VALID_VECTORS[version])
+        assert result.canonical_vector == VALID_VECTORS[version]
+
+    @pytest.mark.parametrize(("received", "base"), REDUCTION_EXAMPLES)
+    def test_live_shaped_and_specification_examples_reduce_to_base(
+        self, received: str, base: str
+    ) -> None:
+        result = validate_external_cvss_vector(received)
+
+        assert result.canonical_vector == base
+        assert result == validate_cvss_vector(base)
+
+    @pytest.mark.parametrize(("received", "base"), REDUCTION_EXAMPLES)
+    def test_strict_parser_still_rejects_every_reduced_vector(
+        self, received: str, base: str
+    ) -> None:
+        with pytest.raises(InvalidCVSSVectorError):
+            validate_cvss_vector(received)
+
+    def test_outer_whitespace_is_trimmed_before_reduction(self) -> None:
+        received, base = REDUCTION_EXAMPLES[1]
+
+        assert validate_external_cvss_vector(
+            f" \t{received}\n"
+        ) == validate_cvss_vector(base)
+
+
+@pytest.mark.unit
+class TestValidateExternalCvssVectorIdentity:
+    """A vector without non-Base metrics yields exactly the strict result."""
+
+    @pytest.mark.parametrize(
+        "vector",
+        [
+            *VALID_VECTORS.values(),
+            "AV:N/AC:L/Au:N/C:C/I:C/A:C",
+            "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+            "CVSS:4.0/SA:N/SI:N/SC:N/VA:H/VI:H/VC:H/UI:N/PR:N/AT:N/AC:L/AV:N",
+            "  CVSS:3.0/A:H/I:L/C:N/S:C/UI:R/PR:L/AC:H/AV:L\t",
+        ],
+    )
+    def test_base_vector_result_equals_the_strict_parser(self, vector: str) -> None:
+        assert validate_external_cvss_vector(vector) == validate_cvss_vector(vector)
+
+    @pytest.mark.parametrize(
+        "vector",
+        [
+            *EMPTY_AFTER_TRIM_VECTORS,
+            *EMBEDDED_WHITESPACE_VECTORS,
+            *BAD_PREFIX_VECTORS,
+            *CASE_VARIANT_VECTORS,
+            *MALFORMED_TOKEN_VECTORS,
+            *(vector for _, vector in _missing_metric_cases()),
+            *(vector for _, vector in _duplicate_metric_cases()),
+            *(_with_extra(version, extra) for version, extra in UNKNOWN_METRIC_CASES),
+        ],
+    )
+    def test_every_strict_rejection_is_still_rejected(self, vector: str) -> None:
+        with pytest.raises(InvalidCVSSVectorError):
+            validate_cvss_vector(vector)
+        with pytest.raises(InvalidCVSSVectorError):
+            validate_external_cvss_vector(vector)
+
+
+@pytest.mark.unit
+class TestValidateExternalCvssVectorRejections:
+    """Malformed non-Base content rejects the candidate and is never repaired."""
+
+    @pytest.mark.parametrize(
+        "vector",
+        [vector for _, vector in REDUCTION_REJECTIONS],
+        ids=[case_id for case_id, _ in REDUCTION_REJECTIONS],
+    )
+    def test_invalid_candidate_is_rejected(self, vector: str) -> None:
+        with pytest.raises(InvalidCVSSVectorError):
+            validate_external_cvss_vector(vector)
+
+    def test_error_message_never_contains_input(self) -> None:
+        vector = f"{_V31}/E:SENTINEL-MARKER"
+
+        with pytest.raises(InvalidCVSSVectorError) as excinfo:
+            validate_external_cvss_vector(vector)
+
+        assert "SENTINEL-MARKER" not in str(excinfo.value)
+        assert str(excinfo.value) == "Invalid CVSS vector."
+
+    def test_accepts_only_the_vector_string(self) -> None:
+        parameters = inspect.signature(validate_external_cvss_vector).parameters
+
+        assert list(parameters) == ["vector_string"]
+
+
+@pytest.mark.unit
+class TestValidateExternalCvssVectorLength:
+    """The received-length bound is measured before trimming."""
+
+    @staticmethod
+    def _padded(length: int) -> str:
+        received, _ = REDUCTION_EXAMPLES[1]
+        padding = length - len(received)
+        return " " * (padding // 2) + received + "\t" * (padding - padding // 2)
+
+    def test_bound_is_the_received_length_of_input_rule_1(self) -> None:
+        assert cvss.EXTERNAL_VECTOR_MAX_LENGTH == 200
+
+    def test_exactly_200_received_characters_are_accepted(self) -> None:
+        received = self._padded(200)
+        assert len(received) == 200
+
+        result = validate_external_cvss_vector(received)
+
+        assert result.canonical_vector == REDUCTION_EXAMPLES[1][1]
+
+    def test_201_received_characters_are_rejected_without_parsing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[str] = []
+        monkeypatch.setattr(cvss, "validate_cvss_vector", calls.append)
+        received = self._padded(201)
+        assert len(received) == 201
+
+        with pytest.raises(InvalidCVSSVectorError):
+            validate_external_cvss_vector(received)
+
+        assert calls == []
 
 
 # ---------------------------------------------------------------------------

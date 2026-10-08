@@ -16,8 +16,8 @@ raise `pydantic.ValidationError`, whose message never renders the input.
 The payload's own validation rejects U+0000 and over-length values
 (cve-service.md, CVEIngestPayload Schema); that `pydantic.ValidationError`
 propagates as a per-advisory failure. CVSS vectors are passed unparsed:
-`upsert_cve()` owns canonical acceptance and its bounded `invalid_vector`
-warning.
+`upsert_cve()` owns canonical acceptance through the External Base
+Reduction and its bounded `invalid_vector` warning.
 """
 
 from __future__ import annotations

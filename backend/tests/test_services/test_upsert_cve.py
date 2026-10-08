@@ -11,8 +11,8 @@ Owning specifications:
   Payload Duplicate Handling, Affected-Version Snapshot Operations,
   Idempotency; Exceptions; Transaction Ownership; UpsertResult and its
   Design Context).
-- docs/features/tickets/cvss-scoring.md (Input Rules; Provider Identity and
-  Authority).
+- docs/features/tickets/cvss-scoring.md (Input Rules; External Base
+  Reduction; Provider Identity and Authority).
 - docs/data-model.md (CVE, CVESource, CVECVSSAssessment,
   CVEExternalIdentifier, CVEAffectedVersion, CVECWE, CVESSVCAssessment,
   CVEKEVEntry, CVEEPSSScore).
@@ -121,10 +121,12 @@ from tests.support.cve_ingest import (
 )
 from tests.support.cvss_chain import priority_event
 from tests.support.suse_cvss import (
+    V20_CRITICAL,
     V31_CRITICAL,
     V31_CRITICAL_REORDERED,
     V31_HIGH,
     V40_CRITICAL,
+    Vector,
     persisted_assessments,
     unit,
 )
@@ -409,6 +411,9 @@ class TestCanonicalCVSSDuplicates:
             pytest.param(V31_CRITICAL.canonical, id="identical"),
             pytest.param(V31_CRITICAL_REORDERED, id="reordered-metrics"),
             pytest.param(f"  {V31_CRITICAL.canonical}\t", id="outer-whitespace"),
+            pytest.param(
+                f"{V31_CRITICAL.canonical}/E:P/RL:O", id="same-base-reduction"
+            ),
         ],
     )
     async def test_same_canonical_vector_collapses_to_one_row(
@@ -427,6 +432,21 @@ class TestCanonicalCVSSDuplicates:
         assert await persisted_assessments(db_session, result.cve.id) == [
             unit(PROVIDER, V31_CRITICAL)
         ]
+
+    async def test_reduction_with_a_different_base_rejects_the_payload(
+        self, db_session: AsyncSession
+    ) -> None:
+        payload = CVEIngestPayload(
+            cvss_assessments=[
+                cvss(PROVIDER, V31_CRITICAL.canonical),
+                cvss(PROVIDER, f"{V31_HIGH.canonical}/E:P"),
+            ]
+        )
+
+        with StatementRecorder(db_session) as recorder, pytest.raises(ValidationError):
+            await upsert_cve(db_session, NEW_CVE_ID, NVD, payload)
+
+        assert recorder.statements == []
 
     async def test_same_provider_different_versions_do_not_conflict(
         self, db_session: AsyncSession
@@ -1889,7 +1909,12 @@ class TestCVSSCandidateSkips:
             pytest.param(
                 "CVSS:3.2/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H", id="unsupported-version"
             ),
-            pytest.param(f"{V31_CRITICAL.canonical}/E:P", id="temporal-metric"),
+            pytest.param(f"{V31_CRITICAL.canonical}/E:POC", id="non-base-value-of-v2"),
+            pytest.param(
+                f"{V31_CRITICAL.canonical}/E:P/E:P", id="duplicate-non-base-metric"
+            ),
+            pytest.param(f"{V31_CRITICAL.canonical}/E:P/XX:N", id="unknown-metric"),
+            pytest.param("CVSS:3.1/E:P/RL:O", id="only-non-base-metrics"),
             pytest.param("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H", id="incomplete"),
             pytest.param(V31_PADDED_201, id="201-received-characters"),
             pytest.param(f"\x00{V31_HIGH.canonical}", id="nul-start"),
@@ -1937,7 +1962,7 @@ class TestCVSSCandidateSkips:
             parsed.append(vector)
             return original(vector)
 
-        monkeypatch.setattr(cve_service, "validate_cvss_vector", spy)
+        monkeypatch.setattr(cvss_parser, "validate_cvss_vector", spy)
         payload = CVEIngestPayload(
             cvss_assessments=[
                 cvss(PROVIDER, V31_PADDED_201),
@@ -1948,7 +1973,9 @@ class TestCVSSCandidateSkips:
         with capture_logs() as logs:
             result = await _upsert(db_session, payload=payload)
 
-        assert parsed == [V31_PADDED_200]
+        # Only the 200-character value reaches the strict parser, trimmed by
+        # the External Base Reduction.
+        assert parsed == [V31_CRITICAL.canonical]
         assert skip_events(logs) == [_skip(0, "invalid_vector")]
         assert await persisted_assessments(db_session, result.cve.id) == [
             unit(OTHER_PROVIDER, V31_CRITICAL)
@@ -1965,6 +1992,75 @@ class TestCVSSCandidateSkips:
         assert skip_events(logs) == []
         assert await persisted_assessments(db_session, result.cve.id) == [
             unit(PROVIDER, V31_CRITICAL)
+        ]
+
+    @pytest.mark.parametrize(
+        ("received", "expected"),
+        [
+            pytest.param(
+                f"{V31_CRITICAL.canonical}/E:P/RL:O/RC:C",
+                V31_CRITICAL,
+                id="v31-temporal",
+            ),
+            pytest.param(
+                f"{V31_CRITICAL.canonical}/CR:H/MAV:L/MS:C/MA:X",
+                V31_CRITICAL,
+                id="v31-environmental",
+            ),
+            pytest.param(
+                f"{V40_CRITICAL.canonical}/E:P/S:P/AU:Y/R:U/V:C/RE:M/U:Red",
+                V40_CRITICAL,
+                id="v40-threat-and-supplemental",
+            ),
+            pytest.param(
+                "CVSS:4.0/E:X/"
+                + V40_CRITICAL.canonical.removeprefix("CVSS:4.0/")
+                + "/MSI:S",
+                V40_CRITICAL,
+                id="v40-leading-threat-and-environmental",
+            ),
+            pytest.param(
+                f"{V20_CRITICAL.canonical}/E:POC/RL:OF/CDP:MH/AR:ND",
+                V20_CRITICAL,
+                id="v20-temporal-and-environmental",
+            ),
+        ],
+    )
+    async def test_non_base_vector_is_persisted_as_its_base_vector(
+        self, db_session: AsyncSession, received: str, expected: Vector
+    ) -> None:
+        payload = CVEIngestPayload(cvss_assessments=[cvss(PROVIDER, received)])
+
+        with capture_logs() as logs:
+            result = await _upsert(db_session, payload=payload)
+
+        assert skip_events(logs) == []
+        assert await persisted_assessments(db_session, result.cve.id) == [
+            unit(PROVIDER, expected)
+        ]
+        for entry in logs:
+            assert received not in repr(entry)
+
+    async def test_reduced_vector_equal_to_the_stored_base_is_unchanged(
+        self, db_session: AsyncSession
+    ) -> None:
+        base = CVEIngestPayload(
+            cvss_assessments=[cvss(PROVIDER, V40_CRITICAL.canonical)]
+        )
+        first = await _upsert(db_session, payload=base)
+        events = await ticket_events(db_session, first.ticket)
+
+        second = await _upsert(
+            db_session,
+            payload=CVEIngestPayload(
+                cvss_assessments=[cvss(PROVIDER, f"{V40_CRITICAL.canonical}/E:A/U:Red")]
+            ),
+        )
+
+        assert second.action is UNCHANGED
+        assert await ticket_events(db_session, first.ticket) == events
+        assert await persisted_assessments(db_session, first.cve.id) == [
+            unit(PROVIDER, V40_CRITICAL)
         ]
 
     async def test_skips_follow_input_order_with_zero_based_ordinals(

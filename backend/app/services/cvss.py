@@ -2,11 +2,11 @@
 
 Single database-free formula owner for CVSS semantics. See
 `docs/features/tickets/cvss-scoring.md` for the complete contract:
-Accepted Base Vectors (Input Rules, Stable Parsed Result, per-version
-Base metrics), Severity (Version-Specific Assessment Severity, Unified CVE
-Severity, Severity Resolution Cascade), Eligibility Score Resolution,
-Provider Identity and Authority (reserved-name comparison), and Service
-Boundaries (Pure CVSS Logic).
+Accepted Base Vectors (Input Rules, Stable Parsed Result, External Base
+Reduction, per-version Base metrics), Severity (Version-Specific
+Assessment Severity, Unified CVE Severity, Severity Resolution Cascade),
+Eligibility Score Resolution, Provider Identity and Authority
+(reserved-name comparison), and Service Boundaries (Pure CVSS Logic).
 
 Every function is deterministic and side-effect-free: no database access,
 no I/O, and no settings reads — callers pass the configured default CVSS
@@ -17,14 +17,18 @@ this module importing any Model.
 Exceptions:
 
 - `InvalidCVSSVectorError` — `validate_cvss_vector()` rejects a vector
-  that violates Input Rules 2-6 (domain failure, `422 CVSS_INVALID_VECTOR`).
+  that violates Input Rules 2-6 (domain failure, `422 CVSS_INVALID_VECTOR`);
+  `validate_external_cvss_vector()` raises it for every External Base
+  Reduction rejection.
 - `ValueError` — internal contract violations by a caller: a default
   version other than `3.1`/`4.0`, an unsupported assessment version,
   duplicate `(provider_name, cvss_version)` natural keys, or a
   `calculate_severity()` score outside 0.0-10.0.
 
-The received-length limit (Input Rule 1) is owned by the Pydantic request
-schema and is deliberately not enforced here.
+The received-length limit (Input Rule 1) of manual input is owned by the
+Pydantic request schema and is deliberately not enforced by
+`validate_cvss_vector()`; only the external entry point
+`validate_external_cvss_vector()` applies it.
 """
 
 from __future__ import annotations
@@ -372,6 +376,89 @@ _PREFIX_MARKER = "CVSS:"
 
 
 # ---------------------------------------------------------------------------
+# External Base Reduction grammar (FIRST non-Base metrics, Sentinel-owned)
+# ---------------------------------------------------------------------------
+
+EXTERNAL_VECTOR_MAX_LENGTH: Final = 200
+"""Received-length bound of an external vector, checked before trimming
+(cvss-scoring.md, External Base Reduction step 1; Input Rules rule 1)."""
+
+_V2_REQUIREMENT = frozenset({"L", "M", "H", "ND"})
+_V3_REQUIREMENT = frozenset({"X", "H", "M", "L"})
+_V3_IMPACT = frozenset({"X", "N", "L", "H"})
+
+_V2_NON_BASE: Mapping[str, frozenset[str]] = {
+    # Temporal
+    "E": frozenset({"U", "POC", "F", "H", "ND"}),
+    "RL": frozenset({"OF", "TF", "W", "U", "ND"}),
+    "RC": frozenset({"UC", "UR", "C", "ND"}),
+    # Environmental
+    "CDP": frozenset({"N", "L", "LM", "MH", "H", "ND"}),
+    "TD": frozenset({"N", "L", "M", "H", "ND"}),
+    "CR": _V2_REQUIREMENT,
+    "IR": _V2_REQUIREMENT,
+    "AR": _V2_REQUIREMENT,
+}
+
+_V3_NON_BASE: Mapping[str, frozenset[str]] = {
+    # Temporal
+    "E": frozenset({"X", "H", "F", "P", "U"}),
+    "RL": frozenset({"X", "U", "W", "T", "O"}),
+    "RC": frozenset({"X", "C", "R", "U"}),
+    # Environmental
+    "CR": _V3_REQUIREMENT,
+    "IR": _V3_REQUIREMENT,
+    "AR": _V3_REQUIREMENT,
+    "MAV": frozenset({"X", "N", "A", "L", "P"}),
+    "MAC": frozenset({"X", "L", "H"}),
+    "MPR": frozenset({"X", "N", "L", "H"}),
+    "MUI": frozenset({"X", "N", "R"}),
+    "MS": frozenset({"X", "U", "C"}),
+    "MC": _V3_IMPACT,
+    "MI": _V3_IMPACT,
+    "MA": _V3_IMPACT,
+}
+
+_V4_SUBSEQUENT_SAFETY = frozenset({"X", "N", "L", "H", "S"})
+
+_V4_NON_BASE: Mapping[str, frozenset[str]] = {
+    # Threat
+    "E": frozenset({"X", "A", "P", "U"}),
+    # Environmental
+    "CR": _V3_REQUIREMENT,
+    "IR": _V3_REQUIREMENT,
+    "AR": _V3_REQUIREMENT,
+    "MAV": frozenset({"X", "N", "A", "L", "P"}),
+    "MAC": frozenset({"X", "L", "H"}),
+    "MAT": frozenset({"X", "N", "P"}),
+    "MPR": frozenset({"X", "N", "L", "H"}),
+    "MUI": frozenset({"X", "N", "P", "A"}),
+    "MVC": _V3_IMPACT,
+    "MVI": _V3_IMPACT,
+    "MVA": _V3_IMPACT,
+    "MSC": _V3_IMPACT,
+    "MSI": _V4_SUBSEQUENT_SAFETY,
+    "MSA": _V4_SUBSEQUENT_SAFETY,
+    # Supplemental
+    "S": frozenset({"X", "N", "P"}),
+    "AU": frozenset({"X", "N", "Y"}),
+    "R": frozenset({"X", "A", "U", "I"}),
+    "V": frozenset({"X", "D", "C"}),
+    "RE": frozenset({"X", "L", "M", "H"}),
+    "U": frozenset({"X", "Clear", "Green", "Amber", "Red"}),
+}
+
+_NON_BASE_METRICS: Mapping[CVSSVersion, Mapping[str, frozenset[str]]] = {
+    CVSSVersion.V2_0: _V2_NON_BASE,
+    CVSSVersion.V3_0: _V3_NON_BASE,
+    CVSSVersion.V3_1: _V3_NON_BASE,
+    CVSSVersion.V4_0: _V4_NON_BASE,
+}
+"""Recognized non-Base metrics of each version and their official values
+(FIRST CVSS v2 Table 13, v3.0/v3.1 Table 15, v4.0 Table 23)."""
+
+
+# ---------------------------------------------------------------------------
 # Parsing
 # ---------------------------------------------------------------------------
 
@@ -479,6 +566,44 @@ def validate_cvss_vector(vector_string: str) -> ParsedCVSSVector:
         severity=_assessment_severity(version, score),
         metrics=metrics,
     )
+
+
+def validate_external_cvss_vector(vector_string: str) -> ParsedCVSSVector:
+    """Parse one external CVSS vector through the External Base Reduction.
+
+    Only trusted external ingestion calls this function (cvss-scoring.md,
+    External Base Reduction); manual input uses `validate_cvss_vector()`.
+    A received value over `EXTERNAL_VECTOR_MAX_LENGTH` characters is
+    rejected before trimming. After trimming and version detection, each
+    `/`-separated token whose abbreviation is a recognized non-Base metric
+    of the detected version is removed when it carries `:`, an official
+    value of that metric, and occurs only once; any other such token
+    rejects the vector. Every remaining token is kept unchanged, and the
+    reduced vector is parsed by `validate_cvss_vector()`, whose result is
+    returned. A complete Base vector therefore yields exactly the strict
+    parser's result, and malformed input is never repaired.
+
+    Raises:
+        InvalidCVSSVectorError: The vector is over-long, carries an
+            invalid or duplicate recognized non-Base metric, or its
+            reduction violates the accepted Base-vector contract.
+    """
+    if len(vector_string) > EXTERNAL_VECTOR_MAX_LENGTH:
+        raise InvalidCVSSVectorError
+    version, body = _detect_version(vector_string.strip())
+    non_base = _NON_BASE_METRICS[version]
+    kept: list[str] = []
+    removed: set[str] = set()
+    for token in body.split("/"):
+        abbreviation, separator, value = token.partition(":")
+        values = non_base.get(abbreviation)
+        if values is None:
+            kept.append(token)
+            continue
+        if not separator or value not in values or abbreviation in removed:
+            raise InvalidCVSSVectorError
+        removed.add(abbreviation)
+    return validate_cvss_vector(_VERSION_SPECS[version].prefix + "/".join(kept))
 
 
 # ---------------------------------------------------------------------------

@@ -89,7 +89,7 @@ import pytest
 from pydantic import Field, TypeAdapter, ValidationError
 
 from app.core.enums import CVSSVersion
-from app.services.cvss import validate_cvss_vector
+from app.services.cvss import validate_cvss_vector, validate_external_cvss_vector
 from app.services.ticket_mutations_errors import InvalidCVSSVectorError
 from tests.support.ghsa import (
     ADVISORY_FIXTURES,
@@ -323,6 +323,12 @@ def _metric_keys(vector: str) -> set[str]:
     return {part.split(":")[0] for part in vector.split("/")[1:]}
 
 
+def _base_tokens(vector: str, base: frozenset[str]) -> str:
+    """The prefix and the Base tokens of a FIRST-ordered vector."""
+    prefix, *tokens = vector.split("/")
+    return "/".join([prefix, *(t for t in tokens if t.split(":")[0] in base)])
+
+
 def _ranges(name: str) -> list[str]:
     return [
         entry["vulnerable_version_range"]
@@ -512,24 +518,29 @@ class TestCVSSShape:
         assert validate_cvss_vector(vector).version is CVSSVersion.V4_0
 
     @pytest.mark.parametrize("name", _NON_BASE_V4_FIXTURES)
-    def test_non_base_v4_vector_is_rejected_by_the_canonical_parser(
-        self, name: str
-    ) -> None:
-        """The current specified skip (Field Mapping, CVSS assessments)."""
+    def test_non_base_v4_vector_reduces_to_its_base_vector(self, name: str) -> None:
+        """Field Mapping, CVSS assessments: the External Base Reduction of
+        cvss-scoring.md keeps the Base vector; the strict parser rejects it."""
         vector = _vector(name, "v4")
         assert vector is not None
 
         assert _metric_keys(vector) > _V4_BASE_METRICS
+        assert validate_external_cvss_vector(vector).canonical_vector == (
+            _base_tokens(vector, _V4_BASE_METRICS)
+        )
         with pytest.raises(InvalidCVSSVectorError):
             validate_cvss_vector(vector)
 
-    def test_single_query_v3_vector_with_a_temporal_metric_is_rejected(
+    def test_single_query_v3_vector_with_a_temporal_metric_reduces_to_base(
         self,
     ) -> None:
         vector = _vector(SINGLE_REVIEWED_FIXTURE, "v3")
         assert vector is not None
 
         assert _metric_keys(vector) == _V3_BASE_METRICS | {"E"}
+        parsed = validate_external_cvss_vector(vector)
+        assert parsed.version is CVSSVersion.V3_1
+        assert parsed.canonical_vector == _base_tokens(vector, _V3_BASE_METRICS)
         with pytest.raises(InvalidCVSSVectorError):
             validate_cvss_vector(vector)
 

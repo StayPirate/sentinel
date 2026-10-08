@@ -1092,13 +1092,12 @@ class TestIngestion:
                 False,
             ),
         }
-        # The v3 vector carries the Temporal metric `E:H`: skipped with the
-        # one bounded `upsert_cve()` warning, without failing the advisory.
-        assert await _assessments(db_session, target.cve) == set()
-        [skip] = _events(logs, SKIP_EVENT)
-        assert skip["reason"] == "invalid_vector"
-        assert skip["cve_id"] == target.cve_id
-        assert set(skip) <= SKIP_EVENT_KEYS
+        # The v3 vector carries the Temporal metric `E:H`: the External Base
+        # Reduction persists its canonical Base vector, without a warning.
+        assert await _assessments(db_session, target.cve) == {
+            ("GitHub", "3.1", "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H")
+        }
+        assert _events(logs, SKIP_EVENT) == []
         _assert_private(logs, advisory["cvss_severities"]["cvss_v3"]["vector_string"])
         assert await _source_status(db_session, target.cve) == (
             CVESourceFetchStatus.SUCCESS
@@ -1449,26 +1448,44 @@ class TestCvss:
         }
         assert _events(logs, SKIP_EVENT) == []
 
-    async def test_live_non_base_v4_is_skipped_once(
+    @pytest.mark.parametrize(
+        ("name", "member", "base"),
+        [
+            (
+                "advisory_v4_non_base",
+                "cvss_v4",
+                "CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:L/VI:H/VA:N/SC:N/SI:N/SA:N",
+            ),
+            (
+                "advisory_v3_v4_non_base_ranges",
+                "cvss_v4",
+                "CVSS:4.0/AV:L/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:N/SC:H/SI:H/SA:N",
+            ),
+        ],
+        ids=["threat_e_p", "supplemental_re_m_u_red"],
+    )
+    async def test_live_non_base_v4_is_persisted_as_its_base_vector(
         self,
+        name: str,
+        member: str,
+        base: str,
         db_session: AsyncSession,
         target: Target,
         fetcher: SyncGhsaAdvisories,
         server: GhsaServer,
     ) -> None:
-        advisory = _retargeted("advisory_v4_non_base", target.cve_id)
+        advisory = _retargeted(name, target.cve_id)
+        received = advisory["cvss_severities"][member]["vector_string"]
+        assert received != base
         _serve(server, target.cve_id, advisory)
 
         with capture_logs() as logs:
             result = await fetcher.fetch_single(target.cve_id, db_session)
 
         assert result.action is UpsertAction.UPDATED
-        assert await _assessments(db_session, target.cve) == set()
-        assert await _cwes(db_session, target.cve) == {("CWE-295", "GitHub")}
-        assert [entry["reason"] for entry in _events(logs, SKIP_EVENT)] == [
-            "invalid_vector"
-        ]
-        _assert_private(logs, advisory["cvss_severities"]["cvss_v4"]["vector_string"])
+        assert ("GitHub", "4.0", base) in await _assessments(db_session, target.cve)
+        assert _events(logs, SKIP_EVENT) == []
+        _assert_private(logs, received)
 
     @pytest.mark.parametrize(
         "vector",
@@ -1809,6 +1826,11 @@ class TestLogPrivacy:
         advisory["cwes"].append({"cwe_id": f"CWE-x {SECRET}"})
         advisory["vulnerabilities"].append(
             _vulnerability(SECRET, "pip", f"~> {SECRET}")
+        )
+        # The live v4 vector with `E:P` is accepted as its Base vector, so a
+        # rejected v3 vector carries the CVSS skip path.
+        advisory["cvss_severities"]["cvss_v3"]["vector_string"] = (
+            f"CVSS:3.1/AV:N/{SECRET}"
         )
         _serve(server, target.cve_id, advisory)
 
