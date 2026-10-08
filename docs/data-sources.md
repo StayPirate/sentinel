@@ -211,8 +211,9 @@ information relevant for Vulnerability Analysts.
   database is also available as a Git repository at
   `https://github.com/github/advisory-database.git` (not used by Sentinel)
 - **Volume**: one paginated query (100 advisories per page) per 3-hour run;
-  about 80 reviewed advisories were modified in a measured 3-hour window
-  (2026-10-08), so a typical run fetches one or two pages
+  304 reviewed advisories were modified between 2026-10-05 and 2026-10-08
+  (measured windows of 3 hours held 0 to 77), so a typical run fetches one
+  page and rarely more than two
 - **Integration status**: **Active**
 - **Documentation**:
   https://docs.github.com/en/code-security/security-advisories/working-with-global-security-advisories-from-the-github-advisory-database
