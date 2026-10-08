@@ -34,6 +34,7 @@ import os
 import re
 import shutil
 import signal
+import stat
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -153,20 +154,32 @@ def _signal_group(pid: int, signum: signal.Signals) -> None:
 
 
 async def _terminate(process: asyncio.subprocess.Process) -> None:
-    """Terminate the git process group and reap the git process."""
+    """Terminate the git process group and reap the git process.
+
+    A further interruption (cancellation, whole-run signal) while this runs
+    is held until the process is reaped, then raised."""
     if process.returncode is not None:
         return
     _signal_group(process.pid, signal.SIGTERM)
+    interruption: BaseException | None = None
     try:
         async with asyncio.timeout(_TERMINATION_GRACE_SECONDS):
             await asyncio.shield(process.wait())
     except TimeoutError:
         pass
-    finally:
-        # Also removes helpers (remote transport, index-pack) that outlive
-        # the git process itself.
-        _signal_group(process.pid, signal.SIGKILL)
-    await process.wait()
+    except BaseException as exc:
+        interruption = exc
+    # Also removes helpers (remote transport, index-pack) that outlive the
+    # git process itself.
+    _signal_group(process.pid, signal.SIGKILL)
+    while True:
+        try:
+            await asyncio.shield(process.wait())
+            break
+        except BaseException as exc:
+            interruption = exc
+    if interruption is not None:
+        raise interruption
 
 
 async def _run(args: tuple[str, ...], *, limit_seconds: float) -> _Completed:
@@ -319,13 +332,22 @@ async def get_commit_date(repo_path: Path, ref: str) -> str:
     return await _read_with_retries(attempt)
 
 
+def _is_absent_or_not_directory(path: Path) -> bool:
+    """Whether `path` definitively is no directory. Any other failure to
+    inspect it (for example a transient I/O error) is left to the retried
+    git check."""
+    try:
+        return not stat.S_ISDIR(path.stat().st_mode)
+    except FileNotFoundError, NotADirectoryError, ValueError:
+        return True
+    except OSError:
+        return False
+
+
 async def is_clone_valid(repo_path: Path) -> bool:
     """Whether `repo_path` is a bare repository whose `HEAD` names a commit.
     Never raises for a git or filesystem failure."""
-    try:
-        if not await asyncio.to_thread(repo_path.is_dir):
-            return False
-    except OSError:
+    if await asyncio.to_thread(_is_absent_or_not_directory, repo_path):
         return False
 
     async def attempt() -> None:

@@ -19,6 +19,7 @@ import time
 from collections.abc import Awaitable, Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import pytest
 from celery.exceptions import SoftTimeLimitExceeded
@@ -55,6 +56,7 @@ class Behavior:
     """What the fake git does for one subcommand."""
 
     stdout: str = ""
+    stderr: str = ""
     exit_code: int = 0
     hang: bool = False
     ignore_term: bool = False
@@ -87,6 +89,7 @@ def _script_body(behavior: Behavior) -> str:
         ]
     lines += [
         f"printf '%s' {shlex.quote(behavior.stdout)}",
+        f"printf '%s' {shlex.quote(behavior.stderr)} >&2",
         f"exit {behavior.exit_code}",
     ]
     return "\n    ".join(lines)
@@ -348,6 +351,60 @@ async def test_cancelled_call_propagates_cancelled_error_and_leaves_no_process(
 
 
 @pytest.mark.parametrize(
+    ("interruptions", "expected"),
+    [
+        pytest.param({}, asyncio.CancelledError, id="cancelled-again-during-grace"),
+        pytest.param(
+            {1: SoftTimeLimitExceeded()},
+            SoftTimeLimitExceeded,
+            id="soft-time-limit-during-grace",
+        ),
+        pytest.param(
+            {1: SoftTimeLimitExceeded(), 2: MemoryError()},
+            MemoryError,
+            id="memory-error-while-reaping",
+        ),
+    ],
+)
+async def test_further_interruption_while_terminating_reaps_before_propagating(
+    fake_git: FakeGitFactory,
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    interruptions: dict[int, BaseException],
+    expected: type[BaseException],
+) -> None:
+    fake = fake_git.install({"show": Behavior(hang=True, ignore_term=True)})
+    monkeypatch.setattr(git_operations, "_TERMINATION_GRACE_SECONDS", 30)
+    real_shield = asyncio.shield
+    shields: list[asyncio.Future[Any]] = []
+
+    async def interrupt(error: BaseException) -> Any:
+        await asyncio.sleep(0.2)
+        raise error
+
+    def shield(awaitable: Awaitable[Any]) -> asyncio.Future[Any]:
+        # Shielded wait 1 is the SIGTERM grace period; later ones reap.
+        shielded = real_shield(awaitable)
+        shields.append(shielded)
+        error = interruptions.get(len(shields))
+        return shielded if error is None else asyncio.ensure_future(interrupt(error))
+
+    monkeypatch.setattr(asyncio, "shield", shield)
+    task = asyncio.ensure_future(show_file(repo, "HEAD", "README"))
+    await _wait_until(lambda: len(fake.grandchild_pids()) == 1)
+
+    task.cancel()
+    await _wait_until(lambda: len(shields) == 1)
+    if not interruptions:
+        task.cancel()
+    with pytest.raises(expected):
+        await task
+
+    # Reaped before the exception propagated, long before the grace period.
+    await _assert_no_process_left(fake)
+
+
+@pytest.mark.parametrize(
     "error",
     [
         pytest.param(SoftTimeLimitExceeded(), id="soft-time-limit"),
@@ -457,6 +514,28 @@ async def test_clone_fetch_show_failure_makes_one_attempt(
 
     assert fake.subcommands() == subcommands
     assert sleeps == []
+
+
+@pytest.mark.parametrize(
+    ("stderr", "expected"),
+    [
+        pytest.param("fatal: path not found\n", None, id="path-not-found"),
+        pytest.param("fatal: bad object\n", GitFileError, id="other-failure"),
+    ],
+)
+async def test_show_file_exit_128_classified_by_stderr_marker(
+    fake_git: FakeGitFactory,
+    repo: Path,
+    stderr: str,
+    expected: type[GitFileError] | None,
+) -> None:
+    fake_git.install({"show": Behavior(stderr=stderr, exit_code=128)})
+
+    if expected is None:
+        assert await show_file(repo, "HEAD", "README") is None
+    else:
+        with pytest.raises(expected, match="bad object"):
+            await show_file(repo, "HEAD", "README")
 
 
 async def test_read_transient_failure_retried_then_succeeds(

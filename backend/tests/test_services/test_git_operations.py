@@ -586,9 +586,11 @@ async def test_rev_list_before_returns_latest_commit_before_date_or_none(
 ) -> None:
     upstream = init_upstream(tmp_path / "upstream")
     first = commit_files(upstream, {"a": b"1\n"}, date="2026-01-01T00:00:00+00:00")
-    commit_files(upstream, {"a": b"2\n"}, date="2026-02-01T00:00:00+00:00")
+    second = commit_files(upstream, {"a": b"2\n"}, date="2026-02-01T00:00:00+00:00")
+    commit_files(upstream, {"a": b"3\n"}, date="2026-03-01T00:00:00+00:00")
     bare = _clone_bare(upstream, tmp_path / "clone")
 
+    assert await rev_list_before(bare, "2026-02-15T00:00:00+00:00") == second
     assert await rev_list_before(bare, "2026-01-15T00:00:00+00:00") == first
     assert await rev_list_before(bare, "2025-12-01T00:00:00+00:00") is None
 
@@ -629,16 +631,20 @@ async def test_is_clone_valid_non_directory_returns_false_without_git(
     assert sleeps == []
 
 
-async def test_is_clone_valid_filesystem_error_returns_false_without_git(
+async def test_is_clone_valid_transient_inspection_error_leaves_decision_to_git(
     bare: Path, monkeypatch: pytest.MonkeyPatch, git_calls: list[GitCall]
 ) -> None:
-    def failing_is_dir(self: Path, *, follow_symlinks: bool = True) -> bool:
-        raise PermissionError(errno.EACCES, "Permission denied", str(self))
+    real_stat = Path.stat
 
-    monkeypatch.setattr(Path, "is_dir", failing_is_dir)
+    def failing_stat(self: Path, *, follow_symlinks: bool = True) -> os.stat_result:
+        if self == bare:
+            raise OSError(errno.EIO, "Input/output error", str(self))
+        return real_stat(self, follow_symlinks=follow_symlinks)
 
-    assert await is_clone_valid(bare) is False
-    assert git_calls == []
+    monkeypatch.setattr(Path, "stat", failing_stat)
+
+    assert await is_clone_valid(bare) is True
+    assert _subcommands(git_calls) == ["rev-parse", "rev-parse"]
 
 
 def _empty_directory(tmp_path: Path, bare: Path) -> Path:
