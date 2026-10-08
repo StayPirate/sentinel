@@ -73,7 +73,18 @@ subprocess is hermetic:
   `GIT_INDEX_FILE` (absolute for `git commit -a` and `git commit <path>`),
   `GIT_DIR` (in a linked worktree), and `GIT_CONFIG_PARAMETERS` (for `git -c`
   options) to every child process; inherited, they would redirect the
-  temporary repository's commands to the invoking repository.
+  temporary repository's commands to the invoking repository. Instead of the
+  user configuration, the subprocess receives a test-owned global
+  configuration that disables Git's automatic maintenance
+  (`maintenance.auto=false`): `git commit`, `git merge`, and `git fetch`
+  otherwise start a detached `git maintenance run --auto` that can outlive
+  the test and repack the temporary repository while the test inspects it.
+  A control case that proves this may instead run the maintenance in the
+  foreground (`maintenance.autoDetach=false`). The configuration is
+  passed through `GIT_CONFIG_GLOBAL`, which the Git operations module keeps
+  (`docs/features/platform/git-fetcher-infrastructure.md`, Module Invariants
+  Rule 3), so it also reaches the processes that module starts under test;
+  production keeps Git's default maintenance.
 
 A read-only Git command that deliberately inspects the checkout itself, such
 as the `git ls-files` of the documentation-link test (see Structural Tests),

@@ -1,18 +1,25 @@
 """Hermetic temporary Git repositories for the Git operations tests.
 
-Every Git command of a unit test runs against a temporary repository with
-no inherited `GIT_*` variable and no user or system Git configuration (see
+Every Git command of a test runs against a temporary repository with no
+inherited `GIT_*` variable, no user or system Git configuration, and Git's
+automatic maintenance disabled (see
 `docs/features/platform/testing-strategy.md`, Tier 1 — Unit Tests). The Git
 hooks run the suite inside a real Git command, which exports variables such
 as `GIT_DIR` and `GIT_INDEX_FILE`; inherited, they would redirect the
-temporary repository's commands to the invoking repository.
+temporary repository's commands to the invoking repository. The global
+configuration `hermetic.gitconfig` replaces the user's: `git commit`,
+`git merge`, and `git fetch` would otherwise start a detached
+`git maintenance run --auto` that outlives the test and can repack the
+repository while the test inspects it.
 
 The helpers here prepare test state only (upstream repositories, commits,
-deliberate damage); the module under test starts its own processes.
+deliberate damage) and observe the trace2 event stream of Git processes;
+the module under test starts its own processes.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from collections.abc import Mapping
@@ -23,9 +30,13 @@ import pytest
 AUTHOR_NAME = "Example Author"
 AUTHOR_EMAIL = "author@example.invalid"
 
+HERMETIC_GIT_CONFIG = Path(__file__).with_name("hermetic.gitconfig")
+"""The global Git configuration of every hermetic Git process: it disables
+Git's automatic maintenance."""
+
 _HERMETIC_CONFIG = {
     "GIT_CONFIG_NOSYSTEM": "1",
-    "GIT_CONFIG_GLOBAL": os.devnull,
+    "GIT_CONFIG_GLOBAL": str(HERMETIC_GIT_CONFIG),
 }
 
 _IDENTITY = {
@@ -37,8 +48,9 @@ _IDENTITY = {
 
 
 def hermetic_git_env() -> dict[str, str]:
-    """The current environment without any `GIT_*` variable, plus no user or
-    system configuration, a fictional identity, and the C locale."""
+    """The current environment without any `GIT_*` variable, plus the
+    hermetic global configuration instead of the user and system ones, a
+    fictional identity, and the C locale."""
     inherited = {
         name: value for name, value in os.environ.items() if not name.startswith("GIT_")
     }
@@ -47,8 +59,9 @@ def hermetic_git_env() -> dict[str, str]:
 
 def isolate_process_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     """Make processes started by the code under test hermetic: remove every
-    inherited `GIT_*` variable from `os.environ` and disable the user and
-    system Git configuration (restored by `monkeypatch` after the test)."""
+    inherited `GIT_*` variable from `os.environ` and replace the user and
+    system Git configuration with the hermetic one, which the module's own
+    environment filter keeps (restored by `monkeypatch` after the test)."""
     for name in [name for name in os.environ if name.startswith("GIT_")]:
         monkeypatch.delenv(name)
     for name, value in _HERMETIC_CONFIG.items():
@@ -122,3 +135,34 @@ def commit_files(
 def loose_object_path(git_dir: Path, sha: str) -> Path:
     """The loose object file of `sha` in the repository at `git_dir`."""
     return git_dir / "objects" / sha[:2] / sha[2:]
+
+
+def foreground_maintenance_config(directory: Path) -> Path:
+    """A global Git configuration file under `directory` that keeps Git's
+    default automatic maintenance but runs it in the foreground, so a
+    control case observes it without leaving a detached process behind."""
+    path = directory / "foreground-maintenance.gitconfig"
+    path.write_text("[maintenance]\n\tautoDetach = false\n", encoding="utf-8")
+    return path
+
+
+def _trace_events(trace: Path, event: str) -> list[list[str]]:
+    lines = trace.read_text(encoding="utf-8").splitlines() if trace.exists() else []
+    records = [json.loads(line) for line in lines]
+    return [record["argv"] for record in records if record["event"] == event]
+
+
+def traced_commands(trace: Path) -> list[list[str]]:
+    """The argv of every Git process that wrote to the `GIT_TRACE2_EVENT`
+    file `trace`."""
+    return _trace_events(trace, "start")
+
+
+def automatic_maintenance_runs(trace: Path) -> list[list[str]]:
+    """The argv of every `git maintenance run --auto` child started by a Git
+    process that wrote to the `GIT_TRACE2_EVENT` file `trace`."""
+    return [
+        argv
+        for argv in _trace_events(trace, "child_start")
+        if argv[1:4] == ["maintenance", "run", "--auto"]
+    ]

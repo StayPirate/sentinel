@@ -32,12 +32,12 @@ Provided here:
   `reference_service.upsert_references()` ingestion of a fictional JSON file
   (`cve_file()`);
 - `install_git_workspace()`: the hermetic process environment (no inherited
-  `GIT_*` variable, no user or system Git configuration; see
-  docs/features/platform/testing-strategy.md, Tier 1 — Unit Tests), the
-  recorded instead of awaited read-retry backoff, an `Upstream` work-tree
-  repository under `tmp_path` served through a `file://` URL (so a clone
-  transfers only reachable objects), and `GIT_CLONE_BASE_DIR` redirected to
-  `tmp_path`;
+  `GIT_*` variable, no user or system Git configuration, no automatic
+  maintenance; see docs/features/platform/testing-strategy.md, Tier 1 —
+  Unit Tests), the recorded instead of awaited read-retry backoff, an
+  `Upstream` work-tree repository under `tmp_path` served through a
+  `file://` URL (so a clone transfers only reachable objects), and
+  `GIT_CLONE_BASE_DIR` redirected to `tmp_path`;
 - `GitCalls`, a recording spy over the `git_operations` functions the class
   delegates to, with per-function errors and replacements;
 - `open_git_run_harness()`: committed `FetcherConfig` and `FetcherRun` rows

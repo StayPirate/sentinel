@@ -47,13 +47,17 @@ from app.services.git_operations import (
     show_file,
 )
 from tests.support.git_repos import (
+    HERMETIC_GIT_CONFIG,
+    automatic_maintenance_runs,
     commit_files,
+    foreground_maintenance_config,
     git,
     init_bare,
     init_upstream,
     isolate_process_environment,
     loose_object_path,
     rev_parse,
+    traced_commands,
 )
 
 pytestmark = pytest.mark.unit
@@ -219,7 +223,7 @@ def test_git_subprocess_env_inherited_local_variables_removed_and_overrides_appl
     assert env["PATH"] == os.environ["PATH"]
     assert env["HOME"] == str(tmp_path)
     assert env["GIT_CONFIG_NOSYSTEM"] == "1"
-    assert env["GIT_CONFIG_GLOBAL"] == os.devnull
+    assert env["GIT_CONFIG_GLOBAL"] == str(HERMETIC_GIT_CONFIG)
     assert env["SENTINEL_EXAMPLE_UNRELATED"] == "kept"
     assert (env["LC_ALL"], env["GIT_TERMINAL_PROMPT"], env["TZ"]) == ("C", "0", "UTC")
 
@@ -266,6 +270,38 @@ async def test_inherited_repository_variables_do_not_affect_target_clone(
     assert await get_head_sha(bare) == new_head
     assert await show_file(bare, "HEAD", "README") == b"updated\n"
     assert rev_parse(decoy, "HEAD") == decoy_head
+
+
+@pytest.mark.parametrize(
+    ("configuration", "expected_runs"),
+    [
+        pytest.param("hermetic", 0, id="hermetic"),
+        # Control: with git's default, the same fetch starts maintenance.
+        pytest.param("git-default", 1, id="git-default"),
+    ],
+)
+async def test_fetch_origin_automatic_maintenance_follows_global_configuration(
+    bare: Path,
+    upstream: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    configuration: str,
+    expected_runs: int,
+) -> None:
+    # Rule 3 keeps `GIT_CONFIG_GLOBAL`, so the harness configuration reaches
+    # the module's own `git fetch`; production keeps git's default (Fetch
+    # Operations, Automatic maintenance).
+    commit_files(upstream, {"README": b"updated\n"})
+    trace = tmp_path / "trace.json"
+    monkeypatch.setenv("GIT_TRACE2_EVENT", str(trace))
+    if configuration == "git-default":
+        config = foreground_maintenance_config(tmp_path)
+        monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(config))
+
+    await fetch_origin(bare)
+
+    assert ["fetch"] in [argv[2:3] for argv in traced_commands(trace)]
+    assert len(automatic_maintenance_runs(trace)) == expected_runs
 
 
 # --- Clone operations -------------------------------------------------------
