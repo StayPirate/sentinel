@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 
 from app.config import Settings, _split_comma
 
@@ -782,10 +782,35 @@ class TestHttpsApiPrefixValidation:
 
 
 @pytest.mark.unit
+class TestGithubToken:
+    """`GITHUB_TOKEN` (docs/configuration.md, External APIs): a `SecretStr`
+    whose empty default means "not configured". Every test sets or removes
+    the variable explicitly, independent of the developer environment."""
+
+    def test_default_when_unset_is_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("JWT_SECRET_KEY", "a" * 32)
+        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+        s = Settings(_env_file=None)
+        assert isinstance(s.github_token, SecretStr)
+        assert s.github_token.get_secret_value() == ""
+
+    def test_empty_value_is_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("JWT_SECRET_KEY", "a" * 32)
+        monkeypatch.setenv("GITHUB_TOKEN", "")
+        s = Settings(_env_file=None)
+        assert s.github_token.get_secret_value() == ""
+
+    def test_not_listed_in_env_example(self) -> None:
+        env_example = Path(__file__).resolve().parents[1] / ".env.example"
+        assert "GITHUB_TOKEN" not in env_example.read_text(encoding="utf-8")
+
+
+@pytest.mark.unit
 class TestSecretFieldRedaction:
     """Secret field redaction, covering two distinct mechanisms:
 
-    - `SecretStr` fields (`jwt_secret_key`, `ibs_password`, `nvd_api_key`):
+    - `SecretStr` fields (`jwt_secret_key`, `ibs_password`, `nvd_api_key`,
+      `github_token`):
       masked in both `repr()`/`str()` AND `model_dump()`/`model_dump_json()`.
     - `Field(..., repr=False)` URL fields (`database_url`, `redis_url`,
       `celery_broker_url`): the field is entirely excluded from `repr()`,
@@ -822,6 +847,19 @@ class TestSecretFieldRedaction:
         monkeypatch.setenv("NVD_API_KEY", secret_value)
         s = Settings(_env_file=None)
         assert secret_value not in repr(s)
+
+    def test_repr_and_dump_do_not_expose_github_token(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        secret_value = "fictional-github-token-0000000000"
+        monkeypatch.setenv("JWT_SECRET_KEY", "a" * 32)
+        monkeypatch.setenv("GITHUB_TOKEN", secret_value)
+        s = Settings(_env_file=None)
+        assert secret_value not in repr(s)
+        assert secret_value not in str(s)
+        assert secret_value not in s.model_dump_json()
+        assert s.github_token.get_secret_value() == secret_value
 
     def test_repr_does_not_expose_database_url_credentials(
         self,

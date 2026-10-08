@@ -1085,7 +1085,7 @@ Operational parameters that:
 
 | Category | Examples | Reason |
 |----------|----------|--------|
-| Credentials | `IBS_USERNAME`, `IBS_PASSWORD`, `NVD_API_KEY` | Secrets — managed via env vars / Kubernetes Secrets |
+| Credentials | `IBS_USERNAME`, `IBS_PASSWORD`, `NVD_API_KEY`, `GITHUB_TOKEN` | Secrets — managed via env vars / Kubernetes Secrets |
 | Connection URIs | `IBS_API_URL` | Infrastructure — changes with deployment environment |
 | TLS configuration | `SUSE_CA_CERT_PATH` | Infrastructure — tied to certificate management |
 

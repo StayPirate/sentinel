@@ -33,7 +33,7 @@ relevant feature specifications in `docs/features/`.
 | SUSE Bugzilla | Internal | Bug tracking, security issues | Reference only |
 | CISA KEV | Public | Known exploited vulnerabilities catalog | Active |
 | EPSS | Public | Exploit probability scores | Active |
-| GHSA | Public | Security advisories, CVSS, CWE | Specified |
+| GHSA | Public | Security advisories, CVSS, CWE | Active |
 | Linux Kernel CVE | Public | Kernel CVE data, fix/introduce commits | Specified |
 | OSV | Public | Aggregated vulnerability data | Active |
 | SMASH | Internal | Security update management (predecessor to Sentinel) | Not planned |
@@ -210,7 +210,11 @@ information relevant for Vulnerability Analysts.
   with token (60/hour without — insufficient for production). The advisory
   database is also available as a Git repository at
   `https://github.com/github/advisory-database.git` (not used by Sentinel)
-- **Integration status**: **Specified**
+- **Volume**: one paginated query (100 advisories per page) per 3-hour run;
+  304 reviewed advisories were modified between 2026-10-05 and 2026-10-08
+  (measured windows of 3 hours held 0 to 77), so a typical run fetches one
+  page and rarely more than two
+- **Integration status**: **Active**
 - **Documentation**:
   https://docs.github.com/en/code-security/security-advisories/working-with-global-security-advisories-from-the-github-advisory-database
 

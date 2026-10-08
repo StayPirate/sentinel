@@ -123,6 +123,9 @@ class Settings(BaseSettings):
     # NVD API
     nvd_api_key: SecretStr = SecretStr("")
 
+    # GitHub Advisory Database (sync_ghsa_advisories)
+    github_token: SecretStr = SecretStr("")
+
     # Security
     jwt_secret_key: SecretStr
     jwt_expiry_hours: int = 72
