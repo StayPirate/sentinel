@@ -63,12 +63,17 @@ The pattern:
    attempt, or a non-bare repository), delete the directory and proceed
    with a fresh clone.
 2. **Fetch** (subsequent runs): read the clone's branch with
-   `git symbolic-ref HEAD` (for example `refs/heads/main`), then
-   `git fetch origin --end-of-options +<ref>:<ref>` updates that branch,
-   and therefore `HEAD`, and downloads new objects. The explicit refspec
-   is required: a bare clone has no `remote.origin.fetch` configuration,
-   so fetching `origin` without a refspec updates only `FETCH_HEAD` and
-   `HEAD` never advances. The refspec is forced (`+`) so an upstream
+   `git symbolic-ref --end-of-options HEAD` (for example
+   `refs/heads/main`), then
+   `git fetch --end-of-options origin +HEAD:<ref>` updates that branch
+   from the remote's `HEAD` (the upstream default branch), and therefore
+   updates the local `HEAD`, and downloads new objects. The explicit
+   refspec is required: a bare clone has no `remote.origin.fetch`
+   configuration, so fetching `origin` without a refspec updates only
+   `FETCH_HEAD` and `HEAD` never advances. The source is the remote's
+   `HEAD`, not the local branch name, so a change of the upstream
+   default branch (a rename, or a new default branch with the old one
+   frozen) is followed. The refspec is forced (`+`) so an upstream
    history rewrite is followed rather than rejected. This is incremental
    and typically completes in seconds.
 3. **Delta detection**: `git diff --name-only --no-renames
@@ -330,12 +335,15 @@ delta `<cursor_sha>..<head_sha>` applies, which compares the two trees
 and is therefore correct across the rewrite. Date-based recovery takes
 over only once the object is pruned or after a re-clone.
 
-An upstream rename or deletion of the clone's branch is not a cursor
-condition: the forced fetch of the recorded branch fails
-(`couldn't find remote ref`) and raises `GitFetchError` on every run,
-with the clone kept, until an operator deletes the clone directory.
-The next run then re-clones the new default branch and applies the
-reachability check. This is an accepted residual risk.
+A change of the upstream default branch is not a cursor condition
+either: `fetch_origin` fetches the remote's `HEAD` into the clone's own
+branch, so the clone follows the new default branch and the normal tree
+delta from the cursor applies (its size depends on how far the two
+histories' trees differ; reprocessing is idempotent). If the remote's
+`HEAD` cannot be resolved (for example it names a branch that does not
+exist), the fetch fails (`couldn't find remote ref HEAD`) and raises
+`GitFetchError` on every run, with the clone kept, until upstream
+repairs its `HEAD`. This is an accepted residual risk.
 
 **Algorithm**:
 
@@ -452,7 +460,7 @@ timeouts and retry policy per operation category:
 | Operation | Timeout | Retries | Examples |
 |---|---|---|---|
 | Clone | 30 minutes | 0 | Initial bare clone (~2.3 GB download for cvelistV5) |
-| Fetch | 5 minutes | 0 | Incremental `git fetch origin --end-of-options +<ref>:<ref>` |
+| Fetch | 5 minutes | 0 | Incremental `git fetch --end-of-options origin +HEAD:<ref>` |
 | Read | 30 seconds | 3 (backoff: 2s, 4s, 8s) | `git diff`, `git rev-parse`, `git symbolic-ref` (the branch lookup inside `fetch_origin`), `git ls-tree`, `git rev-list`, `git log` |
 | Show | 30 seconds | 0 | `git show --end-of-options <ref>:<path>` (per-file blob access) |
 
@@ -482,7 +490,7 @@ class GitFileError(GitError): ...        # Per-file — continue processing
 
 | Phase | Failure condition | Exception | Fetcher action |
 |-------|-------------------|-----------|----------------|
-| `git clone` / `git fetch` | Any failure (network, auth, timeout, upstream branch no longer found) | `GitFetchError` | Do NOT delete clone. Raise `FetcherError`. Next cycle retries |
+| `git clone` / `git fetch` | Any failure (network, auth, timeout, remote `HEAD` not resolvable) | `GitFetchError` | Do NOT delete clone. Raise `FetcherError`. Next cycle retries |
 | Local read: the branch lookup inside `fetch_origin` before its fetch (`git symbolic-ref`), and every read after a successful fetch (`git diff`, `git rev-parse`, `git ls-tree`, `git rev-list`, `git log`) | Persistent failure after retry exhaustion (3 retries with exponential backoff) | `GitCorruptionError` | Delete clone directory. Raise `FetcherError`. Next cycle re-clones + applies recovery strategy |
 | `git show` during delta file processing | Any failure (timeout, corrupt/missing blob in local store) | `GitFileError` | Periodic delta path: fail that selected item. Single-item candidate lookup: local candidate bookkeeping only; try the next candidate and never call `record_failed()` because no `FetcherRun` exists |
 | Directory deletion (recovery/cleanup) | Filesystem rejection (permissions, read-only mount, busy handle) | `OSError` | Log ERROR with distinct message: path, errno, and guidance ("Manual intervention required — check filesystem permissions and mount state"). Raise `FetcherError`. Next cycle re-attempts (permanent until operator resolves filesystem issue) |
@@ -592,7 +600,9 @@ Three mandatory rules apply to all functions in this module:
 
 Applies ONLY to `check_sha_reachable` (the single entry point for
 database-sourced SHA values). Before invoking git, validate
-the `sha` parameter against regex `^[0-9a-f]{40}$`. If validation fails:
+the `sha` parameter: the whole value must match `[0-9a-f]{40}` (a full
+match, so a value with a trailing newline or any other extra character
+is invalid). If validation fails:
 log the bounded WARNING event `git_invalid_sha_format`, which carries no
 field derived from the invalid value (see
 `docs/features/platform/logging.md`, Secrets and PII Discipline), and
@@ -614,7 +624,7 @@ Every repository-scoped command that takes positional revision, ref,
 refspec, or object arguments MUST place the `--end-of-options` marker
 immediately before its first positional argument; git (2.24 and later)
 then parses no following argument as an option, even one beginning with
-`-`. Applicable commands: `git fetch origin --end-of-options <refspec>`,
+`-`. Applicable commands: `git fetch --end-of-options origin <refspec>`,
 `git symbolic-ref --end-of-options HEAD`,
 `git rev-parse --verify [--quiet] --end-of-options <rev>`,
 `git log ... --end-of-options <ref>`,
@@ -750,14 +760,29 @@ Semantics: updates the clone's own branch, and therefore `HEAD`, from
    or detached `HEAD`, or the timeout — is a failed read: it follows the
    read retry policy and then raises `GitCorruptionError`.
 2. **Fetch** (Fetch phase, not retried): run
-   `git fetch origin --end-of-options +<ref>:<ref>` with the fetch
-   timeout. The explicit forced refspec updates the branch even though
-   a bare clone has no `remote.origin.fetch` configuration, and follows
-   an upstream history rewrite (a non-forced refspec would be rejected).
-   A non-zero exit or the timeout raises `GitFetchError` with stderr
-   content. An upstream rename or deletion of the branch fails here
-   (`couldn't find remote ref`) on every run until an operator deletes
-   the clone (see "Cursor SHA Unreachable").
+   `git fetch --end-of-options origin +HEAD:<ref>` with the fetch
+   timeout. The explicit forced refspec updates the clone's branch from
+   the remote's `HEAD` even though a bare clone has no
+   `remote.origin.fetch` configuration, follows a change of the upstream
+   default branch, and follows an upstream history rewrite (a non-forced
+   refspec would be rejected). Because the source is the remote's `HEAD`,
+   a clone whose local branch name differs from upstream's (for example
+   a clone interrupted before git recorded the upstream default branch)
+   is still updated. A non-zero exit or the timeout raises
+   `GitFetchError` with stderr content. A remote `HEAD` that cannot be
+   resolved fails here on every run (see "Cursor SHA Unreachable").
+
+**Automatic maintenance**: when its thresholds are met, `git fetch`
+starts git's own automatic repository maintenance
+(`git maintenance run --auto`, including `git gc --auto`), which by git's
+default detaches and may continue after `fetch_origin` returns. The
+module keeps git's default: that maintenance is git's own lock-protected
+housekeeping of the clone (it also prunes unreachable objects; see
+"Cursor SHA Unreachable"), not a process the module manages, and
+concurrent object-store reads remain safe (see "Concurrency Rules"). The
+module's process-lifecycle guarantee applies to the `git` process it
+starts: on timeout, cancellation, or a whole-run signal that process is
+terminated and reaped before the exception propagates.
 
 ### Read Operations
 
@@ -816,7 +841,7 @@ Semantics:
 
   **Behavior**:
 
-  0. Validate `sha` against `^[0-9a-f]{40}$` (Rule 1). If invalid: log
+  0. Validate that the whole `sha` matches `[0-9a-f]{40}` (Rule 1). If invalid: log
      the bounded WARNING `git_invalid_sha_format`, return `False`
   1. Execute `git rev-parse --verify --quiet --end-of-options
      <sha>^{commit}` in the repository
@@ -1404,8 +1429,8 @@ operations.
 ## `_compute_recovery_delta()`
 
 Computes the file delta using the stored cursor commit date when the
-cursor SHA is unreachable (force-push, history rewrite, or clone
-rebuild).
+cursor SHA is unreachable (see "Cursor SHA Unreachable" for when that
+occurs).
 
 `async def _compute_recovery_delta(repo_path: Path, head_sha: str, cursor_committed_at: str) -> list[str]`
 
@@ -1464,7 +1489,8 @@ fetcher but:
 - It requires multi-branch tracking (the template assumes
   single-branch, single HEAD)
 - It uses a bare-clone strategy not expressible via the class
-  attributes
+  attributes (for example tracking branches other than the upstream
+  default branch: `fetch_origin` updates only the clone's own branch)
 - Its delta detection is not commit-range based (e.g., full tree scan,
   tag-based comparison)
 - It needs non-linear traversal (e.g., walking merge commits
@@ -1481,6 +1507,9 @@ imposing a fixed execution order. The utility module is bare-only (see
 "Responsibility Separation"): a source that needs a working tree or a
 sparse checkout is served by neither `BaseGitFetcher` nor
 `git_operations.py`, and its clone contract must be specified first.
+Likewise, any capability missing from the Function Catalog (another
+branch, another clone flag, another command) is added to the catalog,
+under Module Invariants, before a fetcher uses it.
 
 **Note**: fetchers that need full tree enumeration (e.g., for initial
 population or full-scan strategies) can use
