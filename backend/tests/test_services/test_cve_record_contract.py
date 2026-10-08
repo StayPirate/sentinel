@@ -40,7 +40,9 @@ Live verification on 2026-10-08, full scans of both repositories:
   `unaffected`, or `unknown`; `defaultStatus` likewise. 161,346 elements
   have an `n/a` vendor or product; 144,340 have both and no package
   coordinate; 925 have neither vendor nor product but `packageName` and
-  `collectionURL`. Versions: `n/a` 154,582 and uppercase `N/A` 1,265. 204
+  `collectionURL`. Versions: `n/a` 154,582; the other placeholder versions
+  `-` 2,242, uppercase `N/A` 1,265, and `NA` 69, and the vendor `N/A` 29,
+  are not sentinels under the specification and are stored as received. 204
   `cpes` arrays are empty; no `versions` array is.
 - `cvelistV5` vectors: every `cvssV2_0`, `cvssV3_0`, `cvssV3_1`, and
   `cvssV4_0` `vectorString` is a string and either a strict Base vector or
@@ -49,8 +51,9 @@ Live verification on 2026-10-08, full scans of both repositories:
   `metrics` entry (`cvssV4_0` with `cvssV3_1` 584 times, ...), and the same
   key repeats within one `metrics` array (`cvssV4_0` in 68 records,
   `cvssV3_1` in 62).
-- CISA-ADP: exactly one `other.type` `ssvc` entry in each of 195,906
-  containers, its `options` always the single-key objects `Exploitation`,
+- CISA-ADP: 195,907 containers; 195,906 carry exactly one `other.type`
+  `ssvc` entry and one (CVE-2013-3735) has `metrics` without one. The
+  `options` are always the single-key objects `Exploitation`,
   `Automatable`, `Technical Impact`, `version` always `2.0.3`, `timestamp`
   always `YYYY-MM-DDTHH:MM:SS.ffffffZ` (190,257) or `...+00:00` (5,649).
   `kev` occurs at most once per container (1,734), `dateAdded` always

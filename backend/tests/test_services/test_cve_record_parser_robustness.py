@@ -30,6 +30,7 @@ from datetime import UTC, date, datetime
 from typing import Any, Final
 
 import pytest
+from pydantic import ValidationError
 
 from app.core.enums import CveState
 from app.services import cve_record_parser
@@ -137,8 +138,10 @@ _ARGUMENTS: Final[tuple[Any, ...]] = (
     {},
     [None, 0, "x", [], {}],
     {"0": {"vendor": VENDOR}},
+    load_fixture("cvelistv5_kev_ssvc_offset_n_a"),
 )
-"""Wrong-typed arguments for every function."""
+"""Wrong-typed arguments for every function, including a whole record (the
+wrong level of the record, carrying every consumed member below it)."""
 
 type Path = tuple[str | int, ...]
 
@@ -206,7 +209,11 @@ def _check_optional_str(value: object) -> None:
 
 
 def _check_title(value: object) -> None:
-    assert value is None or (isinstance(value, str) and len(value) <= TITLE_MAX_LENGTH)
+    """Truncated to the bound unless it contains U+0000 (then untruncated,
+    for the caller's payload to reject)."""
+    assert value is None or (
+        isinstance(value, str) and (len(value) <= TITLE_MAX_LENGTH or "\x00" in value)
+    )
 
 
 def _check_dates(dates: object) -> None:
@@ -396,7 +403,7 @@ def _random_variant(
 
 class TestFixtureMutations:
     @pytest.mark.parametrize("name", ALL_FIXTURES)
-    def test_every_single_mutation_is_handled(self, name: str) -> None:
+    def test_every_single_mutation_yields_documented_types(self, name: str) -> None:
         record = load_fixture(name)
         count = 0
 
@@ -409,7 +416,7 @@ class TestFixtureMutations:
         assert record == load_fixture(name)
 
     @pytest.mark.parametrize("name", ALL_FIXTURES)
-    def test_seeded_combined_mutations_are_handled(self, name: str) -> None:
+    def test_seeded_combined_mutations_yield_documented_types(self, name: str) -> None:
         pristine = load_fixture(name)
         paths = _consumed_paths(pristine)
         rng = random.Random(f"cve-record-parser:{name}")
@@ -438,7 +445,7 @@ class TestFixtureMutations:
 
 class TestPurity:
     @pytest.mark.parametrize("name", ALL_FIXTURES)
-    def test_input_is_never_mutated(self, name: str) -> None:
+    def test_fixture_input_after_parsing_is_unchanged(self, name: str) -> None:
         record = load_fixture(name)
 
         _exercise_record(record)
@@ -446,7 +453,9 @@ class TestPurity:
         assert record == load_fixture(name)
 
     @pytest.mark.parametrize("name", ALL_FIXTURES)
-    def test_results_are_deterministic_and_independent(self, name: str) -> None:
+    def test_repeated_calls_after_other_input_yield_equal_results(
+        self, name: str
+    ) -> None:
         def outputs() -> list[Any]:
             record = load_fixture(name)
             metadata = record["cveMetadata"]
@@ -473,7 +482,7 @@ class TestPurity:
 
         assert outputs() == first
 
-    def test_returned_lists_are_fresh(self) -> None:
+    def test_returned_list_after_mutation_leaves_next_result_unchanged(self) -> None:
         affected = [SIBLING]
 
         first = parse_affected_versions(affected)
@@ -484,13 +493,15 @@ class TestPurity:
 
 class TestWrongTypedArguments:
     @pytest.mark.parametrize("argument", _ARGUMENTS)
-    def test_list_functions_yield_empty_lists(self, argument: Any) -> None:
+    def test_wrong_typed_array_argument_yields_empty_list(self, argument: Any) -> None:
         assert parse_affected_versions(argument) == []
         assert parse_cvss_assessments(argument, "Example CNA") == []
         assert parse_cwe_classifications(argument, "cna:x") == []
 
     @pytest.mark.parametrize("argument", _ARGUMENTS)
-    def test_stamped_context_arguments(self, argument: Any) -> None:
+    def test_wrong_typed_context_argument_yields_empty_or_stamped(
+        self, argument: Any
+    ) -> None:
         """A non-string provider or source yields `[]`; a string one is
         stamped (the provider trimmed) or rejected with the candidate."""
         cvss = parse_cvss_assessments([{"cvssV3_1": {"vectorString": V31}}], argument)
@@ -515,7 +526,7 @@ class TestWrongTypedArguments:
         assert validate_cve_id(argument, {"cveId": CVE_ID}) is argument
 
     @pytest.mark.parametrize("argument", _ARGUMENTS)
-    def test_value_functions_yield_none(self, argument: Any) -> None:
+    def test_wrong_typed_object_argument_yields_none(self, argument: Any) -> None:
         assert parse_description(argument) is None
         assert parse_title(argument) is None
         assert parse_ssvc_assessment(argument) is None
@@ -524,34 +535,80 @@ class TestWrongTypedArguments:
         assert extract_dates(argument) == (None, None, None)
         assert validate_cve_id(CVE_ID, argument) == CVE_ID
 
-    @pytest.mark.parametrize("name", ALL_FIXTURES)
-    def test_whole_record_as_every_argument(self, name: str) -> None:
-        """A caller passing the wrong level of the record gets the empty
-        result, never an exception or a misread."""
-        record = load_fixture(name)
+    @pytest.mark.parametrize(
+        ("call", "expected"),
+        [
+            pytest.param(lambda: parse_affected_versions(SIBLING), [], id="affected"),
+            pytest.param(
+                lambda: parse_cvss_assessments(
+                    {"cvssV3_1": {"vectorString": V31}}, "Example CNA"
+                ),
+                [],
+                id="cvss",
+            ),
+            pytest.param(
+                lambda: parse_cwe_classifications(
+                    {"descriptions": [{"type": "CWE", "cweId": "CWE-79"}]}, "cna:x"
+                ),
+                [],
+                id="cwe",
+            ),
+            pytest.param(
+                lambda: parse_description({"lang": "en", "value": "Fictional."}),
+                None,
+                id="description",
+            ),
+            pytest.param(
+                lambda: parse_title([{"title": "Fictional title"}]), None, id="title"
+            ),
+            pytest.param(
+                lambda: parse_ssvc_assessment(_ssvc_metrics()[0]), None, id="ssvc"
+            ),
+            pytest.param(lambda: parse_kev_data(_kev_metrics()[0]), None, id="kev"),
+            pytest.param(
+                lambda: extract_cve_state([{"state": "PUBLISHED"}]),
+                None,
+                id="state-array",
+            ),
+            pytest.param(
+                lambda: extract_cve_state("PUBLISHED"), None, id="state-value"
+            ),
+            pytest.param(
+                lambda: extract_dates([{"datePublished": "2024-01-01T00:00:00Z"}]),
+                (None, None, None),
+                id="dates-array",
+            ),
+            pytest.param(
+                lambda: extract_dates("2024-01-01T00:00:00Z"),
+                (None, None, None),
+                id="dates-value",
+            ),
+        ],
+    )
+    def test_single_valid_element_instead_of_container_yields_empty_result(
+        self, call: Callable[[], object], expected: object
+    ) -> None:
+        """A valid element, object, or value passed where its array or
+        object is expected is not unwrapped."""
+        assert call() == expected
 
-        assert parse_affected_versions(record) == []
-        assert parse_cvss_assessments(record, "Example CNA") == []
-        assert parse_cwe_classifications(record, "cna:x") == []
-        assert parse_description(record) is None
-        assert parse_title(record) is None
-        assert parse_ssvc_assessment(record) is None
-        assert parse_kev_data(record) is None
-        assert extract_cve_state(record) is None
-        assert extract_dates(record) == (None, None, None)
-        assert validate_cve_id(CVE_ID, record) == CVE_ID
+    def test_container_instead_of_array_yields_empty_result(self) -> None:
+        (container,) = [
+            adp
+            for adp in load_fixture("cvelistv5_kev_ssvc_offset_n_a")["containers"][
+                "adp"
+            ]
+            if adp["providerMetadata"]["shortName"] == "CISA-ADP"
+        ]
 
-    @pytest.mark.parametrize("name", ALL_FIXTURES)
-    def test_container_as_array_arguments(self, name: str) -> None:
-        for container in _containers(load_fixture(name)):
-            assert parse_affected_versions(container) == []
-            assert parse_cvss_assessments(container, "Example CNA") == []
-            assert parse_cwe_classifications(container, "cna:x") == []
-            assert parse_description(container) is None
-            assert parse_ssvc_assessment(container) is None
-            assert parse_kev_data(container) is None
+        assert parse_affected_versions(container) == []
+        assert parse_cvss_assessments(container, "Example CNA") == []
+        assert parse_cwe_classifications(container, "cna:x") == []
+        assert parse_description(container) is None
+        assert parse_ssvc_assessment(container) is None
+        assert parse_kev_data(container) is None
 
-    def test_deeply_nested_input_is_handled(self) -> None:
+    def test_deeply_nested_input_yields_documented_types(self) -> None:
         nested: Any = "x"
         for _ in range(200):
             nested = [nested, {"k": nested}]
@@ -729,10 +786,15 @@ def _description(value: str) -> None:
     descriptions = [{"lang": "en", "value": value}]
 
     assert parse_description(descriptions) == value
+    with pytest.raises(ValidationError):
+        CVEIngestPayload(description=parse_description(descriptions))
 
 
 def _title(value: str) -> None:
+    """Returned untruncated, so the caller's payload rejects it."""
     assert parse_title({"title": value}) == value
+    with pytest.raises(ValidationError):
+        CVEIngestPayload(title=parse_title({"title": value}))
 
 
 _ADMISSIBILITY: Final[dict[str, tuple[str, Callable[[str], None]]]] = {
@@ -771,20 +833,24 @@ _ADMISSIBILITY: Final[dict[str, tuple[str, Callable[[str], None]]]] = {
     "cveMetadata.dateUpdated": ("2024-01-01T00:00:00.000Z", _date_field(1)),
     "cveMetadata.dateRejected": ("2024-01-01T00:00:00.000Z", _date_field(2)),
     "descriptions.value": ("Fictional description.", _description),
-    "title": ("Fictional title", _title),
+    "title": ("t" * 300, _title),
 }
 """Consumed string → (valid base value, check of the named outcome for a
 value containing U+0000) per the spec table (External String
 Admissibility)."""
 
-_PASSED_THROUGH: Final = frozenset({"provider_name", "descriptions.value", "title"})
-"""Values returned unvalidated: the caller or `upsert_cve()` rejects them."""
+_PASSED_THROUGH: Final = frozenset({"provider_name", "descriptions.value"})
+"""Values returned unchanged: the caller or `upsert_cve()` rejects them. A
+`title` is also returned unvalidated, but its 300-character base value is
+truncated, so it stays in the guard below."""
 
 
 class TestExternalStringAdmissibility:
     @pytest.mark.parametrize("position", _POSITIONS)
     @pytest.mark.parametrize("field", list(_ADMISSIBILITY))
-    def test_nul_takes_the_documented_outcome(self, field: str, position: str) -> None:
+    def test_nul_in_consumed_string_yields_documented_outcome(
+        self, field: str, position: str
+    ) -> None:
         base, check = _ADMISSIBILITY[field]
 
         check(_with_nul(base, position))
@@ -792,7 +858,7 @@ class TestExternalStringAdmissibility:
     @pytest.mark.parametrize(
         "field", [f for f in _ADMISSIBILITY if f not in _PASSED_THROUGH]
     )
-    def test_base_value_is_valid(self, field: str) -> None:
+    def test_base_value_without_nul_avoids_the_outcome(self, field: str) -> None:
         """Guards the matrix: without U+0000 the base value does not take the
         rejection outcome, so each outcome above is caused by the
         character."""
@@ -801,12 +867,12 @@ class TestExternalStringAdmissibility:
         with pytest.raises(AssertionError):
             check(base)
 
-    def test_lone_sentinel_vendor_with_nul_is_not_a_sentinel(self) -> None:
+    def test_n_a_vendor_with_nul_skips_the_element(self) -> None:
         element = {"vendor": "n/a\x00", "product": "n/a", "versions": _versions()}
 
         _assert_element_skipped(element)
 
-    def test_less_than_or_equal_with_nul_is_unused_beside_less_than(self) -> None:
+    def test_less_than_or_equal_with_nul_beside_less_than_is_ignored(self) -> None:
         """Only an entry carrying the value is rejected: `lessThan` wins."""
         element = {
             "vendor": VENDOR,
@@ -826,7 +892,9 @@ class TestComparedOnlyValues:
     U+0000 simply does not match."""
 
     @pytest.mark.parametrize("lang", ["\x00en", "e\x00n", "\x00"])
-    def test_description_lang(self, lang: str) -> None:
+    def test_description_lang_with_leading_or_inner_nul_is_not_english(
+        self, lang: str
+    ) -> None:
         descriptions = [
             {"lang": "de", "value": "Fiktive Beschreibung."},
             {"lang": lang, "value": "Fictional description."},
@@ -834,7 +902,7 @@ class TestComparedOnlyValues:
 
         assert parse_description(descriptions) == "Fiktive Beschreibung."
 
-    def test_description_lang_with_a_trailing_nul_still_starts_with_en(self) -> None:
+    def test_description_lang_with_trailing_nul_is_english(self) -> None:
         """The prefix rule compares only the start of `lang`; the value is
         never persisted, so a trailing U+0000 is irrelevant."""
         descriptions = [
@@ -844,7 +912,7 @@ class TestComparedOnlyValues:
 
         assert parse_description(descriptions) == "Fictional description."
 
-    def test_problem_type_type(self) -> None:
+    def test_problem_type_type_with_nul_does_not_select(self) -> None:
         problem = {
             "descriptions": [{"type": "CWE\x00"}, {"type": "\x00", "cweId": "CWE-79"}]
         }
@@ -853,7 +921,7 @@ class TestComparedOnlyValues:
 
         assert [entry.cwe_id for entry in entries] == ["CWE-79"]
 
-    def test_ssvc_option_key(self) -> None:
+    def test_ssvc_option_key_with_nul_yields_none(self) -> None:
         metrics = _ssvc_metrics()
         options = metrics[0]["other"]["content"]["options"]
         options[0] = {"Exploitation\x00": "active"}
@@ -861,7 +929,7 @@ class TestComparedOnlyValues:
         assert parse_ssvc_assessment(metrics) is None
 
     @pytest.mark.parametrize("type_", ["ssvc\x00", "kev\x00", "\x00"])
-    def test_other_type(self, type_: str) -> None:
+    def test_other_type_with_nul_yields_none(self, type_: str) -> None:
         ssvc = _ssvc_metrics()
         kev = _kev_metrics()
         ssvc[0]["other"]["type"] = type_
@@ -871,7 +939,7 @@ class TestComparedOnlyValues:
         assert parse_kev_data(kev) is None
 
     @pytest.mark.parametrize("key", ["cveId", "cveID"])
-    def test_json_cve_id(self, key: str) -> None:
+    def test_json_cve_id_with_nul_yields_the_filename_id(self, key: str) -> None:
         assert validate_cve_id(CVE_ID, {key: CVE_ID + "\x00"}) == CVE_ID
 
 
@@ -953,7 +1021,7 @@ def _attribute_docstrings(tree: ast.Module) -> set[ast.AST]:
 
 
 class TestModuleBoundary:
-    def test_imports_no_logging_database_settings_or_io(self) -> None:
+    def test_imports_include_no_logging_database_settings_or_io(self) -> None:
         modules = imported_modules(_MODULE, "app.services")
 
         assert forbidden_imports(modules) == set()
@@ -974,7 +1042,7 @@ class TestModuleBoundary:
             "app.services.ticket_mutations_errors",
         }
 
-    def test_code_never_references_data_version(self) -> None:
+    def test_code_outside_docstrings_has_no_data_version_reference(self) -> None:
         """Schema Version Handling: no `dataVersion` branching. Only
         documentation strings may mention the key."""
         tree = ast.parse(_MODULE.read_text(encoding="utf-8"))
@@ -1000,7 +1068,7 @@ class TestModuleBoundary:
 
         assert references == []
 
-    def test_code_calls_no_io_builtin(self) -> None:
+    def test_code_calls_include_no_io_builtin(self) -> None:
         tree = ast.parse(_MODULE.read_text(encoding="utf-8"))
 
         called = {

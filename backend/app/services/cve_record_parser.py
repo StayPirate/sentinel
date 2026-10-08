@@ -363,9 +363,15 @@ def parse_description(descriptions: object) -> str | None:
 
 
 def parse_title(cna: object) -> str | None:
-    """`cna.title` truncated to 256 characters, unvalidated (§ `parse_title`)."""
+    """`cna.title` truncated to 256 characters, unvalidated (§ `parse_title`).
+
+    A title containing U+0000 is returned untruncated, so truncation never
+    strips the inadmissible character and the caller's payload rejects it.
+    """
     title = cna.get("title") if isinstance(cna, dict) else None
-    return title[:TITLE_MAX_LENGTH] if isinstance(title, str) else None
+    if not isinstance(title, str):
+        return None
+    return title if contains_nul(title) else title[:TITLE_MAX_LENGTH]
 
 
 def validate_cve_id(filename_id: str, json_metadata: object) -> str:

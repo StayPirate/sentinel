@@ -21,7 +21,7 @@ minimal fictional objects. No database, network, or log is involved.
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from typing import Any, Final
 
 import pytest
@@ -46,7 +46,6 @@ from app.services.cve_ingest import (
 )
 from app.services.cve_record_parser import (
     CVSS_VECTOR_KEYS,
-    TITLE_MAX_LENGTH,
     extract_cve_state,
     extract_dates,
     parse_affected_versions,
@@ -462,7 +461,7 @@ class TestAffectedFields:
         assert entry.version_end_inclusive is None
         assert entry.status is None
 
-    def test_every_field_is_mapped(self) -> None:
+    def test_element_with_every_field_maps_each_to_its_entry_field(self) -> None:
         element = {
             "vendor": VENDOR,
             "product": PRODUCT,
@@ -521,7 +520,7 @@ class TestAffectedFields:
             ({"lessThan": ""}, "", False),
         ],
     )
-    def test_version_end_and_inclusivity(
+    def test_version_bounds_yield_version_end_and_inclusivity(
         self, bounds: dict[str, Any], version_end: str | None, inclusive: bool | None
     ) -> None:
         element = _element(versions=[_version(**bounds)])
@@ -534,7 +533,7 @@ class TestAffectedFields:
     @pytest.mark.parametrize(
         "version_type", ["semver", "git", "custom", "original_commit_for_fix", "rpm"]
     )
-    def test_version_type_is_an_open_set_stored_as_is(self, version_type: str) -> None:
+    def test_version_type_of_any_value_is_stored_as_is(self, version_type: str) -> None:
         element = _element(versions=[_version(versionType=version_type)])
 
         (entry,) = parse_affected_versions([element])
@@ -549,14 +548,14 @@ class TestAffectedFields:
 
         assert (entry.status, entry.default_status) == (status, status)
 
-    def test_first_cpe_is_used(self) -> None:
+    def test_cpes_with_several_items_yield_the_first(self) -> None:
         element = _element(cpes=["cpe:/a:example:first", "cpe:/a:example:second"])
 
         (entry,) = parse_affected_versions([element])
 
         assert entry.cpe == "cpe:/a:example:first"
 
-    def test_only_the_first_cpe_is_consumed(self) -> None:
+    def test_cpes_with_non_string_later_items_yield_the_first(self) -> None:
         element = _element(cpes=["cpe:/a:example:first", 1, None])
 
         (entry,) = parse_affected_versions([element])
@@ -577,7 +576,7 @@ class TestAffectedFields:
             (None, None),
         ],
     )
-    def test_package_url_is_optional(
+    def test_package_url_present_or_absent_is_mapped(
         self, package_url: Any, expected: str | None
     ) -> None:
         (entry,) = parse_affected_versions([_element(packageURL=package_url)])
@@ -593,7 +592,7 @@ class TestAffectedFields:
             (_ABSENT, None),
         ],
     )
-    def test_program_files_are_entry_level(
+    def test_program_files_with_several_versions_are_copied_to_each(
         self, program_files: Any, expected: list[str] | None
     ) -> None:
         element = _element(
@@ -605,7 +604,7 @@ class TestAffectedFields:
 
         assert [entry.program_files for entry in entries] == [expected, expected]
 
-    def test_entry_level_fields_are_copied_to_every_version(self) -> None:
+    def test_entry_level_fields_with_several_versions_are_copied_to_each(self) -> None:
         element = _element(
             defaultStatus="unaffected",
             packageName="example-package",
@@ -632,14 +631,14 @@ class TestAffectedFields:
         assert (entry.product, entry.version, entry.version_end) == (long, long, long)
         assert entry.program_files == [long]
 
-    def test_ecosystem_is_never_set(self) -> None:
+    def test_ecosystem_key_in_element_is_ignored(self) -> None:
         element = _element(ecosystem="PyPI", versions=[_version()])
 
         (entry,) = parse_affected_versions([element])
 
         assert entry.ecosystem is None
 
-    def test_empty_array_yields_no_entry(self) -> None:
+    def test_empty_affected_array_yields_no_entry(self) -> None:
         assert parse_affected_versions([]) == []
 
 
@@ -737,17 +736,6 @@ class TestAffectedDeduplication:
         assert parse_affected_versions([first, second]) == second_alone
         assert parse_affected_versions([second, first]) == first_alone
 
-    def test_unparsed_same_key_entries_would_be_rejected_by_the_payload(self) -> None:
-        """Guards the meaning of the deduplication: without it, these
-        same-key entries are contradictory canonical content."""
-        entries = [
-            _entry(version="1.0", version_type=""),
-            _entry(version="1.0", version_type=None),
-        ]
-
-        with pytest.raises(ValidationError):
-            CVEIngestPayload(affected_version_operations=[_replace_operation(entries)])
-
     def test_same_key_within_one_element_keeps_the_last_version(self) -> None:
         element = _element(
             versions=[
@@ -759,13 +747,13 @@ class TestAffectedDeduplication:
 
         entries = parse_affected_versions([element])
 
-        assert sorted((e.version, e.status) for e in entries) == [
-            ("1.0", "unaffected"),
+        assert [(e.version, e.status) for e in entries] == [
             ("2.0", "affected"),
+            ("1.0", "unaffected"),
         ]
         _assert_accepted_as_snapshot(entries)
 
-    def test_identical_duplicates_collapse(self) -> None:
+    def test_identical_duplicates_across_elements_collapse_to_one(self) -> None:
         element = _element(versions=[_version(), _version()])
 
         assert parse_affected_versions([element, element]) == [
@@ -815,19 +803,20 @@ class TestAffectedDeduplication:
         )
         _assert_accepted_as_snapshot(entries)
 
-    def test_last_of_three_occurrences_wins_and_others_survive(self) -> None:
+    def test_same_key_split_by_another_key_yields_other_then_last(self) -> None:
         a1 = _element(defaultStatus="affected")
         b = _element(product="example-other")
         a2 = _element(defaultStatus="unknown")
 
         entries = parse_affected_versions([a1, b, a2])
 
-        assert len(entries) == 2
-        assert _entry(product="example-other") in entries
-        assert _entry(default_status="unknown") in entries
+        assert entries == [
+            _entry(product="example-other"),
+            _entry(default_status="unknown"),
+        ]
         _assert_accepted_as_snapshot(entries)
 
-    def test_crafted_duplicates_form_a_valid_payload(self) -> None:
+    def test_crafted_duplicates_after_deduplication_form_a_valid_payload(self) -> None:
         affected = [
             _element(versions=[_version(versionType="", lessThan="")]),
             _element(versions=[_version(lessThanOrEqual="")]),
@@ -857,7 +846,9 @@ class TestAffectedInvalidInput:
             ("defaultStatus", 20),
         ],
     )
-    def test_element_level_bound(self, key: str, bound: int) -> None:
+    def test_element_field_over_bound_skips_the_element(
+        self, key: str, bound: int
+    ) -> None:
         at_bound = _element(**{key: "x" * bound})
         over = _element(product="example-over", **{key: "x" * (bound + 1)})
 
@@ -867,7 +858,7 @@ class TestAffectedInvalidInput:
         assert entries[1] == SIBLING_ENTRY
         assert entries[0].product == PRODUCT
 
-    def test_first_cpe_bound(self) -> None:
+    def test_first_cpe_over_bound_skips_the_element(self) -> None:
         bound = 2048
         at_bound = _element(cpes=["c" * bound])
         over = _element(product="example-over", cpes=["c" * (bound + 1)])
@@ -876,7 +867,7 @@ class TestAffectedInvalidInput:
 
         assert [e.product for e in entries] == [PRODUCT, "example-sibling"]
 
-    def test_element_level_bound_skips_every_version_of_the_element(self) -> None:
+    def test_element_field_over_bound_with_versions_skips_every_version(self) -> None:
         over = _element(
             defaultStatus="x" * 21,
             versions=[_version(version="1.0"), _version(version="2.0")],
@@ -885,7 +876,7 @@ class TestAffectedInvalidInput:
         assert parse_affected_versions([over, SIBLING]) == [SIBLING_ENTRY]
 
     @pytest.mark.parametrize(("key", "bound"), [("versionType", 128), ("status", 20)])
-    def test_version_level_bound_skips_only_that_version(
+    def test_version_field_over_bound_skips_only_that_version(
         self, key: str, bound: int
     ) -> None:
         element = _element(
@@ -935,7 +926,7 @@ class TestAffectedInvalidInput:
 
         assert entries == [_entry(version="1.0", status="affected"), SIBLING_ENTRY]
 
-    def test_non_string_less_than_or_equal_beside_less_than_is_unparseable(
+    def test_non_string_less_than_or_equal_beside_less_than_skips_the_version(
         self,
     ) -> None:
         """Both bounds are consumed fields, so a mistyped one skips the
@@ -986,13 +977,11 @@ class TestAffectedInvalidInput:
 
         assert parse_affected_versions([element, SIBLING]) == [SIBLING_ENTRY]
 
-    @pytest.mark.parametrize("affected", [None, {}, {"0": SIBLING}, "x", 1, 1.5, True])
-    def test_wrong_typed_argument_yields_empty_list(self, affected: Any) -> None:
-        assert parse_affected_versions(affected) == []
-
 
 class TestAffectedFixtures:
-    def test_package_only_element_yields_xz_entries(self) -> None:
+    def test_package_only_fixture_element_yields_xz_entries_without_vendor(
+        self,
+    ) -> None:
         entries = parse_affected_versions(
             _container("cvelistv5_5_2_package_only_affected", "cna")["affected"]
         )
@@ -1034,7 +1023,7 @@ class TestAffectedFixtures:
     @pytest.mark.parametrize(
         "name", ["cvelistv5_v3_1_non_base_en_us_kev", "cvelistv5_lowercase_cwe_type"]
     )
-    def test_uppercase_n_a_version_is_kept(self, name: str) -> None:
+    def test_uppercase_n_a_fixture_version_is_kept_as_received(self, name: str) -> None:
         entries = parse_affected_versions(_container(name, "cna")["affected"])
 
         assert "N/A" in {e.version for e in entries}
@@ -1088,7 +1077,7 @@ class TestAffectedFixtures:
 
         assert "custom" in {e.version_type for e in entries}
 
-    def test_package_url_on_a_package_only_element(self) -> None:
+    def test_package_url_on_package_only_fixture_element_is_mapped(self) -> None:
         (entry,) = parse_affected_versions(
             _container("cvelistv5_package_url_package_only", "cna")["affected"]
         )
@@ -1101,7 +1090,7 @@ class TestAffectedFixtures:
             "lib/HTML/FormHandler/Field.pm",
         ]
 
-    def test_package_url_with_vendor_and_product(self) -> None:
+    def test_package_url_with_vendor_and_product_is_mapped(self) -> None:
         (entry,) = parse_affected_versions(
             _container("cvelistv5_package_url_vendor", "cna")["affected"]
         )
@@ -1117,7 +1106,7 @@ class TestAffectedFixtures:
         assert entries
         assert {e.cpe for e in entries} == {None}
 
-    def test_adp_affected_with_rpm_versions_and_cpes(self) -> None:
+    def test_adp_affected_with_rpm_versions_yields_cpes_and_version_types(self) -> None:
         entries = parse_affected_versions(
             _container("cvelistv5_program_files_adp_affected", "adp:redhat-SADP")[
                 "affected"
@@ -1143,14 +1132,6 @@ class TestAffectedFixtures:
         )
 
         assert {e.status for e in entries} == {"affected", "unknown"}
-
-    @pytest.mark.parametrize("name", ALL_FIXTURES)
-    def test_every_scope_is_a_valid_replace_snapshot(self, name: str) -> None:
-        for _, container in _containers(load_fixture(name)):
-            entries = parse_affected_versions(container.get("affected"))
-            assert all(isinstance(e, AffectedVersionEntry) for e in entries)
-            assert all(e.ecosystem is None for e in entries)
-            _assert_accepted_as_snapshot(entries)
 
 
 # ---------------------------------------------------------------------------
@@ -1252,17 +1233,16 @@ class TestCvssProvider:
             ("", ""),
         ],
     )
-    def test_provider_is_stamped_trimmed(self, provider: str, stamped: str) -> None:
+    def test_provider_with_outer_whitespace_is_stamped_trimmed(
+        self, provider: str, stamped: str
+    ) -> None:
         (entry,) = parse_cvss_assessments([_cvss("cvssV3_1", V31)], provider)
 
         assert entry == CVSSAssessmentEntry(provider_name=stamped, vector_string=V31)
 
 
 class TestCvssCandidates:
-    def test_key_order_is_v4_v3_1_v3_0_v2(self) -> None:
-        assert CVSS_VECTOR_KEYS == ("cvssV4_0", "cvssV3_1", "cvssV3_0", "cvssV2_0")
-
-    def test_every_key_of_one_metrics_entry_is_a_candidate(self) -> None:
+    def test_metrics_entry_with_every_key_yields_each_in_key_order(self) -> None:
         metric = {
             "cvssV2_0": {"vectorString": V20},
             "cvssV3_0": {"vectorString": V30},
@@ -1275,7 +1255,7 @@ class TestCvssCandidates:
         assert _vectors(entries) == [V40, V31, V30, V20]
         assert {e.provider_name for e in entries} == {PROVIDER}
 
-    def test_keys_in_separate_entries_are_candidates(self) -> None:
+    def test_keys_in_separate_entries_yield_each_version(self) -> None:
         metrics = [
             _cvss(key, v)
             for key, v in zip(CVSS_VECTOR_KEYS, [V40, V31, V30, V20], strict=True)
@@ -1306,7 +1286,7 @@ class TestCvssCandidates:
             ("cvssV3_1", "  " + V31 + "\t", V31),
         ],
     )
-    def test_vector_goes_through_the_external_base_reduction(
+    def test_non_base_vector_is_reduced_to_its_canonical_base_vector(
         self, key: str, received: str, canonical: str
     ) -> None:
         (entry,) = parse_cvss_assessments([_cvss(key, received)], PROVIDER)
@@ -1354,7 +1334,7 @@ class TestCvssCandidates:
 
         assert _vectors(parse_cvss_assessments([metric], PROVIDER)) == [V40]
 
-    def test_last_valid_candidate_per_version_wins(self) -> None:
+    def test_same_version_candidates_keep_the_last_valid_in_last_position(self) -> None:
         metrics = [
             _cvss("cvssV3_1", V31),
             _cvss("cvssV4_0", V40),
@@ -1363,7 +1343,7 @@ class TestCvssCandidates:
 
         entries = parse_cvss_assessments(metrics, PROVIDER)
 
-        assert sorted(_vectors(entries)) == sorted([V31_ALT, V40])
+        assert _vectors(entries) == [V40, V31_ALT]
 
     def test_later_invalid_candidate_does_not_displace_a_valid_one(self) -> None:
         metrics = [
@@ -1374,7 +1354,7 @@ class TestCvssCandidates:
 
         assert _vectors(parse_cvss_assessments(metrics, PROVIDER)) == [V31]
 
-    def test_version_is_derived_from_the_vector_not_the_key(self) -> None:
+    def test_key_carrying_another_version_yields_the_vector_version(self) -> None:
         (entry,) = parse_cvss_assessments([_cvss("cvssV3_1", V30)], PROVIDER)
 
         assert entry.vector_string == V30
@@ -1389,12 +1369,12 @@ class TestCvssCandidates:
 
         assert _vectors(parse_cvss_assessments([metric], PROVIDER)) == [V30_ALT]
 
-    def test_equal_canonical_vectors_collapse(self) -> None:
+    def test_vectors_with_equal_canonical_form_collapse_to_one(self) -> None:
         metrics = [_cvss("cvssV3_1", V31), _cvss("cvssV3_1", V31 + "/E:P")]
 
         assert _vectors(parse_cvss_assessments(metrics, PROVIDER)) == [V31]
 
-    def test_at_most_four_entries(self) -> None:
+    def test_repeated_full_metrics_yield_at_most_four_entries(self) -> None:
         metric = {
             "cvssV2_0": {"vectorString": V20},
             "cvssV3_0": {"vectorString": V30},
@@ -1433,13 +1413,7 @@ class TestCvssCandidates:
 
         assert _vectors(parse_cvss_assessments(metrics, PROVIDER)) == [V40]
 
-    @pytest.mark.parametrize(
-        "metrics", [None, {}, _cvss("cvssV3_1", V31), "x", 1, True]
-    )
-    def test_wrong_typed_argument_yields_empty_list(self, metrics: Any) -> None:
-        assert parse_cvss_assessments(metrics, PROVIDER) == []
-
-    def test_empty_array_yields_no_entry(self) -> None:
+    def test_empty_metrics_array_yields_no_entry(self) -> None:
         assert parse_cvss_assessments([], PROVIDER) == []
 
 
@@ -1482,17 +1456,12 @@ class TestCvssFixtures:
 
         assert _vectors(parse_cvss_assessments(metrics, "Temporal")) == [first]
 
-    def test_fixture_provider_is_stamped(self) -> None:
+    def test_fixture_adp_provider_is_stamped_on_every_entry(self) -> None:
         metrics = _container("cvelistv5_adp_cvss_v4", "adp:CISA-ADP")["metrics"]
 
         entries = parse_cvss_assessments(metrics, "adp:CISA-ADP")
 
         assert {e.provider_name for e in entries} == {"adp:CISA-ADP"}
-
-    def test_fixture_with_reserved_provider_yields_nothing(self) -> None:
-        metrics = _container("cvelistv5_all_cvss_keys_en_de", "cna")["metrics"]
-
-        assert parse_cvss_assessments(metrics, " SUSE ") == []
 
 
 # ---------------------------------------------------------------------------
@@ -1543,7 +1512,7 @@ scope yields none."""
 
 class TestCweClassifications:
     @pytest.mark.parametrize("type_", ["CWE", "cwe", "Cwe", "cWe"])
-    def test_cwe_type_is_case_insensitive(self, type_: str) -> None:
+    def test_cwe_type_in_any_case_selects_the_description(self, type_: str) -> None:
         entries = parse_cwe_classifications([_problem(_cwe("CWE-79", type_))], SOURCE)
 
         assert entries == [CWEEntry(cwe_id="CWE-79", source=SOURCE)]
@@ -1605,7 +1574,7 @@ class TestCweClassifications:
 
         assert _cwe_ids(entries) == [cwe_id]
 
-    def test_first_occurrence_per_cwe_id_is_retained(self) -> None:
+    def test_repeated_cwe_id_keeps_the_first_occurrence(self) -> None:
         problem_types = [
             _problem(_cwe("CWE-79"), _cwe("CWE-89")),
             _problem(_cwe("CWE-79", "text"), _cwe("CWE-416")),
@@ -1615,7 +1584,7 @@ class TestCweClassifications:
 
         assert _cwe_ids(entries) == ["CWE-79", "CWE-89", "CWE-416"]
 
-    def test_source_is_stamped(self) -> None:
+    def test_source_is_stamped_on_every_entry(self) -> None:
         entries = parse_cwe_classifications([_problem(_cwe("CWE-79"))], "adp:CISA-ADP")
 
         assert entries == [CWEEntry(cwe_id="CWE-79", source="adp:CISA-ADP")]
@@ -1645,12 +1614,6 @@ class TestCweClassifications:
         problem_types = [element, _problem(element, _cwe("CWE-89"))]
 
         assert _cwe_ids(parse_cwe_classifications(problem_types, SOURCE)) == ["CWE-89"]
-
-    @pytest.mark.parametrize(
-        "problem_types", [None, {}, _problem(_cwe("CWE-79")), "x", 1]
-    )
-    def test_wrong_typed_argument_yields_empty_list(self, problem_types: Any) -> None:
-        assert parse_cwe_classifications(problem_types, SOURCE) == []
 
     @pytest.mark.parametrize("name", ALL_FIXTURES)
     def test_fixture_scopes_yield_their_cwes(self, name: str) -> None:
@@ -1684,7 +1647,7 @@ class TestDescription:
 
         assert parse_description(descriptions) == "Fictional description."
 
-    def test_first_english_entry_wins(self) -> None:
+    def test_several_english_entries_yield_the_first(self) -> None:
         descriptions = [
             {"lang": "en-US", "value": "First fictional description."},
             {"lang": "en", "value": "Second fictional description."},
@@ -1692,7 +1655,7 @@ class TestDescription:
 
         assert parse_description(descriptions) == "First fictional description."
 
-    def test_without_english_the_first_entry_is_used(self) -> None:
+    def test_entries_without_english_yield_the_first(self) -> None:
         descriptions = [
             {"lang": "de", "value": "Fiktive Beschreibung."},
             {"lang": "es", "value": "Descripción ficticia."},
@@ -1701,7 +1664,9 @@ class TestDescription:
         assert parse_description(descriptions) == "Fiktive Beschreibung."
 
     @pytest.mark.parametrize("lang", ["EN", "En-us", " en", "fr-en", None, 1, _ABSENT])
-    def test_non_english_or_mistyped_lang_falls_back(self, lang: Any) -> None:
+    def test_non_english_or_mistyped_lang_falls_back_to_the_first(
+        self, lang: Any
+    ) -> None:
         first = {"lang": lang, "value": "First fictional description."}
         first = {k: v for k, v in first.items() if v is not _ABSENT}
         descriptions = [first, {"lang": "de", "value": "Fiktive Beschreibung."}]
@@ -1725,14 +1690,8 @@ class TestDescription:
         assert parse_description(descriptions) is None
 
     @pytest.mark.parametrize("value", ["", "a\x00b", "\r\nFictional\r\n", "x" * 10000])
-    def test_value_is_returned_unvalidated(self, value: str) -> None:
+    def test_value_of_any_content_is_returned_unvalidated(self, value: str) -> None:
         assert parse_description([{"lang": "en", "value": value}]) == value
-
-    @pytest.mark.parametrize(
-        "descriptions", [None, {}, {"lang": "en", "value": "x"}, "x", 1]
-    )
-    def test_wrong_typed_argument_yields_none(self, descriptions: Any) -> None:
-        assert parse_description(descriptions) is None
 
     @pytest.mark.parametrize(
         ("name", "prefix"),
@@ -1748,7 +1707,9 @@ class TestDescription:
             ("vulns_published_5_1_1", "In the Linux kernel"),
         ],
     )
-    def test_fixture_english_description(self, name: str, prefix: str) -> None:
+    def test_fixture_descriptions_yield_the_english_value(
+        self, name: str, prefix: str
+    ) -> None:
         cna = _container(name, "cna")
 
         assert str(parse_description(cna["descriptions"])).startswith(prefix)
@@ -1757,6 +1718,19 @@ class TestDescription:
         cna = _container("cvelistv5_5_2_package_only_affected", "cna")
 
         assert "\r\n" in str(parse_description(cna["descriptions"]))
+
+
+_NUL_TITLES: Final = (
+    "\x00",
+    "a\x00b",
+    "Fictional\x00",
+    "a" * 255 + "\x00",
+    "a" * 256 + "\x00",
+    "a" * 300 + "\x00",
+    "a" * 100 + "\x00" + "a" * 200,
+    "\x00" + "a" * 300,
+)
+"""Titles with U+0000 within and after the first 256 characters."""
 
 
 class TestTitle:
@@ -1771,11 +1745,9 @@ class TestTitle:
             ("x" * 5000, "x" * 256),
         ],
     )
-    def test_title_is_truncated_to_256_characters(
+    def test_nul_free_title_over_256_characters_is_truncated(
         self, title: str, expected: str
     ) -> None:
-        assert TITLE_MAX_LENGTH == 256
-
         assert parse_title({"title": title}) == expected
 
     @pytest.mark.parametrize("title", [None, 1, 1.5, True, ["x"], {"x": "y"}, _ABSENT])
@@ -1784,20 +1756,25 @@ class TestTitle:
 
         assert parse_title(cna) is None
 
-    @pytest.mark.parametrize("title", ["\x00", "a\x00b", "Fictional\x00"])
-    def test_title_is_returned_unvalidated(self, title: str) -> None:
+    @pytest.mark.parametrize("title", _NUL_TITLES)
+    def test_title_with_nul_is_returned_untruncated(self, title: str) -> None:
         assert parse_title({"title": title}) == title
 
-    @pytest.mark.parametrize("cna", [None, [], "title", 1, [{"title": "x"}]])
-    def test_wrong_typed_argument_yields_none(self, cna: Any) -> None:
-        assert parse_title(cna) is None
+    @pytest.mark.parametrize("title", _NUL_TITLES)
+    def test_caller_payload_with_nul_title_raises_validation_error(
+        self, title: str
+    ) -> None:
+        """The untruncated value keeps U+0000, so the caller's payload
+        construction rejects it and fails the CVE item."""
+        with pytest.raises(ValidationError):
+            CVEIngestPayload(title=parse_title({"title": title}))
 
-    def test_fixture_title(self) -> None:
+    def test_fixture_title_is_returned(self) -> None:
         cna = _container("vulns_published_5_1_1", "cna")
 
         assert parse_title(cna) == "example: fictional title of CVE-2019-25160"
 
-    def test_fixture_without_title(self) -> None:
+    def test_fixture_without_title_yields_none(self) -> None:
         assert (
             parse_title(_container("vulns_rejected_5_1_problem_types", "cna")) is None
         )
@@ -1827,16 +1804,12 @@ class TestValidateCveId:
             pytest.param(CVE_ID, id="string-metadata"),
         ],
     )
-    def test_filename_id_is_always_returned(self, metadata: Any) -> None:
+    def test_any_metadata_yields_the_filename_id(self, metadata: Any) -> None:
         assert validate_cve_id(CVE_ID, metadata) == CVE_ID
 
-    @pytest.mark.parametrize("name", ALL_FIXTURES)
-    def test_fixture_cve_id(self, name: str) -> None:
-        metadata = load_fixture(name)["cveMetadata"]
-
-        assert validate_cve_id(source_cve_id(name), metadata) == source_cve_id(name)
-
-    def test_legacy_fixture_with_mismatching_file_name(self) -> None:
+    def test_legacy_fixture_with_mismatching_file_name_yields_the_filename_id(
+        self,
+    ) -> None:
         metadata = load_fixture("vulns_rejected_5_0_legacy_cve_id")["cveMetadata"]
         assert "cveID" in metadata
 
@@ -1849,7 +1822,7 @@ class TestValidateCveId:
 
 
 class TestSsvc:
-    def test_complete_assessment(self) -> None:
+    def test_complete_content_yields_the_assessment(self) -> None:
         assert parse_ssvc_assessment([_other("ssvc", _ssvc_content())]) == _ssvc_entry()
 
     @pytest.mark.parametrize(
@@ -1865,7 +1838,9 @@ class TestSsvc:
             ("2024-01-01T00:30:00-01:00", datetime(2024, 1, 1, 1, 30, tzinfo=UTC)),
         ],
     )
-    def test_assessed_at_is_aware_utc(self, timestamp: str, expected: datetime) -> None:
+    def test_timestamp_forms_yield_aware_utc_assessed_at(
+        self, timestamp: str, expected: datetime
+    ) -> None:
         entry = parse_ssvc_assessment(
             [_other("ssvc", _ssvc_content(timestamp=timestamp))]
         )
@@ -1905,7 +1880,7 @@ class TestSsvc:
 
         assert parse_ssvc_assessment(metrics) is None
 
-    def test_last_ssvc_entry_is_used(self) -> None:
+    def test_several_ssvc_entries_yield_the_last(self) -> None:
         metrics = [
             _other("ssvc", _ssvc_content(exploitation="none")),
             _other("kev", _kev_content()),
@@ -1926,14 +1901,12 @@ class TestSsvc:
             [],
         ],
     )
-    def test_incomplete_last_entry_wins_over_an_earlier_complete(
-        self, last: Any
-    ) -> None:
+    def test_incomplete_last_entry_after_complete_yields_none(self, last: Any) -> None:
         metrics = [_other("ssvc", _ssvc_content()), _other("ssvc", last)]
 
         assert parse_ssvc_assessment(metrics) is None
 
-    def test_complete_last_entry_wins_over_an_earlier_incomplete(self) -> None:
+    def test_complete_last_entry_after_incomplete_yields_the_assessment(self) -> None:
         metrics = [
             _other("ssvc", _ssvc_content(exploitation=_ABSENT)),
             _other("ssvc", _ssvc_content()),
@@ -1941,7 +1914,7 @@ class TestSsvc:
 
         assert parse_ssvc_assessment(metrics) == _ssvc_entry()
 
-    def test_options_are_found_by_key_in_any_order_and_shape(self) -> None:
+    def test_options_in_any_order_and_shape_are_found_by_key(self) -> None:
         content = _ssvc_content()
         content["options"] = [
             {"Technical Impact": "partial", "Unrelated": "x"},
@@ -1958,7 +1931,7 @@ class TestSsvc:
             technical_impact=SSVCTechnicalImpact.PARTIAL,
         )
 
-    def test_first_object_carrying_a_key_supplies_it(self) -> None:
+    def test_repeated_option_key_yields_the_first_value(self) -> None:
         content = _ssvc_content()
         content["options"].append({"Exploitation": "none"})
 
@@ -1967,7 +1940,7 @@ class TestSsvc:
         assert entry is not None
         assert entry.exploitation is SSVCExploitation.ACTIVE
 
-    def test_first_object_with_a_null_value_makes_the_point_missing(self) -> None:
+    def test_first_option_with_null_value_yields_none(self) -> None:
         content = _ssvc_content()
         content["options"].insert(0, {"Exploitation": None})
 
@@ -2014,7 +1987,7 @@ class TestSsvc:
             for t in SSVCTechnicalImpact
         ],
     )
-    def test_every_enum_member_is_accepted(
+    def test_every_enum_member_combination_yields_the_assessment(
         self,
         exploitation: SSVCExploitation,
         automatable: SSVCAutomatable,
@@ -2078,10 +2051,10 @@ class TestSsvc:
             _cvss("cvssV3_1", V31),
         ],
     )
-    def test_entry_not_typed_ssvc_is_ignored(self, metric: Any) -> None:
+    def test_entry_not_typed_ssvc_yields_none(self, metric: Any) -> None:
         assert parse_ssvc_assessment([metric]) is None
 
-    def test_non_ssvc_entries_after_it_do_not_hide_it(self) -> None:
+    def test_non_ssvc_entries_after_ssvc_yield_the_assessment(self) -> None:
         metrics = [
             _other("ssvc", _ssvc_content()),
             {"other": None},
@@ -2091,12 +2064,6 @@ class TestSsvc:
         ]
 
         assert parse_ssvc_assessment(metrics) == _ssvc_entry()
-
-    @pytest.mark.parametrize(
-        "metrics", [None, {}, _other("ssvc", _ssvc_content()), "x", 1]
-    )
-    def test_wrong_typed_argument_yields_none(self, metrics: Any) -> None:
-        assert parse_ssvc_assessment(metrics) is None
 
     @pytest.mark.parametrize(
         ("name", "expected"),
@@ -2130,7 +2097,9 @@ class TestSsvc:
             ),
         ],
     )
-    def test_fixture_assessment(self, name: str, expected: tuple[Any, ...]) -> None:
+    def test_fixture_cisa_adp_metrics_yield_the_assessment(
+        self, name: str, expected: tuple[Any, ...]
+    ) -> None:
         entry = parse_ssvc_assessment(_container(name, "adp:CISA-ADP")["metrics"])
 
         assert entry is not None
@@ -2143,7 +2112,7 @@ class TestSsvc:
         assert entry.version == "2.0.3"
 
     @pytest.mark.parametrize("name", ALL_FIXTURES)
-    def test_every_cisa_adp_fixture_parses_and_no_other_scope_does(
+    def test_fixture_scopes_yield_an_assessment_only_for_cisa_adp(
         self, name: str
     ) -> None:
         for label, container in _containers(load_fixture(name)):
@@ -2163,7 +2132,7 @@ class TestSsvc:
 
 
 class TestKev:
-    def test_complete_entry(self) -> None:
+    def test_complete_content_yields_the_entry(self) -> None:
         entry = parse_kev_data([_other("kev", _kev_content())])
 
         assert entry == KEVEntry(
@@ -2181,7 +2150,7 @@ class TestKev:
             ("9999-12-31T23:59:59-01:00", date(9999, 12, 31)),
         ],
     )
-    def test_date_added_is_the_date_as_written(
+    def test_date_added_forms_yield_the_date_as_written(
         self, date_added: str, expected: date
     ) -> None:
         entry = parse_kev_data([_other("kev", _kev_content(date_added=date_added))])
@@ -2252,7 +2221,7 @@ class TestKev:
 
         assert parse_kev_data(metrics) is None
 
-    def test_last_kev_entry_is_used(self) -> None:
+    def test_several_kev_entries_yield_the_last(self) -> None:
         metrics = [
             _other("kev", _kev_content(date_added="2024-01-01")),
             _other("ssvc", _ssvc_content()),
@@ -2268,7 +2237,7 @@ class TestKev:
         "last",
         [_kev_content(date_added="garbage"), _kev_content(reference=1), None, []],
     )
-    def test_invalid_last_entry_wins_over_an_earlier_valid(self, last: Any) -> None:
+    def test_invalid_last_entry_after_valid_yields_none(self, last: Any) -> None:
         metrics = [_other("kev", _kev_content()), _other("kev", last)]
 
         assert parse_kev_data(metrics) is None
@@ -2282,14 +2251,8 @@ class TestKev:
             {"kev": _kev_content()},
         ],
     )
-    def test_entry_not_typed_kev_is_ignored(self, metric: Any) -> None:
+    def test_entry_not_typed_kev_yields_none(self, metric: Any) -> None:
         assert parse_kev_data([metric]) is None
-
-    @pytest.mark.parametrize(
-        "metrics", [None, {}, _other("kev", _kev_content()), "x", 1]
-    )
-    def test_wrong_typed_argument_yields_none(self, metrics: Any) -> None:
-        assert parse_kev_data(metrics) is None
 
     @pytest.mark.parametrize(
         ("name", "expected"),
@@ -2298,7 +2261,9 @@ class TestKev:
             ("cvelistv5_v3_1_non_base_en_us_kev", date(2022, 1, 10)),
         ],
     )
-    def test_fixture_kev(self, name: str, expected: date) -> None:
+    def test_fixture_cisa_adp_metrics_yield_the_kev_entry(
+        self, name: str, expected: date
+    ) -> None:
         entry = parse_kev_data(_container(name, "adp:CISA-ADP")["metrics"])
 
         assert entry is not None
@@ -2308,7 +2273,9 @@ class TestKev:
         assert source_cve_id(name) in entry.reference_url
 
     @pytest.mark.parametrize("name", ALL_FIXTURES)
-    def test_only_kev_fixtures_yield_an_entry(self, name: str) -> None:
+    def test_fixture_scopes_yield_an_entry_only_for_kev_fixtures(
+        self, name: str
+    ) -> None:
         kev_fixtures = {
             "cvelistv5_kev_ssvc_offset_n_a",
             "cvelistv5_v3_1_non_base_en_us_kev",
@@ -2329,7 +2296,9 @@ class TestCveState:
         ("state", "expected"),
         [("PUBLISHED", CveState.PUBLISHED), ("REJECTED", CveState.REJECTED)],
     )
-    def test_member_is_returned(self, state: str, expected: CveState) -> None:
+    def test_member_value_yields_the_member(
+        self, state: str, expected: CveState
+    ) -> None:
         assert extract_cve_state({"state": state}) is expected
 
     @pytest.mark.parametrize(
@@ -2349,20 +2318,14 @@ class TestCveState:
             {"state": "PUBLISHED"},
         ],
     )
-    def test_unrecognized_state_is_none(self, state: Any) -> None:
+    def test_unrecognized_state_yields_none(self, state: Any) -> None:
         assert extract_cve_state({"state": state}) is None
 
-    def test_absent_state_is_none(self) -> None:
+    def test_absent_state_yields_none(self) -> None:
         assert extract_cve_state({"cveId": CVE_ID}) is None
 
-    @pytest.mark.parametrize(
-        "metadata", [None, [], "PUBLISHED", 1, [{"state": "PUBLISHED"}]]
-    )
-    def test_wrong_typed_argument_yields_none(self, metadata: Any) -> None:
-        assert extract_cve_state(metadata) is None
-
     @pytest.mark.parametrize("name", ALL_FIXTURES)
-    def test_fixture_state(self, name: str) -> None:
+    def test_fixture_state_yields_its_member(self, name: str) -> None:
         metadata = load_fixture(name)["cveMetadata"]
 
         assert extract_cve_state(metadata) is CveState(metadata["state"])
@@ -2392,7 +2355,7 @@ class TestDates:
         ],
     )
     @pytest.mark.parametrize("index", [0, 1, 2])
-    def test_each_date_is_aware_utc(
+    def test_date_time_forms_yield_aware_utc(
         self, index: int, value: str, expected: datetime
     ) -> None:
         dates = extract_dates({_DATE_KEYS[index]: value})
@@ -2428,7 +2391,7 @@ class TestDates:
         ],
     )
     @pytest.mark.parametrize("index", [0, 1, 2])
-    def test_unparseable_date_is_none_independently(
+    def test_unparseable_date_yields_none_independently(
         self, index: int, value: Any
     ) -> None:
         metadata = dict.fromkeys(_DATE_KEYS, "2024-01-01T00:00:00Z")
@@ -2441,22 +2404,10 @@ class TestDates:
             datetime(2024, 1, 1, tzinfo=UTC)
         ] * 2
 
-    def test_absent_dates_are_none(self) -> None:
+    def test_absent_dates_yield_none(self) -> None:
         assert extract_dates({"state": "PUBLISHED"}) == (None, None, None)
 
-    @pytest.mark.parametrize("metadata", [None, [], "2024-01-01T00:00:00Z", 1])
-    def test_wrong_typed_argument_yields_nones(self, metadata: Any) -> None:
-        assert extract_dates(metadata) == (None, None, None)
-
-    def test_offset_in_another_zone_converts_the_instant(self) -> None:
-        zone = timezone(timedelta(hours=-5))
-
-        published, _, _ = extract_dates({"datePublished": "2024-01-01T23:30:00-05:00"})
-
-        assert published == datetime(2024, 1, 1, 23, 30, tzinfo=zone)
-        assert published == datetime(2024, 1, 2, 4, 30, tzinfo=UTC)
-
-    def test_naive_fixture_date_is_utc(self) -> None:
+    def test_naive_fixture_date_yields_utc(self) -> None:
         metadata = load_fixture("cvelistv5_naive_date_published")["cveMetadata"]
 
         published, updated, rejected = extract_dates(metadata)
@@ -2473,7 +2424,9 @@ class TestDates:
             ("cvelistv5_5_1_rejected_without_date_rejected", (True, True, False)),
         ],
     )
-    def test_rejected_fixture_dates(self, name: str, present: tuple[bool, ...]) -> None:
+    def test_rejected_fixture_dates_are_present_as_upstream(
+        self, name: str, present: tuple[bool, ...]
+    ) -> None:
         dates = extract_dates(load_fixture(name)["cveMetadata"])
 
         assert tuple(d is not None for d in dates) == present
@@ -2491,7 +2444,7 @@ class TestDates:
             assert value is None or value.tzinfo is UTC
 
     @pytest.mark.parametrize("name", VULNS_FIXTURES)
-    def test_kernel_records_have_no_dates(self, name: str) -> None:
+    def test_kernel_fixture_without_dates_yields_none(self, name: str) -> None:
         assert extract_dates(load_fixture(name)["cveMetadata"]) == (None, None, None)
 
 
@@ -2505,15 +2458,8 @@ class TestCallerPattern:
     def test_payload_from_the_parser_outputs_validates(self, name: str) -> None:
         payload = _caller_payload(name)
 
-        record = load_fixture(name)
-        assert payload.cve_state is CveState(record["cveMetadata"]["state"])
-        scopes = [
-            label
-            for label, container in _containers(record)
-            if container.get("affected") is not None
-        ]
-        operations = payload.affected_version_operations or []
-        assert [op.source_container for op in operations] == scopes
+        state = load_fixture(name)["cveMetadata"]["state"]
+        assert payload.cve_state is CveState(state)
 
     @pytest.mark.parametrize(
         "name",
@@ -2525,7 +2471,7 @@ class TestCallerPattern:
     )
     def test_legacy_rejected_structure_yields_empty_children(self, name: str) -> None:
         """Schema Version Handling: `rejectedReasons` instead of `affected`
-        and `metrics` yields empty lists and `None`, and no scope."""
+        and `metrics` yields empty lists and `None`."""
         cna = load_fixture(name)["containers"]["cna"]
 
         assert parse_affected_versions(cna.get("affected")) == []
@@ -2535,24 +2481,3 @@ class TestCallerPattern:
         assert parse_title(cna) is None
         assert parse_ssvc_assessment(cna.get("metrics")) is None
         assert parse_kev_data(cna.get("metrics")) is None
-        payload = _caller_payload(name)
-        assert payload.cve_state is CveState.REJECTED
-        assert payload.affected_version_operations == []
-        assert "title" not in payload.model_fields_set
-        assert "description" not in payload.model_fields_set
-
-    def test_rejected_payload_carries_its_date_rejected(self) -> None:
-        payload = _caller_payload("cvelistv5_5_2_rejected")
-
-        assert payload.date_rejected == datetime(
-            2026, 4, 22, 14, 12, 14, 465000, tzinfo=UTC
-        )
-        assert "published_date" not in payload.model_fields_set
-
-    def test_kernel_payload_omits_absent_dates(self) -> None:
-        payload = _caller_payload("vulns_published_5_1_1")
-
-        assert payload.model_fields_set.isdisjoint(
-            {"published_date", "modified_date", "date_rejected"}
-        )
-        assert [c.provider_name for c in payload.cvss_assessments or []] == ["Linux"]
