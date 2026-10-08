@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from pathlib import PurePosixPath
 from typing import Annotated, Any
 from urllib.parse import urlsplit
 
@@ -125,6 +126,9 @@ class Settings(BaseSettings):
 
     # GitHub Advisory Database (sync_ghsa_advisories)
     github_token: SecretStr = SecretStr("")
+
+    # Git-based fetchers
+    git_clone_base_dir: str = "/var/lib/sentinel/git"
 
     # Security
     jwt_secret_key: SecretStr
@@ -284,6 +288,24 @@ class Settings(BaseSettings):
             raise ValueError(msg)
 
         return value[:-1] if path.endswith("/") else value
+
+    @field_validator("git_clone_base_dir")
+    @classmethod
+    def _validate_git_clone_base_dir(cls, value: str) -> str:
+        """Validate GIT_CLONE_BASE_DIR at startup.
+
+        Clones are created and recursively deleted under this directory, so
+        it must be absolute. See
+        docs/features/platform/git-fetcher-infrastructure.md (Environment
+        Configuration).
+        """
+        if "\x00" in value:
+            msg = "Invalid GIT_CLONE_BASE_DIR: U+0000 is not permitted."
+            raise ValueError(msg)
+        if not PurePosixPath(value).is_absolute():
+            msg = "Invalid GIT_CLONE_BASE_DIR: an absolute path is required."
+            raise ValueError(msg)
+        return value
 
     @field_validator("smelt_api_url")
     @classmethod

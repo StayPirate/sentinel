@@ -11,6 +11,9 @@ Consumers:
 - `tests/test_services/test_cve_fetcher_ingestion_composition.py` (the real
   `upsert_cve()` / `upsert_references()` ingestion finalized by the default
   catch-up).
+- `tests/support/git_fetchers.py` (reuses `Publications`,
+  `RecordingSessions`, `watch_drain()`, and `source_state()` for the
+  `BaseGitFetcher` periodic-run harness).
 
 Provided here:
 

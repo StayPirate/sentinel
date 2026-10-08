@@ -806,6 +806,53 @@ class TestGithubToken:
 
 
 @pytest.mark.unit
+class TestGitCloneBaseDir:
+    """`GIT_CLONE_BASE_DIR` (docs/configuration.md, Git-Based Fetchers;
+    git-fetcher-infrastructure.md, Environment Configuration): an absolute
+    path, validated at startup because clones are deleted under it."""
+
+    def test_default_when_unset(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("JWT_SECRET_KEY", "a" * 32)
+        monkeypatch.delenv("GIT_CLONE_BASE_DIR", raising=False)
+        assert Settings(_env_file=None).git_clone_base_dir == "/var/lib/sentinel/git"
+
+    def test_absolute_override_accepted_unchanged(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("JWT_SECRET_KEY", "a" * 32)
+        monkeypatch.setenv("GIT_CLONE_BASE_DIR", "/srv/example/git clones/")
+        s = Settings(_env_file=None)
+        assert s.git_clone_base_dir == "/srv/example/git clones/"
+
+    @pytest.mark.parametrize(
+        "value", ["", "relative/git", "./git", "../git", "~/git", "git"]
+    )
+    def test_empty_or_relative_value_fails_startup(
+        self, monkeypatch: pytest.MonkeyPatch, value: str
+    ) -> None:
+        monkeypatch.setenv("JWT_SECRET_KEY", "a" * 32)
+        monkeypatch.setenv("GIT_CLONE_BASE_DIR", value)
+        with pytest.raises(ValidationError, match="Invalid GIT_CLONE_BASE_DIR"):
+            Settings(_env_file=None)
+
+    def test_nul_character_fails_startup(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("JWT_SECRET_KEY", "a" * 32)
+        with pytest.raises(ValidationError, match="Invalid GIT_CLONE_BASE_DIR"):
+            Settings(_env_file=None, git_clone_base_dir="/var/lib/\x00git")
+
+    def test_listed_in_env_example_with_an_absolute_value(self) -> None:
+        env_example = Path(__file__).resolve().parents[1] / ".env.example"
+        lines = env_example.read_text(encoding="utf-8").splitlines()
+        values = [
+            line.split("=", 1)[1]
+            for line in lines
+            if line.startswith("GIT_CLONE_BASE_DIR=")
+        ]
+        assert len(values) == 1
+        assert values[0].startswith("/")
+
+
+@pytest.mark.unit
 class TestSecretFieldRedaction:
     """Secret field redaction, covering two distinct mechanisms:
 
