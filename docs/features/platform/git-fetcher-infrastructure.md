@@ -81,13 +81,13 @@ The pattern:
    and typically completes in seconds.
 3. **Delta detection**: `git diff --name-only -z --no-renames
    --diff-filter=AM --end-of-options <old_sha>..<new_sha>` returns the
-   list of Added and Modified files. Deleted files are excluded — they do not represent
-   CVE data that needs processing. Rename detection is explicitly
-   disabled (`--no-renames`) so that the diff operates exclusively on
-   local tree/commit objects — no blob content comparison is needed,
-   ensuring deterministic output regardless of clone type. A file rename appears as
-   a separate Delete (old path, excluded) + Add (new path, included);
-   the new path is processed normally.
+   list of Added and Modified files. Deleted files are excluded — they
+   do not represent CVE data that needs processing. Rename detection is
+   explicitly disabled (`--no-renames`) so that the diff operates
+   exclusively on local tree/commit objects — no blob content comparison
+   is needed, ensuring deterministic output regardless of clone type. A
+   file rename appears as a separate Delete (old path, excluded) + Add
+   (new path, included); the new path is processed normally.
 4. **File content access**: `git show --end-of-options <ref>:<path>`
    reads a single file's content from the object store without creating
    a working tree. All blobs are present locally after `git fetch`, so
@@ -262,9 +262,12 @@ These rules apply to ALL git-based fetchers sharing the same volume:
    sync task. `fetch_single()` MUST NOT run `git fetch` or any
    operation that modifies the object store or refs.
 2. **`fetch_single()` reads from the object store only**: uses
-   `git show --end-of-options <ref>:<path>` (via `show_file()`) to read committed
-   objects. The Git object store is append-only with atomic file
-   operations — concurrent reads during a `git fetch` are safe.
+   `git show --end-of-options <ref>:<path>` (via `show_file()`) to read
+   committed objects. Concurrent reads during a `git fetch` or git's
+   automatic maintenance are safe: objects reachable from `HEAD` are
+   never removed, new objects and packs are written atomically, and a
+   repack or prune replaces packs atomically and removes only
+   unreachable objects.
 3. **Stale reads are acceptable**: if `fetch_single()` reads HEAD just
    before `git fetch` updates it, a recently-published CVE might not be
    found. This is not an error — `trigger_on_demand_fetch()` dispatches
@@ -431,7 +434,7 @@ container image of the worker that consumes the `git` queue.
 
 | Dependency | Minimum version | Reason |
 |---|---|---|
-| `git` | 2.25 | Minimum version for protocol v2, improved bare-clone performance, and `--filter` support (retained for future extensibility) |
+| `git` | 2.30 | Minimum version for protocol v2, improved bare-clone performance, `--filter` support (retained for future extensibility), and the `--end-of-options` marker of Module Invariants Rule 2 on every command the module runs (`git rev-parse` accepts it from 2.30) |
 
 The `python:<version>-slim` base image (where `<version>` is the
 project's Python target — see `docs/conventions.md`, Runtime Version) does not include git — it must be added explicitly to the
@@ -477,6 +480,18 @@ timeout and vastly cheaper than a false-positive re-clone of ~2.3 GB). Clone and
 transient network errors through git's own retry logic. Show is not
 retried because per-file failures are already non-fatal (`GitFileError`
 → `record_failed()`, continue to next item).
+
+**Process lifecycle**: every function runs each `git` process it starts
+in its own process group. When the timeout expires, the calling task is
+cancelled, or any other exception (including a whole-run signal such as
+`SoftTimeLimitExceeded` or `MemoryError`) interrupts a running `git`
+process, the module terminates the process group (SIGTERM, so git can
+remove its lock files and a partial clone, then SIGKILL after a short
+grace period) and reaps the `git` process before the timeout
+classification or the original exception propagates, even if a further
+interruption arrives meanwhile. No process started by the module
+outlives the call, except git's own detached automatic maintenance
+(see "Fetch Operations").
 
 ## Error Classification
 
@@ -602,17 +617,16 @@ Three mandatory rules apply to all functions in this module:
 **Rule 1 — SHA Format Validation:**
 
 Applies ONLY to `check_sha_reachable` (the single entry point for
-database-sourced SHA values). Before invoking git, validate
-the `sha` parameter: the whole value must match `[0-9a-f]{40}` (a full
-match, so a value with a trailing newline or any other extra character
-is invalid). If validation fails:
-log the bounded WARNING event `git_invalid_sha_format`, which carries no
-field derived from the invalid value (see
-`docs/features/platform/logging.md`, Secrets and PII Discipline), and
-return `False` immediately (do NOT invoke git, do NOT raise an
-exception). This triggers the natural
-date-based recovery flow (same as unreachable SHA) — no re-clone, cursor
-advances on next successful run.
+database-sourced SHA values). Before invoking git, validate the `sha`
+parameter: the whole value must match `[0-9a-f]{40}` (a full match, so a
+value with a trailing newline or any other extra character is invalid).
+If validation fails: log the bounded WARNING event
+`git_invalid_sha_format`, which carries no field derived from the
+invalid value (see `docs/features/platform/logging.md`, Secrets and PII
+Discipline), and return `False` immediately (do NOT invoke git, do NOT
+raise an exception). This triggers the natural date-based recovery flow
+(same as unreachable SHA) — no re-clone, cursor advances on next
+successful run.
 
 **Rule 2 — Argument injection and repository addressing:**
 
@@ -625,9 +639,10 @@ can never resolve to an enclosing repository.
 
 Every repository-scoped command that takes positional revision, ref,
 refspec, or object arguments MUST place the `--end-of-options` marker
-immediately before its first positional argument; git (2.24 and later)
-then parses no following argument as an option, even one beginning with
-`-`. Applicable commands: `git fetch --end-of-options origin <refspec>`,
+immediately before its first positional argument; git (at the minimum
+version of Runtime Dependencies) then parses no following argument as an
+option, even one beginning with `-`. Applicable commands:
+`git fetch --end-of-options origin <refspec>`,
 `git symbolic-ref --end-of-options HEAD`,
 `git rev-parse --verify [--quiet] --end-of-options <rev>`,
 `git log ... --end-of-options <ref>`,
@@ -790,9 +805,8 @@ module keeps git's default: that maintenance is git's own lock-protected
 housekeeping of the clone (it also prunes unreachable objects; see
 "Cursor SHA Unreachable"), not a process the module manages, and
 concurrent object-store reads remain safe (see "Concurrency Rules"). The
-module's process-lifecycle guarantee applies to the `git` process it
-starts: on timeout, cancellation, or a whole-run signal that process is
-terminated and reaped before the exception propagates.
+module's process-lifecycle guarantee (see "Runtime Dependencies") applies
+to the `git` process it starts.
 
 ### Read Operations
 
@@ -800,11 +814,14 @@ All read-phase functions apply the retry policy (3 retries, backoff
 2s/4s/8s) internally before raising `GitCorruptionError`. Callers
 observe a single function call that either succeeds or raises — the
 retry is transparent. A failed attempt is a non-zero exit, the read
-timeout, or output that does not have the expected form. Exceptions:
+timeout, output that does not have the expected form, or git that
+cannot be started (for example a missing binary). Exceptions:
 
 - `is_clone_valid` never raises: it applies the same retries and then
-  returns `False` instead of raising. An absent `repo_path` is a
-  definitive `False` without invoking git and without retry.
+  returns `False` instead of raising. A `repo_path` that does not exist
+  or is not a directory is a definitive `False` without invoking git
+  and without retry; any other failure to inspect the path is left to
+  the retried git check.
 - For `check_sha_reachable`, the retry applies only to the code path
   that raises `GitCorruptionError` (unexpected failures); the
   `return False` paths (malformed SHA, and exit code 1 — absent or not
@@ -841,8 +858,8 @@ Semantics:
   `git --git-dir=<repo_path> rev-parse --is-bare-repository` exits 0
   and prints `true`, then
   `git --git-dir=<repo_path> rev-parse --verify --quiet --end-of-options
-  HEAD^{commit}` exits 0. Returns `False` if the path does not exist
-  (without invoking git), is not a git repository (including a
+  HEAD^{commit}` exits 0. Returns `False` if the path does not exist or
+  is not a directory (without invoking git), is not a git repository (including a
   non-repository directory nested inside another repository, which
   `--git-dir` never resolves to the enclosing repository), is a non-bare
   repository, has a `HEAD` that names no commit (for example a clone
@@ -859,8 +876,9 @@ Semantics:
 
   **Behavior**:
 
-  0. Validate that the whole `sha` matches `[0-9a-f]{40}` (Rule 1). If invalid: log
-     the bounded WARNING `git_invalid_sha_format`, return `False`
+  0. Validate that the whole `sha` matches `[0-9a-f]{40}` (Rule 1). If
+     invalid: log the bounded WARNING `git_invalid_sha_format`, return
+     `False`
   1. Execute `git rev-parse --verify --quiet --end-of-options
      <sha>^{commit}` in the repository
   2. If exit code is 0: return `True` (the SHA names a commit)

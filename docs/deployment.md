@@ -70,7 +70,7 @@ For architectural decisions and design constraints, see
 | Docker Compose CLI plugin | 2.32.2+ | Repository-managed development and test orchestration |
 | PostgreSQL | 18+ | Primary database |
 | Redis | 8+ | Session cache, Celery broker, rate limiting |
-| Git | 2.25+ | Git-based CVE fetcher operations (git worker container only) |
+| Git | 2.30+ | Git-based CVE fetcher operations (git worker container only) |
 | [uv](https://docs.astral.sh/uv/getting-started/installation/) | 0.11+ | Manages the Python 3.14 interpreter and all backend dependencies for local development (see "Quick Start" below). Development only |
 | [gh](https://cli.github.com/) | any recent release | Strongly recommended, development only — manages issues, pull requests, and GitHub Flow from the command line. See `docs/conventions.md` (Git Conventions) |
 | [glab](https://gitlab.com/gitlab-org/cli) | any recent release | Optional, development only — interacts with SUSE-internal GitLab repositories, issues, and merge requests (e.g., SMELT, SMASH). Requires authentication against `gitlab.suse.de`. See `AGENTS.md` (Local Environment) |
