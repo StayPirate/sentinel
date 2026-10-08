@@ -847,22 +847,18 @@ class TestExternalStringAdmissibility:
             "Fictional description."
         )
 
-    @pytest.mark.parametrize(
-        ("element_field", "version_field"),
-        [("programFiles", None), (None, "version")],
-    )
+    @pytest.mark.parametrize("field", ["programFiles", "version"])
     def test_affected_value_skips_its_entry_and_keeps_siblings(
-        self, element_field: str | None, version_field: str | None
+        self, field: str
     ) -> None:
+        """One element-level and one version-level value; the parser tests
+        own the per-field matrix."""
         poisoned = _affected_element(product="Linux-poisoned")
-        if element_field == "programFiles":
+        if field == "programFiles":
             poisoned["programFiles"] = ["fs/example/file.c", f"fs/{NUL}.c"]
-        elif element_field is not None:
-            poisoned[element_field] = f"x{NUL}"
         else:
-            assert version_field is not None
             for version in poisoned["versions"]:
-                version[version_field] = f"x{NUL}"
+                version[field] = f"x{NUL}"
         affected = [_affected_element(), poisoned]
 
         entries = _cna_entries(_payload(_record(affected=affected)))
