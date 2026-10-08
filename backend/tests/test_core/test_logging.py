@@ -431,6 +431,7 @@ class TestConfigureCliLogging:
 
 # Fictional credential material used by the redaction tests.
 _NVD_SETTING_VALUE = "fictional-nvd-key-0123456789"
+_GITHUB_TOKEN_VALUE = "fictional-github-token-0123456789"
 _BROKER_URL_USERINFO_PART = "fictional-broker-pass-42"
 _BROKER_URL = (
     f"amqps://svc-sentinel:{_BROKER_URL_USERINFO_PART}@rabbit.example.test:5671/"
@@ -630,9 +631,14 @@ class TestCollectSecretValues:
         )
         assert "fictional@db/pass" in _collect_secret_values(settings)
 
+    def test_github_token_is_collected(self) -> None:
+        settings = _settings(github_token=_GITHUB_TOKEN_VALUE)
+        assert _GITHUB_TOKEN_VALUE in _collect_secret_values(settings)
+
     def test_empty_values_and_urls_without_password_are_skipped(self) -> None:
         settings = _settings(
             nvd_api_key="",
+            github_token="",
             ibs_password="",
             database_url="postgresql+asyncpg://svc@db.example.test/db",
             redis_url="redis://cache.example.test:6379/0",
@@ -670,6 +676,27 @@ class TestConfigureLoggingRedaction:
         record = json.loads(stream.getvalue().strip())
         assert record["detail"] == f"key {REDACTED} rejected"
         assert record["event"] == "nvd_request_rejected"
+
+    def test_github_token_is_redacted_as_value_and_bearer_credential(
+        self,
+    ) -> None:
+        stream = _FakeStream(isatty=False)
+        configure_logging(_settings(github_token=_GITHUB_TOKEN_VALUE), stream=stream)
+
+        logger = structlog.get_logger("app.test.redact")
+        logger.warning("ghsa_probe", detail=f"token {_GITHUB_TOKEN_VALUE} rejected")
+        logging.getLogger("httpx").warning(
+            "request headers: Authorization: Bearer %s", "fictional-other-token-0000"
+        )
+
+        output = stream.getvalue()
+        records = [json.loads(line) for line in output.strip().splitlines()]
+        assert _GITHUB_TOKEN_VALUE not in output
+        assert "fictional-other-token-0000" not in output
+        assert records[0]["detail"] == f"token {REDACTED} rejected"
+        assert records[1]["event"] == (
+            f"request headers: Authorization: Bearer {REDACTED}"
+        )
 
     def test_third_party_record_is_redacted(self) -> None:
         stream = self._configure()

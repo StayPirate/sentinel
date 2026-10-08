@@ -57,6 +57,7 @@ class TestBuildSystemProcessEnv:
         explicit key set this function produces."""
         monkeypatch.setenv("IBS_PASSWORD", "canary-real-password-do-not-leak")
         monkeypatch.setenv("NVD_API_KEY", "canary-nvd-key-do-not-leak")
+        monkeypatch.setenv("GITHUB_TOKEN", "canary-github-token-do-not-leak")
         monkeypatch.setenv(
             "DATABASE_URL", "postgresql+asyncpg://canary/should-not-leak"
         )
@@ -68,6 +69,7 @@ class TestBuildSystemProcessEnv:
 
         assert "IBS_PASSWORD" not in env
         assert "NVD_API_KEY" not in env
+        assert "GITHUB_TOKEN" not in env
         assert env["DATABASE_URL"] == _DEFAULT_KWARGS["database_url"]
         assert env["JWT_SECRET_KEY"] == _DEFAULT_KWARGS["jwt_secret_key"]
         for value in env.values():
