@@ -1693,8 +1693,13 @@ def test_set_password_success_active_user(
     monkeypatch: pytest.MonkeyPatch,
     cli_session_factory: async_sessionmaker[AsyncSession],
     cleanup_users_by_username: Callable[..., None],
-    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    """The CLI logging configuration (`bootstrap()`) replaces the root
+    handlers, so `caplog` would see none of the command's records: they
+    reach stderr at WARNING or above, which `result.output` includes.
+    Lower levels are never emitted by a CLI process; their absence of
+    password material is proven by `test_user_service.py`
+    (`test_reset_logs_contain_no_password_or_hash`)."""
     _inject_session_factory(monkeypatch, cli_session_factory)
     _allow_tty(monkeypatch)
     username = "clisetpwdsuccess"
@@ -1718,10 +1723,7 @@ def test_set_password_success_active_user(
     assert refreshed.password_hash != old_hash
     assert refreshed.password_hash is not None
     assert verify_password(_NEW_STRONG_PASSWORD, refreshed.password_hash)
-
-    log_text = "\n".join(record.getMessage() for record in caplog.records)
-    assert _NEW_STRONG_PASSWORD not in log_text
-    assert refreshed.password_hash not in log_text
+    assert refreshed.password_hash not in result.output
 
 
 @pytest.mark.integration
