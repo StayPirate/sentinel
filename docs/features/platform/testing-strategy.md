@@ -969,6 +969,18 @@ each affected registry in a fixture or teardown. See
 `docs/features/platform/cve-fetcher-infrastructure.md` for the CVE registry
 isolation contract.
 
+The logging configuration is process-wide state of the same kind. CLI
+commands, the Celery `setup_logging` signal, and direct calls of
+`configure_logging()` or `configure_cli_logging()` replace the root logger's
+handlers and level, the third-party loggers' handlers, levels, and
+propagation, and the structlog processor list. An autouse fixture in
+`backend/tests/conftest.py` restores all of them after every test. It keeps
+the original processor-list object, because loggers cached on first use keep
+referencing it and `structlog.testing.capture_logs()` captures through it.
+Module-level application loggers first used while a test's own configuration
+was active are made to rebind to the restored list. A test that changes the
+logging configuration therefore needs no fixture of its own to undo it.
+
 ### Sync Entry-Point Tests
 
 Test functions that exercise code containing `asyncio.run()` — such as

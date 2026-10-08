@@ -1,0 +1,100 @@
+"""Snapshot and restore of the process-wide logging configuration.
+
+`configure_logging()` and `configure_cli_logging()` (`app.core.logging`)
+replace the root logger's handlers and level, clear the third-party
+loggers' handlers, and install a new structlog processor list. Tests
+reach them through CLI commands (`app.cli._runtime.bootstrap()`), the
+Celery `setup_logging` signal, and direct calls. The autouse
+`_preserve_logging_state` fixture in `tests/conftest.py` wraps every
+test in `preserved_logging_state()` so that none of this leaks into a
+later test — see docs/features/platform/testing-strategy.md (Test
+Independence).
+"""
+
+from __future__ import annotations
+
+import logging
+import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
+from typing import Any
+
+import structlog
+
+# NOTE: private structlog module (verified against the pinned
+# `structlog==26.1.0`): the lazy proxy returned by `structlog.get_logger()`
+# is not exported publicly.
+from structlog._config import BoundLoggerLazyProxy
+
+from app.core.logging import _THIRD_PARTY_LOGGERS
+
+
+def _forget_cached_app_loggers() -> None:
+    """Make every module-level logger of the `app` package rebind on its
+    next use, to the processor list configured at that moment.
+
+    A proxy caches its assembled logger, together with the processor list
+    configured at its first use, by setting the instance attribute `bind`;
+    removing that attribute restores the uncached class method. A change
+    in this structlog mechanism fails the regression tests in
+    `tests/test_support/test_logging_state.py`.
+    """
+    for name, module in list(sys.modules.items()):
+        if module is None or not (name == "app" or name.startswith("app.")):
+            continue
+        for value in list(vars(module).values()):
+            if isinstance(value, BoundLoggerLazyProxy):
+                vars(value).pop("bind", None)
+
+
+@contextmanager
+def preserved_logging_state() -> Iterator[None]:
+    """Restore the logging configuration found on entry, on every exit.
+
+    Restores the root logger's handlers and level; the handlers, level,
+    and `propagate` flag of every logger in `_THIRD_PARTY_LOGGERS`; and
+    the structlog configuration.
+
+    The structlog processor list is restored as the same list object,
+    refilled with the entries it held on entry. A logger cached on first
+    use (`cache_logger_on_first_use=True`) keeps the list configured at
+    that moment, and `structlog.testing.capture_logs()` captures by
+    mutating the configured list in place: an equal but new list would
+    leave every logger cached before the scope invisible to later
+    captures.
+
+    When the scope exits with a different processor list configured, a
+    module-level logger first used inside the scope may have cached that
+    list. Every module-level logger of the `app` package therefore
+    forgets its cached list and rebinds to the restored one on its next
+    use.
+    """
+    root = logging.getLogger()
+    root_handlers = list(root.handlers)
+    root_level = root.level
+    third_party = {
+        name: (
+            logging.getLogger(name).level,
+            logging.getLogger(name).propagate,
+            list(logging.getLogger(name).handlers),
+        )
+        for name in _THIRD_PARTY_LOGGERS
+    }
+    structlog_config: dict[str, Any] = structlog.get_config()
+    processors = structlog_config["processors"]
+    processor_entries = list(processors)
+    try:
+        yield
+    finally:
+        root.handlers[:] = root_handlers
+        root.setLevel(root_level)
+        for name, (level, propagate, handlers) in third_party.items():
+            logger = logging.getLogger(name)
+            logger.setLevel(level)
+            logger.propagate = propagate
+            logger.handlers[:] = handlers
+        replaced = structlog.get_config()["processors"] is not processors
+        processors[:] = processor_entries
+        structlog.configure(**structlog_config)
+        if replaced:
+            _forget_cached_app_loggers()

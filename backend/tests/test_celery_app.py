@@ -43,7 +43,6 @@ from app.celery_app import (
     validate_celery_config,
 )
 from app.config import Settings
-from app.core.logging import _THIRD_PARTY_LOGGERS
 
 
 def _settings(**overrides: object) -> Settings:
@@ -64,13 +63,15 @@ def _settings(**overrides: object) -> Settings:
 
 @pytest.fixture(autouse=True)
 def _reset_global_state() -> Iterator[None]:
-    """Save/restore root logger, structlog contextvars, and Celery's
-    internal logging-setup flag around every test.
+    """Save/restore structlog contextvars and Celery's internal
+    logging-setup flag around every test.
 
-    Sending real Celery signals (`setup_logging`, `task_prerun`,
-    `task_postrun`) in these tests mutates global logging/contextvars
-    state exactly as production code would. Without this fixture, that
-    state would leak into other tests in the suite.
+    Sending real Celery signals (`task_prerun`, `task_postrun`) in these
+    tests mutates contextvars state exactly as production code would.
+    Without this fixture, that state would leak into other tests in the
+    suite. The logging configuration installed through the
+    `setup_logging` signal is restored by the autouse
+    `_preserve_logging_state` fixture (tests/conftest.py).
 
     `celery.app.log.Logging._setup` deserves special attention: despite
     being read through an instance property (`already_setup`), it is
@@ -85,25 +86,12 @@ def _reset_global_state() -> Iterator[None]:
     again — masking a broken receiver as a false pass. Resetting it to
     `False` before each test restores per-test independence.
     """
-    root_logger = logging.getLogger()
-    original_handlers = list(root_logger.handlers)
-    original_level = root_logger.level
-    original_third_party = {
-        name: (logging.getLogger(name).level, logging.getLogger(name).propagate)
-        for name in _THIRD_PARTY_LOGGERS
-    }
     original_contextvars = dict(structlog.contextvars.get_contextvars())
     original_celery_log_setup = CeleryLogging._setup
     CeleryLogging._setup = False
 
     yield
 
-    root_logger.handlers.clear()
-    root_logger.handlers.extend(original_handlers)
-    root_logger.setLevel(original_level)
-    for name, (level, propagate) in original_third_party.items():
-        logging.getLogger(name).setLevel(level)
-        logging.getLogger(name).propagate = propagate
     structlog.contextvars.clear_contextvars()
     if original_contextvars:
         structlog.contextvars.bind_contextvars(**original_contextvars)
