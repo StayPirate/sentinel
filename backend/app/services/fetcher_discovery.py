@@ -23,5 +23,6 @@ import app.services.packages.sync_aimaas_thresholds
 import app.services.packages.sync_smelt_products
 import app.services.tickets.sync_cisa_kev
 import app.services.tickets.sync_epss_scores
+import app.services.tickets.sync_ghsa_advisories
 import app.services.tickets.sync_osv_advisories
 import app.services.tickets.sync_redhat_cves  # noqa: F401
