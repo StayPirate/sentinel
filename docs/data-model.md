@@ -651,7 +651,11 @@ See `docs/features/tickets/cvss-scoring.md` for the full specification.
 - `cvss_version`, `score`, `severity`, and `vector_string` are one consistent
   vector-derived unit. Score, version, severity, and expanded metrics are never
   accepted as independent persistence authorities. The shared parser accepts
-  only complete Base vectors and canonicalizes metric order before storage
+  only complete Base vectors and canonicalizes metric order before storage.
+  A stored external vector may be the Base reduction of the received one:
+  trusted external ingestion removes recognized non-Base metrics first
+  (`cvss-scoring.md`, External Base Reduction), and non-Base metrics are
+  never stored
 - Per-assessment `severity` remains version-specific. It is distinct from
   `CVE.severity`, which is derived from the deterministic winning assessment
   and uses one unified five-label scale for every source version. The winner is
