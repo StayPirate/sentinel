@@ -264,7 +264,7 @@ clone — do NOT attempt HTTP access to individual files.
 vulns.git/cve/
 ├── published/YEAR/
 │   ├── CVE-YEAR-ID             # Empty (0 bytes)
-│   ├── CVE-YEAR-ID.json        # ★ Full CVE record (JSON 5.1.1) — PROCESSED by fetcher
+│   ├── CVE-YEAR-ID.json        # ★ Full CVE record (JSON 5.x) — PROCESSED by fetcher
 │   ├── CVE-YEAR-ID.sha1        # Fixing commit SHA (redundant with JSON)
 │   ├── CVE-YEAR-ID.mbox        # Email announcement format
 │   ├── CVE-YEAR-ID.dyad        # Vulnerable:fixed version pairs (redundant with JSON affected[])
@@ -280,24 +280,32 @@ vulns.git/cve/
 │   ├── CVE-YEAR-ID.mbox
 │   └── CVE-YEAR-ID.mbox.rejected  # Rejection announcement
 ├── reserved/YEAR/              # Reserved CVE-IDs (no .json files, not processed)
-└── returned/YEAR/              # Returned CVE-IDs (no .json files, not processed)
+├── returned/YEAR/              # Returned CVE-IDs (no .json files, not processed)
+├── review/                     # Review notes (no CVE files, not processed)
+├── testing/                    # Test tree with its own published/YEAR/CVE-YEAR-ID.json files (not processed)
+├── schema, README, ...         # Repository files (not processed)
+└── CVE_JSON_*_schema.json      # Schema files (not processed)
 ```
 
 The fetcher processes **only `.json` files** from `cve/published/` and
-`cve/rejected/`. All other file types are redundant with JSON content
-and are ignored (see `docs/features/tickets/cve-sync-kernel.md` for the
-full rationale).
+`cve/rejected/`, matched from the start of the repository path so that
+`cve/testing/published/` is excluded. All other file types are redundant with
+JSON content and are ignored (see `docs/features/tickets/cve-sync-kernel.md`
+for the full rationale).
 
 #### Volume and Publishing Pattern
 
 The kernel CNA publishes CVEs in **large batches** aligned with stable
-kernel releases, followed by periods of inactivity. Observed 2026 data:
+kernel releases, followed by periods of inactivity. Observed 2026 data
+(measured 2026-10-09):
 
-- Peak: 173 CVEs published on a single day (2026-04-25)
-- Typical batch: 60-100 CVEs per release day
-- Total published `.json` files: 12,118
-- Total rejected `.json` files: 292
-- Bare clone size: ~91 MB
+- Peak: 848 new published records on a single day (2026-08-15)
+- Typical batch: about 135-275 new records per release day (median 199)
+- Bulk regenerations rewrite thousands of existing `.json` files in one day
+  (up to 10,825 on 2026-05-12)
+- Total published `.json` files: 17,327
+- Total rejected `.json` files: 317
+- Bare clone size: ~167 MB
 
 ### OSV (Open Source Vulnerabilities)
 

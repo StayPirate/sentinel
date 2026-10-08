@@ -222,7 +222,7 @@ automatically (see Recovery below).
 | Property | Value |
 |----------|-------|
 | Persistence | Required across container restarts |
-| Capacity | 8 GB minimum (current usage ~2.4 GB; provides headroom for git repack operations — which temporarily require old + new pack coexistence (~4.7 GB peak) — plus future growth at ~150 MB/year) |
+| Capacity | 8 GB minimum (current usage ~2.5 GB; provides headroom for git repack operations — which temporarily require old + new pack coexistence (~4.9 GB peak) — plus future growth at ~150 MB/year) |
 | Access mode | ReadWriteOnce (single worker pod) |
 | Filesystem | Any POSIX-compliant filesystem |
 | Backup | Not required (recoverable from upstream repos) |
