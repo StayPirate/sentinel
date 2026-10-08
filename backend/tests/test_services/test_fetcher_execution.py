@@ -8,7 +8,11 @@ stale run evaluation, scheduled acquisition vs. manual adoption, and
 the exact stale-threshold boundary (`elapsed > run_timeout + 60`).
 `get_fetcher_enabled()` is the execution-time enabled read of the
 `run_catch_up` sub-operation (Per-Ticket Catch-Up — Celery task wrapper,
-step 2).
+step 2). `get_derived_cursor()` is the run-history cursor read of
+`docs/features/tickets/cve-sync-ghsa.md` (Algorithm step 2, Cursor
+Mechanism): the latest `started_at` among the fetcher's `success` and
+`partial` runs, read on the caller's session without a lock, write, or
+commit.
 
 Functional (non-concurrency) assertions use the standard `db_session`
 fixture — `SELECT ... FOR UPDATE` is a no-op within a single
@@ -37,11 +41,13 @@ from app.services.fetcher_execution import (
     FetcherConfigMissingError,
     acquire_fetcher_run,
     finalize_manual_run_as_failure,
+    get_derived_cursor,
     get_fetcher_enabled,
     is_run_stale,
     resolve_effective_hard_limit,
 )
 from tests.support.database import assert_lock_wait
+from tests.support.ticket_mutations import StatementRecorder
 
 
 def _service_log_text(caplog: pytest.LogCaptureFixture) -> str:
@@ -276,6 +282,145 @@ class TestGetFetcherEnabled:
 
         with pytest.raises(FetcherConfigMissingError, match="no_such_catch_up_fetcher"):
             await get_fetcher_enabled(db_session, "no_such_catch_up_fetcher")
+
+
+# ---------------------------------------------------------------------------
+# Derived cursor read: get_derived_cursor
+# ---------------------------------------------------------------------------
+
+CURSOR_BASE = datetime(2026, 9, 1, 12, 0, 0, 123456, tzinfo=UTC)
+
+
+@pytest.mark.integration
+class TestGetDerivedCursor:
+    async def test_no_run_returns_none(
+        self,
+        db_session: AsyncSession,
+        fetcher_config_factory: Callable[..., Awaitable[FetcherConfig]],
+    ) -> None:
+        config = await fetcher_config_factory()
+
+        assert await get_derived_cursor(db_session, config.fetcher_name) is None
+
+    async def test_unknown_fetcher_returns_none(self, db_session: AsyncSession) -> None:
+        assert await get_derived_cursor(db_session, "no_such_cursor_fetcher") is None
+
+    async def test_runs_that_never_reached_success_or_partial_return_none(
+        self,
+        db_session: AsyncSession,
+        fetcher_config_factory: Callable[..., Awaitable[FetcherConfig]],
+        fetcher_run_factory: Callable[..., Awaitable[FetcherRun]],
+    ) -> None:
+        config = await fetcher_config_factory()
+        name = config.fetcher_name
+        await fetcher_run_factory(
+            fetcher_name=name, status="failure", started_at=CURSOR_BASE
+        )
+        await fetcher_run_factory(
+            fetcher_name=name,
+            status="failure",
+            started_at=None,
+            triggered_by="manual",
+        )
+        await fetcher_run_factory(
+            fetcher_name=name,
+            status="queued",
+            started_at=None,
+            triggered_by="manual",
+        )
+        await fetcher_run_factory(
+            fetcher_name=name,
+            status="running",
+            started_at=CURSOR_BASE + timedelta(hours=1),
+        )
+
+        assert await get_derived_cursor(db_session, name) is None
+
+    @pytest.mark.parametrize("latest_status", ["success", "partial"])
+    async def test_latest_success_or_partial_started_at_wins(
+        self,
+        db_session: AsyncSession,
+        fetcher_config_factory: Callable[..., Awaitable[FetcherConfig]],
+        fetcher_run_factory: Callable[..., Awaitable[FetcherRun]],
+        latest_status: str,
+    ) -> None:
+        config = await fetcher_config_factory()
+        other = await fetcher_config_factory()
+        name = config.fetcher_name
+        latest = CURSOR_BASE + timedelta(hours=3)
+        older_status = "partial" if latest_status == "success" else "success"
+        # Inserted out of chronological order: insertion order, `created_at`,
+        # and primary key never choose the cursor.
+        await fetcher_run_factory(
+            fetcher_name=name, status=older_status, started_at=CURSOR_BASE
+        )
+        await fetcher_run_factory(
+            fetcher_name=name,
+            status=latest_status,
+            started_at=latest,
+            created_at=CURSOR_BASE - timedelta(days=1),
+        )
+        await fetcher_run_factory(
+            fetcher_name=name,
+            status=older_status,
+            started_at=CURSOR_BASE + timedelta(hours=2),
+        )
+        # Newer runs that never reached success/partial, and a queued run
+        # whose NULL `started_at` would sort first in a descending order.
+        await fetcher_run_factory(
+            fetcher_name=name,
+            status="failure",
+            started_at=latest + timedelta(hours=1),
+        )
+        await fetcher_run_factory(
+            fetcher_name=name,
+            status="running",
+            started_at=latest + timedelta(hours=2),
+        )
+        await fetcher_run_factory(
+            fetcher_name=name,
+            status="queued",
+            started_at=None,
+            triggered_by="manual",
+        )
+        # Another fetcher's newer success is not this fetcher's cursor.
+        await fetcher_run_factory(
+            fetcher_name=other.fetcher_name,
+            status="success",
+            started_at=latest + timedelta(days=1),
+        )
+
+        cursor = await get_derived_cursor(db_session, name)
+
+        assert cursor == latest
+        assert cursor is not None
+        assert cursor.utcoffset() == timedelta(0)
+        assert await get_derived_cursor(db_session, other.fetcher_name) == (
+            latest + timedelta(days=1)
+        )
+
+    async def test_read_takes_no_lock_and_writes_or_commits_nothing(
+        self,
+        db_session: AsyncSession,
+        fetcher_run_factory: Callable[..., Awaitable[FetcherRun]],
+    ) -> None:
+        run = await fetcher_run_factory(status="success", started_at=CURSOR_BASE)
+        name = run.fetcher_name
+
+        with StatementRecorder(db_session) as recorder:
+            cursor = await get_derived_cursor(db_session, name)
+
+        assert cursor == CURSOR_BASE
+        # Exactly one plain SELECT: no row lock, no write, and no commit
+        # (a commit would release the test savepoint with its own statement).
+        (statement,) = recorder.statements
+        assert statement.lstrip().upper().startswith("SELECT")
+        assert recorder.row_locks() == []
+        assert recorder.writes() == []
+        assert not db_session.new
+        assert not db_session.dirty
+        assert not db_session.deleted
+        assert db_session.in_transaction()
 
 
 # ---------------------------------------------------------------------------

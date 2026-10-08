@@ -36,6 +36,9 @@ prevents the acquisition protocol, the Active Guard, and the API-facing
 `run_catch_up` sub-operation (fetcher-infrastructure.md, Per-Ticket
 Catch-Up — Celery task wrapper).
 
+`get_derived_cursor()` is the run-history cursor read of the time-window
+CVE fetchers (cve-sync-ghsa.md, Cursor Mechanism).
+
 Registry lookup (`FETCHER_REGISTRY` membership) is the caller's
 responsibility: the task wrapper determines whether `fetcher_name` is
 a known, registered fetcher before calling `acquire_fetcher_run()`.
@@ -559,3 +562,32 @@ async def get_fetcher_enabled(session: AsyncSession, fetcher_name: str) -> bool:
             f"No FetcherConfig row for registered fetcher '{fetcher_name}'"
         )
     return enabled
+
+
+async def get_derived_cursor(
+    session: AsyncSession, fetcher_name: str
+) -> datetime | None:
+    """Read the derived cursor of a fetcher: the `started_at` of its most
+    recent `success` or `partial` `FetcherRun`.
+
+    The cursor of the time-window fetchers whose specifications derive it
+    from run history instead of storing `FetcherRun.cursor`
+    (cve-sync-ghsa.md and cve-sync-nvd.md, Cursor Mechanism). The calling
+    run is `running` and is therefore never its own cursor; a queued run
+    has no `started_at` and never reaches either status. A plain read on
+    the caller's session: no lock, no write, no commit.
+
+    Returns `None` when the fetcher has no `success` or `partial` run.
+    """
+    started_at: datetime | None = await session.scalar(
+        select(FetcherRun.started_at)
+        .where(
+            FetcherRun.fetcher_name == fetcher_name,
+            FetcherRun.status.in_(
+                [FetcherRunStatus.SUCCESS.value, FetcherRunStatus.PARTIAL.value]
+            ),
+        )
+        .order_by(FetcherRun.started_at.desc())
+        .limit(1)
+    )
+    return started_at
