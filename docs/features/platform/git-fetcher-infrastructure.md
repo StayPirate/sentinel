@@ -79,7 +79,7 @@ The pattern:
    frozen) is followed. The refspec is forced (`+`) so an upstream
    history rewrite is followed rather than rejected. This is incremental
    and typically completes in seconds.
-3. **Delta detection**: `git diff --name-only --no-renames
+3. **Delta detection**: `git diff --name-only -z --no-renames
    --diff-filter=AM --end-of-options <old_sha>..<new_sha>` returns the
    list of Added and Modified files. Deleted files are excluded — they do not represent
    CVE data that needs processing. Rename detection is explicitly
@@ -360,7 +360,7 @@ repairs its `HEAD`. This is an accepted residual risk.
    ("Recovery boundary not found — treating as first-run"), return
    empty delta. Cursor advances to HEAD
 4. Compute delta:
-   `git diff --name-only --no-renames --diff-filter=AM --end-of-options
+   `git diff --name-only -z --no-renames --diff-filter=AM --end-of-options
    <boundary_sha>..<head_sha> -- <recovery_path_prefix>`, where the
    prefix is a single argument after `--`, never quoted
    (same `--no-renames` flag as normal delta — guarantees local-only
@@ -864,8 +864,12 @@ Semantics:
 
 - **`diff_names`**: returns the list of added and modified files
   between two commits
-  (`git diff --name-only --no-renames --diff-filter=AM --end-of-options
-  <from>..<to>`).
+  (`git diff --name-only -z --no-renames --diff-filter=AM
+  --end-of-options <from>..<to>`).
+  `-z` makes git print each path verbatim and NUL-terminated instead of
+  quoting paths that contain unusual characters (`core.quotePath`); each
+  path is decoded with the filesystem encoding, so it can be passed back
+  to `show_file` unchanged.
   Rename detection is disabled (`--no-renames`) to ensure deterministic
   diff output and avoid expensive blob-content similarity computation on
   large repositories. Renames appear as separate delete + add pairs; the
