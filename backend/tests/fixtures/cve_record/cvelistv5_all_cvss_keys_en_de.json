@@ -1,0 +1,158 @@
+{
+  "dataType": "CVE_RECORD",
+  "dataVersion": "5.1",
+  "cveMetadata": {
+    "cveId": "CVE-2005-10003",
+    "assignerOrgId": "1af790b2-7ee1-4545-860a-a788eba489b5",
+    "state": "PUBLISHED",
+    "assignerShortName": "VulDB",
+    "dateReserved": "2024-10-15T09:49:35.446Z",
+    "datePublished": "2024-10-17T14:00:16.571Z",
+    "dateUpdated": "2024-10-17T16:13:06.608Z"
+  },
+  "containers": {
+    "cna": {
+      "providerMetadata": {
+        "orgId": "1af790b2-7ee1-4545-860a-a788eba489b5",
+        "shortName": "VulDB",
+        "dateUpdated": "2024-10-17T14:00:16.571Z"
+      },
+      "title": "Fictional title of CVE-2005-10003",
+      "problemTypes": [
+        {
+          "descriptions": [
+            {
+              "type": "CWE",
+              "cweId": "CWE-78",
+              "lang": "en",
+              "description": "OS Command Injection"
+            }
+          ]
+        }
+      ],
+      "affected": [
+        {
+          "vendor": "examplestudios",
+          "product": "Xcomic",
+          "versions": [
+            {
+              "version": "0.8.0",
+              "status": "affected"
+            },
+            {
+              "version": "0.8.1",
+              "status": "affected"
+            },
+            {
+              "version": "0.8.2",
+              "status": "affected"
+            }
+          ]
+        }
+      ],
+      "descriptions": [
+        {
+          "lang": "en",
+          "value": "Fictional description of CVE-2005-10003."
+        },
+        {
+          "lang": "de",
+          "value": "Fiktive Beschreibung von CVE-2005-10003."
+        }
+      ],
+      "metrics": [
+        {
+          "cvssV4_0": {
+            "version": "4.0",
+            "baseScore": 6.3,
+            "vectorString": "CVSS:4.0/AV:N/AC:H/AT:N/PR:N/UI:N/VC:L/VI:L/VA:L/SC:N/SI:N/SA:N",
+            "baseSeverity": "MEDIUM"
+          }
+        },
+        {
+          "cvssV3_1": {
+            "version": "3.1",
+            "baseScore": 5.6,
+            "vectorString": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:L/A:L",
+            "baseSeverity": "MEDIUM"
+          }
+        },
+        {
+          "cvssV3_0": {
+            "version": "3.0",
+            "baseScore": 5.6,
+            "vectorString": "CVSS:3.0/AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:L/A:L",
+            "baseSeverity": "MEDIUM"
+          }
+        },
+        {
+          "cvssV2_0": {
+            "version": "2.0",
+            "baseScore": 5.1,
+            "vectorString": "AV:N/AC:H/Au:N/C:P/I:P/A:P"
+          }
+        }
+      ],
+      "references": [
+        {
+          "url": "https://vuldb.com/?id.280359",
+          "name": "VDB-280359 | Fictional entry",
+          "tags": [
+            "vdb-entry",
+            "technical-description"
+          ]
+        },
+        {
+          "url": "https://advisory.example.invalid/upstream/3",
+          "tags": [
+            "broken-link",
+            "exploit"
+          ]
+        },
+        {
+          "url": "https://advisory.example.invalid/upstream/4",
+          "tags": [
+            "patch"
+          ]
+        }
+      ],
+      "tags": [
+        "unsupported-when-assigned"
+      ]
+    },
+    "adp": [
+      {
+        "metrics": [
+          {
+            "other": {
+              "type": "ssvc",
+              "content": {
+                "timestamp": "2024-10-17T16:12:56.245378Z",
+                "id": "CVE-2005-10003",
+                "options": [
+                  {
+                    "Exploitation": "none"
+                  },
+                  {
+                    "Automatable": "no"
+                  },
+                  {
+                    "Technical Impact": "partial"
+                  }
+                ],
+                "role": "CISA Coordinator",
+                "version": "2.0.3"
+              }
+            }
+          }
+        ],
+        "title": "CISA ADP Vulnrichment",
+        "providerMetadata": {
+          "orgId": "134c704f-9b21-4f2e-91b3-4a467353bcc0",
+          "shortName": "CISA-ADP",
+          "dateUpdated": "2024-10-17T16:13:06.608Z"
+        }
+      }
+    ]
+  }
+}

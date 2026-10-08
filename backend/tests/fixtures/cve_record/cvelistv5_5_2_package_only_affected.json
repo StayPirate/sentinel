@@ -1,0 +1,203 @@
+{
+  "dataType": "CVE_RECORD",
+  "dataVersion": "5.2",
+  "cveMetadata": {
+    "cveId": "CVE-2024-3094",
+    "assignerOrgId": "53f830b8-0a3f-465b-8143-3b8a9948e749",
+    "state": "PUBLISHED",
+    "assignerShortName": "redhat",
+    "dateReserved": "2024-03-29T15:38:13.249Z",
+    "datePublished": "2024-03-29T16:51:12.588Z",
+    "dateUpdated": "2026-08-04T07:05:54.671Z"
+  },
+  "containers": {
+    "cna": {
+      "title": "Fictional title of CVE-2024-3094",
+      "metrics": [
+        {
+          "other": {
+            "content": {
+              "value": "Critical",
+              "namespace": "https://access.redhat.com/security/updates/classification/"
+            },
+            "type": "Red Hat severity rating"
+          }
+        },
+        {
+          "cvssV3_1": {
+            "attackComplexity": "LOW",
+            "attackVector": "NETWORK",
+            "availabilityImpact": "HIGH",
+            "baseScore": 10,
+            "baseSeverity": "CRITICAL",
+            "confidentialityImpact": "HIGH",
+            "integrityImpact": "HIGH",
+            "privilegesRequired": "NONE",
+            "scope": "CHANGED",
+            "userInteraction": "NONE",
+            "vectorString": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H",
+            "version": "3.1"
+          },
+          "format": "CVSS"
+        }
+      ],
+      "descriptions": [
+        {
+          "lang": "en",
+          "value": "Fictional description of CVE-2024-3094. \r\nFictional second paragraph."
+        }
+      ],
+      "affected": [
+        {
+          "versions": [
+            {
+              "status": "affected",
+              "version": "5.6.0"
+            },
+            {
+              "status": "affected",
+              "version": "5.6.1"
+            }
+          ],
+          "packageName": "xz",
+          "collectionURL": "https://github.com/tukaani-project/xz",
+          "defaultStatus": "unaffected"
+        },
+        {
+          "vendor": "Red Hat",
+          "product": "Red Hat Enterprise Linux 10",
+          "collectionURL": "https://access.redhat.com/downloads/content/package-browser/",
+          "packageName": "xz",
+          "defaultStatus": "unaffected",
+          "cpes": [
+            "cpe:/o:redhat:enterprise_linux:10"
+          ]
+        },
+        {
+          "vendor": "Red Hat",
+          "product": "Red Hat JBoss Enterprise Application Platform 8",
+          "collectionURL": "https://access.redhat.com/jbossnetwork/restricted/listSoftware.html",
+          "packageName": "xz",
+          "defaultStatus": "unaffected",
+          "cpes": [
+            "cpe:/a:redhat:jboss_enterprise_application_platform:8"
+          ]
+        }
+      ],
+      "references": [
+        {
+          "url": "https://access.redhat.com/security/cve/CVE-2024-3094",
+          "tags": [
+            "vdb-entry",
+            "x_refsource_REDHAT"
+          ]
+        },
+        {
+          "url": "https://bugzilla.redhat.com/show_bug.cgi?id=2272210",
+          "name": "RHBZ#2272210",
+          "tags": [
+            "issue-tracking",
+            "x_refsource_REDHAT"
+          ]
+        },
+        {
+          "url": "https://advisory.example.invalid/upstream/1"
+        },
+        {
+          "url": "https://www.redhat.com/en/blog/urgent-security-alert-fedora-41-and-rawhide-users"
+        }
+      ],
+      "datePublic": "2024-03-29T00:00:00.000Z",
+      "problemTypes": [
+        {
+          "descriptions": [
+            {
+              "cweId": "CWE-506",
+              "description": "Embedded Malicious Code",
+              "lang": "en",
+              "type": "CWE"
+            }
+          ]
+        }
+      ],
+      "credits": [
+        {
+          "lang": "en",
+          "value": "Example Researcher"
+        }
+      ],
+      "providerMetadata": {
+        "orgId": "53f830b8-0a3f-465b-8143-3b8a9948e749",
+        "shortName": "redhat",
+        "dateUpdated": "2026-08-04T07:05:54.671Z"
+      },
+      "x_generator": {
+        "engine": "cvelib 1.8.0"
+      }
+    },
+    "adp": [
+      {
+        "metrics": [
+          {
+            "other": {
+              "type": "ssvc",
+              "content": {
+                "timestamp": "2024-04-02T04:00:23.138684Z",
+                "id": "CVE-2024-3094",
+                "options": [
+                  {
+                    "Exploitation": "none"
+                  },
+                  {
+                    "Automatable": "yes"
+                  },
+                  {
+                    "Technical Impact": "total"
+                  }
+                ],
+                "role": "CISA Coordinator",
+                "version": "2.0.3"
+              }
+            }
+          }
+        ],
+        "title": "CISA ADP Vulnrichment",
+        "providerMetadata": {
+          "orgId": "134c704f-9b21-4f2e-91b3-4a467353bcc0",
+          "shortName": "CISA-ADP",
+          "dateUpdated": "2024-07-30T15:37:17.662Z"
+        }
+      },
+      {
+        "providerMetadata": {
+          "orgId": "af854a3a-2127-422b-91ae-364da2661108",
+          "shortName": "CVE",
+          "dateUpdated": "2025-08-19T00:24:09.962Z"
+        },
+        "references": [
+          {
+            "url": "https://www.binarly.io/blog/persistent-risk-xz-utils-backdoor-still-lurking-in-docker-images"
+          },
+          {
+            "tags": [
+              "vdb-entry",
+              "x_refsource_REDHAT",
+              "x_transferred"
+            ],
+            "url": "https://access.redhat.com/security/cve/CVE-2024-3094"
+          },
+          {
+            "tags": [
+              "x_transferred"
+            ],
+            "url": "https://advisory.example.invalid/upstream/2"
+          }
+        ],
+        "title": "CVE Program Container",
+        "x_generator": {
+          "engine": "ADPogram 0.0.1"
+        }
+      }
+    ]
+  }
+}

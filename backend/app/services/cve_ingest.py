@@ -226,10 +226,11 @@ def affected_version_content(values: Any) -> AffectedVersionContent:
     return tuple(content)
 
 
-def _affected_version_key(entry: AffectedVersionEntry) -> tuple[Any, ...]:
+def affected_version_key(entry: AffectedVersionEntry) -> tuple[Any, ...]:
     """The entry conflict key: absent `vendor`/`product` differ from an empty
     string, absent `version_type`/`version`/`version_end`/`package_name`/
-    `ecosystem`/`repo` equal one."""
+    `ecosystem`/`repo` equal one. Shared with the CVE record parser's
+    last-occurrence deduplication (cve-record-parser.md)."""
     return (
         entry.vendor,
         entry.product,
@@ -269,7 +270,7 @@ def _normalized_entries(
     by_key: dict[tuple[Any, ...], AffectedVersionContent] = {}
     unique: list[AffectedVersionEntry] = []
     for entry in entries:
-        key = _affected_version_key(entry)
+        key = affected_version_key(entry)
         content = affected_version_content(entry)
         existing = by_key.get(key)
         if existing is None:

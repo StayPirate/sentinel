@@ -1,0 +1,195 @@
+{
+  "dataType": "CVE_RECORD",
+  "dataVersion": "5.2",
+  "cveMetadata": {
+    "state": "PUBLISHED",
+    "cveId": "CVE-2022-3636",
+    "assignerOrgId": "1af790b2-7ee1-4545-860a-a788eba489b5",
+    "assignerShortName": "VulDB",
+    "dateUpdated": "2026-07-28T16:51:44.501Z",
+    "dateReserved": "2022-10-21T00:00:00.000Z",
+    "datePublished": "2022-10-21T00:00:00.000Z"
+  },
+  "containers": {
+    "cna": {
+      "providerMetadata": {
+        "orgId": "1af790b2-7ee1-4545-860a-a788eba489b5",
+        "shortName": "VulDB",
+        "dateUpdated": "2026-07-28T16:51:44.501Z"
+      },
+      "title": "Fictional title of CVE-2022-3636",
+      "problemTypes": [
+        {
+          "descriptions": [
+            {
+              "type": "CWE",
+              "cweId": "CWE-416",
+              "lang": "en",
+              "description": "Use After Free"
+            }
+          ]
+        },
+        {
+          "descriptions": [
+            {
+              "type": "CWE",
+              "cweId": "CWE-119",
+              "lang": "en",
+              "description": "Memory Corruption"
+            }
+          ]
+        }
+      ],
+      "affected": [
+        {
+          "vendor": "Linux",
+          "product": "Kernel",
+          "versions": [
+            {
+              "version": "33fc42de33278b2b3ec6f3390512987bc29a62b7",
+              "status": "affected"
+            }
+          ],
+          "cpes": [
+            "cpe:2.3:o:linux:kernel:*:*:*:*:*:*:*:*"
+          ],
+          "modules": [
+            "Ethernet Handler"
+          ]
+        }
+      ],
+      "descriptions": [
+        {
+          "lang": "en",
+          "value": "Fictional description of CVE-2022-3636."
+        }
+      ],
+      "metrics": [
+        {
+          "cvssV4_0": {
+            "version": "4.0",
+            "baseScore": 5.1,
+            "vectorString": "CVSS:4.0/AV:A/AC:L/AT:N/PR:L/UI:N/VC:L/VI:L/VA:L/SC:N/SI:N/SA:N/E:X",
+            "baseSeverity": "MEDIUM"
+          }
+        },
+        {
+          "cvssV3_1": {
+            "version": "3.1",
+            "baseScore": 5.5,
+            "vectorString": "CVSS:3.1/AV:A/AC:L/PR:L/UI:N/S:U/C:L/I:L/A:L/E:X/RL:O/RC:C",
+            "baseSeverity": "MEDIUM"
+          }
+        },
+        {
+          "cvssV3_0": {
+            "version": "3.0",
+            "baseScore": 5.5,
+            "vectorString": "CVSS:3.0/AV:A/AC:L/PR:L/UI:N/S:U/C:L/I:L/A:L/E:X/RL:O/RC:C",
+            "baseSeverity": "MEDIUM"
+          }
+        },
+        {
+          "cvssV2_0": {
+            "version": "2.0",
+            "baseScore": 4.9,
+            "vectorString": "AV:A/AC:M/Au:S/C:P/I:P/A:P/E:ND/RL:OF/RC:C"
+          }
+        }
+      ],
+      "references": [
+        {
+          "url": "https://vuldb.com/vuln/211935",
+          "name": "VDB-211935 | Linux Kernel Ethernet mtk_ppe.c __mtk_ppe_check_skb use after free",
+          "tags": [
+            "vdb-entry",
+            "technical-description"
+          ]
+        },
+        {
+          "url": "https://vuldb.com/cve/CVE-2022-3636",
+          "name": "CVE-2022-3636 | CVE Analysis and Report",
+          "tags": [
+            "third-party-advisory"
+          ]
+        },
+        {
+          "url": "https://www.kernel.org/",
+          "tags": [
+            "product"
+          ]
+        }
+      ],
+      "tags": [
+        "x_open-source"
+      ],
+      "x_generator": [
+        "VulDB PVTS v202607"
+      ]
+    },
+    "adp": [
+      {
+        "providerMetadata": {
+          "orgId": "af854a3a-2127-422b-91ae-364da2661108",
+          "shortName": "CVE",
+          "dateUpdated": "2024-08-03T01:14:03.212Z"
+        },
+        "title": "CVE Program Container",
+        "references": [
+          {
+            "url": "https://advisory.example.invalid/upstream/5",
+            "tags": [
+              "x_transferred"
+            ]
+          },
+          {
+            "url": "https://vuldb.com/?id.211935",
+            "tags": [
+              "x_transferred"
+            ]
+          },
+          {
+            "name": "DSA-5333",
+            "tags": [
+              "vendor-advisory",
+              "x_transferred"
+            ],
+            "url": "https://www.debian.org/security/2023/dsa-5333"
+          }
+        ]
+      },
+      {
+        "metrics": [
+          {
+            "other": {
+              "type": "ssvc",
+              "content": {
+                "timestamp": "2025-04-14T17:07:51.608381Z",
+                "id": "CVE-2022-3636",
+                "options": [
+                  {
+                    "Exploitation": "none"
+                  },
+                  {
+                    "Automatable": "no"
+                  },
+                  {
+                    "Technical Impact": "partial"
+                  }
+                ],
+                "role": "CISA Coordinator",
+                "version": "2.0.3"
+              }
+            }
+          }
+        ],
+        "title": "CISA ADP Vulnrichment",
+        "providerMetadata": {
+          "orgId": "134c704f-9b21-4f2e-91b3-4a467353bcc0",
+          "shortName": "CISA-ADP",
+          "dateUpdated": "2025-04-15T13:25:07.505Z"
+        }
+      }
+    ]
+  }
+}

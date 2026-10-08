@@ -1,0 +1,62 @@
+{
+  "containers": {
+    "cna": {
+      "affected": [
+        {
+          "defaultStatus": "unaffected",
+          "product": "Linux Kernel",
+          "vendor": "Linux",
+          "versions": [
+            {
+              "status": "affected",
+              "version": "0"
+            }
+          ]
+        }
+      ],
+      "descriptions": [
+        {
+          "lang": "en",
+          "supportingMedia": [
+            {
+              "base64": false,
+              "type": "text/html",
+              "value": "<p>In the Linux kernel, the following vulnerability has been resolved:\n\nexample: fictional subject of CVE-2025-0927\n\nFictional commit message body.</p>"
+            }
+          ],
+          "value": "In the Linux kernel, the following vulnerability has been resolved:\n\nexample: fictional subject of CVE-2025-0927\n\nFictional commit message body."
+        }
+      ],
+      "problemTypes": [
+        {
+          "descriptions": [
+            {
+              "description": "heap overflow in the hfs and hfsplus filesystems with manually crafted filesystem",
+              "lang": "en"
+            }
+          ]
+        }
+      ],
+      "providerMetadata": {
+        "orgId": "f4215fc3-5b6b-47ff-a258-f7189bd81038"
+      },
+      "references": [
+        {
+          "url": "https://www.kernel.org/"
+        }
+      ],
+      "x_generator": {
+        "engine": "Vulnogram 0.2.0"
+      }
+    }
+  },
+  "cveMetadata": {
+    "assignerOrgId": "f4215fc3-5b6b-47ff-a258-f7189bd81038",
+    "cveId": "CVE-2025-0927",
+    "requesterUserId": "requester@example.invalid",
+    "serial": 1,
+    "state": "PUBLISHED"
+  },
+  "dataType": "CVE_RECORD",
+  "dataVersion": "5.1"
+}

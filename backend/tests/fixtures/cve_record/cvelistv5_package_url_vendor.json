@@ -1,0 +1,169 @@
+{
+  "dataType": "CVE_RECORD",
+  "dataVersion": "5.2",
+  "cveMetadata": {
+    "cveId": "CVE-2022-50589",
+    "assignerOrgId": "83251b91-4cc7-4094-a5c7-464a1b83ea10",
+    "state": "PUBLISHED",
+    "assignerShortName": "VulnCheck",
+    "dateReserved": "2025-11-05T14:54:49.234Z",
+    "datePublished": "2025-11-06T19:59:12.520Z",
+    "dateUpdated": "2026-07-15T01:24:42.380Z"
+  },
+  "containers": {
+    "cna": {
+      "affected": [
+        {
+          "defaultStatus": "unaffected",
+          "packageURL": "pkg:github/SuiteCRM/SuiteCRM",
+          "modules": [
+            "‘export’ functionality",
+            "‘uid’ parameter"
+          ],
+          "product": "SuiteCRM",
+          "repo": "https://github.com/SuiteCRM/SuiteCRM",
+          "vendor": "SuiteCRM",
+          "versions": [
+            {
+              "lessThan": "7.12.6",
+              "status": "affected",
+              "version": "0",
+              "versionType": "semver"
+            }
+          ]
+        }
+      ],
+      "credits": [
+        {
+          "lang": "en",
+          "type": "finder",
+          "value": "Example Researcher"
+        }
+      ],
+      "descriptions": [
+        {
+          "lang": "en",
+          "supportingMedia": [
+            {
+              "base64": false,
+              "type": "text/html",
+              "value": "<p>Fictional description of CVE-2022-50589.</p>"
+            }
+          ],
+          "value": "Fictional description of CVE-2022-50589."
+        }
+      ],
+      "metrics": [
+        {
+          "cvssV4_0": {
+            "Automatable": "NOT_DEFINED",
+            "Recovery": "NOT_DEFINED",
+            "Safety": "NOT_DEFINED",
+            "attackComplexity": "LOW",
+            "attackRequirements": "NONE",
+            "attackVector": "NETWORK",
+            "baseScore": 9.3,
+            "baseSeverity": "CRITICAL",
+            "exploitMaturity": "NOT_DEFINED",
+            "privilegesRequired": "NONE",
+            "providerUrgency": "NOT_DEFINED",
+            "subAvailabilityImpact": "NONE",
+            "subConfidentialityImpact": "NONE",
+            "subIntegrityImpact": "NONE",
+            "userInteraction": "NONE",
+            "valueDensity": "NOT_DEFINED",
+            "vectorString": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N",
+            "version": "4.0",
+            "vulnAvailabilityImpact": "HIGH",
+            "vulnConfidentialityImpact": "HIGH",
+            "vulnIntegrityImpact": "HIGH",
+            "vulnerabilityResponseEffort": "NOT_DEFINED"
+          },
+          "format": "CVSS",
+          "scenarios": [
+            {
+              "lang": "en",
+              "value": "GENERAL"
+            }
+          ]
+        }
+      ],
+      "problemTypes": [
+        {
+          "descriptions": [
+            {
+              "cweId": "CWE-89",
+              "description": "CWE-89 Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')",
+              "lang": "en",
+              "type": "CWE"
+            }
+          ]
+        }
+      ],
+      "providerMetadata": {
+        "orgId": "83251b91-4cc7-4094-a5c7-464a1b83ea10",
+        "shortName": "VulnCheck",
+        "dateUpdated": "2026-07-15T01:24:42.380Z"
+      },
+      "references": [
+        {
+          "tags": [
+            "vendor-advisory",
+            "patch"
+          ],
+          "url": "https://docs.suitecrm.com/admin/releases/7.12.x/#_7_12_6"
+        },
+        {
+          "tags": [
+            "technical-description"
+          ],
+          "url": "https://blog.exodusintel.com/2022/06/09/salesagility-suitecrm-export-request-sql-injection-vulnerability/"
+        },
+        {
+          "tags": [
+            "third-party-advisory"
+          ],
+          "url": "https://www.vulncheck.com/advisories/suitecrm-sqli-via-export-functionality"
+        }
+      ],
+      "title": "Fictional title of CVE-2022-50589",
+      "x_generator": {
+        "engine": "vulncheck"
+      }
+    },
+    "adp": [
+      {
+        "metrics": [
+          {
+            "other": {
+              "type": "ssvc",
+              "content": {
+                "timestamp": "2025-11-06T20:27:11.120632Z",
+                "id": "CVE-2022-50589",
+                "options": [
+                  {
+                    "Exploitation": "none"
+                  },
+                  {
+                    "Automatable": "yes"
+                  },
+                  {
+                    "Technical Impact": "total"
+                  }
+                ],
+                "role": "CISA Coordinator",
+                "version": "2.0.3"
+              }
+            }
+          }
+        ],
+        "title": "CISA ADP Vulnrichment",
+        "providerMetadata": {
+          "orgId": "134c704f-9b21-4f2e-91b3-4a467353bcc0",
+          "shortName": "CISA-ADP",
+          "dateUpdated": "2025-11-06T20:27:20.421Z"
+        }
+      }
+    ]
+  }
+}
