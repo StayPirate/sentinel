@@ -65,8 +65,11 @@ and scores, EPSS values, and dates are public product data, not personal
 identifiers, and are retained.
 
 `LIVE_NEXT_LINK` and `LIVE_NEXT_PREV_LINK` are `Link` header values served
-for the first and second page of the same capture; a single-page response
-carries no `Link` header.
+for the first and second page of the same capture. On a multi-page result
+the last page still carries a `Link` header with only `rel="prev"` (verified
+live on 2026-10-08 by an independent re-verification: 4 pages of
+100/100/100/4 advisories for `modified=>=2026-10-05T00:00:00Z`), and a
+single-page response carries none.
 
 `GhsaServer` is an in-process `httpx.MockTransport` handler for the
 advisories endpoint: page requests are served from `pages` with a fake

@@ -19,7 +19,11 @@ Live verification on 2026-10-08 (18 anonymous requests in total):
   100 advisories each (600 advisories). Every response was HTTP 200
   `application/json; charset=utf-8`. Page 1 carried a `Link` header with
   only `rel="next"`; later pages added a `rel="prev"` link with `before=`.
-  A single-page response carries no `Link` header. The next URL is always
+  On a multi-page result the last page still carries a `Link` header with
+  only `rel="prev"` (verified live on 2026-10-08 by an independent
+  re-verification: 4 pages of 100/100/100/4 advisories for
+  `modified=>=2026-10-05T00:00:00Z`), and a single-page response carries
+  none. The next URL is always
   `https://api.github.com/advisories` with the original filters re-encoded
   and an opaque `after=` cursor.
 - Every advisory has all of `ghsa_id`, `cve_id`, `url`, `html_url`,
@@ -189,8 +193,15 @@ _FILTERS = {
 }
 """The periodic query filters of the live capture (Algorithm step 5)."""
 
-_FICTIONAL_TEXT = "Fictional "
+_FICTIONAL_DESCRIPTION_BODY = (
+    "\n\n### Impact\n\nFictional impact statement.\n\n### Patches\n\n"
+    "Fictional patch note."
+)
+"""The fixed fictional text following the first sentence of every
+sanitized `description`."""
 _FICTIONAL_LOGIN = "example-researcher"
+_FICTIONAL_USER_ID = 1000
+_FICTIONAL_NODE_ID = "U_exampleNode0001"
 _FICTIONAL_UPSTREAM = re.compile(r"https://advisory\.example\.invalid/upstream/[0-9]+")
 _FICTIONAL_HOSTS = frozenset({"advisory.example.invalid", "github.example.invalid"})
 _KEPT_HOSTS = frozenset(
@@ -818,9 +829,12 @@ class TestSanitization:
     @pytest.mark.parametrize("name", _ADVISORY_NAMES)
     def test_free_text_is_fictional(self, name: str) -> None:
         advisory = _advisory(name)
+        ghsa_id = advisory["ghsa_id"]
 
-        assert advisory["summary"].startswith(_FICTIONAL_TEXT)
-        assert advisory["description"].startswith(_FICTIONAL_TEXT)
+        assert advisory["summary"] == f"Fictional summary of {ghsa_id}."
+        assert advisory["description"] == (
+            f"Fictional description of {ghsa_id}.{_FICTIONAL_DESCRIPTION_BODY}"
+        )
 
     @pytest.mark.parametrize("name", _ADVISORY_NAMES)
     def test_credits_are_one_fictional_user(self, name: str) -> None:
@@ -829,6 +843,8 @@ class TestSanitization:
         assert len(credits) == 1
         user = credits[0]["user"]
         assert user["login"] == _FICTIONAL_LOGIN
+        assert user["id"] == _FICTIONAL_USER_ID
+        assert user["node_id"] == _FICTIONAL_NODE_ID
         urls = _urls(credits)
         assert urls
         assert all(urlsplit(url).hostname == "github.example.invalid" for url in urls)

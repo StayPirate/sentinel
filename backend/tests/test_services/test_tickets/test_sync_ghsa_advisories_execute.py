@@ -882,16 +882,23 @@ async def _run_expecting(env: Env, error: type[BaseException]) -> FetcherRun:
     return await env.run_outcome(run_id)
 
 
-NOW: Final = datetime(2026, 10, 8, 12, 0, tzinfo=UTC)
-"""The frozen `now` of the stale-cursor boundary tests."""
 STALE_AFTER: Final = timedelta(days=30)
+
+
+def _freeze(monkeypatch: pytest.MonkeyPatch, instant: datetime) -> None:
+    """Freeze the `now` captured at `execute()` entry (Algorithm step 3)."""
+    monkeypatch.setattr(
+        sync_module, "datetime", SimpleNamespace(now=lambda tz: instant)
+    )
 
 
 @pytest.fixture
 def frozen_now(monkeypatch: pytest.MonkeyPatch) -> datetime:
-    """Freeze the `now` captured at `execute()` entry (Algorithm step 3)."""
-    monkeypatch.setattr(sync_module, "datetime", SimpleNamespace(now=lambda tz: NOW))
-    return NOW
+    """Freeze `now` at the real instant of fixture setup, so that the runs
+    a test dates from it precede the `execute()` entry as in production."""
+    now = datetime.now(UTC)
+    _freeze(monkeypatch, now)
+    return now
 
 
 @pytest.mark.integration
@@ -959,7 +966,7 @@ class TestStaleCursor:
         await env.assert_untouched(cve)
 
     async def test_reset_run_is_success_and_becomes_the_cursor(
-        self, env: Env, frozen_now: datetime
+        self, env: Env, frozen_now: datetime, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         await env.seed_run("success", frozen_now - timedelta(days=90))
 
@@ -974,8 +981,9 @@ class TestStaleCursor:
         assert event_entry["age_days"] == 90
         assert reset.started_at is not None
 
-        # The reset run's started_at is now the latest success. The frozen
-        # `now` lies after it, so the next window is fetched.
+        # The reset run's started_at is now the latest success: the next
+        # scheduled run, three hours after it, fetches the window from it.
+        _freeze(monkeypatch, reset.started_at + timedelta(hours=3))
         second = await env.run()
 
         assert _outcome(second) == ("success", 0, 0, 0, 0)
@@ -1549,7 +1557,7 @@ class TestAdvisorySuccess:
         assert ticket.status == "New"
         async with env.factory() as session:
             events = await ticket_events_by_id(session, ticket.id)
-        assert events[:2] == [
+        assert events == [
             EventRow("ticket_created", None, None, None, INGESTION_COMMENT, None),
             EventRow("cve_associated", None, None, cve_id, None, None),
         ]

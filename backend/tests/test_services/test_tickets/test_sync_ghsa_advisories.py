@@ -1191,8 +1191,12 @@ class TestIngestion:
             ("GHSA", GHSA_ID, HTML_URL)
         }
 
+    @pytest.mark.parametrize(
+        "packages", [[], ["example-pkg"]], ids=["no_handoff", "handoff"]
+    )
     async def test_new_cve_is_created_with_a_new_ticket(
         self,
+        packages: list[str],
         db_session: AsyncSession,
         fetcher: SyncGhsaAdvisories,
         server: GhsaServer,
@@ -1201,21 +1205,38 @@ class TestIngestion:
         _serve(
             server,
             cve_id,
-            _advisory(cve_id, summary="Fictional title", references=[URL_1]),
+            _advisory(
+                cve_id,
+                summary="Fictional title",
+                references=[URL_1],
+                vulnerabilities=[_vulnerability(name) for name in packages]
+                if packages
+                else ABSENT,
+            ),
         )
 
         result = await fetcher.fetch_single(cve_id, db_session)
 
-        assert result == CVEFetchResult(UpsertAction.CREATED, None)
         cve = await db_session.scalar(select(CVE).where(CVE.cve_id == cve_id))
         assert cve is not None
         assert cve.title == "Fictional title"
         [ticket] = (
             await db_session.scalars(select(Ticket).where(Ticket.cve_id == cve.id))
         ).all()
+        assert result == CVEFetchResult(
+            UpsertAction.CREATED,
+            PostIngestTasks(
+                ticket_id=str(ticket.id),
+                cpe_matches=[],
+                affected_cpes=[],
+                vendor_products=[],
+                resolved_packages=packages,
+            )
+            if packages
+            else None,
+        )
         assert ticket.status == "New"
-        events = await ticket_events(db_session, ticket)
-        assert events[:2] == [
+        assert await ticket_events(db_session, ticket) == [
             EventRow("ticket_created", None, None, None, INGESTION_COMMENT, None),
             EventRow("cve_associated", None, None, cve_id, None, None),
         ]

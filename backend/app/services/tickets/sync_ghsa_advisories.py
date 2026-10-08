@@ -351,8 +351,9 @@ def _headers(token: str) -> dict[str, str]:
 
 def _raise_chained(response: httpx.Response, message: str) -> None:
     """Raise `FetcherError(message)` chained from the response's
-    `httpx.HTTPStatusError` when it has one (a content-free cause: the
-    status line and the request URL, which carries no token)."""
+    `httpx.HTTPStatusError` when it has one. Its text carries the status
+    line, the request URL (no token), and for a 3xx the `Location` value;
+    never advisory content."""
     try:
         response.raise_for_status()
     except httpx.HTTPStatusError as e:
