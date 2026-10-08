@@ -102,6 +102,7 @@ Sentinel requires outbound access to:
 | FIRST.org EPSS API | `api.first.org` | 443 | EPSS scores (CVE exploitation likelihood) |
 | CISA KEV | `www.cisa.gov` | 443 | KEV catalog download |
 | OSV API | `api.osv.dev` | 443 | CVE enrichment (affected versions, external identifiers, references, package names) |
+| GitHub REST API | `api.github.com` | 443 | GitHub Advisory Database sync (`sync_ghsa_advisories`) |
 | GitHub | `github.com` | 443 | MITRE cvelistV5 repository clone/fetch |
 | git.kernel.org | `git.kernel.org` | 443 | Linux kernel vulnerability repo clone/fetch |
 
@@ -312,6 +313,10 @@ Before the first production deployment:
 - [ ] Redis provisioned and accessible
 - [ ] IBS service account created (`IBS_USERNAME` / `IBS_PASSWORD`)
 - [ ] IBS RabbitMQ credential-bearing URL supplied securely
+- [ ] `GITHUB_TOKEN` supplied (GitHub personal access token), or the
+      `sync_ghsa_advisories` fetcher disabled through `FetcherConfig.enabled`;
+      without a token every GHSA run and on-demand fetch fails at its token
+      guard (`docs/features/tickets/cve-sync-ghsa.md`)
 - [ ] SUSE Trust Root CA present in the built image, both at its
       repository-relative path and installed into the system trust store
       (automated by the Dockerfile build — see
