@@ -1,0 +1,10 @@
+# The global Git configuration of every Git process the test suite runs
+# against a temporary repository (tests/support/git_repos.py); see
+# docs/features/platform/testing-strategy.md, Tier 1 — Unit Tests.
+#
+# Automatic maintenance stays off: `git commit`, `git merge`, and
+# `git fetch` would otherwise start a detached `git maintenance run --auto`
+# that can outlive the test and repack the repository while the test
+# inspects it. `maintenance.auto` takes precedence over `gc.auto`.
+[maintenance]
+	auto = false

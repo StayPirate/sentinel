@@ -13,52 +13,38 @@ merge commit whose first parent is the base branch tip, and a push is a
 commit compared against the pushed ``before`` SHA.
 
 The Git hooks run this file inside a real commit or push, so every Git and
-script subprocess receives an environment without inherited ``GIT_*``
-variables (see `docs/features/platform/testing-strategy.md`, Tier 1 — Unit
-Tests).
+script subprocess receives the hermetic environment of
+`tests/support/git_repos.py`: no inherited ``GIT_*`` variable, which would
+redirect the throwaway repository's commands to the repository whose hook
+runs this file, and Git's automatic maintenance disabled, so no detached
+repack outlives a test (see `docs/features/platform/testing-strategy.md`,
+Tier 1 — Unit Tests).
 """
 
 from __future__ import annotations
 
-import os
 import subprocess
 from pathlib import Path
 
 import pytest
 
+from tests.support.git_repos import (
+    automatic_maintenance_runs,
+    foreground_maintenance_config,
+    hermetic_git_env,
+    traced_commands,
+)
+
 SCRIPT_PATH = (
     Path(__file__).resolve().parents[2] / "scripts" / "dependency-audit-scope.sh"
 )
-
-_GIT_ENV = {
-    "GIT_AUTHOR_NAME": "Example Author",
-    "GIT_AUTHOR_EMAIL": "author@example.invalid",
-    "GIT_COMMITTER_NAME": "Example Author",
-    "GIT_COMMITTER_EMAIL": "author@example.invalid",
-    "GIT_CONFIG_GLOBAL": os.devnull,
-    "GIT_CONFIG_NOSYSTEM": "1",
-}
-
-
-def _git_env() -> dict[str, str]:
-    """The current environment without any inherited Git variable.
-
-    Git hooks export the invoking repository's location (`GIT_DIR`,
-    `GIT_INDEX_FILE`, ...) and `git -c` options (`GIT_CONFIG_PARAMETERS`);
-    left in place, they would redirect the throwaway repository's commands
-    to the repository whose hook runs this file.
-    """
-    inherited = {
-        name: value for name, value in os.environ.items() if not name.startswith("GIT_")
-    }
-    return inherited | _GIT_ENV
 
 
 def _git(repo: Path, *args: str) -> str:
     result = subprocess.run(
         ["git", *args],
         cwd=repo,
-        env=_git_env(),
+        env=hermetic_git_env(),
         capture_output=True,
         text=True,
         check=True,
@@ -125,7 +111,7 @@ def _run_scope_with_env(
     output.unlink(missing_ok=True)
     run_env = {
         key: value
-        for key, value in _git_env().items()
+        for key, value in hermetic_git_env().items()
         if key not in {"EVENT_NAME", "HEAD_REF", "PUSH_BEFORE"}
     }
     run_env |= {"GITHUB_OUTPUT": str(output), **env}
@@ -258,12 +244,9 @@ def test_push_without_dependency_change_skips_audit(repo: Path, tmp_path: Path) 
     assert values == {"required": "false"}
 
 
-@pytest.mark.unit
-def test_push_fetches_missing_before_commit_from_origin(
-    repo: Path, tmp_path: Path
-) -> None:
-    # Mirror the shallow CI checkout: the pushed "before" commit is absent
-    # locally and must be fetched from origin before comparing.
+def _shallow_clone_without_before(repo: Path, tmp_path: Path) -> tuple[Path, str]:
+    """Mirror the shallow CI checkout: a clone whose pushed "before" commit
+    is absent locally and must be fetched from origin before comparing."""
     before = _git(repo, "rev-parse", "HEAD")
     _commit(repo, "lock refresh", {"backend/uv.lock": "version = 2\n"})
     _git(repo, "config", "uploadpack.allowAnySHA1InWant", "true")
@@ -273,12 +256,20 @@ def test_push_fetches_missing_before_commit_from_origin(
         subprocess.run(
             ["git", "cat-file", "-e", f"{before}^{{commit}}"],
             cwd=clone,
-            env=_git_env(),
+            env=hermetic_git_env(),
             capture_output=True,
             check=False,
         ).returncode
         != 0
     )
+    return clone, before
+
+
+@pytest.mark.unit
+def test_push_fetches_missing_before_commit_from_origin(
+    repo: Path, tmp_path: Path
+) -> None:
+    clone, before = _shallow_clone_without_before(repo, tmp_path)
 
     result, values = _run_scope(clone, tmp_path, EVENT_NAME="push", PUSH_BEFORE=before)
 
@@ -287,6 +278,34 @@ def test_push_fetches_missing_before_commit_from_origin(
     # The fetched base was actually compared; the fail-safe did not fire.
     assert "dependency files changed: backend/uv.lock" in result.stdout
     assert "could not be determined" not in result.stdout
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("configuration", "expected_runs"),
+    [
+        pytest.param("hermetic", 0, id="hermetic"),
+        # Control: with Git's default, the same fetch starts maintenance.
+        pytest.param("git-default", 1, id="git-default"),
+    ],
+)
+def test_push_fetch_automatic_maintenance_follows_global_configuration(
+    repo: Path, tmp_path: Path, configuration: str, expected_runs: int
+) -> None:
+    clone, before = _shallow_clone_without_before(repo, tmp_path)
+    trace = tmp_path / "trace.json"
+    env = {"EVENT_NAME": "push", "PUSH_BEFORE": before, "GIT_TRACE2_EVENT": str(trace)}
+    if configuration == "git-default":
+        env["GIT_CONFIG_GLOBAL"] = str(foreground_maintenance_config(tmp_path))
+
+    result, values = _run_scope_with_env(clone, tmp_path, env)
+
+    assert result.returncode == 0, result.stderr
+    assert values == {"required": "true"}
+    # The fetch succeeded; the fail-safe did not fire.
+    assert "dependency files changed: backend/uv.lock" in result.stdout
+    assert ["fetch"] in [argv[1:2] for argv in traced_commands(trace)]
+    assert len(automatic_maintenance_runs(trace)) == expected_runs
 
 
 @pytest.mark.unit
