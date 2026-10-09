@@ -1,0 +1,161 @@
+{
+  "dataType": "CVE_RECORD",
+  "dataVersion": "5.2",
+  "cveMetadata": {
+    "cveId": "CVE-2024-21182",
+    "assignerOrgId": "43595867-4340-4103-b7a2-9a5208d29a85",
+    "state": "PUBLISHED",
+    "assignerShortName": "oracle",
+    "dateReserved": "2023-12-07T22:28:10.687Z",
+    "datePublished": "2024-07-16T22:40:11.035Z",
+    "dateUpdated": "2026-06-02T03:55:36.699Z"
+  },
+  "containers": {
+    "cna": {
+      "providerMetadata": {
+        "orgId": "43595867-4340-4103-b7a2-9a5208d29a85",
+        "shortName": "oracle",
+        "dateUpdated": "2024-07-16T22:40:11.035Z"
+      },
+      "problemTypes": [
+        {
+          "descriptions": [
+            {
+              "lang": "en-US",
+              "description": "Easily exploitable vulnerability allows unauthenticated attacker with network access via T3, IIOP to compromise Oracle WebLogic Server.  Successful attacks of this vulnerability can result in  unauthorized access to critical data or complete access to all Oracle WebLogic Server accessible data."
+            }
+          ]
+        }
+      ],
+      "affected": [
+        {
+          "vendor": "Oracle Corporation",
+          "product": "WebLogic Server",
+          "versions": [
+            {
+              "version": "12.2.1.4.0",
+              "status": "affected"
+            },
+            {
+              "version": "14.1.1.0.0",
+              "status": "affected"
+            }
+          ]
+        }
+      ],
+      "descriptions": [
+        {
+          "lang": "en-US",
+          "value": "example: fictional description of CVE-2024-21182."
+        }
+      ],
+      "references": [
+        {
+          "url": "https://www.oracle.com/security-alerts/cpujul2024.html",
+          "name": "Oracle Advisory",
+          "tags": [
+            "vendor-advisory"
+          ]
+        }
+      ],
+      "metrics": [
+        {
+          "cvssV3_1": {
+            "attackVector": "NETWORK",
+            "attackComplexity": "LOW",
+            "privilegesRequired": "NONE",
+            "userInteraction": "NONE",
+            "scope": "UNCHANGED",
+            "confidentialityImpact": "HIGH",
+            "integrityImpact": "NONE",
+            "availabilityImpact": "NONE",
+            "version": "3.1",
+            "vectorString": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+            "baseScore": 7.5,
+            "baseSeverity": "HIGH"
+          }
+        }
+      ]
+    },
+    "adp": [
+      {
+        "problemTypes": [
+          {
+            "descriptions": [
+              {
+                "type": "CWE",
+                "lang": "en",
+                "description": "CWE-noinfo Not enough information"
+              }
+            ]
+          }
+        ],
+        "references": [
+          {
+            "url": "https://www.cisa.gov/known-exploited-vulnerabilities-catalog?field_cve=CVE-2024-21182",
+            "tags": [
+              "government-resource"
+            ]
+          }
+        ],
+        "metrics": [
+          {
+            "other": {
+              "type": "ssvc",
+              "content": {
+                "timestamp": "2025-01-02T00:00:00+00:00",
+                "options": [
+                  {
+                    "Exploitation": "active"
+                  },
+                  {
+                    "Automatable": "yes"
+                  },
+                  {
+                    "Technical Impact": "partial"
+                  }
+                ],
+                "role": "CISA Coordinator",
+                "version": "2.0.3",
+                "id": "CVE-2024-21182"
+              }
+            }
+          },
+          {
+            "other": {
+              "type": "kev",
+              "content": {
+                "dateAdded": "2026-06-01",
+                "reference": "https://www.cisa.gov/known-exploited-vulnerabilities-catalog?field_cve=CVE-2024-21182"
+              }
+            }
+          }
+        ],
+        "title": "CISA ADP Vulnrichment",
+        "providerMetadata": {
+          "orgId": "134c704f-9b21-4f2e-91b3-4a467353bcc0",
+          "shortName": "CISA-ADP",
+          "dateUpdated": "2026-06-02T03:55:36.699Z"
+        }
+      },
+      {
+        "providerMetadata": {
+          "orgId": "af854a3a-2127-422b-91ae-364da2661108",
+          "shortName": "CVE",
+          "dateUpdated": "2024-08-01T22:13:42.783Z"
+        },
+        "title": "CVE Program Container",
+        "references": [
+          {
+            "url": "https://www.oracle.com/security-alerts/cpujul2024.html",
+            "name": "Oracle Advisory",
+            "tags": [
+              "vendor-advisory",
+              "x_transferred"
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
