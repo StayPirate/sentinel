@@ -13,6 +13,7 @@ at call time, and the retry backoff is recorded instead of awaited.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import shlex
 import time
@@ -177,7 +178,8 @@ def _process_state(pid: int) -> str | None:
         return None
     try:
         status = Path(f"/proc/{pid}/status").read_text()
-    except FileNotFoundError:
+    except FileNotFoundError, ProcessLookupError:
+        # Reaped before the open (no entry) or between open and read (ESRCH).
         return None
     states = [
         line.split()[1] for line in status.splitlines() if line.startswith("State:")
@@ -188,7 +190,8 @@ def _process_state(pid: int) -> str | None:
 def _kill_survivors(fake: FakeGit) -> None:
     for pid in fake.git_pids() + fake.grandchild_pids():
         if _process_state(pid) not in (None, "Z"):
-            os.kill(pid, 9)
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, 9)
 
 
 async def _wait_until(condition: Callable[[], bool]) -> None:
