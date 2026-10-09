@@ -47,6 +47,18 @@ FROM python:${PYTHON_VERSION}-slim@${PYTHON_BASE_DIGEST} AS runtime
 
 WORKDIR /app
 
+# The Git worker role runs the Git-based CVE fetchers through the system
+# git binary (minimum 2.30 — see
+# docs/features/platform/git-fetcher-infrastructure.md, Runtime
+# Dependencies); the slim base image has none. The single image serves every
+# role (docs/deployment.md, Container Build Conventions), so git is
+# installed for all of them. Debian's package is not version-pinned: the
+# image gate asserts the minimum version and the scheduled image scan
+# covers its vulnerabilities.
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
+
 # Install the SUSE internal CA certificate at two layers (see
 # docs/features/platform/networking.md, Trust Store Layering):
 #
@@ -59,7 +71,7 @@ WORKDIR /app
 #    available outside containers (local development).
 # 2. System-wide trust store (COPY + update-ca-certificates below): the
 #    trust source for consumers that resolve TLS via OpenSSL's default
-#    verify paths without an explicit context — e.g., a future git
+#    verify paths without an explicit context — e.g., the git
 #    subprocess cloning from a SUSE-internal host. Baked at build time;
 #    rotating the CA at this layer requires an image rebuild.
 COPY certs/ certs/
@@ -81,8 +93,12 @@ COPY alembic.ini .
 # Activate the virtual environment for all subsequent commands
 ENV PATH="/app/.venv/bin:$PATH"
 
-# Create non-root user
-RUN useradd --create-home --no-log-init appuser
+# Create the non-root user and the default GIT_CLONE_BASE_DIR it owns: a
+# fresh named volume mounted there inherits this ownership, so the Git
+# worker can clone into it (docs/deployment.md, Git Worker Volume)
+RUN useradd --create-home --no-log-init appuser \
+    && install --directory --owner=appuser --group=appuser --mode=0750 \
+    /var/lib/sentinel/git
 USER appuser
 
 EXPOSE 8000

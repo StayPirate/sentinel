@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -10,6 +11,7 @@ import uuid
 from collections.abc import Callable, Generator, Iterator
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlsplit
 
 import httpx
@@ -302,6 +304,49 @@ def compose_exec(
         return _run_compose_bounded(cmd, timeout)
 
     return _exec
+
+
+@pytest.fixture(scope="session")
+def celery_node_inspect(
+    compose_exec: Callable[..., subprocess.CompletedProcess[str]],
+) -> Callable[[str, str, str], Any]:
+    """Run one Celery inspect command addressed only to a service's own node.
+
+    The node is ``<node_prefix>@<container hostname>``; an untargeted inspect
+    is a broadcast that every worker node of the stack answers.
+    """
+
+    def _inspect(service: str, node_prefix: str, command: str) -> Any:
+        hostname = compose_exec(
+            service, "python", "-c", "import socket; print(socket.gethostname())"
+        )
+        assert hostname.returncode == 0, (
+            f"{service} hostname lookup failed (stdout={hostname.stdout!r}, "
+            f"stderr={hostname.stderr!r})"
+        )
+        node = f"{node_prefix}@{hostname.stdout.strip()}"
+        result = compose_exec(
+            service,
+            "celery",
+            "-A",
+            "app.celery_app",
+            "inspect",
+            command,
+            "--json",
+            "--timeout",
+            "10",
+            "-d",
+            node,
+        )
+        assert result.returncode == 0, (
+            f"inspect {command} for {node} failed (stdout={result.stdout!r}, "
+            f"stderr={result.stderr!r})"
+        )
+        replies = json.loads(result.stdout)
+        assert set(replies) == {node}, f"unexpected repliers: {result.stdout!r}"
+        return replies[node]
+
+    return _inspect
 
 
 def _register_disposable_project(context: ImageSmokeContext, project: str) -> None:

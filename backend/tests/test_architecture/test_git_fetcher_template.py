@@ -17,11 +17,10 @@ non-empty strings, and declare `clone_dir_name` as a single path component
 that no other production Git fetcher uses.
 
 The checks are a pure function over a list of classes returning the
-violations. Applied to production it passes vacuously while no production
-Git fetcher exists (the discovered registry holds only non-Git fetchers);
-it is not skipped, so the first production Git fetcher is checked as soon as
-discovery imports it. The self-test defines one violating class per check
-under `isolated_fetcher_registries` and proves each is detected, and that a
+violations. Applied to production it checks every Git fetcher discovery
+imports, so a new production Git fetcher is checked as soon as discovery
+imports it. The self-test defines one violating class per check under
+`isolated_fetcher_registries` and proves each is detected, and that a
 compliant class has no violation. A new exception is a reviewed change to
 the contract, not a workaround.
 """
@@ -96,9 +95,8 @@ def template_violations(classes: Iterable[type[BaseGitFetcher]]) -> list[str]:
 @pytest.mark.unit
 class TestProductionGitFetchers:
     def test_every_production_git_fetcher_follows_the_template(self) -> None:
-        """Vacuous until the first production Git fetcher is discovered:
-        discovery has populated the registry, and no Git fetcher is in it
-        yet. Not skipped, so the check applies as soon as one is."""
+        """Discovery has populated the registry, and every production Git
+        fetcher in it follows the template."""
         assert FETCHER_REGISTRY, "production discovery registered no fetcher"
 
         assert template_violations(git_fetchers(FETCHER_REGISTRY)) == []

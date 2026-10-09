@@ -34,7 +34,7 @@ relevant feature specifications in `docs/features/`.
 | CISA KEV | Public | Known exploited vulnerabilities catalog | Active |
 | EPSS | Public | Exploit probability scores | Active |
 | GHSA | Public | Security advisories, CVSS, CWE | Active |
-| Linux Kernel CVE | Public | Kernel CVE data, fix/introduce commits | Specified |
+| Linux Kernel CVE | Public | Kernel CVE data, fix/introduce commits | Active |
 | OSV | Public | Aggregated vulnerability data | Active |
 | SMASH | Internal | Security update management (predecessor to Sentinel) | Not planned |
 | PackTrack | Internal | Patch submission tracking for maintainers | Not integrated |
@@ -243,7 +243,7 @@ backport verification.
   bare clone + fetch (plain bare clone; `git.kernel.org` does not
   support partial clone, but all fetchers use plain bare clones
   regardless)
-- **Integration status**: **Specified**
+- **Integration status**: **Active**
 - **Documentation**: https://docs.kernel.org/process/cve.html
 
 > See [cve-sync-kernel.md](features/tickets/cve-sync-kernel.md) for the

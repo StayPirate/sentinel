@@ -87,8 +87,11 @@ CVE-IDs, organisation UUIDs, Git SHAs, versions, file paths, CPEs, vectors,
 tool names, and organisation URLs (`git.kernel.org`,
 `syzkaller.appspot.com`) are public product data and are retained.
 
-Consumers: `tests/test_services/test_tickets/test_kernel_record_contract.py`
-and `tests/test_services/test_tickets/test_kernel_cve_record.py`.
+Consumers: `tests/test_services/test_tickets/test_kernel_record_contract.py`,
+`tests/test_services/test_tickets/test_kernel_cve_record.py`, the
+`SyncKernelCves` tests (`test_sync_kernel_cves.py`,
+`test_sync_kernel_cves_execute.py`, `test_sync_kernel_cves_reachability.py`),
+and `tests/support/kernel_fetcher.py`.
 """
 
 from __future__ import annotations

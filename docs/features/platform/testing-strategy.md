@@ -1513,8 +1513,11 @@ evidence appropriate to each active role:
   readiness evidence that depends on both PostgreSQL and Redis. The gate also
   exercises the image's default API command instead of always replacing it in
   Compose.
-- **Worker:** a Celery control round-trip succeeds and a representative set of
-  application tasks is registered after startup bootstrap completes.
+- **Worker (Celery worker and Git worker):** a Celery control round-trip
+  addressed to the role's own node succeeds and a representative set of
+  application tasks is registered after startup bootstrap completes. An
+  untargeted control command is a broadcast that another worker node could
+  answer, so it is not evidence for a specific role.
 - **Beat:** bounded evidence shows startup bootstrap and schedule reconciliation
   completed; merely observing the Beat process still running is insufficient.
 
@@ -1601,9 +1604,9 @@ artifact facts without duplicating focused behavior tests:
   disposable failed-migration ordering scenario;
 - external `/health`, `/ready`, and `/openapi.json` availability through the
   candidate's default API command;
-- startup of each implemented API, worker, and Beat role from the same image,
-  with representative worker task registration and Beat post-reconciliation
-  readiness;
+- startup of each implemented API, worker, Git worker, and Beat role from the
+  same image, with representative worker task registration, the queue each
+  worker role consumes, and Beat post-reconciliation readiness;
 - one representative broker-delivered task producing a durable PostgreSQL
   outcome without a Celery result backend; and
 - only the smallest justified process-command-specific startup failure, in a
