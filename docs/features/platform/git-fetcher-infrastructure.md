@@ -242,9 +242,14 @@ volume mounted. This is achieved via a dedicated Celery queue:
   queue). `BaseGitFetcher` overrides it to `"git"` for the entire
   git-fetcher hierarchy. Non-git fetchers that omit it are routed
   normally — safe by default
-- **Worker configuration**: the worker process with access to the Git
-  volume consumes from the `git` queue (in addition to the default
-  queue, if desired)
+- **Worker configuration**: Sentinel declares no `task_queues` or
+  `task_routes`, so a Celery worker consumes only the queues named by its
+  `-Q` option, and a worker started without `-Q` consumes only the
+  default `celery` queue. Git work is therefore executed only by a worker
+  whose `-Q` names `git`, which must have the Git volume mounted at
+  `$GIT_CLONE_BASE_DIR`: the dedicated Git worker of `docs/deployment.md`
+  (Container Images), started as `celery -A app.celery_app worker -Q git
+  --pool=prefork -n git@%h`
 - **`fetch_single()` routing**: transactional preparation reads
   `fetcher_cls.queue` into primitive dispatch values. Publication passes
   `.apply_async(queue=...)` when that value is non-`None` and omits the queue
@@ -255,9 +260,12 @@ volume mounted. This is achieved via a dedicated Celery queue:
   reach the `git` worker, while a fetcher whose `queue` is `None` uses default
   routing
 
-In single-worker deployments (local dev, simple container runtime), all
-queues are consumed by the same worker process and no explicit routing
-configuration is needed.
+Every deployment, including local development, runs the general worker
+and the Git worker as separate processes with the same commands, so a
+routing defect behaves identically in every environment instead of being
+masked by a worker that consumes both queues. Without a worker consuming
+`git`, every Git fetcher task (periodic run, on-demand fetch, catch-up)
+stays queued and is never executed.
 
 ## Concurrency Rules
 
@@ -417,12 +425,15 @@ and `process_item()` complexity — not network latency. If the delta
 cannot be fully processed within `run_timeout`, the soft time limit
 fires, the run ends as `failure`, and the cursor does not advance.
 
-On the next scheduled execution, the same delta is recomputed. Items
-already processed produce idempotent upserts (no observable side
-effects). The loop processes items until the timeout fires again. This
-continues across successive runs until all items are processed —
-**convergence is guaranteed** through the combination of idempotent
-processing and stable cursor position.
+On the next scheduled execution, the same delta is recomputed and
+processed again from the start. Items already processed produce
+idempotent upserts (no observable side effects), but reprocessing them
+still costs a `show_file()` and a database round trip per item. A run
+therefore gets further than its predecessor only while reprocessing the
+items already handled takes less than `run_timeout`; within that bound,
+successive runs converge through the combination of idempotent
+processing and stable cursor position. A delta whose reprocessing alone
+exceeds `run_timeout` never converges without operator action.
 
 To accelerate recovery, an admin can temporarily increase `run_timeout`
 for the specific fetcher via FetcherConfig (e.g., from 3600 to 36000

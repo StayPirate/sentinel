@@ -188,6 +188,13 @@ cd backend && uv run uvicorn app.main:app --reload --port 8000
 # supported.
 cd backend && uv run celery -A app.celery_app worker --pool=prefork
 
+# Start the Git worker (separate terminal) — the same command as the
+# production Git worker (see "Container Images" below). It is the only
+# worker consuming the `git` queue of the Git-based CVE fetchers, and
+# clones into GIT_CLONE_BASE_DIR (see "Local Environment Variables").
+# -n gives it a node name distinct from the general worker on this host.
+cd backend && uv run celery -A app.celery_app worker -Q git --pool=prefork -n git@%h
+
 # Start Celery Beat scheduler (separate terminal)
 cd backend && uv run celery -A app.celery_app beat
 # Note: the redbeat scheduler class is configured in the Celery app
@@ -206,6 +213,10 @@ JWT_SECRET_KEY=local-development-secret-minimum-32-characters
 DATABASE_URL=postgresql+asyncpg://sentinel:sentinel@localhost:5432/sentinel
 REDIS_URL=redis://localhost:6379/0
 CELERY_BROKER_URL=redis://localhost:6379/1
+
+# Git-based fetchers: an absolute, writable clone directory (the default
+# /var/lib/sentinel/git is usually not writable on a developer host)
+GIT_CLONE_BASE_DIR=/tmp/sentinel-git
 
 # SSO (optional for local — omit to disable SSO)
 SSO_ISSUER_URL=https://id.suse.com
@@ -321,7 +332,12 @@ Before the first production deployment:
       repository-relative path and installed into the system trust store
       (automated by the Dockerfile build — see
       `docs/features/platform/networking.md`, Trust Store Layering;
-      verified by `backend/tests/image/test_networking.py`)
+      verified by `backend/tests/image/test_image_build.py`)
+- [ ] Exactly one Git worker deployed (`-Q git`, see
+      [Container Images](#container-images)) with a persistent volume at
+      `GIT_CLONE_BASE_DIR` that is writable by the image's non-root runtime
+      user (see [Git Worker Volume](#git-worker-volume)); without it the
+      Git-based CVE fetchers never run
 - [ ] DNS configured for `sentinel.suse.de`
 - [ ] TLS certificate provisioned for `sentinel.suse.de`
 - [ ] Reverse proxy / ingress configured to route `/api` to backend
@@ -1072,6 +1088,16 @@ enumeration of all process roles.
 | Celery Beat | Periodic task scheduling | No (singleton) |
 | IBS RabbitMQ consumer | Real-time event consumption | No (singleton — see `docs/features/integrations/ibs-rabbitmq-integration.md`) |
 
+The two Celery worker roles differ only in their command. The Celery worker
+is started without `-Q` and consumes only the default `celery` queue. The Git
+worker is started as `celery -A app.celery_app worker -Q git --pool=prefork -n
+git@%h` and consumes only the `git` queue, to which every Git-based CVE
+fetcher task is routed (periodic run, on-demand fetch, and catch-up — see
+`docs/features/platform/git-fetcher-infrastructure.md`, Worker Affinity). The
+`-n git@%h` node name keeps it distinct from a Celery worker on the same
+host. Local development runs the same two commands (see
+[Quick Start](#quick-start)).
+
 **One-shot jobs:**
 
 - Alembic migration job — see [Database Migrations](#database-migrations)
@@ -1139,9 +1165,8 @@ Startup Handler) for the exact mechanism.
 
 Operator-facing worker commands MUST pass `--pool=prefork` explicitly
 (or omit `--pool`, since `prefork` is Celery's own default) — see the
-Quick Start command in [Local Development](#local-development) and the
-active `worker` service and the currently-commented-out `git-worker`
-service definition in `docker-compose.smoke.yml`.
+Quick Start commands in [Local Development](#local-development) and the
+`worker` and `git-worker` service definitions in `docker-compose.smoke.yml`.
 
 ### Startup Ordering
 
@@ -1215,6 +1240,15 @@ stores bare clones of external git repositories used by CVE fetchers.
 Bare clones have no working tree — accidental checkout expansion
 (which could consume ~4 GB for cvelistV5 alone) is structurally
 impossible.
+
+The volume MUST be writable by the image's non-root runtime user (see
+[Container Build Conventions](#container-build-conventions)). The image
+creates the default directory owned by that user, so a fresh named volume
+mounted there in a container runtime inherits that ownership. An
+orchestrator volume that does not copy image content (for example a
+Kubernetes PersistentVolumeClaim) needs equivalent ownership, such as a pod
+`fsGroup` matching the runtime user's group. A clone directory the user
+cannot write fails every Git fetcher run at clone time.
 
 See `docs/features/platform/git-fetcher-infrastructure.md` (Volume
 Requirements, Recovery, Worker Affinity) for volume layout, recovery
@@ -1915,3 +1949,28 @@ for the record schema.
    PostgreSQL", ensure the database is reachable before Beat can start
    successfully (Beat fails fast when PostgreSQL is unavailable at
    startup)
+7. If only the Git-based CVE fetchers (`sync_kernel_cves`,
+   `sync_mitre_cves`) never run, check that a Git worker consuming the `git`
+   queue is running (see [Container Images](#container-images)); the
+   Celery worker does not consume it
+
+#### Git Fetcher Runs Keep Failing
+
+1. `External git repository unreachable — clone failed` or `— fetch failed`
+   on every run: check outbound access to the repository host (see
+   [Network Access](#network-access-stagingproduction)). For a clone
+   failure, also check that `GIT_CLONE_BASE_DIR` is writable by the
+   runtime user (see [Git Worker Volume](#git-worker-volume))
+2. `fetch failed` on every run while the host is reachable, after the Git
+   worker was killed without a graceful shutdown (for example SIGKILL or
+   an out-of-memory kill): git may have left a stale lock file in the
+   clone, which its `error_detail` (visible with `manage_fetchers`)
+   reports as an existing `.lock` file. Confirm that no run of the
+   affected fetcher is active, then delete its clone directory under
+   `GIT_CLONE_BASE_DIR` (`vulns.git` for `sync_kernel_cves`, `cvelistV5`
+   for `sync_mitre_cves`). The clone is a recoverable cache: the next run
+   re-clones it and resumes from the stored cursor (see
+   `docs/features/platform/git-fetcher-infrastructure.md`, Recovery)
+3. `Local git clone directory could not be removed — manual intervention
+   required`: check the volume's mount state and permissions, then remove
+   the clone directory manually
