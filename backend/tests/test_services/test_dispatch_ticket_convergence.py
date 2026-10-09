@@ -80,6 +80,9 @@ DISPATCH_FAILED_MESSAGE = (
 BROKER_URL = "amqp://sentinel-user:fictional-secret@broker.example.test:5672//"
 """A fictional credential-bearing broker URL carried by the injected error."""
 
+PORT_DIGITS_TICKET_ID = uuid.UUID("01a11fd4-3f1a-7239-a342-fd8d567209f6")
+"""A UUIDv7 whose hexadecimal digits contain the broker port `5672`."""
+
 WAIT = 5
 """Upper bound, in seconds, of every wait that is expected to finish."""
 
@@ -411,9 +414,13 @@ class TestDispatchPublicationOutcomes:
         """`acceptance_unconfirmed`: exactly one sanitized
         `ticket_convergence_dispatch_failed` ERROR with only `ticket_id` and
         the closed cause; the raised error carries the fixed message and no
-        trace of the broker exception. The committed Ticket is unchanged."""
+        trace of the broker exception. The committed Ticket is unchanged.
+        The Ticket ID contains the broker port digits, proving that the
+        no-leak check ignores the logged `ticket_id` value."""
         actor = await world.user(role=Role.VULNERABILITY_ANALYST)
-        ticket = await world.status_ticket(TicketStatus.ANALYZED)
+        ticket = await world.status_ticket(
+            TicketStatus.ANALYZED, id=PORT_DIGITS_TICKET_ID
+        )
         before = await _row(world.probe, ticket.id)
         session = await world.open_session()
         sessions = _Sessions(session)
@@ -438,7 +445,9 @@ class TestDispatchPublicationOutcomes:
                 "cause": "broker_operational_error",
             }
         ]
-        rendered = repr(logs) + str(e.value)
+        # The `ticket_id` value is asserted exactly above; it is removed
+        # here because hexadecimal UUID digits may contain "5672".
+        rendered = repr(logs).replace(str(ticket.id), "") + str(e.value)
         for fragment in ("fictional-secret", "broker.example.test", "5672", "amqp"):
             assert fragment not in rendered
         assert sessions.closed == [session]
