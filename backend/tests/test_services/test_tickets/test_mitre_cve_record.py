@@ -1175,6 +1175,14 @@ class TestSsvcSkip:
             SsvcSkip("incomplete", ("Automatable", "Technical Impact")),
         )
 
+    def test_non_object_option_is_ignored(self) -> None:
+        ssvc = _ssvc()
+        ssvc["other"]["content"]["options"][0] = "Exploitation"
+
+        result = _map(_record(adp=[_cisa(metrics=[ssvc])]))
+
+        assert result.ssvc_skips == (SsvcSkip("incomplete", ("Exploitation",)),)
+
     def test_option_lookup_uses_the_first_object_carrying_a_key(self) -> None:
         ssvc = _ssvc()
         ssvc["other"]["content"]["options"].insert(0, {"Exploitation": None})
