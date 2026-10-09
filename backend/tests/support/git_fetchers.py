@@ -10,7 +10,12 @@ Consumers:
 - `tests/test_services/test_base_git_fetcher_wrappers.py` (the on-demand and
   catch-up wrappers with a test-only Git fetcher);
 - `tests/test_services/test_base_git_fetcher_registration.py` (the
-  `GitCalls` spy for utility delegation).
+  `GitCalls` spy for utility delegation);
+- the production `SyncKernelCves` tests
+  (`tests/test_services/test_tickets/test_sync_kernel_cves_execute.py` and
+  `test_sync_kernel_cves_reachability.py`, through
+  `tests/support/kernel_fetcher.py`), which pass the production class as a
+  `GitFetcherProbe` instead of defining a test-only fetcher.
 
 The fetcher factory, the item steps, the workspace, and the `git_operations`
 spy carry no run-specific assumption, so the other `BaseGitFetcher` tests
