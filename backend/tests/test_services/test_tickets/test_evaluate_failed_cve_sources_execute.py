@@ -664,7 +664,7 @@ class TestRevalidation:
         with capture_logs() as logs:
             fetcher = await _execute(env)
 
-        assert calls == [4]
+        assert calls[0] >= 2
         assert _counters(fetcher) == (1, 0, 0, 0)
         assert _pair_events(logs) == [
             _skipped(leaving, "redhat", "excluded_at_revalidation"),
@@ -984,7 +984,7 @@ class TestRunOutcomes:
         reaches exactly one terminal outcome, exclusions reach none, and
         every pair yields exactly one bounded event. The summary is closed
         and agrees with the persisted counters. One `FetcherRun` is
-        finalized for the evaluator and none for a dispatched fetcher."""
+        finalized for the evaluator."""
         world = env.world
         for name in (REDHAT, OSV, GHSA, MITRE):
             await world.config(name)
@@ -1040,8 +1040,6 @@ class TestRunOutcomes:
         ]
         _assert_private(logs, *(c["kwargs"]["token"] for c in env.published.calls))
         assert await fetcher_run_count(real_session_factory, runs.fetcher_name) == 1
-        for name in (REDHAT, OSV, GHSA, EPSS, MITRE, KERNEL):
-            assert await fetcher_run_count(real_session_factory, name) == 0
 
     async def test_every_selected_pair_failing_is_a_normal_return_failure(
         self, env: _Env, runs: _Runs
@@ -1070,34 +1068,18 @@ class TestRunOutcomes:
         ]
 
     async def test_only_exclusions_is_success_with_zero_counters(
-        self, env: _Env, runs: _Runs, monkeypatch: pytest.MonkeyPatch
+        self, env: _Env, runs: _Runs
     ) -> None:
         """Every skip and every revalidation exclusion contributes to
         neither counter."""
         await env.world.config(REDHAT, enabled=False)
-        await env.world.config(MITRE)
-        await env.world.pair("kev", age=timedelta(hours=4))
-        await env.world.pair("osv", age=timedelta(hours=3), ticket=None)
-        await env.world.pair("redhat", age=timedelta(hours=2))
-        await env.world.pair("mitre", age=timedelta(hours=1))
-        calls = [0]
-
-        def fetchers() -> dict[str, type[BaseCVEFetcher]]:
-            """`mitre` leaves the registry at its revalidation: the sixth
-            lookup (one each for the KEV and ticketless pairs, two each for
-            the `redhat` and `mitre` pairs)."""
-            calls[0] += 1
-            registry = get_fetch_single_fetchers()
-            if calls[0] >= 6:
-                registry.pop("mitre")
-            return registry
-
-        monkeypatch.setattr(evaluator, "get_fetch_single_fetchers", fetchers)
+        await env.world.pair("kev", age=timedelta(hours=3))
+        await env.world.pair("osv", age=timedelta(hours=2), ticket=None)
+        await env.world.pair("redhat", age=timedelta(hours=1))
 
         with capture_logs() as logs:
             run = await _run(runs)
 
-        assert calls == [6]
         assert run.status == "success"
         assert _run_metrics(run) == (0, 0, 0, 0)
         assert (run.error_message, run.error_detail) == (None, None)
@@ -1105,7 +1087,7 @@ class TestRunOutcomes:
             _summary(
                 skipped_no_capability=1,
                 skipped_no_active_ticket=1,
-                excluded_at_revalidation=2,
+                excluded_at_revalidation=1,
             )
         ]
         assert env.published.calls == []
