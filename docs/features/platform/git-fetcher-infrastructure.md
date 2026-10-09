@@ -222,7 +222,7 @@ automatically (see Recovery below).
 | Property | Value |
 |----------|-------|
 | Persistence | Required across container restarts |
-| Capacity | 8 GB minimum (current usage ~2.5 GB; provides headroom for git repack operations — which temporarily require old + new pack coexistence (~4.9 GB peak) — plus future growth at ~150 MB/year) |
+| Capacity | 8 GB minimum (current usage ~3.2 GB; provides headroom for git repack operations — which temporarily require old + new pack coexistence (~6.4 GB peak) — plus future growth at ~150 MB/year) |
 | Access mode | ReadWriteOnce (single worker pod) |
 | Filesystem | Any POSIX-compliant filesystem |
 | Backup | Not required (recoverable from upstream repos) |
@@ -486,10 +486,21 @@ timeouts and retry policy per operation category:
 
 | Operation | Timeout | Retries | Examples |
 |---|---|---|---|
-| Clone | 30 minutes | 0 | Initial bare clone (~2.3 GB download for cvelistV5) |
+| Clone | 30 minutes | 0 | Initial bare clone (~3.0 GB download for cvelistV5) |
 | Fetch | 5 minutes | 0 | Incremental `git fetch --end-of-options origin +HEAD:<ref>` |
 | Read | 30 seconds | 3 (backoff: 2s, 4s, 8s) | `git diff`, `git rev-parse`, `git symbolic-ref` (the branch lookup inside `fetch_origin`), `git ls-tree`, `git rev-list`, `git log` |
 | Show | 30 seconds | 0 | `git show --end-of-options <ref>:<path>` (per-file blob access) |
+
+**Run timeout**: a Git fetcher's `run_timeout` (`FetcherConfig`, see
+`fetcher-infrastructure.md`, Time Limits and Queue Routing) must contain the
+Clone timeout (30 minutes) and the Fetch timeout (5 minutes) within its soft
+time limit, so that a first-run or rebuilt clone, or a slow fetch, ends through
+its own timeout classification rather than the whole-run limit. A run either
+clones or fetches, so the Clone timeout dominates: the soft time limit
+(95% of `run_timeout`) must exceed 30 minutes, which needs a `run_timeout` of
+at least about 1900 seconds. The `FetcherConfig` bootstrap default of 3600
+seconds satisfies this; an operator who lowers `run_timeout` for a Git fetcher
+keeps it above that bound.
 
 **Read retry policy**: read-phase operations are retried up to 3 times
 (4 attempts total) with exponential backoff (2 seconds, 4 seconds, 8
@@ -497,7 +508,7 @@ seconds) before raising `GitCorruptionError`. This absorbs transient
 I/O faults on networked storage (NFS, PVC with remote backend) without
 misclassifying them as repository corruption. The worst-case added
 latency per operation is ~14 seconds (negligible vs. the 30-second
-timeout and vastly cheaper than a false-positive re-clone of ~2.3 GB). Clone and Fetch are not retried because they already handle
+timeout and vastly cheaper than a false-positive re-clone of ~3.0 GB). Clone and Fetch are not retried because they already handle
 transient network errors through git's own retry logic. Show is not
 retried because per-file failures are already non-fatal (`GitFileError`
 → `record_failed()`, continue to next item).
@@ -1486,10 +1497,12 @@ could exist in multiple locations (e.g., `published/` vs. `rejected/`),
 place the most likely or authoritative path first.
 
 **Exception contract**: implementations MUST raise `ValueError` if
-`item_id` does not match the format expected by this source (e.g.,
-not parseable as `CVE-YYYY-NNNN`). Raw parsing exceptions
-(`IndexError`, `KeyError`, etc.) MUST NOT propagate — convert them
-to `ValueError` with a descriptive message. This allows the
+`item_id` does not match the format expected by this source; for a CVE
+source that is any value that is not a canonical CVE-ID
+(`core.identifiers.is_valid_cve_id`), checked before the value is split or
+placed in a path. Raw parsing exceptions (`IndexError`, `KeyError`, etc.)
+MUST NOT propagate — convert them to `ValueError` with a fixed message that
+does not render the value. This allows the
 `fetch_single()` template to distinguish "unrecognizable input" (caught
 → `CVENotInSource` + ERROR log) from genuine hook bugs
 (`AttributeError`, `TypeError`, etc. — propagate uncaught).
@@ -1497,12 +1510,9 @@ to `ValueError` with a descriptive message. This allows the
 ```python
 # Kernel example:
 def _construct_candidate_paths(self, cve_id: str) -> list[str]:
-    parts = cve_id.split("-")
-    if len(parts) < 3 or parts[0] != "CVE":
-        raise ValueError(
-            f"Unrecognizable item_id format for kernel source: {cve_id}"
-        )
-    year = parts[1]  # CVE-YYYY-NNNNN → YYYY
+    if not is_valid_cve_id(cve_id):
+        raise ValueError("item_id is not a canonical CVE-ID")
+    year = cve_id.split("-")[1]  # CVE-YYYY-NNNN → YYYY
     return [
         f"cve/published/{year}/{cve_id}.json",
         f"cve/rejected/{year}/{cve_id}.json",

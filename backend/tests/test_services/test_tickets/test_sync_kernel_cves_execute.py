@@ -74,6 +74,15 @@ from app.services.base_git_fetcher import (
 )
 from app.services.tickets.sync_kernel_cves import SyncKernelCves
 from tests.support.cve_catch_up import RESOLVE, source_state
+from tests.support.git_fetcher_state import (
+    AssessmentRow,
+    ReferenceRow,
+    assessments,
+    audit_events,
+    committed_fetcher_rows,
+    references,
+    ticket_of,
+)
 from tests.support.git_fetchers import (
     GitCalls,
     GitFetcherProbe,
@@ -93,18 +102,11 @@ from tests.support.kernel_fetcher import (
     AUTHOR_EMAIL,
     AUTHOR_NAME,
     NAME,
-    AssessmentRow,
-    ReferenceRow,
-    assessments,
-    audit_events,
     cna,
     commit,
-    committed_fetcher_rows,
     derived_record,
     kernel_probe,
     record_path,
-    references,
-    ticket_of,
 )
 
 pytestmark = pytest.mark.integration
@@ -167,7 +169,7 @@ async def harness(
     db_session_factory: SessionFactory,
 ) -> AsyncIterator[GitRunHarness]:
     # The previous cursor is read from every committed run of the name.
-    assert await committed_fetcher_rows(real_session_factory) == 0
+    assert await committed_fetcher_rows(real_session_factory, NAME) == 0
     opened = await open_git_run_harness(
         monkeypatch, real_session_factory, db_session_factory
     )

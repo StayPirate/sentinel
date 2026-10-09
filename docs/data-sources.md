@@ -17,7 +17,7 @@ relevant feature specifications in `docs/features/`.
 | Source | Scope | Data Provided | Integration Status |
 |---|---|---|---|
 | NVD | Public | CVE data, CVSS scores, CPE matches | Specified |
-| MITRE CVE Services | Public | Early CVE assignments | Specified |
+| MITRE CVE Services | Public | Early CVE assignments | Active |
 | Red Hat Security Data | Public | CVSS assessments | Active |
 | SUSE CSAF VEX | Public | SUSE CVSS assessments per CVE | Not integrated |
 | IBS | Internal | Source packages, builds, repos, declarative product channels | Active |
@@ -86,7 +86,7 @@ MITRE a valuable source for early awareness of new vulnerabilities.
   additional data from multiple providers, including CISA Vulnrichment
   (SSVC, KEV, CWE)
 - **Access**: `cvelistV5` GitHub repository (bare clone + fetch). Public access
-- **Integration status**: **Specified**
+- **Integration status**: **Active**
 - **Documentation**: https://www.cve.org/,
   https://cveawg.mitre.org/api-docs/openapi.json
 

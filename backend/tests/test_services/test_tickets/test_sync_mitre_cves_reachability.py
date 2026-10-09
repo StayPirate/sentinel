@@ -1,15 +1,16 @@
-"""Production reachability of the real `SyncKernelCves` class
-(backend/app/services/tickets/sync_kernel_cves.py): the on-demand
+"""Production reachability of the real `SyncMitreCves` class
+(backend/app/services/tickets/sync_mitre_cves.py): the on-demand
 `fetch_single_cve` workflow and the default catch-up through
-`run_catch_up` over a real `vulns.git` bare clone, the `git`-queue
+`run_catch_up` over a real `cvelistV5` bare clone, the `git`-queue
 publication of both, the bootstrapped `FetcherConfig`, and the RedBeat
 schedule entry.
 
 Owning specifications:
 
-- docs/features/tickets/cve-sync-kernel.md (Fetcher Definition;
-  `fetch_single()` Behavior: published, then rejected candidate, missing
-  as `CVENotInSource`; Storage and Recovery, the bootstrap `run_timeout`).
+- docs/features/tickets/cve-sync-mitre.md (Fetcher Definition;
+  `fetch_single()` Behavior: the single candidate path, the record handed to
+  the periodic `process_item()` hook with its references, missing as
+  `CVENotInSource`; Storage and Recovery, the bootstrap `run_timeout`).
 - docs/features/platform/git-fetcher-infrastructure.md (Default
   `fetch_single()` Implementation, `RuntimeError` for an absent clone;
   Worker Affinity: `fetch_single()` and `catch_up()` routing; Concurrency
@@ -25,11 +26,11 @@ Owning specifications:
 - docs/features/platform/testing-strategy.md (CVE Fetcher Infrastructure:
   Default catch-up, Git queue preservation; Git boundaries; On-Demand CVE
   Refetch: task identity from `fetcher_cls.name` and Git queue
-  preservation for Kernel).
+  preservation for MITRE).
 
 Repositories are real temporary ones under `tmp_path` with hermetic Git
 processes: an upstream served through a `file://` URL and its bare
-`vulns.git` clone, created outside the code under test, under the
+`cvelistV5` clone, created outside the code under test, under the
 redirected `GIT_CLONE_BASE_DIR`. The production class is resolved from the
 registries filled by fetcher discovery; no test-only fetcher is defined.
 Execution uses the harnesses of `tests/support/fetch_single_cve.py` and
@@ -60,7 +61,15 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession, async_sessionm
 from structlog.testing import capture_logs
 
 from app.celery_app import celery_app
-from app.core.enums import CVESourceFetchStatus, CVESourceType, CveState, Scope
+from app.core.enums import (
+    CVESourceFetchStatus,
+    CVESourceType,
+    CveState,
+    ReferenceType,
+    Scope,
+    TicketAuditEventType,
+    TicketStatus,
+)
 from app.models.cve import CVE
 from app.models.fetcher_config import FetcherConfig
 from app.services import cve_service, package_service
@@ -72,7 +81,7 @@ from app.services.fetcher_bootstrap import bootstrap_fetcher_configs
 from app.services.fetcher_schedule import reconcile_beat_schedule
 from app.services.http_client import is_retryable_condition
 from app.services.ticket_visibility import TicketCaller
-from app.services.tickets.sync_kernel_cves import SyncKernelCves
+from app.services.tickets.sync_mitre_cves import SyncMitreCves
 from app.tasks import fetchers
 from tests.support.cve_catch_up import (
     CATCH_UP,
@@ -94,20 +103,26 @@ from tests.support.fetch_single_cve import (
     events_named,
     install_fetch_single_harness,
 )
-from tests.support.git_fetcher_state import committed_fetcher_rows
+from tests.support.git_fetcher_state import (
+    ReferenceRow,
+    audit_events,
+    committed_fetcher_rows,
+    references,
+    ticket_of,
+)
 from tests.support.git_fetchers import (
     GitCalls,
     GitWorkspace,
     assert_bounded_logs,
     install_git_workspace,
 )
-from tests.support.kernel_fetcher import (
+from tests.support.mitre_fetcher import (
     AUTHOR_EMAIL,
     AUTHOR_NAME,
     NAME,
     commit,
     derived_record,
-    kernel_probe,
+    mitre_probe,
     record_path,
 )
 
@@ -115,17 +130,31 @@ pytestmark = pytest.mark.integration
 
 SessionFactory = Callable[[], Awaitable[AsyncSession]]
 
-KERNEL: Final = CVESourceType.KERNEL
-SOURCE: Final = KERNEL.value
+MITRE: Final = CVESourceType.MITRE
+SOURCE: Final = MITRE.value
 D_BASE: Final = "2026-10-01T00:00:00+00:00"
 READ_ONLY_CALLS: Final = {"is_clone_valid", "show_file"}
 SCOPE_ALL: Final = TicketCaller.authenticated(uuid.uuid4(), Scope.ALL)
-RECORD_TEXTS: Final = ("fictional title", "fictional subject", "Fictional scenario")
+RECORD_TEXTS: Final = (
+    "fictional title",
+    "fictional description",
+    "Fictional scenario",
+    "Fictional rejection reason",
+)
+CVE_ORG: Final = "https://cve.org/CVERecord?id="
+ORACLE_ADVISORY: Final = "https://www.oracle.com/security-alerts/cpujul2024.html"
+"""The single CNA reference of `cisa_kev_cwe_tags`."""
+CREATED_COMMENT: Final = "CVE ingested from MITRE"
 
-OUTCOMES: Final = ["published", "rejected-only", "both", "absent", "no-clone"]
-"""`published`: only the published record exists; `rejected-only`: only
-the rejected one; `both`: both directories hold the CVE; `absent`: the
-clone holds no record of it; `no-clone`: no clone exists."""
+OUTCOMES: Final = ["published", "rejected", "absent", "no-clone"]
+"""`published`: the record exists in the `PUBLISHED` state; `rejected`: in
+the `REJECTED` state, at the same single path; `absent`: the clone holds no
+record of it; `no-clone`: no clone exists."""
+
+FIXTURES: Final = {
+    "published": "cisa_kev_cwe_tags",
+    "rejected": "cvelistv5_5_2_rejected",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -136,7 +165,7 @@ clone holds no record of it; `no-clone`: no clone exists."""
 @pytest.fixture
 def workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> GitWorkspace:
     created = install_git_workspace(tmp_path, monkeypatch)
-    monkeypatch.setattr(SyncKernelCves, "repo_url", created.upstream.url)
+    monkeypatch.setattr(SyncMitreCves, "repo_url", created.upstream.url)
     return created
 
 
@@ -169,17 +198,15 @@ async def world(
 
 def _arrange(outcome: str, workspace: GitWorkspace, cve_id: str) -> None:
     """Commit the outcome's upstream files and, except for `no-clone`,
-    create the `vulns.git` bare clone outside the code under test."""
-    published = record_path("published", cve_id)
-    rejected = record_path("rejected", cve_id)
-    files: dict[str, bytes | None] = {"cve/README": b"example: fictional README\n"}
-    if outcome in ("published", "both", "no-clone"):
-        files[published] = derived_record("published_cvss_v3_1", cve_id)
-    if outcome in ("rejected-only", "both"):
-        files[rejected] = derived_record("rejected_cvss_v3_1", cve_id)
+    create the `cvelistV5` bare clone outside the code under test."""
+    files: dict[str, bytes | None] = {"README.md": b"example: fictional README\n"}
+    if outcome in FIXTURES:
+        files[record_path(cve_id)] = derived_record(FIXTURES[outcome], cve_id)
+    elif outcome == "no-clone":
+        files[record_path(cve_id)] = derived_record(FIXTURES["published"], cve_id)
     commit(workspace.upstream, files, date=D_BASE)
     if outcome != "no-clone":
-        workspace.clone(kernel_probe([]))
+        workspace.clone(mitre_probe([]))
 
 
 def _expected_status(outcome: str) -> CVESourceFetchStatus:
@@ -191,13 +218,9 @@ def _expected_status(outcome: str) -> CVESourceFetchStatus:
 
 
 def _expected_reads(outcome: str, cve_id: str) -> list[str]:
-    """The candidate paths read at `HEAD`, in order."""
-    published = record_path("published", cve_id)
-    if outcome in ("published", "both"):
-        return [published]
-    if outcome == "no-clone":
-        return []
-    return [published, record_path("rejected", cve_id)]
+    """The candidate paths read at `HEAD`: the single record path, whatever
+    the record's state, or none without a clone."""
+    return [] if outcome == "no-clone" else [record_path(cve_id)]
 
 
 def _shown(git_calls: GitCalls) -> list[str]:
@@ -211,6 +234,18 @@ async def _stored(factory: async_sessionmaker[AsyncSession], cve_pk: uuid.UUID) 
     return cve
 
 
+def _handoff(ticket_id: uuid.UUID) -> dict[str, Any]:
+    """The package-candidate handoff of `cisa_kev_cwe_tags`: its CNA
+    `affected` vendor and product, no CPE, no package."""
+    return {
+        "ticket_id": str(ticket_id),
+        "cpe_matches": [],
+        "affected_cpes": [],
+        "vendor_products": [["Oracle Corporation", "WebLogic Server"]],
+        "resolved_packages": [],
+    }
+
+
 def _bounded(logs: list[Any], workspace: GitWorkspace) -> None:
     assert_bounded_logs(
         logs,
@@ -219,8 +254,8 @@ def _bounded(logs: list[Any], workspace: GitWorkspace) -> None:
         AUTHOR_NAME,
         AUTHOR_EMAIL,
         "://",
-        "cve/published",
-        "cve/rejected",
+        "cves/",
+        ".json",
     )
 
 
@@ -251,9 +286,9 @@ class TestPublication:
         git_calls: GitCalls,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """The production registry's Kernel entry: the task identity is
-        the class `name` and the queue its inherited `queue`."""
-        assert get_fetch_single_fetchers()[SOURCE] is SyncKernelCves
+        """The production registry's MITRE entry: the task identity is the
+        class `name` and the queue its inherited `queue` (#746)."""
+        assert get_fetch_single_fetchers()[SOURCE] is SyncMitreCves
         assert await db_session.get(FetcherConfig, NAME) is None
         db_session.add(FetcherConfig(fetcher_name=NAME, enabled=True))
         cve = CVE(cve_id=f"CVE-2099-{uuid.uuid4().int % 10**8:08d}")
@@ -295,7 +330,7 @@ class TestPublication:
         git_calls: GitCalls,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        assert get_catch_up_fetchers()[NAME] is SyncKernelCves
+        assert get_catch_up_fetchers()[NAME] is SyncMitreCves
         ticket_id = uuid.uuid7()
         send_task = MagicMock()
         monkeypatch.setattr(celery_app, "send_task", send_task)
@@ -304,12 +339,12 @@ class TestPublication:
             ticket_id=ticket_id, session_factory=real_session_factory
         )
 
-        kernel_calls = [
+        mitre_calls = [
             recorded
             for recorded in send_task.call_args_list
             if recorded.kwargs.get("kwargs", {}).get("fetcher_name") == NAME
         ]
-        assert kernel_calls == [
+        assert mitre_calls == [
             call(
                 CATCH_UP,
                 kwargs={"fetcher_name": NAME, "ticket_id": str(ticket_id)},
@@ -366,11 +401,13 @@ class TestOnDemand:
             else:
                 assert await on_demand.run(NAME, cve.cve_id, SOURCE, token) is None
 
-        state = await source_state(on_demand.factory, cve.id, KERNEL)
+        state = await source_state(on_demand.factory, cve.id, MITRE)
         assert state is not None
         assert state.status == _expected_status(outcome)
         assert await on_demand.marker_value(cve.cve_id, SOURCE) is None
         assert events_named(logs, RETRY_SCHEDULED) == []
+        # Exactly the single candidate path, read from the object store; no
+        # clone, fetch, or deletion.
         assert _shown(git_calls) == _expected_reads(outcome, cve.cve_id)
         assert set(git_calls.names()) <= READ_ONLY_CALLS
         assert await fetcher_run_count(on_demand.factory, NAME) == 0
@@ -380,24 +417,68 @@ class TestOnDemand:
             assert [entry["cause"] for entry in events_named(logs, FAILED)] == [
                 "RuntimeError"
             ]
-            assert not workspace.clone_path(kernel_probe([])).exists()
+            assert not workspace.clone_path(mitre_probe([])).exists()
         else:
             action = "missing" if outcome == "absent" else "updated"
             assert events_named(logs, COMPLETED) == [
                 {"event": COMPLETED, "log_level": "info", "outcome": action, **context}
             ]
-        if outcome in ("published", "both", "rejected-only"):
-            expected = (
-                CveState.REJECTED if outcome == "rejected-only" else CveState.PUBLISHED
-            )
-            assert stored.cve_state == expected
-            assert stored.title is not None
-            [handoff] = on_demand.published.published(RESOLVE)
-            assert "kernel-source" in handoff["resolved_packages"]
+        if outcome == "published":
+            assert stored.cve_state == CveState.PUBLISHED
+            assert stored.description is not None
+            ticket = await ticket_of(on_demand.factory, cve.id)
+            assert ticket is not None
+            assert on_demand.published.published(RESOLVE) == [_handoff(ticket.id)]
+        elif outcome == "rejected":
+            assert stored.cve_state == CveState.REJECTED
+            # A rejected record carries no package candidate.
+            assert on_demand.published.published(RESOLVE) == []
         else:
-            assert stored.title is None
+            assert stored.description is None
+            assert await ticket_of(on_demand.factory, cve.id) is None
             assert on_demand.published.published(RESOLVE) == []
         _bounded(logs, workspace)
+
+    async def test_found_record_creates_references_and_audit_like_the_periodic_path(
+        self,
+        workspace: GitWorkspace,
+        world: IngestionWorld,
+        on_demand: FetchSingleHarness,
+    ) -> None:
+        """`fetch_single()` step 3: the content is handed to the periodic
+        `process_item()` hook, so the Ticket created for the existing CVE
+        carries the MITRE creation audit, and the source reference precedes
+        the CNA references (ADP references are not candidates)."""
+        cve = await world.cve_in()
+        _arrange("published", workspace, cve.cve_id)
+        token = await on_demand.marker(cve.cve_id, SOURCE)
+
+        assert await on_demand.run(NAME, cve.cve_id, SOURCE, token) is None
+
+        ticket = await ticket_of(on_demand.factory, cve.id)
+        assert ticket is not None
+        assert ticket.status == TicketStatus.NEW
+        created = [
+            (event.user_id, event.comment)
+            for event in await audit_events(on_demand.factory, ticket.id)
+            if event.event_type == TicketAuditEventType.TICKET_CREATED
+        ]
+        assert created == [(None, CREATED_COMMENT)]
+        assert await references(on_demand.factory, ticket.id) == [
+            ReferenceRow(
+                url=f"{CVE_ORG}{cve.cve_id}",
+                title="MITRE",
+                type=ReferenceType.ADVISORY,
+                source=NAME,
+            ),
+            # `vendor-advisory` tag.
+            ReferenceRow(
+                url=ORACLE_ADVISORY,
+                title=None,
+                type=ReferenceType.ADVISORY,
+                source=NAME,
+            ),
+        ]
 
 
 # ---------------------------------------------------------------------------
@@ -443,7 +524,7 @@ class TestCatchUp:
         else:
             await fetchers.run_catch_up_async(NAME, str(ticket.id))
 
-        state = await source_state(catch_up.factory, cve.id, KERNEL)
+        state = await source_state(catch_up.factory, cve.id, MITRE)
         assert state is not None
         assert state.status == _expected_status(outcome)
         assert _shown(git_calls) == _expected_reads(outcome, cve.cve_id)
@@ -452,10 +533,8 @@ class TestCatchUp:
             events = catch_up.events
             assert events.count("commit") == 1
             assert events[events.index("commit") - 1] == "flush"
-            [handoff] = catch_up.published.published(RESOLVE)
-            assert handoff["ticket_id"] == str(ticket.id)
-            assert "kernel-source" in handoff["resolved_packages"]
-            assert (await _stored(catch_up.factory, cve.id)).title is not None
+            assert catch_up.published.published(RESOLVE) == [_handoff(ticket.id)]
+            assert (await _stored(catch_up.factory, cve.id)).description is not None
         else:
             assert "commit" not in catch_up.events
             assert "status:commit" in catch_up.events
@@ -482,7 +561,7 @@ class TestBootstrapAndSchedule:
         assert config is not None
         assert config.enabled is True
         assert config.schedule_override is None
-        assert config.request_delay == SyncKernelCves.default_request_delay == 0
+        assert config.request_delay == SyncMitreCves.default_request_delay == 0
         assert config.run_timeout == 3600
         assert config.custom_settings == {}
 
@@ -497,9 +576,9 @@ class TestBootstrapAndSchedule:
         entry = RedBeatSchedulerEntry.from_key(key, app=celery_test_app)
         assert entry.task == "run_fetcher"
         assert entry.kwargs == {"fetcher_name": NAME, "triggered_by": "schedule"}
-        # 0 */3 * * *
+        # 0 */6 * * *
         assert entry.schedule.minute == {0}
-        assert entry.schedule.hour == set(range(0, 24, 3))
+        assert entry.schedule.hour == set(range(0, 24, 6))
         assert entry.schedule.day_of_month == set(range(1, 32))
         assert entry.schedule.month_of_year == set(range(1, 13))
         assert entry.schedule.day_of_week == set(range(7))
