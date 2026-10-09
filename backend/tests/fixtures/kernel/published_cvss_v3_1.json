@@ -1,0 +1,131 @@
+{
+  "containers": {
+    "cna": {
+      "providerMetadata": {
+        "orgId": "f4215fc3-5b6b-47ff-a258-f7189bd81038"
+      },
+      "descriptions": [
+        {
+          "lang": "en",
+          "value": "In the Linux kernel, the following vulnerability has been resolved:\n\nexample: fictional subject of CVE-2026-43070\n\nFictional commit message body."
+        }
+      ],
+      "metrics": [
+        {
+          "cvssV3_1": {
+            "version": "3.1",
+            "vectorString": "CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+            "baseScore": 7.8,
+            "baseSeverity": "HIGH"
+          },
+          "scenarios": [
+            {
+              "lang": "en",
+              "value": "Fictional scenario."
+            }
+          ]
+        }
+      ],
+      "affected": [
+        {
+          "product": "Linux",
+          "vendor": "Linux",
+          "defaultStatus": "unaffected",
+          "repo": "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git",
+          "programFiles": [
+            "kernel/bpf/verifier.c"
+          ],
+          "versions": [
+            {
+              "version": "4c03342e5ac532fb34d13a7b51dd7261dfc48963",
+              "lessThan": "a17443af874229408ce6b78e2c8a2b5adeb4b7d8",
+              "status": "affected",
+              "versionType": "git"
+            },
+            {
+              "version": "d00ce96623a69a100ad79675d0e85fda3c50d89b",
+              "lessThan": "0d15c3611a2cc5d08993545d4032055ae10ae2c1",
+              "status": "affected",
+              "versionType": "git"
+            },
+            {
+              "version": "9d21199842247ab05c675fb9b6c6ca393a5c0024",
+              "lessThan": "a3125bc01884431d30d731461634c8295b6f0529",
+              "status": "affected",
+              "versionType": "git"
+            }
+          ]
+        },
+        {
+          "product": "Linux",
+          "vendor": "Linux",
+          "defaultStatus": "unaffected",
+          "repo": "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git",
+          "programFiles": [
+            "kernel/bpf/verifier.c"
+          ],
+          "versions": [
+            {
+              "version": "6.18.17",
+              "lessThan": "6.18.21",
+              "status": "affected",
+              "versionType": "semver"
+            },
+            {
+              "version": "6.19.7",
+              "lessThan": "6.19.11",
+              "status": "affected",
+              "versionType": "semver"
+            }
+          ]
+        }
+      ],
+      "cpeApplicability": [
+        {
+          "nodes": [
+            {
+              "operator": "OR",
+              "negate": false,
+              "cpeMatch": [
+                {
+                  "vulnerable": true,
+                  "criteria": "cpe:2.3:o:linux:linux_kernel:*:*:*:*:*:*:*:*",
+                  "versionStartIncluding": "6.18.17",
+                  "versionEndExcluding": "6.18.21"
+                },
+                {
+                  "vulnerable": true,
+                  "criteria": "cpe:2.3:o:linux:linux_kernel:*:*:*:*:*:*:*:*",
+                  "versionStartIncluding": "6.19.7",
+                  "versionEndExcluding": "6.19.11"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "references": [
+        {
+          "url": "https://git.kernel.org/stable/c/a17443af874229408ce6b78e2c8a2b5adeb4b7d8"
+        },
+        {
+          "url": "https://git.kernel.org/stable/c/0d15c3611a2cc5d08993545d4032055ae10ae2c1"
+        },
+        {
+          "url": "https://git.kernel.org/stable/c/a3125bc01884431d30d731461634c8295b6f0529"
+        }
+      ],
+      "title": "example: fictional title of CVE-2026-43070",
+      "x_generator": {
+        "engine": "bippy-1.2.0"
+      }
+    }
+  },
+  "cveMetadata": {
+    "assignerOrgId": "f4215fc3-5b6b-47ff-a258-f7189bd81038",
+    "cveId": "CVE-2026-43070",
+    "state": "PUBLISHED"
+  },
+  "dataType": "CVE_RECORD",
+  "dataVersion": "5.1.1"
+}

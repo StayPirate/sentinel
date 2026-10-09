@@ -1,0 +1,112 @@
+{
+  "containers": {
+    "cna": {
+      "providerMetadata": {
+        "orgId": "f4215fc3-5b6b-47ff-a258-f7189bd81038"
+      },
+      "descriptions": [
+        {
+          "lang": "en",
+          "value": "In the Linux kernel, the following vulnerability has been resolved:\n\nexample: fictional subject of CVE-2025-68195\n\nFictional commit message body."
+        }
+      ],
+      "metrics": [
+        {
+          "cvssV3_1": {
+            "version": "3.1",
+            "vectorString": "CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:H",
+            "baseScore": 7.1,
+            "baseSeverity": "HIGH"
+          },
+          "scenarios": [
+            {
+              "lang": "en",
+              "value": "Fictional scenario."
+            }
+          ]
+        }
+      ],
+      "affected": [
+        {
+          "product": "Linux",
+          "vendor": "Linux",
+          "defaultStatus": "unaffected",
+          "repo": "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git",
+          "programFiles": [
+            "arch/x86/kernel/cpu/amd.c"
+          ],
+          "versions": [
+            {
+              "version": "36ff93e66d0efc46e39fab536a9feec968daa766",
+              "lessThan": "4c6b56a76478bd1ab609827c571905386c11d308",
+              "status": "affected",
+              "versionType": "git"
+            },
+            {
+              "version": "607b9fb2ce248cc5b633c5949e0153838992c152",
+              "lessThan": "f1fdffe0afea02ba783acfe815b6a60e7180df40",
+              "status": "affected",
+              "versionType": "git"
+            },
+            {
+              "version": "e980de2ff109dacb6d9d3a77f01b27c467115ecb",
+              "status": "affected",
+              "versionType": "git"
+            },
+            {
+              "version": "6.12.58",
+              "lessThan": "6.13",
+              "status": "affected",
+              "versionType": "semver"
+            }
+          ]
+        },
+        {
+          "product": "Linux",
+          "vendor": "Linux",
+          "defaultStatus": "unaffected",
+          "repo": "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git",
+          "programFiles": [
+            "arch/x86/kernel/cpu/amd.c"
+          ]
+        }
+      ],
+      "cpeApplicability": [
+        {
+          "nodes": [
+            {
+              "operator": "OR",
+              "negate": false,
+              "cpeMatch": [
+                {
+                  "vulnerable": true,
+                  "criteria": "cpe:2.3:o:linux:linux_kernel:*:*:*:*:*:*:*:*",
+                  "versionStartIncluding": "6.12.58"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "references": [
+        {
+          "url": "https://git.kernel.org/stable/c/4c6b56a76478bd1ab609827c571905386c11d308"
+        },
+        {
+          "url": "https://git.kernel.org/stable/c/f1fdffe0afea02ba783acfe815b6a60e7180df40"
+        }
+      ],
+      "title": "example: fictional title of CVE-2025-68195",
+      "x_generator": {
+        "engine": "bippy-1.2.0"
+      }
+    }
+  },
+  "cveMetadata": {
+    "assignerOrgId": "f4215fc3-5b6b-47ff-a258-f7189bd81038",
+    "cveId": "CVE-2025-68195",
+    "state": "PUBLISHED"
+  },
+  "dataType": "CVE_RECORD",
+  "dataVersion": "5.1.1"
+}
