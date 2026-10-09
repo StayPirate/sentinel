@@ -67,6 +67,7 @@ from app.core.enums import (
     TicketStatus,
 )
 from app.models.cve import CVE
+from app.services import reference_service
 from app.services.base_git_fetcher import (
     CVE_FETCH_ITEM_FAILED_EVENT,
     DELTA_FILE_MISSING_AT_HEAD_EVENT,
@@ -853,6 +854,70 @@ class TestPerItemFailure:
         assert state.status == CVESourceFetchStatus.FAILURE
         assert harness.published.calls == []
         _bounded(logs, workspace)
+
+    async def test_reference_failure_rolls_back_the_whole_cve_transaction(
+        self,
+        workspace: GitWorkspace,
+        harness: GitRunHarness,
+        kernel: GitFetcherProbe,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Algorithm step 2g: the reference write is part of the per-CVE
+        transaction, so its failure after `upsert_cve()` rolls back the CVE,
+        Ticket, and CVSS writes and is one isolated per-item failure."""
+        cve = await harness.world.cve_in()
+        await _first_run(workspace, harness, kernel)
+        commit(
+            workspace.upstream,
+            {
+                record_path("published", cve.cve_id): derived_record(
+                    "published_cvss_v3_1", cve.cve_id
+                )
+            },
+            date=D_1,
+        )
+        _reset(harness)
+        calls: list[str] = []
+
+        async def failing_upsert_references(*args: Any, **kwargs: Any) -> None:
+            calls.append(args[2])
+            raise RuntimeError("example: fictional reference write failure")
+
+        monkeypatch.setattr(
+            reference_service, "upsert_references", failing_upsert_references
+        )
+
+        with capture_logs() as logs:
+            result = await harness.run(kernel)
+
+        assert calls == [cve.cve_id]
+        assert events_named(logs, CVE_FETCH_ITEM_FAILED_EVENT) == [
+            {
+                "event": CVE_FETCH_ITEM_FAILED_EVENT,
+                "log_level": "warning",
+                "cve_id": cve.cve_id,
+                "fetcher_name": NAME,
+                "cause": "RuntimeError",
+            }
+        ]
+        assert [
+            event
+            for event in harness.events
+            if event in ("rollback", "commit", "status:commit")
+        ] == ["rollback", "status:commit"]
+        assert result.row.status == "failure"
+        assert result.row.metrics == (0, 0, 0, 1)
+        assert result.row.cursor is None
+        stored = await _cve(harness, cve.cve_id)
+        assert stored.title is None
+        assert stored.description is None
+        assert await ticket_of(harness.factory, cve.id) is None
+        assert await assessments(harness.factory, cve.id) == []
+        state = await source_state(harness.factory, cve.id, KERNEL)
+        assert state is not None
+        assert state.status == CVESourceFetchStatus.FAILURE
+        assert harness.published.calls == []
+        _bounded(logs, workspace, "fictional reference write failure")
 
     async def test_failure_for_an_absent_cve_writes_nothing(
         self,

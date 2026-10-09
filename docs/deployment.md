@@ -70,7 +70,7 @@ For architectural decisions and design constraints, see
 | Docker Compose CLI plugin | 2.32.2+ | Repository-managed development and test orchestration |
 | PostgreSQL | 18+ | Primary database |
 | Redis | 8+ | Session cache, Celery broker, rate limiting |
-| Git | 2.30+ | Git-based CVE fetcher operations (git worker container only) |
+| Git | 2.30+ | Git-based CVE fetcher operations (Git worker only; installed in the image, and on the developer host for the local Git worker) |
 | [uv](https://docs.astral.sh/uv/getting-started/installation/) | 0.11+ | Manages the Python 3.14 interpreter and all backend dependencies for local development (see "Quick Start" below). Development only |
 | [gh](https://cli.github.com/) | any recent release | Strongly recommended, development only — manages issues, pull requests, and GitHub Flow from the command line. See `docs/conventions.md` (Git Conventions) |
 | [glab](https://gitlab.com/gitlab-org/cli) | any recent release | Optional, development only — interacts with SUSE-internal GitLab repositories, issues, and merge requests (e.g., SMELT, SMASH). Requires authentication against `gitlab.suse.de`. See `AGENTS.md` (Local Environment) |
@@ -1088,11 +1088,13 @@ enumeration of all process roles.
 | Celery Beat | Periodic task scheduling | No (singleton) |
 | IBS RabbitMQ consumer | Real-time event consumption | No (singleton — see `docs/features/integrations/ibs-rabbitmq-integration.md`) |
 
-The two Celery worker roles differ only in their command. The Celery worker
-is started without `-Q` and consumes only the default `celery` queue. The Git
-worker is started as `celery -A app.celery_app worker -Q git --pool=prefork -n
-git@%h` and consumes only the `git` queue, to which every Git-based CVE
-fetcher task is routed (periodic run, on-demand fetch, and catch-up — see
+The two Celery worker roles share the image and differ in their command; the
+Git worker also mounts the Git volume (see [Git Worker Volume](#git-worker-volume)).
+The Celery worker is started without `-Q` and consumes only the default
+`celery` queue. The Git worker is started as `celery -A app.celery_app worker
+-Q git --pool=prefork -n git@%h` and consumes only the `git` queue, to which
+every Git-based CVE fetcher task is routed (scheduled or manual run, on-demand
+fetch, and catch-up — see
 `docs/features/platform/git-fetcher-infrastructure.md`, Worker Affinity). The
 `-n git@%h` node name keeps it distinct from a Celery worker on the same
 host. Local development runs the same two commands (see
@@ -1864,6 +1866,12 @@ current digest manually (e.g. `docker buildx imagetools inspect
 python:3.14-slim` or an equivalent registry query) and opens a PR
 directly.
 
+Packages that `backend/Dockerfile` installs itself (the runtime stage's
+`git` and its dependencies) are scanned too, but their layer is rebuilt only
+when a build-cache input of that layer changes, in practice the base image
+digest. A fixable finding in such a package is therefore resolved by the next
+base-digest refresh and remains open until then; this delay is accepted.
+
 ### Python Forward-Compatibility Check
 
 A weekly scheduled workflow
@@ -1956,6 +1964,11 @@ for the record schema.
 
 #### Git Fetcher Runs Keep Failing
 
+The messages below are the failed run's `error_message` (fetcher run list and
+run detail), not log events. The run detail also carries `error_detail`, the
+chained Git diagnostics, shown only to holders of the `manage_fetchers`
+permission.
+
 1. `External git repository unreachable — clone failed` or `— fetch failed`
    on every run: check outbound access to the repository host (see
    [Network Access](#network-access-stagingproduction)). For a clone
@@ -1964,8 +1977,8 @@ for the record schema.
 2. `fetch failed` on every run while the host is reachable, after the Git
    worker was killed without a graceful shutdown (for example SIGKILL or
    an out-of-memory kill): git may have left a stale lock file in the
-   clone, which its `error_detail` (visible with `manage_fetchers`)
-   reports as an existing `.lock` file. Confirm that no run of the
+   clone, which the run's `error_detail` reports as an existing `.lock`
+   file. Confirm that no run of the
    affected fetcher is active, then delete its clone directory under
    `GIT_CLONE_BASE_DIR` (`vulns.git` for `sync_kernel_cves`, `cvelistV5`
    for `sync_mitre_cves`). The clone is a recoverable cache: the next run

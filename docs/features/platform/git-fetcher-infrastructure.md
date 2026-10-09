@@ -248,8 +248,7 @@ volume mounted. This is achieved via a dedicated Celery queue:
   default `celery` queue. Git work is therefore executed only by a worker
   whose `-Q` names `git`, which must have the Git volume mounted at
   `$GIT_CLONE_BASE_DIR`: the dedicated Git worker of `docs/deployment.md`
-  (Container Images), started as `celery -A app.celery_app worker -Q git
-  --pool=prefork -n git@%h`
+  (Container Images)
 - **`fetch_single()` routing**: transactional preparation reads
   `fetcher_cls.queue` into primitive dispatch values. Publication passes
   `.apply_async(queue=...)` when that value is non-`None` and omits the queue
@@ -264,8 +263,8 @@ Every deployment, including local development, runs the general worker
 and the Git worker as separate processes with the same commands, so a
 routing defect behaves identically in every environment instead of being
 masked by a worker that consumes both queues. Without a worker consuming
-`git`, every Git fetcher task (periodic run, on-demand fetch, catch-up)
-stays queued and is never executed.
+`git`, no Git fetcher task (scheduled or manual run, on-demand fetch,
+catch-up) is ever executed.
 
 ## Concurrency Rules
 

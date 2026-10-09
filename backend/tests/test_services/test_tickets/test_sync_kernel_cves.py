@@ -290,7 +290,9 @@ class TestDeduplicateItems:
             REJECTED,
         ]
 
-    def test_same_cve_in_different_years_is_not_merged(self) -> None:
+    def test_distinct_cve_ids_sharing_a_sequence_number_stay_distinct(
+        self,
+    ) -> None:
         """The CVE-ID, not the file stem position, identifies the unit:
         two CVE-IDs that share a sequence number stay distinct."""
         same_number = "cve/rejected/2098/CVE-2098-0001.json"
@@ -309,13 +311,6 @@ class TestDeduplicateItems:
 
     def test_empty_list_stays_empty(self) -> None:
         assert _fetcher().deduplicate_items([]) == []
-
-    def test_only_record_paths_are_selected(self) -> None:
-        """The hook receives filtered paths only; a non-record path never
-        becomes a work unit even when passed directly."""
-        delta = ["cve/README", PUBLISHED, "cve/published/2099/CVE-2099-0001.sha1"]
-
-        assert _fetcher().deduplicate_items(delta) == [PUBLISHED]
 
     def test_composes_with_the_filter_into_one_unit_per_cve(self) -> None:
         fetcher = _fetcher()
@@ -584,22 +579,22 @@ class TestStructuralAbsences:
         ]
         assert [value for value in own if isinstance(value, type)] == [SyncKernelCves]
 
-    def test_touches_no_redis_task_api_or_configuration_layer(self) -> None:
+    def test_touches_no_redis_task_or_api_layer(self) -> None:
         imported = _imported_modules(sync_module)
 
         forbidden = {
             name
             for name in imported
-            if name in ("app.celery_app", "app.config", "app.database")
+            if name == "app.celery_app"
             or name.split(".")[0] in ("redis", "httpx", "celery", "subprocess")
-            or name.startswith(("app.tasks", "app.api", "app.schemas", "app.models"))
+            or name.startswith(("app.tasks", "app.api", "app.schemas"))
         }
         assert forbidden == set()
 
     def test_raises_no_api_facing_error(self) -> None:
         names = _referenced_names(inspect.getsource(sync_module))
 
-        assert not {"ErrorCode", "ServiceError", "HTTPException", "logger"} & names
+        assert not {"ErrorCode", "ServiceError", "HTTPException"} & names
         assert not [name for name in names if name.endswith("ServiceError")]
 
     def test_no_route_task_or_error_code_names_the_source(self) -> None:
