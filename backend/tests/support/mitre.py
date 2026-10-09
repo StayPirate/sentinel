@@ -98,8 +98,11 @@ CVE-IDs, organisation UUIDs and short names, versions, vectors, dates,
 CWE texts, SSVC and KEV content, and URLs of organisations, vendors,
 projects, and advisory databases are public product data and are retained.
 
-Consumers: `tests/test_services/test_tickets/test_mitre_record_contract.py`
-and `tests/test_services/test_tickets/test_mitre_cve_record.py`.
+Consumers: `tests/test_services/test_tickets/test_mitre_record_contract.py`,
+`tests/test_services/test_tickets/test_mitre_cve_record.py`, the
+`SyncMitreCves` tests (`test_sync_mitre_cves.py`,
+`test_sync_mitre_cves_execute.py`, `test_sync_mitre_cves_reachability.py`,
+`test_sync_mitre_cves_kev.py`), and `tests/support/mitre_fetcher.py`.
 """
 
 from __future__ import annotations
