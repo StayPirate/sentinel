@@ -563,7 +563,9 @@ an internal primary key and the stable pagination tie-breaker; it is not exposed
 in the global CVE-source listing response.
 
 **Derived predicate — "stalled"**: `status = 'failure' AND
-first_failed_at < now() - 30 days`. Not a stored column, ENUM value, or
+first_failed_at < now() - 30 days`, where 30 days is a fixed 720-hour
+interval evaluated at the database `now()`, independent of the session time
+zone (not a calendar-day interval). Not a stored column, ENUM value, or
 API status field value — a query-time predicate. See
 `docs/features/platform/cve-source-failure-retry.md` for consumers,
 threshold rationale, and operational guidance.
