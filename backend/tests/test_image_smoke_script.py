@@ -14,6 +14,14 @@ ROOT_DIR = Path(__file__).resolve().parents[2]
 SCRIPT_PATH = ROOT_DIR / "scripts" / "image-smoke.sh"
 IMAGE_ID = f"sha256:{'a' * 64}"
 DRIFTED_IMAGE_ID = f"sha256:{'f' * 64}"
+# Application roles in verification order, with their fake container IDs.
+ROLE_CONTAINERS = {
+    "api": "aaaaaaaaaaaa",
+    "migrate": "bbbbbbbbbbbb",
+    "worker": "cccccccccccc",
+    "git-worker": "eeeeeeeeeeee",
+    "beat": "dddddddddddd",
+}
 
 PYTHON_STUB = r"""#!/usr/bin/env bash
 set -euo pipefail
@@ -111,6 +119,7 @@ if [[ "${1:-}" == "inspect" ]]; then
         bbbbbbbbbbbb) role=migrate ;;
         cccccccccccc) role=worker ;;
         dddddddddddd) role=beat ;;
+        eeeeeeeeeeee) role=git-worker ;;
         *) role=unknown ;;
     esac
     if [[ "$*" == *"{{.State.Running}}"* ]]; then
@@ -153,10 +162,12 @@ if [[ "${1:-}" == "compose" ]]; then
         ps)
             if [[ "$*" == *"-q api"* ]]; then printf 'aaaaaaaaaaaa\n'
             elif [[ "$*" == *"-q migrate"* ]]; then printf 'bbbbbbbbbbbb\n'
+            elif [[ "$*" == *"-q git-worker"* ]]; then printf 'eeeeeeeeeeee\n'
             elif [[ "$*" == *"-q worker"* ]]; then printf 'cccccccccccc\n'
             elif [[ "$*" == *"-q beat"* ]]; then printf 'dddddddddddd\n'
             elif [[ "$*" == *"-q"* ]]; then
-                printf 'aaaaaaaaaaaa\nbbbbbbbbbbbb\ncccccccccccc\ndddddddddddd\n'
+                printf '%s\n' aaaaaaaaaaaa bbbbbbbbbbbb cccccccccccc \
+                    dddddddddddd eeeeeeeeeeee
             else
                 printf '{"Project":"%s","State":"running"}\n' "${project}"
             fi
@@ -715,7 +726,32 @@ def test_runner_strictly_rejects_invalid_discovered_port(
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("role", ["api", "migrate", "worker", "beat"])
+def test_runner_verifies_every_role_container_uses_candidate_image(
+    tmp_path: Path,
+) -> None:
+    result, calls = _run_script(tmp_path, "--no-build")
+
+    assert result.returncode == 0, result.stderr
+    project = _project_from_up(calls)
+    verification_labels = [
+        call.split()[1]
+        for call in _supervisor_calls(calls)
+        if call.startswith("supervisor image-verification-")
+    ]
+    assert verification_labels == [
+        f"image-verification-{role}-{step}"
+        for role in ROLE_CONTAINERS
+        for step in ("container", "image")
+    ]
+    for role, container in ROLE_CONTAINERS.items():
+        assert f"docker compose -p {project} " in next(
+            call for call in calls if call.endswith(f" ps --all -q {role}")
+        )
+        assert f"docker inspect --format {{{{.Image}}}} {container}" in calls
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("role", list(ROLE_CONTAINERS))
 def test_runner_rejects_role_image_substitution(tmp_path: Path, role: str) -> None:
     result, calls = _run_script(
         tmp_path, "--no-build", env_overrides={"ROLE_MISMATCH": role}

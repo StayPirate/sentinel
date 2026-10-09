@@ -34,6 +34,7 @@ assert Path("/app/alembic/versions").is_dir()
 assert Path("/app/certs/SUSE_Trust_Root.crt").is_file()
 assert not Path("/app/tests").exists(), "/app/tests is present"
 assert shutil.which("sentinel") is not None
+assert shutil.which("git") is not None, "git binary is missing"
 assert version("sentinel")
 
 subjects = [

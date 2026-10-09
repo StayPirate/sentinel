@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import json
-import subprocess
 from collections.abc import Callable
+from typing import Any
 
 import pytest
 
@@ -74,26 +73,11 @@ asyncio.run(main())
 
 @pytest.mark.image
 def test_worker_registers_representative_production_tasks_only(
-    compose_exec: Callable[..., subprocess.CompletedProcess[str]],
+    celery_node_inspect: Callable[[str, str, str], Any],
 ) -> None:
-    result = compose_exec(
-        "worker",
-        "celery",
-        "-A",
-        "app.celery_app",
-        "inspect",
-        "registered",
-        "--json",
-    )
-    assert result.returncode == 0, (
-        f"inspect registered failed (stdout={result.stdout!r}, "
-        f"stderr={result.stderr!r})"
-    )
-    replies = json.loads(result.stdout)
-    assert replies, f"no worker replied: {result.stdout!r}"
-    for registered_tasks in replies.values():
-        assert "cleanup_sessions" in registered_tasks
-        assert "run_fetcher" in registered_tasks
+    registered_tasks = celery_node_inspect("worker", "celery", "registered")
+    assert "cleanup_sessions" in registered_tasks
+    assert "run_fetcher" in registered_tasks
 
 
 @pytest.mark.image

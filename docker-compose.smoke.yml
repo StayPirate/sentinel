@@ -29,16 +29,17 @@
 # docs/features/platform/testing-strategy.md, Image / Container Smoke
 # Testing — Artifact-Risk Rule). Keeping them commented lets the argument-free
 # `up --wait` stay green so the CI gate does not block `latest`
-# publication before those services land. `worker` and `beat` are active
-# (Celery runtime — see docs/features/platform/fetcher-infrastructure.md);
-# `git-worker` remains commented out (Phase 5, git-based CVE fetchers).
+# publication before those services land. `worker`, `git-worker`, and `beat`
+# are active (Celery runtime — see
+# docs/features/platform/fetcher-infrastructure.md and
+# docs/features/platform/git-fetcher-infrastructure.md, Worker Affinity).
 
 x-app-common: &app-common
   image: ${IMAGE_SMOKE_IMAGE_ID:?IMAGE_SMOKE_IMAGE_ID is required}
   # Minimum configuration app/config.py requires to start without
   # crashing. JWT_SECRET_KEY is a fictional, fixed test value (>=32
   # chars) — NOT a real secret; safe to commit.
-  environment:
+  environment: &app-environment
     JWT_SECRET_KEY: image-smoke-test-secret-key-not-for-production
     DATABASE_URL: postgresql+asyncpg://sentinel:sentinel@postgres:5432/sentinel
     REDIS_URL: redis://redis:6379/0
@@ -143,8 +144,15 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+    # The ping targets this container's own node (Celery's default node name
+    # `celery@<hostname>`): an untargeted ping is a broadcast that another
+    # worker node, such as `git-worker`, could answer.
     healthcheck:
-      test: ["CMD", "celery", "-A", "app.celery_app", "inspect", "ping"]
+      test:
+        [
+          "CMD-SHELL",
+          "celery -A app.celery_app inspect ping -d \"celery@$${HOSTNAME}\"",
+        ]
       interval: 15s
       timeout: 10s
       retries: 5
@@ -166,7 +174,53 @@ services:
       migrate:
         condition: service_completed_successfully
 
-  # --- Uncomment in Phase 5 (git-based CVE fetchers) ---
-  # git-worker:
-  #   <<: *app-common
-  #   command: ["celery", "-A", "app.celery_app", "worker", "-Q", "git", "--pool=prefork", "--loglevel=info"]
+  # Git-based CVE fetcher execution: the dedicated Celery worker consuming
+  # only the `git` queue, with the documented command (docs/deployment.md,
+  # Container Images; -n gives it the node name `git@<hostname>`), the clone
+  # volume at the default GIT_CLONE_BASE_DIR (docs/deployment.md, Git Worker
+  # Volume; the image creates that directory owned by its non-root user, so
+  # the fresh named volume inherits the ownership), and the recommended Git
+  # worker environment (docs/deployment.md, Locale for git worker
+  # containers). Startup ordering and the health check follow `worker`.
+  git-worker:
+    <<: *app-common
+    command:
+      [
+        "celery",
+        "-A",
+        "app.celery_app",
+        "worker",
+        "-Q",
+        "git",
+        "--pool=prefork",
+        "-n",
+        "git@%h",
+        "--loglevel=info",
+      ]
+    environment:
+      <<: *app-environment
+      TZ: UTC
+      LC_ALL: C
+      GIT_TERMINAL_PROMPT: "0"
+    volumes:
+      - git-clones:/var/lib/sentinel/git
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "celery -A app.celery_app inspect ping -d \"git@$${HOSTNAME}\"",
+        ]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+volumes:
+  git-clones:

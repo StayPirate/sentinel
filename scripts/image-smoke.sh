@@ -363,7 +363,9 @@ discover_api_port() {
 
 verify_role_images() {
     local role container actual status
-    for role in api migrate worker beat; do
+    # Every application role in docker-compose.smoke.yml; worker and
+    # git-worker readiness is their per-node Compose healthcheck (up --wait).
+    for role in api migrate worker git-worker beat; do
         if capture_bounded container "image-verification-${role}-container" \
             "${IMAGE_VERIFICATION_TIMEOUT}" docker compose \
             -p "${COMPOSE_PROJECT}" -f "${SMOKE_COMPOSE}" \
