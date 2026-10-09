@@ -495,9 +495,12 @@ timeouts and retry policy per operation category:
 `fetcher-infrastructure.md`, Time Limits and Queue Routing) must contain the
 Clone timeout (30 minutes) and the Fetch timeout (5 minutes) within its soft
 time limit, so that a first-run or rebuilt clone, or a slow fetch, ends through
-its own timeout classification rather than the whole-run limit. The
-`FetcherConfig` bootstrap default of 3600 seconds satisfies this; an operator
-who lowers `run_timeout` for a Git fetcher keeps it above that bound.
+its own timeout classification rather than the whole-run limit. A run either
+clones or fetches, so the Clone timeout dominates: the soft time limit
+(95% of `run_timeout`) must exceed 30 minutes, which needs a `run_timeout` of
+at least about 1900 seconds. The `FetcherConfig` bootstrap default of 3600
+seconds satisfies this; an operator who lowers `run_timeout` for a Git fetcher
+keeps it above that bound.
 
 **Read retry policy**: read-phase operations are retried up to 3 times
 (4 attempts total) with exponential backoff (2 seconds, 4 seconds, 8
@@ -1494,10 +1497,12 @@ could exist in multiple locations (e.g., `published/` vs. `rejected/`),
 place the most likely or authoritative path first.
 
 **Exception contract**: implementations MUST raise `ValueError` if
-`item_id` does not match the format expected by this source (e.g.,
-not parseable as `CVE-YYYY-NNNN`). Raw parsing exceptions
-(`IndexError`, `KeyError`, etc.) MUST NOT propagate — convert them
-to `ValueError` with a descriptive message. This allows the
+`item_id` does not match the format expected by this source; for a CVE
+source that is any value that is not a canonical CVE-ID
+(`core.identifiers.is_valid_cve_id`), checked before the value is split or
+placed in a path. Raw parsing exceptions (`IndexError`, `KeyError`, etc.)
+MUST NOT propagate — convert them to `ValueError` with a fixed message that
+does not render the value. This allows the
 `fetch_single()` template to distinguish "unrecognizable input" (caught
 → `CVENotInSource` + ERROR log) from genuine hook bugs
 (`AttributeError`, `TypeError`, etc. — propagate uncaught).
@@ -1505,12 +1510,9 @@ to `ValueError` with a descriptive message. This allows the
 ```python
 # Kernel example:
 def _construct_candidate_paths(self, cve_id: str) -> list[str]:
-    parts = cve_id.split("-")
-    if len(parts) < 3 or parts[0] != "CVE":
-        raise ValueError(
-            f"Unrecognizable item_id format for kernel source: {cve_id}"
-        )
-    year = parts[1]  # CVE-YYYY-NNNNN → YYYY
+    if not is_valid_cve_id(cve_id):
+        raise ValueError("item_id is not a canonical CVE-ID")
+    year = cve_id.split("-")[1]  # CVE-YYYY-NNNN → YYYY
     return [
         f"cve/published/{year}/{cve_id}.json",
         f"cve/rejected/{year}/{cve_id}.json",

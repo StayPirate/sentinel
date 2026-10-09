@@ -15,7 +15,8 @@ Consumers:
   (`tests/test_services/test_tickets/test_sync_kernel_cves_execute.py` and
   `test_sync_kernel_cves_reachability.py`, through
   `tests/support/kernel_fetcher.py`) and `SyncMitreCves` tests
-  (`test_sync_mitre_cves_execute.py`, through
+  (`test_sync_mitre_cves_execute.py`, `test_sync_mitre_cves_reachability.py`,
+  and `test_sync_mitre_cves_kev.py`, through
   `tests/support/mitre_fetcher.py`), which pass the production class as a
   `GitFetcherProbe` instead of defining a test-only fetcher;
 - `tests/support/git_fetcher_state.py` (the `Upstream` of `commit()`).
