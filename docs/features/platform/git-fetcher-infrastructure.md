@@ -222,7 +222,7 @@ automatically (see Recovery below).
 | Property | Value |
 |----------|-------|
 | Persistence | Required across container restarts |
-| Capacity | 8 GB minimum (current usage ~2.5 GB; provides headroom for git repack operations — which temporarily require old + new pack coexistence (~4.9 GB peak) — plus future growth at ~150 MB/year) |
+| Capacity | 8 GB minimum (current usage ~3.2 GB; provides headroom for git repack operations — which temporarily require old + new pack coexistence (~6.4 GB peak) — plus future growth at ~150 MB/year) |
 | Access mode | ReadWriteOnce (single worker pod) |
 | Filesystem | Any POSIX-compliant filesystem |
 | Backup | Not required (recoverable from upstream repos) |
@@ -486,7 +486,7 @@ timeouts and retry policy per operation category:
 
 | Operation | Timeout | Retries | Examples |
 |---|---|---|---|
-| Clone | 30 minutes | 0 | Initial bare clone (~2.3 GB download for cvelistV5) |
+| Clone | 30 minutes | 0 | Initial bare clone (~3.0 GB download for cvelistV5) |
 | Fetch | 5 minutes | 0 | Incremental `git fetch --end-of-options origin +HEAD:<ref>` |
 | Read | 30 seconds | 3 (backoff: 2s, 4s, 8s) | `git diff`, `git rev-parse`, `git symbolic-ref` (the branch lookup inside `fetch_origin`), `git ls-tree`, `git rev-list`, `git log` |
 | Show | 30 seconds | 0 | `git show --end-of-options <ref>:<path>` (per-file blob access) |
@@ -505,7 +505,7 @@ seconds) before raising `GitCorruptionError`. This absorbs transient
 I/O faults on networked storage (NFS, PVC with remote backend) without
 misclassifying them as repository corruption. The worst-case added
 latency per operation is ~14 seconds (negligible vs. the 30-second
-timeout and vastly cheaper than a false-positive re-clone of ~2.3 GB). Clone and Fetch are not retried because they already handle
+timeout and vastly cheaper than a false-positive re-clone of ~3.0 GB). Clone and Fetch are not retried because they already handle
 transient network errors through git's own retry logic. Show is not
 retried because per-file failures are already non-fatal (`GitFileError`
 → `record_failed()`, continue to next item).
