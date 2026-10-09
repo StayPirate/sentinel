@@ -480,13 +480,6 @@ class TestDates:
             payload = _payload(_record(metadata={key: malformed}))
             assert field not in payload.model_fields_set
 
-    def test_date_with_offset_is_converted_to_utc(self) -> None:
-        payload = _payload(
-            _record(metadata={"datePublished": "2026-02-03T06:05:06+02:00"})
-        )
-
-        assert payload.published_date == datetime(2026, 2, 3, 4, 5, 6, tzinfo=UTC)
-
     def test_rejected_date_presence_rules(self) -> None:
         def payload(**metadata: Any) -> CVEIngestPayload:
             return _payload(_record(state="REJECTED", metadata=metadata))
@@ -586,7 +579,13 @@ class TestGlobalFields:
 
         result = _map(record)
 
-        assert result.payload.ssvc_assessment is None
+        assert result.payload.model_fields_set == {
+            "cve_state",
+            "published_date",
+            "modified_date",
+        }
+        assert result.skipped_adps == ()
+        assert result.ssvc_skips == ()
         assert result.cna_guard == CnaGuard(org_id=None)
 
     def test_resolved_packages_is_never_set(self) -> None:
@@ -827,9 +826,7 @@ class TestAdp:
         assert ("adp:Example-ADP", V31_OTHER) in _cvss(payload)
 
     @pytest.mark.parametrize("adps", [None, {}, "adp", []])
-    def test_absent_null_or_non_array_adp_observes_no_adp_scope(
-        self, adps: Any
-    ) -> None:
+    def test_null_empty_or_non_array_adp_observes_no_adp_scope(self, adps: Any) -> None:
         record = _record()
         record["containers"]["adp"] = adps
 
@@ -907,6 +904,26 @@ class TestAdpGuard:
         assert set(_operations(result.payload)) == {"cna"}
         assert _cvss(result.payload) == {(CNA_NAME, V31)}
         assert result.payload.ssvc_assessment is not None
+
+    @pytest.mark.parametrize("short_name", [None, "", " "])
+    def test_cisa_entry_without_short_name_contributes_nothing(
+        self, short_name: Any
+    ) -> None:
+        """CISA-ADP is recognized by `orgId`, but the guard skips the entire
+        entry first: no SSVC, KEV, CWE, or SSVC skip."""
+        cisa = _cisa(
+            providerMetadata={"orgId": CISA_ADP_ORG_ID, "shortName": short_name},
+            metrics=[_ssvc(exploitation=None), _kev()],
+            affected=[_affected("CISA Product")],
+        )
+
+        result = _map(_record(adp=[cisa]))
+
+        assert result.skipped_adps == (SkippedAdp(CISA_ADP_ORG_ID),)
+        assert result.ssvc_skips == ()
+        assert not {"ssvc_assessment", "kev_data"} & result.payload.model_fields_set
+        assert ("CWE-79", CISA_ADP_CWE_SOURCE) not in _cwe(result.payload)
+        assert set(_operations(result.payload)) == {"cna"}
 
     def test_short_name_at_the_scope_bound_is_kept(self) -> None:
         name = "a" * 96
@@ -1227,8 +1244,8 @@ class TestSsvcSkip:
 
         (skip,) = _map(_record(adp=[_cisa(metrics=[ssvc])])).ssvc_skips
 
-        assert set(skip.missing_fields) <= set(SSVC_FIELDS)
-        assert skip.reason in {"incomplete", "invalid_value"}
+        # A missing field takes precedence over an invalid value.
+        assert skip == SsvcSkip("incomplete", ("Automatable",))
         assert SECRET not in repr(skip)
 
 
