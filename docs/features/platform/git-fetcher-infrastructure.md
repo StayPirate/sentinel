@@ -491,6 +491,14 @@ timeouts and retry policy per operation category:
 | Read | 30 seconds | 3 (backoff: 2s, 4s, 8s) | `git diff`, `git rev-parse`, `git symbolic-ref` (the branch lookup inside `fetch_origin`), `git ls-tree`, `git rev-list`, `git log` |
 | Show | 30 seconds | 0 | `git show --end-of-options <ref>:<path>` (per-file blob access) |
 
+**Run timeout**: a Git fetcher's `run_timeout` (`FetcherConfig`, see
+`fetcher-infrastructure.md`, Time Limits and Queue Routing) must contain the
+Clone timeout (30 minutes) and the Fetch timeout (5 minutes) within its soft
+time limit, so that a first-run or rebuilt clone, or a slow fetch, ends through
+its own timeout classification rather than the whole-run limit. The
+`FetcherConfig` bootstrap default of 3600 seconds satisfies this; an operator
+who lowers `run_timeout` for a Git fetcher keeps it above that bound.
+
 **Read retry policy**: read-phase operations are retried up to 3 times
 (4 attempts total) with exponential backoff (2 seconds, 4 seconds, 8
 seconds) before raising `GitCorruptionError`. This absorbs transient
