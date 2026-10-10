@@ -111,7 +111,11 @@ _VULN_STATUS_STATES: Final[Mapping[str, CveState]] = MappingProxyType(
 )
 """`vulnStatus` → `CVEState` mapping; any other value maps to `PUBLISHED`."""
 
-_DATE_TIME_PREFIX: Final = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T")
+_DATE_TIME_FORM: Final = re.compile(
+    r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}"
+    r"(?::[0-9]{2}(?:\.[0-9]+)?)?(?:Z|[+-][0-9]{2}:[0-9]{2})?"
+)
+"""The extended-format date-time of Required fields; apply with `fullmatch`."""
 _CWE_PATTERN: Final = re.compile(r"CWE-[1-9][0-9]*")
 _UUID_FORM: Final = re.compile(
     r"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}"
@@ -408,12 +412,8 @@ def _source_entry(entry: object) -> tuple[str, list[str]] | None:
 
 
 def _timestamp(value: object) -> datetime:
-    """An ISO 8601 date-time with the `T` separator, as aware UTC."""
-    if (
-        not isinstance(value, str)
-        or contains_nul(value)
-        or _DATE_TIME_PREFIX.match(value) is None
-    ):
+    """An ISO 8601 extended-format date-time, as aware UTC."""
+    if not isinstance(value, str) or _DATE_TIME_FORM.fullmatch(value) is None:
         raise NvdRecordStructureError
     try:
         parsed = datetime.fromisoformat(value)
