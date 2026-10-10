@@ -11,7 +11,9 @@ Packages Across Tickets), and docs/data-model.md (CveState Enum,
 CVESourceFetchStatus Enum, CVESourceType Python Enum,
 CVEExternalIdentifierSource Python Enum, CVESSVCAssessment,
 TicketAuditEventType Enum,
-ReferenceType Enum, IBSRequestState Enum, IBSRequestActionType Enum).
+ReferenceType Enum, IBSRequestState Enum, IBSRequestActionType Enum), and
+docs/features/tickets/tickets.md (Status Categories) for the Ticket status
+categories.
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ from enum import StrEnum
 import pytest
 
 from app.core.enums import (
+    ACTIVE_TICKET_STATUSES,
     Capability,
     CredentialKind,
     CurrentPhase,
@@ -499,6 +502,35 @@ class TestTicketStatusEnum:
             "Resolved",
             "Ignored",
             "Duplicated",
+        ]
+
+
+@pytest.mark.unit
+class TestTicketStatusCategories:
+    """The canonical Ticket status categories: tickets.md (Status Categories)
+    and conventions.md (Ticket Status Category Terminology)."""
+
+    def test_active_statuses_are_new_analysis_and_analyzed(self) -> None:
+        assert ACTIVE_TICKET_STATUSES == (
+            TicketStatus.NEW,
+            TicketStatus.ANALYSIS,
+            TicketStatus.ANALYZED,
+        )
+
+    def test_inactive_statuses_are_the_complement_of_the_active_ones(self) -> None:
+        assert set(TicketStatus) - set(ACTIVE_TICKET_STATUSES) == {
+            TicketStatus.RESOLVED,
+            TicketStatus.IGNORED,
+            TicketStatus.DUPLICATED,
+        }
+
+    def test_raw_stored_values_match_by_membership(self) -> None:
+        """Consumers test the raw `Ticket.status` column string."""
+        stored = [member.value for member in TicketStatus]
+        assert [value for value in stored if value in ACTIVE_TICKET_STATUSES] == [
+            "New",
+            "Analysis",
+            "Analyzed",
         ]
 
 

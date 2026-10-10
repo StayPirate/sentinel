@@ -53,12 +53,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.enums import (
+    ACTIVE_TICKET_STATUSES,
     IdentityAuditEventType,
     Role,
     SessionInvalidationReason,
     SortOrder,
     TicketAuditEventType,
-    TicketStatus,
     UserSortField,
     UserType,
 )
@@ -135,12 +135,6 @@ _VA_ROLE_LOSS_REASONS: Final[frozenset[str]] = frozenset(
 _UNASSIGNMENT_REASONS: Final[frozenset[str]] = _VA_ROLE_LOSS_REASONS | {
     "user deactivated"
 }
-
-_UNASSIGNABLE_STATUSES: Final = frozenset(
-    {TicketStatus.NEW.value, TicketStatus.ANALYSIS.value, TicketStatus.ANALYZED.value}
-)
-"""Statuses whose assignment the identity batch clears; `Resolved`,
-`Ignored`, and `Duplicated` keep their assignee."""
 
 
 class UserServiceError(ServiceError):
@@ -670,7 +664,7 @@ async def get_deactivation_impact(
             .select_from(Ticket)
             .where(
                 Ticket.assignee_id == user.id,
-                Ticket.status.in_(sorted(_UNASSIGNABLE_STATUSES)),
+                Ticket.status.in_(ACTIVE_TICKET_STATUSES),
             )
         )
     ).scalar_one()
@@ -1306,7 +1300,7 @@ async def _unassign_active_tickets(
     )
     username = user.username
     for ticket in locked:
-        if ticket.assignee_id != user.id or ticket.status not in _UNASSIGNABLE_STATUSES:
+        if ticket.assignee_id != user.id or ticket.status not in ACTIVE_TICKET_STATUSES:
             continue
         ticket.assignee_id = None
         await TicketAuditLog.log_event(

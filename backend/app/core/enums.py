@@ -5,11 +5,15 @@ defined in this module — both Category A (state-machine, additionally
 protected by a database CHECK constraint) and Category B (classification,
 validated only in Python). See `docs/conventions.md` (Enum Storage
 Strategy) for the classification criterion.
+
+The specification-defined Ticket status categories are declared once here,
+next to `TicketStatus`, so every consumer shares one definition.
 """
 
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import Final
 
 
 class Role(StrEnum):
@@ -690,6 +694,20 @@ class TicketStatus(StrEnum):
     RESOLVED = "Resolved"
     IGNORED = "Ignored"
     DUPLICATED = "Duplicated"
+
+
+# Ticket status categories. Each is a tuple of members: it compiles to the
+# stored values in `Ticket.status.in_(...)` with a deterministic parameter
+# order, and `StrEnum` equality admits raw column values in membership
+# checks.
+
+ACTIVE_TICKET_STATUSES: Final[tuple[TicketStatus, ...]] = (
+    TicketStatus.NEW,
+    TicketStatus.ANALYSIS,
+    TicketStatus.ANALYZED,
+)
+"""The active statuses (tickets.md, Status Categories); every other status
+is inactive (conventions.md, Ticket Status Category Terminology)."""
 
 
 class TicketPriority(StrEnum):

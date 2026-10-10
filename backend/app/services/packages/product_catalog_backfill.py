@@ -45,7 +45,7 @@ from celery.exceptions import SoftTimeLimitExceeded
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.core.enums import TicketStatus
+from app.core.enums import ACTIVE_TICKET_STATUSES
 from app.models.ticket import Ticket
 from app.models.ticket_package import TicketPackage
 from app.services.http_client import create_http_client
@@ -73,13 +73,6 @@ HTTP_CLIENT_NAME: Final = "backfill_product_catalog"
 
 PAIR_FAILED_EVENT: Final = "product_catalog_backfill_pair_failed"
 COMPLETED_EVENT: Final = "product_catalog_backfill_completed"
-
-ACTIVE_TICKET_STATUSES: Final = (
-    TicketStatus.NEW,
-    TicketStatus.ANALYSIS,
-    TicketStatus.ANALYZED,
-)
-"""Ticket statuses whose included package markers are selected."""
 
 
 @dataclass(frozen=True, slots=True)

@@ -92,6 +92,7 @@ from sqlalchemy.orm import aliased
 from sqlalchemy.orm.util import AliasedClass
 
 from app.core.enums import (
+    ACTIVE_TICKET_STATUSES,
     DeliveryStatus,
     LifecyclePhase,
     MaintainerWorkSortField,
@@ -2567,10 +2568,6 @@ PackageAddedComment = Literal[
 ]
 """Closed system context recorded as the `package_added` comment."""
 
-_ACTIVE_STATUSES: Final = frozenset(
-    {TicketStatus.NEW, TicketStatus.ANALYSIS, TicketStatus.ANALYZED}
-)
-
 
 @dataclass(frozen=True, slots=True)
 class ResolvedTrackData:
@@ -2772,7 +2769,7 @@ async def add_package_records(
         acting_user = await stabilize_acting_user(db, acting_user_id)
         ticket = await lock_accessible_ticket(db, ticket_id, caller)
 
-    if active_ticket_only and ticket.status not in _ACTIVE_STATUSES:
+    if active_ticket_only and ticket.status not in ACTIVE_TICKET_STATUSES:
         return PackageRecordsResult(
             outcome=PackageRecordsOutcome.ACTIVE_TICKET_ONLY_SKIPPED,
             tracks_created=0,

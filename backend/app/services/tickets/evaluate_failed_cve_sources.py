@@ -39,7 +39,7 @@ from celery.exceptions import SoftTimeLimitExceeded
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.enums import CVESourceFetchStatus
+from app.core.enums import ACTIVE_TICKET_STATUSES, CVESourceFetchStatus
 from app.database import async_session_factory
 from app.models.cve import CVE
 from app.models.cve_source import CVESource
@@ -47,11 +47,7 @@ from app.models.ticket import Ticket
 from app.services.base_cve_fetcher import get_fetch_single_fetchers
 from app.services.base_fetcher import BaseFetcher
 from app.services.cve_projection import CODE_POINT_COLLATION
-from app.services.cve_service import (
-    ACTIVE_TICKET_STATUSES,
-    STALLED_AFTER_HOURS,
-    trigger_on_demand_fetch,
-)
+from app.services.cve_service import STALLED_AFTER_HOURS, trigger_on_demand_fetch
 from app.services.fetcher_execution import (
     FetcherConfigMissingError,
     get_fetcher_enabled,
