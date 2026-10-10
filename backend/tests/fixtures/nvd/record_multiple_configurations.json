@@ -1,0 +1,161 @@
+{
+  "cve": {
+    "id": "CVE-2022-36524",
+    "sourceIdentifier": "mitre-1@example.com",
+    "published": "2022-08-15T17:15:13.823",
+    "lastModified": "2026-07-09T01:17:36.253",
+    "vulnStatus": "Modified",
+    "cveTags": [],
+    "descriptions": [
+      {
+        "lang": "en",
+        "value": "Fictional description of CVE-2022-36524."
+      },
+      {
+        "lang": "es",
+        "value": "Descripción ficticia de CVE-2022-36524."
+      }
+    ],
+    "affected": [
+      {
+        "source": "mitre-1@example.com",
+        "affectedData": [
+          {
+            "vendor": "n/a",
+            "product": "n/a",
+            "versions": [
+              {
+                "version": "n/a",
+                "status": "affected"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "metrics": {
+      "cvssMetricV31": [
+        {
+          "source": "nvd@nist.gov",
+          "type": "Primary",
+          "cvssData": {
+            "version": "3.1",
+            "vectorString": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+            "baseScore": 7.5,
+            "baseSeverity": "HIGH",
+            "attackVector": "NETWORK",
+            "attackComplexity": "LOW",
+            "privilegesRequired": "NONE",
+            "userInteraction": "NONE",
+            "scope": "UNCHANGED",
+            "confidentialityImpact": "HIGH",
+            "integrityImpact": "NONE",
+            "availabilityImpact": "NONE"
+          },
+          "exploitabilityScore": 3.9,
+          "impactScore": 3.6
+        }
+      ]
+    },
+    "weaknesses": [
+      {
+        "source": "nvd@nist.gov",
+        "type": "Primary",
+        "description": [
+          {
+            "lang": "en",
+            "value": "CWE-287"
+          }
+        ]
+      }
+    ],
+    "configurations": [
+      {
+        "operator": "AND",
+        "nodes": [
+          {
+            "operator": "OR",
+            "negate": false,
+            "cpeMatch": [
+              {
+                "vulnerable": true,
+                "criteria": "cpe:2.3:o:dlink:go-rt-ac750_firmware:101b03:*:*:*:*:*:*:*",
+                "matchCriteriaId": "11857770-E809-483A-993F-1C827428B334"
+              }
+            ]
+          },
+          {
+            "operator": "OR",
+            "negate": false,
+            "cpeMatch": [
+              {
+                "vulnerable": false,
+                "criteria": "cpe:2.3:h:dlink:go-rt-ac750:revision_a:*:*:*:*:*:*:*",
+                "matchCriteriaId": "426BE281-6336-4A4E-892B-CE8BBCA8ABF7"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "operator": "AND",
+        "nodes": [
+          {
+            "operator": "OR",
+            "negate": false,
+            "cpeMatch": [
+              {
+                "vulnerable": true,
+                "criteria": "cpe:2.3:o:dlink:go-rt-ac750_firmware:200b02:*:*:*:*:*:*:*",
+                "matchCriteriaId": "E610B4D9-198B-4986-89CC-F3C75DBC3EF3"
+              }
+            ]
+          },
+          {
+            "operator": "OR",
+            "negate": false,
+            "cpeMatch": [
+              {
+                "vulnerable": false,
+                "criteria": "cpe:2.3:h:dlink:go-rt-ac750:revision_b:*:*:*:*:*:*:*",
+                "matchCriteriaId": "5F4EF05A-EF25-4E60-8A08-9C0CDD9244EF"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "references": [
+      {
+        "url": "https://advisory.example.invalid/upstream/1",
+        "source": "mitre-1@example.com",
+        "tags": [
+          "Broken Link",
+          "Third Party Advisory"
+        ]
+      },
+      {
+        "url": "https://advisory.example.invalid/upstream/2",
+        "source": "mitre-1@example.com",
+        "tags": [
+          "Vendor Advisory"
+        ]
+      },
+      {
+        "url": "https://advisory.example.invalid/upstream/3",
+        "source": "af854a3a-2127-422b-91ae-364da2661108",
+        "tags": [
+          "Broken Link",
+          "Third Party Advisory"
+        ]
+      },
+      {
+        "url": "https://advisory.example.invalid/upstream/4",
+        "source": "af854a3a-2127-422b-91ae-364da2661108",
+        "tags": [
+          "Vendor Advisory"
+        ]
+      }
+    ]
+  }
+}

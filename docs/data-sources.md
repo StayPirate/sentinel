@@ -56,8 +56,8 @@ vulnerability information including severity scores, affected product
 configurations, and references to advisories and patches.
 
 - **Relevant data**: CVE identifiers, descriptions, CVSS v3.1 scores
-  (v4.0 support is being gradually added by NVD), primary NVD and
-  secondary CNA assessments, CWE identifiers, CPE-based affected
+  (v4.0 support is being gradually added by NVD), NVD's own and
+  CNA/ADP assessments, CWE identifiers, CPE-based affected
   product configurations with version ranges, vulnerability status, and
   reference links to advisories and patches
 - **Access**: REST API v2 at `services.nvd.nist.gov/rest/json/cves/2.0`.
@@ -1209,7 +1209,7 @@ feature documentation (not its implementation status):
 
 | Fetcher | Source | Schedule | Auth | Rate Limits | Data Ingested | Spec | Spec Status |
 |---------|--------|----------|------|-------------|---------------|------|-------------|
-| `sync_nvd_cves` | NVD | Every 6 hours | API key (free, optional) | Without key: 5 req/30s; with key: 50 req/30s | CVE records, CVSS (NVD Primary + CNA Secondary), CWE, CPE applicability statements, references | [cve-sync-nvd.md](features/tickets/cve-sync-nvd.md#fetcher-definition) | Complete |
+| `sync_nvd_cves` | NVD | Every 6 hours | API key (free, optional) | Without key: 5 req/30s; with key: 50 req/30s | CVE records, CVSS (NVD's own and CNA/ADP assessments), CWE, CPE applicability statements, references | [cve-sync-nvd.md](features/tickets/cve-sync-nvd.md#fetcher-definition) | Complete |
 | `sync_mitre_cves` | MITRE cvelistV5 (Git) | Every 6 hours | None | None (bare clone + fetch) | CVE records, all ADP data (affected versions, CVSS), CISA-specific (SSVC, KEV, CWE), references | [cve-sync-mitre.md](features/tickets/cve-sync-mitre.md#fetcher-definition) | Complete |
 | `sync_redhat_cves` | Red Hat Security Data | Daily at 03:00 UTC | None | Undocumented; Sentinel uses 2s delay between requests | CVSS Red Hat, CWE, references, package-name candidates | [cve-sync-redhat.md](features/tickets/cve-sync-redhat.md#fetcher-definition) | Complete |
 | `sync_smelt_products` | SMELT | Daily at 01:00 UTC | None | N/A (internal) | Product catalog and repository mappings; dispatches active-ticket Product catalog backfill when Products become newly current | [product-catalog.md](features/packages/product-catalog.md#fetcher-sync_smelt_products) | Complete |

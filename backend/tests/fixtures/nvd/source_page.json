@@ -1,0 +1,200 @@
+{
+  "resultsPerPage": 514,
+  "startIndex": 0,
+  "totalResults": 514,
+  "format": "NVD_SOURCE",
+  "version": "2.0",
+  "timestamp": "2026-10-10T17:14:51.527",
+  "sources": [
+    {
+      "name": "MITRE",
+      "contactEmail": "contact-mitre@example.com",
+      "sourceIdentifiers": [
+        "mitre-1@example.com",
+        "8254265b-2729-46b6-b9e3-3dfca2d5bfca"
+      ],
+      "lastModified": "2019-09-09T16:18:45.930",
+      "created": "2019-09-09T16:18:45.930",
+      "v3AcceptanceLevel": {
+        "description": "Contributor",
+        "lastModified": "2026-10-10T00:00:26.020"
+      },
+      "cweAcceptanceLevel": {
+        "description": "Provider",
+        "lastModified": "2026-09-17T00:00:00.210"
+      }
+    },
+    {
+      "name": "NIST",
+      "contactEmail": "contact-nist@example.com",
+      "sourceIdentifiers": [
+        "nvd@nist.gov"
+      ],
+      "lastModified": "2019-09-09T16:18:45.930",
+      "created": "2019-09-09T16:18:45.930"
+    },
+    {
+      "name": "Apache Software Foundation",
+      "contactEmail": "contact-apache-software-foundation@example.com",
+      "sourceIdentifiers": [
+        "apache-software-foundation-1@example.com",
+        "f0158376-9dc2-43b6-827c-5f631a4d8d09"
+      ],
+      "lastModified": "2019-09-09T16:18:46.023",
+      "created": "2019-09-09T16:18:46.023",
+      "v3AcceptanceLevel": {
+        "description": "Contributor",
+        "lastModified": "2026-08-06T00:00:27.750"
+      },
+      "cweAcceptanceLevel": {
+        "description": "Provider",
+        "lastModified": "2026-08-08T00:00:00.190"
+      }
+    },
+    {
+      "name": "HackerOne",
+      "contactEmail": "contact-hackerone@example.com",
+      "sourceIdentifiers": [
+        "hackerone-1@example.com",
+        "36234546-b8fa-4601-9d6f-f4e334aa8ea1"
+      ],
+      "lastModified": "2019-09-09T16:18:46.400",
+      "created": "2019-09-09T16:18:46.400",
+      "v3AcceptanceLevel": {
+        "description": "Reference",
+        "lastModified": "2026-09-04T00:00:25.500"
+      },
+      "cweAcceptanceLevel": {
+        "description": "Contributor",
+        "lastModified": "2026-07-10T00:00:00.170"
+      }
+    },
+    {
+      "name": "IBM Corporation",
+      "contactEmail": "contact-ibm-corporation@example.com",
+      "sourceIdentifiers": [
+        "ibm-corporation-1@example.com",
+        "9a959283-ebb5-44b6-b705-dcc2bbced522"
+      ],
+      "lastModified": "2019-09-09T16:18:46.587",
+      "created": "2019-09-09T16:18:46.587",
+      "v2AcceptanceLevel": {
+        "description": "Reference",
+        "lastModified": "2023-11-09T00:00:11.980"
+      },
+      "v3AcceptanceLevel": {
+        "description": "Provider",
+        "lastModified": "2026-10-10T00:00:26.020"
+      },
+      "cweAcceptanceLevel": {
+        "description": "Provider",
+        "lastModified": "2026-10-10T00:00:00.177"
+      }
+    },
+    {
+      "name": "Microsoft Corporation",
+      "contactEmail": "contact-microsoft-corporation@example.com",
+      "sourceIdentifiers": [
+        "microsoft-corporation-1@example.com",
+        "f38d906d-7342-40ea-92c1-6c4a2c6478c8"
+      ],
+      "lastModified": "2019-09-09T16:18:46.837",
+      "created": "2019-09-09T16:18:46.837",
+      "v3AcceptanceLevel": {
+        "description": "Provider",
+        "lastModified": "2026-10-08T00:00:28.427"
+      },
+      "cweAcceptanceLevel": {
+        "description": "Provider",
+        "lastModified": "2026-08-28T00:00:00.223"
+      }
+    },
+    {
+      "name": "SUSE",
+      "contactEmail": "contact-suse@example.com",
+      "sourceIdentifiers": [
+        "suse-2@example.com",
+        "suse-3@example.com",
+        "suse-1@example.com",
+        "404e59f5-483d-4b8a-8e7a-e67604dd8afb"
+      ],
+      "lastModified": "2019-09-09T16:18:47.150",
+      "created": "2019-09-09T16:18:47.150",
+      "v3AcceptanceLevel": {
+        "description": "Contributor",
+        "lastModified": "2026-09-19T00:00:26.100"
+      },
+      "cweAcceptanceLevel": {
+        "description": "Provider",
+        "lastModified": "2026-07-09T00:00:00.290"
+      }
+    },
+    {
+      "name": "Wordfence",
+      "contactEmail": "contact-wordfence@example.com",
+      "sourceIdentifiers": [
+        "wordfence-1@example.com",
+        "b15e7b5b-3da4-40ae-a43c-f7aa60e62599"
+      ],
+      "lastModified": "2021-07-07T13:15:08.467",
+      "created": "2021-07-07T13:15:08.467",
+      "v3AcceptanceLevel": {
+        "description": "Provider",
+        "lastModified": "2026-04-09T00:00:24.453"
+      },
+      "cweAcceptanceLevel": {
+        "description": "Provider",
+        "lastModified": "2026-04-09T00:00:00.180"
+      }
+    },
+    {
+      "name": "Google Devices",
+      "contactEmail": "contact-google-devices@example.com",
+      "sourceIdentifiers": [
+        "google-devices-1@example.com",
+        "83238938-5644-45f0-9007-c0392bcf6222"
+      ],
+      "lastModified": "2023-10-11T21:15:09.737",
+      "created": "2023-10-11T21:15:09.737",
+      "v3AcceptanceLevel": {
+        "description": "Reference",
+        "lastModified": "2025-07-25T00:00:21.110"
+      },
+      "cweAcceptanceLevel": {
+        "description": "Reference",
+        "lastModified": "2025-07-25T00:00:00.063"
+      }
+    },
+    {
+      "name": "kernel.org",
+      "contactEmail": "contact-kernel-org@example.com",
+      "sourceIdentifiers": [
+        "416baaa9-dc9f-4396-8d5f-8c081fb06d67"
+      ],
+      "lastModified": "2024-02-20T13:15:08.140",
+      "created": "2024-02-20T13:15:08.140",
+      "v3AcceptanceLevel": {
+        "description": "Contributor",
+        "lastModified": "2026-10-08T00:00:28.427"
+      }
+    },
+    {
+      "name": "CISA-ADP",
+      "contactEmail": "contact-cisa-adp@example.com",
+      "sourceIdentifiers": [
+        "134c704f-9b21-4f2e-91b3-4a467353bcc0"
+      ],
+      "lastModified": "2024-06-28T00:17:35.997",
+      "created": "2024-06-28T00:17:35.997"
+    },
+    {
+      "name": "CVE",
+      "contactEmail": "contact-cve@example.com",
+      "sourceIdentifiers": [
+        "af854a3a-2127-422b-91ae-364da2661108"
+      ],
+      "lastModified": "2024-09-12T20:12:05.090",
+      "created": "2024-09-12T20:12:05.090"
+    }
+  ]
+}
