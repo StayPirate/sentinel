@@ -2409,6 +2409,47 @@ changed, tests MUST cover the complete matrix in
 the SQL/pure-function equivalence and the proof that deadlines create no audit
 event and never affect gates, eligibility, or assignment.
 
+### NVD CPE Applicability Selection
+
+When the NVD CPE selection (`docs/features/tickets/cve-sync-nvd.md`, CPE
+configurations) is implemented or changed, focused tests MUST cover:
+
+- selection: `vulnerable = true` entries in a single-node configuration and in
+  the vulnerable node of an `AND` configuration are selected;
+  `vulnerable = false` platform entries are excluded, including a platform
+  whose vendor and product have a mapping entry and a `criteria` that is a
+  platform in one configuration and selected in another; application,
+  operating-system, and hardware entries, and versioned, wildcard, NA, and
+  range-qualified entries, are selected alike; operators and range fields
+  never change the result;
+- negation: `negate = true` on a node and on a configuration excludes
+  everything beneath it without validating it, while an absent or `null`
+  `negate` does not;
+- shapes: `configurations` absent or `null` yields `None`; empty
+  `configurations`, `nodes`, and `cpeMatch` arrays and an all-excluded tree
+  yield an empty list; an entry selected from several nodes or configurations
+  is transported once per occurrence; a `Rejected` record follows the same
+  rule;
+- invalid data: every row of the validation table skips only its unit and
+  everything beneath it while sibling entries remain selected, with boundary
+  cases for `criteria` at 2048 and 2049 code points, U+0000 in `criteria` and
+  `matchCriteriaId`, an absent or `null` `matchCriteriaId` mapped to `None`, a
+  lowercase and an uppercase UUID accepted, and a non-CPE-2.3 `criteria`
+  transported unchanged; the `criteria` and `matchCriteriaId` of a
+  `vulnerable = false` entry are not validated; `CVEIngestPayload` construction
+  never fails because of CPE data;
+- outcome: in `execute()` a CVE with skipped units keeps its ordinary action and
+  success and records no failure; in `fetch_single()` it returns normally;
+- logging: at most one `cve_fetch_candidate_skipped` event per CVE and reason,
+  carrying only the owner's field set and no CPE string or identifier; excluded
+  entries log nothing; and
+- handoff: selected entries reach `resolve_ticket_packages` through
+  `build_post_ingest_tasks()`, and no excluded or skipped entry does.
+
+Sanitized live fixtures cover the observed shapes (`docs/conventions.md`,
+External Integration Contract Verification); synthetic cases cover shapes not
+observed live, such as negation and invalid data.
+
 ### Post-Ingest Package Resolution
 
 When `resolve_ticket_packages` or its package-service async workflow is
