@@ -644,9 +644,11 @@ See `docs/features/tickets/cvss-scoring.md` for the full specification.
 **Unique constraint**: (cve_id, provider_name, cvss_version)
 
 **Notes**:
-- `provider_name` for NVD Primary assessments is always `"NVD"`
-- `provider_name` for NVD Secondary (CNA) assessments is resolved from the
-  NVD Source API to a human-readable name (e.g., `"Intel Corporation"`)
+- `provider_name` for NVD's own assessments (NVD source identifier
+  `nvd@nist.gov`) is always `"NVD"`
+- `provider_name` for CNA and ADP assessments carried by NVD is resolved from
+  the NVD Source API to a human-readable name (e.g., `"Intel Corporation"`),
+  whatever their NVD `Primary` or `Secondary` type
 - `provider_name` for the SUSE internal assessment is always `"SUSE"`. Any
   input equal to `SUSE` after outer trimming and Unicode case-folding is
   reserved and cannot be persisted by an external ingestion caller
@@ -665,7 +667,7 @@ See `docs/features/tickets/cvss-scoring.md` for the full specification.
   ties use explicit Unicode code-point lexical ordering rather than database
   collation
 - When a direct source (e.g., Red Hat API) provides data that also exists
-  as an NVD Secondary, both write to the same UPSERT conflict key
+  as a CNA assessment carried by NVD, both write to the same UPSERT conflict key
   `(cve_id, provider_name, cvss_version)` — last-writer-wins. Since all
   fetchers run on regular schedules, data converges to the most recent
   value within one cycle
