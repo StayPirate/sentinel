@@ -92,6 +92,8 @@ from sqlalchemy.orm import aliased
 from sqlalchemy.orm.util import AliasedClass
 
 from app.core.enums import (
+    ACTIVE_TICKET_STATUSES,
+    MANUAL_ZONE_TICKET_STATUSES,
     DeliveryStatus,
     LifecyclePhase,
     MaintainerWorkSortField,
@@ -2366,8 +2368,6 @@ PRODUCT_RECALCULATION_REASONS: Final[frozenset[str]] = frozenset(
     get_args(ProductRecalculationReason)
 )
 
-_MANUAL_ZONE: Final = frozenset({TicketStatus.IGNORED, TicketStatus.DUPLICATED})
-
 
 @dataclass(frozen=True, slots=True)
 class ProductEligibilityRecalculationResult:
@@ -2442,7 +2442,7 @@ async def recalculate_product_eligibility_for_ticket(
         evaluation_date = _utc_today()
 
     ticket = await _lock_system_ticket(db, ticket_id)
-    if ticket.status in _MANUAL_ZONE:
+    if ticket.status in MANUAL_ZONE_TICKET_STATUSES:
         return ProductEligibilityRecalculationResult(
             examined=0, override_skipped=0, changed=0, manual_zone_skipped=True
         )
@@ -2566,10 +2566,6 @@ PackageAddedComment = Literal[
     "CVE package resolution", "Product catalog backfill", "Ticket convergence"
 ]
 """Closed system context recorded as the `package_added` comment."""
-
-_ACTIVE_STATUSES: Final = frozenset(
-    {TicketStatus.NEW, TicketStatus.ANALYSIS, TicketStatus.ANALYZED}
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -2772,7 +2768,7 @@ async def add_package_records(
         acting_user = await stabilize_acting_user(db, acting_user_id)
         ticket = await lock_accessible_ticket(db, ticket_id, caller)
 
-    if active_ticket_only and ticket.status not in _ACTIVE_STATUSES:
+    if active_ticket_only and ticket.status not in ACTIVE_TICKET_STATUSES:
         return PackageRecordsResult(
             outcome=PackageRecordsOutcome.ACTIVE_TICKET_ONLY_SKIPPED,
             tracks_created=0,

@@ -29,6 +29,7 @@ from types import MappingProxyType
 from typing import Final
 
 from app.core.enums import (
+    MANUAL_ZONE_TICKET_STATUSES,
     CurrentPhase,
     DeliveryStatus,
     IBSRequestState,
@@ -69,9 +70,6 @@ exactly 100, so the QA milestone always equals the final release deadline.
 
 SECONDS_PER_DAY_PERCENT: Final = 864
 """Seconds in one percent of a day (86 400 / 100): the Formula's unit."""
-
-MANUAL_ZONE_STATUSES: Final = frozenset({TicketStatus.IGNORED, TicketStatus.DUPLICATED})
-"""Ticket statuses with no due dates and no milestones (Null Due Dates)."""
 
 LATER_PHASE_APPLICABLE_STATUSES: Final = frozenset(
     {PackageStatus.ANALYSIS, PackageStatus.AFFECTED, PackageStatus.FIXED}
@@ -175,7 +173,7 @@ def compute_due_dates(
     """
     _require_aware(created_at, "created_at")
     sla_days = resolve_sla_days(severity)
-    if ticket_status in MANUAL_ZONE_STATUSES or sla_days is None:
+    if ticket_status in MANUAL_ZONE_TICKET_STATUSES or sla_days is None:
         return None
 
     start = created_at.astimezone(UTC)

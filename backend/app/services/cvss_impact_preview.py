@@ -60,7 +60,14 @@ from sqlalchemy import (
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.enums import CVSSVersion, LifecyclePhase, PackageStatus, TicketStatus
+from app.core.enums import (
+    GATE_ZONE_TICKET_STATUSES,
+    OPERABLE_TICKET_STATUSES,
+    CVSSVersion,
+    LifecyclePhase,
+    PackageStatus,
+    TicketStatus,
+)
 from app.models.cve import CVE
 from app.models.cve_cvss_assessment import CVECVSSAssessment
 from app.models.product import Product
@@ -92,19 +99,6 @@ _PAGE_SIZE: Final = 1000
 _SUPPORTED_VERSIONS: Final = frozenset({CVSSVersion.V3_1.value, CVSSVersion.V4_0.value})
 _ACCEPTED_VERSIONS: Final = frozenset(version.value for version in CVSSVersion)
 
-_EVALUATED_STATUSES: Final = frozenset(
-    {
-        TicketStatus.NEW,
-        TicketStatus.ANALYSIS,
-        TicketStatus.ANALYZED,
-        TicketStatus.RESOLVED,
-    }
-)
-"""Ticket statuses whose occurrences execution evaluates for eligibility."""
-
-_GATE_ZONE: Final = frozenset(
-    {TicketStatus.ANALYSIS, TicketStatus.ANALYZED, TicketStatus.RESOLVED}
-)
 _REGRESSED: Final = frozenset({TicketStatus.ANALYSIS, TicketStatus.ANALYZED})
 
 _QUERY_CANCELED: Final = "57014"
@@ -363,7 +357,7 @@ def _page_statement(
         .correlate(Ticket)
         .scalar_subquery()
     )
-    evaluated = Ticket.status.in_([status.value for status in _EVALUATED_STATUSES])
+    evaluated = Ticket.status.in_(OPERABLE_TICKET_STATUSES)
 
     def _bounds(column: Any) -> list[ColumnElement[bool]]:
         bounds: list[ColumnElement[bool]] = [column <= mark]
@@ -437,10 +431,12 @@ def _project_unit(row: Any, proposed_version: str, counts: _Counts) -> None:
         counts.cve_severity_changes += 1
 
     status = TicketStatus(row.ticket_status) if row.ticket_status else None
-    if status in _EVALUATED_STATUSES:
+    if status in OPERABLE_TICKET_STATUSES:
         eligibility = resolve_eligibility_score(assessments, proposed_version)
         tracks, eligibility_changes = _project_tree(row, eligibility, counts)
-        if status in _GATE_ZONE and (severity_changed or eligibility_changes):
+        if status in GATE_ZONE_TICKET_STATUSES and (
+            severity_changed or eligibility_changes
+        ):
             projected = project_gate_status(
                 tracks=tracks,
                 has_cve=True,

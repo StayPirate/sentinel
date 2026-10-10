@@ -44,7 +44,7 @@ from celery.exceptions import SoftTimeLimitExceeded
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.core.enums import TicketStatus
+from app.core.enums import OPERABLE_TICKET_STATUSES
 from app.models.ticket import Ticket
 from app.models.ticket_package import TicketPackage
 from app.models.ticket_package_product import TicketPackageProduct
@@ -61,14 +61,6 @@ logger = structlog.get_logger(__name__)
 
 RE_EVALUATE_PRODUCT_ELIGIBILITY_TASK: Final = "re_evaluate_product_eligibility"
 """Explicit registered name of the Celery sub-task."""
-
-OPERABLE_TICKET_STATUSES: Final = (
-    TicketStatus.NEW,
-    TicketStatus.ANALYSIS,
-    TicketStatus.ANALYZED,
-    TicketStatus.RESOLVED,
-)
-"""Ticket statuses whose Product occurrences receive automatic maintenance."""
 
 
 def parse_recalculation_arguments(

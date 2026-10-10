@@ -111,8 +111,11 @@ class WorkbenchClassification(StrEnum):
 # Ticket statuses admitted to each classification (maintainer.md, Ticket
 # Status and Workflow Boundaries): pending and in-progress rows require an
 # active gate-zone Ticket; `Resolved` contributes completed rows only.
-_ACTIVE_STATUSES: Final = (TicketStatus.ANALYSIS.value, TicketStatus.ANALYZED.value)
-_COMPLETED_STATUSES: Final = (*_ACTIVE_STATUSES, TicketStatus.RESOLVED.value)
+_ACTIVE_GATE_ZONE_STATUSES: Final = (
+    TicketStatus.ANALYSIS.value,
+    TicketStatus.ANALYZED.value,
+)
+_COMPLETED_STATUSES: Final = (*_ACTIVE_GATE_ZONE_STATUSES, TicketStatus.RESOLVED.value)
 _IN_PROGRESS_AFFECTEDNESS: Final = (
     PackageStatus.AFFECTED.value,
     PackageStatus.FIXED.value,
@@ -241,7 +244,7 @@ def classification_condition(
         affectedness = track.status.in_(_IN_PROGRESS_AFFECTEDNESS)
         delivery = DeliveryStatus.IN_PROGRESS
     return and_(
-        Ticket.status.in_(_ACTIVE_STATUSES),
+        Ticket.status.in_(_ACTIVE_GATE_ZONE_STATUSES),
         affectedness,
         track.delivery_status == delivery.value,
         actionable,

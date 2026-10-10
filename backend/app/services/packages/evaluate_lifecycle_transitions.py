@@ -46,14 +46,13 @@ from __future__ import annotations
 import uuid
 from collections.abc import Sequence
 from datetime import UTC, date, datetime
-from typing import Final
 
 import structlog
 from celery.exceptions import SoftTimeLimitExceeded
 from sqlalchemy import ColumnElement, and_, exists, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.enums import TicketStatus
+from app.core.enums import GATE_ZONE_TICKET_STATUSES
 from app.database import async_session_factory
 from app.models.ticket import Ticket
 from app.models.ticket_package import TicketPackage
@@ -72,13 +71,6 @@ from app.services.ticket_mutations import gate_status_expression
 
 logger = structlog.get_logger(__name__)
 
-GATE_ZONE_STATUSES: Final = (
-    TicketStatus.ANALYSIS,
-    TicketStatus.ANALYZED,
-    TicketStatus.RESOLVED,
-)
-"""Ticket statuses selected for lifecycle-aware gate reconciliation."""
-
 
 def lifecycle_gate_mismatch_condition(evaluation_date: date) -> ColumnElement[bool]:
     """The `Ticket` is in the gate zone and its status differs from its gates.
@@ -88,7 +80,7 @@ def lifecycle_gate_mismatch_condition(evaluation_date: date) -> ColumnElement[bo
     `reconcile_ticket_status()` would change status on that date.
     """
     return and_(
-        Ticket.status.in_(GATE_ZONE_STATUSES),
+        Ticket.status.in_(GATE_ZONE_TICKET_STATUSES),
         Ticket.status != gate_status_expression(evaluation_date),
     )
 

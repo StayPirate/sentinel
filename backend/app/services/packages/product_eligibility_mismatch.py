@@ -33,7 +33,7 @@ from typing import Final
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.enums import LifecyclePhase
+from app.core.enums import OPERABLE_TICKET_STATUSES, LifecyclePhase
 from app.models.cve_cvss_assessment import CVECVSSAssessment
 from app.models.product import Product
 from app.models.ticket import Ticket
@@ -42,9 +42,6 @@ from app.models.ticket_package_product import TicketPackageProduct
 from app.models.ticket_package_track import TicketPackageTrack
 from app.services import settings as settings_service
 from app.services.cvss import EligibilityResolution, resolve_eligibility_score
-from app.services.packages.product_eligibility_recalculation import (
-    OPERABLE_TICKET_STATUSES,
-)
 from app.services.product_eligibility import evaluate_product_eligibility
 from app.services.product_service import lifecycle_phase_expression
 

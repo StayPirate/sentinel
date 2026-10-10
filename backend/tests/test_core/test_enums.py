@@ -11,7 +11,10 @@ Packages Across Tickets), and docs/data-model.md (CveState Enum,
 CVESourceFetchStatus Enum, CVESourceType Python Enum,
 CVEExternalIdentifierSource Python Enum, CVESSVCAssessment,
 TicketAuditEventType Enum,
-ReferenceType Enum, IBSRequestState Enum, IBSRequestActionType Enum).
+ReferenceType Enum, IBSRequestState Enum, IBSRequestActionType Enum), and
+docs/features/tickets/tickets.md (Status Categories) and
+docs/features/tickets/ticket-mutations.md (State Machine Zones) for the
+Ticket status categories.
 """
 
 from __future__ import annotations
@@ -22,6 +25,10 @@ from enum import StrEnum
 import pytest
 
 from app.core.enums import (
+    ACTIVE_TICKET_STATUSES,
+    GATE_ZONE_TICKET_STATUSES,
+    MANUAL_ZONE_TICKET_STATUSES,
+    OPERABLE_TICKET_STATUSES,
     Capability,
     CredentialKind,
     CurrentPhase,
@@ -500,6 +507,58 @@ class TestTicketStatusEnum:
             "Ignored",
             "Duplicated",
         ]
+
+
+_TICKET_STATUS_CATEGORIES = pytest.mark.parametrize(
+    ("category", "expected"),
+    [
+        (ACTIVE_TICKET_STATUSES, ["New", "Analysis", "Analyzed"]),
+        (GATE_ZONE_TICKET_STATUSES, ["Analysis", "Analyzed", "Resolved"]),
+        (MANUAL_ZONE_TICKET_STATUSES, ["Ignored", "Duplicated"]),
+        (OPERABLE_TICKET_STATUSES, ["New", "Analysis", "Analyzed", "Resolved"]),
+    ],
+    ids=["active", "gate_zone", "manual_zone", "operable"],
+)
+
+
+@pytest.mark.unit
+class TestTicketStatusCategories:
+    """The canonical Ticket status categories: tickets.md (Status Categories;
+    Mark-as-Duplicate Operation for operable), ticket-mutations.md (State
+    Machine Zones), and conventions.md (Ticket Status Category Terminology)."""
+
+    @_TICKET_STATUS_CATEGORIES
+    def test_exact_members_in_status_order(
+        self, category: tuple[TicketStatus, ...], expected: list[str]
+    ) -> None:
+        assert type(category) is tuple
+        assert all(type(member) is TicketStatus for member in category)
+        assert [member.value for member in category] == expected
+
+    @_TICKET_STATUS_CATEGORIES
+    def test_raw_stored_values_match_by_membership(
+        self, category: tuple[TicketStatus, ...], expected: list[str]
+    ) -> None:
+        """Consumers test the raw `Ticket.status` column string."""
+        stored = [member.value for member in TicketStatus]
+        assert [value for value in stored if value in category] == expected
+
+    def test_inactive_statuses_are_the_complement_of_the_active_ones(self) -> None:
+        assert set(TicketStatus) - set(ACTIVE_TICKET_STATUSES) == {
+            TicketStatus.RESOLVED,
+            TicketStatus.IGNORED,
+            TicketStatus.DUPLICATED,
+        }
+
+    def test_operable_statuses_are_the_complement_of_the_manual_zone(self) -> None:
+        assert set(OPERABLE_TICKET_STATUSES) == set(TicketStatus) - set(
+            MANUAL_ZONE_TICKET_STATUSES
+        )
+
+    def test_gate_zone_is_operable_without_the_pre_gate_new_status(self) -> None:
+        assert set(GATE_ZONE_TICKET_STATUSES) == set(OPERABLE_TICKET_STATUSES) - {
+            TicketStatus.NEW
+        }
 
 
 @pytest.mark.unit

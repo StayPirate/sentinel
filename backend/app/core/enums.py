@@ -5,11 +5,15 @@ defined in this module — both Category A (state-machine, additionally
 protected by a database CHECK constraint) and Category B (classification,
 validated only in Python). See `docs/conventions.md` (Enum Storage
 Strategy) for the classification criterion.
+
+The specification-defined Ticket status categories are declared once here,
+next to `TicketStatus`, so every consumer shares one definition.
 """
 
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import Final
 
 
 class Role(StrEnum):
@@ -690,6 +694,45 @@ class TicketStatus(StrEnum):
     RESOLVED = "Resolved"
     IGNORED = "Ignored"
     DUPLICATED = "Duplicated"
+
+
+# Ticket status categories. Each is a tuple of members: it compiles to the
+# stored values in `Ticket.status.in_(...)` with a deterministic parameter
+# order, and `StrEnum` equality admits raw column values in membership
+# checks.
+
+ACTIVE_TICKET_STATUSES: Final[tuple[TicketStatus, ...]] = (
+    TicketStatus.NEW,
+    TicketStatus.ANALYSIS,
+    TicketStatus.ANALYZED,
+)
+"""The active statuses (tickets.md, Status Categories); every other status
+is inactive (conventions.md, Ticket Status Category Terminology)."""
+
+GATE_ZONE_TICKET_STATUSES: Final[tuple[TicketStatus, ...]] = (
+    TicketStatus.ANALYSIS,
+    TicketStatus.ANALYZED,
+    TicketStatus.RESOLVED,
+)
+"""The gate zone, whose status gate reconciliation determines
+(ticket-mutations.md, State Machine Zones). `New` is the pre-gate state."""
+
+MANUAL_ZONE_TICKET_STATUSES: Final[tuple[TicketStatus, ...]] = (
+    TicketStatus.IGNORED,
+    TicketStatus.DUPLICATED,
+)
+"""The manual zone, set only by explicit actions or specific system events
+and never reconciled (ticket-mutations.md, State Machine Zones)."""
+
+OPERABLE_TICKET_STATUSES: Final[tuple[TicketStatus, ...]] = (
+    TicketStatus.NEW,
+    TicketStatus.ANALYSIS,
+    TicketStatus.ANALYZED,
+    TicketStatus.RESOLVED,
+)
+"""The operable statuses: every status outside the manual zone
+(tickets.md, Mark-as-Duplicate Operation; ticket-mutations.md,
+`ensure_ticket_operable()`)."""
 
 
 class TicketPriority(StrEnum):

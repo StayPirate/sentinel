@@ -34,6 +34,7 @@ instant is rejected.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Final, cast
@@ -56,6 +57,7 @@ from sqlalchemy.orm import aliased
 from sqlalchemy.orm.util import AliasedClass
 
 from app.core.enums import (
+    MANUAL_ZONE_TICKET_STATUSES,
     DeliveryStatus,
     IBSRequestActionType,
     MilestonePhase,
@@ -78,7 +80,6 @@ from app.services.package_actionability import (
 from app.services.ticket_deadlines import (
     ACTIVE_RELEASE_REQUEST_STATES,
     LATER_PHASE_APPLICABLE_STATUSES,
-    MANUAL_ZONE_STATUSES,
     PHASE_SHARES,
     SECONDS_PER_DAY_PERCENT,
     SLA_TIER_DAYS,
@@ -108,7 +109,7 @@ def _cumulative_shares() -> dict[MilestonePhase, int]:
 _CUMULATIVE_SHARES: Final = _cumulative_shares()
 
 
-def _sorted_values(members: frozenset[str]) -> list[str]:
+def _sorted_values(members: Iterable[str]) -> list[str]:
     """Stored enum values in a stable order (deterministic compiled SQL)."""
     return sorted(str(member) for member in members)
 
@@ -164,7 +165,7 @@ def sla_days_expression(
         label.value: SLA_TIER_DAYS.get(label) for label in Severity
     }
     days: ColumnElement[int | None] = case(
-        (ticket.status.in_(_sorted_values(MANUAL_ZONE_STATUSES)), null()),
+        (ticket.status.in_(_sorted_values(MANUAL_ZONE_TICKET_STATUSES)), null()),
         else_=case(
             tier_by_label,
             value=resolved,

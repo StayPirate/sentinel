@@ -109,6 +109,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import settings
 from app.core.enums import (
+    ACTIVE_TICKET_STATUSES,
     CVESortField,
     CVESourceDerivedStatus,
     CVESourceFetchStatus,
@@ -1257,15 +1258,6 @@ async def list_cve_sources(
 # (cve-fetcher-infrastructure.md, Session Lifecycle for API-based CVE
 # Fetchers)
 # ---------------------------------------------------------------------------
-
-ACTIVE_TICKET_STATUSES: Final[tuple[str, ...]] = (
-    TicketStatus.NEW.value,
-    TicketStatus.ANALYSIS.value,
-    TicketStatus.ANALYZED.value,
-)
-"""The active Ticket statuses (tickets.md, Status Categories). Also the
-active-Ticket flag of `evaluate_failed_cve_sources`
-(cve-source-failure-retry.md, Active Ticket Check)."""
 
 
 async def get_active_ticket_cve_ids(session: AsyncSession) -> list[str]:
