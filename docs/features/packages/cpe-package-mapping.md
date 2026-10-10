@@ -471,10 +471,11 @@ resolution) and is not duplicated here.
 - **NVD applicability ownership**: the resolution function accepts one
   CPE already selected by its caller and is intentionally unaware of NVD
   configuration trees, logical operators, `negate`, version ranges, and
-  the `vulnerable` flag. Which CPE entries are package candidates is owned
-  by [`cve-sync-nvd.md`](../tickets/cve-sync-nvd.md#cpe-configurations-from-configurations)
-  (CPE configurations); this specification neither adds nor removes
-  candidates
+  the `vulnerable` flag. Which NVD `cpeMatch` entries are package
+  candidates is owned by
+  [`cve-sync-nvd.md`](../tickets/cve-sync-nvd.md#cpe-configurations-from-configurations)
+  (CPE configurations); this specification neither adds nor removes entries
+  from that selection
 - **Version data is informational only**: version ranges from
   `CVEAffectedVersion` records are stored and displayed to VAs (see
   [Get CVE Affected Versions](../tickets/cve-tracking.md#get-cve-affected-versions)) but

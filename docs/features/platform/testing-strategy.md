@@ -2428,21 +2428,23 @@ configurations) is implemented or changed, focused tests MUST cover:
 - shapes: `configurations` absent or `null` yields `None`; empty
   `configurations`, `nodes`, and `cpeMatch` arrays and an all-excluded tree
   yield an empty list; an entry selected from several nodes or configurations
-  is transported once per occurrence; a `Rejected` record follows the same
-  rule;
+  appears in `cpe_matches` once per occurrence; a `Rejected` record follows
+  the same rule;
 - invalid data: every row of the validation table skips only its unit and
   everything beneath it while sibling entries remain selected, with boundary
   cases for `criteria` at 2048 and 2049 code points, U+0000 in `criteria` and
-  `matchCriteriaId`, an absent or `null` `matchCriteriaId` mapped to `None`, a
-  lowercase and an uppercase UUID accepted, and a non-CPE-2.3 `criteria`
-  transported unchanged; the `criteria` and `matchCriteriaId` of a
-  `vulnerable = false` entry are not validated; `CVEIngestPayload` construction
-  never fails because of CPE data;
+  `matchCriteriaId`, an unpaired surrogate escape in `criteria`, an absent or
+  `null` `matchCriteriaId` mapped to `None`, lowercase, uppercase, and
+  mixed-case UUIDs accepted, and a non-CPE-2.3 `criteria` transported
+  unchanged; the `criteria` and `matchCriteriaId` of a `vulnerable = false`
+  entry are not validated; `CVEIngestPayload` construction never fails because
+  of CPE data;
 - outcome: in `execute()` a CVE with skipped units keeps its ordinary action and
   success and records no failure; in `fetch_single()` it returns normally;
-- logging: at most one `cve_fetch_candidate_skipped` event per CVE and reason,
-  carrying only the owner's field set and no CPE string or identifier; excluded
-  entries log nothing; and
+- logging: exactly one `cve_fetch_candidate_skipped` event per CVE and reason
+  with at least one skipped unit, however many units were skipped, carrying
+  only the owner's field set and no CPE string or identifier; excluded entries
+  log nothing; and
 - handoff: selected entries reach `resolve_ticket_packages` through
   `build_post_ingest_tasks()`, and no excluded or skipped entry does.
 
