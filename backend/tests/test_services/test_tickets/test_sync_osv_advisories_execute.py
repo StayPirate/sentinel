@@ -75,11 +75,13 @@ from app.services import (
     reference_service,
     task_publication,
 )
-from app.services.base_cve_fetcher import HANDOFF_PUBLICATION_FAILED_EVENT
+from app.services.base_cve_fetcher import (
+    CVE_FETCH_ITEM_FAILED_EVENT,
+    HANDOFF_PUBLICATION_FAILED_EVENT,
+)
 from app.services.base_fetcher import FetcherError, FetcherRunConfig
 from app.services.tickets import sync_osv_advisories as sync_module
 from app.services.tickets.sync_osv_advisories import (
-    CVE_FETCH_ITEM_FAILED_EVENT,
     OSV_SUBREQUEST_SKIPPED_EVENT,
     SyncOsvAdvisories,
 )

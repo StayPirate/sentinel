@@ -104,6 +104,8 @@ from app.services import (
     task_publication,
 )
 from app.services.base_cve_fetcher import (
+    CVE_FETCH_CANDIDATE_SKIPPED_EVENT,
+    CVE_FETCH_ITEM_FAILED_EVENT,
     HANDOFF_PUBLICATION_FAILED_EVENT,
     CVEFetchResult,
 )
@@ -114,8 +116,6 @@ from app.services.tickets import sync_ghsa_advisories as sync_module
 from app.services.tickets.sync_ghsa_advisories import (
     AUTHENTICATION_FAILED,
     CONNECTION_FAILED,
-    CVE_FETCH_CANDIDATE_SKIPPED_EVENT,
-    CVE_FETCH_ITEM_FAILED_EVENT,
     GHSA_CURSOR_RESET_EVENT,
     GHSA_VERSION_RANGE_UNRECOGNIZED_EVENT,
     RATE_LIMITED,

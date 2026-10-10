@@ -69,10 +69,10 @@ from app.services import (
     task_publication,
     ticket_convergence_publication,
 )
+from app.services.base_cve_fetcher import CVE_FETCH_ITEM_FAILED_EVENT
 from app.services.base_fetcher import FetcherError, FetcherRunConfig
 from app.services.tickets import sync_epss_scores as sync_module
 from app.services.tickets.sync_epss_scores import (
-    CVE_FETCH_ITEM_FAILED_EVENT,
     EPSS_DATA_STALE_EVENT,
     EPSS_STALENESS_CHECK_FAILED_EVENT,
     SyncEpssScores,

@@ -56,6 +56,7 @@ from app.models.ticket_reference import TicketReference
 from app.services import cve_service, reference_service
 from app.services.base_cve_fetcher import (
     _CVE_SOURCE_TYPE_MAP,
+    CVE_FETCH_CANDIDATE_SKIPPED_EVENT,
     BaseCVEFetcher,
     CVEFetchResult,
     CVENotInSource,
@@ -74,7 +75,6 @@ from app.services.http_client import (
 )
 from app.services.reference_service import AutomaticReferenceInput
 from app.services.tickets.sync_redhat_cves import (
-    CVE_FETCH_CANDIDATE_SKIPPED_EVENT,
     RedhatResponseError,
     SyncRedhatCves,
 )

@@ -64,7 +64,11 @@ from app.models.system_setting import SystemSetting
 from app.models.ticket import Ticket
 from app.models.ticket_reference import TicketReference
 from app.services import cve_service, fetcher_execution, reference_service
-from app.services.base_cve_fetcher import CVEFetchResult, CVENotInSource
+from app.services.base_cve_fetcher import (
+    CVE_FETCH_CANDIDATE_SKIPPED_EVENT,
+    CVEFetchResult,
+    CVENotInSource,
+)
 from app.services.base_fetcher import FetcherError
 from app.services.cve_ingest import CVEIngestPayload, PostIngestTasks, UpsertAction
 from app.services.http_client import is_infrastructure_failure, is_retryable_condition
@@ -72,7 +76,6 @@ from app.services.reference_service import AutomaticReferenceInput
 from app.services.tickets import sync_ghsa_advisories as sync_module
 from app.services.tickets.sync_ghsa_advisories import (
     AUTHENTICATION_FAILED,
-    CVE_FETCH_CANDIDATE_SKIPPED_EVENT,
     GHSA_VERSION_RANGE_UNRECOGNIZED_EVENT,
     TOKEN_NOT_CONFIGURED,
     UNTRUSTED_NEXT_URL,

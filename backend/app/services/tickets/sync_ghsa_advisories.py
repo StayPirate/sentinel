@@ -45,6 +45,8 @@ from app.config import settings
 from app.core.enums import CVESourceFetchStatus, CVESourceType
 from app.services import cve_service, fetcher_execution, reference_service
 from app.services.base_cve_fetcher import (
+    CVE_FETCH_CANDIDATE_SKIPPED_EVENT,
+    CVE_FETCH_ITEM_FAILED_EVENT,
     BaseCVEFetcher,
     CVEFetchResult,
     CVENotInSource,
@@ -62,15 +64,6 @@ _NEXT_URL_NETLOC: Final = "api.github.com"
 _NEXT_URL_PATH: Final = "/advisories"
 
 GITHUB_API_VERSION: Final = "2022-11-28"
-
-CVE_FETCH_ITEM_FAILED_EVENT: Final = "cve_fetch_item_failed"
-"""The per-item failure WARNING (cve-fetcher-infrastructure.md, Batch Error
-Handling): canonical CVE-ID when valid, fetcher name, and exception class
-name only."""
-
-CVE_FETCH_CANDIDATE_SKIPPED_EVENT: Final = "cve_fetch_candidate_skipped"
-"""The WARNING of one rejected CWE (Response Validation, Candidate skip
-event): canonical CVE-ID, fetcher name, and closed reason."""
 
 GHSA_VERSION_RANGE_UNRECOGNIZED_EVENT: Final = "ghsa_version_range_unrecognized"
 """The WARNING of one unrecognized `vulnerable_version_range` (Version range

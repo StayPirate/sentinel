@@ -39,7 +39,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.enums import CVESourceType, ReferenceType
 from app.models.cve import CVE
 from app.services import cve_service, reference_service
-from app.services.base_cve_fetcher import BaseCVEFetcher, CVEFetchResult
+from app.services.base_cve_fetcher import (
+    CVE_FETCH_CANDIDATE_SKIPPED_EVENT,
+    CVE_FETCH_ITEM_FAILED_EVENT,
+    BaseCVEFetcher,
+    CVEFetchResult,
+)
 from app.services.base_fetcher import FetcherError
 from app.services.cve_ingest import CVEIngestPayload
 from app.services.tickets import cisa_kev_catalog
@@ -52,15 +57,6 @@ CISA_KEV_URL: Final = (
     "known_exploited_vulnerabilities.json"
 )
 """The complete catalog (Fetcher Definition, Source)."""
-
-CVE_FETCH_ITEM_FAILED_EVENT: Final = "cve_fetch_item_failed"
-"""The per-item failure WARNING (cve-fetcher-infrastructure.md, Batch Error
-Handling): canonical CVE-ID when valid, fetcher name, and exception class
-name only."""
-
-CVE_FETCH_CANDIDATE_SKIPPED_EVENT: Final = "cve_fetch_candidate_skipped"
-"""The WARNING of one rejected `cwes` item (Error Handling, Candidate skip
-event): canonical CVE-ID, fetcher name, and closed reason."""
 
 CISA_KEV_CATALOG_RECEIVED_EVENT: Final = "cisa_kev_catalog_received"
 """The INFO observability record of the catalog `count` (Algorithm

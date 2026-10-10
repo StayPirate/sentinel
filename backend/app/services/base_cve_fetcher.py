@@ -5,7 +5,8 @@ Class; `CVEFetchResult`; Per-CVE Finalization; Default `catch_up()`
 implementation; CVE-ID Format Validation Helper; `__init_subclass__`
 Validation; Session Lifecycle for API-based CVE Fetchers, Isolated status
 commit and Metric placement; `CVENotInSource` Signal; CVE Source Type
-Identity) for the contract this module implements.
+Identity; Batch Error Handling, Per-item failure event; Candidate Skip
+Event) for the contract this module implements.
 
 `BaseCVEFetcher.__init_subclass__` treats `FETCHER_REGISTRY` and
 `_CVE_SOURCE_TYPE_MAP` as one registration unit: the
@@ -71,6 +72,15 @@ ISOLATED_STATUS_WRITE_FAILED_EVENT: Final = "cve_isolated_status_write_failed"
 
 ISOLATED_STATUS_CVE_MISSING_EVENT: Final = "cve_isolated_status_cve_missing"
 """The DEBUG of an isolated status write skipped for an absent CVE row."""
+
+CVE_FETCH_ITEM_FAILED_EVENT: Final = "cve_fetch_item_failed"
+"""The per-item failure WARNING (Batch Error Handling, Per-item failure
+event): canonical CVE-ID when valid, fetcher name, and exception class name
+only."""
+
+CVE_FETCH_CANDIDATE_SKIPPED_EVENT: Final = "cve_fetch_candidate_skipped"
+"""The WARNING of one skipped candidate value (Candidate Skip Event):
+canonical CVE-ID, fetcher name, and the emitting fetcher's closed reason."""
 
 _ISOLATED_STATUSES: Final = (
     CVESourceFetchStatus.FAILURE,

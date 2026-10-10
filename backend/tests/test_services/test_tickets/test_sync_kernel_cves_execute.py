@@ -68,10 +68,8 @@ from app.core.enums import (
 )
 from app.models.cve import CVE
 from app.services import reference_service
-from app.services.base_git_fetcher import (
-    CVE_FETCH_ITEM_FAILED_EVENT,
-    DELTA_FILE_MISSING_AT_HEAD_EVENT,
-)
+from app.services.base_cve_fetcher import CVE_FETCH_ITEM_FAILED_EVENT
+from app.services.base_git_fetcher import DELTA_FILE_MISSING_AT_HEAD_EVENT
 from app.services.tickets.sync_kernel_cves import SyncKernelCves
 from tests.support.cve_catch_up import RESOLVE, source_state
 from tests.support.git_fetcher_state import (

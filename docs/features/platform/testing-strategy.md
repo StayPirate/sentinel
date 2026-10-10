@@ -2443,8 +2443,9 @@ configurations) is implemented or changed, focused tests MUST cover:
   success and records no failure; in `fetch_single()` it returns normally;
 - logging: exactly one `cve_fetch_candidate_skipped` event per CVE and reason
   with at least one skipped unit, however many units were skipped, carrying
-  only the owner's field set and no CPE string or identifier; excluded entries
-  log nothing; and
+  only the field set of the shared candidate skip event
+  (`cve-fetcher-infrastructure.md`, Candidate Skip Event) and no CPE string or
+  identifier; excluded entries log nothing; and
 - handoff: selected entries reach `resolve_ticket_packages` through
   `build_post_ingest_tasks()`, and no excluded or skipped entry does.
 

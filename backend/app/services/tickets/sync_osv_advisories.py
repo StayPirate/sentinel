@@ -49,6 +49,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.enums import CVESourceFetchStatus, CVESourceType, ReferenceType
 from app.services import cve_service, reference_service
 from app.services.base_cve_fetcher import (
+    CVE_FETCH_ITEM_FAILED_EVENT,
     BaseCVEFetcher,
     CVEFetchResult,
     CVENotInSource,
@@ -73,10 +74,6 @@ logger = structlog.get_logger(__name__)
 OSV_VULN_URL: Final = "https://api.osv.dev/v1/vulns/{record_id}"
 """The vulnerability-record endpoint of both phases (Algorithm steps 1 and
 5); `record_id` is the CVE-ID or an alias ID that passed the step-5 check."""
-
-CVE_FETCH_ITEM_FAILED_EVENT: Final = "cve_fetch_item_failed"
-"""The per-item failure WARNING (cve-fetcher-infrastructure.md, Batch Error
-Handling): canonical CVE-ID, fetcher name, and exception class name only."""
 
 OSV_SUBREQUEST_SKIPPED_EVENT: Final = "osv_subrequest_skipped"
 """The sub-request skip WARNING (Algorithm step 7): CVE-ID, fetcher name,
