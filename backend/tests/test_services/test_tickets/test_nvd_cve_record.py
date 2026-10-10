@@ -76,10 +76,8 @@ from tests.support.module_imports import APP_ROOT, forbidden_imports, imported_m
 from tests.support.nvd import (
     CISA_ADP_SOURCE_IDENTIFIER,
     PAGE_EMPTY,
-    PAGE_FIXTURES,
     PAGE_REJECTED,
     RECORD_CVE_IDS,
-    RECORD_FIXTURES,
     SINGLE_LOG4SHELL,
     SINGLE_PLATFORM_ALSO_VULNERABLE,
     SOURCE_PAGE,
@@ -415,14 +413,6 @@ class TestParsePage:
 
         assert page.total_results == total
         assert page.vulnerabilities == tuple(load_json_fixture(name)["vulnerabilities"])
-
-    def test_every_live_page_fixture_is_covered(self) -> None:
-        assert set(PAGE_FIXTURES) == {
-            SINGLE_LOG4SHELL,
-            SINGLE_PLATFORM_ALSO_VULNERABLE,
-            PAGE_REJECTED,
-            PAGE_EMPTY,
-        }
 
 
 # ---------------------------------------------------------------------------
@@ -2662,8 +2652,22 @@ class TestSkipReasons:
             INVALID_CPE_MATCH,
         }
 
-        assert constants == ALL_REASONS
-        assert len(ALL_REASONS) == 10
+        assert (
+            constants
+            == ALL_REASONS
+            == {
+                "invalid_description",
+                "invalid_cvss_metric",
+                "invalid_vector",
+                "missing_source",
+                "unresolved_source",
+                "reserved_provider",
+                "invalid_cwe",
+                "invalid_reference",
+                "invalid_cpe_configuration",
+                "invalid_cpe_match",
+            }
+        )
 
     def test_many_skipped_units_of_one_reason_yield_it_once(self) -> None:
         element = _cvss_record(
@@ -2744,10 +2748,15 @@ class TestLiveRecords:
     def test_every_live_record_maps_in_degraded_mode(
         self, name: str, element: dict[str, Any]
     ) -> None:
-        payload = _map(element, None).payload
+        degraded = _map(element, None).payload
+        resolved = _map(element, _live_names()).payload
 
-        assert {p for p, _ in _cvss(payload)} <= {NVD_PROVIDER_NAME}
-        assert {s for _, s in _cwe(payload)} <= {NVD_PROVIDER_NAME}
+        assert _cvss(degraded) == [
+            entry for entry in _cvss(resolved) if entry[0] == NVD_PROVIDER_NAME
+        ]
+        assert _cwe(degraded) == [
+            entry for entry in _cwe(resolved) if entry[1] == NVD_PROVIDER_NAME
+        ]
 
     def test_cna_primary_cvss_keeps_both_providers(self) -> None:
         payload = _payload(load_record("record_cna_primary_cvss"), _live_names())
@@ -2833,7 +2842,6 @@ class TestLiveRecords:
 
     def test_support_constants_match_the_mapping(self) -> None:
         assert nvd_support.NVD_SOURCE_IDENTIFIER == NVD_SOURCE_IDENTIFIER
-        assert set(RECORD_FIXTURES) == set(RECORD_CVE_IDS)
 
 
 # ---------------------------------------------------------------------------

@@ -56,8 +56,8 @@ vulnerability information including severity scores, affected product
 configurations, and references to advisories and patches.
 
 - **Relevant data**: CVE identifiers, descriptions, CVSS v3.1 scores
-  (v4.0 support is being gradually added by NVD), primary NVD and
-  secondary CNA assessments, CWE identifiers, CPE-based affected
+  (v4.0 support is being gradually added by NVD), NVD's own and
+  CNA/ADP assessments, CWE identifiers, CPE-based affected
   product configurations with version ranges, vulnerability status, and
   reference links to advisories and patches
 - **Access**: REST API v2 at `services.nvd.nist.gov/rest/json/cves/2.0`.

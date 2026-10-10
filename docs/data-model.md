@@ -647,8 +647,8 @@ See `docs/features/tickets/cvss-scoring.md` for the full specification.
 - `provider_name` for NVD's own assessments (NVD source identifier
   `nvd@nist.gov`) is always `"NVD"`
 - `provider_name` for CNA and ADP assessments carried by NVD is resolved from
-  the NVD Source API to a human-readable name (e.g., `"Intel Corporation"`),
-  whatever their NVD `Primary` or `Secondary` type
+  the NVD Source API to a human-readable name (e.g., `"Intel Corporation"`);
+  see `docs/features/tickets/cve-sync-nvd.md` (Source identity)
 - `provider_name` for the SUSE internal assessment is always `"SUSE"`. Any
   input equal to `SUSE` after outer trimming and Unicode case-folding is
   reserved and cannot be persisted by an external ingestion caller
@@ -666,11 +666,11 @@ See `docs/features/tickets/cvss-scoring.md` for the full specification.
   consistent across application and database environments because provider
   ties use explicit Unicode code-point lexical ordering rather than database
   collation
-- When a direct source (e.g., Red Hat API) provides data that also exists
-  as a CNA assessment carried by NVD, both write to the same UPSERT conflict key
-  `(cve_id, provider_name, cvss_version)` — last-writer-wins. Since all
-  fetchers run on regular schedules, data converges to the most recent
-  value within one cycle
+- Provider names are source-owned. A direct source and NVD write the same
+  UPSERT conflict key `(cve_id, provider_name, cvss_version)` only when they
+  write the same provider name (last-writer-wins, converging within one
+  cycle); otherwise, for example Red Hat's direct `"Red Hat"` and NVD's
+  Source API name `"Red Hat, Inc."`, both rows are retained
 - External ingestion is additive: omitted, explicit-null, or empty assessment
   input retains existing rows. A supplied equal vector-derived unit is a no-op;
   no fetcher deletion is inferred from source absence
