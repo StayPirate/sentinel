@@ -1,0 +1,167 @@
+{
+  "resultsPerPage": 1,
+  "startIndex": 0,
+  "totalResults": 1,
+  "format": "NVD_CVE",
+  "version": "2.0",
+  "timestamp": "2026-10-10T17:20:08.432",
+  "vulnerabilities": [
+    {
+      "cve": {
+        "id": "CVE-2026-50355",
+        "sourceIdentifier": "microsoft-corporation-1@example.com",
+        "published": "2026-07-14T18:17:35.490",
+        "lastModified": "2026-07-24T14:16:19.867",
+        "vulnStatus": "Analyzed",
+        "cveTags": [],
+        "descriptions": [
+          {
+            "lang": "en",
+            "value": "Fictional description of CVE-2026-50355."
+          }
+        ],
+        "affected": [
+          {
+            "source": "microsoft-corporation-1@example.com",
+            "affectedData": [
+              {
+                "vendor": "Microsoft",
+                "product": "Microsoft .NET Framework 3.5 AND 4.7.2",
+                "platforms": [
+                  "Windows 10 Version 1607 for 32-bit Systems",
+                  "Windows 10 Version 1607 for x64-based Systems",
+                  "Windows 10 Version 1809 for 32-bit Systems",
+                  "Windows 10 Version 1809 for x64-based Systems",
+                  "Windows Server 2016",
+                  "Windows Server 2016 (Server Core installation)",
+                  "Windows Server 2019",
+                  "Windows Server 2019 (Server Core installation)"
+                ],
+                "versions": [
+                  {
+                    "version": "4.7.0",
+                    "lessThan": "2.0.50727.9069 & 3.0.30729.9067 & 4.7.4143.0",
+                    "versionType": "custom",
+                    "status": "affected"
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "metrics": {
+          "cvssMetricV31": [
+            {
+              "source": "microsoft-corporation-1@example.com",
+              "type": "Secondary",
+              "cvssData": {
+                "version": "3.1",
+                "vectorString": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+                "baseScore": 7.5,
+                "baseSeverity": "HIGH",
+                "attackVector": "NETWORK",
+                "attackComplexity": "LOW",
+                "privilegesRequired": "NONE",
+                "userInteraction": "NONE",
+                "scope": "UNCHANGED",
+                "confidentialityImpact": "NONE",
+                "integrityImpact": "NONE",
+                "availabilityImpact": "HIGH"
+              },
+              "exploitabilityScore": 3.9,
+              "impactScore": 3.6
+            }
+          ],
+          "ssvcV203": [
+            {
+              "source": "134c704f-9b21-4f2e-91b3-4a467353bcc0",
+              "ssvcData": {
+                "timestamp": "2026-07-14T20:35:49.993254Z",
+                "id": "CVE-2026-50355",
+                "options": [
+                  {
+                    "exploitation": "none"
+                  },
+                  {
+                    "automatable": "yes"
+                  },
+                  {
+                    "technicalImpact": "partial"
+                  }
+                ],
+                "role": "CISA Coordinator",
+                "version": "2.0.3"
+              }
+            }
+          ]
+        },
+        "weaknesses": [
+          {
+            "source": "microsoft-corporation-1@example.com",
+            "type": "Secondary",
+            "description": [
+              {
+                "lang": "en",
+                "value": "CWE-121"
+              }
+            ]
+          }
+        ],
+        "configurations": [
+          {
+            "nodes": [
+              {
+                "operator": "OR",
+                "negate": false,
+                "cpeMatch": [
+                  {
+                    "vulnerable": true,
+                    "criteria": "cpe:2.3:o:microsoft:windows_server_2012:-:*:*:*:*:*:*:*",
+                    "matchCriteriaId": "A7DF96F8-BA6A-4780-9CA3-F719B3F81074"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "operator": "AND",
+            "nodes": [
+              {
+                "operator": "OR",
+                "negate": false,
+                "cpeMatch": [
+                  {
+                    "vulnerable": true,
+                    "criteria": "cpe:2.3:a:microsoft:.net_framework:4.8:*:*:*:*:*:*:*",
+                    "matchCriteriaId": "2D3F18AF-84ED-473B-A8DF-65EB23C475AF"
+                  }
+                ]
+              },
+              {
+                "operator": "OR",
+                "negate": false,
+                "cpeMatch": [
+                  {
+                    "vulnerable": false,
+                    "criteria": "cpe:2.3:o:microsoft:windows_server_2012:-:*:*:*:*:*:*:*",
+                    "matchCriteriaId": "A7DF96F8-BA6A-4780-9CA3-F719B3F81074"
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "references": [
+          {
+            "url": "https://advisory.example.invalid/upstream/1",
+            "source": "microsoft-corporation-1@example.com",
+            "tags": [
+              "Patch",
+              "Vendor Advisory"
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

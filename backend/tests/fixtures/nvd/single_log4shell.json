@@ -1,0 +1,306 @@
+{
+  "resultsPerPage": 1,
+  "startIndex": 0,
+  "totalResults": 1,
+  "format": "NVD_CVE",
+  "version": "2.0",
+  "timestamp": "2026-10-10T17:20:01.421",
+  "vulnerabilities": [
+    {
+      "cve": {
+        "id": "CVE-2021-44228",
+        "sourceIdentifier": "apache-software-foundation-1@example.com",
+        "published": "2021-12-10T10:15:09.143",
+        "lastModified": "2026-08-11T19:33:44.513",
+        "vulnStatus": "Analyzed",
+        "cveTags": [],
+        "descriptions": [
+          {
+            "lang": "en",
+            "value": "Fictional description of CVE-2021-44228."
+          },
+          {
+            "lang": "es",
+            "value": "Descripción ficticia de CVE-2021-44228."
+          }
+        ],
+        "affected": [
+          {
+            "source": "apache-software-foundation-1@example.com",
+            "affectedData": [
+              {
+                "vendor": "Apache Software Foundation",
+                "product": "Apache Log4j2",
+                "versions": [
+                  {
+                    "version": "2.0-beta9",
+                    "lessThan": "log4j-core*",
+                    "versionType": "custom",
+                    "status": "affected",
+                    "changes": [
+                      {
+                        "at": "2.3.1",
+                        "status": "unaffected"
+                      },
+                      {
+                        "at": "2.4",
+                        "status": "affected"
+                      },
+                      {
+                        "at": "2.12.2",
+                        "status": "unaffected"
+                      },
+                      {
+                        "at": "2.13.0",
+                        "status": "affected"
+                      },
+                      {
+                        "at": "2.15.0",
+                        "status": "unaffected"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "metrics": {
+          "cvssMetricV31": [
+            {
+              "source": "nvd@nist.gov",
+              "type": "Primary",
+              "cvssData": {
+                "version": "3.1",
+                "vectorString": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H",
+                "baseScore": 10.0,
+                "baseSeverity": "CRITICAL",
+                "attackVector": "NETWORK",
+                "attackComplexity": "LOW",
+                "privilegesRequired": "NONE",
+                "userInteraction": "NONE",
+                "scope": "CHANGED",
+                "confidentialityImpact": "HIGH",
+                "integrityImpact": "HIGH",
+                "availabilityImpact": "HIGH"
+              },
+              "exploitabilityScore": 3.9,
+              "impactScore": 6.0
+            },
+            {
+              "source": "134c704f-9b21-4f2e-91b3-4a467353bcc0",
+              "type": "Secondary",
+              "cvssData": {
+                "version": "3.1",
+                "vectorString": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H",
+                "baseScore": 10.0,
+                "baseSeverity": "CRITICAL",
+                "attackVector": "NETWORK",
+                "attackComplexity": "LOW",
+                "privilegesRequired": "NONE",
+                "userInteraction": "NONE",
+                "scope": "CHANGED",
+                "confidentialityImpact": "HIGH",
+                "integrityImpact": "HIGH",
+                "availabilityImpact": "HIGH"
+              },
+              "exploitabilityScore": 3.9,
+              "impactScore": 6.0
+            }
+          ],
+          "cvssMetricV2": [
+            {
+              "source": "nvd@nist.gov",
+              "type": "Primary",
+              "cvssData": {
+                "version": "2.0",
+                "vectorString": "AV:N/AC:M/Au:N/C:C/I:C/A:C",
+                "baseScore": 9.3,
+                "accessVector": "NETWORK",
+                "accessComplexity": "MEDIUM",
+                "authentication": "NONE",
+                "confidentialityImpact": "COMPLETE",
+                "integrityImpact": "COMPLETE",
+                "availabilityImpact": "COMPLETE"
+              },
+              "baseSeverity": "HIGH",
+              "exploitabilityScore": 8.6,
+              "impactScore": 10.0,
+              "acInsufInfo": false,
+              "obtainAllPrivilege": false,
+              "obtainUserPrivilege": false,
+              "obtainOtherPrivilege": false,
+              "userInteractionRequired": false
+            }
+          ],
+          "ssvcV203": [
+            {
+              "source": "134c704f-9b21-4f2e-91b3-4a467353bcc0",
+              "ssvcData": {
+                "timestamp": "2025-02-04T14:25:34.416117Z",
+                "id": "CVE-2021-44228",
+                "options": [
+                  {
+                    "exploitation": "active"
+                  },
+                  {
+                    "automatable": "yes"
+                  },
+                  {
+                    "technicalImpact": "total"
+                  }
+                ],
+                "role": "CISA Coordinator",
+                "version": "2.0.3"
+              }
+            }
+          ]
+        },
+        "cisaExploitAdd": "2021-12-10",
+        "cisaActionDue": "2021-12-24",
+        "cisaRequiredAction": "For all affected software assets for which updates exist, the only acceptable remediation actions are: 1) Apply updates; OR 2) remove affected assets from agency networks. Temporary mitigations using one of the measures provided at https://www.cisa.gov/uscert/ed-22-02-apache-log4j-recommended-mitigation-measures are only acceptable until updates are available.",
+        "cisaVulnerabilityName": "Apache Log4j2 Remote Code Execution Vulnerability",
+        "weaknesses": [
+          {
+            "source": "apache-software-foundation-1@example.com",
+            "type": "Secondary",
+            "description": [
+              {
+                "lang": "en",
+                "value": "CWE-20"
+              },
+              {
+                "lang": "en",
+                "value": "CWE-400"
+              },
+              {
+                "lang": "en",
+                "value": "CWE-502"
+              }
+            ]
+          },
+          {
+            "source": "nvd@nist.gov",
+            "type": "Secondary",
+            "description": [
+              {
+                "lang": "en",
+                "value": "CWE-917"
+              }
+            ]
+          }
+        ],
+        "configurations": [
+          {
+            "nodes": [
+              {
+                "operator": "OR",
+                "negate": false,
+                "cpeMatch": [
+                  {
+                    "vulnerable": true,
+                    "criteria": "cpe:2.3:a:apache:log4j:*:*:*:*:*:*:*:*",
+                    "versionStartIncluding": "2.0.1",
+                    "versionEndExcluding": "2.3.1",
+                    "matchCriteriaId": "03FA5E81-F9C0-403E-8A4B-E4284E4E7B72"
+                  },
+                  {
+                    "vulnerable": true,
+                    "criteria": "cpe:2.3:a:apache:log4j:*:*:*:*:*:*:*:*",
+                    "versionStartIncluding": "2.4.0",
+                    "versionEndExcluding": "2.12.2",
+                    "matchCriteriaId": "AED3D5EC-DAD5-4E5F-8BBD-B4E3349D84FC"
+                  },
+                  {
+                    "vulnerable": true,
+                    "criteria": "cpe:2.3:a:apache:log4j:*:*:*:*:*:*:*:*",
+                    "versionStartIncluding": "2.13.0",
+                    "versionEndExcluding": "2.15.0",
+                    "matchCriteriaId": "D31D423D-FC4D-428A-B863-55AF472B80DC"
+                  },
+                  {
+                    "vulnerable": true,
+                    "criteria": "cpe:2.3:a:apache:log4j:2.0:-:*:*:*:*:*:*",
+                    "matchCriteriaId": "17854E42-7063-4A55-BF2A-4C7074CC2D60"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "operator": "AND",
+            "nodes": [
+              {
+                "operator": "OR",
+                "negate": false,
+                "cpeMatch": [
+                  {
+                    "vulnerable": true,
+                    "criteria": "cpe:2.3:o:siemens:6bk1602-0aa12-0tp0_firmware:*:*:*:*:*:*:*:*",
+                    "versionEndExcluding": "2.7.0",
+                    "matchCriteriaId": "BD64FC36-CC7B-4FD7-9845-7EA1DDB0E627"
+                  }
+                ]
+              },
+              {
+                "operator": "OR",
+                "negate": false,
+                "cpeMatch": [
+                  {
+                    "vulnerable": false,
+                    "criteria": "cpe:2.3:h:siemens:6bk1602-0aa12-0tp0:-:*:*:*:*:*:*:*",
+                    "matchCriteriaId": "CF99FE8F-40D0-48A8-9A40-43119B259535"
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "references": [
+          {
+            "url": "https://advisory.example.invalid/upstream/1",
+            "source": "apache-software-foundation-1@example.com",
+            "tags": [
+              "Third Party Advisory",
+              "VDB Entry"
+            ]
+          },
+          {
+            "url": "https://advisory.example.invalid/upstream/2",
+            "source": "apache-software-foundation-1@example.com",
+            "tags": [
+              "Third Party Advisory",
+              "VDB Entry"
+            ]
+          },
+          {
+            "url": "https://advisory.example.invalid/upstream/3",
+            "source": "apache-software-foundation-1@example.com",
+            "tags": [
+              "Exploit",
+              "Third Party Advisory",
+              "VDB Entry"
+            ]
+          },
+          {
+            "url": "https://advisory.example.invalid/upstream/4",
+            "source": "apache-software-foundation-1@example.com",
+            "tags": [
+              "Exploit",
+              "Third Party Advisory",
+              "VDB Entry"
+            ]
+          },
+          {
+            "url": "https://advisory.example.invalid/upstream/5",
+            "source": "apache-software-foundation-1@example.com",
+            "tags": [
+              "Third Party Advisory",
+              "VDB Entry"
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

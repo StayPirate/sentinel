@@ -1,0 +1,67 @@
+{
+  "cve": {
+    "id": "CVE-2023-54233",
+    "sourceIdentifier": "416baaa9-dc9f-4396-8d5f-8c081fb06d67",
+    "published": "2025-12-30T13:16:11.743",
+    "lastModified": "2026-10-03T11:17:29.700",
+    "vulnStatus": "Deferred",
+    "cveTags": [],
+    "descriptions": [
+      {
+        "lang": "en",
+        "value": "Fictional description of CVE-2023-54233."
+      }
+    ],
+    "affected": [
+      {
+        "source": "416baaa9-dc9f-4396-8d5f-8c081fb06d67",
+        "affectedData": [
+          {
+            "vendor": "Linux",
+            "product": "Linux",
+            "defaultStatus": "unaffected",
+            "programFiles": [
+              "sound/soc/sof/ipc4-topology.c"
+            ],
+            "repo": "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git",
+            "versions": [
+              {
+                "version": "3acd527089463742a3dd95e274d53c2fdd834716",
+                "lessThan": "d42fe2721111138d7656d4f621f38c171979c8a0",
+                "versionType": "git",
+                "status": "affected"
+              },
+              {
+                "version": "3acd527089463742a3dd95e274d53c2fdd834716",
+                "lessThan": "170818974e9732506195c6302743856cc8bdfd6f",
+                "versionType": "git",
+                "status": "affected"
+              },
+              {
+                "version": "3acd527089463742a3dd95e274d53c2fdd834716",
+                "lessThan": "e3720f92e0237921da537e47a0b24e27899203f8",
+                "versionType": "git",
+                "status": "affected"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "metrics": {},
+    "references": [
+      {
+        "url": "https://advisory.example.invalid/upstream/1",
+        "source": "416baaa9-dc9f-4396-8d5f-8c081fb06d67"
+      },
+      {
+        "url": "https://advisory.example.invalid/upstream/2",
+        "source": "416baaa9-dc9f-4396-8d5f-8c081fb06d67"
+      },
+      {
+        "url": "https://advisory.example.invalid/upstream/3",
+        "source": "416baaa9-dc9f-4396-8d5f-8c081fb06d67"
+      }
+    ]
+  }
+}

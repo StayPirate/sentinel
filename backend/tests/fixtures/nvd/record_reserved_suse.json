@@ -1,0 +1,105 @@
+{
+  "cve": {
+    "id": "CVE-2025-46808",
+    "sourceIdentifier": "suse-1@example.com",
+    "published": "2026-09-09T09:17:10.013",
+    "lastModified": "2026-09-10T15:17:24.780",
+    "vulnStatus": "Awaiting Analysis",
+    "cveTags": [],
+    "descriptions": [
+      {
+        "lang": "en",
+        "value": "Fictional description of CVE-2025-46808."
+      }
+    ],
+    "affected": [
+      {
+        "source": "suse-1@example.com",
+        "affectedData": [
+          {
+            "vendor": "SUSE",
+            "product": "neuvector",
+            "defaultStatus": "unaffected",
+            "packageName": "manager",
+            "versions": [
+              {
+                "version": "0",
+                "lessThan": "5.4.5",
+                "versionType": "semver",
+                "status": "affected"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "metrics": {
+      "cvssMetricV31": [
+        {
+          "source": "suse-1@example.com",
+          "type": "Secondary",
+          "cvssData": {
+            "version": "3.1",
+            "vectorString": "CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:H/I:N/A:N",
+            "baseScore": 6.8,
+            "baseSeverity": "MEDIUM",
+            "attackVector": "NETWORK",
+            "attackComplexity": "LOW",
+            "privilegesRequired": "LOW",
+            "userInteraction": "REQUIRED",
+            "scope": "CHANGED",
+            "confidentialityImpact": "HIGH",
+            "integrityImpact": "NONE",
+            "availabilityImpact": "NONE"
+          },
+          "exploitabilityScore": 2.3,
+          "impactScore": 4.0
+        }
+      ],
+      "ssvcV203": [
+        {
+          "source": "134c704f-9b21-4f2e-91b3-4a467353bcc0",
+          "ssvcData": {
+            "timestamp": "2026-09-10T14:05:27.065483Z",
+            "id": "CVE-2025-46808",
+            "options": [
+              {
+                "exploitation": "none"
+              },
+              {
+                "automatable": "no"
+              },
+              {
+                "technicalImpact": "partial"
+              }
+            ],
+            "role": "CISA Coordinator",
+            "version": "2.0.3"
+          }
+        }
+      ]
+    },
+    "weaknesses": [
+      {
+        "source": "suse-1@example.com",
+        "type": "Secondary",
+        "description": [
+          {
+            "lang": "en",
+            "value": "CWE-532"
+          }
+        ]
+      }
+    ],
+    "references": [
+      {
+        "url": "https://advisory.example.invalid/upstream/1",
+        "source": "suse-1@example.com"
+      },
+      {
+        "url": "https://advisory.example.invalid/upstream/2",
+        "source": "suse-1@example.com"
+      }
+    ]
+  }
+}

@@ -1,0 +1,226 @@
+{
+  "resultsPerPage": 12,
+  "startIndex": 0,
+  "totalResults": 12,
+  "format": "NVD_CVE",
+  "version": "2.0",
+  "timestamp": "2026-10-10T17:16:33.760",
+  "vulnerabilities": [
+    {
+      "cve": {
+        "id": "CVE-2021-47469",
+        "sourceIdentifier": "416baaa9-dc9f-4396-8d5f-8c081fb06d67",
+        "published": "2024-05-22T07:15:11.690",
+        "lastModified": "2025-03-03T09:15:09.473",
+        "vulnStatus": "Rejected",
+        "cveTags": [],
+        "descriptions": [
+          {
+            "lang": "en",
+            "value": "Rejected reason: fictional rejection note for CVE-2021-47469."
+          }
+        ],
+        "metrics": {},
+        "references": []
+      }
+    },
+    {
+      "cve": {
+        "id": "CVE-2023-52917",
+        "sourceIdentifier": "416baaa9-dc9f-4396-8d5f-8c081fb06d67",
+        "published": "2024-10-21T13:15:02.230",
+        "lastModified": "2025-03-03T09:15:16.830",
+        "vulnStatus": "Rejected",
+        "cveTags": [],
+        "descriptions": [
+          {
+            "lang": "en",
+            "value": "Rejected reason: fictional rejection note for CVE-2023-52917."
+          }
+        ],
+        "metrics": {},
+        "references": []
+      }
+    },
+    {
+      "cve": {
+        "id": "CVE-2024-50181",
+        "sourceIdentifier": "416baaa9-dc9f-4396-8d5f-8c081fb06d67",
+        "published": "2024-11-08T06:15:15.390",
+        "lastModified": "2025-03-03T09:15:24.317",
+        "vulnStatus": "Rejected",
+        "cveTags": [],
+        "descriptions": [
+          {
+            "lang": "en",
+            "value": "Rejected reason: fictional rejection note for CVE-2024-50181."
+          }
+        ],
+        "metrics": {},
+        "references": []
+      }
+    },
+    {
+      "cve": {
+        "id": "CVE-2024-56741",
+        "sourceIdentifier": "416baaa9-dc9f-4396-8d5f-8c081fb06d67",
+        "published": "2024-12-29T12:15:07.477",
+        "lastModified": "2025-03-03T09:15:31.623",
+        "vulnStatus": "Rejected",
+        "cveTags": [],
+        "descriptions": [
+          {
+            "lang": "en",
+            "value": "Rejected reason: fictional rejection note for CVE-2024-56741."
+          }
+        ],
+        "metrics": {},
+        "references": []
+      }
+    },
+    {
+      "cve": {
+        "id": "CVE-2025-23087",
+        "sourceIdentifier": "unknown-1@example.com",
+        "published": "2025-01-22T02:15:34.080",
+        "lastModified": "2025-03-01T03:15:23.067",
+        "vulnStatus": "Rejected",
+        "cveTags": [],
+        "descriptions": [
+          {
+            "lang": "en",
+            "value": "Rejected reason: fictional rejection note for CVE-2025-23087."
+          }
+        ],
+        "metrics": {},
+        "references": []
+      }
+    },
+    {
+      "cve": {
+        "id": "CVE-2025-23088",
+        "sourceIdentifier": "unknown-1@example.com",
+        "published": "2025-01-22T02:15:34.207",
+        "lastModified": "2025-03-01T03:15:23.157",
+        "vulnStatus": "Rejected",
+        "cveTags": [],
+        "descriptions": [
+          {
+            "lang": "en",
+            "value": "Rejected reason: fictional rejection note for CVE-2025-23088."
+          }
+        ],
+        "metrics": {},
+        "references": []
+      }
+    },
+    {
+      "cve": {
+        "id": "CVE-2025-23089",
+        "sourceIdentifier": "unknown-1@example.com",
+        "published": "2025-01-22T02:15:34.327",
+        "lastModified": "2025-03-01T03:15:23.210",
+        "vulnStatus": "Rejected",
+        "cveTags": [],
+        "descriptions": [
+          {
+            "lang": "en",
+            "value": "Rejected reason: fictional rejection note for CVE-2025-23089."
+          }
+        ],
+        "metrics": {},
+        "references": []
+      }
+    },
+    {
+      "cve": {
+        "id": "CVE-2022-49045",
+        "sourceIdentifier": "416baaa9-dc9f-4396-8d5f-8c081fb06d67",
+        "published": "2025-02-26T07:00:41.790",
+        "lastModified": "2025-03-02T15:15:11.130",
+        "vulnStatus": "Rejected",
+        "cveTags": [],
+        "descriptions": [
+          {
+            "lang": "en",
+            "value": "Rejected reason: fictional rejection note for CVE-2022-49045."
+          }
+        ],
+        "metrics": {},
+        "references": []
+      }
+    },
+    {
+      "cve": {
+        "id": "CVE-2025-21818",
+        "sourceIdentifier": "416baaa9-dc9f-4396-8d5f-8c081fb06d67",
+        "published": "2025-02-27T20:16:04.330",
+        "lastModified": "2025-03-02T15:15:12.043",
+        "vulnStatus": "Rejected",
+        "cveTags": [],
+        "descriptions": [
+          {
+            "lang": "en",
+            "value": "Rejected reason: fictional rejection note for CVE-2025-21818."
+          }
+        ],
+        "metrics": {},
+        "references": []
+      }
+    },
+    {
+      "cve": {
+        "id": "CVE-2025-1803",
+        "sourceIdentifier": "unknown-2@example.com",
+        "published": "2025-03-01T01:15:28.077",
+        "lastModified": "2025-03-01T01:15:28.077",
+        "vulnStatus": "Rejected",
+        "cveTags": [],
+        "descriptions": [
+          {
+            "lang": "en",
+            "value": "Rejected reason: fictional rejection note for CVE-2025-1803."
+          }
+        ],
+        "metrics": {},
+        "references": []
+      }
+    },
+    {
+      "cve": {
+        "id": "CVE-2025-25725",
+        "sourceIdentifier": "unknown-3@example.com",
+        "published": "2025-03-02T02:15:36.760",
+        "lastModified": "2025-03-02T02:15:36.760",
+        "vulnStatus": "Rejected",
+        "cveTags": [],
+        "descriptions": [
+          {
+            "lang": "en",
+            "value": "Rejected reason: fictional rejection note for CVE-2025-25725."
+          }
+        ],
+        "metrics": {},
+        "references": []
+      }
+    },
+    {
+      "cve": {
+        "id": "CVE-2025-25726",
+        "sourceIdentifier": "unknown-3@example.com",
+        "published": "2025-03-02T02:15:36.850",
+        "lastModified": "2025-03-02T02:15:36.850",
+        "vulnStatus": "Rejected",
+        "cveTags": [],
+        "descriptions": [
+          {
+            "lang": "en",
+            "value": "Rejected reason: fictional rejection note for CVE-2025-25726."
+          }
+        ],
+        "metrics": {},
+        "references": []
+      }
+    }
+  ]
+}
