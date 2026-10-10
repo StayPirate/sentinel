@@ -52,6 +52,7 @@ from app.core.enums import CVESourceFetchStatus
 from app.models.ticket import Ticket
 from app.services import ticket_convergence_publication
 from app.services.base_cve_fetcher import (
+    CVE_FETCH_ITEM_FAILED_EVENT,
     HANDOFF_PUBLICATION_FAILED_EVENT,
     CVEFetchResult,
 )
@@ -65,7 +66,6 @@ from app.services.base_git_fetcher import (
     CURSOR_COMMITTED_AT_UNUSABLE_EVENT,
     CURSOR_MALFORMED_EVENT,
     CURSOR_SHA_UNREACHABLE_EVENT,
-    CVE_FETCH_ITEM_FAILED_EVENT,
     DELETE_FAILED_GUIDANCE,
     DELETE_FAILED_MESSAGE,
     DELTA_FILE_MISSING_AT_HEAD_EVENT,

@@ -42,6 +42,7 @@ from app import config
 from app.core.enums import CVESourceFetchStatus
 from app.services import git_operations
 from app.services.base_cve_fetcher import (
+    CVE_FETCH_ITEM_FAILED_EVENT,
     BaseCVEFetcher,
     CVEFetchResult,
     CVENotInSource,
@@ -70,7 +71,6 @@ DELETE_FAILED_GUIDANCE: Final = (
 CLONE_UNAVAILABLE_MESSAGE: Final = "Git clone not available for single-item lookup"
 ALL_CANDIDATES_FAILED_MESSAGE: Final = "File read failed for all candidate paths"
 
-CVE_FETCH_ITEM_FAILED_EVENT: Final = "cve_fetch_item_failed"
 CLONE_INVALID_REBUILDING_EVENT: Final = "git_clone_invalid_rebuilding"
 CLONE_CORRUPTION_DETECTED_EVENT: Final = "git_clone_corruption_detected"
 CLONE_DELETE_FAILED_EVENT: Final = "git_clone_delete_failed"

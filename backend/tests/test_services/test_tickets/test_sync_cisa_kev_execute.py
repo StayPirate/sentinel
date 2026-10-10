@@ -85,7 +85,11 @@ from app.services import (
     task_publication,
     ticket_convergence_publication,
 )
-from app.services.base_cve_fetcher import CVEFetchResult
+from app.services.base_cve_fetcher import (
+    CVE_FETCH_CANDIDATE_SKIPPED_EVENT,
+    CVE_FETCH_ITEM_FAILED_EVENT,
+    CVEFetchResult,
+)
 from app.services.base_fetcher import FetcherError, FetcherRunConfig
 from app.services.cve_ingest import (
     CVEIngestPayload,
@@ -98,8 +102,6 @@ from app.services.tickets.cisa_kev_catalog import KevCatalogStructureError
 from app.services.tickets.sync_cisa_kev import (
     CISA_KEV_CATALOG_RECEIVED_EVENT,
     CISA_KEV_URL,
-    CVE_FETCH_CANDIDATE_SKIPPED_EVENT,
-    CVE_FETCH_ITEM_FAILED_EVENT,
     SyncCisaKev,
 )
 from tests.support.cisa_kev import (

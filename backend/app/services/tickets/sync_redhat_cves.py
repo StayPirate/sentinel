@@ -36,6 +36,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.enums import CVESourceFetchStatus, CVESourceType, ReferenceType
 from app.services import cve_service, reference_service
 from app.services.base_cve_fetcher import (
+    CVE_FETCH_CANDIDATE_SKIPPED_EVENT,
+    CVE_FETCH_ITEM_FAILED_EVENT,
     BaseCVEFetcher,
     CVEFetchResult,
     CVENotInSource,
@@ -52,14 +54,6 @@ REDHAT_CVE_URL: Final = (
     "https://access.redhat.com/hydra/rest/securitydata/cve/{cve_id}.json"
 )
 """The per-CVE endpoint of the Red Hat Security Data API (Algorithm step 1)."""
-
-CVE_FETCH_ITEM_FAILED_EVENT: Final = "cve_fetch_item_failed"
-"""The per-item failure WARNING (cve-fetcher-infrastructure.md, Batch Error
-Handling): canonical CVE-ID, fetcher name, and exception class name only."""
-
-CVE_FETCH_CANDIDATE_SKIPPED_EVENT: Final = "cve_fetch_candidate_skipped"
-"""The WARNING of one rejected vector or CWE (§ Response Validation,
-Candidate skip event): canonical CVE-ID, fetcher name, and closed reason."""
 
 SOURCE_REFERENCE_TITLE: Final = "Red Hat"
 

@@ -70,13 +70,13 @@ from app.services import (
     reference_service,
     task_publication,
 )
-from app.services.base_cve_fetcher import HANDOFF_PUBLICATION_FAILED_EVENT
+from app.services.base_cve_fetcher import (
+    CVE_FETCH_ITEM_FAILED_EVENT,
+    HANDOFF_PUBLICATION_FAILED_EVENT,
+)
 from app.services.base_fetcher import FetcherError, FetcherRunConfig
 from app.services.tickets import sync_redhat_cves as sync_module
-from app.services.tickets.sync_redhat_cves import (
-    CVE_FETCH_ITEM_FAILED_EVENT,
-    SyncRedhatCves,
-)
+from app.services.tickets.sync_redhat_cves import SyncRedhatCves
 from tests.support.cve_ingest import IngestionWorld
 from tests.support.redhat import RedhatServer, raising
 

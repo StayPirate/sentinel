@@ -6,7 +6,8 @@ Class; `CVEFetchResult`; CVE-ID Format Validation Helper;
 `__init_subclass__` Validation, including Atomic cross-registry
 registration and Test isolation; `CVENotInSource` Signal; CVE Source Type
 Identity and both registry accessors; Class Attributes, the
-`participates_in_catch_up` auto-derivation and rule 5) for the contract
+`participates_in_catch_up` auto-derivation and rule 5; Batch Error
+Handling, Per-item failure event; Candidate Skip Event) for the contract
 under test, `docs/features/platform/fetcher-infrastructure.md`
 (Import-time validation, rules 7-8), and
 `docs/features/platform/testing-strategy.md` (CVE Fetcher Infrastructure —
@@ -44,6 +45,8 @@ import app.services.base_cve_fetcher as base_cve_fetcher_module
 from app.core.enums import CVESourceType
 from app.services.base_cve_fetcher import (
     _CVE_SOURCE_TYPE_MAP,
+    CVE_FETCH_CANDIDATE_SKIPPED_EVENT,
+    CVE_FETCH_ITEM_FAILED_EVENT,
     BaseCVEFetcher,
     CVEFetchResult,
     CVENotInSource,
@@ -794,3 +797,14 @@ class TestCVEFetchResult:
             "post_ingest": None,
         }
         assert "_consumed" not in repr(result)
+
+
+class TestSharedEventNames:
+    """Fetcher tests import these constants, so only a literal comparison
+    detects a renamed log event."""
+
+    def test_per_item_failure_event_name_is_stable(self) -> None:
+        assert CVE_FETCH_ITEM_FAILED_EVENT == "cve_fetch_item_failed"
+
+    def test_candidate_skip_event_name_is_stable(self) -> None:
+        assert CVE_FETCH_CANDIDATE_SKIPPED_EVENT == "cve_fetch_candidate_skipped"

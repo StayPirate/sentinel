@@ -35,6 +35,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.enums import CVESourceFetchStatus, CVESourceType
 from app.services import cve_service
 from app.services.base_cve_fetcher import (
+    CVE_FETCH_ITEM_FAILED_EVENT,
     BaseCVEFetcher,
     CVEFetchResult,
     CVENotInSource,
@@ -49,10 +50,6 @@ logger = structlog.get_logger(__name__)
 EPSS_URL: Final = "https://api.first.org/data/v1/epss"
 """The EPSS API endpoint; the CVE-ID is the `cve` query parameter
 (Algorithm step 1)."""
-
-CVE_FETCH_ITEM_FAILED_EVENT: Final = "cve_fetch_item_failed"
-"""The per-item failure WARNING (cve-fetcher-infrastructure.md, Batch Error
-Handling): canonical CVE-ID, fetcher name, and exception class name only."""
 
 EPSS_DATA_STALE_EVENT: Final = "epss_data_stale"
 """The diagnostic staleness WARNING (Algorithm, Staleness validation)."""
