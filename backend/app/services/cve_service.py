@@ -630,12 +630,14 @@ async def _obtain_cve(db: AsyncSession, cve_id: str, *, lock: bool) -> tuple[CVE
 
 MAX_PER_PAGE: Final = 100
 
-_STALLED_AFTER_HOURS: Final = 30 * 24
+STALLED_AFTER_HOURS: Final = 30 * 24
 """Failure-streak age (30 days) beyond which a persisted `failure` row is
 stalled (`docs/data-model.md`, CVESource, Derived predicate "stalled").
 Applied as a fixed-length `make_interval(hours => 720)`, so the boundary
 does not depend on the database session time zone (a `'30 days'`
-interval would follow calendar days across a daylight-saving change)."""
+interval would follow calendar days across a daylight-saving change).
+Also bounds the retry window of `evaluate_failed_cve_sources`
+(cve-source-failure-retry.md, Algorithm)."""
 
 # Documented lowercase wire value -> stored value (cve-tracking.md, List
 # CVEs, Query Parameters). `unresolved` is the SQL `NULL` severity.
@@ -1115,7 +1117,7 @@ def _stalled_condition() -> ColumnElement[bool]:
         CVESource.status == CVESourceFetchStatus.FAILURE.value,
         CVESource.first_failed_at.is_not(None),
         CVESource.first_failed_at
-        < func.now() - func.make_interval(0, 0, 0, 0, _STALLED_AFTER_HOURS),
+        < func.now() - func.make_interval(0, 0, 0, 0, STALLED_AFTER_HOURS),
     )
 
 
@@ -1256,12 +1258,14 @@ async def list_cve_sources(
 # Fetchers)
 # ---------------------------------------------------------------------------
 
-_ACTIVE_TICKET_STATUSES: Final[tuple[str, ...]] = (
+ACTIVE_TICKET_STATUSES: Final[tuple[str, ...]] = (
     TicketStatus.NEW.value,
     TicketStatus.ANALYSIS.value,
     TicketStatus.ANALYZED.value,
 )
-"""The active Ticket statuses (tickets.md, Status Categories)."""
+"""The active Ticket statuses (tickets.md, Status Categories). Also the
+active-Ticket flag of `evaluate_failed_cve_sources`
+(cve-source-failure-retry.md, Active Ticket Check)."""
 
 
 async def get_active_ticket_cve_ids(session: AsyncSession) -> list[str]:
@@ -1292,7 +1296,7 @@ async def get_active_ticket_cve_ids(session: AsyncSession) -> list[str]:
         select(Ticket.id)
         .where(
             Ticket.cve_id == CVE.id,
-            Ticket.status.in_(_ACTIVE_TICKET_STATUSES),
+            Ticket.status.in_(ACTIVE_TICKET_STATUSES),
         )
         .exists()
     )
