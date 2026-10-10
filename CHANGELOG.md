@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.9.0](https://github.com/StayPirate/sentinel/compare/v0.8.0...v0.9.0) (2026-10-10)
+
+
+### Features
+
+* add BaseGitFetcher and the GIT_CLONE_BASE_DIR setting ([#887](https://github.com/StayPirate/sentinel/issues/887)) ([52a05c7](https://github.com/StayPirate/sentinel/commit/52a05c7d8474395ca65a68424ddf130c4a8e229a))
+* add the CISA KEV catalog fetcher ([#861](https://github.com/StayPirate/sentinel/issues/861)) ([13829f6](https://github.com/StayPirate/sentinel/commit/13829f6dd16115cb47f69815368863b04367d2b0)), closes [#849](https://github.com/StayPirate/sentinel/issues/849)
+* add the CVE affected-versions read endpoint ([#867](https://github.com/StayPirate/sentinel/issues/867)) ([30e55b0](https://github.com/StayPirate/sentinel/commit/30e55b0d8fc306e425a2c9113094d63e0a3a099f)), closes [#864](https://github.com/StayPirate/sentinel/issues/864)
+* add the CVE record parser ([#883](https://github.com/StayPirate/sentinel/issues/883)) ([e814f13](https://github.com/StayPirate/sentinel/commit/e814f131802d667ee40be085d499537d09a1cf9d))
+* add the CVE source failure retry evaluator ([#904](https://github.com/StayPirate/sentinel/issues/904)) ([4ca7b54](https://github.com/StayPirate/sentinel/commit/4ca7b5462d1a9924ad44d42e683e67b448cc66e6))
+* add the EPSS score fetcher ([#855](https://github.com/StayPirate/sentinel/issues/855)) ([c842aa1](https://github.com/StayPirate/sentinel/commit/c842aa13540a4bdd45833cd06c21bae7f165a83b)), closes [#848](https://github.com/StayPirate/sentinel/issues/848)
+* add the Git operations utility ([#885](https://github.com/StayPirate/sentinel/issues/885)) ([879fc7b](https://github.com/StayPirate/sentinel/commit/879fc7b85e193eb1fee6bd0b1b88bde89974319b)), closes [#877](https://github.com/StayPirate/sentinel/issues/877)
+* add the GitHub Security Advisories fetcher ([#869](https://github.com/StayPirate/sentinel/issues/869)) ([f9d54d1](https://github.com/StayPirate/sentinel/commit/f9d54d1f1824cb212e286650bb71e7dbb22b1b74))
+* add the Linux Kernel CVE fetcher and the git-worker runtime ([#890](https://github.com/StayPirate/sentinel/issues/890)) ([57c5209](https://github.com/StayPirate/sentinel/commit/57c5209f4452a6b2850586e7220ab92c05ecd5b6)), closes [#880](https://github.com/StayPirate/sentinel/issues/880)
+* add the Linux Kernel CVE record mapping ([#889](https://github.com/StayPirate/sentinel/issues/889)) ([aebeb70](https://github.com/StayPirate/sentinel/commit/aebeb70486dd536b590ceb937aff20b2eb9fa9ee)), closes [#879](https://github.com/StayPirate/sentinel/issues/879)
+* add the MITRE CVE fetcher ([#897](https://github.com/StayPirate/sentinel/issues/897)) ([24705e1](https://github.com/StayPirate/sentinel/commit/24705e19c322c9adb8ca4925a7d6a5e69b302805)), closes [#882](https://github.com/StayPirate/sentinel/issues/882)
+* add the MITRE CVE record mapping ([#896](https://github.com/StayPirate/sentinel/issues/896)) ([f1c7e6f](https://github.com/StayPirate/sentinel/commit/f1c7e6f78d4757a5989f3cec1fe8e89def7e229f)), closes [#881](https://github.com/StayPirate/sentinel/issues/881)
+* add the NVD CVE record mapping ([#908](https://github.com/StayPirate/sentinel/issues/908)) ([acab48a](https://github.com/StayPirate/sentinel/commit/acab48a808c68fcfd5be0d6ace7c21295a39225c))
+* add the OSV advisory fetcher ([#863](https://github.com/StayPirate/sentinel/issues/863)) ([327b413](https://github.com/StayPirate/sentinel/commit/327b4138c1b0719518bef9ed1fa4bc783e193989)), closes [#850](https://github.com/StayPirate/sentinel/issues/850)
+* add the Red Hat CVE fetcher and its production-registry isolation ([#852](https://github.com/StayPirate/sentinel/issues/852)) ([0bdc493](https://github.com/StayPirate/sentinel/commit/0bdc4939eb41cffcb418330009d7e21b4f557a87))
+* reduce external CVSS vectors to their Base metrics ([#873](https://github.com/StayPirate/sentinel/issues/873)) ([e5d70e3](https://github.com/StayPirate/sentinel/commit/e5d70e3b338fca81eff32994f63a61321fe0f74c)), closes [#868](https://github.com/StayPirate/sentinel/issues/868)
+
+
+### Bug Fixes
+
+* derive KEV "missing" from the run start, not its finish ([#862](https://github.com/StayPirate/sentinel/issues/862)) ([57973fd](https://github.com/StayPirate/sentinel/commit/57973fd6b08e51a449fc6c59e7f763734b38bae4)), closes [#860](https://github.com/StayPirate/sentinel/issues/860)
+* initialize redbeat config before generating entry keys ([#858](https://github.com/StayPirate/sentinel/issues/858)) ([a7d1a0a](https://github.com/StayPirate/sentinel/commit/a7d1a0a84f6c310c1afdcf86b065df1c290f2472)), closes [#854](https://github.com/StayPirate/sentinel/issues/854)
+
 ## [0.8.0](https://github.com/StayPirate/sentinel/compare/v0.7.0...v0.8.0) (2026-10-06)
 
 
