@@ -93,6 +93,7 @@ from sqlalchemy.orm.util import AliasedClass
 
 from app.core.enums import (
     ACTIVE_TICKET_STATUSES,
+    MANUAL_ZONE_TICKET_STATUSES,
     DeliveryStatus,
     LifecyclePhase,
     MaintainerWorkSortField,
@@ -2367,8 +2368,6 @@ PRODUCT_RECALCULATION_REASONS: Final[frozenset[str]] = frozenset(
     get_args(ProductRecalculationReason)
 )
 
-_MANUAL_ZONE: Final = frozenset({TicketStatus.IGNORED, TicketStatus.DUPLICATED})
-
 
 @dataclass(frozen=True, slots=True)
 class ProductEligibilityRecalculationResult:
@@ -2443,7 +2442,7 @@ async def recalculate_product_eligibility_for_ticket(
         evaluation_date = _utc_today()
 
     ticket = await _lock_system_ticket(db, ticket_id)
-    if ticket.status in _MANUAL_ZONE:
+    if ticket.status in MANUAL_ZONE_TICKET_STATUSES:
         return ProductEligibilityRecalculationResult(
             examined=0, override_skipped=0, changed=0, manual_zone_skipped=True
         )

@@ -68,6 +68,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased, selectinload
 
 from app.core.enums import (
+    GATE_ZONE_TICKET_STATUSES,
+    MANUAL_ZONE_TICKET_STATUSES,
     CVSSVersion,
     LifecyclePhase,
     PackageStatus,
@@ -170,7 +172,6 @@ Canonical Automatic Comment Vocabulary); takes precedence."""
 VA_ROLE_REMOVED_REASON: Final = "vulnerability_analyst role removed"
 """Sanitation reason for an active assignee without any VA origin."""
 
-_MANUAL_ZONE: Final = frozenset({TicketStatus.IGNORED, TicketStatus.DUPLICATED})
 _SANITIZED_RESULTS: Final = frozenset({TicketStatus.ANALYSIS, TicketStatus.ANALYZED})
 _ACCEPTED_CVSS_VERSIONS: Final = tuple(version.value for version in CVSSVersion)
 
@@ -202,7 +203,7 @@ def ensure_ticket_operable(ticket: Ticket) -> None:
     Q6: raises `TicketNotMutableError` exactly when the status is
     `Ignored` or `Duplicated`.
     """
-    if ticket.status in _MANUAL_ZONE:
+    if ticket.status in MANUAL_ZONE_TICKET_STATUSES:
         raise TicketNotMutableError()
 
 
@@ -563,7 +564,7 @@ def _registers_convergence(
     effective_previous: TicketStatus, new_status: TicketStatus
 ) -> bool:
     """Step 5: a manual-zone exit or a `Resolved` regression."""
-    if effective_previous in _MANUAL_ZONE:
+    if effective_previous in MANUAL_ZONE_TICKET_STATUSES:
         return True
     return (
         effective_previous is TicketStatus.RESOLVED and new_status in _SANITIZED_RESULTS
@@ -631,7 +632,7 @@ async def reconcile_ticket_status(
                 assignee_id=str(ticket.assignee_id),
             )
         return
-    if current in _MANUAL_ZONE:
+    if current in MANUAL_ZONE_TICKET_STATUSES:
         raise ValueError(
             "reconcile_ticket_status() never operates on a manual-zone Ticket."
         )
@@ -985,9 +986,6 @@ class _Unset(Enum):
 
 
 _UNSET: Final = _Unset.UNSET
-_GATE_ZONE: Final = frozenset(
-    {TicketStatus.ANALYSIS, TicketStatus.ANALYZED, TicketStatus.RESOLVED}
-)
 
 
 def _eligibility_value(eligible: bool) -> str:
@@ -1107,7 +1105,10 @@ def _propagation_for(mode: CVSSChainMode, ticket: Ticket | None) -> CVSSPropagat
     `recalculate_cvss_chain()` step 7)."""
     if ticket is None:
         return CVSSPropagation.NOT_APPLICABLE
-    if mode is CVSSChainMode.DEFAULT_VERSION and ticket.status in _MANUAL_ZONE:
+    if (
+        mode is CVSSChainMode.DEFAULT_VERSION
+        and ticket.status in MANUAL_ZONE_TICKET_STATUSES
+    ):
         return CVSSPropagation.DEFERRED_UNTIL_REACTIVATION
     return CVSSPropagation.IMMEDIATE
 
@@ -1288,7 +1289,7 @@ async def recalculate_cvss_chain(
         priority_changed = await refresh_priority_auto(db, ticket=ticket)
         if (
             not association
-            and ticket.status in _GATE_ZONE
+            and ticket.status in GATE_ZONE_TICKET_STATUSES
             and (severity_changed or products.changed > 0)
         ):
             await reconcile_ticket_status(ticket, db, evaluation_date=evaluation_date)
@@ -1656,7 +1657,9 @@ async def upsert_cvss_assessment(
             or products.changed > 0
             or suse_present_before != _has_suse_assessment(assessments)
         )
-        if ticket.status in _GATE_ZONE and (gate_input_changed or promoted):
+        if ticket.status in GATE_ZONE_TICKET_STATUSES and (
+            gate_input_changed or promoted
+        ):
             await reconcile_ticket_status(ticket, db, evaluation_date=evaluation_date)
             reconciled = True
     await db.flush()
@@ -1866,7 +1869,9 @@ async def delete_cvss_assessment(
             or products.changed > 0
             or suse_present_before != _has_suse_assessment(assessments)
         )
-        if ticket.status in _GATE_ZONE and (gate_input_changed or promoted):
+        if ticket.status in GATE_ZONE_TICKET_STATUSES and (
+            gate_input_changed or promoted
+        ):
             await reconcile_ticket_status(ticket, db, evaluation_date=evaluation_date)
             reconciled = True
     await db.flush()
@@ -2196,7 +2201,7 @@ async def upsert_external_cvss_batch(
                 old_value=old_severity,
                 new_value=new_severity,
             )
-        if ticket.status in _MANUAL_ZONE:
+        if ticket.status in MANUAL_ZONE_TICKET_STATUSES:
             propagation = CVSSPropagation.DEFERRED_UNTIL_REACTIVATION
         else:
             propagation = CVSSPropagation.IMMEDIATE
@@ -2207,7 +2212,9 @@ async def upsert_external_cvss_batch(
                 evaluation_date=evaluation_date,
             )
         await refresh_priority_auto(db, ticket=ticket)
-        if ticket.status in _GATE_ZONE and (severity_changed or products.changed > 0):
+        if ticket.status in GATE_ZONE_TICKET_STATUSES and (
+            severity_changed or products.changed > 0
+        ):
             await reconcile_ticket_status(ticket, db, evaluation_date=evaluation_date)
             reconciled = True
     await db.flush()
