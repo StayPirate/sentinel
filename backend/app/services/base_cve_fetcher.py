@@ -79,8 +79,8 @@ event): canonical CVE-ID when valid, fetcher name, and exception class name
 only."""
 
 CVE_FETCH_CANDIDATE_SKIPPED_EVENT: Final = "cve_fetch_candidate_skipped"
-"""The WARNING of one skipped candidate value (Candidate Skip Event):
-canonical CVE-ID, fetcher name, and the emitting fetcher's closed reason."""
+"""The candidate skip WARNING (Candidate Skip Event): canonical CVE-ID,
+fetcher name, and the emitting fetcher's closed reason."""
 
 _ISOLATED_STATUSES: Final = (
     CVESourceFetchStatus.FAILURE,
