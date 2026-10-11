@@ -976,9 +976,26 @@ Rules:
 - Access the real value of a `SecretStr` field exclusively via
   `.get_secret_value()`. Never rely on implicit `str()` conversion, which
   returns the masked representation (`'**********'`), not the real value
-- Validators (`@model_validator`) that inspect a `SecretStr` field MUST call
-  `.get_secret_value()` before performing checks such as length or emptiness
-  validation
+- Validators (`@field_validator` or `@model_validator`) that inspect a
+  `SecretStr` field MUST call `.get_secret_value()` before performing checks
+  such as length or emptiness validation
+- The `Settings` class declares `hide_input_in_errors=True`, so no `Settings`
+  validation error renders a received value. Without it, Pydantic renders
+  the rejected value of a field, and a failure not tied to one field (for
+  example a missing required setting) renders the input mapping, which holds
+  every configured secret as a plain string. Validator messages name the
+  environment variable and never include a secret value
+- A non-empty secret that is sent verbatim as an HTTP header value, alone or
+  after a fixed prefix such as an authentication scheme, MUST consist of
+  printable ASCII characters without whitespace (U+0021 to U+007E). Any other
+  value, for example one with a trailing newline from a file-based secret,
+  fails startup with an error that names the variable; the value is
+  rejected, never trimmed or otherwise altered. Otherwise the HTTP library
+  either renders the value in its protocol error, which reaches fetcher
+  error details and logs, or sends it malformed. Empty or unset keeps its
+  documented meaning. A secret that the HTTP library encodes before it
+  reaches a header, such as an HTTP Basic password, is not subject to this
+  rule
 - URL fields that may embed credentials use `Field(..., repr=False)` to retain
   direct string compatibility with downstream libraries. `repr=False` hides
   the field from `repr(settings)` but is not a serialization or logging
