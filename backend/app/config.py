@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import PurePosixPath
 from typing import Annotated, Any
 from urllib.parse import urlsplit
@@ -11,6 +12,7 @@ from pydantic import (
     BeforeValidator,
     Field,
     SecretStr,
+    ValidationInfo,
     field_validator,
     model_validator,
 )
@@ -73,6 +75,14 @@ def _validate_https_api_prefix(value: str, variable: str) -> str:
     return value.rstrip("/")
 
 
+_HEADER_VALUE = re.compile(r"[\x21-\x7e]*")
+"""Printable ASCII without whitespace; empty means "not configured"."""
+
+_HEADER_SECRET_FIELDS = ("nvd_api_key", "github_token")
+"""Secret settings sent verbatim as an HTTP header value
+(docs/conventions.md, Secret Field Typing)."""
+
+
 _VALID_LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 _VALID_LOG_FORMATS = ("auto", "json", "console")
 
@@ -80,10 +90,13 @@ _VALID_LOG_FORMATS = ("auto", "json", "console")
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
+    # `hide_input_in_errors`: a validation error never renders a received
+    # value, which may be a secret (docs/conventions.md, Secret Field Typing).
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
         case_sensitive=False,
+        hide_input_in_errors=True,
     )
 
     # Application
@@ -218,6 +231,25 @@ class Settings(BaseSettings):
             )
             raise ValueError(msg)
         return self
+
+    @field_validator(*_HEADER_SECRET_FIELDS)
+    @classmethod
+    def _validate_header_secret(
+        cls, value: SecretStr, info: ValidationInfo
+    ) -> SecretStr:
+        """Reject a secret that is not a valid HTTP header value at startup.
+
+        The value is rejected, never trimmed, and the message names only the
+        variable. See docs/conventions.md (Secret Field Typing).
+        """
+        if _HEADER_VALUE.fullmatch(value.get_secret_value()) is None:
+            variable = (info.field_name or "").upper()
+            msg = (
+                f"Invalid {variable}: must be printable ASCII without whitespace "
+                "(it is sent as an HTTP header value)."
+            )
+            raise ValueError(msg)
+        return value
 
     @field_validator("ibs_download_base_url")
     @classmethod

@@ -731,32 +731,6 @@ class TestOnDemandFetch:
         assert API_KEY not in repr(logs)
         assert all(client.is_closed for client in server.clients)
 
-    async def test_invalid_api_key_value_is_an_immediate_failure_without_request(
-        self,
-        world: IngestionWorld,
-        on_demand: FetchSingleHarness,
-        server: ClientServer,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        monkeypatch.setattr(app_settings, "nvd_api_key", SecretStr(f"{API_KEY}\n"))
-        cve, _ = await _active_cve(world)
-        _serve(server, cve)
-        token = await on_demand.marker(cve.cve_id, NVD.value)
-
-        with capture_logs() as logs, pytest.raises(FetcherError):
-            await on_demand.run(NAME, cve.cve_id, NVD.value, token)
-
-        assert server.requests == []
-        state = await source_state(on_demand.factory, cve.id, NVD)
-        assert state is not None
-        assert state.status == CVESourceFetchStatus.FAILURE
-        assert await on_demand.marker_value(cve.cve_id, NVD.value) is None
-        assert events_named(logs, RETRY_SCHEDULED) == []
-        [failed] = events_named(logs, FAILED)
-        assert failed["cause"] == "FetcherError"
-        assert failed["retries"] == 0
-        assert API_KEY not in repr(logs)
-
     @pytest.mark.parametrize(
         "kind", ["http_429", "http_500", "http_503", "connect", "timeout"]
     )
