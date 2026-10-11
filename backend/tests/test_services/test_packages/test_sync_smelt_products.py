@@ -358,7 +358,7 @@ class TestSnapshotValidation:
 
         error = _rejected(_listing(product_row(1), product_row(2, **{field: value})))
 
-        assert str(error) == f"row 1: {field} contains U+0000"
+        assert str(error) == f"row 1: {field} contains an inadmissible character"
 
     def test_repository_containing_nul_is_rejected(self) -> None:
         row = product_row(
@@ -367,7 +367,7 @@ class TestSnapshotValidation:
 
         error = _rejected(_listing(row))
 
-        assert str(error) == "row 0: repository contains U+0000"
+        assert str(error) == "row 0: repository contains an inadmissible character"
         assert MARKER not in str(error)
 
     def test_duplicate_cpe_is_rejected(self) -> None:

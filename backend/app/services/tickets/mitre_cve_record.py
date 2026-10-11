@@ -15,8 +15,9 @@ and the WARNING events built from the facts reported here.
 reference candidates, and the bounded facts of skipped data. Every failure
 is a per-item failure: a `MitreRecordError` subclass for a path, content,
 state, rejection date, or duplicate that cannot be mapped, or the payload's
-`pydantic.ValidationError` for a `title` or description containing U+0000
-(cve-service.md, CVEIngestPayload Schema). No message renders the input.
+`pydantic.ValidationError` for a `title` or description containing an
+inadmissible character (cve-service.md, CVEIngestPayload Schema). No
+message renders the input.
 """
 
 from __future__ import annotations
@@ -28,7 +29,7 @@ from dataclasses import dataclass
 from typing import Any, Final, Literal
 
 from app.core.enums import CveState, ReferenceType
-from app.core.external_strings import contains_nul
+from app.core.external_strings import contains_inadmissible_character
 from app.core.identifiers import is_valid_cve_id
 from app.services.cve_ingest import (
     AffectedVersionContent,
@@ -450,7 +451,9 @@ def _short_name(provider_metadata: object) -> str | None:
 
 def _admissible_scope(scope: str) -> bool:
     """A malformed ADP identity cannot form a valid scope or provider."""
-    return len(scope) <= _SCOPE_MAX_LENGTH and not contains_nul(scope)
+    if len(scope) > _SCOPE_MAX_LENGTH:
+        return False
+    return not contains_inadmissible_character(scope)
 
 
 def _org_id(provider_metadata: object) -> str | None:

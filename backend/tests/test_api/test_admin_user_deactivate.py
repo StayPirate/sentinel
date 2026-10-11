@@ -14,8 +14,8 @@ Owning specifications:
   Credential Resolution).
 - docs/features/identity/rbac.md (Endpoint Permission Map, Business Rules
   3-5).
-- docs/api-spec.md (User Identifier Resolution, NUL Characters in Request
-  Input, Global Responses, Authorization Chain Evaluation Order).
+- docs/api-spec.md (User Identifier Resolution, Inadmissible Characters in
+  Request Input, Global Responses, Authorization Chain Evaluation Order).
 - docs/features/platform/testing-strategy.md (User Lifecycle and
   Management, "Deactivation API"; Authentication and Session, "Session
   liveness and invalidation"; API Key Management, no direct `ApiKey`
@@ -83,6 +83,7 @@ from app.models.user_role import UserRole
 from app.services import api_key_service, session_service, user_service
 from app.services.session_service import create_session
 from app.services.user_service import DeactivationResult
+from tests.support.inadmissible import REQUEST_INPUT_ERROR
 from tests.support.ticket_api import INTERNAL_ERROR, force_production_error_page
 from tests.support.ticket_mutations import StatementRecorder
 
@@ -113,7 +114,6 @@ _FORBIDDEN = {
     "code": "AUTH_INSUFFICIENT_PERMISSION",
     "detail": "Insufficient permissions",
 }
-_NUL_ERROR = {"msg": "Value error, must not contain U+0000", "type": "value_error"}
 # user-management.md, Get User.
 _PROFILE_FIELDS = {
     "id",
@@ -160,11 +160,12 @@ def _bearer(token: str) -> dict[str, str]:
 
 
 def _assert_nul_rejection(response_json: object, loc: list[object]) -> None:
-    """Mirrors the identical helper in `tests/test_api/test_request_nul.py`."""
+    """Mirrors the identical helper in
+    `tests/test_api/test_request_admissibility.py`."""
     assert response_json == {
         "code": "VALIDATION_ERROR",
         "detail": "Request validation failed",
-        "errors": [{"loc": loc, **_NUL_ERROR}],
+        "errors": [{"loc": loc, **REQUEST_INPUT_ERROR}],
     }
 
 

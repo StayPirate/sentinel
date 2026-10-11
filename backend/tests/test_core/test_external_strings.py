@@ -1,79 +1,142 @@
 """Unit tests for backend/app/core/external_strings.py.
 
 Covers `docs/conventions.md` (External String Admissibility): a string
-containing U+0000 is rejected, never stripped or replaced, and the error
-never renders the value. Consumer outcomes are tested with each consumer.
+containing an inadmissible character, U+0000 or a surrogate code point, is
+rejected, never stripped or replaced, and the error never renders the
+value. A supplementary character, including one decoded from a correctly
+paired surrogate escape, is admissible. Consumer outcomes are tested with
+each consumer.
 """
 
 from __future__ import annotations
 
+import json
+import re
+
 import pytest
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from app.core.external_strings import NUL, NulFreeStr, contains_nul, reject_nul
+from app.core.external_strings import (
+    INADMISSIBLE_CHARACTER_MESSAGE,
+    AdmissibleStr,
+    contains_inadmissible_character,
+    reject_inadmissible_characters,
+)
+from tests.support.inadmissible import INADMISSIBLE_CHARACTERS
 from tests.support.module_imports import APP_ROOT, imported_modules
 
 _MARKER = "FICTIONAL-SECRET-MARKER-5e11"
-_WITH_NUL = [
-    pytest.param("\x00", id="only"),
-    pytest.param(f"\x00{_MARKER}", id="start"),
-    pytest.param(f"{_MARKER}\x00{_MARKER}", id="middle"),
-    pytest.param(f"{_MARKER}\x00", id="end"),
+_WITH_INADMISSIBLE = [
+    pytest.param("\x00", id="nul-only"),
+    pytest.param(f"\x00{_MARKER}", id="nul-start"),
+    pytest.param(f"{_MARKER}\x00{_MARKER}", id="nul-middle"),
+    pytest.param(f"{_MARKER}\x00", id="nul-end"),
+    pytest.param("\ud800", id="high-surrogate-only"),
+    pytest.param(f"\udfff{_MARKER}", id="low-surrogate-start"),
+    pytest.param(f"{_MARKER}\udbff{_MARKER}", id="surrogate-middle"),
+    pytest.param(f"{_MARKER}\udc00", id="surrogate-end"),
+    # Two code points, e.g. CESU-8 bytes decoded with `surrogatepass`:
+    # still unencodable, although `jsonb` would silently merge them.
+    pytest.param(f"{_MARKER}\ud83d\ude00", id="high-then-low-surrogate"),
+    pytest.param(
+        json.loads(b'"\xed\xa0\x80"'), id="surrogate-decoded-from-encoded-bytes"
+    ),
+    pytest.param(json.loads('"\\ud800"'), id="surrogate-decoded-from-json-escape"),
 ]
-_WITHOUT_NUL = [
+_ADMISSIBLE = [
     pytest.param("", id="empty"),
     pytest.param("cpe:/o:example:product-a:1", id="plain"),
     pytest.param("\x01\t\n\r\x1f\x7f", id="other-control-characters"),
-    pytest.param("\\u0000", id="escaped-text"),
+    pytest.param("\\u0000 \\ud800", id="escaped-text"),
     pytest.param("0", id="digit-zero"),
+    pytest.param("\ud7ff\ue000\uffff", id="code-points-bordering-surrogates"),
+    pytest.param("\U0001f600\U00010000\U0010ffff", id="supplementary-characters"),
+    pytest.param(json.loads('"\\ud83d\\ude00"'), id="paired-surrogate-escape"),
 ]
 
 
 class _Model(BaseModel):
     model_config = ConfigDict(strict=True, hide_input_in_errors=True)
 
-    value: NulFreeStr = Field(min_length=1, max_length=8)
+    value: AdmissibleStr = Field(min_length=1, max_length=8)
+
+
+class _UnconstrainedModel(BaseModel):
+    model_config = ConfigDict(strict=True, hide_input_in_errors=True)
+
+    value: AdmissibleStr
 
 
 @pytest.mark.unit
-class TestContainsNul:
-    def test_nul_is_u_0000(self) -> None:
-        assert NUL == "\u0000"
+class TestContainsInadmissibleCharacter:
+    @pytest.mark.parametrize("value", _WITH_INADMISSIBLE)
+    def test_inadmissible_value_is_detected(self, value: str) -> None:
+        assert contains_inadmissible_character(value) is True
 
-    @pytest.mark.parametrize("value", _WITH_NUL)
-    def test_value_with_nul_is_detected(self, value: str) -> None:
-        assert contains_nul(value) is True
+    @pytest.mark.parametrize("value", _ADMISSIBLE)
+    def test_admissible_value_is_not_detected(self, value: str) -> None:
+        assert contains_inadmissible_character(value) is False
 
-    @pytest.mark.parametrize("value", _WITHOUT_NUL)
-    def test_value_without_nul_is_not_detected(self, value: str) -> None:
-        assert contains_nul(value) is False
+    @pytest.mark.parametrize("value", _ADMISSIBLE)
+    def test_every_admissible_value_has_a_utf8_encoding(self, value: str) -> None:
+        """The predicate's surrogate range is exactly the set of code
+        points without a UTF-8 encoding."""
+        value.encode("utf-8")
+
+    def test_every_surrogate_code_point_is_detected(self) -> None:
+        assert all(
+            contains_inadmissible_character(chr(code_point))
+            for code_point in range(0xD800, 0xE000)
+        )
 
 
 @pytest.mark.unit
-class TestRejectNul:
-    @pytest.mark.parametrize("value", _WITH_NUL)
-    def test_value_with_nul_raises_without_rendering_it(self, value: str) -> None:
-        with pytest.raises(ValueError, match="must not contain U\\+0000") as raised:
-            reject_nul(value)
+class TestRejectInadmissibleCharacters:
+    @pytest.mark.parametrize("value", _WITH_INADMISSIBLE)
+    def test_inadmissible_value_raises_without_rendering_it(self, value: str) -> None:
+        with pytest.raises(
+            ValueError, match=re.escape(INADMISSIBLE_CHARACTER_MESSAGE)
+        ) as raised:
+            reject_inadmissible_characters(value)
 
         assert _MARKER not in str(raised.value)
 
-    @pytest.mark.parametrize("value", _WITHOUT_NUL)
-    def test_value_without_nul_is_returned_unchanged(self, value: str) -> None:
-        assert reject_nul(value) is value
+    @pytest.mark.parametrize("value", _ADMISSIBLE)
+    def test_admissible_value_is_returned_unchanged(self, value: str) -> None:
+        assert reject_inadmissible_characters(value) is value
+
+    def test_message_names_both_characters(self) -> None:
+        assert INADMISSIBLE_CHARACTER_MESSAGE == (
+            "must not contain U+0000 or a surrogate code point"
+        )
 
 
 @pytest.mark.unit
-class TestNulFreeStr:
-    @pytest.mark.parametrize("value", ["a\x00", "\x00"], ids=["trailing", "only"])
-    def test_nul_is_a_validation_error(self, value: str) -> None:
+class TestAdmissibleStr:
+    @pytest.mark.parametrize("character", INADMISSIBLE_CHARACTERS)
+    @pytest.mark.parametrize("position", ["trailing", "only"])
+    def test_unconstrained_field_rejects_with_value_error(
+        self, character: str, position: str
+    ) -> None:
+        """Without a length or pattern constraint Pydantic itself accepts
+        a surrogate, so the rejection comes from this validator."""
+        value = f"a{character}" if position == "trailing" else character
+
         with pytest.raises(ValidationError) as raised:
-            _Model(value=value)
+            _UnconstrainedModel(value=value)
 
         assert [error["type"] for error in raised.value.errors()] == ["value_error"]
 
+    @pytest.mark.parametrize("character", INADMISSIBLE_CHARACTERS)
+    def test_constrained_field_still_rejects(self, character: str) -> None:
+        with pytest.raises(ValidationError):
+            _Model(value=f"a{character}")
+
     def test_valid_value_is_preserved(self) -> None:
         assert _Model(value=" a\tb ").value == " a\tb "
+
+    def test_supplementary_character_is_preserved(self) -> None:
+        assert _UnconstrainedModel(value="a\U0001f600").value == "a\U0001f600"
 
     def test_field_length_constraints_keep_their_standard_error_types(self) -> None:
         for value, expected in (("", "string_too_short"), ("x" * 9, "string_too_long")):

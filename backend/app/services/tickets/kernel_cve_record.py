@@ -12,8 +12,8 @@ Record 5.x field parsing to `cve_record_parser`, and builds the
 `CVEIngestPayload` and the ordered reference candidates. Every failure is
 a per-item failure: a `KernelRecordError` subclass for a path, content, or
 state that cannot be mapped, or the payload's `pydantic.ValidationError`
-for a `title` or description containing U+0000 (cve-service.md,
-CVEIngestPayload Schema). Neither message renders the input.
+for a `title` or description containing an inadmissible character
+(cve-service.md, CVEIngestPayload Schema). Neither message renders the input.
 """
 
 from __future__ import annotations

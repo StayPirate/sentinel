@@ -770,8 +770,8 @@ Deliberately an unconstrained string: a malformed value must reach the
 service and produce `404 TICKET_NOT_FOUND`, not the `422` a schema
 pattern would return (`docs/api-spec.md`, Ticket Identifier Resolution).
 The only exception is a value containing U+0000, which the app-wide
-`reject_nul_in_request_input` dependency rejects with `422` first
-(`docs/api-spec.md`, NUL Characters in Request Input).
+`reject_inadmissible_request_input` dependency rejects with `422` first
+(`docs/api-spec.md`, Inadmissible Characters in Request Input).
 """
 
 CVEIdPath = Annotated[
@@ -789,8 +789,8 @@ Deliberately an unconstrained string: a malformed value must reach the
 service and produce `404 CVE_NOT_FOUND`, not the `422` a schema pattern
 would return (`docs/api-spec.md`, CVE Identifier Resolution). The only
 exception is a value containing U+0000, which the app-wide
-`reject_nul_in_request_input` dependency rejects with `422` first
-(`docs/api-spec.md`, NUL Characters in Request Input).
+`reject_inadmissible_request_input` dependency rejects with `422` first
+(`docs/api-spec.md`, Inadmissible Characters in Request Input).
 """
 
 

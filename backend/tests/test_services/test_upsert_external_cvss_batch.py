@@ -277,7 +277,7 @@ DATE = "requires an evaluation_date"
 CVE_ID = "requires the CVE UUID"
 SEQUENCE = "must be a sequence"
 ITEM = "must be a ParsedExternalCVSSAssessment"
-PROVIDER = "empty, overlength, NUL-containing, or reserved"
+PROVIDER = "empty, overlength, reserved, or contains an inadmissible character"
 MALFORMED = "parsed result is malformed"
 DUPLICATE = "Duplicate canonical"
 
@@ -383,6 +383,7 @@ GUARD_CASES = [
     _provider_guard("\t\n", "whitespace-only"),
     _provider_guard("P" * (EXTERNAL_PROVIDER_MAX_LENGTH + 1), "101-characters"),
     _provider_guard("Example\x00CNA", "nul"),
+    _provider_guard("Example\ud800CNA", "surrogate"),
     _provider_guard(None, "none"),
     _provider_guard(42, "integer"),
     _provider_guard("SUSE", "reserved"),

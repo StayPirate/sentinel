@@ -8,9 +8,9 @@ Owning specifications:
 - docs/features/identity/user-service.md (`get_deactivation_impact()`).
 - docs/features/identity/rbac.md (Endpoint Permission Map, Business Rules
   3-4).
-- docs/api-spec.md (Authorization Chain Evaluation Order, NUL Characters in
-  Request Input, Response Format, Global Responses, User Identifier
-  Resolution).
+- docs/api-spec.md (Authorization Chain Evaluation Order, Inadmissible
+  Characters in Request Input, Response Format, Global Responses, User
+  Identifier Resolution).
 - docs/features/platform/testing-strategy.md (User Lifecycle and
   Management, "Deactivation API"; Ticket Accessibility, no grant or
   maintainership count in the impact API; API Key Management, no direct
@@ -52,6 +52,7 @@ from app.main import app
 from app.models.user import User
 from app.services import api_key_service, user_service
 from app.services.user_service import DeactivationImpact
+from tests.support.inadmissible import REQUEST_INPUT_ERROR
 from tests.support.ticket_mutations import StatementRecorder
 
 Factory = Callable[..., Awaitable[Any]]
@@ -76,7 +77,6 @@ _FORBIDDEN = {
     "code": "AUTH_INSUFFICIENT_PERMISSION",
     "detail": "Insufficient permissions",
 }
-_NUL_ERROR = {"msg": "Value error, must not contain U+0000", "type": "value_error"}
 # user-management.md, Get Deactivation Impact: the zero-impact response.
 _ZEROED = {
     "data": {
@@ -451,7 +451,7 @@ class TestRequestValidation:
         assert response.json() == {
             "code": "VALIDATION_ERROR",
             "detail": "Request validation failed",
-            "errors": [{"loc": ["path", "user"], **_NUL_ERROR}],
+            "errors": [{"loc": ["path", "user"], **REQUEST_INPUT_ERROR}],
         }
         assert "fictional" not in response.text
         resolve.assert_not_awaited()

@@ -45,6 +45,7 @@ from app.models.user_role import UserRole
 from app.services import api_key_service, user_service
 from app.services.session_service import create_session
 from app.services.user_service import RoleUpdateResult
+from tests.support.inadmissible import REQUEST_INPUT_ERROR
 from tests.support.ticket_api import INTERNAL_ERROR, force_production_error_page
 from tests.support.ticket_mutations import StatementRecorder
 
@@ -67,7 +68,6 @@ _FORBIDDEN = {
     "code": "AUTH_INSUFFICIENT_PERMISSION",
     "detail": "Insufficient permissions",
 }
-_NUL_ERROR = {"msg": "Value error, must not contain U+0000", "type": "value_error"}
 
 
 def _url(identifier: object) -> str:
@@ -90,11 +90,12 @@ def _make_api_key_credential() -> tuple[str, str]:
 
 
 def _assert_nul_rejection(response_json: object, loc: list[object]) -> None:
-    """Mirrors the identical helper in `tests/test_api/test_request_nul.py`."""
+    """Mirrors the identical helper in
+    `tests/test_api/test_request_admissibility.py`."""
     assert response_json == {
         "code": "VALIDATION_ERROR",
         "detail": "Request validation failed",
-        "errors": [{"loc": loc, **_NUL_ERROR}],
+        "errors": [{"loc": loc, **REQUEST_INPUT_ERROR}],
     }
 
 

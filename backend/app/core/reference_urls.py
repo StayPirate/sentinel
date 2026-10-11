@@ -93,8 +93,10 @@ _URI_PARTS: Final = re.compile(
     r"(?:([^:/?#]+):)?(//([^/?#]*))?[^?#]*(?:\?[^#]*)?(?:#.*)?", re.DOTALL
 )
 
-# Any C0 control character or DEL (step 2).
-_CONTROL_CHARACTER: Final = re.compile(r"[\x00-\x1f\x7f]")
+# Any C0 control character or DEL (step 2), and any surrogate code point,
+# which step 2 counts as a control character (an inadmissible character
+# under External String Admissibility, docs/conventions.md).
+_CONTROL_CHARACTER: Final = re.compile(r"[\x00-\x1f\x7f\ud800-\udfff]")
 
 # RFC 3986 `reg-name`: unreserved / pct-encoded / sub-delims, ASCII only.
 _REG_NAME: Final = re.compile(

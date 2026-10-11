@@ -13,8 +13,8 @@ Owning specifications:
   Actionability), and docs/features/tickets/tickets.md (Gate: Analysis →
   Analyzed, Gate: Analyzed → Resolved) for the expected projected values.
 - docs/api-spec.md (Query Parameter Length Limit, Undeclared Query
-  Parameters, NUL Characters in Request Input, Response Format, Global
-  Responses).
+  Parameters, Inadmissible Characters in Request Input, Response Format,
+  Global Responses).
 - docs/features/platform/testing-strategy.md (Default-CVSS Impact Preview,
   E2E tests; Mandatory Test Scenarios, API Endpoints).
 
@@ -424,8 +424,8 @@ class TestQueryValidation:
     async def test_shared_input_checks_precede_authentication(
         self, value: str, client: AsyncClient, forbidden_preview: AsyncMock
     ) -> None:
-        """api-spec.md, NUL Characters in Request Input and Query Parameter
-        Length Limit: the shared checks inspect the string-valued
+        """api-spec.md, Inadmissible Characters in Request Input and Query
+        Parameter Length Limit: the shared checks inspect the string-valued
         `proposed_version` and run before authentication, so an
         unauthenticated request receives `422`, not `401`."""
         response = await client.get(_PATH, params={"proposed_version": value})

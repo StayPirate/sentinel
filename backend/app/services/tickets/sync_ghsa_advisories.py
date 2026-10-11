@@ -150,8 +150,8 @@ class SyncGhsaAdvisories(BaseCVEFetcher):
         2xx, a non-array root, or a non-object first element raises
         `GhsaResponseError`. Transport, JSON decoding,
         `pydantic.ValidationError` (schema mismatch, or a payload value
-        containing U+0000 or over its length bound), and delegate
-        exceptions propagate unchanged.
+        containing an inadmissible character or over its length bound), and
+        delegate exceptions propagate unchanged.
         """
         token = self._token()
         if not self._is_valid_cve_id(cve_id):

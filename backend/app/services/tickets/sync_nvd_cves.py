@@ -225,9 +225,9 @@ class SyncNvdCves(BaseCVEFetcher):
         another 2xx, or `totalResults >= 1` with an empty or multi-element
         `vulnerabilities`, raises `NvdResponseError`. An unparseable body
         raises `NvdPageError`; a structurally non-processable element raises
-        `NvdRecordStructureError`; a payload value containing U+0000 raises
-        `pydantic.ValidationError`. Transport and delegate exceptions
-        propagate unchanged.
+        `NvdRecordStructureError`; a payload value containing an inadmissible
+        character raises `pydantic.ValidationError`. Transport and delegate
+        exceptions propagate unchanged.
         """
         if not self._is_valid_cve_id(cve_id):
             raise CVENotInSource()

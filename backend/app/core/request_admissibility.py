@@ -1,15 +1,17 @@
-"""App-wide rejection of U+0000 in consumer-supplied request input.
+"""App-wide rejection of inadmissible characters in consumer-supplied
+request input.
 
-See `docs/api-spec.md` (NUL Characters in Request Input) for the
+See `docs/api-spec.md` (Inadmissible Characters in Request Input) for the
 authoritative contract: no string supplied in a declared path or query
-parameter, or anywhere in a JSON request body, may contain U+0000; a
-violation returns the standard `422 VALIDATION_ERROR` envelope before
-authentication and every endpoint-specific outcome.
+parameter, or anywhere in a JSON request body, may contain U+0000 or a
+surrogate code point; a violation returns the standard `422
+VALIDATION_ERROR` envelope before authentication and every
+endpoint-specific outcome.
 
 See `docs/conventions.md` (FastAPI Conventions, "Cross-cutting request
 input constraints") for why this is a single dependency registered once at
-the app level (`app.main`) rather than a per-field `NulFreeStr`: it applies
-automatically to every current and future endpoint.
+the app level (`app.main`) rather than a per-field `AdmissibleStr`: it
+applies automatically to every current and future endpoint.
 """
 
 from __future__ import annotations
@@ -22,22 +24,26 @@ from fastapi.datastructures import DefaultPlaceholder
 from fastapi.exceptions import RequestValidationError
 from fastapi.routing import APIRoute
 
-from app.core.external_strings import contains_nul
+from app.core.external_strings import (
+    INADMISSIBLE_CHARACTER_MESSAGE,
+    contains_inadmissible_character,
+)
 from app.core.route_params import declared_string_param_names
 
-# The `msg`/`type` pair Pydantic produces for a `NulFreeStr` field
-# (`app.core.external_strings.reject_nul`), so both mechanisms report a
-# U+0000 identically.
-_NUL_ERROR_MESSAGE = "Value error, must not contain U+0000"
-_NUL_ERROR_TYPE = "value_error"
+# The `msg`/`type` pair Pydantic produces for an `AdmissibleStr` field
+# (`app.core.external_strings.reject_inadmissible_characters`), so both
+# mechanisms report an inadmissible character identically.
+_ERROR_MESSAGE = f"Value error, {INADMISSIBLE_CHARACTER_MESSAGE}"
+_ERROR_TYPE = "value_error"
 
-# Stack marker for an object member name containing U+0000, so its error is
-# emitted in document order relative to its siblings' values.
-_NUL_MEMBER_NAME = object()
+# Stack marker for an object member name containing an inadmissible
+# character, so its error is emitted in document order relative to its
+# siblings' values.
+_INADMISSIBLE_MEMBER_NAME = object()
 
 
-def _nul_error(loc: tuple[str | int, ...]) -> dict[str, Any]:
-    return {"loc": loc, "msg": _NUL_ERROR_MESSAGE, "type": _NUL_ERROR_TYPE}
+def _error(loc: tuple[str | int, ...]) -> dict[str, Any]:
+    return {"loc": loc, "msg": _ERROR_MESSAGE, "type": _ERROR_TYPE}
 
 
 def _body_is_decoded_json(request: Request, route: APIRoute) -> bool:
@@ -69,24 +75,26 @@ def _body_is_decoded_json(request: Request, route: APIRoute) -> bool:
     return subtype == "json" or subtype.endswith("+json")
 
 
-def _body_nul_errors(body: Any) -> list[dict[str, Any]]:
-    """One error per JSON string containing U+0000, at any depth.
+def _body_errors(body: Any) -> list[dict[str, Any]]:
+    """One error per JSON string containing an inadmissible character, at
+    any depth.
 
     Walks iteratively so a deeply nested body that the JSON decoder
     accepted cannot exhaust the interpreter recursion limit here. An object
-    member name containing U+0000 is reported at its containing object
-    (the name itself is never echoed in a `loc`), and that member's value
-    is not inspected further. Errors are in document order.
+    member name containing an inadmissible character is reported at its
+    containing object (the name itself is never echoed in a `loc`, which
+    could not even be rendered for a surrogate code point), and that
+    member's value is not inspected further. Errors are in document order.
     """
     errors: list[dict[str, Any]] = []
     stack: list[tuple[tuple[str | int, ...], Any]] = [(("body",), body)]
     while stack:
         loc, value = stack.pop()
-        if value is _NUL_MEMBER_NAME:
-            errors.append(_nul_error(loc))
+        if value is _INADMISSIBLE_MEMBER_NAME:
+            errors.append(_error(loc))
         elif isinstance(value, str):
-            if contains_nul(value):
-                errors.append(_nul_error(loc))
+            if contains_inadmissible_character(value):
+                errors.append(_error(loc))
         elif isinstance(value, list):
             stack.extend(
                 ((*loc, index), item)
@@ -95,16 +103,17 @@ def _body_nul_errors(body: Any) -> list[dict[str, Any]]:
         elif isinstance(value, dict):
             members: list[tuple[tuple[str | int, ...], Any]] = []
             for key, item in value.items():
-                if contains_nul(key):
-                    members.append((loc, _NUL_MEMBER_NAME))
+                if contains_inadmissible_character(key):
+                    members.append((loc, _INADMISSIBLE_MEMBER_NAME))
                 else:
                     members.append(((*loc, key), item))
             stack.extend(reversed(members))
     return errors
 
 
-async def reject_nul_in_request_input(request: Request) -> None:
-    """Reject any consumer-supplied request string containing U+0000.
+async def reject_inadmissible_request_input(request: Request) -> None:
+    """Reject any consumer-supplied request string containing an
+    inadmissible character.
 
     Q1: `request` is the current request. The matched route is read from
     `request.scope["route"]`, populated by Starlette's router after route
@@ -132,13 +141,13 @@ async def reject_nul_in_request_input(request: Request) -> None:
     errors: list[dict[str, Any]] = []
     for name in declared_string_param_names(route.dependant, "path"):
         value = request.path_params.get(name)
-        if isinstance(value, str) and contains_nul(value):
-            errors.append(_nul_error(("path", name)))
+        if isinstance(value, str) and contains_inadmissible_character(value):
+            errors.append(_error(("path", name)))
     for name in declared_string_param_names(route.dependant, "query"):
         for value in request.query_params.getlist(name):
-            if contains_nul(value):
-                errors.append(_nul_error(("query", name)))
+            if contains_inadmissible_character(value):
+                errors.append(_error(("query", name)))
     if _body_is_decoded_json(request, route) and await request.body():
-        errors.extend(_body_nul_errors(await request.json()))
+        errors.extend(_body_errors(await request.json()))
     if errors:
         raise RequestValidationError(errors)

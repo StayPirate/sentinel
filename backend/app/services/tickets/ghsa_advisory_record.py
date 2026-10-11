@@ -13,9 +13,10 @@ absent or `null`, an unparseable or naive date-time, and a non-object root
 raise `pydantic.ValidationError`, whose message never renders the input.
 
 `extract()` builds the `CVEIngestPayload` and the reference candidates.
-The payload's own validation rejects U+0000 and over-length values
-(cve-service.md, CVEIngestPayload Schema); that `pydantic.ValidationError`
-propagates as a per-advisory failure. CVSS vectors are passed unparsed:
+The payload's own validation rejects inadmissible characters (U+0000 and
+surrogate code points) and over-length values (cve-service.md,
+CVEIngestPayload Schema); that `pydantic.ValidationError` propagates as a
+per-advisory failure. CVSS vectors are passed unparsed:
 `upsert_cve()` owns canonical acceptance through the External Base
 Reduction and its bounded `invalid_vector` warning.
 """
@@ -31,7 +32,7 @@ from typing import Annotated, Final
 from pydantic import BaseModel, BeforeValidator, ConfigDict
 
 from app.core.enums import CVEExternalIdentifierSource, ReferenceType
-from app.core.external_strings import contains_nul
+from app.core.external_strings import contains_inadmissible_character
 from app.services.cve_ingest import (
     AffectedVersionEntry,
     AffectedVersionOperation,
@@ -85,10 +86,10 @@ def _iso_datetime(value: object) -> datetime:
     including a date-time without an offset, is a schema mismatch."""
     if not isinstance(value, str):
         raise ValueError("date-time must be a string")
-    if contains_nul(value):
-        # `fromisoformat` ignores a trailing U+0000 and accepts it as the
-        # date/time separator.
-        raise ValueError("date-time must not contain U+0000")
+    if contains_inadmissible_character(value):
+        # `fromisoformat` ignores a trailing U+0000 and accepts U+0000 or a
+        # surrogate code point as the date/time separator.
+        raise ValueError("date-time must not contain U+0000 or a surrogate code point")
     try:
         parsed = datetime.fromisoformat(value)
     except ValueError:
@@ -231,7 +232,8 @@ def extract(advisory: GhsaAdvisory) -> GhsaExtraction:
     """§ Field Mapping for one validated advisory.
 
     Raises `pydantic.ValidationError` when the payload rejects a value
-    (U+0000, over-length, or a conflicting same-key duplicate).
+    (an inadmissible character, over-length, or a conflicting same-key
+    duplicate).
     """
     fields: dict[str, object] = _global_fields(advisory)
     cvss = _cvss_candidates(advisory.cvss_severities)

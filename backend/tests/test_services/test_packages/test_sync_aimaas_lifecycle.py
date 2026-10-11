@@ -382,7 +382,7 @@ class TestParseLifecycleEntries:
         """External String Admissibility: not unmatchable, not stripped."""
         error = _response_error([_item("cpe:/o:example:b:1"), _item(cpe)])
 
-        assert str(error) == "item 1: cpe contains U+0000"
+        assert str(error) == "item 1: cpe contains an inadmissible character"
 
     @pytest.mark.parametrize("field", ALL_DATE_FIELDS)
     def test_missing_date_key_is_a_response_error(self, field: str) -> None:

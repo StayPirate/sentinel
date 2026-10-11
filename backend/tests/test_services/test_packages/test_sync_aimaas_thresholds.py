@@ -445,7 +445,7 @@ class TestParseProductRefs:
         """External String Admissibility: not unmatchable, not stripped."""
         error = _product_error([product_item(1, cpe=value)])
 
-        assert str(error) == "item 0: cpe contains U+0000"
+        assert str(error) == "item 0: cpe contains an inadmissible character"
         assert MARKER not in str(error)
 
     def test_empty_response_yields_no_refs(self) -> None:
@@ -1641,7 +1641,7 @@ _SCHEMA_FAILURES: Final[list[SchemaCase]] = [
         "products",
         "cpe",
         "cpe:/o:example:nul\x00:1",
-        "item 105: cpe contains U+0000",
+        "item 105: cpe contains an inadmissible character",
     ),
     (
         "missing-product",

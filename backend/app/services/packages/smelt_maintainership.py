@@ -43,7 +43,7 @@ import structlog
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.config import settings
-from app.core.external_strings import NulFreeStr
+from app.core.external_strings import AdmissibleStr
 from app.services.http_client import INFRA_FAILURE_TYPES
 
 logger = structlog.get_logger(__name__)
@@ -61,13 +61,14 @@ _CREDENTIAL_HEADERS = ("authorization", "cookie")
 class _Person(BaseModel):
     """A direct user or group member; only `email` is consumed.
 
-    An `email` containing U+0000 is a schema failure (External String
-    Admissibility): the normalized email is a `User.email` query parameter.
+    An `email` containing U+0000 or a surrogate code point is a schema
+    failure (External String Admissibility): the normalized email is a
+    `User.email` query parameter.
     """
 
     model_config = ConfigDict(strict=True, extra="ignore", frozen=True)
 
-    email: NulFreeStr | None = None
+    email: AdmissibleStr | None = None
 
 
 class _Group(BaseModel):

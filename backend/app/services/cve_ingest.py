@@ -14,10 +14,10 @@ values in validation errors, so a rejected payload cannot leak upstream
 content into a log. Construction raises `pydantic.ValidationError` for
 the canonical model-validation failures: explicit-null `cve_state`, an
 explicit `PUBLISHED` with a non-null `date_rejected`, malformed
-affected-version operation shapes, any string value containing U+0000
-outside the untyped CVSS candidates, and conflicting same-key child
-content whose canonical key is available here (CWE, external
-identifiers, affected-version operations and entries). Conflicting CVSS
+affected-version operation shapes, any string value containing U+0000 or a
+surrogate code point outside the untyped CVSS candidates, and conflicting
+same-key child content whose canonical key is available here (CWE,
+external identifiers, affected-version operations and entries). Conflicting CVSS
 candidates are detected by `upsert_cve()`, which owns their
 canonicalization. Naive datetimes are interpreted as UTC and every
 datetime is normalized to aware UTC.
@@ -48,7 +48,7 @@ from app.core.enums import (
     SSVCExploitation,
     SSVCTechnicalImpact,
 )
-from app.core.external_strings import reject_nul
+from app.core.external_strings import reject_inadmissible_characters
 from app.models.cve import CVE
 from app.models.ticket import Ticket
 
@@ -73,15 +73,17 @@ class _PayloadModel(BaseModel):
 
     @field_validator("*", mode="after")
     @classmethod
-    def _reject_nul(cls, value: Any) -> Any:
-        """No `str` value or `str` collection item contains U+0000 (External
-        String Admissibility). Nested models validate their own fields."""
+    def _reject_inadmissible_characters(cls, value: Any) -> Any:
+        """No `str` value or `str` collection item contains U+0000 or a
+        surrogate code point (External String Admissibility), whether or
+        not the field carries a length or pattern constraint. Nested models
+        validate their own fields."""
         if isinstance(value, str):
-            reject_nul(value)
+            reject_inadmissible_characters(value)
         elif isinstance(value, list):
             for item in value:
                 if isinstance(item, str):
-                    reject_nul(item)
+                    reject_inadmissible_characters(item)
         return value
 
 
@@ -89,9 +91,9 @@ class CVSSAssessmentEntry(BaseModel):
     """Untrusted vector-only candidate from an external provider.
 
     Both fields accept any object: an individually invalid candidate,
-    including one containing U+0000, is skipped by `upsert_cve()` without
-    invalidating valid siblings, so this model does not apply the payload
-    U+0000 check.
+    including one containing an inadmissible character, is skipped by
+    `upsert_cve()` without invalidating valid siblings, so this model does
+    not apply the payload admissibility check.
     """
 
     model_config = _PAYLOAD_CONFIG
