@@ -6,11 +6,13 @@ Owning specifications:
 - docs/features/tickets/cve-sync-nvd.md (Custom Settings; Algorithm steps
   1-4.i, including the `totalResults` stability rule; NVD Date Format; Rate
   Limiting; Field Mapping, including the candidate skip event, CPE
-  configurations, and External String Admissibility; NVD Source API Caching;
-  First Run and >120-day Gap Handling; Overlap Buffer; Cursor Mechanism;
-  Error Handling, the `execute()` page-level and per-CVE tables, the partial
-  extraction model, Work unit and metric mapping, and Sanitized error
-  messages; NVD Source API Failure Handling).
+  configurations, and External String Admissibility; NVD Source API Caching,
+  including the Lifecycle's periodic run, which neither reads nor fills the
+  cache that on-demand fetches share; First Run and >120-day Gap Handling;
+  Overlap Buffer; Cursor Mechanism; Error Handling, the `execute()`
+  page-level and per-CVE tables, the partial extraction model, Work unit and
+  metric mapping, and Sanitized error messages; NVD Source API Failure
+  Handling).
 - docs/features/platform/cve-fetcher-infrastructure.md (`CVEFetchResult`;
   Per-CVE Finalization; Session Lifecycle for API-based CVE Fetchers,
   template 2, isolated status commit, and metric placement; Batch Error
@@ -50,9 +52,10 @@ automatic periodic context that `run()` establishes. HTTP is the in-process
 `NVD_API_KEY` is set to a fictional value on `app.config.settings`; the
 broker call is the recorded `task_publication.publish_task`; the isolated
 status sessions are counted and `_isolated_status_commit()` is spied; every
-throttle and rate-limit sleep is recorded instead of slept. All identifiers
-and texts are fictional, except the public data of the live fixtures and
-NVD's institutional source identifier `nvd@nist.gov`.
+throttle and rate-limit sleep is recorded instead of slept; the monotonic
+clock of the shared Source API cache is controlled where its age matters.
+All identifiers and texts are fictional, except the public data of the live
+fixtures and NVD's institutional source identifier `nvd@nist.gov`.
 """
 
 from __future__ import annotations
@@ -1196,6 +1199,95 @@ class TestSourceApi:
             _skip(cve.cve_id, "unresolved_source"),
         ]
         assert await env.assessments(cve) == {("NVD", V31)}
+
+
+# ---------------------------------------------------------------------------
+# Shared Source API cache (NVD Source API Caching, Lifecycle)
+# ---------------------------------------------------------------------------
+
+TTL: Final = sync_module.SOURCE_CACHE_TTL
+EPSILON: Final = 0.001
+BUILT_AT: Final = 10_000.0
+"""The controlled clock's first instant, away from the holder's initial 0.0."""
+CNA_CONTACT: Final = "contact-hackerone@example.com"
+
+
+class Clock:
+    """The controlled monotonic clock of the shared cache."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.now = BUILT_AT
+        monkeypatch.setattr(sync_module, "_monotonic", lambda: self.now)
+
+
+@pytest.fixture
+def clock(monkeypatch: pytest.MonkeyPatch) -> Clock:
+    return Clock(monkeypatch)
+
+
+def _shared() -> Mapping[str, str] | None:
+    return sync_module._shared_source_cache.get()
+
+
+async def _on_demand_build(env: Env) -> Mapping[str, str] | None:
+    """The shared cache lookup of one `fetch_single()`, on a fresh fetcher
+    and client."""
+    fetcher = env.fetcher()
+    try:
+        return await fetcher._shared_source_names()
+    finally:
+        await fetcher._teardown_http_client()
+
+
+@pytest.mark.integration
+class TestSharedSourceCacheIsolation:
+    @pytest.mark.parametrize("run_source", ["available", "unavailable"])
+    async def test_run_builds_its_own_cache_and_leaves_a_warm_shared_one(
+        self, run_source: str, env: Env, batch: Batch, clock: Clock
+    ) -> None:
+        assert _shared() is None
+        shared = await _on_demand_build(env)
+        assert shared is not None
+        assert env.server.kinds == ["source"]
+        cve = await env.cve()
+        env.pages([env.sourced(cve.cve_id)])
+        if run_source == "unavailable":
+            env.server.source_response = status(503)
+        clock.now += 300.0
+
+        with capture_logs() as logs:
+            await batch.execute()
+
+        assert env.server.kinds == ["source", "source", "page"]
+        if run_source == "available":
+            assert logs == []
+            assert await env.assessments(cve) == {("NVD", V31), (CNA_NAME, V31_CNA)}
+        else:
+            # Degraded mode: the run never falls back to the shared cache.
+            assert logs == [UNAVAILABLE, _skip(cve.cve_id, "unresolved_source")]
+            assert await env.assessments(cve) == {("NVD", V31)}
+        _assert_private(logs, CNA_SOURCE, CNA_NAME, CNA_CONTACT)
+        # The same mapping object, still dated from the on-demand build.
+        clock.now = BUILT_AT + TTL - EPSILON
+        assert _shared() is shared
+        clock.now = BUILT_AT + TTL
+        assert _shared() is None
+
+    async def test_successful_run_leaves_a_cold_shared_cache_empty(
+        self, env: Env, batch: Batch
+    ) -> None:
+        assert _shared() is None
+        cve = await env.cve()
+        env.pages([env.sourced(cve.cve_id)])
+
+        await batch.execute()
+
+        assert env.server.kinds == ["source", "page"]
+        assert await env.assessments(cve) == {("NVD", V31), (CNA_NAME, V31_CNA)}
+        assert _shared() is None
+        # The next on-demand fetch still builds with its own request.
+        assert await _on_demand_build(env) is not None
+        assert env.server.kinds == ["source", "page", "source"]
 
 
 # ---------------------------------------------------------------------------

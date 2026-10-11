@@ -5,7 +5,8 @@ per-request API key, and `SyncNvdCves.fetch_single()`
 Owning specifications:
 
 - docs/features/tickets/cve-sync-nvd.md (Fetcher Definition, Class Structure,
-  HTTP Client Configuration, Custom Settings; NVD Source API Caching and NVD
+  HTTP Client Configuration, Custom Settings; NVD Source API Caching,
+  including the Lifecycle of the cache that on-demand fetches share, and NVD
   Source API Failure Handling; `fetch_single(cve_id)`; Field Mapping,
   including the candidate skip event, CPE configurations, and External
   String Admissibility; Error Handling, the `fetch_single()` table and the
@@ -22,7 +23,8 @@ Owning specifications:
 - docs/features/platform/testing-strategy.md (CVE Fetcher Infrastructure,
   Typed result; External String Admissibility; NVD CPE Applicability
   Selection, the outcome, logging, and handoff obligations of
-  `fetch_single()`).
+  `fetch_single()`; Test Independence, the Source API cache reset; Sync
+  Entry-Point Tests).
 
 HTTP is the in-process `NvdServer` of `tests/support/nvd.py`, injected as
 the fetcher's HTTP client, serving the sanitized live fixtures (retargeted
@@ -33,10 +35,12 @@ any database work use a session that fails on any use, and spies on
 `cve_service.upsert_cve()` and `reference_service.upsert_references()` prove
 no mutation was attempted; they are unit tests. Ingestion tests run the real
 `upsert_cve()` and `upsert_references()` on `db_session`, rolled back at
-teardown. The periodic `execute()` is tested in
-`test_sync_nvd_cves_execute.py`. All identifiers and texts are fictional,
-except the public data of the live fixtures and NVD's institutional source
-identifier `nvd@nist.gov`.
+teardown. Shared-cache tests run each fetch on a fresh fetcher and client,
+as a task attempt does, and replace the cache's monotonic clock
+(`sync_nvd_cves._monotonic`) with a controlled one. The periodic `execute()`
+is tested in `test_sync_nvd_cves_execute.py`. All identifiers and texts are
+fictional, except the public data of the live fixtures and NVD's
+institutional source identifier `nvd@nist.gov`.
 """
 
 from __future__ import annotations
@@ -47,7 +51,7 @@ import uuid
 from collections.abc import AsyncIterator, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 from typing import Any, Final, cast
 
 import httpx
@@ -1523,6 +1527,476 @@ class TestSourceApi:
             }
         ]
         assert (CNA_NAME, "3.1", V31_CNA) in await _assessments(db_session, target.cve)
+
+
+# ---------------------------------------------------------------------------
+# Shared Source API cache (NVD Source API Caching, Lifecycle)
+# ---------------------------------------------------------------------------
+
+TTL: Final = sync_module.SOURCE_CACHE_TTL
+EPSILON: Final = 0.001
+BUILT_AT: Final = 10_000.0
+"""The controlled clock's first instant, away from the holder's initial 0.0."""
+CNA_UUID: Final = "36234546-b8fa-4601-9d6f-f4e334aa8ea1"
+CNA_CONTACT: Final = "contact-hackerone@example.com"
+"""The CNA's other identifier and its contact address in the Source API body."""
+CNA_PRIVATE: Final = (CNA_SOURCE, CNA_UUID, CNA_NAME, CNA_CONTACT)
+LATE_NAME: Final = "Example Late CNA"
+LATE_CONTACT: Final = "contact-example-late-cna@example.com"
+"""A fictional CNA that NVD adds after a build, identified by `UNKNOWN_SOURCE`."""
+
+RESOLVED: Final = {("NVD", "3.1", V31), (CNA_NAME, "3.1", V31_CNA)}
+RESOLVED_CWES: Final = {("CWE-79", "NVD"), ("CWE-352", CNA_NAME)}
+DEGRADED: Final = {("NVD", "3.1", V31)}
+DEGRADED_CWES: Final = {("CWE-79", "NVD")}
+
+UNSTORED_FAILURES: Final[list[Responder]] = [
+    status(503),
+    raising(httpx.ConnectError("[Errno 111] Connection refused")),
+    status(200, b"{"),
+]
+"""One failed build per degraded-mode path of the Source API request (a
+non-200 status, a transport error, an unparseable body); `TestSourceApi` owns
+the complete failure matrix."""
+UNSTORED_FAILURE_IDS: Final = ["http_503", "connection_refused", "truncated_json"]
+ENTRIES_SKIPPED: Final = {
+    "event": NVD_SOURCE_ENTRIES_SKIPPED_EVENT,
+    "log_level": "warning",
+    "fetcher_name": NAME,
+    "count": 2,
+}
+CACHE_INCOMPLETE: Final = {
+    "event": NVD_SOURCE_CACHE_INCOMPLETE_EVENT,
+    "log_level": "warning",
+    "fetcher_name": NAME,
+}
+
+
+class Clock:
+    """The controlled monotonic clock of the shared cache."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.now = BUILT_AT
+        monkeypatch.setattr(sync_module, "_monotonic", lambda: self.now)
+
+
+@pytest.fixture
+def clock(monkeypatch: pytest.MonkeyPatch) -> Clock:
+    return Clock(monkeypatch)
+
+
+def _shared() -> Mapping[str, str] | None:
+    return sync_module._shared_source_cache.get()
+
+
+def _assert_built_at(clock: Clock, built_at: float, names: Mapping[str, str]) -> None:
+    """The shared cache holds `names` from a build completed at `built_at`:
+    valid just below the TTL from that instant and expired at it."""
+    now = clock.now
+    try:
+        clock.now = built_at + TTL - EPSILON
+        assert _shared() is names
+        clock.now = built_at + TTL
+        assert _shared() is None
+    finally:
+        clock.now = now
+
+
+async def _fetch_fresh(
+    server: NvdServer, cve_id: str, session: AsyncSession
+) -> CVEFetchResult:
+    """One on-demand fetch as a task attempt runs it: a fresh fetcher with
+    its own client of `server`, closed afterwards."""
+    instance = SyncNvdCves()
+    instance._http_client = server.client()
+    try:
+        return await instance.fetch_single(cve_id, session)
+    finally:
+        await instance._teardown_http_client()
+
+
+async def _assert_resolved(db: AsyncSession, target: Target) -> None:
+    assert await _assessments(db, target.cve) == RESOLVED
+    assert await _cwes(db, target.cve) == RESOLVED_CWES
+
+
+async def _assert_degraded(db: AsyncSession, target: Target) -> None:
+    assert await _assessments(db, target.cve) == DEGRADED
+    assert await _cwes(db, target.cve) == DEGRADED_CWES
+
+
+async def _sourced_targets(
+    db: AsyncSession, server: NvdServer, count: int
+) -> list[Target]:
+    """`count` CVEs with Tickets, each served with `_sourced()`."""
+    targets = [await _target(db, TicketStatus.ANALYSIS) for _ in range(count)]
+    for target in targets:
+        _serve(server, target.cve_id, _sourced(target.cve_id))
+    return targets
+
+
+_BEFORE_SOURCE_API: Final[dict[str, tuple[Responder | None, type[Exception]]]] = {
+    "zero_results": (status(200, load_raw_fixture(PAGE_EMPTY)), CVENotInSource),
+    "other_cve": (
+        json_body(page_body([_sourced("CVE-2099-0001")], 1)),
+        CVENotInSource,
+    ),
+    "http_500": (status(500, SECRET.encode()), httpx.HTTPStatusError),
+    "http_404": (
+        status(404, headers={"message": "Invalid apiKey."}),
+        httpx.HTTPStatusError,
+    ),
+    "transport_error": (
+        raising(httpx.ConnectError("[Errno 111] Connection refused")),
+        httpx.ConnectError,
+    ),
+    "invalid_api_key": (None, FetcherError),
+}
+"""Fetches that end before the Source API: the CVE request's responder
+(`None`: an API key that is not a valid header value, no request at all)
+and the raised exception."""
+
+
+def _end_before_source_api(
+    kind: str, server: NvdServer, cve_id: str, monkeypatch: pytest.MonkeyPatch
+) -> type[Exception]:
+    responder, error = _BEFORE_SOURCE_API[kind]
+    if responder is None:
+        monkeypatch.setattr(app_settings, "nvd_api_key", SecretStr(f"{API_KEY}\n"))
+    else:
+        server.single_responses[cve_id] = responder
+    return error
+
+
+@pytest.mark.integration
+class TestSharedSourceCache:
+    async def test_consecutive_fetches_send_one_source_request(
+        self, db_session: AsyncSession, server: NvdServer, clock: Clock
+    ) -> None:
+        # The autouse reset leaves no cache that an earlier test built.
+        assert _shared() is None
+        targets = await _sourced_targets(db_session, server, 3)
+        fetch_logs = []
+
+        for target in targets:
+            with capture_logs() as logs:
+                result = await _fetch_fresh(server, target.cve_id, db_session)
+            assert result.action is UpsertAction.UPDATED
+            fetch_logs.append(logs)
+            clock.now += 600.0
+
+        assert server.kinds == ["single", "source", "single", "single"]
+        assert [r.url.params["cveId"] for r in server.single_requests] == [
+            target.cve_id for target in targets
+        ]
+        for target in targets:
+            await _assert_resolved(db_session, target)
+        # A complete build logs nothing; a fetch served by the cache neither.
+        assert fetch_logs == [[], [], []]
+        names = _shared()
+        assert names is not None
+        assert names[CNA_SOURCE] == CNA_NAME
+        _assert_built_at(clock, BUILT_AT, names)
+
+    async def test_cache_serves_below_the_ttl_and_is_rebuilt_at_it(
+        self, db_session: AsyncSession, server: NvdServer, clock: Clock
+    ) -> None:
+        assert _shared() is None
+        [target] = await _sourced_targets(db_session, server, 1)
+        await _fetch_fresh(server, target.cve_id, db_session)
+        built = _shared()
+        assert built is not None
+
+        clock.now = BUILT_AT + TTL - EPSILON
+        with capture_logs() as served_logs:
+            await _fetch_fresh(server, target.cve_id, db_session)
+
+        assert server.kinds == ["single", "source", "single"]
+        assert _shared() is built
+
+        clock.now = BUILT_AT + TTL
+        assert _shared() is None
+        with capture_logs() as rebuilt_logs:
+            await _fetch_fresh(server, target.cve_id, db_session)
+
+        assert server.kinds == ["single", "source", "single", "single", "source"]
+        rebuilt = _shared()
+        assert rebuilt is not None
+        assert rebuilt is not built
+        assert dict(rebuilt) == dict(built)
+        # The rebuild replaced the stored cache with its own build time.
+        _assert_built_at(clock, BUILT_AT + TTL, rebuilt)
+
+        clock.now = BUILT_AT + 2 * TTL - EPSILON
+        await _fetch_fresh(server, target.cve_id, db_session)
+
+        assert server.kinds[5:] == ["single"]
+        assert served_logs == rebuilt_logs == []
+        await _assert_resolved(db_session, target)
+
+    async def test_age_is_measured_from_the_completion_of_the_build(
+        self, db_session: AsyncSession, server: NvdServer, clock: Clock
+    ) -> None:
+        build_duration = 120.0
+
+        def slow(request: httpx.Request) -> httpx.Response:
+            clock.now += build_duration
+            return json_body(server.sources)(request)
+
+        server.source_once = [slow]
+        [target] = await _sourced_targets(db_session, server, 1)
+        await _fetch_fresh(server, target.cve_id, db_session)
+        completed = BUILT_AT + build_duration
+        assert clock.now == completed
+        built = _shared()
+        assert built is not None
+
+        _assert_built_at(clock, completed, built)
+        # Older than the TTL from the build's start, younger from its end.
+        clock.now = completed + TTL - EPSILON
+        await _fetch_fresh(server, target.cve_id, db_session)
+
+        assert server.kinds == ["single", "source", "single"]
+        await _assert_resolved(db_session, target)
+
+    @pytest.mark.parametrize("responder", UNSTORED_FAILURES, ids=UNSTORED_FAILURE_IDS)
+    async def test_failed_build_is_not_stored_and_the_next_fetch_rebuilds(
+        self,
+        responder: Responder,
+        db_session: AsyncSession,
+        server: NvdServer,
+        clock: Clock,
+    ) -> None:
+        degraded, recovered, served = await _sourced_targets(db_session, server, 3)
+        server.source_once = [responder]
+
+        with capture_logs() as degraded_logs:
+            result = await _fetch_fresh(server, degraded.cve_id, db_session)
+
+        assert result.action is UpsertAction.UPDATED
+        assert degraded_logs == [
+            UNAVAILABLE,
+            _skip(degraded.cve_id, "unresolved_source"),
+        ]
+        await _assert_degraded(db_session, degraded)
+        assert await _source_status(db_session, degraded.cve) == (
+            CVESourceFetchStatus.SUCCESS
+        )
+        assert _shared() is None
+
+        clock.now += 1.0
+        with capture_logs() as recovered_logs:
+            await _fetch_fresh(server, recovered.cve_id, db_session)
+        names = _shared()
+        assert names is not None
+        with capture_logs() as served_logs:
+            await _fetch_fresh(server, served.cve_id, db_session)
+
+        assert server.kinds == ["single", "source", "single", "source", "single"]
+        assert recovered_logs == served_logs == []
+        await _assert_resolved(db_session, recovered)
+        await _assert_resolved(db_session, served)
+        _assert_built_at(clock, BUILT_AT + 1.0, names)
+        _assert_private([*degraded_logs, *recovered_logs, *served_logs], *CNA_PRIVATE)
+
+    async def test_expired_cache_is_not_reused_when_its_rebuild_fails(
+        self, db_session: AsyncSession, server: NvdServer, clock: Clock
+    ) -> None:
+        first, degraded, recovered = await _sourced_targets(db_session, server, 3)
+        await _fetch_fresh(server, first.cve_id, db_session)
+        assert _shared() is not None
+
+        clock.now = BUILT_AT + TTL
+        server.source_once = [status(503)]
+        with capture_logs() as logs:
+            await _fetch_fresh(server, degraded.cve_id, db_session)
+
+        assert logs == [UNAVAILABLE, _skip(degraded.cve_id, "unresolved_source")]
+        _assert_private(logs, *CNA_PRIVATE)
+        await _assert_degraded(db_session, degraded)
+        assert _shared() is None
+
+        clock.now += 1.0
+        await _fetch_fresh(server, recovered.cve_id, db_session)
+
+        assert server.kinds == ["single", "source"] * 3
+        await _assert_resolved(db_session, first)
+        await _assert_resolved(db_session, recovered)
+        names = _shared()
+        assert names is not None
+        _assert_built_at(clock, BUILT_AT + TTL + 1.0, names)
+
+    @pytest.mark.parametrize("partial", ["malformed", "incomplete", "both"])
+    async def test_partial_build_is_stored_and_logs_its_events_only_once(
+        self,
+        partial: str,
+        db_session: AsyncSession,
+        server: NvdServer,
+        clock: Clock,
+    ) -> None:
+        malformed = partial in ("malformed", "both")
+        incomplete = partial in ("incomplete", "both")
+        server.sources = _source_page_with(
+            *(
+                [{"name": " ", "sourceIdentifiers": [UNKNOWN_SOURCE]}, SECRET]
+                if malformed
+                else []
+            ),
+            **({"totalResults": 515, "resultsPerPage": 514} if incomplete else {}),
+        )
+        builder, served = await _sourced_targets(db_session, server, 2)
+
+        with capture_logs() as build_logs:
+            await _fetch_fresh(server, builder.cve_id, db_session)
+        names = _shared()
+        assert names is not None
+        clock.now = BUILT_AT + TTL - EPSILON
+        with capture_logs() as served_logs:
+            await _fetch_fresh(server, served.cve_id, db_session)
+
+        assert build_logs == [
+            *([ENTRIES_SKIPPED] if malformed else []),
+            *([CACHE_INCOMPLETE] if incomplete else []),
+        ]
+        assert served_logs == []
+        assert server.kinds == ["single", "source", "single"]
+        assert UNKNOWN_SOURCE not in names
+        assert _shared() is names
+        await _assert_resolved(db_session, builder)
+        await _assert_resolved(db_session, served)
+        _assert_private([*build_logs, *served_logs], UNKNOWN_SOURCE, *CNA_PRIVATE)
+
+    @pytest.mark.parametrize("kind", list(_BEFORE_SOURCE_API))
+    async def test_fetch_ending_before_the_source_api_leaves_a_warm_cache_unchanged(
+        self,
+        kind: str,
+        db_session: AsyncSession,
+        server: NvdServer,
+        clock: Clock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        [target] = await _sourced_targets(db_session, server, 1)
+        await _fetch_fresh(server, target.cve_id, db_session)
+        names = _shared()
+        assert names is not None
+        failing = fictional_cve_id()
+        error = _end_before_source_api(kind, server, failing, monkeypatch)
+        clock.now += 300.0
+
+        with capture_logs() as logs, pytest.raises(error):
+            await _fetch_fresh(server, failing, NO_SESSION)
+
+        assert server.kinds == ["single", "source"] + (
+            [] if kind == "invalid_api_key" else ["single"]
+        )
+        assert logs == []
+        # The same mapping object, still dated from its own build.
+        _assert_built_at(clock, BUILT_AT, names)
+
+    async def test_identifier_absent_from_the_stored_cache_waits_for_the_rebuild(
+        self, db_session: AsyncSession, server: NvdServer, clock: Clock
+    ) -> None:
+        [builder] = await _sourced_targets(db_session, server, 1)
+        late = await _target(db_session, TicketStatus.ANALYSIS)
+        _serve(
+            server,
+            late.cve_id,
+            _record(
+                late.cve_id,
+                metrics={
+                    "cvssMetricV31": [
+                        _metric(NVD, V31),
+                        _metric(UNKNOWN_SOURCE, V31_CNA),
+                    ]
+                },
+                weaknesses=[
+                    _weakness(NVD, "CWE-79"),
+                    _weakness(UNKNOWN_SOURCE, "CWE-352"),
+                ],
+            ),
+        )
+        await _fetch_fresh(server, builder.cve_id, db_session)
+        built = _shared()
+        assert built is not None
+        assert UNKNOWN_SOURCE not in built
+        # NVD lists the CNA only after the build.
+        server.sources = _source_page_with(
+            {
+                "name": LATE_NAME,
+                "sourceIdentifiers": [UNKNOWN_SOURCE],
+                "contactEmail": LATE_CONTACT,
+            }
+        )
+
+        clock.now = BUILT_AT + TTL - EPSILON
+        with capture_logs() as stale_logs:
+            await _fetch_fresh(server, late.cve_id, db_session)
+
+        assert stale_logs == [_skip(late.cve_id, "unresolved_source")]
+        assert server.kinds == ["single", "source", "single"]
+        await _assert_degraded(db_session, late)
+        assert _shared() is built
+
+        clock.now = BUILT_AT + TTL
+        with capture_logs() as rebuilt_logs:
+            await _fetch_fresh(server, late.cve_id, db_session)
+
+        assert rebuilt_logs == []
+        assert server.kinds[3:] == ["single", "source"]
+        assert await _assessments(db_session, late.cve) == {
+            ("NVD", "3.1", V31),
+            (LATE_NAME, "3.1", V31_CNA),
+        }
+        assert await _cwes(db_session, late.cve) == {
+            ("CWE-79", "NVD"),
+            ("CWE-352", LATE_NAME),
+        }
+        _assert_private(
+            [*stale_logs, *rebuilt_logs], UNKNOWN_SOURCE, LATE_NAME, LATE_CONTACT
+        )
+
+
+@pytest.mark.unit
+class TestSharedSourceCacheContent:
+    def test_cache_survives_separate_event_loops_and_holds_only_strings(
+        self,
+    ) -> None:
+        """Each task attempt runs in its own `asyncio.run()` with a fresh
+        fetcher and client (Sync Entry-Point Tests: a plain `def` test)."""
+        assert _shared() is None
+        server = NvdServer()
+
+        async def attempt() -> tuple[Mapping[str, str] | None, httpx.AsyncClient]:
+            instance = SyncNvdCves()
+            client = server.client()
+            instance._http_client = client
+            try:
+                return await instance._shared_source_names(), client
+            finally:
+                await instance._teardown_http_client()
+
+        first, first_client = asyncio.run(attempt())
+        second, second_client = asyncio.run(attempt())
+
+        assert server.kinds == ["source"]
+        assert first_client is not second_client
+        # Each client was closed inside its own event loop.
+        assert first_client.is_closed
+        assert second_client.is_closed
+        assert first is not None
+        assert second is first
+        assert _shared() is first
+        assert first[CNA_SOURCE] == first[CNA_UUID] == CNA_NAME
+        assert CNA_CONTACT not in first
+        assert CNA_CONTACT not in first.values()
+        assert isinstance(first, MappingProxyType)
+        assert all(
+            type(key) is str and type(value) is str for key, value in first.items()
+        )
+        holder = sync_module._shared_source_cache
+        assert type(holder).__slots__ == ("_built_at", "_names")
+        assert not hasattr(holder, "__dict__")
+        assert type(holder._built_at) is float
 
 
 # ---------------------------------------------------------------------------

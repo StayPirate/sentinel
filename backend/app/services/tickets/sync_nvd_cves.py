@@ -22,9 +22,12 @@ contract of docs/features/platform/cve-fetcher-infrastructure.md:
   is processed in its own transaction with `commit_and_dispatch()` outside
   the per-CVE catch.
 - `fetch_single()` sends one `cveId` query and, when the response holds the
-  requested CVE, builds its own Source API cache. Every HTTP error status
-  propagates unchanged so `is_retryable_condition()` keeps classifying it;
-  HTTP 404 is a rejected request, never a missing CVE.
+  requested CVE, resolves provider names through the Source API cache that
+  every `fetch_single()` of the process shares: a successful build serves
+  for `SOURCE_CACHE_TTL` seconds on a monotonic clock, and a degraded build
+  is never stored. Every HTTP error status propagates unchanged so
+  `is_retryable_condition()` keeps classifying it; HTTP 404 is a rejected
+  request, never a missing CVE.
 - `catch_up()` is the inherited `BaseCVEFetcher` default.
 
 The record mapping, the Source API cache, and the CPE selection are the
@@ -40,6 +43,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import time
 from asyncio import CancelledError
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
@@ -116,6 +120,52 @@ _NVD_DATE_FORMAT: Final = "%Y-%m-%dT%H:%M:%S.000"
 _HEADER_VALUE: Final = re.compile(r"[\x21-\x7e]+")
 """A valid API key header value: printable ASCII without whitespace."""
 
+SOURCE_CACHE_TTL: Final = 3600.0
+"""Seconds a successful Source API build serves the `fetch_single()` calls of
+one process (NVD Source API Caching, Lifecycle); a fixed value, not a
+setting."""
+
+_monotonic = time.monotonic
+"""The clock of the shared Source API cache."""
+
+
+class _SharedSourceCache:
+    """The Source API cache that every `fetch_single()` of the process shares
+    (NVD Source API Caching, Lifecycle).
+
+    Holds only the identifier-to-name mapping of the last successful build
+    and that build's completion time on `_monotonic()`: nothing bound to an
+    event loop, session, or HTTP client, so it outlives the per-attempt
+    `asyncio.run()` of the worker tasks. A degraded build is never stored.
+    """
+
+    __slots__ = ("_built_at", "_names")
+
+    def __init__(self) -> None:
+        self._names: Mapping[str, str] | None = None
+        self._built_at = 0.0
+
+    def get(self) -> Mapping[str, str] | None:
+        """The stored mapping while its age is below `SOURCE_CACHE_TTL`,
+        `None` before the first build and once it has expired."""
+        if self._names is None or _monotonic() - self._built_at >= SOURCE_CACHE_TTL:
+            return None
+        return self._names
+
+    def store(self, names: Mapping[str, str]) -> None:
+        """Replace the stored mapping with a build completed now."""
+        self._names = names
+        self._built_at = _monotonic()
+
+    def clear(self) -> None:
+        """Forget the stored mapping."""
+        self._names = None
+        self._built_at = 0.0
+
+
+_shared_source_cache: Final = _SharedSourceCache()
+"""The process-wide instance; `execute()` never reads or fills it."""
+
 
 class NvdResponseError(Exception):
     """A `fetch_single()` response that is neither an HTTP error nor the
@@ -162,9 +212,10 @@ class SyncNvdCves(BaseCVEFetcher):
 
         Q3: one `GET /cves/2.0?cveId=…` with the per-request API key header,
         without redirects or throttle. When the response holds the requested
-        CVE, one Source API request builds the provider cache (degraded mode
-        and its WARNING on any failure); the element is mapped, its skip and
-        unknown-status facts logged, then `upsert_cve()` and
+        CVE, the provider cache is the one shared by the process while it is
+        valid; otherwise one Source API request builds it (degraded mode and
+        its WARNING on any failure, never stored). The element is mapped, its
+        skip and unknown-status facts logged, then `upsert_cve()` and
         `upsert_references()` (the NVD source reference first, then
         `.references[]`) run in `session`. Adds no flush beyond its
         delegates' own, never commits, and records no metric.
@@ -205,7 +256,7 @@ class SyncNvdCves(BaseCVEFetcher):
             raise nvd_cve_record.NvdRecordStructureError
         if record_id != cve_id:
             raise CVENotInSource()
-        source_names = await self._source_names()
+        source_names = await self._shared_source_names()
         return await self._ingest(session, element, source_names)
 
     async def execute(self, session: AsyncSession) -> None:
@@ -255,6 +306,17 @@ class SyncNvdCves(BaseCVEFetcher):
             if start_index >= total_results:
                 return
             await asyncio.sleep(request_delay)
+
+    async def _shared_source_names(self) -> Mapping[str, str] | None:
+        """The provider cache of `fetch_single()`: the process-wide cache
+        while valid, otherwise one `_source_names()` build, stored only when
+        it succeeded; `None` is degraded mode."""
+        names = _shared_source_cache.get()
+        if names is None:
+            names = await self._source_names()
+            if names is not None:
+                _shared_source_cache.store(names)
+        return names
 
     async def _source_names(self) -> Mapping[str, str] | None:
         """One Source API request (NVD Source API Caching); `None` is
