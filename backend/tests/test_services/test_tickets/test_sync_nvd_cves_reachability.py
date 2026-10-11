@@ -9,8 +9,10 @@ schedule entry.
 Owning specifications:
 
 - docs/features/tickets/cve-sync-nvd.md (Fetcher Definition; Class
-  Structure; Custom Settings; `fetch_single(cve_id)`; Error Handling, the
-  `fetch_single()` table, including HTTP 404 as a non-retryable failure).
+  Structure; Custom Settings; NVD Source API Caching, Lifecycle, the cache
+  that on-demand fetches and catch-up share; `fetch_single(cve_id)`; Error
+  Handling, the `fetch_single()` table, including HTTP 404 as a
+  non-retryable failure).
 - docs/features/platform/cve-fetcher-infrastructure.md (Class Attributes;
   `__init_subclass__` Validation; Non-Modification Statement; `fetch_single`
   Signaling Convention; Retry Policy for `fetch_single`; Error
@@ -254,6 +256,7 @@ class TestRegistrationAndCapability:
 
     def test_no_base_cve_fetcher_member_is_added(self) -> None:
         for name in (
+            "_shared_source_names",
             "_source_names",
             "_get_page",
             "_request_page",
@@ -321,6 +324,7 @@ class TestConcreteCompliance:
             inspect.getsource(method)
             for method in (
                 SyncNvdCves.fetch_single,
+                SyncNvdCves._shared_source_names,
                 SyncNvdCves._source_names,
                 SyncNvdCves._ingest,
             )
@@ -957,6 +961,96 @@ class TestCatchUp:
         assert await _assessment_count(catch_up.factory, cve) == 0
         assert "commit" not in catch_up.events
         assert len(server.single_requests) == 1
+
+
+# ---------------------------------------------------------------------------
+# Shared Source API cache (NVD Source API Caching, Lifecycle)
+# ---------------------------------------------------------------------------
+
+CNA_SOURCE: Final = "hackerone-1@example.com"
+CNA_NAME: Final = "HackerOne"
+CNA_CONTACT: Final = "contact-hackerone@example.com"
+"""A fictional CNA identifier, its display name, and its contact address in
+the trimmed live Source API body."""
+V31_CNA: Final = "CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H"
+SOURCE_EVENTS: Final = frozenset(
+    {
+        "nvd_source_api_unavailable",
+        "nvd_source_entries_skipped",
+        "nvd_source_cache_incomplete",
+    }
+)
+
+
+def _cna_record(cve_id: str) -> dict[str, Any]:
+    """NVD's own and a CNA's vector, and one vulnerable CPE entry."""
+    return _record(
+        cve_id,
+        metrics={
+            "cvssMetricV31": [
+                {"source": "nvd@nist.gov", "cvssData": {"vectorString": V31}},
+                {"source": CNA_SOURCE, "cvssData": {"vectorString": V31_CNA}},
+            ]
+        },
+    )
+
+
+async def _providers(factory: async_sessionmaker[AsyncSession], cve: CVE) -> set[str]:
+    async with factory() as session:
+        rows = await session.scalars(
+            select(CVECVSSAssessment.provider_name).where(
+                CVECVSSAssessment.cve_id == cve.id
+            )
+        )
+        return set(rows.all())
+
+
+@pytest.mark.integration
+class TestSharedSourceCacheThroughTheWrappers:
+    async def test_on_demand_runs_and_catch_up_share_one_source_request(
+        self,
+        world: IngestionWorld,
+        on_demand: FetchSingleHarness,
+        server: ClientServer,
+        real_session_factory: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        assert sync_module._shared_source_cache.get() is None
+        active = [await _active_cve(world) for _ in range(3)]
+        for cve, _ in active:
+            server.singles[cve.cve_id] = [_cna_record(cve.cve_id)]
+        (first, _), (second, _), (third, third_ticket) = active
+
+        with capture_logs() as logs:
+            for cve in (first, second):
+                token = await on_demand.marker(cve.cve_id, NVD.value)
+                outcome = await on_demand.run(NAME, cve.cve_id, NVD.value, token)
+                assert outcome is None
+            assert server.kinds == ["single", "source", "single"]
+            # The catch-up substitutes replace the on-demand ones; the
+            # configuration that `on_demand` seeded serves both wrappers.
+            catch_up = install_harness(monkeypatch, real_session_factory)
+            await fetchers.run_catch_up_async(NAME, str(third_ticket.id))
+
+        assert server.kinds == ["single", "source", "single", "single"]
+        assert [request.url.params["cveId"] for request in server.single_requests] == [
+            first.cve_id,
+            second.cve_id,
+            third.cve_id,
+        ]
+        for cve in (first, second, third):
+            state = await source_state(real_session_factory, cve.id, NVD)
+            assert state is not None
+            assert state.status == CVESourceFetchStatus.SUCCESS
+            # The fetches served by the shared cache resolve the CNA as well.
+            assert await _providers(real_session_factory, cve) == {"NVD", CNA_NAME}
+        # Each run created its own fetcher client, and its workflow closed it.
+        assert len(server.clients) == 3
+        assert all(client.is_closed for client in server.clients)
+        catch_up.engine.dispose.assert_awaited_once()
+        assert [entry for entry in logs if entry["event"] in SOURCE_EVENTS] == []
+        for value in (CNA_SOURCE, CNA_NAME, CNA_CONTACT, API_KEY):
+            assert value not in repr(logs)
 
 
 # ---------------------------------------------------------------------------

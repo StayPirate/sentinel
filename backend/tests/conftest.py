@@ -102,6 +102,7 @@ from app.services import (
 from app.services.base_cve_fetcher import _CVE_SOURCE_TYPE_MAP
 from app.services.base_fetcher import FETCHER_REGISTRY
 from app.services.session_service import create_session
+from app.services.tickets import sync_nvd_cves
 from tests.support.audit_models import SampleAuditEvent
 from tests.support.database import create_database, drop_database
 from tests.support.logging_state import preserved_logging_state
@@ -638,6 +639,22 @@ def _preserve_logging_state() -> Iterator[None]:
     """
     with preserved_logging_state():
         yield
+
+
+@pytest.fixture(autouse=True)
+def _empty_nvd_source_cache() -> Iterator[None]:
+    """Empty the process-wide Source API cache of `sync_nvd_cves` before and
+    after every test.
+
+    On-demand NVD fetches share one cache per process
+    (docs/features/tickets/cve-sync-nvd.md, NVD Source API Caching), so a
+    cache built by one test would otherwise serve a later test on the same
+    worker — see docs/features/platform/testing-strategy.md (Test
+    Independence). Pure in-process state: no database or Redis access.
+    """
+    sync_nvd_cves._shared_source_cache.clear()
+    yield
+    sync_nvd_cves._shared_source_cache.clear()
 
 
 @pytest.fixture
