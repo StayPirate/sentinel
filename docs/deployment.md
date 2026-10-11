@@ -328,6 +328,11 @@ Before the first production deployment:
       `sync_ghsa_advisories` fetcher disabled through `FetcherConfig.enabled`;
       without a token every GHSA run and on-demand fetch fails at its token
       guard (`docs/features/tickets/cve-sync-ghsa.md`)
+- [ ] `NVD_API_KEY` supplied (free NVD API key, recommended) and the
+      `sync_nvd_cves` `request_delay` lowered to 0.6 through `FetcherConfig`;
+      without a key the fetcher works, but bursts of on-demand fetches,
+      catch-up, and failed-source retries reach NVD's anonymous rate limit
+      (`docs/features/tickets/cve-sync-nvd.md`, Rate Limiting)
 - [ ] SUSE Trust Root CA present in the built image, both at its
       repository-relative path and installed into the system trust store
       (automated by the Dockerfile build — see
