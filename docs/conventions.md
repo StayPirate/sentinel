@@ -444,10 +444,11 @@ exemption removal there so it is not forgotten.
 
 - **Cross-cutting request input constraints**: enforce global constraints
   (such as the 500-character string query parameter length limit and the
-  U+0000 rejection defined in `docs/api-spec.md`) via a shared dependency
-  injected at the app or router level, rather than repeating validation logic
-  in individual endpoint handlers or schema fields. This ensures consistent
-  enforcement across all endpoints and reduces the risk of omission
+  inadmissible-character rejection defined in `docs/api-spec.md`) via a
+  shared dependency injected at the app or router level, rather than
+  repeating validation logic in individual endpoint handlers or schema
+  fields. This ensures consistent enforcement across all endpoints and
+  reduces the risk of omission
 
 ### Pydantic Conventions
 
@@ -1079,22 +1080,37 @@ applies, in which case the spec fix and implementation ship together.
 
 ### External String Admissibility
 
-PostgreSQL cannot represent U+0000 (NUL): a `text` or `varchar` parameter
-containing it fails with SQLSTATE 22021, and a `jsonb` value containing its
-JSON escape fails with SQLSTATE 22P05. Both failures occur whether the value
-is written or only compared in a query. JSON permits the character as an
-escape sequence and Pydantic `str` accepts it, so a structurally valid
-external value could otherwise fail only at the database.
+PostgreSQL cannot represent two kinds of character, the **inadmissible
+characters**:
+
+- U+0000 (NUL). A `text` or `varchar` parameter containing it fails with
+  SQLSTATE 22021, and a `jsonb` value containing its JSON escape fails with
+  SQLSTATE 22P05.
+- A surrogate code point, U+D800 through U+DFFF. It has no UTF-8 encoding: the
+  database driver rejects a `text` or `varchar` parameter containing it before
+  sending the query, and a `jsonb` value containing its JSON escape fails with
+  SQLSTATE 22P02.
+
+Every failure occurs whether the value is written or only compared in a query.
+JSON permits both characters as escape sequences, and decoding a JSON document
+from bytes also turns a surrogate's three-byte UTF-8-style encoding, such as
+`ED A0 80`, into a surrogate code point. A correctly paired surrogate escape
+denotes one supplementary character and is admissible. Pydantic `str` accepts
+both characters. A string length or pattern constraint happens to reject a
+surrogate code point, but that is a library detail and does not satisfy this
+rule. A structurally valid external value could therefore otherwise fail only
+at the database.
 
 A string received from an external source — an HTTP response, a repository
 file, a message-bus payload, or an identity-provider claim — that Sentinel
 persists, stores inside a `jsonb` value, or uses as a query parameter MUST NOT
-contain U+0000:
+contain an inadmissible character:
 
-- A value containing U+0000 is an invalid value of its field. The owning
-  integration contract's existing invalid-data outcome applies at that
-  contract's existing granularity, such as a complete response, snapshot,
-  run, CVE item, candidate, or message. The rule adds no separate outcome.
+- A value containing an inadmissible character is an invalid value of its
+  field. The owning integration contract's existing invalid-data outcome
+  applies at that contract's existing granularity, such as a complete
+  response, snapshot, run, CVE item, candidate, or message. The rule adds no
+  separate outcome.
 - The value is rejected, never stripped, replaced, or escaped, so the rule
   never silently alters a received value. This applies equally to
   identifiers, match keys, and free text.
@@ -1102,18 +1118,24 @@ contain U+0000:
   encoding error is never a documented outcome.
 - Values that never reach PostgreSQL, such as fields used only in log
   messages, and unconsumed fields are not checked.
-- Only U+0000 is covered. Other control characters are governed by per-field
-  rules where an owning contract defines them, for example reference URLs in
-  `docs/features/tickets/ticket-references.md` (URL Normalization).
-- An XML 1.0 document cannot contain U+0000, raw or as a character reference.
-  A conforming parser rejects it as not well-formed, so the owning
-  parse-failure outcome satisfies this rule without an additional check.
+- Where a specification states the outcome, check, or guard for a value
+  containing U+0000 under this rule, the same applies to a value containing
+  any inadmissible character.
+- Only the inadmissible characters are covered. Other control characters are
+  governed by per-field rules where an owning contract defines them, for
+  example reference URLs in `docs/features/tickets/ticket-references.md` (URL
+  Normalization).
+- An XML 1.0 document cannot contain an inadmissible character, raw or as a
+  character reference. A conforming parser rejects it as not well-formed, so
+  the owning parse-failure outcome satisfies this rule without an additional
+  check.
 
 Each owning specification of a non-XML consumer references this rule at its
 validation contract and names the applicable outcome. Consumer-supplied API
 input is not an external source under this rule; it follows `docs/api-spec.md`
-(NUL Characters in Request Input). The mandatory test scenario is defined in
-`docs/features/platform/testing-strategy.md` (External String Admissibility).
+(Inadmissible Characters in Request Input). The mandatory test scenario is
+defined in `docs/features/platform/testing-strategy.md` (External String
+Admissibility).
 
 ### Runtime Version
 

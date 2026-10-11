@@ -162,7 +162,11 @@ For each URL, in this order:
 1. Require a string with at least one character. Do not trim or otherwise
    repair the input.
 2. Reject a pre-parse value longer than 2048 characters or containing any
-   control character U+0000 through U+001F or U+007F.
+   control character U+0000 through U+001F or U+007F. A surrogate code point
+   (U+D800 through U+DFFF), an inadmissible character under External String
+   Admissibility (`docs/conventions.md`), is rejected by the same check and
+   counts as a control character wherever this specification refers to one,
+   including the step 6 recheck and the `control_character` rejection reason.
 3. Parse the complete value as an absolute URL. Accept only `http` or `https`,
    case-insensitively. Require a syntactically valid, non-empty host. Reject
    any user-information component, including a username or password, whether
@@ -205,8 +209,9 @@ corresponding Pydantic rule as `422 VALIDATION_ERROR` before service mutation.
 Titles, when non-NULL, must be strings of 1 through 500 characters and must not
 be whitespace-only. Descriptions, when non-NULL, must be strings of 1 through
 2000 characters and must not be whitespace-only. These values are not trimmed.
-An automatic candidate title containing U+0000 is invalid under External String
-Admissibility (`docs/conventions.md`) and is skipped as `invalid_metadata`.
+An automatic candidate title containing an inadmissible character (U+0000 or a
+surrogate code point) is invalid under External String Admissibility
+(`docs/conventions.md`) and is skipped as `invalid_metadata`.
 
 ### Automatic Rejection Logging
 
