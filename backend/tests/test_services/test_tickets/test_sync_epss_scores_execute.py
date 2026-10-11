@@ -87,6 +87,7 @@ from tests.support.epss import (
     raising,
     status,
 )
+from tests.support.inadmissible import INADMISSIBLE_CHARACTERS
 
 SessionFactory = Callable[[], Awaitable[AsyncSession]]
 
@@ -138,6 +139,7 @@ def _assert_private(logs: Iterable[Mapping[str, Any]]) -> None:
             assert fragment not in rendered, entry
         assert "Example-Secret-Token" not in rendered, entry
         assert "\\x00" not in rendered, entry
+        assert "\\ud800" not in rendered, entry
 
 
 # ---------------------------------------------------------------------------
@@ -788,13 +790,14 @@ class TestItemFailure:
         assert counters(batch.fetcher) == Counters(0, 0, 0, 1)
         assert env.sleeps == [0.25]
 
+    @pytest.mark.parametrize("character", INADMISSIBLE_CHARACTERS)
     @pytest.mark.parametrize("member", ["epss", "percentile", "date"])
-    async def test_nul_in_a_consumed_field_is_an_isolated_failure(
-        self, member: str, env: Env, batch: Batch
+    async def test_inadmissible_character_in_a_consumed_field_is_an_isolated_failure(
+        self, member: str, character: str, env: Env, batch: Batch
     ) -> None:
         cve = await env.active_cve()
         await env.seed_score(cve)
-        env.serve(cve, **{member: f"{SCORED[member]}\x00"})
+        env.serve(cve, **{member: f"{SCORED[member]}{character}"})
 
         with capture_logs() as logs:
             await batch.execute()

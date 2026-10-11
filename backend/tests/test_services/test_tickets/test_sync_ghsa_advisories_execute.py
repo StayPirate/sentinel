@@ -140,6 +140,7 @@ from tests.support.ghsa import (
     status,
 )
 from tests.support.ghsa import body as json_body
+from tests.support.inadmissible import INADMISSIBLE_CHARACTERS, SURROGATE
 from tests.support.ticket_mutations import EventRow, ticket_events_by_id
 
 SessionFactory = Callable[[], Awaitable[AsyncSession]]
@@ -210,6 +211,7 @@ def _assert_private(logs: Iterable[Mapping[str, Any]], *values: str) -> None:
             "Alice",
             CREDIT_LOGIN,
             "\\x00",
+            "\\ud800",
             *values,
         ):
             assert fragment not in rendered, entry
@@ -1444,6 +1446,7 @@ _INVALID_ELEMENTS: Final[list[Any]] = [
     "advisory:over_long",
     "advisory:free_text",
     "advisory:nul",
+    "advisory:surrogate",
 ]
 _INVALID_IDS: Final = [
     "string_element",
@@ -1461,6 +1464,7 @@ _INVALID_IDS: Final = [
     "over_long",
     "free_text",
     "nul",
+    "surrogate",
 ]
 _INVALID_VALUES: Final[dict[str, Any]] = {
     "advisory:CVE-24-1": "CVE-24-1",
@@ -1472,6 +1476,7 @@ _INVALID_VALUES: Final[dict[str, Any]] = {
     "advisory:over_long": "CVE-2099-" + "1" * 12,
     "advisory:free_text": f"CVE-2099-0001 {FAILURE_TEXT}",
     "advisory:nul": "CVE-2099-0001\x00",
+    "advisory:surrogate": f"CVE-2099-0001{SURROGATE}",
 }
 
 
@@ -2075,28 +2080,34 @@ class TestCvss:
 # External String Admissibility (periodic outcomes)
 # ---------------------------------------------------------------------------
 
-NUL: Final = f"{FAILURE_TEXT}\x00"
-VERSION_NUL: Final = "1.0-fictional\x00"
-"""A U+0000 operand without `<`, `>`, or `=`, so the range is recognized."""
 
-
-def _nul_members(field_name: str) -> dict[str, Any]:
+def _invalid_members(field_name: str, character: str = "") -> dict[str, Any]:
+    """Advisory members whose `field_name` value contains `character`, or
+    is over its length bound for a `_<length>` field name."""
+    value = f"{FAILURE_TEXT}{character}"
+    # An operand without `<`, `>`, or `=`, so the range is recognized.
+    operand = f"1.0-fictional{character}"
     vulnerability = _vulnerability("example", "npm", ">= 1.0, < 2.0")
     members: dict[str, Any] = {"vulnerabilities": [vulnerability]}
     if field_name in {"summary", "description", "ghsa_id", "html_url"}:
-        members[field_name] = NUL
+        members[field_name] = value
     elif field_name in {"published_at", "updated_at"}:
-        members[field_name] = "2026-01-01T00:00:00Z\x00"
+        members[field_name] = f"2026-01-01T00:00:00Z{character}"
+    elif field_name in {"published_at_separator", "updated_at_separator"}:
+        # `fromisoformat` accepts either character as the date/time separator.
+        members[field_name.removesuffix("_separator")] = (
+            f"2026-01-01{character}00:00:00Z"
+        )
     elif field_name == "source_code_location":
-        members[field_name] = f"https://git.example.invalid/{NUL}"
+        members[field_name] = f"https://git.example.invalid/{value}"
     elif field_name == "package_name":
-        vulnerability["package"]["name"] = NUL
+        vulnerability["package"]["name"] = value
     elif field_name == "ecosystem":
-        vulnerability["package"]["ecosystem"] = NUL
+        vulnerability["package"]["ecosystem"] = value
     elif field_name == "version":
-        vulnerability["vulnerable_version_range"] = f">= {VERSION_NUL}, < 2.0"
+        vulnerability["vulnerable_version_range"] = f">= {operand}, < 2.0"
     elif field_name == "version_end":
-        vulnerability["vulnerable_version_range"] = f">= 1.0, < {VERSION_NUL}"
+        vulnerability["vulnerable_version_range"] = f">= 1.0, < {operand}"
     elif field_name == "ecosystem_51":
         vulnerability["package"]["ecosystem"] = "E" * 51
     elif field_name == "source_code_location_2049":
@@ -2107,8 +2118,30 @@ def _nul_members(field_name: str) -> dict[str, Any]:
     return members
 
 
+async def _assert_isolated_payload_failure(
+    env: Env, batch: Batch, members: dict[str, Any]
+) -> None:
+    failing, later = await env.cve(), await env.cve()
+    env.pages([env.advisory(failing.cve_id, **members), env.advisory(later.cve_id)])
+
+    with capture_logs() as logs:
+        await batch.execute()
+
+    assert _events(logs, CVE_FETCH_ITEM_FAILED_EVENT) == [
+        _failed(failing.cve_id, "ValidationError")
+    ]
+    _assert_private(logs)
+    assert await env.source_status(failing) == CVESourceFetchStatus.FAILURE
+    assert await env.count(CVEAffectedVersion, failing) == 0
+    assert await env.count(CVEExternalIdentifier, failing) == 0
+    assert await env.references(failing) == []
+    assert await env.source_status(later) == CVESourceFetchStatus.SUCCESS
+    assert counters(batch.fetcher) == Counters(1, 0, 1, 1)
+
+
 @pytest.mark.integration
 class TestExternalStringAdmissibility:
+    @pytest.mark.parametrize("character", INADMISSIBLE_CHARACTERS)
     @pytest.mark.parametrize(
         "field_name",
         [
@@ -2117,54 +2150,48 @@ class TestExternalStringAdmissibility:
             "ghsa_id",
             "html_url",
             "published_at",
+            "published_at_separator",
             "updated_at",
+            "updated_at_separator",
             "source_code_location",
             "package_name",
             "ecosystem",
             "version",
             "version_end",
-            "ecosystem_51",
-            "source_code_location_2049",
-            "ghsa_id_101",
         ],
     )
     async def test_inadmissible_payload_value_is_an_isolated_failure(
-        self, field_name: str, env: Env, batch: Batch
+        self, field_name: str, character: str, env: Env, batch: Batch
     ) -> None:
-        failing, later = await env.cve(), await env.cve()
-        env.pages(
-            [
-                env.advisory(failing.cve_id, **_nul_members(field_name)),
-                env.advisory(later.cve_id),
-            ]
+        await _assert_isolated_payload_failure(
+            env, batch, _invalid_members(field_name, character)
         )
 
-        with capture_logs() as logs:
-            await batch.execute()
+    @pytest.mark.parametrize(
+        "field_name", ["ecosystem_51", "source_code_location_2049", "ghsa_id_101"]
+    )
+    async def test_over_long_payload_value_is_an_isolated_failure(
+        self, field_name: str, env: Env, batch: Batch
+    ) -> None:
+        await _assert_isolated_payload_failure(env, batch, _invalid_members(field_name))
 
-        assert _events(logs, CVE_FETCH_ITEM_FAILED_EVENT) == [
-            _failed(failing.cve_id, "ValidationError")
-        ]
-        _assert_private(logs)
-        assert await env.source_status(failing) == CVESourceFetchStatus.FAILURE
-        assert await env.count(CVEAffectedVersion, failing) == 0
-        assert await env.count(CVEExternalIdentifier, failing) == 0
-        assert await env.references(failing) == []
-        assert await env.source_status(later) == CVESourceFetchStatus.SUCCESS
-        assert counters(batch.fetcher) == Counters(1, 0, 1, 1)
-
-    async def test_nul_in_a_candidate_skips_only_that_candidate(
-        self, env: Env, batch: Batch
+    @pytest.mark.parametrize("character", INADMISSIBLE_CHARACTERS)
+    async def test_inadmissible_character_in_a_candidate_skips_only_that_candidate(
+        self, env: Env, batch: Batch, character: str
     ) -> None:
         cve = await env.cve()
         advisory = env.advisory(
             cve.cve_id,
             cvss_severities={
-                "cvss_v3": {"vector_string": f"{V31}\x00"},
+                "cvss_v3": {"vector_string": f"{V31}{character}"},
                 "cvss_v4": {"vector_string": V40},
             },
-            cwes=[{"cwe_id": "CWE-79\x00"}, {"cwe_id": "CWE-352"}],
-            references=[f"{URL_1}?{NUL}"],
+            cwes=[{"cwe_id": f"CWE-79{character}"}, {"cwe_id": "CWE-352"}],
+            references=[
+                f"{URL_1}/{FAILURE_TEXT}{character}",
+                f"{URL_1}?{FAILURE_TEXT}{character}",
+                f"{URL_1}#{FAILURE_TEXT}{character}",
+            ],
         )
         env.pages([advisory])
 
@@ -2181,6 +2208,8 @@ class TestExternalStringAdmissibility:
                 (CVE_FETCH_CANDIDATE_SKIPPED_EVENT, "invalid_cwe"),
                 (SKIP_EVENT, "invalid_vector"),
                 ("automatic_reference_rejected", "control_character"),
+                ("automatic_reference_rejected", "control_character"),
+                ("automatic_reference_rejected", "control_character"),
             ]
         )
         _assert_private(logs, V31)
@@ -2190,11 +2219,12 @@ class TestExternalStringAdmissibility:
             advisory["html_url"]
         ]
 
-    async def test_nul_in_cve_id_is_the_invalid_id_path(
-        self, env: Env, batch: Batch
+    @pytest.mark.parametrize("character", INADMISSIBLE_CHARACTERS)
+    async def test_inadmissible_character_in_cve_id_is_the_invalid_id_path(
+        self, env: Env, batch: Batch, character: str
     ) -> None:
         cve = await env.cve()
-        env.pages([env.advisory(f"{cve.cve_id}\x00")])
+        env.pages([env.advisory(f"{cve.cve_id}{character}")])
 
         with capture_logs() as logs:
             await batch.execute()

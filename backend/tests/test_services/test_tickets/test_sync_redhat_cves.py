@@ -79,6 +79,7 @@ from app.services.tickets.sync_redhat_cves import (
     SyncRedhatCves,
 )
 from tests.support.fetch_single_cve import fictional_cve_id
+from tests.support.inadmissible import INADMISSIBLE_CHARACTERS
 from tests.support.redhat import (
     RedhatServer,
     load_cve_fixture,
@@ -273,6 +274,7 @@ def _assert_no_raw_value(logs: Iterable[Mapping[str, Any]], *values: str) -> Non
     for entry in logs:
         rendered = repr(dict(entry))
         assert "\\x00" not in rendered, entry
+        assert "\\ud800" not in rendered, entry
         for value in values:
             assert value not in rendered, entry
 
@@ -1208,16 +1210,18 @@ class TestDataPreservation:
 
 
 @pytest.mark.integration
+@pytest.mark.parametrize("character", INADMISSIBLE_CHARACTERS)
 class TestExternalStringAdmissibility:
-    async def test_package_name_with_nul_fails_the_item_before_any_write(
+    async def test_inadmissible_package_name_fails_the_item_before_any_write(
         self,
+        character: str,
         db_session: AsyncSession,
         target: Target,
         fetcher: SyncRedhatCves,
         server: RedhatServer,
         ingestion: Ingestion,
     ) -> None:
-        name = f"{SECRET}\x00"
+        name = f"{SECRET}{character}"
         _serve(
             server,
             target.cve_id,
@@ -1239,9 +1243,10 @@ class TestExternalStringAdmissibility:
         assert not is_retryable_condition(raised.value)
 
     @pytest.mark.parametrize("field", ["cvss3", "cvss"])
-    async def test_vector_with_nul_is_an_invalid_vector_skip(
+    async def test_inadmissible_vector_is_an_invalid_vector_skip(
         self,
         field: str,
+        character: str,
         db_session: AsyncSession,
         target: Target,
         fetcher: SyncRedhatCves,
@@ -1251,7 +1256,7 @@ class TestExternalStringAdmissibility:
         _serve(
             server,
             target.cve_id,
-            {field: {f"{field}_scoring_vector": vector + "\x00"}, "cwe": "CWE-79"},
+            {field: {f"{field}_scoring_vector": vector + character}, "cwe": "CWE-79"},
         )
 
         with capture_logs() as logs:
@@ -1262,14 +1267,17 @@ class TestExternalStringAdmissibility:
         assert [entry["reason"] for entry in logs] == ["invalid_vector"]
         _assert_no_raw_value(logs, vector)
 
-    async def test_cwe_with_nul_is_an_invalid_cwe_skip(
+    async def test_inadmissible_cwe_is_an_invalid_cwe_skip(
         self,
+        character: str,
         db_session: AsyncSession,
         target: Target,
         fetcher: SyncRedhatCves,
         server: RedhatServer,
     ) -> None:
-        _serve(server, target.cve_id, {"cwe": "CWE-79\x00", "references": [URL_1]})
+        _serve(
+            server, target.cve_id, {"cwe": f"CWE-79{character}", "references": [URL_1]}
+        )
 
         with capture_logs() as logs:
             await fetcher.fetch_single(target.cve_id, db_session)
@@ -1282,37 +1290,57 @@ class TestExternalStringAdmissibility:
         ("body", "rejected", "reason"),
         [
             (
-                {"references": [f"{URL_2}?{SECRET}\x00\n{URL_1}"]},
+                lambda c: {"references": [f"{URL_2}/{SECRET}{c}\n{URL_1}"]},
                 URL_2,
                 "control_character",
             ),
             (
-                {"references": [URL_1], "bugzilla": {"url": f"{BUGZILLA_URL}\x00"}},
+                lambda c: {"references": [f"{URL_2}?{SECRET}{c}\n{URL_1}"]},
+                URL_2,
+                "control_character",
+            ),
+            (
+                lambda c: {"references": [f"{URL_2}#{SECRET}{c}\n{URL_1}"]},
+                URL_2,
+                "control_character",
+            ),
+            (
+                lambda c: {
+                    "references": [URL_1],
+                    "bugzilla": {"url": f"{BUGZILLA_URL}{c}"},
+                },
                 BUGZILLA_URL,
                 "control_character",
             ),
             (
-                {
+                lambda c: {
                     "references": [URL_1],
-                    "bugzilla": {"url": BUGZILLA_URL, "description": f"{SECRET}\x00"},
+                    "bugzilla": {"url": BUGZILLA_URL, "description": f"{SECRET}{c}"},
                 },
                 BUGZILLA_URL,
                 "invalid_metadata",
             ),
         ],
-        ids=["reference_line", "bugzilla_url", "bugzilla_description"],
+        ids=[
+            "reference_line_path",
+            "reference_line_query",
+            "reference_line_fragment",
+            "bugzilla_url",
+            "bugzilla_description",
+        ],
     )
-    async def test_reference_candidate_with_nul_is_skipped(
+    async def test_inadmissible_reference_candidate_is_skipped(
         self,
-        body: dict[str, Any],
+        body: Any,
         rejected: str,
         reason: str,
+        character: str,
         db_session: AsyncSession,
         target: Target,
         fetcher: SyncRedhatCves,
         server: RedhatServer,
     ) -> None:
-        _serve(server, target.cve_id, body)
+        _serve(server, target.cve_id, body(character))
 
         with capture_logs() as logs:
             await fetcher.fetch_single(target.cve_id, db_session)

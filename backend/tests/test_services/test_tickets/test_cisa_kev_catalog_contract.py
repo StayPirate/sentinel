@@ -31,7 +31,8 @@ absent or non-integer `count` or one that differs from the list length;
 an entry that is not an object; an absent, non-string, or non-canonical
 `cveID`; an absent, non-string, or invalid `dateAdded`; a `null`, absent,
 or non-list `cwes` and non-string or non-canonical `cwes` items; non-200
-statuses; a non-JSON body; and U+0000 in any string.
+statuses; a non-JSON body; and an inadmissible character (U+0000 or a
+surrogate code point) in any string.
 """
 
 from __future__ import annotations
@@ -43,6 +44,7 @@ from typing import Any, TypedDict
 import pytest
 from pydantic import TypeAdapter, ValidationError
 
+from app.core.external_strings import contains_inadmissible_character
 from app.core.identifiers import is_valid_cve_id
 from app.services.cve_ingest import CWEEntry, KEVEntry
 from tests.support.cisa_kev import (
@@ -157,8 +159,10 @@ class TestTypedCatalog:
         with pytest.raises(ValidationError):
             _validated({"count": 1, "vulnerabilities": [entry]})
 
-    def test_no_string_contains_nul(self) -> None:
-        assert all("\x00" not in s for s in _strings(load_catalog()))
+    def test_no_string_contains_an_inadmissible_character(self) -> None:
+        assert not any(
+            contains_inadmissible_character(s) for s in _strings(load_catalog())
+        )
 
     def test_fixture_is_minified_with_ascii_escapes_and_one_trailing_newline(
         self,

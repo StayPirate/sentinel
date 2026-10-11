@@ -30,7 +30,8 @@ Not observable live, and therefore covered by the fetcher unit tests only:
 more than one `data[]` entry; a missing, `null`, or non-string consumed
 field; a sign, exponent, whitespace, `NaN`, or out-of-range value; an
 invalid calendar date; a non-object root or missing `data`; a non-JSON
-body; non-200 statuses; and U+0000 in any string.
+body; non-200 statuses; and an inadmissible character (U+0000 or a surrogate
+code point) in any string.
 """
 
 from __future__ import annotations
@@ -43,6 +44,7 @@ from typing import Any, TypedDict
 import pytest
 from pydantic import TypeAdapter, ValidationError
 
+from app.core.external_strings import contains_inadmissible_character
 from app.services.cve_ingest import EPSSEntry
 from tests.support.epss import (
     ALL_FIXTURES,
@@ -128,8 +130,10 @@ class TestTypedResponse:
             _validated({"data": [entry]})
 
     @pytest.mark.parametrize("name", ALL_FIXTURES)
-    def test_no_string_contains_nul(self, name: str) -> None:
-        assert all("\x00" not in s for s in _strings(load_fixture(name)))
+    def test_no_string_contains_an_inadmissible_character(self, name: str) -> None:
+        assert not any(
+            contains_inadmissible_character(s) for s in _strings(load_fixture(name))
+        )
 
 
 @pytest.mark.unit

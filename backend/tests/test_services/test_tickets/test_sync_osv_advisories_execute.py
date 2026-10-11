@@ -86,6 +86,7 @@ from app.services.tickets.sync_osv_advisories import (
     SyncOsvAdvisories,
 )
 from tests.support.cve_ingest import IngestionWorld
+from tests.support.inadmissible import NUL, SURROGATE
 from tests.support.osv import OsvServer, raising, status
 
 SessionFactory = Callable[[], Awaitable[AsyncSession]]
@@ -718,16 +719,17 @@ class TestItemFailure:
             assert "Example-Secret-Token" not in rendered, entry
 
     @pytest.mark.parametrize(
-        ("body", "responder", "cause"),
+        ("body", "responder", "cause", "character"),
         [
-            (None, status(403, FAILURE_TEXT.encode()), "HTTPStatusError"),
-            (None, status(429), "HTTPStatusError"),
-            (None, status(200, b"{"), "JSONDecodeError"),
-            (None, status(200, b"[1]"), "ValidationError"),
-            (None, status(204), "OsvResponseError"),
-            (None, raising(httpx.ConnectError(FAILURE_TEXT)), "ConnectError"),
-            (GUARD_BODY, None, "CompletenessGuardError"),
-            ({"summary": FAILURE_TEXT}, None, "ValidationError"),
+            (None, status(403, FAILURE_TEXT.encode()), "HTTPStatusError", None),
+            (None, status(429), "HTTPStatusError", None),
+            (None, status(200, b"{"), "JSONDecodeError", None),
+            (None, status(200, b"[1]"), "ValidationError", None),
+            (None, status(204), "OsvResponseError", None),
+            (None, raising(httpx.ConnectError(FAILURE_TEXT)), "ConnectError", None),
+            (GUARD_BODY, None, "CompletenessGuardError", None),
+            ({"summary": FAILURE_TEXT}, None, "ValidationError", NUL),
+            ({"summary": FAILURE_TEXT}, None, "ValidationError", SURROGATE),
         ],
         ids=[
             "forbidden",
@@ -737,7 +739,8 @@ class TestItemFailure:
             "unexpected_2xx",
             "connect",
             "completeness_guard",
-            "payload",
+            "payload_nul",
+            "payload_surrogate",
         ],
     )
     async def test_event_names_only_the_exception_class(
@@ -745,16 +748,17 @@ class TestItemFailure:
         body: Any,
         responder: Any,
         cause: str,
+        character: str | None,
         env: Env,
         batch: Batch,
     ) -> None:
         cve = await env.active_cve(body)
         if responder is not None:
             env.respond(cve, responder)
-        if cause == "ValidationError" and body is not None:
-            # An applicable alias package name containing U+0000 fails the
-            # payload.
-            env.serve_updated(cve, f"{PERSONAL_TEXT}\x00", **body)
+        if character is not None:
+            # An applicable alias package name containing an inadmissible
+            # character fails the payload.
+            env.serve_updated(cve, f"{PERSONAL_TEXT}{character}", **body)
 
         with capture_logs() as logs:
             await batch.execute()
@@ -772,6 +776,7 @@ class TestItemFailure:
         assert FAILURE_TEXT not in repr(logs)
         assert PERSONAL_TEXT not in repr(logs)
         assert await env.source_status(cve) == CVESourceFetchStatus.FAILURE
+        assert await env.osv_row_count(cve) == 0
         assert counters(batch.fetcher) == Counters(0, 0, 0, 1)
 
     async def test_guard_failure_keeps_previous_data_and_logs_bounded_skips(

@@ -38,7 +38,8 @@ Not observable live, and therefore covered by the fetcher unit tests only:
 null, empty, or whitespace-only vectors; invalid or non-Base vectors; CWE
 chains or lists; blank or CRLF reference lines and trailing newlines; an
 empty Bugzilla URL; null or blank package names; `cvss4`; a non-object
-root; and U+0000 in any string.
+root; and an inadmissible character (U+0000 or a surrogate code point) in
+any string.
 """
 
 from __future__ import annotations
@@ -52,6 +53,7 @@ import pytest
 from pydantic import TypeAdapter, ValidationError
 
 from app.core.enums import CVSSVersion
+from app.core.external_strings import contains_inadmissible_character
 from app.services.cvss import validate_cvss_vector
 from tests.support.redhat import (
     CVE_SUCCESS_FIXTURES,
@@ -171,9 +173,11 @@ class TestTypedResponse:
             _validated({**load_cve_fixture("cve_full_v3"), key: value})
 
     @pytest.mark.parametrize("name", CVE_SUCCESS_FIXTURES)
-    def test_no_string_contains_nul_or_carriage_return(self, name: str) -> None:
+    def test_no_string_contains_an_inadmissible_character_or_carriage_return(
+        self, name: str
+    ) -> None:
         for value in _strings(load_cve_fixture(name)):
-            assert "\x00" not in value
+            assert not contains_inadmissible_character(value)
             assert "\r" not in value
 
 

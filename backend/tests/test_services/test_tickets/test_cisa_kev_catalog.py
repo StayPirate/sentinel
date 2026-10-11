@@ -42,6 +42,7 @@ from tests.support.cisa_kev import (
     load_catalog,
     reference_url,
 )
+from tests.support.inadmissible import SURROGATE
 
 CVE_ID: Final = "CVE-2099-48001"
 URL: Final = reference_url(CVE_ID)
@@ -189,8 +190,26 @@ class TestEntryCveId:
 
     @pytest.mark.parametrize(
         "value",
-        [CVE_ID, "cve-2099-48001", "CVE-2099-1", f"{CVE_ID}\x00", "", 48001, None],
-        ids=["canonical", "lowercase", "short", "nul", "empty", "int", "null"],
+        [
+            CVE_ID,
+            "cve-2099-48001",
+            "CVE-2099-1",
+            f"{CVE_ID}\x00",
+            f"{CVE_ID}{SURROGATE}",
+            "",
+            48001,
+            None,
+        ],
+        ids=[
+            "canonical",
+            "lowercase",
+            "short",
+            "nul",
+            "surrogate",
+            "empty",
+            "int",
+            "null",
+        ],
     )
     def test_raw_value_is_returned_unvalidated(self, value: Any) -> None:
         assert entry_cve_id(_entry(cveID=value)) == value
@@ -325,6 +344,8 @@ class TestExtractCwes:
             "NVD-CWE-noinfo",
             "CWE-79\x00",
             "\x00",
+            f"CWE-79{SURROGATE}",
+            SURROGATE,
             SECRET_TEXT,
         ],
         ids=[
@@ -348,6 +369,8 @@ class TestExtractCwes:
             "nvd_noinfo",
             "nul_suffix",
             "nul_only",
+            "surrogate_suffix",
+            "surrogate_only",
             "free_text",
         ],
     )
@@ -422,6 +445,9 @@ class TestExtractDateAdded:
             "\uff12\uff10\uff12\uff16-10-01",
             "2026-10-01\x00",
             "\x002026-10-01",
+            f"2026-10-01{SURROGATE}",
+            f"{SURROGATE}2026-10-01",
+            f"2026-10{SURROGATE}-01",
             SECRET_TEXT,
         ],
         ids=[
@@ -450,6 +476,9 @@ class TestExtractDateAdded:
             "fullwidth_digits",
             "nul_suffix",
             "nul_prefix",
+            "surrogate_suffix",
+            "surrogate_prefix",
+            "surrogate_inner",
             "free_text",
         ],
     )

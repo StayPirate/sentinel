@@ -92,6 +92,7 @@ from app.services.tickets.sync_osv_advisories import (
     SyncOsvAdvisories,
 )
 from tests.support.fetch_single_cve import fictional_cve_id
+from tests.support.inadmissible import INADMISSIBLE_CHARACTERS, SURROGATE
 from tests.support.osv import (
     ALIAS_NOT_FOUND_FIXTURE,
     OSV_HOST,
@@ -485,6 +486,7 @@ def _assert_no_raw_value(logs: Iterable[Mapping[str, Any]], *values: str) -> Non
     for entry in logs:
         rendered = repr(dict(entry))
         assert "\\x00" not in rendered, entry
+        assert "\\ud800" not in rendered, entry
         for value in values:
             assert value not in rendered, entry
 
@@ -569,6 +571,8 @@ UNSAFE_IDS: Final = [
     "/GHSA-fict-0001-aaaa",
     "GHSA-fict\x00",
     "\x00",
+    f"GHSA-fict{SURROGATE}",
+    SURROGATE,
     "A" * 101,
     "GHSA fict",
     "GHSA-fict?x=1",
@@ -1009,7 +1013,13 @@ class TestFailedSubRequests:
 # Explicitly Ignored Fields)
 # ---------------------------------------------------------------------------
 
-CVE_ALIASES: Final = [OTHER_CVE, OTHER_CVE_2, "CVE-x/../y", "CVE-\x00" + SECRET]
+CVE_ALIASES: Final = [
+    OTHER_CVE,
+    OTHER_CVE_2,
+    "CVE-x/../y",
+    "CVE-\x00" + SECRET,
+    f"CVE-{SURROGATE}{SECRET}",
+]
 """`CVE-*` aliases, including ones that would fail the step-5 ID check: the
 `CVE-` prefix is checked first, so none is requested or logged."""
 
@@ -1111,32 +1121,33 @@ class TestThrottle:
 # External String Admissibility and length bounds (before any write)
 # ---------------------------------------------------------------------------
 
-NUL: Final = f"{SECRET}\x00"
 
-
-def _nul_phase1(field_name: str) -> dict[str, Any]:
+def _phase1_with(field_name: str, character: str) -> dict[str, Any]:
+    value = f"{SECRET}{character}"
     if field_name == "repo":
-        return {"affected": [{"ranges": [_git(("fixed", "abc"), repo=NUL)]}]}
-    events = [("introduced", "aaa"), (field_name, NUL)]
+        return {"affected": [{"ranges": [_git(("fixed", "abc"), repo=value)]}]}
+    events = [("introduced", "aaa"), (field_name, value)]
     if field_name == "introduced":
-        events = [("introduced", NUL), ("fixed", "bbb")]
+        events = [("introduced", value), ("fixed", "bbb")]
     return {"affected": [{"ranges": [_git(*events)]}]}
 
 
 @pytest.mark.unit
 class TestExternalStringAdmissibility:
+    @pytest.mark.parametrize("character", INADMISSIBLE_CHARACTERS)
     @pytest.mark.parametrize(
         "field_name", ["introduced", "fixed", "last_affected", "limit", "repo"]
     )
-    async def test_nul_in_a_phase1_git_value_fails_the_cve_before_any_write(
+    async def test_inadmissible_phase1_git_value_fails_the_cve_before_any_write(
         self,
         field_name: str,
+        character: str,
         fetcher: SyncOsvAdvisories,
         server: OsvServer,
         ingestion: Ingestion,
     ) -> None:
         cve_id = fictional_cve_id()
-        server.bodies[cve_id] = _nul_phase1(field_name)
+        server.bodies[cve_id] = _phase1_with(field_name, character)
 
         with capture_logs() as logs, pytest.raises(ValidationError) as raised:
             await fetcher.fetch_single(cve_id, NO_SESSION)
@@ -1146,20 +1157,21 @@ class TestExternalStringAdmissibility:
         assert not is_retryable_condition(raised.value)
         assert logs == []
 
+    @pytest.mark.parametrize("character", INADMISSIBLE_CHARACTERS)
     @pytest.mark.parametrize(
         "affected",
         [
-            _package(NUL),
-            _package("example", NUL),
-            _package("example", "PyPI", NUL),
-            _package("example", events=(("introduced", NUL),)),
-            _package("example", events=(("introduced", "1"), ("fixed", NUL))),
-            _package(
+            lambda v: _package(v),
+            lambda v: _package("example", v),
+            lambda v: _package("example", "PyPI", v),
+            lambda v: _package("example", events=(("introduced", v),)),
+            lambda v: _package("example", events=(("introduced", "1"), ("fixed", v))),
+            lambda v: _package(
                 "example",
                 range_type="SEMVER",
-                events=(("introduced", "1"), ("last_affected", NUL)),
+                events=(("introduced", "1"), ("last_affected", v)),
             ),
-            _package("example", versions=["1.0", NUL]),
+            lambda v: _package("example", versions=["1.0", v]),
         ],
         ids=[
             "package_name",
@@ -1171,21 +1183,48 @@ class TestExternalStringAdmissibility:
             "versions",
         ],
     )
-    async def test_nul_in_an_alias_value_fails_the_cve_before_any_write(
+    async def test_inadmissible_alias_value_fails_the_cve_before_any_write(
         self,
-        affected: dict[str, Any],
+        affected: Any,
+        character: str,
         fetcher: SyncOsvAdvisories,
         server: OsvServer,
         ingestion: Ingestion,
     ) -> None:
         cve_id = _listing(server, [ALIAS])
-        server.bodies[ALIAS] = _alias_body(cve_id, affected)
+        server.bodies[ALIAS] = _alias_body(cve_id, affected(f"{SECRET}{character}"))
 
         with capture_logs() as logs, pytest.raises(ValidationError) as raised:
             await fetcher.fetch_single(cve_id, NO_SESSION)
 
         # A payload failure, not a failed sub-request: no skip WARNING.
         assert logs == []
+        assert ingestion.calls == 0
+        assert SECRET not in str(raised.value)
+        assert not is_retryable_condition(raised.value)
+
+    @pytest.mark.parametrize("character", INADMISSIBLE_CHARACTERS)
+    async def test_inadmissible_package_name_fails_the_cve_with_the_scope_omitted(
+        self,
+        character: str,
+        fetcher: SyncOsvAdvisories,
+        server: OsvServer,
+        ingestion: Ingestion,
+    ) -> None:
+        """A failed alias omits the `osv` replacement, but an applicable
+        alias `package.name` still reaches `resolved_packages`."""
+        cve_id = _listing(server, [ALIAS, ALIAS_2])
+        server.bodies[ALIAS] = _alias_body(
+            cve_id, _package(f"{SECRET}{character}", versions=["1.0"])
+        )
+        server.responses[ALIAS_2] = status(503)
+
+        with capture_logs() as logs, pytest.raises(ValidationError) as raised:
+            await fetcher.fetch_single(cve_id, NO_SESSION)
+
+        assert logs == [
+            _skip(cve_id, "http_status", record_id=ALIAS_2, status_code=503)
+        ]
         assert ingestion.calls == 0
         assert SECRET not in str(raised.value)
         assert not is_retryable_condition(raised.value)
@@ -1507,8 +1546,10 @@ class TestScopeCompleteness:
         assert result.action is UpsertAction.UPDATED
         assert _skips(logs) == [_skip(target.cve_id, reason, status_code=code)]
 
+    @pytest.mark.parametrize("character", INADMISSIBLE_CHARACTERS)
     async def test_unobserved_scope_values_never_reach_the_payload(
         self,
+        character: str,
         db_session: AsyncSession,
         target: Target,
         fetcher: SyncOsvAdvisories,
@@ -1518,11 +1559,12 @@ class TestScopeCompleteness:
         """Only an emitted replacement carries entries, so an inadmissible
         Phase 1 or alias entry value of an omitted scope fails nothing."""
         server.bodies[target.cve_id] = {
-            "affected": [{"ranges": [_git(("fixed", f"{SECRET}\x00"))]}],
+            "affected": [{"ranges": [_git(("fixed", f"{SECRET}{character}"))]}],
             "aliases": [ALIAS, ALIAS_2],
         }
         server.bodies[ALIAS] = _alias_body(
-            target.cve_id, _package("example", "PyPI", f"pkg:pypi/{SECRET}\x00")
+            target.cve_id,
+            _package("example", "PyPI", f"pkg:pypi/{SECRET}{character}"),
         )
         server.responses[ALIAS_2] = status(503)
 
@@ -2223,18 +2265,24 @@ class TestReferences:
         assert server.requested_ids == [target.cve_id, "GHSA-jfh8-c2jp-5v3q"]
         assert _skips(logs) == []
 
-    async def test_nul_in_a_reference_url_skips_that_candidate_only(
+    @pytest.mark.parametrize("character", INADMISSIBLE_CHARACTERS)
+    async def test_inadmissible_reference_url_skips_that_candidate_only(
         self,
+        character: str,
         db_session: AsyncSession,
         target: Target,
         fetcher: SyncOsvAdvisories,
         server: OsvServer,
     ) -> None:
+        """An inadmissible `type` is not a mapped value: `explicit_type` is
+        `None`."""
         server.bodies[target.cve_id] = {
             "affected": [],
             "references": [
-                {"type": "FIX", "url": f"{URL_1}?{SECRET}\x00"},
-                {"type": f"FIX{SECRET}\x00", "url": URL_2},
+                {"type": "FIX", "url": f"{URL_1}/{SECRET}{character}"},
+                {"type": "FIX", "url": f"{URL_1}?{SECRET}{character}"},
+                {"type": "FIX", "url": f"{URL_1}#{SECRET}{character}"},
+                {"type": f"FIX{SECRET}{character}", "url": URL_2},
             ],
         }
 
@@ -2246,15 +2294,19 @@ class TestReferences:
             SOURCE_URL.format(cve_id=target.cve_id): ("OSV", "advisory", NAME),
             URL_2: (None, None, NAME),
         }
-        assert logs == [
-            {
-                "event": "automatic_reference_rejected",
-                "log_level": "warning",
-                "cve_id": target.cve_id,
-                "source": NAME,
-                "reason": "control_character",
-            }
-        ]
+        assert (
+            logs
+            == [
+                {
+                    "event": "automatic_reference_rejected",
+                    "log_level": "warning",
+                    "cve_id": target.cve_id,
+                    "source": NAME,
+                    "reason": "control_character",
+                }
+            ]
+            * 3
+        )
         _assert_no_raw_value(logs, SECRET)
 
 

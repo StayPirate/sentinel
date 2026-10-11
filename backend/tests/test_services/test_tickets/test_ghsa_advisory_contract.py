@@ -57,9 +57,9 @@ Live verification on 2026-10-08 (18 anonymous requests in total):
   (`E:P` six times, `RE:M` twice, `U:Red`, `U:Amber`, `S:P`, `AU:Y`,
   `R:U`, `V:C`, and `X` values); 5 of those 9 advisories have no v3
   vector.
-- No string contains U+0000. No two affected-version entries collide on
-  the conflict key `(product/package_name, version, version_end,
-  ecosystem, repo)`.
+- No string contains an inadmissible character (U+0000 or a surrogate
+  code point). No two affected-version entries collide on the conflict key
+  `(product/package_name, version, version_end, ecosystem, repo)`.
 - `?cve_id=` single queries: a reviewed advisory (CVE-2021-44228) returns a
   list of one advisory with that `cve_id`, whose v3 vector carries the
   Temporal metric `E:H`; an unknown, a withdrawn-only, and an
@@ -74,7 +74,8 @@ tests only: a null, absent, or empty `vulnerabilities`; a null `package` or
 package `name`; a null or empty range; an unrecognized range or a single
 lower bound; the `other` and `pub` ecosystems; an invalid CWE; an invalid
 `cve_id` or a null one other than the observed null; a non-array root;
-U+0000 in any string; and over-length values.
+an inadmissible character (U+0000 or a surrogate code point) in any string;
+and over-length values.
 """
 
 from __future__ import annotations
@@ -89,6 +90,7 @@ import pytest
 from pydantic import Field, TypeAdapter, ValidationError
 
 from app.core.enums import CVSSVersion
+from app.core.external_strings import contains_inadmissible_character
 from app.services.cvss import validate_cvss_vector, validate_external_cvss_vector
 from app.services.ticket_mutations_errors import InvalidCVSSVectorError
 from tests.support.ghsa import (
@@ -443,8 +445,10 @@ class TestTypedAdvisory:
         assert keys - {"epss"} == _TOP_LEVEL_KEYS
 
     @pytest.mark.parametrize("name", _ADVISORY_NAMES)
-    def test_no_string_contains_nul(self, name: str) -> None:
-        assert all("\x00" not in s for s in _strings(_advisory(name)))
+    def test_no_string_contains_an_inadmissible_character(self, name: str) -> None:
+        assert not any(
+            contains_inadmissible_character(s) for s in _strings(_advisory(name))
+        )
 
     @pytest.mark.parametrize("name", _ADVISORY_NAMES)
     def test_dates_parse_as_utc_date_times(self, name: str) -> None:

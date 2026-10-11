@@ -54,6 +54,7 @@ from tests.support.ghsa import (
     load_advisory_fixture,
     load_list_fixture,
 )
+from tests.support.inadmissible import INADMISSIBLE_CHARACTERS, NUL, SURROGATE
 
 GHSA_ID: Final = "GHSA-xxxx-yyyy-zzzz"
 HTML_URL: Final = f"https://github.com/advisories/{GHSA_ID}"
@@ -243,12 +244,6 @@ class TestResponseValidation:
             "2024-06-19T15:04:41",
             "not a date-time",
             "",
-            "2024-06-19T15:04:41Z\x00",
-            "\x002024-06-19T15:04:41Z",
-            "2024-06-19\x0015:04:41Z",
-            "2024-06-19T15:04:41\x00Z",
-            "2024-06-19T15:04:41+00:00\x00",
-            "\x00",
             "2024-13-19T15:04:41Z",
         ],
         ids=[
@@ -260,12 +255,6 @@ class TestResponseValidation:
             "naive",
             "text",
             "empty",
-            "trailing_nul",
-            "leading_nul",
-            "nul_separator",
-            "nul_before_zone",
-            "nul_after_offset",
-            "only_nul",
             "invalid_month",
         ],
     )
@@ -274,6 +263,28 @@ class TestResponseValidation:
     ) -> None:
         with pytest.raises(ValidationError):
             parse_advisory(_advisory(**{field: value}))
+
+    @pytest.mark.parametrize("field", ["published_at", "updated_at"])
+    @pytest.mark.parametrize("character", INADMISSIBLE_CHARACTERS)
+    @pytest.mark.parametrize(
+        "template",
+        [
+            "2024-06-19T15:04:41Z{}",
+            "{}2024-06-19T15:04:41Z",
+            "2024-06-19{}15:04:41Z",
+            "2024-06-19T15:04:41{}Z",
+            "2024-06-19T15:04:41+00:00{}",
+            "{}",
+        ],
+        ids=["trailing", "leading", "separator", "before_zone", "after_offset", "only"],
+    )
+    def test_inadmissible_character_in_a_date_time_is_a_schema_mismatch(
+        self, field: str, template: str, character: str
+    ) -> None:
+        """`fromisoformat` would accept either character as the date/time
+        separator (External String Admissibility)."""
+        with pytest.raises(ValidationError):
+            parse_advisory(_advisory(**{field: template.format(character)}))
 
     @pytest.mark.parametrize(
         ("value", "expected"),
@@ -523,10 +534,12 @@ class TestGlobalFields:
         assert payload.description is not None
         assert len(payload.description) == stored
 
-    def test_truncation_precedes_validation(self) -> None:
-        """A U+0000 only in the truncated tail never reaches the payload."""
+    @pytest.mark.parametrize("character", INADMISSIBLE_CHARACTERS)
+    def test_truncation_precedes_validation(self, character: str) -> None:
+        """An inadmissible character only in the truncated tail never
+        reaches the payload."""
         payload = _extract(
-            summary="s" * 256 + "\x00", description="d" * 65535 + "\x00"
+            summary="s" * 256 + character, description="d" * 65535 + character
         ).payload
 
         assert payload.title == "s" * 256
@@ -602,10 +615,14 @@ class TestExternalIdentifierAndReferences:
         assert extraction.upstream_references == []
         assert extraction.source_reference.url == HTML_URL
 
-    @pytest.mark.parametrize("url", [f"{URL_1}\x00", " not a url ", ""])
+    @pytest.mark.parametrize(
+        "url",
+        [f"{URL_1}{NUL}", f"{URL_1}?q{SURROGATE}", " not a url ", ""],
+        ids=["nul", "surrogate", "blank", "empty"],
+    )
     def test_upstream_url_is_passed_as_received(self, url: str) -> None:
-        """`reference_service` owns URL rejection (U+0000 is skipped there as
-        `control_character`), never the advisory."""
+        """`reference_service` owns URL rejection (an inadmissible character
+        is skipped there as `control_character`), never the advisory."""
         extraction = _extract(references=[url, URL_2])
 
         assert extraction.upstream_references == [
@@ -663,7 +680,8 @@ class TestCvssCandidates:
             ({"cvss_v3": {"vector_string": V40}}, [V40]),
             ({"cvss_v3": {"vector_string": "not a vector"}}, ["not a vector"]),
             ({"cvss_v4": {"vector_string": V40 + "/E:P"}}, [V40 + "/E:P"]),
-            ({"cvss_v3": {"vector_string": V31 + "\x00"}}, [V31 + "\x00"]),
+            ({"cvss_v3": {"vector_string": V31 + NUL}}, [V31 + NUL]),
+            ({"cvss_v3": {"vector_string": V31 + SURROGATE}}, [V31 + SURROGATE]),
             ({"cvss_v3": {"vector_string": " "}}, [" "]),
         ],
         ids=[
@@ -675,6 +693,7 @@ class TestCvssCandidates:
             "malformed",
             "non_base",
             "nul",
+            "surrogate",
             "blank",
         ],
     )
@@ -838,6 +857,8 @@ class TestCweCandidates:
             "CWE-\u0667\u0669",
             "CWE-79\x00",
             "\x00",
+            f"CWE-79{SURROGATE}",
+            SURROGATE,
             "CWE-" + "1" * 17,
         ],
         ids=[
@@ -855,6 +876,8 @@ class TestCweCandidates:
             "non_ascii_digits",
             "nul",
             "only_nul",
+            "surrogate",
+            "only_surrogate",
             "over_long",
         ],
     )
@@ -1233,8 +1256,13 @@ class TestAffectedVersions:
             "example-c",
         ]
 
-    def test_u0000_in_an_unrecognized_range_is_not_a_bound(self) -> None:
-        extraction = _extract(vulnerabilities=[_vulnerability(version_range="~1\x00")])
+    @pytest.mark.parametrize("character", INADMISSIBLE_CHARACTERS)
+    def test_inadmissible_character_in_an_unrecognized_range_is_not_a_bound(
+        self, character: str
+    ) -> None:
+        extraction = _extract(
+            vulnerabilities=[_vulnerability(version_range=f"~1{character}")]
+        )
 
         assert _bounds(_entries(extraction)) == [(None, None, None)]
         assert extraction.unrecognized_ranges == 1
@@ -1444,29 +1472,33 @@ class TestIgnoredFields:
 
 @pytest.mark.unit
 class TestAdmissibility:
-    """U+0000 and over-length values pass `parse_advisory()` and are rejected
-    by the payload validation in `extract()` (an advisory-level failure,
-    before any write)."""
+    """Inadmissible characters (U+0000 and surrogate code points) and
+    over-length values pass `parse_advisory()` and are rejected by the
+    payload validation in `extract()` (an advisory-level failure, before any
+    write)."""
 
+    @pytest.mark.parametrize("character", INADMISSIBLE_CHARACTERS)
     @pytest.mark.parametrize(
         "fields",
         [
-            {"summary": "Fictional\x00 summary"},
-            {"summary": "\x00"},
-            {"description": "Fictional description\x00"},
-            {"ghsa_id": f"{GHSA_ID}\x00"},
-            {"html_url": f"\x00{HTML_URL}"},
-            {"source_code_location": f"{REPO}\x00", "vulnerabilities": [{}]},
-            {"vulnerabilities": [_vulnerability(name="example\x00")]},
-            {"vulnerabilities": [_vulnerability(ecosystem="conda\x00")]},
-            {"vulnerabilities": [_vulnerability(ecosystem="pip\x00")]},
-            {"vulnerabilities": [_vulnerability(version_range="< 2.0\x00")]},
-            {"vulnerabilities": [_vulnerability(version_range=">= \x001, < 2")]},
-            {"vulnerabilities": [_vulnerability(version_range="= 1.\x00")]},
+            lambda c: {"summary": f"Fictional{c} summary"},
+            lambda c: {"summary": c},
+            lambda c: {"description": f"Fictional description{c}"},
+            lambda c: {"ghsa_id": f"{GHSA_ID}{c}"},
+            lambda c: {"html_url": f"{c}{HTML_URL}"},
+            lambda c: {"source_code_location": f"{REPO}{c}", "vulnerabilities": [{}]},
+            lambda c: {"vulnerabilities": [_vulnerability(name=f"example{c}")]},
+            lambda c: {"vulnerabilities": [_vulnerability(ecosystem=f"conda{c}")]},
+            lambda c: {"vulnerabilities": [_vulnerability(ecosystem=f"pip{c}")]},
+            lambda c: {"vulnerabilities": [_vulnerability(version_range=f"< 2.0{c}")]},
+            lambda c: {
+                "vulnerabilities": [_vulnerability(version_range=f">= {c}1, < 2")]
+            },
+            lambda c: {"vulnerabilities": [_vulnerability(version_range=f"= 1.{c}")]},
         ],
         ids=[
             "summary",
-            "summary_only_nul",
+            "summary_only_character",
             "description",
             "ghsa_id",
             "html_url",
@@ -1479,40 +1511,49 @@ class TestAdmissibility:
             "exact_bound",
         ],
     )
-    def test_u0000_rejects_the_advisory(self, fields: dict[str, Any]) -> None:
-        advisory = parse_advisory(_advisory(**fields))
+    def test_inadmissible_character_rejects_the_advisory(
+        self, fields: Any, character: str
+    ) -> None:
+        advisory = parse_advisory(_advisory(**fields(character)))
 
         with pytest.raises(ValidationError) as raised:
             extract(advisory)
 
-        assert "\x00" not in str(raised.value)
+        assert character not in str(raised.value)
 
-    def test_u0000_in_a_cwe_is_skipped(self) -> None:
-        extraction = _extract(cwes=_cwes("CWE-79\x00", "CWE-20"))
+    @pytest.mark.parametrize("character", INADMISSIBLE_CHARACTERS)
+    def test_inadmissible_character_in_a_cwe_is_skipped(self, character: str) -> None:
+        extraction = _extract(cwes=_cwes(f"CWE-79{character}", "CWE-20"))
 
         assert extraction.payload.cwe_classifications == [
             CWEEntry(cwe_id="CWE-20", source="GitHub")
         ]
         assert extraction.skipped_cwes == 1
 
-    def test_u0000_in_a_vector_is_passed_to_upsert_cve(self) -> None:
+    @pytest.mark.parametrize("character", INADMISSIBLE_CHARACTERS)
+    def test_inadmissible_character_in_a_vector_is_passed_to_upsert_cve(
+        self, character: str
+    ) -> None:
         payload = _extract(
             cvss_severities={
-                "cvss_v3": {"vector_string": V31 + "\x00"},
+                "cvss_v3": {"vector_string": V31 + character},
                 "cvss_v4": {"vector_string": V40},
             }
         ).payload
 
         assert payload.cvss_assessments == [
-            _candidate(V31 + "\x00"),
+            _candidate(V31 + character),
             _candidate(V40),
         ]
 
-    def test_u0000_in_a_reference_is_passed_to_reference_service(self) -> None:
-        extraction = _extract(references=[f"{URL_1}\x00"])
+    @pytest.mark.parametrize("character", INADMISSIBLE_CHARACTERS)
+    def test_inadmissible_character_in_a_reference_is_passed_to_reference_service(
+        self, character: str
+    ) -> None:
+        extraction = _extract(references=[f"{URL_1}{character}"])
 
         assert extraction.upstream_references == [
-            AutomaticReferenceInput(url=f"{URL_1}\x00")
+            AutomaticReferenceInput(url=f"{URL_1}{character}")
         ]
 
     @pytest.mark.parametrize(
@@ -1586,9 +1627,12 @@ class TestAdmissibility:
 
         assert entry.version == bound
 
-    def test_payload_validation_error_never_renders_the_input(self) -> None:
+    @pytest.mark.parametrize("character", INADMISSIBLE_CHARACTERS)
+    def test_payload_validation_error_never_renders_the_input(
+        self, character: str
+    ) -> None:
         advisory = parse_advisory(
-            _advisory(summary=f"{SECRET_INPUT}\x00", ghsa_id=SECRET_INPUT * 10)
+            _advisory(summary=f"{SECRET_INPUT}{character}", ghsa_id=SECRET_INPUT * 10)
         )
 
         with pytest.raises(ValidationError) as raised:

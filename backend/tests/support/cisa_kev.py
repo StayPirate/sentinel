@@ -36,6 +36,8 @@ from typing import Any
 
 import httpx
 
+from tests.support.inadmissible import json_bytes
+
 FIXTURE_PATH = (
     Path(__file__).resolve().parents[1]
     / "fixtures"
@@ -167,7 +169,13 @@ class KevServer:
             return httpx.Response(404, request=request)
         if self.response is not None:
             return self.response(request)
-        return httpx.Response(200, json=self.catalog, request=request)
+        # A surrogate code point travels as its `\\uXXXX` escape.
+        return httpx.Response(
+            200,
+            content=json_bytes(self.catalog),
+            headers={"Content-Type": "application/json"},
+            request=request,
+        )
 
     def client(self) -> httpx.AsyncClient:
         """A client whose transport is this server (redirects not followed)."""
