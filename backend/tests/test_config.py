@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import traceback
 from pathlib import Path
 from typing import Any
 
@@ -803,6 +804,204 @@ class TestGithubToken:
     def test_not_listed_in_env_example(self) -> None:
         env_example = Path(__file__).resolve().parents[1] / ".env.example"
         assert "GITHUB_TOKEN" not in env_example.read_text(encoding="utf-8")
+
+
+def _rendered(error: ValidationError) -> str:
+    """Every rendering a process may print or log for `error`: its message,
+    its repr, and the traceback an uncaught startup failure prints."""
+    return "\n".join(
+        [str(error), repr(error), "".join(traceback.format_exception(error))]
+    )
+
+
+_HEADER_SECRET_MARKER = "Fictional-Header-Secret"
+"""A fragment of every rejected header-secret value below; never rendered."""
+
+
+@pytest.mark.unit
+class TestHeaderSecretValidation:
+    """`NVD_API_KEY` and `GITHUB_TOKEN` are sent verbatim as HTTP header
+    values (`docs/conventions.md`, Secret Field Typing; docs/configuration.md,
+    External APIs): a non-empty value must be printable ASCII without
+    whitespace, otherwise startup fails with an error that names the
+    variable and never renders the value. Empty or unset stays valid."""
+
+    @pytest.fixture(
+        params=[("NVD_API_KEY", "nvd_api_key"), ("GITHUB_TOKEN", "github_token")],
+        ids=["nvd", "github"],
+    )
+    def setting(self, request: pytest.FixtureRequest) -> tuple[str, str]:
+        """`(environment variable, Settings attribute)`."""
+        value: tuple[str, str] = request.param
+        return value
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "00000000-0000-4000-8000-000000000000",
+            "ghp_Fictional0000000000000000000000000000",
+            "github_pat_Fictional_0000000000",
+            "!~",
+            "x",
+        ],
+    )
+    def test_valid_value_is_accepted_unchanged(
+        self, monkeypatch: pytest.MonkeyPatch, setting: tuple[str, str], value: str
+    ) -> None:
+        variable, attribute = setting
+        monkeypatch.setenv("JWT_SECRET_KEY", "a" * 32)
+        monkeypatch.setenv(variable, value)
+        secret = getattr(Settings(_env_file=None), attribute)
+        assert secret.get_secret_value() == value
+
+    @pytest.mark.parametrize("unset", [True, False], ids=["unset", "empty"])
+    def test_empty_or_unset_is_accepted(
+        self, monkeypatch: pytest.MonkeyPatch, setting: tuple[str, str], unset: bool
+    ) -> None:
+        variable, attribute = setting
+        monkeypatch.setenv("JWT_SECRET_KEY", "a" * 32)
+        if unset:
+            monkeypatch.delenv(variable, raising=False)
+        else:
+            monkeypatch.setenv(variable, "")
+        assert getattr(Settings(_env_file=None), attribute).get_secret_value() == ""
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            f"{_HEADER_SECRET_MARKER}\n",
+            f"{_HEADER_SECRET_MARKER}\r\n",
+            f"{_HEADER_SECRET_MARKER}\r",
+            f" {_HEADER_SECRET_MARKER}",
+            f"{_HEADER_SECRET_MARKER} ",
+            f"{_HEADER_SECRET_MARKER} 0000",
+            f"{_HEADER_SECRET_MARKER}\t",
+            f"{_HEADER_SECRET_MARKER}\u00a0",
+            f"{_HEADER_SECRET_MARKER}-\u00e9",
+            f"{_HEADER_SECRET_MARKER}\x00",
+            f"{_HEADER_SECRET_MARKER}\x1b",
+            f"{_HEADER_SECRET_MARKER}\x7f",
+        ],
+        ids=[
+            "trailing_newline",
+            "trailing_crlf",
+            "trailing_cr",
+            "leading_space",
+            "trailing_space",
+            "inner_space",
+            "tab",
+            "no_break_space",
+            "non_ascii",
+            "nul",
+            "escape",
+            "del",
+        ],
+    )
+    def test_invalid_value_fails_startup_without_rendering_it(
+        self, monkeypatch: pytest.MonkeyPatch, setting: tuple[str, str], value: str
+    ) -> None:
+        variable, attribute = setting
+        monkeypatch.setenv("JWT_SECRET_KEY", "a" * 32)
+        overrides: dict[str, Any] = {attribute: value}
+        with pytest.raises(ValidationError) as raised:
+            Settings(_env_file=None, **overrides)
+
+        [error] = raised.value.errors(include_url=False, include_input=False)
+        assert error["loc"] == (attribute,)
+        assert f"Invalid {variable}:" in error["msg"]
+        rendered = _rendered(raised.value)
+        assert _HEADER_SECRET_MARKER not in rendered
+        assert "input_value" not in rendered
+
+    def test_value_read_from_the_environment_is_rejected(
+        self, monkeypatch: pytest.MonkeyPatch, setting: tuple[str, str]
+    ) -> None:
+        """The realistic path: a file-based secret with a trailing newline."""
+        variable, _ = setting
+        monkeypatch.setenv("JWT_SECRET_KEY", "a" * 32)
+        monkeypatch.setenv(variable, f"{_HEADER_SECRET_MARKER}\n")
+        with pytest.raises(ValidationError, match=f"Invalid {variable}:") as raised:
+            Settings(_env_file=None)
+        assert _HEADER_SECRET_MARKER not in _rendered(raised.value)
+
+    @pytest.mark.parametrize("value", [" ", "\n", "\t"])
+    def test_whitespace_only_value_fails_startup(
+        self, monkeypatch: pytest.MonkeyPatch, setting: tuple[str, str], value: str
+    ) -> None:
+        variable, _ = setting
+        monkeypatch.setenv("JWT_SECRET_KEY", "a" * 32)
+        monkeypatch.setenv(variable, value)
+        with pytest.raises(ValidationError, match=f"Invalid {variable}:"):
+            Settings(_env_file=None)
+
+
+def _fictional(name: str) -> str:
+    """A fictional secret value, built at run time so that no credential-like
+    literal appears in the source."""
+    return f"fictional-{name}-value"
+
+
+_CONFIGURED_SECRETS: dict[str, str] = {
+    "DATABASE_URL": f"postgresql+asyncpg://sentinel:{_fictional('db')}@db/sentinel",
+    "REDIS_URL": f"redis://:{_fictional('redis')}@redis:6379/0",
+    "CELERY_BROKER_URL": f"redis://:{_fictional('broker')}@redis:6379/1",
+    "IBS_PASSWORD": _fictional("ibs"),
+    "NVD_API_KEY": _fictional("nvd"),
+    "GITHUB_TOKEN": _fictional("github"),
+}
+_SHORT_JWT_SECRET_KEY = _fictional("jwt")
+"""Shorter than the 32-character minimum."""
+_SECRET_FRAGMENTS = tuple(
+    _fictional(name)
+    for name in ("db", "redis", "broker", "ibs", "nvd", "github", "jwt")
+)
+
+
+@pytest.mark.unit
+class TestValidationErrorsHideInput:
+    """`Settings` declares `hide_input_in_errors` (`docs/conventions.md`,
+    Secret Field Typing): no startup failure renders a received value. A
+    failure not tied to one field would otherwise render the input mapping,
+    which holds every configured secret as a plain string."""
+
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            {"JWT_SECRET_KEY": None},
+            {"JWT_SECRET_KEY": _SHORT_JWT_SECRET_KEY},
+            {"JWT_EXPIRY_HOURS": "0"},
+            {"SESSION_MAX_LIFETIME_DAYS": "0"},
+            {"LOGIN_MAX_ATTEMPTS": "0"},
+            {"JWT_EXPIRY_HOURS": "not-a-number"},
+            {"GIT_CLONE_BASE_DIR": "relative/git"},
+        ],
+        ids=[
+            "missing_jwt_secret_key",
+            "short_jwt_secret_key",
+            "jwt_expiry_hours",
+            "session_max_lifetime_days",
+            "login_max_attempts",
+            "int_parsing",
+            "field_validator",
+        ],
+    )
+    def test_startup_failure_never_renders_a_configured_secret(
+        self, monkeypatch: pytest.MonkeyPatch, failure: dict[str, str | None]
+    ) -> None:
+        monkeypatch.setenv("JWT_SECRET_KEY", "a" * 32)
+        for variable, value in {**_CONFIGURED_SECRETS, **failure}.items():
+            if value is None:
+                monkeypatch.delenv(variable, raising=False)
+            else:
+                monkeypatch.setenv(variable, value)
+
+        with pytest.raises(ValidationError) as raised:
+            Settings(_env_file=None)
+
+        rendered = _rendered(raised.value)
+        assert "input_value" not in rendered
+        for fragment in _SECRET_FRAGMENTS:
+            assert fragment not in rendered
 
 
 @pytest.mark.unit
