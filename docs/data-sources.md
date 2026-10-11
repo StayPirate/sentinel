@@ -16,7 +16,7 @@ relevant feature specifications in `docs/features/`.
 
 | Source | Scope | Data Provided | Integration Status |
 |---|---|---|---|
-| NVD | Public | CVE data, CVSS scores, CPE matches | Specified |
+| NVD | Public | CVE data, CVSS scores, CPE matches | Active |
 | MITRE CVE Services | Public | Early CVE assignments | Active |
 | Red Hat Security Data | Public | CVSS assessments | Active |
 | SUSE CSAF VEX | Public | SUSE CVSS assessments per CVE | Not integrated |
@@ -66,7 +66,7 @@ configurations, and references to advisories and patches.
   at `services.nvd.nist.gov/rest/json/source/2.0` resolves CNA identifiers
   to human-readable names. Rate limits: 5 req/30s without key, 50 req/30s
   with key
-- **Integration status**: **Specified**
+- **Integration status**: **Active**
 - **Documentation**: https://nvd.nist.gov/developers
 
 > See [cve-sync-nvd.md](features/tickets/cve-sync-nvd.md) for the full

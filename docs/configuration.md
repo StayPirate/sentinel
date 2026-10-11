@@ -234,7 +234,7 @@ be added if an approved contract requires them.
 
 | Env Var | Type | Default | Description | Defined in |
 |---------|------|---------|-------------|------------|
-| `NVD_API_KEY` | string | `""` (optional) | NVD API key for higher rate limits on CVE fetching. When non-empty, consider reducing the `sync_nvd_cves` fetcher's `request_delay` from 6.0s to ~0.6s via the fetcher admin dashboard | `docs/features/tickets/cve-sync-nvd.md` |
+| `NVD_API_KEY` | string | `""` (optional; recommended in production) | NVD API key for higher rate limits on CVE fetching. Recommended in production: without it, bursts of on-demand fetches, catch-up, and failed-source retries reach NVD's anonymous rate limit. When non-empty, consider reducing the `sync_nvd_cves` fetcher's `request_delay` from 6.0s to ~0.6s via the fetcher admin dashboard | `docs/features/tickets/cve-sync-nvd.md` |
 | `GITHUB_TOKEN` | string | `""` (required for `sync_ghsa_advisories`) | GitHub personal access token for GHSA advisory sync. Required for production rate limits (see `docs/data-sources.md`). The fetcher refuses to execute if this is empty or unset | `docs/features/tickets/cve-sync-ghsa.md` |
 
 ## Git-Based Fetchers

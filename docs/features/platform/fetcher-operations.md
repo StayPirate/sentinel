@@ -1310,13 +1310,13 @@ fetcher-specific custom settings and the schema that describes them.
 ```json
 {
   "data": {
-    "fetcher_name": "sync_redhat_cves",
+    "fetcher_name": "sync_nvd_cves",
     "enabled": true,
     "schedule_override": null,
-    "default_schedule": "0 3 * * *",
-    "effective_schedule": "0 3 * * *",
+    "default_schedule": "0 */6 * * *",
+    "effective_schedule": "0 */6 * * *",
     "run_timeout": 3600,
-    "request_delay": 0,
+    "request_delay": 6.0,
     "custom_settings": {
       "results_per_page": 500
     },
@@ -1666,7 +1666,7 @@ Displays the full configuration of a fetcher, including custom settings
 with their current values, defaults, and descriptions.
 
 ```
-sentinel fetcher config sync_redhat_cves
+sentinel fetcher config sync_nvd_cves
 ```
 
 **Parameters**:
@@ -1678,11 +1678,11 @@ sentinel fetcher config sync_redhat_cves
 **Output** (to stdout):
 
 ```
-Fetcher: sync_redhat_cves
+Fetcher: sync_nvd_cves
 Enabled: yes
-Schedule: 0 3 * * * (default)
+Schedule: 0 */6 * * * (default)
 Timeout: 3600s
-Request delay: 0s
+Request delay: 6s
 
 Custom settings:
   results_per_page = 500  (default: 2000, range: 100–2000)
@@ -1692,11 +1692,11 @@ Custom settings:
 For a fetcher with no custom settings schema:
 
 ```
-Fetcher: sync_nvd_cves
+Fetcher: sync_redhat_cves
 Enabled: yes
-Schedule: 0 */6 * * * (default)
+Schedule: 0 3 * * * (default)
 Timeout: 3600s
-Request delay: 0s
+Request delay: 2s
 
 No custom settings available for this fetcher.
 ```
