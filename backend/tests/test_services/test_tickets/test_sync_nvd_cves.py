@@ -76,6 +76,7 @@ from app.models.system_setting import SystemSetting
 from app.models.ticket import Ticket
 from app.models.ticket_reference import TicketReference
 from app.services import cve_service, fetcher_execution, reference_service
+from app.services import http_client as shared_http_client
 from app.services.base_cve_fetcher import (
     _CVE_SOURCE_TYPE_MAP,
     CVE_FETCH_CANDIDATE_SKIPPED_EVENT,
@@ -98,6 +99,8 @@ from app.services.tickets.sync_nvd_cves import (
     NVD_SOURCE_CACHE_INCOMPLETE_EVENT,
     NVD_SOURCE_ENTRIES_SKIPPED_EVENT,
     NVD_VULN_STATUS_UNRECOGNIZED_EVENT,
+    RATE_LIMIT_EXHAUSTED,
+    RATE_LIMIT_RETRY_DELAY,
     NvdResponseError,
     SyncNvdCves,
 )
@@ -1238,6 +1241,115 @@ class TestErrorPropagation:
 
         assert raised.value is signal
         assert ingestion.calls == 0
+
+
+# ---------------------------------------------------------------------------
+# Live rate-limit response through the shared retry transport (Rate Limiting)
+# ---------------------------------------------------------------------------
+
+
+def _rate_limited(request: httpx.Request) -> httpx.Response:
+    """NVD's rate-limit response as observed live in October 2026: HTTP 429
+    from its Cloudflare edge with `Retry-After: 0` and a JSON body that the
+    fetcher never reads (`detail` is a synthetic marker for the rest of the
+    live body)."""
+    return httpx.Response(
+        429,
+        json={"title": "Error 1015: You are being rate limited", "detail": SECRET},
+        headers={"Retry-After": "0", "Server": "cloudflare"},
+        request=request,
+    )
+
+
+@pytest.fixture
+async def retrying_fetcher(server: NvdServer) -> AsyncIterator[SyncNvdCves]:
+    """A fetcher whose client keeps the production transport-level retry
+    (`create_http_client()` wraps every transport in `_RetryTransport`)
+    over the fake server."""
+    instance = SyncNvdCves()
+    instance._http_client = httpx.AsyncClient(
+        transport=shared_http_client._RetryTransport(
+            httpx.MockTransport(server.handler), retry_non_idempotent=False
+        )
+    )
+    try:
+        yield instance
+    finally:
+        await instance._teardown_http_client()
+
+
+async def _execute_recent_window(
+    fetcher: SyncNvdCves, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def derived_cursor(session: AsyncSession, name: str) -> datetime:
+        return datetime.now(UTC) - timedelta(hours=1)
+
+    monkeypatch.setattr(fetcher_execution, "get_derived_cursor", derived_cursor)
+    await fetcher.execute(cast(AsyncSession, _RollbackOnly()))
+
+
+@pytest.mark.unit
+class TestLiveRateLimitResponse:
+    async def test_page_waits_30_seconds_after_the_immediate_guided_retry(
+        self,
+        retrying_fetcher: SyncNvdCves,
+        server: NvdServer,
+        sleeps: list[float],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """`Retry-After: 0` makes the transport retry at once; a second 429
+        reaches the fetcher, which waits 30 seconds and succeeds."""
+        server.page_once[0] = [_rate_limited, _rate_limited]
+
+        with capture_logs() as logs:
+            await _execute_recent_window(retrying_fetcher, monkeypatch)
+
+        assert server.kinds == ["source", "page", "page", "page"]
+        assert server.requested_page_indexes == [0, 0, 0]
+        assert sleeps == [SyncNvdCves.default_request_delay, RATE_LIMIT_RETRY_DELAY]
+        assert logs == []
+
+    async def test_persistent_rate_limit_aborts_with_a_content_free_cause(
+        self,
+        retrying_fetcher: SyncNvdCves,
+        server: NvdServer,
+        sleeps: list[float],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        server.page_responses[0] = _rate_limited
+
+        with pytest.raises(FetcherError) as raised:
+            await _execute_recent_window(retrying_fetcher, monkeypatch)
+
+        assert str(raised.value) == RATE_LIMIT_EXHAUSTED
+        cause = raised.value.__cause__
+        assert isinstance(cause, httpx.HTTPStatusError)
+        assert cause.response.status_code == 429
+        assert SECRET not in str(cause)
+        # Two transport attempts before and after the fetcher's 30-second wait.
+        assert server.requested_page_indexes == [0, 0, 0, 0]
+        assert sleeps == [SyncNvdCves.default_request_delay, RATE_LIMIT_RETRY_DELAY]
+
+    async def test_fetch_single_raises_the_retryable_429_after_the_guided_retry(
+        self,
+        retrying_fetcher: SyncNvdCves,
+        server: NvdServer,
+        sleeps: list[float],
+        ingestion: Ingestion,
+    ) -> None:
+        cve_id = fictional_cve_id()
+        server.single_responses[cve_id] = _rate_limited
+
+        with capture_logs() as logs, pytest.raises(httpx.HTTPStatusError) as raised:
+            await retrying_fetcher.fetch_single(cve_id, NO_SESSION)
+
+        assert raised.value.response.status_code == 429
+        assert is_retryable_condition(raised.value)
+        assert SECRET not in str(raised.value)
+        assert server.kinds == ["single", "single"]
+        assert sleeps == []
+        assert ingestion.calls == 0
+        assert logs == []
 
 
 # ---------------------------------------------------------------------------
