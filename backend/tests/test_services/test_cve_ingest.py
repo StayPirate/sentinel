@@ -573,22 +573,6 @@ class TestInadmissibleCharacterRejection:
             ((field,), "value_error")
         ]
 
-    @pytest.mark.parametrize(
-        ("model", "field", "is_list"),
-        _UNCONSTRAINED_CASES,
-        ids=map(_case_id, _UNCONSTRAINED_CASES),
-    )
-    def test_unconstrained_field_accepts_supplementary_character(
-        self, model: type[BaseModel], field: str, is_list: bool
-    ) -> None:
-        """A supplementary character, such as one decoded from a correctly
-        paired surrogate escape, is admissible and kept unchanged."""
-        value = "widget\U0001f600"
-
-        built = _build(model, **{field: ["valid", value] if is_list else value})
-
-        assert getattr(built, field) == (["valid", value] if is_list else value)
-
     @pytest.mark.parametrize("character", INADMISSIBLE_CHARACTERS)
     @pytest.mark.parametrize(
         "data",

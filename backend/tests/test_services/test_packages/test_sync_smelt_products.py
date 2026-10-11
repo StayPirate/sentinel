@@ -973,7 +973,10 @@ _RUN_FAILURES: Final[list[FailureCase]] = [
             VALIDATION_FAILED,
             SnapshotValidationError,
         )
-        for field in (*FIELDS, "repos")
+        # One field per shared check: every required string shares
+        # `_required_string()` (per-field outcomes are unit-tested), and the
+        # repository items have their own check.
+        for field in ("cpe", "repos")
         for kind, character in (("nul", NUL), ("surrogate", SURROGATE))
     ],
     ("duplicate-cpe", _duplicate_cpe, VALIDATION_FAILED, SnapshotValidationError),

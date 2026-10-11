@@ -131,6 +131,7 @@ SEED_FILES: Final = {
 
 VULNS_TREE: Final = "https://git.kernel.org/pub/scm/linux/security/vulns.git/tree"
 BASE_VECTOR: Final = "CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H"
+_VALID_V40: Final = "CVSS:4.0/AV:L/AC:L/AT:N/PR:L/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N"
 """The strict Base vector of `published_cvss_v3_1` (and the fixture whose
 non-Base form the reduction test derives)."""
 
@@ -532,8 +533,10 @@ class TestExternalStringAdmissibility:
             first, second = container["affected"]
             first["programFiles"].append(f"kernel/{character}.c")
             second["versions"][0]["lessThan"] = f"6.18.21{character}"
+            # A complete, otherwise valid vector: only the character makes
+            # this candidate invalid.
             container["metrics"].append(
-                {"cvssV4_0": {"vectorString": f"CVSS:4.0/AV:L{character}"}}
+                {"cvssV4_0": {"vectorString": f"{_VALID_V40}{character}"}}
             )
             container["references"].extend(
                 {"url": f"https://advisory.example.invalid/upstream/{suffix}"}
