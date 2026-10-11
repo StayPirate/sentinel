@@ -117,6 +117,7 @@ from tests.support.aimaas import (
     threshold_item,
     threshold_sync_router,
 )
+from tests.support.inadmissible import INADMISSIBLE_CHARACTERS, NUL, SURROGATE
 from tests.support.ticket_mutations import EVAL
 
 MARKER: Final = "Example-Confidential-Aimaas-Value"
@@ -436,13 +437,18 @@ class TestParseProductRefs:
         assert str(error) == "item 0: cpe must be a string"
         assert MARKER not in str(error)
 
+    @pytest.mark.parametrize("character", INADMISSIBLE_CHARACTERS)
     @pytest.mark.parametrize(
-        "value",
-        ["\x00", f"\x00{MARKER}", f"{MARKER}\x00{MARKER}", f"{MARKER}\x00"],
+        "template",
+        ["{c}", "{c}{m}", "{m}{c}{m}", "{m}{c}"],
         ids=["only", "start", "middle", "end"],
     )
-    def test_cpe_containing_nul_is_a_response_error(self, value: str) -> None:
+    def test_cpe_containing_inadmissible_character_is_a_response_error(
+        self, character: str, template: str
+    ) -> None:
         """External String Admissibility: not unmatchable, not stripped."""
+        value = template.format(c=character, m=MARKER)
+
         error = _product_error([product_item(1, cpe=value)])
 
         assert str(error) == "item 0: cpe contains an inadmissible character"
@@ -1618,8 +1624,9 @@ _RETRIEVAL_FAILURES: Final[list[RetrievalCase]] = [
 ]
 
 
-def _break_item(server: AimaasServer, field: str, value: Any) -> None:
-    item = server.pages[2]["items"][5]
+def _break_item(server: AimaasServer, field: str, value: Any, position: int) -> None:
+    """Break the item at the 0-based collection `position`."""
+    item = server.pages[position // 100 + 1]["items"][position % 100]
     if value is _DELETE:
         del item[field]
     else:
@@ -1628,27 +1635,44 @@ def _break_item(server: AimaasServer, field: str, value: Any) -> None:
 
 _DELETE: Final = object()
 
-SchemaCase = tuple[str, str, str, Any, str]
+SchemaCase = tuple[str, str, str, Any, str, int]
+"""`(id, phase, field, value, category, position)`; `position` is the
+0-based collection position of the broken item."""
+
+_THRESHOLDED_ITEM: Final = 105
+"""Product 106 (page 2), which has a threshold in `_failing_router()`."""
+
+_UNTHRESHOLDED_ITEM: Final = 220
+"""Product 221 (page 3), beyond the 150 thresholds of `_failing_router()`."""
 
 _SCHEMA_FAILURES: Final[list[SchemaCase]] = [
-    ("missing-id", "products", "id", _DELETE, "item 105: id is missing"),
-    ("missing-cpe", "products", "cpe", _DELETE, "item 105: cpe is missing"),
-    ("string-id", "products", "id", MARKER, "item 105: id must be an integer"),
-    ("bool-id", "products", "id", True, "item 105: id must be an integer"),
-    ("int-cpe", "products", "cpe", 7, "item 105: cpe must be a string"),
-    (
-        "nul-cpe",
-        "products",
-        "cpe",
-        "cpe:/o:example:nul\x00:1",
-        "item 105: cpe contains an inadmissible character",
-    ),
+    ("missing-id", "products", "id", _DELETE, "item 105: id is missing", 105),
+    ("missing-cpe", "products", "cpe", _DELETE, "item 105: cpe is missing", 105),
+    ("string-id", "products", "id", MARKER, "item 105: id must be an integer", 105),
+    ("bool-id", "products", "id", True, "item 105: id must be an integer", 105),
+    ("int-cpe", "products", "cpe", 7, "item 105: cpe must be a string", 105),
+    *[
+        (
+            f"{kind}-cpe-{product}",
+            "products",
+            "cpe",
+            f"cpe:/o:example:bad{character}:1",
+            f"item {position}: cpe contains an inadmissible character",
+            position,
+        )
+        for kind, character in (("nul", NUL), ("surrogate", SURROGATE))
+        for product, position in (
+            ("thresholded", _THRESHOLDED_ITEM),
+            ("unthresholded", _UNTHRESHOLDED_ITEM),
+        )
+    ],
     (
         "missing-product",
         "cvss_thresholds",
         "product",
         _DELETE,
         "item 105: product is missing",
+        105,
     ),
     (
         "missing-threshold",
@@ -1656,6 +1680,7 @@ _SCHEMA_FAILURES: Final[list[SchemaCase]] = [
         "threshold",
         _DELETE,
         "item 105: threshold is missing",
+        105,
     ),
     (
         "string-product",
@@ -1663,6 +1688,7 @@ _SCHEMA_FAILURES: Final[list[SchemaCase]] = [
         "product",
         MARKER,
         "item 105: product must be an integer",
+        105,
     ),
     (
         "bool-product",
@@ -1670,6 +1696,7 @@ _SCHEMA_FAILURES: Final[list[SchemaCase]] = [
         "product",
         False,
         "item 105: product must be an integer",
+        105,
     ),
 ]
 
@@ -1732,7 +1759,7 @@ class TestWholeRunFailureBeforePublication:
         assert await _product_rows(db_session) == before
 
     @pytest.mark.parametrize(
-        ("phase", "field", "value", "category"),
+        ("phase", "field", "value", "category", "position"),
         [case[1:] for case in _SCHEMA_FAILURES],
         ids=[case[0] for case in _SCHEMA_FAILURES],
     )
@@ -1745,12 +1772,13 @@ class TestWholeRunFailureBeforePublication:
         field: str,
         value: Any,
         category: str,
+        position: int,
     ) -> None:
         await _seed_failure_world(seed, db_session)
         before = await _product_rows(db_session)
         router = _failing_router()
         endpoint, invalid_message = _PHASES[phase]
-        _break_item(router.routes[endpoint], field, value)
+        _break_item(router.routes[endpoint], field, value, position)
         events: list[tuple[str, str]] = []
 
         with SqlRecorder(db_session, events), capture_logs() as logs:

@@ -83,6 +83,7 @@ from tests.support.aimaas import (
     make_items,
     product_item,
 )
+from tests.support.inadmissible import INADMISSIBLE_CHARACTERS, NUL, SURROGATE
 
 MARKER: Final = "Example-Confidential-Aimaas-Value"
 T0: Final = datetime(2026, 9, 1, 1, 0, tzinfo=UTC)
@@ -373,13 +374,18 @@ class TestParseLifecycleEntries:
 
         assert str(error) == "item 0: cpe must be a string"
 
+    @pytest.mark.parametrize("character", INADMISSIBLE_CHARACTERS)
     @pytest.mark.parametrize(
-        "cpe",
-        ["\x00", "\x00cpe:/o:example:a:1", "cpe:/o:\x00example:a:1", "cpe:/o:a:1\x00"],
+        "template",
+        ["{c}", "{c}cpe:/o:example:a:1", "cpe:/o:{c}example:a:1", "cpe:/o:a:1{c}"],
         ids=["only", "start", "middle", "end"],
     )
-    def test_cpe_containing_nul_is_a_response_error(self, cpe: str) -> None:
+    def test_cpe_containing_inadmissible_character_is_a_response_error(
+        self, character: str, template: str
+    ) -> None:
         """External String Admissibility: not unmatchable, not stripped."""
+        cpe = template.format(c=character)
+
         error = _response_error([_item("cpe:/o:example:b:1"), _item(cpe)])
 
         assert str(error) == "item 1: cpe contains an inadmissible character"
@@ -1295,8 +1301,11 @@ def _missing_cpe(server: AimaasServer) -> None:
     del server.pages[3]["items"][0]["cpe"]
 
 
-def _nul_cpe(server: AimaasServer) -> None:
-    server.pages[2]["items"][7]["cpe"] = "cpe:/o:example:nul\x00:1"
+def _inadmissible_cpe(character: str) -> Callable[[AimaasServer], None]:
+    def break_server(server: AimaasServer) -> None:
+        server.pages[2]["items"][7]["cpe"] = f"cpe:/o:example:bad{character}:1"
+
+    return break_server
 
 
 def _invalid_date(server: AimaasServer) -> None:
@@ -1324,7 +1333,18 @@ _RUN_FAILURES: Final[list[FailureCase]] = [
         InvalidAimaasListingError,
     ),
     ("missing-cpe", _missing_cpe, INVALID_RESPONSE_MESSAGE, LifecycleResponseError),
-    ("nul-cpe", _nul_cpe, INVALID_RESPONSE_MESSAGE, LifecycleResponseError),
+    (
+        "nul-cpe",
+        _inadmissible_cpe(NUL),
+        INVALID_RESPONSE_MESSAGE,
+        LifecycleResponseError,
+    ),
+    (
+        "surrogate-cpe",
+        _inadmissible_cpe(SURROGATE),
+        INVALID_RESPONSE_MESSAGE,
+        LifecycleResponseError,
+    ),
     ("invalid-date", _invalid_date, INVALID_RESPONSE_MESSAGE, LifecycleResponseError),
     ("missing-date", _missing_date, INVALID_RESPONSE_MESSAGE, LifecycleResponseError),
     (

@@ -41,6 +41,8 @@ from typing import Any
 
 import httpx
 
+from tests.support.inadmissible import json_bytes
+
 FIXTURE_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "aimaas"
 
 # Representative captured Product list pages: first, middle, final, and
@@ -207,7 +209,13 @@ class AimaasServer:
             return self.responses[page](request)
         if page not in self.pages:
             return httpx.Response(404, json={"detail": "Not Found"})
-        return httpx.Response(200, json=self.pages[page])
+        # A surrogate code point travels as its `\uXXXX` escape
+        # (`tests.support.inadmissible.json_bytes`).
+        return httpx.Response(
+            200,
+            content=json_bytes(self.pages[page]),
+            headers={"Content-Type": "application/json"},
+        )
 
     def client(self) -> httpx.AsyncClient:
         """A client whose transport is this server (redirects not followed)."""

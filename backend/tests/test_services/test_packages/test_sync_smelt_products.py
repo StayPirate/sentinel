@@ -77,6 +77,7 @@ from app.services.packages.sync_smelt_products import (
     validate_snapshot,
 )
 from app.services.product_service import list_products
+from tests.support.inadmissible import INADMISSIBLE_CHARACTERS, NUL, SURROGATE
 from tests.support.smelt import (
     SMELT_TEST_API_URL,
     SmeltServer,
@@ -346,23 +347,29 @@ class TestSnapshotValidation:
         _rejected(_listing(product_row(1, repos=["r" * (REPO_LIMIT + 1)])))
 
     @pytest.mark.parametrize("field", FIELDS)
+    @pytest.mark.parametrize("character", INADMISSIBLE_CHARACTERS)
     @pytest.mark.parametrize(
-        "template", ["\x00{}", "{}\x00{}", "{}\x00"], ids=["start", "middle", "end"]
+        "template",
+        ["{c}", "{c}1", "1{c}2", "1{c}"],
+        ids=["only", "start", "middle", "end"],
     )
-    def test_required_field_containing_nul_is_rejected(
-        self, field: str, template: str
+    def test_required_field_containing_inadmissible_character_is_rejected(
+        self, field: str, character: str, template: str
     ) -> None:
-        """External String Admissibility: U+0000 is never stripped. The
+        """External String Admissibility: the value is never stripped. The
         exact message proves that no source value is rendered."""
-        value = template.format("1", "2")
+        value = template.format(c=character)
 
         error = _rejected(_listing(product_row(1), product_row(2, **{field: value})))
 
         assert str(error) == f"row 1: {field} contains an inadmissible character"
 
-    def test_repository_containing_nul_is_rejected(self) -> None:
+    @pytest.mark.parametrize("character", INADMISSIBLE_CHARACTERS)
+    def test_repository_containing_inadmissible_character_is_rejected(
+        self, character: str
+    ) -> None:
         row = product_row(
-            1, repos=["EXAMPLE:Updates:ProductA:1:x86_64", f"{MARKER}\x00"]
+            1, repos=["EXAMPLE:Updates:ProductA:1:x86_64", f"{MARKER}{character}"]
         )
 
         error = _rejected(_listing(row))
@@ -921,12 +928,19 @@ def _invalid_row(server: SmeltServer) -> None:
     server.pages[3]["results"][0]["repos"] = []
 
 
-def _nul_cpe(server: SmeltServer) -> None:
-    server.pages[3]["results"][0]["cpe"] = "cpe:/o:example:nul\x00:1"
+def _inadmissible(field: str, character: str) -> Callable[[SmeltServer], None]:
+    """Place `character` in `field` (or a repository) of one row of the
+    middle or final page."""
 
+    def break_server(server: SmeltServer) -> None:
+        if field == "repos":
+            row = server.pages[2]["results"][0]
+            row["repos"] = [f"EXAMPLE:Updates:Bad{character}:1:x86_64"]
+        else:
+            row = server.pages[3]["results"][0]
+            row[field] = f"{row[field]}{character}"
 
-def _nul_repository(server: SmeltServer) -> None:
-    server.pages[2]["results"][0]["repos"] = ["EXAMPLE:Updates:Nul\x00:1:x86_64"]
+    return break_server
 
 
 def _duplicate_cpe(server: SmeltServer) -> None:
@@ -952,8 +966,16 @@ _RUN_FAILURES: Final[list[FailureCase]] = [
     ("timeout", _read_timeout, "SMELT request timed out", httpx.ReadTimeout),
     ("pagination", _invalid_metadata, INVALID_RESPONSE, InvalidProductListingError),
     ("row", _invalid_row, VALIDATION_FAILED, SnapshotValidationError),
-    ("nul-cpe", _nul_cpe, VALIDATION_FAILED, SnapshotValidationError),
-    ("nul-repository", _nul_repository, VALIDATION_FAILED, SnapshotValidationError),
+    *[
+        (
+            f"{kind}-{field}",
+            _inadmissible(field, character),
+            VALIDATION_FAILED,
+            SnapshotValidationError,
+        )
+        for field in (*FIELDS, "repos")
+        for kind, character in (("nul", NUL), ("surrogate", SURROGATE))
+    ],
     ("duplicate-cpe", _duplicate_cpe, VALIDATION_FAILED, SnapshotValidationError),
     ("zero-count", _zero_count, VALIDATION_FAILED, SnapshotValidationError),
 ]

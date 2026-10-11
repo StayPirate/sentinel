@@ -53,6 +53,8 @@ from urllib.parse import parse_qs
 
 import httpx
 
+from tests.support.inadmissible import json_bytes
+
 FIXTURE_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "smelt"
 
 # Page numbers of the captured live pages.
@@ -214,7 +216,13 @@ class SmeltServer:
             return self.responses[page](request)
         if page not in self.pages:
             return httpx.Response(404, json={"detail": "Invalid page."})
-        return httpx.Response(200, json=self.pages[page])
+        # A surrogate code point travels as its `\uXXXX` escape
+        # (`tests.support.inadmissible.json_bytes`).
+        return httpx.Response(
+            200,
+            content=json_bytes(self.pages[page]),
+            headers={"Content-Type": "application/json"},
+        )
 
     def client(self) -> httpx.AsyncClient:
         """A client whose transport is this server (redirects not followed)."""

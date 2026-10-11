@@ -105,8 +105,10 @@ from app.models.session import Session as SessionRow
 from app.models.ticket import Ticket
 from app.models.user import User
 from app.services import package_service, task_publication, ticket_service, user_service
+from app.services.packages.smelt_maintainership import ACQUISITION_UNAVAILABLE_EVENT
 from app.services.session_service import create_session
 from tests.support.cvss_chain import DEFAULT_VERSION
+from tests.support.inadmissible import INADMISSIBLE_CHARACTERS
 from tests.support.package_addition import (
     PackageSmelt,
     Pause,
@@ -927,6 +929,52 @@ class TestSuccess:
         assert await maintainers(api.db, ticket.id) == [(PKG, maintainer.id)]
         assert await tree_rows(api.db, ticket.id) == tree_before
         assert await ticket_row(api.db, ticket.id) == (ANALYSIS, None)
+
+    @pytest.mark.parametrize("character", INADMISSIBLE_CHARACTERS)
+    async def test_inadmissible_maintainer_email_adds_the_package_without_maintainer(
+        self, api: _Api, ticket_factory: TicketFactory, character: str
+    ) -> None:
+        """package-maintainership.md, Successful response and Missing and
+        invalid responses; docs/conventions.md, External String
+        Admissibility: a consumed email containing an inadmissible character
+        rejects the whole maintainership response before any `User.email`
+        query. The package is added with the normal 201 and no maintainer,
+        not even for the valid matching email of the same response, and one
+        `schema` WARNING names neither email; no database error occurs."""
+        caller = await api.caller(Role.VULNERABILITY_ANALYST)
+        await seed_user(
+            api.db, username="erin.maintainer", email="erin.maintainer@example.com"
+        )
+        ticket = await cveless(ticket_factory, assignee_id=caller.user.id)
+        (product,) = await _current(api.db)
+        _serve(
+            api.smelt,
+            codestream(IBS_REF, "SLE_15", product.cpe),
+            emails=["erin.maintainer@example.com", f"{MARKER}{character}@example.com"],
+        )
+
+        with capture_logs() as logs:
+            response = await api.post(ticket, caller=caller)
+
+        assert response.status_code == 201, response.text
+        assert response.json() == _data(1, 0, 1, 0)
+        assert api.smelt.kinds == BOTH
+        assert await maintainers(api.db, ticket.id) == []
+        assert await ticket_events_by_id(api.db, ticket.id) == [
+            package_added_event(PKG, caller.user)
+        ]
+        assert logs == [
+            {
+                "event": ACQUISITION_UNAVAILABLE_EVENT,
+                "log_level": "warning",
+                "ticket_id": str(ticket.id),
+                "package_name": PKG,
+                "category": "schema",
+                "status_code": 200,
+            }
+        ]
+        for secret in (MARKER, "erin.maintainer"):
+            assert secret not in repr(logs)
 
     async def test_unassigned_new_ticket_is_assigned_to_the_active_va_caller(
         self, api: _Api, ticket_factory: TicketFactory

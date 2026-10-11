@@ -31,6 +31,7 @@ from app.services.packages.smelt_product_listing import (
     SmeltProductListing,
     fetch_product_listing,
 )
+from tests.support.inadmissible import NUL, SURROGATE
 from tests.support.smelt import (
     SMELT_TEST_API_URL,
     SMELT_TEST_ENDPOINT,
@@ -366,7 +367,12 @@ _METADATA_REJECTIONS: list[tuple[str, Mutator]] = [
     ("empty-user-information", _set(1, "next", _url(f"http://@{_HOST}"))),
     ("fragment", _set(1, "next", _meta(f"{_NEXT_2}#results"))),
     ("whitespace", _set(1, "next", _meta(f"{_NEXT_2} "))),
-    ("control-character", _set(1, "next", _meta(f"{_NEXT_2}\x00"))),
+    ("control-character", _set(1, "next", _meta(f"{_NEXT_2}{NUL}"))),
+    ("surrogate-in-next", _set(1, "next", _meta(f"{_NEXT_2}{SURROGATE}"))),
+    (
+        "surrogate-in-previous",
+        _set(3, "previous", _meta(f"page=2&page_size=100{SURROGATE}")),
+    ),
     ("duplicate-page-size", _set(1, "next", _meta(f"{_NEXT_2}&page_size=100"))),
     ("duplicate-page", _set(1, "next", _meta(f"page=2&{_NEXT_2}"))),
     ("unknown-parameter", _set(1, "next", _meta(f"{_NEXT_2}&format=json"))),

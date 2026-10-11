@@ -54,6 +54,7 @@ from app.services.package_service import (
     add_package_to_ticket,
 )
 from app.services.ticket_visibility import TicketCaller
+from tests.support.inadmissible import json_bytes
 
 SNAPSHOT_AT = datetime(2099, 1, 1, 3, 0, tzinfo=UTC)
 """The current Product catalog snapshot timestamp of a published Product."""
@@ -151,10 +152,15 @@ def maintainership(*emails: str | None) -> dict[str, Any]:
 
 
 def reply(status_code: int, body: Any) -> Respond:
-    """Respond with `status_code` and the JSON `body`."""
+    """Respond with `status_code` and the JSON `body`; a surrogate code point
+    travels as its `\\uXXXX` escape (`tests.support.inadmissible.json_bytes`)."""
 
     def respond(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(status_code, json=body)
+        return httpx.Response(
+            status_code,
+            content=json_bytes(body),
+            headers={"Content-Type": "application/json"},
+        )
 
     return respond
 
