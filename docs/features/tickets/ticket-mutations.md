@@ -878,8 +878,8 @@ effective assessment action contributes an effective CVSS child change to
   version, and the sequence must contain at most one canonical item for each
   `(provider, version)` key.
 - A missing `evaluation_date`, missing CVE UUID, malformed parsed-result type,
-  empty, over-length, or inadmissible-character-containing provider, reserved
-  provider, or duplicate canonical key
+  empty or over-length provider, a provider containing an inadmissible
+  character, a reserved provider, or a duplicate canonical key
   raises `ValueError`. These are internal contract failures, not API outcomes.
 
 All guards use input only and complete before persistent writes. An empty

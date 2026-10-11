@@ -1088,18 +1088,20 @@ characters**:
   SQLSTATE 22P05.
 - A surrogate code point, U+D800 through U+DFFF. It has no UTF-8 encoding: the
   database driver rejects a `text` or `varchar` parameter containing it before
-  sending the query, and a `jsonb` value containing its JSON escape fails with
-  SQLSTATE 22P02.
+  sending the query. In a `jsonb` value, an unpaired surrogate's JSON escape
+  fails with SQLSTATE 22P02, while a high surrogate code point followed by a
+  low one is silently stored as one supplementary character.
 
-Every failure occurs whether the value is written or only compared in a query.
+These failures occur whether the value is written or only compared in a query.
 JSON permits both characters as escape sequences, and decoding a JSON document
-from bytes also turns a surrogate's three-byte UTF-8-style encoding, such as
-`ED A0 80`, into a surrogate code point. A correctly paired surrogate escape
-denotes one supplementary character and is admissible. Pydantic `str` accepts
-both characters. A string length or pattern constraint happens to reject a
-surrogate code point, but that is a library detail and does not satisfy this
-rule. A structurally valid external value could therefore otherwise fail only
-at the database.
+from bytes with the standard-library decoder also turns a surrogate's
+UTF-8-style encoding, such as `ED A0 80`, into a surrogate code point. A
+correctly paired surrogate escape decodes to one supplementary character, which
+is admissible. Pydantic `str` accepts both characters. A string length or
+pattern constraint happens to reject a surrogate code point, but that is a
+library detail and is not relied on to satisfy this rule. A structurally valid
+external value could therefore otherwise fail, or be altered, only at the
+database.
 
 A string received from an external source — an HTTP response, a repository
 file, a message-bus payload, or an identity-provider claim — that Sentinel
@@ -1121,10 +1123,10 @@ contain an inadmissible character:
 - Where a specification states the outcome, check, or guard for a value
   containing U+0000 under this rule, the same applies to a value containing
   any inadmissible character.
-- Only the inadmissible characters are covered. Other control characters are
-  governed by per-field rules where an owning contract defines them, for
-  example reference URLs in `docs/features/tickets/ticket-references.md` (URL
-  Normalization).
+- Only the inadmissible characters are covered. Control characters other than
+  U+0000 are governed by per-field rules where an owning contract defines
+  them, for example reference URLs in
+  `docs/features/tickets/ticket-references.md` (URL Normalization).
 - An XML 1.0 document cannot contain an inadmissible character, raw or as a
   character reference. A conforming parser rejects it as not well-formed, so
   the owning parse-failure outcome satisfies this rule without an additional

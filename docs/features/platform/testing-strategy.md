@@ -1988,8 +1988,9 @@ at its documented granularity, with no database error and no write from the
 rejected unit. A field whose length or pattern constraint would reject a
 surrogate code point incidentally is not exempt. Fields validated by one
 shared check may be covered by one parametrized test. The tests of the shared
-check itself also prove that a correctly paired surrogate escape is
-admissible.
+check itself also prove that a high surrogate code point followed by a low one
+is rejected and that a supplementary character, such as one decoded from a
+correctly paired surrogate escape, is admissible.
 
 ### Inadmissible Characters in Request Input
 
@@ -2000,8 +2001,8 @@ whole value. The tests cover each input kind: a path parameter, including a
 percent-encoded `%00`; a single and repeated query parameter; and a body
 string value, list item, nested value, object member name, and undeclared
 member. A surrogate code point is covered for the body input kinds, both as an
-unpaired JSON escape and as its encoded bytes; path and query parameters cannot
-carry one. Each violation must produce its own `errors` entry at the documented
+unpaired JSON escape and as its UTF-8-style encoding in the body bytes; path
+and query parameters cannot carry one. Each violation must produce its own `errors` entry at the documented
 location. The tests must also prove that undeclared query parameters and
 non-string parameters are not inspected, that a correctly paired surrogate
 escape is accepted, and that the offending value is not echoed and does not
@@ -3128,7 +3129,7 @@ transport contract.
 |---|---|
 | Accepted schemes and host | `http` and `https` with a valid non-empty host are accepted; every other scheme, a missing or empty host, and malformed URL structure are rejected |
 | Embedded user information | User information or credentials in the authority component are rejected, including username-only and username/password forms |
-| Control characters | Every U+0000-U+001F character and U+007F is rejected rather than stripped or encoded |
+| Control characters | Every U+0000-U+001F character, U+007F, and every surrogate code point (U+D800-U+DFFF) is rejected rather than stripped or encoded |
 | Length | Exactly 2048 characters before and after normalization is accepted when otherwise valid; a value exceeding either pre-normalization or post-normalization length is rejected |
 | Scheme and host case | Scheme and host are lowercased without changing path, query, or fragment case |
 | HTTP upgrade | `http` normalizes to `https` before classification, comparison, and storage |

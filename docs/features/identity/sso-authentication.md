@@ -274,8 +274,8 @@ callback URL with an authorization `code` and `state` parameter.
    External String Admissibility (`docs/conventions.md`), because it is a
    query parameter in step 6: return the same HTTP 401 `AUTH_SSO_FAILED`
    response and log at WARNING level: `"SSO callback: claim
-   '{claim_name}' in ID token from {issuer} contains U+0000."` (the
-   claim value is never logged)
+   '{claim_name}' in ID token from {issuer} contains an inadmissible
+   character."` (the claim value is never logged)
 6. Look up the user by matching `username` to the extracted claim value
    (lowercased — see Matching rules). Additionally verify that
    `external_id IS NOT NULL` (i.e., the matched user is an

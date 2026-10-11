@@ -202,10 +202,10 @@ them. The rule covers:
   of either, including a percent-encoded `%00`; and
 - every string in a request body that the endpoint accepts and decodes as
   JSON, at any nesting level, including object member names and members the
-  endpoint does not declare. A surrogate code point arrives either as an
-  unpaired JSON escape such as `\ud800` or as its three-byte encoded form in
-  the body; a correctly paired escape denotes one supplementary character and
-  is admissible.
+  endpoint does not declare. A surrogate code point arrives, for example, as
+  an unpaired JSON escape such as `\ud800` or as its UTF-8-style encoding,
+  such as `ED A0 80`, in the body bytes; a correctly paired escape decodes to
+  one supplementary character, which is admissible.
 
 Path and query parameters are percent-decoded as UTF-8 with replacement, so
 undecodable bytes become U+FFFD and these parameters can carry U+0000 but never
