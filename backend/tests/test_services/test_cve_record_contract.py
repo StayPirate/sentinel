@@ -71,7 +71,8 @@ Every consumed field was observed live in at least one repository; none is
 documentation-only.
 
 Not observable live, and therefore covered by the parser unit tests only:
-U+0000 in any string; over-bound values; a `null`, non-string, or
+an inadmissible character (U+0000 or a surrogate code point) in any string;
+over-bound values; a `null`, non-string, or
 non-list value of a consumed field; an empty-string vendor, product, or
 version; both `lessThan` and `lessThanOrEqual` on one version; an empty
 `versions` array; a description list without an English entry; a JSON
@@ -99,6 +100,7 @@ from app.core.enums import (
     SSVCExploitation,
     SSVCTechnicalImpact,
 )
+from app.core.external_strings import contains_inadmissible_character
 from app.services.cve_ingest import (
     AffectedVersionEntry,
     CVEIngestPayload,
@@ -1191,14 +1193,14 @@ class TestProblemTypes:
 
 class TestExternalStringAdmissibility:
     @pytest.mark.parametrize("name", ALL_FIXTURES)
-    def test_every_consumed_string_is_nul_free_and_within_its_bound(
+    def test_every_consumed_string_is_admissible_and_within_its_bound(
         self, name: str
     ) -> None:
         strings = _consumed_strings(_record(name))
 
         assert strings
         for label, value, bound in strings:
-            assert "\x00" not in value, label
+            assert not contains_inadmissible_character(value), label
             assert bound is None or len(value) <= bound, label
 
     def test_bounded_payload_fields_are_checked(self) -> None:

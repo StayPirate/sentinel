@@ -70,6 +70,7 @@ from app.services.tickets.mitre_cve_record import (
     map_record,
 )
 from tests.support import mitre as mitre_support
+from tests.support.inadmissible import INADMISSIBLE_CHARACTERS, NUL, SURROGATE
 from tests.support.mitre import (
     ALL_RECORDS,
     load_raw_record,
@@ -93,7 +94,6 @@ V31_OTHER: Final = "CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H"
 V40: Final = "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N"
 URL_1: Final = "https://advisory.example.invalid/upstream/1"
 URL_2: Final = "https://advisory.example.invalid/upstream/2"
-NUL: Final = "\x00"
 SECRET: Final = "Example-Secret-Input-Value"
 TIMESTAMP: Final = "2026-01-02T03:04:05.000006Z"
 
@@ -447,7 +447,15 @@ class TestState:
 
 class TestCveId:
     @pytest.mark.parametrize(
-        "cve_id", ["CVE-2026-9999", "cve-2026-0001", None, 7, f"{CVE_ID}{NUL}"]
+        "cve_id",
+        [
+            "CVE-2026-9999",
+            "cve-2026-0001",
+            None,
+            7,
+            f"{CVE_ID}{NUL}",
+            f"{CVE_ID}{SURROGATE}",
+        ],
     )
     def test_file_name_id_is_authoritative(self, cve_id: Any) -> None:
         record = _record(metadata={"cveId": cve_id})
@@ -740,6 +748,7 @@ class TestCnaGuard:
             (CNA_ORG_ID.replace("-", ""), None),
             (f"{CNA_ORG_ID}\n", None),
             (f"{CNA_ORG_ID}{NUL}", None),
+            (f"{CNA_ORG_ID}{SURROGATE}", None),
             (42, None),
             (None, None),
         ],
@@ -873,6 +882,10 @@ class TestAdpGuard:
             (_adp_identity({"orgId": ADP_ORG_ID, "shortName": 3}), ADP_ORG_ID),
             (_adp_identity({"orgId": SECRET, "shortName": ""}), None),
             (_adp_identity({"orgId": ADP_ORG_ID, "shortName": f"A{NUL}"}), ADP_ORG_ID),
+            (
+                _adp_identity({"orgId": ADP_ORG_ID, "shortName": f"A{SURROGATE}"}),
+                ADP_ORG_ID,
+            ),
             (_adp_identity({"orgId": ADP_ORG_ID, "shortName": "a" * 97}), ADP_ORG_ID),
             (None, None),
             ("adp", None),
@@ -889,6 +902,7 @@ class TestAdpGuard:
             "number-short-name",
             "non-uuid-org-id",
             "nul-short-name",
+            "surrogate-short-name",
             "over-bound-short-name",
             "null-element",
             "string-element",
@@ -1404,66 +1418,76 @@ class TestReferences:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("character", INADMISSIBLE_CHARACTERS)
 class TestExternalStringAdmissibility:
     @pytest.mark.parametrize(
         "cna",
         [
-            {"title": f"{SECRET}{NUL}"},
-            {"title": SECRET * 20 + NUL},
-            {"descriptions": [{"lang": "en", "value": f"{SECRET}{NUL}"}]},
+            lambda c: {"title": f"{SECRET}{c}"},
+            lambda c: {"title": SECRET * 20 + c},
+            lambda c: {"descriptions": [{"lang": "en", "value": f"{SECRET}{c}"}]},
         ],
         ids=["title", "title-after-bound", "description"],
     )
     def test_global_string_fails_payload_construction(
-        self, cna: dict[str, Any]
+        self, cna: Any, character: str
     ) -> None:
         with pytest.raises(ValidationError) as caught:
-            _map(_record(**cna))
+            _map(_record(**cna(character)))
 
         assert SECRET not in str(caught.value)
 
-    def test_unselected_description_is_not_consumed(self) -> None:
+    def test_unselected_description_is_not_consumed(self, character: str) -> None:
         descriptions = [
             {"lang": "en", "value": "Fictional description."},
-            {"lang": "de", "value": f"Fiktiv{NUL}"},
+            {"lang": "de", "value": f"Fiktiv{character}"},
         ]
 
         assert _payload(_record(descriptions=descriptions)).description == (
             "Fictional description."
         )
 
-    def test_state_is_unrecognized(self) -> None:
+    def test_state_is_unrecognized(self, character: str) -> None:
         with pytest.raises(MitreRecordStateError):
-            _map(_record(state=f"PUBLISHED{NUL}"))
+            _map(_record(state=f"PUBLISHED{character}"))
 
     @pytest.mark.parametrize(
         ("field", "key"),
         [("published_date", "datePublished"), ("modified_date", "dateUpdated")],
     )
-    def test_date_is_omitted(self, field: str, key: str) -> None:
-        payload = _payload(_record(metadata={key: f"2026-01-01T00:00:00Z{NUL}"}))
+    @pytest.mark.parametrize(
+        "template", ["2026-01-01T00:00:00Z{c}", "2026-01-01{c}00:00:00Z"]
+    )
+    def test_date_is_omitted(
+        self, field: str, key: str, template: str, character: str
+    ) -> None:
+        value = template.format(c=character)
+
+        payload = _payload(_record(metadata={key: value}))
 
         assert field not in payload.model_fields_set
 
-    def test_rejected_date_is_omitted(self) -> None:
-        record = _record(state="REJECTED", metadata={"dateRejected": f"2026{NUL}"})
+    def test_rejected_date_is_omitted(self, character: str) -> None:
+        record = _record(
+            state="REJECTED", metadata={"dateRejected": f"2026{character}"}
+        )
 
         assert "date_rejected" not in _payload(record).model_fields_set
 
     @pytest.mark.parametrize("scope", ["cna", "adp"])
     @pytest.mark.parametrize("field", ["programFiles", "version", "product"])
     def test_affected_value_skips_its_entry_and_keeps_siblings(
-        self, scope: str, field: str
+        self, scope: str, field: str, character: str
     ) -> None:
         """One element-level list, one version-level, and one element-level
         string; the parser tests own the per-field matrix."""
         poisoned = _affected("Poisoned Product")
         if field == "programFiles":
-            poisoned["programFiles"] = ["src/example.c", f"src/{NUL}.c"]
+            poisoned["programFiles"] = ["src/example.c", f"src/{character}.c"]
         elif field == "version":
-            poisoned["versions"][0]["version"] = f"1{NUL}"
+            poisoned["versions"][0]["version"] = f"1{character}"
         else:
-            poisoned["product"] = f"Poisoned{NUL}"
+            poisoned["product"] = f"Poisoned{character}"
         affected = [_affected("Kept Product"), poisoned]
         if scope == "cna":
             record = _record(affected=affected)
@@ -1475,9 +1499,9 @@ class TestExternalStringAdmissibility:
 
         assert [e.product for e in entries] == ["Kept Product"]
 
-    def test_vector_skips_its_candidate(self) -> None:
+    def test_vector_skips_its_candidate(self, character: str) -> None:
         metrics = [
-            {"cvssV4_0": {"vectorString": V40 + NUL}},
+            {"cvssV4_0": {"vectorString": V40 + character}},
             {"cvssV3_1": {"vectorString": V31}},
         ]
 
@@ -1486,9 +1510,13 @@ class TestExternalStringAdmissibility:
         assert cvss == [CVSSAssessmentEntry(provider_name=CNA_NAME, vector_string=V31)]
 
     @pytest.mark.parametrize("container", ["cna", "cisa"])
-    def test_cwe_id_skips_its_classification(self, container: str) -> None:
+    def test_cwe_id_skips_its_classification(
+        self, container: str, character: str
+    ) -> None:
         poisoned = _problem_types("CWE-20")
-        poisoned[0]["descriptions"].append({"type": "CWE", "cweId": f"CWE-1{NUL}"})
+        poisoned[0]["descriptions"].append(
+            {"type": "CWE", "cweId": f"CWE-1{character}"}
+        )
         if container == "cna":
             record = _record(problemTypes=poisoned)
         else:
@@ -1499,17 +1527,19 @@ class TestExternalStringAdmissibility:
         assert {c[0] for c in cwe} == {"CWE-20"}
 
     @pytest.mark.parametrize(
-        "ssvc",
+        ("key", "value"),
         [
-            _ssvc(exploitation=f"active{NUL}"),
-            _ssvc(version=f"2.0{NUL}"),
-            _ssvc(timestamp=f"{TIMESTAMP}{NUL}"),
+            ("exploitation", "active{c}"),
+            ("version", "2.0{c}"),
+            ("timestamp", f"{TIMESTAMP}{{c}}"),
         ],
         ids=["option", "version", "timestamp"],
     )
     def test_ssvc_value_skips_the_assessment_as_invalid(
-        self, ssvc: dict[str, Any]
+        self, key: str, value: str, character: str
     ) -> None:
+        ssvc = _ssvc(**{key: value.format(c=character)})
+
         result = _map(_record(adp=[_cisa(metrics=[ssvc, _kev()])]))
 
         assert result.payload.ssvc_assessment is None
@@ -1517,32 +1547,49 @@ class TestExternalStringAdmissibility:
         assert result.payload.kev_data is not None
 
     @pytest.mark.parametrize(
-        "kev",
-        [_kev(date_added=f"2026-01-05{NUL}"), _kev(reference=f"{URL_2}{NUL}")],
-        ids=["date-added", "reference"],
+        ("key", "value"),
+        [
+            ("date_added", "2026-01-05{c}"),
+            ("date_added", "2026-01-05{c}00:00:00Z"),
+            ("reference", f"{URL_2}{{c}}"),
+        ],
+        ids=["date-added", "date-added-separator", "reference"],
     )
-    def test_kev_value_skips_the_entry(self, kev: dict[str, Any]) -> None:
+    def test_kev_value_skips_the_entry(
+        self, key: str, value: str, character: str
+    ) -> None:
+        kev = _kev(**{key: value.format(c=character)})
+
         payload = _payload(_record(adp=[_cisa(metrics=[_ssvc(), kev])]))
 
         assert "kev_data" not in payload.model_fields_set
         assert payload.ssvc_assessment is not None
 
-    def test_cna_short_name_leaves_cvss_to_upsert_and_skips_cwe(self) -> None:
-        provider = {"orgId": CNA_ORG_ID, "shortName": f"Example{NUL}"}
+    def test_cna_short_name_leaves_cvss_to_upsert_and_skips_cwe(
+        self, character: str
+    ) -> None:
+        provider = {"orgId": CNA_ORG_ID, "shortName": f"Example{character}"}
 
         result = _map(_record(providerMetadata=provider))
 
-        assert _cvss(result.payload) == {(f"Example{NUL}", V31)}
+        assert _cvss(result.payload) == {(f"Example{character}", V31)}
         assert "cwe_classifications" not in result.payload.model_fields_set
         assert result.cna_guard is None
 
-    def test_adp_short_name_skips_the_entry(self) -> None:
-        result = _map(_record(adp=[_adp(f"Example{NUL}")]))
+    def test_adp_short_name_skips_the_entry(self, character: str) -> None:
+        result = _map(_record(adp=[_adp(f"Example{character}")]))
 
         assert result.skipped_adps == (SkippedAdp(ADP_ORG_ID),)
 
-    def test_reference_url_is_left_to_the_reference_service(self) -> None:
-        url = f"{URL_1}{NUL}"
+    @pytest.mark.parametrize(
+        "template",
+        [f"{URL_1}{{c}}", f"{URL_1}?q={{c}}", f"{URL_1}#{{c}}"],
+        ids=["path", "query", "fragment"],
+    )
+    def test_reference_url_is_left_to_the_reference_service(
+        self, template: str, character: str
+    ) -> None:
+        url = template.format(c=character)
 
         upstream = _map(_record(references=[{"url": url}])).upstream_references
 
@@ -1551,17 +1598,17 @@ class TestExternalStringAdmissibility:
     @pytest.mark.parametrize(
         "mutate",
         [
-            lambda r: r["cveMetadata"].update(cveId=f"{CVE_ID}{NUL}"),
-            lambda r: r["cveMetadata"].update(assignerOrgId=NUL),
-            lambda r: r["cveMetadata"].update(dateReserved=NUL),
-            lambda r: r["containers"]["cna"].update(x_generator={"engine": NUL}),
-            lambda r: r["containers"]["cna"]["providerMetadata"].update(orgId=NUL),
-            lambda r: r["containers"]["cna"]["references"][0].update(name=NUL),
-            lambda r: r["containers"]["cna"]["references"][0].update(
-                tags=["patch", f"x_{NUL}"]
+            lambda r, c: r["cveMetadata"].update(cveId=f"{CVE_ID}{c}"),
+            lambda r, c: r["cveMetadata"].update(assignerOrgId=c),
+            lambda r, c: r["cveMetadata"].update(dateReserved=c),
+            lambda r, c: r["containers"]["cna"].update(x_generator={"engine": c}),
+            lambda r, c: r["containers"]["cna"]["providerMetadata"].update(orgId=c),
+            lambda r, c: r["containers"]["cna"]["references"][0].update(name=c),
+            lambda r, c: r["containers"]["cna"]["references"][0].update(
+                tags=["patch", f"x_{c}"]
             ),
-            lambda r: r["containers"]["cna"]["descriptions"][0].update(
-                supportingMedia=[{"value": NUL}]
+            lambda r, c: r["containers"]["cna"]["descriptions"][0].update(
+                supportingMedia=[{"value": c}]
             ),
         ],
         ids=[
@@ -1575,9 +1622,11 @@ class TestExternalStringAdmissibility:
             "supporting-media",
         ],
     )
-    def test_unconsumed_or_compared_only_value_has_no_effect(self, mutate: Any) -> None:
+    def test_unconsumed_or_compared_only_value_has_no_effect(
+        self, mutate: Any, character: str
+    ) -> None:
         record = _record()
-        mutate(record)
+        mutate(record, character)
 
         assert _map(record).payload == _payload(_record())
 

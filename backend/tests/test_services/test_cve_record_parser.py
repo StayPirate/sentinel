@@ -63,6 +63,7 @@ from tests.support.cve_record import (
     load_fixture,
     source_cve_id,
 )
+from tests.support.inadmissible import INADMISSIBLE_CHARACTERS, NUL, SURROGATE
 
 pytestmark = pytest.mark.unit
 
@@ -1309,6 +1310,7 @@ class TestCvssCandidates:
             pytest.param("", id="empty"),
             pytest.param("   ", id="blank"),
             pytest.param(V31 + "\x00", id="nul"),
+            pytest.param(V31 + SURROGATE, id="surrogate"),
             pytest.param(None, id="null"),
             pytest.param(3.1, id="number"),
             pytest.param([V31], id="list"),
@@ -1594,7 +1596,10 @@ class TestCweClassifications:
 
         assert [e.source for e in entries] == ["s" * 100]
 
-    @pytest.mark.parametrize("source", ["s" * 101, "cna:\x00", "\x00", None, 1])
+    @pytest.mark.parametrize(
+        "source",
+        ["s" * 101, "cna:\x00", "\x00", f"cna:{SURROGATE}", SURROGATE, None, 1],
+    )
     def test_invalid_source_skips_every_cwe(self, source: Any) -> None:
         problem = _problem(_cwe("CWE-79"), _cwe("CWE-89"))
 
@@ -1689,7 +1694,10 @@ class TestDescription:
     def test_no_string_value_yields_none(self, descriptions: list[Any]) -> None:
         assert parse_description(descriptions) is None
 
-    @pytest.mark.parametrize("value", ["", "a\x00b", "\r\nFictional\r\n", "x" * 10000])
+    @pytest.mark.parametrize(
+        "value",
+        ["", "a\x00b", f"a{SURROGATE}b", "\r\nFictional\r\n", "x" * 10000],
+    )
     def test_value_of_any_content_is_returned_unvalidated(self, value: str) -> None:
         assert parse_description([{"lang": "en", "value": value}]) == value
 
@@ -1720,17 +1728,19 @@ class TestDescription:
         assert "\r\n" in str(parse_description(cna["descriptions"]))
 
 
-_NUL_TITLES: Final = (
-    "\x00",
-    "a\x00b",
-    "Fictional\x00",
-    "a" * 255 + "\x00",
-    "a" * 256 + "\x00",
-    "a" * 300 + "\x00",
-    "a" * 100 + "\x00" + "a" * 200,
-    "\x00" + "a" * 300,
+_INADMISSIBLE_TITLES: Final = (
+    NUL,
+    "a" + NUL + "b",
+    "Fictional" + NUL,
+    "a" * 255 + NUL,
+    "a" * 256 + NUL,
+    "a" * 300 + NUL,
+    "a" * 100 + NUL + "a" * 200,
+    NUL + "a" * 300,
 )
-"""Titles with U+0000 within and after the first 256 characters."""
+"""Titles with an inadmissible character, written as `NUL`, within and after
+the first 256 characters; each test substitutes every inadmissible
+character."""
 
 
 class TestTitle:
@@ -1756,16 +1766,24 @@ class TestTitle:
 
         assert parse_title(cna) is None
 
-    @pytest.mark.parametrize("title", _NUL_TITLES)
-    def test_title_with_nul_is_returned_untruncated(self, title: str) -> None:
+    @pytest.mark.parametrize("character", INADMISSIBLE_CHARACTERS)
+    @pytest.mark.parametrize("template", _INADMISSIBLE_TITLES)
+    def test_title_with_inadmissible_character_is_returned_untruncated(
+        self, template: str, character: str
+    ) -> None:
+        title = template.replace(NUL, character)
+
         assert parse_title({"title": title}) == title
 
-    @pytest.mark.parametrize("title", _NUL_TITLES)
-    def test_caller_payload_with_nul_title_raises_validation_error(
-        self, title: str
+    @pytest.mark.parametrize("character", INADMISSIBLE_CHARACTERS)
+    @pytest.mark.parametrize("template", _INADMISSIBLE_TITLES)
+    def test_caller_payload_with_inadmissible_title_raises_validation_error(
+        self, template: str, character: str
     ) -> None:
-        """The untruncated value keeps U+0000, so the caller's payload
-        construction rejects it and fails the CVE item."""
+        """The untruncated value keeps the inadmissible character, so the
+        caller's payload construction rejects it and fails the CVE item."""
+        title = template.replace(NUL, character)
+
         with pytest.raises(ValidationError):
             CVEIngestPayload(title=parse_title({"title": title}))
 
@@ -1799,6 +1817,7 @@ class TestValidateCveId:
             pytest.param({"cveId": None}, id="null"),
             pytest.param({"cveId": 2026}, id="non-string"),
             pytest.param({"cveId": CVE_ID + "\x00"}, id="nul"),
+            pytest.param({"cveId": CVE_ID + SURROGATE}, id="surrogate"),
             pytest.param(None, id="null-metadata"),
             pytest.param([], id="list-metadata"),
             pytest.param(CVE_ID, id="string-metadata"),
@@ -1867,6 +1886,10 @@ class TestSsvc:
             "2024-13-01T00:00:00Z",
             "2024-01-01T12:00:00\x00",
             "\x00",
+            "2024-01-01\x0012:00:00Z",
+            f"2024-01-01T12:00:00{SURROGATE}",
+            SURROGATE,
+            f"2024-01-01{SURROGATE}12:00:00Z",
             "0001-01-01T00:00:00+01:00",
             1,
             1.5,
@@ -2173,6 +2196,11 @@ class TestKev:
             "2024-01-01\x00",
             "\x002024-01-01",
             "2024-01-01T00:00:00\x00",
+            "2024-01-01\x0000:00:00",
+            f"2024-01-01{SURROGATE}",
+            f"{SURROGATE}2024-01-01",
+            f"2024-01-01T00:00:00{SURROGATE}",
+            f"2024-01-01{SURROGATE}00:00:00",
             20240115,
             1.5,
             True,
@@ -2208,6 +2236,8 @@ class TestKev:
             "r" * 2049,
             KEV_REFERENCE + "\x00",
             "\x00",
+            KEV_REFERENCE + SURROGATE,
+            SURROGATE,
             1,
             1.5,
             True,
@@ -2310,6 +2340,7 @@ class TestCveState:
             " PUBLISHED",
             "PUBLISHED\n",
             "PUBLISHED\x00",
+            f"PUBLISHED{SURROGATE}",
             "",
             None,
             1,
@@ -2381,6 +2412,9 @@ class TestDates:
             "2024-01-01T12:00:00Z\x00",
             "\x002024-01-01T12:00:00Z",
             "2024-01-01\x0012:00:00",
+            f"2024-01-01T12:00:00Z{SURROGATE}",
+            f"{SURROGATE}2024-01-01T12:00:00Z",
+            f"2024-01-01{SURROGATE}12:00:00",
             "0001-01-01T00:00:00+01:00",
             "9999-12-31T23:59:59-01:00",
             20240101,

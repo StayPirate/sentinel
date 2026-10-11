@@ -54,7 +54,8 @@ or configuration; nested nodes; `configurations` `null` or `[]`; an absent,
 invalid `criteria`; an unknown `vulnStatus`; timestamps with an offset;
 absent or wrongly typed required global fields; wrongly typed optional
 members; a Source API body other than the observed envelope; malformed
-source entries; blank source names; and U+0000 anywhere.
+source entries; blank source names; and an inadmissible character (U+0000 or
+a surrogate code point) anywhere.
 """
 
 from __future__ import annotations
@@ -69,6 +70,7 @@ import pytest
 from pydantic import Field, TypeAdapter, ValidationError
 
 from app.core.enums import CVSSVersion
+from app.core.external_strings import contains_inadmissible_character
 from app.core.identifiers import is_valid_cve_id
 from app.services.cvss import validate_cvss_vector, validate_external_cvss_vector
 from app.services.ticket_mutations_errors import InvalidCVSSVectorError
@@ -902,8 +904,7 @@ class TestCpeConfigurations:
             criteria = match["criteria"]
             assert criteria.startswith("cpe:2.3:")
             assert len(criteria) <= _CRITERIA_MAX_LENGTH
-            assert "\x00" not in criteria
-            criteria.encode("utf-8")
+            assert not contains_inadmissible_character(criteria)
 
     @pytest.mark.parametrize(("name", "element"), _RECORD_PARAMS)
     def test_match_criteria_ids_are_uppercase_uuids(
@@ -1146,9 +1147,11 @@ class TestSanitization:
             assert _FICTIONAL_UPSTREAM.fullmatch(reference["url"])
 
     @pytest.mark.parametrize("name", _ALL_FIXTURES)
-    def test_no_fixture_contains_nul(self, name: str) -> None:
+    def test_no_fixture_contains_an_inadmissible_character(self, name: str) -> None:
         raw = load_raw_fixture(name)
 
         assert b"\\u0000" not in raw
         assert b"\x00" not in raw
-        assert all("\x00" not in s for s in _strings(json.loads(raw)))
+        assert not any(
+            contains_inadmissible_character(s) for s in _strings(json.loads(raw))
+        )

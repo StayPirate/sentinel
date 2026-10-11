@@ -72,6 +72,7 @@ from app.services.tickets.nvd_cve_record import (
     select_cpe_matches,
 )
 from tests.support import nvd as nvd_support
+from tests.support.inadmissible import INADMISSIBLE_CHARACTERS, NUL, SURROGATE
 from tests.support.module_imports import APP_ROOT, forbidden_imports, imported_modules
 from tests.support.nvd import (
     CISA_ADP_SOURCE_IDENTIFIER,
@@ -124,9 +125,6 @@ MATCH_ID_LOWER: Final = MATCH_ID.lower()
 
 URL_1: Final = "https://advisory.example.invalid/upstream/1"
 URL_2: Final = "https://advisory.example.invalid/upstream/2"
-NUL: Final = "\x00"
-SURROGATE: Final[str] = chr(0xD800)
-"""An unpaired surrogate, built at runtime: mypy cannot cache it as a literal."""
 SECRET: Final = "Example-Secret-Input-Value"
 
 STRUCTURE_MESSAGE: Final = "NVD record is structurally non-processable"
@@ -667,6 +665,8 @@ class TestRequiredFields:
             "",
             f"CVE-2026-0001{NUL}",
             f"CVE-2026-{NUL}0001",
+            f"CVE-2026-0001{SURROGATE}",
+            f"CVE-2026-{SURROGATE}0001",
             "CVE-\uff12\uff10\uff12\uff16-0001",
         ],
         ids=repr,
@@ -705,6 +705,11 @@ class TestRequiredFields:
             f"2026-10-01T00:00:00.000{NUL}",
             f"{NUL}2026-10-01T00:00:00.000",
             f"2026-10-01T00:{NUL}00:00.000",
+            f"2026-10-01{NUL}00:00:00.000",
+            f"2026-10-01T00:00:00.000{SURROGATE}",
+            f"{SURROGATE}2026-10-01T00:00:00.000",
+            f"2026-10-01T00:{SURROGATE}00:00.000",
+            f"2026-10-01{SURROGATE}00:00:00.000",
         ],
         ids=repr,
     )
@@ -855,6 +860,7 @@ class TestRequiredFields:
             pytest.param(_record(id="cve-2026-0001"), id="id-lowercase"),
             pytest.param(_record(id="CVE-2026-1"), id="id-malformed"),
             pytest.param(_record(id=f"{CVE_ID}{NUL}"), id="id-nul"),
+            pytest.param(_record(id=f"{CVE_ID}{SURROGATE}"), id="id-surrogate"),
         ],
     )
     def test_element_cve_id_is_none_without_a_valid_id(self, element: object) -> None:
@@ -887,6 +893,7 @@ class TestVulnStatus:
             "Rejected ",
             "",
             f"Rejected{NUL}",
+            f"Rejected{SURROGATE}",
         ],
         ids=repr,
     )
@@ -1002,8 +1009,11 @@ class TestDescription:
         assert result.payload.description == "Fictional."
         assert result.skip_reasons == {INVALID_DESCRIPTION}
 
-    def test_nul_in_the_selected_english_value_fails_the_item(self) -> None:
-        element = _record(descriptions=[_description("en", f"{SECRET}{NUL}text")])
+    @pytest.mark.parametrize("character", INADMISSIBLE_CHARACTERS)
+    def test_inadmissible_character_in_the_selected_english_value_fails_the_item(
+        self, character: str
+    ) -> None:
+        element = _record(descriptions=[_description("en", f"{SECRET}{character}text")])
 
         with pytest.raises(ValidationError) as caught:
             _map(element)
@@ -1011,23 +1021,32 @@ class TestDescription:
         assert SECRET not in str(caught.value)
         assert SECRET not in repr(caught.value)
 
+    @pytest.mark.parametrize("character", INADMISSIBLE_CHARACTERS)
     @pytest.mark.parametrize(
         "descriptions",
         [
             pytest.param(
-                [_description("es", f"No{NUL}"), _description("en", "Fictional.")],
+                lambda c: [
+                    _description("es", f"No{c}"),
+                    _description("en", "Fictional."),
+                ],
                 id="other-language",
             ),
             pytest.param(
-                [_description("en", "Fictional."), _description("en", f"No{NUL}")],
+                lambda c: [
+                    _description("en", "Fictional."),
+                    _description("en", f"No{c}"),
+                ],
                 id="later-english",
             ),
         ],
     )
-    def test_nul_in_an_unselected_value_is_not_consumed(
-        self, descriptions: object
+    def test_inadmissible_character_in_an_unselected_value_is_not_consumed(
+        self, descriptions: Any, character: str
     ) -> None:
-        assert _payload(_record(descriptions=descriptions)).description == "Fictional."
+        element = _record(descriptions=descriptions(character))
+
+        assert _payload(element).description == "Fictional."
 
 
 # ---------------------------------------------------------------------------
@@ -1480,8 +1499,8 @@ class TestCvssMetrics:
 
     @pytest.mark.parametrize(
         "provider",
-        [f"Example{NUL}CNA", "P" * 101, "P" * 200],
-        ids=["nul", "over-100", "over-200"],
+        [f"Example{NUL}CNA", f"Example{SURROGATE}CNA", "P" * 101, "P" * 200],
+        ids=["nul", "surrogate", "over-100", "over-200"],
     )
     def test_inadmissible_provider_is_passed_to_upsert_cve(self, provider: str) -> None:
         result = _map(_cvss_record(_metric(CNA_SOURCE)), {CNA_SOURCE: provider})
@@ -1527,6 +1546,7 @@ class TestCweWeaknesses:
             "79",
             "",
             f"CWE-79{NUL}",
+            f"CWE-79{SURROGATE}",
         ],
         ids=repr,
     )
@@ -1601,7 +1621,9 @@ class TestCweWeaknesses:
         assert result.skip_reasons == {INVALID_CWE}
 
     @pytest.mark.parametrize(
-        "name", ["S" * 101, f"Example{NUL}CNA"], ids=["over-100", "nul"]
+        "name",
+        ["S" * 101, f"Example{NUL}CNA", f"Example{SURROGATE}CNA"],
+        ids=["over-100", "nul", "surrogate"],
     )
     def test_inadmissible_source_is_skipped_and_the_cve_mapped(self, name: str) -> None:
         element = _record(
@@ -2018,6 +2040,7 @@ class TestCpeSelection:
             pytest.param([1, None, "x"], id="non-object-entries"),
             pytest.param([_match(vulnerable="yes")], id="vulnerable-string"),
             pytest.param([_match(f"cpe{NUL}")], id="criteria-nul"),
+            pytest.param([_match(f"cpe{SURROGATE}")], id="criteria-surrogate"),
             pytest.param([_match(match_criteria_id="{bad}")], id="match-id-invalid"),
         ],
     )
@@ -2452,91 +2475,102 @@ class TestCpeValidation:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("character", INADMISSIBLE_CHARACTERS)
 class TestExternalStringAdmissibility:
     @pytest.mark.parametrize(
         ("element", "error"),
         [
-            pytest.param(_record(id=f"CVE-2026-0{NUL}001"), NvdRecordIdError, id="id"),
             pytest.param(
-                _record(published=f"2026-10-01T00:00{NUL}:00.000"),
+                lambda c: _record(id=f"CVE-2026-0{c}001"), NvdRecordIdError, id="id"
+            ),
+            pytest.param(
+                lambda c: _record(published=f"2026-10-01T00:00{c}:00.000"),
                 NvdRecordStructureError,
                 id="published",
             ),
             pytest.param(
-                _record(lastModified=f"2026-10-01T00:00:00.000{NUL}"),
+                lambda c: _record(lastModified=f"2026-10-01T00:00:00.000{c}"),
                 NvdRecordStructureError,
                 id="last-modified",
             ),
             pytest.param(
-                _record(descriptions=[_description("en", f"Fictional{NUL}.")]),
+                lambda c: _record(descriptions=[_description("en", f"Fictional{c}.")]),
                 ValidationError,
                 id="selected-description",
             ),
         ],
     )
-    def test_nul_fails_the_cve_item(
-        self, element: dict[str, Any], error: type[Exception]
+    def test_inadmissible_character_fails_the_cve_item(
+        self, element: Any, error: type[Exception], character: str
     ) -> None:
         with pytest.raises(error):
-            _map(element)
+            _map(element(character))
 
     @pytest.mark.parametrize(
         ("element", "names", "reason"),
         [
             pytest.param(
-                _cvss_record(_metric(vector=f"CVSS:3.1/AV:N{NUL}/AC:L")),
-                NAMES,
+                lambda c: _cvss_record(_metric(vector=f"CVSS:3.1/AV:N{c}/AC:L")),
+                lambda c: NAMES,
                 INVALID_VECTOR,
                 id="vector-string",
             ),
             pytest.param(
-                _cwe_record(_weakness("CWE-79")),
-                {CNA_SOURCE: f"Example{NUL}CNA"},
+                lambda c: _cwe_record(_weakness("CWE-79")),
+                lambda c: {CNA_SOURCE: f"Example{c}CNA"},
                 INVALID_CWE,
                 id="resolved-cwe-source",
             ),
             pytest.param(
-                _record(
-                    configurations=[_configuration(_node(_match(f"{CPE_A}{NUL}")))]
+                lambda c: _record(
+                    configurations=[_configuration(_node(_match(f"{CPE_A}{c}")))]
                 ),
-                NAMES,
+                lambda c: NAMES,
                 INVALID_CPE_MATCH,
                 id="criteria",
             ),
             pytest.param(
-                _record(
+                lambda c: _record(
                     configurations=[
                         _configuration(
-                            _node(_match(match_criteria_id=f"{NUL}{MATCH_ID[1:]}"))
+                            _node(_match(match_criteria_id=f"{c}{MATCH_ID[1:]}"))
                         )
                     ]
                 ),
-                NAMES,
+                lambda c: NAMES,
                 INVALID_CPE_MATCH,
                 id="match-criteria-id",
             ),
         ],
     )
-    def test_nul_skips_the_unit_with_its_reason(
-        self, element: dict[str, Any], names: Mapping[str, str], reason: str
+    def test_inadmissible_character_skips_the_unit_with_its_reason(
+        self, element: Any, names: Any, reason: str, character: str
     ) -> None:
-        result = _map(element, names)
+        result = _map(element(character), names(character))
 
         assert result.skip_reasons == {reason}
-        assert "\\u0000" not in result.payload.model_dump_json()
+        dumped = json.dumps(result.payload.model_dump(mode="json"))
+        assert json.dumps(character)[1:-1] not in dumped
 
-    def test_nul_in_a_resolved_cvss_provider_is_passed_to_upsert_cve(self) -> None:
-        provider = f"Example{NUL}CNA"
+    def test_inadmissible_character_in_a_resolved_cvss_provider_is_passed_to_upsert_cve(
+        self, character: str
+    ) -> None:
+        provider = f"Example{character}CNA"
 
         result = _map(_cvss_record(_metric()), {CNA_SOURCE: provider})
 
         assert _cvss(result.payload) == [(provider, V31)]
         assert result.skip_reasons == frozenset()
 
-    def test_nul_in_a_reference_url_and_tag_is_passed_to_reference_service(
-        self,
+    @pytest.mark.parametrize(
+        "template",
+        [f"{URL_1}{{c}}", f"{URL_1}?q={{c}}", f"{URL_1}#{{c}}"],
+        ids=["path", "query", "fragment"],
+    )
+    def test_reference_url_and_tag_are_passed_to_reference_service(
+        self, template: str, character: str
     ) -> None:
-        url, tag = f"{URL_1}{NUL}", f"Patch{NUL}"
+        url, tag = template.format(c=character), f"Patch{character}"
 
         result = _map(_record(references=[{"url": url, "tags": [tag]}]))
 
@@ -2545,23 +2579,31 @@ class TestExternalStringAdmissibility:
         )
         assert result.skip_reasons == frozenset()
 
-    def test_nul_in_a_weakness_value_is_skipped_silently(self) -> None:
-        result = _map(_cwe_record(_weakness(f"CWE-79{NUL}", f"{NUL}CWE-20")))
+    def test_inadmissible_character_in_a_weakness_value_is_skipped_silently(
+        self, character: str
+    ) -> None:
+        result = _map(
+            _cwe_record(_weakness(f"CWE-79{character}", f"{character}CWE-20"))
+        )
 
         assert "cwe_classifications" not in result.payload.model_fields_set
         assert result.skip_reasons == frozenset()
 
-    def test_nul_in_vuln_status_is_only_compared(self) -> None:
-        result = _map(_record(vulnStatus=f"Analyzed{NUL}"))
+    def test_inadmissible_character_in_vuln_status_is_only_compared(
+        self, character: str
+    ) -> None:
+        result = _map(_record(vulnStatus=f"Analyzed{character}"))
 
         assert result.payload.cve_state is CveState.PUBLISHED
         assert result.unrecognized_vuln_status is True
 
-    def test_nul_in_lang_is_only_compared(self) -> None:
+    def test_inadmissible_character_in_lang_is_only_compared(
+        self, character: str
+    ) -> None:
         result = _map(
             _record(
-                descriptions=[_description(f"en{NUL}", "Fictional.")],
-                weaknesses=[_weakness("CWE-79", lang=f"en{NUL}")],
+                descriptions=[_description(f"en{character}", "Fictional.")],
+                weaknesses=[_weakness("CWE-79", lang=f"en{character}")],
             )
         )
 
@@ -2569,8 +2611,10 @@ class TestExternalStringAdmissibility:
         assert "cwe_classifications" not in result.payload.model_fields_set
         assert result.skip_reasons == frozenset()
 
-    def test_nul_in_a_source_identifier_is_only_a_cache_key(self) -> None:
-        source = f"cna{NUL}@example.com"
+    def test_inadmissible_character_in_a_source_identifier_is_only_a_cache_key(
+        self, character: str
+    ) -> None:
+        source = f"cna{character}@example.com"
         element = _record(
             metrics={"cvssMetricV31": [_metric(source)]},
             weaknesses=[_weakness("CWE-79", source=source)],
@@ -2584,13 +2628,18 @@ class TestExternalStringAdmissibility:
         assert _cwe(resolved.payload) == [("CWE-79", CNA_NAME)]
         assert resolved.skip_reasons == frozenset()
 
-    def test_nul_in_excluded_or_negated_cpe_data_is_not_checked(self) -> None:
+    def test_inadmissible_character_in_excluded_or_negated_cpe_data_is_not_checked(
+        self, character: str
+    ) -> None:
         configurations = [
             _configuration(
-                _node(_platform(f"{CPE_O}{NUL}"), _SIBLING, operator=NUL),
-                _node(_match(f"{CPE_H}{NUL}"), negate=True),
+                _node(_platform(f"{CPE_O}{character}"), _SIBLING, operator=character),
+                _node(_match(f"{CPE_H}{character}"), negate=True),
             ),
-            {"negate": True, "nodes": [_node(_match(NUL, match_criteria_id=NUL))]},
+            {
+                "negate": True,
+                "nodes": [_node(_match(character, match_criteria_id=character))],
+            },
         ]
 
         result = _map(_record(configurations=configurations))
@@ -2598,12 +2647,14 @@ class TestExternalStringAdmissibility:
         assert _payload_criteria(result.payload) == [CPE_A]
         assert result.skip_reasons == frozenset()
 
-    def test_nul_in_a_source_api_name_is_kept_until_resolved(self) -> None:
-        content = _source_page(_source(f"Example{NUL}CNA", CNA_SOURCE))
+    def test_inadmissible_character_in_a_source_api_name_is_kept_until_resolved(
+        self, character: str
+    ) -> None:
+        content = _source_page(_source(f"Example{character}CNA", CNA_SOURCE))
 
         cache = build_source_cache(content)
 
-        assert cache.names == {CNA_SOURCE: f"Example{NUL}CNA"}
+        assert cache.names == {CNA_SOURCE: f"Example{character}CNA"}
         assert cache.malformed_entries == 0
 
 
@@ -2636,7 +2687,7 @@ class TestIgnoredFields:
                 "affected": "not an array",
                 "title": "Ignored title",
                 "dateRejected": "2026-10-01T00:00:00.000",
-                "unknownMember": {"nested": NUL},
+                "unknownMember": {"nested": [NUL, SURROGATE]},
             }
         )
         rich["unknownElementMember"] = 1

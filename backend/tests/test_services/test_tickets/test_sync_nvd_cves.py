@@ -109,6 +109,7 @@ from app.services.tickets.sync_nvd_cves import (
 )
 from tests.support.cve_ingest import SKIP_EVENT
 from tests.support.fetch_single_cve import fictional_cve_id
+from tests.support.inadmissible import INADMISSIBLE_CHARACTERS, SURROGATE
 from tests.support.nvd import (
     API_KEY_HEADER,
     CVE_API_URL,
@@ -369,6 +370,7 @@ CPE_CONFIGURATIONS: Final = [
                     _match(CPE_A, matchCriteriaId=MATCH_ID),
                     _match(CPE_O),
                     _match(f"{CPE_A}\x00"),
+                    _match(f"{CPE_A}{SURROGATE}"),
                     _match(f"cpe:2.3:a:{SECRET}:x:-:*:*:*:*:*:*:*", vulnerable="yes"),
                 ],
             },
@@ -384,7 +386,7 @@ CPE_CONFIGURATIONS: Final = [
     _configuration(_match(CPE_H, matchCriteriaId=f"{SECRET}-not-a-uuid")),
 ]
 """Two selected entries (an application with a match criteria ID and an
-operating system), an excluded platform and negated configuration, two
+operating system), an excluded platform and negated configuration, three
 invalid entries, an invalid configuration, and an entry with an invalid
 match criteria ID."""
 
@@ -473,6 +475,7 @@ def _assert_private(logs: Iterable[Mapping[str, Any]], *values: str) -> None:
     for entry in logs:
         rendered = repr(dict(entry))
         assert "\\x00" not in rendered, entry
+        assert "\\ud800" not in rendered, entry
         for value in (API_KEY, OTHER_KEY, API_KEY_HEADER, SECRET, "cpe:2.3", *values):
             assert value not in rendered, entry
 
@@ -816,8 +819,17 @@ class TestMissingBeforeMutation:
             "",
             "CVE-2099-" + "1" * 12,
             "CVE-2099-0001\x00",
+            f"CVE-2099-0001{SURROGATE}",
         ],
-        ids=["short", "lowercase", "trailing_space", "empty", "over_long", "nul"],
+        ids=[
+            "short",
+            "lowercase",
+            "trailing_space",
+            "empty",
+            "over_long",
+            "nul",
+            "surrogate",
+        ],
     )
     async def test_malformed_requested_cve_id_is_missing_without_http(
         self,
@@ -871,8 +883,17 @@ class TestMissingBeforeMutation:
             "",
             f"CVE-2099-0001 {SECRET}",
             "requested+nul",
+            "requested+surrogate",
         ],
-        ids=["other_valid", "short_year", "lowercase", "empty", "free_text", "nul"],
+        ids=[
+            "other_valid",
+            "short_year",
+            "lowercase",
+            "empty",
+            "free_text",
+            "nul",
+            "surrogate",
+        ],
     )
     async def test_single_element_naming_another_cve_is_missing(
         self,
@@ -882,9 +903,11 @@ class TestMissingBeforeMutation:
         ingestion: Ingestion,
     ) -> None:
         cve_id = fictional_cve_id()
-        value = {"other": fictional_cve_id(), "requested+nul": f"{cve_id}\x00"}.get(
-            record_id, record_id
-        )
+        value = {
+            "other": fictional_cve_id(),
+            "requested+nul": f"{cve_id}\x00",
+            "requested+surrogate": f"{cve_id}{SURROGATE}",
+        }.get(record_id, record_id)
         _serve(
             server,
             cve_id,
@@ -2311,19 +2334,24 @@ class TestCpeOutcomes:
 # External String Admissibility (on-demand outcomes)
 # ---------------------------------------------------------------------------
 
-NUL: Final = f"{SECRET}\x00"
-
 
 @pytest.mark.unit
+@pytest.mark.parametrize("character", INADMISSIBLE_CHARACTERS)
 class TestExternalStringAdmissibility:
-    async def test_nul_in_the_english_description_fails_before_any_write(
-        self, fetcher: SyncNvdCves, server: NvdServer, ingestion: Ingestion
+    async def test_inadmissible_english_description_fails_before_any_write(
+        self,
+        fetcher: SyncNvdCves,
+        server: NvdServer,
+        ingestion: Ingestion,
+        character: str,
     ) -> None:
         cve_id = fictional_cve_id()
         _serve(
             server,
             cve_id,
-            _record(cve_id, descriptions=[{"lang": "en", "value": NUL}]),
+            _record(
+                cve_id, descriptions=[{"lang": "en", "value": f"{SECRET}{character}"}]
+            ),
         )
 
         with capture_logs() as logs, pytest.raises(ValidationError) as raised:
@@ -2335,15 +2363,16 @@ class TestExternalStringAdmissibility:
         assert logs == []
 
     @pytest.mark.parametrize("member", ["published", "lastModified"])
-    async def test_nul_in_a_timestamp_is_a_non_processable_record(
+    async def test_inadmissible_character_in_a_timestamp_is_a_non_processable_record(
         self,
         member: str,
         fetcher: SyncNvdCves,
         server: NvdServer,
         ingestion: Ingestion,
+        character: str,
     ) -> None:
         cve_id = fictional_cve_id()
-        _serve(server, cve_id, _record(cve_id, **{member: f"{PUBLISHED}\x00"}))
+        _serve(server, cve_id, _record(cve_id, **{member: f"{PUBLISHED}{character}"}))
 
         with pytest.raises(NvdRecordStructureError) as raised:
             await fetcher.fetch_single(cve_id, NO_SESSION)
@@ -2351,11 +2380,15 @@ class TestExternalStringAdmissibility:
         assert not is_retryable_condition(raised.value)
         assert ingestion.calls == 0
 
-    async def test_nul_in_the_record_id_is_missing_before_any_write(
-        self, fetcher: SyncNvdCves, server: NvdServer, ingestion: Ingestion
+    async def test_inadmissible_character_in_the_record_id_is_missing_before_any_write(
+        self,
+        fetcher: SyncNvdCves,
+        server: NvdServer,
+        ingestion: Ingestion,
+        character: str,
     ) -> None:
         cve_id = fictional_cve_id()
-        _serve(server, cve_id, _record(f"{cve_id}\x00"))
+        _serve(server, cve_id, _record(f"{cve_id}{character}"))
 
         with pytest.raises(CVENotInSource):
             await fetcher.fetch_single(cve_id, NO_SESSION)
@@ -2365,16 +2398,20 @@ class TestExternalStringAdmissibility:
 
 
 @pytest.mark.integration
+@pytest.mark.parametrize("character", INADMISSIBLE_CHARACTERS)
 class TestAdmissibilityOutcomes:
-    async def test_nul_failure_writes_nothing(
+    async def test_inadmissible_character_failure_writes_nothing(
         self,
         db_session: AsyncSession,
         target: Target,
         fetcher: SyncNvdCves,
         server: NvdServer,
+        character: str,
     ) -> None:
         record = _sourced(target.cve_id)
-        record["cve"]["descriptions"] = [{"lang": "en", "value": NUL}]
+        record["cve"]["descriptions"] = [
+            {"lang": "en", "value": f"{SECRET}{character}"}
+        ]
         record["cve"]["references"] = [{"url": URL_1}]
         _serve(server, target.cve_id, record)
 
@@ -2385,31 +2422,47 @@ class TestAdmissibilityOutcomes:
             assert await _row_count(db_session, model, target.cve) == 0
         assert await _references(db_session, target.ticket) == []
 
-    async def test_nul_in_a_candidate_skips_only_that_candidate(
+    async def test_inadmissible_character_in_a_candidate_skips_only_that_candidate(
         self,
         db_session: AsyncSession,
         target: Target,
         fetcher: SyncNvdCves,
         server: NvdServer,
+        character: str,
     ) -> None:
+        """The resolved Source API display name of `UNKNOWN_SOURCE` carries
+        the character: its CVSS candidate is skipped by `upsert_cve()` as
+        `invalid_provider` and its CWE as `invalid_cwe`."""
+        server.sources = _source_page_with(
+            {"name": f"Example{character}CNA", "sourceIdentifiers": [UNKNOWN_SOURCE]}
+        )
         _serve(
             server,
             target.cve_id,
             _record(
                 target.cve_id,
                 metrics={
-                    "cvssMetricV30": [_metric(CNA_SOURCE, f"{V31}\x00")],
-                    "cvssMetricV31": [_metric(NVD, V31)],
+                    "cvssMetricV30": [_metric(CNA_SOURCE, f"{V31}{character}")],
+                    "cvssMetricV31": [
+                        _metric(NVD, V31),
+                        _metric(UNKNOWN_SOURCE, V31_CNA),
+                    ],
                 },
                 weaknesses=[
-                    _weakness(NVD, "CWE-79\x00"),
+                    _weakness(NVD, f"CWE-79{character}"),
                     _weakness(NVD, "CWE-352"),
+                    _weakness(UNKNOWN_SOURCE, "CWE-20"),
                 ],
-                references=[{"url": f"{URL_1}?{NUL}"}, {"url": URL_2}],
+                references=[
+                    {"url": f"{URL_1}{SECRET}{character}"},
+                    {"url": f"{URL_1}?{SECRET}{character}"},
+                    {"url": f"{URL_1}#{SECRET}{character}"},
+                    {"url": URL_2},
+                ],
                 configurations=[
                     _configuration(
-                        _match(f"{CPE_A}\x00"),
-                        _match(CPE_O, matchCriteriaId=f"{MATCH_ID}\x00"),
+                        _match(f"{CPE_A}{character}"),
+                        _match(CPE_O, matchCriteriaId=f"{MATCH_ID}{character}"),
                         _match(CPE_H),
                     )
                 ],
@@ -2430,12 +2483,16 @@ class TestAdmissibilityOutcomes:
             URL_2,
             f"https://nvd.nist.gov/vuln/detail/{target.cve_id}",
         ]
-        assert [(entry["event"], entry.get("reason")) for entry in logs] == [
-            (CVE_FETCH_CANDIDATE_SKIPPED_EVENT, "invalid_cpe_match"),
-            (CVE_FETCH_CANDIDATE_SKIPPED_EVENT, "invalid_vector"),
+        assert sorted((entry["event"], entry.get("reason")) for entry in logs) == [
             ("automatic_reference_rejected", "control_character"),
+            ("automatic_reference_rejected", "control_character"),
+            ("automatic_reference_rejected", "control_character"),
+            (SKIP_EVENT, "invalid_provider"),
+            (CVE_FETCH_CANDIDATE_SKIPPED_EVENT, "invalid_cpe_match"),
+            (CVE_FETCH_CANDIDATE_SKIPPED_EVENT, "invalid_cwe"),
+            (CVE_FETCH_CANDIDATE_SKIPPED_EVENT, "invalid_vector"),
         ]
-        _assert_private(logs, V31, URL_1)
+        _assert_private(logs, V31, URL_1, "Example")
 
 
 # ---------------------------------------------------------------------------
