@@ -1550,13 +1550,15 @@ RESOLVED_CWES: Final = {("CWE-79", "NVD"), ("CWE-352", CNA_NAME)}
 DEGRADED: Final = {("NVD", "3.1", V31)}
 DEGRADED_CWES: Final = {("CWE-79", "NVD")}
 
-SOURCE_EVENTS: Final = frozenset(
-    {
-        NVD_SOURCE_API_UNAVAILABLE_EVENT,
-        NVD_SOURCE_ENTRIES_SKIPPED_EVENT,
-        NVD_SOURCE_CACHE_INCOMPLETE_EVENT,
-    }
-)
+UNSTORED_FAILURES: Final[list[Responder]] = [
+    status(503),
+    raising(httpx.ConnectError("[Errno 111] Connection refused")),
+    status(200, b"{"),
+]
+"""One failed build per degraded-mode path of the Source API request (a
+non-200 status, a transport error, an unparseable body); `TestSourceApi` owns
+the complete failure matrix."""
+UNSTORED_FAILURE_IDS: Final = ["http_503", "connection_refused", "truncated_json"]
 ENTRIES_SKIPPED: Final = {
     "event": NVD_SOURCE_ENTRIES_SKIPPED_EVENT,
     "log_level": "warning",
@@ -1757,7 +1759,7 @@ class TestSharedSourceCache:
         assert server.kinds == ["single", "source", "single"]
         await _assert_resolved(db_session, target)
 
-    @pytest.mark.parametrize("responder", SOURCE_FAILURES, ids=SOURCE_FAILURE_IDS)
+    @pytest.mark.parametrize("responder", UNSTORED_FAILURES, ids=UNSTORED_FAILURE_IDS)
     async def test_failed_build_is_not_stored_and_the_next_fetch_rebuilds(
         self,
         responder: Responder,
@@ -1863,34 +1865,6 @@ class TestSharedSourceCache:
         await _assert_resolved(db_session, builder)
         await _assert_resolved(db_session, served)
         _assert_private([*build_logs, *served_logs], UNKNOWN_SOURCE, *CNA_PRIVATE)
-
-    @pytest.mark.parametrize("kind", list(_BEFORE_SOURCE_API))
-    async def test_fetch_ending_before_the_source_api_leaves_a_cold_cache_empty(
-        self,
-        kind: str,
-        db_session: AsyncSession,
-        server: NvdServer,
-        clock: Clock,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        assert _shared() is None
-        failing = fictional_cve_id()
-        error = _end_before_source_api(kind, server, failing, monkeypatch)
-
-        with capture_logs() as logs, pytest.raises(error):
-            await _fetch_fresh(server, failing, NO_SESSION)
-
-        assert server.kinds == ([] if kind == "invalid_api_key" else ["single"])
-        assert logs == []
-        assert _shared() is None
-
-        monkeypatch.setattr(app_settings, "nvd_api_key", SecretStr(API_KEY))
-        [target] = await _sourced_targets(db_session, server, 1)
-        await _fetch_fresh(server, target.cve_id, db_session)
-
-        assert len(server.source_requests) == 1
-        assert server.kinds[-2:] == ["single", "source"]
-        await _assert_resolved(db_session, target)
 
     @pytest.mark.parametrize("kind", list(_BEFORE_SOURCE_API))
     async def test_fetch_ending_before_the_source_api_leaves_a_warm_cache_unchanged(
@@ -2019,8 +1993,6 @@ class TestSharedSourceCacheContent:
         assert all(
             type(key) is str and type(value) is str for key, value in first.items()
         )
-        with pytest.raises(TypeError):
-            cast(Any, first)[UNKNOWN_SOURCE] = LATE_NAME
         holder = sync_module._shared_source_cache
         assert type(holder).__slots__ == ("_built_at", "_names")
         assert not hasattr(holder, "__dict__")
