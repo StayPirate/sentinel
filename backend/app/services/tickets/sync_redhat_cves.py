@@ -113,7 +113,8 @@ class SyncRedhatCves(BaseCVEFetcher):
         status raises its original `httpx.HTTPStatusError`
         (`RedhatResponseError` for another 2xx); transport, JSON decoding,
         `pydantic.ValidationError` (schema mismatch, or a payload value
-        containing U+0000), and delegate exceptions propagate unchanged.
+        containing an inadmissible character), and delegate exceptions
+        propagate unchanged.
         """
         if not self._is_valid_cve_id(cve_id):
             raise CVENotInSource()

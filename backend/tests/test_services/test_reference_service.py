@@ -90,6 +90,7 @@ from app.services.ticket_convergence_registry import (
     pending_ticket_convergence_effects,
 )
 from app.services.ticket_visibility import ANONYMOUS_CALLER, TicketCaller
+from tests.support.inadmissible import SURROGATE
 from tests.support.no_outbound import OutboundGuard
 from tests.support.ticket_api import MAX_SEQUENCE
 from tests.support.ticket_mutations import (
@@ -420,6 +421,7 @@ _BAD_URLS: list[tuple[str, object]] = [
     ("username-only", "https://reviewer@example.com/path"),
     ("username-password", "https://reviewer:secret@example.com/path"),
     ("nul-control", "https://example.com/a\x00b"),
+    ("surrogate-control", f"https://example.com/a{SURROGATE}b"),
     ("del-control", "https://example.com/a\x7fb"),
     ("tab-control", "https://example.com/a\tb"),
     ("too-long", "https://example.com/" + "a" * 2029),

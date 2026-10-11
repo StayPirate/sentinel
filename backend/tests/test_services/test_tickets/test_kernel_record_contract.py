@@ -8,10 +8,11 @@ docs/data-sources.md (Linux Kernel CVE Feed: Repository Structure), verified
 against the sanitized live capture documented in `tests/support/kernel.py`.
 
 Only source-specific facts are asserted here. The CVE Record 5.x field
-shapes of kernel records (types, nullability, bounds, U+0000) are owned and
-asserted by `tests/test_services/test_cve_record_contract.py` for the
-parser's `vulns_*` fixtures; this module applies its strict test-local model
-of the kernel-specific shape to those and to the records added here.
+shapes of kernel records (types, nullability, bounds, inadmissible
+characters) are owned and asserted by
+`tests/test_services/test_cve_record_contract.py` for the parser's `vulns_*`
+fixtures; this module applies its strict test-local model of the
+kernel-specific shape to those and to the records added here.
 
 Facts recorded in `tests/support/kernel.py` rather than asserted from a
 fixture: the default branch (`master`), the server ignoring `--filter`, the
@@ -19,8 +20,9 @@ record counts and frequencies of the full scan, and the documentation-only
 source reference URL form. Not observable live, and therefore covered by the
 mapping unit tests only: a `null` or mistyped global field, an unrecognized
 state under `published/`, a JSON CVE-ID that mismatches its file name, a
-`cvssV4_0` or non-Base vector, a non-object reference element, U+0000 in any
-string, and undecodable content.
+`cvssV4_0` or non-Base vector, a non-object reference element, an
+inadmissible character (U+0000 or a surrogate code point) in any string, and
+undecodable content.
 """
 
 from __future__ import annotations

@@ -96,6 +96,7 @@ from tests.support.epss import (
     status,
 )
 from tests.support.fetch_single_cve import fictional_cve_id
+from tests.support.inadmissible import INADMISSIBLE_CHARACTERS
 from tests.support.ticket_mutations import EventRow, ticket_events
 
 NAME: Final = "sync_epss_scores"
@@ -900,15 +901,16 @@ class TestExternalStringAdmissibility:
     `failure`, stored score untouched) is in
     `test_sync_epss_scores_execute.py::TestItemFailure`."""
 
+    @pytest.mark.parametrize("character", INADMISSIBLE_CHARACTERS)
     @pytest.mark.parametrize(
         "fields",
         [
-            {"epss": "0.5\x00"},
-            {"epss": "\x00"},
-            {"percentile": "0.\x005"},
-            {"percentile": "\x000.5"},
-            {"date": "2026-10-06\x00"},
-            {"date": "2026-10\x00-06"},
+            {"epss": "0.5{}"},
+            {"epss": "{}"},
+            {"percentile": "0.{}5"},
+            {"percentile": "{}0.5"},
+            {"date": "2026-10-06{}"},
+            {"date": "2026-10{}-06"},
         ],
         ids=[
             "epss_end",
@@ -919,21 +921,27 @@ class TestExternalStringAdmissibility:
             "date_middle",
         ],
     )
-    async def test_nul_is_a_data_quality_failure_before_any_database_work(
+    async def test_inadmissible_character_is_a_data_quality_failure_before_any_write(
         self,
         fields: dict[str, str],
+        character: str,
         fetcher: SyncEpssScores,
         server: EpssServer,
         ingestion: Ingestion,
     ) -> None:
         cve_id = fictional_cve_id()
-        server.entries[cve_id] = {**entry_for(cve_id), **fields}
+        server.entries[cve_id] = {
+            **entry_for(cve_id),
+            **{member: value.format(character) for member, value in fields.items()},
+        }
 
         with capture_logs() as logs, pytest.raises(ValidationError) as raised:
             await fetcher.fetch_single(cve_id, NO_SESSION)
 
         assert ingestion.calls == []
         assert "\\x00" not in str(raised.value)
+        assert "\\ud800" not in str(raised.value)
+        assert character not in str(raised.value)
         assert not is_retryable_condition(raised.value)
         assert not is_infrastructure_failure(raised.value)
         assert logs == []

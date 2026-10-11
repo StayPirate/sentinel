@@ -42,6 +42,7 @@ from app.services.packages.smelt_maintainership import (
     fetch_package_maintainer_emails,
     maintainership_url,
 )
+from tests.support.inadmissible import NUL, SURROGATE
 from tests.support.smelt import (
     MAINTAINERSHIP_NOT_FOUND_FIXTURE,
     MAINTAINERSHIP_SUCCESS_FIXTURES,
@@ -581,22 +582,25 @@ _UNCONSUMED_VALUES: list[tuple[str, dict[str, Any]]] = [
             )
         ),
     ),
-    (
-        "nul-in-unconsumed-strings",
-        _success(
-            _entry(
-                users=[_person(EMAIL_ONE, username="maintainer\x00one")],
-                groups=[
-                    _group(
-                        _person(EMAIL_TWO, username="maintainer\x00two"),
-                        name="fictional\x00group",
-                        email="fictional-group\x00@example.com",
-                    )
-                ],
-                codestream={"name": "Fictional:\x00Codestream:1"},
-            )
-        ),
-    ),
+    *[
+        (
+            f"{kind}-in-unconsumed-strings",
+            _success(
+                _entry(
+                    users=[_person(EMAIL_ONE, username=f"maintainer{character}one")],
+                    groups=[
+                        _group(
+                            _person(EMAIL_TWO, username=f"maintainer{character}two"),
+                            name=f"fictional{character}group",
+                            email=f"fictional-group{character}@example.com",
+                        )
+                    ],
+                    codestream={"name": f"Fictional:{character}Codestream:1"},
+                )
+            ),
+        )
+        for kind, character in (("nul", NUL), ("surrogate", SURROGATE))
+    ],
 ]
 
 
@@ -703,10 +707,16 @@ _BAD_EMAILS: list[tuple[str, Any]] = [
     ("bool", True),
     ("list", [EMAIL_ONE]),
     ("object", {"address": EMAIL_ONE}),
-    ("nul-only", "\x00"),
-    ("nul-start", f"\x00{EMAIL_ONE}"),
-    ("nul-middle", EMAIL_ONE.replace("@", "\x00@")),
-    ("nul-end", f"{EMAIL_ONE}\x00"),
+    *[
+        case
+        for kind, character in (("nul", NUL), ("surrogate", SURROGATE))
+        for case in (
+            (f"{kind}-only", character),
+            (f"{kind}-start", f"{character}{EMAIL_ONE}"),
+            (f"{kind}-middle", EMAIL_ONE.replace("@", f"{character}@")),
+            (f"{kind}-end", f"{EMAIL_ONE}{character}"),
+        )
+    ],
 ]
 
 _SCHEMA_REJECTIONS: list[tuple[str, dict[str, Any]]] = [

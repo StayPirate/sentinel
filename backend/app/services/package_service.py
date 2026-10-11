@@ -111,6 +111,7 @@ from app.core.exceptions import (
     TicketNotFoundError,
     TicketNotMutableError,
 )
+from app.core.external_strings import contains_inadmissible_character
 from app.core.identifiers import format_ticket_id, parse_ticket_id
 from app.models.cve_cvss_assessment import CVECVSSAssessment
 from app.models.product import Product
@@ -3328,10 +3329,11 @@ def _canonical_uuid(value: object) -> uuid.UUID | None:
 
 
 def _bounded_string(value: object, max_length: int | None) -> TypeGuard[str]:
-    """A `str` without U+0000 and within its code-point bound."""
+    """A `str` without U+0000 or a surrogate code point and within its
+    code-point bound."""
     return (
         isinstance(value, str)
-        and "\x00" not in value
+        and not contains_inadmissible_character(value)
         and (max_length is None or len(value) <= max_length)
     )
 
@@ -3411,7 +3413,8 @@ def parse_post_ingest_arguments(
     an affected CPE has at most 2048 code points; a vendor/product pair is
     a two-string array with a vendor of at most 512 code points; a direct
     package-name candidate satisfies the producer heuristic. No string
-    contains U+0000 (cve-service.md, CVEIngestPayload Schema). No value is
+    contains U+0000 or a surrogate code point (cve-service.md,
+    CVEIngestPayload Schema). No value is
     trimmed, case-normalized, coerced, or dropped.
 
     Raises `PostIngestArgumentError` (a `ValueError`) for the first

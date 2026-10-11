@@ -53,6 +53,8 @@ from typing import Any
 
 import httpx
 
+from tests.support.inadmissible import json_bytes
+
 FIXTURE_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "redhat"
 
 REDHAT_CVE_PATH_PREFIX = "/hydra/rest/securitydata/cve/"
@@ -126,7 +128,12 @@ class RedhatServer:
                 content=load_raw_fixture(NOT_FOUND_FIXTURE),
                 headers={"Content-Type": "application/json"},
             )
-        return httpx.Response(200, json=self.bodies[cve_id])
+        # A surrogate code point travels as its `\\uXXXX` escape.
+        return httpx.Response(
+            200,
+            content=json_bytes(self.bodies[cve_id]),
+            headers={"Content-Type": "application/json"},
+        )
 
     def client(self) -> httpx.AsyncClient:
         """A client whose transport is this server (redirects not followed)."""

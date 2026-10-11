@@ -123,8 +123,8 @@ class SyncEpssScores(BaseCVEFetcher):
         `httpx.HTTPStatusError` (`EpssResponseError` for another 2xx);
         transport errors, JSON decoding errors,
         `pydantic.ValidationError` (schema mismatch, more than one entry,
-        an out-of-range or unparseable value, or U+0000), and delegate
-        exceptions propagate unchanged.
+        an out-of-range or unparseable value, or an inadmissible character),
+        and delegate exceptions propagate unchanged.
         """
         if not self._is_valid_cve_id(cve_id):
             raise CVENotInSource()

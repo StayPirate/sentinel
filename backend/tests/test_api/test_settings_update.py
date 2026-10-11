@@ -34,12 +34,12 @@ concurrency matrix of the service are proven by
 `tests/test_services/test_settings_mutation.py` and
 `tests/test_services/test_settings_mutation_races.py`; the absence of
 statements in the handler by the AST checks of `TestThinRoute`. The shared
-NUL-character check (api-spec.md, NUL Characters in Request Input) is
-proven by `tests/test_api/test_request_nul.py` and
-`tests/test_core/test_request_nul.py`. These tests cover the HTTP contract,
-the transaction boundary, and the audit actor. The OpenAPI surface is
-asserted in `tests/test_api/test_settings.py`. The endpoint addresses no
-resource, so the mandatory 404 scenario does not apply.
+inadmissible-character check (api-spec.md, Inadmissible Characters in
+Request Input) is proven by `tests/test_api/test_request_admissibility.py`
+and `tests/test_core/test_request_admissibility.py`. These tests cover the
+HTTP contract, the transaction boundary, and the audit actor. The OpenAPI
+surface is asserted in `tests/test_api/test_settings.py`. The endpoint
+addresses no resource, so the mandatory 404 scenario does not apply.
 
 Expected values are transcribed from the specifications, never computed
 with the module under test.

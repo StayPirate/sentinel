@@ -110,7 +110,10 @@ def hash_password(password: str) -> str:
     with a fresh random salt and returns the resulting 60-character
     bcrypt hash string (`$2b$12$...`).
 
-    Q6: infallible for any `str` input.
+    Q6: raises `UnicodeEncodeError` for a `password` containing a
+    surrogate code point, which has no UTF-8 encoding; the request-input
+    check (`docs/api-spec.md`, Inadmissible Characters in Request Input)
+    and the CLI prompts reject such input first. Otherwise infallible.
     """
     hashed = bcrypt.hashpw(_prehash(password), bcrypt.gensalt(rounds=BCRYPT_COST))
     return hashed.decode("ascii")
@@ -156,6 +159,8 @@ def verify_dummy_password(password: str) -> None:
     Point 4 decision (anti-enumeration via equal verification cost, not
     wall-clock timing equivalence).
 
-    Q6: infallible — never raises.
+    Q6: raises `UnicodeEncodeError` for a `password` containing a
+    surrogate code point, like `hash_password()`; callers receive such
+    input only after the same upstream rejection. Otherwise infallible.
     """
     bcrypt.checkpw(_prehash(password), _DUMMY_HASH)

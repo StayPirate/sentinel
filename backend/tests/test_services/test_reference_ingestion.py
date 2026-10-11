@@ -82,6 +82,7 @@ from app.services.reference_service import (
     ReferenceServiceError,
     upsert_references,
 )
+from tests.support.inadmissible import INADMISSIBLE_CHARACTERS, SURROGATE
 from tests.support.no_outbound import OutboundGuard
 from tests.support.suse_cvss_races import CommittedWorld
 from tests.support.ticket_mutations import (
@@ -633,6 +634,21 @@ _URL_REJECTIONS: list[tuple[str, object, str]] = [
         "url_too_long",
     ),
     ("nul", f"https://{LEAK}.example.test/a\x00b", "control_character"),
+    (
+        "surrogate-path",
+        f"https://{LEAK}.example.test/a{SURROGATE}b",
+        "control_character",
+    ),
+    (
+        "surrogate-query",
+        f"https://{LEAK}.example.test/p?{LEAK}=a{SURROGATE}b",
+        "control_character",
+    ),
+    (
+        "surrogate-fragment",
+        f"https://{LEAK}.example.test/p#{LEAK}{SURROGATE}",
+        "control_character",
+    ),
     ("unit-separator", f"https://{LEAK}.example.test/a\x1fb", "control_character"),
     ("delete", f"https://{LEAK}.example.test/a\x7fb", "control_character"),
     ("newline", f"https://{LEAK}.example.test/a\nb", "control_character"),
@@ -665,6 +681,10 @@ _METADATA_REJECTIONS: list[tuple[str, dict[str, Any]]] = [
     ("title-nul-start", {"title": f"\x00{LEAK}"}),
     ("title-nul-middle", {"title": f"{LEAK}\x00{LEAK}"}),
     ("title-nul-end", {"title": f"{LEAK}\x00"}),
+    ("title-surrogate-only", {"title": SURROGATE}),
+    ("title-surrogate-start", {"title": f"{SURROGATE}{LEAK}"}),
+    ("title-surrogate-middle", {"title": f"{LEAK}{SURROGATE}{LEAK}"}),
+    ("title-surrogate-end", {"title": f"{LEAK}{SURROGATE}"}),
     ("type-plain-string", {"explicit_type": "patch"}),
     ("type-integer", {"explicit_type": 1}),
 ]
@@ -765,11 +785,13 @@ class TestRejections:
 
         await self._assert_skipped(db_session, caplog, ticket, _ref(**fields), reason)
 
+    @pytest.mark.parametrize("character", INADMISSIBLE_CHARACTERS)
     async def test_invalid_source_candidate_is_skipped_and_upstream_continues(
         self,
         db_session: AsyncSession,
         ticket_factory: TicketFactory,
         caplog: pytest.LogCaptureFixture,
+        character: str,
     ) -> None:
         ticket = await ticket_factory()
 
@@ -778,7 +800,7 @@ class TestRejections:
                 db_session,
                 ticket.id,
                 _ref(
-                    f"https://cves.example.test/{LEAK}\x00",
+                    f"https://cves.example.test/{LEAK}{character}",
                     title=MARKED_TITLE,
                     explicit_type=ReferenceType.ADVISORY,
                 ),

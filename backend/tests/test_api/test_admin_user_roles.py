@@ -45,6 +45,7 @@ from app.models.user_role import UserRole
 from app.services import api_key_service, user_service
 from app.services.session_service import create_session
 from app.services.user_service import RoleUpdateResult
+from tests.support.inadmissible import REQUEST_INPUT_ERROR
 from tests.support.ticket_api import INTERNAL_ERROR, force_production_error_page
 from tests.support.ticket_mutations import StatementRecorder
 
@@ -67,7 +68,6 @@ _FORBIDDEN = {
     "code": "AUTH_INSUFFICIENT_PERMISSION",
     "detail": "Insufficient permissions",
 }
-_NUL_ERROR = {"msg": "Value error, must not contain U+0000", "type": "value_error"}
 
 
 def _url(identifier: object) -> str:
@@ -89,12 +89,13 @@ def _make_api_key_credential() -> tuple[str, str]:
     return token, digest
 
 
-def _assert_nul_rejection(response_json: object, loc: list[object]) -> None:
-    """Mirrors the identical helper in `tests/test_api/test_request_nul.py`."""
+def _assert_rejection(response_json: object, loc: list[object]) -> None:
+    """Mirrors the identical helper in
+    `tests/test_api/test_request_admissibility.py`."""
     assert response_json == {
         "code": "VALIDATION_ERROR",
         "detail": "Request validation failed",
-        "errors": [{"loc": loc, **_NUL_ERROR}],
+        "errors": [{"loc": loc, **REQUEST_INPUT_ERROR}],
     }
 
 
@@ -473,7 +474,7 @@ class TestRequestValidation:
         )
 
         assert response.status_code == 422
-        _assert_nul_rejection(response.json(), ["path", "user"])
+        _assert_rejection(response.json(), ["path", "user"])
         assert "fictional" not in response.text
 
     async def test_nul_in_body_element_returns_422_without_echo_or_write(
@@ -488,7 +489,7 @@ class TestRequestValidation:
         response = await client.post(_url(target.id), json={"add": ["adm\u0000in"]})
 
         assert response.status_code == 422
-        _assert_nul_rejection(response.json(), ["body", "add", 0])
+        _assert_rejection(response.json(), ["body", "add", 0])
         assert "adm" not in response.text
         assert await _origins(db_session, target.id) == set()
         assert await _identity_events(db_session, target.id) == []

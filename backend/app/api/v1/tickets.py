@@ -1544,9 +1544,9 @@ Deliberately an unconstrained string (tickets.md, Revoke Access): the
 UUID-or-username value is passed unchanged to `revoke_access()`, which
 reports an unknown user only after locked-current Ticket accessibility
 and the confidentiality guard. The only exception is a value containing
-U+0000, which the app-wide `reject_nul_in_request_input` dependency
-rejects with `422` first (`docs/api-spec.md`, NUL Characters in Request
-Input).
+U+0000, which the app-wide `reject_inadmissible_request_input` dependency
+rejects with `422` first (`docs/api-spec.md`, Inadmissible Characters in
+Request Input).
 """
 
 

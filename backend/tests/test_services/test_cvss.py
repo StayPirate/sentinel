@@ -52,6 +52,7 @@ from app.services.ticket_mutations_errors import (
     InvalidCVSSVectorError,
     TicketMutationsError,
 )
+from tests.support.inadmissible import SURROGATE
 from tests.support.module_imports import (
     APP_ROOT,
     forbidden_imports,
@@ -761,6 +762,7 @@ REDUCTION_REJECTIONS: list[tuple[str, str]] = [
     ("trailing-separator", f"{_V31}/E:H/"),
     ("embedded-whitespace", f"{_V31}/E:H\tRL:O"),
     ("nul", f"{_V31}/E:H\x00"),
+    ("surrogate", f"{_V31}/E:H{SURROGATE}"),
     # removing a token never turns embedded whitespace into outer whitespace
     ("kept-v2-token-trailing-space", f"{_V20} /E:F"),
     ("kept-v2-token-leading-space", f"E:F/ {_V20}"),

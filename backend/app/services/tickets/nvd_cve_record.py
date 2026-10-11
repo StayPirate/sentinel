@@ -12,15 +12,17 @@ WARNING events built from the facts reported here.
 
 Bodies are decoded as strict UTF-8 with the standard-library JSON decoder,
 which keeps an unpaired surrogate escape as a string value so that it reaches
-the outcome of its own field (for example `invalid_cpe_match`); Pydantic's
-JSON mode would reject the whole body. The envelopes are then validated by
-strict models of their consumed members.
+the inadmissible-character outcome of its own field (for example
+`invalid_cpe_match`); Pydantic's JSON mode would reject the whole body.
+The envelopes are then validated by strict models of their consumed
+members.
 
 `parse_page()` raises `NvdPageError` for an unparseable page response.
 `map_vulnerability()` raises `NvdRecordIdError` for an `.id` string that is
 not a valid CVE-ID, `NvdRecordStructureError` for a structurally
 non-processable record, and the payload's `pydantic.ValidationError` for a
-description containing U+0000 (cve-service.md, CVEIngestPayload Schema).
+description containing an inadmissible character (cve-service.md,
+CVEIngestPayload Schema).
 Every other invalid unit is skipped and reported as a closed skip reason. No
 message renders the input.
 """
@@ -39,7 +41,7 @@ from typing import Any, Final, Literal, TypeGuard
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.core.enums import CveState, ReferenceType
-from app.core.external_strings import contains_nul
+from app.core.external_strings import contains_inadmissible_character
 from app.core.identifiers import is_valid_cve_id
 from app.services.cve_ingest import (
     CPEMatchEntry,
@@ -609,8 +611,7 @@ def _cpe_match(entry: object) -> CPEMatchEntry | None:
     if (
         not isinstance(criteria, str)
         or len(criteria) > CPE_CRITERIA_MAX_LENGTH
-        or contains_nul(criteria)
-        or not _encodable(criteria)
+        or contains_inadmissible_character(criteria)
     ):
         raise _SkippedUnitError(INVALID_CPE_MATCH)
     match_criteria_id = entry.get("matchCriteriaId")
@@ -625,15 +626,6 @@ def _cpe_match(entry: object) -> CPEMatchEntry | None:
         vulnerable=True,
         match_criteria_id=uuid.UUID(match_criteria_id),
     )
-
-
-def _encodable(value: str) -> bool:
-    """Whether `value` has a UTF-8 encoding (no unpaired surrogate)."""
-    try:
-        value.encode("utf-8")
-    except UnicodeEncodeError:
-        return False
-    return True
 
 
 def _upstream_references(

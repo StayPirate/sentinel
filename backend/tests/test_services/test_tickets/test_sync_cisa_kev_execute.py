@@ -118,6 +118,7 @@ from tests.support.cisa_kev import (
     status,
 )
 from tests.support.cve_ingest import IngestionWorld
+from tests.support.inadmissible import INADMISSIBLE_CHARACTERS, SURROGATE
 from tests.support.ticket_mutations import EventRow, ticket_events_by_id
 
 SessionFactory = Callable[[], Awaitable[AsyncSession]]
@@ -175,6 +176,8 @@ def _assert_private(logs: Iterable[Mapping[str, Any]]) -> None:
         assert "Example-Secret-Token" not in rendered, entry
         assert "\\x00" not in rendered, entry
         assert "\x00" not in rendered, entry
+        assert "\\ud800" not in rendered, entry
+        assert SURROGATE not in rendered, entry
 
 
 def _failed(cve_id: str | None, cause: str) -> dict[str, Any]:
@@ -1225,6 +1228,7 @@ _INVALID_ENTRIES: Final[list[Any]] = [
     _entry("CVE-2099-" + "1" * 12),
     _entry(f"CVE-2099-0001 {FAILURE_TEXT}"),
     _entry("CVE-2099-0001\x00"),
+    _entry(f"CVE-2099-0001{SURROGATE}"),
 ]
 _INVALID_IDS: Final = [
     "string_entry",
@@ -1245,6 +1249,7 @@ _INVALID_IDS: Final = [
     "over_long",
     "free_text",
     "nul",
+    "surrogate",
 ]
 
 
@@ -1356,6 +1361,7 @@ class TestEntryFailure:
             "2026-10-01\n",
             FAILURE_TEXT,
             "2026-10-01\x00",
+            f"2026-10-01{SURROGATE}",
         ],
         ids=[
             "missing",
@@ -1368,6 +1374,7 @@ class TestEntryFailure:
             "trailing_newline",
             "free_text",
             "nul",
+            "surrogate",
         ],
     )
     async def test_invalid_date_added_rolls_back(
@@ -1668,17 +1675,24 @@ class TestEntryFailure:
 
 
 @pytest.mark.integration
+@pytest.mark.parametrize("character", INADMISSIBLE_CHARACTERS)
 class TestExternalStringAdmissibility:
     @pytest.mark.parametrize(
-        "cve_id",
-        ["CVE-2099-0001\x00", "\x00CVE-2099-0001", "CVE-2099-\x000001", "\x00"],
+        "template",
+        ["CVE-2099-0001{}", "{}CVE-2099-0001", "CVE-2099-{}0001", "{}"],
         ids=["end", "start", "middle", "whole"],
     )
-    async def test_nul_in_cve_id_is_an_invalid_id_unit_with_no_query(
-        self, cve_id: str, env: Env, batch: Batch, monkeypatch: pytest.MonkeyPatch
+    async def test_inadmissible_character_in_cve_id_is_an_invalid_id_unit(
+        self,
+        template: str,
+        character: str,
+        env: Env,
+        batch: Batch,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """No database statement is issued for the unit."""
         later = await env.cve()
-        env.serve(_entry(cve_id), _entry(later.cve_id))
+        env.serve(_entry(template.format(character)), _entry(later.cve_id))
         trace = _trace(monkeypatch, batch)
 
         with capture_logs() as logs, trace.recording(batch):
@@ -1693,15 +1707,15 @@ class TestExternalStringAdmissibility:
         assert counters(batch.fetcher) == Counters(1, 0, 1, 1)
 
     @pytest.mark.parametrize(
-        "item",
-        ["CWE-79\x00", "\x00CWE-79", "CWE-\x0079", "\x00"],
+        "template",
+        ["CWE-79{}", "{}CWE-79", "CWE-{}79", "{}"],
         ids=["end", "start", "middle", "whole"],
     )
-    async def test_nul_in_a_cwe_item_skips_that_cwe(
-        self, item: str, env: Env, batch: Batch
+    async def test_inadmissible_character_in_a_cwe_item_skips_that_cwe(
+        self, template: str, character: str, env: Env, batch: Batch
     ) -> None:
         cve = await env.cve()
-        env.serve(_entry(cve.cve_id, cwes=[item, "CWE-352"]))
+        env.serve(_entry(cve.cve_id, cwes=[template.format(character), "CWE-352"]))
 
         with capture_logs() as logs:
             await batch.execute()
@@ -1715,20 +1729,24 @@ class TestExternalStringAdmissibility:
         assert counters(batch.fetcher) == Counters(1, 0, 1, 0)
 
     @pytest.mark.parametrize(
-        "date_added",
-        ["2026-10-01\x00", "\x002026-10-01", "2026-10\x00-01", "\x00"],
+        "template",
+        ["2026-10-01{}", "{}2026-10-01", "2026-10{}-01", "{}"],
         ids=["end", "start", "middle", "whole"],
     )
-    async def test_nul_in_date_added_is_an_invalid_date_unit(
+    async def test_inadmissible_character_in_date_added_is_an_invalid_date_unit(
         self,
-        date_added: str,
+        template: str,
+        character: str,
         env: Env,
         batch: Batch,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         failing = await env.cve()
         later = await env.cve()
-        env.serve(_entry(failing.cve_id, dateAdded=date_added), _entry(later.cve_id))
+        env.serve(
+            _entry(failing.cve_id, dateAdded=template.format(character)),
+            _entry(later.cve_id),
+        )
         trace = _trace(monkeypatch, batch)
 
         with capture_logs() as logs:

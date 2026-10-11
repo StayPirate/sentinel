@@ -22,8 +22,8 @@ response is validated before any result is returned:
   non-empty `name` of at most 255 characters, unique across the response,
   and a declared `type`; every `SLFO` and `SLE_15` entry needs a non-empty
   `targets` array whose `product.cpe` values are non-empty strings; neither
-  `name` nor `product.cpe` may contain U+0000 (External String
-  Admissibility);
+  `name` nor `product.cpe` may contain U+0000 or a surrogate code point
+  (External String Admissibility);
 - `SLFO_IBS` and `UNKNOWN` entries are skipped without validating their
   targets, with one WARNING each once the response is accepted.
 
@@ -53,7 +53,7 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
 from app.config import settings
 from app.core.enums import WorkflowType
-from app.core.external_strings import NulFreeStr
+from app.core.external_strings import AdmissibleStr
 from app.services.http_client import INFRA_FAILURE_TYPES
 
 logger = structlog.get_logger(__name__)
@@ -137,7 +137,7 @@ class _Codestream(BaseModel):
 
     model_config = ConfigDict(strict=True, extra="ignore", frozen=True)
 
-    name: NulFreeStr = Field(min_length=1, max_length=REFERENCE_MAX_LENGTH)
+    name: AdmissibleStr = Field(min_length=1, max_length=REFERENCE_MAX_LENGTH)
     type: Literal["SLFO", "SLFO_IBS", "SLE_15", "UNKNOWN"]
 
 
@@ -155,7 +155,7 @@ class _Product(BaseModel):
 
     model_config = ConfigDict(strict=True, extra="ignore", frozen=True)
 
-    cpe: NulFreeStr = Field(min_length=1)
+    cpe: AdmissibleStr = Field(min_length=1)
     friendly_name: Any = None
 
 

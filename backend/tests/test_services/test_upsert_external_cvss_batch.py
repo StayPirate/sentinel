@@ -224,6 +224,7 @@ class TestProviderPredicate:
             pytest.param("SUSE CNA", id="contains-suse"),
             pytest.param("SUSEx", id="suse-prefix"),
             pytest.param("Ärzte CNA", id="non-ascii"),
+            pytest.param("Example \U0001f600 CNA", id="supplementary-character"),
             pytest.param("P" * EXTERNAL_PROVIDER_MAX_LENGTH, id="100-characters"),
             pytest.param(" " + "P" * 99, id="100-characters-with-whitespace"),
         ],
@@ -243,6 +244,8 @@ class TestProviderPredicate:
             pytest.param("\x00Example CNA", id="nul-start"),
             pytest.param("Example\x00CNA", id="nul-middle"),
             pytest.param("Example CNA\x00", id="nul-end"),
+            pytest.param("Example\ud800CNA", id="surrogate-middle"),
+            pytest.param("Example CNA\udfff", id="low-surrogate-end"),
             pytest.param("SUSE\x00", id="reserved-with-nul"),
             pytest.param("SUSE", id="reserved"),
             pytest.param("suse", id="reserved-lowercase"),
@@ -277,7 +280,7 @@ DATE = "requires an evaluation_date"
 CVE_ID = "requires the CVE UUID"
 SEQUENCE = "must be a sequence"
 ITEM = "must be a ParsedExternalCVSSAssessment"
-PROVIDER = "empty, overlength, NUL-containing, or reserved"
+PROVIDER = "empty, overlength, reserved, or contains an inadmissible character"
 MALFORMED = "parsed result is malformed"
 DUPLICATE = "Duplicate canonical"
 
@@ -383,6 +386,7 @@ GUARD_CASES = [
     _provider_guard("\t\n", "whitespace-only"),
     _provider_guard("P" * (EXTERNAL_PROVIDER_MAX_LENGTH + 1), "101-characters"),
     _provider_guard("Example\x00CNA", "nul"),
+    _provider_guard("Example\ud800CNA", "surrogate"),
     _provider_guard(None, "none"),
     _provider_guard(42, "integer"),
     _provider_guard("SUSE", "reserved"),

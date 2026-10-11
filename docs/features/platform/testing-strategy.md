@@ -1981,28 +1981,40 @@ rerun endpoint's 503 publication failure.
 
 When a consumer of external strings governed by `docs/conventions.md`
 (External String Admissibility) is implemented or changed, its tests MUST
-supply U+0000 in every consumed string field it validates, including items of
-string collections, and prove that the owning contract's invalid-data outcome
-occurs at its documented granularity, with no database error and no write
-from the rejected unit. Fields validated by one shared check may be covered by
-one parametrized test.
+supply each inadmissible character — U+0000 and a surrogate code point — in
+every consumed string field it validates, including items of string
+collections, and prove that the owning contract's invalid-data outcome occurs
+at its documented granularity, with no database error and no write from the
+rejected unit. A field whose length or pattern constraint would reject a
+surrogate code point incidentally is not exempt. Fields validated by one
+shared check may be covered by one parametrized test. The tests of the shared
+check itself also prove that a high surrogate code point followed by a low one
+is rejected and that a supplementary character, such as one decoded from a
+correctly paired surrogate escape, is admissible.
 
-### NUL Characters in Request Input
+### Inadmissible Characters in Request Input
 
-When the shared check for `docs/api-spec.md` (NUL Characters in Request Input)
-is implemented or changed, its tests MUST cover U+0000 at the start, middle,
-and end of a value and as the whole value. The tests cover each input kind: a
-path parameter, including a percent-encoded `%00`; a single and repeated query
-parameter; and a body string value, list item, nested value, object member
-name, and undeclared member. Each violation must produce its own `errors`
-entry at the documented location. The tests must also prove that undeclared
-query parameters and non-string parameters are not inspected and that the
-offending value is not echoed. Through the registered application, end-to-end
-tests prove for representative real endpoints that each input kind returns
-`422 VALIDATION_ERROR` with no database error, no write, and no
+When the shared check for `docs/api-spec.md` (Inadmissible Characters in
+Request Input) is implemented or changed, its tests MUST cover each
+inadmissible character at the start, middle, and end of a value and as the
+whole value. The tests cover each input kind: a path parameter, including a
+percent-encoded `%00`; a single and repeated query parameter; and a body
+string value, list item, nested value, object member name, and undeclared
+member. A surrogate code point is covered for the body input kinds, both as an
+unpaired JSON escape and as its UTF-8-style encoding in the body bytes; path
+and query parameters cannot carry one. Each violation must produce its own `errors` entry at the documented
+location. The tests must also prove that undeclared query parameters and
+non-string parameters are not inspected, that a correctly paired surrogate
+escape is accepted, and that the offending value is not echoed and does not
+prevent the response from rendering. Through the registered application,
+end-to-end tests prove for representative real endpoints that each input kind
+returns `422 VALIDATION_ERROR` with no database error, no write, and no
 authentication-side effect, and that the response precedes authentication and
-the scoped Ticket not-found response. An endpoint relying only on the shared
-check needs no endpoint-specific U+0000 test.
+the scoped Ticket not-found response. For local login, they prove that a
+surrogate code point in the password returns the same `422 VALIDATION_ERROR`
+for an existing and an unknown username without changing the lockout counter.
+An endpoint relying only on the shared check needs no endpoint-specific
+inadmissible-character test.
 
 ### CVE Ingestion Persistence
 
@@ -3117,7 +3129,7 @@ transport contract.
 |---|---|
 | Accepted schemes and host | `http` and `https` with a valid non-empty host are accepted; every other scheme, a missing or empty host, and malformed URL structure are rejected |
 | Embedded user information | User information or credentials in the authority component are rejected, including username-only and username/password forms |
-| Control characters | Every U+0000-U+001F character and U+007F is rejected rather than stripped or encoded |
+| Control characters | Every U+0000-U+001F character, U+007F, and every surrogate code point (U+D800-U+DFFF) is rejected rather than stripped or encoded |
 | Length | Exactly 2048 characters before and after normalization is accepted when otherwise valid; a value exceeding either pre-normalization or post-normalization length is rejected |
 | Scheme and host case | Scheme and host are lowercased without changing path, query, or fragment case |
 | HTTP upgrade | `http` normalizes to `https` before classification, comparison, and storage |

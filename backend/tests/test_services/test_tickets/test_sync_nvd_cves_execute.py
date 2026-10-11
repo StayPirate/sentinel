@@ -135,6 +135,7 @@ from app.services.tickets.sync_nvd_cves import (
 )
 from tests.support.cve_catch_up import Publications
 from tests.support.cve_ingest import SKIP_EVENT, IngestionWorld
+from tests.support.inadmissible import INADMISSIBLE_CHARACTERS, SURROGATE
 from tests.support.nvd import (
     API_KEY_HEADER,
     CVE_API_URL,
@@ -228,6 +229,7 @@ def _assert_private(logs: Iterable[Mapping[str, Any]], *values: str) -> None:
             "Alice",
             "cpe:2.3",
             "\\x00",
+            "\\ud800",
             *values,
         ):
             assert fragment not in rendered, entry
@@ -316,6 +318,7 @@ CPE_CONFIGURATIONS: Final = [
                     _match(CPE_A, matchCriteriaId=MATCH_ID),
                     _match(CPE_O),
                     _match(f"{CPE_A}\x00"),
+                    _match(f"{CPE_A}{SURROGATE}"),
                     _match(CPE_H, vulnerable="yes"),
                 ],
             },
@@ -331,7 +334,7 @@ CPE_CONFIGURATIONS: Final = [
     _configuration(_match(CPE_H, matchCriteriaId="not-a-uuid")),
 ]
 """Two selected entries, an excluded platform and negated configuration,
-three invalid entries, and an invalid configuration."""
+four invalid entries, and an invalid configuration."""
 
 SELECTED_CPES: Final = [
     {
@@ -1824,6 +1827,7 @@ _INVALID_ELEMENTS: Final[list[tuple[Any, str]]] = [
     ("id:CVE-2099-111111111111", _ID),
     ("id:free_text", _ID),
     ("id:nul", _ID),
+    ("id:surrogate", _ID),
 ]
 _INVALID_IDS: Final = [
     "string_element",
@@ -1846,6 +1850,7 @@ _INVALID_IDS: Final = [
     "over_long",
     "free_text",
     "nul",
+    "surrogate",
 ]
 
 
@@ -1860,6 +1865,7 @@ def _invalid_element(spec: Any) -> Any:
         "list": ["CVE-2099-0001"],
         "free_text": f"CVE-2099-0001 {FAILURE_TEXT}",
         "nul": "CVE-2099-0001\x00",
+        "surrogate": f"CVE-2099-0001{SURROGATE}",
     }
     value = special.get(value, value)
     element = Env.record(value, descriptions=[{"lang": "en", "value": FAILURE_TEXT}])
@@ -2528,26 +2534,30 @@ class TestCpeOutcomes:
 # External String Admissibility (periodic outcomes)
 # ---------------------------------------------------------------------------
 
-NUL: Final = f"{FAILURE_TEXT}\x00"
-
 
 @pytest.mark.integration
+@pytest.mark.parametrize("character", INADMISSIBLE_CHARACTERS)
 class TestExternalStringAdmissibility:
     @pytest.mark.parametrize(
         ("members", "cause"),
         [
-            ({"descriptions": [{"lang": "en", "value": NUL}]}, "ValidationError"),
-            ({"published": f"{PUBLISHED}\x00"}, _STRUCTURE),
-            ({"lastModified": f"{LAST_MODIFIED}\x00"}, _STRUCTURE),
+            (
+                lambda c: {
+                    "descriptions": [{"lang": "en", "value": f"{FAILURE_TEXT}{c}"}]
+                },
+                "ValidationError",
+            ),
+            (lambda c: {"published": f"{PUBLISHED}{c}"}, _STRUCTURE),
+            (lambda c: {"lastModified": f"{LAST_MODIFIED}{c}"}, _STRUCTURE),
         ],
         ids=["description", "published", "last_modified"],
     )
-    async def test_nul_in_a_global_string_is_an_isolated_failure(
-        self, members: dict[str, Any], cause: str, env: Env, batch: Batch
+    async def test_inadmissible_character_in_a_global_string_is_an_isolated_failure(
+        self, members: Any, cause: str, env: Env, batch: Batch, character: str
     ) -> None:
         failing, later = await env.cve(), await env.cve()
         record = env.sourced(failing.cve_id)
-        record["cve"].update(members, references=[{"url": URL_1}])
+        record["cve"].update(members(character), references=[{"url": URL_1}])
         env.pages([record, env.record(later.cve_id)])
 
         with capture_logs() as logs:
@@ -2568,11 +2578,11 @@ class TestExternalStringAdmissibility:
         assert await env.source_status(later) == CVESourceFetchStatus.SUCCESS
         assert counters(batch.fetcher) == Counters(1, 0, 1, 1)
 
-    async def test_nul_in_the_record_id_is_the_invalid_id_path(
-        self, env: Env, batch: Batch
+    async def test_inadmissible_character_in_the_record_id_is_the_invalid_id_path(
+        self, env: Env, batch: Batch, character: str
     ) -> None:
         cve = await env.cve()
-        env.pages([env.record(f"{cve.cve_id}\x00")])
+        env.pages([env.record(f"{cve.cve_id}{character}")])
 
         with capture_logs() as logs:
             await batch.execute()
@@ -2583,27 +2593,44 @@ class TestExternalStringAdmissibility:
         assert env.isolated == []
         assert counters(batch.fetcher) == Counters(0, 0, 0, 1)
 
-    async def test_nul_in_a_candidate_skips_only_that_candidate(
-        self, env: Env, batch: Batch
+    async def test_inadmissible_character_in_a_candidate_skips_only_that_candidate(
+        self, env: Env, batch: Batch, character: str
     ) -> None:
+        """The resolved Source API display name of `UNKNOWN_SOURCE` carries
+        the character: its CVSS candidate is skipped by `upsert_cve()` as
+        `invalid_provider` and its CWE as `invalid_cwe`."""
+        sources = copy.deepcopy(load_json_fixture(SOURCE_PAGE))
+        sources["sources"].append(
+            {"name": f"Example{character}CNA", "sourceIdentifiers": [UNKNOWN_SOURCE]}
+        )
+        env.server.sources = sources
         cve = await env.cve()
         env.pages(
             [
                 env.record(
                     cve.cve_id,
                     metrics={
-                        "cvssMetricV30": [_metric(CNA_SOURCE, f"{V31}\x00")],
-                        "cvssMetricV31": [_metric(NVD, V31)],
+                        "cvssMetricV30": [_metric(CNA_SOURCE, f"{V31}{character}")],
+                        "cvssMetricV31": [
+                            _metric(NVD, V31),
+                            _metric(UNKNOWN_SOURCE, V31_CNA),
+                        ],
                     },
                     weaknesses=[
-                        _weakness(NVD, "CWE-79\x00"),
+                        _weakness(NVD, f"CWE-79{character}"),
                         _weakness(NVD, "CWE-352"),
+                        _weakness(UNKNOWN_SOURCE, "CWE-20"),
                     ],
-                    references=[{"url": f"{URL_1}?{NUL}"}, {"url": URL_2}],
+                    references=[
+                        {"url": f"{URL_1}{FAILURE_TEXT}{character}"},
+                        {"url": f"{URL_1}?{FAILURE_TEXT}{character}"},
+                        {"url": f"{URL_1}#{FAILURE_TEXT}{character}"},
+                        {"url": URL_2},
+                    ],
                     configurations=[
                         _configuration(
-                            _match(f"{CPE_A}\x00"),
-                            _match(CPE_O, matchCriteriaId=f"{MATCH_ID}\x00"),
+                            _match(f"{CPE_A}{character}"),
+                            _match(CPE_O, matchCriteriaId=f"{MATCH_ID}{character}"),
                             _match(CPE_H),
                         )
                     ],
@@ -2617,10 +2644,14 @@ class TestExternalStringAdmissibility:
         assert counters(batch.fetcher) == Counters(1, 0, 1, 0)
         assert sorted((entry["event"], entry.get("reason")) for entry in logs) == [
             ("automatic_reference_rejected", "control_character"),
+            ("automatic_reference_rejected", "control_character"),
+            ("automatic_reference_rejected", "control_character"),
+            (SKIP_EVENT, "invalid_provider"),
             (CVE_FETCH_CANDIDATE_SKIPPED_EVENT, "invalid_cpe_match"),
+            (CVE_FETCH_CANDIDATE_SKIPPED_EVENT, "invalid_cwe"),
             (CVE_FETCH_CANDIDATE_SKIPPED_EVENT, "invalid_vector"),
         ]
-        _assert_private(logs, V31, URL_1)
+        _assert_private(logs, V31, URL_1, "Example")
         assert await env.assessments(cve) == {("NVD", V31)}
         assert await env.cwes(cve) == {("CWE-352", "NVD")}
         assert [url for url, _, _ in await env.references(cve)] == [

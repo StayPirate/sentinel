@@ -7,8 +7,8 @@ Owning specifications:
   semantics, the four result lists, the error table, Access check behavior,
   Behavior; Security);
 - docs/api-spec.md (Authorization Chain Evaluation Order; Query Parameter
-  Length Limit; NUL Characters in Request Input; Response Format; Global
-  Responses; CVE Accessibility Check with the refetch exception and outcome
+  Length Limit; Inadmissible Characters in Request Input; Response Format;
+  Global Responses; CVE Accessibility Check with the refetch exception and outcome
   matrix; Manual-Zone Mutability Guard; CVE Identifier Resolution);
 - docs/features/identity/rbac.md (Endpoint Permission Map row
   `POST /api/v1/cves/{cve_id}/refetch` -> `triage_ticket`; Predefined
@@ -93,6 +93,7 @@ from tests.support.fetch_single_cve import (
     forbid_redis,
     pending_key,
 )
+from tests.support.inadmissible import REQUEST_INPUT_ERROR
 from tests.support.ticket_api import INTERNAL_ERROR, force_production_error_page
 from tests.support.ticket_mutations import StatementRecorder
 
@@ -112,7 +113,6 @@ _CELERY_UNAVAILABLE = {
     "code": "CELERY_UNAVAILABLE",
     "detail": "CVE refetch could not be dispatched to the task broker",
 }
-_NUL_ERROR = {"msg": "Value error, must not contain U+0000", "type": "value_error"}
 
 UNCONFIRMED = "cve_fetch_publication_unconfirmed"
 """The WARNING of a non-empty `sources_failed` (issue #800, D4)."""
@@ -524,10 +524,10 @@ class TestRequestInputConstraints:
         roles: tuple[Role, ...] | None,
         where: str,
     ) -> None:
-        """api-spec.md, NUL Characters in Request Input: a percent-encoded
-        `%00` in `{cve_id}` or a U+0000 in `source` is rejected before
-        authentication, authorization, and CVE resolution, located at the
-        string and never echoed."""
+        """api-spec.md, Inadmissible Characters in Request Input: a
+        percent-encoded `%00` in `{cve_id}` or a U+0000 in `source` is
+        rejected before authentication, authorization, and CVE resolution,
+        located at the string and never echoed."""
         cve = await api.cve()
         headers = {} if roles is None else await api.headers(*roles)
         attempts = forbid_redis(monkeypatch)
@@ -545,7 +545,7 @@ class TestRequestInputConstraints:
         assert response.json() == {
             "code": "VALIDATION_ERROR",
             "detail": "Request validation failed",
-            "errors": [{"loc": loc, **_NUL_ERROR}],
+            "errors": [{"loc": loc, **REQUEST_INPUT_ERROR}],
         }
         assert api.sessions.calls == 0
         _assert_no_dispatch(attempts, api.published)

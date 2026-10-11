@@ -85,7 +85,7 @@ from app.core.exceptions import (
     TicketNotMutableError,
     UserNotFoundError,
 )
-from app.core.external_strings import contains_nul
+from app.core.external_strings import contains_inadmissible_character
 from app.core.identifiers import parse_ticket_id
 from app.models.cve import CVE
 from app.models.cve_cvss_assessment import CVECVSSAssessment
@@ -1908,16 +1908,16 @@ def is_valid_external_provider_name(provider: object) -> bool:
     (ticket-mutations.md, `upsert_external_cvss_batch()` > Guards;
     cvss-scoring.md, Provider Identity and Authority): a string that is
     non-empty after outer trim, at most 100 characters as received, free
-    of U+0000 (External String Admissibility), and not equivalent to the
-    reserved `SUSE` after outer trim and Unicode case-folding. Shared with
-    the ingestion-side `invalid_provider` skip so the skip and the batch
-    guard cannot diverge.
+    of U+0000 and surrogate code points (External String Admissibility),
+    and not equivalent to the reserved `SUSE` after outer trim and Unicode
+    case-folding. Shared with the ingestion-side `invalid_provider` skip so
+    the skip and the batch guard cannot diverge.
     """
     return (
         isinstance(provider, str)
         and bool(provider.strip())
         and len(provider) <= EXTERNAL_PROVIDER_MAX_LENGTH
-        and not contains_nul(provider)
+        and not contains_inadmissible_character(provider)
         and not is_reserved_provider_name(provider)
     )
 
@@ -2005,7 +2005,8 @@ def _validated_batch(
             raise ValueError("Every candidate must be a ParsedExternalCVSSAssessment.")
         if not is_valid_external_provider_name(item.provider):
             raise ValueError(
-                "Candidate provider is empty, overlength, NUL-containing, or reserved."
+                "Candidate provider is empty, overlength, reserved, or contains an"
+                " inadmissible character."
             )
         parsed = item.parsed
         if not isinstance(parsed, ParsedCVSSVector) or not isinstance(
@@ -2079,8 +2080,9 @@ async def upsert_external_cvss_batch(
 
     Q6: raises `ValueError` before any database operation for a missing
     `evaluation_date` or CVE UUID, a malformed candidate or parsed result,
-    an empty, overlength, U+0000-containing, or reserved provider, or a
-    duplicate canonical key; and after the lock lookup for a CVE that does not exist.
+    an empty, overlength, or reserved provider or one containing U+0000 or
+    a surrogate code point, or a duplicate canonical key; and after the
+    lock lookup for a CVE that does not exist.
     `RequiredSystemSettingMissingError`, and settings, database, audit,
     eligibility, flush, reconciliation, cancellation, and programming
     exceptions propagate unchanged and roll back the caller's complete

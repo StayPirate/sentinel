@@ -15,7 +15,8 @@ ingestion.
   and collapsed `CWEEntry` list. No received string reaches PostgreSQL
   unvalidated: `dateAdded` must be a `YYYY-MM-DD` string naming a
   calendar date, and each CWE must match the `CWEEntry` contract, which
-  rejects U+0000 (docs/conventions.md, External String Admissibility).
+  rejects U+0000 and surrogate code points (docs/conventions.md, External
+  String Admissibility).
 """
 
 from __future__ import annotations

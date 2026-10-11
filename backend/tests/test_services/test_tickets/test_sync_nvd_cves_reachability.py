@@ -132,6 +132,7 @@ from tests.support.fetch_single_cve import (
     events_named,
     install_fetch_single_harness,
 )
+from tests.support.inadmissible import NUL, SURROGATE
 from tests.support.nvd import (
     API_KEY_HEADER,
     NvdServer,
@@ -548,17 +549,22 @@ def _respond(server: NvdServer, cve: CVE, kind: str) -> None:
             page_body([_record(cve.cve_id), _record(cve.cve_id)], 2)
         ),
         "structure": json_body(page_body([_record(cve.cve_id, published=None)], 1)),
-        "nul_description": json_body(
-            page_body(
-                [
-                    _record(
-                        cve.cve_id,
-                        descriptions=[{"lang": "en", "value": "Fictional\x00"}],
-                    )
-                ],
-                1,
+        **{
+            f"{name}_description": json_body(
+                page_body(
+                    [
+                        _record(
+                            cve.cve_id,
+                            descriptions=[
+                                {"lang": "en", "value": f"Fictional{character}"}
+                            ],
+                        )
+                    ],
+                    1,
+                )
             )
-        ),
+            for name, character in (("nul", NUL), ("surrogate", SURROGATE))
+        },
     }
     server.single_responses[cve.cve_id] = responders[kind]
 
@@ -577,6 +583,7 @@ _NON_RETRYABLE: Final[list[tuple[str, type[BaseException], str]]] = [
     ("two_elements", NvdResponseError, "NvdResponseError"),
     ("structure", NvdRecordStructureError, "NvdRecordStructureError"),
     ("nul_description", ValidationError, "ValidationError"),
+    ("surrogate_description", ValidationError, "ValidationError"),
 ]
 
 
@@ -662,7 +669,9 @@ class TestOnDemandFetch:
         assert server.clients
         assert all(client.is_closed for client in server.clients)
 
-    @pytest.mark.parametrize("answer", ["zero_results", "other", "invalid", "nul"])
+    @pytest.mark.parametrize(
+        "answer", ["zero_results", "other", "invalid", "nul", "surrogate"]
+    )
     async def test_no_record_of_the_requested_cve_is_missing(
         self,
         answer: str,
@@ -675,7 +684,8 @@ class TestOnDemandFetch:
             other = {
                 "other": "CVE-2099-0001",
                 "invalid": "CVE-24-1",
-                "nul": f"{cve.cve_id}\x00",
+                "nul": f"{cve.cve_id}{NUL}",
+                "surrogate": f"{cve.cve_id}{SURROGATE}",
             }
             server.singles[cve.cve_id] = [_record(other[answer])]
         token = await on_demand.marker(cve.cve_id, NVD.value)
@@ -910,8 +920,15 @@ class TestCatchUp:
             ("two_elements", NvdResponseError),
             ("structure", NvdRecordStructureError),
             ("nul_description", ValidationError),
+            ("surrogate_description", ValidationError),
         ],
-        ids=["http_404", "two_elements", "structure", "nul_description"],
+        ids=[
+            "http_404",
+            "two_elements",
+            "structure",
+            "nul_description",
+            "surrogate_description",
+        ],
     )
     async def test_non_retryable_failure_writes_failure(
         self,

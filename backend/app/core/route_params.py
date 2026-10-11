@@ -1,8 +1,8 @@
 """Discovery of the string-shaped parameters a matched route declares.
 
 Shared by the app-wide request input dependencies (`app.core.query_limits`,
-`app.core.request_nul`), which inspect only parameters the matched route
-declares, per `docs/api-spec.md` (Undeclared Query Parameters).
+`app.core.request_admissibility`), which inspect only parameters the matched
+route declares, per `docs/api-spec.md` (Undeclared Query Parameters).
 """
 
 from __future__ import annotations

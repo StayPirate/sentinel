@@ -29,6 +29,7 @@ from app.services.tickets.redhat_cve_record import (
     extract,
     parse_response,
 )
+from tests.support.inadmissible import INADMISSIBLE_CHARACTERS, SURROGATE
 from tests.support.redhat import CVE_SUCCESS_FIXTURES, load_cve_fixture
 
 V31: Final = "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"
@@ -327,12 +328,15 @@ class TestCvss:
         assert extraction.cvss_vectors == (V31,)
         assert parser.calls == [padded]
 
+    @pytest.mark.parametrize("character", INADMISSIBLE_CHARACTERS)
     @pytest.mark.parametrize("position", ["start", "middle", "end"])
-    def test_vector_containing_nul_is_an_invalid_vector(self, position: str) -> None:
+    def test_vector_containing_an_inadmissible_character_is_an_invalid_vector(
+        self, position: str, character: str
+    ) -> None:
         vector = {
-            "start": "\x00" + V31,
-            "middle": V31.replace("/C:H", "/C:\x00H"),
-            "end": V31 + "\x00",
+            "start": character + V31,
+            "middle": V31.replace("/C:H", f"/C:{character}H"),
+            "end": V31 + character,
         }[position]
 
         extraction = _extract(cvss3={"cvss3_scoring_vector": vector})
@@ -383,6 +387,8 @@ class TestCwe:
             "CWE-" + "1" * 17,
             "CWE-\x00200",
             "CWE-200\x00",
+            f"CWE-{SURROGATE}200",
+            f"CWE-200{SURROGATE}",
         ],
         ids=[
             "chain",
@@ -398,6 +404,8 @@ class TestCwe:
             "over_long",
             "nul_middle",
             "nul_end",
+            "surrogate_middle",
+            "surrogate_end",
         ],
     )
     def test_invalid_value_is_skipped_and_other_data_continues(self, cwe: str) -> None:
@@ -486,10 +494,13 @@ class TestReferences:
     def test_one_non_blank_line_is_extractable_data(self) -> None:
         assert _extract(references=["\n", "x"]).has_extractable_data
 
-    def test_line_containing_nul_is_kept_for_the_url_boundary(self) -> None:
-        extraction = _extract(references=[f"{URL_1}\x00"])
+    @pytest.mark.parametrize("character", INADMISSIBLE_CHARACTERS)
+    def test_line_containing_an_inadmissible_character_is_kept_for_the_url_boundary(
+        self, character: str
+    ) -> None:
+        extraction = _extract(references=[f"{URL_1}{character}"])
 
-        assert extraction.reference_urls == (f"{URL_1}\x00",)
+        assert extraction.reference_urls == (f"{URL_1}{character}",)
 
 
 @pytest.mark.unit
@@ -517,11 +528,17 @@ class TestBugzilla:
     def test_object_without_url_is_skipped(self) -> None:
         assert _extract(bugzilla={"description": "Fictional flaw"}).bugzilla is None
 
-    def test_url_is_kept_verbatim(self) -> None:
-        extraction = _extract(bugzilla={"url": f" {BUGZILLA_URL}\x00"})
+    @pytest.mark.parametrize("character", INADMISSIBLE_CHARACTERS)
+    def test_url_and_description_are_kept_verbatim(self, character: str) -> None:
+        extraction = _extract(
+            bugzilla={
+                "url": f" {BUGZILLA_URL}{character}",
+                "description": f"Fictional{character}",
+            }
+        )
 
         assert extraction.bugzilla == BugzillaLink(
-            url=f" {BUGZILLA_URL}\x00", title=None
+            url=f" {BUGZILLA_URL}{character}", title=f"Fictional{character}"
         )
 
     def test_bugzilla_alone_is_extractable_data(self) -> None:
@@ -566,6 +583,14 @@ class TestPackages:
         extraction = _extract(package_state=[{"package_name": " Example:1 "}])
 
         assert extraction.package_names == (" Example:1 ",)
+
+    @pytest.mark.parametrize("character", INADMISSIBLE_CHARACTERS)
+    def test_inadmissible_name_is_kept_for_the_payload_validation(
+        self, character: str
+    ) -> None:
+        extraction = _extract(package_state=[{"package_name": f"example{character}"}])
+
+        assert extraction.package_names == (f"example{character}",)
 
     def test_all_names_filtered_is_no_extractable_data(self) -> None:
         extraction = _extract(

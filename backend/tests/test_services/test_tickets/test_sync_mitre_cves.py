@@ -72,6 +72,7 @@ from app.services.reference_service import AutomaticReferenceInput
 from app.services.tickets import mitre_cve_record
 from app.services.tickets import sync_mitre_cves as sync_module
 from app.services.tickets.sync_mitre_cves import SyncMitreCves
+from tests.support.inadmissible import INADMISSIBLE_CHARACTERS
 from tests.support.mitre import (
     ALL_RECORDS,
     CISA_ADP_ORG_ID,
@@ -560,6 +561,56 @@ class TestCallerWarnings:
         [(_, _, payload)] = ingest.upserts
         assert payload.ssvc_assessment is not None
         assert payload.kev_data is not None
+
+    @pytest.mark.parametrize("character", INADMISSIBLE_CHARACTERS)
+    async def test_inadmissible_short_name_skips_the_adp_with_one_event(
+        self, ingest: FakeIngest, character: str
+    ) -> None:
+        """External String Admissibility: an ADP `shortName` containing an
+        inadmissible character is a malformed identity (ADP defensive
+        guard), so the entry contributes nothing and one bounded event is
+        logged."""
+        short_name = f"Example-Raw-Short-Name{character}"
+
+        def edit(record: dict[str, Any]) -> None:
+            record["containers"]["adp"].append(
+                {
+                    "providerMetadata": {"orgId": ADP_ORG_ID, "shortName": short_name},
+                    "affected": [{"vendor": "Example Vendor", "product": "Example"}],
+                    "metrics": [
+                        {
+                            "cvssV3_1": {
+                                "vectorString": (
+                                    "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"
+                                )
+                            }
+                        }
+                    ],
+                }
+            )
+
+        _, logs = await _process(ingest, _content("cisa_kev_cwe_tags", edit))
+
+        assert _skip_events(logs) == [
+            {
+                "event": "mitre_adp_entry_skipped",
+                "log_level": "warning",
+                "cve_id": CVE_ID,
+                "fetcher_name": NAME,
+                "org_id": ADP_ORG_ID,
+            }
+        ]
+        [(_, _, payload)] = ingest.upserts
+        scopes = {
+            operation.source_container
+            for operation in payload.affected_version_operations or []
+        }
+        providers = {str(c.provider_name) for c in payload.cvss_assessments or []}
+        assert not any(short_name in scope for scope in scopes)
+        assert not any(short_name in provider for provider in providers)
+        assert payload.ssvc_assessment is not None
+        rendered = repr([dict(entry) for entry in logs])
+        assert "Example-Raw-Short-Name" not in rendered
 
     async def test_cna_guard_is_one_event_with_the_uuid_org_id(
         self, ingest: FakeIngest

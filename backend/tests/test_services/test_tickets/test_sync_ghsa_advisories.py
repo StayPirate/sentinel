@@ -101,6 +101,7 @@ from tests.support.ghsa import (
     status,
 )
 from tests.support.ghsa import body as json_body
+from tests.support.inadmissible import INADMISSIBLE_CHARACTERS, SURROGATE
 from tests.support.ticket_mutations import EventRow, ticket_events
 
 NAME: Final = "sync_ghsa_advisories"
@@ -387,6 +388,7 @@ def _assert_private(logs: Iterable[Mapping[str, Any]], *values: str) -> None:
     for entry in logs:
         rendered = repr(dict(entry))
         assert "\\x00" not in rendered, entry
+        assert "\\ud800" not in rendered, entry
         for value in (TOKEN, "Bearer", SECRET, CREDIT_LOGIN, *values):
             assert value not in rendered, entry
 
@@ -564,8 +566,17 @@ class TestMissingBeforeMutation:
             "",
             "CVE-2099-" + "1" * 12,
             "CVE-2099-0001\x00",
+            f"CVE-2099-0001{SURROGATE}",
         ],
-        ids=["short", "lowercase", "trailing_space", "empty", "over_long", "nul"],
+        ids=[
+            "short",
+            "lowercase",
+            "trailing_space",
+            "empty",
+            "over_long",
+            "nul",
+            "surrogate",
+        ],
     )
     async def test_malformed_requested_cve_id_is_missing_without_http(
         self,
@@ -612,6 +623,7 @@ class TestMissingBeforeMutation:
             "",
             "other",
             "CVE-2099-0001\x00",
+            f"CVE-2099-0001{SURROGATE}",
         ],
         ids=[
             "null",
@@ -623,6 +635,7 @@ class TestMissingBeforeMutation:
             "empty",
             "different",
             "nul",
+            "surrogate",
         ],
     )
     async def test_unusable_first_cve_id_is_missing(
@@ -1510,8 +1523,16 @@ class TestCvss:
             "CVSS:3.1/AV:N/AC:L",
             V31 + "/AV:N" * 40,
             f"{V31}\x00",
+            f"{V31}{SURROGATE}",
         ],
-        ids=["malformed", "unknown_prefix", "incomplete", "over_200", "nul"],
+        ids=[
+            "malformed",
+            "unknown_prefix",
+            "incomplete",
+            "over_200",
+            "nul",
+            "surrogate",
+        ],
     )
     async def test_rejected_v3_is_skipped_once_and_the_v4_sibling_persists(
         self,
@@ -1543,7 +1564,7 @@ class TestCvss:
         skips = _events(logs, SKIP_EVENT)
         assert [entry["reason"] for entry in skips] == ["invalid_vector"]
         assert all(set(entry) <= SKIP_EVENT_KEYS for entry in skips)
-        _assert_private(logs, vector.rstrip("\x00"))
+        _assert_private(logs, vector.rstrip(f"\x00{SURROGATE}"))
         assert await _source_status(db_session, target.cve) == (
             CVESourceFetchStatus.SUCCESS
         )
@@ -1597,6 +1618,7 @@ class TestFetcherWarnings:
                     {"cwe_id": f"CWE-0 {SECRET}"},
                     {"cwe_id": "NVD-CWE-Other"},
                     {"cwe_id": "CWE-79\x00"},
+                    {"cwe_id": f"CWE-79{SURROGATE}"},
                 ],
                 vulnerabilities=[
                     _vulnerability("ok", version_range=">= 1.0, < 2.0"),
@@ -1622,7 +1644,7 @@ class TestFetcherWarnings:
             "cve_id": target.cve_id,
             "fetcher_name": NAME,
         }
-        assert logs == [skipped] * 3 + [unrecognized] * 3
+        assert logs == [skipped] * 4 + [unrecognized] * 3
         _assert_private(logs, *bad_ranges, "NVD-CWE-Other")
         assert await _cwes(db_session, target.cve) == {("CWE-79", "GitHub")}
         # An unrecognized range keeps its package with NULL version fields.
@@ -1636,38 +1658,44 @@ class TestFetcherWarnings:
 # External String Admissibility (on-demand outcomes)
 # ---------------------------------------------------------------------------
 
-NUL: Final = f"{SECRET}\x00"
 
-
-def _with_nul(cve_id: str, field_name: str) -> dict[str, Any]:
-    """An advisory whose `field_name` value contains U+0000."""
+def _with_character(cve_id: str, field_name: str, character: str) -> dict[str, Any]:
+    """An advisory whose `field_name` value contains `character`."""
+    value = f"{SECRET}{character}"
     vulnerability = _vulnerability("example", "npm", ">= 1.0, < 2.0")
     members: dict[str, Any] = {"vulnerabilities": [vulnerability]}
     if field_name in {"summary", "description", "ghsa_id", "html_url"}:
-        members[field_name] = NUL
+        members[field_name] = value
     elif field_name in {"published_at", "updated_at"}:
-        members[field_name] = "2026-01-01T00:00:00Z\x00"
+        members[field_name] = f"2026-01-01T00:00:00Z{character}"
+    elif field_name in {"published_at_separator", "updated_at_separator"}:
+        # `fromisoformat` accepts either character as the date/time separator.
+        members[field_name.removesuffix("_separator")] = (
+            f"2026-01-01{character}00:00:00Z"
+        )
     elif field_name == "source_code_location":
-        members[field_name] = f"https://git.example.invalid/{NUL}"
+        members[field_name] = f"https://git.example.invalid/{value}"
     elif field_name == "package_name":
-        vulnerability["package"]["name"] = NUL
+        vulnerability["package"]["name"] = value
     elif field_name == "ecosystem":
-        vulnerability["package"]["ecosystem"] = NUL
+        vulnerability["package"]["ecosystem"] = value
     elif field_name == "version":
-        vulnerability["vulnerable_version_range"] = f">= {NUL}, < 2.0"
+        vulnerability["vulnerable_version_range"] = f">= {value}, < 2.0"
     else:
         assert field_name == "version_end"
-        vulnerability["vulnerable_version_range"] = f">= 1.0, < {NUL}"
+        vulnerability["vulnerable_version_range"] = f">= 1.0, < {value}"
     return _advisory(cve_id, **members)
 
 
-PAYLOAD_NUL_FIELDS: Final = [
+PAYLOAD_FIELDS: Final = [
     "summary",
     "description",
     "ghsa_id",
     "html_url",
     "published_at",
+    "published_at_separator",
     "updated_at",
+    "updated_at_separator",
     "source_code_location",
     "package_name",
     "ecosystem",
@@ -1678,16 +1706,18 @@ PAYLOAD_NUL_FIELDS: Final = [
 
 @pytest.mark.unit
 class TestExternalStringAdmissibility:
-    @pytest.mark.parametrize("field_name", PAYLOAD_NUL_FIELDS)
-    async def test_nul_in_a_payload_value_fails_before_any_write(
+    @pytest.mark.parametrize("character", INADMISSIBLE_CHARACTERS)
+    @pytest.mark.parametrize("field_name", PAYLOAD_FIELDS)
+    async def test_inadmissible_character_in_a_payload_value_fails_before_any_write(
         self,
         field_name: str,
+        character: str,
         fetcher: SyncGhsaAdvisories,
         server: GhsaServer,
         ingestion: Ingestion,
     ) -> None:
         cve_id = fictional_cve_id()
-        _serve(server, cve_id, _with_nul(cve_id, field_name))
+        _serve(server, cve_id, _with_character(cve_id, field_name, character))
 
         with capture_logs() as logs, pytest.raises(ValidationError) as raised:
             await fetcher.fetch_single(cve_id, NO_SESSION)
@@ -1772,8 +1802,10 @@ class TestAdmissibilityBounds:
             ghsa_id
         }
 
-    async def test_nul_in_a_cwe_or_reference_skips_only_that_candidate(
+    @pytest.mark.parametrize("character", INADMISSIBLE_CHARACTERS)
+    async def test_inadmissible_character_in_a_cwe_or_reference_skips_that_candidate(
         self,
+        character: str,
         db_session: AsyncSession,
         target: Target,
         fetcher: SyncGhsaAdvisories,
@@ -1784,8 +1816,13 @@ class TestAdmissibilityBounds:
             target.cve_id,
             _advisory(
                 target.cve_id,
-                cwes=[{"cwe_id": "CWE-79\x00"}, {"cwe_id": "CWE-352"}],
-                references=[f"{URL_1}?{NUL}", URL_2],
+                cwes=[{"cwe_id": f"CWE-79{character}"}, {"cwe_id": "CWE-352"}],
+                references=[
+                    f"{URL_1}/{SECRET}{character}",
+                    f"{URL_1}?{SECRET}{character}",
+                    f"{URL_1}#{SECRET}{character}",
+                    URL_2,
+                ],
             ),
         )
 
@@ -1801,17 +1838,27 @@ class TestAdmissibilityBounds:
         assert [(entry["event"], entry.get("reason")) for entry in logs] == [
             (CVE_FETCH_CANDIDATE_SKIPPED_EVENT, "invalid_cwe"),
             ("automatic_reference_rejected", "control_character"),
+            ("automatic_reference_rejected", "control_character"),
+            ("automatic_reference_rejected", "control_character"),
         ]
         _assert_private(logs)
 
-    async def test_nul_failure_writes_nothing(
+    @pytest.mark.parametrize("character", INADMISSIBLE_CHARACTERS)
+    @pytest.mark.parametrize("field_name", ["package_name", "description"])
+    async def test_inadmissible_character_failure_writes_nothing(
         self,
+        field_name: str,
+        character: str,
         db_session: AsyncSession,
         target: Target,
         fetcher: SyncGhsaAdvisories,
         server: GhsaServer,
     ) -> None:
-        _serve(server, target.cve_id, _with_nul(target.cve_id, "package_name"))
+        _serve(
+            server,
+            target.cve_id,
+            _with_character(target.cve_id, field_name, character),
+        )
 
         with pytest.raises(ValidationError):
             await fetcher.fetch_single(target.cve_id, db_session)

@@ -100,6 +100,11 @@ from tests.support.git_fetchers import (
     open_git_run_harness,
     show_missing,
 )
+from tests.support.inadmissible import (
+    INADMISSIBLE_CHARACTERS,
+    NUL,
+    SURROGATE,
+)
 from tests.support.mitre import (
     CISA_ADP_ORG_ID,
     RECORD_SOURCES,
@@ -1002,29 +1007,33 @@ class TestCallerWarnings:
         )
         _bounded(logs, workspace)
 
-    async def test_nul_in_entry_values_skips_only_those_entries(
+    @pytest.mark.parametrize("character", INADMISSIBLE_CHARACTERS)
+    async def test_inadmissible_character_in_entry_values_skips_only_those_entries(
         self,
         workspace: GitWorkspace,
         harness: GitRunHarness,
         mitre: GitFetcherProbe,
+        character: str,
     ) -> None:
-        """External String Admissibility: U+0000 in the CNA `shortName`
-        skips the CNA CVSS candidate (`invalid_provider`) and its CWE
-        source; in a reference URL, the candidate (`control_character`); in
-        an `affected[]` value, only that entry. No database error, and the
-        rest of the record is ingested."""
+        """External String Admissibility: an inadmissible character in the
+        CNA `shortName` skips the CNA CVSS candidate (`invalid_provider`)
+        and its CWE source; in the path, query, or fragment of a reference
+        URL, that candidate (`control_character`); in an `affected[]` value,
+        only that entry. No database error, and the rest of the record is
+        ingested."""
 
         def edit(record: dict[str, Any]) -> None:
             container = cna(record)
-            container["providerMetadata"]["shortName"] = "oracle\x00"
+            container["providerMetadata"]["shortName"] = f"oracle{character}"
             container["problemTypes"][0]["descriptions"][0]["cweId"] = "CWE-200"
-            container["references"].append(
-                {"url": "https://advisory.example.invalid/upstream/1\x00"}
+            container["references"].extend(
+                {"url": f"https://advisory.example.invalid/upstream/{suffix}"}
+                for suffix in (f"1{character}", f"2?q={character}", f"3#{character}")
             )
             container["affected"].append(
                 {
                     "vendor": "Example Vendor",
-                    "product": "Example\x00Product",
+                    "product": f"Example{character}Product",
                     "versions": [{"version": "1.0", "status": "affected"}],
                 }
             )
@@ -1042,6 +1051,8 @@ class TestCallerWarnings:
         ] == [
             ("cve_cvss_candidate_skipped", "invalid_provider"),
             ("automatic_reference_rejected", "control_character"),
+            ("automatic_reference_rejected", "control_character"),
+            ("automatic_reference_rejected", "control_character"),
         ]
         cve = await _cve(harness, cve_id)
         assert await assessments(harness.factory, cve.id) == []
@@ -1058,7 +1069,8 @@ class TestCallerWarnings:
             f"{CVE_ORG}{cve_id}",
             "https://www.oracle.com/security-alerts/cpujul2024.html",
         ]
-        _bounded(logs, workspace, "oracle\\x00", "Example\\x00Product")
+        escaped = repr(character)[1:-1]
+        _bounded(logs, workspace, f"oracle{escaped}", f"Example{escaped}Product")
 
 
 # ---------------------------------------------------------------------------
@@ -1086,12 +1098,20 @@ def _conflicting_cisa(record: dict[str, Any]) -> None:
     adps(record).append(duplicate)
 
 
-def _nul_title(record: dict[str, Any]) -> None:
-    cna(record)["title"] = "example: fictional\x00title"
+def _inadmissible_title(character: str) -> Edit:
+    def edit(record: dict[str, Any]) -> None:
+        cna(record)["title"] = f"example: fictional{character}title"
+
+    return edit
 
 
-def _nul_description(record: dict[str, Any]) -> None:
-    cna(record)["descriptions"][0]["value"] = "Fictional description\x00 text."
+def _inadmissible_description(character: str) -> Edit:
+    def edit(record: dict[str, Any]) -> None:
+        cna(record)["descriptions"][0]["value"] = (
+            f"Fictional description{character} text."
+        )
+
+    return edit
 
 
 def _failing_content(case: str, cve_id: str) -> bytes:
@@ -1104,12 +1124,13 @@ def _failing_content(case: str, cve_id: str) -> bytes:
         return b"[]"
     edits: dict[str, Edit] = {
         "unrecognized-state": _set_state("RESERVED"),
-        "nul-state": _set_state("PUBLISHED\x00"),
         "published-with-date-rejected": _published_with_rejection_date,
         "conflicting-adp": _conflicting_cisa,
-        "nul-title": _nul_title,
-        "nul-description": _nul_description,
     }
+    for name, character in (("nul", NUL), ("surrogate", SURROGATE)):
+        edits[f"{name}-state"] = _set_state(f"PUBLISHED{character}")
+        edits[f"{name}-title"] = _inadmissible_title(character)
+        edits[f"{name}-description"] = _inadmissible_description(character)
     return derived_record("cisa_kev_cwe_tags", cve_id, edits[case])
 
 
@@ -1119,10 +1140,13 @@ _FAILURES: Final = [
     ("array-root", "MitreRecordDecodeError"),
     ("unrecognized-state", "MitreRecordStateError"),
     ("nul-state", "MitreRecordStateError"),
+    ("surrogate-state", "MitreRecordStateError"),
     ("published-with-date-rejected", "MitreRecordRejectionDateError"),
     ("conflicting-adp", "MitreRecordConflictError"),
     ("nul-title", "ValidationError"),
+    ("surrogate-title", "ValidationError"),
     ("nul-description", "ValidationError"),
+    ("surrogate-description", "ValidationError"),
 ]
 
 
@@ -1248,7 +1272,16 @@ class TestPerItemFailure:
         assert harness.published.calls == []
         _bounded(logs, workspace, "fictional reference write failure")
 
-    @pytest.mark.parametrize("case", ["nul-title", "nul-description", "array-root"])
+    @pytest.mark.parametrize(
+        "case",
+        [
+            "nul-title",
+            "surrogate-title",
+            "nul-description",
+            "surrogate-description",
+            "array-root",
+        ],
+    )
     async def test_failure_for_an_absent_cve_writes_nothing(
         self,
         workspace: GitWorkspace,

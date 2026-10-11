@@ -10,7 +10,8 @@ Every function is a Category B function: no I/O, no logging, no database,
 and no exception escapes. The input is untrusted, so every consumed value
 is checked for its JSON type. A wrong-typed argument yields the empty
 result; an unparseable entry, including one the payload model rejects for a
-bound, pattern, enum, or U+0000, is skipped while its siblings survive.
+bound, pattern, enum, or an inadmissible character (U+0000 or a surrogate
+code point), is skipped while its siblings survive.
 There is no `dataVersion` branching: parsing follows the actual structure.
 
 Callers own presence: whether a scoped affected-version operation exists,
@@ -33,7 +34,7 @@ from app.core.enums import (
     SSVCExploitation,
     SSVCTechnicalImpact,
 )
-from app.core.external_strings import contains_nul
+from app.core.external_strings import contains_inadmissible_character
 from app.services.cve_ingest import (
     AffectedVersionEntry,
     CVSSAssessmentEntry,
@@ -141,8 +142,13 @@ def _parse_datetime(value: object) -> datetime | None:
 
     Anything else, including a date without a time of day, is `None`.
     """
-    if not isinstance(value, str) or contains_nul(value) or "T" not in value:
-        # `fromisoformat` accepts U+0000 as the date/time separator.
+    if (
+        not isinstance(value, str)
+        or contains_inadmissible_character(value)
+        or "T" not in value
+    ):
+        # `fromisoformat` accepts U+0000 or a surrogate code point as the
+        # date/time separator.
         return None
     try:
         parsed = datetime.fromisoformat(value)
@@ -155,7 +161,7 @@ def _parse_datetime(value: object) -> datetime | None:
 
 def _parse_date(value: object) -> date | None:
     """An ISO 8601 date, or the date portion of a date-time as written."""
-    if not isinstance(value, str) or contains_nul(value):
+    if not isinstance(value, str) or contains_inadmissible_character(value):
         return None
     try:
         if len(value) == _DATE_LENGTH:
@@ -365,13 +371,16 @@ def parse_description(descriptions: object) -> str | None:
 def parse_title(cna: object) -> str | None:
     """`cna.title` truncated to 256 characters, unvalidated (§ `parse_title`).
 
-    A title containing U+0000 is returned untruncated, so truncation never
-    strips the inadmissible character and the caller's payload rejects it.
+    A title containing an inadmissible character (U+0000 or a surrogate
+    code point) is returned untruncated, so truncation never strips it and
+    the caller's payload rejects it.
     """
     title = cna.get("title") if isinstance(cna, dict) else None
     if not isinstance(title, str):
         return None
-    return title if contains_nul(title) else title[:TITLE_MAX_LENGTH]
+    if contains_inadmissible_character(title):
+        return title
+    return title[:TITLE_MAX_LENGTH]
 
 
 def validate_cve_id(filename_id: str, json_metadata: object) -> str:
@@ -446,7 +455,8 @@ def parse_kev_data(metrics: object) -> KEVEntry | None:
     (§ `parse_kev_data`).
 
     `None` when `dateAdded` is absent or unparseable, or when a present
-    `reference` is not a string within its bound or contains U+0000.
+    `reference` is not a string within its bound or contains an
+    inadmissible character.
     """
     content = _last_other_content(metrics, "kev")
     if not isinstance(content, dict):

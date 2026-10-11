@@ -33,6 +33,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.core.enums import CveState
+from app.core.external_strings import contains_inadmissible_character
 from app.services import cve_record_parser
 from app.services.cve_ingest import (
     AffectedVersionEntry,
@@ -60,6 +61,7 @@ from app.services.cve_record_parser import (
 )
 from app.services.cvss import validate_cvss_vector
 from tests.support.cve_record import ALL_FIXTURES, load_fixture
+from tests.support.inadmissible import INADMISSIBLE_CHARACTERS, SURROGATE
 from tests.support.module_imports import (
     APP_ROOT,
     forbidden_imports,
@@ -118,8 +120,10 @@ _REPLACEMENTS: Final[tuple[Any, ...]] = (
     "x" * 5000,
     "\x00",
     "a\x00",
+    SURROGATE,
+    "a" + SURROGATE,
     [[None, {"k": "\x00"}], "x"],
-    {"k": {"k": [1, None, "\x00"]}},
+    {"k": {"k": [1, None, "\x00", SURROGATE]}},
 )
 """Malformed values substituted for every consumed member."""
 
@@ -133,6 +137,7 @@ _ARGUMENTS: Final[tuple[Any, ...]] = (
     "",
     "x",
     "\x00",
+    SURROGATE,
     b"x",
     [],
     {},
@@ -209,10 +214,11 @@ def _check_optional_str(value: object) -> None:
 
 
 def _check_title(value: object) -> None:
-    """Truncated to the bound unless it contains U+0000 (then untruncated,
-    for the caller's payload to reject)."""
+    """Truncated to the bound unless it contains an inadmissible character
+    (then untruncated, for the caller's payload to reject)."""
     assert value is None or (
-        isinstance(value, str) and (len(value) <= TITLE_MAX_LENGTH or "\x00" in value)
+        isinstance(value, str)
+        and (len(value) <= TITLE_MAX_LENGTH or contains_inadmissible_character(value))
     )
 
 
@@ -517,7 +523,7 @@ class TestWrongTypedArguments:
             assert [e.provider_name for e in cvss] == [argument.strip()]
             assert cwe == (
                 []
-                if "\x00" in argument
+                if contains_inadmissible_character(argument)
                 else [CWEEntry(cwe_id="CWE-79", source=argument)]
             )
         else:
@@ -627,13 +633,13 @@ class TestWrongTypedArguments:
 _POSITIONS: Final = ("start", "middle", "end", "whole")
 
 
-def _with_nul(base: str, position: str) -> str:
+def _with(base: str, position: str, character: str) -> str:
     middle = len(base) // 2
     return {
-        "start": "\x00" + base,
-        "middle": base[:middle] + "\x00" + base[middle:],
-        "end": base + "\x00",
-        "whole": "\x00",
+        "start": character + base,
+        "middle": base[:middle] + character + base[middle:],
+        "end": base + character,
+        "whole": character,
     }[position]
 
 
@@ -836,8 +842,8 @@ _ADMISSIBILITY: Final[dict[str, tuple[str, Callable[[str], None]]]] = {
     "title": ("t" * 300, _title),
 }
 """Consumed string → (valid base value, check of the named outcome for a
-value containing U+0000) per the spec table (External String
-Admissibility)."""
+value containing an inadmissible character) per the spec table (External
+String Admissibility)."""
 
 _PASSED_THROUGH: Final = frozenset({"provider_name", "descriptions.value"})
 """Values returned unchanged: the caller or `upsert_cve()` rejects them. A
@@ -846,39 +852,52 @@ truncated, so it stays in the guard below."""
 
 
 class TestExternalStringAdmissibility:
+    @pytest.mark.parametrize("character", INADMISSIBLE_CHARACTERS)
     @pytest.mark.parametrize("position", _POSITIONS)
     @pytest.mark.parametrize("field", list(_ADMISSIBILITY))
-    def test_nul_in_consumed_string_yields_documented_outcome(
-        self, field: str, position: str
+    def test_inadmissible_character_in_consumed_string_yields_documented_outcome(
+        self, field: str, position: str, character: str
     ) -> None:
         base, check = _ADMISSIBILITY[field]
 
-        check(_with_nul(base, position))
+        check(_with(base, position, character))
 
     @pytest.mark.parametrize(
         "field", [f for f in _ADMISSIBILITY if f not in _PASSED_THROUGH]
     )
-    def test_base_value_without_nul_avoids_the_outcome(self, field: str) -> None:
-        """Guards the matrix: without U+0000 the base value does not take the
-        rejection outcome, so each outcome above is caused by the
-        character."""
+    def test_base_value_without_inadmissible_character_avoids_the_outcome(
+        self, field: str
+    ) -> None:
+        """Guards the matrix: without an inadmissible character the base
+        value does not take the rejection outcome, so each outcome above is
+        caused by the character."""
         base, check = _ADMISSIBILITY[field]
 
         with pytest.raises(AssertionError):
             check(base)
 
-    def test_n_a_vendor_with_nul_skips_the_element(self) -> None:
-        element = {"vendor": "n/a\x00", "product": "n/a", "versions": _versions()}
+    @pytest.mark.parametrize("character", INADMISSIBLE_CHARACTERS)
+    def test_n_a_vendor_with_inadmissible_character_skips_the_element(
+        self, character: str
+    ) -> None:
+        element = {
+            "vendor": f"n/a{character}",
+            "product": "n/a",
+            "versions": _versions(),
+        }
 
         _assert_element_skipped(element)
 
-    def test_less_than_or_equal_with_nul_beside_less_than_is_ignored(self) -> None:
+    @pytest.mark.parametrize("character", INADMISSIBLE_CHARACTERS)
+    def test_less_than_or_equal_with_inadmissible_character_beside_less_than_is_ignored(
+        self, character: str
+    ) -> None:
         """Only an entry carrying the value is rejected: `lessThan` wins."""
         element = {
             "vendor": VENDOR,
             "product": PRODUCT,
             "versions": [
-                {"version": "1.0", "lessThan": "2.0", "lessThanOrEqual": "\x00"}
+                {"version": "1.0", "lessThan": "2.0", "lessThanOrEqual": character}
             ],
         }
 
@@ -887,60 +906,73 @@ class TestExternalStringAdmissibility:
         assert (entry.version_end, entry.version_end_inclusive) == ("2.0", False)
 
 
+@pytest.mark.parametrize("character", INADMISSIBLE_CHARACTERS)
 class TestComparedOnlyValues:
     """Values the parser only compares are not checked; a value containing
-    U+0000 simply does not match."""
+    an inadmissible character simply does not match."""
 
-    @pytest.mark.parametrize("lang", ["\x00en", "e\x00n", "\x00"])
-    def test_description_lang_with_leading_or_inner_nul_is_not_english(
-        self, lang: str
+    @pytest.mark.parametrize("template", ["{c}en", "e{c}n", "{c}"])
+    def test_description_lang_with_leading_or_inner_character_is_not_english(
+        self, template: str, character: str
     ) -> None:
         descriptions = [
             {"lang": "de", "value": "Fiktive Beschreibung."},
-            {"lang": lang, "value": "Fictional description."},
+            {"lang": template.format(c=character), "value": "Fictional description."},
         ]
 
         assert parse_description(descriptions) == "Fiktive Beschreibung."
 
-    def test_description_lang_with_trailing_nul_is_english(self) -> None:
+    def test_description_lang_with_trailing_character_is_english(
+        self, character: str
+    ) -> None:
         """The prefix rule compares only the start of `lang`; the value is
-        never persisted, so a trailing U+0000 is irrelevant."""
+        never persisted, so a trailing inadmissible character is
+        irrelevant."""
         descriptions = [
             {"lang": "de", "value": "Fiktive Beschreibung."},
-            {"lang": "en\x00", "value": "Fictional description."},
+            {"lang": f"en{character}", "value": "Fictional description."},
         ]
 
         assert parse_description(descriptions) == "Fictional description."
 
-    def test_problem_type_type_with_nul_does_not_select(self) -> None:
+    def test_problem_type_type_with_character_does_not_select(
+        self, character: str
+    ) -> None:
         problem = {
-            "descriptions": [{"type": "CWE\x00"}, {"type": "\x00", "cweId": "CWE-79"}]
+            "descriptions": [
+                {"type": f"CWE{character}"},
+                {"type": character, "cweId": "CWE-79"},
+            ]
         }
 
         entries = parse_cwe_classifications([problem], "cna:x")
 
         assert [entry.cwe_id for entry in entries] == ["CWE-79"]
 
-    def test_ssvc_option_key_with_nul_yields_none(self) -> None:
+    def test_ssvc_option_key_with_character_yields_none(self, character: str) -> None:
         metrics = _ssvc_metrics()
         options = metrics[0]["other"]["content"]["options"]
-        options[0] = {"Exploitation\x00": "active"}
+        options[0] = {f"Exploitation{character}": "active"}
 
         assert parse_ssvc_assessment(metrics) is None
 
-    @pytest.mark.parametrize("type_", ["ssvc\x00", "kev\x00", "\x00"])
-    def test_other_type_with_nul_yields_none(self, type_: str) -> None:
+    @pytest.mark.parametrize("template", ["ssvc{c}", "kev{c}", "{c}"])
+    def test_other_type_with_character_yields_none(
+        self, template: str, character: str
+    ) -> None:
         ssvc = _ssvc_metrics()
         kev = _kev_metrics()
-        ssvc[0]["other"]["type"] = type_
-        kev[0]["other"]["type"] = type_
+        ssvc[0]["other"]["type"] = template.format(c=character)
+        kev[0]["other"]["type"] = template.format(c=character)
 
         assert parse_ssvc_assessment(ssvc) is None
         assert parse_kev_data(kev) is None
 
     @pytest.mark.parametrize("key", ["cveId", "cveID"])
-    def test_json_cve_id_with_nul_yields_the_filename_id(self, key: str) -> None:
-        assert validate_cve_id(CVE_ID, {key: CVE_ID + "\x00"}) == CVE_ID
+    def test_json_cve_id_with_character_yields_the_filename_id(
+        self, key: str, character: str
+    ) -> None:
+        assert validate_cve_id(CVE_ID, {key: CVE_ID + character}) == CVE_ID
 
 
 # ---------------------------------------------------------------------------

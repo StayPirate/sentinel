@@ -37,6 +37,8 @@ from typing import Any
 
 import httpx
 
+from tests.support.inadmissible import json_bytes
+
 FIXTURE_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "epss"
 
 EPSS_URL = "https://api.first.org/data/v1/epss"
@@ -117,9 +119,20 @@ def body(value: Any) -> Responder:
     """A responder that serves the JSON `value` with HTTP 200."""
 
     def respond(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json=value, request=request)
+        return _json_response(value, request)
 
     return respond
+
+
+def _json_response(value: Any, request: httpx.Request) -> httpx.Response:
+    """HTTP 200 with the JSON `value`; a surrogate code point travels as its
+    `\\uXXXX` escape (`tests.support.inadmissible.json_bytes`)."""
+    return httpx.Response(
+        200,
+        content=json_bytes(value),
+        headers={"Content-Type": "application/json"},
+        request=request,
+    )
 
 
 class EpssServer:
@@ -157,7 +170,7 @@ class EpssServer:
                 headers={"Content-Type": "application/json; charset=utf-8"},
                 request=request,
             )
-        return httpx.Response(200, json=envelope(self.entries[cve_id]), request=request)
+        return _json_response(envelope(self.entries[cve_id]), request)
 
     def client(self) -> httpx.AsyncClient:
         """A client whose transport is this server (redirects not followed)."""

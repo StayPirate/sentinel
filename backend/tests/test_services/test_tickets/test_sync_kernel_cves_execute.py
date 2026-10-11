@@ -95,6 +95,11 @@ from tests.support.git_fetchers import (
     open_git_run_harness,
     show_missing,
 )
+from tests.support.inadmissible import (
+    INADMISSIBLE_CHARACTERS,
+    NUL,
+    SURROGATE,
+)
 from tests.support.kernel import RECORD_SOURCES, load_raw_record, load_record
 from tests.support.kernel_fetcher import (
     AUTHOR_EMAIL,
@@ -106,6 +111,7 @@ from tests.support.kernel_fetcher import (
     kernel_probe,
     record_path,
 )
+from tests.support.mitre_fetcher import affected_versions
 
 pytestmark = pytest.mark.integration
 
@@ -125,6 +131,7 @@ SEED_FILES: Final = {
 
 VULNS_TREE: Final = "https://git.kernel.org/pub/scm/linux/security/vulns.git/tree"
 BASE_VECTOR: Final = "CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H"
+_VALID_V40: Final = "CVSS:4.0/AV:L/AC:L/AT:N/PR:L/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N"
 """The strict Base vector of `published_cvss_v3_1` (and the fixture whose
 non-Base form the reduction test derives)."""
 
@@ -501,6 +508,83 @@ class TestPublishedRecord:
 
 
 # ---------------------------------------------------------------------------
+# External String Admissibility
+# ---------------------------------------------------------------------------
+
+
+class TestExternalStringAdmissibility:
+    @pytest.mark.parametrize("character", INADMISSIBLE_CHARACTERS)
+    async def test_inadmissible_character_in_entry_values_skips_only_those_entries(
+        self,
+        workspace: GitWorkspace,
+        harness: GitRunHarness,
+        kernel: GitFetcherProbe,
+        character: str,
+    ) -> None:
+        """External String Admissibility: an inadmissible character in the
+        path, query, or fragment of a reference URL skips that candidate
+        (`control_character`); in an `affected[]` value (a `programFiles`
+        item, a `lessThan`), only the entries carrying it; in a CVSS
+        vector, only that candidate. No database error, and the rest of the
+        record is ingested."""
+
+        def edit(record: dict[str, Any]) -> None:
+            container = cna(record)
+            first, second = container["affected"]
+            first["programFiles"].append(f"kernel/{character}.c")
+            second["versions"][0]["lessThan"] = f"6.18.21{character}"
+            # A complete, otherwise valid vector: only the character makes
+            # this candidate invalid.
+            container["metrics"].append(
+                {"cvssV4_0": {"vectorString": f"{_VALID_V40}{character}"}}
+            )
+            container["references"].extend(
+                {"url": f"https://advisory.example.invalid/upstream/{suffix}"}
+                for suffix in (f"1{character}", f"2?q={character}", f"3#{character}")
+            )
+
+        cve_id = harness.world.new_cve_id()
+        await _first_run(workspace, harness, kernel)
+        commit(
+            workspace.upstream,
+            {
+                record_path("published", cve_id): derived_record(
+                    "published_cvss_v3_1", cve_id, edit
+                )
+            },
+            date=D_1,
+        )
+        _reset(harness)
+
+        with capture_logs() as logs:
+            result = await harness.run(kernel)
+
+        assert result.row.status == "success"
+        assert result.row.metrics == (1, 1, 0, 0)
+        assert [
+            (entry["event"], entry["reason"])
+            for entry in logs
+            if entry.get("log_level") in ("warning", "error", "critical")
+        ] == [("automatic_reference_rejected", "control_character")] * 3
+        cve = await _cve(harness, cve_id)
+        assert await assessments(harness.factory, cve.id) == [
+            AssessmentRow("Linux", "3.1", BASE_VECTOR)
+        ]
+        assert [
+            row.version for row in await affected_versions(harness.factory, cve.id)
+        ] == ["6.19.7"]
+        ticket = await ticket_of(harness.factory, cve.id)
+        assert ticket is not None
+        fixture = cna(load_record("published_cvss_v3_1"))
+        assert [row.url for row in await references(harness.factory, ticket.id)] == [
+            f"{VULNS_TREE}/{record_path('published', cve_id)}",
+            *(reference["url"] for reference in fixture["references"]),
+        ]
+        escaped = repr(character)[1:-1]
+        _bounded(logs, workspace, escaped)
+
+
+# ---------------------------------------------------------------------------
 # Rejection and revert
 # ---------------------------------------------------------------------------
 
@@ -763,12 +847,20 @@ def _state(value: str) -> Any:
     return edit
 
 
-def _nul_title(record: dict[str, Any]) -> None:
-    cna(record)["title"] = "example: fictional\x00title"
+def _inadmissible_title(character: str) -> Any:
+    def edit(record: dict[str, Any]) -> None:
+        cna(record)["title"] = f"example: fictional{character}title"
+
+    return edit
 
 
-def _nul_description(record: dict[str, Any]) -> None:
-    cna(record)["descriptions"][0]["value"] = "Fictional description\x00 text."
+def _inadmissible_description(character: str) -> Any:
+    def edit(record: dict[str, Any]) -> None:
+        cna(record)["descriptions"][0]["value"] = (
+            f"Fictional description{character} text."
+        )
+
+    return edit
 
 
 def _failing_content(case: str, cve_id: str) -> bytes:
@@ -779,12 +871,11 @@ def _failing_content(case: str, cve_id: str) -> bytes:
         return b'{"title": "\xff\xfe"}'
     if case == "array-root":
         return b"[]"
-    edits = {
-        "unrecognized-state": _state("RESERVED"),
-        "nul-state": _state("PUBLISHED\x00"),
-        "nul-title": _nul_title,
-        "nul-description": _nul_description,
-    }
+    edits = {"unrecognized-state": _state("RESERVED")}
+    for name, character in (("nul", NUL), ("surrogate", SURROGATE)):
+        edits[f"{name}-state"] = _state(f"PUBLISHED{character}")
+        edits[f"{name}-title"] = _inadmissible_title(character)
+        edits[f"{name}-description"] = _inadmissible_description(character)
     return derived_record("published_without_metrics", cve_id, edits[case])
 
 
@@ -794,8 +885,11 @@ _FAILURES: Final = [
     ("array-root", "KernelRecordDecodeError"),
     ("unrecognized-state", "KernelRecordStateError"),
     ("nul-state", "KernelRecordStateError"),
+    ("surrogate-state", "KernelRecordStateError"),
     ("nul-title", "ValidationError"),
+    ("surrogate-title", "ValidationError"),
     ("nul-description", "ValidationError"),
+    ("surrogate-description", "ValidationError"),
 ]
 
 
@@ -919,18 +1013,18 @@ class TestPerItemFailure:
         assert harness.published.calls == []
         _bounded(logs, workspace, "fictional reference write failure")
 
+    @pytest.mark.parametrize("case", ["nul-title", "surrogate-title"])
     async def test_failure_for_an_absent_cve_writes_nothing(
         self,
         workspace: GitWorkspace,
         harness: GitRunHarness,
         kernel: GitFetcherProbe,
+        case: str,
     ) -> None:
         cve_id = harness.world.new_cve_id()
         path = record_path("published", cve_id)
         await _first_run(workspace, harness, kernel)
-        commit(
-            workspace.upstream, {path: _failing_content("nul-title", cve_id)}, date=D_1
-        )
+        commit(workspace.upstream, {path: _failing_content(case, cve_id)}, date=D_1)
 
         with capture_logs() as logs:
             result = await harness.run(kernel)

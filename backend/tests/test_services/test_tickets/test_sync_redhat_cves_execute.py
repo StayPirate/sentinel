@@ -78,6 +78,7 @@ from app.services.base_fetcher import FetcherError, FetcherRunConfig
 from app.services.tickets import sync_redhat_cves as sync_module
 from app.services.tickets.sync_redhat_cves import SyncRedhatCves
 from tests.support.cve_ingest import IngestionWorld
+from tests.support.inadmissible import INADMISSIBLE_CHARACTERS
 from tests.support.redhat import RedhatServer, raising
 
 SessionFactory = Callable[[], Awaitable[AsyncSession]]
@@ -657,13 +658,14 @@ class TestItemFailure:
         assert await env.source_status(cve) == CVESourceFetchStatus.FAILURE
         assert counters(batch.fetcher) == Counters(0, 0, 0, 1)
 
+    @pytest.mark.parametrize("character", INADMISSIBLE_CHARACTERS)
     async def test_payload_failure_is_an_isolated_item_failure(
-        self, env: Env, batch: Batch
+        self, env: Env, batch: Batch, character: str
     ) -> None:
         cve = await env.active_cve(
             {
                 "cvss3": {"cvss3_scoring_vector": V31},
-                "package_state": [{"package_name": f"{PERSONAL_TEXT}\x00"}],
+                "package_state": [{"package_name": f"{PERSONAL_TEXT}{character}"}],
             }
         )
 

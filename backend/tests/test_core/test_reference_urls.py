@@ -123,7 +123,24 @@ class TestControlCharacters:
 
         assert _rejection(f"https://example.com/pa{char}th") is R.CONTROL_CHARACTER
 
-    @pytest.mark.parametrize("char", ["\x00", "\t", "\n", "\r", "\x1f", "\x7f"])
+    @pytest.mark.parametrize(
+        "char",
+        [chr(code) for code in (0xD800, 0xDBFF, 0xDC00, 0xDFFF)],
+        ids=lambda c: f"U+{ord(c):04X}",
+    )
+    def test_surrogate_code_point_is_a_control_character(self, char: str) -> None:
+        """Step 2 counts a surrogate code point, an inadmissible character
+        under External String Admissibility, as a control character."""
+        assert _rejection(f"https://example.com/pa{char}th") is R.CONTROL_CHARACTER
+
+    def test_high_then_low_surrogate_is_a_control_character(self) -> None:
+        """Two surrogate code points are rejected even where they would
+        form a pair, so a `jsonb` merge can never alter a stored URL."""
+        assert _rejection("https://example.com/a\ud83d\ude00") is (R.CONTROL_CHARACTER)
+
+    @pytest.mark.parametrize(
+        "char", ["\x00", "\t", "\n", "\r", "\x1f", "\x7f", "\ud800"]
+    )
     @pytest.mark.parametrize(
         "template",
         [
@@ -142,10 +159,11 @@ class TestControlCharacters:
         assert _rejection(template.format(c=char)) is R.CONTROL_CHARACTER
 
     def test_characters_outside_the_specified_range_are_preserved(self) -> None:
-        # Step 2 names exactly U+0000-U+001F and U+007F. U+0085 (a C1
-        # control) and U+00A0 are outside that range; in the path they are
-        # preserved literally.
-        value = "https://example.com/a\u0085b\u00a0c"
+        # Step 2 names exactly U+0000-U+001F, U+007F, and the surrogate
+        # code points. U+0085 (a C1 control), U+00A0, and a supplementary
+        # character are outside that range; in the path they are preserved
+        # literally.
+        value = "https://example.com/a\u0085b\u00a0c\U0001f600\ud7ff\ue000"
         assert normalize_reference_url(value) == value
 
 

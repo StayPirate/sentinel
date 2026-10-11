@@ -226,8 +226,8 @@ class SyncOsvAdvisories(BaseCVEFetcher):
         non-200 status raises its original `httpx.HTTPStatusError`
         (`OsvResponseError` for another 2xx); transport, JSON decoding,
         `pydantic.ValidationError` (schema mismatch, or a payload value that
-        contains U+0000, is over-length, or conflicts with a same-key
-        value), and delegate exceptions propagate unchanged. When at least
+        contains an inadmissible character, is over-length, or conflicts with
+        a same-key value), and delegate exceptions propagate unchanged. When at least
         one alias sub-request is listed and every one failed, raises
         `CompletenessGuardError` before any database work.
         Sub-request failures never leave this method; cancellation,

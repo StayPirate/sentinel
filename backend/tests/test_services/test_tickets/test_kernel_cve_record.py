@@ -46,6 +46,7 @@ from app.services.tickets.kernel_cve_record import (
     KernelRecordStateError,
     map_record,
 )
+from tests.support.inadmissible import INADMISSIBLE_CHARACTERS
 from tests.support.kernel import (
     ALL_RECORDS,
     load_raw_record,
@@ -75,7 +76,6 @@ URL_1: Final = (
     "https://git.kernel.org/stable/c/0000000000000000000000000000000000000001"
 )
 URL_2: Final = "https://advisory.example.invalid/upstream/2"
-NUL: Final = "\x00"
 SECRET: Final = "Example-Secret-Input-Value"
 
 _KERNEL_FIELDS: Final = frozenset(
@@ -819,28 +819,29 @@ class TestReferences:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("character", INADMISSIBLE_CHARACTERS)
 class TestExternalStringAdmissibility:
     @pytest.mark.parametrize(
         "cna",
         [
-            {"title": f"{SECRET}{NUL}"},
-            {"title": SECRET * 20 + NUL},
-            {"descriptions": [{"lang": "en", "value": f"{SECRET}{NUL}"}]},
+            lambda c: {"title": f"{SECRET}{c}"},
+            lambda c: {"title": SECRET * 20 + c},
+            lambda c: {"descriptions": [{"lang": "en", "value": f"{SECRET}{c}"}]},
         ],
         ids=["title", "title-after-bound", "description"],
     )
     def test_global_string_fails_payload_construction(
-        self, cna: dict[str, Any]
+        self, cna: Any, character: str
     ) -> None:
         with pytest.raises(ValidationError) as caught:
-            _map(_record(**cna))
+            _map(_record(**cna(character)))
 
         assert SECRET not in str(caught.value)
 
-    def test_unselected_description_is_not_consumed(self) -> None:
+    def test_unselected_description_is_not_consumed(self, character: str) -> None:
         descriptions = [
             {"lang": "en", "value": "Fictional description."},
-            {"lang": "de", "value": f"Fiktiv{NUL}"},
+            {"lang": "de", "value": f"Fiktiv{character}"},
         ]
 
         assert _payload(_record(descriptions=descriptions)).description == (
@@ -849,16 +850,16 @@ class TestExternalStringAdmissibility:
 
     @pytest.mark.parametrize("field", ["programFiles", "version"])
     def test_affected_value_skips_its_entry_and_keeps_siblings(
-        self, field: str
+        self, field: str, character: str
     ) -> None:
         """One element-level and one version-level value; the parser tests
         own the per-field matrix."""
         poisoned = _affected_element(product="Linux-poisoned")
         if field == "programFiles":
-            poisoned["programFiles"] = ["fs/example/file.c", f"fs/{NUL}.c"]
+            poisoned["programFiles"] = ["fs/example/file.c", f"fs/{character}.c"]
         else:
             for version in poisoned["versions"]:
-                version[field] = f"x{NUL}"
+                version[field] = f"x{character}"
         affected = [_affected_element(), poisoned]
 
         entries = _cna_entries(_payload(_record(affected=affected)))
@@ -866,9 +867,9 @@ class TestExternalStringAdmissibility:
         assert {e.product for e in entries} == {"Linux"}
         assert len(entries) == 2
 
-    def test_vector_skips_its_candidate(self) -> None:
+    def test_vector_skips_its_candidate(self, character: str) -> None:
         metrics = [
-            {"cvssV4_0": {"vectorString": V40 + NUL}},
+            {"cvssV4_0": {"vectorString": V40 + character}},
             {"cvssV3_1": {"vectorString": V31}},
         ]
 
@@ -876,16 +877,23 @@ class TestExternalStringAdmissibility:
 
         assert cvss == [CVSSAssessmentEntry(provider_name="Linux", vector_string=V31)]
 
-    def test_reference_url_is_left_to_the_reference_service(self) -> None:
-        url = f"{URL_1}{NUL}"
+    @pytest.mark.parametrize(
+        "template",
+        [f"{URL_1}{{c}}", f"{URL_1}?q={{c}}", f"{URL_1}#{{c}}"],
+        ids=["path", "query", "fragment"],
+    )
+    def test_reference_url_is_left_to_the_reference_service(
+        self, template: str, character: str
+    ) -> None:
+        url = template.format(c=character)
 
         upstream = _map(_record(references=[{"url": url}])).upstream_references
 
         assert upstream == (AutomaticReferenceInput(url=url),)
 
-    def test_published_state_is_unrecognized(self) -> None:
+    def test_published_state_is_unrecognized(self, character: str) -> None:
         record = _record()
-        record["cveMetadata"]["state"] = f"PUBLISHED{NUL}"
+        record["cveMetadata"]["state"] = f"PUBLISHED{character}"
 
         with pytest.raises(KernelRecordStateError):
             _map(record)
@@ -893,15 +901,15 @@ class TestExternalStringAdmissibility:
     @pytest.mark.parametrize(
         "mutate",
         [
-            lambda r: r["cveMetadata"].update(cveId=f"{CVE_ID}{NUL}"),
-            lambda r: r["cveMetadata"].update(assignerOrgId=NUL),
-            lambda r: r["cveMetadata"].update(datePublished=NUL),
-            lambda r: r["containers"]["cna"].update(x_generator={"engine": NUL}),
-            lambda r: r["containers"]["cna"].update(cpeApplicability=[{"n": NUL}]),
-            lambda r: r["containers"]["cna"].update(
-                problemTypes=[{"descriptions": [{"description": NUL}]}]
+            lambda r, c: r["cveMetadata"].update(cveId=f"{CVE_ID}{c}"),
+            lambda r, c: r["cveMetadata"].update(assignerOrgId=c),
+            lambda r, c: r["cveMetadata"].update(datePublished=c),
+            lambda r, c: r["containers"]["cna"].update(x_generator={"engine": c}),
+            lambda r, c: r["containers"]["cna"].update(cpeApplicability=[{"n": c}]),
+            lambda r, c: r["containers"]["cna"].update(
+                problemTypes=[{"descriptions": [{"description": c}]}]
             ),
-            lambda r: r["containers"]["cna"]["providerMetadata"].update(orgId=NUL),
+            lambda r, c: r["containers"]["cna"]["providerMetadata"].update(orgId=c),
         ],
         ids=[
             "cve-id",
@@ -913,9 +921,11 @@ class TestExternalStringAdmissibility:
             "provider-org-id",
         ],
     )
-    def test_unconsumed_or_compared_only_value_has_no_effect(self, mutate: Any) -> None:
+    def test_unconsumed_or_compared_only_value_has_no_effect(
+        self, mutate: Any, character: str
+    ) -> None:
         record = _record()
-        mutate(record)
+        mutate(record, character)
 
         assert _map(record) == _map(_record())
 

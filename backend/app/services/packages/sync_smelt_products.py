@@ -42,7 +42,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.core.external_strings import contains_nul
+from app.core.external_strings import contains_inadmissible_character
 from app.models.product import Product
 from app.models.product_repository import ProductRepository
 from app.services import task_publication
@@ -144,8 +144,10 @@ def _required_string(
         raise SnapshotValidationError(
             f"row {position}: {field} exceeds {max_length} characters"
         )
-    if contains_nul(value):
-        raise SnapshotValidationError(f"row {position}: {field} contains U+0000")
+    if contains_inadmissible_character(value):
+        raise SnapshotValidationError(
+            f"row {position}: {field} contains an inadmissible character"
+        )
     return value
 
 
@@ -165,8 +167,10 @@ def _repositories(row: dict[str, Any], position: int) -> tuple[str, ...]:
             raise SnapshotValidationError(
                 f"row {position}: repository exceeds {_REPO_NAME_MAX_LENGTH} characters"
             )
-        if contains_nul(repo):
-            raise SnapshotValidationError(f"row {position}: repository contains U+0000")
+        if contains_inadmissible_character(repo):
+            raise SnapshotValidationError(
+                f"row {position}: repository contains an inadmissible character"
+            )
         if repo in seen:
             raise SnapshotValidationError(f"row {position}: repeated repository")
         seen.add(repo)

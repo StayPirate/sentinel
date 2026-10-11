@@ -9,7 +9,7 @@ Behavior: single candidate) and docs/features/tickets/cve-service.md
 `tests/support/mitre.py`.
 
 Only source-specific facts are asserted here. The CVE Record 5.x field
-shapes (types, nullability, bounds, U+0000) are owned by
+shapes (types, nullability, bounds, inadmissible characters) are owned by
 `tests/test_services/test_cve_record_contract.py`; its strict typed model and
 consumed-string inventory are applied to the records added here, and its own
 assertions already cover the parser's `cvelistv5_*` fixtures.
@@ -25,7 +25,8 @@ covered by the mapping unit tests only: a RESERVED or unrecognized state, a
 `PUBLISHED` record with `dateRejected`, a `null` or mistyped global, an ADP
 without `providerMetadata` or `shortName`, two ADPs resolving to one scope,
 two CISA-ADP containers, an incomplete or invalid SSVC, a non-object
-reference element, U+0000 in any string, and undecodable content.
+reference element, an inadmissible character (U+0000 or a surrogate code
+point) in any string, and undecodable content.
 """
 
 from __future__ import annotations
@@ -39,6 +40,7 @@ from urllib.parse import urlsplit
 import pytest
 
 import tests.test_services.test_cve_record_contract as record_contract
+from app.core.external_strings import contains_inadmissible_character
 from app.services.cvss import is_reserved_provider_name
 from tests.support.mitre import (
     ADP_IDENTITIES,
@@ -215,13 +217,13 @@ class TestTypedRecord:
         assert dumped == record_contract._project(raw, dumped)
 
     @pytest.mark.parametrize("name", list(RECORD_SOURCES))
-    def test_every_consumed_string_is_nul_free_and_within_its_bound(
+    def test_every_consumed_string_is_admissible_and_within_its_bound(
         self, name: str
     ) -> None:
         record = record_contract._Record.model_validate(load_record(name))
 
         for label, value, bound in record_contract._consumed_strings(record):
-            assert "\x00" not in value, label
+            assert not contains_inadmissible_character(value), label
             assert bound is None or len(value) <= bound, label
 
 
