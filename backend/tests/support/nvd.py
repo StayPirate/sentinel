@@ -117,18 +117,42 @@ with `contact-<organization>@example.com`. NVD's institutional identifier
 organization vendors), `matchCriteriaId` values, vectors, CWEs, tags, and
 dates are public data, not personal identifiers, and are retained.
 
+`NvdServer` is an in-process `httpx.MockTransport` handler for both
+endpoints: window pages are served by `startIndex` (page `i` for
+`startIndex = i * resultsPerPage`) inside a page envelope whose
+`totalResults` covers every configured page unless overridden, `cveId`
+queries from `singles`, and the Source API from `sources` (the trimmed
+`source_page` body by default). Tests override raw responses, queue one-shot
+responses, and inspect the recorded requests (URL, query, headers) in order.
+
 Consumers, under `tests/test_services/test_tickets/`:
-`test_nvd_cve_record_contract.py` and `test_nvd_cve_record.py`.
+`test_nvd_cve_record_contract.py` and `test_nvd_cve_record.py` (fixture
+loaders); `test_sync_nvd_cves.py`, `test_sync_nvd_cves_execute.py`, and
+`test_sync_nvd_cves_reachability.py` (loaders and `NvdServer`).
 """
 
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+import httpx
+
 FIXTURE_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "nvd"
+
+NVD_HOST = "services.nvd.nist.gov"
+CVE_API_PATH = "/rest/json/cves/2.0"
+SOURCE_API_PATH = "/rest/json/source/2.0"
+CVE_API_URL = f"https://{NVD_HOST}{CVE_API_PATH}"
+SOURCE_API_URL = f"https://{NVD_HOST}{SOURCE_API_PATH}"
+
+API_KEY_HEADER = "apiKey"
+"""The NVD-proprietary API key header, spelled literally."""
+
+JSON_CONTENT_TYPE = "application/json"
+"""The `Content-Type` of the fake JSON responses (not read by the fetcher)."""
 
 NVD_SOURCE_IDENTIFIER = "nvd@nist.gov"
 """NVD's own source identifier (test-local copy)."""
@@ -202,3 +226,250 @@ def all_records() -> list[tuple[str, dict[str, Any]]]:
     for element in load_json_fixture(PAGE_REJECTED)["vulnerabilities"]:
         records.append((PAGE_REJECTED, element))
     return records
+
+
+# ---------------------------------------------------------------------------
+# Fake NVD endpoints
+# ---------------------------------------------------------------------------
+
+
+def page_body(
+    elements: Sequence[Any], total_results: int, start_index: int = 0
+) -> dict[str, Any]:
+    """A CVE API page envelope with every member of the live envelope."""
+    return {
+        "resultsPerPage": len(elements),
+        "startIndex": start_index,
+        "totalResults": total_results,
+        "format": "NVD_CVE",
+        "version": "2.0",
+        "timestamp": "2026-10-10T00:00:00.000",
+        "vulnerabilities": list(elements),
+    }
+
+
+Responder = Callable[[httpx.Request], httpx.Response]
+
+
+def raising(error: BaseException) -> Responder:
+    """A responder that raises `error` (for example `httpx.ConnectError`)."""
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        raise error
+
+    return respond
+
+
+def status(
+    code: int, content: bytes = b"", headers: Mapping[str, str] | None = None
+) -> Responder:
+    """A responder that answers with `code`, the raw `content`, and
+    `headers`."""
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            code, content=content, headers=dict(headers or {}), request=request
+        )
+
+    return respond
+
+
+def body(value: Any, code: int = 200) -> Responder:
+    """A responder that serves the JSON `value` with `code`."""
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        return _json_response(request, value, code)
+
+    return respond
+
+
+def _json_response(
+    request: httpx.Request, value: Any, code: int = 200
+) -> httpx.Response:
+    return httpx.Response(
+        code,
+        content=json.dumps(value).encode(),
+        headers={"Content-Type": JSON_CONTENT_TYPE},
+        request=request,
+    )
+
+
+def _is_endpoint(request: httpx.Request, path: str) -> bool:
+    url = request.url
+    return (
+        url.scheme == "https"
+        and url.host == NVD_HOST
+        and url.port is None
+        and url.path == path
+    )
+
+
+def is_cve_api_request(request: httpx.Request) -> bool:
+    """Whether `request` targets the CVE API (no explicit port)."""
+    return _is_endpoint(request, CVE_API_PATH)
+
+
+def is_source_api_request(request: httpx.Request) -> bool:
+    """Whether `request` targets the Source API (no explicit port)."""
+    return _is_endpoint(request, SOURCE_API_PATH)
+
+
+def requested_cve_id(request: httpx.Request) -> str | None:
+    """The `cveId` parameter of a CVE API request, `None` otherwise."""
+    if not is_cve_api_request(request) or "cveId" not in request.url.params:
+        return None
+    cve_id: str = request.url.params["cveId"]
+    return cve_id
+
+
+def request_kind(request: httpx.Request) -> str:
+    """`source`, `single` (a `cveId` query), `page`, or `other`."""
+    if is_source_api_request(request):
+        return "source"
+    if requested_cve_id(request) is not None:
+        return "single"
+    if is_cve_api_request(request):
+        return "page"
+    return "other"
+
+
+def requested_page_index(request: httpx.Request) -> int | None:
+    """The page index `startIndex / resultsPerPage` of a window page
+    request, `None` when either is absent or not a multiple."""
+    if request_kind(request) != "page":
+        return None
+    try:
+        start_index = int(request.url.params["startIndex"])
+        results_per_page = int(request.url.params["resultsPerPage"])
+    except KeyError, ValueError:
+        return None
+    if results_per_page <= 0 or start_index % results_per_page:
+        return None
+    return start_index // results_per_page
+
+
+class NvdServer:
+    """A fake NVD CVE API and Source API for `httpx.MockTransport`.
+
+    A Source API request is answered by the next `source_once` responder,
+    else by `source_response`, else with `sources` (any JSON value) and
+    HTTP 200. A CVE API request with a `cveId` parameter is a single query:
+    the next `single_once[cve_id]` responder, else `single_responses[cve_id]`,
+    else a page of `singles[cve_id]` (an empty page for an unknown CVE-ID)
+    whose `totalResults` is its element count. Any other CVE API request is a
+    window page `i` (`startIndex = i * resultsPerPage`): the next
+    `page_once[i]` responder, else `page_responses[i]`, else `pages[i]` (a
+    list of elements) in a page envelope whose `totalResults` is
+    `totals[i]` when set, otherwise the count that makes `len(pages)` pages
+    of `resultsPerPage` with the last one's elements. An unknown page and a
+    request to another scheme, host, port, or path are answered with HTTP
+    404. Every request is recorded in `requests`, in order.
+    """
+
+    def __init__(
+        self,
+        pages: Sequence[Sequence[Any]] | None = None,
+        singles: Mapping[str, Sequence[Any]] | None = None,
+        sources: Any = None,
+    ) -> None:
+        self.pages: list[list[Any]] = (
+            [list(page) for page in pages] if pages is not None else [[]]
+        )
+        self.totals: dict[int, int] = {}
+        self.page_responses: dict[int, Responder] = {}
+        self.page_once: dict[int, list[Responder]] = {}
+        self.singles: dict[str, list[Any]] = {
+            cve_id: list(elements) for cve_id, elements in (singles or {}).items()
+        }
+        self.single_responses: dict[str, Responder] = {}
+        self.single_once: dict[str, list[Responder]] = {}
+        self.sources: Any = (
+            load_json_fixture(SOURCE_PAGE) if sources is None else sources
+        )
+        self.source_response: Responder | None = None
+        self.source_once: list[Responder] = []
+        self.requests: list[httpx.Request] = []
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        kind = request_kind(request)
+        if kind == "source":
+            return self._source(request)
+        if kind == "single":
+            return self._single(request)
+        if kind == "page":
+            return self._page(request)
+        return httpx.Response(404, request=request)
+
+    def _source(self, request: httpx.Request) -> httpx.Response:
+        if self.source_once:
+            return self.source_once.pop(0)(request)
+        if self.source_response is not None:
+            return self.source_response(request)
+        return _json_response(request, self.sources)
+
+    def _single(self, request: httpx.Request) -> httpx.Response:
+        cve_id = requested_cve_id(request)
+        assert cve_id is not None
+        queued = self.single_once.get(cve_id)
+        if queued:
+            return queued.pop(0)(request)
+        if cve_id in self.single_responses:
+            return self.single_responses[cve_id](request)
+        elements = self.singles.get(cve_id, [])
+        return _json_response(request, page_body(elements, len(elements)))
+
+    def _page(self, request: httpx.Request) -> httpx.Response:
+        index = requested_page_index(request)
+        if index is None:
+            return httpx.Response(404, request=request)
+        queued = self.page_once.get(index)
+        if queued:
+            return queued.pop(0)(request)
+        if index in self.page_responses:
+            return self.page_responses[index](request)
+        if index >= len(self.pages):
+            return httpx.Response(404, request=request)
+        results_per_page = int(request.url.params["resultsPerPage"])
+        total = self.totals.get(
+            index,
+            results_per_page * (len(self.pages) - 1) + len(self.pages[-1]),
+        )
+        return _json_response(
+            request,
+            page_body(self.pages[index], total, index * results_per_page),
+        )
+
+    def client(self) -> httpx.AsyncClient:
+        """A client whose transport is this server (redirects not followed)."""
+        return httpx.AsyncClient(transport=httpx.MockTransport(self.handler))
+
+    @property
+    def kinds(self) -> list[str]:
+        """The `request_kind()` of every request, in order."""
+        return [request_kind(request) for request in self.requests]
+
+    @property
+    def requested_urls(self) -> list[str]:
+        return [str(request.url) for request in self.requests]
+
+    @property
+    def api_key_headers(self) -> list[str | None]:
+        """The `apiKey` header of every request, in order."""
+        return [request.headers.get(API_KEY_HEADER) for request in self.requests]
+
+    @property
+    def page_requests(self) -> list[httpx.Request]:
+        return [r for r in self.requests if request_kind(r) == "page"]
+
+    @property
+    def single_requests(self) -> list[httpx.Request]:
+        return [r for r in self.requests if request_kind(r) == "single"]
+
+    @property
+    def source_requests(self) -> list[httpx.Request]:
+        return [r for r in self.requests if request_kind(r) == "source"]
+
+    @property
+    def requested_page_indexes(self) -> list[int | None]:
+        return [requested_page_index(request) for request in self.page_requests]
