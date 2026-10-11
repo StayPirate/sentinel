@@ -995,6 +995,13 @@ Module-level application loggers first used while a test's own configuration
 was active are made to rebind to the restored list. A test that changes the
 logging configuration therefore needs no fixture of its own to undo it.
 
+The Source API cache that on-demand NVD fetches share within a process
+(`docs/features/tickets/cve-sync-nvd.md`, NVD Source API Caching) is
+process-wide state as well. An autouse fixture in `backend/tests/conftest.py`
+empties it before and after every test, so no test is served a cache that
+another test built; a test that exercises the sharing builds the cache
+itself.
+
 ### Sync Entry-Point Tests
 
 Test functions that exercise code containing `asyncio.run()` — such as
