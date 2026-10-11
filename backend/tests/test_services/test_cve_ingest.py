@@ -69,6 +69,7 @@ from app.services.cve_ingest import (
     normalize_cwe_classifications,
     normalize_external_identifiers,
 )
+from tests.support.inadmissible import INADMISSIBLE_CHARACTERS, SURROGATE
 
 _GLOBAL_FIELDS = (
     "title",
@@ -480,28 +481,43 @@ def _string_fields(model: type[BaseModel]) -> list[tuple[str, bool]]:
 
 
 # Every string-bearing field, pinned so the derived cases cannot be vacuous.
-_NUL_CASES: list[tuple[type[BaseModel], str, bool]] = [
+_STRING_CASES: list[tuple[type[BaseModel], str, bool]] = [
     (model, name, is_list)
     for model in _BASES
     if model is not CVSSAssessmentEntry
     for name, is_list in _string_fields(model)
 ]
-_NUL_TEMPLATES = ["\x00", "\x00{}", "{}\x00{}", "{}\x00"]
-_NUL_MARKER = "FICTIONAL-SECRET-MARKER-0000"
+# Whole value, start, middle, and end; `{c}` is the inadmissible character.
+_POSITION_TEMPLATES = ["{c}", "{c}{a}", "{a}{c}{b}", "{a}{c}"]
+_LEAK_MARKER = "FICTIONAL-SECRET-MARKER-0000"
+
+# String fields without a length or pattern constraint: only the payload
+# admissibility check rejects a surrogate code point in them, which
+# previously reached PostgreSQL and failed the whole CVE (issue #884).
+_UNCONSTRAINED_CASES: list[tuple[type[BaseModel], str, bool]] = [
+    (CVEIngestPayload, "description", False),
+    (CVEIngestPayload, "resolved_packages", True),
+    (AffectedVersionEntry, "product", False),
+    (AffectedVersionEntry, "version", False),
+    (AffectedVersionEntry, "version_end", False),
+    (AffectedVersionEntry, "program_files", True),
+]
 
 
-def _nul_id(case: tuple[Any, ...]) -> str:
+def _case_id(case: tuple[Any, ...]) -> str:
     return f"{case[0].__name__}.{case[1]}"
 
 
 @pytest.mark.unit
-class TestNulRejection:
+class TestInadmissibleCharacterRejection:
     """External String Admissibility (cve-service.md, CVEIngestPayload
-    Schema design notes): U+0000 in any string value is a payload
-    validation failure; untyped CVSS candidates are excluded."""
+    Schema design notes; testing-strategy.md, External String
+    Admissibility): U+0000 or a surrogate code point in any string value
+    or string-collection item is a payload validation failure; untyped
+    CVSS candidates are excluded."""
 
     def test_every_string_field_is_covered(self) -> None:
-        assert {(model.__name__, name) for model, name, _ in _NUL_CASES} == {
+        assert {(model.__name__, name) for model, name, _ in _STRING_CASES} == {
             ("CVEIngestPayload", "title"),
             ("CVEIngestPayload", "description"),
             ("CVEIngestPayload", "resolved_packages"),
@@ -520,70 +536,120 @@ class TestNulRejection:
             ("ExternalIdentifierEntry", "url"),
         }
 
-    @pytest.mark.parametrize("template", _NUL_TEMPLATES)
+    @pytest.mark.parametrize("character", INADMISSIBLE_CHARACTERS)
+    @pytest.mark.parametrize("template", _POSITION_TEMPLATES)
     @pytest.mark.parametrize(
-        ("model", "field", "is_list"), _NUL_CASES, ids=map(_nul_id, _NUL_CASES)
+        ("model", "field", "is_list"), _STRING_CASES, ids=map(_case_id, _STRING_CASES)
     )
-    def test_string_containing_nul_is_rejected(
-        self, model: type[BaseModel], field: str, is_list: bool, template: str
+    def test_string_containing_inadmissible_character_is_rejected(
+        self,
+        model: type[BaseModel],
+        field: str,
+        is_list: bool,
+        template: str,
+        character: str,
     ) -> None:
-        value = template.format("1", "2")
+        value = template.format(a="1", b="2", c=character)
 
         with pytest.raises(ValidationError):
             _build(model, **{field: ["valid", value] if is_list else value})
 
     @pytest.mark.parametrize(
+        ("model", "field", "is_list"),
+        _UNCONSTRAINED_CASES,
+        ids=map(_case_id, _UNCONSTRAINED_CASES),
+    )
+    def test_unconstrained_field_rejects_surrogate_by_admissibility_check(
+        self, model: type[BaseModel], field: str, is_list: bool
+    ) -> None:
+        """Regression (issue #884): no length or pattern constraint rejects
+        the surrogate incidentally; the admissibility check does."""
+        value = f"widget{SURROGATE}"
+
+        with pytest.raises(ValidationError) as excinfo:
+            _build(model, **{field: ["valid", value] if is_list else value})
+
+        assert [(e["loc"], e["type"]) for e in excinfo.value.errors()] == [
+            ((field,), "value_error")
+        ]
+
+    @pytest.mark.parametrize(
+        ("model", "field", "is_list"),
+        _UNCONSTRAINED_CASES,
+        ids=map(_case_id, _UNCONSTRAINED_CASES),
+    )
+    def test_unconstrained_field_accepts_supplementary_character(
+        self, model: type[BaseModel], field: str, is_list: bool
+    ) -> None:
+        """A supplementary character, such as one decoded from a correctly
+        paired surrogate escape, is admissible and kept unchanged."""
+        value = "widget\U0001f600"
+
+        built = _build(model, **{field: ["valid", value] if is_list else value})
+
+        assert getattr(built, field) == (["valid", value] if is_list else value)
+
+    @pytest.mark.parametrize("character", INADMISSIBLE_CHARACTERS)
+    @pytest.mark.parametrize(
         "data",
         [
-            pytest.param({"title": f"{_NUL_MARKER}\x00"}, id="global"),
+            pytest.param({"title": "{marker}{c}"}, id="global"),
+            pytest.param({"description": "{marker}{c}"}, id="global-unconstrained"),
             pytest.param(
                 {
                     "affected_version_operations": [
                         {
                             "source_container": "cna",
                             "operation": "replace",
-                            "entries": [{"program_files": [f"{_NUL_MARKER}\x00"]}],
+                            "entries": [{"program_files": ["{marker}{c}"]}],
                         }
                     ]
                 },
                 id="nested-jsonb-item",
             ),
             pytest.param(
-                {
-                    "cpe_matches": [
-                        {"criteria": f"{_NUL_MARKER}\x00", "vulnerable": True}
-                    ]
-                },
+                {"cpe_matches": [{"criteria": "{marker}{c}", "vulnerable": True}]},
                 id="non-persisted-candidate",
             ),
             pytest.param(
-                {"resolved_packages": ["widget", f"{_NUL_MARKER}\x00"]},
+                {"resolved_packages": ["widget", "{marker}{c}"]},
                 id="package-candidate",
             ),
         ],
     )
-    def test_payload_rejects_nul_without_rendering_the_value(
-        self, data: dict[str, Any]
+    def test_payload_rejects_inadmissible_character_without_rendering_the_value(
+        self, data: dict[str, Any], character: str
     ) -> None:
+        def fill(value: Any) -> Any:
+            if isinstance(value, str):
+                return value.format(marker=_LEAK_MARKER, c=character)
+            if isinstance(value, list):
+                return [fill(item) for item in value]
+            if isinstance(value, dict):
+                return {key: fill(item) for key, item in value.items()}
+            return value
+
         with pytest.raises(ValidationError) as excinfo:
-            CVEIngestPayload.model_validate(data)
+            CVEIngestPayload.model_validate(fill(data))
 
-        assert _NUL_MARKER not in str(excinfo.value)
-        assert _NUL_MARKER not in repr(excinfo.value)
+        assert _LEAK_MARKER not in str(excinfo.value)
+        assert _LEAK_MARKER not in repr(excinfo.value)
 
-    def test_cvss_candidate_containing_nul_is_carried_for_individual_skip(
-        self,
+    @pytest.mark.parametrize("character", INADMISSIBLE_CHARACTERS)
+    def test_cvss_candidate_with_inadmissible_character_is_carried_for_skip(
+        self, character: str
     ) -> None:
+        provider = f"Example{character}CNA"
         payload = CVEIngestPayload(
             cvss_assessments=[
                 CVSSAssessmentEntry(
-                    provider_name="Example\x00CNA", vector_string="CVSS:3.1\x00"
+                    provider_name=provider, vector_string=f"CVSS:3.1{character}"
                 )
             ]
         )
 
         assert payload.cvss_assessments is not None
-        assert payload.cvss_assessments[0].provider_name == "Example\x00CNA"
+        assert payload.cvss_assessments[0].provider_name == provider
 
 
 @pytest.mark.unit

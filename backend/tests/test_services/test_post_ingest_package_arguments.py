@@ -11,14 +11,15 @@ Owning specifications:
   resolution; Audit and observability, the `failed` event and log privacy).
 - docs/features/packages/cpe-package-mapping.md (Resolution Function;
   Consumers: the four post-ingest rows).
-- docs/features/tickets/cve-service.md (PostIngestTasks; the "No U+0000 in
-  string values" bullet of the payload schema; `build_post_ingest_tasks()`
-  package-name heuristic).
+- docs/features/tickets/cve-service.md (PostIngestTasks; the "No
+  inadmissible characters in string values" bullet of the payload schema;
+  `build_post_ingest_tasks()` package-name heuristic).
 - docs/features/platform/testing-strategy.md (Post-Ingest Package
   Resolution: argument validation, deduplication, grammar, and ordering
   bullets; External String Admissibility).
 - Issue #786 decisions D1 (U+0000 in any string argument is a caller-contract
-  failure) and D2 (the workflow events carry no candidate value).
+  failure; issue #884 extends it to surrogate code points) and D2 (the
+  workflow events carry no candidate value).
 
 Validation and candidate resolution touch no database, HTTP client, or
 SMELT; the resolver tests substitute the two `cpe_mapping` resolvers that
@@ -52,6 +53,7 @@ from app.services.package_service import (
     parse_post_ingest_arguments,
     resolve_post_ingest_candidates,
 )
+from tests.support.inadmissible import INADMISSIBLE_CHARACTERS, NUL, SURROGATE
 
 LogEntry = MutableMapping[str, Any]
 
@@ -118,7 +120,8 @@ def _assert_rejected(
     assert logs == [_rejection(argument, with_ticket_id=with_ticket_id)]
     for text in (repr(logs), str(raised.value), repr(raised.value.args)):
         assert MARKER not in text
-        assert "\x00" not in text
+        assert NUL not in text
+        assert SURROGATE not in text
 
 
 # ---------------------------------------------------------------------------
@@ -381,57 +384,63 @@ class TestInvalidItems:
 
 
 # ---------------------------------------------------------------------------
-# U+0000 in every string argument (issue #786 D1; testing-strategy.md,
-# External String Admissibility)
+# U+0000 or a surrogate code point in every string argument (issue #786 D1;
+# testing-strategy.md, External String Admissibility)
 # ---------------------------------------------------------------------------
 
-NUL_CASES = [
+INADMISSIBLE_CASES = [
     pytest.param(
-        _arguments(cpe_matches=[_match(criteria=CPE_A + "\x00")]),
+        lambda c: _arguments(cpe_matches=[_match(criteria=CPE_A + c)]),
         "cpe_matches",
         id="criteria",
     ),
     pytest.param(
-        _arguments(cpe_matches=[_match(mcid="\x00" + MCID)]),
+        lambda c: _arguments(cpe_matches=[_match(mcid=c + MCID)]),
         "cpe_matches",
         id="match-criteria-id",
     ),
     pytest.param(
-        _arguments(affected_cpes=["\x00" + CPE_A]),
+        lambda c: _arguments(affected_cpes=[c + CPE_A]),
         "affected_cpes",
         id="affected-cpe",
     ),
     pytest.param(
-        _arguments(vendor_products=[["exa\x00mple", "alpha"]]),
+        lambda c: _arguments(vendor_products=[[f"exa{c}mple", "alpha"]]),
         "vendor_products",
         id="vendor",
     ),
     pytest.param(
-        _arguments(vendor_products=[["example", "\x00"]]),
+        lambda c: _arguments(vendor_products=[["example", c]]),
         "vendor_products",
         id="product",
     ),
     pytest.param(
-        _arguments(resolved_packages=["fictional\x00pkg"]),
+        lambda c: _arguments(resolved_packages=[f"fictional{c}pkg"]),
         "resolved_packages",
         id="package-name",
     ),
 ]
-"""One U+0000 position per consumed string field (start, middle, end, and
-the whole value are each used at least once)."""
+"""One inadmissible-character position per consumed string field (start,
+middle, end, and the whole value are each used at least once)."""
 
 
 @pytest.mark.unit
-class TestNulCharacters:
-    @pytest.mark.parametrize(("arguments", "argument"), NUL_CASES)
-    def test_nul_in_a_string_argument_is_a_caller_contract_failure(
-        self, arguments: dict[str, object], argument: str
+@pytest.mark.parametrize("character", INADMISSIBLE_CHARACTERS)
+class TestInadmissibleCharacters:
+    @pytest.mark.parametrize(("arguments", "argument"), INADMISSIBLE_CASES)
+    def test_inadmissible_character_in_string_argument_is_rejected(
+        self,
+        arguments: Callable[[str], dict[str, object]],
+        argument: str,
+        character: str,
     ) -> None:
-        _assert_rejected(arguments, argument)
+        _assert_rejected(arguments(character), argument)
 
-    def test_nul_in_ticket_id_is_rejected_without_ticket_id_field(self) -> None:
+    def test_inadmissible_character_in_ticket_id_omits_ticket_id_field(
+        self, character: str
+    ) -> None:
         _assert_rejected(
-            _arguments(ticket_id=TICKET_ID[:8] + "\x00" + TICKET_ID[8:]),
+            _arguments(ticket_id=TICKET_ID[:8] + character + TICKET_ID[8:]),
             "ticket_id",
             with_ticket_id=False,
         )

@@ -60,6 +60,7 @@ from app.services.package_service import (
     ValidatedCPEMatch,
 )
 from app.tasks import cve_tasks
+from tests.support.inadmissible import INADMISSIBLE_CHARACTERS
 from tests.support.module_imports import APP_ROOT
 
 LogEntry = MutableMapping[str, Any]
@@ -223,22 +224,24 @@ class TestResolveTicketPackagesAsync:
         fake_engine.dispose.assert_awaited_once_with()
         assert order == ["workflow", "dispose"]
 
+    @pytest.mark.parametrize("character", INADMISSIBLE_CHARACTERS)
     async def test_malformed_arguments_raise_before_any_work_and_dispose(
         self,
         workflow: AsyncMock,
         fake_engine: _FakeEngine,
         forbidden_session_factory: MagicMock,
         forbidden_work: dict[str, MagicMock],
+        character: str,
     ) -> None:
-        """One representative malformed value (U+0000 in a direct package
-        name); per-argument rejection is owned by
+        """One representative malformed value (an inadmissible character in
+        a direct package name); per-argument rejection is owned by
         `tests/test_services/test_post_ingest_package_arguments.py`."""
         with (
             capture_logs() as logs,
             pytest.raises(ValueError, match=INVALID_ARGUMENT) as raised,
         ):
             await cve_tasks.resolve_ticket_packages_async(
-                **_primitives(resolved_packages=[MARKER + "\x00"])
+                **_primitives(resolved_packages=[MARKER + character])
             )
 
         assert isinstance(raised.value, PostIngestArgumentError)

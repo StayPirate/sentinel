@@ -120,6 +120,7 @@ from tests.support.cve_ingest import (
     source_rows,
 )
 from tests.support.cvss_chain import priority_event
+from tests.support.inadmissible import SURROGATE
 from tests.support.suse_cvss import (
     V20_CRITICAL,
     V31_CRITICAL,
@@ -1876,6 +1877,7 @@ class TestCVSSCandidateSkips:
             pytest.param("  \t ", id="whitespace-only"),
             pytest.param("P" * 101, id="101-characters"),
             pytest.param("Example\x00CNA", id="nul"),
+            pytest.param(f"Example{SURROGATE}CNA", id="surrogate"),
             pytest.param(" suse ", id="reserved-padded"),
             pytest.param("Suse", id="reserved-mixed-case"),
             pytest.param("SUSE", id="reserved"),
@@ -1922,6 +1924,12 @@ class TestCVSSCandidateSkips:
                 V31_HIGH.canonical.replace("/AC:", "/\x00AC:"), id="nul-middle"
             ),
             pytest.param(f"{V31_HIGH.canonical}\x00", id="nul-end"),
+            pytest.param(f"{SURROGATE}{V31_HIGH.canonical}", id="surrogate-start"),
+            pytest.param(
+                V31_HIGH.canonical.replace("/AC:", f"/{SURROGATE}AC:"),
+                id="surrogate-middle",
+            ),
+            pytest.param(f"{V31_HIGH.canonical}{SURROGATE}", id="surrogate-end"),
         ],
     )
     async def test_invalid_vector_is_skipped_and_valid_sibling_persisted(
