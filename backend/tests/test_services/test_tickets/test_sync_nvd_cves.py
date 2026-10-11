@@ -1250,8 +1250,9 @@ class TestErrorPropagation:
 
 def _rate_limited(request: httpx.Request) -> httpx.Response:
     """NVD's rate-limit response as observed live in October 2026: HTTP 429
-    from its Cloudflare edge with `Retry-After: 0` and a JSON body that the
-    fetcher never reads (`detail` is a synthetic marker for the rest of the
+    from its Cloudflare edge with `Retry-After: 0` and an error body that the
+    fetcher never reads (JSON for `Accept: application/json`, the shared
+    client's default; `detail` is a synthetic marker for the rest of the
     live body)."""
     return httpx.Response(
         429,
