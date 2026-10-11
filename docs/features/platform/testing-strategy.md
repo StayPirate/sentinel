@@ -1724,6 +1724,20 @@ the normal Celery entrypoint. This ensures:
   host's registry to its pre-test state without clearing the global
   registry.
 
+Importing the normal Celery entrypoint also runs production discovery,
+which populates both fetcher registries. After that import, and before
+any worker or Beat startup handler runs, the launcher restricts the
+spawned process's registries: `FETCHER_REGISTRY` contains exactly the
+test-only fetcher, and `_CVE_SOURCE_TYPE_MAP` contains no class, because
+the test-only fetcher is not a CVE fetcher and the two registries form
+one registration unit (see
+`docs/features/platform/cve-fetcher-infrastructure.md`,
+`__init_subclass__` Validation). Startup bootstrap and schedule
+reconciliation therefore see only the test fetcher, and the CVE registry
+accessors return no production class in a spawned process. A unit test
+imports the launcher in a fresh interpreter and verifies both
+registries.
+
 The spawned worker and Beat subprocesses MUST receive an explicit
 environment that sets `DATABASE_URL` and `CELERY_BROKER_URL` (and
 `REDIS_URL` if consumed) to the test-harness infrastructure derived
