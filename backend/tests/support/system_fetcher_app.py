@@ -36,7 +36,7 @@ Boundary). `app.celery_app`'s import chain pulls in
   entry or `FetcherConfig` row.
 
 Pruning happens strictly at import time of this module — before
-Celery's own `worker_ready`/`beat_init` startup signals fire and invoke
+Celery's own `celeryd_after_setup`/`beat_init` startup signals fire and invoke
 `bootstrap_fetcher_configs()` — so the bootstrap and reconciliation
 handlers only ever see the test fetcher. The production discovery
 import path itself still runs unpruned; only the resulting registries
