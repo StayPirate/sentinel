@@ -1001,6 +1001,35 @@ class TestStaleCursor:
         assert counters(batch.fetcher) == Counters(0, 0, 0, 0)
         await env.assert_untouched(cve)
 
+    async def test_now_is_captured_once_at_execute_entry(
+        self, env: Env, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Algorithm step 2: the window end and the 120-day comparison use the
+        instant captured when `execute()` starts. A later `now` would end the
+        window one day later and reset this exactly-120-day cursor."""
+        entry = datetime.now(UTC)
+        window_start = entry - STALE_AFTER
+        await env.seed_run("success", window_start + OVERLAP)
+        instants = iter(entry + timedelta(days=offset) for offset in range(10))
+        calls: list[object] = []
+
+        def now(tz: object) -> datetime:
+            calls.append(tz)
+            return next(instants)
+
+        monkeypatch.setattr(sync_module, "datetime", SimpleNamespace(now=now))
+        batch = await env.batch(cursor=False)
+
+        with capture_logs() as logs:
+            await batch.execute()
+
+        assert calls == [UTC]
+        assert _events(logs, NVD_CURSOR_RESET_EVENT) == []
+        assert env.server.kinds == ["source", "page"]
+        assert [params["lastModEndDate"] for params in env.page_params] == [
+            _nvd_date(entry)
+        ]
+
     async def test_reset_run_is_success_and_becomes_the_cursor(
         self, env: Env, frozen_now: datetime, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1768,9 +1797,9 @@ class TestInvalidCveId:
         assert trace.statements_of(0) == []
         assert trace.rollbacks == [-1]
         assert trace.ingested == [1]
-        [failed] = _events(logs, CVE_FETCH_ITEM_FAILED_EVENT)
-        assert failed == _failed(None, cause)
-        assert set(failed) == INVALID_ID_EVENT_KEYS
+        # Exactly one event: no second WARNING carrying the raw identifier.
+        assert logs == [_failed(None, cause)]
+        assert set(logs[0]) == INVALID_ID_EVENT_KEYS
         _assert_private(logs, "GHSA-", "CVE-24-1", "cve-2099")
         # No isolated status for the invalid element.
         assert env.isolated == []
@@ -2306,6 +2335,37 @@ class TestWholeRunSignals:
         await batch.session.rollback()
         await env.assert_untouched(first)
         await env.assert_untouched(second)
+
+    @pytest.mark.parametrize("request_kind", ["source", "page"])
+    @pytest.mark.parametrize("signal_type", _SIGNALS, ids=lambda t: t.__name__)
+    async def test_signal_propagates_from_an_nvd_request(
+        self,
+        request_kind: str,
+        signal_type: type[BaseException],
+        env: Env,
+        batch: Batch,
+    ) -> None:
+        """Neither the Source API degraded mode nor the page-level
+        sanitization converts a whole-run signal."""
+        cve = await env.cve()
+        env.pages([env.record(cve.cve_id)])
+        signal = signal_type()
+        if request_kind == "source":
+            env.server.source_once.append(raising(signal))
+        else:
+            env.server.page_once[0] = [raising(signal)]
+
+        with capture_logs() as logs, pytest.raises(signal_type) as raised:
+            await batch.execute()
+
+        assert raised.value is signal
+        assert raised.value.__cause__ is None
+        assert env.server.kinds == (
+            ["source"] if request_kind == "source" else ["source", "page"]
+        )
+        assert counters(batch.fetcher) == Counters(0, 0, 0, 0)
+        assert logs == []
+        await env.assert_untouched(cve)
 
 
 # ---------------------------------------------------------------------------

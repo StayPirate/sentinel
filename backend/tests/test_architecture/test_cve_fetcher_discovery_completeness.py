@@ -49,7 +49,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 import app.services.fetcher_discovery  # noqa: F401 — production discovery
 from app.core.enums import CVESourceType
-from app.services.base_cve_fetcher import _CVE_SOURCE_TYPE_MAP
+from app.services.base_cve_fetcher import _CVE_SOURCE_TYPE_MAP, BaseCVEFetcher
 from app.services.base_fetcher import FETCHER_REGISTRY, BaseFetcher
 from tests.support.cve_discovery import assert_complete_cve_discovery
 from tests.support.module_imports import APP_ROOT
@@ -143,6 +143,10 @@ _CELERY_COMMAND: Final = re.compile(
     r"(?P<options>(?:\s+-[^\s`]+(?:\s+[^\s`#-][^\s`]*)?)*)"
 )
 _CELERY_WITHOUT_APP: Final = re.compile(r"(?<![\w-])celery\s+(?:worker|beat)\b")
+_FENCED_BLOCK: Final = re.compile(
+    r"^[ \t]*```[^\n]*\n(.*?)^[ \t]*```", re.MULTILINE | re.DOTALL
+)
+_CODE_SPAN: Final = re.compile(r"`([^`]+)`")
 
 _SERVICE_INDENT: Final = 2
 _PROPERTY_INDENT: Final = 4
@@ -228,6 +232,22 @@ def _compose_commands(path: Path) -> dict[str, list[str] | None]:
     }
 
 
+def _code_fragments(text: str) -> list[str]:
+    """The fenced code blocks and inline code spans of a Markdown text: the
+    only places where a command, rather than prose, is written."""
+    prose = _FENCED_BLOCK.sub("", text)
+    return [*_FENCED_BLOCK.findall(text), *_CODE_SPAN.findall(prose)]
+
+
+def _celery_commands_without_app(text: str) -> list[str]:
+    """Every `celery worker`/`celery beat` command without `-A`, in code."""
+    return [
+        match
+        for fragment in _code_fragments(text)
+        for match in _CELERY_WITHOUT_APP.findall(fragment)
+    ]
+
+
 def _deployment_commands(text: str) -> list[list[str]]:
     """Every `uvicorn <module>:<app>` and `celery -A <module> ...`
     occurrence, wherever it appears in the document."""
@@ -293,7 +313,20 @@ class TestRoleCommands:
         roles = _assert_production_targets(_deployment_commands(text))
 
         assert roles >= set(_ROLE_TARGETS)
-        assert _CELERY_WITHOUT_APP.findall(text) == []
+        assert _celery_commands_without_app(text) == []
+
+    def test_command_without_app_is_found_only_in_code(self) -> None:
+        """Prose mentioning a Celery worker is not a command."""
+        text = (
+            "A celery worker restarts after a crash.\n"
+            "Start it with `celery worker --pool=prefork`.\n"
+            "```bash\nuv run celery beat\n```\n"
+        )
+
+        assert sorted(_celery_commands_without_app(text)) == [
+            "celery beat",
+            "celery worker",
+        ]
 
     def test_deployment_extraction_is_lenient_about_document_shape(self) -> None:
         """Commands are found in code blocks and in prose, including an
@@ -393,6 +426,30 @@ class TestDiscoveryAssertion:
 
         with pytest.raises(AssertionError, match=r"is not FETCHER_REGISTRY\['sync_nvd"):
             assert_complete_cve_discovery(source_map, registry)
+
+    def test_abstract_owner_fails(self) -> None:
+        """An intermediate class declaring `abstract = True` in its own body
+        is never registered; as an owner it is not a concrete class."""
+        abstract_owner = type(
+            "SyncAbstractExample",
+            (BaseCVEFetcher,),
+            {
+                "abstract": True,
+                "__module__": "app.services.tickets.example",
+                "cve_source_type": CVESourceType.NVD,
+                "name": "sync_nvd_cves",
+            },
+        )
+        source_map, registry = _production_copies()
+        source_map[CVESourceType.NVD] = abstract_owner
+        registry["sync_nvd_cves"] = abstract_owner
+
+        with pytest.raises(AssertionError) as raised:
+            assert_complete_cve_discovery(source_map, registry)
+
+        assert str(raised.value).endswith(
+            "owner app.services.tickets.example.SyncAbstractExample is not concrete"
+        )
 
     def test_owner_of_another_source_fails(self) -> None:
         source_map, registry = _production_copies()

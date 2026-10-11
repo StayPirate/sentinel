@@ -83,7 +83,7 @@ from app.services.base_cve_fetcher import (
     CVEFetchResult,
     CVENotInSource,
 )
-from app.services.base_fetcher import FETCHER_REGISTRY
+from app.services.base_fetcher import FETCHER_REGISTRY, FetcherError
 from app.services.cve_ingest import CVEIngestPayload, PostIngestTasks, UpsertAction
 from app.services.http_client import is_infrastructure_failure, is_retryable_condition
 from app.services.reference_service import AutomaticReferenceInput
@@ -93,6 +93,7 @@ from app.services.tickets.nvd_cve_record import (
     NvdRecordStructureError,
 )
 from app.services.tickets.sync_nvd_cves import (
+    API_KEY_INVALID,
     NVD_SOURCE_API_UNAVAILABLE_EVENT,
     NVD_SOURCE_CACHE_INCOMPLETE_EVENT,
     NVD_SOURCE_ENTRIES_SKIPPED_EVENT,
@@ -734,6 +735,71 @@ class TestApiKey:
         assert API_KEY not in str(raised.value)
         assert API_KEY not in repr(raised.value)
         assert server.source_requests == []
+        assert logs == []
+
+    @pytest.mark.parametrize(
+        "key",
+        [
+            f"{API_KEY}\n",
+            f" {API_KEY}",
+            f"{API_KEY} ",
+            "fictional nvd-api-key",
+            "fictional-nvd-api-k\u00e9y",
+            f"{API_KEY}\x00",
+            "\t",
+        ],
+        ids=[
+            "trailing_newline",
+            "leading_space",
+            "trailing_space",
+            "inner_space",
+            "non_ascii",
+            "nul",
+            "whitespace_only",
+        ],
+    )
+    async def test_invalid_header_value_fails_fetch_single_before_any_request(
+        self,
+        key: str,
+        fetcher: SyncNvdCves,
+        server: NvdServer,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The HTTP library would render the key in its protocol error."""
+        monkeypatch.setattr(app_settings, "nvd_api_key", SecretStr(key))
+        cve_id = fictional_cve_id()
+
+        with capture_logs() as logs, pytest.raises(FetcherError) as raised:
+            await fetcher.fetch_single(cve_id, NO_SESSION)
+
+        assert str(raised.value) == API_KEY_INVALID
+        assert raised.value.__cause__ is None
+        assert raised.value.__context__ is None
+        assert not is_retryable_condition(raised.value)
+        assert server.requests == []
+        assert logs == []
+
+    async def test_invalid_header_value_fails_execute_before_any_request(
+        self,
+        fetcher: SyncNvdCves,
+        server: NvdServer,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(app_settings, "nvd_api_key", SecretStr(f"{API_KEY}\n"))
+
+        async def derived_cursor(session: AsyncSession, name: str) -> datetime:
+            return datetime.now(UTC) - timedelta(hours=1)
+
+        monkeypatch.setattr(fetcher_execution, "get_derived_cursor", derived_cursor)
+
+        with capture_logs() as logs, pytest.raises(FetcherError) as raised:
+            await fetcher.execute(cast(AsyncSession, _RollbackOnly()))
+
+        # The Source API failure path is not degraded mode: the run fails.
+        assert str(raised.value) == API_KEY_INVALID
+        assert raised.value.__cause__ is None
+        assert raised.value.__context__ is None
+        assert server.requests == []
         assert logs == []
 
 

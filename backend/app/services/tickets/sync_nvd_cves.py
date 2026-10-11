@@ -6,7 +6,9 @@ contract of docs/features/platform/cve-fetcher-infrastructure.md:
 - Every NVD request (CVE API and Source API) carries the `apiKey` header
   when `NVD_API_KEY` is set, attached per request from
   `settings.nvd_api_key`; the key is never a client default header or a
-  query parameter. Redirects are never followed.
+  query parameter, and a key that is not a valid header value fails the
+  request before it is sent with a fixed message. Redirects are never
+  followed.
 - `execute()` follows template 2 of Session Lifecycle for API-based CVE
   Fetchers: `now` is captured at entry, and the derived cursor
   (`fetcher_execution.get_derived_cursor()`) is read and its transaction
@@ -37,6 +39,7 @@ import cycle of `base_cve_fetcher`.
 from __future__ import annotations
 
 import asyncio
+import re
 from asyncio import CancelledError
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
@@ -91,6 +94,7 @@ NVD_VULN_STATUS_UNRECOGNIZED_EVENT: Final = "nvd_vuln_status_unrecognized"
 """The bounded WARNING of an unlisted `vulnStatus` (canonical CVE-ID and
 fetcher name, never the value)."""
 
+API_KEY_INVALID: Final = "NVD_API_KEY is not a valid header value"
 CONNECTION_FAILED: Final = "Failed to connect to NVD API"
 TIMED_OUT: Final = "NVD API request timed out"
 RATE_LIMIT_EXHAUSTED: Final = "NVD API rate limit exceeded — retries exhausted"
@@ -108,6 +112,9 @@ RATE_LIMIT_RETRY_DELAY: Final = 30.0
 
 _NVD_DATE_FORMAT: Final = "%Y-%m-%dT%H:%M:%S.000"
 """NVD Date Format: UTC, `.000` milliseconds, no offset."""
+
+_HEADER_VALUE: Final = re.compile(r"[\x21-\x7e]+")
+"""A valid API key header value: printable ASCII without whitespace."""
 
 
 class NvdResponseError(Exception):
@@ -149,7 +156,9 @@ class SyncNvdCves(BaseCVEFetcher):
         Q1: `cve_id` is the CVE-ID to fetch; `session` is the caller's
         per-CVE session.
 
-        Q2: a malformed `cve_id` raises `CVENotInSource` before any request.
+        Q2: a malformed `cve_id` raises `CVENotInSource` before any request;
+        a configured API key that is not a valid header value then raises
+        `FetcherError(API_KEY_INVALID)` without a cause, before any request.
 
         Q3: one `GET /cves/2.0?cveId=…` with the per-request API key header,
         without redirects or throttle. When the response holds the requested
@@ -392,9 +401,18 @@ class SyncNvdCves(BaseCVEFetcher):
 
 def _headers() -> dict[str, str]:
     """The per-request headers: `apiKey` when a key is configured, read at
-    call time and never stored on the client."""
+    call time and never stored on the client.
+
+    A configured key that is not a valid header value raises
+    `FetcherError(API_KEY_INVALID)` without a cause before any request:
+    the HTTP library would otherwise render the key in its protocol error.
+    """
     api_key = settings.nvd_api_key.get_secret_value()
-    return {API_KEY_HEADER: api_key} if api_key else {}
+    if not api_key:
+        return {}
+    if _HEADER_VALUE.fullmatch(api_key) is None:
+        raise FetcherError(API_KEY_INVALID)
+    return {API_KEY_HEADER: api_key}
 
 
 def _raw_cve_id(element: object) -> object:
