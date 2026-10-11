@@ -981,10 +981,11 @@ Rules:
   such as length or emptiness validation
 - The `Settings` class declares `hide_input_in_errors=True`, so no `Settings`
   validation error renders a received value. Without it, Pydantic renders
-  the rejected value of a field, and a failure not tied to one field (for
-  example a missing required setting) renders the input mapping, which holds
-  every configured secret as a plain string. Validator messages name the
-  environment variable and never include a secret value
+  the rejected value of a field, and an error whose input is the whole
+  settings mapping (a missing required setting or a model-level validator
+  failure) renders that mapping, which holds every configured secret as a
+  plain string. Validator messages name the environment variable and never
+  include a secret value
 - A non-empty secret that is sent verbatim as an HTTP header value, alone or
   after a fixed prefix such as an authentication scheme, MUST consist of
   printable ASCII characters without whitespace (U+0021 to U+007E). Any other

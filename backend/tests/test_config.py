@@ -961,27 +961,22 @@ _SECRET_FRAGMENTS = tuple(
 class TestValidationErrorsHideInput:
     """`Settings` declares `hide_input_in_errors` (`docs/conventions.md`,
     Secret Field Typing): no startup failure renders a received value. A
-    failure not tied to one field would otherwise render the input mapping,
-    which holds every configured secret as a plain string."""
+    missing required setting or a model-level validator failure would
+    otherwise render the whole input mapping, which holds every configured
+    secret as a plain string. One case per error mechanism."""
 
     @pytest.mark.parametrize(
         "failure",
         [
             {"JWT_SECRET_KEY": None},
             {"JWT_SECRET_KEY": _SHORT_JWT_SECRET_KEY},
-            {"JWT_EXPIRY_HOURS": "0"},
-            {"SESSION_MAX_LIFETIME_DAYS": "0"},
-            {"LOGIN_MAX_ATTEMPTS": "0"},
             {"JWT_EXPIRY_HOURS": "not-a-number"},
             {"GIT_CLONE_BASE_DIR": "relative/git"},
         ],
         ids=[
-            "missing_jwt_secret_key",
-            "short_jwt_secret_key",
-            "jwt_expiry_hours",
-            "session_max_lifetime_days",
-            "login_max_attempts",
-            "int_parsing",
+            "missing_required_setting",
+            "model_validator",
+            "type_parsing",
             "field_validator",
         ],
     )
