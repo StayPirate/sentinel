@@ -159,7 +159,7 @@ def _bearer(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
-def _assert_nul_rejection(response_json: object, loc: list[object]) -> None:
+def _assert_rejection(response_json: object, loc: list[object]) -> None:
     """Mirrors the identical helper in
     `tests/test_api/test_request_admissibility.py`."""
     assert response_json == {
@@ -589,7 +589,7 @@ class TestRequestValidation:
         response = await client.post("/api/v1/admin/users/fictional%00user/deactivate")
 
         assert response.status_code == 422
-        _assert_nul_rejection(response.json(), ["path", "user"])
+        _assert_rejection(response.json(), ["path", "user"])
         assert "fictional" not in response.text
         resolve.assert_not_awaited()
         mutation.assert_not_awaited()

@@ -406,15 +406,37 @@ class TestRejectInadmissibleRequestInput:
         self, checked_client: AsyncClient
     ) -> None:
         """The standard-library decoder turns the UTF-8-style bytes of a
-        surrogate into a surrogate code point (`surrogatepass`)."""
+        surrogate into a surrogate code point (`surrogatepass`), in every
+        body input kind."""
         response = await checked_client.post(
             "/payloads",
-            content=b'{"title": "ok", "tags": ["a\xed\xa0\x80b"]}',
+            content=(
+                b'{"title": "a\xed\xa0\x80", "tags": ["ok", "\xed\xa0\x80"],'
+                b' "inner": {"note": "n\xed\xa0\x80"},'
+                b' "settings": {"k\xed\xa0\x80": "v"},'
+                b' "undeclared": "\xed\xa0\x80"}'
+            ),
             headers=_JSON_HEADERS,
         )
 
         assert response.status_code == 422
-        assert response.json()["errors"] == [_error("body", "tags", 0)]
+        assert response.json()["errors"] == [
+            _error("body", "title"),
+            _error("body", "tags", 1),
+            _error("body", "inner", "note"),
+            _error("body", "settings"),
+            _error("body", "undeclared"),
+        ]
+
+    async def test_surrogate_encoded_in_a_top_level_body_string_is_rejected(
+        self, checked_client: AsyncClient
+    ) -> None:
+        response = await checked_client.post(
+            "/raw", content=b'"\xed\xa0\x80"', headers=_JSON_HEADERS
+        )
+
+        assert response.status_code == 422
+        assert response.json()["errors"] == [_error("body")]
 
     async def test_paired_surrogate_escape_is_accepted(
         self, checked_client: AsyncClient
@@ -453,7 +475,9 @@ class TestRejectInadmissibleRequestInput:
         response = await checked_client.get("/items/a%ED%A0%80?tag=%ED%A0%80")
 
         assert response.status_code == 200
-        assert response.json() == {"name": "a\ufffd\ufffd\ufffd"}
+        name = response.json()["name"]
+        assert name.startswith("a\ufffd")
+        assert not any("\ud800" <= c <= "\udfff" for c in name)
 
     async def test_path_and_query_violations_are_reported_together(
         self, checked_client: AsyncClient

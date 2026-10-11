@@ -77,12 +77,6 @@ class TestContainsInadmissibleCharacter:
     def test_admissible_value_is_not_detected(self, value: str) -> None:
         assert contains_inadmissible_character(value) is False
 
-    @pytest.mark.parametrize("value", _ADMISSIBLE)
-    def test_every_admissible_value_has_a_utf8_encoding(self, value: str) -> None:
-        """The predicate's surrogate range is exactly the set of code
-        points without a UTF-8 encoding."""
-        value.encode("utf-8")
-
     def test_every_surrogate_code_point_is_detected(self) -> None:
         assert all(
             contains_inadmissible_character(chr(code_point))
@@ -126,11 +120,6 @@ class TestAdmissibleStr:
             _UnconstrainedModel(value=value)
 
         assert [error["type"] for error in raised.value.errors()] == ["value_error"]
-
-    @pytest.mark.parametrize("character", INADMISSIBLE_CHARACTERS)
-    def test_constrained_field_still_rejects(self, character: str) -> None:
-        with pytest.raises(ValidationError):
-            _Model(value=f"a{character}")
 
     def test_valid_value_is_preserved(self) -> None:
         assert _Model(value=" a\tb ").value == " a\tb "

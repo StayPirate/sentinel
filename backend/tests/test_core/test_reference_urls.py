@@ -163,7 +163,7 @@ class TestControlCharacters:
         # code points. U+0085 (a C1 control), U+00A0, and a supplementary
         # character are outside that range; in the path they are preserved
         # literally.
-        value = "https://example.com/a\u0085b\u00a0c\U0001f600"
+        value = "https://example.com/a\u0085b\u00a0c\U0001f600\ud7ff\ue000"
         assert normalize_reference_url(value) == value
 
 

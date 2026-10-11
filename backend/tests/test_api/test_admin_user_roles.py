@@ -89,7 +89,7 @@ def _make_api_key_credential() -> tuple[str, str]:
     return token, digest
 
 
-def _assert_nul_rejection(response_json: object, loc: list[object]) -> None:
+def _assert_rejection(response_json: object, loc: list[object]) -> None:
     """Mirrors the identical helper in
     `tests/test_api/test_request_admissibility.py`."""
     assert response_json == {
@@ -474,7 +474,7 @@ class TestRequestValidation:
         )
 
         assert response.status_code == 422
-        _assert_nul_rejection(response.json(), ["path", "user"])
+        _assert_rejection(response.json(), ["path", "user"])
         assert "fictional" not in response.text
 
     async def test_nul_in_body_element_returns_422_without_echo_or_write(
@@ -489,7 +489,7 @@ class TestRequestValidation:
         response = await client.post(_url(target.id), json={"add": ["adm\u0000in"]})
 
         assert response.status_code == 422
-        _assert_nul_rejection(response.json(), ["body", "add", 0])
+        _assert_rejection(response.json(), ["body", "add", 0])
         assert "adm" not in response.text
         assert await _origins(db_session, target.id) == set()
         assert await _identity_events(db_session, target.id) == []
