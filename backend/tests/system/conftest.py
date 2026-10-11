@@ -94,7 +94,8 @@ _SYSTEM_TEST_JWT_SECRET_KEY = "system-test-jwt-secret-key-not-for-production-32c
 # (testing-strategy.md, Registration Boundary) — every `Settings`
 # field this suite does not set falls back to its own declared
 # default, which is safe because the spawned process's fetcher
-# registry is pruned to exactly the test fetcher (see
+# registries are pruned to exactly the test fetcher, with no CVE
+# fetcher left in the source-type registry (see
 # `tests/support/system_fetcher_app.py`): no code path in the spawned
 # process ever reads a field this function does not set.
 _INHERITED_OS_ENV_KEYS = ("PATH", "LANG", "LC_ALL", "TZ")
@@ -796,7 +797,7 @@ async def fetcher_pipeline_harness(
         # — never a table-wide delete (testing-strategy.md, Parallel
         # Safety). Computed by diffing against the baseline (rather than
         # hardcoding SYSTEM_FETCHER_NAME) as defense-in-depth: the
-        # spawned processes' registry is pruned to exactly the test
+        # spawned processes' registries are pruned to exactly the test
         # fetcher (see `tests/support/system_fetcher_app.py`), so this
         # is expected to equal exactly {SYSTEM_FETCHER_NAME} in
         # practice — a diff-based delete still catches any subprocess
