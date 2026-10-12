@@ -5,13 +5,12 @@
 # docs/features/platform/testing-strategy.md (Pre-Commit Hooks).
 #
 # This file extends gitleaks' built-in default rule set (it does not
-# replace it). No repository-specific allowlist is defined today:
-# verification during implementation confirmed the default rule set
-# does not flag any of the fictional/placeholder values currently used
-# in tests, examples, or documentation (fictional bcrypt hashes,
-# "not-for-production" markers, documentation placeholders). If a real
-# false positive is observed in the future, add a pattern-based (never
-# path-based) [[allowlists]] table here — see
+# replace it). The default rule set does not flag the fictional or
+# placeholder values used in tests, examples, or documentation
+# (fictional bcrypt hashes, "not-for-production" markers, documentation
+# placeholders). Each confirmed false positive of a non-secret value has
+# a pattern-based (never path-based) [[allowlists]] table below, with a
+# comment explaining why the value is not a secret — see
 # https://github.com/gitleaks/gitleaks#configuration for the format.
 title = "Sentinel gitleaks config"
 
@@ -26,3 +25,13 @@ useDefault = true
 [[allowlists]]
 description = "SQLAlchemy populate_existing kwarg (not a secret)"
 regexes = ['''populate_existing=True''']
+
+# False positive: the IBS API source-diff document's root carries a
+# `key` attribute holding the 32-character hexadecimal key of the server's
+# diff cache entry (backend/tests/fixtures/ibs/). It is a public
+# cache identifier derived from the compared source states, never a
+# credential, and Sentinel does not consume it.
+[[allowlists]]
+description = "IBS API sourcediff cache key attribute (not a secret)"
+regexTarget = "line"
+regexes = ['''<sourcediff key="[0-9a-f]{32}"''']

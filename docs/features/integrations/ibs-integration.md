@@ -45,6 +45,12 @@ Applicability and Convergence).
   environment variables (`IBS_USERNAME`, `IBS_SSH_PRIVATE_KEY`), never code.
   Credentials that are not configured do not block application startup;
   credentialed IBS API operations fail at runtime.
+- `IBS_API_URL` is the IBS API prefix (default: `https://api.suse.de`); API
+  paths such as `source/{project}` are appended to it after removing any
+  trailing slash. It must use HTTPS, name a host, and contain no user
+  information, query, or fragment; a non-default port is permitted. Because
+  request signatures and session cookies are sent to it, an invalid value
+  fails application startup with an error naming only the variable.
 - `IBS_DOWNLOAD_BASE_URL` is a separate anonymous HTTPS Product-repository
   front door (default: `https://download.suse.de/ibs`). Product release
   detection does not send IBS API credentials, an `Authorization` header, or
@@ -142,9 +148,9 @@ The realm is taken from the challenge rather than compared with a fixed value.
 It is the SSHSIG namespace, but only the TLS-validated `IBS_API_URL` origin can
 supply it, and the signed message always has the fixed form above, so a
 signature only authenticates the account to that origin. A changed realm text
-therefore does not interrupt operation. IBS may reject a signature whose
-`created` differs from its own clock; the accepted window is unverified. The
-clocks of hosts running Sentinel must therefore be synchronized
+therefore does not interrupt operation. IBS rejects a signature whose
+`created` differs too far from its own clock; the accepted window is
+unverified. The clocks of hosts running Sentinel must therefore be synchronized
 (`docs/deployment.md`, Clock Synchronization).
 
 `IBSAuthenticationError` carries exactly one bounded reason,
@@ -189,12 +195,23 @@ inspection of OBS, osc, and osc-tiny, established:
   or HTTP Basic, while the IBS front end enforces the signature scheme. OBS API
   tokens are accepted only by trigger operations.
 
-Not verified: whether IBS rejects a stale `created` and its accepted window,
-whether it accepts a resent signature, and a signed request produced by
-`IBSClient` itself. Documentation-only verification is not sufficient for the
-signer: no production workflow consumes `IBSClient` until one live signed
-read-only operation by `IBSClient` has succeeded under External Integration
-Contract Verification (`docs/conventions.md`).
+Documentation-only verification is not sufficient for the signer, so
+`IBSClient` itself was verified live and read-only on 2026-10-12 under
+External Integration Contract Verification (`docs/conventions.md`), with a
+registered Ed25519 key:
+
+- its unsigned targeted source-info request received the HTTP 401 challenge,
+  and the one signed attempt succeeded and set a session cookie;
+- the following source-diff requests of the same client instance were
+  accepted with that cookie and without a signature: none received HTTP 401,
+  and the one naming a deliberately unavailable `orev` received its ordinary
+  HTTP 400;
+- the identical signed request, resent about two seconds later without a
+  session cookie, succeeded; and
+- a signature whose `created` was one hour before or after the current time
+  received HTTP 401 to the signed attempt.
+
+Not verified: the exact window within which IBS accepts `created`.
 
 ### Key API Operations
 
@@ -370,6 +387,16 @@ Sanitized read-only verification against IBS on 2026-09-03 established:
 
 OBS source inspection established that `added`, `changed`, and `deleted`
 describe changes to issue references extracted from package changes files.
+
+The sanitized source-info and source-diff contract fixtures captured on
+2026-10-12 also established that:
+
+- a requested package that does not exist in the project is not omitted from
+  source info: its entry carries an `error` child and no `srcmd5`, so it is an
+  error-bearing entry rather than a missing one; and
+- a source diff without issue references, observed between identical
+  revisions, has no `issues` element. A source diff without an `issues`
+  element, or with an empty one, is therefore a valid empty issue set.
 
 Sanitized read-only verification on 2026-10-11 and 2026-10-12, using fictional
 checksums, established the unavailable-revision shapes in
@@ -817,7 +844,14 @@ the following overrides:
   Configuration)
 - Transport-level retry active (4 attempts for 5xx/timeout/connection
   errors)
-- Long-lived client: instantiated per-process, not per-request
+- Client lifetime: one client instance per workflow invocation, reused for
+  every request of that invocation and closed before it ends. In a Celery
+  role, each task invocation runs its own event loop, so its workflow creates
+  the client on that loop and closes it before returning; the IBS RabbitMQ
+  consumer runs one event loop and uses one client for its process. A client
+  never crosses an event loop and is never held at module level. Its session
+  cookies therefore last at most one invocation or consumer process (see
+  [Session Reuse](#session-reuse))
 
 #### Product Repository Download Boundary
 

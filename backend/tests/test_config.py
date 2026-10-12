@@ -2,15 +2,24 @@
 
 from __future__ import annotations
 
+import functools
 import logging
 import traceback
 from pathlib import Path
 from typing import Any
 
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ec, rsa
 from pydantic import SecretStr, ValidationError
 
 from app.config import Settings, _split_comma
+from tests.support.ibs_keys import (
+    encode_settings_value,
+    fictional_ed25519_key,
+    fictional_settings_value,
+    openssh_file,
+)
 
 
 @pytest.mark.unit
@@ -330,43 +339,51 @@ class TestDebugLogLevelOrthogonality:
 
 @pytest.mark.unit
 class TestIbsCredentialWarning:
-    """IBS credential startup warning."""
+    """IBS API credential startup warning
+    (docs/features/integrations/ibs-integration.md, IBS API Credentials): the
+    application starts and the warning names only the empty settings."""
 
-    def test_empty_ibs_credentials_warns(
+    @pytest.mark.parametrize(
+        ("username", "key_configured", "expected"),
+        [
+            ("", False, "IBS_USERNAME / IBS_SSH_PRIVATE_KEY empty"),
+            ("", True, "IBS_USERNAME empty"),
+            ("jdoe", False, "IBS_SSH_PRIVATE_KEY empty"),
+        ],
+        ids=["both_empty", "username_empty", "key_empty"],
+    )
+    def test_empty_credentials_warn_naming_the_empty_settings(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        username: str,
+        key_configured: bool,
+        expected: str,
+    ) -> None:
+        monkeypatch.setenv("JWT_SECRET_KEY", "a" * 32)
+        monkeypatch.setenv("IBS_USERNAME", username)
+        key = fictional_settings_value() if key_configured else ""
+        monkeypatch.setenv("IBS_SSH_PRIVATE_KEY", key)
+        with caplog.at_level(logging.WARNING):
+            Settings(_env_file=None)
+        assert f"IBS credentials not configured ({expected})" in caplog.text
+        if key_configured:
+            assert key not in caplog.text
+
+    def test_unset_credentials_warn(
         self,
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         monkeypatch.setenv("JWT_SECRET_KEY", "a" * 32)
-        monkeypatch.setenv("IBS_USERNAME", "")
-        monkeypatch.setenv("IBS_PASSWORD", "")
+        monkeypatch.delenv("IBS_USERNAME", raising=False)
+        monkeypatch.delenv("IBS_SSH_PRIVATE_KEY", raising=False)
         with caplog.at_level(logging.WARNING):
             Settings(_env_file=None)
-        assert "IBS credentials not configured" in caplog.text
-
-    def test_only_username_empty_warns(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        monkeypatch.setenv("JWT_SECRET_KEY", "a" * 32)
-        monkeypatch.setenv("IBS_USERNAME", "")
-        monkeypatch.setenv("IBS_PASSWORD", "secret")
-        with caplog.at_level(logging.WARNING):
-            Settings(_env_file=None)
-        assert "IBS credentials not configured" in caplog.text
-
-    def test_only_password_empty_warns(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        monkeypatch.setenv("JWT_SECRET_KEY", "a" * 32)
-        monkeypatch.setenv("IBS_USERNAME", "jdoe")
-        monkeypatch.setenv("IBS_PASSWORD", "")
-        with caplog.at_level(logging.WARNING):
-            Settings(_env_file=None)
-        assert "IBS credentials not configured" in caplog.text
+        assert (
+            "IBS credentials not configured (IBS_USERNAME / IBS_SSH_PRIVATE_KEY empty)"
+            in caplog.text
+        )
 
     def test_configured_ibs_credentials_no_warning(
         self,
@@ -375,10 +392,223 @@ class TestIbsCredentialWarning:
     ) -> None:
         monkeypatch.setenv("JWT_SECRET_KEY", "a" * 32)
         monkeypatch.setenv("IBS_USERNAME", "jdoe")
-        monkeypatch.setenv("IBS_PASSWORD", "secret-password-here")
+        monkeypatch.setenv("IBS_SSH_PRIVATE_KEY", fictional_settings_value())
         with caplog.at_level(logging.WARNING):
             Settings(_env_file=None)
         assert "IBS credentials not configured" not in caplog.text
+
+
+@pytest.mark.unit
+class TestIbsUsernameValidation:
+    """`IBS_USERNAME` (docs/features/integrations/ibs-integration.md, IBS API
+    Credentials): a non-empty value consists only of U+0021 to U+007E other
+    than `"` and `\\`; any other value fails startup naming the variable."""
+
+    @pytest.mark.parametrize(
+        "value", ["jdoe", "svc-sentinel_01", "a.b@c", "!~#$%&'()*+,-./:;<=>?[]^`{|}"]
+    )
+    def test_admissible_value_is_accepted_unchanged(
+        self, monkeypatch: pytest.MonkeyPatch, value: str
+    ) -> None:
+        monkeypatch.setenv("JWT_SECRET_KEY", "a" * 32)
+        monkeypatch.setenv("IBS_USERNAME", value)
+        assert Settings(_env_file=None).ibs_username == value
+
+    def test_empty_value_is_not_configured(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("JWT_SECRET_KEY", "a" * 32)
+        monkeypatch.setenv("IBS_USERNAME", "")
+        assert Settings(_env_file=None).ibs_username == ""
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            'jdoe"',
+            "jdoe\\",
+            "j doe",
+            " jdoe",
+            "jdoe\n",
+            "jdoe\t",
+            "jdoe\x00",
+            "jdoe\x7f",
+            "jdo\u00e9",
+            "jdoe\u00a0",
+        ],
+        ids=[
+            "double_quote",
+            "backslash",
+            "inner_space",
+            "leading_space",
+            "trailing_newline",
+            "tab",
+            "nul",
+            "del",
+            "non_ascii",
+            "no_break_space",
+        ],
+    )
+    def test_inadmissible_value_fails_startup(
+        self, monkeypatch: pytest.MonkeyPatch, value: str
+    ) -> None:
+        monkeypatch.setenv("JWT_SECRET_KEY", "a" * 32)
+        with pytest.raises(ValidationError) as raised:
+            Settings(_env_file=None, ibs_username=value)
+        [error] = raised.value.errors(include_url=False, include_input=False)
+        assert error["loc"] == ("ibs_username",)
+        assert "Invalid IBS_USERNAME:" in error["msg"]
+        assert "input_value" not in _rendered(raised.value)
+
+
+_KEY_MARKER = "FictionalKeyMarker"
+"""Text embedded in rejected key values; never rendered in an error."""
+
+
+def _key_file() -> bytes:
+    return openssh_file(fictional_ed25519_key())
+
+
+@functools.cache
+def _rejected_key_values() -> dict[str, str]:
+    """Every rejected `IBS_SSH_PRIVATE_KEY` shape, by case id."""
+    data = _key_file()
+    body = data[:-1]
+    begin, *_, end = body.split(b"\n")
+    marker = _KEY_MARKER.encode()
+    valid = encode_settings_value(data)
+    other_key = openssh_file(fictional_ed25519_key("sentinel-other-fictional-key"))
+    return {
+        "invalid_base64": f"{_KEY_MARKER}!!",
+        "missing_padding": _padded_encoding(data).rstrip("="),
+        "non_canonical_padding_bits": _with_non_canonical_bits(data),
+        "trailing_newline": valid + "\n",
+        "line_wrapped": valid[:64] + "\n" + valid[64:],
+        "leading_space": " " + valid,
+        "non_ascii": valid + "\u00e9",
+        "multi_line_file_not_encoded": data.decode("ascii"),
+        "text_before_armor": encode_settings_value(marker + b"\n" + data),
+        "text_after_armor": encode_settings_value(data + marker + b"\n"),
+        "two_keys": encode_settings_value(data + other_key),
+        "two_final_line_feeds": encode_settings_value(data + b"\n"),
+        "crlf_separators": encode_settings_value(data.replace(b"\n", b"\r\n")),
+        "no_final_line_feed_but_cr": encode_settings_value(body + b"\r"),
+        "armor_only": encode_settings_value(begin + b"\n" + end + b"\n"),
+        "corrupt_body": encode_settings_value(
+            begin + b"\n" + marker + b"\n" + end + b"\n"
+        ),
+        "pem_private_key": encode_settings_value(
+            fictional_ed25519_key().private_bytes(
+                serialization.Encoding.PEM,
+                serialization.PrivateFormat.PKCS8,
+                serialization.NoEncryption(),
+            )
+        ),
+        "encrypted": encode_settings_value(
+            openssh_file(fictional_ed25519_key(), passphrase=b"fictional-passphrase")
+        ),
+        "ecdsa": encode_settings_value(
+            openssh_file(ec.generate_private_key(ec.SECP256R1()))
+        ),
+        "rsa": encode_settings_value(
+            openssh_file(rsa.generate_private_key(public_exponent=65537, key_size=2048))
+        ),
+    }
+
+
+def _padded_encoding(data: bytes) -> str:
+    """The encoding of `data`, or of the same key file without its final LF,
+    whichever ends with base64 padding; both files are valid."""
+    encoded = encode_settings_value(data)
+    return encoded if encoded.endswith("=") else encode_settings_value(data[:-1])
+
+
+def _with_non_canonical_bits(data: bytes) -> str:
+    """A valid key file encoded with non-zero unused bits in its last base64
+    symbol, which a lenient decoder accepts as the same bytes."""
+    encoded = _padded_encoding(data)
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+    stem = encoded.rstrip("=")
+    last = alphabet.index(stem[-1])
+    return stem[:-1] + alphabet[last | 1] + encoded[len(stem) :]
+
+
+@pytest.mark.unit
+class TestIbsSshPrivateKeyValidation:
+    """`IBS_SSH_PRIVATE_KEY` (docs/features/integrations/ibs-integration.md,
+    IBS API Credentials): the one-line standard padded base64 encoding of
+    exactly one unencrypted OpenSSH Ed25519 private-key file. Any other
+    non-empty value fails startup naming only the variable, never trimmed,
+    and the error carries no part of the value or a parser detail."""
+
+    def test_valid_value_is_accepted_unchanged(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        value = fictional_settings_value()
+        monkeypatch.setenv("JWT_SECRET_KEY", "a" * 32)
+        monkeypatch.setenv("IBS_SSH_PRIVATE_KEY", value)
+        key = Settings(_env_file=None).ibs_ssh_private_key
+        assert isinstance(key, SecretStr)
+        assert key.get_secret_value() == value
+
+    def test_file_without_final_line_feed_is_accepted(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        value = encode_settings_value(_key_file()[:-1])
+        monkeypatch.setenv("JWT_SECRET_KEY", "a" * 32)
+        monkeypatch.setenv("IBS_SSH_PRIVATE_KEY", value)
+        assert Settings(_env_file=None).ibs_ssh_private_key.get_secret_value() == value
+
+    @pytest.mark.parametrize("unset", [True, False], ids=["unset", "empty"])
+    def test_empty_or_unset_is_not_configured(
+        self, monkeypatch: pytest.MonkeyPatch, unset: bool
+    ) -> None:
+        monkeypatch.setenv("JWT_SECRET_KEY", "a" * 32)
+        if unset:
+            monkeypatch.delenv("IBS_SSH_PRIVATE_KEY", raising=False)
+        else:
+            monkeypatch.setenv("IBS_SSH_PRIVATE_KEY", "")
+        assert Settings(_env_file=None).ibs_ssh_private_key.get_secret_value() == ""
+
+    @pytest.mark.parametrize("case", sorted(_rejected_key_values()))
+    def test_invalid_value_fails_startup_without_rendering_it(
+        self, monkeypatch: pytest.MonkeyPatch, case: str
+    ) -> None:
+        value = _rejected_key_values()[case]
+        monkeypatch.setenv("JWT_SECRET_KEY", "a" * 32)
+        with pytest.raises(ValidationError) as raised:
+            Settings(_env_file=None, ibs_ssh_private_key=value)
+
+        [error] = raised.value.errors(include_url=False, include_input=False)
+        assert error["loc"] == ("ibs_ssh_private_key",)
+        assert error["msg"] == (
+            "Value error, Invalid IBS_SSH_PRIVATE_KEY: must be the one-line "
+            "base64 encoding of one unencrypted OpenSSH Ed25519 private-key file."
+        )
+        rendered = _rendered(raised.value)
+        assert "input_value" not in rendered
+        assert _KEY_MARKER not in rendered
+        assert value not in rendered
+        for fragment in (value[:16], value[-16:]):
+            assert fragment not in rendered
+        assert "password" not in rendered.lower()
+
+    def test_value_read_from_the_environment_is_rejected(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The realistic path: an encoded file with a trailing newline."""
+        monkeypatch.setenv("JWT_SECRET_KEY", "a" * 32)
+        monkeypatch.setenv("IBS_SSH_PRIVATE_KEY", fictional_settings_value() + "\n")
+        with pytest.raises(ValidationError, match="Invalid IBS_SSH_PRIVATE_KEY:"):
+            Settings(_env_file=None)
+
+    def test_not_listed_in_env_example(self) -> None:
+        env_example = Path(__file__).resolve().parents[1] / ".env.example"
+        text = env_example.read_text(encoding="utf-8")
+        assert "IBS_SSH_PRIVATE_KEY" not in text
+        assert "IBS_PASSWORD" not in text
+
+    def test_ibs_password_setting_no_longer_exists(self) -> None:
+        assert "ibs_password" not in Settings.model_fields
 
 
 @pytest.mark.unit
@@ -595,12 +825,13 @@ class TestIbsDownloadBaseUrlValidation:
 
 @pytest.mark.unit
 class TestHttpsApiPrefixValidation:
-    """`SMELT_API_URL` and `AIMAAS_API_URL` startup validation and
-    canonicalization (`docs/features/packages/product-catalog.md`, SMELT
+    """`SMELT_API_URL`, `AIMAAS_API_URL`, and `IBS_API_URL` startup validation
+    and canonicalization (`docs/features/packages/product-catalog.md`, SMELT
     Integration and AIMAAS Integration -> Origin, Authentication, and
-    Pagination; Configuration).
+    Pagination; Configuration; `docs/features/integrations/ibs-integration.md`,
+    Origins and Authentication).
 
-    Both settings follow the same rules, so every case runs for each:
+    The settings follow the same rules, so every case runs for each:
     HTTPS, a hostname, no user information, query, or fragment, a permitted
     non-default port, and trailing-slash removal, plus malformed-URL
     rejection. The stricter `IBS_DOWNLOAD_BASE_URL` path rules are
@@ -611,8 +842,9 @@ class TestHttpsApiPrefixValidation:
         params=[
             ("SMELT_API_URL", "smelt_api_url", "https://smelt.suse.de/api"),
             ("AIMAAS_API_URL", "aimaas_api_url", "https://aimaas.suse.de/api"),
+            ("IBS_API_URL", "ibs_api_url", "https://api.suse.de"),
         ],
-        ids=["smelt", "aimaas"],
+        ids=["smelt", "aimaas", "ibs_api"],
     )
     def setting(self, request: pytest.FixtureRequest) -> tuple[str, str, str]:
         """`(environment variable, Settings attribute, default)`."""
@@ -945,15 +1177,16 @@ _CONFIGURED_SECRETS: dict[str, str] = {
     "DATABASE_URL": f"postgresql+asyncpg://sentinel:{_fictional('db')}@db/sentinel",
     "REDIS_URL": f"redis://:{_fictional('redis')}@redis:6379/0",
     "CELERY_BROKER_URL": f"redis://:{_fictional('broker')}@redis:6379/1",
-    "IBS_PASSWORD": _fictional("ibs"),
+    "IBS_SSH_PRIVATE_KEY": fictional_settings_value(),
     "NVD_API_KEY": _fictional("nvd"),
     "GITHUB_TOKEN": _fictional("github"),
 }
 _SHORT_JWT_SECRET_KEY = _fictional("jwt")
 """Shorter than the 32-character minimum."""
-_SECRET_FRAGMENTS = tuple(
-    _fictional(name)
-    for name in ("db", "redis", "broker", "ibs", "nvd", "github", "jwt")
+_SECRET_FRAGMENTS = (
+    *(_fictional(name) for name in ("db", "redis", "broker", "nvd", "github", "jwt")),
+    _CONFIGURED_SECRETS["IBS_SSH_PRIVATE_KEY"][:24],
+    _CONFIGURED_SECRETS["IBS_SSH_PRIVATE_KEY"][-24:],
 )
 
 
@@ -1050,8 +1283,8 @@ class TestGitCloneBaseDir:
 class TestSecretFieldRedaction:
     """Secret field redaction, covering two distinct mechanisms:
 
-    - `SecretStr` fields (`jwt_secret_key`, `ibs_password`, `nvd_api_key`,
-      `github_token`):
+    - `SecretStr` fields (`jwt_secret_key`, `ibs_ssh_private_key`,
+      `nvd_api_key`, `github_token`):
       masked in both `repr()`/`str()` AND `model_dump()`/`model_dump_json()`.
     - `Field(..., repr=False)` URL fields (`database_url`, `redis_url`,
       `celery_broker_url`): the field is entirely excluded from `repr()`,
@@ -1069,15 +1302,16 @@ class TestSecretFieldRedaction:
         assert secret_value not in repr(s)
         assert secret_value not in str(s)
 
-    def test_repr_does_not_expose_ibs_password(
+    def test_repr_and_dump_do_not_expose_ibs_ssh_private_key(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        secret_value = "super-secret-ibs-password"
+        secret_value = fictional_settings_value()
         monkeypatch.setenv("JWT_SECRET_KEY", "a" * 32)
-        monkeypatch.setenv("IBS_PASSWORD", secret_value)
+        monkeypatch.setenv("IBS_SSH_PRIVATE_KEY", secret_value)
         s = Settings(_env_file=None)
-        assert secret_value not in repr(s)
+        for rendered in (repr(s), str(s), s.model_dump_json()):
+            assert secret_value[:24] not in rendered
 
     def test_repr_does_not_expose_nvd_api_key(
         self,

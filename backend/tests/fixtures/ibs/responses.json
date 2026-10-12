@@ -1,0 +1,83 @@
+{
+  "captured_at": "2026-10-12",
+  "api_url": "https://api.suse.de",
+  "project": "SUSE:SLE-15-SP6:Update",
+  "documents": {
+    "sourceinfo_single_linked.xml": {
+      "method": "GET",
+      "path": "/source/SUSE:SLE-15-SP6:Update",
+      "query": [["view", "info"], ["nofilename", "1"], ["package", "openssh"]],
+      "status": 200
+    },
+    "sourceinfo_multiple.xml": {
+      "method": "GET",
+      "path": "/source/SUSE:SLE-15-SP6:Update",
+      "query": [
+        ["view", "info"],
+        ["nofilename", "1"],
+        ["package", "openssh"],
+        ["package", "libxml2"],
+        ["package", "sentinel-nonexistent-pkg"]
+      ],
+      "status": 200
+    },
+    "diff_first_observation.xml": {
+      "method": "POST",
+      "path": "/source/SUSE:SLE-15-SP6:Update/sudo",
+      "query": [
+        ["cmd", "diff"],
+        ["view", "xml"],
+        ["onlyissues", "1"],
+        ["expand", "1"],
+        ["orev", "0"],
+        ["rev", "f6cf5398175f44ce4265e2381f6309b2"]
+      ],
+      "status": 200
+    },
+    "diff_added_changed.xml": {
+      "method": "POST",
+      "path": "/source/SUSE:SLE-15-SP6:Update/libxml2",
+      "query": [
+        ["cmd", "diff"],
+        ["view", "xml"],
+        ["onlyissues", "1"],
+        ["expand", "1"],
+        ["orev", "746089c90539b6ff4a924ce513b6b800"],
+        ["rev", "de84bf76520480292946d884daf7308a"]
+      ],
+      "status": 200
+    },
+    "diff_deleted.xml": {
+      "method": "POST",
+      "path": "/source/SUSE:SLE-15-SP6:Update/sudo",
+      "query": [
+        ["cmd", "diff"],
+        ["view", "xml"],
+        ["onlyissues", "1"],
+        ["expand", "1"],
+        ["orev", "f6cf5398175f44ce4265e2381f6309b2"],
+        ["rev", "f736184f96b348a33510f43cdfa12bc9"]
+      ],
+      "status": 200
+    },
+    "diff_empty.xml": {
+      "method": "POST",
+      "path": "/source/SUSE:SLE-15-SP6:Update/sudo",
+      "query": [
+        ["cmd", "diff"],
+        ["view", "xml"],
+        ["onlyissues", "1"],
+        ["expand", "1"],
+        ["orev", "f6cf5398175f44ce4265e2381f6309b2"],
+        ["rev", "f6cf5398175f44ce4265e2381f6309b2"]
+      ],
+      "status": 200
+    }
+  },
+  "unauthenticated": {
+    "status": 401,
+    "content_type": "text/html",
+    "www_authenticate": ["Signature realm=\"Use your developer account\",headers=\"(created)\""],
+    "set_cookie": []
+  }
+}

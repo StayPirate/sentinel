@@ -1254,12 +1254,12 @@ commit proceeds — the same treatment already applied to `shellcheck`
 and `shfmt` (see `docs/conventions.md`, Shell Scripting). No specific
 version is pinned locally; any recent release is expected to behave
 consistently for this use case. `.gitleaks.toml` at the repository
-root extends gitleaks' default rule set and defines no allowlist
-today — verification during implementation confirmed the fictional
-values already used in this repository (e.g., the fictional bcrypt
-hash, `not-for-production` markers) do not trigger any default rule.
-Should a real false positive be observed in the future, it must be
-allowlisted by regex pattern — never by path — in that file.
+root extends gitleaks' default rule set. The fictional values used in
+this repository (e.g., the fictional bcrypt hash, `not-for-production`
+markers) do not trigger any default rule; each confirmed false positive
+of a non-secret value is allowlisted in that file by a regex pattern —
+never by path — with a comment explaining why the value is not a
+secret.
 
 To activate after cloning:
 

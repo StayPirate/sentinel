@@ -1,0 +1,29 @@
+<sourceinfolist>
+  <sourceinfo package="openssh" rev="12" vrev="6.50" srcmd5="ab2ccc8c1ee7376c2a639ee600caa123" lsrcmd5="b95163ee54a56a78a4a48b352254f541" verifymd5="9f6b908f834eacb858d393c1ea05f070">
+    <linked project="SUSE:SLE-15-SP6:Update" package="openssh.45727"/>
+  </sourceinfo>
+  <sourceinfo package="libxml2" rev="14" vrev="7.1" srcmd5="de84bf76520480292946d884daf7308a" lsrcmd5="8f9fa0e98578a727496b853363ba4771" verifymd5="c7f98b249f9329dba6018335af352aa1">
+    <originproject>SUSE:SLE-15-SP5:Update</originproject>
+    <linked project="SUSE:SLE-15-SP6:GA" package="libxml2"/>
+    <linked project="SUSE:SLE-15-SP5:Update" package="libxml2"/>
+    <linked project="SUSE:SLE-15-SP6:Update" package="libxml2.45368"/>
+    <linked project="SUSE:SLE-15-SP6:GA" package="libxml2.45368"/>
+    <linked project="SUSE:SLE-15-SP5:Update" package="libxml2.45368"/>
+  </sourceinfo>
+  <sourceinfo package="sentinel-nonexistent-pkg">
+    <error>404 package 'sentinel-nonexistent-pkg' does not exist</error>
+    <linked project="SUSE:SLE-15-SP6:GA" package="sentinel-nonexistent-pkg"/>
+    <linked project="SUSE:SLE-15-SP5:Update" package="sentinel-nonexistent-pkg"/>
+    <linked project="SUSE:SLE-15-SP5:GA" package="sentinel-nonexistent-pkg"/>
+    <linked project="SUSE:SLE-15-SP4:Update" package="sentinel-nonexistent-pkg"/>
+    <linked project="SUSE:SLE-15-SP4:GA" package="sentinel-nonexistent-pkg"/>
+    <linked project="SUSE:SLE-15-SP3:Update" package="sentinel-nonexistent-pkg"/>
+    <linked project="SUSE:SLE-15-SP3:GA" package="sentinel-nonexistent-pkg"/>
+    <linked project="SUSE:SLE-15-SP2:Update" package="sentinel-nonexistent-pkg"/>
+    <linked project="SUSE:SLE-15-SP2:GA" package="sentinel-nonexistent-pkg"/>
+    <linked project="SUSE:SLE-15-SP1:Update" package="sentinel-nonexistent-pkg"/>
+    <linked project="SUSE:SLE-15-SP1:GA" package="sentinel-nonexistent-pkg"/>
+    <linked project="SUSE:SLE-15:Update" package="sentinel-nonexistent-pkg"/>
+    <linked project="SUSE:SLE-15:GA" package="sentinel-nonexistent-pkg"/>
+  </sourceinfo>
+</sourceinfolist>

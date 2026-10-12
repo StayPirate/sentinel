@@ -18,6 +18,12 @@ from pydantic import (
 )
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
+from app.core.ibs_ssh_key import (
+    INVALID_USERNAME_MESSAGE,
+    is_valid_ibs_username,
+    load_ibs_ssh_private_key,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -32,11 +38,13 @@ CommaSeparated = Annotated[list[str], NoDecode, BeforeValidator(_split_comma)]
 
 
 def _validate_https_api_prefix(value: str, variable: str) -> str:
-    """Validate and canonicalize an anonymous HTTPS API prefix setting.
+    """Validate and canonicalize an HTTPS API prefix setting.
 
     Enforces the prefix rules of docs/features/packages/product-catalog.md
-    (Configuration): HTTPS; a hostname; no user information, query, or
-    fragment; a non-default port permitted; any trailing slash removed.
+    (Configuration) and docs/features/integrations/ibs-integration.md
+    (Origins and Authentication): HTTPS; a hostname; no user information,
+    query, or fragment; a non-default port permitted; any trailing slash
+    removed.
     Malformed values (including whitespace or control characters and an
     invalid port) are rejected. Every message names `variable`.
     """
@@ -127,7 +135,7 @@ class Settings(BaseSettings):
     # IBS Integration
     ibs_api_url: str = "https://api.suse.de"
     ibs_username: str = ""
-    ibs_password: SecretStr = SecretStr("")
+    ibs_ssh_private_key: SecretStr = SecretStr("")
     ibs_download_base_url: str = "https://download.suse.de/ibs"
 
     # SMELT / AIMAAS
@@ -321,6 +329,42 @@ class Settings(BaseSettings):
 
         return value[:-1] if path.endswith("/") else value
 
+    @field_validator("ibs_api_url")
+    @classmethod
+    def _validate_ibs_api_url(cls, value: str) -> str:
+        """Validate and canonicalize IBS_API_URL at startup.
+
+        See docs/features/integrations/ibs-integration.md (Origins and
+        Authentication).
+        """
+        return _validate_https_api_prefix(value, "IBS_API_URL")
+
+    @field_validator("ibs_username")
+    @classmethod
+    def _validate_ibs_username(cls, value: str) -> str:
+        """Reject a non-empty IBS_USERNAME that cannot be a `keyId`.
+
+        See docs/features/integrations/ibs-integration.md (IBS API
+        Credentials). Empty means "not configured".
+        """
+        if value and not is_valid_ibs_username(value):
+            raise ValueError(INVALID_USERNAME_MESSAGE)
+        return value
+
+    @field_validator("ibs_ssh_private_key")
+    @classmethod
+    def _validate_ibs_ssh_private_key(cls, value: SecretStr) -> SecretStr:
+        """Reject a non-empty IBS_SSH_PRIVATE_KEY that is not one unencrypted
+        Ed25519 OpenSSH key in its one-line base64 form.
+
+        See docs/features/integrations/ibs-integration.md (IBS API
+        Credentials). The message names only the variable.
+        """
+        encoded = value.get_secret_value()
+        if encoded:
+            load_ibs_ssh_private_key(encoded)
+        return value
+
     @field_validator("git_clone_base_dir")
     @classmethod
     def _validate_git_clone_base_dir(cls, value: str) -> str:
@@ -361,11 +405,27 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _validate_ibs_settings(self) -> Settings:
-        """Warn if IBS credentials are not configured."""
-        if not self.ibs_username or not self.ibs_password.get_secret_value():
+        """Warn if the IBS API credentials are not configured.
+
+        See docs/features/integrations/ibs-integration.md (IBS API
+        Credentials); the warning names only the empty settings.
+        """
+        empty = [
+            name
+            for name, configured in (
+                ("IBS_USERNAME", bool(self.ibs_username)),
+                (
+                    "IBS_SSH_PRIVATE_KEY",
+                    bool(self.ibs_ssh_private_key.get_secret_value()),
+                ),
+            )
+            if not configured
+        ]
+        if empty:
             logger.warning(
-                "IBS credentials not configured (IBS_USERNAME / IBS_PASSWORD "
-                "empty). IBS-dependent fetchers will fail at runtime."
+                "IBS credentials not configured (%s empty). Credentialed IBS "
+                "API operations will fail at runtime.",
+                " / ".join(empty),
             )
         return self
 
