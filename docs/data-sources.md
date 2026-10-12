@@ -374,9 +374,13 @@ repositories.
     to more than one Product projection. Consumers need the Product linkage
     provided by SMELT rather than deriving Product identity from the target
     name.
-- **Access**: REST API at `api.suse.de` (HTTP Basic Auth or API tokens).
-  Anonymous Product repository downloads use the configurable HTTPS
-  MirrorCache front door at `download.suse.de/ibs`. A repository artifact may
+- **Access**: REST API at `api.suse.de`. Every consumed API operation requires
+  SSH-signature authentication (`WWW-Authenticate: Signature`) with a dedicated
+  account and its Ed25519 key; HTTP Basic credentials and OBS API tokens are
+  not used, and OBS API tokens authorize only trigger operations. The complete
+  contract is in `docs/features/integrations/ibs-integration.md` (Origins and
+  Authentication). Anonymous Product repository downloads use the
+  configurable HTTPS MirrorCache front door at `download.suse.de/ibs`. A repository artifact may
   perform one validated same-path HTTP 302 redirect to `dist.suse.de`; Sentinel never
   sends or forwards IBS API credentials on this path. Key API endpoints:
   - `GET /source/{project}?view=info&nofilename=1&package={package}...` —
@@ -1215,10 +1219,10 @@ feature documentation (not its implementation status):
 | `sync_smelt_products` | SMELT | Daily at 01:00 UTC | None | N/A (internal) | Product catalog and repository mappings; dispatches active-ticket Product catalog backfill when Products become newly current | [product-catalog.md](features/packages/product-catalog.md#fetcher-sync_smelt_products) | Complete |
 | `sync_aimaas_lifecycle` | AIMAAS | Daily at 02:15 UTC | None | N/A (internal) | Product lifecycle dates via paginated list with `all_fields=true`; field-level clearing on null change; lifecycle dates retained on product disappearance | [product-catalog.md](features/packages/product-catalog.md#fetcher-sync_aimaas_lifecycle) | Complete |
 | `sync_aimaas_thresholds` | AIMAAS | Daily at 02:45 UTC | None | N/A (internal) | CVSS thresholds per product via in-memory join (product list + threshold list); threshold clearing to NULL on disappearance with eligibility re-evaluation | [product-catalog.md](features/packages/product-catalog.md#fetcher-sync_aimaas_thresholds) | Complete |
-| `detect_ibs_track_releases` | IBS | Daily at 02:00 UTC | HTTP Basic / API token (internal) | N/A (internal) | Reconciles existing active-Ticket IBS tracks from targeted expanded source state; one successfully examined checkpoint per track | [ibs-track-release-detection.md](features/packages/ibs-track-release-detection.md#fetcher-detect_ibs_track_releases) | Complete |
+| `detect_ibs_track_releases` | IBS | Daily at 02:00 UTC | SSH signature (dedicated IBS account) | N/A (internal) | Reconciles existing active-Ticket IBS tracks from targeted expanded source state; one successfully examined checkpoint per track | [ibs-track-release-detection.md](features/packages/ibs-track-release-detection.md#fetcher-detect_ibs_track_releases) | Complete |
 | `detect_ibs_product_releases` | IBS Product repositories | Daily at 04:00 UTC | None | N/A (internal) | Reconciles unreleased occurrences below active-Ticket IBS tracks from bounded, integrity-validated stable security updateinfo advisories and exact source-package entries | [ibs-product-release-detection.md](features/packages/ibs-product-release-detection.md#fetcher-detect_ibs_product_releases) | Complete |
 | `evaluate_lifecycle_transitions` | Local (no external source) | Daily at 04:15 UTC | N/A | N/A | Reconciles automatic eligibility and Ticket gate state from derived Product lifecycle and package-tree actionability | [product-lifecycle-transitions.md](features/packages/product-lifecycle-transitions.md#fetcher-evaluate_lifecycle_transitions) | Complete |
-| `sync_ibs_requests` | IBS | Daily at 02:30 UTC | HTTP Basic / API token (internal) | N/A (internal) | Cursorless complete state scan of active-Ticket IBS tracks; reconciles normalized request actions, exact track correlations, provenance, and delivery, with generic package-add/Ticket-convergence catch-up and RabbitMQ request-number acceleration using the same boundary | [ibs-submission-tracking.md](features/packages/ibs-submission-tracking.md#fetcher-sync_ibs_requests) | Complete |
+| `sync_ibs_requests` | IBS | Daily at 02:30 UTC | SSH signature (dedicated IBS account) | N/A (internal) | Cursorless complete state scan of active-Ticket IBS tracks; reconciles normalized request actions, exact track correlations, provenance, and delivery, with generic package-add/Ticket-convergence catch-up and RabbitMQ request-number acceleration using the same boundary | [ibs-submission-tracking.md](features/packages/ibs-submission-tracking.md#fetcher-sync_ibs_requests) | Complete |
 | `sync_cisa_kev` | CISA KEV | 4x daily (`0 4,10,18,22 * * *`) | None | None (single JSON file) | KEV date_added, reference_url, CWE classifications | [cve-sync-kev.md](features/tickets/cve-sync-kev.md#fetcher-definition) | Complete |
 | `sync_epss_scores` | FIRST.org EPSS | Daily at 14:00 UTC | None | 1000 req/min (public) | EPSS score + percentile per CVE | [cve-sync-epss.md](features/tickets/cve-sync-epss.md#fetcher-definition) | Complete |
 | `sync_ghsa_advisories` | GitHub Advisory DB | Every 3 hours (`0 */3 * * *`) | GitHub token (free) | 5,000 req/hour with token | CVSS GitHub (v3.x + v4.0, `provider_name = "GitHub"`), GHSA-ID (as CVEExternalIdentifier), CWE, affected versions (multi-ecosystem, `source_container = "ghsa"`), package-name candidates, references | [cve-sync-ghsa.md](features/tickets/cve-sync-ghsa.md#fetcher-definition) | Complete |

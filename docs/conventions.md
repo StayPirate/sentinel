@@ -968,7 +968,7 @@ Classification:
 
 | Field nature | Type | Example |
 |---|---|---|
-| Pure secret (signing key, password, token, API key) | `SecretStr` | `jwt_secret_key: SecretStr` |
+| Pure secret (signing key, private key, password, token, API key) | `SecretStr` | `jwt_secret_key: SecretStr` |
 | URL that may embed credentials (`user:password@host`) | `str` with `Field(..., repr=False)` | `database_url: str = Field(default="...", repr=False)` |
 | Non-secret configuration (usernames, public URLs, flags) | plain type (default) | `ibs_api_url: str = "..."` |
 
@@ -997,13 +997,15 @@ Rules:
   error details and logs, or sends it malformed. Empty or unset keeps its
   documented meaning. A secret that the HTTP library encodes before it
   reaches a header, such as an HTTP Basic password, is not subject to this
-  rule
+  rule. Neither is a secret that is never sent, such as a private key from
+  which only a request signature is derived; its owning specification defines
+  its format, which may include line breaks
 - URL fields that may embed credentials use `Field(..., repr=False)` to retain
   direct string compatibility with downstream libraries. `repr=False` hides
   the field from `repr(settings)` but is not a serialization or logging
   boundary
 - A username field (e.g., `ibs_username`) is NOT treated as a secret by this
-  convention; only the paired credential (e.g., `ibs_password`) is
+  convention; only the paired credential (e.g., `ibs_ssh_private_key`) is
 - When adding a new `Settings` field that holds credential material, apply
   this classification before implementation. If genuinely uncertain whether
   a value counts as a secret, treat it as a secret

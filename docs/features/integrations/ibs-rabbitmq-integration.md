@@ -594,13 +594,13 @@ The `unreachable` response has the same null field values as `disabled`, with
 | Malformed or unsupported delivery | Sanitized warning and ACK | None required; poison input is discarded |
 | Valid irrelevant delivery | ACK | None required |
 | Duplicate or out-of-order delivery | Current-state no-op and ACK | None required |
-| IBS HTTP failure after shared retries | Roll back incomplete work, count failure, ACK | Corresponding periodic fetcher or later event |
+| IBS HTTP failure after shared retries, or an IBS API credentials-not-configured or authentication failure | Roll back incomplete work, count failure, ACK | Corresponding periodic fetcher or later event |
 | PostgreSQL failure during delivery | Roll back, count failure, ACK | Corresponding periodic fetcher or later event |
 | Partial per-track package reconciliation | Keep committed siblings, count delivery failure, ACK | Track fetcher or later event for failed tracks |
 | Partial per-track request reconciliation | Keep committed siblings, count delivery failure, ACK | Request fetcher or later event for failed tracks |
 | Connection loss or broker cancellation | Cancel handler, no dead-channel settlement, reconnect with a new queue | Corresponding periodic fetcher for lost messages |
 | Redis unavailable | Continue consumption; heartbeat/status degrades | Next heartbeat write after Redis recovers |
-| Fatal TLS, authentication, exchange, or topology condition | Exit non-zero | Operator correction and orchestrator restart |
+| Fatal TLS, RabbitMQ authentication, exchange, or topology condition | Exit non-zero | Operator correction and orchestrator restart |
 | Consumer or corresponding fetcher disabled | No event acceleration or polling recovery from that component | Operator re-enables the component |
 
 ## Security

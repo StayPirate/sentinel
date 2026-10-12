@@ -364,6 +364,9 @@ Log statements MUST NEVER include:
 - Values obtained via `SecretStr.get_secret_value()` or any other raw
   credential material (per `docs/conventions.md`, Secret Field
   Typing).
+- Credentials derived from that material or issued by an upstream
+  service: `Authorization` header values, request signatures, and session
+  cookies.
 - Personal data, except as already permitted by the placeholder rules
   in `docs/conventions.md` ("Example Data in Documentation") and
   Guardrail #23.
@@ -457,7 +460,11 @@ keeps them free of secrets per the discipline above.
   not matched by exact value, because a short value (such as a
   development database password) would also mask ordinary words,
   identifiers, and paths that coincide with it; they remain masked
-  when they appear as URI userinfo.
+  when they appear as URI userinfo. A value containing line breaks,
+  such as a private key, is also matched line by line: each of its
+  lines at least 12 characters long is masked wherever it occurs, so
+  the value stays masked when it is logged with its line breaks escaped
+  or one line at a time.
 - **URI userinfo** — the userinfo component of any URI with an
   authority, for any scheme: `scheme://userinfo@host` becomes
   `scheme://***@host`. URIs without userinfo are unchanged.
@@ -465,7 +472,14 @@ keeps them free of secrets per the discipline above.
   `Authorization` or `Proxy-Authorization` header name
   (case-insensitive, `:` or `=` separator, optional quotes), preserving
   the authentication scheme when present:
-  `Authorization: Bearer ***`.
+  `Authorization: Bearer ***`. When the credential is a list of
+  parameters, which may contain quoted values, commas, and `=`
+  characters (as in the `Signature` scheme), the complete list is
+  masked: `Authorization: Signature ***`.
+- **Cookie header values** — the complete value following a `Cookie` or
+  `Set-Cookie` header name (case-insensitive), in a header line, in a
+  mapping representation, or in a name–value pair representation such
+  as `(b'Set-Cookie', b'...')`: `Set-Cookie: ***`.
 
 **Best-effort semantics.** The processor cannot recognize credentials
 it does not know (for example, a token in a URL query string or in a
@@ -538,8 +552,11 @@ are expected to be tested as follows:
   a third-party stdlib logger, and in rendered exception text; that
   records without sensitive content (CVE IDs, UUIDs, correlation IDs,
   ordinary URLs) are unchanged; that empty and short configured values
-  are never matched by exact value; that a redaction failure still
-  emits the record; and that the CLI configuration applies the same
+  are never matched by exact value; that a multi-line configured secret
+  is masked whole, with escaped line breaks, and line by line; that a
+  parameter-list `Authorization` value is masked completely; that cookie
+  values are masked in each listed representation; that a redaction
+  failure still emits the record; and that the CLI configuration applies the same
   processor.
 - Application-level log assertions (e.g., "a WARNING is logged when
   X occurs", prescribed by individual feature specs) use `caplog`
