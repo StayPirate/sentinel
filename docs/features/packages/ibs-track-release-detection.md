@@ -267,7 +267,8 @@ them fails, all local effects for that track roll back and the old checkpoint
 remains. The detector never creates a second audit event.
 
 If the Ticket moved to `Ignored` or `Duplicated` before the local transaction,
-the package-service operability guard rejects the mutation; the track returns a
+the operability guard (`ensure_ticket_operable()`) rejects the local unit under
+the lock, whether or not the track has qualifying evidence; the track returns a
 successful stale/inapplicable no-op and retains its old checkpoint. A track
 selected while active may still complete a
 factual update after a concurrent transition to `Resolved`, consistent with the
@@ -388,9 +389,15 @@ owned by `../integrations/ibs-rabbitmq-integration.md`.
 
 `DetectIbsTrackReleases.catch_up(ticket_id, session)` is a custom non-CVE
 catch-up under the shared `BaseFetcher` contract. After package-tree
-re-resolution has attempted its units, catch-up selects the specified Ticket's
-existing IBS tracks in `ANALYSIS` or `AFFECTED` whose parent Ticket has a CVE,
-and invokes the same per-track checkpoint algorithm:
+re-resolution has attempted its units, catch-up uses the supplied session only
+to verify the Ticket and enumerate its tracks. Selection applies the complete
+[Scope](#scope), including the active-Ticket condition: it selects the
+specified Ticket's existing IBS tracks in `ANALYSIS` or `AFFECTED` when that
+Ticket is active and has a CVE. A missing Ticket, a Ticket that is not active
+when catch-up starts, a Ticket without a CVE, or no relevant track returns
+silently. A `Resolved` Ticket needs no catch-up: a later regression to an
+active status registers Ticket convergence, which runs catch-up again.
+Catch-up invokes the same per-track checkpoint algorithm:
 
 - a track without a checkpoint uses `orev=0`;
 - a track with an equal current checkpoint is a no-op;
@@ -401,7 +408,12 @@ and invokes the same per-track checkpoint algorithm:
 
 Pre-finalization per-item failures are logged and processing continues. Partial
 success returns normally; when every selected track fails, `catch_up()`
-propagates according to the shared `run_catch_up` contract. Commit
+propagates according to the shared non-CVE `run_catch_up` contract by raising
+`FetcherError` with the sanitized message
+`"All {failed} IBS track release checks failed"`. That exception is not
+retryable under `run_catch_up`: IBS request failures, including missing
+credentials and rejected authentication, have already been classified per
+track, and the daily fetcher retries every still-eligible track. Commit
 exception/ambiguity and non-operational post-commit publication failure instead
 terminate the invocation under the per-track local outcome contract. Duplicate
 catch-up and concurrent periodic or event processing are safe under the
@@ -429,6 +441,7 @@ HTTP status codes, and bounded reason categories may be logged.
 | Condition | Per-track behavior | Recovery |
 |---|---|---|
 | IBS transport failure, timeout, 5xx, or rate limit after shared handling | `record_failed()` once for each dependent eligible track; keep checkpoints | Later event, manual run, catch-up, or scheduled run |
+| IBS API credentials not configured (`IBSCredentialsNotConfiguredError`) or authentication rejected (`IBSAuthenticationError`) on a source-info or source-diff request | Same as a transport failure of that request: `record_failed()` once for each dependent eligible track; keep checkpoints; no HTTP request is sent when credentials are not configured | Correct the account, key, key registration, or host clock; then a later event, manual run, catch-up, or scheduled run |
 | Source-info requested package missing, duplicate, malformed, or carrying an error | Fail each dependent track; valid sibling packages may continue | Same as above |
 | Malformed or interrupted source-info XML | Fail every dependent track in that request | Same as above |
 | Source diff HTTP or parser failure, including every 400 or 404 not identified as an unavailable checkpoint | Fail every dependent track sharing that diff | Same as above |
@@ -460,16 +473,26 @@ added by the logging infrastructure and are not repeated here.
 | `ibs_track_release_diff_failed` | WARNING | `codestream`, `package_name`, `affected_track_count`, `reason_category` | `http_status` |
 | `ibs_track_release_issue_ignored` | WARNING | `codestream`, `package_name`, `reason_category="invalid_cve_label"` | — |
 | `ibs_track_release_history_unavailable` | WARNING | `codestream`, `package_name`, `track_id`, `reason_category` | `http_status` |
-| `ibs_track_release_track_failed` | WARNING | `codestream`, `package_name`, `track_id`, `reason_category` | — |
+| `ibs_track_release_track_failed` | WARNING | `codestream`, `package_name`, `track_id`, `ticket_id`, `fetcher_name`, `reason_category` | — |
+| `ibs_track_release_track_stale` | WARNING | `codestream`, `package_name`, `track_id`, `ticket_id`, `reason_category="ticket_not_operable"` | — |
 
 `reason_category` is a bounded internal classification, not an upstream error
 string. At minimum it distinguishes transport, HTTP status, malformed XML,
 interrupted response, missing package, duplicate package, upstream package
 error, invalid source checksum, invalid issue structure, invalid CVE label,
-history unavailable, scope changed, Ticket not operable, stale checkpoint, and
-database/audit failure. Shared request failures produce one request-level log;
+history unavailable, scope changed, Ticket not operable, stale checkpoint,
+database/audit failure, IBS API credentials not configured, and each bounded
+`IBSAuthenticationError` reason (`unsupported_challenge`,
+`signature_rejected`). Shared request failures produce one request-level log;
 the metric still counts each affected track once. The detector does not log raw
 CVE label text when it is invalid.
+
+`ibs_track_release_track_failed` is emitted once for every track with a
+terminal `failed` outcome, including each track that depends on a failed shared
+request, so a per-Ticket catch-up identifies every failed item. It never
+repeats for a parsing stage or retry attempt. `ibs_track_release_track_stale`
+is emitted once for a track whose Ticket became `Ignored` or `Duplicated`
+before its local transaction; that track is a successful no-op.
 
 ## Background Fetcher
 
