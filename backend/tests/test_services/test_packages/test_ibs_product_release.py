@@ -917,6 +917,8 @@ class TestAudit:
 
         assert result == summary(selected=1, no_op=1)
         assert hook.kinds == [(occurrence.id, "no_op")]
+        # No repository result survives the first invocation.
+        assert replay.requests
         assert len(units.sessions) == 2
         assert await released_at(world, occurrence) == ISSUED_AT
         assert await events_of(world, occurrence.ticket_id) == [
