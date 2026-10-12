@@ -460,11 +460,7 @@ keeps them free of secrets per the discipline above.
   not matched by exact value, because a short value (such as a
   development database password) would also mask ordinary words,
   identifiers, and paths that coincide with it; they remain masked
-  when they appear as URI userinfo. A value containing line breaks,
-  such as a private key, is also matched line by line: each of its
-  lines at least 12 characters long is masked wherever it occurs, so
-  the value stays masked when it is logged with its line breaks escaped
-  or one line at a time.
+  when they appear as URI userinfo.
 - **URI userinfo** — the userinfo component of any URI with an
   authority, for any scheme: `scheme://userinfo@host` becomes
   `scheme://***@host`. URIs without userinfo are unchanged.
@@ -552,9 +548,8 @@ are expected to be tested as follows:
   a third-party stdlib logger, and in rendered exception text; that
   records without sensitive content (CVE IDs, UUIDs, correlation IDs,
   ordinary URLs) are unchanged; that empty and short configured values
-  are never matched by exact value; that a multi-line configured secret
-  is masked whole, with escaped line breaks, and line by line; that a
-  parameter-list `Authorization` value is masked completely; that cookie
+  are never matched by exact value; that a parameter-list
+  `Authorization` value is masked completely; that cookie
   values are masked in each listed representation; that a redaction
   failure still emits the record; and that the CLI configuration applies the same
   processor.

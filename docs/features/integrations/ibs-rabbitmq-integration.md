@@ -644,8 +644,8 @@ Implementation tests must cover:
 - cancellation cleanup and no settlement after channel or connection death;
 - transient reconnect delay, cap, fresh queue creation, and process-scoped
   counter retention across reconnects;
-- fatal TLS/authentication/exchange/topology classification versus transient
-  broker/network classification;
+- fatal TLS/RabbitMQ-authentication/exchange/topology classification versus
+  transient broker/network classification;
 - graceful completion within the 30-second shutdown deadline and forced
   cancellation after it;
 - PostgreSQL startup requirement and Redis-independent event processing;

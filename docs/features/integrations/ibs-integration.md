@@ -57,7 +57,7 @@ Applicability and Convergence).
 | Setting | Contract |
 |---|---|
 | `IBS_USERNAME` | Name of the IBS account, sent as the `keyId` of every signature. Not a secret. A non-empty value consists only of printable ASCII characters other than space, `"`, and `\` (U+0021 to U+007E except U+0022 and U+005C). |
-| `IBS_SSH_PRIVATE_KEY` | Secret. The complete content of one unencrypted OpenSSH-format Ed25519 private key registered for that account, including its `-----BEGIN OPENSSH PRIVATE KEY-----` and `-----END OPENSSH PRIVATE KEY-----` lines and its line breaks. A final line break is optional. |
+| `IBS_SSH_PRIVATE_KEY` | Secret. The standard padded base64 encoding, on one line without whitespace, of the complete OpenSSH private-key file of one unencrypted Ed25519 key registered for that account. The decoded file starts with its `-----BEGIN OPENSSH PRIVATE KEY-----` line and ends with its `-----END OPENSSH PRIVATE KEY-----` line, optionally followed by one line break; its lines are separated by LF. |
 
 The IBS API credentials are **configured** only when both settings are
 non-empty. When either is empty or unset, the application starts and logs a
@@ -65,18 +65,23 @@ warning naming the empty settings, and every credentialed IBS API operation
 fails as specified in [Request Authentication](#request-authentication).
 
 A non-empty value that violates its contract fails application startup with an
-error naming only the variable. For `IBS_SSH_PRIVATE_KEY`, this includes content
-that is not exactly one OpenSSH-format private key, a key encrypted with a
-passphrase, and every key type other than Ed25519. The error never includes the
-value, part of it, or a parser detail derived from it. Ed25519 is the only
-supported key type: the key is generated for this account alone, and a single
-signature algorithm leaves no algorithm or hash selection to negotiate.
+error naming only the variable. The value is never trimmed or otherwise
+altered. For `IBS_SSH_PRIVATE_KEY`, a violation includes invalid base64, a
+decoded value that is not exactly one OpenSSH-format private key file, a key
+encrypted with a passphrase, and every key type other than Ed25519. The error
+never includes the value, part of it, or a parser detail derived from it.
+Ed25519 is the only supported key type: the key is generated for this account
+alone, and a single signature algorithm leaves no algorithm or hash selection to
+negotiate. The single-line encoding lets every environment mechanism, including
+an environment file, carry the key unchanged.
 
-The private key is held only in process memory. Sentinel never writes it to a
-file, passes it to a subprocess or an SSH agent, sends it, logs it, or includes
-it in an error. Signatures are computed in process; Sentinel does not run
-`ssh-keygen`, `ssh-agent`, `osc`, or another external program to sign. Only the
-per-request signature derived from the key leaves the process.
+Sentinel never writes the private key to a file, sends it, logs it, includes it
+in an error, or gives it to a subprocess or an SSH agent as an argument, input,
+or file. Like every setting supplied through the environment, the encoded value
+is present in the environment that subprocesses inherit. Signatures are computed
+in process; Sentinel does not run `ssh-keygen`, `ssh-agent`, `osc`, or another
+external program to sign. Only the per-request signature derived from the key
+is sent.
 
 #### Request Authentication
 
@@ -92,14 +97,17 @@ per-request signature derived from the key leaves the process.
    is not involved. In particular, an HTTP 403 authorization failure follows
    the operation's escaping outcomes and is never answered with a signature.
 4. On HTTP 401, the client discards every session cookie it holds and examines
-   every `WWW-Authenticate` value of the response. It continues only when
+   every `WWW-Authenticate` value of the response. Challenges and their
+   parameters are parsed as defined by RFC 9110 (section 11.6.1, including
+   several challenges in one value); parameter names are case-insensitive, and
+   a quoted value is unescaped before validation and use. It continues only when
    exactly one challenge uses the scheme `Signature` (case-insensitive), that
    challenge's `realm` is non-empty and consists only of printable ASCII
    characters (U+0020 to U+007E), and its `headers` parameter is absent or
    exactly `(created)`. Other parameters of that challenge, and challenges of
    other schemes such as `Basic`, are ignored and never answered. In every
-   other case, the operation raises `IBSAuthenticationError` without a further
-   request.
+   other case, the operation raises `IBSAuthenticationError` with reason
+   `unsupported_challenge` and makes no further request.
 5. The client computes one signature:
    - `created` is the current Unix time in whole seconds, from the system
      clock;
@@ -119,8 +127,9 @@ per-request signature derived from the key leaves the process.
    Authorization: Signature keyId="{IBS_USERNAME}",algorithm="ssh",headers="(created)",created={created},signature="{signature}"
    ```
 
-7. An HTTP 401 response to the signed attempt raises `IBSAuthenticationError`;
-   the client does not sign again for that operation. Any other response is
+7. An HTTP 401 response to the signed attempt raises `IBSAuthenticationError`
+   with reason `signature_rejected`; the client does not sign again for that
+   operation. Any other response is
    the operation's response.
 
 Each attempt keeps the shared transport retry policy
@@ -134,14 +143,21 @@ The realm is taken from the challenge rather than compared with a fixed value.
 It is the SSHSIG namespace, but the signed message always has the fixed form
 above and the key is dedicated to this account, so a signature only
 authenticates the account to IBS. A changed realm text therefore does not
-interrupt operation. IBS validates `created`, so the clocks of hosts running
-Sentinel must be synchronized (`docs/deployment.md`, Clock Synchronization).
+interrupt operation. IBS may reject a signature whose `created` differs from its
+own clock; the accepted window is unverified. The clocks of hosts running
+Sentinel must therefore be synchronized (`docs/deployment.md`, Clock
+Synchronization).
 
+`IBSAuthenticationError` carries exactly one bounded reason,
+`unsupported_challenge` or `signature_rejected`, which consuming workflows may
+use as their reason category. It never carries challenge content, the realm,
+the account name, or response data.
 `IBSCredentialsNotConfiguredError` and `IBSAuthenticationError` are not `httpx`
 exceptions. They are therefore neither infrastructure failures nor retryable
 conditions under `docs/features/platform/networking.md` (Infrastructure Failure
-Classification, Celery Retry Classification): retrying cannot succeed until an
-operator corrects the account, key, or key registration.
+Classification, Celery Retry Classification). A prompt retry is not expected to
+succeed: recovery requires correcting the account, key, key registration, or
+host clock, or supporting a changed challenge.
 
 #### Session Reuse
 
@@ -164,19 +180,21 @@ inspection of OBS, osc, and osc-tiny, established:
   body from the IBS front end, no cookie, and exactly one challenge:
   `WWW-Authenticate: Signature realm="Use your developer account",headers="(created)"`.
   No `Basic` challenge is offered;
-- a signature by a key not registered for the named account, and an unknown
-  session cookie, each receive the same HTTP 401 challenge;
+- a signature for an unknown account by an unregistered Ed25519 key, and an
+  unknown session cookie, each receive the same HTTP 401 challenge;
 - a client signing with a registered Ed25519 key and the header form above
   succeeds for every operation family, and each successful signed login sets a
-  session cookie valid for 24 hours; and
+  session cookie with a 24-hour expiry; and
 - the OBS API itself authenticates through a front-end proxy, a web session,
   or HTTP Basic, while the IBS front end enforces the signature scheme. OBS API
   tokens are accepted only by trigger operations.
 
-A signed request produced by `IBSClient` itself has not yet been verified. Its
-implementation verifies one live signed read-only operation under External
-Integration Contract Verification (`docs/conventions.md`) before relying on
-authenticated responses.
+Not verified: whether IBS rejects a stale `created` and its accepted window,
+whether it accepts a resent signature, and a signed request produced by
+`IBSClient` itself. Documentation-only verification is not sufficient for the
+signer: no production workflow consumes `IBSClient` until one live signed
+read-only operation by `IBSClient` has succeeded under External Integration
+Contract Verification (`docs/conventions.md`).
 
 ### Key API Operations
 
@@ -661,7 +679,7 @@ The methods have these escaping outcomes:
 |---|---|
 | Invalid or empty method input, including an unbounded request search or invalid source-history control combination | `ValueError` before HTTP I/O |
 | IBS API credentials not configured: `IBS_USERNAME` or `IBS_SSH_PRIVATE_KEY` is empty or unset | `IBSCredentialsNotConfiguredError` before HTTP I/O, after method input validation |
-| Authentication rejected: HTTP 401 to the signed attempt, or an HTTP 401 without exactly one supported `Signature` challenge | `IBSAuthenticationError`; no further request for that operation |
+| Authentication rejected: HTTP 401 to the signed attempt, or an HTTP 401 without exactly one supported `Signature` challenge | `IBSAuthenticationError` with reason `signature_rejected` or `unsupported_challenge`; no further request for that operation |
 | Transport failure, timeout, rate limit, or HTTP error other than an authentication failure or an operation-specific incomplete-evidence response, including an HTTP 403 authorization failure, after shared retry handling | The corresponding `httpx` exception propagates with the response body excluded from application logs |
 | Malformed/interrupted source-info or source-diff XML, or its document-level schema failure | `IBSResponseDataError` |
 | One requested source-info package missing, duplicated, error-bearing, or carrying an invalid `srcmd5` | A per-package failed result in the returned mapping; valid sibling package results remain usable |
@@ -839,12 +857,13 @@ event bus.
 - IBS and OBS credentials are managed via environment variables
 - API calls are made server-side only; credentials are never exposed to
   the frontend
-- The IBS API account is a dedicated, non-personal account whose Ed25519 key is
-  generated for it and used for no other purpose (`docs/deployment.md`)
-- The IBS SSH private key never leaves the process; only per-request signatures
-  derived from it are sent, and only to the `IBS_API_URL` origin
-- Key material, `Authorization` header values, signatures, session cookies, and
-  `WWW-Authenticate` challenge content are never logged or included in an error
+- In staging and production, the IBS API account is a dedicated, non-personal
+  account whose Ed25519 key is generated for it and used for no other purpose
+- The IBS SSH private key is never sent; only per-request signatures derived
+  from it are sent, and only to the `IBS_API_URL` origin
+- Sentinel's log statements and errors never include key material,
+  `Authorization` header values, signatures, session cookies, or
+  `WWW-Authenticate` challenge content
 - Product repository downloads are anonymous and never attach or forward IBS
   API credentials, signatures, or session cookies
 - Operations that modify IBS/OBS state (future: rebuild triggers) require

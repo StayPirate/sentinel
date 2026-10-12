@@ -375,9 +375,9 @@ repositories.
     provided by SMELT rather than deriving Product identity from the target
     name.
 - **Access**: REST API at `api.suse.de`. Every consumed API operation requires
-  SSH-signature authentication (`WWW-Authenticate: Signature`) with a dedicated
-  account and its Ed25519 key; HTTP Basic credentials and OBS API tokens are
-  not used, and OBS API tokens authorize only trigger operations. The complete
+  SSH-signature authentication (`WWW-Authenticate: Signature`); Sentinel uses a
+  dedicated account and its Ed25519 key. HTTP Basic credentials are not used,
+  and OBS API tokens authorize only trigger operations. The complete
   contract is in `docs/features/integrations/ibs-integration.md` (Origins and
   Authentication). Anonymous Product repository downloads use the
   configurable HTTPS MirrorCache front door at `download.suse.de/ibs`. A repository artifact may

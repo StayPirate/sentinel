@@ -999,7 +999,7 @@ Rules:
   reaches a header, such as an HTTP Basic password, is not subject to this
   rule. Neither is a secret that is never sent, such as a private key from
   which only a request signature is derived; its owning specification defines
-  its format, which may include line breaks
+  its format
 - URL fields that may embed credentials use `Field(..., repr=False)` to retain
   direct string compatibility with downstream libraries. `repr=False` hides
   the field from `repr(settings)` but is not a serialization or logging

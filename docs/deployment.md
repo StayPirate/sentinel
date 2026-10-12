@@ -258,7 +258,7 @@ cd backend && uv run python -m app.cli manage-user create \
 | `CORS_ORIGINS` | `https://sentinel-staging.suse.de` | |
 | `DEBUG` | `false` | Never enable debug in staging |
 | `IBS_API_URL` | `https://api.suse.de` | |
-| `IBS_USERNAME` / `IBS_SSH_PRIVATE_KEY` | Dedicated non-personal IBS account and the content of its unencrypted Ed25519 private key | Multi-line secret: supply it through the secret store or an environment mechanism that preserves line breaks (Docker's `--env-file` cannot carry a multi-line value) |
+| `IBS_USERNAME` / `IBS_SSH_PRIVATE_KEY` | Dedicated non-personal IBS account and the one-line base64 encoding of its unencrypted Ed25519 private-key file | Supply the key through the environment or secret store; never log it |
 | `IBS_RABBITMQ_URL` | Credential-bearing AMQPS URL | Supply through the environment or secret store; never log it |
 
 #### Deployment Steps
@@ -327,7 +327,8 @@ Before the first production deployment:
       it. The key pair is Ed25519, generated without a passphrase for this
       account only, and not used elsewhere. `IBS_USERNAME` and
       `IBS_SSH_PRIVATE_KEY` supplied securely
-      (`docs/features/integrations/ibs-integration.md`, IBS API Credentials)
+      (`docs/features/integrations/ibs-integration.md`, IBS API Credentials
+      and Security)
 - [ ] IBS RabbitMQ credential-bearing URL supplied securely
 - [ ] `GITHUB_TOKEN` supplied (GitHub personal access token), or the
       `sync_ghsa_advisories` fetcher disabled through `FetcherConfig.enabled`;
@@ -1327,8 +1328,8 @@ timestamps for several security and correctness mechanisms:
 - JWT `exp` and `iat` claim verification
 - Session expiration enforcement
 - Cache TTL calculations (discovery document, JWKS)
-- IBS API request signatures, whose signed `created` timestamp IBS validates
-  against its own clock
+- IBS API request signatures, which IBS may reject when their signed
+  `created` timestamp differs from its own clock
 
 Clock skew between instances can shorten or lengthen time-based windows
 unpredictably. For example, if the instance generating an SSO state has
