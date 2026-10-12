@@ -111,7 +111,8 @@ class IBSResponseDataError(Exception):
     or an undecodable body), `interrupted_response` (the body ended with a
     transport failure), `invalid_document` (document-level shape), or
     `invalid_issue` (a source-diff issue with an unusable structure). Never
-    raised for an error response, whose body is not parsed.
+    raised for an error response, including a source-diff 400 whose body
+    is read only for the unavailable-revision classification.
     """
 
     def __init__(self, reason: ResponseDataReason) -> None:

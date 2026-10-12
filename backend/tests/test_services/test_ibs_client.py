@@ -1170,6 +1170,9 @@ class TestUnavailableOldRevision:
             b"<status><summary>"
             + _unavailable(FICTIONAL_OREV).encode()
             + b"</summary>",
+            b'<?xml version="1.0" encoding="x-fictional"?><status><summary>'
+            + _unavailable(FICTIONAL_OREV).encode()
+            + b"</summary></status>",
         ],
         ids=[
             "empty",
@@ -1193,6 +1196,7 @@ class TestUnavailableOldRevision:
             "nested_status",
             "doctype",
             "unclosed_root",
+            "unusable_encoding",
         ],
     )
     async def test_partial_or_ambiguous_400_keeps_the_http_error(

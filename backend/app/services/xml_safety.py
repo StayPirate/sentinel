@@ -21,7 +21,11 @@ specifications require the same restrictions:
 U+0000 and surrogate code points cannot occur in a well-formed XML 1.0
 document, raw or as a character reference; expat rejects both as not
 well-formed, so the parser-failure outcome satisfies External String
-Admissibility (docs/conventions.md) without an additional check.
+Admissibility (docs/conventions.md) without an additional check. A declared
+encoding that Python cannot use for expat (unknown, multi-byte, or not a
+text encoding) makes expat raise `LookupError` or `ValueError` instead of
+`ExpatError`; it is the same `malformed` outcome, and its message, which
+can repeat the declared name, is discarded.
 
 Byte, decompression, and ratio limits belong to the caller's transport
 layer. Element names are reported with namespace processing: a name in a
@@ -101,6 +105,7 @@ class SafeXMLParser:
         self._name_counts: dict[str, int] = {}
         self._failed = False
         self._closed = False
+        self._handler_error: BaseException | None = None
 
         parser = expat.ParserCreate(namespace_separator=NAMESPACE_SEPARATOR)
         parser.buffer_text = True
@@ -112,7 +117,7 @@ class SafeXMLParser:
         parser.ExternalEntityRefHandler = self._forbidden_external
         parser.StartElementHandler = self._start
         parser.EndElementHandler = self._end
-        parser.CharacterDataHandler = handler.character_data
+        parser.CharacterDataHandler = self._characters
         self._parser = parser
 
     def feed(self, data: bytes) -> None:
@@ -127,14 +132,24 @@ class SafeXMLParser:
     def _parse(self, data: bytes, *, final: bool) -> None:
         if self._failed or self._closed:
             raise RuntimeError("SafeXMLParser is no longer usable")
+        unusable_encoding = False
         try:
             self._parser.Parse(data, final)
         except expat.ExpatError:
             self._failed = True
             raise XMLSafetyError("malformed") from None
+        except (LookupError, ValueError) as exc:
+            self._failed = True
+            if exc is self._handler_error:
+                raise
+            # Raised by expat's handling of the declared encoding; raised
+            # below, outside this block, so the message is not retained.
+            unusable_encoding = True
         except BaseException:
             self._failed = True
             raise
+        if unusable_encoding:
+            raise XMLSafetyError("malformed")
 
     def _forbidden(self, *_: object) -> None:
         raise XMLSafetyError("forbidden_construct")
@@ -143,6 +158,29 @@ class SafeXMLParser:
         raise XMLSafetyError("forbidden_construct")
 
     def _start(self, name: str, attributes: dict[str, str]) -> None:
+        try:
+            self._check_limits(name)
+            self._handler.start_element(name, attributes)
+        except BaseException as exc:
+            self._handler_error = exc
+            raise
+
+    def _end(self, name: str) -> None:
+        self._depth -= 1
+        try:
+            self._handler.end_element(name)
+        except BaseException as exc:
+            self._handler_error = exc
+            raise
+
+    def _characters(self, data: str) -> None:
+        try:
+            self._handler.character_data(data)
+        except BaseException as exc:
+            self._handler_error = exc
+            raise
+
+    def _check_limits(self, name: str) -> None:
         limits = self._limits
         self._depth += 1
         self._elements += 1
@@ -156,8 +194,3 @@ class SafeXMLParser:
             if count > maximum:
                 raise XMLSafetyError("resource_limit")
             self._name_counts[name] = count
-        self._handler.start_element(name, attributes)
-
-    def _end(self, name: str) -> None:
-        self._depth -= 1
-        self._handler.end_element(name)
