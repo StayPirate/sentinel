@@ -13,7 +13,8 @@ actionability reconciliation
 package mutation foundation (`PackageServiceError` hierarchy, the
 explicit system invocation context, the locked semantic-locator loader
 at the package, track, and Product levels) with the mutations
-`set_track_status()`, `set_product_eligibility()`, and the six direct
+`set_track_status()`, `set_product_eligibility()`, the system Product
+release confirmation `set_product_released_at()`, and the six direct
 exclusion and restoration operations (`soft_delete_ticket_package[_track|
 _product]()`, `restore_ticket_package[_track|_product]()`), the
 cross-Ticket package search (`search_packages()`), and the four
@@ -2071,6 +2072,127 @@ async def _track_status_result(
             db, ticket=ticket, track_id=track_id, evaluation_date=evaluation_date
         ),
         evaluation_date=evaluation_date,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Product release confirmation (package-service.md, `set_product_released_at()`)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class ProductReleasedResult:
+    """Result of `set_product_released_at()`.
+
+    `outcome` is `changed` or `no_op`; `released_at` is the occurrence's
+    locked-current value (a concurrent winner's value on `no_op`).
+    """
+
+    outcome: MutationOutcome
+    ticket_package_product_id: uuid.UUID
+    released_at: datetime
+
+
+def _format_utc_instant(value: datetime) -> str:
+    """An aware instant as UTC ISO 8601 with a `Z` suffix (the
+    `product_released` `new_value` format, ticket-audit-log.md)."""
+    return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
+async def set_product_released_at(
+    db: AsyncSession,
+    *,
+    ticket_id: uuid.UUID,
+    package_id: uuid.UUID,
+    track_id: uuid.UUID,
+    ticket_package_product_id: uuid.UUID,
+    released_at: datetime,
+    advisory_id: str,
+) -> ProductReleasedResult:
+    """Record the advisory-issued release time of one Product occurrence.
+
+    Category A system mutation (package-service.md,
+    `set_product_released_at()`; package-model.md, Product Release
+    Confirmation). Callers are the IBS Product release detection tasks
+    only; there is no user-attributed form and no auto-assignment.
+
+    Q1: `ticket_id`, `package_id`, `track_id`, `ticket_package_product_id`
+    are the declared semantic locator (the last is a
+    `TicketPackageProduct.id`). `released_at` is the selected advisory's
+    aware issued instant; `advisory_id` its validated identifier.
+
+    Q2: the caller owns the transaction and has completed every external
+    I/O. Locks: the Ticket `FOR UPDATE` as the first state-dependent
+    database operation (compatible when the caller already holds it).
+
+    Q3: (2) `ensure_ticket_operable()`; (3) locked reload of the complete
+    package/track/Product path, soft-deleted and EOL records included;
+    (4) `no_op` when `released_at` is already set (irreversible); (5) sets
+    `released_at` in UTC; (6) one `product_released` event (`user_id =
+    NULL`, `new_value` the UTC ISO 8601 `Z` instant, event-time Product
+    subject plus `advisory_id`); (7) `reconcile_ticket_status()` once;
+    (8) flushes. A no-op creates no event, reconciliation, or convergence
+    registration. Never commits, reads audit history, or performs
+    external I/O.
+
+    Q4: returns the outcome and the locked-current `released_at`.
+
+    Q5: idempotent; a repeated or concurrent call observes the first
+    committed value and returns `no_op` without replacing it.
+
+    Q6: raises `ValueError` before any database operation when
+    `released_at` is naive. Raises `TicketNotFoundError`,
+    `TicketNotMutableError` (`Ignored`/`Duplicated`),
+    `PackageNotFoundError`, `TrackNotFoundError`, or
+    `ProductNotFoundError` without side effects. Audit, database, flush,
+    and reconciliation exceptions propagate and roll back the caller's
+    transaction.
+    """
+    if released_at.tzinfo is None or released_at.utcoffset() is None:
+        raise ValueError("released_at must be timezone-aware")
+    released_utc = released_at.astimezone(UTC)
+    evaluation_date = _utc_today()
+
+    ticket = await _lock_system_ticket(db, ticket_id)
+    ensure_ticket_operable(ticket)
+    path = await _load_locked_product(
+        db,
+        ticket_id=ticket.id,
+        package_id=package_id,
+        track_id=track_id,
+        ticket_package_product_id=ticket_package_product_id,
+        evaluation_date=evaluation_date,
+    )
+    occurrence = path.occurrence
+    if occurrence.released_at is not None:
+        return ProductReleasedResult(
+            outcome=MutationOutcome.NO_OP,
+            ticket_package_product_id=occurrence.id,
+            released_at=occurrence.released_at,
+        )
+
+    occurrence.released_at = released_utc
+    await TicketAuditLog.log_event(
+        db,
+        ticket_id=ticket.id,
+        event_type=TicketAuditEventType.PRODUCT_RELEASED,
+        user_id=None,
+        old_value=None,
+        new_value=_format_utc_instant(released_utc),
+        detail={
+            "track": path.track.reference,
+            "package": path.package.package_name,
+            "product_name": path.product.display_name,
+            "product_cpe": path.product.cpe,
+            "advisory_id": advisory_id,
+        },
+    )
+    await reconcile_ticket_status(ticket, db, evaluation_date=evaluation_date)
+    await db.flush()
+    return ProductReleasedResult(
+        outcome=MutationOutcome.CHANGED,
+        ticket_package_product_id=occurrence.id,
+        released_at=released_utc,
     )
 
 

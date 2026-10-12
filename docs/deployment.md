@@ -94,6 +94,8 @@ Sentinel requires outbound access to:
 |---------|------|------|---------|
 | SUSE IdP | `id.suse.com` | 443 | SSO authentication (OIDC) |
 | IBS API | `api.suse.de` | 443 | Build service integration |
+| IBS Product repositories | `download.suse.de` | 443 | Anonymous Product repository metadata for release detection (`IBS_DOWNLOAD_BASE_URL`) |
+| IBS Product repository redirect target | `dist.suse.de` | 443 | Permitted same-path redirect target of the updateinfo artifact |
 | IBS RabbitMQ | `rabbit.suse.de` | 5671 | Real-time event consumption |
 | SMELT | `smelt.suse.de` | 443 | Product/package data |
 | AIMAAS | `aimaas.suse.de` | 443 | Product lifecycle, CVSS thresholds |
@@ -1815,10 +1817,12 @@ responsibility.
 #### `LOG_LEVEL=DEBUG` risk in production
 
 Setting `LOG_LEVEL=DEBUG` causes third-party loggers (notably
-`sqlalchemy.engine` and `httpx`) to emit sensitive data — SQL
-statements with bound parameters, full request URLs that may embed
-tokens. See `docs/features/platform/logging.md` (Secrets and PII
-Discipline) for the full policy. Operators should use
+`sqlalchemy.engine` and `httpcore`) to emit sensitive data — SQL result
+rows, HTTP connection traces including response headers. SQL statements
+(without bound parameters) and full request URLs are logged by
+`sqlalchemy.engine` and `httpx` already at the default `INFO` level. See
+`docs/features/platform/logging.md` (Secrets and PII Discipline) for the
+full policy. Operators should use
 `LOG_LEVEL=DEBUG` in production only for time-bounded diagnostics and
 revert promptly.
 

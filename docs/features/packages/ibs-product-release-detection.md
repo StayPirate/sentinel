@@ -438,9 +438,10 @@ the atomic `product_released` event. A pre-finalization database, audit, or
 reconciliation failure rolls back the complete occurrence transaction. If the
 Ticket moved to `Ignored` or `Duplicated`, or the occurrence/CVE/workflow
 identity changed, the occurrence returns a successful stale/inapplicable no-op
-without mutation. An in-flight occurrence selected while active may complete
-after the Ticket becomes `Resolved`, consistent with the operable-Ticket
-factual-update contract.
+without mutation and emits one `ibs_product_release_occurrence_stale` warning.
+An in-flight occurrence selected while active may complete after the Ticket
+becomes `Resolved`, consistent with the operable-Ticket factual-update
+contract.
 
 Concurrent periodic, catch-up, or retry invocations serialize on the Ticket
 lock. Only the first effective NULL-to-timestamp change mutates or emits an
@@ -484,8 +485,9 @@ Operational logging is structured and bounded:
 |---|---|---|
 | `ibs_product_release_repository_failed` | WARNING | Once per failed repository validation per invocation; `repository`, `affected_occurrence_count`, `reason_category`, optional `http_status` |
 | `ibs_product_release_advisories_ignored` | WARNING | At most once per repository and reason category per invocation; `repository`, `reason_category`, `advisory_count` |
-| `ibs_product_release_occurrence_failed` | WARNING | At most once per selected failed occurrence per invocation; `ticket_package_product_id`, `repository`, `reason_category` |
-| `ibs_product_release_run_completed` | INFO | Once per periodic or catch-up invocation; selected, updated, no-match/no-op, and failed occurrence counts |
+| `ibs_product_release_occurrence_failed` | WARNING | At most once per selected failed occurrence per invocation; `ticket_package_product_id`, `ticket_id`, `fetcher_name`, `repository`, `reason_category` |
+| `ibs_product_release_occurrence_stale` | WARNING | At most once per selected occurrence per invocation whose local transaction found the Ticket non-operable or the selected scope changed; `ticket_package_product_id`, `ticket_id`, `reason_category` |
+| `ibs_product_release_run_completed` | INFO | Once per periodic invocation, including an empty run, and once per catch-up invocation that selects at least one occurrence; selected, updated, no-match/no-op, and failed occurrence counts |
 
 `reason_category` is a bounded internal value. It distinguishes at least
 transport, timeout, HTTP status, redirect, unsafe path, content type, size,
@@ -541,8 +543,11 @@ persistent cache.
 `DetectIbsProductReleases.catch_up(ticket_id, session)` is a custom non-CVE
 catch-up under `fetcher-infrastructure.md`. The supplied session is used only to
 verify the Ticket and enumerate its unreleased Product occurrence IDs after
-package-tree re-resolution. A missing Ticket, a Ticket without a CVE, or no
-relevant occurrence returns silently.
+package-tree re-resolution. Selection applies the complete [Scope](#scope),
+including the active-Ticket condition. A missing Ticket, a Ticket that is not
+active when catch-up starts, a Ticket without a CVE, or no relevant occurrence
+returns silently. A `Resolved` Ticket needs no catch-up: a later regression to
+an active status registers Ticket convergence, which runs catch-up again.
 
 Catch-up applies the same current/historical repository tiers, complete
 validation, timestamp selection, per-invocation deduplication, and independent
@@ -550,7 +555,12 @@ per-occurrence transactions as periodic execution. Advisories that predate the
 Ticket or Ticket convergence remain discoverable and retain their original issued
 time. Pre-finalization per-occurrence failures are logged and siblings continue.
 Partial success returns normally; when every selected occurrence fails,
-catch-up propagates according to the shared non-CVE `run_catch_up` contract.
+catch-up propagates according to the shared non-CVE `run_catch_up` contract by
+raising `FetcherError` with the sanitized message
+`"All {failed} IBS Product release occurrences failed"`. That exception is not
+retryable under `run_catch_up`: repository transport failures have already been
+classified per occurrence, and the daily fetcher retries every still-unreleased
+occurrence.
 Commit exception/ambiguity and non-operational post-commit publication failure
 instead terminate the invocation under the local mutation contract. Concurrent
 catch-up and periodic execution are idempotent under the local mutation rules.

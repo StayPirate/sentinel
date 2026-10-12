@@ -110,13 +110,17 @@ There is no "pin" or "release" mechanism coupling the two. Setting
 independent of `DEBUG`, and vice versa.
 
 **PII/credential risk at `LOG_LEVEL=DEBUG`**: when set to `DEBUG`,
-third-party loggers (notably `sqlalchemy.engine` and `httpx`) emit
-sensitive data (SQL statements with bound parameters, full HTTP URLs
-which may embed tokens). This is accepted as an operator-initiated
-action: the operator explicitly requests maximum verbosity and accepts
-the consequences. See "Secrets and PII Discipline" below and
-`docs/deployment.md` (Log Aggregation) for the corresponding
-operational guidance. No code-level safety mechanism restricts
+third-party loggers (notably `sqlalchemy.engine` and `httpcore`) emit
+sensitive data (SQL result rows, HTTP connection traces including
+response headers). This is accepted as an operator-initiated action: the
+operator explicitly requests maximum verbosity and accepts the
+consequences. SQL statements and request URLs are not limited to
+`DEBUG`: at `INFO`, the default level, `sqlalchemy.engine` logs every SQL
+statement (its bound parameters are hidden because the engine is created
+with `hide_parameters=True`) and `httpx` logs the method, URL, and status
+of every request (see "Integration with Third-Party Loggers"). See
+"Secrets and PII Discipline" below and `docs/deployment.md` (Log
+Aggregation) for the corresponding operational guidance. No code-level safety mechanism restricts
 `LOG_LEVEL` — the protection is operational, not architectural. The
 Redaction Processor (see "Secrets and PII Discipline") masks only known
 credential material; it does not make `DEBUG` output safe.
@@ -284,8 +288,9 @@ follow `LOG_LEVEL` unconditionally — no pins, no conditional levels.
 
 | Logger | Typical output at `DEBUG` | PII/credential risk |
 |--------|----------------------------|----------------------|
-| `sqlalchemy.engine` | SQL statements with bound parameters | Yes — may include credentials |
-| `httpx` / `httpcore` | Full request URLs, headers | Yes — URLs may embed tokens |
+| `sqlalchemy.engine` | SQL statements at `INFO`, with bound parameters hidden (`hide_parameters=True`); result rows at `DEBUG` | Yes — result rows may include credentials or personal data |
+| `httpx` | One `HTTP Request:` line per request with the method, full URL, and response status, emitted at `INFO` and therefore also at the default level | Yes — URLs may embed tokens |
+| `httpcore` | Connection and request/response traces, including response headers | Yes — headers may carry credentials |
 | `celery` | Task execution details | Low |
 | `uvicorn.access` | HTTP access log entries | Low |
 
@@ -411,17 +416,22 @@ requiring personal identifiers in the log stream.
 **Third-party logger gap.** The rule above governs only the
 application's own log statements. It does not, by itself, prevent
 third-party loggers captured by the stdlib bridge — notably
-`sqlalchemy.engine` (SQL statements with bound parameters at
-`DEBUG`/`INFO`) and `httpx`/`httpcore` (full request URLs, which may
-embed credentials, at `DEBUG`) — from emitting sensitive data when
-`LOG_LEVEL=DEBUG`. This is accepted as an explicit operator choice:
-setting `LOG_LEVEL=DEBUG` is a deliberate request for maximum
-verbosity, and the operator accepts the PII/credential exposure risk.
+`sqlalchemy.engine` (SQL result rows at `DEBUG`) and `httpcore`
+(connection traces and response headers at `DEBUG`) — from emitting
+sensitive data when `LOG_LEVEL=DEBUG`. This is accepted as an explicit
+operator choice: setting `LOG_LEVEL=DEBUG` is a deliberate request for
+maximum verbosity, and the operator accepts the PII/credential exposure
+risk. At `INFO`, the default level, `sqlalchemy.engine` logs SQL statements
+without their bound parameters (`hide_parameters=True`), while `httpx` logs
+the full URL of every request, so a credential embedded in a request URL
+would be logged without any operator choice. The Redaction Processor masks
+only the URL's userinfo and exact configured secret values (see Redaction
+Processor); any other credential in a URL path or query is logged as is.
 See `docs/deployment.md` (Log Aggregation) for the corresponding
-operational note. The Redaction Processor (below) masks known
-credential material in these records, but it does not remove personal
-data or SQL bound parameters, so this operator-choice rule still
-applies.
+operational note. The Redaction Processor (below) masks known credential
+material in these records, but it does not remove personal data from SQL
+result rows or other third-party output, so this operator-choice rule
+still applies.
 
 ### Redaction Processor
 
