@@ -551,8 +551,8 @@ are expected to be tested as follows:
   are never matched by exact value; that a parameter-list
   `Authorization` value is masked completely; that cookie
   values are masked in each listed representation; that a redaction
-  failure still emits the record; and that the CLI configuration applies the same
-  processor.
+  failure still emits the record; and that the CLI configuration
+  applies the same processor.
 - Application-level log assertions (e.g., "a WARNING is logged when
   X occurs", prescribed by individual feature specs) use `caplog`
   (pytest) or `structlog.testing.capture_logs` as appropriate.

@@ -377,12 +377,13 @@ repositories.
 - **Access**: REST API at `api.suse.de`. Every consumed API operation requires
   SSH-signature authentication (`WWW-Authenticate: Signature`); Sentinel uses a
   dedicated account and its Ed25519 key. HTTP Basic credentials are not used,
-  and OBS API tokens authorize only trigger operations. The complete
-  contract is in `docs/features/integrations/ibs-integration.md` (Origins and
-  Authentication). Anonymous Product repository downloads use the
-  configurable HTTPS MirrorCache front door at `download.suse.de/ibs`. A repository artifact may
-  perform one validated same-path HTTP 302 redirect to `dist.suse.de`; Sentinel never
-  sends or forwards IBS API credentials on this path. Key API endpoints:
+  and OBS API tokens authorize only trigger operations. The complete contract
+  is in `docs/features/integrations/ibs-integration.md` (Origins and
+  Authentication). Anonymous Product repository downloads use the configurable
+  HTTPS MirrorCache front door at `download.suse.de/ibs`. A repository artifact
+  may perform one validated same-path HTTP 302 redirect to `dist.suse.de`;
+  Sentinel never sends or forwards IBS API credentials on this path. Key API
+  endpoints:
   - `GET /source/{project}?view=info&nofilename=1&package={package}...` —
     targeted package source info; `srcmd5` is the expanded source-tree state
   - `POST /source/{project}/{package}?cmd=diff&view=xml&onlyissues=1&expand=1` —

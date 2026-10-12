@@ -129,8 +129,7 @@ is sent.
 
 7. An HTTP 401 response to the signed attempt raises `IBSAuthenticationError`
    with reason `signature_rejected`; the client does not sign again for that
-   operation. Any other response is
-   the operation's response.
+   operation. Any other response is the operation's response.
 
 Each attempt keeps the shared transport retry policy
 (`docs/features/platform/networking.md`, Transport-Level Retry). A transport
@@ -140,18 +139,19 @@ never followed, so neither the signature nor a session cookie reaches another
 destination.
 
 The realm is taken from the challenge rather than compared with a fixed value.
-It is the SSHSIG namespace, but the signed message always has the fixed form
-above and the key is dedicated to this account, so a signature only
-authenticates the account to IBS. A changed realm text therefore does not
-interrupt operation. IBS may reject a signature whose `created` differs from its
-own clock; the accepted window is unverified. The clocks of hosts running
-Sentinel must therefore be synchronized (`docs/deployment.md`, Clock
-Synchronization).
+It is the SSHSIG namespace, but only the TLS-validated `IBS_API_URL` origin can
+supply it, and the signed message always has the fixed form above, so a
+signature only authenticates the account to that origin. A changed realm text
+therefore does not interrupt operation. IBS may reject a signature whose
+`created` differs from its own clock; the accepted window is unverified. The
+clocks of hosts running Sentinel must therefore be synchronized
+(`docs/deployment.md`, Clock Synchronization).
 
 `IBSAuthenticationError` carries exactly one bounded reason,
 `unsupported_challenge` or `signature_rejected`, which consuming workflows may
 use as their reason category. It never carries challenge content, the realm,
 the account name, or response data.
+
 `IBSCredentialsNotConfiguredError` and `IBSAuthenticationError` are not `httpx`
 exceptions. They are therefore neither infrastructure failures nor retryable
 conditions under `docs/features/platform/networking.md` (Infrastructure Failure
@@ -700,12 +700,12 @@ handler. `IBSCredentialsNotConfiguredError` and `IBSAuthenticationError` are
 internal integration exceptions that every method can raise. Each consuming
 workflow handles them as a failure of the scope that depended on the operation,
 with its own bounded reason category; they never reach an API handler and never
-represent a negative observation. Submission reconciliation consumes
-incomplete `RequestEvidenceResult` values and preserves prior request, action, correlation, and delivery state for
-that scope. It does not convert unavailable evidence into a no-match.
-`IBSHistoricalRevisionUnavailable` is emitted only after the live status/body
-discriminator required above has been verified. Until then, an ambiguous
-source-diff 400/404 remains the original HTTP error.
+represent a negative observation. Submission reconciliation consumes incomplete
+`RequestEvidenceResult` values and preserves prior request, action,
+correlation, and delivery state for that scope. It does not convert unavailable
+evidence into a no-match. `IBSHistoricalRevisionUnavailable` is emitted only
+after the live status/body discriminator required above has been verified.
+Until then, an ambiguous source-diff 400/404 remains the original HTTP error.
 
 All request-search, point-detail, request-diff, and source-history XML uses the
 same incremental parsing safety boundary as source release data: DTDs, external

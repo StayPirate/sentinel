@@ -395,12 +395,12 @@ The shared HTTP client does not follow redirects by default
 merely inherited from httpx defaults.
 
 **Security rationale**: outbound requests from Sentinel frequently carry
-sensitive credentials in request headers — IBS API request signatures
-and session cookies, NVD API keys, GitHub tokens. If the client
-automatically follows redirects (301, 302, 307, 308), these
-credentials would be forwarded to the redirect target, which may be an untrusted host. A compromised or
-misconfigured upstream service could redirect authenticated requests to
-an attacker-controlled server, leaking credentials silently.
+sensitive credentials in request headers — IBS API request signatures and
+session cookies, NVD API keys, GitHub tokens. If the client automatically
+follows redirects (301, 302, 307, 308), these credentials would be forwarded to
+the redirect target, which may be an untrusted host. A compromised or
+misconfigured upstream service could redirect authenticated requests to an
+attacker-controlled server, leaking credentials silently.
 
 **Generic opt-in mechanism**: consumers that genuinely require automatic
 redirect following must opt in explicitly via `http_client_options`:
