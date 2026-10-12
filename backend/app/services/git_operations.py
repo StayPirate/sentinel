@@ -23,7 +23,9 @@ cancellation, or any other exception while it starts or runs, its process
 group is terminated (SIGTERM, then SIGKILL after a short grace period) and
 the process is reaped before the exception propagates. Git's own detached
 automatic maintenance after a fetch is not managed here (Fetch Operations,
-Automatic maintenance).
+Automatic maintenance), and a start that asyncio itself abandons after
+spawning git is an accepted residual risk (Runtime Dependencies, Process
+lifecycle).
 """
 
 from __future__ import annotations
