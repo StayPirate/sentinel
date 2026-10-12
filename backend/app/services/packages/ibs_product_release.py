@@ -239,9 +239,10 @@ async def reconcile_ibs_product_releases(
     is `updated`; an already-released or stale outcome rolls back and is
     `no_op` (a stale one emits one `ibs_product_release_occurrence_stale`);
     a `SQLAlchemyError` before commit rolls back and is `failed`. The hook
-    runs after the commit or rollback, then committed effects are drained
-    after the session is closed. One `ibs_product_release_run_completed`
-    is emitted when the invocation completes.
+    runs immediately after the commit or rollback, before the session is
+    closed; committed effects are drained after the close. One
+    `ibs_product_release_run_completed` is emitted when the invocation
+    completes.
 
     Q4: returns the invocation's counts. Creates no audit event itself.
 
@@ -331,7 +332,9 @@ async def reconcile_ibs_product_releases(
                     if result == "stale":
                         _log_stale(candidate, SCOPE_CHANGED_CATEGORY)
                     kind = "no_op"
-        finish(candidate, kind)
+            # Terminal outcome before any awaitable post-commit action,
+            # including the session close.
+            finish(candidate, kind)
         if committed:
             await drain_ticket_convergence(unit)
 
