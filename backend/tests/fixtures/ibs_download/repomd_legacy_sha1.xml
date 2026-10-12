@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<repomd xmlns="http://linux.duke.edu/metadata/repo" xmlns:rpm="http://linux.duke.edu/metadata/rpm">
+  <revision>1758224983</revision>
+  <tags>
+    <repo>updates://zypp-patches.suse.de/autobuild/SLE_SERVER/11-SP4/update/x86_64</repo>
+    <repo>obsrepository://build.suse.de/SUSE:Updates:SLE-SERVER:11-SP4:x86_64/update</repo>
+    <repo>obsbuildid:1533394659</repo>
+  </tags>
+  <data type="primary">
+    <checksum type="sha">580babe1bea003a01a5ca718c5b52609343f0358</checksum>
+    <open-checksum type="sha">159a21ff77f59e833cedc506428aaf5f47c120e8</open-checksum>
+    <location href="repodata/primary.xml.gz"/>
+    <timestamp>1758224983</timestamp>
+    <size>3419880</size>
+    <open-size>30192440</open-size>
+  </data>
+  <data type="filelists">
+    <checksum type="sha">62e627c3cc019c04863377c22efdcd2709d783cf</checksum>
+    <open-checksum type="sha">225c4dd32fb8b87e457a6a1b99a5153762d3fdff</open-checksum>
+    <location href="repodata/filelists.xml.gz"/>
+    <timestamp>1758224983</timestamp>
+    <size>22369744</size>
+    <open-size>353989585</open-size>
+  </data>
+  <data type="other">
+    <checksum type="sha">285bc980daa91cce1c06761e209fc5d0867ef60f</checksum>
+    <open-checksum type="sha">ad1ae1f583672643cbbf950c97c7811e43d92e40</open-checksum>
+    <location href="repodata/other.xml.gz"/>
+    <timestamp>1758224983</timestamp>
+    <size>3249095</size>
+    <open-size>41581863</open-size>
+  </data>
+  <data type="deltainfo">
+    <checksum type="sha">76b22c4a4ff3545d61e263990d985db21f843334</checksum>
+    <open-checksum type="sha">243755981ec3fea759ace5610ccafd9de48468cf</open-checksum>
+    <location href="repodata/deltainfo.xml.gz"/>
+    <timestamp>1758224988</timestamp>
+    <size>142874</size>
+    <open-size>768244</open-size>
+  </data>
+  <data type="susedata">
+    <checksum type="sha">9b05b964d0b2217dbc46ae62bb5f87f16080649b</checksum>
+    <open-checksum type="sha">83d60906aad55faf2684cd5667a2e545f7a211d8</open-checksum>
+    <location href="repodata/susedata.xml.gz"/>
+    <timestamp>1758224989</timestamp>
+    <size>150082</size>
+    <open-size>903568</open-size>
+  </data>
+  <data type="updateinfo">
+    <checksum type="sha">0c1480b70894cfdefcbaf26807e3a714494cf75b</checksum>
+    <open-checksum type="sha">3a8f8c0a64d2a63724a76060ed4f70873d5c45b0</open-checksum>
+    <location href="repodata/updateinfo.xml.gz"/>
+    <timestamp>1758224984</timestamp>
+    <size>644327</size>
+    <open-size>4219005</open-size>
+  </data>
+</repomd>
