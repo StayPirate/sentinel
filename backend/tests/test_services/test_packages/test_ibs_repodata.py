@@ -723,7 +723,7 @@ def test_parse_repomd_overlong_field_text_raises_xml_structure(field: str) -> No
     # every valid value: the longest is a 64-digit SHA-256 checksum.
     markup = _field_markup(field)
     start = markup.index(">") + 1
-    overlong = f"{markup[:start]}{'0' * 129}{markup[markup.index('</') :]}"
+    overlong = f"{markup[:start]}{'1' * 129}{markup[markup.index('</') :]}"
 
     assert _failure(_repomd(overrides={field: overlong})) == "xml_structure"
 

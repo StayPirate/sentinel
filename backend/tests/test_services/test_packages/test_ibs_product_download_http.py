@@ -307,6 +307,14 @@ class TestAcceptedExamination:
         assert "gzip" in server.requests[1].headers["accept"]
         assert "gzip" in server.requests[2].headers["accept"]
 
+    async def test_client_without_user_agent_sends_none(self) -> None:
+        server = _server()
+        client = server.client()
+        del client.headers["user-agent"]
+
+        _assert_matched(await _observe(server, client))
+        assert all("user-agent" not in r.headers for r in server.requests)
+
     async def test_shared_factory_client_supplies_user_agent(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
