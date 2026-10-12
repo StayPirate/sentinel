@@ -357,10 +357,6 @@ fallback diff uses `orev=0`, so it cannot report unavailable history itself.
 Each of its failures, including an unavailable current `srcmd5`, is an ordinary
 diff failure.
 
-Any other 400 or 404 diff response, including a response that satisfies only
-part of the discriminator, is an ordinary diff failure and never invokes
-fallback.
-
 `orev=0` identifies references present in current source, not when they first
 appeared. Consequently, if a VA corrected `FIXED` and the saved historical
 revision later becomes unavailable, fallback can interpret the retained old CVE
@@ -398,8 +394,9 @@ and invokes the same per-track checkpoint algorithm:
 
 - a track without a checkpoint uses `orev=0`;
 - a track with an equal current checkpoint is a no-op;
-- a changed or unusable checkpoint follows the ordinary diff or fallback path;
-  and
+- a changed checkpoint follows the ordinary diff path, or
+  [Unavailable History Fallback](#unavailable-history-fallback) when that diff
+  raises `IBSHistoricalRevisionUnavailable`; and
 - each track is an independent transaction unit.
 
 Pre-finalization per-item failures are logged and processing continues. Partial
@@ -499,7 +496,7 @@ Grouping IBS requests never changes that per-track accounting unit.
 | Mapping | Exact behavior |
 |---|---|
 | Selected | Each distinct existing IBS track in `ANALYSIS` or `AFFECTED` under an active Ticket with a CVE, once. |
-| Succeeded | `record_succeeded()` once for every terminal `updated` or `no_op` outcome. Successful no-ops include unchanged source, valid no-match, final-status race, checkpoint already advanced, repeated idempotent work, unavailable-history fallback success, and only the stale race where the Ticket became `Ignored` or `Duplicated`. |
+| Succeeded | `record_succeeded()` once for every terminal `updated` or `no_op` outcome. Successful no-ops include unchanged source, valid no-match, final-status race, checkpoint already advanced, repeated idempotent work, unavailable-history fallback success without a transition, and only the stale race where the Ticket became `Ignored` or `Duplicated`. |
 | Failed | `record_failed()` once for every terminal `failed` outcome before finalization. This includes a selected track that disappeared, changed expected Ticket/package scope, or lost its Ticket CVE association; its checkpoint does not advance. A shared request failure counts every dependent selected track once. Commit exception/ambiguity produces no terminal metric. |
 | Created | Never; checkpoint creation is operational reconciliation state and the detector creates no domain record represented by this effect metric. |
 | Updated | `record_updated()` once only for a selected track effectively transitioned to `FIXED` by this invocation. Checkpoint-only progress and every no-op have no update effect. |
@@ -539,11 +536,16 @@ Future implementation tests must cover:
 - malformed, interrupted, and safely streamed XML with DTD/entity expansion
   disabled;
 - unavailable-history classification under
-  `../integrations/ibs-integration.md` (Unavailable Old Revision): fallback for
-  an HTTP 400 whose status summary names the persisted checkpoint; an ordinary
-  diff failure for a 400 naming the current `srcmd5`, a 400 with an empty,
-  malformed, differently shaped, or non-matching body, a matching summary with
-  another status, and the 404 `no such revision` and unknown-package responses;
+  `../integrations/ibs-integration.md` (Unavailable Old Revision):
+  - fallback for an HTTP 400 whose status summary names the persisted
+    checkpoint;
+  - an ordinary diff failure for a 400 naming the current `srcmd5`, a matching
+    summary with another status, and the 404 `no such revision` and
+    unknown-package responses;
+  - the HTTP error outcome, never a response-data error, for a 400 with an
+    empty, malformed, DTD- or entity-bearing, differently shaped, or
+    non-matching body; and
+  - the transport outcome for an interrupted 400 body;
 - unavailable-history fallback, fallback failure including an unavailable
   current `srcmd5`, and the documented VA correction ambiguity;
 - preservation of a VA `FIXED` to `AFFECTED`/`ANALYSIS` correction until new
@@ -574,10 +576,8 @@ Verified behavior and remaining implementation gates are summarized in
 implementation, retain a sanitized live fixture for every consumed source-info
 and diff shape. These include the unavailable-`orev` and unavailable-`rev` 400
 responses, the 404 `no such revision` response, and the unknown-package 404
-response. A historical checksum whose tree was actually removed was verified
-only through OBS source inspection. Its response takes the same backend path as
-the fabricated-checksum fixture
-(`../integrations/ibs-integration.md`, Track-Release Contract Verification
+response. Shapes verified only through OBS source inspection are recorded in
+`../integrations/ibs-integration.md` (Track-Release Contract Verification
 Status).
 
 Sanitized aggregate verification on 2026-09-08 covered 9,620 deployed

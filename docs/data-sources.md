@@ -436,15 +436,11 @@ repositories.
     2026-10-12; and
   - SSH-signature authentication on 2026-10-12.
 
-  The track-release contract has no remaining verification gate. One
-  authentication gate remains: no production workflow consumes `IBSClient`
-  until a signed read-only operation by `IBSClient` itself has succeeded. Each
-  implementing change still verifies its consumed fields live under External
-  Integration Contract Verification (`docs/conventions.md`). Verified shapes,
-  fields verified only through OBS source inspection, and the remaining gate
-  are recorded in the Authentication, Track-Release, and Request Contract
-  Verification Status sections of
-  `docs/features/integrations/ibs-integration.md`
+  Gate status: the track-release contract has no open verification gate, and
+  one authentication gate remains. Verified shapes, fields verified only
+  through OBS source inspection, and the remaining gate are recorded in the
+  Authentication, Track-Release, and Request Contract Verification Status
+  sections of `docs/features/integrations/ibs-integration.md`
 - **See also**: `docs/features/integrations/ibs-integration.md`,
   `docs/features/packages/package-model.md`,
   `docs/features/packages/ibs-track-release-detection.md`,

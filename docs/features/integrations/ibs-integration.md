@@ -340,16 +340,16 @@ unavailable history. This includes:
 - every other 4xx.
 
 A response that satisfies only some conditions is ambiguous and keeps its
-ordinary HTTP error outcome. Examples are a 400 whose body is empty, malformed,
-interrupted, or differently shaped, and a matching summary with another status.
-A failure to parse the body for this classification never becomes a
-response-data error.
+ordinary outcome. Examples are a 400 whose body is empty, malformed, or
+differently shaped, and a matching summary with another status. A 400 body
+that fails to parse for this classification keeps the HTTP error outcome and
+never becomes a response-data error. An interrupted body remains a transport
+failure.
 
-The summary text has been unchanged in OBS since at least 2016. If IBS changes
-it, the classification stops matching. Unavailable history then becomes an
-ordinary diff failure that retains the old checkpoint; a changed text never
-produces a false fallback. The response body, including its summary, is never
-logged.
+If IBS changes the summary text, the classification stops matching.
+Unavailable history then becomes an ordinary diff failure that retains the old
+checkpoint; a changed text never produces a false fallback. The response body,
+including its summary, is never logged.
 
 #### Track-Release Contract Verification Status
 
@@ -365,8 +365,8 @@ Sanitized read-only verification against IBS on 2026-09-03 established:
 - source diff entries expose `tracker`, `state`, tracker-native `name`, and
   canonical `label`, including empty, mixed-tracker, multi-CVE, `added`,
   `changed`, and `deleted` results; and
-- unavailable historical references can produce 400 or 404, depending on the
-  reference form.
+- unknown or unavailable revision references produce 400 or 404, depending on
+  the reference form.
 
 OBS source inspection established that `added`, `changed`, and `deleted`
 describe changes to issue references extracted from package changes files.
@@ -387,9 +387,9 @@ checksums, established the unavailable-revision shapes in
 
 OBS source inspection established that the summary is produced when the stored
 tree of a checksum is missing. A checksum that was never stored and one whose
-tree retention cleanup removed take the same path. Inspection also established
-that the source diff resolves `rev` before `orev` and that the summary text has
-been unchanged since at least 2016.
+tree was removed by retention cleanup take the same backend path. Inspection
+also established that the source diff resolves `rev` before `orev` and that the
+summary text has been unchanged since at least 2016.
 
 A historical expanded checksum whose tree was actually removed was not verified
 live: obtaining an old expanded checksum requires an expanding request, which
@@ -779,8 +779,7 @@ represent a negative observation. Submission reconciliation consumes incomplete
 correlation, and delivery state for that scope. It does not convert unavailable
 evidence into a no-match. `IBSHistoricalRevisionUnavailable` is raised only
 when every condition of [Unavailable Old Revision](#unavailable-old-revision)
-holds, and it carries no response content. Every other source-diff 400 or 404
-remains the original HTTP error.
+holds, and it carries no response content.
 
 All request-search, point-detail, request-diff, and source-history XML uses the
 same incremental parsing safety boundary as source release data: DTDs, external
