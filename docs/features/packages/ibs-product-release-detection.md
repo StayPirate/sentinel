@@ -180,8 +180,8 @@ parameters are permitted and ignored after syntactic validation. A compatible
 media type never substitutes for structural, checksum, or size validation.
 
 The shared no-redirect default remains in force. The detector may manually
-accept at most one redirect for a metadata artifact only when all of these
-conditions hold:
+accept at most one redirect for the updateinfo artifact only when all of
+these conditions hold:
 
 - the original request was constructed from the validated configured HTTPS
   base;
@@ -193,9 +193,9 @@ conditions hold:
   request path; and
 - the target path independently passes the path-safety rules above.
 
-Any other 3xx status or target, a second redirect, an HTTP downgrade, a
-port or path change, a malformed location, or path traversal fails the
-repository. Generic automatic redirect following is not compliant with this
+Any redirect of `repomd.xml`, any other 3xx status or target, a second
+redirect, an HTTP downgrade, a port or path change, a malformed location, or
+path traversal fails the repository. Generic automatic redirect following is not compliant with this
 contract. No credential is sent or forwarded on either request.
 
 ## Repomd Contract
