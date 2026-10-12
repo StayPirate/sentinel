@@ -330,8 +330,10 @@ class TestSelection:
         assert candidates == sorted(
             [first.candidate(), checked.candidate()], key=lambda c: c.track_id
         )
-        assert checked.candidate().checkpoint == CHECKPOINT
-        assert first.candidate().checkpoint is None
+        by_track = {candidate.track_id: candidate for candidate in candidates}
+        assert by_track[checked.id].checkpoint == CHECKPOINT
+        assert by_track[checked.id].project == OTHER_PROJECT
+        assert by_track[first.id].checkpoint is None
 
     async def test_candidates_are_ordered_by_track_id(
         self, db_session: AsyncSession

@@ -317,3 +317,62 @@ class TestFetcherReadsOnly:
 
         assert names & {"async_session_factory", "get_async_session"} == set()
         assert names & (_IO_NAMES - {"IBSClient", "client"}) == set()
+
+
+@pytest.mark.unit
+class TestNoDomainCreation:
+    """ibs-track-release-detection.md, Scope: the detector never calls
+    `add_package_to_ticket()` and never creates a CVE, Ticket, package,
+    track, or Product occurrence; its only own write is the operational
+    `TrackReleaseCheckpoint` (the affectedness mutation and its event
+    belong to `package_service.set_track_status()`)."""
+
+    @pytest.mark.parametrize("path", _MODULES)
+    def test_no_package_addition_or_record_creation_path(self, path: Path) -> None:
+        names = _referenced_names(_tree(path))
+
+        assert (
+            names
+            & {
+                "add_package_to_ticket",
+                "add_package_records",
+                "upsert_cve",
+                "create_ticket",
+            }
+            == set()
+        )
+
+    def test_the_only_constructed_model_is_the_checkpoint(self) -> None:
+        tree = _tree(_BOUNDARY)
+        models = {
+            alias.asname or alias.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom)
+            and (node.module or "").startswith("app.models")
+            for alias in node.names
+        }
+        constructed = {
+            node.func.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id in models
+        }
+
+        assert models >= {"TrackReleaseCheckpoint", "Ticket", "TicketPackageTrack"}
+        assert constructed == {"TrackReleaseCheckpoint"}
+
+    def test_the_only_session_add_is_in_the_locking_function(self) -> None:
+        tree = _tree(_BOUNDARY)
+        parents = _parents(tree)
+        adds = [
+            _qualified_function(node, parents)
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in {"add", "add_all", "merge"}
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id in {"db", "session", "unit"}
+        ]
+
+        assert adds == [_LOCKING]

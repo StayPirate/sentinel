@@ -1249,6 +1249,45 @@ class TestUnavailableOldRevision:
         with pytest.raises(httpx.TransportError):
             await _sudo_diff(server, respond, FICTIONAL_OREV, _SUDO)
 
+    @pytest.mark.parametrize(
+        ("operation", "status", "old", "new"),
+        [
+            ("diff", 404, FICTIONAL_OREV, _SUDO),
+            ("diff", 403, FICTIONAL_OREV, _SUDO),
+            ("diff", 400, "0", _SUDO),
+            ("diff", 400, _SUDO, _SUDO),
+            ("source_info", 400, "", ""),
+        ],
+        ids=[
+            "diff_404",
+            "diff_403",
+            "diff_400_empty_tree_orev",
+            "diff_400_orev_equals_rev",
+            "source_info_400",
+        ],
+    )
+    async def test_error_body_outside_the_classification_is_never_read(
+        self, server: IBSServer, operation: str, status: int, old: str, new: str
+    ) -> None:
+        """Only a source-diff 400 for a distinct checksum `orev` reads its
+        body; every other error keeps its HTTP error even when reading the
+        body would fail."""
+        body = _status_document(_unavailable(old or FICTIONAL_OREV))
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            response = chunked_response([body[:40]], fail_after=True)(request)
+            response.status_code = status
+            return response
+
+        call = (
+            _sudo_diff(server, respond, old, new)
+            if operation == "diff"
+            else _source_info(server, respond, ["sudo"])
+        )
+        with pytest.raises(httpx.HTTPStatusError) as raised:
+            await call
+        assert raised.value.response.status_code == status
+
     async def test_undecodable_compressed_400_body_keeps_the_http_error(
         self, server: IBSServer
     ) -> None:
