@@ -246,6 +246,39 @@ class TestConcurrentRelease:
         assert await released_at(world, occurrence) == WINNER_AT
         assert await events_of(world, occurrence.ticket_id) == []
 
+    async def test_service_no_op_is_a_silent_no_op(
+        self,
+        world: ReleaseWorld,
+        units: UnitSessions,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The package service owns the irreversible no-op: when it reports
+        `no_op` (defensively; the locked reload already excludes a released
+        occurrence), the unit rolls back with no event and no warning."""
+        (occurrence,) = await _seeded(world)
+
+        async def no_op(db: AsyncSession, **kwargs: Any) -> Any:
+            return package_service.ProductReleasedResult(
+                outcome=package_service.MutationOutcome.NO_OP,
+                ticket_package_product_id=kwargs["ticket_package_product_id"],
+                released_at=WINNER_AT,
+            )
+
+        monkeypatch.setattr(package_service, "set_product_released_at", no_op)
+        hook = Outcomes()
+
+        with capture_logs() as logs:
+            result = await reconcile_from(
+                _server(occurrence), [occurrence.candidate()], hook
+            )
+
+        assert result == summary(selected=1, no_op=1)
+        assert hook.kinds == [(occurrence.id, "no_op")]
+        assert len(units.sessions) == 1
+        assert logs == [run_completed(selected=1, no_op=1)]
+        assert await released_at(world, occurrence) is None
+        assert await events_of(world, occurrence.ticket_id) == []
+
     async def test_unit_waits_for_the_ticket_lock_and_keeps_the_winner(
         self, world: ReleaseWorld, units: UnitSessions
     ) -> None:
