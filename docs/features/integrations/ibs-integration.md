@@ -148,9 +148,9 @@ The realm is taken from the challenge rather than compared with a fixed value.
 It is the SSHSIG namespace, but only the TLS-validated `IBS_API_URL` origin can
 supply it, and the signed message always has the fixed form above, so a
 signature only authenticates the account to that origin. A changed realm text
-therefore does not interrupt operation. IBS may reject a signature whose
-`created` differs from its own clock; the accepted window is unverified. The
-clocks of hosts running Sentinel must therefore be synchronized
+therefore does not interrupt operation. IBS rejects a signature whose
+`created` differs too far from its own clock; the accepted window is
+unverified. The clocks of hosts running Sentinel must therefore be synchronized
 (`docs/deployment.md`, Clock Synchronization).
 
 `IBSAuthenticationError` carries exactly one bounded reason,
@@ -195,12 +195,21 @@ inspection of OBS, osc, and osc-tiny, established:
   or HTTP Basic, while the IBS front end enforces the signature scheme. OBS API
   tokens are accepted only by trigger operations.
 
-Not verified: whether IBS rejects a stale `created` and its accepted window,
-whether it accepts a resent signature, and a signed request produced by
-`IBSClient` itself. Documentation-only verification is not sufficient for the
-signer: no production workflow consumes `IBSClient` until one live signed
-read-only operation by `IBSClient` has succeeded under External Integration
-Contract Verification (`docs/conventions.md`).
+Documentation-only verification is not sufficient for the signer, so
+`IBSClient` itself was verified live and read-only on 2026-10-12 under
+External Integration Contract Verification (`docs/conventions.md`), with a
+registered Ed25519 key:
+
+- its unsigned targeted source-info request received the HTTP 401 challenge,
+  and the one signed attempt succeeded and set a session cookie;
+- the following source-diff requests of the same client instance succeeded
+  with that cookie and without a signature;
+- the identical signed request, resent about two seconds later without a
+  session cookie, succeeded; and
+- a signature whose `created` was one hour before or after the current time
+  received HTTP 401 to the signed attempt.
+
+Not verified: the exact window within which IBS accepts `created`.
 
 ### Key API Operations
 

@@ -434,11 +434,12 @@ repositories.
     on 2026-09-08;
   - the source-diff unavailable-revision responses on 2026-10-11 and
     2026-10-12; and
-  - SSH-signature authentication on 2026-10-12.
+  - SSH-signature authentication on 2026-10-12, including a live signed
+    request by Sentinel's own IBS client.
 
-  Gate status: the track-release contract has no open verification gate, and
-  one authentication gate remains. Verified shapes, fields verified only
-  through OBS source inspection, and the remaining gate are recorded in the
+  Gate status: neither the track-release nor the authentication contract has
+  an open verification gate. Verified shapes, fields verified only through OBS
+  source inspection, and the remaining unverified details are recorded in the
   Authentication, Track-Release, and Request Contract Verification Status
   sections of `docs/features/integrations/ibs-integration.md`
 - **See also**: `docs/features/integrations/ibs-integration.md`,
