@@ -55,7 +55,7 @@ class TestBuildSystemProcessEnv:
         not reach the built environment — not even as an empty value:
         the key itself must be absent, since it is not part of the
         explicit key set this function produces."""
-        monkeypatch.setenv("IBS_PASSWORD", "canary-real-password-do-not-leak")
+        monkeypatch.setenv("IBS_SSH_PRIVATE_KEY", "canary-real-ibs-key-do-not-leak")
         monkeypatch.setenv("NVD_API_KEY", "canary-nvd-key-do-not-leak")
         monkeypatch.setenv("GITHUB_TOKEN", "canary-github-token-do-not-leak")
         monkeypatch.setenv(
@@ -67,7 +67,7 @@ class TestBuildSystemProcessEnv:
 
         env = _build_env(tmp_path)
 
-        assert "IBS_PASSWORD" not in env
+        assert "IBS_SSH_PRIVATE_KEY" not in env
         assert "NVD_API_KEY" not in env
         assert "GITHUB_TOKEN" not in env
         assert env["DATABASE_URL"] == _DEFAULT_KWARGS["database_url"]

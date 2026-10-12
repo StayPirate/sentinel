@@ -56,7 +56,7 @@ def _format_validation_error(exc: ValidationError) -> str:
     entire input mapping for some error types (e.g. a required field
     that is `missing`), which can include other, unrelated
     credential-bearing settings (`DATABASE_URL`, `NVD_API_KEY`,
-    `IBS_PASSWORD`) that are still plain strings at validation time —
+    `IBS_SSH_PRIVATE_KEY`) that are still plain strings at validation time —
     before `SecretStr`/`repr=False` masking would otherwise apply. This
     renders only the failing field path and the validator's own message
     (`errors(include_input=False)`), which is exactly the safe subset

@@ -119,9 +119,8 @@ def is_infrastructure_failure(exc: Exception) -> bool:
 def is_retryable_condition(exc: Exception) -> bool:
     """Classify whether a post-transport exception is worth retrying.
 
-    Used by Celery task wrappers (`fetch_single_cve`, `run_catch_up`,
-    `correlate_submission_request`) to decide `self.retry()` vs immediate
-    failure.
+    Used by Celery task wrappers (`fetch_single_cve`, `run_catch_up`) to
+    decide `self.retry()` vs immediate failure.
 
     Returns `True` for transient conditions where a subsequent attempt may
     succeed: infrastructure failures (network, timeout, proxy, protocol
