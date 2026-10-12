@@ -249,7 +249,9 @@ class IBSServer:
     """Scripted IBS API under `TEST_API_URL` with the live authentication
     behavior: unauthenticated requests receive HTTP 401 with `challenges`;
     a request carrying a verifiable signature, or an issued session cookie,
-    is served from `routes` keyed by `(method, raw path)`."""
+    is served from `routes` keyed by `(method, decoded path)`. `intercept`,
+    when set, may answer (or raise for) a request before authentication.
+    `requests` holds header snapshots in arrival order."""
 
     public_key: Ed25519PublicKey
     realm: str = LIVE_REALM
@@ -257,6 +259,7 @@ class IBSServer:
     challenges: list[str] = field(default_factory=lambda: [LIVE_CHALLENGE])
     issue_session: bool = True
     reject_signatures: bool = False
+    intercept: Callable[[httpx.Request], httpx.Response | None] | None = None
     routes: dict[tuple[str, str], Responder] = field(default_factory=dict)
     requests: list[httpx.Request] = field(default_factory=list)
     signatures: list[VerifiedSignature] = field(default_factory=list)
@@ -270,7 +273,17 @@ class IBSServer:
         return httpx.MockTransport(self.handle)
 
     def handle(self, request: httpx.Request) -> httpx.Response:
-        self.requests.append(request)
+        # A snapshot: the authentication flow mutates and resends the same
+        # request object.
+        self.requests.append(
+            httpx.Request(
+                request.method, request.url, headers=list(request.headers.raw)
+            )
+        )
+        if self.intercept is not None:
+            intercepted = self.intercept(request)
+            if intercepted is not None:
+                return intercepted
         session = self._session(request)
         authorization = request.headers.get("authorization")
         set_cookie: str | None = None

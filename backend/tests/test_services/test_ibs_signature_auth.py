@@ -102,6 +102,10 @@ class TestParseChallenges:
         assert parse_challenges("Signature abc=") == [
             Challenge("Signature", token68="abc=")
         ]
+        assert parse_challenges("Signature realm= , Basic") == [
+            Challenge("Signature", token68="realm="),
+            Challenge("Basic"),
+        ]
         assert parse_challenges("Signature a/b+c") == [
             Challenge("Signature", token68="a/b+c")
         ]
@@ -117,6 +121,9 @@ class TestParseChallenges:
             'Signature realm="bad\x00character"',
             'Signature realm="trailing escape\\',
             "Signature, =realm",
+            'Signature"realm"',
+            "Signature @@@",
+            'Signature realm="a\\\x00"',
         ],
     )
     def test_invalid_syntax_is_rejected(self, value: str) -> None:
