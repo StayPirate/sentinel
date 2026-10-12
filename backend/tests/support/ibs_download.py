@@ -48,7 +48,12 @@ repositories under `TEST_BASE_URL` with live-shaped responses: `repomd.xml`
 as `application/xml;name="repomd.xml"`, the updateinfo artifact as a
 same-path 302 to `https://dist.suse.de` followed by `application/x-gzip`.
 Tests register repositories, script exact responses per URL, and inspect
-`requests`.
+`requests`. Every response helper returns an unread body, as a real
+transport does (`unread_response`). `StreamedBody` serves a lazily yielded body without
+`Content-Length` (optionally failing mid-body) and counts the chunks it
+handed out, so tests can prove that a download was aborted early.
+`candidate()` and `observe()` drive one `ProductRepositoryDownloads`
+invocation against such a client.
 
 Consumers: `tests/test_services/test_packages/test_ibs_download_contract.py`
 and the `test_ibs_*` boundary tests in the same directory.
@@ -59,13 +64,20 @@ from __future__ import annotations
 import gzip
 import hashlib
 import json
-from collections.abc import Callable, Iterable
+import uuid
+from collections.abc import AsyncIterator, Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final
 from xml.sax.saxutils import escape, quoteattr
 
 import httpx
+
+from app.services.packages.ibs_product_download import (
+    ProductOccurrenceCandidate,
+    ProductReleaseObservation,
+    ProductRepositoryDownloads,
+)
 
 FIXTURE_DIR: Final = (
     Path(__file__).resolve().parent.parent / "fixtures" / "ibs_download"
@@ -362,11 +374,25 @@ class DownloadServer:
                 return redirect_response(
                     f"https://{REDIRECT_HOST}{request.url.raw_path.decode()}"
                 )
-        return httpx.Response(
-            404,
-            headers={"Content-Type": "text/html; charset=utf-8"},
-            content=b"<html/>",
+        return unread_response(
+            404, [("Content-Type", "text/html; charset=utf-8")], b"<html/>"
         )
+
+
+def unread_response(
+    status: int, headers: list[tuple[str, str]], content: bytes
+) -> httpx.Response:
+    """A response whose body is still unread, as from a real transport.
+
+    `httpx.Response(content=...)` is read on construction, so the
+    boundary's `aiter_raw()` would refuse it. The live `Content-Length`
+    is set explicitly.
+    """
+    return httpx.Response(
+        status,
+        headers=[*headers, ("Content-Length", str(len(content)))],
+        stream=httpx.ByteStream(content),
+    )
 
 
 def xml_response(
@@ -374,29 +400,89 @@ def xml_response(
     *,
     status: int = 200,
     content_type: str = 'application/xml;name="repomd.xml"',
-    headers: dict[str, str] | None = None,
 ) -> httpx.Response:
-    merged = {"Content-Type": content_type, **(headers or {})}
-    return httpx.Response(status, headers=merged, content=content)
+    return unread_response(status, [("Content-Type", content_type)], content)
 
 
 def gzip_response(
-    content: bytes,
-    *,
-    content_type: str = "application/x-gzip",
-    headers: dict[str, str] | list[tuple[str, str]] | None = None,
+    content: bytes, *, content_type: str = "application/x-gzip"
 ) -> httpx.Response:
-    if isinstance(headers, list):
-        return httpx.Response(
-            200, headers=[("Content-Type", content_type), *headers], content=content
-        )
-    merged = {"Content-Type": content_type, **(headers or {})}
-    return httpx.Response(200, headers=merged, content=content)
+    return unread_response(200, [("Content-Type", content_type)], content)
 
 
 def redirect_response(location: str, *, status: int = 302) -> httpx.Response:
-    return httpx.Response(
+    return unread_response(
         status,
-        headers={"Location": location, "Content-Type": "application/x-gzip"},
-        content=b"",
+        [("Location", location), ("Content-Type", "application/x-gzip")],
+        b"",
     )
+
+
+@dataclass
+class StreamedBody:
+    """A response body yielded lazily, chunk by chunk.
+
+    A response built from it has no automatic `Content-Length`. `error`,
+    when set, is raised after the chunks. `yielded` counts the chunks
+    handed out; `exhausted` tells whether the reader consumed them all.
+    """
+
+    chunks: Iterable[bytes]
+    error: BaseException | None = None
+    yielded: int = 0
+    exhausted: bool = False
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        for chunk in self.chunks:
+            self.yielded += 1
+            yield chunk
+        self.exhausted = True
+        if self.error is not None:
+            raise self.error
+
+
+def streamed_response(
+    body: StreamedBody,
+    *,
+    content_type: str | None,
+    headers: list[tuple[str, str]] | None = None,
+    status: int = 200,
+) -> httpx.Response:
+    """A response streaming `body`; `content_type=None` omits the header."""
+    merged = [("Content-Type", content_type)] if content_type is not None else []
+    return httpx.Response(status, headers=[*merged, *(headers or [])], content=body)
+
+
+# --- Boundary invocation -------------------------------------------------
+
+DEFAULT_CVE: Final = "CVE-2024-0001"
+DEFAULT_PACKAGE: Final = "example"
+
+
+def candidate(
+    *,
+    current: Iterable[str] = (),
+    historical: Iterable[str] = (),
+    package_name: str = DEFAULT_PACKAGE,
+    cve_id: str = DEFAULT_CVE,
+) -> ProductOccurrenceCandidate:
+    """One Product occurrence with a fresh occurrence ID."""
+    return ProductOccurrenceCandidate(
+        occurrence_id=uuid.uuid4(),
+        cve_id=cve_id,
+        package_name=package_name,
+        current_repositories=tuple(current),
+        historical_repositories=tuple(historical),
+    )
+
+
+async def observe(
+    client: httpx.AsyncClient,
+    *candidates: ProductOccurrenceCandidate,
+    base_url: str | None = TEST_BASE_URL,
+) -> list[ProductReleaseObservation]:
+    """One invocation observing every candidate in the given order."""
+    async with ProductRepositoryDownloads(
+        client, candidates, base_url=base_url
+    ) as downloads:
+        return [await downloads.observe(item.occurrence_id) for item in candidates]
