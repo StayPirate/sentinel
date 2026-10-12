@@ -717,6 +717,17 @@ def test_parse_repomd_text_field_with_child_element_raises_xml_structure(
     assert _failure(_repomd(overrides={field: nested})) == "xml_structure"
 
 
+@pytest.mark.parametrize("field", _TEXT_FIELDS)
+def test_parse_repomd_overlong_field_text_raises_xml_structure(field: str) -> None:
+    # Consumed text is bounded while parsing (128 characters), far above
+    # every valid value: the longest is a 64-digit SHA-256 checksum.
+    markup = _field_markup(field)
+    start = markup.index(">") + 1
+    overlong = f"{markup[:start]}{'0' * 129}{markup[markup.index('</') :]}"
+
+    assert _failure(_repomd(overrides={field: overlong})) == "xml_structure"
+
+
 @pytest.mark.parametrize(
     "location",
     [

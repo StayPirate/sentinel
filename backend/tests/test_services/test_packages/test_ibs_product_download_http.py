@@ -368,6 +368,7 @@ _NON_COMPLIANT_LOCATIONS: Final[dict[str, Callable[[str], str]]] = {
     "trailing-space": lambda p: f"{DIST}{p} ",
     "inner-space": lambda p: f"{DIST}{p.replace('/update/', '/up date/')}",
     "empty": lambda p: "",
+    "unbalanced-ipv6-bracket": lambda p: f"https://[{REDIRECT_HOST}{p}",
 }
 
 
@@ -1087,6 +1088,28 @@ class TestGzipIntegrity:
 
         _assert_incomplete(await _observe(server), "gzip")
         assert _hosts(server).count(REDIRECT_HOST) == 1
+
+    @pytest.mark.parametrize(
+        "tail",
+        [
+            pytest.param(_MEMBER, id="second-member"),
+            pytest.param(b"\x00" * 8, id="zero-padding"),
+        ],
+    )
+    async def test_data_after_member_in_a_later_chunk_is_gzip(
+        self, tail: bytes
+    ) -> None:
+        # The member ends exactly at a chunk boundary, so the trailing data
+        # arrives after the decompressor has already reached end of stream.
+        compressed = _MEMBER + tail
+        item = Artifact(compressed=compressed, open_bytes=MATCH_DOCUMENT)
+        server = _server(item)
+        server.script(
+            _dist_url(server, item),
+            _stream(StreamedBody([_MEMBER, tail]), "application/x-gzip"),
+        )
+
+        _assert_incomplete(await _observe(server), "gzip")
 
     @pytest.mark.parametrize(
         ("checksum_type", "field"),

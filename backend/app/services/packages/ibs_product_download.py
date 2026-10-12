@@ -504,8 +504,6 @@ class _UpdateinfoStream:
         self._decompressor = zlib.decompressobj(wbits=31)
 
     def feed(self, chunk: bytes) -> None:
-        if not chunk:
-            return
         self._compressed += len(chunk)
         if self._compressed > self._identity.size:
             raise RepositoryDataError("size")
