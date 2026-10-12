@@ -191,9 +191,14 @@ Configuration).
 | Env Var | Type | Default | Description | Defined in |
 |---------|------|---------|-------------|------------|
 | `IBS_API_URL` | string | `https://api.suse.de` | IBS API base URL | `docs/features/integrations/ibs-integration.md` |
-| `IBS_USERNAME` | string | `""` | IBS HTTP Basic Auth username. Empty or unset: app starts without IBS credentials; IBS-dependent fetchers will fail at runtime | `docs/features/integrations/ibs-integration.md` |
-| `IBS_PASSWORD` | string | `""` | IBS HTTP Basic Auth password. Same rationale as `IBS_USERNAME` | `docs/features/integrations/ibs-integration.md` |
+| `IBS_USERNAME` | string | `""` | IBS API account name, sent as the `keyId` of SSH-signature authentication. Not a secret. A non-empty value must be printable ASCII without whitespace, `"`, or `\`; any other value fails startup. Empty or unset: the app starts with a warning, and credentialed IBS API operations fail at runtime | `docs/features/integrations/ibs-integration.md` |
+| `IBS_SSH_PRIVATE_KEY` | secret string (base64) | `""` | Standard padded base64 encoding, on one line, of the complete OpenSSH private-key file of the unencrypted Ed25519 key registered for `IBS_USERNAME` (for example, `base64 -w0 <key file>`), used only to sign IBS API requests in process. Any other non-empty value, including an encrypted key or another key type, fails startup naming only the variable; it is never trimmed. Empty or unset: same as `IBS_USERNAME` | `docs/features/integrations/ibs-integration.md` |
 | `IBS_DOWNLOAD_BASE_URL` | HTTPS URL | `https://download.suse.de/ibs` | Anonymous IBS Product-repository MirrorCache front door. Must be absolute HTTPS with a hostname and contain no user information, query, fragment, unsafe/empty path segment, percent encoding, backslash, or control character; one trailing slash is accepted and removed. Invalid values fail startup. Product downloads never send IBS API credentials | `docs/features/packages/ibs-product-release-detection.md` |
+
+The IBS API uses SSH-signature authentication only; HTTP Basic credentials and
+OBS API tokens are not used. `IBS_SSH_PRIVATE_KEY` is never sent: only a
+signature derived from it is, so the header-value rule in
+`docs/conventions.md` (Secret Field Typing) does not apply to it.
 
 ## IBS RabbitMQ Consumer
 

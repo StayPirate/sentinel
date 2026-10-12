@@ -479,7 +479,7 @@ CVE label text when it is invalid.
 | Schedule | Daily at 02:00 UTC (`0 2 * * *`) |
 | Source | IBS HTTP API (`IBS_API_URL`) |
 | Scope | Existing IBS tracks in `ANALYSIS` or `AFFECTED` under active Tickets with a CVE; exclusions, EOL, and actionability do not narrow scope |
-| Auth | Configured IBS HTTP Basic/API-token credentials |
+| Auth | IBS API SSH-signature authentication with the configured account and key (`../integrations/ibs-integration.md`, Origins and Authentication) |
 | `participates_in_catch_up` | `True` — custom per-Ticket catch-up |
 | Custom settings | None |
 

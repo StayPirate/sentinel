@@ -36,16 +36,165 @@ Applicability and Convergence).
 
 ### Origins and Authentication
 
-- The IBS API at `IBS_API_URL` uses HTTP Basic Auth or API tokens.
-  `IBS_USERNAME` and `IBS_PASSWORD` are stored as environment variables, never
-  in code. Empty or unset credentials do not block application startup;
-  credentialed IBS API consumers fail at runtime.
+- The IBS API at `IBS_API_URL` authenticates every operation Sentinel uses
+  with the SSH-signature scheme defined in
+  [Request Authentication](#request-authentication). Sentinel uses no other IBS
+  API authentication scheme. It never sends HTTP Basic credentials, and it does
+  not use OBS API tokens, which authorize only OBS trigger operations and none
+  of the read operations below. The account name and private key are
+  environment variables (`IBS_USERNAME`, `IBS_SSH_PRIVATE_KEY`), never code.
+  Credentials that are not configured do not block application startup;
+  credentialed IBS API operations fail at runtime.
 - `IBS_DOWNLOAD_BASE_URL` is a separate anonymous HTTPS Product-repository
   front door (default: `https://download.suse.de/ibs`). Product release
   detection does not send IBS API credentials, an `Authorization` header, or
   another credential to the download front door or its permitted redirect
   target. Its complete validation, path, and redirect contract is defined in
   `docs/features/packages/ibs-product-release-detection.md`.
+
+#### IBS API Credentials
+
+| Setting | Contract |
+|---|---|
+| `IBS_USERNAME` | Name of the IBS account, sent as the `keyId` of every signature. Not a secret. A non-empty value consists only of printable ASCII characters other than space, `"`, and `\` (U+0021 to U+007E except U+0022 and U+005C). |
+| `IBS_SSH_PRIVATE_KEY` | Secret. The standard padded base64 encoding, on one line without whitespace, of the complete OpenSSH private-key file of one unencrypted Ed25519 key registered for that account. The decoded file starts with its `-----BEGIN OPENSSH PRIVATE KEY-----` line and ends with its `-----END OPENSSH PRIVATE KEY-----` line, optionally followed by one line break; its lines are separated by LF. |
+
+The IBS API credentials are **configured** only when both settings are
+non-empty. When either is empty or unset, the application starts and logs a
+warning naming the empty settings, and every credentialed IBS API operation
+fails as specified in [Request Authentication](#request-authentication).
+
+A non-empty value that violates its contract fails application startup with an
+error naming only the variable. The value is never trimmed or otherwise
+altered. For `IBS_SSH_PRIVATE_KEY`, a violation includes invalid base64, a
+decoded value that is not exactly one OpenSSH-format private key file, a key
+encrypted with a passphrase, and every key type other than Ed25519. The error
+never includes the value, part of it, or a parser detail derived from it.
+Ed25519 is the only supported key type: the key is generated for this account
+alone, and a single signature algorithm leaves no algorithm or hash selection to
+negotiate. The single-line encoding lets every environment mechanism, including
+an environment file, carry the key unchanged.
+
+Sentinel never writes the private key to a file, sends it, logs it, includes it
+in an error, or gives it to a subprocess or an SSH agent as an argument, input,
+or file. Like every setting supplied through the environment, the encoded value
+is present in the environment that subprocesses inherit. Signatures are computed
+in process; Sentinel does not run `ssh-keygen`, `ssh-agent`, `osc`, or another
+external program to sign. Only the per-request signature derived from the key
+is sent.
+
+#### Request Authentication
+
+`IBSClient` authenticates each credentialed operation reactively:
+
+1. When the IBS API credentials are not configured, the operation raises
+   `IBSCredentialsNotConfiguredError` without an HTTP request. Method input
+   validation precedes this check.
+2. The request is sent without an `Authorization` header. It carries the
+   client instance's session cookie when one is held (see
+   [Session Reuse](#session-reuse)).
+3. A response other than HTTP 401 is that operation's response; authentication
+   is not involved. In particular, an HTTP 403 authorization failure follows
+   the operation's escaping outcomes and is never answered with a signature.
+4. On HTTP 401, the client discards every session cookie it holds and examines
+   every `WWW-Authenticate` value of the response. Challenges and their
+   parameters are parsed as defined by RFC 9110 (section 11.6.1, including
+   several challenges in one value); parameter names are case-insensitive, and
+   a quoted value is unescaped before validation and use. It continues only when
+   exactly one challenge uses the scheme `Signature` (case-insensitive), that
+   challenge's `realm` is non-empty and consists only of printable ASCII
+   characters (U+0020 to U+007E), and its `headers` parameter is absent or
+   exactly `(created)`. Other parameters of that challenge, and challenges of
+   other schemes such as `Basic`, are ignored and never answered. In every
+   other case, the operation raises `IBSAuthenticationError` with reason
+   `unsupported_challenge` and makes no further request.
+5. The client computes one signature:
+   - `created` is the current Unix time in whole seconds, from the system
+     clock;
+   - the signed message is the ASCII string `(created): ` followed by `created`
+     in decimal, without a line break;
+   - the signature is an OpenSSH SSHSIG version 1 signature
+     (`PROTOCOL.sshsig`) over that message, with the challenge `realm` as its
+     namespace, hash algorithm `sha512`, and signature algorithm
+     `ssh-ed25519`; and
+   - its header value is the standard padded base64 encoding of the complete
+     binary SSHSIG blob, without the armor lines or line breaks.
+6. The client resends the same method, URL, and body exactly once with this
+   header, using the parameter names, order, and quoting shown; `created` is an
+   unquoted decimal integer:
+
+   ```text
+   Authorization: Signature keyId="{IBS_USERNAME}",algorithm="ssh",headers="(created)",created={created},signature="{signature}"
+   ```
+
+7. An HTTP 401 response to the signed attempt raises `IBSAuthenticationError`
+   with reason `signature_rejected`; the client does not sign again for that
+   operation. Any other response is the operation's response.
+
+Each attempt keeps the shared transport retry policy
+(`docs/features/platform/networking.md`, Transport-Level Retry). A transport
+retry of the signed attempt resends the same signature. One operation
+therefore makes at most one unsigned and one signed attempt. Redirects are
+never followed, so neither the signature nor a session cookie reaches another
+destination.
+
+The realm is taken from the challenge rather than compared with a fixed value.
+It is the SSHSIG namespace, but only the TLS-validated `IBS_API_URL` origin can
+supply it, and the signed message always has the fixed form above, so a
+signature only authenticates the account to that origin. A changed realm text
+therefore does not interrupt operation. IBS may reject a signature whose
+`created` differs from its own clock; the accepted window is unverified. The
+clocks of hosts running Sentinel must therefore be synchronized
+(`docs/deployment.md`, Clock Synchronization).
+
+`IBSAuthenticationError` carries exactly one bounded reason,
+`unsupported_challenge` or `signature_rejected`, which consuming workflows may
+use as their reason category. It never carries challenge content, the realm,
+the account name, or response data.
+
+`IBSCredentialsNotConfiguredError` and `IBSAuthenticationError` are not `httpx`
+exceptions. They are therefore neither infrastructure failures nor retryable
+conditions under `docs/features/platform/networking.md` (Infrastructure Failure
+Classification, Celery Retry Classification). A prompt retry is not expected to
+succeed: recovery requires correcting the account, key, key registration, or
+host clock, or supporting a changed challenge.
+
+#### Session Reuse
+
+A successful signed response can set a session cookie. `IBSClient` keeps
+cookies set by IBS API responses only in memory, for the lifetime of one client
+instance, and sends them only to the `IBS_API_URL` origin. It never persists
+them, shares them between client instances or processes, or depends on a cookie
+name or lifetime. Correctness never depends on a session: a request whose
+session IBS no longer accepts receives HTTP 401 and continues at step 4 of
+[Request Authentication](#request-authentication).
+
+#### Authentication Contract Verification Status
+
+Sanitized read-only verification against the IBS API on 2026-10-12, and source
+inspection of OBS, osc, and osc-tiny, established:
+
+- `GET /about` is public. Without authentication, every operation family below
+  (targeted source info, source diff, request ID search, request point detail,
+  action-scoped request diff, and source history) returns HTTP 401 with an HTML
+  body from the IBS front end, no cookie, and exactly one challenge:
+  `WWW-Authenticate: Signature realm="Use your developer account",headers="(created)"`.
+  No `Basic` challenge is offered;
+- a signature for an unknown account by an unregistered Ed25519 key, and an
+  unknown session cookie, each receive the same HTTP 401 challenge;
+- a client signing with a registered Ed25519 key and the header form above
+  succeeds for every operation family, and each successful signed login sets a
+  session cookie with a 24-hour expiry; and
+- the OBS API itself authenticates through a front-end proxy, a web session,
+  or HTTP Basic, while the IBS front end enforces the signature scheme. OBS API
+  tokens are accepted only by trigger operations.
+
+Not verified: whether IBS rejects a stale `created` and its accepted window,
+whether it accepts a resent signature, and a signed request produced by
+`IBSClient` itself. Documentation-only verification is not sufficient for the
+signer: no production workflow consumes `IBSClient` until one live signed
+read-only operation by `IBSClient` has succeeded under External Integration
+Contract Verification (`docs/conventions.md`).
 
 ### Key API Operations
 
@@ -215,10 +364,12 @@ entry is structurally valid, IDs are distinct, and the returned count equals
 `matches`. A count mismatch, malformed successful response, or ambiguous
 candidate set is incomplete evidence, never a negative result. The client does
 not need to distinguish an upstream result-limit rejection from another
-non-authentication search rejection: after shared rate-limit handling, any 4xx
-from this read-only search except `401` or `403` is an incomplete
-`RequestEvidenceResult`. Authentication and authorization failures propagate as
-HTTP errors. The endpoint has no offset-pagination contract.
+search rejection: after shared rate-limit handling, any 4xx from this read-only
+search except `401` or `403` is an incomplete `RequestEvidenceResult`. An
+authentication failure raises `IBSAuthenticationError` (see
+[Request Authentication](#request-authentication)), and a `403` authorization
+failure propagates as an HTTP error. The endpoint has no offset-pagination
+contract.
 
 Every returned ID is point-fetched. A source-package prefix proposes candidates
 but does not establish logical package identity. The detail must validate the
@@ -527,14 +678,16 @@ The methods have these escaping outcomes:
 | Condition | Signal to caller |
 |---|---|
 | Invalid or empty method input, including an unbounded request search or invalid source-history control combination | `ValueError` before HTTP I/O |
-| Transport failure, timeout, rate limit, or HTTP error other than an operation-specific incomplete-evidence response after shared retry handling | The corresponding `httpx` exception propagates with the response body excluded from application logs |
+| IBS API credentials not configured: `IBS_USERNAME` or `IBS_SSH_PRIVATE_KEY` is empty or unset | `IBSCredentialsNotConfiguredError` before HTTP I/O, after method input validation |
+| Authentication rejected: HTTP 401 to the signed attempt, or an HTTP 401 without exactly one supported `Signature` challenge | `IBSAuthenticationError` with reason `signature_rejected` or `unsupported_challenge`; no further request for that operation |
+| Transport failure, timeout, rate limit, or HTTP error other than an authentication failure or an operation-specific incomplete-evidence response, including an HTTP 403 authorization failure, after shared retry handling | The corresponding `httpx` exception propagates with the response body excluded from application logs |
 | Malformed/interrupted source-info or source-diff XML, or its document-level schema failure | `IBSResponseDataError` |
 | One requested source-info package missing, duplicated, error-bearing, or carrying an invalid `srcmd5` | A per-package failed result in the returned mapping; valid sibling package results remain usable |
 | Source diff old revision positively identified as unavailable | `IBSHistoricalRevisionUnavailable` |
 | Source diff contains an issue with an unusable structural shape | `IBSResponseDataError` |
 | Source diff is valid and contains no qualifying issue | Empty list |
 | Request ID search reports inconsistent successful-response completeness or leaves candidate identity ambiguous | Incomplete `RequestEvidenceResult` |
-| Request ID search receives a non-authentication 4xx after shared rate-limit handling, including an upstream result-limit or predicate rejection | Incomplete `RequestEvidenceResult`; it never proves a negative |
+| Request ID search receives a 4xx other than 401 or 403 after shared rate-limit handling, including an upstream result-limit or predicate rejection | Incomplete `RequestEvidenceResult`; it never proves a negative |
 | Request detail is 404, has an unknown state or action type, has an invalid supersession relationship, or omits a required supported-action field | Incomplete `RequestEvidenceResult` |
 | Request detail contains only known non-maintenance actions | Complete typed parent with an empty supported-action collection |
 | Required request action diff is 404, absent, unmatched, malformed, or partial | Incomplete `RequestEvidenceResult`; retained correlation and delivery evidence is not invalidated |
@@ -543,12 +696,16 @@ The methods have these escaping outcomes:
 
 `IBSResponseDataError` and `IBSHistoricalRevisionUnavailable` are internal
 integration exceptions caught by the Track detector; they never reach an API
-handler. Submission reconciliation consumes incomplete `RequestEvidenceResult`
-values and preserves prior request, action, correlation, and delivery state for
-that scope. It does not convert unavailable evidence into a no-match.
-`IBSHistoricalRevisionUnavailable` is emitted only after the live status/body
-discriminator required above has been verified. Until then, an ambiguous
-source-diff 400/404 remains the original HTTP error.
+handler. `IBSCredentialsNotConfiguredError` and `IBSAuthenticationError` are
+internal integration exceptions that every method can raise. Each consuming
+workflow handles them as a failure of the scope that depended on the operation,
+with its own bounded reason category; they never reach an API handler and never
+represent a negative observation. Submission reconciliation consumes incomplete
+`RequestEvidenceResult` values and preserves prior request, action,
+correlation, and delivery state for that scope. It does not convert unavailable
+evidence into a no-match. `IBSHistoricalRevisionUnavailable` is emitted only
+after the live status/body discriminator required above has been verified.
+Until then, an ambiguous source-diff 400/404 remains the original HTTP error.
 
 All request-search, point-detail, request-diff, and source-history XML uses the
 same incremental parsing safety boundary as source release data: DTDs, external
@@ -571,13 +728,16 @@ recovery belong to `ibs-submission-tracking.md` and the release-detector
 specifications.
 
 Configuration is injected via the application settings (`IBS_API_URL`,
-`IBS_USERNAME`, `IBS_PASSWORD`).
+`IBS_USERNAME`, `IBS_SSH_PRIVATE_KEY`).
 
 **HTTP client infrastructure**: `IBSClient` uses the standalone HTTP
 client factory (`backend/app/services/http_client.py`) directly, with
 the following overrides:
 
 - `Accept: application/xml` (IBS API returns XML, not JSON)
+- SSH-signature authentication and in-memory session cookies as specified in
+  [Request Authentication](#request-authentication) and
+  [Session Reuse](#session-reuse); redirects are not followed
 - TLS validated against the SUSE Trust Root CA via the combined trust
   store (see `networking.md`, TLS Trust Store
   Configuration)
@@ -651,8 +811,10 @@ path use this same boundary. Full behavior is documented in
 
 ### Business Rules
 
-1. Credentialed IBS API consumers warn when IBS credentials are empty or unset;
-   anonymous Product repository downloads never consume those credentials
+1. The application warns at startup when the IBS API account name or SSH
+   private key is empty or unset, and credentialed IBS API operations then fail
+   without an HTTP request; anonymous Product repository downloads never
+   consume those credentials
 2. IBS mutations use their owning service and audit contracts; read-only
    external operations use bounded operational logging rather than audit events
 3. Track release reconciliation only modifies records with status
@@ -695,8 +857,15 @@ event bus.
 - IBS and OBS credentials are managed via environment variables
 - API calls are made server-side only; credentials are never exposed to
   the frontend
+- In staging and production, the IBS API account is a dedicated, non-personal
+  account whose Ed25519 key is generated for it and used for no other purpose
+- The IBS SSH private key is never sent; only per-request signatures derived
+  from it are sent, and only to the `IBS_API_URL` origin
+- Sentinel's log statements and errors never include key material,
+  `Authorization` header values, signatures, session cookies, or
+  `WWW-Authenticate` challenge content
 - Product repository downloads are anonymous and never attach or forward IBS
-  API credentials
+  API credentials, signatures, or session cookies
 - Operations that modify IBS/OBS state (future: rebuild triggers) require
   the Vulnerability Analyst or Admin role
 - XML parsers disable DTDs, external entities, and parser network access;

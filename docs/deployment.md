@@ -258,7 +258,7 @@ cd backend && uv run python -m app.cli manage-user create \
 | `CORS_ORIGINS` | `https://sentinel-staging.suse.de` | |
 | `DEBUG` | `false` | Never enable debug in staging |
 | `IBS_API_URL` | `https://api.suse.de` | |
-| `IBS_USERNAME` / `IBS_PASSWORD` | Service account credentials | |
+| `IBS_USERNAME` / `IBS_SSH_PRIVATE_KEY` | Dedicated non-personal IBS account and the one-line base64 encoding of its unencrypted Ed25519 private-key file | Supply the key through the environment or secret store; never log it |
 | `IBS_RABBITMQ_URL` | Credential-bearing AMQPS URL | Supply through the environment or secret store; never log it |
 
 #### Deployment Steps
@@ -322,7 +322,13 @@ Before the first production deployment:
 - [ ] `JWT_SECRET_KEY` generated (cryptographically random, >= 32 chars)
 - [ ] PostgreSQL provisioned and accessible
 - [ ] Redis provisioned and accessible
-- [ ] IBS service account created (`IBS_USERNAME` / `IBS_PASSWORD`)
+- [ ] Dedicated, non-personal IBS service account created, with read access to
+      the IBS projects Sentinel queries and an SSH public key registered for
+      it. The key pair is Ed25519, generated without a passphrase for this
+      account only, and not used elsewhere. `IBS_USERNAME` and
+      `IBS_SSH_PRIVATE_KEY` supplied securely
+      (`docs/features/integrations/ibs-integration.md`, IBS API Credentials
+      and Security)
 - [ ] IBS RabbitMQ credential-bearing URL supplied securely
 - [ ] `GITHUB_TOKEN` supplied (GitHub personal access token), or the
       `sync_ghsa_advisories` fetcher disabled through `FetcherConfig.enabled`;
@@ -1314,13 +1320,16 @@ GIT_TERMINAL_PROMPT=0
 
 All application instances in a multi-instance deployment must have their
 system clocks synchronized via NTP (or an equivalent time
-synchronization protocol). Sentinel relies on timestamps for several
-security and correctness mechanisms:
+synchronization protocol); a single-instance deployment needs the same
+synchronization for IBS API request signatures. Sentinel relies on
+timestamps for several security and correctness mechanisms:
 
 - SSO state parameter validation (10-minute TTL window)
 - JWT `exp` and `iat` claim verification
 - Session expiration enforcement
 - Cache TTL calculations (discovery document, JWKS)
+- IBS API request signatures, which IBS may reject when their signed
+  `created` timestamp differs from its own clock
 
 Clock skew between instances can shorten or lengthen time-based windows
 unpredictably. For example, if the instance generating an SSO state has

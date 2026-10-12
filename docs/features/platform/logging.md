@@ -364,6 +364,9 @@ Log statements MUST NEVER include:
 - Values obtained via `SecretStr.get_secret_value()` or any other raw
   credential material (per `docs/conventions.md`, Secret Field
   Typing).
+- Credentials derived from that material or issued by an upstream
+  service: `Authorization` header values, request signatures, and session
+  cookies.
 - Personal data, except as already permitted by the placeholder rules
   in `docs/conventions.md` ("Example Data in Documentation") and
   Guardrail #23.
@@ -465,7 +468,14 @@ keeps them free of secrets per the discipline above.
   `Authorization` or `Proxy-Authorization` header name
   (case-insensitive, `:` or `=` separator, optional quotes), preserving
   the authentication scheme when present:
-  `Authorization: Bearer ***`.
+  `Authorization: Bearer ***`. When the credential is a list of
+  parameters, which may contain quoted values, commas, and `=`
+  characters (as in the `Signature` scheme), the complete list is
+  masked: `Authorization: Signature ***`.
+- **Cookie header values** — the complete value following a `Cookie` or
+  `Set-Cookie` header name (case-insensitive), in a header line, in a
+  mapping representation, or in a name–value pair representation such
+  as `(b'Set-Cookie', b'...')`: `Set-Cookie: ***`.
 
 **Best-effort semantics.** The processor cannot recognize credentials
 it does not know (for example, a token in a URL query string or in a
@@ -538,9 +548,11 @@ are expected to be tested as follows:
   a third-party stdlib logger, and in rendered exception text; that
   records without sensitive content (CVE IDs, UUIDs, correlation IDs,
   ordinary URLs) are unchanged; that empty and short configured values
-  are never matched by exact value; that a redaction failure still
-  emits the record; and that the CLI configuration applies the same
-  processor.
+  are never matched by exact value; that a parameter-list
+  `Authorization` value is masked completely; that cookie
+  values are masked in each listed representation; that a redaction
+  failure still emits the record; and that the CLI configuration
+  applies the same processor.
 - Application-level log assertions (e.g., "a WARNING is logged when
   X occurs", prescribed by individual feature specs) use `caplog`
   (pytest) or `structlog.testing.capture_logs` as appropriate.

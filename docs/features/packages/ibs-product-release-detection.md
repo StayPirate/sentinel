@@ -79,8 +79,9 @@ validated base is canonicalized by removing its trailing slash, if present.
 Repository requests use the combined TLS trust store from `networking.md`.
 
 Product-repository downloads are anonymous. The detector never sends
-`IBS_USERNAME`, `IBS_PASSWORD`, an API token, an `Authorization` header, or
-another credential to the configured base or to a redirect target.
+`IBS_USERNAME`, `IBS_SSH_PRIVATE_KEY`, a signature derived from it, an IBS API
+session cookie, an `Authorization` header, or another credential to the
+configured base or to a redirect target.
 
 ### Repository qualification and URL construction
 

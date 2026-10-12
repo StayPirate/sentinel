@@ -69,9 +69,9 @@ Three settings receive special protection in the factory:
   `name` for traceability. Example log: `"Redirect following enabled
   by 'sync_example' — credentials may be forwarded to redirect
   targets"`. Rationale: outbound requests may carry credentials (IBS
-  HTTP Basic Auth, NVD API key, GitHub token) in the Authorization
-  header; automatic redirect following could forward these to
-  untrusted hosts.
+  API request signatures and session cookies, NVD API key, GitHub
+  token) in request headers; automatic redirect following could
+  forward these to untrusted hosts.
 
 ### Default Configuration
 
@@ -395,12 +395,12 @@ The shared HTTP client does not follow redirects by default
 merely inherited from httpx defaults.
 
 **Security rationale**: outbound requests from Sentinel frequently carry
-sensitive credentials in the `Authorization` header — IBS HTTP Basic
-Auth, NVD API keys, GitHub tokens. If the client automatically follows
-redirects (301, 302, 307, 308), these credentials would be forwarded to
+sensitive credentials in request headers — IBS API request signatures and
+session cookies, NVD API keys, GitHub tokens. If the client automatically
+follows redirects (301, 302, 307, 308), these credentials would be forwarded to
 the redirect target, which may be an untrusted host. A compromised or
-misconfigured upstream service could redirect authenticated requests to
-an attacker-controlled server, leaking credentials silently.
+misconfigured upstream service could redirect authenticated requests to an
+attacker-controlled server, leaking credentials silently.
 
 **Generic opt-in mechanism**: consumers that genuinely require automatic
 redirect following must opt in explicitly via `http_client_options`:

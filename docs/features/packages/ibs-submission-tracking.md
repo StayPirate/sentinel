@@ -545,7 +545,7 @@ fallback mapping.
 | Schedule | `30 2 * * *` (daily at 02:30 UTC) |
 | Source | IBS |
 | Scope | Distinct IBS tracks belonging to active Tickets, including excluded and lifecycle-non-actionable tracks |
-| Auth | Existing IBS HTTP Basic authentication or API token through the shared IBS client |
+| Auth | IBS API SSH-signature authentication through the shared IBS client (`../integrations/ibs-integration.md`, Origins and Authentication) |
 | `participates_in_catch_up` | `True` |
 | Custom settings | No |
 | Cursor | None; `FetcherRun.cursor` remains NULL |
@@ -580,7 +580,7 @@ what a long-gap run can prove; incomplete scopes preserve prior delivery.
 
 | Failure | Behavior |
 |---|---|
-| One track has a transport, timeout, rate-limit, HTTP, parse, validation, search-completeness, retention, ambiguity, or local transaction failure | Roll back that scope, increment `record_failed` once, log the track/Ticket/request identities and sanitized category, and continue. Raw response bodies, URLs, credentials, and personal identifiers are not logged. |
+| One track has a credentials-not-configured, authentication, transport, timeout, rate-limit, HTTP, parse, validation, search-completeness, retention, ambiguity, or local transaction failure | Roll back that scope, increment `record_failed` once, log the track/Ticket/request identities and sanitized category, and continue. Raw response bodies, URLs, credentials, and personal identifiers are not logged. |
 | Scope enumeration or another whole-run database prerequisite fails | Raise so `BaseFetcher` finalizes the run as failure. Public `error_message` uses the infrastructure's sanitized generic category; restricted error fields retain diagnostics. |
 | Every selected scope fails | Return normally after counting failures; `BaseFetcher` records run failure because no selected scope succeeded. |
 | Some scopes complete and some fail | Return normally; `BaseFetcher` records a partial run from the mixed terminal outcomes, including when every successful scope was a no-op. |
