@@ -427,6 +427,20 @@ repositories.
   (`openSUSE/open-build-service` on GitHub — particularly
   `src/api/app/controllers/` for endpoint logic and `src/api/config/routes.rb`
   for route definitions) rather than relying solely on the published docs
+- **Contract verification**: sanitized read-only verification against the IBS
+  API established:
+  - the track-release source-info and source-diff shapes on 2026-09-03;
+  - the request search, point-detail, request-diff, and source-history shapes
+    on 2026-09-08;
+  - the source-diff unavailable-revision responses on 2026-10-11 and
+    2026-10-12; and
+  - SSH-signature authentication on 2026-10-12.
+
+  Gate status: the track-release contract has no open verification gate, and
+  one authentication gate remains. Verified shapes, fields verified only
+  through OBS source inspection, and the remaining gate are recorded in the
+  Authentication, Track-Release, and Request Contract Verification Status
+  sections of `docs/features/integrations/ibs-integration.md`
 - **See also**: `docs/features/integrations/ibs-integration.md`,
   `docs/features/packages/package-model.md`,
   `docs/features/packages/ibs-track-release-detection.md`,

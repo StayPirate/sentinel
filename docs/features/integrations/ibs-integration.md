@@ -289,18 +289,67 @@ The complete XML document must parse successfully before dependent local
 outcomes are committed. A malformed or interrupted response fails every track
 depending on that diff. A valid empty issue set is a successful no-match.
 
-IBS can return 400 or 404 when a historical revision is unavailable. Before
-implementation, a representative live response must establish the exact
-status/body discriminator that distinguishes unavailable history from malformed
-input, authorization failure, or another client error. Only a positively
-identified unavailable-history response permits the detector's `orev=0`
-fallback; an ambiguous 4xx is an ordinary failure.
-
 Both source-info and source-diff XML are processed incrementally with DTDs,
 external entities, and parser network access disabled. Sentinel does not impose
 an arbitrary response-byte or issue-count cap, but never accepts a truncated or
 partially parsed document. The shared request and fetcher-run timeouts remain
 the execution bounds.
+
+##### Unavailable Old Revision
+
+IBS no longer serves a source checksum whose stored source tree is absent, for
+example after retention cleanup. A source diff naming such a checksum fails with
+HTTP 400 and a backend status document. Example, with a fictional package and
+checksum:
+
+```xml
+<status code="400" origin="backend">
+  <summary>SUSE:SLE-15-SP6:Update/fictional-package/0123456789abcdef0123456789abcdef: not in repository. Either not existing or misconfigured server setting for '$nosharedtrees' setting in BSConfig.pm</summary>
+</status>
+```
+
+A source-diff response identifies the requested `orev` as unavailable only when
+all of the following hold:
+
+1. the request's `orev` is a 32-character hexadecimal checksum, not `0`, and
+   differs from its `rev`;
+2. the HTTP status is 400;
+3. the complete body is a well-formed XML document, parsed under the safety
+   boundary above, whose root is a no-namespace `status` element with exactly
+   one `summary` child element; and
+4. the text of that `summary` starts with exactly
+   `{project}/{package}/{orev}: not in repository`, where the three values are
+   the project, package, and `orev` of the request. The comparison is
+   case-sensitive and applies no trimming or other normalization.
+
+The `code` and `origin` attributes, the text after that prefix, and other child
+elements are not consumed. The summary names the checksum IBS failed to
+resolve. IBS resolves `rev` before `orev`, so a summary naming `orev` also
+establishes that the current `rev` was available, while an unavailable `rev`
+produces the same shape naming `rev`. A summary naming `rev`, a link target, or
+another project or package does not satisfy condition 4.
+
+Every other response keeps its ordinary outcome and is never treated as
+unavailable history. This includes:
+
+- a 400 that names another checksum;
+- a 404, such as `no such revision` for an unknown numeric revision, or the
+  response for an unknown package or project;
+- a 401, handled by [Request Authentication](#request-authentication);
+- a 403; and
+- every other 4xx.
+
+A response that satisfies only some conditions is ambiguous and keeps its
+ordinary outcome. Examples are a 400 whose body is empty, malformed, or
+differently shaped, and a matching summary with another status. A 400 body
+that fails to parse for this classification keeps the HTTP error outcome and
+never becomes a response-data error. An interrupted body remains a transport
+failure.
+
+If IBS changes the summary text, the classification stops matching.
+Unavailable history then becomes an ordinary diff failure that retains the old
+checkpoint; a changed text never produces a false fallback. The response body,
+including its summary, is never logged.
 
 #### Track-Release Contract Verification Status
 
@@ -316,13 +365,36 @@ Sanitized read-only verification against IBS on 2026-09-03 established:
 - source diff entries expose `tracker`, `state`, tracker-native `name`, and
   canonical `label`, including empty, mixed-tracker, multi-CVE, `added`,
   `changed`, and `deleted` results; and
-- unavailable historical references can produce 400 or 404, depending on the
-  reference form.
+- unknown or unavailable revision references produce 400 or 404, depending on
+  the reference form.
 
 OBS source inspection established that `added`, `changed`, and `deleted`
-describe changes to issue references extracted from package changes files. The
-exact sanitized IBS error discriminator for an unavailable historical checksum
-is still unverified and remains the implementation gate stated above.
+describe changes to issue references extracted from package changes files.
+
+Sanitized read-only verification on 2026-10-11 and 2026-10-12, using fictional
+checksums, established the unavailable-revision shapes in
+[Unavailable Old Revision](#unavailable-old-revision):
+
+- an `orev` checksum without a stored tree returns HTTP 400 with the backend
+  status document shown there, naming the requested project, package, and
+  `orev`. The shape is the same with `expand=1` for linked packages, packages
+  without a link, and packages inherited through a project link;
+- an unavailable `rev` returns the same shape naming `rev`, also when `orev` is
+  `0` or is unavailable as well; and
+- a numeric `orev` without a matching revision returns HTTP 404 with the
+  summary `no such revision`, and an unknown package or project returns HTTP 404
+  with its own summary.
+
+OBS source inspection established that the summary is produced when the stored
+tree of a checksum is missing. A checksum that was never stored and one whose
+tree was removed by retention cleanup take the same backend path. Inspection
+also established that the source diff resolves `rev` before `orev` and that the
+summary text has been unchanged since at least 2016.
+
+A historical expanded checksum whose tree was actually removed was not verified
+live: obtaining an old expanded checksum requires an expanding request, which
+can recreate its tree. Contract fixtures therefore use the fabricated-checksum
+responses, whose backend path is the same.
 
 #### Request ID Search
 
@@ -623,10 +695,12 @@ Methods:
   `expand=1` (`old_md5` is either a 32-character expanded checksum or the
   literal string `"0"`), parses the complete XML response, and returns structured issue
   fields sufficient for the detector to evaluate `tracker`, `state`, and
-  `label`. It does not reinterpret `bnc` names as CVE IDs. A positively
-  identified unavailable `old_md5` raises a distinct internal condition used
-  by the detector's fallback; every other HTTP or response-data failure remains
-  distinct from successful empty results.
+  `label`. It does not reinterpret `bnc` names as CVE IDs. A response that
+  identifies `old_md5` as unavailable under
+  [Unavailable Old Revision](#unavailable-old-revision) raises
+  `IBSHistoricalRevisionUnavailable`, which the detector's fallback consumes.
+  Every other HTTP or response-data failure, including an unavailable
+  `new_md5`, remains distinct from successful empty results.
 - `search_request_ids(action_type: IBSRequestActionType, *, states:
   Collection[IBSRequestState] | None = None, source_project: str | None = None,
   source_packages: Collection[str] | None = None, source_package_prefix: str |
@@ -680,10 +754,10 @@ The methods have these escaping outcomes:
 | Invalid or empty method input, including an unbounded request search or invalid source-history control combination | `ValueError` before HTTP I/O |
 | IBS API credentials not configured: `IBS_USERNAME` or `IBS_SSH_PRIVATE_KEY` is empty or unset | `IBSCredentialsNotConfiguredError` before HTTP I/O, after method input validation |
 | Authentication rejected: HTTP 401 to the signed attempt, or an HTTP 401 without exactly one supported `Signature` challenge | `IBSAuthenticationError` with reason `signature_rejected` or `unsupported_challenge`; no further request for that operation |
-| Transport failure, timeout, rate limit, or HTTP error other than an authentication failure or an operation-specific incomplete-evidence response, including an HTTP 403 authorization failure, after shared retry handling | The corresponding `httpx` exception propagates with the response body excluded from application logs |
-| Malformed/interrupted source-info or source-diff XML, or its document-level schema failure | `IBSResponseDataError` |
+| Transport failure, timeout, rate limit, or HTTP error other than an authentication failure, an identified unavailable source-diff old revision, or an operation-specific incomplete-evidence response, after shared retry handling. This includes an HTTP 403 authorization failure and every other source-diff 400 or 404 | The corresponding `httpx` exception propagates with the response body excluded from application logs |
+| Malformed/interrupted successful source-info or source-diff XML, or its document-level schema failure | `IBSResponseDataError` |
 | One requested source-info package missing, duplicated, error-bearing, or carrying an invalid `srcmd5` | A per-package failed result in the returned mapping; valid sibling package results remain usable |
-| Source diff old revision positively identified as unavailable | `IBSHistoricalRevisionUnavailable` |
+| Source diff response identifies `old_md5` as unavailable under [Unavailable Old Revision](#unavailable-old-revision) | `IBSHistoricalRevisionUnavailable` |
 | Source diff contains an issue with an unusable structural shape | `IBSResponseDataError` |
 | Source diff is valid and contains no qualifying issue | Empty list |
 | Request ID search reports inconsistent successful-response completeness or leaves candidate identity ambiguous | Incomplete `RequestEvidenceResult` |
@@ -703,9 +777,9 @@ with its own bounded reason category; they never reach an API handler and never
 represent a negative observation. Submission reconciliation consumes incomplete
 `RequestEvidenceResult` values and preserves prior request, action,
 correlation, and delivery state for that scope. It does not convert unavailable
-evidence into a no-match. `IBSHistoricalRevisionUnavailable` is emitted only
-after the live status/body discriminator required above has been verified.
-Until then, an ambiguous source-diff 400/404 remains the original HTTP error.
+evidence into a no-match. `IBSHistoricalRevisionUnavailable` is raised only
+when every condition of [Unavailable Old Revision](#unavailable-old-revision)
+holds, and it carries no response content.
 
 All request-search, point-detail, request-diff, and source-history XML uses the
 same incremental parsing safety boundary as source release data: DTDs, external
