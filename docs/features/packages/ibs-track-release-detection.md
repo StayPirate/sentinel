@@ -197,9 +197,11 @@ validation or outcome semantics.
 6. Parse and validate the complete diff before applying local outcomes. Retain
    only canonical CVE labels relevant to dependent tracks; unrelated valid
    references do not need to remain in memory.
-7. If IBS authoritatively reports that a persisted historical `srcmd5` is no
-   longer available, apply [Unavailable History Fallback](#unavailable-history-fallback).
-   Other HTTP 4xx responses are failures and do not trigger fallback.
+7. If the diff from a checkpoint raises `IBSHistoricalRevisionUnavailable`,
+   IBS has identified the persisted checkpoint `srcmd5` as no longer
+   available; apply [Unavailable History Fallback](#unavailable-history-fallback).
+   Every other HTTP 4xx response, including one reporting the current
+   `srcmd5` as unavailable, is a diff failure and does not trigger fallback.
 8. Apply [Per-Track Local Outcome](#per-track-local-outcome) independently to
    every dependent track. Commit or roll back each track as its own transaction
    unit. After each successful commit, record its periodic terminal and update
@@ -336,22 +338,28 @@ used.
 
 ## Unavailable History Fallback
 
-When IBS authoritatively reports that the persisted checkpoint revision is no
-longer available:
+The fallback applies when the diff from the persisted checkpoint raises
+`IBSHistoricalRevisionUnavailable`. The IBS client raises it only for a response
+that names that checkpoint `srcmd5` as unavailable, under the discriminator in
+`../integrations/ibs-integration.md` (Unavailable Old Revision). The detector
+then:
 
-1. emit a sanitized `ibs_track_release_history_unavailable` warning with
+1. emits a sanitized `ibs_track_release_history_unavailable` warning with
    `codestream`, `package_name`, `track_id`, and `reason_category`;
-2. request a new expanded diff from `orev=0` to the same current `srcmd5`;
-3. evaluate only the existing Ticket CVE under the ordinary issue rules; and
-4. accept the current `srcmd5` only after the per-track local outcome completes.
+2. requests a new expanded diff from `orev=0` to the same current `srcmd5`;
+3. evaluates only the existing Ticket CVE under the ordinary issue rules; and
+4. accepts the current `srcmd5` only after the per-track local outcome
+   completes.
 
 Fallback success is a recovered reconciliation, not a failed item. Fallback
-failure leaves the previous checkpoint unchanged and fails the track.
+failure leaves the previous checkpoint unchanged and fails the track. The
+fallback diff uses `orev=0`, so it cannot report unavailable history itself.
+Each of its failures, including an unavailable current `srcmd5`, is an ordinary
+diff failure.
 
-The exact IBS status and sanitized error shape that distinguish unavailable
-history from other 400/404 responses must be verified against a representative
-live response before implementation. Until that discriminator is verified, an
-ambiguous 400/404 is an ordinary failure and must not invoke fallback.
+Any other 400 or 404 diff response, including a response that satisfies only
+part of the discriminator, is an ordinary diff failure and never invokes
+fallback.
 
 `orev=0` identifies references present in current source, not when they first
 appeared. Consequently, if a VA corrected `FIXED` and the saved historical
@@ -426,8 +434,8 @@ HTTP status codes, and bounded reason categories may be logged.
 | IBS transport failure, timeout, 5xx, or rate limit after shared handling | `record_failed()` once for each dependent eligible track; keep checkpoints | Later event, manual run, catch-up, or scheduled run |
 | Source-info requested package missing, duplicate, malformed, or carrying an error | Fail each dependent track; valid sibling packages may continue | Same as above |
 | Malformed or interrupted source-info XML | Fail every dependent track in that request | Same as above |
-| Source diff HTTP or parser failure | Fail every dependent track sharing that diff | Same as above |
-| Persisted history authoritatively unavailable | Warn and use `orev=0`; fail only if fallback fails | Current-state fallback, then ordinary retry |
+| Source diff HTTP or parser failure, including every 400 or 404 not identified as an unavailable checkpoint | Fail every dependent track sharing that diff | Same as above |
+| Source diff identifies the persisted checkpoint as unavailable (`IBSHistoricalRevisionUnavailable`) | Warn and use `orev=0`; fail only if fallback fails | Current-state fallback, then ordinary retry |
 | Ticket becomes `Ignored` or `Duplicated` | Roll back local work and return a successful stale/inapplicable no-op for that track; keep its checkpoint | Later qualifying Ticket convergence |
 | Track disappears, no longer belongs to the expected Ticket/package scope, or loses its Ticket CVE association | Fail the selected track and do not advance its checkpoint | Corrected invocation, catch-up, event, manual run, or scheduled run |
 | Concurrent checkpoint predecessor changed | Already-complete no-op, re-evaluate, or fail without writing stale state | Current or later invocation |
@@ -530,8 +538,14 @@ Future implementation tests must cover:
 - missing, duplicate, error-bearing, and malformed source-info entries;
 - malformed, interrupted, and safely streamed XML with DTD/entity expansion
   disabled;
-- unavailable-history fallback, fallback failure, and the documented VA
-  correction ambiguity;
+- unavailable-history classification under
+  `../integrations/ibs-integration.md` (Unavailable Old Revision): fallback for
+  an HTTP 400 whose status summary names the persisted checkpoint; an ordinary
+  diff failure for a 400 naming the current `srcmd5`, a 400 with an empty,
+  malformed, differently shaped, or non-matching body, a matching summary with
+  another status, and the 404 `no such revision` and unknown-package responses;
+- unavailable-history fallback, fallback failure including an unavailable
+  current `srcmd5`, and the documented VA correction ambiguity;
 - preservation of a VA `FIXED` to `AFFECTED`/`ANALYSIS` correction until new
   source evidence;
 - one atomic status/audit/Ticket-reconciliation/checkpoint transaction and
@@ -558,7 +572,13 @@ Future implementation tests must cover:
 Verified behavior and remaining implementation gates are summarized in
 `../integrations/ibs-integration.md` and `../../data-sources.md`. Before parser
 implementation, retain a sanitized live fixture for every consumed source-info
-and diff shape. The exact unavailable-history discriminator remains unverified.
+and diff shape. These include the unavailable-`orev` and unavailable-`rev` 400
+responses, the 404 `no such revision` response, and the unknown-package 404
+response. A historical checksum whose tree was actually removed was verified
+only through OBS source inspection. Its response takes the same backend path as
+the fabricated-checksum fixture
+(`../integrations/ibs-integration.md`, Track-Release Contract Verification
+Status).
 
 Sanitized aggregate verification on 2026-09-08 covered 9,620 deployed
 `suse.obs.package.commit` deliveries. Every delivery had non-empty string
