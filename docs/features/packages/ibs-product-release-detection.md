@@ -487,7 +487,7 @@ Operational logging is structured and bounded:
 | `ibs_product_release_advisories_ignored` | WARNING | At most once per repository and reason category per invocation; `repository`, `reason_category`, `advisory_count` |
 | `ibs_product_release_occurrence_failed` | WARNING | At most once per selected failed occurrence per invocation; `ticket_package_product_id`, `ticket_id`, `fetcher_name`, `repository`, `reason_category` |
 | `ibs_product_release_occurrence_stale` | WARNING | At most once per selected occurrence per invocation whose local transaction found the Ticket non-operable or the selected scope changed; `ticket_package_product_id`, `ticket_id`, `reason_category` |
-| `ibs_product_release_run_completed` | INFO | Once per periodic or catch-up invocation; selected, updated, no-match/no-op, and failed occurrence counts |
+| `ibs_product_release_run_completed` | INFO | Once per periodic invocation, including an empty run, and once per catch-up invocation that selects at least one occurrence; selected, updated, no-match/no-op, and failed occurrence counts |
 
 `reason_category` is a bounded internal value. It distinguishes at least
 transport, timeout, HTTP status, redirect, unsafe path, content type, size,
