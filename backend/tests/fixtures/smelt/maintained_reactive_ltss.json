@@ -13,17 +13,6 @@
           "source_package_name": "kernel-default",
           "support_status": "L3",
           "divergence_by_product_id": {
-            "589": {
-              "is_support_status_divergent": false,
-              "support_statuses_observed": [
-                "L3"
-              ],
-              "is_architecture_divergent": false,
-              "architectures_observed": [
-                "x86_64"
-              ],
-              "architectures_missing": []
-            },
             "929": {
               "is_support_status_divergent": false,
               "support_statuses_observed": [
@@ -41,20 +30,6 @@
       "targets": [
         {
           "product": {
-            "id": 589,
-            "friendly_name": "SUSE Linux Enterprise Server 11 SP4",
-            "cpe": "cpe:/o:suse:suse_sles:11:sp4",
-            "support_status": "End Of Life"
-          },
-          "repository": "SUSE:Updates:SLE-SERVER:11-SP4-LTSS-EXTREME-CORE",
-          "product_definition": {
-            "name": "SLE-SERVER_11-SP4-LTSS-EXTREME-CORE",
-            "url": "https://build.example.invalid/fictional/2",
-            "type": "channel"
-          }
-        },
-        {
-          "product": {
             "id": 929,
             "friendly_name": "SUSE Linux Enterprise Server 11 SP4 LTSS EXTREME CORE",
             "cpe": "cpe:/o:suse:suse_sles_ltss-extreme-core:11:sp4",
@@ -63,17 +38,17 @@
           "repository": "SUSE:Updates:SLE-SERVER:11-SP4-LTSS-EXTREME-CORE",
           "product_definition": {
             "name": "SLE-SERVER_11-SP4-LTSS-EXTREME-CORE",
-            "url": "https://build.example.invalid/fictional/3",
+            "url": "https://build.example.invalid/fictional/2",
             "type": "channel"
           }
         }
       ],
-      "support_status": "End Of Life"
+      "support_status": "Missing"
     },
     {
       "codestream": {
         "name": "SUSE:SLE-12-SP3:Update:Products:Teradata:Update",
-        "url": "https://build.example.invalid/fictional/4",
+        "url": "https://build.example.invalid/fictional/3",
         "type": "SLE_15"
       },
       "binary_packages": [
@@ -107,7 +82,7 @@
           "repository": "SUSE:Updates:SLE-SERVER:12-SP3-TERADATA",
           "product_definition": {
             "name": "SLE-SERVER_12-SP3-TERADATA",
-            "url": "https://build.example.invalid/fictional/5",
+            "url": "https://build.example.invalid/fictional/4",
             "type": "channel"
           }
         }
@@ -117,7 +92,7 @@
     {
       "codestream": {
         "name": "SUSE:SLE-12-SP5:Update",
-        "url": "https://build.example.invalid/fictional/6",
+        "url": "https://build.example.invalid/fictional/5",
         "type": "SLE_15"
       },
       "binary_packages": [
@@ -165,7 +140,7 @@
           "repository": "SUSE:Updates:SLE-Live-Patching:12-SP5",
           "product_definition": {
             "name": "SLE-Live-Patching_12-SP5",
-            "url": "https://build.example.invalid/fictional/7",
+            "url": "https://build.example.invalid/fictional/6",
             "type": "channel"
           }
         },
@@ -179,7 +154,7 @@
           "repository": "SUSE:Updates:SLE-SERVER:12-SP5-LTSS",
           "product_definition": {
             "name": "SLE-SERVER_12-SP5-LTSS",
-            "url": "https://build.example.invalid/fictional/8",
+            "url": "https://build.example.invalid/fictional/7",
             "type": "channel"
           }
         },
@@ -193,7 +168,7 @@
           "repository": "SUSE:Updates:SLE-SERVER:12-SP5-LTSS-Extended-Security",
           "product_definition": {
             "name": "SLE-SERVER_12-SP5-LTSS-EXTENDED-SECURITY",
-            "url": "https://build.example.invalid/fictional/9",
+            "url": "https://build.example.invalid/fictional/8",
             "type": "channel"
           }
         }
@@ -203,7 +178,7 @@
     {
       "codestream": {
         "name": "SUSE:SLE-15-SP1:Update",
-        "url": "https://build.example.invalid/fictional/10",
+        "url": "https://build.example.invalid/fictional/9",
         "type": "SLE_15"
       },
       "binary_packages": [
@@ -212,18 +187,6 @@
           "source_package_name": "kernel-default",
           "support_status": "L3",
           "divergence_by_product_id": {
-            "376": {
-              "is_support_status_divergent": false,
-              "support_statuses_observed": [
-                "L3"
-              ],
-              "is_architecture_divergent": false,
-              "architectures_observed": [
-                "ppc64le",
-                "x86_64"
-              ],
-              "architectures_missing": []
-            },
             "432": {
               "is_support_status_divergent": false,
               "support_statuses_observed": [
@@ -252,21 +215,7 @@
           "repository": "SUSE:Updates:SLE-Product-SLES:15-SP1-LTSS",
           "product_definition": {
             "name": "SLE-Product-SLES_15-SP1-LTSS",
-            "url": "https://build.example.invalid/fictional/11",
-            "type": "channel"
-          }
-        },
-        {
-          "product": {
-            "id": 376,
-            "friendly_name": "SUSE Linux Enterprise Server for SAP Applications 15 SP1",
-            "cpe": "cpe:/o:suse:sles_sap:15:sp1",
-            "support_status": "End Of Life"
-          },
-          "repository": "SUSE:Updates:SLE-Product-SLES_SAP:15-SP1",
-          "product_definition": {
-            "name": "SLE-Product-SLES_15-SP1-LTSS",
-            "url": "https://build.example.invalid/fictional/12",
+            "url": "https://build.example.invalid/fictional/10",
             "type": "channel"
           }
         }
@@ -276,7 +225,7 @@
     {
       "codestream": {
         "name": "SUSE:SLE-15-SP2:Update",
-        "url": "https://build.example.invalid/fictional/13",
+        "url": "https://build.example.invalid/fictional/11",
         "type": "SLE_15"
       },
       "binary_packages": [
@@ -285,18 +234,6 @@
           "source_package_name": "kernel-default",
           "support_status": "L3",
           "divergence_by_product_id": {
-            "349": {
-              "is_support_status_divergent": false,
-              "support_statuses_observed": [
-                "L3"
-              ],
-              "is_architecture_divergent": false,
-              "architectures_observed": [
-                "ppc64le",
-                "x86_64"
-              ],
-              "architectures_missing": []
-            },
             "423": {
               "is_support_status_divergent": false,
               "support_statuses_observed": [
@@ -325,21 +262,7 @@
           "repository": "SUSE:Updates:SLE-Product-SLES:15-SP2-LTSS",
           "product_definition": {
             "name": "SLE-Product-SLES_15-SP2-LTSS",
-            "url": "https://build.example.invalid/fictional/14",
-            "type": "channel"
-          }
-        },
-        {
-          "product": {
-            "id": 349,
-            "friendly_name": "SUSE Linux Enterprise Server for SAP Applications 15 SP2",
-            "cpe": "cpe:/o:suse:sles_sap:15:sp2",
-            "support_status": "End Of Life"
-          },
-          "repository": "SUSE:Updates:SLE-Product-SLES_SAP:15-SP2",
-          "product_definition": {
-            "name": "SLE-Product-SLES_15-SP2-LTSS",
-            "url": "https://build.example.invalid/fictional/15",
+            "url": "https://build.example.invalid/fictional/12",
             "type": "channel"
           }
         }
@@ -349,7 +272,7 @@
     {
       "codestream": {
         "name": "SUSE:SLE-15-SP3:Update",
-        "url": "https://build.example.invalid/fictional/16",
+        "url": "https://build.example.invalid/fictional/13",
         "type": "SLE_15"
       },
       "binary_packages": [
@@ -358,18 +281,6 @@
           "source_package_name": "kernel-default",
           "support_status": "L3",
           "divergence_by_product_id": {
-            "782": {
-              "is_support_status_divergent": false,
-              "support_statuses_observed": [
-                "L3"
-              ],
-              "is_architecture_divergent": false,
-              "architectures_observed": [
-                "aarch64",
-                "x86_64"
-              ],
-              "architectures_missing": []
-            },
             "926": {
               "is_support_status_divergent": false,
               "support_statuses_observed": [
@@ -390,20 +301,6 @@
       "targets": [
         {
           "product": {
-            "id": 782,
-            "friendly_name": "SUSE Enterprise Storage 7.1",
-            "cpe": "cpe:/o:suse:ses:7.1",
-            "support_status": "End Of Life"
-          },
-          "repository": "SUSE:Updates:Storage:7.1",
-          "product_definition": {
-            "name": "SLE-Product-SLES_15-SP3-LTSS",
-            "url": "https://build.example.invalid/fictional/17",
-            "type": "channel"
-          }
-        },
-        {
-          "product": {
             "id": 926,
             "friendly_name": "SUSE Linux Enterprise Server 15 SP3 LTSS",
             "cpe": "cpe:/o:suse:sles-ltss:15:sp3",
@@ -412,7 +309,7 @@
           "repository": "SUSE:Updates:SLE-Product-SLES:15-SP3-LTSS",
           "product_definition": {
             "name": "SLE-Product-SLES_15-SP3-LTSS",
-            "url": "https://build.example.invalid/fictional/18",
+            "url": "https://build.example.invalid/fictional/14",
             "type": "channel"
           }
         }
@@ -422,7 +319,7 @@
     {
       "codestream": {
         "name": "SUSE:SLE-15-SP4:Update",
-        "url": "https://build.example.invalid/fictional/19",
+        "url": "https://build.example.invalid/fictional/15",
         "type": "SLE_15"
       },
       "binary_packages": [
@@ -459,21 +356,7 @@
           "repository": "SUSE:Updates:SLE-Product-HA:15-SP4",
           "product_definition": {
             "name": "SLE-Product-HA_15-SP4",
-            "url": "https://build.example.invalid/fictional/20",
-            "type": "channel"
-          }
-        },
-        {
-          "product": {
-            "id": 738,
-            "friendly_name": "SUSE Linux Enterprise High Performance Computing ESPOS 15 SP4",
-            "cpe": "cpe:/o:suse:sle_hpc-espos:15:sp4",
-            "support_status": "End Of Life"
-          },
-          "repository": "SUSE:Updates:SLE-Product-HPC:15-SP4-ESPOS",
-          "product_definition": {
-            "name": "SLE-Product-HPC_15-SP4-ESPOS",
-            "url": "https://build.example.invalid/fictional/21",
+            "url": "https://build.example.invalid/fictional/16",
             "type": "channel"
           }
         },
@@ -487,7 +370,7 @@
           "repository": "SUSE:Updates:SLE-Product-HPC:15-SP4-LTSS",
           "product_definition": {
             "name": "SLE-Product-HPC_15-SP4-LTSS",
-            "url": "https://build.example.invalid/fictional/22",
+            "url": "https://build.example.invalid/fictional/17",
             "type": "channel"
           }
         },
@@ -501,7 +384,7 @@
           "repository": "SUSE:Updates:SLE-Module-Live-Patching:15-SP4",
           "product_definition": {
             "name": "SLE-Module-Live-Patching_15-SP4",
-            "url": "https://build.example.invalid/fictional/23",
+            "url": "https://build.example.invalid/fictional/18",
             "type": "channel"
           }
         },
@@ -515,7 +398,7 @@
           "repository": "SUSE:Updates:SLE-Micro:5.3",
           "product_definition": {
             "name": "SLE-Micro_5.3",
-            "url": "https://build.example.invalid/fictional/24",
+            "url": "https://build.example.invalid/fictional/19",
             "type": "channel"
           }
         },
@@ -529,7 +412,7 @@
           "repository": "SUSE:Updates:SLE-Micro:5.4",
           "product_definition": {
             "name": "SLE-Micro_5.4",
-            "url": "https://build.example.invalid/fictional/25",
+            "url": "https://build.example.invalid/fictional/20",
             "type": "channel"
           }
         },
@@ -543,7 +426,7 @@
           "repository": "SUSE:Updates:SLE-Micro:5.3",
           "product_definition": {
             "name": "SLE-Micro_5.3",
-            "url": "https://build.example.invalid/fictional/26",
+            "url": "https://build.example.invalid/fictional/21",
             "type": "channel"
           }
         },
@@ -557,7 +440,7 @@
           "repository": "SUSE:Updates:SLE-Micro:5.4",
           "product_definition": {
             "name": "SLE-Micro_5.4",
-            "url": "https://build.example.invalid/fictional/27",
+            "url": "https://build.example.invalid/fictional/22",
             "type": "channel"
           }
         },
@@ -571,7 +454,7 @@
           "repository": "SUSE:Updates:SLE-Product-SLES:15-SP4-LTSS",
           "product_definition": {
             "name": "SLE-Product-SLES_15-SP4-LTSS",
-            "url": "https://build.example.invalid/fictional/28",
+            "url": "https://build.example.invalid/fictional/23",
             "type": "channel"
           }
         },
@@ -585,7 +468,7 @@
           "repository": "SUSE:Updates:SLE-Product-SLES:15-SP4-TERADATA",
           "product_definition": {
             "name": "SLE-Product-SLES_15-SP4-TERADATA",
-            "url": "https://build.example.invalid/fictional/29",
+            "url": "https://build.example.invalid/fictional/24",
             "type": "channel"
           }
         },
@@ -599,7 +482,7 @@
           "repository": "SUSE:Updates:SLE-Product-SLES_SAP:15-SP4",
           "product_definition": {
             "name": "SLE-Product-SLES_SAP_15-SP4",
-            "url": "https://build.example.invalid/fictional/30",
+            "url": "https://build.example.invalid/fictional/25",
             "type": "channel"
           }
         }
@@ -609,7 +492,7 @@
     {
       "codestream": {
         "name": "SUSE:SLE-15-SP5:Update",
-        "url": "https://build.example.invalid/fictional/31",
+        "url": "https://build.example.invalid/fictional/26",
         "type": "SLE_15"
       },
       "binary_packages": [
@@ -626,18 +509,6 @@
               "is_architecture_divergent": false,
               "architectures_observed": [
                 "ppc64le",
-                "x86_64"
-              ],
-              "architectures_missing": []
-            },
-            "791": {
-              "is_support_status_divergent": false,
-              "support_statuses_observed": [
-                "L3"
-              ],
-              "is_architecture_divergent": false,
-              "architectures_observed": [
-                "aarch64",
                 "x86_64"
               ],
               "architectures_missing": []
@@ -674,20 +545,6 @@
       "targets": [
         {
           "product": {
-            "id": 791,
-            "friendly_name": "SUSE Linux Enterprise High Performance Computing ESPOS 15 SP5",
-            "cpe": "cpe:/o:suse:sle_hpc-espos:15:sp5",
-            "support_status": "End Of Life"
-          },
-          "repository": "SUSE:Updates:SLE-Product-HPC:15-SP5-ESPOS",
-          "product_definition": {
-            "name": "SLE-Product-HPC_15-SP5-ESPOS",
-            "url": "https://build.example.invalid/fictional/32",
-            "type": "channel"
-          }
-        },
-        {
-          "product": {
             "id": 792,
             "friendly_name": "SUSE Linux Enterprise High Performance Computing LTSS 15 SP5",
             "cpe": "cpe:/o:suse:sle_hpc-ltss:15:sp5",
@@ -696,7 +553,7 @@
           "repository": "SUSE:Updates:SLE-Product-HPC:15-SP5-LTSS",
           "product_definition": {
             "name": "SLE-Product-HPC_15-SP5-LTSS",
-            "url": "https://build.example.invalid/fictional/33",
+            "url": "https://build.example.invalid/fictional/27",
             "type": "channel"
           }
         },
@@ -710,7 +567,7 @@
           "repository": "SUSE:Updates:SLE-Module-Live-Patching:15-SP5",
           "product_definition": {
             "name": "SLE-Module-Live-Patching_15-SP5",
-            "url": "https://build.example.invalid/fictional/34",
+            "url": "https://build.example.invalid/fictional/28",
             "type": "channel"
           }
         },
@@ -724,7 +581,7 @@
           "repository": "SUSE:Updates:SLE-Micro:5.5",
           "product_definition": {
             "name": "SLE-Micro_5.5",
-            "url": "https://build.example.invalid/fictional/35",
+            "url": "https://build.example.invalid/fictional/29",
             "type": "channel"
           }
         },
@@ -738,7 +595,7 @@
           "repository": "SUSE:Updates:SLE-Product-SLES:15-SP5-LTSS",
           "product_definition": {
             "name": "SLE-Product-SLES_15-SP5-LTSS",
-            "url": "https://build.example.invalid/fictional/36",
+            "url": "https://build.example.invalid/fictional/30",
             "type": "channel"
           }
         },
@@ -752,7 +609,7 @@
           "repository": "SUSE:Updates:SLE-Product-SLES_SAP:15-SP5",
           "product_definition": {
             "name": "SLE-Product-SLES_SAP_15-SP5",
-            "url": "https://build.example.invalid/fictional/37",
+            "url": "https://build.example.invalid/fictional/31",
             "type": "channel"
           }
         }
@@ -762,7 +619,7 @@
     {
       "codestream": {
         "name": "SUSE:SLE-15-SP6:Update",
-        "url": "https://build.example.invalid/fictional/38",
+        "url": "https://build.example.invalid/fictional/32",
         "type": "SLE_15"
       },
       "binary_packages": [
@@ -803,34 +660,6 @@
       "targets": [
         {
           "product": {
-            "id": 1245,
-            "friendly_name": "SUSE Linux Enterprise High Availability Extension 15 SP6",
-            "cpe": "cpe:/o:suse:sle-ha:15:sp6",
-            "support_status": "End Of Life"
-          },
-          "repository": "SUSE:Updates:SLE-Product-HA:15-SP6",
-          "product_definition": {
-            "name": "SLE-Product-HA_15-SP6",
-            "url": "https://build.example.invalid/fictional/39",
-            "type": "channel"
-          }
-        },
-        {
-          "product": {
-            "id": 1254,
-            "friendly_name": "SUSE Linux Enterprise Live Patching 15-SP6",
-            "cpe": "cpe:/o:suse:sle-module-live-patching:15:sp6",
-            "support_status": "End Of Life"
-          },
-          "repository": "SUSE:Updates:SLE-Module-Live-Patching:15-SP6",
-          "product_definition": {
-            "name": "SLE-Module-Live-Patching_15-SP6",
-            "url": "https://build.example.invalid/fictional/40",
-            "type": "channel"
-          }
-        },
-        {
-          "product": {
             "id": 3948,
             "friendly_name": "SUSE Linux Enterprise Server 15 SP6 LTSS",
             "cpe": "cpe:/o:suse:sles-ltss:15:sp6",
@@ -839,7 +668,7 @@
           "repository": "SUSE:Updates:SLE-Product-SLES:15-SP6-LTSS",
           "product_definition": {
             "name": "SLE-Product-SLES_15-SP6-LTSS",
-            "url": "https://build.example.invalid/fictional/41",
+            "url": "https://build.example.invalid/fictional/33",
             "type": "channel"
           }
         },
@@ -853,7 +682,7 @@
           "repository": "SUSE:Updates:SLE-Product-SLES_SAP:15-SP6",
           "product_definition": {
             "name": "SLE-Product-SLES_SAP_15-SP6",
-            "url": "https://build.example.invalid/fictional/42",
+            "url": "https://build.example.invalid/fictional/34",
             "type": "channel"
           }
         }
@@ -863,7 +692,7 @@
     {
       "codestream": {
         "name": "SUSE:SLE-15-SP7:Update",
-        "url": "https://build.example.invalid/fictional/43",
+        "url": "https://build.example.invalid/fictional/35",
         "type": "SLE_15"
       },
       "binary_packages": [
@@ -900,7 +729,7 @@
           "repository": "SUSE:Updates:SLE-Module-Basesystem:15-SP7",
           "product_definition": {
             "name": "SLE-Module-Basesystem_15-SP7",
-            "url": "https://build.example.invalid/fictional/44",
+            "url": "https://build.example.invalid/fictional/36",
             "type": "channel"
           }
         },
@@ -914,7 +743,7 @@
           "repository": "SUSE:Updates:SLE-Module-Legacy:15-SP7",
           "product_definition": {
             "name": "SLE-Module-Legacy_15-SP7",
-            "url": "https://build.example.invalid/fictional/45",
+            "url": "https://build.example.invalid/fictional/37",
             "type": "channel"
           }
         },
@@ -928,7 +757,7 @@
           "repository": "SUSE:Updates:SLE-Product-HA:15-SP7",
           "product_definition": {
             "name": "SLE-Product-HA_15-SP7",
-            "url": "https://build.example.invalid/fictional/46",
+            "url": "https://build.example.invalid/fictional/38",
             "type": "channel"
           }
         },
@@ -942,7 +771,7 @@
           "repository": "SUSE:Updates:SLE-Module-Live-Patching:15-SP7",
           "product_definition": {
             "name": "SLE-Module-Live-Patching_15-SP7",
-            "url": "https://build.example.invalid/fictional/47",
+            "url": "https://build.example.invalid/fictional/39",
             "type": "channel"
           }
         },
@@ -956,7 +785,7 @@
           "repository": "SUSE:Updates:SLE-Product-WE:15-SP7",
           "product_definition": {
             "name": "SLE-Product-WE_15-SP7",
-            "url": "https://build.example.invalid/fictional/48",
+            "url": "https://build.example.invalid/fictional/40",
             "type": "channel"
           }
         }

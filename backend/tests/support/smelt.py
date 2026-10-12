@@ -17,8 +17,11 @@ duplicate relationships are preserved.
 The `maintained_*.json` files are live
 `experimental/v2/maintained/{package_name}?include_reactive_ltss=true`
 responses captured anonymously from the default `SMELT_API_URL` on
-2026-10-03, before `tools/smelt#1465` was deployed (#780 refreshes them if
-the deployed shape changes). Every URL-valued string (`codestream.url`,
+2026-10-12 (SMELT v3.94.1), after `tools/smelt#1465` was deployed and the
+fake `SUSE:Channels` records were reprocessed (#780): every SLFO codestream
+is typed `SLFO` and resolved only through compose. The `sle15_only`,
+`not_found`, and `case_variant` captures were identical to the earlier
+2026-10-03 captures. Every URL-valued string (`codestream.url`,
 `product_definition.url`) was replaced with a fictional
 `build.example.invalid` URL, and the unconsumed `binary_packages` array was
 trimmed to its first element per entry. Codestream names, Product CPEs,
