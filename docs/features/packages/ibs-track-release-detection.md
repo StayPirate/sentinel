@@ -543,8 +543,7 @@ Future implementation tests must cover:
     summary with another status, and the 404 `no such revision` and
     unknown-package responses;
   - the HTTP error outcome, never a response-data error, for a 400 with an
-    empty, malformed, DTD- or entity-bearing, differently shaped, or
-    non-matching body; and
+    empty, malformed, differently shaped, or non-matching body; and
   - the transport outcome for an interrupted 400 body;
 - unavailable-history fallback, fallback failure including an unavailable
   current `srcmd5`, and the documented VA correction ambiguity;

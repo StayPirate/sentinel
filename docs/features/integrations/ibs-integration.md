@@ -755,7 +755,7 @@ The methods have these escaping outcomes:
 | IBS API credentials not configured: `IBS_USERNAME` or `IBS_SSH_PRIVATE_KEY` is empty or unset | `IBSCredentialsNotConfiguredError` before HTTP I/O, after method input validation |
 | Authentication rejected: HTTP 401 to the signed attempt, or an HTTP 401 without exactly one supported `Signature` challenge | `IBSAuthenticationError` with reason `signature_rejected` or `unsupported_challenge`; no further request for that operation |
 | Transport failure, timeout, rate limit, or HTTP error other than an authentication failure, an identified unavailable source-diff old revision, or an operation-specific incomplete-evidence response, after shared retry handling. This includes an HTTP 403 authorization failure and every other source-diff 400 or 404 | The corresponding `httpx` exception propagates with the response body excluded from application logs |
-| Malformed/interrupted source-info or source-diff XML, or its document-level schema failure | `IBSResponseDataError` |
+| Malformed/interrupted successful source-info or source-diff XML, or its document-level schema failure | `IBSResponseDataError` |
 | One requested source-info package missing, duplicated, error-bearing, or carrying an invalid `srcmd5` | A per-package failed result in the returned mapping; valid sibling package results remain usable |
 | Source diff response identifies `old_md5` as unavailable under [Unavailable Old Revision](#unavailable-old-revision) | `IBSHistoricalRevisionUnavailable` |
 | Source diff contains an issue with an unusable structural shape | `IBSResponseDataError` |
