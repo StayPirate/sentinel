@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<updates>
+  <update from="maintenance@example.invalid" status="stable" type="security" version="1">
+    <id>slessp4-kernel-20190225-13979</id>
+    <title>Fictional title of slessp4-kernel-20190225-13979</title>
+    <severity>important</severity>
+    <release>SUSE Updates SLE-SERVER 11-SP4 x86 64</release>
+    <issued date="1552657768" />
+    <references>
+      <reference href="https://bugzilla.suse.com/show_bug.cgi?id=1012382" id="1012382" title="Fictional reference title" type="bugzilla" />
+      <reference href="https://bugzilla.suse.com/show_bug.cgi?id=1031572" id="1031572" title="Fictional reference title" type="bugzilla" />
+      <reference href="http://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2016-10741" id="CVE-2016-10741" title="Fictional reference title" type="cve" />
+      <reference href="http://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2019-7222" id="CVE-2019-7222" title="Fictional reference title" type="cve" />
+      <reference href="http://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2017-18360" id="CVE-2017-18360" title="Fictional reference title" type="cve" />
+      </references>
+    <description>Fictional advisory description.</description>
+    <pkglist>
+      <collection>
+        <package name="kernel-default" epoch="0" version="3.0.101" release="108.87.1" arch="nosrc" src="nosrc/kernel-default-3.0.101-108.87.1.nosrc.rpm">
+          <filename>kernel-default-3.0.101-108.87.1.nosrc.rpm</filename>
+          <reboot_suggested>True</reboot_suggested>
+        </package>
+        <package name="kernel-default" epoch="0" version="3.0.101" release="108.87.1" arch="x86_64" src="x86_64/kernel-default-3.0.101-108.87.1.x86_64.rpm">
+          <filename>kernel-default-3.0.101-108.87.1.x86_64.rpm</filename>
+          <reboot_suggested>True</reboot_suggested>
+        </package>
+        <package name="kernel-default-base" epoch="0" version="3.0.101" release="108.87.1" arch="x86_64" src="x86_64/kernel-default-base-3.0.101-108.87.1.x86_64.rpm">
+          <filename>kernel-default-base-3.0.101-108.87.1.x86_64.rpm</filename>
+          <reboot_suggested>True</reboot_suggested>
+        </package>
+        <package name="kernel-ec2" epoch="0" version="3.0.101" release="108.87.1" arch="nosrc" src="nosrc/kernel-ec2-3.0.101-108.87.1.nosrc.rpm">
+          <filename>kernel-ec2-3.0.101-108.87.1.nosrc.rpm</filename>
+          <reboot_suggested>True</reboot_suggested>
+        </package>
+        <package name="kernel-source" epoch="0" version="3.0.101" release="108.87.1" arch="src" src="src/kernel-source-3.0.101-108.87.1.src.rpm">
+          <filename>kernel-source-3.0.101-108.87.1.src.rpm</filename>
+          <reboot_suggested>True</reboot_suggested>
+        </package>
+        <package name="kernel-syms" epoch="0" version="3.0.101" release="108.87.1" arch="src" src="src/kernel-syms-3.0.101-108.87.1.src.rpm">
+          <filename>kernel-syms-3.0.101-108.87.1.src.rpm</filename>
+          <reboot_suggested>True</reboot_suggested>
+        </package>
+        <package name="kernel-trace" epoch="0" version="3.0.101" release="108.87.1" arch="nosrc" src="nosrc/kernel-trace-3.0.101-108.87.1.nosrc.rpm">
+          <filename>kernel-trace-3.0.101-108.87.1.nosrc.rpm</filename>
+          <reboot_suggested>True</reboot_suggested>
+        </package>
+        <package name="kernel-xen" epoch="0" version="3.0.101" release="108.87.1" arch="nosrc" src="nosrc/kernel-xen-3.0.101-108.87.1.nosrc.rpm">
+          <filename>kernel-xen-3.0.101-108.87.1.nosrc.rpm</filename>
+          <reboot_suggested>True</reboot_suggested>
+        </package>
+        </collection>
+    </pkglist>
+  </update>
+  <update from="maintenance@example.invalid" status="stable" type="security" version="1">
+    <id>slessp4-firefox38-20150820-12083</id>
+    <title>Fictional title of slessp4-firefox38-20150820-12083</title>
+    <severity>important</severity>
+    <release>SUSE Updates SLE-SERVER 11-SP4 x86 64</release>
+    <issued date="1441839048" />
+    <references>
+      <reference href="https://bugzilla.suse.com/show_bug.cgi?id=940806" id="940806" title="Fictional reference title" type="bugzilla" />
+      <reference href="http://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2015-4487" id="CVE-2015-4487" title="Fictional reference title" type="cve" />
+      <reference href="http://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2015-4486" id="CVE-2015-4486" title="Fictional reference title" type="cve" />
+      <reference href="http://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2015-4485" id="CVE-2015-4485" title="Fictional reference title" type="cve" />
+      </references>
+    <description>Fictional advisory description.</description>
+    <pkglist>
+      <collection>
+        <package name="MozillaFirefox" epoch="0" version="38.2.1esr" release="19.3" arch="src" src="src/MozillaFirefox-38.2.1esr-19.3.src.rpm">
+          <filename>MozillaFirefox-38.2.1esr-19.3.src.rpm</filename>
+        </package>
+        <package name="MozillaFirefox" epoch="0" version="38.2.1esr" release="19.3" arch="x86_64" src="x86_64/MozillaFirefox-38.2.1esr-19.3.x86_64.rpm">
+          <filename>MozillaFirefox-38.2.1esr-19.3.x86_64.rpm</filename>
+        </package>
+        <package name="MozillaFirefox-branding-SLED" epoch="0" version="31.0" release="0.12.51" arch="src" src="src/MozillaFirefox-branding-SLED-31.0-0.12.51.src.rpm">
+          <filename>MozillaFirefox-branding-SLED-31.0-0.12.51.src.rpm</filename>
+        </package>
+        <package name="MozillaFirefox-branding-SLED" epoch="0" version="31.0" release="0.12.51" arch="x86_64" src="x86_64/MozillaFirefox-branding-SLED-31.0-0.12.51.x86_64.rpm">
+          <filename>MozillaFirefox-branding-SLED-31.0-0.12.51.x86_64.rpm</filename>
+        </package>
+        <package name="mozilla-nss" epoch="0" version="3.19.2.0" release="0.16.1" arch="src" src="src/mozilla-nss-3.19.2.0-0.16.1.src.rpm">
+          <filename>mozilla-nss-3.19.2.0-0.16.1.src.rpm</filename>
+        </package>
+        </collection>
+    </pkglist>
+  </update>
+</updates>

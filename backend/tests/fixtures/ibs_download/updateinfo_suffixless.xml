@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<updates>
+  <update from="maintenance@example.invalid" status="stable" type="security" version="1">
+    <id>openSUSE-Leap-Micro-5.5-2024-1867</id>
+    <title>Fictional title of openSUSE-Leap-Micro-5.5-2024-1867</title>
+    <severity>moderate</severity>
+    <release>SUSE Updates openSUSE-Leap-Micro 5.5</release>
+    <issued date="1717071697" />
+    <references>
+      <reference href="https://bugzilla.suse.com/show_bug.cgi?id=1209188" id="1209188" title="Fictional reference title" type="bugzilla" />
+      <reference href="https://bugzilla.suse.com/show_bug.cgi?id=1221301" id="1221301" title="Fictional reference title" type="bugzilla" />
+    </references>
+    <description>Fictional advisory description.</description>
+    <pkglist>
+      <collection>
+        <package name="fwupdate" epoch="0" version="12" release="150100.11.15.2" arch="src" src="src/fwupdate-12-150100.11.15.2.src.rpm">
+          <filename>fwupdate-12-150100.11.15.2.src.rpm</filename>
+        </package>
+        <package name="fwupdate" epoch="0" version="12" release="150100.11.15.2" arch="x86_64" src="x86_64/fwupdate-12-150100.11.15.2.x86_64.rpm">
+          <filename>fwupdate-12-150100.11.15.2.x86_64.rpm</filename>
+        </package>
+        <package name="fwupdate-efi" epoch="0" version="12" release="150100.11.15.2" arch="x86_64" src="x86_64/fwupdate-efi-12-150100.11.15.2.x86_64.rpm">
+          <filename>fwupdate-efi-12-150100.11.15.2.x86_64.rpm</filename>
+        </package>
+        </collection>
+    </pkglist>
+  </update>
+  <update from="maintenance@example.invalid" status="stable" type="security" version="1">
+    <id>openSUSE-Leap-Micro-5.5-2023-3817</id>
+    <title>Fictional title of openSUSE-Leap-Micro-5.5-2023-3817</title>
+    <severity>important</severity>
+    <release>SUSE Updates openSUSE-Leap-Micro 5.5</release>
+    <issued date="1697655906" />
+    <references>
+      <reference href="https://bugzilla.suse.com/show_bug.cgi?id=1212475" id="1212475" title="Fictional reference title" type="bugzilla" />
+    </references>
+    <description>Fictional advisory description.</description>
+    <pkglist>
+      <collection>
+        <package name="containerd" epoch="0" version="1.6.21" release="150000.95.1" arch="src" src="src/containerd-1.6.21-150000.95.1.src.rpm">
+          <filename>containerd-1.6.21-150000.95.1.src.rpm</filename>
+        </package>
+        <package name="containerd" epoch="0" version="1.6.21" release="150000.95.1" arch="x86_64" src="x86_64/containerd-1.6.21-150000.95.1.x86_64.rpm">
+          <filename>containerd-1.6.21-150000.95.1.x86_64.rpm</filename>
+        </package>
+        <package name="containerd" epoch="0" version="1.6.21" release="150000.95.1" arch="s390x" src="s390x/containerd-1.6.21-150000.95.1.s390x.rpm">
+          <filename>containerd-1.6.21-150000.95.1.s390x.rpm</filename>
+        </package>
+        </collection>
+    </pkglist>
+  </update>
+  <update from="maintenance@example.invalid" status="retracted" type="security" version="1">
+    <id>openSUSE-Leap-Micro-5.5-2024-794</id>
+    <title>Fictional title of openSUSE-Leap-Micro-5.5-2024-794</title>
+    <severity>important</severity>
+    <release>SUSE Updates openSUSE-Leap-Micro 5.5</release>
+    <issued date="1709886924" />
+    <references>
+      <reference href="https://bugzilla.suse.com/show_bug.cgi?id=1220389" id="1220389" title="Fictional reference title" type="bugzilla" />
+      <reference href="https://bugzilla.suse.com/show_bug.cgi?id=1219026" id="1219026" title="Fictional reference title" type="bugzilla" />
+      <reference href="http://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2023-42465" id="CVE-2023-42465" title="Fictional reference title" type="cve" />
+    </references>
+    <description>Fictional advisory description.</description>
+    <pkglist>
+      <collection>
+        <package name="sudo" epoch="0" version="1.9.12p1" release="150500.7.7.1" arch="src" src="src/sudo-1.9.12p1-150500.7.7.1.src.rpm">
+          <filename>sudo-1.9.12p1-150500.7.7.1.src.rpm</filename>
+        </package>
+        <package name="sudo" epoch="0" version="1.9.12p1" release="150500.7.7.1" arch="x86_64" src="x86_64/sudo-1.9.12p1-150500.7.7.1.x86_64.rpm">
+          <filename>sudo-1.9.12p1-150500.7.7.1.x86_64.rpm</filename>
+        </package>
+        <package name="sudo" epoch="0" version="1.9.12p1" release="150500.7.7.1" arch="s390x" src="s390x/sudo-1.9.12p1-150500.7.7.1.s390x.rpm">
+          <filename>sudo-1.9.12p1-150500.7.7.1.s390x.rpm</filename>
+        </package>
+        </collection>
+    </pkglist>
+  </update>
+</updates>

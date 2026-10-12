@@ -1,0 +1,284 @@
+{
+  "captured_at": "2026-10-12",
+  "repomd": {
+    "current": {
+      "repo_name": "SUSE:Updates:SLE-Module-Basesystem:15-SP6:x86_64",
+      "status": 200,
+      "content_type": "application/xml;name=\"repomd.xml\"",
+      "content_length": [
+        "3131"
+      ]
+    },
+    "historical": {
+      "repo_name": "SUSE:Updates:SLE-Module-Basesystem:15-SP2:x86_64",
+      "status": 200,
+      "content_type": "application/xml;name=\"repomd.xml\"",
+      "content_length": [
+        "3130"
+      ]
+    },
+    "suffixless": {
+      "repo_name": "SUSE:Updates:openSUSE-Leap-Micro:5.5",
+      "status": 200,
+      "content_type": "application/xml;name=\"repomd.xml\"",
+      "content_length": [
+        "3117"
+      ]
+    },
+    "architecture": {
+      "repo_name": "SUSE:Updates:SLE-Module-Basesystem:15-SP6:aarch64",
+      "status": 200,
+      "content_type": "application/xml;name=\"repomd.xml\"",
+      "content_length": [
+        "3134"
+      ]
+    },
+    "ltss": {
+      "repo_name": "SUSE:Updates:SLE-SERVER:12-SP5-LTSS:x86_64",
+      "status": 200,
+      "content_type": "application/xml;name=\"repomd.xml\"",
+      "content_length": [
+        "3124"
+      ]
+    },
+    "espos_no_updateinfo": {
+      "repo_name": "SUSE:Updates:SLE-Product-HPC:15-SP6-ESPOS:x86_64",
+      "status": 200,
+      "content_type": "text/xml",
+      "content_length": [
+        "1706"
+      ]
+    },
+    "source_no_updateinfo": {
+      "repo_name": "SUSE:Updates:RES:7-LTSS:src",
+      "status": 200,
+      "content_type": "text/xml",
+      "content_length": [
+        "1567"
+      ]
+    },
+    "legacy_sha1": {
+      "repo_name": "SUSE:Updates:SLE-SERVER:11-SP4:x86_64",
+      "status": 200,
+      "content_type": "application/xml;name=\"repomd.xml\"",
+      "content_length": [
+        "2493"
+      ]
+    },
+    "absent": {
+      "repo_name": "SUSE:Updates:SLE-Module-Fictional:1:x86_64",
+      "status": 404,
+      "content_type": "text/html; charset=utf-8"
+    },
+    "non_rpm_ubuntu": {
+      "repo_name": "SUSE:Updates:MultiLinuxManagerTools:Ubuntu-24.04:x86_64",
+      "status": 404,
+      "content_type": "text/html; charset=utf-8"
+    },
+    "non_rpm_debian": {
+      "repo_name": "SUSE:Updates:Debian:12-CLIENT-TOOLS:x86_64",
+      "status": 404,
+      "content_type": "text/html; charset=utf-8"
+    },
+    "forbidden": {
+      "repo_name": "SUSE:Updates:SLL:9.4:x86_64",
+      "status": 403,
+      "content_type": "text/html; charset=utf-8"
+    }
+  },
+  "artifacts": {
+    "direct_artifact": {
+      "repo_name": "SUSE:Updates:SLE-INSTALLER:15-SP2:x86_64",
+      "responses": [
+        {
+          "url_path": "/ibs/SUSE/Updates/SLE-INSTALLER/15-SP2/x86_64/update/repodata/5f518c1a1e932a7b601a4439c9558e54b628616cfeb03131665522ac830c87b2-updateinfo.xml.gz",
+          "status": 200,
+          "content_type": "application/x-gzip;name=\"5f518c1a1e932a7b601a4439c9558e54b628616cfeb03131665522ac830c87b2-updateinfo.xml.gz\"",
+          "content_length": [
+            "52102"
+          ]
+        }
+      ]
+    },
+    "path_changing_redirect": {
+      "repo_name": "SUSE:Updates:RES:7-LTSS:x86_64",
+      "responses": [
+        {
+          "url_path": "/ibs/SUSE/Updates/RES/7-LTSS/x86_64/update/repodata/d4a5f9fc473f7e8ea6767cb11bec4282daa25efa0597cd30f21404b6cfcf7df2-updateinfo.xml.gz",
+          "status": 302,
+          "content_type": "application/x-gzip",
+          "content_length": [
+            "0"
+          ],
+          "location": "https://dist.suse.de/RH.epam/RH7.0-LT/x86_64/repodata/d4a5f9fc473f7e8ea6767cb11bec4282daa25efa0597cd30f21404b6cfcf7df2-updateinfo.xml.gz"
+        }
+      ]
+    },
+    "updateinfo_current": {
+      "repo_name": "SUSE:Updates:SLE-Module-Basesystem:15-SP6:x86_64",
+      "responses": [
+        {
+          "url_path": "/ibs/SUSE/Updates/SLE-Module-Basesystem/15-SP6/x86_64/update/repodata/fa618aba4fb91be6c4ba5d732e175f4a89c81af8cd1667e64c167c15540b79c8-updateinfo.xml.gz",
+          "status": 302,
+          "content_type": "application/x-gzip",
+          "content_length": [
+            "0"
+          ],
+          "location": "https://dist.suse.de/ibs/SUSE/Updates/SLE-Module-Basesystem/15-SP6/x86_64/update/repodata/fa618aba4fb91be6c4ba5d732e175f4a89c81af8cd1667e64c167c15540b79c8-updateinfo.xml.gz"
+        },
+        {
+          "url_path": "/ibs/SUSE/Updates/SLE-Module-Basesystem/15-SP6/x86_64/update/repodata/fa618aba4fb91be6c4ba5d732e175f4a89c81af8cd1667e64c167c15540b79c8-updateinfo.xml.gz",
+          "status": 200,
+          "content_type": "application/x-gzip",
+          "content_length": [
+            "1130443"
+          ]
+        }
+      ],
+      "verification": {
+        "compressed_bytes": 1130443,
+        "open_bytes": 6325465,
+        "size_matches": true,
+        "open_size_matches": true,
+        "checksum_matches": true,
+        "open_checksum_matches": true,
+        "gzip_magic": "1f8b"
+      }
+    },
+    "updateinfo_suffixless": {
+      "repo_name": "SUSE:Updates:openSUSE-Leap-Micro:5.5",
+      "responses": [
+        {
+          "url_path": "/ibs/SUSE/Updates/openSUSE-Leap-Micro/5.5/update/repodata/45ebbcd07f2414ddc509d7f0c3e1a2e353ded50500f7789c385af01c904cdbb7-updateinfo.xml.gz",
+          "status": 302,
+          "content_type": "application/x-gzip",
+          "content_length": [
+            "0"
+          ],
+          "location": "https://dist.suse.de/ibs/SUSE/Updates/openSUSE-Leap-Micro/5.5/update/repodata/45ebbcd07f2414ddc509d7f0c3e1a2e353ded50500f7789c385af01c904cdbb7-updateinfo.xml.gz"
+        },
+        {
+          "url_path": "/ibs/SUSE/Updates/openSUSE-Leap-Micro/5.5/update/repodata/45ebbcd07f2414ddc509d7f0c3e1a2e353ded50500f7789c385af01c904cdbb7-updateinfo.xml.gz",
+          "status": 200,
+          "content_type": "application/x-gzip",
+          "content_length": [
+            "1078677"
+          ]
+        }
+      ],
+      "verification": {
+        "compressed_bytes": 1078677,
+        "open_bytes": 5754657,
+        "size_matches": true,
+        "open_size_matches": true,
+        "checksum_matches": true,
+        "open_checksum_matches": true,
+        "gzip_magic": "1f8b"
+      }
+    },
+    "updateinfo_ltss": {
+      "repo_name": "SUSE:Updates:SLE-SERVER:12-SP5-LTSS:x86_64",
+      "responses": [
+        {
+          "url_path": "/ibs/SUSE/Updates/SLE-SERVER/12-SP5-LTSS/x86_64/update/repodata/e2eb8c9e2122d995f3a17e11c13ec37b1fd288b855f39a88444d6b54ef925282-updateinfo.xml.gz",
+          "status": 302,
+          "content_type": "application/x-gzip",
+          "content_length": [
+            "0"
+          ],
+          "location": "https://dist.suse.de/ibs/SUSE/Updates/SLE-SERVER/12-SP5-LTSS/x86_64/update/repodata/e2eb8c9e2122d995f3a17e11c13ec37b1fd288b855f39a88444d6b54ef925282-updateinfo.xml.gz"
+        },
+        {
+          "url_path": "/ibs/SUSE/Updates/SLE-SERVER/12-SP5-LTSS/x86_64/update/repodata/e2eb8c9e2122d995f3a17e11c13ec37b1fd288b855f39a88444d6b54ef925282-updateinfo.xml.gz",
+          "status": 200,
+          "content_type": "application/x-gzip",
+          "content_length": [
+            "578532"
+          ]
+        }
+      ],
+      "verification": {
+        "compressed_bytes": 578532,
+        "open_bytes": 4014345,
+        "size_matches": true,
+        "open_size_matches": true,
+        "checksum_matches": true,
+        "open_checksum_matches": true,
+        "gzip_magic": "1f8b"
+      }
+    },
+    "updateinfo_legacy_sha1": {
+      "repo_name": "SUSE:Updates:SLE-SERVER:11-SP4:x86_64",
+      "responses": [
+        {
+          "url_path": "/ibs/SUSE/Updates/SLE-SERVER/11-SP4/x86_64/update/repodata/updateinfo.xml.gz",
+          "status": 302,
+          "content_type": "application/x-gzip",
+          "content_length": [
+            "0"
+          ],
+          "location": "https://dist.suse.de/ibs/SUSE/Updates/SLE-SERVER/11-SP4/x86_64/update/repodata/updateinfo.xml.gz"
+        },
+        {
+          "url_path": "/ibs/SUSE/Updates/SLE-SERVER/11-SP4/x86_64/update/repodata/updateinfo.xml.gz",
+          "status": 200,
+          "content_type": "application/x-gzip",
+          "content_length": [
+            "644327"
+          ]
+        }
+      ],
+      "verification": {
+        "compressed_bytes": 644327,
+        "open_bytes": 4219005,
+        "size_matches": true,
+        "open_size_matches": true,
+        "checksum_matches": true,
+        "open_checksum_matches": true,
+        "gzip_magic": "1f8b"
+      }
+    }
+  },
+  "updateinfo": {
+    "current": {
+      "repo_name": "SUSE:Updates:SLE-Module-Basesystem:15-SP6:x86_64",
+      "advisories_total": 974,
+      "advisories_kept": [
+        "SUSE-SLE-Module-Basesystem-15-SP6-2024-1557",
+        "SUSE-SLE-Module-Basesystem-15-SP6-2024-2203",
+        "SUSE-SLE-Module-Basesystem-15-SP6-2024-1865",
+        "SUSE-SLE-Module-Basesystem-15-SP6-2024-2265",
+        "SUSE-SLE-Module-Basesystem-15-SP6-2025-118",
+        "SUSE-SLE-Module-Basesystem-15-SP6-2024-2684",
+        "SUSE-SLE-Module-Basesystem-15-SP6-2024-839",
+        "SUSE-SLE-Module-Basesystem-15-SP6-2024-1501"
+      ]
+    },
+    "suffixless": {
+      "repo_name": "SUSE:Updates:openSUSE-Leap-Micro:5.5",
+      "advisories_total": 591,
+      "advisories_kept": [
+        "openSUSE-Leap-Micro-5.5-2024-1867",
+        "openSUSE-Leap-Micro-5.5-2023-3817",
+        "openSUSE-Leap-Micro-5.5-2024-794"
+      ]
+    },
+    "ltss": {
+      "repo_name": "SUSE:Updates:SLE-SERVER:12-SP5-LTSS:x86_64",
+      "advisories_total": 604,
+      "advisories_kept": [
+        "SUSE-SLE-SERVER-12-SP5-LTSS-2026-3585",
+        "SUSE-SLE-SERVER-12-SP5-LTSS-2025-659",
+        "SUSE-SLE-SERVER-12-SP5-LTSS-2024-4342"
+      ]
+    },
+    "legacy_sha1": {
+      "repo_name": "SUSE:Updates:SLE-SERVER:11-SP4:x86_64",
+      "advisories_total": 985,
+      "advisories_kept": [
+        "slessp4-kernel-20190225-13979",
+        "slessp4-firefox38-20150820-12083"
+      ]
+    }
+  }
+}

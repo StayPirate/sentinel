@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<repomd xmlns="http://linux.duke.edu/metadata/repo" xmlns:rpm="http://linux.duke.edu/metadata/rpm">
+  <revision>1782868737</revision>
+  <tags>
+    <repo>obsrepository://build.suse.de/SUSE:Updates:openSUSE-Leap-Micro:5.5/update</repo>
+    <repo>obsbuildid:1692349483</repo>
+  </tags>
+  <data type="primary">
+    <checksum type="sha256">d644b0440f3a08fe0bbf2bf997881dbd4aae61ffe5975d05b7234563a7609b72</checksum>
+    <open-checksum type="sha256">2a3264f34ed4f9f0cc84b8df8a38a0a14ca2e10e15cb81cddf3491d1d3faba51</open-checksum>
+    <location href="repodata/d644b0440f3a08fe0bbf2bf997881dbd4aae61ffe5975d05b7234563a7609b72-primary.xml.gz"/>
+    <timestamp>1782868737</timestamp>
+    <size>26831817</size>
+    <open-size>192288322</open-size>
+  </data>
+  <data type="filelists">
+    <checksum type="sha256">5d82b9c82efb14a9f0d3fb99005e37b0bfc5b3cea8ba13bbd679a6492542760b</checksum>
+    <open-checksum type="sha256">f3af6757e595310a5d5bf5f30eca0b5ac60dd031b0c55e3f8566b3b3474216bb</open-checksum>
+    <location href="repodata/5d82b9c82efb14a9f0d3fb99005e37b0bfc5b3cea8ba13bbd679a6492542760b-filelists.xml.gz"/>
+    <timestamp>1782868737</timestamp>
+    <size>3573945</size>
+    <open-size>54299378</open-size>
+  </data>
+  <data type="other">
+    <checksum type="sha256">57532843d643e0f0e205dcca15caafc5e6e5d86fadaf2acbffbdafdaa2cbe7b7</checksum>
+    <open-checksum type="sha256">3739888f6a0cb4aba256b77a1778983d669fc3b73c0571a7b4a32c21e91bf007</open-checksum>
+    <location href="repodata/57532843d643e0f0e205dcca15caafc5e6e5d86fadaf2acbffbdafdaa2cbe7b7-other.xml.gz"/>
+    <timestamp>1782868737</timestamp>
+    <size>4862600</size>
+    <open-size>53564356</open-size>
+  </data>
+  <data type="deltainfo">
+    <checksum type="sha256">c4979a4a518f5dc79e0702c97496f773038c1a2a18f78c58515b096fd2060196</checksum>
+    <open-checksum type="sha256">496dace5c57d8981090e453d5844204e35375c65685526e7b913f7dd0012e906</open-checksum>
+    <location href="repodata/c4979a4a518f5dc79e0702c97496f773038c1a2a18f78c58515b096fd2060196-deltainfo.xml.gz"/>
+    <timestamp>1782868743</timestamp>
+    <size>196646</size>
+    <open-size>929037</open-size>
+  </data>
+  <data type="susedata">
+    <checksum type="sha256">054e0ee7e199b59f94bdfadab08f445ad8b41bc3caad5c88a36245a10b27d35a</checksum>
+    <open-checksum type="sha256">b10c23d8466a9a594f07dbb3d9d5d6824e061a79dccc6708faafcb3d723de6e9</open-checksum>
+    <location href="repodata/054e0ee7e199b59f94bdfadab08f445ad8b41bc3caad5c88a36245a10b27d35a-susedata.xml.gz"/>
+    <timestamp>1782868746</timestamp>
+    <size>189900</size>
+    <open-size>869628</open-size>
+  </data>
+  <data type="updateinfo">
+    <checksum type="sha256">45ebbcd07f2414ddc509d7f0c3e1a2e353ded50500f7789c385af01c904cdbb7</checksum>
+    <open-checksum type="sha256">81af1cf276eedee129a85832b064911da78cd6a7734c42d8f2ae3a4b98bad102</open-checksum>
+    <location href="repodata/45ebbcd07f2414ddc509d7f0c3e1a2e353ded50500f7789c385af01c904cdbb7-updateinfo.xml.gz"/>
+    <timestamp>1782868737</timestamp>
+    <size>1078677</size>
+    <open-size>5754657</open-size>
+  </data>
+</repomd>

@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<updates>
+  <update from="maintenance@example.invalid" status="stable" type="security" version="1">
+    <id>SUSE-SLE-SERVER-12-SP5-LTSS-2026-3585</id>
+    <title>Fictional title of SUSE-SLE-SERVER-12-SP5-LTSS-2026-3585</title>
+    <severity>important</severity>
+    <release>SUSE Updates SLE-SERVER 12-SP5-LTSS x86 64</release>
+    <issued date="1786459611" />
+    <references>
+      <reference href="https://bugzilla.suse.com/show_bug.cgi?id=1189821" id="1189821" title="Fictional reference title" type="bugzilla" />
+      <reference href="https://bugzilla.suse.com/show_bug.cgi?id=1269553" id="1269553" title="Fictional reference title" type="bugzilla" />
+      <reference href="http://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2026-57965" id="CVE-2026-57965" title="Fictional reference title" type="cve" />
+      <reference href="http://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2026-57966" id="CVE-2026-57966" title="Fictional reference title" type="cve" />
+    </references>
+    <description>Fictional advisory description.</description>
+    <pkglist>
+      <collection>
+        <package name="spice-vdagent" epoch="0" version="0.16.0" release="8.13.2" arch="src" src="src/spice-vdagent-0.16.0-8.13.2.src.rpm">
+          <filename>spice-vdagent-0.16.0-8.13.2.src.rpm</filename>
+        </package>
+        <package name="spice-vdagent" epoch="0" version="0.16.0" release="8.13.2" arch="x86_64" src="x86_64/spice-vdagent-0.16.0-8.13.2.x86_64.rpm">
+          <filename>spice-vdagent-0.16.0-8.13.2.x86_64.rpm</filename>
+        </package>
+      </collection>
+    </pkglist>
+  </update>
+  <update from="maintenance@example.invalid" status="stable" type="security" version="1">
+    <id>SUSE-SLE-SERVER-12-SP5-LTSS-2025-659</id>
+    <title>Fictional title of SUSE-SLE-SERVER-12-SP5-LTSS-2025-659</title>
+    <severity>moderate</severity>
+    <release>SUSE Updates SLE-SERVER 12-SP5-LTSS x86 64</release>
+    <issued date="1740312235" />
+    <references>
+      <reference href="https://bugzilla.suse.com/show_bug.cgi?id=1220110" id="1220110" title="Fictional reference title" type="bugzilla" />
+      <reference href="https://bugzilla.suse.com/show_bug.cgi?id=1225637" id="1225637" title="Fictional reference title" type="bugzilla" />
+      <reference href="http://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2025-26465" id="CVE-2025-26465" title="Fictional reference title" type="cve" />
+      </references>
+    <description>Fictional advisory description.</description>
+    <pkglist>
+      <collection>
+        <package name="openssh" epoch="0" version="7.2p2" release="81.26.1" arch="src" src="src/openssh-7.2p2-81.26.1.src.rpm">
+          <filename>openssh-7.2p2-81.26.1.src.rpm</filename>
+        </package>
+        <package name="openssh" epoch="0" version="7.2p2" release="81.26.1" arch="x86_64" src="x86_64/openssh-7.2p2-81.26.1.x86_64.rpm">
+          <filename>openssh-7.2p2-81.26.1.x86_64.rpm</filename>
+        </package>
+        <package name="openssh-askpass-gnome" epoch="0" version="7.2p2" release="81.26.1" arch="src" src="src/openssh-askpass-gnome-7.2p2-81.26.1.src.rpm">
+          <filename>openssh-askpass-gnome-7.2p2-81.26.1.src.rpm</filename>
+        </package>
+        <package name="openssh-askpass-gnome" epoch="0" version="7.2p2" release="81.26.1" arch="x86_64" src="x86_64/openssh-askpass-gnome-7.2p2-81.26.1.x86_64.rpm">
+          <filename>openssh-askpass-gnome-7.2p2-81.26.1.x86_64.rpm</filename>
+        </package>
+        </collection>
+    </pkglist>
+  </update>
+  <update from="maintenance@example.invalid" status="retracted" type="recommended" version="1">
+    <id>SUSE-SLE-SERVER-12-SP5-LTSS-2024-4342</id>
+    <title>Fictional title of SUSE-SLE-SERVER-12-SP5-LTSS-2024-4342</title>
+    <severity>moderate</severity>
+    <release>SUSE Updates SLE-SERVER 12-SP5-LTSS x86 64</release>
+    <issued date="1734553426" />
+    <references>
+      <reference href="https://bugzilla.suse.com/show_bug.cgi?id=1234304" id="1234304" title="Fictional reference title" type="bugzilla" />
+    </references>
+    <description>Fictional advisory description.</description>
+    <pkglist>
+      <collection>
+        <package name="libzypp" epoch="0" version="16.22.14" release="68.1" arch="src" src="src/libzypp-16.22.14-68.1.src.rpm">
+          <filename>libzypp-16.22.14-68.1.src.rpm</filename>
+          <restart_suggested>True</restart_suggested>
+        </package>
+        <package name="libzypp" epoch="0" version="16.22.14" release="68.1" arch="x86_64" src="x86_64/libzypp-16.22.14-68.1.x86_64.rpm">
+          <filename>libzypp-16.22.14-68.1.x86_64.rpm</filename>
+          <restart_suggested>True</restart_suggested>
+        </package>
+        <package name="libzypp-devel" epoch="0" version="16.22.14" release="68.1" arch="x86_64" src="x86_64/libzypp-devel-16.22.14-68.1.x86_64.rpm">
+          <filename>libzypp-devel-16.22.14-68.1.x86_64.rpm</filename>
+          <restart_suggested>True</restart_suggested>
+        </package>
+      </collection>
+    </pkglist>
+  </update>
+</updates>

@@ -1,0 +1,219 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<updates>
+  <update from="maintenance@example.invalid" status="stable" type="security" version="1">
+    <id>SUSE-SLE-Module-Basesystem-15-SP6-2024-1557</id>
+    <title>Fictional title of SUSE-SLE-Module-Basesystem-15-SP6-2024-1557</title>
+    <severity>moderate</severity>
+    <release>SUSE Updates SLE-Module-Basesystem 15-SP6 x86 64</release>
+    <issued date="1717068854" />
+    <references>
+      <reference href="https://bugzilla.suse.com/show_bug.cgi?id=1191175" id="1191175" title="Fictional reference title" type="bugzilla" />
+      <reference href="https://bugzilla.suse.com/show_bug.cgi?id=1218686" id="1218686" title="Fictional reference title" type="bugzilla" />
+      <reference href="http://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2021-3521" id="CVE-2021-3521" title="Fictional reference title" type="cve" />
+    </references>
+    <description>Fictional advisory description.</description>
+    <pkglist>
+      <collection>
+        <package name="python-rpm" epoch="0" version="4.14.3" release="150400.59.16.1" arch="src" src="src/python-rpm-4.14.3-150400.59.16.1.src.rpm">
+          <filename>python-rpm-4.14.3-150400.59.16.1.src.rpm</filename>
+        </package>
+        <package name="python3-rpm" epoch="0" version="4.14.3" release="150400.59.16.1" arch="x86_64" src="x86_64/python3-rpm-4.14.3-150400.59.16.1.x86_64.rpm">
+          <filename>python3-rpm-4.14.3-150400.59.16.1.x86_64.rpm</filename>
+        </package>
+        <package name="rpm" epoch="0" version="4.14.3" release="150400.59.16.1" arch="src" src="src/rpm-4.14.3-150400.59.16.1.src.rpm">
+          <filename>rpm-4.14.3-150400.59.16.1.src.rpm</filename>
+        </package>
+        <package name="rpm" epoch="0" version="4.14.3" release="150400.59.16.1" arch="x86_64" src="x86_64/rpm-4.14.3-150400.59.16.1.x86_64.rpm">
+          <filename>rpm-4.14.3-150400.59.16.1.x86_64.rpm</filename>
+        </package>
+        </collection>
+    </pkglist>
+  </update>
+  <update from="maintenance@example.invalid" status="stable" type="security" version="1">
+    <id>SUSE-SLE-Module-Basesystem-15-SP6-2024-2203</id>
+    <title>Fictional title of SUSE-SLE-Module-Basesystem-15-SP6-2024-2203</title>
+    <severity>important</severity>
+    <release>SUSE Updates SLE-Module-Basesystem 15-SP6 x86 64</release>
+    <issued date="1719320682" />
+    <references>
+      <reference href="https://bugzilla.suse.com/show_bug.cgi?id=1226158" id="1226158" title="Fictional reference title" type="bugzilla" />
+      <reference href="https://bugzilla.suse.com/show_bug.cgi?id=1012628" id="1012628" title="Fictional reference title" type="bugzilla" />
+      <reference href="http://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2023-0160" id="CVE-2023-0160" title="Fictional reference title" type="cve" />
+      <reference href="http://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2023-52434" id="CVE-2023-52434" title="Fictional reference title" type="cve" />
+      <reference href="http://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2023-52458" id="CVE-2023-52458" title="Fictional reference title" type="cve" />
+      </references>
+    <description>Fictional advisory description.</description>
+    <pkglist>
+      <collection>
+        <package name="kernel-default" epoch="0" version="6.4.0" release="150600.23.7.3" arch="nosrc" src="nosrc/kernel-default-6.4.0-150600.23.7.3.nosrc.rpm">
+          <filename>kernel-default-6.4.0-150600.23.7.3.nosrc.rpm</filename>
+          <reboot_suggested>True</reboot_suggested>
+        </package>
+        <package name="kernel-default" epoch="0" version="6.4.0" release="150600.23.7.3" arch="x86_64" src="x86_64/kernel-default-6.4.0-150600.23.7.3.x86_64.rpm">
+          <filename>kernel-default-6.4.0-150600.23.7.3.x86_64.rpm</filename>
+          <reboot_suggested>True</reboot_suggested>
+        </package>
+        <package name="kernel-default-base" epoch="0" version="6.4.0" release="150600.23.7.3.150600.12.2.7" arch="src" src="src/kernel-default-base-6.4.0-150600.23.7.3.150600.12.2.7.src.rpm">
+          <filename>kernel-default-base-6.4.0-150600.23.7.3.150600.12.2.7.src.rpm</filename>
+          <reboot_suggested>True</reboot_suggested>
+        </package>
+        <package name="kernel-default-base" epoch="0" version="6.4.0" release="150600.23.7.3.150600.12.2.7" arch="x86_64" src="x86_64/kernel-default-base-6.4.0-150600.23.7.3.150600.12.2.7.x86_64.rpm">
+          <filename>kernel-default-base-6.4.0-150600.23.7.3.150600.12.2.7.x86_64.rpm</filename>
+          <reboot_suggested>True</reboot_suggested>
+        </package>
+        <package name="kernel-source" epoch="0" version="6.4.0" release="150600.23.7.2" arch="src" src="src/kernel-source-6.4.0-150600.23.7.2.src.rpm">
+          <filename>kernel-source-6.4.0-150600.23.7.2.src.rpm</filename>
+          <reboot_suggested>True</reboot_suggested>
+        </package>
+      </collection>
+    </pkglist>
+  </update>
+  <update from="maintenance@example.invalid" status="stable" type="security" version="1">
+    <id>SUSE-SLE-Module-Basesystem-15-SP6-2024-1865</id>
+    <title>Fictional title of SUSE-SLE-Module-Basesystem-15-SP6-2024-1865</title>
+    <severity>moderate</severity>
+    <release>SUSE Updates SLE-Module-Basesystem 15-SP6 x86 64</release>
+    <issued date="1717071611" />
+    <references>
+      <reference href="http://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2024-4855" id="CVE-2024-4855" title="Fictional reference title" type="cve" />
+      <reference href="http://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2024-4854" id="CVE-2024-4854" title="Fictional reference title" type="cve" />
+      <reference href="http://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2024-4853" id="CVE-2024-4853" title="Fictional reference title" type="cve" />
+      <reference href="https://bugzilla.suse.com/show_bug.cgi?id=1224276" id="1224276" title="Fictional reference title" type="bugzilla" />
+      <reference href="https://bugzilla.suse.com/show_bug.cgi?id=1224274" id="1224274" title="Fictional reference title" type="bugzilla" />
+      </references>
+    <description>Fictional advisory description.</description>
+    <pkglist>
+      <collection>
+        <package name="wireshark" epoch="0" version="3.6.23" release="150000.3.115.1" arch="src" src="src/wireshark-3.6.23-150000.3.115.1.src.rpm">
+          <filename>wireshark-3.6.23-150000.3.115.1.src.rpm</filename>
+        </package>
+      </collection>
+    </pkglist>
+  </update>
+  <update from="maintenance@example.invalid" status="stable" type="security" version="1">
+    <id>SUSE-SLE-Module-Basesystem-15-SP6-2024-2265</id>
+    <title>Fictional title of SUSE-SLE-Module-Basesystem-15-SP6-2024-2265</title>
+    <severity>moderate</severity>
+    <release>SUSE Updates SLE-Module-Basesystem 15-SP6 x86 64</release>
+    <issued date="1719908085" />
+    <references>
+      <reference href="http://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2024-4855" id="CVE-2024-4855" title="Fictional reference title" type="cve" />
+      <reference href="http://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2024-4854" id="CVE-2024-4854" title="Fictional reference title" type="cve" />
+      <reference href="http://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2024-4853" id="CVE-2024-4853" title="Fictional reference title" type="cve" />
+      <reference href="https://bugzilla.suse.com/show_bug.cgi?id=1224276" id="1224276" title="Fictional reference title" type="bugzilla" />
+      <reference href="https://bugzilla.suse.com/show_bug.cgi?id=1224274" id="1224274" title="Fictional reference title" type="bugzilla" />
+      </references>
+    <description>Fictional advisory description.</description>
+    <pkglist>
+      <collection>
+        <package name="libwireshark15" epoch="0" version="3.6.23" release="150600.18.3.1" arch="x86_64" src="x86_64/libwireshark15-3.6.23-150600.18.3.1.x86_64.rpm">
+          <filename>libwireshark15-3.6.23-150600.18.3.1.x86_64.rpm</filename>
+        </package>
+        <package name="libwiretap12" epoch="0" version="3.6.23" release="150600.18.3.1" arch="x86_64" src="x86_64/libwiretap12-3.6.23-150600.18.3.1.x86_64.rpm">
+          <filename>libwiretap12-3.6.23-150600.18.3.1.x86_64.rpm</filename>
+        </package>
+        <package name="wireshark" epoch="0" version="3.6.23" release="150600.18.3.1" arch="src" src="src/wireshark-3.6.23-150600.18.3.1.src.rpm">
+          <filename>wireshark-3.6.23-150600.18.3.1.src.rpm</filename>
+        </package>
+        </collection>
+    </pkglist>
+  </update>
+  <update from="maintenance@example.invalid" status="retracted" type="security" version="1">
+    <id>SUSE-SLE-Module-Basesystem-15-SP6-2025-118</id>
+    <title>Fictional title of SUSE-SLE-Module-Basesystem-15-SP6-2025-118</title>
+    <severity>important</severity>
+    <release>SUSE Updates SLE-Module-Basesystem 15-SP6 x86 64</release>
+    <issued date="1736952030" />
+    <references>
+      <reference href="https://bugzilla.suse.com/show_bug.cgi?id=1234100" id="1234100" title="Fictional reference title" type="bugzilla" />
+      <reference href="https://bugzilla.suse.com/show_bug.cgi?id=1234101" id="1234101" title="Fictional reference title" type="bugzilla" />
+      <reference href="http://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2024-12084" id="CVE-2024-12084" title="Fictional reference title" type="cve" />
+      <reference href="http://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2024-12085" id="CVE-2024-12085" title="Fictional reference title" type="cve" />
+      <reference href="http://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2024-12086" id="CVE-2024-12086" title="Fictional reference title" type="cve" />
+      </references>
+    <description>Fictional advisory description.</description>
+    <pkglist>
+      <collection>
+        <package name="rsync" epoch="0" version="3.2.7" release="150600.3.4.1" arch="src" src="src/rsync-3.2.7-150600.3.4.1.src.rpm">
+          <filename>rsync-3.2.7-150600.3.4.1.src.rpm</filename>
+        </package>
+        <package name="rsync" epoch="0" version="3.2.7" release="150600.3.4.1" arch="x86_64" src="x86_64/rsync-3.2.7-150600.3.4.1.x86_64.rpm">
+          <filename>rsync-3.2.7-150600.3.4.1.x86_64.rpm</filename>
+        </package>
+      </collection>
+    </pkglist>
+  </update>
+  <update from="maintenance@example.invalid" status="stable" type="recommended" version="1">
+    <id>SUSE-SLE-Module-Basesystem-15-SP6-2024-2684</id>
+    <title>Fictional title of SUSE-SLE-Module-Basesystem-15-SP6-2024-2684</title>
+    <severity>moderate</severity>
+    <release>SUSE Updates SLE-Module-Basesystem 15-SP6 x86 64</release>
+    <issued date="1722449120" />
+    <references>
+      <reference href="https://bugzilla.suse.com/show_bug.cgi?id=1222826" id="1222826" title="Fictional reference title" type="bugzilla" />
+      <reference href="https://bugzilla.suse.com/show_bug.cgi?id=1224115" id="1224115" title="Fictional reference title" type="bugzilla" />
+      <reference href="http://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2023-5388" id="CVE-2023-5388" title="Fictional reference title" type="cve" />
+      </references>
+    <description>Fictional advisory description.</description>
+    <pkglist>
+      <collection>
+        <package name="libfreebl3" epoch="0" version="3.101.2" release="150400.3.48.1" arch="x86_64" src="x86_64/libfreebl3-3.101.2-150400.3.48.1.x86_64.rpm">
+          <filename>libfreebl3-3.101.2-150400.3.48.1.x86_64.rpm</filename>
+        </package>
+        <package name="libsoftokn3" epoch="0" version="3.101.2" release="150400.3.48.1" arch="x86_64" src="x86_64/libsoftokn3-3.101.2-150400.3.48.1.x86_64.rpm">
+          <filename>libsoftokn3-3.101.2-150400.3.48.1.x86_64.rpm</filename>
+        </package>
+        <package name="mozilla-nss" epoch="0" version="3.101.2" release="150400.3.48.1" arch="src" src="src/mozilla-nss-3.101.2-150400.3.48.1.src.rpm">
+          <filename>mozilla-nss-3.101.2-150400.3.48.1.src.rpm</filename>
+        </package>
+        </collection>
+    </pkglist>
+  </update>
+  <update from="maintenance@example.invalid" status="stable" type="feature" version="1">
+    <id>SUSE-SLE-Module-Basesystem-15-SP6-2024-839</id>
+    <title>Fictional title of SUSE-SLE-Module-Basesystem-15-SP6-2024-839</title>
+    <severity>moderate</severity>
+    <release>SUSE Updates SLE-Module-Basesystem 15-SP6 x86 64</release>
+    <issued date="1718708636" />
+    <references />
+    <description>Fictional advisory description.</description>
+    <pkglist>
+      <collection>
+        <package name="bubblewrap" epoch="0" version="0.8.0" release="150500.3.3.1" arch="src" src="src/bubblewrap-0.8.0-150500.3.3.1.src.rpm">
+          <filename>bubblewrap-0.8.0-150500.3.3.1.src.rpm</filename>
+        </package>
+        <package name="bubblewrap" epoch="0" version="0.8.0" release="150500.3.3.1" arch="x86_64" src="x86_64/bubblewrap-0.8.0-150500.3.3.1.x86_64.rpm">
+          <filename>bubblewrap-0.8.0-150500.3.3.1.x86_64.rpm</filename>
+        </package>
+        <package name="bubblewrap-zsh-completion" epoch="0" version="0.8.0" release="150500.3.3.1" arch="x86_64" src="x86_64/bubblewrap-zsh-completion-0.8.0-150500.3.3.1.x86_64.rpm">
+          <filename>bubblewrap-zsh-completion-0.8.0-150500.3.3.1.x86_64.rpm</filename>
+        </package>
+        <package name="libostree" epoch="0" version="2023.7" release="150500.3.6.1" arch="src" src="src/libostree-2023.7-150500.3.6.1.src.rpm">
+          <filename>libostree-2023.7-150500.3.6.1.src.rpm</filename>
+        </package>
+      </collection>
+    </pkglist>
+  </update>
+  <update from="maintenance@example.invalid" status="stable" type="optional" version="1">
+    <id>SUSE-SLE-Module-Basesystem-15-SP6-2024-1501</id>
+    <title>Fictional title of SUSE-SLE-Module-Basesystem-15-SP6-2024-1501</title>
+    <severity>low</severity>
+    <release>SUSE Updates SLE-Module-Basesystem 15-SP6 x86 64</release>
+    <issued date="1714986048" />
+    <references />
+    <description>Fictional advisory description.</description>
+    <pkglist>
+      <collection>
+        <package name="update-test-affects-package-manager" epoch="0" version="5.1" release="150200.37.1" arch="x86_64" src="x86_64/update-test-affects-package-manager-5.1-150200.37.1.x86_64.rpm">
+          <filename>update-test-affects-package-manager-5.1-150200.37.1.x86_64.rpm</filename>
+        </package>
+        <package name="update-test-broken" epoch="0" version="5.1" release="150200.37.1" arch="x86_64" src="x86_64/update-test-broken-5.1-150200.37.1.x86_64.rpm">
+          <filename>update-test-broken-5.1-150200.37.1.x86_64.rpm</filename>
+        </package>
+        <package name="update-test-trivial" epoch="0" version="5.1" release="150200.37.1" arch="src" src="src/update-test-trivial-5.1-150200.37.1.src.rpm">
+          <filename>update-test-trivial-5.1-150200.37.1.src.rpm</filename>
+        </package>
+        </collection>
+    </pkglist>
+  </update>
+</updates>

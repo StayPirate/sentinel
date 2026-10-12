@@ -89,8 +89,8 @@ The detector derives a repository root from an exact retained `repo_name` only
 when all of the following hold:
 
 - the name starts with `SUSE:Updates:`;
-- every colon-separated segment is non-empty and matches
-  `[A-Za-z0-9._+-]+`;
+- every colon-separated segment is non-empty, is neither `.` nor `..`, and
+  matches `[A-Za-z0-9._+-]+`;
 - the terminal segment is not `debug` or `src`; and
 - no segment identifies a Debian or Ubuntu target: exact `Debian` or `Ubuntu`,
   or a segment beginning with `Debian-` or `Ubuntu-`.
@@ -180,8 +180,8 @@ parameters are permitted and ignored after syntactic validation. A compatible
 media type never substitutes for structural, checksum, or size validation.
 
 The shared no-redirect default remains in force. The detector may manually
-accept at most one redirect for a metadata artifact only when all of these
-conditions hold:
+accept at most one redirect for the updateinfo artifact only when all of
+these conditions hold:
 
 - the original request was constructed from the validated configured HTTPS
   base;
@@ -193,10 +193,11 @@ conditions hold:
   request path; and
 - the target path independently passes the path-safety rules above.
 
-Any other 3xx status or target, a second redirect, an HTTP downgrade, a
-port or path change, a malformed location, or path traversal fails the
-repository. Generic automatic redirect following is not compliant with this
-contract. No credential is sent or forwarded on either request.
+Any redirect of `repomd.xml`, any other 3xx status or target, a second
+redirect, an HTTP downgrade, a port or path change, a malformed location, or
+path traversal fails the repository. Generic automatic redirect following is
+not compliant with this contract. No credential is sent or forwarded on either
+request.
 
 ## Repomd Contract
 
@@ -664,7 +665,17 @@ above; the largest measured updateinfo was 4,817,145 compressed bytes,
 37,369,379 open bytes, depth 6, 221,719 total elements, 2,697 advisories, and
 75,558 package entries.
 
-No anonymous 403 or hostile upstream document was observed. Those are defined
+A broader sanitized read-only sample on 2026-10-12 confirmed these shapes and
+observed further ones that the contract above already classifies: an
+anonymous HTTP 403 for some Red Hat-derived repository metadata; Red
+Hat-derived updateinfo artifacts redirected to `dist.suse.de` with a
+different path, or containing only advisories with `status="final"`; legacy
+repositories whose updateinfo entry has no `open-size`; stable security
+advisories with an empty `references`; and conflicting duplicate advisory IDs
+in legacy repositories. Each yields the repository failure, non-match, or
+ignored-advisory outcome defined above.
+
+No hostile upstream document was observed. Hostile documents are defined
 failure shapes, not claims about current repository policy. Implementation must
 freshly verify representative live responses and retain sanitized fixtures as
 required by `docs/conventions.md` (External Integration Contract Verification).
