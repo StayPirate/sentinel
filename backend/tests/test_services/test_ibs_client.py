@@ -2,9 +2,10 @@
 
 Contract under test: docs/features/integrations/ibs-integration.md
 (Origins and Authentication, Request Authentication, Session Reuse,
-Project Source Info, Source Diff with Issue Extraction, Service Layer >
-IBSClient, Security); docs/features/packages/ibs-track-release-detection.md
-(Source-Info Validation, Source-Diff Validation, XML and Response Safety);
+Project Source Info, Source Diff with Issue Extraction and its Unavailable
+Old Revision, Service Layer > IBSClient, Security);
+docs/features/packages/ibs-track-release-detection.md (Source-Info
+Validation, Source-Diff Validation, XML and Response Safety);
 docs/features/platform/networking.md (Transport-Level Retry, Method Safety,
 Redirect Policy); docs/conventions.md (External String Admissibility).
 
@@ -30,16 +31,22 @@ from pydantic import SecretStr
 from app.config import settings
 from app.services import http_client
 from app.services import ibs_client as ibs_client_module
+from app.services.http_client import is_retryable_condition
 from app.services.ibs_client import (
     DiffIssue,
     IBSAuthenticationError,
     IBSClient,
     IBSCredentialsNotConfiguredError,
+    IBSHistoricalRevisionUnavailable,
     IBSResponseDataError,
     SourceInfo,
     SourceInfoResult,
+    is_valid_checksum,
+    is_valid_ibs_name,
 )
 from tests.support.ibs_api import (
+    FICTIONAL_OREV,
+    FICTIONAL_REV,
     LIVE_CHALLENGE,
     LIVE_PROJECT,
     LIVE_REALM,
@@ -996,9 +1003,13 @@ class TestHttpErrors:
     async def test_client_error_propagates_as_the_original_http_error(
         self, server: IBSServer, operation: str, status: int
     ) -> None:
+        # The summary names the current `rev`, so even the source-diff 400
+        # is not unavailable history (ibs-integration.md, Unavailable Old
+        # Revision); that classification is covered by
+        # `TestUnavailableOldRevision`.
         body = (
             b'<status code="400" origin="backend"><summary>SUSE:SLE-15-SP6:Update/pkg/'
-            + _OLD.encode()
+            + _NEW.encode()
             + b": not in repository. fictional</summary></status>"
         )
         with pytest.raises(httpx.HTTPStatusError) as raised:
@@ -1033,6 +1044,268 @@ class TestHttpErrors:
         with pytest.raises(httpx.ReadTimeout):
             await _run(server, operation, status_response(200))
         assert len(server.requests) == 4
+
+
+# ---------------------------------------------------------------------------
+# Unavailable old revision (ibs-integration.md, Unavailable Old Revision)
+# ---------------------------------------------------------------------------
+
+_SUDO_PATH: Final = f"{_PROJECT_PATH}/sudo"
+
+
+def _status_document(summary: str, root: str = "status") -> bytes:
+    return (
+        f'<{root} code="400" origin="backend"><summary>{summary}</summary></{root}>'
+    ).encode()
+
+
+def _unavailable(
+    checksum: str, project: str = LIVE_PROJECT, package: str = "sudo"
+) -> str:
+    return (
+        f"{project}/{package}/{checksum}: not in repository. Either not existing "
+        "or misconfigured server setting for '$nosharedtrees' setting in BSConfig.pm"
+    )
+
+
+async def _sudo_diff(
+    server: IBSServer, responder: Responder, old: str, new: str
+) -> None:
+    server.route("POST", _SUDO_PATH, responder)
+    async with _client() as client:
+        await client.get_diff_issues(LIVE_PROJECT, "sudo", old, new)
+
+
+class TestUnavailableOldRevision:
+    async def test_live_unavailable_orev_is_classified(self, server: IBSServer) -> None:
+        responder = status_response(400, load_fixture("diff_error_orev_unavailable"))
+        with pytest.raises(IBSHistoricalRevisionUnavailable) as raised:
+            await _sudo_diff(server, responder, FICTIONAL_OREV, _SUDO)
+        # Carries no response content and is neither an httpx exception
+        # nor a retryable condition.
+        assert raised.value.args == ("IBS source diff old revision is unavailable",)
+        assert raised.value.__cause__ is None
+        assert raised.value.__context__ is None
+        assert not isinstance(raised.value, httpx.HTTPError)
+        assert not is_retryable_condition(raised.value)
+        assert len(_signed(server)) == 1
+
+    @pytest.mark.parametrize(
+        ("fixture", "old", "new", "status"),
+        [
+            ("diff_error_rev_unavailable", "0", FICTIONAL_REV, 400),
+            ("diff_error_both_unavailable", FICTIONAL_OREV, FICTIONAL_REV, 400),
+            ("diff_error_no_such_revision", FICTIONAL_OREV, _SUDO, 404),
+            ("diff_error_unknown_package", FICTIONAL_OREV, _SUDO, 404),
+        ],
+    )
+    async def test_other_live_error_responses_keep_the_http_error(
+        self, server: IBSServer, fixture: str, old: str, new: str, status: int
+    ) -> None:
+        responder = status_response(status, load_fixture(fixture))
+        with pytest.raises(httpx.HTTPStatusError) as raised:
+            await _sudo_diff(server, responder, old, new)
+        assert raised.value.response.status_code == status
+
+    @pytest.mark.parametrize("status", [403, 404, 409, 410, 422])
+    async def test_matching_summary_with_another_status_keeps_the_http_error(
+        self, server: IBSServer, status: int
+    ) -> None:
+        responder = status_response(
+            status, _status_document(_unavailable(FICTIONAL_OREV))
+        )
+        with pytest.raises(httpx.HTTPStatusError) as raised:
+            await _sudo_diff(server, responder, FICTIONAL_OREV, _SUDO)
+        assert raised.value.response.status_code == status
+
+    @pytest.mark.parametrize(
+        ("old", "new"),
+        [("0", _SUDO), (_SUDO, _SUDO)],
+        ids=["empty_tree_orev", "orev_equals_rev"],
+    )
+    async def test_orev_that_is_not_a_distinct_checksum_is_never_classified(
+        self, server: IBSServer, old: str, new: str
+    ) -> None:
+        responder = status_response(400, _status_document(_unavailable(old)))
+        with pytest.raises(httpx.HTTPStatusError):
+            await _sudo_diff(server, responder, old, new)
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            b"",
+            b"<status",
+            b"not xml at all",
+            b"<html><body>fictional</body></html>",
+            _status_document(_unavailable(FICTIONAL_OREV), root="error"),
+            _status_document(_unavailable(_SUDO)),
+            _status_document(_unavailable(FICTIONAL_OREV, package="sudo.12345")),
+            _status_document(_unavailable(FICTIONAL_OREV, project="SUSE:Other")),
+            _status_document(_unavailable(FICTIONAL_OREV.upper())),
+            _status_document(" " + _unavailable(FICTIONAL_OREV)),
+            _status_document(f"{LIVE_PROJECT}/sudo/{FICTIONAL_OREV}: not found"),
+            _status_document(""),
+            b'<status code="400"/>',
+            b'<status code="400"><details>'
+            + _unavailable(FICTIONAL_OREV).encode()
+            + b"</details></status>",
+            b"<status><summary>"
+            + _unavailable(FICTIONAL_OREV).encode()
+            + b"</summary><summary>x</summary></status>",
+            b"<status><summary><b>"
+            + _unavailable(FICTIONAL_OREV).encode()
+            + b"</b></summary></status>",
+            b'<status xmlns="urn:fictional"><summary>'
+            + _unavailable(FICTIONAL_OREV).encode()
+            + b"</summary></status>",
+            b'<status><summary xmlns="urn:fictional">'
+            + _unavailable(FICTIONAL_OREV).encode()
+            + b"</summary></status>",
+            b"<wrapper><status><summary>"
+            + _unavailable(FICTIONAL_OREV).encode()
+            + b"</summary></status></wrapper>",
+            b"<!DOCTYPE status><status><summary>"
+            + _unavailable(FICTIONAL_OREV).encode()
+            + b"</summary></status>",
+            b"<status><summary>"
+            + _unavailable(FICTIONAL_OREV).encode()
+            + b"</summary>",
+        ],
+        ids=[
+            "empty",
+            "truncated",
+            "not_xml",
+            "html",
+            "other_root",
+            "names_rev",
+            "names_other_package",
+            "names_other_project",
+            "different_case",
+            "leading_whitespace",
+            "other_text",
+            "empty_summary",
+            "no_summary",
+            "details_only",
+            "two_summaries",
+            "summary_with_child",
+            "namespaced_root",
+            "namespaced_summary",
+            "nested_status",
+            "doctype",
+            "unclosed_root",
+        ],
+    )
+    async def test_partial_or_ambiguous_400_keeps_the_http_error(
+        self, server: IBSServer, body: bytes
+    ) -> None:
+        """Never `IBSResponseDataError`: a 400 body that fails to parse or
+        has another shape keeps the HTTP error outcome."""
+        with pytest.raises(httpx.HTTPStatusError) as raised:
+            await _sudo_diff(server, status_response(400, body), FICTIONAL_OREV, _SUDO)
+        assert raised.value.response.status_code == 400
+        assert "not in repository" not in str(raised.value)
+
+    async def test_extra_children_and_attributes_are_not_consumed(
+        self, server: IBSServer
+    ) -> None:
+        body = (
+            b'<status code="fictional" origin="x"><details>d</details><summary>'
+            + _unavailable(FICTIONAL_OREV).encode()
+            + b" and more fictional text</summary><data/></status>"
+        )
+        with pytest.raises(IBSHistoricalRevisionUnavailable):
+            await _sudo_diff(server, status_response(400, body), FICTIONAL_OREV, _SUDO)
+
+    async def test_summary_split_across_chunks_and_entities_is_classified(
+        self, server: IBSServer
+    ) -> None:
+        body = _status_document(
+            f"{LIVE_PROJECT}/sudo/{FICTIONAL_OREV}&#58; not in repository"
+        )
+
+        def respond(_: httpx.Request) -> httpx.Response:
+            chunks = [body[i : i + 3] for i in range(0, len(body), 3)]
+            response = chunked_response(chunks)(_)
+            response.status_code = 400
+            return response
+
+        with pytest.raises(IBSHistoricalRevisionUnavailable):
+            await _sudo_diff(server, respond, FICTIONAL_OREV, _SUDO)
+
+    async def test_interrupted_400_body_is_a_transport_failure(
+        self, server: IBSServer
+    ) -> None:
+        body = _status_document(_unavailable(FICTIONAL_OREV))
+
+        def respond(_: httpx.Request) -> httpx.Response:
+            response = chunked_response([body[:40]], fail_after=True)(_)
+            response.status_code = 400
+            return response
+
+        with pytest.raises(httpx.TransportError):
+            await _sudo_diff(server, respond, FICTIONAL_OREV, _SUDO)
+
+    async def test_undecodable_compressed_400_body_keeps_the_http_error(
+        self, server: IBSServer
+    ) -> None:
+        def respond(request: httpx.Request) -> httpx.Response:
+            response = status_response(400, b"not gzip")(request)
+            response.headers["content-encoding"] = "gzip"
+            return response
+
+        with pytest.raises(httpx.HTTPStatusError):
+            await _sudo_diff(server, respond, FICTIONAL_OREV, _SUDO)
+
+    async def test_source_info_400_is_never_classified(self, server: IBSServer) -> None:
+        body = _status_document(_unavailable(FICTIONAL_OREV))
+        with pytest.raises(httpx.HTTPStatusError):
+            await _source_info(server, status_response(400, body), ["sudo"])
+
+    async def test_classification_emits_no_log(
+        self, server: IBSServer, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        caplog.set_level(logging.DEBUG)
+        responder = status_response(400, load_fixture("diff_error_orev_unavailable"))
+        with pytest.raises(IBSHistoricalRevisionUnavailable):
+            await _sudo_diff(server, responder, FICTIONAL_OREV, _SUDO)
+        assert "not in repository" not in caplog.text
+
+
+class TestNamePredicates:
+    @pytest.mark.parametrize(
+        ("value", "valid"),
+        [
+            (LIVE_PROJECT, True),
+            ("sudo", True),
+            ("libxml2.12345", True),
+            ("", False),
+            (".", False),
+            ("..", False),
+            ("a/b", False),
+            ("a b", False),
+            ("a\tb", False),
+            ("é", False),
+            (None, False),
+            (1, False),
+        ],
+    )
+    def test_is_valid_ibs_name(self, value: object, valid: bool) -> None:
+        assert is_valid_ibs_name(value) is valid
+
+    @pytest.mark.parametrize(
+        ("value", "valid"),
+        [
+            (_SUDO, True),
+            (_SUDO.upper(), True),
+            ("0", False),
+            (_SUDO[:-1], False),
+            (_SUDO + "0", False),
+            ("g" * 32, False),
+            (None, False),
+        ],
+    )
+    def test_is_valid_checksum(self, value: object, valid: bool) -> None:
+        assert is_valid_checksum(value) is valid
 
 
 class TestResponseDataErrorContent:
