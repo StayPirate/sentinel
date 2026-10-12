@@ -132,12 +132,9 @@ class _ChallengeParser:
             self._skip(_WHITESPACE)
             self._expect("=")
             self._skip(_WHITESPACE)
-            if self._peek() == '"':
-                value = self._quoted_string()
-            else:
-                value = self._token()
-                if not value:
-                    raise ChallengeSyntaxError("expected a parameter value")
+            # `_at_parameter()` has established that a quoted string or a
+            # non-empty token follows the "=".
+            value = self._quoted_string() if self._peek() == '"' else self._token()
             parameters.append((name, value))
             self._skip(_WHITESPACE)
             if self._position >= self._end:
