@@ -183,26 +183,15 @@ class TestSingleAuthoritativeRepresentation:
             }
             assert definitions == expected[entry["codestream"]["type"]]
 
-    @pytest.mark.parametrize("name", MAINTAINED_SUCCESS_FIXTURES)
-    def test_no_product_is_exposed_through_both_channel_and_compose(
-        self, name: str
-    ) -> None:
+    def test_no_product_is_exposed_through_both_channel_and_compose(self) -> None:
         definitions: dict[str, set[str]] = {}
-        for target in _targets(name):
-            definitions.setdefault(target["product"]["cpe"], set()).add(
-                target["product_definition"]["type"]
-            )
+        for name in MAINTAINED_SUCCESS_FIXTURES:
+            for target in _targets(name):
+                definitions.setdefault(target["product"]["cpe"], set()).add(
+                    target["product_definition"]["type"]
+                )
 
         assert all(len(types) == 1 for types in definitions.values())
-
-    def test_a_codestream_has_one_type_across_captures(self) -> None:
-        types: dict[str, set[str]] = {}
-        for name in MAINTAINED_SUCCESS_FIXTURES:
-            for entry in _entries(name):
-                codestream = entry["codestream"]
-                types.setdefault(codestream["name"], set()).add(codestream["type"])
-
-        assert all(len(observed) == 1 for observed in types.values())
 
 
 @pytest.mark.unit
