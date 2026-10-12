@@ -202,8 +202,10 @@ registered Ed25519 key:
 
 - its unsigned targeted source-info request received the HTTP 401 challenge,
   and the one signed attempt succeeded and set a session cookie;
-- the following source-diff requests of the same client instance succeeded
-  with that cookie and without a signature;
+- the following source-diff requests of the same client instance were
+  accepted with that cookie and without a signature: none received HTTP 401,
+  and the one naming a deliberately unavailable `orev` received its ordinary
+  HTTP 400;
 - the identical signed request, resent about two seconds later without a
   session cookie, succeeded; and
 - a signature whose `created` was one hour before or after the current time
@@ -385,6 +387,16 @@ Sanitized read-only verification against IBS on 2026-09-03 established:
 
 OBS source inspection established that `added`, `changed`, and `deleted`
 describe changes to issue references extracted from package changes files.
+
+The sanitized source-info and source-diff contract fixtures captured on
+2026-10-12 also established that:
+
+- a requested package that does not exist in the project is not omitted from
+  source info: its entry carries an `error` child and no `srcmd5`, so it is an
+  error-bearing entry rather than a missing one; and
+- a source diff without issue references, observed between identical
+  revisions, has no `issues` element. A source diff without an `issues`
+  element, or with an empty one, is therefore a valid empty issue set.
 
 Sanitized read-only verification on 2026-10-11 and 2026-10-12, using fictional
 checksums, established the unavailable-revision shapes in

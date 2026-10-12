@@ -20,9 +20,6 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.asymmetric.types import PrivateKeyTypes
 
-FICTIONAL_IBS_USERNAME = "jdoe"
-"""An approved fictional username (docs/conventions.md, Example Data)."""
-
 
 def fictional_ed25519_key(
     label: str = "sentinel-fictional-ibs-key",
@@ -54,10 +51,3 @@ def encode_settings_value(data: bytes) -> str:
 def fictional_settings_value(label: str = "sentinel-fictional-ibs-key") -> str:
     """A valid `IBS_SSH_PRIVATE_KEY` value for the fictional key `label`."""
     return encode_settings_value(openssh_file(fictional_ed25519_key(label)))
-
-
-def public_key_bytes(key: Ed25519PrivateKey) -> bytes:
-    """The raw 32-byte Ed25519 public key."""
-    return key.public_key().public_bytes(
-        serialization.Encoding.Raw, serialization.PublicFormat.Raw
-    )

@@ -375,11 +375,43 @@ class TestRequestAuthentication:
             with pytest.raises(IBSAuthenticationError) as raised:
                 await client.get_source_info(LIVE_PROJECT, ["openssh"])
             assert raised.value.reason == "signature_rejected"
-            assert len(client._http.cookies) == 0
         assert len(server.requests) == 2
         assert len(_signed(server)) == 1
         assert "jdoe" not in str(raised.value)
         assert LIVE_REALM not in str(raised.value)
+
+    @pytest.mark.parametrize(
+        ("rejection", "reason"),
+        [("signature", "signature_rejected"), ("challenge", "unsupported_challenge")],
+    )
+    async def test_held_session_cookie_is_discarded_on_401(
+        self, server: IBSServer, rejection: str, reason: str
+    ) -> None:
+        server.route(
+            "GET", _PROJECT_PATH, xml_response(load_fixture("sourceinfo_single_linked"))
+        )
+        async with _client() as client:
+            await client.get_source_info(LIVE_PROJECT, ["openssh"])
+            assert len(client._http.cookies) == 1
+            server.expire_sessions()
+            if rejection == "signature":
+                server.reject_signatures = True
+            else:
+                server.challenges = ['Basic realm="fictional"']
+            with pytest.raises(IBSAuthenticationError) as raised:
+                await client.get_source_info(LIVE_PROJECT, ["openssh"])
+            assert raised.value.reason == reason
+            assert len(client._http.cookies) == 0
+            server.reject_signatures = False
+            server.challenges = [LIVE_CHALLENGE]
+            await client.get_source_info(LIVE_PROJECT, ["openssh"])
+        stale = server.requests[2]
+        assert (
+            stale.headers["cookie"] == f"{SESSION_COOKIE_NAME}=fictional-session-0001"
+        )
+        after = server.requests[-2]
+        assert "cookie" not in after.headers
+        assert "authorization" not in after.headers
 
     @pytest.mark.parametrize(
         "challenges",
@@ -397,15 +429,6 @@ class TestRequestAuthentication:
         assert raised.value.reason == "unsupported_challenge"
         assert len(server.requests) == 1
         assert _signed(server) == []
-
-    async def test_basic_is_never_answered(self, server: IBSServer) -> None:
-        server.challenges = ['Basic realm="fictional"']
-        server.route(
-            "GET", _PROJECT_PATH, xml_response(load_fixture("sourceinfo_single_linked"))
-        )
-        with pytest.raises(IBSAuthenticationError):
-            await _source_info(server, xml_response(b""), ["openssh"])
-        assert all("authorization" not in r.headers for r in server.requests)
 
     @pytest.mark.parametrize("status", [403, 404, 400])
     async def test_non_401_error_is_never_answered_with_a_signature(
@@ -1010,6 +1033,32 @@ class TestHttpErrors:
         with pytest.raises(httpx.ReadTimeout):
             await _run(server, operation, status_response(200))
         assert len(server.requests) == 4
+
+
+class TestResponseDataErrorContent:
+    @pytest.mark.parametrize("operation", _OPERATIONS)
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "<sourceinfolist><FictionalMarker>",
+            '<FictionalMarker a="FictionalMarker"/>',
+            '<sourcediff><issues><issue tracker="FictionalMarker"/>'
+            "</issues></sourcediff>",
+        ],
+        ids=["malformed", "wrong_root", "invalid_structure"],
+    )
+    async def test_rejection_carries_no_response_content(
+        self, server: IBSServer, operation: str, body: str
+    ) -> None:
+        with pytest.raises(IBSResponseDataError) as raised:
+            await _run(server, operation, _document(body))
+        assert raised.value.__context__ is None
+        assert raised.value.__cause__ is None
+        rendered = f"{raised.value!s} {raised.value!r} {raised.value.args!r}"
+        assert "FictionalMarker" not in rendered
+        assert raised.value.args == (
+            f"IBS response data rejected: {raised.value.reason}",
+        )
 
 
 class TestXmlSafety:

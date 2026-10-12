@@ -57,7 +57,7 @@ import hashlib
 import json
 import re
 import struct
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final
@@ -231,11 +231,9 @@ class _Chunks(httpx.AsyncByteStream):
     def __init__(self, chunks: list[bytes], *, fail_after: bool = False) -> None:
         self._chunks = chunks
         self._fail_after = fail_after
-        self.read_chunks = 0
 
     async def __aiter__(self) -> Any:
         for chunk in self._chunks:
-            self.read_chunks += 1
             yield chunk
         if self._fail_after:
             raise httpx.RemoteProtocolError("peer closed connection mid-body")
@@ -332,6 +330,3 @@ class IBSServer:
         return httpx.Response(
             401, headers=headers, stream=_Chunks([b"<html>fictional</html>"])
         )
-
-    def authenticated_requests(self) -> Iterator[httpx.Request]:
-        return (r for r in self.requests if "authorization" in r.headers)
