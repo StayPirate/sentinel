@@ -19,9 +19,9 @@ backoff before `GitCorruptionError`. A `git show` failure raises
 only; sanitizing it for public messages is the caller's responsibility.
 
 The git process started by a call never outlives it: on timeout,
-cancellation, or any other exception while it runs, its process group is
-terminated (SIGTERM, then SIGKILL after a short grace period) and the
-process is reaped before the exception propagates. Git's own detached
+cancellation, or any other exception while it starts or runs, its process
+group is terminated (SIGTERM, then SIGKILL after a short grace period) and
+the process is reaped before the exception propagates. Git's own detached
 automatic maintenance after a fetch is not managed here (Fetch Operations,
 Automatic maintenance).
 """
@@ -198,11 +198,16 @@ async def _terminate(
         raise interruption
 
 
-async def _run(args: tuple[str, ...], *, limit_seconds: float) -> _Completed:
-    """Run one git command; a spawn failure or the timeout is a failed
-    attempt. Every other exception propagates after the process is gone."""
-    try:
-        process = await asyncio.create_subprocess_exec(
+async def _start(args: tuple[str, ...]) -> asyncio.subprocess.Process:
+    """Start one git process; a spawn failure is a failed attempt.
+
+    asyncio spawns git and then connects its pipes; an interruption there
+    would make asyncio kill git alone, not its process group. The start
+    therefore runs in its own task, and an interruption meanwhile is held
+    until the start completes; the started process is then terminated like
+    a running one before the interruption propagates."""
+    starting = asyncio.ensure_future(
+        asyncio.create_subprocess_exec(
             "git",
             *args,
             stdin=asyncio.subprocess.DEVNULL,
@@ -211,8 +216,27 @@ async def _run(args: tuple[str, ...], *, limit_seconds: float) -> _Completed:
             env=_git_subprocess_env(),
             start_new_session=True,
         )
-    except OSError as exc:
-        raise _AttemptFailedError(f"git could not be started: {exc}") from exc
+    )
+    interruption: BaseException | None = None
+    while not starting.done():
+        try:
+            await asyncio.wait({starting})
+        except BaseException as exc:
+            interruption = _held(interruption, exc)
+    if interruption is None:
+        try:
+            return starting.result()
+        except OSError as exc:
+            raise _AttemptFailedError(f"git could not be started: {exc}") from exc
+    if not starting.cancelled() and starting.exception() is None:
+        await _terminate(starting.result(), interruption)
+    raise interruption
+
+
+async def _run(args: tuple[str, ...], *, limit_seconds: float) -> _Completed:
+    """Run one git command; a spawn failure or the timeout is a failed
+    attempt. Every other exception propagates after the process is gone."""
+    process = await _start(args)
     try:
         async with asyncio.timeout(limit_seconds):
             stdout, stderr = await process.communicate()
