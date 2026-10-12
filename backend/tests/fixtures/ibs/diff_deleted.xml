@@ -1,0 +1,9 @@
+<sourcediff key="42004fec437375ad94c81b854ffba562">
+  <old project="SUSE:SLE-15-SP6:Update" package="sudo" rev="f6cf5398175f44ce4265e2381f6309b2" srcmd5="f6cf5398175f44ce4265e2381f6309b2"/>
+  <new project="SUSE:SLE-15-SP6:Update" package="sudo" rev="f736184f96b348a33510f43cdfa12bc9" srcmd5="f736184f96b348a33510f43cdfa12bc9"/>
+  <files/>
+  <issues>
+    <issue state="deleted" tracker="cve" name="2026-35535" label="CVE-2026-35535" url="http://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2026-35535"/>
+    <issue state="deleted" tracker="bnc" name="1261420" label="bsc#1261420" url="https://bugzilla.suse.com/show_bug.cgi?id=1261420"/>
+  </issues>
+</sourcediff>

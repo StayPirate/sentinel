@@ -26,3 +26,13 @@ useDefault = true
 [[allowlists]]
 description = "SQLAlchemy populate_existing kwarg (not a secret)"
 regexes = ['''populate_existing=True''']
+
+# False positive: the IBS API source-diff document's root carries a
+# `key` attribute holding the 32-character hexadecimal key of the server's
+# diff cache entry (backend/tests/fixtures/ibs/). It is a public
+# cache identifier derived from the compared source states, never a
+# credential, and Sentinel does not consume it.
+[[allowlists]]
+description = "IBS API sourcediff cache key attribute (not a secret)"
+regexTarget = "line"
+regexes = ['''<sourcediff key="[0-9a-f]{32}"''']

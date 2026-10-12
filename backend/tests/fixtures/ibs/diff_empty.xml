@@ -1,0 +1,5 @@
+<sourcediff key="0b4d2fe79ab17db453b67185521d0cd0">
+  <old project="SUSE:SLE-15-SP6:Update" package="sudo" rev="f6cf5398175f44ce4265e2381f6309b2" srcmd5="f6cf5398175f44ce4265e2381f6309b2"/>
+  <new project="SUSE:SLE-15-SP6:Update" package="sudo" rev="f6cf5398175f44ce4265e2381f6309b2" srcmd5="f6cf5398175f44ce4265e2381f6309b2"/>
+  <files/>
+</sourcediff>

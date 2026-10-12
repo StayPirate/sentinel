@@ -1,0 +1,5 @@
+<sourceinfolist>
+  <sourceinfo package="openssh" rev="12" vrev="6.50" srcmd5="ab2ccc8c1ee7376c2a639ee600caa123" lsrcmd5="b95163ee54a56a78a4a48b352254f541" verifymd5="9f6b908f834eacb858d393c1ea05f070">
+    <linked project="SUSE:SLE-15-SP6:Update" package="openssh.45727"/>
+  </sourceinfo>
+</sourceinfolist>

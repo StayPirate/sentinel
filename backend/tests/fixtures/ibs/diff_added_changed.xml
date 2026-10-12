@@ -1,0 +1,29 @@
+<sourcediff key="2d5b5a6b450d795024af6ad19913483a">
+  <old project="SUSE:SLE-15-SP6:Update" package="libxml2" rev="746089c90539b6ff4a924ce513b6b800" srcmd5="746089c90539b6ff4a924ce513b6b800"/>
+  <new project="SUSE:SLE-15-SP6:Update" package="libxml2" rev="de84bf76520480292946d884daf7308a" srcmd5="de84bf76520480292946d884daf7308a"/>
+  <files/>
+  <issues>
+    <issue state="changed" tracker="cve" name="2026-0989" label="CVE-2026-0989" url="http://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2026-0989"/>
+    <issue state="changed" tracker="bnc" name="1256805" label="bsc#1256805" url="https://bugzilla.suse.com/show_bug.cgi?id=1256805"/>
+    <issue state="added" tracker="cve" name="2025-10911" label="CVE-2025-10911" url="http://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2025-10911"/>
+    <issue state="added" tracker="cve" name="2025-8732" label="CVE-2025-8732" url="http://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2025-8732"/>
+    <issue state="added" tracker="cve" name="2026-0990" label="CVE-2026-0990" url="http://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2026-0990"/>
+    <issue state="added" tracker="cve" name="2026-0992" label="CVE-2026-0992" url="http://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2026-0992"/>
+    <issue state="added" tracker="cve" name="2026-11979" label="CVE-2026-11979" url="http://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2026-11979"/>
+    <issue state="added" tracker="cve" name="2026-1757" label="CVE-2026-1757" url="http://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2026-1757"/>
+    <issue state="added" tracker="bnc" name="1247850" label="bsc#1247850" url="https://bugzilla.suse.com/show_bug.cgi?id=1247850"/>
+    <issue state="added" tracker="bnc" name="1247858" label="bsc#1247858" url="https://bugzilla.suse.com/show_bug.cgi?id=1247858"/>
+    <issue state="added" tracker="bnc" name="1250553" label="bsc#1250553" url="https://bugzilla.suse.com/show_bug.cgi?id=1250553"/>
+    <issue state="added" tracker="bnc" name="1256804" label="bsc#1256804" url="https://bugzilla.suse.com/show_bug.cgi?id=1256804"/>
+    <issue state="added" tracker="bnc" name="1256807" label="bsc#1256807" url="https://bugzilla.suse.com/show_bug.cgi?id=1256807"/>
+    <issue state="added" tracker="bnc" name="1256808" label="bsc#1256808" url="https://bugzilla.suse.com/show_bug.cgi?id=1256808"/>
+    <issue state="added" tracker="bnc" name="1256809" label="bsc#1256809" url="https://bugzilla.suse.com/show_bug.cgi?id=1256809"/>
+    <issue state="added" tracker="bnc" name="1256810" label="bsc#1256810" url="https://bugzilla.suse.com/show_bug.cgi?id=1256810"/>
+    <issue state="added" tracker="bnc" name="1256811" label="bsc#1256811" url="https://bugzilla.suse.com/show_bug.cgi?id=1256811"/>
+    <issue state="added" tracker="bnc" name="1256812" label="bsc#1256812" url="https://bugzilla.suse.com/show_bug.cgi?id=1256812"/>
+    <issue state="added" tracker="bnc" name="1257593" label="bsc#1257593" url="https://bugzilla.suse.com/show_bug.cgi?id=1257593"/>
+    <issue state="added" tracker="bnc" name="1257594" label="bsc#1257594" url="https://bugzilla.suse.com/show_bug.cgi?id=1257594"/>
+    <issue state="added" tracker="bnc" name="1257595" label="bsc#1257595" url="https://bugzilla.suse.com/show_bug.cgi?id=1257595"/>
+    <issue state="added" tracker="bnc" name="1269790" label="bsc#1269790" url="https://bugzilla.suse.com/show_bug.cgi?id=1269790"/>
+  </issues>
+</sourcediff>
