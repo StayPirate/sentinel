@@ -195,8 +195,9 @@ these conditions hold:
 
 Any redirect of `repomd.xml`, any other 3xx status or target, a second
 redirect, an HTTP downgrade, a port or path change, a malformed location, or
-path traversal fails the repository. Generic automatic redirect following is not compliant with this
-contract. No credential is sent or forwarded on either request.
+path traversal fails the repository. Generic automatic redirect following is
+not compliant with this contract. No credential is sent or forwarded on either
+request.
 
 ## Repomd Contract
 
