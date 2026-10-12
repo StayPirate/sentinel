@@ -16,12 +16,21 @@ boundaries.
   method take no lock, and the selection never writes or ends its
   transaction (Scheduled Reconciliation Algorithm step 1: candidate
   selection acquires no Ticket mutation lock).
+- The fetcher module `detect_ibs_track_releases.py` takes no lock and only
+  reads through the session it is given: its one session operation is the
+  commit that ends the read (Catch-Up: the supplied session only verifies
+  the Ticket and enumerates its tracks;
+  docs/features/platform/fetcher-infrastructure.md, Interface contract:
+  no direct Ticket lock, the passed session is for read-only queries
+  only). It opens no session of its own and never uses
+  `BaseFetcher.http_client`.
 
 Each detector module is listed in `_LOCK_OWNERS` with the functions
 allowed to take a row lock (the fetcher module joins with none). The
 behavior is proven by
-`tests/test_services/test_packages/test_ibs_track_release*.py`; these
-checks keep a later edit from crossing the boundaries.
+`tests/test_services/test_packages/test_ibs_track_release*.py` and
+`test_detect_ibs_track_releases.py`; these checks keep a later edit from
+crossing the boundaries.
 """
 
 from __future__ import annotations
@@ -33,10 +42,11 @@ from typing import Final
 
 import pytest
 
-from tests.support.module_imports import APP_ROOT
+from tests.support.module_imports import APP_ROOT, imported_modules
 
 _PACKAGES = APP_ROOT / "services" / "packages"
 _BOUNDARY = _PACKAGES / "ibs_track_release.py"
+_FETCHER = _PACKAGES / "detect_ibs_track_releases.py"
 
 _LOCKING: Final = "_reconcile_track"
 _APPLY: Final = "_Reconciliation._apply"
@@ -44,7 +54,7 @@ _ORCHESTRATION: Final = "reconcile_ibs_track_releases"
 _SELECTION: Final = "load_track_release_candidates"
 _RECONCILIATION: Final = "_Reconciliation"
 
-_LOCK_OWNERS: Final[dict[Path, list[str]]] = {_BOUNDARY: [_LOCKING]}
+_LOCK_OWNERS: Final[dict[Path, list[str]]] = {_BOUNDARY: [_LOCKING], _FETCHER: []}
 """Every detector module and the qualified functions allowed to take a
 row lock in it."""
 
@@ -251,3 +261,59 @@ class TestLockingFunctionBody:
         body = _functions(_tree(_BOUNDARY))[_SELECTION]
 
         assert _called_attributes(body) & _SESSION_WRITES == set()
+
+
+@pytest.mark.unit
+class TestFetcherReadsOnly:
+    def test_execute_and_catch_up_take_no_lock(self) -> None:
+        functions = _functions(_tree(_FETCHER))
+
+        for name in (
+            "DetectIbsTrackReleases.execute",
+            "DetectIbsTrackReleases.catch_up",
+        ):
+            assert "with_for_update" not in _referenced_names(functions[name])
+
+    def test_imports_no_sqlalchemy_write_construct_or_model(self) -> None:
+        tree = _tree(_FETCHER)
+        imported = {
+            alias.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom)
+            and (node.module or "").startswith("sqlalchemy")
+            for alias in node.names
+        }
+
+        assert imported & {"update", "insert", "delete", "text"} == set()
+        assert [
+            module
+            for module in imported_modules(_FETCHER, "app.services.packages")
+            if module == "app.models" or module.startswith("app.models.")
+        ] == []
+
+    @pytest.mark.parametrize("method", ["execute", "catch_up"])
+    def test_the_passed_session_only_ends_its_read(self, method: str) -> None:
+        """Every method called on the passed `session` is `commit()`."""
+        body = _functions(_tree(_FETCHER))[f"DetectIbsTrackReleases.{method}"]
+        called = {
+            node.func.attr
+            for node in ast.walk(body)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "session"
+        }
+
+        assert called == {"commit"}
+
+    def test_module_calls_no_other_session_operation(self) -> None:
+        assert _called_attributes(_tree(_FETCHER)) & _SESSION_WRITES == {"commit"}
+
+    def test_module_opens_no_session_and_uses_no_fetcher_http_client(self) -> None:
+        """Only the boundary opens unit sessions and requests IBS through
+        the fetcher's own `IBSClient`; `BaseFetcher.http_client` is never
+        used."""
+        names = _referenced_names(_tree(_FETCHER))
+
+        assert names & {"async_session_factory", "get_async_session"} == set()
+        assert names & (_IO_NAMES - {"IBSClient", "client"}) == set()

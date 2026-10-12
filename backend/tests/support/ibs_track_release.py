@@ -38,8 +38,9 @@ All data is fictional: CVE identifiers `CVE-2099-NNNNNNNN`, packages
 `example*`, checksums derived from fictional labels, the account `jdoe`
 with a fictional key derived at run time.
 
-Consumers: `tests/test_services/test_packages/test_ibs_track_release.py`
-and `tests/test_services/test_packages/test_ibs_track_release_races.py`.
+Consumers: `tests/test_services/test_packages/test_ibs_track_release.py`,
+`tests/test_services/test_packages/test_ibs_track_release_races.py`, and
+`tests/test_services/test_packages/test_detect_ibs_track_releases.py`.
 """
 
 from __future__ import annotations
