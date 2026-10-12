@@ -2,9 +2,10 @@
 
 Contract under test: docs/features/packages/package-model.md (SMELT Query
 for Package Resolution: Envelope and error handling, Entry validation,
-Consumed fields) and docs/data-sources.md (SMELT, Contract
-characteristics), verified against sanitized live responses captured
-anonymously from the default `SMELT_API_URL` on 2026-10-03
+Consumed fields, Single authoritative representation) and
+docs/data-sources.md (SMELT, Contract characteristics, Source semantics),
+verified against sanitized live responses captured anonymously from the
+default `SMELT_API_URL` on 2026-10-12, after `tools/smelt#1465`
 (docs/conventions.md, External Integration Contract Verification). Every
 field the client validates or consumes is asserted for name, nesting,
 type, and nullability.
@@ -159,6 +160,38 @@ class TestFixtureCoverage:
 
     def test_a_codestream_has_several_targets(self) -> None:
         assert any(len(entry["targets"]) > 1 for entry in _entries("reactive_ltss"))
+
+
+@pytest.mark.unit
+class TestSingleAuthoritativeRepresentation:
+    """The captures show SMELT's one representation per Product (#780).
+
+    Sentinel does not consume `product_definition.type` and applies no
+    channel/compose deduplication; these checks only keep a re-capture of
+    pre-`tools/smelt#1465` data, where fake `SUSE:Channels` records typed
+    SLFO codestreams `SLE_15`, from passing unnoticed.
+    """
+
+    @pytest.mark.parametrize("name", MAINTAINED_SUCCESS_FIXTURES)
+    def test_targets_resolve_through_the_source_of_their_process(
+        self, name: str
+    ) -> None:
+        expected = {"SLE_15": {"channel"}, "SLFO": {"compose"}}
+        for entry in _entries(name):
+            definitions = {
+                target["product_definition"]["type"] for target in entry["targets"]
+            }
+            assert definitions == expected[entry["codestream"]["type"]]
+
+    def test_no_product_is_exposed_through_both_channel_and_compose(self) -> None:
+        definitions: dict[str, set[str]] = {}
+        for name in MAINTAINED_SUCCESS_FIXTURES:
+            for target in _targets(name):
+                definitions.setdefault(target["product"]["cpe"], set()).add(
+                    target["product_definition"]["type"]
+                )
+
+        assert all(len(types) == 1 for types in definitions.values())
 
 
 @pytest.mark.unit

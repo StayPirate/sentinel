@@ -3,69 +3,8 @@
   "data": [
     {
       "codestream": {
-        "name": "SUSE:ALP:Products:Marble:6.0",
-        "url": "https://build.example.invalid/fictional/1",
-        "type": "SLFO"
-      },
-      "binary_packages": [
-        {
-          "name": "SL-Micro-Extras-release",
-          "source_package_name": "000release-packages",
-          "support_status": "L3",
-          "divergence_by_product_id": {
-            "4394": {
-              "is_support_status_divergent": true,
-              "support_statuses_observed": [
-                "L3",
-                "UNKNOWN"
-              ],
-              "is_architecture_divergent": false,
-              "architectures_observed": [
-                "aarch64",
-                "s390x",
-                "x86_64"
-              ],
-              "architectures_missing": []
-            }
-          }
-        }
-      ],
-      "targets": [
-        {
-          "product": {
-            "id": 2697,
-            "friendly_name": "SUSE Linux Micro 6.0",
-            "cpe": "cpe:/o:suse:sl-micro:6.0",
-            "support_status": "General Support"
-          },
-          "repository": "SUSE:Products:SL-Micro:6.0",
-          "product_definition": {
-            "name": "sle_micro",
-            "url": "https://build.example.invalid/fictional/2",
-            "type": "compose"
-          }
-        },
-        {
-          "product": {
-            "id": 4394,
-            "friendly_name": "SUSE Linux Micro Extras 6.0",
-            "cpe": "cpe:/o:suse:sl-micro-extras:6.0",
-            "support_status": "General Support"
-          },
-          "repository": "SUSE:Products:SL-Micro-Extras:6.0",
-          "product_definition": {
-            "name": "sle_micro_extras",
-            "url": "https://build.example.invalid/fictional/3",
-            "type": "compose"
-          }
-        }
-      ],
-      "support_status": "General Support"
-    },
-    {
-      "codestream": {
         "name": "SUSE:SLFO:Products:Multi-Linux-Manager:5.1",
-        "url": "https://build.example.invalid/fictional/4",
+        "url": "https://build.example.invalid/fictional/1",
         "type": "SLFO"
       },
       "binary_packages": [
@@ -102,7 +41,7 @@
           "repository": "SUSE:Products:Multi-Linux-Manager-Proxy:5.1",
           "product_definition": {
             "name": "multilinux_manager_proxy",
-            "url": "https://build.example.invalid/fictional/5",
+            "url": "https://build.example.invalid/fictional/2",
             "type": "compose"
           }
         },
@@ -116,7 +55,7 @@
           "repository": "SUSE:Products:Multi-Linux-Manager-Retail-Branch-Server:5.1",
           "product_definition": {
             "name": "multilinux_manager_rbs",
-            "url": "https://build.example.invalid/fictional/6",
+            "url": "https://build.example.invalid/fictional/3",
             "type": "compose"
           }
         },
@@ -130,7 +69,7 @@
           "repository": "SUSE:Products:Multi-Linux-Manager-Server:5.1",
           "product_definition": {
             "name": "multilinux_manager_server",
-            "url": "https://build.example.invalid/fictional/7",
+            "url": "https://build.example.invalid/fictional/4",
             "type": "compose"
           }
         }
@@ -140,7 +79,7 @@
     {
       "codestream": {
         "name": "SUSE:SLFO:Products:Multi-Linux-Manager:5.2",
-        "url": "https://build.example.invalid/fictional/8",
+        "url": "https://build.example.invalid/fictional/5",
         "type": "SLFO"
       },
       "binary_packages": [
@@ -177,7 +116,7 @@
           "repository": "SUSE:Products:Multi-Linux-Manager-Proxy:5.2",
           "product_definition": {
             "name": "multilinux_manager_proxy",
-            "url": "https://build.example.invalid/fictional/9",
+            "url": "https://build.example.invalid/fictional/6",
             "type": "compose"
           }
         },
@@ -191,7 +130,7 @@
           "repository": "SUSE:Products:Multi-Linux-Manager-Retail-Branch-Server:5.2",
           "product_definition": {
             "name": "multilinux_manager_rbs",
-            "url": "https://build.example.invalid/fictional/10",
+            "url": "https://build.example.invalid/fictional/7",
             "type": "compose"
           }
         },
@@ -205,7 +144,7 @@
           "repository": "SUSE:Products:Multi-Linux-Manager-Server:5.2",
           "product_definition": {
             "name": "multilinux_manager_server",
-            "url": "https://build.example.invalid/fictional/11",
+            "url": "https://build.example.invalid/fictional/8",
             "type": "compose"
           }
         }
@@ -215,7 +154,7 @@
     {
       "codestream": {
         "name": "SUSE:SLFO:Products:MultiLinuxManagerTools-Beta:SLES-16",
-        "url": "https://build.example.invalid/fictional/12",
+        "url": "https://build.example.invalid/fictional/9",
         "type": "SLFO"
       },
       "binary_packages": [
@@ -252,7 +191,7 @@
           "repository": "SUSE:Products:MultiLinuxManagerTools-Beta:SLE-16",
           "product_definition": {
             "name": "multilinux_managertools_sle16",
-            "url": "https://build.example.invalid/fictional/13",
+            "url": "https://build.example.invalid/fictional/10",
             "type": "compose"
           }
         }
@@ -262,7 +201,7 @@
     {
       "codestream": {
         "name": "SUSE:SLFO:Products:MultiLinuxManagerTools:SL-Micro-6",
-        "url": "https://build.example.invalid/fictional/14",
+        "url": "https://build.example.invalid/fictional/11",
         "type": "SLFO"
       },
       "binary_packages": [
@@ -299,7 +238,7 @@
           "repository": "SUSE:Products:MultiLinuxManagerTools:SL-Micro-6",
           "product_definition": {
             "name": "multilinux_managertools_slmicro6",
-            "url": "https://build.example.invalid/fictional/15",
+            "url": "https://build.example.invalid/fictional/12",
             "type": "compose"
           }
         }
@@ -309,7 +248,7 @@
     {
       "codestream": {
         "name": "SUSE:SLFO:Products:MultiLinuxManagerTools:SLES-16",
-        "url": "https://build.example.invalid/fictional/16",
+        "url": "https://build.example.invalid/fictional/13",
         "type": "SLFO"
       },
       "binary_packages": [
@@ -346,12 +285,72 @@
           "repository": "SUSE:Products:MultiLinuxManagerTools:SLE-16",
           "product_definition": {
             "name": "multilinux_managertools_sle16",
-            "url": "https://build.example.invalid/fictional/17",
+            "url": "https://build.example.invalid/fictional/14",
             "type": "compose"
           }
         }
       ],
       "support_status": "Undefined"
+    },
+    {
+      "codestream": {
+        "name": "SUSE:SLFO:Products:SL-Micro:6.0",
+        "url": "https://build.example.invalid/fictional/15",
+        "type": "SLFO"
+      },
+      "binary_packages": [
+        {
+          "name": "SL-Micro-Extras-release",
+          "source_package_name": "000release-packages",
+          "support_status": "UNKNOWN",
+          "divergence_by_product_id": {
+            "4394": {
+              "is_support_status_divergent": false,
+              "support_statuses_observed": [
+                "UNKNOWN"
+              ],
+              "is_architecture_divergent": false,
+              "architectures_observed": [
+                "aarch64",
+                "s390x",
+                "x86_64"
+              ],
+              "architectures_missing": []
+            }
+          }
+        }
+      ],
+      "targets": [
+        {
+          "product": {
+            "id": 2697,
+            "friendly_name": "SUSE Linux Micro 6.0",
+            "cpe": "cpe:/o:suse:sl-micro:6.0",
+            "support_status": "General Support"
+          },
+          "repository": "SUSE:Products:SL-Micro:6.0",
+          "product_definition": {
+            "name": "sle_micro",
+            "url": "https://build.example.invalid/fictional/16",
+            "type": "compose"
+          }
+        },
+        {
+          "product": {
+            "id": 4394,
+            "friendly_name": "SUSE Linux Micro Extras 6.0",
+            "cpe": "cpe:/o:suse:sl-micro-extras:6.0",
+            "support_status": "General Support"
+          },
+          "repository": "SUSE:Products:SL-Micro-Extras:6.0",
+          "product_definition": {
+            "name": "sle_micro_extras",
+            "url": "https://build.example.invalid/fictional/17",
+            "type": "compose"
+          }
+        }
+      ],
+      "support_status": "General Support"
     },
     {
       "codestream": {
@@ -363,12 +362,11 @@
         {
           "name": "SL-Micro-Extras-release",
           "source_package_name": "000release-packages",
-          "support_status": "L3",
+          "support_status": "UNKNOWN",
           "divergence_by_product_id": {
             "2696": {
-              "is_support_status_divergent": true,
+              "is_support_status_divergent": false,
               "support_statuses_observed": [
-                "L3",
                 "UNKNOWN"
               ],
               "is_architecture_divergent": false,
@@ -425,12 +423,11 @@
         {
           "name": "SL-Micro-Extras-release",
           "source_package_name": "000release-packages",
-          "support_status": "L3",
+          "support_status": "UNKNOWN",
           "divergence_by_product_id": {
             "3792": {
-              "is_support_status_divergent": true,
+              "is_support_status_divergent": false,
               "support_statuses_observed": [
-                "L3",
                 "UNKNOWN"
               ],
               "is_architecture_divergent": false,
@@ -516,9 +513,9 @@
           },
           "repository": "SUSE:Products:SLE-Product-SLES:16.0",
           "product_definition": {
-            "name": "SLE-Product-SLES_16.0",
+            "name": "sles",
             "url": "https://build.example.invalid/fictional/25",
-            "type": "channel"
+            "type": "compose"
           }
         },
         {
@@ -530,9 +527,9 @@
           },
           "repository": "SUSE:Products:SLE-Product-HA:16.0",
           "product_definition": {
-            "name": "SLE-Product-HA_16.0",
+            "name": "sles_ha",
             "url": "https://build.example.invalid/fictional/26",
-            "type": "channel"
+            "type": "compose"
           }
         },
         {
@@ -544,9 +541,9 @@
           },
           "repository": "SUSE:Products:SLE-Product-SLES_SAP:16.0",
           "product_definition": {
-            "name": "SLE-Product-SLES_SAP_16.0",
+            "name": "sles_sap",
             "url": "https://build.example.invalid/fictional/27",
-            "type": "channel"
+            "type": "compose"
           }
         },
         {
@@ -605,9 +602,9 @@
           },
           "repository": "SUSE:Products:SLE-Product-SLES:16.1",
           "product_definition": {
-            "name": "SLE-Product-SLES_16.1",
+            "name": "sles",
             "url": "https://build.example.invalid/fictional/30",
-            "type": "channel"
+            "type": "compose"
           }
         },
         {
@@ -633,9 +630,9 @@
           },
           "repository": "SUSE:Products:SLE-Product-SLES_SAP:16.1",
           "product_definition": {
-            "name": "SLE-Product-SLES_SAP_16.1",
+            "name": "sles_sap",
             "url": "https://build.example.invalid/fictional/32",
-            "type": "channel"
+            "type": "compose"
           }
         }
       ],
