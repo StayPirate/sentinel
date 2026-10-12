@@ -79,7 +79,6 @@ _REPOMD_MEDIA_TYPES: Final = frozenset({"application/xml", "text/xml"})
 _UPDATEINFO_MEDIA_TYPES: Final = frozenset({"application/gzip", "application/x-gzip"})
 _REPOMD_ACCEPT: Final = "application/xml, text/xml"
 _UPDATEINFO_ACCEPT: Final = "application/gzip, application/x-gzip"
-_CREDENTIAL_HEADERS: Final = ("authorization", "cookie")
 _GZIP_MAGIC: Final = b"\x1f\x8b"
 _INVALID_LOCATION_ERROR: Final = "Invalid URL in location header"
 _DECOMPRESS_CHUNK: Final = 1024 * 1024
@@ -171,12 +170,12 @@ _ABSENT: Final = _Absent()
 class ProductRepositoryDownloads:
     """Repository observations for one detector invocation.
 
-    `client` is the caller's shared HTTP client. Every request disables
-    redirect following and client authentication and drops the
-    `Authorization` and `Cookie` headers; other client defaults (headers,
-    query parameters) are sent as configured, so the client must carry no
-    other credential-bearing default. `base_url`
-    defaults to the validated `IBS_DOWNLOAD_BASE_URL`. Duplicate
+    `client` is the caller's shared HTTP client; it supplies the transport
+    (TLS, shared retries), the timeout, and the `User-Agent`. Requests are
+    built independently of the client's other defaults: no default header,
+    query parameter, cookie, or authentication is sent, and redirects are
+    never followed automatically. `base_url` defaults to the validated
+    `IBS_DOWNLOAD_BASE_URL`. Duplicate
     occurrence IDs are rejected with `ValueError`.
     """
 
@@ -381,11 +380,18 @@ class ProductRepositoryDownloads:
         return response
 
     async def _send(self, url: httpx.URL, *, accept: str) -> httpx.Response:
-        request = self._client.build_request(
-            "GET", url, headers={"Accept": accept, "Accept-Encoding": "identity"}
+        # Built directly rather than through `build_request()`, which would
+        # merge the client's default headers, query parameters, and cookies.
+        headers = {"Accept": accept, "Accept-Encoding": "identity"}
+        user_agent = self._client.headers.get("user-agent")
+        if user_agent is not None:
+            headers["User-Agent"] = user_agent
+        request = httpx.Request(
+            "GET",
+            url,
+            headers=headers,
+            extensions={"timeout": self._client.timeout.as_dict()},
         )
-        for header in _CREDENTIAL_HEADERS:
-            request.headers.pop(header, None)
         try:
             return await self._client.send(
                 request, auth=None, stream=True, follow_redirects=False

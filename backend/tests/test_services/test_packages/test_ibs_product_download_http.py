@@ -262,15 +262,24 @@ class TestAcceptedExamination:
         )
         client = httpx.AsyncClient(
             transport=server.transport(),
-            headers={"Authorization": "Bearer fictional-token"},
+            headers={
+                "Authorization": "Bearer fictional-token",
+                "X-Api-Key": "fictional-key",
+                "PRIVATE-TOKEN": "fictional-private",
+                "User-Agent": "Sentinel/test (fictional)",
+            },
+            params={"apikey": "fictional-param"},
             auth=("fictional-user", "fictional-pass"),
             cookies={"session": "fictional"},
             follow_redirects=True,
+            timeout=httpx.Timeout(10.0, read=120.0),
         )
-        # Control: the client attaches both to an ordinary request.
+        # Control: the client attaches every default to an ordinary request.
         control = client.build_request("GET", _repomd_url(server))
         assert control.headers["authorization"] == "Bearer fictional-token"
+        assert control.headers["x-api-key"] == "fictional-key"
         assert control.headers["cookie"] == "session=fictional"
+        assert control.url.query == b"apikey=fictional-param"
 
         outcome = await _observe(server, client)
 
@@ -278,12 +287,39 @@ class TestAcceptedExamination:
         assert len(server.requests) == 4
         for request in server.requests:
             assert request.method == "GET"
+            assert request.url.query == b""
+            assert set(request.headers) == {
+                "host",
+                "accept",
+                "accept-encoding",
+                "user-agent",
+            }
             assert request.headers["accept-encoding"] == "identity"
-            assert "authorization" not in request.headers
-            assert "cookie" not in request.headers
+            # Only the client's User-Agent and timeout are inherited.
+            assert request.headers["user-agent"] == "Sentinel/test (fictional)"
+            assert request.extensions["timeout"] == {
+                "connect": 10.0,
+                "read": 120.0,
+                "write": 10.0,
+                "pool": 10.0,
+            }
         assert "application/xml" in server.requests[0].headers["accept"]
         assert "gzip" in server.requests[1].headers["accept"]
         assert "gzip" in server.requests[2].headers["accept"]
+
+    async def test_shared_factory_client_supplies_user_agent(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        item = _artifact()
+        server = _server(item)
+        monkeypatch.setattr(httpx, "AsyncHTTPTransport", lambda **_: server.transport())
+        client = http_client.create_http_client("detect_ibs_product_releases")
+
+        _assert_matched(await _observe(server, client))
+        for request in server.requests:
+            assert request.headers["user-agent"].startswith("Sentinel/")
+            assert "detect_ibs_product_releases" in request.headers["user-agent"]
+            assert request.headers["accept-encoding"] == "identity"
 
     async def test_client_following_redirects_does_not_follow_a_second_one(
         self,
