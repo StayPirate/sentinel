@@ -235,8 +235,9 @@ An issue without a usable `tracker` or `state`, or with an unrecognized
 structural shape, is a data-quality failure. For `tracker="cve"` and `state`
 `added` or `changed`, a missing or non-canonical `label` is ignored and is
 never accepted or interpreted from `name`; a diff request containing any such
-entry emits one bounded warning, however many entries it contains. Valid `bnc` and other tracker entries, and valid `deleted` entries, are
-ignored without a malformed-CVE warning.
+entry emits one bounded warning, however many entries it contains. Valid
+`bnc` and other tracker entries, and valid `deleted` entries, are ignored
+without a malformed-CVE warning.
 
 A malformed or interrupted diff fails every dependent track using that diff
 and leaves their previous checkpoints unchanged. An empty valid diff is a
