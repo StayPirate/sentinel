@@ -45,6 +45,12 @@ Applicability and Convergence).
   environment variables (`IBS_USERNAME`, `IBS_SSH_PRIVATE_KEY`), never code.
   Credentials that are not configured do not block application startup;
   credentialed IBS API operations fail at runtime.
+- `IBS_API_URL` is the IBS API prefix (default: `https://api.suse.de`); API
+  paths such as `source/{project}` are appended to it after removing any
+  trailing slash. It must use HTTPS, name a host, and contain no user
+  information, query, or fragment; a non-default port is permitted. Because
+  request signatures and session cookies are sent to it, an invalid value
+  fails application startup with an error naming only the variable.
 - `IBS_DOWNLOAD_BASE_URL` is a separate anonymous HTTPS Product-repository
   front door (default: `https://download.suse.de/ibs`). Product release
   detection does not send IBS API credentials, an `Authorization` header, or
@@ -817,7 +823,14 @@ the following overrides:
   Configuration)
 - Transport-level retry active (4 attempts for 5xx/timeout/connection
   errors)
-- Long-lived client: instantiated per-process, not per-request
+- Client lifetime: one client instance per workflow invocation, reused for
+  every request of that invocation and closed before it ends. In a Celery
+  role, each task invocation runs its own event loop, so its workflow creates
+  the client on that loop and closes it before returning; the IBS RabbitMQ
+  consumer runs one event loop and uses one client for its process. A client
+  never crosses an event loop and is never held at module level. Its session
+  cookies therefore last at most one invocation or consumer process (see
+  [Session Reuse](#session-reuse))
 
 #### Product Repository Download Boundary
 

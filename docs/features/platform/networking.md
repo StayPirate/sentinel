@@ -434,14 +434,18 @@ redirect behavior for another integration.
 `IBSClient` calls the standalone factory directly and manages its own
 client lifecycle independently of `BaseFetcher`:
 
-- Instantiated per-process (each Celery worker and IBSEventConsumer)
-- Long-lived client with connection pooling
+- One client per workflow invocation: in Celery roles each task
+  invocation runs its own event loop, creates the client on it, and closes
+  it before returning; the IBS RabbitMQ consumer uses one client for its
+  single-loop process. A client never crosses an event loop
+- Connection pooling within one client lifetime
 - Uses `Accept: application/xml` override (from JSON default)
 - TLS validated via the same combined trust store
 - httpx idle connection management (~5s timeout) prevents stale
   connections without manual intervention
-- Certificate rotation requires process restart (long-lived client;
-  see "Certificate rotation" below)
+- A rotated CA is picked up by the next client: the next workflow
+  invocation in Celery roles, a process restart for the consumer (see
+  "Certificate rotation" below)
 
 ## TLS Trust Store Configuration
 
@@ -481,8 +485,9 @@ internal CA.
     `fetch_single_cve`
   - Standalone `resolve_ticket_packages` tasks: once per task — the client is
     created and closed by the task workflow per invocation
-  - Long-lived clients (IBSClient, IBSEventConsumer): once per process
-    lifetime
+  - `IBSClient`: once per workflow invocation in Celery roles; once per
+    process lifetime in the IBS RabbitMQ consumer
+  - `IBSEventConsumer` (AMQPS): once per process lifetime
 - **If file is corrupt or unparseable**: `build_tls_context()` raises
   `TLSConfigurationError` with the file path and parse error detail.
   The calling component handles this error according to its own
@@ -544,7 +549,7 @@ outage. In local development or a custom image without the
 |----------|-------|------------------------|
 | Fetchers (httpx via `create_http_client()`) | 2 | Next run, no restart |
 | `IBSEventConsumer` (AMQPS) | 2 | Next reconnection attempt, no restart |
-| `IBSClient` (long-lived httpx client) | 2 | Process restart |
+| `IBSClient` (httpx client, one per workflow invocation) | 2 | Next workflow invocation in Celery roles, no restart; process restart in the IBS RabbitMQ consumer |
 | Git subprocess and other OpenSSL-default-verify clients | 1 | Image rebuild (`SUSE_CA_CERT_PATH` overrides only layer 2 — a mounted replacement file does not reach layer 1) |
 
 No git-based fetcher currently clones from a SUSE-internal host (both
