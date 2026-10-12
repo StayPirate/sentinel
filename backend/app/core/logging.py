@@ -105,12 +105,42 @@ _URI_USERINFO_PATTERN = re.compile(
 # Credential following an Authorization/Proxy-Authorization header name,
 # as rendered in header lines ("Authorization: Basic ...") or in dict/bytes
 # reprs ("'authorization': b'Bearer ...'"). The authentication scheme
-# token, when present, is preserved.
+# token, when present, is preserved. A credential that is a list of
+# parameters ('Signature keyId="...",created=1,signature="..."'), whose
+# quoted values may contain commas, "=", and spaces, is masked whole; a
+# single token (token68 or an opaque value) is masked up to its delimiter.
+_TCHAR = r"[!#$%&*+.^_`|~0-9A-Za-z-]"
+# A token68 credential with "=" padding ("Basic YWJj==") also matches one
+# parameter whose value begins with "=", so it is masked whole as well.
+_AUTH_PARAM = (
+    rf"{_TCHAR}+[ \t]*=[ \t]*"
+    rf"(?:\"(?:[^\"\\\r\n]|\\.)*\"|=*{_TCHAR}*)"
+)
 _AUTHORIZATION_PATTERN = re.compile(
     r"(?P<prefix>\b(?:proxy-)?authorization[\"']?\s*[:=]\s*(?:b?[\"'])?"
-    r"(?:[A-Za-z][A-Za-z0-9_-]*\s+)?)[^\s\"',}]+",
+    r"(?:[A-Za-z][A-Za-z0-9_-]*\s+)?)"
+    rf"(?:{_AUTH_PARAM}(?:[ \t]*,[ \t]*{_AUTH_PARAM})*|[^\s\"',}}]+)",
     re.IGNORECASE,
 )
+
+# Value following a Cookie/Set-Cookie header name, in a header line
+# ("Set-Cookie: name=value; Path=/"), a mapping repr
+# ("'cookie': 'name=value'"), or a name-value pair repr such as httpcore's
+# "(b'Set-Cookie', b'name=value; Path=/')". The complete value is masked:
+# up to its closing quote when quoted, otherwise up to the end of the line.
+_COOKIE_PATTERN = re.compile(
+    r"(?P<prefix>\b(?:set-)?cookie"
+    r"(?:[\"']\s*[:,]\s*(?=b?[\"'])|\s*[:=]\s*))"
+    r"(?:(?P<quote>b?')(?:[^'\\]|\\.)*(?=')"
+    r"|(?P<double_quote>b?\")(?:[^\"\\]|\\.)*(?=\")"
+    r"|[^\r\n]+)",
+    re.IGNORECASE,
+)
+
+
+def _mask_cookie(match: re.Match[str]) -> str:
+    opening = match["quote"] or match["double_quote"] or ""
+    return f"{match['prefix']}{opening}{REDACTED}"
 
 
 def _collect_secret_values(settings: Settings) -> list[str]:
@@ -145,7 +175,8 @@ def _redact_text(text: str, exact_pattern: re.Pattern[str] | None) -> str:
     if exact_pattern is not None:
         text = exact_pattern.sub(REDACTED, text)
     text = _URI_USERINFO_PATTERN.sub(rf"\g<scheme>{REDACTED}@", text)
-    return _AUTHORIZATION_PATTERN.sub(rf"\g<prefix>{REDACTED}", text)
+    text = _AUTHORIZATION_PATTERN.sub(rf"\g<prefix>{REDACTED}", text)
+    return _COOKIE_PATTERN.sub(_mask_cookie, text)
 
 
 def _build_redaction_processor(

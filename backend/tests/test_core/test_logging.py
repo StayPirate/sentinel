@@ -25,6 +25,7 @@ from app.core.logging import (
     configure_logging,
     resolve_log_format,
 )
+from tests.support.ibs_keys import fictional_settings_value
 
 
 def _settings(**overrides: str) -> Settings:
@@ -333,6 +334,17 @@ class TestConfigureCliLogging:
 # Fictional credential material used by the redaction tests.
 _NVD_SETTING_VALUE = "fictional-nvd-key-0123456789"
 _GITHUB_TOKEN_VALUE = "fictional-github-token-0123456789"
+_IBS_KEY_SETTING_VALUE = fictional_settings_value()
+_SIGNATURE_PARAMETERS = (
+    'keyId="jdoe",algorithm="ssh",headers="(created)",created=1700000000,'
+    'signature="ZmljdGlvbmFsLXNpZ25hdHVyZQ=="'
+)
+"""Fictional `Signature` credential (docs/features/integrations/
+ibs-integration.md, Request Authentication)."""
+_SESSION_COOKIE = (
+    "IBS_session=fictional-session-value; path=/; domain=.api.example.test; "
+    "Secure; HttpOnly"
+)
 _BROKER_URL_USERINFO_PART = "fictional-broker-pass-42"
 _BROKER_URL = (
     f"amqps://svc-sentinel:{_BROKER_URL_USERINFO_PART}@rabbit.example.test:5671/"
@@ -433,12 +445,142 @@ class TestRedactionProcessor:
                 '"Authorization": "fictional-raw-token"',
                 f'"Authorization": "{REDACTED}"',
             ),
+            (
+                "Authorization: Basic ZmljdGlvbmFsOg==",
+                f"Authorization: Basic {REDACTED}",
+            ),
+            (
+                "Authorization: Basic ZmljdGlv/bmFs+Og==",
+                f"Authorization: Basic {REDACTED}",
+            ),
         ],
     )
     def test_authorization_header_credential_is_masked(
         self, text: str, expected: str
     ) -> None:
         assert _redact(text) == expected
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            (
+                f"Authorization: Signature {_SIGNATURE_PARAMETERS}",
+                f"Authorization: Signature {REDACTED}",
+            ),
+            (
+                f"Authorization: Signature {_SIGNATURE_PARAMETERS}\r\nAccept: x",
+                f"Authorization: Signature {REDACTED}\r\nAccept: x",
+            ),
+            (
+                f"{{'authorization': 'Signature {_SIGNATURE_PARAMETERS}', 'a': 'x'}}",
+                f"{{'authorization': 'Signature {REDACTED}', 'a': 'x'}}",
+            ),
+            (
+                f"{{'authorization': b'Signature {_SIGNATURE_PARAMETERS}'}}",
+                f"{{'authorization': b'Signature {REDACTED}'}}",
+            ),
+            (
+                'Authorization: Signature keyId="a, b=c",signature="x y=="',
+                f"Authorization: Signature {REDACTED}",
+            ),
+            (
+                'authorization=Signature keyId = "jdoe" , created=1',
+                f"authorization=Signature {REDACTED}",
+            ),
+        ],
+        ids=[
+            "header_line",
+            "header_block",
+            "mapping",
+            "bytes_mapping",
+            "quoted_commas_and_equals",
+            "spaced_parameters",
+        ],
+    )
+    def test_parameter_list_authorization_is_masked_completely(
+        self, text: str, expected: str
+    ) -> None:
+        redacted = _redact(text)
+        assert redacted == expected
+        for fragment in ("jdoe", "1700000000", "Zmljd", "(created)", "x y"):
+            assert fragment not in redacted
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            (
+                f"Set-Cookie: {_SESSION_COOKIE}",
+                f"Set-Cookie: {REDACTED}",
+            ),
+            (
+                f"Set-Cookie: {_SESSION_COOKIE}\r\nContent-Type: text/xml",
+                f"Set-Cookie: {REDACTED}\r\nContent-Type: text/xml",
+            ),
+            (
+                "cookie: IBS_session=fictional-session-value; other=x",
+                f"cookie: {REDACTED}",
+            ),
+            (
+                f"{{'set-cookie': '{_SESSION_COOKIE}', 'server': 'x'}}",
+                f"{{'set-cookie': '{REDACTED}', 'server': 'x'}}",
+            ),
+            (
+                f'{{"Cookie": "{_SESSION_COOKIE}"}}',
+                f'{{"Cookie": "{REDACTED}"}}',
+            ),
+            (
+                f"[(b'Server', b'Apache'), (b'Set-Cookie', b'{_SESSION_COOKIE}'), "
+                "(b'Content-Type', b'text/xml')]",
+                f"[(b'Server', b'Apache'), (b'Set-Cookie', b'{REDACTED}'), "
+                "(b'Content-Type', b'text/xml')]",
+            ),
+            (
+                f"('cookie', '{_SESSION_COOKIE}')",
+                f"('cookie', '{REDACTED}')",
+            ),
+        ],
+        ids=[
+            "set_cookie_header_line",
+            "set_cookie_header_block",
+            "cookie_header_line",
+            "mapping",
+            "double_quoted_mapping",
+            "httpcore_bytes_pairs",
+            "str_pair",
+        ],
+    )
+    def test_cookie_header_value_is_masked_completely(
+        self, text: str, expected: str
+    ) -> None:
+        redacted = _redact(text)
+        assert redacted == expected
+        assert "fictional-session-value" not in redacted
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "the session cookie was discarded",
+            "cookie jar cleared, retrying",
+            "Set-Cookie header absent",
+        ],
+    )
+    def test_cookie_words_without_a_value_are_unchanged(self, text: str) -> None:
+        assert _redact(text) == text
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "Authorization: Signature " + 'a="b",' * 50000,
+            "Authorization: x" + 'a="' * 50000,
+            "Set-Cookie: '" + "\\a" * 50000,
+            "authorization: " * 50000,
+        ],
+        ids=["many_parameters", "unterminated_quotes", "escapes", "repeated_names"],
+    )
+    def test_credential_header_scan_is_linear(self, text: str) -> None:
+        started = time.perf_counter()
+        _redact(text)
+        assert time.perf_counter() - started < 1.0
 
     @pytest.mark.parametrize(
         "text",
@@ -489,7 +631,7 @@ class TestCollectSecretValues:
         settings = _settings(
             jwt_secret_key="j" * 32,
             nvd_api_key=_NVD_SETTING_VALUE,
-            ibs_password="fictional-ibs-password",
+            ibs_ssh_private_key=_IBS_KEY_SETTING_VALUE,
             database_url="postgresql+asyncpg://svc:fictional-db-pass@db.example.test/db",
             redis_url="redis://:fictional-redis-pass@cache.example.test:6379/0",
             celery_broker_url=_BROKER_URL,
@@ -500,7 +642,7 @@ class TestCollectSecretValues:
         assert set(values) == {
             "j" * 32,
             _NVD_SETTING_VALUE,
-            "fictional-ibs-password",
+            _IBS_KEY_SETTING_VALUE,
             "fictional-db-pass",
             "fictional-redis-pass",
             _BROKER_URL_USERINFO_PART,
@@ -540,7 +682,7 @@ class TestCollectSecretValues:
         settings = _settings(
             nvd_api_key="",
             github_token="",
-            ibs_password="",
+            ibs_ssh_private_key="",
             database_url="postgresql+asyncpg://svc@db.example.test/db",
             redis_url="redis://cache.example.test:6379/0",
             celery_broker_url="redis://cache.example.test:6379/1",
@@ -598,6 +740,37 @@ class TestConfigureLoggingRedaction:
         assert records[1]["event"] == (
             f"request headers: Authorization: Bearer {REDACTED}"
         )
+
+    def test_ibs_credentials_are_redacted_in_third_party_records(self) -> None:
+        """The IBS key value, a `Signature` credential, and session cookies
+        in httpcore's response-header form (logging.md, Redaction
+        Processor)."""
+        stream = _FakeStream(isatty=False)
+        configure_logging(
+            _settings(ibs_ssh_private_key=_IBS_KEY_SETTING_VALUE), stream=stream
+        )
+
+        logging.getLogger("httpcore.http11").warning(
+            "receive_response_headers.complete return_value=%s",
+            (b"HTTP/1.1", 200, b"OK", [(b"Set-Cookie", _SESSION_COOKIE.encode())]),
+        )
+        logging.getLogger("httpx").warning(
+            "request headers: Authorization: Signature %s", _SIGNATURE_PARAMETERS
+        )
+        structlog.get_logger("app.test.redact").warning(
+            "ibs_probe", detail=f"key {_IBS_KEY_SETTING_VALUE}"
+        )
+
+        output = stream.getvalue()
+        records = [json.loads(line) for line in output.strip().splitlines()]
+        assert "fictional-session-value" not in output
+        assert "ZmljdGlvbmFsLXNpZ25hdHVyZQ" not in output
+        assert _IBS_KEY_SETTING_VALUE not in output
+        assert f"(b'Set-Cookie', b'{REDACTED}')" in records[0]["event"]
+        assert records[1]["event"] == (
+            f"request headers: Authorization: Signature {REDACTED}"
+        )
+        assert records[2]["detail"] == f"key {REDACTED}"
 
     def test_third_party_record_is_redacted(self) -> None:
         stream = self._configure()
