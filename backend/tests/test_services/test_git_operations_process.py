@@ -353,6 +353,64 @@ async def test_cancelled_call_propagates_cancelled_error_and_leaves_no_process(
     await _assert_no_process_left(fake)
 
 
+async def test_call_cancelled_while_git_starts_terminates_process_group(
+    fake_git: FakeGitFactory, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # asyncio spawns git, then connects its output pipes. Holding the pipe
+    # connection open puts the cancellation inside asyncio's own start, whose
+    # cleanup would kill git alone and leave its grandchild running.
+    fake = fake_git.install({"show": _HANG})
+    loop_class = type(asyncio.get_running_loop())
+    real_connect_read_pipe = loop_class.connect_read_pipe
+    connecting = asyncio.Event()
+    release = asyncio.Event()
+
+    async def connect_read_pipe(
+        self: asyncio.AbstractEventLoop,
+        protocol_factory: Callable[[], asyncio.BaseProtocol],
+        pipe: Any,
+    ) -> tuple[asyncio.ReadTransport, asyncio.BaseProtocol]:
+        connecting.set()
+        await release.wait()
+        return await real_connect_read_pipe(self, protocol_factory, pipe)
+
+    monkeypatch.setattr(loop_class, "connect_read_pipe", connect_read_pipe)
+    task = asyncio.ensure_future(show_file(repo, "HEAD", "README"))
+    await _wait_until(lambda: connecting.is_set() and len(fake.grandchild_pids()) == 1)
+
+    task.cancel()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert fake.subcommands() == ["show"]
+    await _assert_no_process_left(fake)
+
+
+async def test_start_failing_after_interruption_propagates_the_interruption(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    starting = asyncio.Event()
+    release = asyncio.Event()
+
+    async def create_subprocess_exec(
+        *args: object, **kwargs: object
+    ) -> asyncio.subprocess.Process:
+        starting.set()
+        await release.wait()
+        raise FileNotFoundError("git")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess_exec)
+    task = asyncio.ensure_future(show_file(repo, "HEAD", "README"))
+    await _wait_until(starting.is_set)
+
+    task.cancel()
+    release.set()
+    # Not GitFileError: the start failure is not classified once interrupted.
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
 @pytest.mark.parametrize(
     ("first", "interruptions", "expected"),
     [

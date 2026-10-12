@@ -525,11 +525,19 @@ interruption that arrives meanwhile is held until the process is reaped.
 Of the original exception and the further interruptions, the first one
 that is not a cancellation propagates (if all are cancellations, the
 latest one); the module's own timeout classification never outranks a
-further interruption. The reap waits as
+further interruption. An interruption that arrives while `git` is still
+being started is held until the start completes and then handled the
+same way. The reap waits as
 long as the process cannot exit (for example uninterruptible I/O on a
 hung mount), which the Celery hard time limit bounds. No process started
 by the module outlives the call, except git's own detached automatic
-maintenance (see "Fetch Operations").
+maintenance (see "Fetch Operations") and one accepted residual risk:
+when asyncio itself abandons a start after spawning `git` (its pipe
+setup fails, or the event loop shuts down and cancels every task while
+`git` is being started), asyncio kills only the `git` process and the
+module receives no process whose group it could terminate, so a process
+that `git` started within that window of milliseconds can outlive the
+call.
 
 ## Error Classification
 
