@@ -362,7 +362,7 @@ class ProductRepositoryDownloads:
     ) -> httpx.Response:
         """Send an anonymous GET, applying the one-redirect rule.
 
-        Only the metadata artifact may follow one compliant 302; any
+        Only the updateinfo artifact may follow one compliant 302; any
         other redirect fails the repository. Returns the open streamed
         response; the caller closes it.
         """

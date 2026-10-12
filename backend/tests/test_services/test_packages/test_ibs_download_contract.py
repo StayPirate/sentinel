@@ -12,8 +12,11 @@ standard-library tree parser because the fixtures are trusted.
 
 Observed live but not retained as documents: an anonymous HTTP 403 for
 some Red Hat-derived repositories (status and media type recorded in
-`responses.json`), and duplicate advisory IDs with conflicting content in
-a few legacy repositories; the boundary tests reproduce both
+`responses.json`), Red Hat-derived updateinfo with only
+`status="final"` advisories, legacy updateinfo entries without
+`open-size`, stable security advisories with an empty `references`, and
+duplicate advisory IDs with conflicting content in a few legacy
+repositories; the parser and boundary tests reproduce each
 synthetically. Not observable live, and therefore covered by synthetic
 fixtures only: hostile documents, every resource ceiling, malformed
 `Content-Length` or `Location` values, redirect statuses other than 302,

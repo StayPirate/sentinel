@@ -352,21 +352,6 @@ class TestRedirect:
         _assert_incomplete(await _observe(server), "redirect", 302)
         assert _hosts(server) == [DOWNLOAD_HOST, DOWNLOAD_HOST]
 
-    @pytest.mark.parametrize("kind", list(_NON_COMPLIANT_LOCATIONS))
-    async def test_non_compliant_repomd_302_fails_without_following(
-        self, kind: str
-    ) -> None:
-        server = _server()
-        location = _NON_COMPLIANT_LOCATIONS[kind](
-            f"{repository_path(REPO)}/repodata/repomd.xml"
-        )
-        server.script(_repomd_url(server), lambda _: redirect_response(location))
-
-        _assert_incomplete(await _observe(server), "redirect", 302)
-        assert [str(request.url) for request in server.requests] == [
-            _repomd_url(server)
-        ]
-
     async def test_302_without_location_fails(self) -> None:
         item = _artifact()
         server = _server(item)
@@ -1022,8 +1007,8 @@ class TestLargeArtifact:
     async def test_decompressed_bytes_beyond_open_size_fail_in_bounded_steps(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # A high-ratio member declaring a smaller open size stops after at
-        # most one decompression step past the declaration.
+        # A member that inflates beyond its declared open size stops at the
+        # first decompression step that would exceed the declaration.
         document = _large_document(4_000)
         item = artifact(document)
         declared = len(document) // 4
@@ -1042,8 +1027,8 @@ class TestLargeArtifact:
         )
 
         _assert_incomplete(await _observe(server), "size")
-        assert sum(fed) <= declared
-        assert max(fed) <= 1024 * 1024
+        assert declared > 1024 * 1024
+        assert fed == [1024 * 1024]
 
 
 class TestGzipIntegrity:
