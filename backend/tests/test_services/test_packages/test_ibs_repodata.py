@@ -25,6 +25,7 @@ import pytest
 
 from app.services.packages.ibs_repodata import (
     RECOGNIZED_ARCHITECTURES,
+    REPOMD_MAX_BYTES,
     REPOMD_MAX_DEPTH,
     REPOMD_MAX_ELEMENTS,
     UPDATEINFO_MAX_COMPRESSED_BYTES,
@@ -186,6 +187,13 @@ def test_qualify_repository_name_valid_name_returns_segments(repo_name: str) -> 
         ),
         pytest.param("SUSE:Updates:Example:Debian", id="debian-terminal"),
         pytest.param("SUSE:Updates:Example:Ubuntu:x86_64", id="ubuntu-middle"),
+        pytest.param(
+            "SUSE:Updates:..:..:SUSE:Products:SLE-Product-SLES:15-SP6:x86_64",
+            id="dot-dot-escapes-updates",
+        ),
+        pytest.param("SUSE:Updates:..:..:..:Example:x86_64", id="dot-dot-escapes-base"),
+        pytest.param("SUSE:Updates:Example:..", id="dot-dot-terminal"),
+        pytest.param("SUSE:Updates:.:Example:x86_64", id="dot"),
     ],
 )
 def test_qualify_repository_name_excluded_or_invalid_returns_none(
@@ -693,6 +701,7 @@ def test_resource_limit_constants_match_the_specification() -> None:
     assert UPDATEINFO_MAX_COMPRESSED_BYTES == 32 * 1024 * 1024
     assert UPDATEINFO_MAX_OPEN_BYTES == 256 * 1024 * 1024
     assert UPDATEINFO_MAX_RATIO == 100
+    assert REPOMD_MAX_BYTES == 64 * 1024
     assert REPOMD_MAX_DEPTH == 16
     assert REPOMD_MAX_ELEMENTS == 10_000
 

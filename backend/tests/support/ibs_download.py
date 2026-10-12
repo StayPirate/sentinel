@@ -35,7 +35,9 @@ Verification Status):
 - `responses.json` records, per request, the status, media type,
   `Content-Length` values, and redirect `Location`: every `repomd.xml`
   above, an absent repository and two Debian/Ubuntu targets (HTTP 404,
-  never requested by Sentinel), an updateinfo artifact served directly
+  never requested by Sentinel), an anonymous HTTP 403
+  (`SUSE:Updates:SLL:9.4:x86_64`, status and media type only; its HTML
+  body was not retained), an updateinfo artifact served directly
   (HTTP 200), the same-path HTTP 302 to `dist.suse.de` of the four
   captured artifacts with the verification that the complete downloaded
   bytes matched the repomd sizes and checksums, and a path-changing HTTP

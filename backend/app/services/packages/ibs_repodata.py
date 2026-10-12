@@ -87,15 +87,20 @@ def qualify_repository_name(repo_name: str) -> tuple[str, ...] | None:
     """Return the validated colon-separated segments, or `None`.
 
     `None` means the name is not a candidate and is never requested: it
-    does not start with `SUSE:Updates:`, a segment is empty or outside
-    `[A-Za-z0-9._+-]+`, the terminal segment is `debug` or `src`, or a
-    segment identifies a Debian or Ubuntu target (exactly `Debian` or
-    `Ubuntu`, or beginning with `Debian-` or `Ubuntu-`).
+    does not start with `SUSE:Updates:`, a segment is empty, `.`, `..`,
+    or outside `[A-Za-z0-9._+-]+`, the terminal segment is `debug` or
+    `src`, or a segment identifies a Debian or Ubuntu target (exactly
+    `Debian` or `Ubuntu`, or beginning with `Debian-` or `Ubuntu-`). Dot
+    segments are rejected because URL normalization would otherwise move
+    the request outside `SUSE/Updates` or the configured base path.
     """
     if not repo_name.startswith(_REPOSITORY_PREFIX):
         return None
     segments = tuple(repo_name.split(":"))
-    if not all(_SEGMENT.fullmatch(segment) for segment in segments):
+    if not all(
+        segment not in (".", "..") and _SEGMENT.fullmatch(segment)
+        for segment in segments
+    ):
         return None
     if segments[-1] in _EXCLUDED_TERMINAL_SEGMENTS:
         return None

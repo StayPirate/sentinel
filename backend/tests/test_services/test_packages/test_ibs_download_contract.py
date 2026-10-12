@@ -10,10 +10,14 @@ Contract Verification). Every consumed field is asserted for name,
 nesting, cardinality, and format; the documents are read with the
 standard-library tree parser because the fixtures are trusted.
 
-Not observable live, and therefore covered by synthetic fixtures in the
-boundary tests only: an anonymous HTTP 403, hostile or malformed
-documents, every resource ceiling, and duplicate or conflicting advisory
-IDs (the specification permits this).
+Observed live but not retained as documents: an anonymous HTTP 403 for
+some Red Hat-derived repositories (status and media type recorded in
+`responses.json`), and duplicate advisory IDs with conflicting content in
+a few legacy repositories; the boundary tests reproduce both
+synthetically. Not observable live, and therefore covered by synthetic
+fixtures only: hostile documents, every resource ceiling, malformed
+`Content-Length` or `Location` values, redirect statuses other than 302,
+a second redirect, and a downgrade (the specification permits this).
 """
 
 from __future__ import annotations
@@ -190,6 +194,13 @@ def test_repomd_media_type_parameter_is_observed() -> None:
 @pytest.mark.parametrize("name", ["absent", "non_rpm_ubuntu", "non_rpm_debian"])
 def test_absent_and_non_rpm_repositories_return_404(name: str) -> None:
     assert _responses()["repomd"][name]["status"] == 404
+
+
+def test_anonymous_403_is_recorded_without_body() -> None:
+    response = _responses()["repomd"]["forbidden"]
+    assert response["status"] == 403
+    assert _base_media_type(response["content_type"]) == "text/html"
+    assert set(response) == {"repo_name", "status", "content_type"}
 
 
 @pytest.mark.parametrize("name", UPDATEINFO_FIXTURES)

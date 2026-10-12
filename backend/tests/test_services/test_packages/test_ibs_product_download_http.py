@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import gzip
+import hashlib
 from collections.abc import Callable, Iterator
 from types import SimpleNamespace
 from typing import Final
@@ -49,6 +50,7 @@ from app.services.packages.ibs_repodata import (
 from app.services.packages.ibs_updateinfo import (
     UPDATEINFO_MAX_DEPTH,
     UPDATEINFO_MAX_UPDATES,
+    UpdateinfoParser,
 )
 from tests.support.ibs_download import (
     DEFAULT_CVE,
@@ -231,16 +233,16 @@ class TestAcceptedExamination:
         _assert_matched(await _observe(server))
         assert REDIRECT_HOST not in _hosts(server)
 
-    async def test_compliant_302_for_repomd_is_followed_once(self) -> None:
+    async def test_302_for_repomd_fails_without_following(self) -> None:
+        # The one-redirect exception covers the metadata artifact only.
         item = _artifact()
         server = _server(item)
         dist_repomd = _repomd_url(server, REDIRECT_HOST)
         server.script(_repomd_url(server), lambda _: redirect_response(dist_repomd))
         server.script(dist_repomd, _xml(_repomd(item)))
 
-        _assert_matched(await _observe(server))
-        assert len(server.requests_to(_repomd_url(server))) == 2
-        assert len(server.requests_to(dist_repomd)) == 2
+        _assert_incomplete(await _observe(server), "redirect", 302)
+        assert server.requests_to(dist_repomd) == []
 
     async def test_every_request_is_anonymous_identity_get_despite_client_defaults(
         self,
@@ -443,16 +445,10 @@ class TestRedirect:
         assert REDIRECT_HOST not in _hosts(server)
 
     @pytest.mark.parametrize("status", [301, 302, 307])
-    @pytest.mark.parametrize("resource", ["repomd", "artifact"])
-    async def test_second_redirect_from_dist_fails(
-        self, status: int, resource: str
-    ) -> None:
+    async def test_second_redirect_from_dist_fails(self, status: int) -> None:
         item = _artifact()
         server = _server(item)
-        if resource == "repomd":
-            url, target = _repomd_url(server), _repomd_url(server, REDIRECT_HOST)
-        else:
-            url, target = server.artifact_url(REPO, item), _dist_url(server, item)
+        url, target = server.artifact_url(REPO, item), _dist_url(server, item)
         server.script(url, lambda _: redirect_response(target))
         server.script(target, lambda _: redirect_response(target, status=status))
 
@@ -987,6 +983,67 @@ def _flip(data: bytes, index: int) -> bytes:
 
 
 _MEMBER: Final = gzip_member(MATCH_DOCUMENT)
+
+
+def _large_document(advisories: int) -> bytes:
+    """A valid updateinfo document of several MiB with a moderate ratio.
+
+    Each fictional advisory carries a distinct deterministic digest so
+    that deflate cannot reach the 100:1 limit; the matching advisory is
+    the last one, so every decompression step must be parsed.
+    """
+    fillers = [
+        advisory(
+            f"SUSE-Example-Filler-{index}",
+            cves=[f"CVE-2023-{index:05d}"],
+            sources=[f"filler{index}"],
+            extra="<note>"
+            + hashlib.sha256(str(index).encode()).hexdigest() * 4
+            + "</note>",
+        )
+        for index in range(advisories)
+    ]
+    return updateinfo_document(*fillers, MATCH_ADVISORY)
+
+
+class TestLargeArtifact:
+    async def test_single_chunk_inflating_beyond_several_steps_is_accepted(
+        self,
+    ) -> None:
+        document = _large_document(4_000)
+        item = artifact(document)
+        # One received chunk inflates to several 1 MiB decompression steps.
+        assert len(document) > 3 * 1024 * 1024
+        assert len(document) < len(item.compressed) * UPDATEINFO_MAX_RATIO
+        server = _server(item)
+
+        _assert_matched(await _observe(server))
+
+    async def test_decompressed_bytes_beyond_open_size_fail_in_bounded_steps(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A high-ratio member declaring a smaller open size stops after at
+        # most one decompression step past the declaration.
+        document = _large_document(4_000)
+        item = artifact(document)
+        declared = len(document) // 4
+        fed: list[int] = []
+        original = UpdateinfoParser.feed
+
+        def counting_feed(self: UpdateinfoParser, data: bytes) -> None:
+            fed.append(len(data))
+            original(self, data)
+
+        monkeypatch.setattr(UpdateinfoParser, "feed", counting_feed)
+        server = _server(item)
+        server.script(
+            _repomd_url(server),
+            _xml(_repomd(item, **{"open-size": f"<open-size>{declared}</open-size>"})),
+        )
+
+        _assert_incomplete(await _observe(server), "size")
+        assert sum(fed) <= declared
+        assert max(fed) <= 1024 * 1024
 
 
 class TestGzipIntegrity:
@@ -1558,7 +1615,7 @@ class TestSnapshotConsistency:
         assert _hosts(server).count(REDIRECT_HOST) == 2
 
     @pytest.mark.parametrize("second", ["absent", "no-updateinfo"])
-    async def test_disappearance_in_second_snapshot_is_non_match_without_download(
+    async def test_disappeared_second_snapshot_is_non_match_without_second_download(
         self, second: str
     ) -> None:
         item = _artifact()

@@ -79,6 +79,11 @@
       "repo_name": "SUSE:Updates:Debian:12-CLIENT-TOOLS:x86_64",
       "status": 404,
       "content_type": "text/html; charset=utf-8"
+    },
+    "forbidden": {
+      "repo_name": "SUSE:Updates:SLL:9.4:x86_64",
+      "status": 403,
+      "content_type": "text/html; charset=utf-8"
     }
   },
   "artifacts": {

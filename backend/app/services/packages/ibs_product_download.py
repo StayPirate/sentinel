@@ -10,9 +10,10 @@ detector invocation, without any database, Redis, or filesystem access:
   associations only after every current one completed without a match,
   deterministic order, and the stop rules of the outcome table;
 - HTTP and Redirect Contract: `Accept-Encoding: identity`, media types,
-  and at most one manually validated 302 to `dist.suse.de` with an
-  identical path; no credential, `Authorization` header, or cookie is
-  sent on any request;
+  and at most one manually validated 302 of the updateinfo artifact to
+  `dist.suse.de` with an identical path (`repomd.xml` is never
+  redirected); no credential, `Authorization` header, or cookie is sent
+  on any request;
 - Repomd Contract, Resource and XML Safety, Snapshot Consistency, and
   Updateinfo and Advisory Validation: streamed, bounded, checksummed, and
   completely parsed snapshots (`ibs_updateinfo`);
@@ -170,8 +171,11 @@ _ABSENT: Final = _Absent()
 class ProductRepositoryDownloads:
     """Repository observations for one detector invocation.
 
-    `client` is the caller's shared HTTP client; its redirect, credential,
-    and cookie defaults are overridden on every request. `base_url`
+    `client` is the caller's shared HTTP client. Every request disables
+    redirect following and client authentication and drops the
+    `Authorization` and `Cookie` headers; other client defaults (headers,
+    query parameters) are sent as configured, so the client must carry no
+    other credential-bearing default. `base_url`
     defaults to the validated `IBS_DOWNLOAD_BASE_URL`. Duplicate
     occurrence IDs are rejected with `ValueError`.
     """
@@ -293,7 +297,9 @@ class ProductRepositoryDownloads:
 
     async def _fetch_repomd(self, root: str) -> UpdateinfoIdentity | _Absent | None:
         response = await self._open(
-            httpx.URL(f"{root}/repodata/repomd.xml"), accept=_REPOMD_ACCEPT
+            httpx.URL(f"{root}/repodata/repomd.xml"),
+            accept=_REPOMD_ACCEPT,
+            redirect_allowed=False,
         )
         try:
             if response.status_code == 404:
@@ -324,7 +330,9 @@ class ProductRepositoryDownloads:
         self, root: str, identity: UpdateinfoIdentity
     ) -> UpdateinfoSnapshot:
         response = await self._open(
-            httpx.URL(f"{root}/{identity.location}"), accept=_UPDATEINFO_ACCEPT
+            httpx.URL(f"{root}/{identity.location}"),
+            accept=_UPDATEINFO_ACCEPT,
+            redirect_allowed=True,
         )
         try:
             if response.status_code != 200:
@@ -349,14 +357,18 @@ class ProductRepositoryDownloads:
         finally:
             await response.aclose()
 
-    async def _open(self, url: httpx.URL, *, accept: str) -> httpx.Response:
+    async def _open(
+        self, url: httpx.URL, *, accept: str, redirect_allowed: bool
+    ) -> httpx.Response:
         """Send an anonymous GET, applying the one-redirect rule.
 
-        Returns the open streamed response; the caller closes it.
+        Only the metadata artifact may follow one compliant 302; any
+        other redirect fails the repository. Returns the open streamed
+        response; the caller closes it.
         """
         response = await self._send(url, accept=accept)
         status = response.status_code
-        if status == 302:
+        if status == 302 and redirect_allowed:
             target = await _redirect_target(url, response)
             response = await self._send(target, accept=accept)
             status = response.status_code

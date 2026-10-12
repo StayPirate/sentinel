@@ -209,6 +209,8 @@ class TestTraversalOrder:
             "SUSE:Updates:MultiLinuxManagerTools:Ubuntu-24.04:x86_64",
             "SUSE:Updates:MultiLinuxManagerTools:Debian-12:x86_64",
             "SUSE:Updates:Ubuntu:22.04",
+            "SUSE:Updates:..:..:SUSE:Products:Example:1:x86_64",
+            "SUSE:Updates:.:Example:1:x86_64",
             "SUSE:Updates:Example::1",
             "SUSE:Updates:Example:1/../2",
             "SUSE:Updates:Exa mple:1",
