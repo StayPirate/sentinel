@@ -94,6 +94,8 @@ Sentinel requires outbound access to:
 |---------|------|------|---------|
 | SUSE IdP | `id.suse.com` | 443 | SSO authentication (OIDC) |
 | IBS API | `api.suse.de` | 443 | Build service integration |
+| IBS Product repositories | `download.suse.de` | 443 | Anonymous Product repository metadata for release detection (`IBS_DOWNLOAD_BASE_URL`) |
+| IBS Product repository redirect target | `dist.suse.de` | 443 | Permitted same-path redirect target of the updateinfo artifact |
 | IBS RabbitMQ | `rabbit.suse.de` | 5671 | Real-time event consumption |
 | SMELT | `smelt.suse.de` | 443 | Product/package data |
 | AIMAAS | `aimaas.suse.de` | 443 | Product lifecycle, CVSS thresholds |
