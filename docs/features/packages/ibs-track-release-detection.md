@@ -233,9 +233,9 @@ dependent track in that request. No affected checkpoint advances.
 The diff parser accepts only a well-formed, completely consumed XML document.
 An issue without a usable `tracker` or `state`, or with an unrecognized
 structural shape, is a data-quality failure. For `tracker="cve"` and `state`
-`added` or `changed`, a missing or non-canonical `label` emits one bounded
-warning and that entry is ignored; it is never accepted or interpreted from
-`name`. Valid `bnc` and other tracker entries, and valid `deleted` entries, are
+`added` or `changed`, a missing or non-canonical `label` is ignored and is
+never accepted or interpreted from `name`; a diff request containing any such
+entry emits one bounded warning, however many entries it contains. Valid `bnc` and other tracker entries, and valid `deleted` entries, are
 ignored without a malformed-CVE warning.
 
 A malformed or interrupted diff fails every dependent track using that diff
@@ -270,9 +270,9 @@ If the Ticket moved to `Ignored` or `Duplicated` before the local transaction,
 the operability guard (`ensure_ticket_operable()`) rejects the local unit under
 the lock, whether or not the track has qualifying evidence; the track returns a
 successful stale/inapplicable no-op and retains its old checkpoint. A track
-selected while active may still complete a
-factual update after a concurrent transition to `Resolved`, consistent with the
-operable-Ticket mutation and in-flight catch-up contracts.
+selected while active may still complete a factual update after a concurrent
+transition to `Resolved`, consistent with the operable-Ticket mutation and
+in-flight catch-up contracts.
 
 If the track no longer exists, no longer belongs to the expected Ticket/package
 scope, or has lost its Ticket CVE association, the reconciliation fails and no
@@ -441,10 +441,10 @@ HTTP status codes, and bounded reason categories may be logged.
 | Condition | Per-track behavior | Recovery |
 |---|---|---|
 | IBS transport failure, timeout, 5xx, or rate limit after shared handling | `record_failed()` once for each dependent eligible track; keep checkpoints | Later event, manual run, catch-up, or scheduled run |
-| IBS API credentials not configured (`IBSCredentialsNotConfiguredError`) or authentication rejected (`IBSAuthenticationError`) on a source-info or source-diff request | Same as a transport failure of that request: `record_failed()` once for each dependent eligible track; keep checkpoints; no HTTP request is sent when credentials are not configured | Correct the account, key, key registration, or host clock; then a later event, manual run, catch-up, or scheduled run |
 | Source-info requested package missing, duplicate, malformed, or carrying an error | Fail each dependent track; valid sibling packages may continue | Same as above |
 | Malformed or interrupted source-info XML | Fail every dependent track in that request | Same as above |
 | Source diff HTTP or parser failure, including every 400 or 404 not identified as an unavailable checkpoint | Fail every dependent track sharing that diff | Same as above |
+| IBS API credentials not configured (`IBSCredentialsNotConfiguredError`) or authentication rejected (`IBSAuthenticationError`) on a source-info or source-diff request | As for a transport failure of that request, `record_failed()` once for each dependent eligible track; keep checkpoints; no HTTP request is sent when credentials are not configured | Correct the account, key, key registration, or host clock, or support a changed challenge; then a later event, manual run, catch-up, or scheduled run |
 | Source diff identifies the persisted checkpoint as unavailable (`IBSHistoricalRevisionUnavailable`) | Warn and use `orev=0`; fail only if fallback fails | Current-state fallback, then ordinary retry |
 | Ticket becomes `Ignored` or `Duplicated` | Roll back local work and return a successful stale/inapplicable no-op for that track; keep its checkpoint | Later qualifying Ticket convergence |
 | Track disappears, no longer belongs to the expected Ticket/package scope, or loses its Ticket CVE association | Fail the selected track and do not advance its checkpoint | Corrected invocation, catch-up, event, manual run, or scheduled run |
@@ -459,7 +459,9 @@ One external failure shared by multiple tracks is logged at the request level
 and counts each affected track once, not once per parsing stage or retry attempt.
 Known failures use bounded sanitized reason categories. Unexpected exceptions
 follow `BaseFetcher` error sanitization and must not expose raw upstream data in
-the public `FetcherRun.error_message`.
+the public `FetcherRun.error_message`. A database failure that prevents
+candidate enumeration is reported as the sanitized `FetcherError` with the
+message `"Failed to enumerate IBS track release candidates"`.
 
 ### Structured Logs
 
