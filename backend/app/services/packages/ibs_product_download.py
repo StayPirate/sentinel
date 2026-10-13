@@ -20,6 +20,9 @@ detector invocation, without any database, Redis, or filesystem access:
 - Reconciliation Boundary: each repository is examined at most once per
   invocation and its result reused for every dependent occurrence;
   nothing is retained across invocations;
+- Fetcher: Request Delay: the caller's delay separates every two
+  consecutive repository requests of the invocation, redirects and
+  consistency restarts included; none precedes the first;
 - Irreversibility, Audit, and Observability: the repository-level events
   `ibs_product_release_repository_failed` and
   `ibs_product_release_advisories_ignored`.
@@ -175,8 +178,9 @@ class ProductRepositoryDownloads:
     built independently of the client's other defaults: no default header,
     query parameter, cookie, or authentication is sent, and redirects are
     never followed automatically. `base_url` defaults to the validated
-    `IBS_DOWNLOAD_BASE_URL`. Duplicate
-    occurrence IDs are rejected with `ValueError`.
+    `IBS_DOWNLOAD_BASE_URL`; `request_delay` is the seconds waited before
+    every request but the first. Duplicate occurrence IDs are rejected
+    with `ValueError`.
     """
 
     def __init__(
@@ -185,9 +189,12 @@ class ProductRepositoryDownloads:
         candidates: Iterable[ProductOccurrenceCandidate],
         *,
         base_url: str | None = None,
+        request_delay: float = 0.0,
     ) -> None:
         self._client = client
         self._base_url = base_url or settings.ibs_download_base_url
+        self._request_delay = request_delay
+        self._requested = False
         self._candidates: dict[uuid.UUID, ProductOccurrenceCandidate] = {}
         for candidate in candidates:
             if candidate.occurrence_id in self._candidates:
@@ -380,6 +387,9 @@ class ProductRepositoryDownloads:
         return response
 
     async def _send(self, url: httpx.URL, *, accept: str) -> httpx.Response:
+        if self._requested and self._request_delay > 0:
+            await asyncio.sleep(self._request_delay)
+        self._requested = True
         # Built directly rather than through `build_request()`, which would
         # merge the client's default headers, query parameters, and cookies.
         headers = {"Accept": accept, "Accept-Encoding": "identity"}

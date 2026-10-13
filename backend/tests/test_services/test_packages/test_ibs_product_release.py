@@ -14,7 +14,8 @@ Owning specifications:
   Audit, and Observability (one service-owned `product_released` event; no
   event for every non-mutating outcome; the bounded occurrence and run
   events); Error Handling (one shared repository failure counts each
-  dependent occurrence once); Catch-Up (an advisory predating the Ticket
+  dependent occurrence once); Request Delay (every wait precedes the first
+  per-occurrence transaction); Catch-Up (an advisory predating the Ticket
   keeps its original issued time); Testing Requirements).
 - docs/features/packages/package-model.md (IBS Workflow Applicability and
   Convergence: strict workflow applicability; active Tickets only;
@@ -46,6 +47,7 @@ import asyncio
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any, Final
 
 import httpx
@@ -62,6 +64,7 @@ from app.models.ticket_package import TicketPackage
 from app.models.ticket_package_product import TicketPackageProduct
 from app.models.ticket_package_track import TicketPackageTrack
 from app.services import package_service, task_publication
+from app.services.packages import ibs_product_download
 from app.services.packages.ibs_product_release import (
     ProductReleaseCandidate,
     load_product_release_candidates,
@@ -822,6 +825,59 @@ class TestOutcomes:
             "phase-one-closed",
             *["unit", "commit", "close"] * 2,
         ]
+
+    async def test_request_delay_separates_requests_before_the_first_unit(
+        self,
+        world: ReleaseWorld,
+        units: UnitSessions,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Fetcher: Request Delay. The delay is waited before every request
+        but the first, across repositories, and every wait completes
+        before the first unit session (and so the first Ticket lock)."""
+        first, second = await _seeded(world, 2)
+        (no_match,) = await _seeded(world)
+        server = DownloadServer()
+        server.add(REPOSITORY, repository(matching(first.cve_id, second.cve_id)))
+        server.add(OTHER_REPOSITORY, repository(matching("CVE-2099-99999999")))
+        events: list[str] = []
+        delays: list[float] = []
+        units.events = events
+
+        async def closed() -> None:
+            events.append("phase-one-closed")
+
+        async def sleep(delay: float) -> None:
+            delays.append(delay)
+            events.append("sleep")
+
+        between_phases(monkeypatch, closed)
+        monkeypatch.setattr(
+            ibs_product_download,
+            "asyncio",
+            SimpleNamespace(Lock=asyncio.Lock, sleep=sleep),
+        )
+
+        async with recording_client(server, events) as client:
+            result = await reconcile_ibs_product_releases(
+                [
+                    no_match.candidate(current=(OTHER_REPOSITORY,)),
+                    second.candidate(),
+                    first.candidate(),
+                ],
+                client=client,
+                fetcher_name=FETCHER,
+                request_delay=0.25,
+            )
+
+        assert result == summary(selected=3, updated=2, no_op=1)
+        assert events == [
+            "http",
+            *["sleep", "http"] * 7,
+            "phase-one-closed",
+            *["unit", "commit", "close"] * 2,
+        ]
+        assert delays == [0.25] * 7
 
 
 # ---------------------------------------------------------------------------

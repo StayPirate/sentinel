@@ -14,6 +14,11 @@ created on its event loop and closed before it returns (`async with`);
 has nothing of this fetcher to close. An empty selection creates no
 client and sends no request.
 
+The boundary separates consecutive IBS requests by the request delay
+(Background Fetcher: Request Delay): the run's `request_delay` in
+`execute()`, the class `default_request_delay` in `catch_up()`, which has
+no run snapshot.
+
 Periodic metrics are recorded through the boundary's per-outcome hook:
 `updated` is succeeded and updated, `no_op` is succeeded, `failed` is
 failed; nothing is ever created. A candidate enumeration failure becomes
@@ -61,6 +66,7 @@ class DetectIbsTrackReleases(BaseFetcher):
         "source state"
     )
     default_schedule = "0 2 * * *"
+    default_request_delay = 0
     participates_in_catch_up = True
 
     async def execute(self, session: AsyncSession) -> None:
@@ -80,7 +86,15 @@ class DetectIbsTrackReleases(BaseFetcher):
                 client=client,
                 fetcher_name=self.name,
                 on_outcome=self._record_outcome,
+                request_delay=self._run_request_delay(),
             )
+
+    def _run_request_delay(self) -> float:
+        """The run snapshot's `request_delay`; the class value only when
+        `execute()` is called outside `run()`."""
+        if self.config is not None:
+            return self.config.request_delay
+        return self.default_request_delay
 
     def _record_outcome(self, outcome: TrackReleaseOutcome) -> None:
         if outcome.kind == "failed":
@@ -110,7 +124,10 @@ class DetectIbsTrackReleases(BaseFetcher):
 
         async with IBSClient() as client:
             outcomes = await reconcile_ibs_track_releases(
-                candidates, client=client, fetcher_name=self.name
+                candidates,
+                client=client,
+                fetcher_name=self.name,
+                request_delay=self.default_request_delay,
             )
         failed = sum(1 for outcome in outcomes if outcome.kind == "failed")
         if failed == len(outcomes):

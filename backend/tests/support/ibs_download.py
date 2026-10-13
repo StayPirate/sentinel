@@ -482,9 +482,10 @@ async def observe(
     client: httpx.AsyncClient,
     *candidates: ProductOccurrenceCandidate,
     base_url: str | None = TEST_BASE_URL,
+    request_delay: float = 0.0,
 ) -> list[ProductReleaseObservation]:
     """One invocation observing every candidate in the given order."""
     async with ProductRepositoryDownloads(
-        client, candidates, base_url=base_url
+        client, candidates, base_url=base_url, request_delay=request_delay
     ) as downloads:
         return [await downloads.observe(item.occurrence_id) for item in candidates]

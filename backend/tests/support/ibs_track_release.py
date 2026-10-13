@@ -625,11 +625,21 @@ async def reconcile(
     hook: Callable[[TrackReleaseOutcome], None] | None = None,
     *,
     configured: bool = True,
+    request_delay: float | None = None,
 ) -> list[TrackReleaseOutcome]:
-    """One boundary invocation over a fresh client of `fake`."""
+    """One boundary invocation over a fresh client of `fake`;
+    `request_delay` is passed only when given."""
     async with fake.client(configured=configured) as client:
+        if request_delay is None:
+            return await reconcile_ibs_track_releases(
+                candidates, client=client, fetcher_name=FETCHER, on_outcome=hook
+            )
         return await reconcile_ibs_track_releases(
-            candidates, client=client, fetcher_name=FETCHER, on_outcome=hook
+            candidates,
+            client=client,
+            fetcher_name=FETCHER,
+            on_outcome=hook,
+            request_delay=request_delay,
         )
 
 

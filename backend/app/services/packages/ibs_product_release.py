@@ -217,6 +217,7 @@ async def reconcile_ibs_product_releases(
     client: httpx.AsyncClient,
     fetcher_name: str,
     on_outcome: OutcomeHook | None = None,
+    request_delay: float = 0.0,
 ) -> ProductReleaseSummary:
     """Reconcile the selected occurrences against their repositories.
 
@@ -226,7 +227,9 @@ async def reconcile_ibs_product_releases(
     Q1: `candidates` come from `load_product_release_candidates()`;
     duplicate occurrence IDs are processed once. `client` is the fetcher's
     shared HTTP client; `fetcher_name` identifies the caller in per-item
-    logs; `on_outcome`, when given, receives each terminal outcome.
+    logs; `on_outcome`, when given, receives each terminal outcome;
+    `request_delay` is the seconds waited before every repository request
+    except the first (Request Delay), all in phase 1.
 
     Q2: acquires no lock; each matching unit serializes on the Ticket row
     lock in `_release_occurrence()`.
@@ -277,7 +280,9 @@ async def reconcile_ibs_product_releases(
     observations: dict[uuid.UUID, ProductReleaseObservation] = {}
     if ordered:
         async with ProductRepositoryDownloads(
-            client, [_download_candidate(candidate) for candidate in ordered]
+            client,
+            [_download_candidate(candidate) for candidate in ordered],
+            request_delay=request_delay,
         ) as downloads:
             for candidate in ordered:
                 observations[candidate.occurrence_id] = await downloads.observe(
