@@ -653,22 +653,26 @@ project links, and `expand=1` expands both sides; the logical codestream
 package gives the same result as the previous incident package that IBS
 selects. Without `expand=1`, a linked source would be compared unexpanded and
 report its entire changelog as added, so a not-accepted action is never diffed
-without it. The not-accepted form deliberately differs from IBS in two cases:
+without it. The not-accepted form deliberately differs from IBS in these cases:
 
-- IBS omits `expand=1` for an action whose source package is a local link to a
-  package carried by another action of the same request, and for an action that
-  updates its link. Sentinel always expands, so such an action's diff includes
-  the changes of its link target.
+- IBS omits `expand=1`, and diffs against the link target's package, for an
+  action whose source package is a local link to a package carried by another
+  action of the same request, and for an action that updates its link.
+  Sentinel always expands against the codestream package, so such an action's
+  diff includes the changes of its link target.
 - IBS diffs a package that does not yet exist in the codestream against an
   empty tree. Sentinel's diff names the missing old package, receives HTTP 404,
   and is incomplete.
+- IBS diffs the current source of an action without `source/@rev`. Sentinel
+  requests no diff for it, and the result is incomplete.
 
 The diff is not requested, and the result is incomplete, when a required form
-input is absent (`target/@project`, `target/@package`, both `xsrcmd5` and
-`srcmd5`, or `source/@rev`), or when the path project or `oproject` is not a
-`SUSE:` project. The last rule keeps every project outside the `SUSE:` namespace out of
-request URLs; point detail has already replaced such a project by `_redacted_`.
-A not-accepted action from such a project therefore has no available diff.
+input is absent (accepted form: `target/@project`, `target/@package`, or both
+`xsrcmd5` and `srcmd5`; not-accepted form: `source/@rev`), or when the path
+project or `oproject` is not a `SUSE:` project. The last rule keeps every
+project outside the `SUSE:` namespace out of request URLs; point detail has
+already replaced such a project by `_redacted_`. A not-accepted action from such
+a project therefore has no available diff.
 
 Example response, with fictional values:
 
@@ -857,15 +861,16 @@ Established only by OBS source inspection:
 - revision numbering from 1 without gaps survives package deletion,
   undeletion, and history-preserving project copies, and the API forwards no
   `startbefore` and applies no default `limit`;
-- how IBS builds the diff of a request action, including the two cases in
-  which the not-accepted form deliberately differs.
+- how IBS builds the diff of a request action, including the cases in which
+  the not-accepted form deliberately differs.
 
 Documentation-only, not verified: HTTP 403 outcomes; `deleted` on a maintenance
 request; an action of an unknown type; a supported action missing a required
 field; malformed or interrupted bodies and U+0000 (synthetic test data only);
 an accepted action with neither `oxsrcmd5` nor `osrcmd5`; a not-accepted action
-whose source is a local link carried by another action of the same request; and
-a not-accepted action for a package that does not yet exist in the codestream.
+whose source is a local link carried by another action of the same request, or
+that updates its link; and a not-accepted action for a package that does not yet
+exist in the codestream.
 
 IBS does not guarantee indefinite retention of detail, diff, or source history.
 The resulting unavailable-evidence outcomes are part of the contract, not an
