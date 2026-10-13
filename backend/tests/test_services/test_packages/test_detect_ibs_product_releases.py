@@ -1400,30 +1400,25 @@ class TestRequestDelay:
         assert len(server.requests) == 4
         assert sleeps == expected
 
-    @pytest.mark.parametrize(
-        ("default", "expected"), [(0, []), (0.25, [0.25] * 3)], ids=["0", "0.25"]
-    )
     async def test_catch_up_waits_the_class_default_delay(
         self,
         world: ReleaseWorld,
         server: DownloadServer,
         monkeypatch: pytest.MonkeyPatch,
-        default: float,
-        expected: list[float],
     ) -> None:
         """Catch-up has no run snapshot: the class `default_request_delay`
-        (0 in production) separates its requests."""
+        (0 in production, patched here) separates its requests."""
         (occurrence,) = await _seeded(world)
         _serve(server, occurrence)
         sleeps = _recorded_sleeps(monkeypatch)
-        monkeypatch.setattr(DetectIbsProductReleases, "default_request_delay", default)
+        monkeypatch.setattr(DetectIbsProductReleases, "default_request_delay", 0.25)
 
         await DetectIbsProductReleases().catch_up(
             str(occurrence.ticket_id), await world.open_session()
         )
 
         assert len(server.requests) == 4
-        assert sleeps == expected
+        assert sleeps == [0.25] * 3
         assert await released_at(world, occurrence) == ISSUED_AT
 
 

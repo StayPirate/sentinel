@@ -794,47 +794,10 @@ class TestOutcomes:
     ) -> None:
         """Every request, including the later occurrences' repositories,
         completes and the download context closes before the first unit
-        session (and so the first Ticket lock) is opened."""
-        first, second = await _seeded(world, 2)
-        (no_match,) = await _seeded(world)
-        server = DownloadServer()
-        server.add(REPOSITORY, repository(matching(first.cve_id, second.cve_id)))
-        server.add(OTHER_REPOSITORY, repository(matching("CVE-2099-99999999")))
-        events: list[str] = []
-        units.events = events
-
-        async def closed() -> None:
-            events.append("phase-one-closed")
-
-        between_phases(monkeypatch, closed)
-
-        async with recording_client(server, events) as client:
-            result = await reconcile_ibs_product_releases(
-                [
-                    no_match.candidate(current=(OTHER_REPOSITORY,)),
-                    second.candidate(),
-                    first.candidate(),
-                ],
-                client=client,
-                fetcher_name=FETCHER,
-            )
-
-        assert result == summary(selected=3, updated=2, no_op=1)
-        assert events == [
-            *["http"] * 8,
-            "phase-one-closed",
-            *["unit", "commit", "close"] * 2,
-        ]
-
-    async def test_request_delay_separates_requests_before_the_first_unit(
-        self,
-        world: ReleaseWorld,
-        units: UnitSessions,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Fetcher: Request Delay. The delay is waited before every request
-        but the first, across repositories, and every wait completes
-        before the first unit session (and so the first Ticket lock)."""
+        session (and so the first Ticket lock) is opened. The request delay
+        (Fetcher: Request Delay) is waited before every request but the
+        first, across repositories, so every wait also precedes the first
+        unit."""
         first, second = await _seeded(world, 2)
         (no_match,) = await _seeded(world)
         server = DownloadServer()

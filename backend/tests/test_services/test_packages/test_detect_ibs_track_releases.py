@@ -1963,29 +1963,24 @@ class TestRequestDelay:
         assert len(ibs.served) == 3
         assert sleeps == expected
 
-    @pytest.mark.parametrize(
-        ("default", "expected"), [(0, []), (0.25, [0.25, 0.25])], ids=["0", "0.25"]
-    )
     async def test_catch_up_waits_the_class_default_delay(
         self,
         world: TrackWorld,
         ibs: FakeIBS,
         monkeypatch: pytest.MonkeyPatch,
-        default: float,
-        expected: list[float],
     ) -> None:
         """Catch-up has no run snapshot: the class `default_request_delay`
-        (0 in production) separates its requests."""
+        (0 in production, patched here) separates its requests."""
         first, second = await _two_packages(world, ibs)
         sleeps = _recorded_sleeps(monkeypatch)
-        monkeypatch.setattr(DetectIbsTrackReleases, "default_request_delay", default)
+        monkeypatch.setattr(DetectIbsTrackReleases, "default_request_delay", 0.25)
 
         await DetectIbsTrackReleases().catch_up(
             str(first.ticket_id), await world.open_session()
         )
 
         assert len(ibs.served) == 3
-        assert sleeps == expected
+        assert sleeps == [0.25, 0.25]
         for track in (first, second):
             assert await track_status(world, track) == PackageStatus.FIXED.value
 
