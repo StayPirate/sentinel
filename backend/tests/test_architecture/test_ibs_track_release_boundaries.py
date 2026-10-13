@@ -1,0 +1,378 @@
+"""Structural tests for the IBS track release detection lock and I/O
+boundaries.
+
+- `_reconcile_track()` in `app/services/packages/ibs_track_release.py` is
+  the only function of the detector that takes the Ticket row lock; it is
+  called only by `_Reconciliation._apply()`, performs no IBS, HTTP, Redis,
+  or Celery I/O, and never commits, rolls back, or closes its
+  caller-owned unit (docs/features/packages/ibs-track-release-detection.md,
+  Per-Track Local Outcome: external IBS I/O and XML parsing complete
+  before any Ticket lock; Checkpoint Concurrency: no IBS call, Redis
+  operation, or task enqueue while a Ticket lock is held;
+  docs/features/packages/package-service.md, Module invariant:
+  I/O-then-Lock pattern).
+- The candidate selection, the I/O orchestration
+  `reconcile_ibs_track_releases()`, and every other `_Reconciliation`
+  method take no lock, and the selection never writes or ends its
+  transaction (Scheduled Reconciliation Algorithm step 1: candidate
+  selection acquires no Ticket mutation lock).
+- The fetcher module `detect_ibs_track_releases.py` takes no lock and only
+  reads through the session it is given: its one session operation is the
+  commit that ends the read (Catch-Up: the supplied session only verifies
+  the Ticket and enumerates its tracks;
+  docs/features/platform/fetcher-infrastructure.md, Interface contract:
+  no direct Ticket lock, the passed session is for read-only queries
+  only). It opens no session of its own and never uses
+  `BaseFetcher.http_client`.
+
+Each detector module is listed in `_LOCK_OWNERS` with the functions
+allowed to take a row lock (the fetcher module joins with none). The
+behavior is proven by
+`tests/test_services/test_packages/test_ibs_track_release*.py` and
+`test_detect_ibs_track_releases.py`; these checks keep a later edit from
+crossing the boundaries.
+"""
+
+from __future__ import annotations
+
+import ast
+import re
+from pathlib import Path
+from typing import Final
+
+import pytest
+
+from tests.support.module_imports import APP_ROOT, imported_modules
+
+_PACKAGES = APP_ROOT / "services" / "packages"
+_BOUNDARY = _PACKAGES / "ibs_track_release.py"
+_FETCHER = _PACKAGES / "detect_ibs_track_releases.py"
+
+_LOCKING: Final = "_reconcile_track"
+_APPLY: Final = "_Reconciliation._apply"
+_ORCHESTRATION: Final = "reconcile_ibs_track_releases"
+_SELECTION: Final = "load_track_release_candidates"
+_RECONCILIATION: Final = "_Reconciliation"
+
+_LOCK_OWNERS: Final[dict[Path, list[str]]] = {_BOUNDARY: [_LOCKING], _FETCHER: []}
+"""Every detector module and the qualified functions allowed to take a
+row lock in it."""
+
+_FOR_UPDATE: Final = re.compile(r"\bfor\s+(no\s+key\s+)?update\b", re.IGNORECASE)
+
+_IO_NAMES: Final = {
+    "httpx",
+    "IBSClient",
+    "client",
+    "get_source_info",
+    "get_diff_issues",
+    "task_publication",
+    "publish_task",
+    "drain_ticket_convergence",
+    "redis",
+    "celery",
+    "celery_app",
+    "http_client",
+    "async_session_factory",
+}
+"""Names through which a function could perform IBS, HTTP, broker, or
+Redis I/O, or open another session."""
+
+_SESSION_WRITES: Final = {
+    "add",
+    "add_all",
+    "flush",
+    "delete",
+    "merge",
+    "rollback",
+    "commit",
+    "close",
+    "with_for_update",
+}
+
+
+def _tree(path: Path) -> ast.Module:
+    return ast.parse(path.read_text(encoding="utf-8"))
+
+
+def _parents(tree: ast.AST) -> dict[ast.AST, ast.AST]:
+    return {
+        child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)
+    }
+
+
+def _qualified_function(node: ast.AST, parents: dict[ast.AST, ast.AST]) -> str | None:
+    """`Class.method` or `function` of the innermost enclosing function."""
+    names: list[str] = []
+    while node in parents:
+        node = parents[node]
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            if names:
+                # A nested function is attributed to its outer function.
+                names = []
+            names.append(node.name)
+        elif isinstance(node, ast.ClassDef) and names:
+            names.insert(0, node.name)
+    return ".".join(names) if names else None
+
+
+def _functions(tree: ast.Module) -> dict[str, ast.FunctionDef | ast.AsyncFunctionDef]:
+    """Module-level functions by name and class methods as `Class.method`."""
+    found: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            found[node.name] = node
+        elif isinstance(node, ast.ClassDef):
+            for item in node.body:
+                if isinstance(item, ast.FunctionDef | ast.AsyncFunctionDef):
+                    found[f"{node.name}.{item.name}"] = item
+    return found
+
+
+def _referenced_names(node: ast.AST) -> set[str]:
+    names: set[str] = set()
+    for child in ast.walk(node):
+        if isinstance(child, ast.Name):
+            names.add(child.id)
+        elif isinstance(child, ast.Attribute):
+            names.add(child.attr)
+        elif isinstance(child, ast.alias):
+            names.add(child.asname or child.name.split(".")[-1])
+    return names
+
+
+def _called_attributes(node: ast.AST) -> set[str]:
+    return {
+        child.func.attr
+        for child in ast.walk(node)
+        if isinstance(child, ast.Call) and isinstance(child.func, ast.Attribute)
+    }
+
+
+def _docstrings(tree: ast.AST) -> set[ast.AST]:
+    found: set[ast.AST] = set()
+    for node in ast.walk(tree):
+        if isinstance(
+            node, ast.Module | ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef
+        ):
+            body = node.body
+            if (
+                body
+                and isinstance(body[0], ast.Expr)
+                and isinstance(body[0].value, ast.Constant)
+                and isinstance(body[0].value.value, str)
+            ):
+                found.add(body[0].value)
+    return found
+
+
+def _lock_sites(path: Path) -> list[str | None]:
+    """The qualified enclosing function of every `with_for_update`
+    reference."""
+    tree = _tree(path)
+    parents = _parents(tree)
+    return [
+        _qualified_function(node, parents)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute) and node.attr == "with_for_update"
+    ]
+
+
+_MODULES = [pytest.param(path, id=path.name) for path in _LOCK_OWNERS]
+
+
+@pytest.mark.unit
+class TestTicketLockPlacement:
+    @pytest.mark.parametrize("path", _MODULES)
+    def test_only_the_designated_functions_take_a_row_lock(self, path: Path) -> None:
+        assert _lock_sites(path) == _LOCK_OWNERS[path]
+
+    @pytest.mark.parametrize("path", _MODULES)
+    def test_no_literal_for_update_sql(self, path: Path) -> None:
+        tree = _tree(path)
+        docstrings = _docstrings(tree)
+
+        assert [
+            node.lineno
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and node not in docstrings
+            and _FOR_UPDATE.search(node.value)
+        ] == []
+
+    def test_selection_orchestration_and_every_other_method_take_no_lock(
+        self,
+    ) -> None:
+        functions = _functions(_tree(_BOUNDARY))
+        unlocked = [
+            name
+            for name in functions
+            if name in (_SELECTION, _ORCHESTRATION)
+            or name.startswith(f"{_RECONCILIATION}.")
+        ]
+
+        assert {_SELECTION, _ORCHESTRATION, _APPLY} <= set(unlocked)
+        assert [
+            name
+            for name in unlocked
+            if "with_for_update" in _referenced_names(functions[name])
+        ] == []
+
+    def test_locking_function_is_called_only_by_apply(self) -> None:
+        sites: list[tuple[str, str | None]] = []
+        for path in sorted(APP_ROOT.rglob("*.py")):
+            tree = _tree(path)
+            parents = _parents(tree)
+            for node in ast.walk(tree):
+                name = (
+                    node.id
+                    if isinstance(node, ast.Name)
+                    else node.attr
+                    if isinstance(node, ast.Attribute)
+                    else node.name
+                    if isinstance(node, ast.alias)
+                    else None
+                )
+                if name == _LOCKING:
+                    sites.append(
+                        (
+                            str(path.relative_to(APP_ROOT)),
+                            _qualified_function(node, parents),
+                        )
+                    )
+
+        assert sites == [("services/packages/ibs_track_release.py", _APPLY)]
+
+
+@pytest.mark.unit
+class TestLockingFunctionBody:
+    def test_performs_no_ibs_http_broker_or_redis_io(self) -> None:
+        body = _functions(_tree(_BOUNDARY))[_LOCKING]
+
+        assert _referenced_names(body) & _IO_NAMES == set()
+
+    def test_never_commits_rolls_back_or_closes_the_caller_owned_unit(self) -> None:
+        body = _functions(_tree(_BOUNDARY))[_LOCKING]
+
+        assert _called_attributes(body) & {"commit", "rollback", "close"} == set()
+
+    def test_selection_never_writes_or_ends_the_transaction(self) -> None:
+        body = _functions(_tree(_BOUNDARY))[_SELECTION]
+
+        assert _called_attributes(body) & _SESSION_WRITES == set()
+
+
+@pytest.mark.unit
+class TestFetcherReadsOnly:
+    def test_execute_and_catch_up_take_no_lock(self) -> None:
+        functions = _functions(_tree(_FETCHER))
+
+        for name in (
+            "DetectIbsTrackReleases.execute",
+            "DetectIbsTrackReleases.catch_up",
+        ):
+            assert "with_for_update" not in _referenced_names(functions[name])
+
+    def test_imports_no_sqlalchemy_write_construct_or_model(self) -> None:
+        tree = _tree(_FETCHER)
+        imported = {
+            alias.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom)
+            and (node.module or "").startswith("sqlalchemy")
+            for alias in node.names
+        }
+
+        assert imported & {"update", "insert", "delete", "text"} == set()
+        assert [
+            module
+            for module in imported_modules(_FETCHER, "app.services.packages")
+            if module == "app.models" or module.startswith("app.models.")
+        ] == []
+
+    @pytest.mark.parametrize("method", ["execute", "catch_up"])
+    def test_the_passed_session_only_ends_its_read(self, method: str) -> None:
+        """Every method called on the passed `session` is `commit()`."""
+        body = _functions(_tree(_FETCHER))[f"DetectIbsTrackReleases.{method}"]
+        called = {
+            node.func.attr
+            for node in ast.walk(body)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "session"
+        }
+
+        assert called == {"commit"}
+
+    def test_module_calls_no_other_session_operation(self) -> None:
+        assert _called_attributes(_tree(_FETCHER)) & _SESSION_WRITES == {"commit"}
+
+    def test_module_opens_no_session_and_uses_no_fetcher_http_client(self) -> None:
+        """Only the boundary opens unit sessions and requests IBS through
+        the fetcher's own `IBSClient`; `BaseFetcher.http_client` is never
+        used."""
+        names = _referenced_names(_tree(_FETCHER))
+
+        assert names & {"async_session_factory", "get_async_session"} == set()
+        assert names & (_IO_NAMES - {"IBSClient", "client"}) == set()
+
+
+@pytest.mark.unit
+class TestNoDomainCreation:
+    """ibs-track-release-detection.md, Scope: the detector never calls
+    `add_package_to_ticket()` and never creates a CVE, Ticket, package,
+    track, or Product occurrence; its only own write is the operational
+    `TrackReleaseCheckpoint` (the affectedness mutation and its event
+    belong to `package_service.set_track_status()`)."""
+
+    @pytest.mark.parametrize("path", _MODULES)
+    def test_no_package_addition_or_record_creation_path(self, path: Path) -> None:
+        names = _referenced_names(_tree(path))
+
+        assert (
+            names
+            & {
+                "add_package_to_ticket",
+                "add_package_records",
+                "upsert_cve",
+                "create_ticket",
+            }
+            == set()
+        )
+
+    def test_the_only_constructed_model_is_the_checkpoint(self) -> None:
+        tree = _tree(_BOUNDARY)
+        models = {
+            alias.asname or alias.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom)
+            and (node.module or "").startswith("app.models")
+            for alias in node.names
+        }
+        constructed = {
+            node.func.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id in models
+        }
+
+        assert models >= {"TrackReleaseCheckpoint", "Ticket", "TicketPackageTrack"}
+        assert constructed == {"TrackReleaseCheckpoint"}
+
+    def test_the_only_session_add_is_in_the_locking_function(self) -> None:
+        tree = _tree(_BOUNDARY)
+        parents = _parents(tree)
+        adds = [
+            _qualified_function(node, parents)
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in {"add", "add_all", "merge"}
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id in {"db", "session", "unit"}
+        ]
+
+        assert adds == [_LOCKING]

@@ -1,0 +1,3 @@
+<status code="400" origin="backend">
+  <summary>SUSE:SLE-15-SP6:Update/sudo/0123456789abcdef0123456789abcdef: not in repository. Either not existing or misconfigured server setting for '$nosharedtrees' setting in BSConfig.pm</summary>
+</status>

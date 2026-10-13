@@ -484,6 +484,63 @@ def test_feed_handler_exception_in_later_chunk_propagates_unchanged() -> None:
 
 
 @pytest.mark.parametrize(
+    "encoding",
+    ["x-fictional-SECRET-TOKEN-7f3a9c", "utf-7", "rot13", "idna"],
+    ids=["unknown", "multi-byte", "not-a-text-encoding", "unsupported-errors"],
+)
+def test_parse_unusable_declared_encoding_raises_malformed(encoding: str) -> None:
+    """expat raises `LookupError`/`ValueError` for these declarations; they
+    are the `malformed` outcome and the declared name is discarded."""
+    error = _rejected(f'<?xml version="1.0" encoding="{encoding}"?><r/>'.encode())
+
+    assert error.reason == "malformed"
+    assert encoding not in str(error)
+    assert error.__cause__ is None
+    assert error.__context__ is None
+
+
+@pytest.mark.parametrize(
+    "error",
+    [ValueError("handler value error"), LookupError("handler lookup error")],
+    ids=["value-error", "lookup-error"],
+)
+def test_handler_value_and_lookup_errors_propagate_unchanged(
+    error: Exception,
+) -> None:
+    parser = SafeXMLParser(_ExplodingHandler(error))
+
+    with pytest.raises(type(error)) as caught:
+        parser.feed(b"<r><boom/></r>")
+
+    assert caught.value is error
+
+
+@pytest.mark.parametrize("callback", ["end_element", "character_data"])
+def test_end_and_character_handler_errors_propagate_unchanged(callback: str) -> None:
+    error = ValueError("handler value error")
+
+    class _Failing(_Recorder):
+        def end_element(self, name: str) -> None:
+            if callback == "end_element":
+                raise error
+
+        def character_data(self, data: str) -> None:
+            if callback == "character_data":
+                raise error
+
+    with pytest.raises(ValueError, match="handler value error") as caught:
+        _parse_with(_Failing(), b"<r>text</r>")
+
+    assert caught.value is error
+
+
+def _parse_with(handler: _Recorder, document: bytes) -> None:
+    parser = SafeXMLParser(handler)
+    parser.feed(document)
+    parser.close()
+
+
+@pytest.mark.parametrize(
     "document",
     [
         pytest.param(b"<r><boom/></r>", id="handler-exception"),

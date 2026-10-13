@@ -72,6 +72,71 @@
         ["rev", "f6cf5398175f44ce4265e2381f6309b2"]
       ],
       "status": 200
+    },
+    "diff_error_orev_unavailable.xml": {
+      "method": "POST",
+      "path": "/source/SUSE:SLE-15-SP6:Update/sudo",
+      "query": [
+        ["cmd", "diff"],
+        ["view", "xml"],
+        ["onlyissues", "1"],
+        ["expand", "1"],
+        ["orev", "0123456789abcdef0123456789abcdef"],
+        ["rev", "f6cf5398175f44ce4265e2381f6309b2"]
+      ],
+      "status": 400
+    },
+    "diff_error_rev_unavailable.xml": {
+      "method": "POST",
+      "path": "/source/SUSE:SLE-15-SP6:Update/sudo",
+      "query": [
+        ["cmd", "diff"],
+        ["view", "xml"],
+        ["onlyissues", "1"],
+        ["expand", "1"],
+        ["orev", "0"],
+        ["rev", "fedcba9876543210fedcba9876543210"]
+      ],
+      "status": 400
+    },
+    "diff_error_both_unavailable.xml": {
+      "method": "POST",
+      "path": "/source/SUSE:SLE-15-SP6:Update/sudo",
+      "query": [
+        ["cmd", "diff"],
+        ["view", "xml"],
+        ["onlyissues", "1"],
+        ["expand", "1"],
+        ["orev", "0123456789abcdef0123456789abcdef"],
+        ["rev", "fedcba9876543210fedcba9876543210"]
+      ],
+      "status": 400
+    },
+    "diff_error_no_such_revision.xml": {
+      "method": "POST",
+      "path": "/source/SUSE:SLE-15-SP6:Update/sudo",
+      "query": [
+        ["cmd", "diff"],
+        ["view", "xml"],
+        ["onlyissues", "1"],
+        ["expand", "1"],
+        ["orev", "999999"],
+        ["rev", "f6cf5398175f44ce4265e2381f6309b2"]
+      ],
+      "status": 404
+    },
+    "diff_error_unknown_package.xml": {
+      "method": "POST",
+      "path": "/source/SUSE:SLE-15-SP6:Update/sentinel-nonexistent-pkg",
+      "query": [
+        ["cmd", "diff"],
+        ["view", "xml"],
+        ["onlyissues", "1"],
+        ["expand", "1"],
+        ["orev", "0123456789abcdef0123456789abcdef"],
+        ["rev", "f6cf5398175f44ce4265e2381f6309b2"]
+      ],
+      "status": 404
     }
   },
   "unauthenticated": {

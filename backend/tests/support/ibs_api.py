@@ -27,12 +27,35 @@ and status of each request. All requests targeted
 - `diff_empty.xml`: a diff between identical revisions: a valid
   `sourcediff` without an `issues` element.
 
+The source-diff error responses (docs/features/integrations/
+ibs-integration.md, Unavailable Old Revision) were captured the same day
+with `secbox osc --debug -A https://api.suse.de api -X POST ...` against
+`sudo`, whose current expanded `srcmd5` came from source info. The
+fictional checksums `0123456789abcdef0123456789abcdef` (F1) and
+`fedcba9876543210fedcba9876543210` (F2) are not stored trees. Inside the
+capture pipe an allow-list kept only the HTTP status of osc's error line
+and the response body of its `DEBUG: b'<status ...'` line; every header,
+signature, and cookie line was discarded unread:
+
+- `diff_error_orev_unavailable.xml`: HTTP 400, `orev=F1` and the current
+  `rev`: the backend status document whose summary names the project,
+  package, and `orev`;
+- `diff_error_rev_unavailable.xml`: HTTP 400, `orev=0` and `rev=F2`: the
+  same shape naming `rev`;
+- `diff_error_both_unavailable.xml`: HTTP 400, `orev=F1` and `rev=F2`:
+  `rev` is resolved first, so the summary names `rev`;
+- `diff_error_no_such_revision.xml`: HTTP 404, the numeric `orev=999999`:
+  `no such revision`;
+- `diff_error_unknown_package.xml`: HTTP 404 for the fictional package
+  `sentinel-nonexistent-pkg`.
+
 Every issue carries `state`, `tracker`, `name`, `label`, and an `url`
 attribute that Sentinel does not consume. The documents contain public
 package, project, checksum, CVE, and bug identifiers only; no personal
 identifier was present, so nothing was replaced. The checksums are public
-source-state identifiers. Response headers were not observable through
-`osc api`, so the media type is not recorded; Sentinel does not consume it.
+source-state identifiers or the fictional F1 and F2. Response headers were
+not recorded, so the media type is not recorded; Sentinel does not consume
+it.
 
 The `unauthenticated` entry of `responses.json` restates the sanitized
 401 challenge recorded in docs/features/integrations/ibs-integration.md
@@ -82,6 +105,17 @@ DIFF_FIXTURES: Final = (
     "diff_deleted",
     "diff_empty",
 )
+DIFF_ERROR_FIXTURES: Final = (
+    "diff_error_orev_unavailable",
+    "diff_error_rev_unavailable",
+    "diff_error_both_unavailable",
+    "diff_error_no_such_revision",
+    "diff_error_unknown_package",
+)
+FICTIONAL_OREV: Final = "0123456789abcdef0123456789abcdef"
+"""F1: the fictional `orev` of the captured error responses."""
+FICTIONAL_REV: Final = "fedcba9876543210fedcba9876543210"
+"""F2: the fictional `rev` of the captured error responses."""
 
 
 def load_fixture(name: str) -> bytes:

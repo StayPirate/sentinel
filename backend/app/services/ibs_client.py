@@ -19,11 +19,16 @@ Every operation is a read without side effects. The source-diff `POST` is
 semantically read-only, so the client opts into the shared transport retry
 for non-idempotent methods. Redirects are never followed. A final response
 other than 2xx raises the original `httpx.HTTPStatusError` without reading
-or parsing its body; every source-diff 400 and 404 therefore keeps its HTTP
-error outcome here. Successful bodies are parsed incrementally by the
-shared XML safety boundary without a byte or issue-count cap; no result is
-returned until the complete document has parsed. The client logs nothing,
-and its exceptions carry bounded reasons only, never response content.
+or parsing its body, with one exception: a source-diff HTTP 400 whose
+request names a checksum `orev` other than `rev` has its body read through
+the same XML safety boundary to apply the discriminator of
+ibs-integration.md (Unavailable Old Revision), which raises
+`IBSHistoricalRevisionUnavailable`. Every other source-diff 400 and 404
+keeps its HTTP error outcome. Successful bodies are parsed incrementally by
+the shared XML safety boundary without a byte or issue-count cap; no result
+is returned until the complete document has parsed. The client logs
+nothing, and its exceptions carry bounded reasons only, never response
+content.
 """
 
 from __future__ import annotations
@@ -61,11 +66,14 @@ __all__ = [
     "IBSAuthenticationError",
     "IBSClient",
     "IBSCredentialsNotConfiguredError",
+    "IBSHistoricalRevisionUnavailable",
     "IBSResponseDataError",
     "ResponseDataReason",
     "SourceInfo",
     "SourceInfoFailure",
     "SourceInfoResult",
+    "is_valid_checksum",
+    "is_valid_ibs_name",
 ]
 
 HTTP_CLIENT_NAME: Final = "ibs_client"
@@ -103,12 +111,29 @@ class IBSResponseDataError(Exception):
     or an undecodable body), `interrupted_response` (the body ended with a
     transport failure), `invalid_document` (document-level shape), or
     `invalid_issue` (a source-diff issue with an unusable structure). Never
-    raised for an error response, whose body is not parsed.
+    raised for an error response, including a source-diff 400 whose body
+    is read only for the unavailable-revision classification.
     """
 
     def __init__(self, reason: ResponseDataReason) -> None:
         super().__init__(f"IBS response data rejected: {reason}")
         self.reason: ResponseDataReason = reason
+
+
+class IBSHistoricalRevisionUnavailable(Exception):  # noqa: N818 — specified name
+    """IBS identified the source diff's `old_md5` as no longer available.
+
+    Raised only when every condition of ibs-integration.md (Unavailable Old
+    Revision) holds: `old_md5` is a checksum other than `"0"` and
+    `new_md5`, the status is HTTP 400, and the complete body is a
+    no-namespace `status` document with exactly one `summary` child whose
+    text starts with `{project}/{package}/{old_md5}: not in repository`.
+    Carries no response content. Not an `httpx` exception and not
+    retryable.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("IBS source diff old revision is unavailable")
 
 
 @dataclass(frozen=True, slots=True)
@@ -265,9 +290,11 @@ class IBSClient:
         root other than `sourcediff` or more than one `issues` element
         (`invalid_document`), or an issue that is not an `issue` element
         without children carrying a non-empty `tracker` and a `state` of
-        `added`, `changed`, or `deleted` (`invalid_issue`); and the `httpx`
-        exception of a transport failure or non-2xx response, including
-        every 400 and 404.
+        `added`, `changed`, or `deleted` (`invalid_issue`);
+        `IBSHistoricalRevisionUnavailable` when the response identifies
+        `old_md5` as unavailable; and the `httpx` exception of a transport
+        failure (including an interrupted error body) or of every other
+        non-2xx response, including every other 400 and every 404.
         """
         _validate_name(project, "project")
         _validate_name(package, "package")
@@ -279,6 +306,13 @@ class IBSClient:
             raise ValueError(msg)
         self._require_credentials()
 
+        # Condition 1 of Unavailable Old Revision; conditions 2-4 are
+        # evaluated on the response.
+        unavailable_prefix = (
+            f"{project}/{package}/{old_md5}: not in repository"
+            if old_md5 not in {_EMPTY_SOURCE_TREE, new_md5}
+            else None
+        )
         handler = _DiffHandler()
         params = [
             ("cmd", "diff"),
@@ -289,7 +323,9 @@ class IBSClient:
             ("rev", new_md5),
         ]
         path = f"source/{_segment(project)}/{_segment(package)}"
-        await self._read("POST", path, params, handler)
+        await self._read(
+            "POST", path, params, handler, unavailable_prefix=unavailable_prefix
+        )
         return handler.issues
 
     def _require_credentials(self) -> None:
@@ -305,9 +341,17 @@ class IBSClient:
         path: str,
         params: list[tuple[str, str]],
         handler: _SourceInfoHandler | _DiffHandler,
+        *,
+        unavailable_prefix: str | None = None,
     ) -> None:
         async with self._http.stream(method, path, params=tuple(params)) as response:
             if not response.is_success:
+                if (
+                    unavailable_prefix is not None
+                    and response.status_code == httpx.codes.BAD_REQUEST
+                    and await _names_unavailable_revision(response, unavailable_prefix)
+                ):
+                    raise IBSHistoricalRevisionUnavailable
                 response.raise_for_status()
             parser = SafeXMLParser(handler)
             reason: ResponseDataReason | None = None
@@ -323,16 +367,27 @@ class IBSClient:
                 raise IBSResponseDataError(reason)
 
 
+def is_valid_ibs_name(value: object) -> bool:
+    """Whether `value` is an IBS project or package name this client
+    accepts: a non-empty string of printable ASCII without whitespace or
+    `/`, and not a dot segment. Pure predicate."""
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and value not in {".", ".."}
+        and all(0x21 <= ord(character) <= 0x7E for character in value)
+        and "/" not in value
+    )
+
+
+def is_valid_checksum(value: object) -> bool:
+    """Whether `value` is a 32-character hexadecimal source checksum this
+    client accepts as `old_md5` or `new_md5`. Pure predicate."""
+    return isinstance(value, str) and _CHECKSUM.fullmatch(value) is not None
+
+
 def _validate_name(value: str, what: str) -> None:
-    """An IBS project or package name: printable ASCII without whitespace
-    or `/`, and not a dot segment."""
-    if (
-        not isinstance(value, str)
-        or not value
-        or value in {".", ".."}
-        or not all(0x21 <= ord(character) <= 0x7E for character in value)
-        or "/" in value
-    ):
+    if not is_valid_ibs_name(value):
         msg = f"invalid IBS {what} name"
         raise ValueError(msg)
 
@@ -429,6 +484,75 @@ class _DiffHandler:
 
     def character_data(self, data: str) -> None:
         return None
+
+
+async def _names_unavailable_revision(response: httpx.Response, prefix: str) -> bool:
+    """Whether a source-diff HTTP 400 body satisfies conditions 3 and 4 of
+    ibs-integration.md (Unavailable Old Revision) for `prefix`.
+
+    Reads the complete body through the XML safety boundary. A body that is
+    not well-formed, is undecodable, contains a forbidden construct, or has
+    another shape returns `False`, so the caller keeps the HTTP error. A
+    transport failure while reading the body propagates unchanged (the
+    transport outcome). Retains at most `len(prefix)` characters of the
+    summary and nothing else.
+    """
+    handler = _StatusSummaryHandler(limit=len(prefix))
+    parser = SafeXMLParser(handler)
+    try:
+        async for chunk in response.aiter_bytes():
+            parser.feed(chunk)
+        parser.close()
+    except XMLSafetyError, httpx.DecodingError:
+        return False
+    summary = handler.summary_prefix()
+    return summary is not None and summary.startswith(prefix)
+
+
+@dataclass
+class _StatusSummaryHandler:
+    """Collects the start of the single `summary` of a `status` document.
+
+    The root must be the no-namespace `status` element (a namespaced name
+    is reported as `"{uri} {local}"`, so it never equals `"status"`) with
+    exactly one no-namespace `summary` child that contains text only.
+    """
+
+    limit: int
+    _depth: int = 0
+    _root_is_status: bool = False
+    _summaries: int = 0
+    _in_summary: bool = False
+    _summary_has_child: bool = False
+    _text: list[str] = field(default_factory=list)
+    _length: int = 0
+
+    def start_element(self, name: str, attributes: dict[str, str]) -> None:
+        self._depth += 1
+        if self._depth == 1:
+            self._root_is_status = name == "status"
+        elif self._depth == 2 and name == "summary":
+            self._summaries += 1
+            self._in_summary = True
+        elif self._in_summary:
+            self._summary_has_child = True
+
+    def end_element(self, name: str) -> None:
+        if self._depth == 2:
+            self._in_summary = False
+        self._depth -= 1
+
+    def character_data(self, data: str) -> None:
+        if self._in_summary and self._depth == 2 and self._length < self.limit:
+            kept = data[: self.limit - self._length]
+            self._text.append(kept)
+            self._length += len(kept)
+
+    def summary_prefix(self) -> str | None:
+        """The retained summary start, or `None` for any other shape."""
+        if not self._root_is_status or self._summaries != 1 or self._summary_has_child:
+            return None
+        return "".join(self._text)
 
 
 def _issue(name: str, attributes: Mapping[str, str]) -> DiffIssue:

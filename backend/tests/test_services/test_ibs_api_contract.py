@@ -16,10 +16,14 @@ returned as an entry with an `<error>` child rather than omitted, and a
 valid empty diff has no `issues` element. Not retained, and therefore
 covered by synthetic documents in the client tests: a requested package
 entirely absent from the response, duplicate entries, an `<error>` child on
-an entry that also carries checksums, malformed or interrupted documents,
-and the HTTP 400/404 error responses (whose unavailable-revision
-classification belongs to the track detector item). The response media type
-was not observable through `osc api` and is not consumed.
+an entry that also carries checksums, and malformed or interrupted
+documents. The source-diff HTTP 400 and 404 error responses are retained
+and asserted against docs/features/integrations/ibs-integration.md
+(Unavailable Old Revision) before the client's classification uses them;
+a historical checksum whose stored tree was actually removed is
+documentation-only (OBS source inspection), because its backend path is the
+one the fabricated checksums take. The response media type was not
+observable through `osc api` and is not consumed.
 """
 
 from __future__ import annotations
@@ -33,7 +37,10 @@ from typing import Final
 import pytest
 
 from tests.support.ibs_api import (
+    DIFF_ERROR_FIXTURES,
     DIFF_FIXTURES,
+    FICTIONAL_OREV,
+    FICTIONAL_REV,
     FIXTURE_DIR,
     LIVE_CHALLENGE,
     LIVE_PROJECT,
@@ -69,15 +76,31 @@ class TestFixtureInventory:
     def test_every_fixture_is_recorded_and_every_record_has_a_fixture(self) -> None:
         recorded = set(load_responses()["documents"])
         stored = {path.name for path in Path(FIXTURE_DIR).glob("*.xml")}
-        expected = {f"{name}.xml" for name in (*SOURCEINFO_FIXTURES, *DIFF_FIXTURES)}
+        expected = {
+            f"{name}.xml"
+            for name in (*SOURCEINFO_FIXTURES, *DIFF_FIXTURES, *DIFF_ERROR_FIXTURES)
+        }
         assert recorded == stored == expected
 
-    def test_every_request_targets_the_live_project_and_succeeded(self) -> None:
+    def test_every_request_targets_the_live_project(self) -> None:
         responses = load_responses()
         assert responses["api_url"] == "https://api.suse.de"
         for record in responses["documents"].values():
             assert record["path"].startswith(f"/source/{LIVE_PROJECT}")
-            assert record["status"] == 200
+
+    def test_success_documents_succeeded_and_error_documents_did_not(self) -> None:
+        documents = load_responses()["documents"]
+        for name in (*SOURCEINFO_FIXTURES, *DIFF_FIXTURES):
+            assert documents[f"{name}.xml"]["status"] == 200
+        assert {
+            name: documents[f"{name}.xml"]["status"] for name in DIFF_ERROR_FIXTURES
+        } == {
+            "diff_error_orev_unavailable": 400,
+            "diff_error_rev_unavailable": 400,
+            "diff_error_both_unavailable": 400,
+            "diff_error_no_such_revision": 404,
+            "diff_error_unknown_package": 404,
+        }
 
     def test_unauthenticated_record_matches_the_specified_challenge(self) -> None:
         record = load_responses()["unauthenticated"]
@@ -237,3 +260,99 @@ class TestSourceDiffContract:
         assert root.find("issues") is None
         query = dict(fixture_query("diff_empty"))
         assert query["orev"] == query["rev"]
+
+
+def _request_identity(name: str) -> tuple[str, str, str, str]:
+    """`(project, package, orev, rev)` of the live request of `name`."""
+    record = load_responses()["documents"][f"{name}.xml"]
+    project, package = record["path"].removeprefix("/source/").split("/")
+    query = dict(fixture_query(name))
+    return project, package, query["orev"], query["rev"]
+
+
+class TestSourceDiffErrorContract:
+    """ibs-integration.md, Unavailable Old Revision: the HTTP 400 backend
+    status document naming the checksum IBS failed to resolve, and the
+    404 responses that never identify unavailable history."""
+
+    @pytest.mark.parametrize("name", DIFF_ERROR_FIXTURES)
+    def test_request_uses_the_expanded_issue_form(self, name: str) -> None:
+        query = fixture_query(name)
+        assert [key for key, _ in query] == [
+            "cmd",
+            "view",
+            "onlyissues",
+            "expand",
+            "orev",
+            "rev",
+        ]
+        assert query[:4] == [
+            ("cmd", "diff"),
+            ("view", "xml"),
+            ("onlyissues", "1"),
+            ("expand", "1"),
+        ]
+
+    @pytest.mark.parametrize("name", DIFF_ERROR_FIXTURES)
+    def test_body_is_a_no_namespace_status_with_exactly_one_summary(
+        self, name: str
+    ) -> None:
+        root = _root(name)
+        assert root.tag == "status"
+        assert [child.tag for child in root] == ["summary"]
+        [summary] = list(root)
+        assert list(summary) == []
+        assert summary.text
+
+    @pytest.mark.parametrize(
+        ("name", "named"),
+        [
+            ("diff_error_orev_unavailable", "orev"),
+            ("diff_error_rev_unavailable", "rev"),
+            ("diff_error_both_unavailable", "rev"),
+        ],
+    )
+    def test_unavailable_checksum_summary_names_the_unresolved_checksum(
+        self, name: str, named: str
+    ) -> None:
+        project, package, orev, rev = _request_identity(name)
+        checksum = orev if named == "orev" else rev
+        root = _root(name)
+        summary = root.find("summary")
+        assert summary is not None
+        assert root.attrib == {"code": "400", "origin": "backend"}
+        assert (summary.text or "").startswith(
+            f"{project}/{package}/{checksum}: not in repository"
+        )
+
+    def test_only_the_orev_sample_satisfies_the_discriminator_inputs(self) -> None:
+        """Condition 1 (a checksum `orev` other than `0` and `rev`) holds
+        for the `orev` and both-unavailable samples; only the `orev` sample
+        also names `orev` (condition 4), because IBS resolves `rev` first."""
+        _, _, orev, rev = _request_identity("diff_error_orev_unavailable")
+        assert orev == FICTIONAL_OREV
+        assert _CHECKSUM.fullmatch(rev)
+        assert rev not in {FICTIONAL_OREV, FICTIONAL_REV}
+        _, _, orev, rev = _request_identity("diff_error_rev_unavailable")
+        assert (orev, rev) == ("0", FICTIONAL_REV)
+        _, _, orev, rev = _request_identity("diff_error_both_unavailable")
+        assert (orev, rev) == (FICTIONAL_OREV, FICTIONAL_REV)
+
+    def test_numeric_revision_is_a_404_no_such_revision(self) -> None:
+        root = _root("diff_error_no_such_revision")
+        _, _, orev, _ = _request_identity("diff_error_no_such_revision")
+        assert orev.isdigit()
+        assert not _CHECKSUM.fullmatch(orev)
+        assert root.attrib == {"code": "not_found"}
+        summary = root.find("summary")
+        assert summary is not None
+        assert summary.text == "no such revision"
+
+    def test_unknown_package_is_a_404_with_its_own_summary(self) -> None:
+        project, package, _, _ = _request_identity("diff_error_unknown_package")
+        root = _root("diff_error_unknown_package")
+        assert root.attrib == {"code": "unknown_package"}
+        summary = root.find("summary")
+        assert summary is not None
+        assert summary.text == f"Package not found: {project}/{package}"
+        assert "not in repository" not in (summary.text or "")
