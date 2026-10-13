@@ -404,7 +404,9 @@ Catch-up invokes the same per-track checkpoint algorithm:
 - a track with an equal current checkpoint is a no-op;
 - a changed checkpoint follows the ordinary diff path, or
   [Unavailable History Fallback](#unavailable-history-fallback) when that diff
-  raises `IBSHistoricalRevisionUnavailable`; and
+  raises `IBSHistoricalRevisionUnavailable`;
+- consecutive IBS requests are separated by the class
+  `default_request_delay` ([Request Delay](#request-delay)); and
 - each track is an independent transaction unit.
 
 Pre-finalization per-item failures are logged and processing continues. Partial
@@ -513,6 +515,19 @@ before its local transaction; that track is a successful no-op.
 | Auth | IBS API SSH-signature authentication with the configured account and key (`../integrations/ibs-integration.md`, Origins and Authentication) |
 | `participates_in_catch_up` | `True` — custom per-Ticket catch-up |
 | Custom settings | None |
+| `default_request_delay` | 0 s — no IBS API rate limit is documented (`../../data-sources.md`, Fetcher Registry); see [Request Delay](#request-delay) |
+
+### Request Delay
+
+The detector waits the inter-request delay before every IBS source-info and
+source-diff request of one invocation except the first, including the
+`orev=0` fallback diff. A periodic run uses `request_delay` from its runtime
+configuration snapshot; catch-up, which has no snapshot, uses the class
+`default_request_delay` (`../platform/fetcher-infrastructure.md`,
+FetcherConfig). A zero delay never waits. The delay does not separate the
+unsigned and signed attempts of one operation or its shared transport
+retries. A request starts only after the preceding per-track transaction has
+closed, so the detector never waits while a Ticket lock is held.
 
 ### Metrics and Run Status
 
@@ -589,6 +604,10 @@ Future implementation tests must cover:
   independent database sessions;
 - status and Ticket-state races under the Ticket lock;
 - no external HTTP, Redis, or task publication while a Ticket lock is held;
+- the request delay: no wait before the first IBS request, the run's
+  `request_delay` before every later source-info and diff request of a
+  periodic run, the class `default_request_delay` in catch-up, no wait for a
+  zero delay, and no wait while a Ticket lock is held;
 - exactly one service-owned audit event for an effective transition and none
   for checkpoint-only or idempotent outcomes; and
 - sanitized logs and public fetcher errors with no raw response, credential, or
