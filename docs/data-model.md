@@ -1972,7 +1972,7 @@ table; RabbitMQ action IDs and array positions are not durable identities.
 | id | UUID | PK | Internal UUIDv7 action identifier |
 | ibs_request_id | UUID | FK(ibs_request.id) ON DELETE RESTRICT, NOT NULL | Parent request |
 | action_type | VARCHAR(32) | NOT NULL | `IBSRequestActionType`: `maintenance_incident` or `maintenance_release` |
-| source_project | VARCHAR(255) | nullable | Exact normalized action source project |
+| source_project | VARCHAR(255) | nullable | Exact normalized action source project; a project outside the `SUSE:` namespace is stored as the fixed token described below |
 | source_package | VARCHAR(255) | nullable | Exact normalized physical source package |
 | target_project | VARCHAR(255) | nullable | Exact normalized target project; for an accepted submission action this may be the incident project |
 | target_package | VARCHAR(255) | nullable | Exact normalized physical target package |
@@ -2016,6 +2016,13 @@ table; RabbitMQ action IDs and array positions are not durable identities.
   it. This index serves the retained exact roots of a request in RabbitMQ
   request wake-ups (`docs/features/packages/ibs-submission-tracking.md`) and
   loading of the request-to-action relationship.
+
+Every project column stores the value returned by IBS point detail, whose
+parser replaces each project outside the `SUSE:` namespace, such as a personal
+`home:` project, by the fixed token `_redacted_`
+(`docs/features/integrations/ibs-integration.md`, Request Point Detail). Such a
+project name is never stored, and identities and comparisons use the stored
+form (`docs/features/packages/ibs-submission-tracking.md`).
 
 The two unique partial indexes encode the request-scoped, type-specific durable
 semantic identities. The partial-index predicate fixes the action type, so that
