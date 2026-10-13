@@ -194,22 +194,23 @@ The generic `FetcherConfig` fields apply to every fetcher, and
 `request_delay` is "Applied by the fetcher"
 (`fetcher-infrastructure.md`, Custom Settings Schema and Data Model ›
 FetcherConfig). Operators can change it through the fetcher configuration
-API and CLI. This check applies to a fetcher that makes more than one
-external request in one invocation, periodic or catch-up, including requests
-made by the boundaries it delegates to. A fetcher whose invocation makes a
-single external request (one file, one git fetch) or none is exempt.
+API. This check applies to a fetcher that makes more than one external
+request in one invocation, periodic or catch-up, including requests made by
+the boundaries it delegates to. A fetcher whose invocation makes a single
+external request (one file, one git fetch) or none is exempt.
 
 - In a periodic run, does the effective flow wait the run snapshot's
   `request_delay` (`self.config.request_delay`) between consecutive external
   requests? A value that an operator can set but that has no effect is a
   "Needs revision" issue
-- Outside a run (catch-up, on-demand), does the delay follow the owning
-  spec, normally the class `default_request_delay`, and does the owning spec
-  state where the delay applies?
-- Does `default_request_delay` agree with the source's Rate Limits column in
-  `docs/data-sources.md` (Fetcher Registry) and with the owning spec? A
-  source with a rate limit requires a non-zero value
-  (`fetcher-infrastructure.md`, FetcherConfig notes)
+- For an outside-run flow (catch-up, on-demand) that itself makes more than
+  one external request, does the delay follow the owning spec, normally the
+  class `default_request_delay`, and does the owning spec state where the
+  delay applies?
+- When the source has a rate limit (the Rate Limits column of
+  `docs/data-sources.md`, Fetcher Registry, or the owning spec), is
+  `default_request_delay` non-zero (`fetcher-infrastructure.md`,
+  FetcherConfig notes)?
 - Is every wait outside each pessimistic row lock and open per-item
   transaction? Waiting while a lock is held prolongs it
   (`docs/conventions.md`, Transaction Hygiene Rules)
