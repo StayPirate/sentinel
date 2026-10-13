@@ -144,7 +144,7 @@ One normalized relevant action belonging to one `IBSRequest`.
 | `id` | UUID | PK | Local action identifier. |
 | `ibs_request_id` | UUID | FK(`ibs_request.id`) ON DELETE RESTRICT, NOT NULL | Parent request. |
 | `action_type` | VARCHAR(32) | NOT NULL | `maintenance_incident` or `maintenance_release`; classification validated by `IBSRequestActionType`. |
-| `source_project` | VARCHAR(255) | nullable | Exact normalized action source project. |
+| `source_project` | VARCHAR(255) | nullable | Action source project in its normalized stored form: the exact project in the `SUSE:` namespace, otherwise the fixed token `_redacted_`. |
 | `source_package` | VARCHAR(255) | nullable | Exact normalized physical source package. |
 | `target_project` | VARCHAR(255) | nullable | Exact normalized target project. For an accepted SR this may be the incident project. |
 | `target_package` | VARCHAR(255) | nullable | Exact normalized physical target package. |
@@ -168,6 +168,15 @@ Type-specific structural checks require:
 - `maintenance_release`: non-null `source_project`, `source_package`,
   `target_project`, `target_package`, and `incident_number`;
   `codestream_name` equals the validated target project.
+
+Every project column stores the value returned by IBS point detail, whose
+parser replaces each project outside the `SUSE:` namespace by the fixed token
+`_redacted_` (`../integrations/ibs-integration.md`, Request Point Detail). Such
+a project, for example a personal `home:` project, is treated as a personal
+identifier and is never persisted. Semantic identities, upserts,
+conflict checks, correlation, and every comparison between retained and current
+actions use this stored form; two actions of one request that become identical
+through the replacement make the observation incomplete.
 
 Optional fields are omitted by IBS rather than represented as null. A later
 complete observation may fill a retained nullable provenance field. Omission in
@@ -251,8 +260,9 @@ For each track it may use all of these roots:
 - released-binary or published-advisory evidence as optional discovery or
   corroboration only.
 
-A narrow ID search is complete only when the response reports all matches and
-does not hit the upstream search-result limit. Every returned ID is point-fetched
+A narrow ID search is complete only when its response is complete under the
+ID-search contract in `../integrations/ibs-integration.md` (Request ID Search).
+Every returned ID is point-fetched
 and each action is validated against the exact logical package, codestream, and
 semantic identity. Prefix matching proposes candidates; it never proves package
 identity. The common physical-package suffix transformation is not universal
@@ -265,17 +275,20 @@ closed by point-fetching each positive `superseded_by_request_number`, with a
 visited set and a finite cycle check. A cycle, missing required successor, or
 unknown successor state is incomplete evidence.
 
-Source-history traversal follows the IBS history operation until the available
-history is exhausted, using its exact revision and backward-traversal controls.
-No wall-clock cutoff is applied. Upstream retention can still make old evidence
-unavailable; that condition is handled as incomplete evidence, not as absence.
+Source history is read as the complete available history of a package in one
+unpaged response, or by exact revision or checksum lookup
+(`../integrations/ibs-integration.md`, Package Source History). A history that
+is not complete under that contract is incomplete evidence. No wall-clock cutoff
+is applied. Upstream retention can still make old evidence unavailable; that
+condition is handled as incomplete evidence, not as absence.
 
 ### Action-Scoped CVE Evidence
 
-Request diffs are evaluated per action. An issue is positive correlation
-evidence only when all of these hold:
+Each relevant action is diffed on its own through the request action diff
+(`../integrations/ibs-integration.md`, Request Action Diff). An issue is
+positive correlation evidence only when all of these hold:
 
-- it belongs to the exact action's `sourcediff`;
+- it belongs to the exact action's own diff;
 - `tracker = cve`;
 - `state` is `added` or `changed`; and
 - canonical `label` exactly equals the Ticket CVE ID.
@@ -285,10 +298,13 @@ positive correlation evidence. `changed` is accepted because a later SR can
 replace incident contents while retaining an existing CVE reference.
 
 A completely parsed action diff with no qualifying issue is a successful
-no-match for that action. An absent diff for an action that does not have one is
-not an error unless that diff is required to determine correlation or effective
-contents. A malformed, unavailable, truncated, or ambiguous required diff is
-incomplete and never deletes retained history or proves a negative.
+no-match for that action. A malformed, unavailable, truncated, or ambiguous diff
+is incomplete; when correlation or effective contents depend on it, the
+observation is incomplete, and it never deletes retained history or proves a
+negative. The diff of an action that is not accepted is unavailable when its
+source project lies outside the `SUSE:` namespace, because such a project is
+never placed in a request URL, and once its source link conflicts with the
+current codestream or its staging project has been removed.
 
 ### Effective SR
 
@@ -343,7 +359,7 @@ Each track-scope reconciliation produces exactly one classification:
 |---|---|---|
 | Complete positive | All required roots and artifacts were validated and relevant current SR/incident/RR evidence exists. | Atomically upsert relevant domain evidence and derive delivery. |
 | Complete no-match | All required roots were exhausted successfully and no relevant current delivery evidence exists. | Retain history; a non-stale negative may derive `PENDING`. |
-| Incomplete | Required evidence is absent, retention-limited, truncated, contradictory, unknown, malformed, search-limited, cyclic, or ambiguous. | Preserve request/action/correlation and delivery state exactly. |
+| Incomplete | Required evidence is absent, retention-limited, truncated, contradictory, unknown, malformed, cyclic, or ambiguous. | Preserve request/action/correlation and delivery state exactly. |
 | Failed | A required external or local operation failed. | Roll back the scope and preserve prior state. |
 
 Examples of incomplete evidence include a required detail 404, unknown request
@@ -836,11 +852,17 @@ Implementation coverage must include:
 - all seven request states, including `declined -> new|review`, explicit
   `deleted`, incomplete 404 handling, and supersession cycles;
 - multi-action parsing and semantic-identity constraints without array position
-  or RabbitMQ `action_id`;
-- action-scoped `added`/`changed` CVE correlation, valid no-match, malformed and
-  missing diff evidence, and unknown action/state handling;
+  or RabbitMQ `action_id`, the eight IBS action types (two supported, six
+  ignored, any other incomplete), and the replacement of projects outside the
+  `SUSE:` namespace, including actions whose identities collide through it;
+- action-scoped `added`/`changed` CVE correlation through the accepted and
+  not-accepted request action diff forms, valid no-match, malformed, HTTP 400
+  and 404, and unrequested diff evidence (a missing form input or a project
+  outside the `SUSE:` namespace), and unknown action/state handling;
 - effective-SR and accepted-RR provenance success, mismatch, unavailable
-  history, missing acceptinfo, and retention-limited outcomes;
+  history, complete and incomplete unpaged history (not starting at revision 1
+  or not contiguous), revision and checksum lookups, missing acceptinfo, and
+  retention-limited outcomes;
 - every delivery transition, irreversible `RELEASED`, complete-negative
   regression, and stale-negative concurrency with independent sessions;
 - atomic request/action/join/delivery commit and rollback, including successful
@@ -859,7 +881,8 @@ Implementation coverage must include:
   including missing/inaccessible 404 equivalence and one visibility-constrained
   distinct candidate set for items and totals; and
 - log, API, and persistence assertions proving that authors, actors, comments,
-  descriptions, raw payloads, credentials, and raw response bodies are absent.
+  descriptions, raw payloads, credentials, raw response bodies, and project
+  names outside the `SUSE:` namespace are absent, including from request URLs.
 
 ## Security and Privacy
 
@@ -871,7 +894,14 @@ Implementation coverage must include:
   API output, metrics, or logs.
 - Personal identifiers and free text from IBS are neither persisted nor
   returned. Logs never include raw event payloads, raw response bodies, actors,
-  comments, descriptions, credentials, or credential-bearing URLs.
+  comments, descriptions, credentials, or credential-bearing URLs. A project
+  outside the `SUSE:` namespace, such as a personal `home:` project, is treated
+  as a personal identifier: request evidence stores the fixed token
+  `_redacted_` instead, and no request operation places such a project in a
+  request URL, so it never reaches `httpx` request logs
+  (`../integrations/ibs-integration.md`, Request Point Detail and Request Action
+  Diff). Request action diffs carry issue references only, never file diff
+  text.
 - RabbitMQ event action arrays and personal fields are ignored. Only the public
   positive request number is consumed as the request wake-up identity.
 

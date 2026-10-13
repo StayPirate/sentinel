@@ -392,16 +392,19 @@ repositories.
     matching
   - `GET /search/request/id?match={typed_narrow_predicate}` — complete ID-only
     discovery for a bounded maintenance action, state, and source scope. Every
-    returned number is point-fetched; a search-result-limit or inconsistent
-    count is incomplete evidence, not a negative result
+    returned number is point-fetched; an inconsistent count is incomplete
+    evidence, not a negative result
   - `GET /request/{request_number}` — authoritative current request state and
     complete REST action representation. Request-event state and action arrays
     are not used as domain evidence
-  - `POST /request/{request_number}?cmd=diff&withissues=1&view=xml` —
-    semantically read-only action-scoped issue evidence
-  - `GET /source/{project}/{package}/_history` — source revision, checksum,
-    time, and optional request-number provenance used for request delivery
-    reconciliation
+  - `POST /source/{project}/{package}?cmd=diff&view=xml&withissues=1&onlyissues=1`
+    — semantically read-only issue evidence for one request action, with the
+    form derived from point detail. The request diff
+    (`POST /request/{request_number}?cmd=diff`) is not used
+  - `GET /source/{project}/{package}/_history[?rev={revision}]` — complete
+    unpaged source history, or an exact revision or checksum lookup, with
+    revision, checksum, time, and optional request-number provenance used for
+    request delivery reconciliation
 - **Integration status**: **Active**. Codestream-level release detection
   uses two complementary mechanisms: the `IBSEventConsumer` (real-time
   via IBS RabbitMQ, see `docs/features/integrations/ibs-rabbitmq-integration.md`) and
@@ -430,18 +433,21 @@ repositories.
 - **Contract verification**: sanitized read-only verification against the IBS
   API established:
   - the track-release source-info and source-diff shapes on 2026-09-03;
-  - the request search, point-detail, request-diff, and source-history shapes
-    on 2026-09-08;
+  - the request search, point-detail, and source-history shapes on 2026-09-08;
   - the source-diff unavailable-revision responses on 2026-10-11 and
-    2026-10-12; and
+    2026-10-12;
   - SSH-signature authentication on 2026-10-12, including a live signed
-    request by Sentinel's own IBS client.
+    request by Sentinel's own IBS client; and
+  - on 2026-10-13, the request operations as currently specified, including
+    the request action diff forms compared with the request diff and the
+    unpaged source history with exact lookups.
 
-  Gate status: neither the track-release nor the authentication contract has
-  an open verification gate. Verified shapes, fields verified only through OBS
-  source inspection, and the remaining unverified details are recorded in the
-  Authentication, Track-Release, and Request Contract Verification Status
-  sections of `docs/features/integrations/ibs-integration.md`
+  Gate status: none of the track-release, authentication, and request-operation
+  contracts has an open verification gate. Verified shapes, fields verified
+  only through OBS source inspection, and the remaining unverified details are
+  recorded in the Authentication, Track-Release, and Request Contract
+  Verification Status sections of
+  `docs/features/integrations/ibs-integration.md`
 - **See also**: `docs/features/integrations/ibs-integration.md`,
   `docs/features/packages/package-model.md`,
   `docs/features/packages/ibs-track-release-detection.md`,
