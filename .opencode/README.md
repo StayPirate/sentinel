@@ -109,7 +109,7 @@ summaries brief while preserving scope, limitations, evidence, and verdicts.
 | `@docs-placement-reviewer` | Reviewer | Guardrail 21 | Verifies rules and patterns are placed in the most appropriate location (not misplaced or duplicated) |
 | `@docs-reviewer` | Reviewer | Guardrail 9 | Reviews documentation completeness and coherence with implementation |
 | `@external-contract-verifier` | Reviewer | On-demand | Verifies external structures and documented destination-field mappings against recorded or live upstream contracts |
-| `@fetcher-compliance-reviewer` | Reviewer | Guardrail 14 | Verifies scheduled fetchers use the applicable BaseFetcher, BaseCVEFetcher, or BaseGitFetcher lifecycle, metrics, and registry contracts |
+| `@fetcher-compliance-reviewer` | Reviewer | Guardrail 14 | Verifies scheduled fetchers use the applicable BaseFetcher, BaseCVEFetcher, or BaseGitFetcher lifecycle, metrics, request-delay, and registry contracts |
 | `@security-reviewer` | Reviewer | Guardrail 10 | Reviews code for security vulnerabilities and insecure patterns |
 | `@spec-coherence-reviewer` | Reviewer | Guardrail 15 | Detects contradictions and inconsistencies across feature specifications |
 | `@spec-conformance-reviewer` | Reviewer | Pre-PR (unconditional) | Verifies a pull request implements what its issue and owning specs require, and introduces no unspecified behavior |

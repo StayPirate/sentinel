@@ -1,8 +1,8 @@
 ---
 description: >
   Reviews scheduled fetchers for correct BaseFetcher, BaseCVEFetcher, or
-  BaseGitFetcher lifecycle, metrics, registry, and task integration. Use after
-  creating or changing a fetcher. Read-only.
+  BaseGitFetcher lifecycle, metrics, request delay, registry, and task
+  integration. Use after creating or changing a fetcher. Read-only.
 mode: subagent
 permission:
   edit: deny
@@ -188,6 +188,32 @@ structural complexity without presenting it to the user for a decision.
 - Does the `name` conflict with any other registered fetcher? Check all
   other fetcher classes for duplicate names.
 
+### Request delay
+
+The generic `FetcherConfig` fields apply to every fetcher, and
+`request_delay` is "Applied by the fetcher"
+(`fetcher-infrastructure.md`, Custom Settings Schema and Data Model ›
+FetcherConfig). Operators can change it through the fetcher configuration
+API and CLI. This check applies to a fetcher that makes more than one
+external request in one invocation, periodic or catch-up, including requests
+made by the boundaries it delegates to. A fetcher whose invocation makes a
+single external request (one file, one git fetch) or none is exempt.
+
+- In a periodic run, does the effective flow wait the run snapshot's
+  `request_delay` (`self.config.request_delay`) between consecutive external
+  requests? A value that an operator can set but that has no effect is a
+  "Needs revision" issue
+- Outside a run (catch-up, on-demand), does the delay follow the owning
+  spec, normally the class `default_request_delay`, and does the owning spec
+  state where the delay applies?
+- Does `default_request_delay` agree with the source's Rate Limits column in
+  `docs/data-sources.md` (Fetcher Registry) and with the owning spec? A
+  source with a rate limit requires a non-zero value
+  (`fetcher-infrastructure.md`, FetcherConfig notes)
+- Is every wait outside each pessimistic row lock and open per-item
+  transaction? Waiting while a lock is held prolongs it
+  (`docs/conventions.md`, Transaction Hygiene Rules)
+
 ### Metric reporting
 
 - For a concrete fetcher that owns `execute()`, does it call
@@ -251,6 +277,9 @@ structural complexity without presenting it to the user for a decision.
   with status `failure` and a populated `error_message`?
 - Do the tests verify that the fetcher is discoverable in the
   `FETCHER_REGISTRY`?
+- For a fetcher subject to the request-delay check, do the tests cover a
+  zero and a non-zero delay in a periodic run and the delay used outside a
+  run?
 
 ### Celery task integration
 
@@ -267,7 +296,7 @@ Provide a structured summary with these sections:
 1. **Clean**: aspects of the fetcher that correctly follow the
    `BaseFetcher` pattern
 2. **Integration issues**: problems with base class inheritance,
-   registration, or metric reporting
+   registration, metric reporting, or the request delay
 3. **Error handling concerns**: issues with exception handling that could
    cause silent failures or expose infrastructure details in public
    error messages
