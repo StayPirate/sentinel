@@ -9,7 +9,7 @@ Owning specifications:
 - docs/features/packages/ibs-track-release-detection.md (Scope; Scheduled
   Reconciliation Algorithm steps 1 and 9; Catch-Up; Error Handling and its
   Structured Logs; Background Fetcher: Fetcher `detect_ibs_track_releases`,
-  Metrics and Run Status; Testing Requirements).
+  Request Delay, Metrics and Run Status; Testing Requirements).
 - docs/features/platform/fetcher-infrastructure.md (BaseFetcher Base
   Class: Finalization, Outcome and effect accounting; Abstract Interface,
   Naming Convention; Per-Ticket Catch-Up: Override-point contract, Celery
@@ -68,6 +68,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Final
 from unittest.mock import AsyncMock, MagicMock, Mock
 
@@ -567,12 +568,14 @@ class TestRegistration:
         assert DetectIbsTrackReleases.http_client_options == {}
 
     def test_class_body_declares_no_settings_queue_or_client_options(self) -> None:
-        """Custom settings: None; default routing (no `queue`); the
-        fetcher's HTTP client is never used, so it overrides no option."""
+        """Custom settings: None; default routing (no `queue`); the 0 s
+        `default_request_delay` is declared explicitly; the fetcher's HTTP
+        client is never used, so it overrides no option."""
         assert _class_body_assignments(DetectIbsTrackReleases) == {
             "name",
             "description",
             "default_schedule",
+            "default_request_delay",
             "participates_in_catch_up",
         }
 
@@ -1894,6 +1897,92 @@ class TestCatchUp:
         assert await events_of(world, track.ticket_id) == [track.fixed_event()]
         assert await checkpoint_srcmd5(world, track) == CURRENT
         ibs_clients.assert_each_closed(2)
+
+
+# ---------------------------------------------------------------------------
+# A8b. Request delay (Background Fetcher: Request Delay); the boundary's
+# placement of each wait is covered by `test_ibs_track_release_races.py`
+# ---------------------------------------------------------------------------
+
+
+def _recorded_sleeps(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """Replace the boundary's `asyncio.sleep` by a recorder."""
+    sleeps: list[float] = []
+
+    async def sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr(boundary, "asyncio", SimpleNamespace(sleep=sleep))
+    return sleeps
+
+
+async def _two_packages(world: TrackWorld, ibs: FakeIBS) -> tuple[Track, Track]:
+    """Two evidence tracks of two packages below one Ticket: one source-info
+    request and two diffs."""
+    seed = Seed(world.session, world)
+    ticket = await seed.ticket()
+    first = await seed.track(ticket)
+    second = await seed.track(ticket, package_name=SIBLING_PACKAGE)
+    await seed.commit()
+    _evidence(ibs, first, second)
+    return first, second
+
+
+@pytest.mark.integration
+@pytest.mark.usefixtures("units")
+class TestRequestDelay:
+    @pytest.mark.parametrize(
+        ("configured", "expected"), [(0.0, []), (0.5, [0.5, 0.5])], ids=["0", "0.5"]
+    )
+    async def test_run_waits_its_snapshot_delay_between_requests(
+        self,
+        world: TrackWorld,
+        runs: _Runs,
+        ibs: FakeIBS,
+        monkeypatch: pytest.MonkeyPatch,
+        configured: float,
+        expected: list[float],
+    ) -> None:
+        """The run snapshot's `request_delay`, not the class value, separates
+        the three requests of a periodic run."""
+        await _two_packages(world, ibs)
+        sleeps = _recorded_sleeps(monkeypatch)
+        monkeypatch.setattr(DetectIbsTrackReleases, "default_request_delay", 9.0)
+        run_id = await runs.start()
+
+        await DetectIbsTrackReleases().run(
+            run_id=run_id,
+            config=FetcherRunConfig(
+                hard_time_limit_seconds=3600,
+                request_delay=configured,
+                custom_settings={},
+            ),
+        )
+
+        assert _outcome(await runs.finalized(run_id)) == ("success", 2, 0, 2, 0)
+        assert len(ibs.served) == 3
+        assert sleeps == expected
+
+    async def test_catch_up_waits_the_class_default_delay(
+        self,
+        world: TrackWorld,
+        ibs: FakeIBS,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Catch-up has no run snapshot: the class `default_request_delay`
+        (0 in production, patched here) separates its requests."""
+        first, second = await _two_packages(world, ibs)
+        sleeps = _recorded_sleeps(monkeypatch)
+        monkeypatch.setattr(DetectIbsTrackReleases, "default_request_delay", 0.25)
+
+        await DetectIbsTrackReleases().catch_up(
+            str(first.ticket_id), await world.open_session()
+        )
+
+        assert len(ibs.served) == 3
+        assert sleeps == [0.25, 0.25]
+        for track in (first, second):
+            assert await track_status(world, track) == PackageStatus.FIXED.value
 
 
 # ---------------------------------------------------------------------------

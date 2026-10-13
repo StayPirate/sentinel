@@ -513,6 +513,7 @@ validation.
 | `participates_in_catch_up` | `True` — custom per-Ticket catch-up |
 | Custom settings | None |
 | HTTP read timeout | 120 seconds per request |
+| `default_request_delay` | 0 s — no rate limit is documented for the download front door (`docs/data-sources.md`, Fetcher Registry); see [Request Delay](#request-delay) |
 
 ### Algorithm
 
@@ -538,6 +539,18 @@ This state-based complete scan is also first-run, re-enable, and long-gap
 recovery. It has no distinct backfill mode, cursor, temporal window, or
 persistent cache.
 
+### Request Delay
+
+The detector waits the inter-request delay before every repository HTTP
+request of one invocation except the first: each `repomd.xml` request, the
+updateinfo artifact request, its permitted redirect, and the requests of a
+consistency restart. A periodic run uses `request_delay` from its runtime
+configuration snapshot; catch-up, which has no snapshot, uses the class
+`default_request_delay` (`docs/features/platform/fetcher-infrastructure.md`,
+FetcherConfig). A zero delay never waits. The delay does not separate the
+shared transport retries of one request. Every wait precedes the first
+per-occurrence transaction, so none occurs while a Ticket lock is held.
+
 ### Catch-Up
 
 `DetectIbsProductReleases.catch_up(ticket_id, session)` is a custom non-CVE
@@ -551,7 +564,9 @@ an active status registers Ticket convergence, which runs catch-up again.
 
 Catch-up applies the same current/historical repository tiers, complete
 validation, timestamp selection, per-invocation deduplication, and independent
-per-occurrence transactions as periodic execution. Advisories that predate the
+per-occurrence transactions as periodic execution, and separates consecutive
+repository requests by the class `default_request_delay`
+([Request Delay](#request-delay)). Advisories that predate the
 Ticket or Ticket convergence remain discoverable and retain their original issued
 time. Pre-finalization per-occurrence failures are logged and siblings continue.
 Partial success returns normally; when every selected occurrence fails,
@@ -640,6 +655,11 @@ Future implementation tests must cover:
   non-operational propagation without reclassification;
 - per-invocation repository reuse without cross-run cache, cursor, Redis, or
   filesystem state;
+- the request delay: no wait before the first repository request, the run's
+  `request_delay` before every later request of a periodic run, including a
+  redirect and a consistency restart, the class `default_request_delay` in
+  catch-up, no wait for a zero delay, and every wait before the first
+  per-occurrence transaction;
 - periodic and catch-up partial/all-failed outcomes, exact metrics and inherited
   run statuses;
 - updated, no-match, concurrent already-released, stale/inapplicable, failed,

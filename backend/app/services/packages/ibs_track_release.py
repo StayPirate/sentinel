@@ -22,7 +22,10 @@ the periodic fetcher and the per-Ticket catch-up of
   baselines first, then `orev=0` for first observations and the
   unavailable-history fallback). After each diff it applies the local
   outcome of every dependent track as one independent transaction, so no
-  IBS request is made while a Ticket lock is held.
+  IBS request is made while a Ticket lock is held. The caller's request
+  delay separates every two consecutive IBS requests (Background Fetcher:
+  Request Delay); none precedes the first, and none is waited inside a
+  local transaction.
 - `_reconcile_track()` is the only function that takes the Ticket row lock:
   it applies `ensure_ticket_operable()`, revalidates the selected scope,
   compares the checkpoint predecessor (the Ticket lock serializes every
@@ -45,6 +48,7 @@ finalization become per-track failures; every other exception, including
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Sequence
@@ -229,6 +233,7 @@ async def reconcile_ibs_track_releases(
     client: IBSClient,
     fetcher_name: str,
     on_outcome: TrackReleaseOutcomeHook | None = None,
+    request_delay: float = 0.0,
 ) -> list[TrackReleaseOutcome]:
     """Reconcile the selected tracks against their expanded IBS source state.
 
@@ -239,7 +244,9 @@ async def reconcile_ibs_track_releases(
     equivalent selection); duplicate track IDs are processed once.
     `client` is the caller's open `IBSClient`; `fetcher_name` identifies
     the caller in per-track logs; `on_outcome`, when given, receives each
-    terminal outcome exactly once.
+    terminal outcome exactly once; `request_delay` is the seconds waited
+    before every source-info or diff request except the first (Request
+    Delay), never while a local transaction is open.
 
     Q2: acquires no lock and performs IBS I/O only outside every local
     transaction; each local unit serializes on the Ticket row lock in
@@ -282,7 +289,12 @@ async def reconcile_ibs_track_releases(
     selected: dict[uuid.UUID, TrackReleaseCandidate] = {}
     for candidate in candidates:
         selected.setdefault(candidate.track_id, candidate)
-    run = _Reconciliation(client=client, fetcher_name=fetcher_name, hook=on_outcome)
+    run = _Reconciliation(
+        client=client,
+        fetcher_name=fetcher_name,
+        hook=on_outcome,
+        request_delay=request_delay,
+    )
     if selected:
         await run.execute([selected[key] for key in sorted(selected)])
     return run.outcomes
@@ -295,7 +307,15 @@ class _Reconciliation:
     client: IBSClient
     fetcher_name: str
     hook: TrackReleaseOutcomeHook | None
+    request_delay: float
     outcomes: list[TrackReleaseOutcome] = field(default_factory=list)
+    requested: bool = False
+
+    async def _pace(self) -> None:
+        """Wait the request delay before every IBS request but the first."""
+        if self.requested and self.request_delay > 0:
+            await asyncio.sleep(self.request_delay)
+        self.requested = True
 
     async def execute(self, ordered: Sequence[TrackReleaseCandidate]) -> None:
         valid: list[TrackReleaseCandidate] = []
@@ -354,6 +374,7 @@ class _Reconciliation:
                     for package in partition
                     for track in dependents_by_package[package]
                 ]
+                await self._pace()
                 try:
                     results = await self.client.get_source_info(project, partition)
                 except _REQUEST_ERRORS as exc:
@@ -396,6 +417,7 @@ class _Reconciliation:
         they have no outcome yet and continue with the `orev=0` diff.
         """
         project, package, baseline, srcmd5 = key
+        await self._pace()
         try:
             issues = await self.client.get_diff_issues(
                 project, package, baseline, srcmd5

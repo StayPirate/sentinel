@@ -7,9 +7,9 @@ contract and registration, `run()` finalization over the real
 Owning specifications:
 
 - docs/features/packages/ibs-product-release-detection.md (Fetcher:
-  `detect_ibs_product_releases` properties, Algorithm, Catch-Up, Error
-  Handling, Metrics and Run Status; Local mutation and concurrency:
-  per-unit finalization; Testing Requirements).
+  `detect_ibs_product_releases` properties, Algorithm, Request Delay,
+  Catch-Up, Error Handling, Metrics and Run Status; Local mutation and
+  concurrency: per-unit finalization; Testing Requirements).
 - docs/features/platform/fetcher-infrastructure.md (BaseFetcher Base
   Class, Finalization; Per-Ticket Catch-Up: Celery task wrapper, Interface
   contract, Fetcher inventory; Error Message Sanitization and the
@@ -50,12 +50,14 @@ only current association is `REPOSITORY`. All data is fictional.
 from __future__ import annotations
 
 import ast
+import asyncio
 import inspect
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Final
 from unittest.mock import AsyncMock, MagicMock, Mock
 
@@ -96,6 +98,7 @@ from app.services.fetcher_schedule import reconcile_beat_schedule
 from app.services.http_client import create_http_client, is_retryable_condition
 from app.services.package_service import run_ticket_convergence
 from app.services.packages import detect_ibs_product_releases as detector
+from app.services.packages import ibs_product_download as download
 from app.services.packages import ibs_product_release as boundary
 from app.services.packages.detect_ibs_product_releases import (
     DetectIbsProductReleases,
@@ -466,11 +469,13 @@ class TestRegistration:
         assert DetectIbsProductReleases.http_client_options == {"timeout": TIMEOUT}
 
     def test_class_body_declares_no_settings_or_queue(self) -> None:
-        """Custom settings: None; default routing (no `queue`)."""
+        """Custom settings: None; default routing (no `queue`); the 0 s
+        `default_request_delay` is declared explicitly."""
         assert _class_body_assignments(DetectIbsProductReleases) == {
             "name",
             "description",
             "default_schedule",
+            "default_request_delay",
             "participates_in_catch_up",
             "http_client_options",
         }
@@ -1337,6 +1342,84 @@ class TestCatchUp:
         assert await released_events(world, occurrence.ticket_id) == [
             occurrence.released_event()
         ]
+
+
+# ---------------------------------------------------------------------------
+# A6b. Request delay (Fetcher: Request Delay); the placement of each wait is
+# covered by `test_ibs_product_download_http.py` and
+# `test_ibs_product_release.py`
+# ---------------------------------------------------------------------------
+
+
+def _recorded_sleeps(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """Replace the download module's `asyncio.sleep` by a recorder."""
+    sleeps: list[float] = []
+
+    async def sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr(
+        download, "asyncio", SimpleNamespace(Lock=asyncio.Lock, sleep=sleep)
+    )
+    return sleeps
+
+
+@pytest.mark.integration
+@pytest.mark.usefixtures("units")
+class TestRequestDelay:
+    @pytest.mark.parametrize(
+        ("configured", "expected"), [(0.0, []), (0.5, [0.5] * 3)], ids=["0", "0.5"]
+    )
+    async def test_run_waits_its_snapshot_delay_between_requests(
+        self,
+        world: ReleaseWorld,
+        runs: _Runs,
+        server: DownloadServer,
+        monkeypatch: pytest.MonkeyPatch,
+        configured: float,
+        expected: list[float],
+    ) -> None:
+        """The run snapshot's `request_delay`, not the class value, separates
+        the four requests of one repository examination."""
+        (occurrence,) = await _seeded(world)
+        _serve(server, occurrence)
+        sleeps = _recorded_sleeps(monkeypatch)
+        monkeypatch.setattr(DetectIbsProductReleases, "default_request_delay", 9.0)
+        run_id = await runs.start()
+
+        await DetectIbsProductReleases().run(
+            run_id=run_id,
+            config=FetcherRunConfig(
+                hard_time_limit_seconds=3600,
+                request_delay=configured,
+                custom_settings={},
+            ),
+        )
+
+        assert _outcome(await runs.finalized(run_id)) == ("success", 1, 0, 1, 0)
+        assert len(server.requests) == 4
+        assert sleeps == expected
+
+    async def test_catch_up_waits_the_class_default_delay(
+        self,
+        world: ReleaseWorld,
+        server: DownloadServer,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Catch-up has no run snapshot: the class `default_request_delay`
+        (0 in production, patched here) separates its requests."""
+        (occurrence,) = await _seeded(world)
+        _serve(server, occurrence)
+        sleeps = _recorded_sleeps(monkeypatch)
+        monkeypatch.setattr(DetectIbsProductReleases, "default_request_delay", 0.25)
+
+        await DetectIbsProductReleases().catch_up(
+            str(occurrence.ticket_id), await world.open_session()
+        )
+
+        assert len(server.requests) == 4
+        assert sleeps == [0.25] * 3
+        assert await released_at(world, occurrence) == ISSUED_AT
 
 
 # ---------------------------------------------------------------------------

@@ -3,7 +3,8 @@
 Contract under test: docs/features/packages/ibs-product-release-detection.md
 (Download Origin and Repository Paths: anonymous requests; HTTP and Redirect
 Contract; Repomd Contract with Checksums; Resource and XML Safety; Snapshot
-Consistency; the failure rows of Repository Traversal), docs/features/
+Consistency; the failure rows of Repository Traversal; Fetcher: Request
+Delay), docs/features/
 integrations/ibs-integration.md (Origins and Authentication, Business Rule 1,
 Security), docs/features/platform/networking.md (Transport-Level Retry before
 classification; Redirect Policy, IBS Product-repodata exception), and
@@ -32,6 +33,7 @@ import httpx
 import pytest
 
 from app.services import http_client
+from app.services.packages import ibs_product_download
 from app.services.packages.ibs_product_download import (
     ProductReleaseIncomplete,
     ProductReleaseMatch,
@@ -81,6 +83,7 @@ from tests.support.inadmissible import INADMISSIBLE_CHARACTERS, NUL, SURROGATE
 pytestmark = pytest.mark.unit
 
 REPO: Final = "SUSE:Updates:Example:1:x86_64"
+OTHER_REPO: Final = "SUSE:Updates:Example:2:x86_64"
 MATCH_ID: Final = "SUSE-Example-2024-1"
 MATCH_ADVISORY: Final = advisory(
     MATCH_ID, cves=[DEFAULT_CVE], sources=[DEFAULT_PACKAGE]
@@ -1689,6 +1692,94 @@ class TestSnapshotConsistency:
 
         _assert_incomplete(await _observe(server), "http_status", 503)
         assert _hosts(server).count(REDIRECT_HOST) == 1
+
+
+# ---------------------------------------------------------------------------
+# Request delay (Fetcher: Request Delay)
+# ---------------------------------------------------------------------------
+
+
+def _recorded_waits(
+    monkeypatch: pytest.MonkeyPatch, server: DownloadServer
+) -> list[tuple[float, int]]:
+    """Replace the module's `asyncio.sleep` by a recorder of each delay and
+    the number of requests the server had received when it was waited."""
+    waits: list[tuple[float, int]] = []
+
+    async def sleep(delay: float) -> None:
+        waits.append((delay, len(server.requests)))
+
+    monkeypatch.setattr(
+        ibs_product_download,
+        "asyncio",
+        SimpleNamespace(Lock=asyncio.Lock, sleep=sleep),
+    )
+    return waits
+
+
+class TestRequestDelay:
+    async def test_delay_precedes_every_request_but_the_first_of_the_invocation(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Two repositories in one invocation: each `repomd.xml`, artifact,
+        and redirect request after the first waits the delay once."""
+        item = _artifact()
+        server = _server(item)
+        server.add(OTHER_REPO, artifact(updateinfo_document()))
+        waits = _recorded_waits(monkeypatch, server)
+
+        async with server.client() as client:
+            outcomes = await observe(
+                client,
+                candidate(current=[OTHER_REPO]),
+                candidate(current=[REPO]),
+                request_delay=0.25,
+            )
+
+        assert outcomes[0] == ProductReleaseNoMatch()
+        _assert_matched(outcomes[1])
+        assert len(server.requests) == 8
+        assert waits == [(0.25, count) for count in range(1, 8)]
+
+    async def test_consistency_restart_requests_are_delayed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        old = _artifact()
+        new = artifact(
+            updateinfo_document(
+                advisory(
+                    "SUSE-Example-2024-2",
+                    cves=[DEFAULT_CVE],
+                    sources=[DEFAULT_PACKAGE],
+                    issued="1717000000",
+                )
+            )
+        )
+        server = _server(old)
+        _serve_artifact(server, new)
+        server.script(_repomd_url(server), _xml(_repomd(old)), _xml(_repomd(new)))
+        waits = _recorded_waits(monkeypatch, server)
+
+        async with server.client() as client:
+            [outcome] = await observe(
+                client, candidate(current=[REPO]), request_delay=0.5
+            )
+
+        assert isinstance(outcome, ProductReleaseMatch)
+        # R1, artifact, redirect, R2 (changed), artifact, redirect, R3.
+        assert len(server.requests) == 7
+        assert waits == [(0.5, count) for count in range(1, 7)]
+
+    async def test_zero_delay_never_waits(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        server = _server()
+        waits = _recorded_waits(monkeypatch, server)
+
+        _assert_matched(await _observe(server))
+
+        assert len(server.requests) == 4
+        assert waits == []
 
 
 # ---------------------------------------------------------------------------

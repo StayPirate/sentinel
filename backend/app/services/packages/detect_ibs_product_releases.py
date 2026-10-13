@@ -9,6 +9,11 @@ delegate to `reconcile_ibs_product_releases()`, which owns the repository
 I/O, the independent per-occurrence transactions, and the Ticket
 convergence drain. Neither method takes a Ticket lock.
 
+The boundary separates consecutive repository requests by the request
+delay (Fetcher: Request Delay): the run's `request_delay` in `execute()`,
+the class `default_request_delay` in `catch_up()`, which has no run
+snapshot.
+
 Periodic metrics are recorded through the boundary's per-outcome hook:
 `updated` is succeeded and updated, `no_op` (no match, already released,
 or stale) is succeeded, `failed` is failed; nothing is ever created. A
@@ -56,6 +61,7 @@ class DetectIbsProductReleases(BaseFetcher):
         "validated updateinfo advisories"
     )
     default_schedule = "0 4 * * *"
+    default_request_delay = 0
     participates_in_catch_up = True
     http_client_options: ClassVar[dict[str, Any]] = {
         "timeout": httpx.Timeout(10.0, read=120.0)
@@ -75,7 +81,15 @@ class DetectIbsProductReleases(BaseFetcher):
             client=self.http_client,
             fetcher_name=self.name,
             on_outcome=self._record_outcome,
+            request_delay=self._run_request_delay(),
         )
+
+    def _run_request_delay(self) -> float:
+        """The run snapshot's `request_delay`; the class value only when
+        `execute()` is called outside `run()`."""
+        if self.config is not None:
+            return self.config.request_delay
+        return self.default_request_delay
 
     def _record_outcome(self, outcome: ProductReleaseOutcome) -> None:
         if outcome.kind == "failed":
@@ -104,7 +118,10 @@ class DetectIbsProductReleases(BaseFetcher):
             return
 
         summary = await reconcile_ibs_product_releases(
-            candidates, client=self.http_client, fetcher_name=self.name
+            candidates,
+            client=self.http_client,
+            fetcher_name=self.name,
+            request_delay=self.default_request_delay,
         )
         if summary.failed == summary.selected:
             raise FetcherError(all_failed_message(summary.failed))

@@ -16,7 +16,8 @@ Owning specifications:
   exception or ambiguity terminates the invocation; broker-operational
   publication absorption; non-operational propagation without
   reclassification; Checkpoint Concurrency; Error Handling and its
-  Structured Logs; Testing Requirements).
+  Structured Logs; Background Fetcher: Request Delay; Testing
+  Requirements).
 - docs/features/packages/package-service.md (`set_track_status()`
   Track-release composition; Concurrency Control; Excluded and
   Non-Actionable Records > Ticket-level operability; Architectural Test
@@ -47,7 +48,9 @@ import re
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any, Final
+from unittest.mock import AsyncMock
 
 import pytest
 from celery.exceptions import OperationalError as KombuOperationalError
@@ -64,6 +67,7 @@ from app.models.ticket_package import TicketPackage
 from app.models.ticket_package_track import TicketPackageTrack
 from app.models.track_release_checkpoint import TrackReleaseCheckpoint
 from app.services import package_service, task_publication
+from app.services.packages import ibs_track_release
 from app.services.packages.ibs_track_release import (
     TrackReleaseCandidate,
     reconcile_ibs_track_releases,
@@ -1123,6 +1127,108 @@ class TestNoIBSRequestUnderTheTicketLock:
         assert events.count("unit") == 4
         assert events.count("close") == 4
         assert events[0] == "http:source"
+
+
+# ---------------------------------------------------------------------------
+# Request delay (Background Fetcher: Request Delay)
+# ---------------------------------------------------------------------------
+
+
+class TestRequestDelay:
+    async def test_delay_precedes_every_later_request_and_no_unit(
+        self,
+        world: TrackWorld,
+        ibs: FakeIBS,
+        units: TrackUnitSessions,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Two projects, an unavailable-history fallback, and a failed diff:
+        no wait before the first IBS request, the delay immediately before
+        every later source-info and diff request (the `orev=0` fallback
+        included), and never while a unit is open."""
+        seed = Seed(world.session, world)
+        first = await seed.track(await seed.ticket())
+        fallback = await seed.track(await seed.ticket(), checkpoint=CHECKPOINT)
+        other = await seed.track(await seed.ticket(), project=OTHER_PROJECT)
+        broken = await seed.track(await seed.ticket(), package_name="example-zz")
+        await seed.commit()
+        ibs.source(PROJECT, PACKAGE, CURRENT)
+        ibs.source(PROJECT, "example-zz", CURRENT)
+        ibs.source(OTHER_PROJECT, PACKAGE, CURRENT)
+        ibs.diff(
+            PROJECT,
+            PACKAGE,
+            CHECKPOINT,
+            CURRENT,
+            unavailable(PROJECT, PACKAGE, CHECKPOINT),
+        )
+        ibs.issues(
+            PROJECT, PACKAGE, "0", CURRENT, issue(_cve(first)), issue(_cve(fallback))
+        )
+        ibs.issues(OTHER_PROJECT, PACKAGE, "0", CURRENT, issue(OTHER_CVE))
+        ibs.diff(PROJECT, "example-zz", "0", CURRENT, xml_response(b"<sourcediff"))
+        events: list[str] = []
+        delays: list[float] = []
+        units.events = events
+        ibs.events = events
+
+        async def sleep(delay: float) -> None:
+            delays.append(delay)
+            events.append("sleep")
+
+        monkeypatch.setattr(ibs_track_release, "asyncio", SimpleNamespace(sleep=sleep))
+
+        outcomes = await reconcile(
+            ibs,
+            [t.candidate() for t in (first, fallback, other, broken)],
+            request_delay=0.25,
+        )
+
+        assert kinds(outcomes) == {
+            first.id: "updated",
+            fallback.id: "updated",
+            other.id: "no_op",
+            broken.id: "failed",
+        }
+        requests = [entry for entry in events if entry.startswith("http:")]
+        # Two source-info requests, the checkpoint diff, the fallback and
+        # first-observation diff, the failed diff, and the other project's.
+        assert len(requests) == 6
+        assert events[0] == "http:source"
+        assert delays == [0.25] * (len(requests) - 1)
+        inside = False
+        for position, entry in enumerate(events):
+            if entry == "unit":
+                inside = True
+            elif entry == "close":
+                inside = False
+            elif entry == "sleep":
+                assert not inside, events
+                assert events[position + 1].startswith("http:"), events
+
+    @pytest.mark.parametrize("delay", [None, 0.0], ids=["omitted", "zero"])
+    async def test_zero_or_omitted_delay_never_waits(
+        self,
+        world: TrackWorld,
+        ibs: FakeIBS,
+        monkeypatch: pytest.MonkeyPatch,
+        delay: float | None,
+    ) -> None:
+        seed = Seed(world.session, world)
+        first = await seed.track(await seed.ticket())
+        other = await seed.track(await seed.ticket(), project=OTHER_PROJECT)
+        await seed.commit()
+        _evidence(ibs, first, other)
+        sleep = AsyncMock()
+        monkeypatch.setattr(ibs_track_release, "asyncio", SimpleNamespace(sleep=sleep))
+
+        outcomes = await reconcile(
+            ibs, [first.candidate(), other.candidate()], request_delay=delay
+        )
+
+        assert kinds(outcomes) == {first.id: "updated", other.id: "updated"}
+        assert len(ibs.served) == 4
+        sleep.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------
