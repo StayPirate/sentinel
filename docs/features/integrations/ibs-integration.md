@@ -180,7 +180,7 @@ session IBS no longer accepts receives HTTP 401 and continues at step 4 of
 Sanitized read-only verification against the IBS API on 2026-10-12, and source
 inspection of OBS, osc, and osc-tiny, established:
 
-- `GET /about` is public. Without authentication, every operation family below
+- `GET /about` is public. Without authentication, every operation family tested
   (targeted source info, source diff, request ID search, request point detail,
   request diff, and source history) returns HTTP 401 with an HTML
   body from the IBS front end, no cookie, and exactly one challenge:
@@ -325,8 +325,10 @@ checksum:
 </status>
 ```
 
-A source-diff response identifies the requested `orev` as unavailable only when
-all of the following hold:
+This classification applies only to the track-release source diff
+(`get_diff_issues()`); the [Request Action Diff](#request-action-diff) treats
+every HTTP 400 as an incomplete result. A source-diff response identifies the
+requested `orev` as unavailable only when all of the following hold:
 
 1. the request's `orev` is a 32-character hexadecimal checksum, not `0`, and
    differs from its `rev`;
@@ -526,6 +528,10 @@ Sentinel consumes these action shapes:
 | `maintenance_incident` | `action/@type`, `source/@project`, `source/@package`, `target/@releaseproject` | `source/@rev`, `target/@project`, `target/@package`, and `acceptinfo` fields |
 | `maintenance_release` | `action/@type`, `source/@project`, `source/@package`, `target/@project`, `target/@package` | `source/@rev`, `target/@releaseproject`, and `acceptinfo` fields |
 
+`source/@rev`, when present, is a positive decimal revision number or a
+lowercase 32-character hexadecimal checksum. It is a provenance field and an
+input of the not-accepted [Request Action Diff](#request-action-diff) form.
+
 When `<acceptinfo>` is present, Sentinel consumes these optional attributes:
 
 | Attribute | Contract | Use |
@@ -543,17 +549,19 @@ that is not also a provenance field is never compared, persisted, or substituted
 for a provenance field. Other acceptinfo attributes are not consumed. Missing
 optional elements or attributes are represented as absent typed values, not
 empty strings. Omission can make provenance incomplete, but it is not by itself
-malformed response data. A present consumed attribute that is empty or violates
-its contract makes the request observation incomplete.
+malformed response data. A present `source/@rev` or consumed acceptinfo
+attribute that is empty or violates its contract makes the request observation
+incomplete.
 
 Every consumed project and package value (`source/@project`, `source/@package`,
 `target/@project`, `target/@package`, `target/@releaseproject`, and acceptinfo
 `oproject` and `opackage`) is an **IBS name**: 1 to 255 characters, each an
 ASCII letter or digit, `_`, `.`, `:`, `+`, or `-`, and neither `.` nor `..`.
-OBS restricts project and package names to these characters, and the rule
-keeps every value safe to place in a request path, query, or search predicate
-unchanged. A supported action whose consumed project or package value is not an
-IBS name makes the request observation incomplete.
+OBS restricts project and package names to these characters. None of them ends
+a path segment, a query parameter, or a quoted XPath string literal; path
+segments and query values are still percent-encoded, so a `+` in a query value
+is sent as `%2B`. A supported action whose consumed project or package value is
+not an IBS name makes the request observation incomplete.
 
 IBS request actions have exactly eight types: `submit`, `delete`, `add_role`,
 `set_bugowner`, `change_devel`, `release`, `maintenance_incident`, and
@@ -575,7 +583,8 @@ identifies a person. After validation, the parser replaces every consumed
 project value that does not start with exactly `SUSE:` by the fixed token
 `_redacted_`. The token does not start with `SUSE:` and is not a valid OBS
 project name, because OBS project names cannot start with `_`, so it never
-equals a real project. No other project name leaves the parser: typed values,
+equals a real project. No project name outside the `SUSE:` namespace leaves the
+parser: typed values,
 semantic identities, and every comparison and persisted value derived from
 point detail use the replaced value. Two supported actions of one request whose
 semantic identities become equal through the replacement make the request
@@ -623,7 +632,7 @@ response always carries complete file diffs, including changes-file text that
 contains personal data. With `onlyissues=1`, the response carries issue
 references without file names or diff text.
 
-The form reproduces the diff that IBS computes for the action. An action is
+The form follows how IBS builds the diff of a request action. An action is
 **accepted** when its point detail has `<acceptinfo>`; every other action is
 **not accepted**, whatever its request state. In the table, `xsrcmd5`,
 `srcmd5`, `oxsrcmd5`, `osrcmd5`, `oproject`, and `opackage` are the acceptinfo
@@ -634,21 +643,30 @@ attributes:
 | Accepted | `target/@project` / `target/@package` | `rev` = `xsrcmd5`, or `srcmd5` when `xsrcmd5` is absent; `orev` = `oxsrcmd5`, or `osrcmd5` when `oxsrcmd5` is absent, or `0` when both are absent; `oproject` and `opackage`, each only when present |
 | Not accepted | `source/@project` / `source/@package` | `expand=1`; `rev` = `source/@rev`; `oproject` = the codestream, which is `target/@releaseproject` of a `maintenance_incident` action and `target/@project` of a `maintenance_release` action; `opackage` = the caller-supplied logical package of that codestream |
 
-These fallbacks select diff inputs only. Provenance never substitutes one
-acceptinfo attribute for another; it compares only the fields its proof names.
+These fallbacks select diff inputs only.
 
-The accepted form compares the stored source states before and after
-acceptance. The not-accepted form compares the request source with the current
-codestream package, as IBS shows an open request: the old package resolves
-through its own link and through project links, and `expand=1` expands both
-sides. Without `expand=1`, a linked source would be compared unexpanded and
+The accepted form is the diff IBS shows for an accepted action: it compares the
+stored source states before and after acceptance. The not-accepted form
+compares the request source with the current codestream package, as IBS shows
+an open request. The old package resolves through its own link and through
+project links, and `expand=1` expands both sides; the logical codestream
+package gives the same result as the previous incident package that IBS
+selects. Without `expand=1`, a linked source would be compared unexpanded and
 report its entire changelog as added, so a not-accepted action is never diffed
-without it.
+without it. The not-accepted form deliberately differs from IBS in two cases:
+
+- IBS omits `expand=1` for an action whose source package is a local link to a
+  package carried by another action of the same request, and for an action that
+  updates its link. Sentinel always expands, so such an action's diff includes
+  the changes of its link target.
+- IBS diffs a package that does not yet exist in the codestream against an
+  empty tree. Sentinel's diff names the missing old package, receives HTTP 404,
+  and is incomplete.
 
 The diff is not requested, and the result is incomplete, when a required form
-input is absent (`target/@package`, both `xsrcmd5` and `srcmd5`, or
-`source/@rev`), or when the path project or `oproject` is not a `SUSE:`
-project. The last rule keeps every project outside the `SUSE:` namespace out of
+input is absent (`target/@project`, `target/@package`, both `xsrcmd5` and
+`srcmd5`, or `source/@rev`), or when the path project or `oproject` is not a
+`SUSE:` project. The last rule keeps every project outside the `SUSE:` namespace out of
 request URLs; point detail has already replaced such a project by `_redacted_`.
 A not-accepted action from such a project therefore has no available diff.
 
@@ -795,7 +813,9 @@ Verified live:
     `xsrcmd5`, `osrcmd5`, and `oxsrcmd5`. Accepted `maintenance_release`
     actions of a package other than patchinfo carry `rev`, `srcmd5`,
     `osrcmd5`, `oxsrcmd5`, `oproject`, and `opackage`, without `xsrcmd5`;
-    patchinfo actions carry only `rev`, `srcmd5`, and `osrcmd5`. Omitted values
+    patchinfo actions carry only `rev`, `srcmd5`, and `osrcmd5`. Every
+    observed `source/@rev` and acceptinfo checksum is lowercase 32-character
+    hexadecimal, and every acceptinfo `rev` a decimal number. Omitted values
     are never rendered empty.
   - HTTP 404 `not_found` answers an unknown, zero, or non-numeric request
     number.
@@ -803,7 +823,7 @@ Verified live:
   - For accepted and not-accepted actions of submission and release requests,
     including open, superseded, revoked, and declined requests, the issue set
     equals the one in the request diff for the same action. The responses
-    were 0.5 to 91 kB, against 10 kB to 1.4 MB for the request diff.
+    were 0.6 to 91 kB, against 10 kB to 1.4 MB for the request diff.
   - Using the logical codestream package as `opackage` gives the same result
     as the previous incident package that IBS derives. An old package
     inherited through a project link resolves.
@@ -837,14 +857,15 @@ Established only by OBS source inspection:
 - revision numbering from 1 without gaps survives package deletion,
   undeletion, and history-preserving project copies, and the API forwards no
   `startbefore` and applies no default `limit`;
-- the request action diff forms reproduce how IBS builds the diff of a request
-  action.
+- how IBS builds the diff of a request action, including the two cases in
+  which the not-accepted form deliberately differs.
 
 Documentation-only, not verified: HTTP 403 outcomes; `deleted` on a maintenance
 request; an action of an unknown type; a supported action missing a required
 field; malformed or interrupted bodies and U+0000 (synthetic test data only);
-an accepted action without both `oxsrcmd5` and `osrcmd5`; and a not-accepted
-action without `source/@rev`.
+an accepted action with neither `oxsrcmd5` nor `osrcmd5`; a not-accepted action
+whose source is a local link carried by another action of the same request; and
+a not-accepted action for a package that does not yet exist in the codestream.
 
 IBS does not guarantee indefinite retention of detail, diff, or source history.
 The resulting unavailable-evidence outcomes are part of the contract, not an
@@ -914,9 +935,10 @@ Methods:
   unsupported action types, empty state/package collections, calls without a
   source-project or source-package bound, and calls supplying more than one of
   `source_project`, `source_packages`, or `source_package_prefix` before HTTP
-  I/O. Each name input must be an IBS name, and `source_project` must start with
-  `SUSE:`. A complete result contains distinct positive request numbers and the
-  reported match count.
+  I/O. Each project, package, and prefix input must be an IBS name (see
+  [Request Point Detail](#request-point-detail)), and `source_project` must
+  start with `SUSE:`. A complete result contains distinct positive request
+  numbers and the reported match count.
 - `get_request(request_number: int) ->
   RequestEvidenceResult[IBSRequestDetail]`: point-fetches one positive request
   number. A complete result contains the typed parent plus every supported
@@ -928,17 +950,14 @@ Methods:
   [Request Point Detail](#request-point-detail). A detail 404 is an incomplete
   result rather than a synthetic deleted state.
 - `get_request_action_diff(action: IBSRequestActionDetail, *,
-  codestream_package: str | None = None) ->
-  RequestEvidenceResult[RequestActionDiff]`: diffs one supported action of a
-  complete `IBSRequestDetail` with the semantically read-only
-  [Request Action Diff](#request-action-diff). It selects the accepted form when
-  the action has acceptinfo, and the not-accepted form otherwise.
+  codestream_package: str) -> RequestEvidenceResult[RequestActionDiff]`: diffs
+  one supported action of a complete `IBSRequestDetail` with the semantically
+  read-only [Request Action Diff](#request-action-diff). It selects the accepted
+  form when the action has acceptinfo, and the not-accepted form otherwise.
   `codestream_package` is the logical package of the action's codestream,
-  supplied by the caller from its package identity. It is required, as an IBS
-  name, for an action without acceptinfo, and must be omitted for an accepted
-  action; either violation is rejected before HTTP I/O. A missing form input or
-  a project outside the `SUSE:` namespace is an incomplete result without a
-  request. A complete result contains the action's typed issues with `tracker`,
+  supplied by the caller from its package identity; it must be an IBS name and
+  is used only by the not-accepted form. A missing form input or a project
+  outside the `SUSE:` namespace is an incomplete result without a request. A complete result contains the action's typed issues with `tracker`,
   `state`, `name`, and `label` preserved for the owning reconciliation to
   evaluate; `changed` evidence is not filtered out.
 - `get_source_history(project: str, package: str, *, revision: str | None =
@@ -965,20 +984,20 @@ The methods have these escaping outcomes:
 
 | Condition | Signal to caller |
 |---|---|
-| Invalid or empty method input, including an unbounded request search, a request-operation project input outside the `SUSE:` namespace, an invalid source-history revision, or a `codestream_package` that is missing for an action without acceptinfo or present for an accepted action | `ValueError` before HTTP I/O |
+| Invalid or empty method input, including an unbounded request search, a name input that is not an IBS name, a request-operation project input outside the `SUSE:` namespace, or an invalid source-history revision | `ValueError` before HTTP I/O |
 | IBS API credentials not configured: `IBS_USERNAME` or `IBS_SSH_PRIVATE_KEY` is empty or unset | `IBSCredentialsNotConfiguredError` before HTTP I/O, after method input validation |
 | Authentication rejected: HTTP 401 to the signed attempt, or an HTTP 401 without exactly one supported `Signature` challenge | `IBSAuthenticationError` with reason `signature_rejected` or `unsupported_challenge`; no further request for that operation |
 | Transport failure, timeout, rate limit, or HTTP error other than an authentication failure, an identified unavailable source-diff old revision, or an operation-specific incomplete-evidence response, after shared retry handling. This includes an HTTP 403 authorization failure and every other `get_diff_issues()` 400 or 404 | The corresponding `httpx` exception propagates with the response body excluded from application logs |
-| Malformed/interrupted successful source-info or source-diff XML, or its document-level schema failure | `IBSResponseDataError` |
+| Malformed/interrupted successful `get_source_info()` or `get_diff_issues()` XML, or its document-level schema failure | `IBSResponseDataError` |
 | One requested source-info package missing, duplicated, error-bearing, or carrying an invalid `srcmd5` | A per-package failed result in the returned mapping; valid sibling package results remain usable |
-| Source diff response identifies `old_md5` as unavailable under [Unavailable Old Revision](#unavailable-old-revision) | `IBSHistoricalRevisionUnavailable` |
-| Source diff contains an issue with an unusable structural shape | `IBSResponseDataError` |
-| Source diff is valid and contains no qualifying issue | Empty list |
+| `get_diff_issues()` response identifies `old_md5` as unavailable under [Unavailable Old Revision](#unavailable-old-revision) | `IBSHistoricalRevisionUnavailable` |
+| `get_diff_issues()` response contains an issue with an unusable structural shape | `IBSResponseDataError` |
+| `get_diff_issues()` response is valid and contains no qualifying issue | Empty list |
 | Request ID search reports inconsistent successful-response completeness or leaves candidate identity ambiguous | Incomplete `RequestEvidenceResult` |
 | Request ID search receives a 4xx other than 401 or 403 after shared rate-limit handling, including a predicate rejection | Incomplete `RequestEvidenceResult`; it never proves a negative |
 | Request detail is 404, has an unknown state or an action type outside the eight IBS types, has an invalid supersession relationship, omits a required supported-action field, has an invalid consumed field or IBS name, or has two supported actions with one semantic identity, including through project replacement | Incomplete `RequestEvidenceResult` |
 | Request detail contains only actions of the six ignored types | Complete typed parent with an empty supported-action collection |
-| Request action diff cannot be requested (missing form input, or a project outside the `SUSE:` namespace), returns HTTP 400 or 404, or is malformed, interrupted, or partial | Incomplete `RequestEvidenceResult`; retained correlation and delivery evidence is not invalidated |
+| Request action diff cannot be requested (missing form input, or a project outside the `SUSE:` namespace), returns HTTP 400 or 404, or is malformed, interrupted, or partial, including an issue without a non-empty `tracker` or `state` | Incomplete `RequestEvidenceResult`; retained correlation and delivery evidence is not invalidated |
 | Source history is 404, an exact lookup returns no entry, an unpaged history is not complete under [Package Source History](#package-source-history), or an entry is malformed, duplicated, conflicting, or does not match the lookup | Incomplete `RequestEvidenceResult` |
 | Request action diff is complete and has no positive `added` or `changed` canonical CVE issue for an action | A valid typed action diff with no qualifying issue; the owning reconciler treats it as that action's successful no-match |
 
@@ -1000,8 +1019,7 @@ uses the same incremental parsing safety boundary as source release data: DTDs,
 external entities, and parser network access are disabled, and no result is
 accepted until the complete document has parsed. Raw XML, response bodies,
 actor data, free text, and project names outside the `SUSE:` namespace never
-enter logs, and no request URL contains such a project name. A parser or
-interrupted-body failure produces
+enter logs. A parser or interrupted-body failure produces
 the error or incomplete result assigned to that operation above. A document
 containing U+0000, raw or as a character reference, is not well-formed XML and
 produces that parser failure, which satisfies External String Admissibility

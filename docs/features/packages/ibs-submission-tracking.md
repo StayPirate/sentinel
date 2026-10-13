@@ -144,7 +144,7 @@ One normalized relevant action belonging to one `IBSRequest`.
 | `id` | UUID | PK | Local action identifier. |
 | `ibs_request_id` | UUID | FK(`ibs_request.id`) ON DELETE RESTRICT, NOT NULL | Parent request. |
 | `action_type` | VARCHAR(32) | NOT NULL | `maintenance_incident` or `maintenance_release`; classification validated by `IBSRequestActionType`. |
-| `source_project` | VARCHAR(255) | nullable | Action source project in its normalized stored form: the exact project in the `SUSE:` namespace, otherwise the fixed token `_redacted_`. |
+| `source_project` | VARCHAR(255) | nullable | Exact normalized action source project; a project outside the `SUSE:` namespace is stored as the fixed token below. |
 | `source_package` | VARCHAR(255) | nullable | Exact normalized physical source package. |
 | `target_project` | VARCHAR(255) | nullable | Exact normalized target project. For an accepted SR this may be the incident project. |
 | `target_package` | VARCHAR(255) | nullable | Exact normalized physical target package. |
@@ -173,10 +173,9 @@ Every project column stores the value returned by IBS point detail, whose
 parser replaces each project outside the `SUSE:` namespace by the fixed token
 `_redacted_` (`../integrations/ibs-integration.md`, Request Point Detail). Such
 a project, for example a personal `home:` project, is treated as a personal
-identifier and is never persisted. Semantic identities, upserts,
-conflict checks, correlation, and every comparison between retained and current
-actions use this stored form; two actions of one request that become identical
-through the replacement make the observation incomplete.
+identifier and is never persisted. Semantic identities, upserts, conflict
+checks, correlation, and every comparison between retained and current
+actions use this stored form.
 
 Optional fields are omitted by IBS rather than represented as null. A later
 complete observation may fill a retained nullable provenance field. Omission in
@@ -301,10 +300,9 @@ A completely parsed action diff with no qualifying issue is a successful
 no-match for that action. A malformed, unavailable, truncated, or ambiguous diff
 is incomplete; when correlation or effective contents depend on it, the
 observation is incomplete, and it never deletes retained history or proves a
-negative. The diff of an action that is not accepted is unavailable when its
-source project lies outside the `SUSE:` namespace, because such a project is
-never placed in a request URL, and once its source link conflicts with the
-current codestream or its staging project has been removed.
+negative. The diff of an action that is not accepted can be unavailable,
+temporarily or permanently, for the reasons listed in
+`../integrations/ibs-integration.md` (Request Action Diff).
 
 ### Effective SR
 
@@ -856,9 +854,9 @@ Implementation coverage must include:
   ignored, any other incomplete), and the replacement of projects outside the
   `SUSE:` namespace, including actions whose identities collide through it;
 - action-scoped `added`/`changed` CVE correlation through the accepted and
-  not-accepted request action diff forms, valid no-match, malformed, HTTP 400
-  and 404, and unrequested diff evidence (a missing form input or a project
-  outside the `SUSE:` namespace), and unknown action/state handling;
+  not-accepted request action diff forms; valid no-match; malformed, HTTP 400,
+  HTTP 404, and unrequested diffs (a missing form input or a project outside the
+  `SUSE:` namespace); and unknown action/state handling;
 - effective-SR and accepted-RR provenance success, mismatch, unavailable
   history, complete and incomplete unpaged history (not starting at revision 1
   or not contiguous), revision and checksum lookups, missing acceptinfo, and
