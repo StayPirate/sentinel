@@ -3733,20 +3733,21 @@ The bootstrap routine:
 
 #### Request Delay
 
-`request_delay` is the minimum interval, in seconds, between two consecutive
-external requests of one fetcher invocation. An invocation is one periodic
-run, one on-demand `fetch_single()`, or one `catch_up()`. Every fetcher applies
-it as follows:
+The request delay is the minimum interval, in seconds, between two consecutive
+external requests of one fetcher invocation. An invocation is one run,
+scheduled or manually triggered, one on-demand `fetch_single()`, or one
+`catch_up()`. Every fetcher applies it as follows:
 
-- **Spacing**: consecutive requests of one invocation are separated by at least
-  the delay, including requests of different phases, pages, or collections. No
-  wait precedes the first request of an invocation, and a zero delay never
-  waits.
-- **Value**: a periodic run uses `request_delay` from its runtime configuration
-  snapshot ([Runtime Configuration Snapshot](#runtime-configuration-snapshot)).
-  An invocation outside a run has no snapshot: it applies a delay only where
-  the owning fetcher specification states so, and then uses the class
+- **Value**: a run always applies the delay, using `request_delay` from its
+  runtime configuration snapshot
+  ([Runtime Configuration Snapshot](#runtime-configuration-snapshot)). An
+  invocation outside a run has no snapshot: it applies the delay only where the
+  owning fetcher specification states so, and then uses the class
   `default_request_delay`.
+- **Spacing**: when an invocation applies the delay, its consecutive requests
+  are separated by at least the delay, including requests of different phases,
+  pages, or collections. No wait precedes the first request of an invocation,
+  and a zero delay never waits.
 - **One request**: the shared transport retries of a request
   ([Transport-Level Retry](networking.md#transport-level-retry)), and any other
   attempt or retry that the owning fetcher or integration specification
