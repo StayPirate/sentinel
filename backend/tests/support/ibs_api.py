@@ -66,11 +66,15 @@ answers unauthenticated requests the same way.
 responses under `TEST_API_URL`, challenges unauthenticated requests,
 verifies signatures with `verify_signature_header()` (an implementation
 independent of the production signer), issues a session cookie after a
-successful signed request, and records every request.
+successful signed request, and records every request. `ibs_client()` builds
+a production `IBSClient` for it with the fictional account and key of
+`tests/support/ibs_keys.py`; the pytest fixtures that install the fake API
+as the client's transport are in `tests/support/ibs_client_fixtures.py`.
 
 Consumers: `tests/test_services/test_ibs_api_contract.py`,
-`tests/test_services/test_ibs_signature_auth.py`, and
-`tests/test_services/test_ibs_client.py`.
+`tests/test_services/test_ibs_signature_auth.py`, the `IBSClient` tests
+(`tests/test_services/test_ibs_client*.py`), and the request fixtures of
+`tests/support/ibs_request_api.py`.
 """
 
 from __future__ import annotations
@@ -88,6 +92,10 @@ from typing import Any, Final
 import httpx
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+from pydantic import SecretStr
+
+from app.services.ibs_client import IBSClient
+from tests.support.ibs_keys import fictional_settings_value
 
 FIXTURE_DIR: Final = Path(__file__).resolve().parents[1] / "fixtures" / "ibs"
 LIVE_PROJECT: Final = "SUSE:SLE-15-SP6:Update"
@@ -95,6 +103,8 @@ LIVE_REALM: Final = "Use your developer account"
 LIVE_CHALLENGE: Final = f'Signature realm="{LIVE_REALM}",headers="(created)"'
 
 TEST_API_URL: Final = "https://api.ibs.example.test"
+CLOCK: Final = 1700000000.75
+"""The Unix time of the test clients' signature `created` value."""
 TEST_HOST: Final = "api.ibs.example.test"
 SESSION_COOKIE_NAME: Final = "IBS_session"
 
@@ -364,3 +374,23 @@ class IBSServer:
         return httpx.Response(
             401, headers=headers, stream=_Chunks([b"<html>fictional</html>"])
         )
+
+
+def ibs_client(
+    *,
+    username: str = "jdoe",
+    key: str | None = None,
+    clock: Callable[[], float] = lambda: CLOCK,
+) -> IBSClient:
+    """A client for the fake API with the fictional account and key."""
+    return IBSClient(
+        api_url=TEST_API_URL,
+        username=username,
+        ssh_private_key=SecretStr(fictional_settings_value() if key is None else key),
+        clock=clock,
+    )
+
+
+def signed_requests(server: IBSServer) -> list[httpx.Request]:
+    """The requests that carried a signature."""
+    return [r for r in server.requests if "authorization" in r.headers]

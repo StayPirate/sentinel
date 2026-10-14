@@ -1,0 +1,111 @@
+<request id="910100">
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80006" package="python311.SUSE_SLE-15-SP4_Update" rev="18c1b955a7722d903fd8df13304a906f" />
+    <target project="SUSE:SLE-15-SP4:Update" package="python311.80006" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80006" package="patchinfo" />
+    <target project="SUSE:SLE-15-SP4:Update" package="patchinfo.80006" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80006" package="patchinfo" />
+    <target project="SUSE:Updates:SLE-Module-Public-Cloud:15-SP4:aarch64" package="patchinfo.80006" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80006" package="patchinfo" />
+    <target project="SUSE:Updates:SLE-Module-Public-Cloud:15-SP4:ppc64le" package="patchinfo.80006" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80006" package="patchinfo" />
+    <target project="SUSE:Updates:SLE-Module-Public-Cloud:15-SP4:s390x" package="patchinfo.80006" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80006" package="patchinfo" />
+    <target project="SUSE:Updates:SLE-Module-Public-Cloud:15-SP4:x86_64" package="patchinfo.80006" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80006" package="patchinfo" />
+    <target project="SUSE:Updates:SLE-Product-SLES:15-SP4-TERADATA:x86_64" package="patchinfo.80006" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80006" package="patchinfo" />
+    <target project="SUSE:Updates:SLE-Product-HPC:15-SP4-ESPOS:aarch64" package="patchinfo.80006" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80006" package="patchinfo" />
+    <target project="SUSE:Updates:SLE-Product-HPC:15-SP4-ESPOS:x86_64" package="patchinfo.80006" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80006" package="patchinfo" />
+    <target project="SUSE:Updates:SLE-Product-HPC:15-SP4-LTSS:aarch64" package="patchinfo.80006" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80006" package="patchinfo" />
+    <target project="SUSE:Updates:SLE-Product-HPC:15-SP4-LTSS:x86_64" package="patchinfo.80006" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80006" package="patchinfo" />
+    <target project="SUSE:Updates:SLE-Product-HPC:15-SP5-ESPOS:aarch64" package="patchinfo.80006" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80006" package="patchinfo" />
+    <target project="SUSE:Updates:SLE-Product-HPC:15-SP5-ESPOS:x86_64" package="patchinfo.80006" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80006" package="patchinfo" />
+    <target project="SUSE:Updates:SLE-Product-HPC:15-SP5-LTSS:aarch64" package="patchinfo.80006" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80006" package="patchinfo" />
+    <target project="SUSE:Updates:SLE-Product-HPC:15-SP5-LTSS:x86_64" package="patchinfo.80006" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80006" package="patchinfo" />
+    <target project="SUSE:Updates:SLE-Product-SLES:15-SP4-LTSS:aarch64" package="patchinfo.80006" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80006" package="patchinfo" />
+    <target project="SUSE:Updates:SLE-Product-SLES:15-SP4-LTSS:ppc64le" package="patchinfo.80006" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80006" package="patchinfo" />
+    <target project="SUSE:Updates:SLE-Product-SLES:15-SP4-LTSS:s390x" package="patchinfo.80006" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80006" package="patchinfo" />
+    <target project="SUSE:Updates:SLE-Product-SLES:15-SP4-LTSS:x86_64" package="patchinfo.80006" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80006" package="patchinfo" />
+    <target project="SUSE:Updates:SLE-Product-SLES:15-SP5-LTSS:aarch64" package="patchinfo.80006" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80006" package="patchinfo" />
+    <target project="SUSE:Updates:SLE-Product-SLES:15-SP5-LTSS:ppc64le" package="patchinfo.80006" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80006" package="patchinfo" />
+    <target project="SUSE:Updates:SLE-Product-SLES:15-SP5-LTSS:s390x" package="patchinfo.80006" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80006" package="patchinfo" />
+    <target project="SUSE:Updates:SLE-Product-SLES:15-SP5-LTSS:x86_64" package="patchinfo.80006" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80006" package="patchinfo" />
+    <target project="SUSE:Updates:SLE-Product-SLES_SAP:15-SP4:ppc64le" package="patchinfo.80006" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80006" package="patchinfo" />
+    <target project="SUSE:Updates:SLE-Product-SLES_SAP:15-SP4:x86_64" package="patchinfo.80006" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80006" package="patchinfo" />
+    <target project="SUSE:Updates:SLE-Product-SLES_SAP:15-SP5:ppc64le" package="patchinfo.80006" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80006" package="patchinfo" />
+    <target project="SUSE:Updates:SLE-Product-SLES_SAP:15-SP5:x86_64" package="patchinfo.80006" />
+  </action>
+  <state name="review" created="2026-10-13T09:07:30" when="2026-10-14T12:13:17" />
+</request>

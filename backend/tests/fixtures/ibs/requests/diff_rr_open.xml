@@ -1,0 +1,18 @@
+<sourcediff>
+  <issues>
+    <issue state="changed" tracker="cve" name="2026-15310" label="CVE-2026-15310" />
+    <issue state="changed" tracker="cve" name="2026-15806" label="CVE-2026-15806" />
+    <issue state="changed" tracker="cve" name="2026-17084" label="CVE-2026-17084" />
+    <issue state="changed" tracker="cve" name="2026-19672" label="CVE-2026-19672" />
+    <issue state="changed" tracker="bnc" name="1276223" label="bsc#1276223" />
+    <issue state="changed" tracker="bnc" name="1276226" label="bsc#1276226" />
+    <issue state="changed" tracker="bnc" name="1276227" label="bsc#1276227" />
+    <issue state="changed" tracker="bnc" name="1277111" label="bsc#1277111" />
+    <issue state="added" tracker="cve" name="2026-19445" label="CVE-2026-19445" />
+    <issue state="added" tracker="cve" name="2026-19553" label="CVE-2026-19553" />
+    <issue state="added" tracker="cve" name="2026-82049" label="CVE-2026-82049" />
+    <issue state="added" tracker="bnc" name="1280459" label="bsc#1280459" />
+    <issue state="added" tracker="bnc" name="1283826" label="bsc#1283826" />
+    <issue state="added" tracker="bnc" name="1283969" label="bsc#1283969" />
+  </issues>
+</sourcediff>

@@ -2,11 +2,15 @@
 
 Implements docs/features/integrations/ibs-integration.md (Service Layer >
 IBSClient) for the targeted source-info and expanded source-diff operations
-used by track release detection, with the SSH-signature authentication of
+used by track release detection, and for the request ID search, request
+point detail, request action diff, and package source history operations
+used by submission tracking, with the SSH-signature authentication of
 Request Authentication and the in-memory cookies of Session Reuse
-(`app.services.ibs_signature_auth`). The parsing outcomes follow
-docs/features/packages/ibs-track-release-detection.md (Source-Info
-Validation, Source-Diff Validation, XML and Response Safety).
+(`app.services.ibs_signature_auth`). The source-info and source-diff
+parsing outcomes follow docs/features/packages/ibs-track-release-detection.md
+(Source-Info Validation, Source-Diff Validation, XML and Response Safety);
+the request records, field contracts, and parsers live in
+`app.services.ibs_request_evidence` and are re-exported here.
 
 Lifetime: one client per workflow invocation, created on that invocation's
 event loop and closed before it ends (`async with IBSClient() as client`);
@@ -29,6 +33,15 @@ the shared XML safety boundary without a byte or issue-count cap; no result
 is returned until the complete document has parsed. The client logs
 nothing, and its exceptions carry bounded reasons only, never response
 content.
+
+The request operations return `RequestEvidenceResult` values instead of
+raising for unusable evidence: the operation-specific HTTP statuses (every
+search 4xx except 401 and 403; a detail or history 404; a request action
+diff 400 or 404) become incomplete results without reading the body, and a
+parser failure, interrupted body, or invalid document becomes an incomplete
+result with one bounded reason. Every other final non-2xx response raises
+the original `httpx.HTTPStatusError`. No request URL ever contains a project
+outside the `SUSE:` namespace.
 """
 
 from __future__ import annotations
@@ -45,12 +58,35 @@ import httpx
 from pydantic import SecretStr
 
 from app.config import settings
+from app.core.enums import IBSRequestActionType, IBSRequestState
 from app.core.ibs_ssh_key import (
     INVALID_USERNAME_MESSAGE,
     is_valid_ibs_username,
     load_ibs_ssh_private_key,
 )
 from app.services.http_client import create_http_client
+from app.services.ibs_request_evidence import (
+    SUSE_NAMESPACE,
+    AcceptInfo,
+    EvidenceHandler,
+    IBSRequestActionDetail,
+    IBSRequestDetail,
+    IncompleteEvidenceError,
+    IncompleteReason,
+    RequestActionDiff,
+    RequestActionIssue,
+    RequestDetailHandler,
+    RequestEvidenceResult,
+    RequestIdSearchResult,
+    SearchHandler,
+    SourceHistory,
+    SourceHistoryEntry,
+    SourceHistoryHandler,
+    is_lowercase_checksum,
+    is_valid_ibs_name,
+    is_valid_request_revision,
+    request_action_diff_form,
+)
 from app.services.ibs_signature_auth import (
     AuthenticationFailureReason,
     IBSAuthenticationError,
@@ -60,6 +96,7 @@ from app.services.xml_safety import SafeXMLParser, XMLSafetyError
 
 __all__ = [
     "HTTP_CLIENT_NAME",
+    "AcceptInfo",
     "AuthenticationFailureReason",
     "DiffIssue",
     "DiffIssueState",
@@ -67,13 +104,23 @@ __all__ = [
     "IBSClient",
     "IBSCredentialsNotConfiguredError",
     "IBSHistoricalRevisionUnavailable",
+    "IBSRequestActionDetail",
+    "IBSRequestDetail",
     "IBSResponseDataError",
+    "IncompleteReason",
+    "RequestActionDiff",
+    "RequestActionIssue",
+    "RequestEvidenceResult",
+    "RequestIdSearchResult",
     "ResponseDataReason",
+    "SourceHistory",
+    "SourceHistoryEntry",
     "SourceInfo",
     "SourceInfoFailure",
     "SourceInfoResult",
     "is_valid_checksum",
     "is_valid_ibs_name",
+    "is_valid_request_revision",
 ]
 
 HTTP_CLIENT_NAME: Final = "ibs_client"
@@ -112,7 +159,9 @@ class IBSResponseDataError(Exception):
     transport failure), `invalid_document` (document-level shape), or
     `invalid_issue` (a source-diff issue with an unusable structure). Never
     raised for an error response, including a source-diff 400 whose body
-    is read only for the unavailable-revision classification.
+    is read only for the unavailable-revision classification. Raised by
+    `get_source_info()` and `get_diff_issues()` only: the request action
+    diff turns the same shape failures into incomplete results.
     """
 
     def __init__(self, reason: ResponseDataReason) -> None:
@@ -313,7 +362,7 @@ class IBSClient:
             if old_md5 not in {_EMPTY_SOURCE_TREE, new_md5}
             else None
         )
-        handler = _DiffHandler()
+        handler = _DiffHandler(_diff_issue)
         params = [
             ("cmd", "diff"),
             ("view", "xml"),
@@ -328,6 +377,218 @@ class IBSClient:
         )
         return handler.issues
 
+    async def search_request_ids(
+        self,
+        action_type: IBSRequestActionType,
+        *,
+        states: Collection[IBSRequestState] | None = None,
+        source_package_prefix: str | None = None,
+        target_package_prefix: str | None = None,
+    ) -> RequestEvidenceResult[RequestIdSearchResult]:
+        """Search request numbers with one typed same-action predicate.
+
+        Calls `GET /search/request/id?match=action[@type='{action_type}' and
+        starts-with({source|target}/@package,'{prefix}')]`, followed by
+        ` and (state/@name='…' or …)` when `states` is given (in
+        `IBSRequestState` order). `target/@releaseproject` is never part of
+        the predicate. A complete result holds the distinct request numbers
+        in ascending order and the reported `matches`.
+
+        Raises `ValueError` before any HTTP request for an action type that
+        is not an `IBSRequestActionType`, an empty, string, or non-member
+        state collection, no prefix or both prefixes, a source-package
+        prefix with `maintenance_release` or a target-package prefix with
+        `maintenance_incident`, and a prefix that is not an IBS name; then
+        `IBSCredentialsNotConfiguredError`; `IBSAuthenticationError`; and
+        the `httpx` exception of a transport failure, a 403, a 5xx, or a
+        3xx. Every other 4xx is an incomplete result (`not_found` for 404,
+        `rejected` otherwise), as are a malformed or interrupted document
+        (`malformed_xml`, `interrupted_response`), a document of another
+        shape (`invalid_document`), an invalid entry (`invalid_entry`),
+        duplicate numbers (`duplicate_identity`), and a count that differs
+        from `matches` (`count_mismatch`).
+        """
+        if not isinstance(action_type, IBSRequestActionType):
+            msg = "unsupported IBS request action type"
+            raise ValueError(msg)
+        selected = _validate_states(states)
+        if source_package_prefix is not None and target_package_prefix is None:
+            if action_type is not IBSRequestActionType.MAINTENANCE_INCIDENT:
+                msg = "source_package_prefix requires maintenance_incident"
+                raise ValueError(msg)
+            field_path, prefix = "source/@package", source_package_prefix
+        elif target_package_prefix is not None and source_package_prefix is None:
+            if action_type is not IBSRequestActionType.MAINTENANCE_RELEASE:
+                msg = "target_package_prefix requires maintenance_release"
+                raise ValueError(msg)
+            field_path, prefix = "target/@package", target_package_prefix
+        else:
+            msg = "exactly one of source_package_prefix and target_package_prefix"
+            raise ValueError(msg)
+        _validate_name(prefix, "package prefix")
+        self._require_credentials()
+
+        # IBS names contain no quote, bracket, or parenthesis, so the
+        # literals cannot leave their XPath string.
+        predicate = (
+            f"action[@type='{action_type.value}' and "
+            f"starts-with({field_path},'{prefix}')]"
+        )
+        if selected:
+            alternatives = " or ".join(f"state/@name='{s.value}'" for s in selected)
+            predicate = f"{predicate} and ({alternatives})"
+        return await self._read_evidence(
+            "GET",
+            "search/request/id",
+            [("match", predicate)],
+            SearchHandler(),
+            incomplete_status=_search_incomplete_status,
+        )
+
+    async def get_request(
+        self, request_number: int
+    ) -> RequestEvidenceResult[IBSRequestDetail]:
+        """Point-fetch one request: `GET /request/{request_number}`.
+
+        A complete result holds the parent and every `maintenance_incident`
+        and `maintenance_release` action, validated and in the stored form
+        of ibs-integration.md (Request Point Detail): projects outside
+        `SUSE:` become `_redacted_`; actions of the six other IBS types are
+        ignored.
+
+        Raises `ValueError` for a request number that is not a positive
+        integer before any HTTP request; `IBSCredentialsNotConfiguredError`;
+        `IBSAuthenticationError`; and the `httpx` exception of a transport
+        failure and of every final non-2xx response except 404. A 404 is an
+        incomplete result (`not_found`), never a deleted state; so are a
+        malformed or interrupted document, a root or `state` cardinality
+        that is not one request with one state or an ID other than the
+        requested number (`invalid_document`), an unknown state, invalid
+        timestamp, or invalid supersession (`invalid_state`), an action
+        type outside the eight IBS types (`unknown_action_type`), a
+        supported action with a missing or invalid consumed field
+        (`invalid_action`), and two supported actions with one semantic
+        identity (`duplicate_identity`).
+        """
+        if (
+            isinstance(request_number, bool)
+            or not isinstance(request_number, int)
+            or request_number < 1
+        ):
+            msg = "request_number must be a positive integer"
+            raise ValueError(msg)
+        self._require_credentials()
+        return await self._read_evidence(
+            "GET",
+            f"request/{request_number}",
+            [],
+            RequestDetailHandler(request_number),
+            incomplete_status=_not_found_status,
+        )
+
+    async def get_request_action_diff(
+        self, action: IBSRequestActionDetail, *, codestream_package: str
+    ) -> RequestEvidenceResult[RequestActionDiff]:
+        """Diff one supported request action: `POST /source/{project}/
+        {package}?cmd=diff&view=xml&withissues=1&onlyissues=1&{form}`.
+
+        The accepted form applies when the action has acceptinfo, the
+        not-accepted form (always `expand=1`) otherwise; `codestream_package`
+        is the logical package of the action's codestream and is used only
+        by the not-accepted form (ibs-integration.md, Request Action Diff).
+        A complete result holds the issues as served, in document order,
+        including `changed` and duplicates; nothing is filtered or logged.
+
+        Raises `ValueError` for an `action` that is not an
+        `IBSRequestActionDetail` with valid field values and for a
+        `codestream_package` that is not an IBS name. Then, without any
+        request and without the credential check, a missing form input is
+        an incomplete result (`missing_diff_input`), and so is a path
+        project or `oproject` outside `SUSE:` (`outside_suse_namespace`).
+        Then raises `IBSCredentialsNotConfiguredError`;
+        `IBSAuthenticationError`; and the `httpx` exception of a transport
+        failure and of every final non-2xx response except 400 and 404,
+        which are incomplete results (`rejected`, `not_found`) whose body
+        is not read. A malformed or interrupted document, another root or
+        a repeated `issues` element (`invalid_document`), and an issue
+        without a non-empty `tracker` or `state` (`invalid_issue`) are
+        incomplete results; never `IBSHistoricalRevisionUnavailable` or
+        `IBSResponseDataError`.
+        """
+        checked = _validate_diff_action(action)
+        _validate_name(codestream_package, "codestream package")
+        try:
+            form = request_action_diff_form(checked, codestream_package)
+        except IncompleteEvidenceError as exc:
+            return RequestEvidenceResult(incomplete_reason=exc.reason)
+        self._require_credentials()
+
+        params = [
+            ("cmd", "diff"),
+            ("view", "xml"),
+            ("withissues", "1"),
+            ("onlyissues", "1"),
+            *form.params,
+        ]
+        path = f"source/{_segment(form.project)}/{_segment(form.package)}"
+        result = await self._read_evidence(
+            "POST",
+            path,
+            params,
+            _DiffHandler(_request_action_issue),
+            incomplete_status=_diff_incomplete_status,
+        )
+        if result.value is None:
+            return RequestEvidenceResult(incomplete_reason=result.incomplete_reason)
+        return RequestEvidenceResult(value=RequestActionDiff(tuple(result.value)))
+
+    async def get_source_history(
+        self, project: str, package: str, *, revision: str | None = None
+    ) -> RequestEvidenceResult[SourceHistory]:
+        """Read package source history: `GET /source/{project}/{package}/
+        _history`, unpaged without `revision`, or the exact lookup
+        `?rev={revision}`; `limit` and `startbefore` are never sent.
+
+        A complete unpaged history is non-empty, starts at revision 1, and
+        is contiguous; a revision lookup returns exactly that revision; a
+        checksum lookup returns at least one entry, each with that checksum
+        (ibs-integration.md, Package Source History). Entries are ascending
+        and carry the revision, checksum, UTC time, and optional request
+        number.
+
+        Raises `ValueError` before any HTTP request for a `project` or
+        `package` that is not an IBS name, a `project` outside `SUSE:`, and
+        a `revision` that is neither a positive decimal number nor a
+        lowercase 32-character checksum; then
+        `IBSCredentialsNotConfiguredError`; `IBSAuthenticationError`; and
+        the `httpx` exception of a transport failure and of every final
+        non-2xx response except 404, which is an incomplete result
+        (`not_found`). An empty lookup or an unpaged history that is not
+        complete is `history_unavailable`; duplicate revisions are
+        `duplicate_identity`; an invalid, unordered, or non-matching entry
+        is `invalid_entry`; a malformed or interrupted document is
+        `malformed_xml` or `interrupted_response`.
+        """
+        _validate_name(project, "project")
+        _validate_name(package, "package")
+        if not project.startswith(SUSE_NAMESPACE):
+            msg = "source history project must be in the SUSE: namespace"
+            raise ValueError(msg)
+        if revision is not None and not is_valid_request_revision(revision):
+            msg = "revision must be a positive decimal number or a lowercase checksum"
+            raise ValueError(msg)
+        self._require_credentials()
+
+        params = [] if revision is None else [("rev", revision)]
+        path = f"source/{_segment(project)}/{_segment(package)}/_history"
+        return await self._read_evidence(
+            "GET",
+            path,
+            params,
+            SourceHistoryHandler(revision),
+            incomplete_status=_not_found_status,
+        )
+
     def _require_credentials(self) -> None:
         if not self._configured:
             raise IBSCredentialsNotConfiguredError
@@ -340,7 +601,7 @@ class IBSClient:
         method: str,
         path: str,
         params: list[tuple[str, str]],
-        handler: _SourceInfoHandler | _DiffHandler,
+        handler: _SourceInfoHandler | _DiffHandler[DiffIssue],
         *,
         unavailable_prefix: str | None = None,
     ) -> None:
@@ -366,18 +627,45 @@ class IBSClient:
             if reason is not None:
                 raise IBSResponseDataError(reason)
 
+    async def _read_evidence[T](
+        self,
+        method: str,
+        path: str,
+        params: list[tuple[str, str]],
+        handler: EvidenceHandler[T],
+        *,
+        incomplete_status: Callable[[int], IncompleteReason | None],
+    ) -> RequestEvidenceResult[T]:
+        """Read one request-evidence document.
 
-def is_valid_ibs_name(value: object) -> bool:
-    """Whether `value` is an IBS project or package name this client
-    accepts: a non-empty string of printable ASCII without whitespace or
-    `/`, and not a dot segment. Pure predicate."""
-    return (
-        isinstance(value, str)
-        and bool(value)
-        and value not in {".", ".."}
-        and all(0x21 <= ord(character) <= 0x7E for character in value)
-        and "/" not in value
-    )
+        A final non-2xx status for which `incomplete_status` returns a
+        reason is an incomplete result, without reading the body; every
+        other one raises the original `httpx.HTTPStatusError`. A successful
+        body is parsed completely through the XML safety boundary before
+        `handler.result()` is taken.
+        """
+        reason: IncompleteReason
+        async with self._http.stream(method, path, params=tuple(params)) as response:
+            if not response.is_success:
+                status_reason = incomplete_status(response.status_code)
+                if status_reason is not None:
+                    return RequestEvidenceResult(incomplete_reason=status_reason)
+                response.raise_for_status()
+            parser = SafeXMLParser(handler)
+            try:
+                async for chunk in response.aiter_bytes():
+                    parser.feed(chunk)
+                parser.close()
+                return RequestEvidenceResult(value=handler.result())
+            except XMLSafetyError, httpx.DecodingError:
+                reason = "malformed_xml"
+            except httpx.TransportError:
+                reason = "interrupted_response"
+            except IncompleteEvidenceError as exc:
+                reason = exc.reason
+            except IBSResponseDataError as exc:  # the shared source-diff handler
+                reason = exc.reason
+        return RequestEvidenceResult(incomplete_reason=reason)
 
 
 def is_valid_checksum(value: object) -> bool:
@@ -394,6 +682,50 @@ def _validate_name(value: str, what: str) -> None:
 
 def _segment(value: str) -> str:
     return quote(value, safe=":+")
+
+
+def _validate_states(
+    states: Collection[IBSRequestState] | None,
+) -> tuple[IBSRequestState, ...]:
+    """The selected states in `IBSRequestState` order; `()` for `None`."""
+    if states is None:
+        return ()
+    if isinstance(states, str) or not states:
+        msg = "states must be a non-empty collection of IBSRequestState"
+        raise ValueError(msg)
+    selected = set(states)
+    if not all(isinstance(state, IBSRequestState) for state in selected):
+        msg = "states must be a non-empty collection of IBSRequestState"
+        raise ValueError(msg)
+    return tuple(state for state in IBSRequestState if state in selected)
+
+
+def _search_incomplete_status(status: int) -> IncompleteReason | None:
+    """ibs-integration.md (Request ID Search): every 4xx except 401 and 403
+    is incomplete evidence."""
+    if status == httpx.codes.NOT_FOUND:
+        return "not_found"
+    if 400 <= status < 500 and status not in {
+        httpx.codes.UNAUTHORIZED,
+        httpx.codes.FORBIDDEN,
+    }:
+        return "rejected"
+    return None
+
+
+def _not_found_status(status: int) -> IncompleteReason | None:
+    """Point detail and source history: only a 404 is incomplete evidence."""
+    return "not_found" if status == httpx.codes.NOT_FOUND else None
+
+
+def _diff_incomplete_status(status: int) -> IncompleteReason | None:
+    """Request action diff: a 400 or 404 is incomplete evidence for that
+    action, and its body is not read."""
+    if status == httpx.codes.NOT_FOUND:
+        return "not_found"
+    if status == httpx.codes.BAD_REQUEST:
+        return "rejected"
+    return None
 
 
 @dataclass
@@ -449,15 +781,19 @@ class _SourceInfoHandler:
 
 
 @dataclass
-class _DiffHandler:
-    """Collects the issues of a `sourcediff` document.
+class _DiffHandler[I]:
+    """Collects the issues of a `sourcediff` document; `issue` validates
+    and types one `issues` child.
 
     An unrecognized shape inside `issues` is rejected rather than skipped,
     because a diff without qualifying issues advances the caller's
-    checkpoint: it never turns into a successful no-match.
+    checkpoint or is a no-match: it never turns into a successful no-match.
+    Shape failures raise `IBSResponseDataError`; the request action diff
+    turns them into incomplete results.
     """
 
-    issues: list[DiffIssue] = field(default_factory=list)
+    issue: Callable[[str, Mapping[str, str]], I]
+    issues: list[I] = field(default_factory=list)
     _depth: int = 0
     _issues_elements: int = 0
     _in_issues: bool = False
@@ -473,7 +809,7 @@ class _DiffHandler:
                 raise IBSResponseDataError("invalid_document")
             self._in_issues = True
         elif self._in_issues and self._depth == 3:
-            self.issues.append(_issue(name, attributes))
+            self.issues.append(self.issue(name, attributes))
         elif self._in_issues:
             raise IBSResponseDataError("invalid_issue")
 
@@ -484,6 +820,9 @@ class _DiffHandler:
 
     def character_data(self, data: str) -> None:
         return None
+
+    def result(self) -> list[I]:
+        return self.issues
 
 
 async def _names_unavailable_revision(response: httpx.Response, prefix: str) -> bool:
@@ -555,7 +894,7 @@ class _StatusSummaryHandler:
         return "".join(self._text)
 
 
-def _issue(name: str, attributes: Mapping[str, str]) -> DiffIssue:
+def _diff_issue(name: str, attributes: Mapping[str, str]) -> DiffIssue:
     tracker = attributes.get("tracker")
     state = attributes.get("state")
     if name != "issue" or not tracker or state not in _DIFF_ISSUE_STATES:
@@ -566,3 +905,51 @@ def _issue(name: str, attributes: Mapping[str, str]) -> DiffIssue:
         name=attributes.get("name"),
         label=attributes.get("label"),
     )
+
+
+def _request_action_issue(
+    name: str, attributes: Mapping[str, str]
+) -> RequestActionIssue:
+    """One request action diff issue: an `issue` element with a non-empty
+    `tracker` and `state`, returned as served (ibs-integration.md, Request
+    Action Diff)."""
+    tracker = attributes.get("tracker")
+    state = attributes.get("state")
+    if name != "issue" or not tracker or not state:
+        raise IBSResponseDataError("invalid_issue")
+    return RequestActionIssue(
+        tracker=tracker,
+        state=state,
+        name=attributes.get("name"),
+        label=attributes.get("label"),
+    )
+
+
+def _validate_diff_action(action: object) -> IBSRequestActionDetail:
+    """`action` if it is a request action whose present values satisfy the
+    point-detail field contracts; otherwise `ValueError`."""
+    if not isinstance(action, IBSRequestActionDetail):
+        msg = "action must be an IBSRequestActionDetail"
+        raise ValueError(msg)
+    accepted = action.acceptinfo or AcceptInfo()
+    names = (
+        action.source_project,
+        action.source_package,
+        action.target_project,
+        action.target_package,
+        action.target_release_project,
+        accepted.oproject,
+        accepted.opackage,
+    )
+    checksums = (accepted.srcmd5, accepted.xsrcmd5, accepted.osrcmd5, accepted.oxsrcmd5)
+    if (
+        not all(value is None or is_valid_ibs_name(value) for value in names)
+        or not all(value is None or is_lowercase_checksum(value) for value in checksums)
+        or not (
+            action.source_revision is None
+            or is_valid_request_revision(action.source_revision)
+        )
+    ):
+        msg = "invalid IBS request action"
+        raise ValueError(msg)
+    return action

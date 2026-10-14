@@ -1,0 +1,8 @@
+<request id="928349">
+  <action type="maintenance_incident">
+    <source project="home:fictional" package="openvpn-openssl1.SUSE_SLE-11-SP3_Update" rev="f4d465785e38daee2184a31f131fd844" />
+    <target project="SUSE:Maintenance:80013" package="openvpn-openssl1.SUSE_SLE-11-SP3_Update" releaseproject="SUSE:SLE-11-SP3:Update" />
+    <acceptinfo rev="2" srcmd5="f111e10b14ee91390e739489464b1228" xsrcmd5="b4948bdcb81d66dfb7ddb3496978c7ae" osrcmd5="ab1709edab8fd9ca6d5625926c10f39e" oxsrcmd5="8285b7cfefe4ae095180f975d16e0fd8" />
+  </action>
+  <state name="accepted" created="2021-05-01T17:16:18" when="2021-05-04T08:07:28" />
+</request>

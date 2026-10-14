@@ -1,0 +1,10 @@
+<request id="910015">
+  <action type="maintenance_incident">
+    <source project="SUSE:Maintenance:REQUEST:910015" package="openvpn.SUSE_SLE-15-SP6_Update" rev="b28e7df0a50947dc1327f4da92c888b6" />
+    <target project="SUSE:Maintenance" releaseproject="SUSE:SLE-15-SP6:Update" />
+  </action>
+  <action type="delete">
+    <target project="SUSE:Maintenance:REQUEST:910015" />
+  </action>
+  <state name="new" created="2026-10-01T05:20:43" when="2026-10-01T09:16:55" />
+</request>

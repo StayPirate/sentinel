@@ -1,0 +1,166 @@
+<request id="910132">
+  <action type="submit">
+    <source project="SUSE:Maintenance:80007" package="SLE-Module-Live-Patching_15-SP6_ppc64le.SUSE_Channels" rev="c69a5f2f8c209bfae10c474be1991168" />
+    <target project="SUSE:Channels" package="SLE-Module-Live-Patching_15-SP6_ppc64le" />
+    <acceptinfo rev="203" srcmd5="ce71296bdd67756ee6bf12019be1bb38" osrcmd5="1ca162945b1d9198c7aa6e2b6418f91d" />
+  </action>
+  <action type="submit">
+    <source project="SUSE:Maintenance:80007" package="SLE-Module-Live-Patching_15-SP6_s390x.SUSE_Channels" rev="671304b55d1eabf3d51e572a83191e4a" />
+    <target project="SUSE:Channels" package="SLE-Module-Live-Patching_15-SP6_s390x" />
+    <acceptinfo rev="203" srcmd5="89794cb66e9d1d3eb88d09418098574a" osrcmd5="9339d54f6fbaed466824e985893556e6" />
+  </action>
+  <action type="submit">
+    <source project="SUSE:Maintenance:80007" package="SLE-Module-Live-Patching_15-SP6_x86_64.SUSE_Channels" rev="5389204b127f118c262e659e1981ab1a" />
+    <target project="SUSE:Channels" package="SLE-Module-Live-Patching_15-SP6_x86_64" />
+    <acceptinfo rev="311" srcmd5="7ad165589fb615d7d9188f6c6dc1b6cc" osrcmd5="e11dd26888431c4d0fa21b053df25787" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80007" package="dtb-aarch64.SUSE_SLE-15-SP6_Update" rev="af4c9a9bfaa622dbbc71b21c47c5a3ac" />
+    <target project="SUSE:SLE-15-SP6:Update" package="dtb-aarch64.80007" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80007" package="dtb-armv7l.SUSE_SLE-15-SP6_Update" rev="af4c9a9bfaa622dbbc71b21c47c5a3ac" />
+    <target project="SUSE:SLE-15-SP6:Update" package="dtb-armv7l.80007" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80007" package="kernel-64kb.SUSE_SLE-15-SP6_Update" rev="af4c9a9bfaa622dbbc71b21c47c5a3ac" />
+    <target project="SUSE:SLE-15-SP6:Update" package="kernel-64kb.80007" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80007" package="kernel-debug.SUSE_SLE-15-SP6_Update" rev="af4c9a9bfaa622dbbc71b21c47c5a3ac" />
+    <target project="SUSE:SLE-15-SP6:Update" package="kernel-debug.80007" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80007" package="kernel-default-base.SUSE_SLE-15-SP6_Update" rev="f153128ef507a160e43b15ccbbe62697" />
+    <target project="SUSE:SLE-15-SP6:Update" package="kernel-default-base.80007" />
+    <acceptinfo rev="1" srcmd5="69b510c3e128fed038f78983041bfb8f" osrcmd5="69b510c3e128fed038f78983041bfb8f" oxsrcmd5="69b510c3e128fed038f78983041bfb8f" oproject="SUSE:SLE-15-SP6:Update" opackage="kernel-default-base.80008" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80007" package="kernel-default.SUSE_SLE-15-SP6_Update" rev="af4c9a9bfaa622dbbc71b21c47c5a3ac" />
+    <target project="SUSE:SLE-15-SP6:Update" package="kernel-default.80007" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80007" package="kernel-docs.SUSE_SLE-15-SP6_Update" rev="af4c9a9bfaa622dbbc71b21c47c5a3ac" />
+    <target project="SUSE:SLE-15-SP6:Update" package="kernel-docs.80007" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80007" package="kernel-kvmsmall.SUSE_SLE-15-SP6_Update" rev="af4c9a9bfaa622dbbc71b21c47c5a3ac" />
+    <target project="SUSE:SLE-15-SP6:Update" package="kernel-kvmsmall.80007" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80007" package="kernel-livepatch-SLE15-SP6_Update_32.SUSE_SLE-15-SP6_Update" rev="c9d325ca1923f0477a479a84a61e3d39" />
+    <target project="SUSE:SLE-15-SP6:Update" package="kernel-livepatch-SLE15-SP6_Update_32.80007" />
+    <acceptinfo rev="1" srcmd5="668b1c02b7fe15e0860696f39a71300c" osrcmd5="5d61198235509afd311c0a8cdfa3ac2d" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80007" package="kernel-lpae.SUSE_SLE-15-SP6_Update" rev="af4c9a9bfaa622dbbc71b21c47c5a3ac" />
+    <target project="SUSE:SLE-15-SP6:Update" package="kernel-lpae.80007" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80007" package="kernel-obs-build.SUSE_SLE-15-SP6_Update" rev="af4c9a9bfaa622dbbc71b21c47c5a3ac" />
+    <target project="SUSE:SLE-15-SP6:Update" package="kernel-obs-build.80007" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80007" package="kernel-obs-qa.SUSE_SLE-15-SP6_Update" rev="af4c9a9bfaa622dbbc71b21c47c5a3ac" />
+    <target project="SUSE:SLE-15-SP6:Update" package="kernel-obs-qa.80007" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80007" package="kernel-source.SUSE_SLE-15-SP6_Update" rev="14075dced9ccbb8deff703397cbabbfb" />
+    <target project="SUSE:SLE-15-SP6:Update" package="kernel-source.80007" />
+    <acceptinfo rev="1" srcmd5="9701e4de27ec34fbfe2a2bf163eae092" osrcmd5="47d21c7648840315b3f2b2f74a398c11" oxsrcmd5="47d21c7648840315b3f2b2f74a398c11" oproject="SUSE:SLE-15-SP6:Update" opackage="kernel-source.80008" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80007" package="kernel-syms.SUSE_SLE-15-SP6_Update" rev="af4c9a9bfaa622dbbc71b21c47c5a3ac" />
+    <target project="SUSE:SLE-15-SP6:Update" package="kernel-syms.80007" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80007" package="kernel-zfcpdump.SUSE_SLE-15-SP6_Update" rev="af4c9a9bfaa622dbbc71b21c47c5a3ac" />
+    <target project="SUSE:SLE-15-SP6:Update" package="kernel-zfcpdump.80007" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80007" package="patchinfo" />
+    <target project="SUSE:SLE-15-SP6:Update" package="patchinfo.80007" />
+    <acceptinfo rev="1" srcmd5="4a1edc438c585d61c5ef61c1ecc5f112" osrcmd5="5d61198235509afd311c0a8cdfa3ac2d" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80007" package="patchinfo" />
+    <target project="SUSE:Updates:SLE-Module-Live-Patching:15-SP6:ppc64le" package="patchinfo.80007" />
+    <acceptinfo rev="1" srcmd5="4a1edc438c585d61c5ef61c1ecc5f112" osrcmd5="5d61198235509afd311c0a8cdfa3ac2d" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80007" package="patchinfo" />
+    <target project="SUSE:Updates:SLE-Module-Live-Patching:15-SP6:s390x" package="patchinfo.80007" />
+    <acceptinfo rev="1" srcmd5="4a1edc438c585d61c5ef61c1ecc5f112" osrcmd5="5d61198235509afd311c0a8cdfa3ac2d" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80007" package="patchinfo" />
+    <target project="SUSE:Updates:SLE-Module-Live-Patching:15-SP6:x86_64" package="patchinfo.80007" />
+    <acceptinfo rev="1" srcmd5="4a1edc438c585d61c5ef61c1ecc5f112" osrcmd5="5d61198235509afd311c0a8cdfa3ac2d" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80007" package="patchinfo" />
+    <target project="SUSE:Updates:SLE-Product-HA:15-SP6:aarch64" package="patchinfo.80007" />
+    <acceptinfo rev="1" srcmd5="4a1edc438c585d61c5ef61c1ecc5f112" osrcmd5="5d61198235509afd311c0a8cdfa3ac2d" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80007" package="patchinfo" />
+    <target project="SUSE:Updates:SLE-Product-HA:15-SP6:ppc64le" package="patchinfo.80007" />
+    <acceptinfo rev="1" srcmd5="4a1edc438c585d61c5ef61c1ecc5f112" osrcmd5="5d61198235509afd311c0a8cdfa3ac2d" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80007" package="patchinfo" />
+    <target project="SUSE:Updates:SLE-Product-HA:15-SP6:s390x" package="patchinfo.80007" />
+    <acceptinfo rev="1" srcmd5="4a1edc438c585d61c5ef61c1ecc5f112" osrcmd5="5d61198235509afd311c0a8cdfa3ac2d" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80007" package="patchinfo" />
+    <target project="SUSE:Updates:SLE-Product-HA:15-SP6:x86_64" package="patchinfo.80007" />
+    <acceptinfo rev="1" srcmd5="4a1edc438c585d61c5ef61c1ecc5f112" osrcmd5="5d61198235509afd311c0a8cdfa3ac2d" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80007" package="patchinfo" />
+    <target project="SUSE:Updates:SLE-Product-SLES:15-SP6-LTSS:aarch64" package="patchinfo.80007" />
+    <acceptinfo rev="1" srcmd5="4a1edc438c585d61c5ef61c1ecc5f112" osrcmd5="5d61198235509afd311c0a8cdfa3ac2d" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80007" package="patchinfo" />
+    <target project="SUSE:Updates:SLE-Product-SLES:15-SP6-LTSS:ppc64le" package="patchinfo.80007" />
+    <acceptinfo rev="1" srcmd5="4a1edc438c585d61c5ef61c1ecc5f112" osrcmd5="5d61198235509afd311c0a8cdfa3ac2d" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80007" package="patchinfo" />
+    <target project="SUSE:Updates:SLE-Product-SLES:15-SP6-LTSS:s390x" package="patchinfo.80007" />
+    <acceptinfo rev="1" srcmd5="4a1edc438c585d61c5ef61c1ecc5f112" osrcmd5="5d61198235509afd311c0a8cdfa3ac2d" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80007" package="patchinfo" />
+    <target project="SUSE:Updates:SLE-Product-SLES:15-SP6-LTSS:x86_64" package="patchinfo.80007" />
+    <acceptinfo rev="1" srcmd5="4a1edc438c585d61c5ef61c1ecc5f112" osrcmd5="5d61198235509afd311c0a8cdfa3ac2d" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80007" package="patchinfo" />
+    <target project="SUSE:Updates:SLE-Product-SLES_SAP:15-SP6:ppc64le" package="patchinfo.80007" />
+    <acceptinfo rev="1" srcmd5="4a1edc438c585d61c5ef61c1ecc5f112" osrcmd5="5d61198235509afd311c0a8cdfa3ac2d" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80007" package="patchinfo" />
+    <target project="SUSE:Updates:SLE-Product-SLES_SAP:15-SP6:x86_64" package="patchinfo.80007" />
+    <acceptinfo rev="1" srcmd5="4a1edc438c585d61c5ef61c1ecc5f112" osrcmd5="5d61198235509afd311c0a8cdfa3ac2d" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80007" package="patchinfo.livepatch" />
+    <target project="SUSE:Updates:SLE-Module-Live-Patching:15-SP6:ppc64le" package="patchinfo.livepatch.80007" />
+    <acceptinfo rev="1" srcmd5="eb19e83ff61ff8873a93fe093a42a3c6" osrcmd5="5d61198235509afd311c0a8cdfa3ac2d" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80007" package="patchinfo.livepatch" />
+    <target project="SUSE:Updates:SLE-Module-Live-Patching:15-SP6:s390x" package="patchinfo.livepatch.80007" />
+    <acceptinfo rev="1" srcmd5="eb19e83ff61ff8873a93fe093a42a3c6" osrcmd5="5d61198235509afd311c0a8cdfa3ac2d" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80007" package="patchinfo.livepatch" />
+    <target project="SUSE:Updates:SLE-Module-Live-Patching:15-SP6:x86_64" package="patchinfo.livepatch.80007" />
+    <acceptinfo rev="1" srcmd5="eb19e83ff61ff8873a93fe093a42a3c6" osrcmd5="5d61198235509afd311c0a8cdfa3ac2d" />
+  </action>
+  <state name="accepted" created="2026-10-08T22:35:48" when="2026-10-14T10:09:04" />
+</request>

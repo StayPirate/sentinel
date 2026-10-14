@@ -1,0 +1,11 @@
+<request id="910053">
+  <action type="maintenance_incident">
+    <source project="SUSE:Maintenance:REQUEST:910053" package="openvpn.SUSE_SLE-15-SP6_Update" rev="0f7d47874bfd58176c66276bb3e2320c" />
+    <target project="SUSE:Maintenance:80001" package="openvpn.SUSE_SLE-15-SP6_Update" releaseproject="SUSE:SLE-15-SP6:Update" />
+    <acceptinfo rev="10" srcmd5="0f7d47874bfd58176c66276bb3e2320c" xsrcmd5="91054a5ca2b02f7921270c7462a526d0" osrcmd5="085c5cdd702c40cf571553a08ad4d0b6" oxsrcmd5="b1d7f1158d968bf4b4bf012de7cf15f8" />
+  </action>
+  <action type="delete">
+    <target project="SUSE:Maintenance:REQUEST:910053" />
+  </action>
+  <state name="accepted" created="2026-09-11T14:29:15" when="2026-09-11T15:27:49" />
+</request>
