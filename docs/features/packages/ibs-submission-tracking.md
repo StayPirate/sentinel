@@ -163,7 +163,7 @@ Type-specific structural checks require:
 
 - `maintenance_incident`: non-null `source_project`, `source_package`, and
   `target_release_project`; `codestream_name` equals the validated target
-  release project. `target_project`, `target_package`, incident, revision, and
+  release project. `target_project`, `target_package`, incident, and
   acceptinfo fields may be absent until IBS exposes them.
 - `maintenance_release`: non-null `source_project`, `source_package`,
   `target_project`, `target_package`, and `incident_number`;
