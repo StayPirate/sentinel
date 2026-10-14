@@ -1,0 +1,7 @@
+<request id="930434">
+  <action type="submit">
+    <source project="home:fictional" package="openvpn-formula" rev="6" />
+    <target project="SUSE:SLE-15-SP7:Update:Products:MultiLinuxManager52" package="openvpn-formula" />
+  </action>
+  <state name="revoked" created="2026-01-30T12:16:19" when="2026-01-30T12:35:04" />
+</request>

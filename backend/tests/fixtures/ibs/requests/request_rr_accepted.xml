@@ -1,0 +1,83 @@
+<request id="910051">
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80001" package="openvpn.SUSE_SLE-15-SP6_Update" rev="91054a5ca2b02f7921270c7462a526d0" />
+    <target project="SUSE:SLE-15-SP6:Update" package="openvpn.80001" />
+    <acceptinfo rev="1" srcmd5="c40f9d03a8728b65ac857fe47495c082" osrcmd5="eaa736f26f67a409be8ccd779db7d1e2" oxsrcmd5="eaa736f26f67a409be8ccd779db7d1e2" oproject="SUSE:SLE-15-SP6:Update" opackage="openvpn.80002" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80001" package="patchinfo" />
+    <target project="SUSE:SLE-15-SP6:Update" package="patchinfo.80001" />
+    <acceptinfo rev="1" srcmd5="cd6b7dcfb53664136ff4d462e1052cd4" osrcmd5="5d61198235509afd311c0a8cdfa3ac2d" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80001" package="patchinfo" />
+    <target project="SUSE:Updates:SLE-Module-Basesystem:15-SP7:aarch64" package="patchinfo.80001" />
+    <acceptinfo rev="1" srcmd5="cd6b7dcfb53664136ff4d462e1052cd4" osrcmd5="5d61198235509afd311c0a8cdfa3ac2d" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80001" package="patchinfo" />
+    <target project="SUSE:Updates:SLE-Module-Basesystem:15-SP7:ppc64le" package="patchinfo.80001" />
+    <acceptinfo rev="1" srcmd5="cd6b7dcfb53664136ff4d462e1052cd4" osrcmd5="5d61198235509afd311c0a8cdfa3ac2d" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80001" package="patchinfo" />
+    <target project="SUSE:Updates:SLE-Module-Basesystem:15-SP7:s390x" package="patchinfo.80001" />
+    <acceptinfo rev="1" srcmd5="cd6b7dcfb53664136ff4d462e1052cd4" osrcmd5="5d61198235509afd311c0a8cdfa3ac2d" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80001" package="patchinfo" />
+    <target project="SUSE:Updates:SLE-Module-Basesystem:15-SP7:x86_64" package="patchinfo.80001" />
+    <acceptinfo rev="1" srcmd5="cd6b7dcfb53664136ff4d462e1052cd4" osrcmd5="5d61198235509afd311c0a8cdfa3ac2d" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80001" package="patchinfo" />
+    <target project="SUSE:Updates:SLE-Module-Development-Tools-OBS:15-SP7:aarch64" package="patchinfo.80001" />
+    <acceptinfo rev="1" srcmd5="cd6b7dcfb53664136ff4d462e1052cd4" osrcmd5="5d61198235509afd311c0a8cdfa3ac2d" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80001" package="patchinfo" />
+    <target project="SUSE:Updates:SLE-Module-Development-Tools-OBS:15-SP7:ppc64le" package="patchinfo.80001" />
+    <acceptinfo rev="1" srcmd5="cd6b7dcfb53664136ff4d462e1052cd4" osrcmd5="5d61198235509afd311c0a8cdfa3ac2d" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80001" package="patchinfo" />
+    <target project="SUSE:Updates:SLE-Module-Development-Tools-OBS:15-SP7:s390x" package="patchinfo.80001" />
+    <acceptinfo rev="1" srcmd5="cd6b7dcfb53664136ff4d462e1052cd4" osrcmd5="5d61198235509afd311c0a8cdfa3ac2d" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80001" package="patchinfo" />
+    <target project="SUSE:Updates:SLE-Module-Development-Tools-OBS:15-SP7:x86_64" package="patchinfo.80001" />
+    <acceptinfo rev="1" srcmd5="cd6b7dcfb53664136ff4d462e1052cd4" osrcmd5="5d61198235509afd311c0a8cdfa3ac2d" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80001" package="patchinfo" />
+    <target project="SUSE:Updates:SLE-Product-SLES:15-SP6-LTSS:aarch64" package="patchinfo.80001" />
+    <acceptinfo rev="1" srcmd5="cd6b7dcfb53664136ff4d462e1052cd4" osrcmd5="5d61198235509afd311c0a8cdfa3ac2d" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80001" package="patchinfo" />
+    <target project="SUSE:Updates:SLE-Product-SLES:15-SP6-LTSS:ppc64le" package="patchinfo.80001" />
+    <acceptinfo rev="1" srcmd5="cd6b7dcfb53664136ff4d462e1052cd4" osrcmd5="5d61198235509afd311c0a8cdfa3ac2d" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80001" package="patchinfo" />
+    <target project="SUSE:Updates:SLE-Product-SLES:15-SP6-LTSS:s390x" package="patchinfo.80001" />
+    <acceptinfo rev="1" srcmd5="cd6b7dcfb53664136ff4d462e1052cd4" osrcmd5="5d61198235509afd311c0a8cdfa3ac2d" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80001" package="patchinfo" />
+    <target project="SUSE:Updates:SLE-Product-SLES:15-SP6-LTSS:x86_64" package="patchinfo.80001" />
+    <acceptinfo rev="1" srcmd5="cd6b7dcfb53664136ff4d462e1052cd4" osrcmd5="5d61198235509afd311c0a8cdfa3ac2d" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80001" package="patchinfo" />
+    <target project="SUSE:Updates:SLE-Product-SLES_SAP:15-SP6:ppc64le" package="patchinfo.80001" />
+    <acceptinfo rev="1" srcmd5="cd6b7dcfb53664136ff4d462e1052cd4" osrcmd5="5d61198235509afd311c0a8cdfa3ac2d" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80001" package="patchinfo" />
+    <target project="SUSE:Updates:SLE-Product-SLES_SAP:15-SP6:x86_64" package="patchinfo.80001" />
+    <acceptinfo rev="1" srcmd5="cd6b7dcfb53664136ff4d462e1052cd4" osrcmd5="5d61198235509afd311c0a8cdfa3ac2d" />
+  </action>
+  <state name="accepted" created="2026-09-14T07:54:09" when="2026-09-16T11:53:27" />
+</request>

@@ -1,0 +1,324 @@
+{
+  "captured_at": "2026-10-14",
+  "api_url": "https://api.suse.de",
+  "documents": {
+    "diff_error_bad_link.xml": {
+      "method": "POST",
+      "path": "/source/SUSE:Maintenance:REQUEST:910095/openvpn.SUSE_SLE-15-SP4_Update",
+      "query": [
+        ["cmd", "diff"],
+        ["view", "xml"],
+        ["withissues", "1"],
+        ["onlyissues", "1"],
+        ["expand", "1"],
+        ["rev", "1ee85cd1ccc252af238d888e0cf3ed69"],
+        ["oproject", "SUSE:SLE-15-SP4:Update"],
+        ["opackage", "openvpn"]
+      ],
+      "status": 400
+    },
+    "diff_error_unavailable_checksum.xml": {
+      "method": "POST",
+      "path": "/source/SUSE:Maintenance:80001/openvpn.SUSE_SLE-15-SP6_Update",
+      "query": [
+        ["cmd", "diff"],
+        ["view", "xml"],
+        ["withissues", "1"],
+        ["onlyissues", "1"],
+        ["rev", "0123456789abcdef0123456789abcdef"],
+        ["orev", "b1d7f1158d968bf4b4bf012de7cf15f8"]
+      ],
+      "status": 400
+    },
+    "diff_error_unknown_package.xml": {
+      "method": "POST",
+      "path": "/source/SUSE:Maintenance:REQUEST:910015/openvpn.SUSE_SLE-15-SP6_Update",
+      "query": [
+        ["cmd", "diff"],
+        ["view", "xml"],
+        ["withissues", "1"],
+        ["onlyissues", "1"],
+        ["expand", "1"],
+        ["rev", "b28e7df0a50947dc1327f4da92c888b6"],
+        ["oproject", "SUSE:SLE-15-SP6:Update"],
+        ["opackage", "sentinel-nonexistent-pkg"]
+      ],
+      "status": 404
+    },
+    "diff_error_unknown_project.xml": {
+      "method": "POST",
+      "path": "/source/SUSE:Maintenance:REQUEST:910067/openvpn.SUSE_SLE-15_Update",
+      "query": [
+        ["cmd", "diff"],
+        ["view", "xml"],
+        ["withissues", "1"],
+        ["onlyissues", "1"],
+        ["expand", "1"],
+        ["rev", "d09bfa70d41638b26c371e79a8eed784"],
+        ["oproject", "SUSE:SLE-15:Update"],
+        ["opackage", "openvpn"]
+      ],
+      "status": 404
+    },
+    "diff_rr_accepted.xml": {
+      "method": "POST",
+      "path": "/source/SUSE:SLE-15-SP6:Update/openvpn.80001",
+      "query": [
+        ["cmd", "diff"],
+        ["view", "xml"],
+        ["withissues", "1"],
+        ["onlyissues", "1"],
+        ["rev", "c40f9d03a8728b65ac857fe47495c082"],
+        ["orev", "eaa736f26f67a409be8ccd779db7d1e2"],
+        ["oproject", "SUSE:SLE-15-SP6:Update"],
+        ["opackage", "openvpn.80002"]
+      ],
+      "status": 200
+    },
+    "diff_rr_open.xml": {
+      "method": "POST",
+      "path": "/source/SUSE:Maintenance:80006/python311.SUSE_SLE-15-SP4_Update",
+      "query": [
+        ["cmd", "diff"],
+        ["view", "xml"],
+        ["withissues", "1"],
+        ["onlyissues", "1"],
+        ["expand", "1"],
+        ["rev", "18c1b955a7722d903fd8df13304a906f"],
+        ["oproject", "SUSE:SLE-15-SP4:Update"],
+        ["opackage", "python311"]
+      ],
+      "status": 200
+    },
+    "diff_rr_patchinfo_accepted.xml": {
+      "method": "POST",
+      "path": "/source/SUSE:SLE-15-SP6:Update/patchinfo.80001",
+      "query": [
+        ["cmd", "diff"],
+        ["view", "xml"],
+        ["withissues", "1"],
+        ["onlyissues", "1"],
+        ["rev", "cd6b7dcfb53664136ff4d462e1052cd4"],
+        ["orev", "5d61198235509afd311c0a8cdfa3ac2d"]
+      ],
+      "status": 200
+    },
+    "diff_sr_accepted.xml": {
+      "method": "POST",
+      "path": "/source/SUSE:Maintenance:80001/openvpn.SUSE_SLE-15-SP6_Update",
+      "query": [
+        ["cmd", "diff"],
+        ["view", "xml"],
+        ["withissues", "1"],
+        ["onlyissues", "1"],
+        ["rev", "91054a5ca2b02f7921270c7462a526d0"],
+        ["orev", "b1d7f1158d968bf4b4bf012de7cf15f8"]
+      ],
+      "status": 200
+    },
+    "diff_sr_home_accepted.xml": {
+      "method": "POST",
+      "path": "/source/SUSE:Maintenance:80013/openvpn-openssl1.SUSE_SLE-11-SP3_Update",
+      "query": [
+        ["cmd", "diff"],
+        ["view", "xml"],
+        ["withissues", "1"],
+        ["onlyissues", "1"],
+        ["rev", "b4948bdcb81d66dfb7ddb3496978c7ae"],
+        ["orev", "8285b7cfefe4ae095180f975d16e0fd8"]
+      ],
+      "status": 200
+    },
+    "diff_sr_open.xml": {
+      "method": "POST",
+      "path": "/source/SUSE:Maintenance:REQUEST:910015/openvpn.SUSE_SLE-15-SP6_Update",
+      "query": [
+        ["cmd", "diff"],
+        ["view", "xml"],
+        ["withissues", "1"],
+        ["onlyissues", "1"],
+        ["expand", "1"],
+        ["rev", "b28e7df0a50947dc1327f4da92c888b6"],
+        ["oproject", "SUSE:SLE-15-SP6:Update"],
+        ["opackage", "openvpn"]
+      ],
+      "status": 200
+    },
+    "history_codestream.xml": {
+      "method": "GET",
+      "path": "/source/SUSE:SLE-15-SP6:Update/openvpn/_history",
+      "query": [],
+      "status": 200
+    },
+    "history_error_unknown_package.xml": {
+      "method": "GET",
+      "path": "/source/SUSE:SLE-15-SP6:Update/sentinel-nonexistent-pkg/_history",
+      "query": [],
+      "status": 404
+    },
+    "history_error_unknown_project.xml": {
+      "method": "GET",
+      "path": "/source/SUSE:Sentinel-Nonexistent:Update/openvpn/_history",
+      "query": [],
+      "status": 404
+    },
+    "history_incident.xml": {
+      "method": "GET",
+      "path": "/source/SUSE:Maintenance:80001/openvpn.SUSE_SLE-15-SP6_Update/_history",
+      "query": [],
+      "status": 200
+    },
+    "history_lookup_checksum_multiple.xml": {
+      "method": "GET",
+      "path": "/source/SUSE:Maintenance:80001/openvpn.SUSE_SLE-15-SP6_Update/_history",
+      "query": [
+        ["rev", "085c5cdd702c40cf571553a08ad4d0b6"]
+      ],
+      "status": 200
+    },
+    "history_lookup_revision.xml": {
+      "method": "GET",
+      "path": "/source/SUSE:SLE-15-SP6:Update/openvpn.80001/_history",
+      "query": [
+        ["rev", "1"]
+      ],
+      "status": 200
+    },
+    "history_lookup_unknown_checksum.xml": {
+      "method": "GET",
+      "path": "/source/SUSE:SLE-15-SP6:Update/openvpn/_history",
+      "query": [
+        ["rev", "0123456789abcdef0123456789abcdef"]
+      ],
+      "status": 200
+    },
+    "history_lookup_unknown_revision.xml": {
+      "method": "GET",
+      "path": "/source/SUSE:SLE-15-SP6:Update/openvpn/_history",
+      "query": [
+        ["rev", "99"]
+      ],
+      "status": 200
+    },
+    "request_non_maintenance.xml": {
+      "method": "GET",
+      "path": "/request/930434",
+      "query": [],
+      "status": 200
+    },
+    "request_not_found.xml": {
+      "method": "GET",
+      "path": "/request/99999999",
+      "query": [],
+      "status": 404
+    },
+    "request_rr_accepted.xml": {
+      "method": "GET",
+      "path": "/request/910051",
+      "query": [],
+      "status": 200
+    },
+    "request_rr_kernel.xml": {
+      "method": "GET",
+      "path": "/request/910132",
+      "query": [],
+      "status": 200
+    },
+    "request_rr_open.xml": {
+      "method": "GET",
+      "path": "/request/910100",
+      "query": [],
+      "status": 200
+    },
+    "request_rr_revoked.xml": {
+      "method": "GET",
+      "path": "/request/910141",
+      "query": [],
+      "status": 200
+    },
+    "request_sr_accepted.xml": {
+      "method": "GET",
+      "path": "/request/910053",
+      "query": [],
+      "status": 200
+    },
+    "request_sr_accepted_earlier.xml": {
+      "method": "GET",
+      "path": "/request/910052",
+      "query": [],
+      "status": 200
+    },
+    "request_sr_declined.xml": {
+      "method": "GET",
+      "path": "/request/910095",
+      "query": [],
+      "status": 200
+    },
+    "request_sr_home.xml": {
+      "method": "GET",
+      "path": "/request/928349",
+      "query": [],
+      "status": 200
+    },
+    "request_sr_open.xml": {
+      "method": "GET",
+      "path": "/request/910015",
+      "query": [],
+      "status": 200
+    },
+    "request_sr_superseded.xml": {
+      "method": "GET",
+      "path": "/request/910094",
+      "query": [],
+      "status": 200
+    },
+    "search_all_states.xml": {
+      "method": "GET",
+      "path": "/search/request/id",
+      "query": [
+        ["match", "action[@type='maintenance_incident' and starts-with(source/@package,'openvpn.')]"]
+      ],
+      "status": 200
+    },
+    "search_error_releaseproject.xml": {
+      "method": "GET",
+      "path": "/search/request/id",
+      "query": [
+        ["match", "action[@type='maintenance_incident' and starts-with(source/@package,'openvpn.') and target/@releaseproject='SUSE:SLE-15-SP6:Update']"]
+      ],
+      "status": 400
+    },
+    "search_open_rr_empty.xml": {
+      "method": "GET",
+      "path": "/search/request/id",
+      "query": [
+        ["match", "action[@type='maintenance_release' and starts-with(target/@package,'openvpn.')] and (state/@name='new' or state/@name='review')"]
+      ],
+      "status": 200
+    },
+    "search_open_rr_target_prefix.xml": {
+      "method": "GET",
+      "path": "/search/request/id",
+      "query": [
+        ["match", "action[@type='maintenance_release' and starts-with(target/@package,'kernel-source.')] and (state/@name='new' or state/@name='review')"]
+      ],
+      "status": 200
+    },
+    "search_open_sr_source_prefix.xml": {
+      "method": "GET",
+      "path": "/search/request/id",
+      "query": [
+        ["match", "action[@type='maintenance_incident' and starts-with(source/@package,'openvpn.')] and (state/@name='new' or state/@name='review')"]
+      ],
+      "status": 200
+    },
+    "search_single_state.xml": {
+      "method": "GET",
+      "path": "/search/request/id",
+      "query": [
+        ["match", "action[@type='maintenance_incident' and starts-with(source/@package,'openvpn.')] and (state/@name='declined')"]
+      ],
+      "status": 200
+    }
+  }
+}

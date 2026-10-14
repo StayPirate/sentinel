@@ -1,0 +1,10 @@
+<request id="910095">
+  <action type="maintenance_incident">
+    <source project="SUSE:Maintenance:REQUEST:910095" package="openvpn.SUSE_SLE-15-SP4_Update" rev="1ee85cd1ccc252af238d888e0cf3ed69" />
+    <target project="SUSE:Maintenance" releaseproject="SUSE:SLE-15-SP4:Update" />
+  </action>
+  <action type="delete">
+    <target project="SUSE:Maintenance:REQUEST:910095" />
+  </action>
+  <state name="declined" created="2026-08-04T06:32:55" when="2026-08-04T08:36:13" />
+</request>

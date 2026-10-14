@@ -1,0 +1,43 @@
+<request id="910141">
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80001" package="openvpn.SUSE_SLE-15-SP6_Update" rev="d136bb7277c01d99a7897d7a995d8410" />
+    <target project="SUSE:SLE-15-SP6:Update" package="openvpn.80001" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80001" package="patchinfo" />
+    <target project="SUSE:SLE-15-SP6:Update" package="patchinfo.80001" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80001" package="patchinfo" />
+    <target project="SUSE:Updates:SLE-Module-Basesystem:15-SP7:aarch64" package="patchinfo.80001" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80001" package="patchinfo" />
+    <target project="SUSE:Updates:SLE-Module-Basesystem:15-SP7:ppc64le" package="patchinfo.80001" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80001" package="patchinfo" />
+    <target project="SUSE:Updates:SLE-Module-Basesystem:15-SP7:s390x" package="patchinfo.80001" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80001" package="patchinfo" />
+    <target project="SUSE:Updates:SLE-Module-Basesystem:15-SP7:x86_64" package="patchinfo.80001" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80001" package="patchinfo" />
+    <target project="SUSE:Updates:SLE-Module-Development-Tools-OBS:15-SP7:aarch64" package="patchinfo.80001" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80001" package="patchinfo" />
+    <target project="SUSE:Updates:SLE-Module-Development-Tools-OBS:15-SP7:ppc64le" package="patchinfo.80001" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80001" package="patchinfo" />
+    <target project="SUSE:Updates:SLE-Module-Development-Tools-OBS:15-SP7:s390x" package="patchinfo.80001" />
+  </action>
+  <action type="maintenance_release">
+    <source project="SUSE:Maintenance:80001" package="patchinfo" />
+    <target project="SUSE:Updates:SLE-Module-Development-Tools-OBS:15-SP7:x86_64" package="patchinfo.80001" />
+  </action>
+  <state name="revoked" created="2026-09-08T16:52:22" when="2026-09-11T15:27:41" />
+</request>

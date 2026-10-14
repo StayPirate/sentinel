@@ -1,0 +1,10 @@
+<request id="910094">
+  <action type="maintenance_incident">
+    <source project="SUSE:Maintenance:REQUEST:910094" package="openvpn.SUSE_SLE-15-SP4_Update" rev="3c96030e063a546f22cdee9989400232" />
+    <target project="SUSE:Maintenance" releaseproject="SUSE:SLE-15-SP4:Update" />
+  </action>
+  <action type="delete">
+    <target project="SUSE:Maintenance:REQUEST:910094" />
+  </action>
+  <state name="superseded" created="2026-08-03T12:03:34" when="2026-08-04T06:32:56" superseded_by="910095" />
+</request>
