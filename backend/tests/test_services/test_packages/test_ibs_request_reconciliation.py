@@ -49,7 +49,7 @@ from typing import Any, ClassVar, Final
 
 import pytest
 from celery.exceptions import SoftTimeLimitExceeded
-from sqlalchemy import delete, event, select, update
+from sqlalchemy import delete, event, select, text, update
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from structlog.testing import capture_logs
@@ -151,6 +151,8 @@ EARLIER: Final = "2026-10-01T08:00:00"
 """A current-state time older than the seeded `WHEN_AT`."""
 
 RELEASE_REV: Final = "3"
+INDEX_POPULATION: Final = 50
+"""Other actions present when the retained-root plan is explained."""
 """The acceptinfo `rev` of every accepted release action built here."""
 
 HOME_PROJECT: Final = "home:jdoe:branches:SUSE:SLE-15-SP6:Update"
@@ -2007,8 +2009,18 @@ class TestRetainedRootIndex:
     async def test_retained_root_reader_can_use_the_package_codestream_index(
         self, db_session: AsyncSession, package: str
     ) -> None:
+        """With a population of other packages' actions and fresh statistics
+        (both rolled back with the test), so the plan does not depend on
+        what earlier tests left in the worker database's statistics."""
+        for _ in range(INDEX_POPULATION):
+            other = committed_number()
+            await seed_evidence(
+                db_session, other, REVIEW, submission(unique_package(), other)
+            )
         number = committed_number()
         await seed_evidence(db_session, number, REVIEW, submission(package, number))
+        await db_session.execute(text("ANALYZE ibs_request"))
+        await db_session.execute(text("ANALYZE ibs_request_action"))
         captured: list[tuple[str, Any]] = []
 
         def _record(*args: Any) -> None:
