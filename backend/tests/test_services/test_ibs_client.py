@@ -9,18 +9,16 @@ Validation, Source-Diff Validation, XML and Response Safety);
 docs/features/platform/networking.md (Transport-Level Retry, Method Safety,
 Redirect Policy); docs/conventions.md (External String Admissibility).
 
-Every client is a real `create_http_client` client: only the network
-transport is replaced by the fake IBS API of `tests/support/ibs_api.py`,
-so the shared retry transport, the authentication flow, and the cookie jar
-are the production ones. Retry backoff sleeps are recorded, not awaited.
+Clients and the fake IBS API come from `tests/support/ibs_client_fixtures.py`:
+only the network transport is replaced, so the shared retry transport, the
+authentication flow, and the cookie jar are the production ones.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable, Iterator
-from types import SimpleNamespace
+from collections.abc import Iterator
 from typing import Any, Final
 from unittest.mock import AsyncMock
 
@@ -29,7 +27,6 @@ import pytest
 from pydantic import SecretStr
 
 from app.config import settings
-from app.services import http_client
 from app.services import ibs_client as ibs_client_module
 from app.services.http_client import is_retryable_condition
 from app.services.ibs_client import (
@@ -61,11 +58,13 @@ from tests.support.ibs_api import (
     verify_signature_header,
     xml_response,
 )
+from tests.support.ibs_api import ibs_client as _client
+from tests.support.ibs_api import signed_requests as _signed
 from tests.support.ibs_keys import fictional_ed25519_key, fictional_settings_value
 
 pytestmark = pytest.mark.unit
+pytest_plugins = ["tests.support.ibs_client_fixtures"]
 
-_CLOCK: Final = 1700000000.75
 _PROJECT_PATH: Final = f"/source/{LIVE_PROJECT}"
 _OLD: Final = "746089c90539b6ff4a924ce513b6b800"
 _NEW: Final = "de84bf76520480292946d884daf7308a"
@@ -74,48 +73,6 @@ _SUDO: Final = "f6cf5398175f44ce4265e2381f6309b2"
 
 def _diff_path(package: str = "pkg") -> str:
     return f"{_PROJECT_PATH}/{package}"
-
-
-@pytest.fixture
-def sleep(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
-    recorded = AsyncMock()
-    monkeypatch.setattr(http_client, "asyncio", SimpleNamespace(sleep=recorded))
-    return recorded
-
-
-@pytest.fixture
-def server(monkeypatch: pytest.MonkeyPatch, sleep: AsyncMock) -> IBSServer:
-    """The fake IBS API behind every client the test creates."""
-    fake = IBSServer(public_key=fictional_ed25519_key().public_key())
-    for variable in (
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
-        "ALL_PROXY",
-        "http_proxy",
-        "https_proxy",
-        "all_proxy",
-    ):
-        monkeypatch.delenv(variable, raising=False)
-    monkeypatch.setattr(httpx, "AsyncHTTPTransport", lambda **_: fake.transport())
-    return fake
-
-
-def _client(
-    *,
-    username: str = "jdoe",
-    key: str | None = None,
-    clock: Callable[[], float] = lambda: _CLOCK,
-) -> IBSClient:
-    return IBSClient(
-        api_url=TEST_API_URL,
-        username=username,
-        ssh_private_key=SecretStr(fictional_settings_value() if key is None else key),
-        clock=clock,
-    )
-
-
-def _signed(server: IBSServer) -> list[httpx.Request]:
-    return [r for r in server.requests if "authorization" in r.headers]
 
 
 def _document(body: str) -> Responder:
@@ -754,17 +711,43 @@ class TestResultRecords:
 
 
 class TestPathEncoding:
-    async def test_project_and_package_are_single_encoded_path_segments(
+    async def test_project_and_package_are_single_path_segments(
         self, server: IBSServer
     ) -> None:
-        server.route("POST", "/source/home:j%x+y/lib?c++", _sourcediff(""))
+        server.route("POST", "/source/SUSE:SLE-15:Update/libstdc++6", _sourcediff(""))
         async with _client() as client:
             assert (
-                await client.get_diff_issues("home:j%x+y", "lib?c++", "0", _NEW) == []
+                await client.get_diff_issues(
+                    "SUSE:SLE-15:Update", "libstdc++6", "0", _NEW
+                )
+                == []
             )
         request = server.requests[-1]
-        assert request.url.raw_path.split(b"?")[0] == b"/source/home:j%25x+y/lib%3Fc++"
+        assert (
+            request.url.raw_path.split(b"?")[0]
+            == b"/source/SUSE:SLE-15:Update/libstdc++6"
+        )
         assert request.url.params["rev"] == _NEW
+
+    @pytest.mark.parametrize(
+        ("project", "package"),
+        [
+            ("home:j%x", "lib"),
+            (LIVE_PROJECT, "lib?c"),
+            (LIVE_PROJECT, "lib#c"),
+            (LIVE_PROJECT, "lib'c"),
+            (LIVE_PROJECT, "lib&c=1"),
+        ],
+    )
+    async def test_names_with_url_delimiters_are_rejected_before_any_request(
+        self, server: IBSServer, project: str, package: str
+    ) -> None:
+        async with _client() as client:
+            with pytest.raises(ValueError, match="invalid IBS"):
+                await client.get_diff_issues(project, package, "0", _NEW)
+            with pytest.raises(ValueError, match="invalid IBS"):
+                await client.get_source_info(project, [package])
+        assert server.requests == []
 
 
 # ---------------------------------------------------------------------------
@@ -1321,13 +1304,34 @@ class TestNamePredicates:
             (LIVE_PROJECT, True),
             ("sudo", True),
             ("libxml2.12345", True),
+            ("libstdc++6", True),
+            ("go1.27", True),
+            ("kguiaddons.openSUSE_Backports_SLE-15-SP4_Update", True),
+            ("_redacted_", True),
+            ("a" * 255, True),
+            ("a" * 256, False),
             ("", False),
             (".", False),
             ("..", False),
+            ("...", True),
             ("a/b", False),
             ("a b", False),
             ("a\tb", False),
+            ("a%b", False),
+            ("a?b", False),
+            ("a#b", False),
+            ("a'b", False),
+            ('a"b', False),
+            ("a[b]", False),
+            ("a(b)", False),
+            ("a=b", False),
+            ("a&b", False),
+            ("a@b", False),
+            ("a~b", False),
+            ("a\nb", False),
             ("é", False),
+            ("\uff21", False),
+            ("\u0661", False),
             (None, False),
             (1, False),
         ],
