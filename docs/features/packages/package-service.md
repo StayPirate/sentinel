@@ -366,8 +366,11 @@ no external I/O.
 - Package and track must exist under the declared Ticket/package path
 - The transition `current_delivery_status → new_delivery_status` must be
   unchanged or one of `PENDING → IN_PROGRESS`, `IN_PROGRESS → RELEASED`, or
-  `IN_PROGRESS → PENDING` under the evidence and stale-negative rules in
-  `docs/features/packages/package-model.md`. Any change out of `RELEASED` is
+  `IN_PROGRESS → PENDING` of the delivery state machine in
+  `docs/features/packages/package-model.md` (Automatic Transitions). The
+  caller applies the evidence and stale-negative rules of
+  `docs/features/packages/ibs-submission-tracking.md` (Delivery Derivation)
+  before requesting a transition. Any change out of `RELEASED` is
   illegal. A caller whose complete observation proves `RELEASED` from `PENDING`
   applies the two approved forward transitions in one transaction.
 

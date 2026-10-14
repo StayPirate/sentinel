@@ -58,10 +58,9 @@ its positive number on actions when it can be established, but does not create a
    effective source contents.
 3. A `maintenance_release` action in an RR releases incident contents toward a
    codestream.
-4. Acceptance of the RR is delivery evidence only when the RR's own target
-   provenance and release diff prove that it released contents carrying the
-   Ticket CVE to the codestream
-   ([Accepted RR Provenance](#accepted-rr-provenance)).
+4. Acceptance of the RR alone is not delivery evidence;
+   [Accepted RR Provenance](#accepted-rr-provenance) defines when an accepted
+   RR proves the release.
 
 IBS permits multiple actions in each request, multiple SRs for one incident,
 and multiple historical RRs for an incident. Sentinel never assumes one request
@@ -601,33 +600,32 @@ established local delivery state is the intentional safe result.
 
 ## Delivery Derivation
 
-The three delivery values retain the meanings established by
-`package-model.md`:
-
-| Delivery status | Authoritative meaning here |
-|---|---|
-| `PENDING` | Sentinel has not established relevant current delivery progress. It does not prove no SR exists or that synchronization succeeded. |
-| `IN_PROGRESS` | Complete authoritative evidence establishes a relevant current SR, effective accepted SR, or open RR, but no release has been proven. |
-| `RELEASED` | An accepted RR is proven, by its own target provenance and release diff, to have released contents carrying the Ticket CVE to the track codestream ([Accepted RR Provenance](#accepted-rr-provenance)). |
+This section maps IBS evidence to the delivery values whose meanings are
+defined in `package-model.md`
+([Axis 3](package-model.md#axis-3-delivery-and-release-observation)).
 
 For a complete observation, derive the strongest proven state:
 
-1. A proven release yields `RELEASED`.
+1. A release proven under [Accepted RR Provenance](#accepted-rr-provenance)
+   yields `RELEASED`.
 2. Otherwise, a relevant `new`/`review` SR, effective accepted SR, complete
    relevant supersession successor, or relevant `new`/`review` RR yields
    `IN_PROGRESS`.
 3. Otherwise, a complete authoritative no-match yields `PENDING`.
 
 A complete no-match is complete within the bounded discovery of
-[Required Roots](#required-roots), whose accepted limitations apply: `PENDING`
-never proves that no SR or release exists.
+[Required Roots](#required-roots), whose accepted limitations apply; the
+resulting `PENDING` carries the caveat stated in
+[Axis 3](package-model.md#axis-3-delivery-and-release-observation). An
+incomplete or failed observation never changes delivery.
 
-`RELEASED` is irreversible. An incomplete or failed observation never changes
-delivery. `IN_PROGRESS -> PENDING` is permitted only after complete negative
-reconciliation and the stale-negative guard below. A missed history can converge
-directly from `PENDING` to the proven final outcome; when the centralized
-package mutation contract requires adjacent transitions, the transaction
-applies `PENDING -> IN_PROGRESS -> RELEASED` atomically.
+The derived value is applied under the delivery state machine in
+`package-model.md`
+([Automatic Transitions](package-model.md#automatic-transitions)), including
+irreversible `RELEASED` and the atomic `PENDING -> IN_PROGRESS -> RELEASED`
+application of a release proven while the persisted value is `PENDING`. A
+negative regression `IN_PROGRESS -> PENDING` also requires the stale-negative
+guard of [Algorithm](#algorithm) step 8.
 
 All effective changes use `package_service.set_track_delivery_status()` with
 system attribution. Delivery changes create no Ticket audit event and do not
@@ -698,10 +696,10 @@ For each selected scope:
    actions are not persisted. Existing provenance omitted by IBS is retained;
    contradictory immutable provenance rolls back the scope.
 8. Derive delivery from the complete observation and the reloaded retained
-   evidence. For a complete negative observation, do not regress
-   `IN_PROGRESS` if any relevant request, action, or correlation row changed
-   after `observation_started_at`, or if the track's delivery value differs from
-   the value observed before external I/O.
+   evidence. Stale-negative guard: for a complete negative observation, do not
+   regress `IN_PROGRESS` if any relevant request, action, or correlation row
+   changed after `observation_started_at`, or if the track's delivery value
+   differs from the value observed before external I/O.
 9. Apply any effective delivery transition through
    `package_service.set_track_delivery_status()` with the complete Ticket,
    package, and track locator in the same transaction. Consume `changed` or
@@ -722,9 +720,9 @@ timestamp and normalized content; a Ticket lock alone is not treated as a
 cross-Ticket request lock. The timestamp/content checks prevent an older
 point-fetch from replacing newer request truth. Uniqueness conflicts on a
 concurrently inserted identity are resolved by reloading and applying the same
-condition, not by replacing the winner. The post-scan evidence and expected-
-delivery checks prevent a stale negative result from overwriting positive event
-or polling work committed after the scan began. Audit history is never queried
+condition, not by replacing the winner. The stale-negative guard of step 8
+prevents a stale negative result from overwriting positive event or polling
+work committed after the scan began. Audit history is never queried
 for current state, idempotency, or provenance.
 
 ## Accelerators
@@ -1277,8 +1275,9 @@ status, metrics, and sanitized logs, never by another delivery state.
   and source-history client contracts.
 - `docs/features/integrations/ibs-rabbitmq-integration.md` - request wake-up,
   acknowledgement, process, and heartbeat contracts.
-- `docs/features/packages/package-model.md` - orthogonal dimensions, strict IBS
-  applicability, active-Ticket scope, and Ticket convergence ordering.
+- `docs/features/packages/package-model.md` - orthogonal dimensions, delivery
+  value meanings and the delivery state machine, strict IBS applicability,
+  active-Ticket scope, and Ticket convergence ordering.
 - `docs/features/packages/package-service.md` - centralized delivery mutation
   and Ticket locking.
 - `docs/features/packages/maintainer.md` - current-state workbench projection;

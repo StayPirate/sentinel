@@ -508,12 +508,16 @@ publication for one Product occurrence. Neither fact derives the other, and
 neither changes affectedness or eligibility. Only Product `released_at`, not
 track `delivery_status`, participates in the Resolved gate.
 
-| State | Meaning | Condition |
-|-------|---------|-----------|
-| `PENDING` | Relevant delivery progress has not been established | Initial state, or a complete non-stale reconciliation found no relevant current progress. This does not prove that no SR exists or that synchronization succeeded |
-| `IN_PROGRESS` | Relevant fix delivery is authoritatively in progress | Complete evidence establishes a relevant current SR, effective accepted SR, or open RR, but does not prove a release |
-| `RELEASED` | Release to the track is proven | An accepted RR's own target provenance and release diff prove that it released contents carrying the Ticket CVE to the track codestream; this state is irreversible |
+| State | Meaning |
+|-------|---------|
+| `PENDING` | Relevant current delivery progress has not been established. It is the initial state, and the result of a complete, non-stale observation that found no relevant current delivery progress. It does not prove that no submission or release exists, or that synchronization succeeded |
+| `IN_PROGRESS` | Complete authoritative evidence establishes relevant current delivery progress of the fix to the track, but does not prove a release |
+| `RELEASED` | Release of contents carrying the Ticket CVE to the track is proven. This state is irreversible |
 
+The IBS evidence that establishes each value, including the release proof, is
+defined in `ibs-submission-tracking.md`
+([Delivery Derivation](ibs-submission-tracking.md#delivery-derivation) and
+[Accepted RR Provenance](ibs-submission-tracking.md#accepted-rr-provenance)).
 The delivery status is updated only by the shared authoritative IBS request
 reconciliation. IBS RabbitMQ events, package-add catch-up, Ticket-convergence
 catch-up, and the daily `SyncIbsRequests` fetcher all invoke that same
@@ -596,7 +600,6 @@ Maintainer prepares fix
         |
         v
 Relevant SR/current incident proven      --> delivery: IN_PROGRESS
-(or an open RR, when no SR was observed)
         |
         v
 Incident (SUSE:Maintenance:XXXXX)
@@ -608,8 +611,7 @@ Incident (SUSE:Maintenance:XXXXX)
 RR (Release Request) created
         |
         v
-RR acceptance and release provenance proven
-                                          --> delivery: RELEASED
+RR accepted, release to the track proven --> delivery: RELEASED
         |
         v
 Fix evidence appears in track source     --> affectedness: FIXED (automatic, via expanded source diff)
@@ -620,15 +622,16 @@ Fix lands in Product repositories (updateinfo.xml) --> released_at set
 
 The two axes are managed independently:
 - `delivery_status` transitions to `RELEASED` only when IBS submission
-  tracking proves that an accepted RR released contents carrying the Ticket
-  CVE to the track
+  tracking proves the release to the track
+  ([Accepted RR Provenance](ibs-submission-tracking.md#accepted-rr-provenance))
 - `status` transitions to `FIXED` when track release detection confirms the
   Ticket CVE in the expanded codestream source diff
 
-RR acceptance by itself is insufficient delivery proof. Sentinel validates the
-accepted RR's own target source-history provenance and release diff
-independently from track affectedness detection and Product publication
-detection.
+The diagram shows the typical order of events. The evidence that establishes
+each delivery value is defined in
+[Delivery Derivation](ibs-submission-tracking.md#delivery-derivation);
+delivery is derived independently from track affectedness detection and
+Product publication detection.
 
 #### Product Release Confirmation
 
@@ -657,17 +660,20 @@ maintenance process. Product confirmation verifies the end result.
 
 #### Delivery Reconciliation
 
-`SyncIbsRequests` runs the complete state-based reconciliation daily at 02:30
-UTC for every IBS track (`workflow_type = 'ibs'`) belonging to an active
-Ticket, including tracks in every affectedness, delivery, exclusion, and
-actionability state. It is the permanent recovery owner for missed events,
-failed accelerators, request reopens, supersession, first enablement, and long
-gaps while sufficient upstream evidence remains discoverable.
+`SyncIbsRequests` runs the complete state-based reconciliation daily, on the
+schedule in its [Properties](ibs-submission-tracking.md#properties), for every
+IBS track (`workflow_type = 'ibs'`) belonging to an active Ticket, including
+tracks in every affectedness, delivery, exclusion, and actionability state. It
+is the permanent recovery owner for missed events, failed accelerators, request
+reopens, supersession, first enablement, and long gaps while sufficient
+upstream evidence remains discoverable.
 
 Each track observation is classified as complete positive, complete no-match,
 incomplete, or failed under `ibs-submission-tracking.md`. Only a complete
-observation may change delivery. Incomplete, failed, retention-limited,
-ambiguous, or stale evidence preserves the persisted status. This
+observation may change delivery: an incomplete, failed, or stale observation,
+including a negative that fails the stale-negative guard, preserves the
+persisted status (see
+[Delivery status regression](#delivery-status-regression)). This
 reconciliation applies only to IBS tracks. Git tracks will have their own
 delivery detection and reconciliation mechanism (TBD).
 
@@ -685,7 +691,7 @@ context of the current affectedness — see
 | Affectedness | Delivery | Relevant | Anomaly | Meaning |
 |-------------|----------|----------|---------|---------|
 | `ANALYSIS` | `PENDING` | Yes | | Not yet analyzed; relevant delivery progress is not established |
-| `ANALYSIS` | `IN_PROGRESS` | Yes | | Relevant SR, incident, or open-RR progress is established before VA analysis |
+| `ANALYSIS` | `IN_PROGRESS` | Yes | | Relevant delivery progress is established before VA analysis |
 | `ANALYSIS` | `RELEASED` | Yes | | Fix released before VA analyzed the track |
 | `AFFECTED` | `PENDING` | Yes | | Affected, fix expected, relevant delivery progress not established |
 | `AFFECTED` | `IN_PROGRESS` | Yes | | Fix in the pipeline |
@@ -773,9 +779,14 @@ service result itself does not prescribe an exception type.
 
 | From | To | Trigger |
 |------|----|---------|
-| `PENDING` | `IN_PROGRESS` | Complete authoritative evidence establishes a relevant `new` or `review` SR, effective accepted SR, complete relevant supersession successor, or relevant `new` or `review` RR |
-| `IN_PROGRESS` | `RELEASED` | An accepted RR's own target provenance and release diff prove that it released contents carrying the Ticket CVE to the track |
-| `IN_PROGRESS` | `PENDING` | Complete authoritative reconciliation establishes no relevant current delivery progress, and the negative observation passes the stale-result guard |
+| `PENDING` | `IN_PROGRESS` | A complete observation establishes relevant current delivery progress |
+| `IN_PROGRESS` | `RELEASED` | A complete observation proves the release to the track |
+| `IN_PROGRESS` | `PENDING` | A complete observation establishes no relevant current delivery progress, and the negative observation passes the stale-negative guard ([Delivery status regression](#delivery-status-regression)) |
+
+Each trigger uses the meanings in
+[Axis 3](#axis-3-delivery-and-release-observation); the IBS evidence for each
+is defined in
+[Delivery Derivation](ibs-submission-tracking.md#delivery-derivation).
 
 When a complete observation proves `RELEASED` while the persisted value is
 `PENDING`, the same transaction applies `PENDING → IN_PROGRESS → RELEASED`.
@@ -784,28 +795,31 @@ idempotent no-op.
 
 #### Delivery status regression
 
-`delivery_status` can regress from `IN_PROGRESS` to `PENDING` only when the
-shared reconciliation completely exhausts every required discovery root and
-artifact (`ibs-submission-tracking.md`, Required Roots) and establishes that no
-relevant current SR, effective accepted SR, open RR, or complete relevant
-supersession successor remains. Exact request states are
-evaluated under `ibs-submission-tracking.md`: `declined`, `revoked`, and
-`deleted` do not establish current progress; a `superseded` request establishes
-progress only through a completely traversed relevant successor chain.
+`delivery_status` can regress from `IN_PROGRESS` to `PENDING` only when a
+complete observation of the shared reconciliation exhausts every required
+discovery root and artifact and establishes that no relevant current delivery
+progress remains. A request-state change alone never proves the negative. An
+incomplete or failed observation preserves `IN_PROGRESS`.
 
-A request-state change alone never proves the negative. A required detail 404,
-missing or retained-away history, search truncation, malformed data, ambiguous
-provenance, or any other incomplete or failed observation preserves
-`IN_PROGRESS`. A complete negative also preserves `IN_PROGRESS` when relevant
-request/action evidence changed after the observation began or the persisted
-delivery value changed during external I/O.
+A complete negative also preserves `IN_PROGRESS` unless it passes the
+stale-negative guard, which prevents a negative observation from overwriting
+evidence or delivery committed while it ran.
+
+For IBS tracks, `ibs-submission-tracking.md` defines the required roots
+([Required Roots](ibs-submission-tracking.md#required-roots)), which request
+states establish progress
+([Action-Scoped CVE Evidence](ibs-submission-tracking.md#action-scoped-cve-evidence)
+and [Effective SR](ibs-submission-tracking.md#effective-sr)), what makes an
+observation incomplete
+([Observation Outcomes](ibs-submission-tracking.md#observation-outcomes)), and
+the stale-negative guard ([Algorithm](ibs-submission-tracking.md#algorithm),
+step 8).
 
 #### RELEASED is irreversible
 
 Once `delivery_status` reaches `RELEASED`, it cannot regress. The state records
-an accepted RR whose release provenance passed the complete proof contract at
-observation time; later disappearance or incomplete evidence does not reverse
-that accepted factual observation.
+a release proven at observation time; later disappearance or incomplete
+evidence does not reverse that accepted factual observation.
 
 These transitions are derived by the shared authoritative reconciliation,
 invoked by IBS RabbitMQ wake-ups and the `SyncIbsRequests` scheduled or targeted
@@ -1534,8 +1548,8 @@ different data:
   (automatic) when track release detection finds qualifying canonical evidence
   for the Ticket CVE in the codestream's expanded source diff.
 - The track level updates `TicketPackageTrack.delivery_status` to
-  `RELEASED` when IBS submission tracking proves that an accepted Release
-  Request released contents carrying the Ticket CVE to that codestream.
+  `RELEASED` when IBS submission tracking proves the release to that
+  codestream (see [Axis 3](#axis-3-delivery-and-release-observation)).
 - The product level sets `TicketPackageProduct.released_at` when the
   fix appears in that specific product's update repository.
 
