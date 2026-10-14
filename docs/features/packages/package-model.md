@@ -670,9 +670,10 @@ upstream evidence remains discoverable.
 
 Each track observation is classified as complete positive, complete no-match,
 incomplete, or failed under `ibs-submission-tracking.md`. Only a complete
-observation may change delivery: an incomplete or failed observation, or a
-negative that fails the stale-negative guard, preserves the persisted status
-(see [Delivery status regression](#delivery-status-regression)). This
+observation may change delivery: an incomplete, failed, or stale observation,
+including a negative that fails the stale-negative guard, preserves the
+persisted status (see
+[Delivery status regression](#delivery-status-regression)). This
 reconciliation applies only to IBS tracks. Git tracks will have their own
 delivery detection and reconciliation mechanism (TBD).
 
