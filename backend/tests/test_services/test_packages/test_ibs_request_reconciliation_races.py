@@ -72,6 +72,7 @@ from tests.support.ibs_request_reconciliation import (
     install_fake_requests,
     install_request_units,
     kinds,
+    proven_release,
     reconcile,
     request_rows,
     submission,
@@ -502,6 +503,41 @@ class TestTicketLock:
             row.request_number for row in await evidence_of(probe, scope.track_id)
         ] == [number]
         assert await events_of(world, scope.ticket_id) == []
+
+    async def test_release_proven_after_a_concurrent_release_requests_no_transition(
+        self,
+        world: RequestWorld,
+        fake: FakeRequests,
+        monkeypatch: pytest.MonkeyPatch,
+        delivery_calls: list[DeliveryStatus],
+    ) -> None:
+        """Another writer commits `RELEASED` during the scan of a scope that
+        proves the release itself: the scope commits its evidence and
+        requests no delivery transition (Delivery Derivation)."""
+        seed = RequestSeed(world)
+        scope = await seed.track(await seed.ticket(), package=unique_package())
+        await seed.commit()
+        number, _ = proven_release(fake, world, scope)
+
+        async def release_first(target: IBSRequestScope) -> None:
+            await _commit(
+                world,
+                update(TicketPackageTrack)
+                .where(TicketPackageTrack.id == target.track_id)
+                .values(delivery_status=RELEASED.value),
+            )
+
+        _once(monkeypatch, release_first)
+
+        outcomes = await reconcile(fake, [scope])
+
+        assert kinds(outcomes) == {scope.track_id: "created"}
+        assert delivery_calls == []
+        probe = await world.probe()
+        assert await delivery_of(probe, scope.track_id) == RELEASED
+        assert [
+            row.request_number for row in await evidence_of(probe, scope.track_id)
+        ] == [number]
 
 
 # ---------------------------------------------------------------------------

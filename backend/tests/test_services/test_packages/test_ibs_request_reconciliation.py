@@ -107,6 +107,7 @@ from tests.support.ibs_request_reconciliation import (
     kinds,
     next_incident,
     origin,
+    proven_release,
     reconcile,
     release,
     request_document,
@@ -291,42 +292,6 @@ def positive(
     current release evidence without the CVE: a complete `IN_PROGRESS`."""
     number, action = open_submission(fake, world, scope)
     fake.quiet(scope.package_name, scope.codestream, open_submissions=[number])
-    return number, action
-
-
-def proven_release(
-    fake: FakeRequests, world: RequestWorld, scope: IBSRequestScope
-) -> tuple[int, Action]:
-    """An accepted RR of `scope` proven through the release scan: current
-    release evidence with the CVE, the codestream history ending with the
-    RR, the accepted detail, its release diff, and the exact lookup."""
-    number, incident = world.number(), next_incident()
-    srcmd5 = checksum(f"rr-target-{number}")
-    action = release(
-        scope.package_name,
-        incident,
-        codestream=scope.codestream,
-        accept=Accept(rev=RELEASE_REV, srcmd5=srcmd5),
-    )
-    assert action.target_package is not None
-    fake.request(number, ACCEPTED, action)
-    fake.action_diff(
-        number, action, cve_issue(cve_of(scope)), codestream_package=scope.package_name
-    )
-    fake.history(
-        scope.codestream,
-        action.target_package,
-        [(int(RELEASE_REV), srcmd5, number)],
-        revision=RELEASE_REV,
-    )
-    fake.release_evidence(
-        scope.codestream, scope.package_name, cve_issue(cve_of(scope))
-    )
-    fake.history(
-        scope.codestream,
-        scope.package_name,
-        [(1, checksum(f"link-{scope.package_name}-1"), number)],
-    )
     return number, action
 
 

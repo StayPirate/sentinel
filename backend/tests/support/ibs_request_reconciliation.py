@@ -1032,3 +1032,42 @@ def before_lock(
         return await original(db, target, snapshot_, observation)
 
     monkeypatch.setattr(ibs_request_reconciliation, "_reconcile_scope", wrapped)
+
+
+def proven_release(
+    fake: FakeRequests,
+    world: RequestWorld,
+    scope: IBSRequestScope,
+    *,
+    revision: str = "3",
+) -> tuple[int, Action]:
+    """An accepted RR of `scope` proven through the release scan: current
+    release evidence with the CVE, the codestream history ending with the
+    RR, the accepted detail, its release diff, and the exact lookup."""
+    assert scope.cve_id is not None
+    number, incident = world.number(), next_incident()
+    srcmd5 = checksum(f"rr-target-{number}")
+    action = release(
+        scope.package_name,
+        incident,
+        codestream=scope.codestream,
+        accept=Accept(rev=revision, srcmd5=srcmd5),
+    )
+    assert action.target_package is not None
+    fake.request(number, IBSRequestState.ACCEPTED, action)
+    fake.action_diff(
+        number, action, cve_issue(scope.cve_id), codestream_package=scope.package_name
+    )
+    fake.history(
+        scope.codestream,
+        action.target_package,
+        [(int(revision), srcmd5, number)],
+        revision=revision,
+    )
+    fake.release_evidence(scope.codestream, scope.package_name, cve_issue(scope.cve_id))
+    fake.history(
+        scope.codestream,
+        scope.package_name,
+        [(1, checksum(f"link-{scope.package_name}-1"), number)],
+    )
+    return number, action
