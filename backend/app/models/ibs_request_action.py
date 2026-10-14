@@ -50,8 +50,10 @@ class IBSRequestAction(Base):
     semantic identity is request-scoped and type-specific, encoded by the two
     unique partial indexes; array position and the RabbitMQ `action_id` are
     never stored. `ix_ibs_request_action_ibs_request_id` serves the
-    request-to-all-actions lookup, which neither partial index can serve.
-    Actions are retained indefinitely; the parent FK uses
+    request-to-all-actions lookup, which neither partial index can serve;
+    `ix_ibs_request_action_logical_package_codestream_name` serves the
+    retained-root lookup of one logical package and codestream. Actions are
+    retained indefinitely; the parent FK uses
     `ON DELETE RESTRICT`. `track_links` loads the action's
     `IBSRequestActionTrack` correlations.
     """
@@ -81,10 +83,6 @@ class IBSRequestAction(Base):
             "accepted_srcmd5 IS NULL OR accepted_srcmd5 ~ '^[0-9a-f]{32}$'",
             name="chk_ibs_request_action_accepted_srcmd5_hex",
         ),
-        CheckConstraint(
-            "accepted_xsrcmd5 IS NULL OR accepted_xsrcmd5 ~ '^[0-9a-f]{32}$'",
-            name="chk_ibs_request_action_accepted_xsrcmd5_hex",
-        ),
         # Type-specific durable semantic identities (docs/data-model.md,
         # IBSRequestAction, Indexes). The predicate fixes the action type, so
         # it is omitted from each key; SR target fields are outside identity.
@@ -109,6 +107,14 @@ class IBSRequestAction(Base):
         # neither partial-index predicate (docs/data-model.md,
         # IBSRequestAction, Indexes).
         Index("ix_ibs_request_action_ibs_request_id", "ibs_request_id"),
+        # Non-unique, non-partial: the retained-root lookup of one logical
+        # package and codestream in submission reconciliation
+        # (docs/data-model.md, IBSRequestAction, Indexes).
+        Index(
+            "ix_ibs_request_action_logical_package_codestream_name",
+            "logical_package",
+            "codestream_name",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -133,10 +139,8 @@ class IBSRequestAction(Base):
     logical_package: Mapped[str] = mapped_column(String(255), nullable=False)
     codestream_name: Mapped[str] = mapped_column(String(255), nullable=False)
     incident_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    source_revision: Mapped[str | None] = mapped_column(String(255), nullable=True)
     accepted_revision: Mapped[str | None] = mapped_column(String(255), nullable=True)
     accepted_srcmd5: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    accepted_xsrcmd5: Mapped[str | None] = mapped_column(String(32), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

@@ -46,10 +46,8 @@ _DOCUMENTED_COLUMNS = {
     "logical_package",
     "codestream_name",
     "incident_number",
-    "source_revision",
     "accepted_revision",
     "accepted_srcmd5",
-    "accepted_xsrcmd5",
     "created_at",
     "updated_at",
 }
@@ -61,19 +59,17 @@ _NULLABLE_COLUMNS = {
     "target_package",
     "target_release_project",
     "incident_number",
-    "source_revision",
     "accepted_revision",
     "accepted_srcmd5",
-    "accepted_xsrcmd5",
 }
 
 _INCIDENT_POSITIVE_CHECK = "chk_ibs_request_action_incident_number_positive"
 _COHERENCE_CHECK = "chk_ibs_request_action_type_coherence"
 _SRCMD5_CHECK = "chk_ibs_request_action_accepted_srcmd5_hex"
-_XSRCMD5_CHECK = "chk_ibs_request_action_accepted_xsrcmd5_hex"
 _INCIDENT_IDENTITY = "uq_ibs_request_action_maintenance_incident_identity"
 _RELEASE_IDENTITY = "uq_ibs_request_action_maintenance_release_identity"
 _REQUEST_INDEX = "ix_ibs_request_action_ibs_request_id"
+_RETAINED_ROOT_INDEX = "ix_ibs_request_action_logical_package_codestream_name"
 _REQUEST_FK = "ibs_request_action_ibs_request_id_fkey"
 
 _EXPECTED_INDEXES = {
@@ -93,15 +89,15 @@ _EXPECTED_INDEXES = {
         f"action_type = '{_RELEASE}'",
     ),
     _REQUEST_INDEX: (("ibs_request_id",), False, None),
+    _RETAINED_ROOT_INDEX: (("logical_package", "codestream_name"), False, None),
 }
 
 _CODESTREAM = "Example:Codestream:One:Update"
 _OTHER_CODESTREAM = "Example:Codestream:Two:Update"
 _CHECKSUM = "0123456789abcdef0123456789abcdef"
-_CHECKSUM_CASES = [
-    ("accepted_srcmd5", _SRCMD5_CHECK),
-    ("accepted_xsrcmd5", _XSRCMD5_CHECK),
-]
+_DROPPED_COLUMNS = ("source_revision", "accepted_xsrcmd5")
+"""Removed by user decision C1 (#942): request action diff inputs that
+always come from fresh point detail and have no persisted reader."""
 
 
 @pytest.mark.integration
@@ -121,10 +117,8 @@ class TestIBSRequestActionCreation:
         assert action.target_project is None
         assert action.target_package is None
         assert action.incident_number is None
-        assert action.source_revision is None
         assert action.accepted_revision is None
         assert action.accepted_srcmd5 is None
-        assert action.accepted_xsrcmd5 is None
         assert action.created_at is not None
         assert action.updated_at is not None
 
@@ -163,10 +157,8 @@ class TestIBSRequestActionCreation:
             logical_package="example-pkg",
             codestream_name=_CODESTREAM,
             incident_number=4242,
-            source_revision="7",
             accepted_revision="3",
             accepted_srcmd5=_CHECKSUM,
-            accepted_xsrcmd5="fedcba9876543210fedcba9876543210",
         )
         action_id = action.id
         db_session.expunge(action)
@@ -183,10 +175,8 @@ class TestIBSRequestActionCreation:
         assert reloaded.logical_package == "example-pkg"
         assert reloaded.codestream_name == _CODESTREAM
         assert reloaded.incident_number == 4242
-        assert reloaded.source_revision == "7"
         assert reloaded.accepted_revision == "3"
         assert reloaded.accepted_srcmd5 == _CHECKSUM
-        assert reloaded.accepted_xsrcmd5 == "fedcba9876543210fedcba9876543210"
 
     async def test_raw_insert_applies_server_defaults(
         self, db_session: AsyncSession, ibs_request_factory: IBSRequestFactory
@@ -217,12 +207,22 @@ class TestIBSRequestActionSchemaShape:
     """Exactly the documented columns, constraints, and indexes (#633
     decision A2): no author, actor, comment, description, raw payload, array
     position, or RabbitMQ `action_id` column; no UNIQUE constraint beyond the
-    two partial identity indexes; the four documented CHECKs (none is a
+    two partial identity indexes; the three documented CHECKs (none is a
     single-column enum CHECK on Category B `action_type`); and exactly the
-    three documented indexes."""
+    four documented indexes."""
 
     def test_columns_match_documented_set(self) -> None:
         assert set(IBSRequestAction.__table__.columns.keys()) == _DOCUMENTED_COLUMNS
+
+    @pytest.mark.parametrize("column", _DROPPED_COLUMNS)
+    def test_dropped_column_is_neither_mapped_nor_an_attribute(
+        self, column: str
+    ) -> None:
+        """docs/data-model.md, IBSRequestAction (user decision C1 on #942):
+        no column and no ORM attribute retains a request action diff input
+        that has no persisted reader."""
+        assert column not in IBSRequestAction.__table__.columns
+        assert not hasattr(IBSRequestAction, column)
 
     def test_nullability_matches_documented_set(self) -> None:
         nullable = {c.name for c in IBSRequestAction.__table__.columns if c.nullable}
@@ -239,7 +239,6 @@ class TestIBSRequestActionSchemaShape:
             _INCIDENT_POSITIVE_CHECK,
             _COHERENCE_CHECK,
             _SRCMD5_CHECK,
-            _XSRCMD5_CHECK,
         }
 
     def test_exact_index_set(self) -> None:
@@ -315,6 +314,41 @@ class TestIBSRequestActionDatabaseIndexes:
         assert definitions[_RELEASE_IDENTITY].startswith("CREATE UNIQUE INDEX")
         assert definitions[_REQUEST_INDEX].endswith("USING btree (ibs_request_id)")
         assert definitions[_REQUEST_INDEX].startswith("CREATE INDEX")
+        assert definitions[_RETAINED_ROOT_INDEX].endswith(
+            "USING btree (logical_package, codestream_name)"
+        )
+        assert definitions[_RETAINED_ROOT_INDEX].startswith("CREATE INDEX")
+
+    @pytest.mark.parametrize("action_type", [_INCIDENT, _RELEASE])
+    async def test_retained_root_lookup_uses_the_index(
+        self,
+        db_session: AsyncSession,
+        ibs_request_action_factory: IBSRequestActionFactory,
+        action_type: str,
+    ) -> None:
+        """docs/data-model.md, IBSRequestAction, Indexes and Notes (FK and
+        access-path criterion): the retained-root lookup of one logical
+        package and codestream is covered for both action types. Sequential
+        scans are disabled for the planner check only, so the plan is
+        deterministic on a small test table."""
+        await ibs_request_action_factory(
+            action_type=action_type, logical_package="example-root"
+        )
+        await db_session.execute(text("SET LOCAL enable_seqscan = off"))
+        plan = "\n".join(
+            row[0]
+            for row in (
+                await db_session.execute(
+                    text(
+                        "EXPLAIN SELECT id FROM ibs_request_action "
+                        "WHERE logical_package = :package "
+                        "AND codestream_name = :codestream"
+                    ),
+                    {"package": "example-root", "codestream": _CODESTREAM},
+                )
+            ).all()
+        )
+        assert _RETAINED_ROOT_INDEX in plan
 
 
 @pytest.mark.integration
@@ -327,7 +361,6 @@ class TestIBSRequestActionColumnLengths:
             "target_project",
             "target_package",
             "logical_package",
-            "source_revision",
             "accepted_revision",
         ],
     )
@@ -363,12 +396,11 @@ class TestIBSRequestActionColumnLengths:
         with pytest.raises(DBAPIError, match="value too long"):
             await ibs_request_action_factory(action_type="a" * 33)
 
-    @pytest.mark.parametrize("column", ["accepted_srcmd5", "accepted_xsrcmd5"])
     async def test_checksum_over_maximum_rejected(
-        self, ibs_request_action_factory: IBSRequestActionFactory, column: str
+        self, ibs_request_action_factory: IBSRequestActionFactory
     ) -> None:
         with pytest.raises(DBAPIError, match="value too long"):
-            await ibs_request_action_factory(**{column: "a" * 33})
+            await ibs_request_action_factory(accepted_srcmd5="a" * 33)
 
 
 @pytest.mark.integration
@@ -581,35 +613,26 @@ class TestIBSRequestActionTypeCoherence:
 
 @pytest.mark.integration
 class TestIBSRequestActionChecksumHex:
-    """`chk_ibs_request_action_accepted_srcmd5_hex` and
-    `chk_ibs_request_action_accepted_xsrcmd5_hex`: exactly 32 lowercase
+    """`chk_ibs_request_action_accepted_srcmd5_hex`: exactly 32 lowercase
     hexadecimal characters when present."""
 
-    @pytest.mark.parametrize(("column", "check"), _CHECKSUM_CASES)
     @pytest.mark.parametrize("value", [_CHECKSUM, "0" * 32, "f" * 32])
     async def test_lowercase_32_hex_accepted(
         self,
         db_session: AsyncSession,
         ibs_request_action_factory: IBSRequestActionFactory,
-        column: str,
-        check: str,
         value: str,
     ) -> None:
-        action = await ibs_request_action_factory(**{column: value})
+        action = await ibs_request_action_factory(accepted_srcmd5=value)
         await db_session.refresh(action)
-        assert getattr(action, column) == value
+        assert action.accepted_srcmd5 == value
 
-    @pytest.mark.parametrize(("column", "check"), _CHECKSUM_CASES)
     async def test_null_accepted(
-        self,
-        ibs_request_action_factory: IBSRequestActionFactory,
-        column: str,
-        check: str,
+        self, ibs_request_action_factory: IBSRequestActionFactory
     ) -> None:
-        action = await ibs_request_action_factory(**{column: None})
-        assert getattr(action, column) is None
+        action = await ibs_request_action_factory(accepted_srcmd5=None)
+        assert action.accepted_srcmd5 is None
 
-    @pytest.mark.parametrize(("column", "check"), _CHECKSUM_CASES)
     @pytest.mark.parametrize(
         "value",
         [
@@ -622,14 +645,10 @@ class TestIBSRequestActionChecksumHex:
         ],
     )
     async def test_invalid_value_rejected(
-        self,
-        ibs_request_action_factory: IBSRequestActionFactory,
-        column: str,
-        check: str,
-        value: str,
+        self, ibs_request_action_factory: IBSRequestActionFactory, value: str
     ) -> None:
-        with pytest.raises(IntegrityError, match=check):
-            await ibs_request_action_factory(**{column: value})
+        with pytest.raises(IntegrityError, match=_SRCMD5_CHECK):
+            await ibs_request_action_factory(accepted_srcmd5=value)
 
 
 @pytest.mark.integration
@@ -983,7 +1002,7 @@ class TestIBSRequestActionTimestamps:
         action.created_at = backdated
         await db_session.flush()
 
-        action.source_revision = "9"
+        action.accepted_revision = "9"
         await db_session.flush()
         await db_session.refresh(action)
 
