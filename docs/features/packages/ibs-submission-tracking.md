@@ -258,19 +258,23 @@ Sentinel derives both from the action's own validated point-detail fields:
 
 | Action | Physical package | Logical package | Codestream |
 |---|---|---|---|
-| `maintenance_incident` | `target/@package` when present (an accepted action), otherwise `source/@package` | The part of the physical package before its first `.SUSE_` when that occurrence is followed by at least one character; otherwise the whole physical package | `target/@releaseproject` |
+| `maintenance_incident` | `target/@package` when present (an accepted action), otherwise `source/@package` | The part of the physical package before its first `.SUSE_`, `.openSUSE_`, or `.RES_` that is followed by at least one character; otherwise the whole physical package | `target/@releaseproject` |
 | `maintenance_release` | `target/@package` | The physical package without its exact final `.{n}`, where `source/@project` is exactly `SUSE:Maintenance:{n}` | `target/@project` |
 
 IBS names a maintenance package `{logical package}.{origin}`, where `{origin}`
 is a project name with every `:` replaced by `_`. The origin is normally the
 release project (`curl.SUSE_SLE-15-SP6_Update`), but it names where the
 submitted source was branched from when that source links elsewhere: an
-incident (`.SUSE_Maintenance_{n}`), a GA project, or `SUSE:Channels`. Every
-such project starts with `SUSE:`, so the first `.SUSE_` separates the logical
-package even when the logical package (`go1.27`) or the origin
-(`.SUSE_SLFO_1.1`) contains dots. This is the rule by which SMELT derives the
-logical package names that tracks carry. A logical package name that itself
-contains `.SUSE_` is not supported. A release request names its target package
+incident (`.SUSE_Maintenance_{n}`), a GA project, `SUSE:Channels`, or an
+openSUSE project, which can precede the release project
+(`kguiaddons.openSUSE_Backports_SLE-15-SP4_Update.SUSE_SLE-15-SP4_Update`).
+Origin projects start with `SUSE:`, `openSUSE:`, or `RES:`, so the first such
+separator splits off the logical package even when the logical package
+(`go1.27`) or an origin (`.SUSE_SLFO_1.1`) contains dots. SMELT splits
+maintenance package names in the same way. A logical package name that itself
+contains one of these separators is not supported. A name without a separator
+is used whole: an SR whose source is outside the `SUSE:` namespace can name the
+package without an origin. A release request names its target package
 `{logical package}.{n}`.
 
 For one scope with logical package `L` and codestream `C`, comparisons are
@@ -296,9 +300,11 @@ release action's `source/@project`. A staging project such as
 A complete observation of one scope (Ticket CVE `X`, logical package `L`,
 codestream `C`) exhausts these roots:
 
-1. **Retained roots.** The actions correlated to the scope's track and every
-   retained action whose `logical_package` is `L` and whose `codestream_name`
-   is `C`, with their parent requests.
+1. **Retained roots.** The actions correlated to the scope's track, with their
+   parent requests, and every retained `accepted` `maintenance_incident` action
+   of `L` in `C` that is not correlated to the track and whose incident has no
+   retained `accepted` release action of `L` in `C`: an incident in flight that
+   Sentinel observed for another Ticket.
 2. **Open submission requests.** The ID search for `maintenance_incident`
    actions in `new` or `review` whose source package starts with `{L}.`.
 3. **Supersession.** The closure of every `superseded_by_request_number` of a
@@ -312,14 +318,18 @@ codestream `C`) exhausts these roots:
    ([Release Discovery](#release-discovery)).
 7. **Incident histories.** The incident-package history of every matching
    accepted `maintenance_incident` action with positive evidence for `X`
-   ([Effective SR](#effective-sr)), required only when no release is proven.
+   ([Effective SR](#effective-sr)).
 
-A retained matching `accepted` release action correlated to the track is
-checked by the proof of [Accepted RR Provenance](#accepted-rr-provenance)
-before roots 5 and 6. Roots 5 and 6 are not required when it proves release, or
-for a track whose persisted delivery is `RELEASED`, because no observation can
-change that delivery. Each matching action also
-requires the diff evidence defined in
+The release proof of [Accepted RR Provenance](#accepted-rr-provenance) is
+applied first: to every matching `accepted` release action correlated to the
+track, then through roots 5 and 6. A proven release is the strongest delivery
+state, so the observation is then complete positive without the remaining
+roots; it persists the proving action with its request and correlation, and no
+evidence from the remaining roots. For a track whose persisted delivery is
+`RELEASED`, roots 5, 6, and 7 are not required, because no observation can
+change that delivery.
+
+Each matching action also requires the diff evidence defined in
 [Action-Scoped CVE Evidence](#action-scoped-cve-evidence). A scope whose track
 reference does not start with `SUSE:` is incomplete before any IBS request.
 
@@ -327,11 +337,14 @@ Current patchinfo issue evidence, released binaries, and published advisories
 are optional corroboration only. They never replace a required root, never
 prove a negative, and never set `TicketPackageProduct.released_at`.
 
-Discovery is bounded, with three accepted limitations:
+Discovery is bounded, with these accepted limitations:
 
 - An accepted SR that Sentinel never observed while it was open, and whose
   incident has no open or accepted release request yet, is not discovered. It
   becomes visible once its release request is opened or accepted.
+- An open SR whose source package does not start with `{L}.`, which is possible
+  only for a source outside the `SUSE:` namespace, is not found by the search.
+  A request wake-up can still select it.
 - A release whose Ticket-CVE reference no longer appears in the current
   codestream sources is not discovered.
 - A release recorded without acceptinfo cannot be proven
@@ -353,9 +366,13 @@ it never proves package identity.
 
 Every retained or candidate request is point-fetched, with one exception. IBS
 permits no state change out of `accepted` and records acceptinfo once, at
-acceptance, so the persisted state and provenance of a retained `accepted`
-request remain current. Such a request is point-fetched again only when the
-scope needs an artifact of it that is not retained, such as an action diff.
+acceptance, so for a retained `accepted` request the persisted state and the
+provenance of its retained actions remain current. Such a request is
+point-fetched again only when the scope needs an artifact that is not retained:
+an action diff, or any action that Sentinel did not retain. Sentinel retains
+only relevant actions, so the absence of a retained action never shows that IBS
+has no such action; the release scan and every other classification of a
+request's actions use point detail unless the action concerned is retained.
 Current detail supplies the authoritative parent state and complete REST action
 set available upstream. RabbitMQ action content is never used to fill or
 replace detail. Supersession is closed by point-fetching each positive
@@ -370,7 +387,7 @@ is not complete under that contract is incomplete evidence. No wall-clock cutoff
 is applied. Upstream retention can still make old evidence unavailable; that
 condition is handled as incomplete evidence, not as absence. A history entry
 without a request number is not by itself evidence of a direct source change:
-IBS records one before every SR acceptance (the branch commit).
+IBS typically records one before an SR acceptance (the branch commit).
 [Effective SR](#effective-sr) and [Release Discovery](#release-discovery)
 define how each kind of entry is used.
 
@@ -383,8 +400,7 @@ reused by every scope that needs it:
 - request detail, per request number;
 - incident-package history, per incident package;
 - an exact history lookup, per package and revision;
-- an action diff, per action, and for the not-accepted form also per
-  `codestream_package`.
+- an action diff, per action.
 
 Reuse never merges scope outcomes. An incomplete or failed shared artifact makes
 every scope that requires it incomplete or failed.
@@ -406,10 +422,14 @@ The tracker-native `name` is not reinterpreted as a CVE ID. `deleted` is not
 positive correlation evidence. `changed` is accepted because a later SR can
 replace incident contents while retaining an existing CVE reference.
 
-A matching action that is not yet correlated to the scope's track requires its
-diff. A matching action that is already correlated to the track is retained
-evidence: its correlation is not derived again, and its diff is required only
-for the release proof
+A matching action requires its diff when it is not yet correlated to the
+scope's track and its request is `new`, `review`, or `accepted`. A matching
+action of a `declined`, `revoked`, `deleted`, or `superseded` request cannot
+establish progress or release by itself (a superseded request acts only through
+its successor), so its diff is not required and an unavailable diff of it never
+makes the observation incomplete. A matching action that is already correlated
+to the track is retained evidence: its correlation is not derived again, and
+its diff is required only for the release proof
 ([Accepted RR Provenance](#accepted-rr-provenance)).
 
 A completely parsed action diff with no qualifying issue is a successful
@@ -439,11 +459,12 @@ History `srcmd5` is the unexpanded commit checksum, so acceptinfo `xsrcmd5` is
 never compared with it. Two kinds of revision neither select nor end an
 effective SR:
 
-- revisions without a request number, which are the branch commit that precedes
-  every SR acceptance or a direct change; and
+- revisions without a request number, such as the branch commit that typically
+  precedes an SR acceptance, or a direct change; and
 - revisions carrying a release-request number.
 
-Point detail of a later request number decides its kind.
+Point detail of a later request number decides its kind; unavailable detail of
+such a request makes the observation incomplete.
 
 When a later SR replaced the incident contents, the later SR is the effective
 one and its own diff decides whether progress for the CVE remains; the older SR
@@ -469,14 +490,13 @@ release:
    `L` in `C` through targeted source info, then the issue set of that state
    through the expanded source diff against the empty tree
    (`../integrations/ibs-integration.md`, Project Source Info and Source Diff
-   with Issue Extraction). The following make the current release evidence
-   incomplete:
-   - a failed package result from source info;
-   - `IBSResponseDataError` or `IBSHistoricalRevisionUnavailable` from the
-     source diff.
-   When the issue set has no positive evidence for the Ticket CVE (the
-   conditions of [Action-Scoped CVE Evidence](#action-scoped-cve-evidence)), no
-   release of the CVE is visible and the release scan is not required.
+   with Issue Extraction). A failed package result from source info, or
+   `IBSResponseDataError` from either operation, makes the current release
+   evidence incomplete; a transport or HTTP error from either operation fails
+   the scope. When the issue set has no positive evidence for the Ticket CVE
+   (the conditions of
+   [Action-Scoped CVE Evidence](#action-scoped-cve-evidence)), no release of
+   the CVE is visible and the release scan is not required.
 2. **Release scan.** Otherwise, read the unpaged history of `L` in `C` and
    examine its entries from the newest to the oldest:
    - Skip an entry without a request number.
@@ -574,7 +594,7 @@ The three delivery values retain the meanings established by
 | Delivery status | Authoritative meaning here |
 |---|---|
 | `PENDING` | Sentinel has not established relevant current delivery progress. It does not prove no SR exists or that synchronization succeeded. |
-| `IN_PROGRESS` | Complete authoritative evidence establishes a relevant current SR, effective incident, or open RR, but no release has been proven. |
+| `IN_PROGRESS` | Complete authoritative evidence establishes a relevant current SR, effective accepted SR, or open RR, but no release has been proven. |
 | `RELEASED` | An accepted RR is proven, by its own target provenance and release diff, to have released contents carrying the Ticket CVE to the track codestream ([Accepted RR Provenance](#accepted-rr-provenance)). |
 
 For a complete observation, derive the strongest proven state:
@@ -584,6 +604,10 @@ For a complete observation, derive the strongest proven state:
    relevant supersession successor, or relevant `new`/`review` RR yields
    `IN_PROGRESS`.
 3. Otherwise, a complete authoritative no-match yields `PENDING`.
+
+A complete no-match is complete within the bounded discovery of
+[Required Roots](#required-roots), whose accepted limitations apply: `PENDING`
+never proves that no SR or release exists.
 
 `RELEASED` is irreversible. An incomplete or failed observation never changes
 delivery. `IN_PROGRESS -> PENDING` is permitted only after complete negative
@@ -786,7 +810,9 @@ runtime configuration snapshot; catch-up, which has no snapshot, uses the class
 FetcherConfig). A zero delay never waits. The delay does not separate the
 unsigned and signed attempts of one operation or its shared transport retries.
 No IBS request occurs while a Ticket lock is held ([Algorithm](#algorithm)), so
-the fetcher never waits while holding one.
+the fetcher never waits while holding one. Request wake-ups
+([RabbitMQ Request Wake-Ups](#rabbitmq-request-wake-ups)) are not fetcher work
+and apply no delay.
 
 ### Algorithm
 
@@ -819,11 +845,14 @@ what a long-gap run can prove; incomplete scopes preserve prior delivery.
 **Run time (accepted limitation).** A first run, a run after a long gap, or a
 large backlog of releases can exceed the default `run_timeout`, because release
 scans read codestream histories. Later runs need less time: each scope commits
-independently, and a track whose release is proven is never scanned again. An
-operator can raise `FetcherConfig.run_timeout` through the fetcher configuration
-operations (`../platform/fetcher-operations.md`) for such runs, or keep it
-higher when regular runs approach the limit. Scopes are not reordered between
-runs.
+independently, and a track whose release is proven is never scanned again. A
+track whose CVE appears in the current codestream sources without a provable
+release, for example a fix that predates the codestream's maintenance releases,
+is scanned in every run. An operator can raise `FetcherConfig.run_timeout`
+through the fetcher configuration operations
+(`../platform/fetcher-operations.md`) for such runs, or keep it higher when
+regular runs approach the limit. The fetcher persists no progress between runs
+and does not rotate scopes; their order within a run is not specified.
 
 The generic `run_fetcher` task has no top-level retry. The next daily execution,
 or the existing generic manual fetcher trigger, repeats the complete idempotent
@@ -1086,20 +1115,27 @@ Implementation coverage must include:
   - match, non-match, and unresolved actions;
   - dotted logical packages (`go1.27`), dotted and branch-origin suffixes
     (`.SUSE_SLFO_1.1`, `.SUSE_Maintenance_{n}`, `.SUSE_Channels`, a GA
-    project);
+    project), an openSUSE origin before the release project, and a name
+    without a separator;
   - release targets with and without the exact incident suffix, patchinfo and
     non-codestream targets, and letter-case differences;
   - incident numbers from exact incident projects only;
   - the origin codestream of an inherited package, and a track reference
     outside the `SUSE:` namespace;
 - every required root:
-  - retained roots, including a retained action correlated only to another
-    Ticket's track of the same package and codestream;
-  - a retained `accepted` request reused without new point detail;
+  - retained roots, including an in-flight accepted SR correlated only to
+    another Ticket's track of the same package and codestream, and its
+    exclusion once a retained accepted release action of its incident exists;
+  - a retained `accepted` request reused without new point detail, and point
+    detail for an action of it that was not retained;
+  - matching actions of `declined`, `revoked`, `deleted`, and `superseded`
+    requests, whose unavailable diff does not make the observation incomplete;
+  - a proven release that makes the observation complete without the remaining
+    roots, including when another root is incomplete;
   - the open-SR and open-RR searches and supersession;
   - current release evidence with and without the Ticket CVE, including an
     incomplete source info or source diff;
-  - a `RELEASED` track without release roots;
+  - a `RELEASED` track without roots 5, 6, and 7;
   - an accepted SR never observed while open and without a release request,
     which is not discovered and yields a complete no-match;
 - the release scan:
@@ -1123,14 +1159,18 @@ Implementation coverage must include:
   - unavailable or incomplete incident history;
 - unpaged history completeness (not starting at revision 1 or not contiguous),
   revision and checksum lookups, and retention-limited outcomes;
-- evidence reuse within one invocation without merging scope outcomes,
-  including not-accepted diffs reused only for the same `codestream_package`,
-  and correlated actions whose diff is not requested again;
+- evidence reuse within one invocation without merging scope outcomes, and
+  correlated actions whose diff is not requested again outside the release
+  proof;
+- release discovery that reads no affectedness, derives the same delivery for
+  every affectedness status, and never changes affectedness, eligibility,
+  `released_at`, or a `TrackReleaseCheckpoint`;
 - the request delay:
   - no wait before the first IBS request of an invocation;
   - the run's `request_delay` before every later request of a periodic run, and
     the class `default_request_delay` in catch-up;
-  - no wait for a zero delay, and none while a Ticket lock is held;
+  - no wait for a zero delay, none while a Ticket lock is held, and none for
+    request wake-ups;
 - every delivery transition, irreversible `RELEASED`, complete-negative
   regression, and stale-negative concurrency with independent sessions;
 - atomic request/action/join/delivery commit and rollback, including successful

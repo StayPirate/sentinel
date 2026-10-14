@@ -277,8 +277,10 @@ POST /source/{project}/{package}?cmd=diff&view=xml&onlyissues=1&expand=1&orev={o
 Returns an XML document listing structured issue-reference changes between
 two expanded source states. `onlyissues=1` asks IBS to extract issue references
 from the source changes. `expand=1` is required so linked packages are compared
-using their expanded source trees. `orev=0` represents an empty source tree and
-is used for a track's first observation and unavailable-history fallback.
+using their expanded source trees. `orev=0` represents an empty source tree. It
+is used for a track's first observation and unavailable-history fallback, and
+by submission tracking to read the issue set of a codestream package's current
+state (`docs/features/packages/ibs-submission-tracking.md`, Release Discovery).
 
 Example response:
 
@@ -766,28 +768,16 @@ not empty successful matches. Malformed, duplicate, or conflicting entries, and
 a lookup entry that does not match the requested revision or checksum, make the
 observation incomplete.
 
-For submission delivery, history and point-detail provenance are compared
-exactly (`docs/features/packages/ibs-submission-tracking.md`, Effective SR,
-Release Discovery, and Accepted RR Provenance):
-
-- the history of an incident package locates the revision of an accepted
-  `maintenance_incident` action by its request number and its acceptinfo
-  `srcmd5`;
-- the exact lookup of an accepted `maintenance_release` action's own target
-  package at its acceptinfo `rev` must return that revision with the acceptinfo
-  `srcmd5` and the release request number; and
-- the history of a logical codestream package names the release requests that
-  changed it; its revisions carry the checksum of the link update and are never
-  compared with release acceptinfo.
-
-History `srcmd5` is the unexpanded commit checksum, so an expanded checksum such
-as acceptinfo `xsrcmd5` is never compared with it. An entry without
-`requestid` is not by itself evidence of a direct source change: IBS records
-one before every submission acceptance. Unavailable history or a
-checksum/revision mismatch is incomplete evidence and preserves the prior
-delivery state. Current patchinfo, binary, or advisory data may discover or
-corroborate candidates but does not replace this provenance and does not mutate
-Product release state.
+Submission delivery compares history with point-detail provenance exactly;
+the comparisons and their outcomes are defined in
+`docs/features/packages/ibs-submission-tracking.md` (Effective SR, Release
+Discovery, and Accepted RR Provenance). History `srcmd5` is the unexpanded
+commit checksum, so an expanded checksum such as acceptinfo `xsrcmd5` never
+matches it. An entry without `requestid` is not by itself evidence of a direct
+source change: IBS typically records one before a submission acceptance (the
+branch commit). After a release, the logical codestream package's new revision
+carries the release request number with the checksum of its link update, while
+the release action's own target package carries the released contents.
 
 #### Request Contract Verification Status
 
@@ -834,7 +824,7 @@ Verified live:
     `{logical package}.{n}` target package. Incident packages are named
     `{logical package}.{origin}`, the origin being the release project or,
     when the submitted source links elsewhere, the branch origin, such as an
-    incident.
+    incident or an openSUSE project preceding the release project.
   - HTTP 404 `not_found` answers an unknown, zero, or non-numeric request
     number.
 - **Request action diff:**
@@ -868,15 +858,16 @@ Verified live:
   - In sampled codestream histories, 5,524 of 5,563 revisions carry a
     `requestid`, and every sampled one names an accepted release request with
     a release action for that package and codestream. In incident histories,
-    a revision without `requestid` (the branch commit) precedes every
+    a revision without `requestid` (the branch commit) typically precedes a
     submission revision.
   - The acceptinfo `srcmd5` of an accepted submission action equals the
     `srcmd5` of its incident-history revision. The acceptinfo `rev` and
     `srcmd5` of an accepted release action equal the exact lookup of its own
     target package, whose revision carries the release request number. The
     acceptinfo `xsrcmd5` of a submission equals the `source/@rev` of its
-    release action only for releases created since 2023; earlier release
-    requests recorded a differently expanded checksum.
+    release action in every sampled release since 2024 and in most of 2023,
+    but rarely before: earlier release requests recorded a differently
+    expanded checksum.
 
 Established only by OBS source inspection:
 
@@ -955,7 +946,7 @@ Methods:
   new_md5: str) -> list[DiffIssue]`: calls the source diff endpoint with
   `expand=1` (`old_md5` is either a 32-character expanded checksum or the
   literal string `"0"`), parses the complete XML response, and returns structured issue
-  fields sufficient for the detector to evaluate `tracker`, `state`, and
+  fields sufficient for its consumers to evaluate `tracker`, `state`, and
   `label`. It does not reinterpret `bnc` names as CVE IDs. A response that
   identifies `old_md5` as unavailable under
   [Unavailable Old Revision](#unavailable-old-revision) raises

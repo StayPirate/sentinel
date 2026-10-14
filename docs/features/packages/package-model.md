@@ -511,7 +511,7 @@ track `delivery_status`, participates in the Resolved gate.
 | State | Meaning | Condition |
 |-------|---------|-----------|
 | `PENDING` | Relevant delivery progress has not been established | Initial state, or a complete non-stale reconciliation found no relevant current progress. This does not prove that no SR exists or that synchronization succeeded |
-| `IN_PROGRESS` | Relevant fix delivery is authoritatively in progress | Complete evidence establishes a relevant current SR, effective incident, or open RR, but does not prove a release |
+| `IN_PROGRESS` | Relevant fix delivery is authoritatively in progress | Complete evidence establishes a relevant current SR, effective accepted SR, or open RR, but does not prove a release |
 | `RELEASED` | Release to the track is proven | An accepted RR's own target provenance and release diff prove that it released contents carrying the Ticket CVE to the track codestream; this state is irreversible |
 
 The delivery status is updated only by the shared authoritative IBS request
@@ -786,7 +786,7 @@ idempotent no-op.
 `delivery_status` can regress from `IN_PROGRESS` to `PENDING` only when the
 shared reconciliation completely exhausts every required discovery root and
 artifact (`ibs-submission-tracking.md`, Required Roots) and establishes that no
-relevant current SR, effective incident, open RR, or complete relevant
+relevant current SR, effective accepted SR, open RR, or complete relevant
 supersession successor remains. Exact request states are
 evaluated under `ibs-submission-tracking.md`: `declined`, `revoked`, and
 `deleted` do not establish current progress; a `superseded` request establishes
