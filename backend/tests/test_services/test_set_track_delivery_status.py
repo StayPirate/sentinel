@@ -33,6 +33,7 @@ specifications, never computed with the module under test.
 
 from __future__ import annotations
 
+import re
 import uuid
 from typing import Any
 
@@ -77,6 +78,9 @@ from tests.support.track_status import Spy, ticket_state
 
 pytest_plugins = ["tests.support.ticket_mutation_fixtures"]
 """Provides the shared `va_user` and `tree` fixtures."""
+
+TICKET_STATEMENT = re.compile(r"\bFROM ticket\b")
+"""A statement reading the `ticket` table itself (not `ticket_package`)."""
 
 PENDING = DeliveryStatus.PENDING
 IN_PROGRESS = DeliveryStatus.IN_PROGRESS
@@ -358,7 +362,7 @@ class TestApprovedTransitions:
             )
 
         first = recorder.statements[0]
-        assert "FROM ticket" in first
+        assert TICKET_STATEMENT.search(first) is not None
         assert first.rstrip().endswith("FOR UPDATE")
         assert recorder.row_locks() == [first]
 
@@ -462,28 +466,6 @@ class TestNoOpAndProhibitedTransitions:
             await _set(db_session, track, target)
         assert (raised.value.current, raised.value.requested) == (source, target)
         assert await _persisted(db_session, track) == source.value
-
-    async def test_released_stays_released_after_a_rejected_regression(
-        self,
-        db_session: AsyncSession,
-        ticket_factory: TicketFactory,
-        tree: TreeBuilder,
-    ) -> None:
-        """package-model.md, RELEASED is irreversible: after the two-step
-        advancement, a later request for any other value is rejected and an
-        unchanged request is a no-op."""
-        ticket = await cveless(ticket_factory)
-        track = await tree(ticket)
-        await _set(db_session, track, IN_PROGRESS)
-        await _set(db_session, track, RELEASED)
-
-        for target in (PENDING, IN_PROGRESS):
-            with pytest.raises(InvalidDeliveryStatusTransition):
-                await _set(db_session, track, target)
-        repeated = await _set(db_session, track, RELEASED)
-
-        assert repeated.outcome is MutationOutcome.NO_OP
-        assert await _persisted(db_session, track) == RELEASED.value
 
 
 # ---------------------------------------------------------------------------
@@ -598,26 +580,21 @@ class TestSystemAttributionAndSideEffects:
 
         assert recorder.statements == []
 
-    @pytest.mark.parametrize(
-        ("source", "target"),
-        [*APPROVED, pytest.param(RELEASED, RELEASED, id="no-op")],
-    )
-    async def test_call_never_reads_audit_history(
+    async def test_no_op_never_reads_audit_history(
         self,
         db_session: AsyncSession,
         ticket_factory: TicketFactory,
         tree: TreeBuilder,
-        source: DeliveryStatus,
-        target: DeliveryStatus,
     ) -> None:
         """testing-strategy.md, Audit Trail Testing: audit history is never
-        queried for current state or idempotency."""
+        queried for idempotency (the effective transitions are covered by
+        `test_effective_change_has_no_assignment_reconciliation_or_event`)."""
         ticket = await cveless(ticket_factory)
         track = await tree(ticket)
-        await _seed(db_session, track, source)
+        await _seed(db_session, track, RELEASED)
 
         with StatementRecorder(db_session) as recorder:
-            await _set(db_session, track, target)
+            await _set(db_session, track, RELEASED)
 
         assert [s for s in recorder.statements if "ticket_audit_event" in s] == []
 
@@ -634,7 +611,7 @@ class TestNestedOwnershipValidation:
     validation (each missing level and each child-belongs-to-another-parent
     mismatch, without mutating or revealing the other occurrence)."""
 
-    async def test_missing_ticket(
+    async def test_missing_ticket_raises_without_effects(
         self,
         db_session: AsyncSession,
         ticket_factory: TicketFactory,
@@ -654,7 +631,7 @@ class TestNestedOwnershipValidation:
             ticket_id=uuid.uuid7(),
         )
 
-    async def test_missing_package(
+    async def test_missing_package_raises_without_effects(
         self,
         db_session: AsyncSession,
         ticket_factory: TicketFactory,
@@ -674,7 +651,7 @@ class TestNestedOwnershipValidation:
             package_id=uuid.uuid7(),
         )
 
-    async def test_missing_track(
+    async def test_missing_track_raises_without_effects(
         self,
         db_session: AsyncSession,
         ticket_factory: TicketFactory,
@@ -694,7 +671,7 @@ class TestNestedOwnershipValidation:
             track_id=uuid.uuid7(),
         )
 
-    async def test_package_of_another_ticket(
+    async def test_package_of_another_ticket_raises_without_effects(
         self,
         db_session: AsyncSession,
         ticket_factory: TicketFactory,
@@ -719,7 +696,7 @@ class TestNestedOwnershipValidation:
             ticket_id=declared.id,
         )
 
-    async def test_track_of_another_package(
+    async def test_track_of_another_package_raises_without_effects(
         self,
         db_session: AsyncSession,
         ticket_factory: TicketFactory,

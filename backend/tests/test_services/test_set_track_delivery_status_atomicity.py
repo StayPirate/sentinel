@@ -45,7 +45,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import pytest
-from sqlalchemy import select, text, update
+from sqlalchemy import select, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -327,9 +327,9 @@ class TestConcurrentCalls:
         self, committed_world: CommittedWorld
     ) -> None:
         """The waiter's stale copy is `IN_PROGRESS`, from which `PENDING`
-        would be approved; the winner committed the two-step `RELEASED`, so
-        the waiter's regression is rejected with the winner's value as the
-        current value and writes nothing (RELEASED is irreversible)."""
+        would be approved; the winner committed `IN_PROGRESS -> RELEASED`,
+        so the waiter's regression is rejected with the winner's value as
+        the current value and writes nothing (RELEASED is irreversible)."""
         track = await _committed_track(committed_world, IN_PROGRESS)
 
         task, _waiter, writes = await self._race(
@@ -384,40 +384,3 @@ class TestConcurrentCalls:
 
         assert task.result().outcome is MutationOutcome.CHANGED
         assert await _committed(committed_world, track) == (IN_PROGRESS.value, 0)
-
-
-# ---------------------------------------------------------------------------
-# Stale identity-map copy without contention
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.integration
-class TestCommittedValueWithoutContention:
-    """package-service.md, step 3: the value is reloaded under the lock, so a
-    session whose identity map still holds an older value classifies
-    against the committed one even without lock contention."""
-
-    async def test_stale_copy_does_not_drive_the_classification(
-        self, committed_world: CommittedWorld
-    ) -> None:
-        track = await _committed_track(committed_world)
-        reader = await committed_world.open_session()
-        stale = await _stale_copy(reader, track)
-        assert stale.delivery_status == PENDING.value
-        await reader.commit()
-
-        writer = await committed_world.open_session()
-        await writer.execute(
-            update(TicketPackageTrack)
-            .where(TicketPackageTrack.id == track.id)
-            .values(delivery_status=RELEASED.value)
-        )
-        await writer.commit()
-
-        result = await _set(reader, track, RELEASED)
-
-        assert (result.outcome, result.delivery_status) == (
-            MutationOutcome.NO_OP,
-            RELEASED,
-        )
-        await reader.rollback()

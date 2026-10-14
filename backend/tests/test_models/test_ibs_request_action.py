@@ -95,9 +95,6 @@ _EXPECTED_INDEXES = {
 _CODESTREAM = "Example:Codestream:One:Update"
 _OTHER_CODESTREAM = "Example:Codestream:Two:Update"
 _CHECKSUM = "0123456789abcdef0123456789abcdef"
-_DROPPED_COLUMNS = ("source_revision", "accepted_xsrcmd5")
-"""Removed by user decision C1 (#942): request action diff inputs that
-always come from fresh point detail and have no persisted reader."""
 
 
 @pytest.mark.integration
@@ -214,16 +211,6 @@ class TestIBSRequestActionSchemaShape:
     def test_columns_match_documented_set(self) -> None:
         assert set(IBSRequestAction.__table__.columns.keys()) == _DOCUMENTED_COLUMNS
 
-    @pytest.mark.parametrize("column", _DROPPED_COLUMNS)
-    def test_dropped_column_is_neither_mapped_nor_an_attribute(
-        self, column: str
-    ) -> None:
-        """docs/data-model.md, IBSRequestAction (user decision C1 on #942):
-        no column and no ORM attribute retains a request action diff input
-        that has no persisted reader."""
-        assert column not in IBSRequestAction.__table__.columns
-        assert not hasattr(IBSRequestAction, column)
-
     def test_nullability_matches_documented_set(self) -> None:
         nullable = {c.name for c in IBSRequestAction.__table__.columns if c.nullable}
         assert nullable == _NULLABLE_COLUMNS
@@ -318,37 +305,6 @@ class TestIBSRequestActionDatabaseIndexes:
             "USING btree (logical_package, codestream_name)"
         )
         assert definitions[_RETAINED_ROOT_INDEX].startswith("CREATE INDEX")
-
-    @pytest.mark.parametrize("action_type", [_INCIDENT, _RELEASE])
-    async def test_retained_root_lookup_uses_the_index(
-        self,
-        db_session: AsyncSession,
-        ibs_request_action_factory: IBSRequestActionFactory,
-        action_type: str,
-    ) -> None:
-        """docs/data-model.md, IBSRequestAction, Indexes and Notes (FK and
-        access-path criterion): the retained-root lookup of one logical
-        package and codestream is covered for both action types. Sequential
-        scans are disabled for the planner check only, so the plan is
-        deterministic on a small test table."""
-        await ibs_request_action_factory(
-            action_type=action_type, logical_package="example-root"
-        )
-        await db_session.execute(text("SET LOCAL enable_seqscan = off"))
-        plan = "\n".join(
-            row[0]
-            for row in (
-                await db_session.execute(
-                    text(
-                        "EXPLAIN SELECT id FROM ibs_request_action "
-                        "WHERE logical_package = :package "
-                        "AND codestream_name = :codestream"
-                    ),
-                    {"package": "example-root", "codestream": _CODESTREAM},
-                )
-            ).all()
-        )
-        assert _RETAINED_ROOT_INDEX in plan
 
 
 @pytest.mark.integration

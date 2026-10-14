@@ -15,11 +15,16 @@ Owning specifications:
 
 The delivery writer's own row (a delivery change mutates no other
 dimension) is in `tests/test_services/test_set_track_delivery_status.py`.
-This module covers the other direction for every other dimension writer
-in every delivery state, including `RELEASED`, which the writers' own
-modules seed only as `PENDING` or `IN_PROGRESS`, and the gate rows. The
-reconciliation rows (selection never suppressed by another dimension) are
-owned by the shared IBS request reconciliation (#963).
+This module covers the other direction for the direct dimension writers in
+`CASES` in every delivery state, including `RELEASED`, where their own
+modules seed only `PENDING` or `IN_PROGRESS`, and the gate rows. The
+system affectedness and Product release writers are already covered for
+every delivery value through their workflows
+(`tests/test_services/test_packages/test_ibs_track_release.py` and
+`test_ibs_product_release.py`, Dimension independence), so they are not
+repeated here. The reconciliation rows (selection never suppressed by
+another dimension) are owned by the shared IBS request reconciliation
+(#963).
 
 Every writer Ticket is CVE-less with `severity_manual = High` (the gate
 Tickets carry a CVE, see `GATES`), and every Product
@@ -33,7 +38,6 @@ from __future__ import annotations
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -55,13 +59,11 @@ from app.models.ticket_package_track import TicketPackageTrack
 from app.models.user import User
 from app.services import package_service
 from app.services.package_service import (
-    SYSTEM_INVOCATION,
     recalculate_product_eligibility_for_ticket,
     restore_ticket_package,
     restore_ticket_package_product,
     restore_ticket_package_track,
     set_product_eligibility,
-    set_product_released_at,
     set_track_status,
     soft_delete_ticket_package,
     soft_delete_ticket_package_product,
@@ -89,10 +91,6 @@ DELIVERY = [
     pytest.param(DeliveryStatus.IN_PROGRESS, id="IN_PROGRESS"),
     pytest.param(DeliveryStatus.RELEASED, id="RELEASED"),
 ]
-
-ISSUED = datetime(2024, 3, 1, 12, 0, tzinfo=UTC)
-ADVISORY = "SUSE-SU-2024:0815-1"
-"""A fictional validated advisory identifier and its issued instant."""
 
 
 @pytest.fixture(autouse=True)
@@ -193,19 +191,6 @@ async def _affectedness_user(db: AsyncSession, tree: _Tree) -> object:
     )
 
 
-async def _affectedness_system(db: AsyncSession, tree: _Tree) -> object:
-    return await set_track_status(
-        db,
-        ticket_id=tree.ticket.id,
-        package_id=tree.package_id,
-        track_id=tree.track.id,
-        status=PackageStatus.FIXED,
-        acting_user_id=None,
-        caller=SYSTEM_INVOCATION,
-        evaluation_date=EVAL,
-    )
-
-
 async def _eligibility_override(db: AsyncSession, tree: _Tree) -> object:
     return await set_product_eligibility(
         db,
@@ -227,18 +212,6 @@ async def _eligibility_recalculation(db: AsyncSession, tree: _Tree) -> object:
         catalog_product_id=tree.occurrence.product_id,
         reason="threshold",
         evaluation_date=EVAL,
-    )
-
-
-async def _product_release(db: AsyncSession, tree: _Tree) -> object:
-    return await set_product_released_at(
-        db,
-        ticket_id=tree.ticket.id,
-        package_id=tree.package_id,
-        track_id=tree.track.id,
-        ticket_package_product_id=tree.occurrence.id,
-        released_at=ISSUED,
-        advisory_id=ADVISORY,
     )
 
 
@@ -287,7 +260,6 @@ CASES = [
         _Case(_affectedness_user, status=PackageStatus.ANALYSIS, changes=(0,)),
         id="affectedness-user",
     ),
-    pytest.param(_Case(_affectedness_system, changes=(0,)), id="affectedness-system"),
     pytest.param(
         _Case(_eligibility_override, changes=(1, 2)), id="eligibility-override"
     ),
@@ -295,7 +267,6 @@ CASES = [
         _Case(_eligibility_recalculation, product=Prod(eligible=False), changes=(1,)),
         id="eligibility-recalculation",
     ),
-    pytest.param(_Case(_product_release, changes=(3,)), id="product-release"),
     pytest.param(
         _Case(_marker(soft_delete_ticket_package, "package"), changes=(4,)),
         id="package-exclusion",
