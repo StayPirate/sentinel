@@ -2018,10 +2018,10 @@ table; RabbitMQ action IDs and array positions are not durable identities.
   loading of the request-to-action relationship.
 - `ix_ibs_request_action_logical_package_codestream_name`: non-unique B-tree
   index on `(logical_package, codestream_name)`. It serves the retained-root
-  lookup of submission reconciliation: every retained action of one logical
-  package and codestream, including actions correlated only to another
-  Ticket's track (`docs/features/packages/ibs-submission-tracking.md`,
-  Required Roots).
+  lookup of one logical package and codestream in submission reconciliation:
+  the in-flight accepted submission actions of another Ticket's track and the
+  check for a retained accepted release action of their incident
+  (`docs/features/packages/ibs-submission-tracking.md`, Required Roots).
 
 Every project column stores the value returned by IBS point detail, whose
 parser replaces each project outside the `SUSE:` namespace, such as a personal

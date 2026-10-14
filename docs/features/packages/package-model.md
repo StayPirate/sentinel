@@ -596,6 +596,7 @@ Maintainer prepares fix
         |
         v
 Relevant SR/current incident proven      --> delivery: IN_PROGRESS
+(or an open RR, when no SR was observed)
         |
         v
 Incident (SUSE:Maintenance:XXXXX)
@@ -684,7 +685,7 @@ context of the current affectedness — see
 | Affectedness | Delivery | Relevant | Anomaly | Meaning |
 |-------------|----------|----------|---------|---------|
 | `ANALYSIS` | `PENDING` | Yes | | Not yet analyzed; relevant delivery progress is not established |
-| `ANALYSIS` | `IN_PROGRESS` | Yes | | Relevant SR/incident progress is established before VA analysis |
+| `ANALYSIS` | `IN_PROGRESS` | Yes | | Relevant SR, incident, or open-RR progress is established before VA analysis |
 | `ANALYSIS` | `RELEASED` | Yes | | Fix released before VA analyzed the track |
 | `AFFECTED` | `PENDING` | Yes | | Affected, fix expected, relevant delivery progress not established |
 | `AFFECTED` | `IN_PROGRESS` | Yes | | Fix in the pipeline |

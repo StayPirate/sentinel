@@ -204,9 +204,8 @@ never stored or used. If a current representation has a different semantic
 identity, Sentinel retains the old recognized action and treats the new identity
 as a distinct action; it does not silently rewrite identity.
 
-A non-unique index on `(logical_package, codestream_name)` serves the lookup of
-the retained actions of one logical package and codestream, including actions
-correlated only to another Ticket's track
+A non-unique index on `(logical_package, codestream_name)` serves the
+retained-root lookup of one logical package and codestream
 ([Required Roots](#required-roots)).
 
 ### IBSRequestActionTrack
@@ -268,13 +267,15 @@ submitted source was branched from when that source links elsewhere: an
 incident (`.SUSE_Maintenance_{n}`), a GA project, `SUSE:Channels`, or an
 openSUSE project, which can precede the release project
 (`kguiaddons.openSUSE_Backports_SLE-15-SP4_Update.SUSE_SLE-15-SP4_Update`).
-Origin projects start with `SUSE:`, `openSUSE:`, or `RES:`, so the first such
+Origin projects start with `SUSE:`, `openSUSE:`, or `RES:` (the last follows
+the SUSE maintenance toolkit and is not observed in IBS), so the first such
 separator splits off the logical package even when the logical package
 (`go1.27`) or an origin (`.SUSE_SLFO_1.1`) contains dots. SMELT splits
 maintenance package names in the same way. A logical package name that itself
 contains one of these separators is not supported. A name without a separator
-is used whole: an SR whose source is outside the `SUSE:` namespace can name the
-package without an origin. A release request names its target package
+is used whole: an SR submitted directly from a codestream or GA project, or from
+a source outside the `SUSE:` namespace, can name the package without an
+origin. A release request names its target package
 `{logical package}.{n}`.
 
 For one scope with logical package `L` and codestream `C`, comparisons are
@@ -298,7 +299,8 @@ release action's `source/@project`. A staging project such as
 ### Required Roots
 
 A complete observation of one scope (Ticket CVE `X`, logical package `L`,
-codestream `C`) exhausts these roots:
+codestream `C`) exhausts these roots, unless a proven release completes it
+first (below):
 
 1. **Retained roots.** The actions correlated to the scope's track, with their
    parent requests, and every retained `accepted` `maintenance_incident` action
@@ -326,8 +328,13 @@ track, then through roots 5 and 6. A proven release is the strongest delivery
 state, so the observation is then complete positive without the remaining
 roots; it persists the proving action with its request and correlation, and no
 evidence from the remaining roots. For a track whose persisted delivery is
-`RELEASED`, roots 5, 6, and 7 are not required, because no observation can
-change that delivery.
+`RELEASED`, the proof is not applied and roots 5, 6, and 7 are not required,
+because no observation can change that delivery; roots 1 to 4 refresh its
+evidence.
+
+An in-flight SR of root 1 that is not correlated to the track only shortens the
+first limitation below. Its unavailable diff or incident history is therefore
+not evidence and does not make the observation incomplete.
 
 Each matching action also requires the diff evidence defined in
 [Action-Scoped CVE Evidence](#action-scoped-cve-evidence). A scope whose track
@@ -339,12 +346,17 @@ prove a negative, and never set `TicketPackageProduct.released_at`.
 
 Discovery is bounded, with these accepted limitations:
 
-- An accepted SR that Sentinel never observed while it was open, and whose
-  incident has no open or accepted release request yet, is not discovered. It
-  becomes visible once its release request is opened or accepted.
-- An open SR whose source package does not start with `{L}.`, which is possible
-  only for a source outside the `SUSE:` namespace, is not found by the search.
-  A request wake-up can still select it.
+- An accepted SR whose incident has no open or accepted release request yet is
+  not discovered when Sentinel never observed it while it was open, or observed
+  it only for another Ticket's track after its incident already had a retained
+  release. It becomes visible once its release request is opened or accepted.
+- An open SR whose source package does not start with `{L}.`, such as an SR
+  submitted directly from a `SUSE:` codestream or GA project or from a source
+  outside the `SUSE:` namespace, is not found by the search. A request wake-up
+  can still select it.
+- The diff of an open SR whose source is outside the `SUSE:` namespace is never
+  available (`../integrations/ibs-integration.md`, Request Action Diff), so the
+  scopes that require it stay incomplete while the SR is open.
 - A release whose Ticket-CVE reference no longer appears in the current
   codestream sources is not discovered.
 - A release recorded without acceptinfo cannot be proven
@@ -563,7 +575,7 @@ Each track-scope reconciliation produces exactly one classification:
 
 | Outcome | Meaning | Local effect |
 |---|---|---|
-| Complete positive | Every [required root](#required-roots) and artifact was validated and relevant current SR/incident/RR evidence exists. | Atomically upsert relevant domain evidence and derive delivery. |
+| Complete positive | Every [required root](#required-roots) and artifact was validated, or a release was proven first, and relevant current SR/incident/RR evidence exists. | Atomically upsert relevant domain evidence and derive delivery. |
 | Complete no-match | Every required root was exhausted successfully and no relevant current delivery evidence exists. | Retain history; a non-stale negative may derive `PENDING`. |
 | Incomplete | Required evidence is absent, retention-limited, truncated, contradictory, unknown, malformed, cyclic, or ambiguous. | Preserve request/action/correlation and delivery state exactly. |
 | Failed | A required external or local operation failed. | Roll back the scope and preserve prior state. |
@@ -665,9 +677,10 @@ For each selected scope:
 2. Discover current request, supersession, incident, and RR candidates over the
    [Required Roots](#required-roots).
 3. Point-fetch current request detail and required action-scoped diffs and source
-   histories. Validate every consumed field, exhaust every required root, and
-   classify the observation. No database mutation occurs for an incomplete or
-   failed observation.
+   histories. Validate every consumed field, exhaust every required root
+   unless a proven release completes the observation first, and classify the
+   observation. No database mutation occurs for an incomplete or failed
+   observation.
 4. For a complete observation, begin one independent local transaction and lock
    the parent Ticket first.
 5. Reload the exact Ticket, CVE, package, track, workflow type, codestream, and
@@ -1124,8 +1137,10 @@ Implementation coverage must include:
     outside the `SUSE:` namespace;
 - every required root:
   - retained roots, including an in-flight accepted SR correlated only to
-    another Ticket's track of the same package and codestream, and its
-    exclusion once a retained accepted release action of its incident exists;
+    another Ticket's track of the same package and codestream, its exclusion
+    once a retained accepted release action of its incident exists, and its
+    unavailable diff or incident history, which does not make the observation
+    incomplete;
   - a retained `accepted` request reused without new point detail, and point
     detail for an action of it that was not retained;
   - matching actions of `declined`, `revoked`, `deleted`, and `superseded`
@@ -1135,7 +1150,7 @@ Implementation coverage must include:
   - the open-SR and open-RR searches and supersession;
   - current release evidence with and without the Ticket CVE, including an
     incomplete source info or source diff;
-  - a `RELEASED` track without roots 5, 6, and 7;
+  - a `RELEASED` track without the release proof and roots 5, 6, and 7;
   - an accepted SR never observed while open and without a release request,
     which is not discovered and yields a complete no-match;
 - the release scan:

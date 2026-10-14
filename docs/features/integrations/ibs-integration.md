@@ -1029,9 +1029,10 @@ The methods have these escaping outcomes:
 | Request action diff is complete and has no positive `added` or `changed` canonical CVE issue for an action | A valid typed action diff with no qualifying issue; the owning reconciler treats it as that action's successful no-match |
 
 `IBSResponseDataError` and `IBSHistoricalRevisionUnavailable` are internal
-integration exceptions caught by the Track detector and by submission
-reconciliation, which reads current release evidence through
-`get_source_info()` and `get_diff_issues()`; they never reach an API handler.
+integration exceptions caught by the Track detector; submission reconciliation,
+which reads current release evidence through `get_source_info()` and
+`get_diff_issues()` against the empty tree, catches `IBSResponseDataError`.
+They never reach an API handler.
 `IBSCredentialsNotConfiguredError` and `IBSAuthenticationError` are
 internal integration exceptions that every method can raise. Each consuming
 workflow handles them as a failure of the scope that depended on the operation,
