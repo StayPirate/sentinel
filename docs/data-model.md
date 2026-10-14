@@ -1980,10 +1980,8 @@ table; RabbitMQ action IDs and array positions are not durable identities.
 | logical_package | VARCHAR(255) | NOT NULL | Validated Sentinel logical package name |
 | codestream_name | VARCHAR(255) | NOT NULL | Exact IBS track reference represented by this action |
 | incident_number | INTEGER | nullable | Positive maintenance incident number; required for a retained release action |
-| source_revision | VARCHAR(255) | nullable | Action source revision when supplied |
 | accepted_revision | VARCHAR(255) | nullable | Action acceptinfo target revision |
 | accepted_srcmd5 | VARCHAR(32) | nullable | Accepted target source checksum, lowercase hexadecimal |
-| accepted_xsrcmd5 | VARCHAR(32) | nullable | Accepted expanded source checksum, lowercase hexadecimal |
 | created_at | TIMESTAMPTZ | NOT NULL, DEFAULT | Local Sentinel row creation time |
 | updated_at | TIMESTAMPTZ | NOT NULL, DEFAULT | Local Sentinel row update time |
 
@@ -1997,9 +1995,9 @@ table; RabbitMQ action IDs and array positions are not durable identities.
   action has non-null `source_project`, `source_package`, `target_project`,
   `target_package`, and `incident_number`, with
   `codestream_name = target_project`.
-- `chk_ibs_request_action_accepted_srcmd5_hex` and
-  `chk_ibs_request_action_accepted_xsrcmd5_hex`: each corresponding nullable
-  checksum is exactly 32 lowercase hexadecimal characters when present.
+- `chk_ibs_request_action_accepted_srcmd5_hex`: the nullable
+  `accepted_srcmd5` is exactly 32 lowercase hexadecimal characters when
+  present.
 
 **Indexes**:
 

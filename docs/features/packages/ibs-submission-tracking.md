@@ -154,10 +154,8 @@ One normalized relevant action belonging to one `IBSRequest`.
 | `logical_package` | VARCHAR(255) | NOT NULL | Validated Sentinel logical package name. |
 | `codestream_name` | VARCHAR(255) | NOT NULL | Exact IBS track reference represented by this action. |
 | `incident_number` | INTEGER | nullable, positive | Incident established from accepted-SR target or RR source provenance. Required for a retained RR action. |
-| `source_revision` | VARCHAR(255) | nullable | Action source revision when supplied. |
 | `accepted_revision` | VARCHAR(255) | nullable | Action `acceptinfo` target revision. |
 | `accepted_srcmd5` | VARCHAR(32) | nullable, lowercase hexadecimal | Accepted target source checksum. |
-| `accepted_xsrcmd5` | VARCHAR(32) | nullable, lowercase hexadecimal | Accepted expanded source checksum. |
 | `created_at` | TIMESTAMPTZ | NOT NULL, DEFAULT | Local row creation time. |
 | `updated_at` | TIMESTAMPTZ | NOT NULL, DEFAULT | Local row update time. |
 

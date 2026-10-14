@@ -527,8 +527,8 @@ Sentinel consumes these action shapes:
 | `maintenance_release` | `action/@type`, `source/@project`, `source/@package`, `target/@project`, `target/@package` | `source/@rev`, `target/@releaseproject`, and `acceptinfo` fields |
 
 `source/@rev`, when present, is a positive decimal revision number or a
-lowercase 32-character hexadecimal checksum. It is a provenance field and an
-input of the not-accepted [Request Action Diff](#request-action-diff) form.
+lowercase 32-character hexadecimal checksum. It is an input of the
+not-accepted [Request Action Diff](#request-action-diff) form only.
 
 When `<acceptinfo>` is present, Sentinel consumes these optional attributes:
 
@@ -536,7 +536,7 @@ When `<acceptinfo>` is present, Sentinel consumes these optional attributes:
 |---|---|---|
 | `rev` | Positive decimal revision number of the accepted target package | Provenance |
 | `srcmd5` | Lowercase 32-character hexadecimal checksum | Provenance and diff input |
-| `xsrcmd5` | Lowercase 32-character hexadecimal checksum | Provenance and diff input |
+| `xsrcmd5` | Lowercase 32-character hexadecimal checksum | Diff input only |
 | `osrcmd5` | Lowercase 32-character hexadecimal checksum | Diff input only |
 | `oxsrcmd5` | Lowercase 32-character hexadecimal checksum | Diff input only |
 | `oproject` | IBS name | Diff input only |
