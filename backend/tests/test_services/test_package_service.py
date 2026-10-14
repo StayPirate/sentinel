@@ -1472,6 +1472,7 @@ class TestPackageServiceModuleBoundary:
             "search_packages",
             "converge_manual_zone_exit_eligibility",
             "set_track_status",
+            "set_track_delivery_status",
             "set_product_eligibility",
             "set_product_released_at",
             "recalculate_product_eligibility_for_ticket",

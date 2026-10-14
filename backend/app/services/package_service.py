@@ -13,7 +13,8 @@ actionability reconciliation
 package mutation foundation (`PackageServiceError` hierarchy, the
 explicit system invocation context, the locked semantic-locator loader
 at the package, track, and Product levels) with the mutations
-`set_track_status()`, `set_product_eligibility()`, the system Product
+`set_track_status()`, `set_product_eligibility()`, the system track
+delivery mutation `set_track_delivery_status()`, the system Product
 release confirmation `set_product_released_at()`, and the six direct
 exclusion and restoration operations (`soft_delete_ticket_package[_track|
 _product]()`, `restore_ticket_package[_track|_product]()`), the
@@ -1572,6 +1573,23 @@ class PackageTargetsUnresolvedError(PackageServiceError):
         super().__init__("Package targets could not be resolved.")
 
 
+class InvalidDeliveryStatusTransition(PackageServiceError):  # noqa: N818 — specified name
+    """The requested track delivery transition is not approved.
+
+    Raised by `set_track_delivery_status()` when the locked-current value
+    cannot move to the requested one: a direct `PENDING -> RELEASED` or any
+    change out of `RELEASED` (package-model.md, Automatic Transitions).
+    System-internal, with no HTTP mapping: the shared IBS reconciler rolls
+    back the track scope and records a sanitized local failure. Carries
+    only the two bounded values, never an identifier.
+    """
+
+    def __init__(self, current: DeliveryStatus, requested: DeliveryStatus) -> None:
+        super().__init__("Delivery status transition not permitted.")
+        self.current = current
+        self.requested = requested
+
+
 # ---------------------------------------------------------------------------
 # Invocation context and semantic outcomes (package-service.md, Consumer
 # caller context and Ticket accessibility; Semantic locators)
@@ -2072,6 +2090,111 @@ async def _track_status_result(
             db, ticket=ticket, track_id=track_id, evaluation_date=evaluation_date
         ),
         evaluation_date=evaluation_date,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Track delivery (package-service.md, `set_track_delivery_status()`)
+# ---------------------------------------------------------------------------
+
+_DELIVERY_TRANSITIONS: Final = frozenset(
+    {
+        (DeliveryStatus.PENDING, DeliveryStatus.IN_PROGRESS),
+        (DeliveryStatus.IN_PROGRESS, DeliveryStatus.RELEASED),
+        (DeliveryStatus.IN_PROGRESS, DeliveryStatus.PENDING),
+    }
+)
+"""The approved delivery transitions (package-model.md, Automatic
+Transitions); no transition leaves `RELEASED`."""
+
+
+@dataclass(frozen=True, slots=True)
+class DeliveryStatusResult:
+    """Result of `set_track_delivery_status()`.
+
+    `outcome` is `changed` or `no_op`, never `rejected`; `delivery_status`
+    is the track's locked-current value after the call (a concurrent
+    winner's value on `no_op`).
+    """
+
+    outcome: MutationOutcome
+    track_id: uuid.UUID
+    delivery_status: DeliveryStatus
+
+
+async def set_track_delivery_status(
+    db: AsyncSession,
+    *,
+    ticket_id: uuid.UUID,
+    package_id: uuid.UUID,
+    track_id: uuid.UUID,
+    delivery_status: DeliveryStatus,
+    acting_user_id: None = None,
+) -> DeliveryStatusResult:
+    """Set the delivery status of one `TicketPackageTrack`.
+
+    Category A system mutation (package-service.md,
+    `set_track_delivery_status()`; package-model.md, Axis 3 and Automatic
+    Transitions). The single package-owned delivery mutation boundary of
+    the shared IBS request reconciliation; there is no user-attributed
+    form.
+
+    Q1: `ticket_id`, `package_id`, `track_id` are the declared semantic
+    locator; `delivery_status` is the requested value; `acting_user_id`
+    is the system-attribution marker and is always `None`.
+
+    Q2: the caller owns the transaction, has completed every external
+    I/O, and has applied the evidence and stale-negative rules of
+    ibs-submission-tracking.md (Delivery Derivation). Locks: the Ticket
+    `FOR UPDATE` as the first state-dependent database operation
+    (compatible when the caller already holds it).
+
+    Q3: (2) `ensure_ticket_operable()`; (3) locked reload of the declared
+    package/track path, excluded records included; (4) an unchanged value
+    returns `no_op`; (5) only `PENDING -> IN_PROGRESS`, `IN_PROGRESS ->
+    RELEASED`, and `IN_PROGRESS -> PENDING` are approved; (6) writes the
+    value; (7) flushes. A caller proving `RELEASED` from `PENDING` applies
+    the two forward transitions in one transaction. Never assigns,
+    reconciles the Ticket, registers a convergence effect, creates an
+    audit event, commits, or performs external I/O.
+
+    Q4: returns the outcome and the locked-current delivery value.
+
+    Q5: idempotent; a repeated or concurrent call classifies against the
+    winner's committed value and never reports a stale pre-lock value.
+
+    Q6: raises `ValueError` before any database operation for a non-`None`
+    `acting_user_id` or a value that is not a `DeliveryStatus`. Raises
+    `TicketNotFoundError`, `TicketNotMutableError` (`Ignored`/
+    `Duplicated`), `PackageNotFoundError`, `TrackNotFoundError`, or
+    `InvalidDeliveryStatusTransition`, all without modification. Database
+    and flush exceptions propagate; the caller owns rollback.
+    """
+    if acting_user_id is not None:
+        raise ValueError("a track delivery change has no acting user.")
+    if not isinstance(delivery_status, DeliveryStatus):
+        raise ValueError("delivery_status must be a DeliveryStatus.")
+
+    ticket = await _lock_system_ticket(db, ticket_id)
+    ensure_ticket_operable(ticket)
+    _package, track = await _load_locked_track(
+        db, ticket_id=ticket.id, package_id=package_id, track_id=track_id
+    )
+
+    current = DeliveryStatus(track.delivery_status)
+    if current is delivery_status:
+        return DeliveryStatusResult(
+            outcome=MutationOutcome.NO_OP, track_id=track.id, delivery_status=current
+        )
+    if (current, delivery_status) not in _DELIVERY_TRANSITIONS:
+        raise InvalidDeliveryStatusTransition(current, delivery_status)
+
+    track.delivery_status = delivery_status.value
+    await db.flush()
+    return DeliveryStatusResult(
+        outcome=MutationOutcome.CHANGED,
+        track_id=track.id,
+        delivery_status=delivery_status,
     )
 
 
