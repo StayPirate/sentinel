@@ -333,8 +333,8 @@ An in-flight SR of root 1 that is not correlated to the track only shortens the
 first limitation below. Its unavailable diff or incident history is therefore
 not evidence and does not make the observation incomplete. Such an SR is
 correlated to the track only when its diff has positive evidence for `X` and
-its incident history is available, and it is not examined for a track whose
-persisted delivery is `RELEASED`.
+its [Effective SR](#effective-sr) evaluation is complete, and it is not
+examined for a track whose persisted delivery is `RELEASED`.
 
 Each matching action also requires the diff evidence defined in
 [Action-Scoped CVE Evidence](#action-scoped-cve-evidence). A scope whose track
@@ -669,7 +669,7 @@ eligibility, and Product lifecycle do not remove it from scope.
 
 A scope whose Ticket has no CVE is also selected. Positive evidence requires a
 label equal to the Ticket CVE, so such a scope is a complete no-match without
-any IBS request.
+any IBS request, whatever its package and codestream.
 
 The scope's codestream is the track `reference`, which is the origin codestream
 of the package (`package-model.md`, SMELT Query for Package Resolution). IBS
@@ -713,14 +713,15 @@ For each selected scope:
    upsert each exact `IBSRequestActionTrack` pair. Unknown and irrelevant
    actions are not persisted. Existing provenance omitted by IBS is retained;
    contradictory immutable provenance rolls back the scope.
-8. Derive delivery from the complete observation and the reloaded retained
-   evidence. Stale-negative guard: for a complete negative observation, do not
-   regress `IN_PROGRESS` if the reloaded relevant request, action, and
-   correlation rows differ from the step-1 snapshot (a row added, removed, or
-   with a different row timestamp), or if the track's delivery value differs
-   from the value observed before external I/O. Rows committed by another
-   writer during the scan only block such a regression; they are never
-   positive evidence for this scope.
+8. Derive delivery from the complete observation, which includes the retained
+   evidence read at step 1; the reloaded evidence serves only the
+   stale-negative guard. Stale-negative guard: for a complete negative
+   observation, do not regress `IN_PROGRESS` if the reloaded relevant request,
+   action, and correlation rows differ from the step-1 snapshot (a row added,
+   removed, or with a different row timestamp), or if the track's delivery
+   value differs from the value observed before external I/O. Rows committed
+   by another writer during the scan only block such a regression; they are
+   never positive evidence for this scope.
 9. Apply any effective delivery transition through
    `package_service.set_track_delivery_status()` with the complete Ticket,
    package, and track locator in the same transaction. Consume `changed` or
@@ -728,10 +729,10 @@ For each selected scope:
 10. Flush and commit the request, action, correlation, and delivery outcome
     atomically. On any local failure, roll back all changes for this scope.
 
-A commit that the database definitely rejects is a local failure of that
-scope. A commit whose outcome is unknown, such as a connection failure during
-`COMMIT`, ends the invocation: that scope receives no terminal outcome, and the
-remaining scopes are not attempted.
+A definitely failed commit, which the database reports as rejected, is a local
+failure of that scope. An ambiguous commit, whose outcome is unknown, such as a
+connection failure during `COMMIT`, ends the invocation: that scope receives no
+terminal outcome, and the remaining scopes are not attempted.
 
 All IBS HTTP work completes before the Ticket lock. No IBS, Redis, AMQP, or
 Celery I/O occurs while the lock is held. Each track scope has its own
@@ -771,10 +772,11 @@ one; `http_status` accompanies `reason_category="http_status"`.
 inapplicable under the locked revalidation of [Algorithm](#algorithm) step 5,
 which is a successful no-op: `reason_category` is `ticket_not_operable` when
 the Ticket became `Ignored` or `Duplicated`, and `scope_changed` otherwise.
-`ibs_request_issue_ignored` is emitted at most once per diff that contains a
-`cve` issue in state `added` or `changed` whose `label` is missing or is not a
-canonical CVE ID; such an issue is not positive evidence
-(`../integrations/ibs-integration.md`, Request Action Diff). `codestream` is
+`ibs_request_issue_ignored` is emitted at most once per request action diff or
+current release evidence diff that contains a `cve` issue in state `added` or
+`changed` whose `label` is missing or is not a canonical CVE ID; such an issue
+is not positive evidence (`../integrations/ibs-integration.md`, Request Action
+Diff). `request_number` accompanies a request action diff. `codestream` is
 logged only when it is a `SUSE:` project.
 
 `reason_category` is a bounded internal classification, never upstream text.
@@ -849,7 +851,9 @@ acceleration signals only. For either routing key the consumer:
    actions and retained exact roots, including all relevant actions in a
    multi-action request.
 5. Invokes the shared authoritative reconciliation inline for each selected
-   scope, with independent transactions.
+   scope, with independent transactions. The detail of step 3 only selects
+   scopes; the reconciliation obtains its own evidence after its step 1
+   ([Algorithm](#algorithm)).
 
 The event handler does not publish a Celery correlation or discovery task.
 Duplicate and out-of-order deliveries converge through current detail and
@@ -915,8 +919,9 @@ not fetcher work and apply no delay.
 2. Process each selected track with the shared authoritative reconciliation.
 3. Commit each complete local scope independently. Roll back and continue after
    an incomplete or failed scope.
-4. Let `SoftTimeLimitExceeded` and `MemoryError` escape as whole-run signals;
-   they are never converted into per-scope failures.
+4. Let `SoftTimeLimitExceeded`, `MemoryError`, and an ambiguous scope commit
+   escape as whole-run signals; they are never converted into per-scope
+   failures.
 5. Return normally after all scopes have been attempted. `BaseFetcher` derives
    success, partial, or failure from the non-overlapping metrics below.
 
@@ -931,8 +936,8 @@ what a long-gap run can prove; incomplete scopes preserve prior delivery.
 |---|---|
 | One track has a credentials-not-configured, authentication, transport, timeout, rate-limit, HTTP, parse, validation, search-completeness, retention, ambiguity, or local transaction failure | Roll back that scope, increment `record_failed` once, log the track/Ticket/request identities and sanitized category, and continue. Raw response bodies, URLs, credentials, and personal identifiers are not logged. |
 | A newer authoritative request observation has already committed when the scope locks the request ([Algorithm](#algorithm) step 6) | Roll back that scope, increment `record_failed` once with the category `stale_request_observation`, and continue; a later run or catch-up observes the request again. |
-| The database definitely rejects a scope commit | A local transaction failure of that scope: it is rolled back, `record_failed` is incremented once with the category `database`, and processing continues. |
-| A scope commit has an unknown outcome, such as a connection failure during `COMMIT` | The invocation ends: that scope records no terminal outcome or effect metric, the exception reaches `BaseFetcher`, which finalizes the run as failure, and scopes committed earlier remain committed. |
+| A definitely failed scope commit, which the database reports as rejected | A local transaction failure of that scope: it is rolled back, `record_failed` is incremented once with the category `database`, and processing continues. |
+| An ambiguous scope commit, whose outcome is unknown, such as a connection failure during `COMMIT` | The invocation ends: that scope records no terminal outcome or effect metric, the exception reaches `BaseFetcher`, which finalizes the run as failure, and scopes committed earlier remain committed. |
 | Scope enumeration or another whole-run database prerequisite fails | Raise so `BaseFetcher` finalizes the run as failure. Public `error_message` uses the infrastructure's sanitized generic category; restricted error fields retain diagnostics. |
 | Every selected scope fails | Return normally after counting failures; `BaseFetcher` records run failure because no selected scope succeeded. |
 | Some scopes complete and some fail | Return normally; `BaseFetcher` records a partial run from the mixed terminal outcomes, including when every successful scope was a no-op. |
@@ -1255,8 +1260,11 @@ Implementation coverage must include:
   - branch-commit and release-request revisions;
   - a later SR replacing the incident contents, with and without the CVE;
   - unavailable or incomplete incident history;
-  - an accepted action without acceptinfo;
+  - an accepted submission action without acceptinfo (incomplete);
 - values to be persisted that exceed their columns;
+- a CVE-less scope without any IBS request, and a stale request observation;
+- an uncorrelated in-flight SR correlated only when its diff is positive and
+  its effective-SR evaluation is complete;
 - unpaged history completeness (not starting at revision 1 or not contiguous),
   revision and checksum lookups, and retention-limited outcomes;
 - evidence reuse within one invocation without merging scope outcomes, and
@@ -1271,11 +1279,13 @@ Implementation coverage must include:
     the class `default_request_delay` in catch-up;
   - no wait for a zero delay, none while a Ticket lock is held, and none for
     request wake-ups;
-- every delivery transition, irreversible `RELEASED`, complete-negative
-  regression, and stale-negative concurrency with independent sessions;
+- every delivery transition, irreversible `RELEASED` (including a track that a
+  concurrent writer moved to `RELEASED` before the locked reload),
+  complete-negative regression, and stale-negative concurrency with independent
+  sessions;
 - atomic request/action/join/delivery commit and rollback, including successful
-  sibling scopes when another fails, a definitely rejected commit, and a commit
-  with an unknown outcome;
+  sibling scopes when another fails, a definitely failed commit, and an
+  ambiguous commit;
 - the structured logs and their bounded categories;
 - zero Ticket-event assertions for effective and unchanged request, action,
   correlation, delivery, stale/inapplicable, incomplete, failed, and wake-up

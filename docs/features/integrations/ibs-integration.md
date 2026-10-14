@@ -818,7 +818,8 @@ Verified live:
     `osrcmd5`. Every observed `source/@rev` of a supported action and every
     acceptinfo checksum is lowercase 32-character hexadecimal, and every
     acceptinfo `rev` a decimal number; `submit` actions, which are ignored,
-    carry a decimal `source/@rev`. Omitted values are never rendered empty.
+    carry a decimal or a checksum `source/@rev`. Omitted values are never
+    rendered empty.
   - Accepted `maintenance_release` actions have no acceptinfo when IBS
     released the package as a link to another package of the same release
     request (for example the kernel flavors, which link to `kernel-source`)
