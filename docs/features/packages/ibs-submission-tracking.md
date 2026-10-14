@@ -1049,7 +1049,7 @@ at response time from request-level incident equality.
 | `package_name` | string | No | Exact `logical_package`. |
 | `codestream_name` | string | No | Exact action codestream. |
 | `state` | request state | No | Exact current parent request state. |
-| `incident_number` | positive integer | No | Exact incident number. |
+| `incident_number` | positive integer | No | Exact incident number. At most 2147483647, the PostgreSQL `INTEGER` maximum; a larger value returns `422 VALIDATION_ERROR`. |
 
 **Response: 200**
 
