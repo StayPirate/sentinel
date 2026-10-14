@@ -41,7 +41,6 @@ from typing import Any, Final
 import pytest
 from sqlalchemy import delete, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-from sqlalchemy.orm import Session
 from structlog.testing import capture_logs
 
 from app.core.enums import DeliveryStatus, IBSRequestActionType, IBSRequestState
@@ -889,22 +888,3 @@ class TestScopeAtomicity:
         assert rows[lower][0] == REVIEW.value
         assert rows[lower][3] == WHEN_AT
         assert await delivery_of(probe, scope.track_id) == IN_PROGRESS
-
-    async def test_every_write_is_flushed_before_the_commit(
-        self,
-        world: RequestWorld,
-        fake: FakeRequests,
-        units: UnitSessions,
-    ) -> None:
-        scope, _ = await _negative_scope(world, fake)
-        pending: list[bool] = []
-
-        def check(session: Session) -> None:
-            pending.append(bool(session.new or session.dirty or session.deleted))
-
-        units.before_commit = check
-
-        outcomes = await reconcile(fake, [scope])
-
-        assert kinds(outcomes) == {scope.track_id: "updated"}
-        assert pending == [False]

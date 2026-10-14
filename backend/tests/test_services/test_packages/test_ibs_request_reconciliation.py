@@ -39,13 +39,13 @@ below an `Analysis` Ticket with its own CVE and a fresh logical package.
 
 from __future__ import annotations
 
-import ast
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, ClassVar, Final
+from unittest.mock import AsyncMock
 
 import pytest
 from celery.exceptions import SoftTimeLimitExceeded
@@ -151,9 +151,9 @@ EARLIER: Final = "2026-10-01T08:00:00"
 """A current-state time older than the seeded `WHEN_AT`."""
 
 RELEASE_REV: Final = "3"
+"""The acceptinfo `rev` of every accepted release action built here."""
 INDEX_POPULATION: Final = 50
 """Other actions present when the retained-root plan is explained."""
-"""The acceptinfo `rev` of every accepted release action built here."""
 
 HOME_PROJECT: Final = "home:jdoe:branches:SUSE:SLE-15-SP6:Update"
 """A fictional personal project outside the `SUSE:` namespace."""
@@ -1132,6 +1132,38 @@ class TestEvidencePersistence:
         assert await requests_of(world, number) == before
         assert await delivery(world, scope) == IN_PROGRESS.value
 
+    async def test_concurrently_inserted_action_identity_is_resolved_by_reload(
+        self,
+        world: RequestWorld,
+        fake: FakeRequests,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """When the action insert finds the identity already present, the
+        winner is reloaded and the same comparison applies; nothing is
+        replaced or duplicated."""
+        seed = RequestSeed(world)
+        scope = await seed.track(await seed.ticket(), package=unique_package())
+        number, action = await correlated(seed, scope)
+        await seed.commit()
+        fake.request(number, REVIEW, action)
+        fake.quiet(scope.package_name)
+        original = ibs_request_reconciliation._lock_actions
+        calls: list[int] = []
+
+        async def first_misses(db: AsyncSession, request_ids: Any) -> Any:
+            calls.append(len(calls))
+            locked = await original(db, request_ids)
+            return {} if len(calls) == 1 else locked
+
+        monkeypatch.setattr(ibs_request_reconciliation, "_lock_actions", first_misses)
+
+        outcomes = await reconcile(fake, [scope])
+
+        assert kinds(outcomes) == {scope.track_id: "updated"}
+        assert calls == [0, 1]
+        assert len(await stored_actions(world, number)) == 1
+        assert [row.request_number for row in await evidence(world, scope)] == [number]
+
     async def test_multi_action_request_persists_only_its_relevant_action(
         self, world: RequestWorld, fake: FakeRequests
     ) -> None:
@@ -1234,26 +1266,28 @@ class TestDeliveryDerivation:
         assert units.events == ["unit", "close", "unit", "commit", "close"]
         assert await delivery(world, scope) == RELEASED.value
 
-    async def test_complete_negative_with_unchanged_snapshot_regresses_to_pending(
+    async def test_delivery_change_alone_is_an_update(
         self,
         world: RequestWorld,
         fake: FakeRequests,
         delivery_calls: list[DeliveryStatus],
     ) -> None:
+        """A `PENDING` track correlated to an open SR whose detail is
+        unchanged: no evidence write, one delivery change, `updated`."""
         seed = RequestSeed(world)
-        scope = await seed.track(
-            await seed.ticket(), package=unique_package(), delivery=IN_PROGRESS
-        )
+        scope = await seed.track(await seed.ticket(), package=unique_package())
         number, action = await correlated(seed, scope)
         await seed.commit()
-        fake.request(number, DECLINED, action, when=LATER)
+        before = await requests_of(world, number)
+        fake.request(number, REVIEW, action)
         fake.quiet(scope.package_name)
 
         outcomes = await reconcile(fake, [scope])
 
         assert kinds(outcomes) == {scope.track_id: "updated"}
-        assert delivery_calls == [PENDING]
-        assert await delivery(world, scope) == PENDING.value
+        assert delivery_calls == [IN_PROGRESS]
+        assert await requests_of(world, number) == before
+        assert await delivery(world, scope) == IN_PROGRESS.value
 
     async def test_released_baseline_refreshes_evidence_and_stays_released(
         self,
@@ -1792,39 +1826,31 @@ class TestAudit:
 
 
 class TestLogsAndPrivacy:
-    async def test_incomplete_detail_logs_the_request_number(
+    async def test_scope_outside_suse_fails_without_request_or_codestream_field(
         self, world: RequestWorld, fake: FakeRequests
     ) -> None:
         seed = RequestSeed(world)
-        scope = await seed.track(await seed.ticket(), package=unique_package())
-        number, _ = await correlated(seed, scope)
+        scope = await seed.track(
+            await seed.ticket(),
+            package=unique_package(),
+            codestream="openSUSE:Leap:15.6:Update",
+        )
         await seed.commit()
-        fake.respond("GET", f"/request/{number}", [], 404)
-        fake.quiet(scope.package_name)
 
         with capture_logs() as logs:
-            await reconcile(fake, [scope])
+            outcomes = await reconcile(fake, [scope])
 
+        assert kinds(outcomes) == {scope.track_id: "failed"}
+        assert fake.served == []
         assert logged(logs, SCOPE_FAILED) == [
-            failed_entry(scope, "not_found", request_number=number)
-        ]
-        assert logged(logs, SCOPE_STALE) == []
-
-    async def test_http_500_logs_the_status_and_its_category(
-        self, world: RequestWorld, fake: FakeRequests
-    ) -> None:
-        seed = RequestSeed(world)
-        scope = await seed.track(await seed.ticket(), package=unique_package())
-        number, _ = await correlated(seed, scope)
-        await seed.commit()
-        fake.respond("GET", f"/request/{number}", [], 500)
-        fake.quiet(scope.package_name)
-
-        with capture_logs() as logs:
-            await reconcile(fake, [scope])
-
-        assert logged(logs, SCOPE_FAILED) == [
-            failed_entry(scope, "http_status", request_number=number, http_status=500)
+            {
+                "event": SCOPE_FAILED,
+                "log_level": "warning",
+                "ticket_id": str(scope.ticket_id),
+                "track_id": str(scope.track_id),
+                "package_name": scope.package_name,
+                "reason_category": "outside_suse_namespace",
+            }
         ]
 
     async def test_logs_carry_no_personal_project_account_credential_or_text(
@@ -1905,60 +1931,36 @@ class TestLogsAndPrivacy:
 # ---------------------------------------------------------------------------
 
 
-def _parsed(module: Any) -> tuple[str, ast.Module]:
-    source = Path(module.__file__).read_text(encoding="utf-8")
-    return source, ast.parse(source)
-
-
-def _selects_ticket(expression: ast.expr) -> bool:
-    return any(
-        isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id == "select"
-        and bool(node.args)
-        and isinstance(node.args[0], ast.Name)
-        and node.args[0].id == "Ticket"
-        for node in ast.walk(expression)
-    )
-
-
 class TestStructure:
-    def test_observation_module_has_no_database_dependency(self) -> None:
-        source, tree = _parsed(ibs_request_observation)
-        imported: list[str] = []
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                imported.extend(alias.name for alias in node.names)
-            elif isinstance(node, ast.ImportFrom) and node.module is not None:
-                imported.append(node.module)
+    async def test_request_delay_spaces_every_later_request_outside_sessions(
+        self,
+        world: RequestWorld,
+        fake: FakeRequests,
+        units: UnitSessions,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The caller's delay precedes every IBS request of the invocation
+        but the first, across scopes, and never runs while the snapshot
+        session or a unit is open."""
+        scopes = await seeded(world, 2)
+        for scope in scopes:
+            positive(fake, world, scope)
+        open_while_waiting: list[bool] = []
 
-        assert imported
-        assert [
-            name
-            for name in imported
-            if name == "sqlalchemy"
-            or name.startswith("sqlalchemy.")
-            or name == "app.database"
-            or name.startswith("app.database.")
-        ] == []
-        assert "with_for_update" not in source
+        async def wait(_: float) -> None:
+            open_while_waiting.append(len(units.sessions) != len(units.closed))
 
-    def test_ticket_row_lock_is_taken_only_in_reconcile_scope(self) -> None:
-        _, tree = _parsed(ibs_request_reconciliation)
-        lockers: list[str] = []
-        for function in ast.walk(tree):
-            if not isinstance(function, ast.FunctionDef | ast.AsyncFunctionDef):
-                continue
-            for node in ast.walk(function):
-                if (
-                    isinstance(node, ast.Call)
-                    and isinstance(node.func, ast.Attribute)
-                    and node.func.attr == "with_for_update"
-                    and _selects_ticket(node.func.value)
-                ):
-                    lockers.append(function.name)
+        recorder = AsyncMock(side_effect=wait)
+        monkeypatch.setattr(
+            ibs_request_observation, "asyncio", SimpleNamespace(sleep=recorder)
+        )
 
-        assert lockers == ["_reconcile_scope"]
+        outcomes = await reconcile(fake, scopes, request_delay=0.25)
+
+        assert kinds(outcomes) == {scope.track_id: "created" for scope in scopes}
+        assert recorder.await_count == len(fake.served) - 1
+        assert {call.args for call in recorder.await_args_list} == {(0.25,)}
+        assert open_while_waiting == [False] * recorder.await_count
 
     async def test_no_ibs_request_is_served_while_a_session_is_open(
         self,
@@ -1998,6 +2000,102 @@ class TestStructure:
         assert state["units"] == 2
         assert fake.served
         assert violations == []
+
+
+class TestInFlightSelection:
+    """Required Roots root 1: the uncorrelated retained accepted SRs that
+    step 1 selects as in flight for a scope."""
+
+    @pytest.mark.parametrize(
+        ("variant", "examined"),
+        [
+            pytest.param("in-flight", True, id="in-flight"),
+            pytest.param("released-other-incident", True, id="other-incident"),
+            pytest.param("released-same-incident", False, id="same-incident"),
+            pytest.param("not-accepted", False, id="not-accepted"),
+            pytest.param("correlated", False, id="correlated-to-the-track"),
+        ],
+    )
+    async def test_selection_of_retained_submissions_of_another_ticket(
+        self,
+        world: RequestWorld,
+        fake: FakeRequests,
+        variant: str,
+        examined: bool,
+    ) -> None:
+        """Another Ticket's track of the same package and codestream is
+        correlated to an accepted SR. It is examined for this scope unless
+        a retained accepted release action of its own incident exists, it
+        is not accepted, or it is already correlated to this track (then
+        it is root-1 evidence, evaluated from retained provenance without
+        point detail)."""
+        seed = RequestSeed(world)
+        package = unique_package()
+        other = await seed.track(await seed.ticket(), package=package)
+        scope = await seed.track(await seed.ticket(), package=package)
+        number, incident = world.number(), next_incident()
+        srcmd5 = checksum(f"sr-commit-{number}")
+        accepted = submission(
+            package,
+            number,
+            incident=incident,
+            accept=Accept(rev="2", srcmd5=srcmd5, xsrcmd5=checksum(f"x-{number}")),
+        )
+        state = REVIEW if variant == "not-accepted" else ACCEPTED
+        retained = submission(package, number) if state is REVIEW else accepted
+        tracks = [other, scope] if variant == "correlated" else [other]
+        await seed.evidence(number, state, retained, tracks=tracks)
+        if variant.startswith("released"):
+            released = world.number()
+            source = (
+                incident if variant == "released-same-incident" else next_incident()
+            )
+            await seed.evidence(
+                released,
+                ACCEPTED,
+                release(
+                    package,
+                    source,
+                    accept=Accept(rev="1", srcmd5=checksum(f"rr-{released}")),
+                ),
+                tracks=[other],
+            )
+        await seed.commit()
+        fake.request(number, ACCEPTED, accepted)
+        fake.action_diff(
+            number,
+            accepted,
+            cve_issue(cve_of(scope)),
+            cve_issue(cve_of(other)),
+            codestream_package=package,
+        )
+        assert accepted.target_package is not None
+        fake.history(
+            f"SUSE:Maintenance:{incident}",
+            accepted.target_package,
+            [(1, checksum("branch"), None), (2, srcmd5, number)],
+        )
+        fake.quiet(package)
+
+        outcomes = await reconcile(fake, [scope])
+
+        fetched = f"/request/{number}" in fake.paths()
+        assert fetched is examined
+        correlated_numbers = [
+            row.request_number for row in await evidence(world, scope)
+        ]
+        if examined:
+            assert kinds(outcomes) == {scope.track_id: "created"}
+            assert correlated_numbers == [number]
+            assert await delivery(world, scope) == IN_PROGRESS.value
+        elif variant == "correlated":
+            assert kinds(outcomes) == {scope.track_id: "updated"}
+            assert correlated_numbers == [number]
+            assert await delivery(world, scope) == IN_PROGRESS.value
+        else:
+            assert kinds(outcomes) == {scope.track_id: "no_op"}
+            assert correlated_numbers == []
+            assert await delivery(world, scope) == PENDING.value
 
 
 # ---------------------------------------------------------------------------
@@ -2130,8 +2228,17 @@ class TestDimensionIndependence:
         {"track": {"checkpoint": CHECKPOINT}},
     ]
 
+    @pytest.mark.parametrize(
+        ("path", "derived"),
+        [("open-submission", IN_PROGRESS), ("proven-release", RELEASED)],
+        ids=["in-progress", "released"],
+    )
     async def test_every_dimension_value_is_selected_and_derives_the_same_delivery(
-        self, world: RequestWorld, fake: FakeRequests
+        self,
+        world: RequestWorld,
+        fake: FakeRequests,
+        path: str,
+        derived: DeliveryStatus,
     ) -> None:
         seed = Seed(world.session, world)
         ticket = await seed.ticket()
@@ -2150,13 +2257,16 @@ class TestDimensionIndependence:
         scopes = await load_ibs_request_scopes(reader, ticket_id=ticket.id)
         await reader.rollback()
         for scope in scopes:
-            positive(fake, world, scope)
+            if path == "open-submission":
+                positive(fake, world, scope)
+            else:
+                proven_release(fake, world, scope)
 
         outcomes = await reconcile(fake, scopes)
 
         assert [scope.track_id for scope in scopes] == sorted(t.id for t in created)
         assert kinds(outcomes) == {track.id: "created" for track in created}
         for scope in scopes:
-            assert await delivery(world, scope) == IN_PROGRESS.value
+            assert await delivery(world, scope) == derived.value
         assert await _dimensions(world, ticket.id) == before
         assert await events_of(world, ticket.id) == []

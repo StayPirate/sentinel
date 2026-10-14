@@ -676,6 +676,24 @@ class TestSupersession:
 
         assert (exc.reason_category, exc.request_number) == ("not_found", successor)
 
+    async def test_unknown_successor_state_is_incomplete(
+        self, fake: FakeRequests, package: str
+    ) -> None:
+        number, successor = next_number(), next_number()
+        fake.request(
+            number, SUPERSEDED, submission(package, number), superseded_by=successor
+        )
+        fake.request(successor, "frozen", submission(package, successor))
+        fake.quiet(package, open_submissions=[number])
+
+        exc = await unusable(fake, scope(package=package))
+
+        assert (exc.reason_category, exc.request_number) == (
+            "invalid_state",
+            successor,
+        )
+        assert detail_numbers(fake) == [number, successor]
+
 
 class TestActionScopedEvidence:
     """Action-Scoped CVE Evidence, Package and Codestream Identity, and the
