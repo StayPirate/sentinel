@@ -519,15 +519,16 @@ before its local transaction; that track is a successful no-op.
 
 ### Request Delay
 
-The detector waits the inter-request delay before every IBS source-info and
-source-diff request of one invocation except the first, including the
-`orev=0` fallback diff. A periodic run uses `request_delay` from its runtime
-configuration snapshot; catch-up, which has no snapshot, uses the class
-`default_request_delay` (`../platform/fetcher-infrastructure.md`,
-FetcherConfig). A zero delay never waits. The delay does not separate the
-unsigned and signed attempts of one operation or its shared transport
-retries. A request starts only after the preceding per-track transaction has
-closed, so the detector never waits while a Ticket lock is held.
+The detector spaces its IBS source-info and source-diff requests, including
+the `orev=0` fallback diff, under the generic request-delay contract
+([fetcher-infrastructure.md, Request
+Delay](../platform/fetcher-infrastructure.md#request-delay)). Catch-up also
+applies the delay, with the class `default_request_delay`. One IBS operation,
+including its unsigned and signed attempts
+([ibs-integration.md, Request
+Authentication](../integrations/ibs-integration.md#request-authentication)), is
+one request. A request starts only after the preceding per-track transaction
+has closed, so the detector never waits while a Ticket lock is held.
 
 ### Metrics and Run Status
 

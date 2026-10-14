@@ -817,16 +817,17 @@ run after a long gap use the same complete state-based algorithm.
 
 ### Request Delay
 
-The fetcher waits the inter-request delay before every IBS request of one
-invocation except the first. A periodic run uses `request_delay` from its
-runtime configuration snapshot; catch-up, which has no snapshot, uses the class
-`default_request_delay` (`../platform/fetcher-infrastructure.md`,
-FetcherConfig). A zero delay never waits. The delay does not separate the
-unsigned and signed attempts of one operation or its shared transport retries.
-No IBS request occurs while a Ticket lock is held ([Algorithm](#algorithm)), so
-the fetcher never waits while holding one. Request wake-ups
-([RabbitMQ Request Wake-Ups](#rabbitmq-request-wake-ups)) are not fetcher work
-and apply no delay.
+The fetcher spaces every IBS request under the generic request-delay contract
+([fetcher-infrastructure.md, Request
+Delay](../platform/fetcher-infrastructure.md#request-delay)). Catch-up also
+applies the delay, with the class `default_request_delay`. One IBS operation,
+including its unsigned and signed attempts
+([ibs-integration.md, Request
+Authentication](../integrations/ibs-integration.md#request-authentication)), is
+one request. No IBS request occurs while a Ticket lock is held
+([Algorithm](#algorithm)), so the fetcher never waits while holding one.
+Request wake-ups ([RabbitMQ Request Wake-Ups](#rabbitmq-request-wake-ups)) are
+not fetcher work and apply no delay.
 
 ### Algorithm
 

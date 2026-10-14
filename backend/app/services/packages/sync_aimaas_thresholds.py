@@ -4,9 +4,11 @@ Implements docs/features/packages/product-catalog.md (AIMAAS Integration >
 CVSS Threshold Sync; Fetcher: `sync_aimaas_thresholds`). Each run:
 
 1. retrieves the complete default AIMAAS Product list (`all_fields=true`)
-   and the complete threshold list before any database work, and parses
-   their consumed fields (Product `id` and `cpe`; threshold `product` and
-   `threshold`);
+   and the complete threshold list before any database work, the run's
+   `request_delay` separating every two consecutive page requests,
+   including the last Product page and the first threshold page
+   (fetcher-infrastructure.md, Request Delay), and parses their consumed
+   fields (Product `id` and `cpe`; threshold `product` and `threshold`);
 2. validates the complete response (no duplicate `id`, non-empty `cpe`, or
    `product`; every `threshold` a number representable at one decimal
    place within `[0.0, 10.0]`) before any change;
@@ -31,6 +33,7 @@ effects happen only in the dispatched task's per-Ticket recalculation
 
 from __future__ import annotations
 
+import asyncio
 import math
 import uuid
 from collections.abc import Callable, Mapping, Sequence
@@ -322,6 +325,9 @@ class SyncAimaasThresholds(BaseFetcher):
             request_delay=request_delay,
             invalid_message=INVALID_PRODUCT_LIST_MESSAGE,
         )
+        if request_delay > 0:
+            # The delay also separates the two collections.
+            await asyncio.sleep(request_delay)
         threshold_listing = await fetch_aimaas_listing(
             self.http_client,
             api_url=settings.aimaas_api_url,
