@@ -414,10 +414,22 @@ class TestObservationWithoutRequests:
     """Scope Identity and Required Roots: outcomes decided before any IBS
     request."""
 
+    @pytest.mark.parametrize(
+        ("name", "codestream"),
+        [
+            pytest.param(None, CODESTREAM, id="valid-identity"),
+            pytest.param("bad name", CODESTREAM, id="invalid-package"),
+            pytest.param(None, "openSUSE:Leap:15.6:Update", id="outside-suse"),
+        ],
+    )
     async def test_observe_scope_cve_less_scope_returns_no_match_without_requests(
-        self, fake: FakeRequests, package: str
+        self, fake: FakeRequests, package: str, name: str | None, codestream: str
     ) -> None:
-        assert await observe(fake, scope(cve=None, package=package)) == NO_MATCH
+        """A CVE-less scope is a complete no-match whatever its package and
+        codestream (Scope Identity)."""
+        target = scope(cve=None, package=name or package, codestream=codestream)
+
+        assert await observe(fake, target) == NO_MATCH
         assert fake.server.requests == []
 
     async def test_observe_scope_track_absent_at_step_1_returns_no_match(

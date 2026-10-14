@@ -1132,7 +1132,7 @@ class TestEvidencePersistence:
         assert await requests_of(world, number) == before
         assert await delivery(world, scope) == IN_PROGRESS.value
 
-    async def test_concurrently_inserted_action_identity_is_resolved_by_reload(
+    async def test_action_insert_meeting_an_existing_identity_reloads_it(
         self,
         world: RequestWorld,
         fake: FakeRequests,
@@ -1841,7 +1841,7 @@ class TestLogsAndPrivacy:
             outcomes = await reconcile(fake, [scope])
 
         assert kinds(outcomes) == {scope.track_id: "failed"}
-        assert fake.served == []
+        assert fake.server.requests == []
         assert logged(logs, SCOPE_FAILED) == [
             {
                 "event": SCOPE_FAILED,

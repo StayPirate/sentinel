@@ -85,7 +85,8 @@ def _parents(tree: ast.AST) -> dict[ast.AST, ast.AST]:
 
 
 def _qualified_function(node: ast.AST, parents: dict[ast.AST, ast.AST]) -> str | None:
-    """`Class.method` or `function` of the innermost enclosing function."""
+    """`Class.method` or `function` of the enclosing function; a nested
+    function is attributed to its outermost enclosing function."""
     names: list[str] = []
     while node in parents:
         node = parents[node]
