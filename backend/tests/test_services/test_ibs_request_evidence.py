@@ -16,8 +16,10 @@ from typing import Any
 import pytest
 
 from app.services.ibs_request_evidence import (
+    IncompleteEvidenceError,
     RequestEvidenceResult,
     RequestIdSearchResult,
+    SearchHandler,
     is_valid_request_revision,
     positive_int,
 )
@@ -90,3 +92,12 @@ class TestFieldContracts:
         self, value: str | None, expected: int | None
     ) -> None:
         assert positive_int(value) == expected
+
+
+class TestHandlers:
+    def test_search_result_without_a_parsed_collection_is_incomplete(self) -> None:
+        """`result()` is taken only after a complete parse, which always
+        reads the root; without one it still never yields a value."""
+        with pytest.raises(IncompleteEvidenceError) as raised:
+            SearchHandler().result()
+        assert raised.value.reason == "invalid_document"
