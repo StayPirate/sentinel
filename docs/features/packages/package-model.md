@@ -510,8 +510,8 @@ track `delivery_status`, participates in the Resolved gate.
 
 | State | Meaning |
 |-------|---------|
-| `PENDING` | Relevant current delivery progress has not been established. It is the initial state, and the result of a complete, non-stale observation that found no relevant current progress. It does not prove that no submission or release exists, or that synchronization succeeded |
-| `IN_PROGRESS` | Relevant delivery of the fix to the track is authoritatively in progress: complete evidence establishes relevant current progress but does not prove a release |
+| `PENDING` | Relevant current delivery progress has not been established. It is the initial state, and the result of a complete, non-stale observation that found no relevant current delivery progress. It does not prove that no submission or release exists, or that synchronization succeeded |
+| `IN_PROGRESS` | Complete authoritative evidence establishes relevant current delivery progress of the fix to the track, but does not prove a release |
 | `RELEASED` | Release of contents carrying the Ticket CVE to the track is proven. This state is irreversible |
 
 The IBS evidence that establishes each value, including the release proof, is
@@ -629,9 +629,9 @@ The two axes are managed independently:
 
 The diagram shows the typical order of events. The evidence that establishes
 each delivery value is defined in
-[Delivery Derivation](ibs-submission-tracking.md#delivery-derivation),
-independently from track affectedness detection and Product publication
-detection.
+[Delivery Derivation](ibs-submission-tracking.md#delivery-derivation);
+delivery is derived independently from track affectedness detection and
+Product publication detection.
 
 #### Product Release Confirmation
 
@@ -670,8 +670,9 @@ upstream evidence remains discoverable.
 
 Each track observation is classified as complete positive, complete no-match,
 incomplete, or failed under `ibs-submission-tracking.md`. Only a complete
-observation may change delivery. Incomplete, failed, retention-limited,
-ambiguous, or stale evidence preserves the persisted status. This
+observation may change delivery: an incomplete or failed observation, or a
+negative that fails the stale-negative guard, preserves the persisted status
+(see [Delivery status regression](#delivery-status-regression)). This
 reconciliation applies only to IBS tracks. Git tracks will have their own
 delivery detection and reconciliation mechanism (TBD).
 
@@ -806,7 +807,8 @@ evidence or delivery committed while it ran.
 For IBS tracks, `ibs-submission-tracking.md` defines the required roots
 ([Required Roots](ibs-submission-tracking.md#required-roots)), which request
 states establish progress
-([Effective SR](ibs-submission-tracking.md#effective-sr)), what makes an
+([Action-Scoped CVE Evidence](ibs-submission-tracking.md#action-scoped-cve-evidence)
+and [Effective SR](ibs-submission-tracking.md#effective-sr)), what makes an
 observation incomplete
 ([Observation Outcomes](ibs-submission-tracking.md#observation-outcomes)), and
 the stale-negative guard ([Algorithm](ibs-submission-tracking.md#algorithm),

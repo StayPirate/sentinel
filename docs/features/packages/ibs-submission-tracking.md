@@ -59,8 +59,8 @@ its positive number on actions when it can be established, but does not create a
 3. A `maintenance_release` action in an RR releases incident contents toward a
    codestream.
 4. Acceptance of the RR alone is not delivery evidence;
-   [Accepted RR Provenance](#accepted-rr-provenance) defines when it proves the
-   release.
+   [Accepted RR Provenance](#accepted-rr-provenance) defines when an accepted
+   RR proves the release.
 
 IBS permits multiple actions in each request, multiple SRs for one incident,
 and multiple historical RRs for an incident. Sentinel never assumes one request
@@ -614,16 +614,18 @@ For a complete observation, derive the strongest proven state:
 3. Otherwise, a complete authoritative no-match yields `PENDING`.
 
 A complete no-match is complete within the bounded discovery of
-[Required Roots](#required-roots), whose accepted limitations apply. An
+[Required Roots](#required-roots), whose accepted limitations apply; the
+resulting `PENDING` carries the caveat stated in
+[Axis 3](package-model.md#axis-3-delivery-and-release-observation). An
 incomplete or failed observation never changes delivery.
 
 The derived value is applied under the delivery state machine in
 `package-model.md`
 ([Automatic Transitions](package-model.md#automatic-transitions)), including
 irreversible `RELEASED` and the atomic `PENDING -> IN_PROGRESS -> RELEASED`
-application of a release proven from `PENDING`. A negative regression
-`IN_PROGRESS -> PENDING` also requires the stale-negative guard of
-[Algorithm](#algorithm) step 8.
+application of a release proven while the persisted value is `PENDING`. A
+negative regression `IN_PROGRESS -> PENDING` also requires the stale-negative
+guard of [Algorithm](#algorithm) step 8.
 
 All effective changes use `package_service.set_track_delivery_status()` with
 system attribution. Delivery changes create no Ticket audit event and do not
@@ -718,9 +720,9 @@ timestamp and normalized content; a Ticket lock alone is not treated as a
 cross-Ticket request lock. The timestamp/content checks prevent an older
 point-fetch from replacing newer request truth. Uniqueness conflicts on a
 concurrently inserted identity are resolved by reloading and applying the same
-condition, not by replacing the winner. The post-scan evidence and expected-
-delivery checks prevent a stale negative result from overwriting positive event
-or polling work committed after the scan began. Audit history is never queried
+condition, not by replacing the winner. The stale-negative guard of step 8
+prevents a stale negative result from overwriting positive event or polling
+work committed after the scan began. Audit history is never queried
 for current state, idempotency, or provenance.
 
 ## Accelerators
@@ -1273,8 +1275,9 @@ status, metrics, and sanitized logs, never by another delivery state.
   and source-history client contracts.
 - `docs/features/integrations/ibs-rabbitmq-integration.md` - request wake-up,
   acknowledgement, process, and heartbeat contracts.
-- `docs/features/packages/package-model.md` - orthogonal dimensions, strict IBS
-  applicability, active-Ticket scope, and Ticket convergence ordering.
+- `docs/features/packages/package-model.md` - orthogonal dimensions, delivery
+  value meanings and the delivery state machine, strict IBS applicability,
+  active-Ticket scope, and Ticket convergence ordering.
 - `docs/features/packages/package-service.md` - centralized delivery mutation
   and Ticket locking.
 - `docs/features/packages/maintainer.md` - current-state workbench projection;
