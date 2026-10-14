@@ -435,7 +435,9 @@ positive correlation evidence. `changed` is accepted because a later SR can
 replace incident contents while retaining an existing CVE reference.
 
 A matching action requires its diff when it is not yet correlated to the
-scope's track and its request is `new`, `review`, or `accepted`. A matching
+scope's track and its request is `new`, `review`, or `accepted`, except that
+the unavailable diff of an uncorrelated in-flight SR of root 1 is not evidence
+([Required Roots](#required-roots)). A matching
 action of a `declined`, `revoked`, `deleted`, or `superseded` request cannot
 establish progress or release by itself (a superseded request acts only through
 its successor), so its diff is not required and an unavailable diff of it never
@@ -484,7 +486,8 @@ is historical. A release of the incident does not end its progress; the release
 is proven separately ([Accepted RR Provenance](#accepted-rr-provenance)). An
 unavailable or incomplete incident history, a missing acceptinfo `srcmd5`, or a
 history that contains no revision for the action makes the observation
-incomplete.
+incomplete, except for an uncorrelated in-flight SR of root 1, whose
+unavailable evidence is not evidence ([Required Roots](#required-roots)).
 
 An SR in `new` or `review` can establish current progress directly after exact
 action and CVE correlation. A `superseded` SR does not establish progress by
