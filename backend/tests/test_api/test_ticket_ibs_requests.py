@@ -931,7 +931,9 @@ class TestQueryShape:
         assert decorated.status_code == 200
         assert decorated.content == plain.content
 
-    @pytest.mark.parametrize("value", ["abc", "45001", "x" * 501])
+    @pytest.mark.parametrize(
+        "value", ["abc", "45001", "x" * 501], ids=["non-integer", "valid", "too-long"]
+    )
     async def test_incident_number_is_undeclared_on_the_submission_list(
         self,
         client: AsyncClient,

@@ -476,7 +476,7 @@ class TestListRaces:
 
         _assert_complete(await _list(kind, reader, ticket, ANONYMOUS_CALLER), expected)
 
-    async def test_count_and_page_come_from_one_view(
+    async def test_actions_committed_between_reads_are_observed_whole(
         self,
         kind: _Kind,
         committed_world: _CommittedWorld,
@@ -485,7 +485,8 @@ class TestListRaces:
         """Actions and correlations committed between two reads are
         observed whole by the later read, in its items and total alike.
         Page/total coherence within one read follows from the single
-        statement proven in `test_ibs_request_lists.py`."""
+        statement proven by `test_read_is_one_statement_without_a_lock` in
+        `test_ibs_request_lists.py`."""
         ticket, package, initial = await _visible_world(
             committed_world, kind, is_confidential=False
         )
