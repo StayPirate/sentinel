@@ -389,11 +389,12 @@ repositories.
   - `POST /source/{project}/{package}?cmd=diff&view=xml&onlyissues=1&expand=1` —
     expanded source diff. Track release detection uses canonical CVE identity
     from `issue.label`, accepts `added` and `changed`, and ignores `bnc` for CVE
-    matching
+    matching; submission tracking reads the current issue set of a codestream
+    package with the same operation
   - `GET /search/request/id?match={typed_narrow_predicate}` — complete ID-only
-    discovery for a bounded maintenance action, state, and source scope. Every
-    returned number is point-fetched; an inconsistent count is incomplete
-    evidence, not a negative result
+    discovery for a bounded maintenance action, state, and package-prefix
+    scope. Every returned number is point-fetched; an inconsistent count is
+    incomplete evidence, not a negative result
   - `GET /request/{request_number}` — authoritative current request state and
     complete REST action representation. Request-event state and action arrays
     are not used as domain evidence
@@ -437,10 +438,13 @@ repositories.
   - the source-diff unavailable-revision responses on 2026-10-11 and
     2026-10-12;
   - SSH-signature authentication on 2026-10-12, including a live signed
-    request by Sentinel's own IBS client; and
+    request by Sentinel's own IBS client;
   - on 2026-10-13, the request operations as currently specified, including
     the request action diff forms compared with the request diff and the
-    unpaged source history with exact lookups.
+    unpaged source history with exact lookups; and
+  - on 2026-10-14, the request naming, incident identity, codestream-history
+    composition, release provenance, and release actions without acceptinfo
+    used by submission tracking.
 
   Gate status: none of the track-release, authentication, and request-operation
   contracts has an open verification gate. Verified shapes, fields verified
@@ -827,7 +831,12 @@ attribute it exposes.
   no freshness marker. These endpoints require no authentication.
 - **Source semantics**:
   - IBS package resolution originates from declarative `SUSE:Channels`
-    records. With Reactive LTSS explicitly requested
+    records. The IBS codestream of a package is the `project` of the channel's
+    `<binaries>` group that ships it (SMELT source). A package that later
+    codestreams inherit through a project link is therefore reported in its
+    origin codestream, which is also the codestream named by the package's IBS
+    maintenance requests (verified live on 2026-10-14). With Reactive LTSS
+    explicitly requested
     (`include_reactive_ltss=true`), SMELT also exposes selected records
     located in `SUSE:Channels:EOL`, but only when the linked Product has an
     AIMAAS-derived Reactive LTSS status.

@@ -196,7 +196,10 @@ follows the naming pattern `SUSE:SLE-<version>:GA` (development phase) or
 A source package may exist in multiple codestreams. If a newer SP inherits
 a package from an older SP without changes, the newer codestream contains
 an IBS link to the older codestream's package — updates to the source
-codestream automatically propagate to the linked codestreams.
+codestream automatically propagate to the linked codestreams. Maintenance
+requests for such a package name its origin codestream, and SMELT reports the
+package there, so Sentinel tracks it in the origin codestream (see
+[SMELT Query for Package Resolution](#smelt-query-for-package-resolution)).
 
 ### Git Track (SLFO)
 
@@ -508,8 +511,8 @@ track `delivery_status`, participates in the Resolved gate.
 | State | Meaning | Condition |
 |-------|---------|-----------|
 | `PENDING` | Relevant delivery progress has not been established | Initial state, or a complete non-stale reconciliation found no relevant current progress. This does not prove that no SR exists or that synchronization succeeded |
-| `IN_PROGRESS` | Relevant fix delivery is authoritatively in progress | Complete evidence establishes a relevant current SR or effective incident chain, but does not prove that an accepted RR released the effective SR contents |
-| `RELEASED` | Release to the track is proven | Exact accepted-RR and source/target provenance proves that the RR released the effective SR contents; this state is irreversible |
+| `IN_PROGRESS` | Relevant fix delivery is authoritatively in progress | Complete evidence establishes a relevant current SR, effective accepted SR, or open RR, but does not prove a release |
+| `RELEASED` | Release to the track is proven | An accepted RR's own target provenance and release diff prove that it released contents carrying the Ticket CVE to the track codestream; this state is irreversible |
 
 The delivery status is updated only by the shared authoritative IBS request
 reconciliation. IBS RabbitMQ events, package-add catch-up, Ticket-convergence
@@ -593,6 +596,7 @@ Maintainer prepares fix
         |
         v
 Relevant SR/current incident proven      --> delivery: IN_PROGRESS
+(or an open RR, when no SR was observed)
         |
         v
 Incident (SUSE:Maintenance:XXXXX)
@@ -604,7 +608,7 @@ Incident (SUSE:Maintenance:XXXXX)
 RR (Release Request) created
         |
         v
-RR acceptance and exact source/target provenance proven
+RR acceptance and release provenance proven
                                           --> delivery: RELEASED
         |
         v
@@ -616,14 +620,15 @@ Fix lands in Product repositories (updateinfo.xml) --> released_at set
 
 The two axes are managed independently:
 - `delivery_status` transitions to `RELEASED` only when IBS submission
-  tracking proves that an accepted RR released the effective SR contents to
-  the track
+  tracking proves that an accepted RR released contents carrying the Ticket
+  CVE to the track
 - `status` transitions to `FIXED` when track release detection confirms the
   Ticket CVE in the expanded codestream source diff
 
 RR acceptance by itself is insufficient delivery proof. Sentinel validates the
-effective SR, accepted RR, and target source-history provenance independently
-from track affectedness detection and Product publication detection.
+accepted RR's own target source-history provenance and release diff
+independently from track affectedness detection and Product publication
+detection.
 
 #### Product Release Confirmation
 
@@ -680,7 +685,7 @@ context of the current affectedness — see
 | Affectedness | Delivery | Relevant | Anomaly | Meaning |
 |-------------|----------|----------|---------|---------|
 | `ANALYSIS` | `PENDING` | Yes | | Not yet analyzed; relevant delivery progress is not established |
-| `ANALYSIS` | `IN_PROGRESS` | Yes | | Relevant SR/incident progress is established before VA analysis |
+| `ANALYSIS` | `IN_PROGRESS` | Yes | | Relevant SR, incident, or open-RR progress is established before VA analysis |
 | `ANALYSIS` | `RELEASED` | Yes | | Fix released before VA analyzed the track |
 | `AFFECTED` | `PENDING` | Yes | | Affected, fix expected, relevant delivery progress not established |
 | `AFFECTED` | `IN_PROGRESS` | Yes | | Fix in the pipeline |
@@ -768,8 +773,8 @@ service result itself does not prescribe an exception type.
 
 | From | To | Trigger |
 |------|----|---------|
-| `PENDING` | `IN_PROGRESS` | Complete authoritative evidence establishes a relevant `new` or `review` SR, effective accepted SR/incident chain, or complete relevant supersession successor |
-| `IN_PROGRESS` | `RELEASED` | Exact accepted-RR and source/target provenance proves release of the effective SR contents to the track |
+| `PENDING` | `IN_PROGRESS` | Complete authoritative evidence establishes a relevant `new` or `review` SR, effective accepted SR, complete relevant supersession successor, or relevant `new` or `review` RR |
+| `IN_PROGRESS` | `RELEASED` | An accepted RR's own target provenance and release diff prove that it released contents carrying the Ticket CVE to the track |
 | `IN_PROGRESS` | `PENDING` | Complete authoritative reconciliation establishes no relevant current delivery progress, and the negative observation passes the stale-result guard |
 
 When a complete observation proves `RELEASED` while the persisted value is
@@ -781,8 +786,9 @@ idempotent no-op.
 
 `delivery_status` can regress from `IN_PROGRESS` to `PENDING` only when the
 shared reconciliation completely exhausts every required discovery root and
-artifact and establishes that no relevant current SR, effective incident, or
-complete relevant supersession successor remains. Exact request states are
+artifact (`ibs-submission-tracking.md`, Required Roots) and establishes that no
+relevant current SR, effective accepted SR, open RR, or complete relevant
+supersession successor remains. Exact request states are
 evaluated under `ibs-submission-tracking.md`: `declined`, `revoked`, and
 `deleted` do not establish current progress; a `superseded` request establishes
 progress only through a completely traversed relevant successor chain.
@@ -797,9 +803,9 @@ delivery value changed during external I/O.
 #### RELEASED is irreversible
 
 Once `delivery_status` reaches `RELEASED`, it cannot regress. The state records
-an accepted RR whose exact source and target provenance passed the complete
-proof contract at observation time; later disappearance or incomplete evidence
-does not reverse that accepted factual observation.
+an accepted RR whose release provenance passed the complete proof contract at
+observation time; later disappearance or incomplete evidence does not reverse
+that accepted factual observation.
 
 These transitions are derived by the shared authoritative reconciliation,
 invoked by IBS RabbitMQ wake-ups and the `SyncIbsRequests` scheduled or targeted
@@ -1376,7 +1382,7 @@ non-paginated JSend envelope.
 
 | Field | Purpose |
 |-------|---------|
-| `data[].codestream.name` | Track reference (`TicketPackageTrack.reference`) |
+| `data[].codestream.name` | Track reference (`TicketPackageTrack.reference`). For an IBS codestream, the origin codestream that holds the package: a package that later codestreams inherit through a project link is reported in the codestream it is inherited from, which is the codestream its IBS maintenance requests name |
 | `data[].codestream.type` | Authoritative track workflow: `SLFO` → `git`, `SLE_15` → `ibs`; `SLFO_IBS` (unsupported) and `UNKNOWN` (unclassified) entries are skipped |
 | `data[].targets[].product.cpe` | Product match key against `Product.cpe` in the current catalog snapshot |
 | `data[].targets[].product.friendly_name` | Logging and warning messages |
@@ -1529,7 +1535,7 @@ different data:
   for the Ticket CVE in the codestream's expanded source diff.
 - The track level updates `TicketPackageTrack.delivery_status` to
   `RELEASED` when IBS submission tracking proves that an accepted Release
-  Request released the effective SR contents to that codestream.
+  Request released contents carrying the Ticket CVE to that codestream.
 - The product level sets `TicketPackageProduct.released_at` when the
   fix appears in that specific product's update repository.
 

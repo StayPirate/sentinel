@@ -277,8 +277,10 @@ POST /source/{project}/{package}?cmd=diff&view=xml&onlyissues=1&expand=1&orev={o
 Returns an XML document listing structured issue-reference changes between
 two expanded source states. `onlyissues=1` asks IBS to extract issue references
 from the source changes. `expand=1` is required so linked packages are compared
-using their expanded source trees. `orev=0` represents an empty source tree and
-is used for a track's first observation and unavailable-history fallback.
+using their expanded source trees. `orev=0` represents an empty source tree. It
+is used for a track's first observation and unavailable-history fallback, and
+by submission tracking to read the issue set of a codestream package's current
+state (`docs/features/packages/ibs-submission-tracking.md`, Release Discovery).
 
 Example response:
 
@@ -439,25 +441,20 @@ The supported predicate inputs are:
 |---|---|---|
 | `action_type` | Yes | Exact `maintenance_incident` or `maintenance_release`. |
 | `states` | No | Non-empty subset of the seven request states below. |
-| `source_project` | No | Exact source project in the `SUSE:` namespace. Used for incident-scoped RR discovery. |
-| `source_packages` | No | Non-empty collection of exact physical source-package names. |
-| `source_package_prefix` | No | Non-empty prefix used only to propose SR candidates. |
+| `source_package_prefix` | No | Non-empty prefix of `source/@package`; only with `maintenance_incident`. Proposes SR candidates. |
+| `target_package_prefix` | No | Non-empty prefix of `target/@package`; only with `maintenance_release`. Proposes RR candidates. |
 
-At least one source-project or source-package constraint is required. The two
-approved searches are:
+Exactly one package prefix is required. The two approved searches are:
 
-- open SR discovery: `maintenance_incident`, states `new` and `review`, and an
-  exact retained physical source package or a prefix rooted in
-  `{logical_package}.`; and
-- incident-scoped RR discovery: `maintenance_release` and the exact incident
-  source project.
+- open SR discovery: `maintenance_incident`, states `new` and `review`, and the
+  source-package prefix `{logical_package}.`; and
+- open RR discovery: `maintenance_release`, states `new` and `review`, and the
+  target-package prefix `{logical_package}.`.
 
-`source_project`, `source_packages`, and `source_package_prefix` are alternative
-search shapes rather than broadening options: one call supplies exactly one of
-them. Multiple exact `source_packages` are ORed within that predicate; action
-type and each supplied state are combined with the package predicate so only
-the requested action/state/package shape can match. The caller uses the prefix
-shape only when retained exact physical package identities are insufficient.
+The action type and the package prefix belong to the same action
+(`action[@type=… and starts-with(…)]`), and the supplied states are combined
+with that action predicate, so only the requested action/state/package shape
+can match.
 
 The response is an XML collection with a required non-negative `matches` count
 and zero or more positive request IDs. The result is complete only when every
@@ -478,12 +475,13 @@ package that differs from the predicate only in letter case; the exact package
 is validated from point detail. Returned IDs are not ordered by number, and the
 result carries no order.
 
-Every returned ID is point-fetched. A source-package prefix proposes candidates
-but does not establish logical package identity. The detail must validate the
-exact action, physical package mapping, and codestream. In particular, Sentinel
-does not include `target/@releaseproject` in the search predicate because the
-deployed search engine rejects that predicate; it validates the field from
-point detail instead.
+Every returned ID is point-fetched. A package prefix proposes candidates but
+does not establish logical package identity. Point detail decides the exact
+action, logical package, and codestream under
+`docs/features/packages/ibs-submission-tracking.md` (Package and Codestream
+Identity). In particular, Sentinel does not include `target/@releaseproject` in
+the search predicate because the deployed search engine rejects that predicate;
+it validates the field from point detail instead.
 
 `GET /request?view=collection` may apply `limit` and `offset` without a stable
 ordering. Sentinel MUST NOT use it as a global scan, a pagination cursor, or
@@ -529,8 +527,8 @@ Sentinel consumes these action shapes:
 | `maintenance_release` | `action/@type`, `source/@project`, `source/@package`, `target/@project`, `target/@package` | `source/@rev`, `target/@releaseproject`, and `acceptinfo` fields |
 
 `source/@rev`, when present, is a positive decimal revision number or a
-lowercase 32-character hexadecimal checksum. It is a provenance field and an
-input of the not-accepted [Request Action Diff](#request-action-diff) form.
+lowercase 32-character hexadecimal checksum. It is an input of the
+not-accepted [Request Action Diff](#request-action-diff) form only.
 
 When `<acceptinfo>` is present, Sentinel consumes these optional attributes:
 
@@ -538,7 +536,7 @@ When `<acceptinfo>` is present, Sentinel consumes these optional attributes:
 |---|---|---|
 | `rev` | Positive decimal revision number of the accepted target package | Provenance |
 | `srcmd5` | Lowercase 32-character hexadecimal checksum | Provenance and diff input |
-| `xsrcmd5` | Lowercase 32-character hexadecimal checksum | Provenance and diff input |
+| `xsrcmd5` | Lowercase 32-character hexadecimal checksum | Diff input only |
 | `osrcmd5` | Lowercase 32-character hexadecimal checksum | Diff input only |
 | `oxsrcmd5` | Lowercase 32-character hexadecimal checksum | Diff input only |
 | `oproject` | IBS name | Diff input only |
@@ -770,37 +768,34 @@ not empty successful matches. Malformed, duplicate, or conflicting entries, and
 a lookup entry that does not match the requested revision or checksum, make the
 observation incomplete.
 
-For submission delivery, history and point-detail provenance are compared
-exactly. The required proof is:
-
-```text
-effective SR acceptinfo.xsrcmd5
-    == accepted RR action source.rev
-    -> RR state is accepted
-    -> RR acceptinfo revision/srcmd5
-    == target package history revision/srcmd5 with the RR requestid
-```
-
-Missing `acceptinfo`, a direct source change without `requestid`, unavailable
-history, or a checksum/revision mismatch is incomplete evidence and preserves
-the prior delivery state. Current patchinfo, binary, or advisory data may
-discover or corroborate candidates but does not replace this provenance chain
-and does not mutate Product release state.
+Submission delivery compares history with point-detail provenance exactly;
+the comparisons and their outcomes are defined in
+`docs/features/packages/ibs-submission-tracking.md` (Effective SR, Release
+Discovery, and Accepted RR Provenance). History `srcmd5` is the unexpanded
+commit checksum, so an expanded checksum such as acceptinfo `xsrcmd5` never
+matches it. An entry without `requestid` is not by itself evidence of a direct
+source change: IBS typically records one before a submission acceptance (the
+branch commit). After a release, the logical codestream package's new revision
+carries the release request number with the checksum of its link update, while
+the release action's own target package carries the released contents.
 
 #### Request Contract Verification Status
 
-Sanitized read-only verification against the IBS API on 2026-09-08 and
-2026-10-13, and inspection of the OBS source, established the request
-operations above. Request numbers, checksums, and personal fields were never
-recorded.
+Sanitized read-only verification against the IBS API on 2026-09-08,
+2026-10-13, and 2026-10-14, and inspection of the OBS source, established the
+request operations above. Request numbers, checksums, and personal fields were
+never recorded.
 
 Verified live:
 
 - **ID search:** a `<collection>` whose `matches` equals its number of
   `request/@id` children, including `matches="0"` with HTTP 200; same-action
-  predicates, the bracket form, and `starts-with` predicates; HTTP 400
-  `illegal_xpath_error` for a `target/@releaseproject` predicate;
-  case-insensitive package matching; IDs not ordered by number.
+  predicates, the bracket form, and `starts-with` predicates on
+  `source/@package` and `target/@package`; HTTP 400 `illegal_xpath_error` for a
+  `target/@releaseproject` predicate; case-insensitive package matching; IDs
+  not ordered by number. Every action of open submission requests came from a
+  `SUSE:Maintenance:REQUEST:{n}` staging project, with a source package ending
+  exactly in its release project with `:` replaced by `_`.
 - **Point detail:**
   - The root `id` equals the requested number, and there is exactly one
     `state` with `name`, `created`, and `when`. The timestamps are offset-less
@@ -821,6 +816,15 @@ Verified live:
     observed `source/@rev` and acceptinfo checksum is lowercase 32-character
     hexadecimal, and every acceptinfo `rev` a decimal number. Omitted values
     are never rendered empty.
+  - Accepted `maintenance_release` actions have no acceptinfo when IBS
+    released the package as a link to another package of the same release
+    request (for example the kernel flavors, which link to `kernel-source`)
+    and in releases from before IBS recorded acceptinfo (observed in 2015).
+  - Release actions name an exact `SUSE:Maintenance:{n}` source project and a
+    `{logical package}.{n}` target package. Incident packages are named
+    `{logical package}.{origin}`, the origin being the release project or,
+    when the submitted source links elsewhere, the branch origin, such as an
+    incident or an openSUSE project preceding the release project.
   - HTTP 404 `not_found` answers an unknown, zero, or non-numeric request
     number.
 - **Request action diff:**
@@ -851,6 +855,19 @@ Verified live:
     404.
   - An inherited package returns the linked project's history. Some entries
     have no `requestid`.
+  - In sampled codestream histories, 5,524 of 5,563 revisions carry a
+    `requestid`, and every sampled one names an accepted release request with
+    a release action for that package and codestream. In incident histories,
+    a revision without `requestid` (the branch commit) typically precedes a
+    submission revision.
+  - The acceptinfo `srcmd5` of an accepted submission action equals the
+    `srcmd5` of its incident-history revision. The acceptinfo `rev` and
+    `srcmd5` of an accepted release action equal the exact lookup of its own
+    target package, whose revision carries the release request number. The
+    acceptinfo `xsrcmd5` of a submission equals the `source/@rev` of its
+    release action in every sampled release since 2024 and in most of 2023,
+    but rarely before: earlier release requests recorded a differently
+    expanded checksum.
 
 Established only by OBS source inspection:
 
@@ -862,7 +879,11 @@ Established only by OBS source inspection:
   undeletion, and history-preserving project copies, and the API forwards no
   `startbefore` and applies no default `limit`;
 - how IBS builds the diff of a request action, including the cases in which
-  the not-accepted form deliberately differs.
+  the not-accepted form deliberately differs;
+- an `accepted` request cannot change state again, and acceptinfo is recorded
+  once, at acceptance;
+- the derivation of incident package names from the branch origin, and the
+  release of local-link packages as links without acceptinfo.
 
 Documentation-only, not verified: HTTP 403 outcomes; `deleted` on a maintenance
 request; an action of an unknown type; a supported action missing a required
@@ -925,7 +946,7 @@ Methods:
   new_md5: str) -> list[DiffIssue]`: calls the source diff endpoint with
   `expand=1` (`old_md5` is either a 32-character expanded checksum or the
   literal string `"0"`), parses the complete XML response, and returns structured issue
-  fields sufficient for the detector to evaluate `tracker`, `state`, and
+  fields sufficient for its consumers to evaluate `tracker`, `state`, and
   `label`. It does not reinterpret `bnc` names as CVE IDs. A response that
   identifies `old_md5` as unavailable under
   [Unavailable Old Revision](#unavailable-old-revision) raises
@@ -933,17 +954,18 @@ Methods:
   Every other HTTP or response-data failure, including an unavailable
   `new_md5`, remains distinct from successful empty results.
 - `search_request_ids(action_type: IBSRequestActionType, *, states:
-  Collection[IBSRequestState] | None = None, source_project: str | None = None,
-  source_packages: Collection[str] | None = None, source_package_prefix: str |
-  None = None) -> RequestEvidenceResult[RequestIdSearchResult]`: calls the
-  ID-only search with an internally constructed narrow predicate. It rejects
-  unsupported action types, empty state/package collections, calls without a
-  source-project or source-package bound, and calls supplying more than one of
-  `source_project`, `source_packages`, or `source_package_prefix` before HTTP
-  I/O. Each project, package, and prefix input must be an IBS name (see
-  [Request Point Detail](#request-point-detail)), and `source_project` must
-  start with `SUSE:`. A complete result contains distinct positive request
-  numbers and the reported match count.
+  Collection[IBSRequestState] | None = None, source_package_prefix: str | None
+  = None, target_package_prefix: str | None = None) ->
+  RequestEvidenceResult[RequestIdSearchResult]`: calls the ID-only search with
+  an internally constructed narrow predicate. Before HTTP I/O it rejects:
+  - unsupported action types and an empty state collection;
+  - calls supplying neither or both prefixes;
+  - a source-package prefix with `maintenance_release`, or a target-package
+    prefix with `maintenance_incident`.
+
+  Each prefix must be an IBS name (see
+  [Request Point Detail](#request-point-detail)). A complete result contains
+  distinct positive request numbers and the reported match count.
 - `get_request(request_number: int) ->
   RequestEvidenceResult[IBSRequestDetail]`: point-fetches one positive request
   number. A complete result contains the typed parent plus every supported
@@ -1007,8 +1029,11 @@ The methods have these escaping outcomes:
 | Request action diff is complete and has no positive `added` or `changed` canonical CVE issue for an action | A valid typed action diff with no qualifying issue; the owning reconciler treats it as that action's successful no-match |
 
 `IBSResponseDataError` and `IBSHistoricalRevisionUnavailable` are internal
-integration exceptions caught by the Track detector; they never reach an API
-handler. `IBSCredentialsNotConfiguredError` and `IBSAuthenticationError` are
+integration exceptions caught by the Track detector; submission reconciliation,
+which reads current release evidence through `get_source_info()` and
+`get_diff_issues()` against the empty tree, catches `IBSResponseDataError`.
+They never reach an API handler.
+`IBSCredentialsNotConfiguredError` and `IBSAuthenticationError` are
 internal integration exceptions that every method can raise. Each consuming
 workflow handles them as a failure of the scope that depended on the operation,
 with its own bounded reason category; they never reach an API handler and never
