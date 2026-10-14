@@ -809,13 +809,16 @@ Verified live:
     `maintenance_release` actions, and not-accepted patchinfo actions have no
     `source/@rev`.
   - Accepted `maintenance_incident` actions carry acceptinfo `rev`, `srcmd5`,
-    `xsrcmd5`, `osrcmd5`, and `oxsrcmd5`. Accepted `maintenance_release`
-    actions of a package other than patchinfo carry `rev`, `srcmd5`,
-    `osrcmd5`, `oxsrcmd5`, `oproject`, and `opackage`, without `xsrcmd5`;
-    patchinfo actions carry only `rev`, `srcmd5`, and `osrcmd5`. Every
-    observed `source/@rev` and acceptinfo checksum is lowercase 32-character
-    hexadecimal, and every acceptinfo `rev` a decimal number. Omitted values
-    are never rendered empty.
+    `xsrcmd5`, `osrcmd5`, and `oxsrcmd5`, with one exception observed: among
+    about 30 actions of an accepted submission request from a personal
+    project, one had neither acceptinfo nor `target/@package`. Accepted
+    `maintenance_release` actions of a package other than patchinfo carry
+    `rev`, `srcmd5`, `osrcmd5`, `oxsrcmd5`, `oproject`, and `opackage`,
+    without `xsrcmd5`; patchinfo actions carry only `rev`, `srcmd5`, and
+    `osrcmd5`. Every observed `source/@rev` of a supported action and every
+    acceptinfo checksum is lowercase 32-character hexadecimal, and every
+    acceptinfo `rev` a decimal number; `submit` actions, which are ignored,
+    carry a decimal `source/@rev`. Omitted values are never rendered empty.
   - Accepted `maintenance_release` actions have no acceptinfo when IBS
     released the package as a link to another package of the same release
     request (for example the kernel flavors, which link to `kernel-source`)

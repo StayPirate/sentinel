@@ -331,7 +331,10 @@ evidence.
 
 An in-flight SR of root 1 that is not correlated to the track only shortens the
 first limitation below. Its unavailable diff or incident history is therefore
-not evidence and does not make the observation incomplete.
+not evidence and does not make the observation incomplete. Such an SR is
+correlated to the track only when its diff has positive evidence for `X` and
+its incident history is available, and it is not examined for a track whose
+persisted delivery is `RELEASED`.
 
 Each matching action also requires the diff evidence defined in
 [Action-Scoped CVE Evidence](#action-scoped-cve-evidence). A scope whose track
@@ -586,7 +589,10 @@ Examples of incomplete evidence include:
 - a non-exhaustive search or unavailable source history;
 - an unresolved action, or a track reference outside the `SUSE:` namespace;
 - an unavailable required diff or a failed release proof;
-- conflicting equal-time request detail.
+- conflicting equal-time request detail;
+- a value to be persisted that exceeds its column: a request, successor, or
+  incident number above 2147483647, or an acceptinfo revision longer than 255
+  characters.
 
 None is translated into a negative result. An accepted release action without
 acceptinfo and a history entry without a request number are not incomplete
@@ -625,7 +631,10 @@ The derived value is applied under the delivery state machine in
 irreversible `RELEASED` and the atomic `PENDING -> IN_PROGRESS -> RELEASED`
 application of a release proven while the persisted value is `PENDING`. A
 negative regression `IN_PROGRESS -> PENDING` also requires the stale-negative
-guard of [Algorithm](#algorithm) step 8.
+guard of [Algorithm](#algorithm) step 8. When the delivery value reloaded under
+the Ticket lock is `RELEASED`, a complete observation commits its evidence and
+leaves delivery unchanged, whatever value it derives; it requests no
+transition.
 
 All effective changes use `package_service.set_track_delivery_status()` with
 system attribution. Delivery changes create no Ticket audit event and do not
@@ -658,6 +667,10 @@ The selected track must belong to an active Ticket and have
 `workflow_type = ibs`. Package and track exclusion, actionability, affectedness,
 eligibility, and Product lifecycle do not remove it from scope.
 
+A scope whose Ticket has no CVE is also selected. Positive evidence requires a
+label equal to the Ticket CVE, so such a scope is a complete no-match without
+any IBS request.
+
 The scope's codestream is the track `reference`, which is the origin codestream
 of the package (`package-model.md`, SMELT Query for Package Resolution). IBS
 requests for a package that later codestreams inherit through a project link
@@ -669,10 +682,14 @@ identifies them.
 
 For each selected scope:
 
-1. Capture `observation_started_at` in UTC and read the retained exact
-   request/action roots and the track's persisted `delivery_status` needed to
-   plan external queries without locking the Ticket. Retain the latter as the
-   pre-I/O delivery baseline.
+1. Without locking the Ticket, read the retained exact request/action roots
+   and the scope's step-1 snapshot: the identity and row timestamps of every
+   retained action of the scope's logical package and codestream, of their
+   parent requests, and of the track's correlations, and the track's persisted
+   `delivery_status`, retained as the pre-I/O delivery baseline. Step 1
+   completes before the first IBS request whose result the scope can use, so
+   evidence reused within one invocation is never older than the scope's
+   snapshot.
 2. Discover current request, supersession, incident, and RR candidates over the
    [Required Roots](#required-roots).
 3. Point-fetch current request detail and required action-scoped diffs and source
@@ -687,25 +704,34 @@ For each selected scope:
    the track no longer exists, its workflow is no longer IBS, or the semantic
    scope no longer matches, return a successful stale/inapplicable no-op.
 6. Conditionally lock or upsert each existing request/action identity that this
-   scope will mutate. Reject the observation as stale if a newer authoritative
-   request observation has already committed. For equal
-   `upstream_updated_at`, identical normalized content is idempotent;
-   conflicting content is incomplete and rolls back.
+   scope will mutate. If a newer authoritative request observation has already
+   committed, the observation is stale: the scope rolls back and fails with the
+   category `stale_request_observation`, and a later run or catch-up observes
+   the request again. For equal `upstream_updated_at`, identical normalized
+   content is idempotent; conflicting content is incomplete and rolls back.
 7. Upsert every validated relevant `IBSRequest` and `IBSRequestAction`, then
    upsert each exact `IBSRequestActionTrack` pair. Unknown and irrelevant
    actions are not persisted. Existing provenance omitted by IBS is retained;
    contradictory immutable provenance rolls back the scope.
 8. Derive delivery from the complete observation and the reloaded retained
    evidence. Stale-negative guard: for a complete negative observation, do not
-   regress `IN_PROGRESS` if any relevant request, action, or correlation row
-   changed after `observation_started_at`, or if the track's delivery value
-   differs from the value observed before external I/O.
+   regress `IN_PROGRESS` if the reloaded relevant request, action, and
+   correlation rows differ from the step-1 snapshot (a row added, removed, or
+   with a different row timestamp), or if the track's delivery value differs
+   from the value observed before external I/O. Rows committed by another
+   writer during the scan only block such a regression; they are never
+   positive evidence for this scope.
 9. Apply any effective delivery transition through
    `package_service.set_track_delivery_status()` with the complete Ticket,
    package, and track locator in the same transaction. Consume `changed` or
    `no_op` from locked-current state; delivery has no `rejected` outcome.
 10. Flush and commit the request, action, correlation, and delivery outcome
     atomically. On any local failure, roll back all changes for this scope.
+
+A commit that the database definitely rejects is a local failure of that
+scope. A commit whose outcome is unknown, such as a connection failure during
+`COMMIT`, ends the invocation: that scope receives no terminal outcome, and the
+remaining scopes are not attempted.
 
 All IBS HTTP work completes before the Ticket lock. No IBS, Redis, AMQP, or
 Celery I/O occurs while the lock is held. Each track scope has its own
@@ -724,6 +750,60 @@ condition, not by replacing the winner. The stale-negative guard of step 8
 prevents a stale negative result from overwriting positive event or polling
 work committed after the scan began. Audit history is never queried
 for current state, idempotency, or provenance.
+
+### Structured Logs
+
+The shared reconciliation logs these events. Standard correlation fields are
+added by the logging infrastructure and are not repeated here.
+
+| Event | Level | Required fields | Optional fields |
+|---|---|---|---|
+| `ibs_request_scope_failed` | WARNING | `ticket_id`, `track_id`, `package_name`, `reason_category` | `codestream`, `request_number`, `http_status` |
+| `ibs_request_scope_stale` | WARNING | `ticket_id`, `track_id`, `package_name`, `reason_category` | `codestream` |
+| `ibs_request_issue_ignored` | WARNING | `package_name`, `reason_category="invalid_cve_label"` | `codestream`, `request_number` |
+
+`ibs_request_scope_failed` is emitted once for every scope whose observation is
+incomplete or failed or whose local transaction fails, including each scope
+that depends on an incomplete or failed shared artifact. `request_number` names
+the request whose evidence made the scope incomplete or failed, when there is
+one; `http_status` accompanies `reason_category="http_status"`.
+`ibs_request_scope_stale` is emitted once for a scope that becomes stale or
+inapplicable under the locked revalidation of [Algorithm](#algorithm) step 5,
+which is a successful no-op: `reason_category` is `ticket_not_operable` when
+the Ticket became `Ignored` or `Duplicated`, and `scope_changed` otherwise.
+`ibs_request_issue_ignored` is emitted at most once per diff that contains a
+`cve` issue in state `added` or `changed` whose `label` is missing or is not a
+canonical CVE ID; such an issue is not positive evidence
+(`../integrations/ibs-integration.md`, Request Action Diff). `codestream` is
+logged only when it is a `SUSE:` project.
+
+`reason_category` is a bounded internal classification, never upstream text.
+It distinguishes at least:
+
+- IBS operation failures: IBS API credentials not configured
+  (`credentials_not_configured`), each `IBSAuthenticationError` reason
+  (`unsupported_challenge`, `signature_rejected`), `transport`, and
+  `http_status`;
+- unusable current release evidence: each `IBSResponseDataError` reason and
+  each source-info package failure (`missing`, `duplicate`, `upstream_error`,
+  `invalid_srcmd5`);
+- each bounded incomplete-evidence reason of the request operations
+  (`../integrations/ibs-integration.md`, Service Layer › IBSClient);
+- observation outcomes: an invalid scope identity (`invalid_identity`), a track
+  reference outside the `SUSE:` namespace (`outside_suse_namespace`), an
+  unresolved action (`unresolved_action`), a supersession cycle
+  (`supersession_cycle`), missing accepted provenance (`missing_provenance`), a
+  failed release proof (`release_proof_failed`), a matching release action of a
+  request that is not accepted in the release scan (`contradictory_evidence`),
+  and a value that exceeds its column (`value_out_of_range`);
+- local outcomes: a stale request observation (`stale_request_observation`),
+  conflicting equal-time request content (`conflicting_observation`),
+  conflicting immutable action identity or acceptinfo
+  (`conflicting_provenance`), a rejected delivery transition
+  (`invalid_delivery_transition`), and a database failure (`database`).
+
+Logs never carry upstream response text, actors, free text, credentials, or a
+project outside the `SUSE:` namespace.
 
 ## Accelerators
 
@@ -850,6 +930,9 @@ what a long-gap run can prove; incomplete scopes preserve prior delivery.
 | Failure | Behavior |
 |---|---|
 | One track has a credentials-not-configured, authentication, transport, timeout, rate-limit, HTTP, parse, validation, search-completeness, retention, ambiguity, or local transaction failure | Roll back that scope, increment `record_failed` once, log the track/Ticket/request identities and sanitized category, and continue. Raw response bodies, URLs, credentials, and personal identifiers are not logged. |
+| A newer authoritative request observation has already committed when the scope locks the request ([Algorithm](#algorithm) step 6) | Roll back that scope, increment `record_failed` once with the category `stale_request_observation`, and continue; a later run or catch-up observes the request again. |
+| The database definitely rejects a scope commit | A local transaction failure of that scope: it is rolled back, `record_failed` is incremented once with the category `database`, and processing continues. |
+| A scope commit has an unknown outcome, such as a connection failure during `COMMIT` | The invocation ends: that scope records no terminal outcome or effect metric, the exception reaches `BaseFetcher`, which finalizes the run as failure, and scopes committed earlier remain committed. |
 | Scope enumeration or another whole-run database prerequisite fails | Raise so `BaseFetcher` finalizes the run as failure. Public `error_message` uses the infrastructure's sanitized generic category; restricted error fields retain diagnostics. |
 | Every selected scope fails | Return normally after counting failures; `BaseFetcher` records run failure because no selected scope succeeded. |
 | Some scopes complete and some fail | Return normally; `BaseFetcher` records a partial run from the mixed terminal outcomes, including when every successful scope was a no-op. |
@@ -1172,6 +1255,8 @@ Implementation coverage must include:
   - branch-commit and release-request revisions;
   - a later SR replacing the incident contents, with and without the CVE;
   - unavailable or incomplete incident history;
+  - an accepted action without acceptinfo;
+- values to be persisted that exceed their columns;
 - unpaged history completeness (not starting at revision 1 or not contiguous),
   revision and checksum lookups, and retention-limited outcomes;
 - evidence reuse within one invocation without merging scope outcomes, and
@@ -1189,7 +1274,9 @@ Implementation coverage must include:
 - every delivery transition, irreversible `RELEASED`, complete-negative
   regression, and stale-negative concurrency with independent sessions;
 - atomic request/action/join/delivery commit and rollback, including successful
-  sibling scopes when another fails;
+  sibling scopes when another fails, a definitely rejected commit, and a commit
+  with an unknown outcome;
+- the structured logs and their bounded categories;
 - zero Ticket-event assertions for effective and unchanged request, action,
   correlation, delivery, stale/inapplicable, incomplete, failed, and wake-up
   outcomes except where another delegated domain mutation requires its ordinary
