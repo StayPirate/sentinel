@@ -57,6 +57,7 @@ from app.core.enums import (
     FetcherRunTriggeredBy,
     HealthCheckStatus,
     IBSRequestActionType,
+    IBSRequestSortField,
     IBSRequestState,
     IdentityAuditEventType,
     LifecyclePhase,
@@ -301,6 +302,18 @@ class TestPackageSortFieldEnum:
         assert {member.value for member in PackageSortField} == {
             "package_name",
             "created_at",
+        }
+
+
+@pytest.mark.unit
+class TestIBSRequestSortFieldEnum:
+    """IBSRequestSortField must have exactly the two `sort_by` values of
+    ibs-submission-tracking.md (Common Query Rules)."""
+
+    def test_exact_members(self) -> None:
+        assert {member.value for member in IBSRequestSortField} == {
+            "upstream_created_at",
+            "upstream_updated_at",
         }
 
 

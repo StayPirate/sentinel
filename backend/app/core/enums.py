@@ -381,6 +381,19 @@ class MaintainerWorkSortField(StrEnum):
     SUBMISSION_DUE_AT = "submission_due_at"
 
 
+class IBSRequestSortField(StrEnum):
+    """Sortable fields for the Ticket submission and release request lists.
+
+    Category B — classification (Python Enum only; never stored in the
+    database). See `docs/features/packages/ibs-submission-tracking.md`
+    (Common Query Rules): both fields are the parent `IBSRequest`'s
+    upstream timestamps, never the local row chronology.
+    """
+
+    UPSTREAM_CREATED_AT = "upstream_created_at"
+    UPSTREAM_UPDATED_AT = "upstream_updated_at"
+
+
 class CatalogPresence(StrEnum):
     """Derived membership of a Product in the latest complete SMELT snapshot.
 
