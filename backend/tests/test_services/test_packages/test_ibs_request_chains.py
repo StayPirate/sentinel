@@ -18,6 +18,7 @@ numbers.
 
 from __future__ import annotations
 
+import xml.etree.ElementTree as ET
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Final
 
@@ -35,10 +36,15 @@ from tests.support.ibs_request_provenance import (
     C_INCIDENT,
     C_RR,
     C_RR_NEWER,
+    C_SR_FIRST,
+    C_SR_SECOND,
     SLE15,
     SP6,
+    load_provenance_fixture,
 )
 from tests.support.ibs_request_reconciliation import (
+    Accept,
+    Action,
     EvidenceRow,
     FakeRequests,
     RequestSeed,
@@ -63,6 +69,34 @@ A_INCIDENT: Final = 80001
 A_LOOKUP_SRCMD5: Final = "c40f9d03a8728b65ac857fe47495c082"
 C_KERNEL_CVE: Final = "CVE-2024-44981"
 """A CVE released by kernel release request 960035 and not by 960036."""
+
+
+def _fixture_action(name: str, target_package: str) -> Action:
+    """The action of provenance fixture `name` whose target package is
+    `target_package`, as served."""
+    root = ET.fromstring(load_provenance_fixture(name))
+    for element in root.iter("action"):
+        target = element.find("target")
+        if target is None or target.get("package") != target_package:
+            continue
+        source = element.find("source")
+        assert source is not None
+        accept = element.find("acceptinfo")
+        return Action(
+            type=element.get("type", ""),
+            source_project=source.get("project", ""),
+            source_package=source.get("package", ""),
+            rev=source.get("rev"),
+            target_project=target.get("project"),
+            target_package=target.get("package"),
+            release_project=target.get("releaseproject"),
+            accept=None if accept is None else Accept(**accept.attrib),
+        )
+    raise AssertionError(f"no action for {target_package} in {name}")
+
+
+def _served_paths(fake: FakeRequests) -> list[str]:
+    return [f"{method} {path}" for method, path, _ in fake.served]
 
 
 @pytest.fixture(autouse=True)
@@ -184,3 +218,136 @@ class TestReleaseProvenChains:
         assert await delivery_of(probe, scope.track_id) == DeliveryStatus.RELEASED
         [row] = await evidence_of(probe, scope.track_id)
         assert (row.request_number, row.incident_number) == (C_RR, C_INCIDENT)
+
+
+class TestKernelIncident:
+    async def test_the_second_sr_replaces_the_first_and_establishes_progress(
+        self, world: RequestWorld, fake: FakeRequests
+    ) -> None:
+        """The track is correlated to the first kernel SR; the incident
+        history names a second SR after it, which is the effective one and
+        carries the Ticket CVE in its own diff."""
+        package = "kernel-source.SUSE_SLE-15-SP6_Update"
+        first = _fixture_action("c_request_sr_first", package)
+        seed = RequestSeed(world)
+        scope = await seed.track(
+            await seed.ticket(cve_id=C_KERNEL_CVE), package="kernel-source"
+        )
+        await seed.evidence(C_SR_FIRST, IBSRequestState.ACCEPTED, first, tracks=[scope])
+        await seed.commit()
+        world.numbers().update({C_SR_SECOND, C_RR})
+        fake.quiet("kernel-source", SP6)
+        for name in (
+            "c_history_incident_source",
+            "c_request_sr_second",
+            "c_diff_sr_second",
+            "c_request_rr_accepted",
+        ):
+            serve_provenance(fake, name)
+
+        outcomes = await reconcile(fake, [scope])
+
+        assert kinds(outcomes) == {scope.track_id: "created"}
+        assert fake.unrouted == []
+        assert f"GET /request/{C_SR_FIRST}" not in _served_paths(fake)
+        probe = await world.probe()
+        assert await delivery_of(probe, scope.track_id) == DeliveryStatus.IN_PROGRESS
+        assert [
+            row.request_number for row in await evidence_of(probe, scope.track_id)
+        ] == [
+            C_SR_FIRST,
+            C_SR_SECOND,
+        ]
+
+    async def test_a_flavor_release_without_acceptinfo_stops_the_scan(
+        self, world: RequestWorld, fake: FakeRequests
+    ) -> None:
+        """The newest release of the link-only flavor has no acceptinfo:
+        neither it nor an older release can be proven, so the observation
+        continues with the other roots and finds nothing."""
+        seed = RequestSeed(world)
+        scope = await seed.track(
+            await seed.ticket(cve_id=C_KERNEL_CVE), package="kernel-default"
+        )
+        await seed.commit()
+        world.numbers().add(C_RR_NEWER)
+        fake.quiet("kernel-default", SP6)
+        fake.release_evidence(SP6, "kernel-default", cve_issue(C_KERNEL_CVE))
+        for name in ("c_history_codestream_default", "c_request_rr_newer"):
+            serve_provenance(fake, name)
+
+        outcomes = await reconcile(fake, [scope])
+
+        assert kinds(outcomes) == {scope.track_id: "no_op"}
+        assert fake.unrouted == []
+        assert [
+            path for path in _served_paths(fake) if path.startswith("GET /request/")
+        ] == [f"GET /request/{C_RR_NEWER}"]
+        assert not [
+            (path, query)
+            for _, path, query in fake.served
+            if ("withissues", "1") in query or (path.endswith("/_history") and query)
+        ]
+        probe = await world.probe()
+        assert await delivery_of(probe, scope.track_id) == DeliveryStatus.PENDING
+        assert await evidence_of(probe, scope.track_id) == []
+
+    async def test_kernel_default_base_is_released_without_cve_evidence(
+        self, world: RequestWorld, fake: FakeRequests
+    ) -> None:
+        """`kernel-default-base` has no SR in its incident; its release
+        request alone passes the exact lookup, but its release diff names
+        no CVE, so it proves nothing and is not incomplete."""
+        target = f"kernel-default-base.{C_INCIDENT}"
+        release_action = _fixture_action("c_request_rr_accepted", target)
+        seed = RequestSeed(world)
+        scope = await seed.track(
+            await seed.ticket(cve_id=C_KERNEL_CVE), package="kernel-default-base"
+        )
+        await seed.evidence(
+            C_RR, IBSRequestState.ACCEPTED, release_action, tracks=[scope]
+        )
+        await seed.commit()
+        fake.quiet("kernel-default-base", SP6)
+        for name in (
+            "c_request_rr_accepted",
+            "c_history_lookup_default_base",
+            "c_diff_rr_default_base",
+        ):
+            serve_provenance(fake, name)
+
+        outcomes = await reconcile(fake, [scope])
+
+        assert kinds(outcomes) == {scope.track_id: "no_op"}
+        assert fake.unrouted == []
+        probe = await world.probe()
+        assert await delivery_of(probe, scope.track_id) == DeliveryStatus.PENDING
+
+
+class TestReleaseBefore2023Submission:
+    async def test_the_effective_sr_establishes_progress_from_retained_provenance(
+        self, world: RequestWorld, fake: FakeRequests
+    ) -> None:
+        """The correlated accepted SR is effective in its incident history
+        (a branch commit before it, its release request after it), checked
+        from retained provenance without point detail; current release
+        evidence without the CVE needs no scan."""
+        sr = _fixture_action("b_request_sr_accepted", "openvpn.SUSE_SLE-15_Update")
+        seed = RequestSeed(world)
+        scope = await seed.track(
+            await seed.ticket(cve_id=B_CVE), package="openvpn", codestream=SLE15
+        )
+        await seed.evidence(B_SR, IBSRequestState.ACCEPTED, sr, tracks=[scope])
+        await seed.commit()
+        world.numbers().add(B_RR)
+        fake.quiet("openvpn", SLE15)
+        for name in ("b_history_incident", "b_request_rr_accepted"):
+            serve_provenance(fake, name)
+
+        outcomes = await reconcile(fake, [scope])
+
+        assert kinds(outcomes) == {scope.track_id: "updated"}
+        assert fake.unrouted == []
+        assert f"GET /request/{B_SR}" not in _served_paths(fake)
+        probe = await world.probe()
+        assert await delivery_of(probe, scope.track_id) == DeliveryStatus.IN_PROGRESS
