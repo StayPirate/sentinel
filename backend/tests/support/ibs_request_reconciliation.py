@@ -22,7 +22,8 @@ reconciliation tests (backend/app/services/packages/ibs_request_*.py).
   `async_session_factory`.
 
 All data is fictional: CVE identifiers `CVE-2099-NNNNNNNN`, packages
-`example-*`, request numbers from 970001, incidents from 82001, checksums
+`example-*`, request numbers from 970001 (random from 10**9 for committed
+rows, `committed_number()`), incidents from 82001, checksums
 derived from fictional labels, the account `jdoe` with a fictional key
 derived at run time.
 """
@@ -32,7 +33,7 @@ from __future__ import annotations
 import hashlib
 import itertools
 import uuid
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -115,6 +116,16 @@ _incidents = itertools.count(82001)
 def next_number() -> int:
     """A fresh fictional request number."""
     return next(_numbers)
+
+
+def committed_number() -> int:
+    """A fresh fictional request number for a committed row: random in
+    `[10**9, 2 * 10**9)` (below the PostgreSQL `INTEGER` maximum and
+    disjoint from `next_number()` and the fixture numbers), so that rows
+    left by an interrupted earlier run in a reused database never collide
+    with the UNIQUE `request_number` of a later run, whose counter restarts
+    at the same value."""
+    return 10**9 + uuid.uuid4().int % 10**9
 
 
 def next_incident() -> int:
@@ -382,6 +393,7 @@ class FakeRequests:
         self.server = server
         self.routes = QueryRoutes(server)
         self.served: list[Served] = []
+        self.on_request: Callable[[Served], None] | None = None
 
     @property
     def unrouted(self) -> list[Served]:
@@ -398,7 +410,10 @@ class FakeRequests:
         self, method: str, path: str, query: list[tuple[str, str]], responder: Responder
     ) -> None:
         def recording(request: httpx.Request) -> httpx.Response:
-            self.served.append((method, path, tuple(query)))
+            served = (method, path, tuple(query))
+            self.served.append(served)
+            if self.on_request is not None:
+                self.on_request(served)
             return responder(request)
 
         self.routes.route(method, path, query, recording)
@@ -640,7 +655,8 @@ class RequestWorld(TrackWorld):
     request_numbers: set[int]
 
     def number(self) -> int:
-        number = next_number()
+        """A fresh `committed_number()` registered for teardown."""
+        number = committed_number()
         self.numbers().add(number)
         return number
 
@@ -995,3 +1011,24 @@ def serve_provenance(fake: FakeRequests, name: str) -> None:
         provenance_fixture_query(name),
         xml_response(load_provenance_fixture(name)),
     )
+
+
+def before_lock(
+    monkeypatch: pytest.MonkeyPatch,
+    action: Callable[[IBSRequestScope], Awaitable[None]],
+) -> None:
+    """Await `action(scope)` after the scope's observation (every IBS request
+    it needs) and inside its unit session before the first statement, so
+    before the Ticket lock."""
+    original = ibs_request_reconciliation._reconcile_scope
+
+    async def wrapped(
+        db: AsyncSession,
+        target: IBSRequestScope,
+        snapshot_: ScopeSnapshot,
+        observation: Any,
+    ) -> Any:
+        await action(target)
+        return await original(db, target, snapshot_, observation)
+
+    monkeypatch.setattr(ibs_request_reconciliation, "_reconcile_scope", wrapped)
