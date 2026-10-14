@@ -541,14 +541,12 @@ persistent cache.
 
 ### Request Delay
 
-The detector waits the inter-request delay before every repository HTTP
-request of one invocation except the first: each `repomd.xml` request, the
-updateinfo artifact request, its permitted redirect, and the requests of a
-consistency restart. A periodic run uses `request_delay` from its runtime
-configuration snapshot; catch-up, which has no snapshot, uses the class
-`default_request_delay` (`docs/features/platform/fetcher-infrastructure.md`,
-FetcherConfig). A zero delay never waits. The delay does not separate the
-shared transport retries of one request. Every wait precedes the first
+The detector spaces every repository HTTP request under the generic
+request-delay contract ([fetcher-infrastructure.md, Request
+Delay](../platform/fetcher-infrastructure.md#request-delay)): each
+`repomd.xml` request, the updateinfo artifact request, its permitted redirect,
+and the requests of a consistency restart. Catch-up also applies the delay,
+with the class `default_request_delay`. Every wait precedes the first
 per-occurrence transaction, so none occurs while a Ticket lock is held.
 
 ### Catch-Up

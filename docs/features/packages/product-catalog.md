@@ -243,6 +243,10 @@ pagination contract:
    aborts the operation; Sentinel does not restart the sequence within the
    same operation.
 
+The run's request delay separates consecutive page requests
+([fetcher-infrastructure.md, Request
+Delay](../platform/fetcher-infrastructure.md#request-delay)).
+
 Live verification on 2026-08-25 confirmed this envelope on the Product listing
 endpoint, one-based page numbering, an effective maximum page size of 500, and
 the HTTP scheme defect in continuation metadata. Using the fixed page size and
@@ -552,7 +556,9 @@ Sentinel requests pages sequentially, starting at page 1, with explicit
 `size=100`. AIMAAS enforces a maximum page size of 100; values above this
 return a 422 validation error. Page numbering is 1-based; page 0 returns
 422. Pages beyond `pages` return `{items: []}` with correct metadata (not
-404).
+404). The run's request delay separates consecutive page requests
+([fetcher-infrastructure.md, Request
+Delay](../platform/fetcher-infrastructure.md#request-delay)).
 
 Pagination validation invariants:
 - Every page must be an object with non-negative integers `total` and
@@ -715,8 +721,10 @@ eligibility and EOL-derived actionability when applicable.
   local Product.
 - **Sync behavior**:
   1. Fetch all AIMAAS product pages (with `all_fields=true`) and all
-     threshold pages before opening a database transaction. Build a
-     `product_id → cpe` mapping from the product list.
+     threshold pages before opening a database transaction. The request
+     delay also separates the last product page request from the first
+     threshold page request. Build a `product_id → cpe` mapping from the
+     product list.
   2. Validate the complete retrieved response before applying any change:
      the product list MUST NOT contain two entries with the same `id` or
      the same non-empty `cpe` (the latter mirrors the identical validation

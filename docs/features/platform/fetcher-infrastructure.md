@@ -3653,7 +3653,7 @@ The bootstrap routine:
 | enabled | BOOLEAN | NOT NULL, DEFAULT true | Whether the fetcher is active |
 | schedule_override | VARCHAR(50) | nullable | Cron expression to override the fetcher's `default_schedule`. NULL means use the default. |
 | run_timeout | INTEGER | NOT NULL, DEFAULT 3600 | Maximum execution time in seconds (hard ceiling). The task is guaranteed to be terminated at this limit. Also used as the basis for the stale run detection threshold. Valid range: 60–604800 (1 minute to 7 days; enforced by API validation). |
-| request_delay | FLOAT | NOT NULL, DEFAULT 0 | Minimum inter-request delay in seconds. 0 = no delay. Valid range: 0–300 (enforced by API validation). Applied by the fetcher via `asyncio.sleep(self.config.request_delay)`. |
+| request_delay | FLOAT | NOT NULL, DEFAULT 0 | Minimum inter-request delay in seconds. 0 = no delay. Valid range: 0–300 (enforced by API validation). Applied by the fetcher as defined in [Request Delay](#request-delay). |
 | custom_settings | JSONB | NOT NULL, DEFAULT `'{}'` | Per-fetcher operational parameters. Structure defined and validated by each fetcher's `Settings` Pydantic model (see "Custom Settings Schema" above). |
 | updated_at | TIMESTAMPTZ | NOT NULL, DEFAULT | Last modification timestamp |
 
@@ -3724,12 +3724,38 @@ The bootstrap routine:
   `default_request_delay` class attribute (default: 0) at auto-creation
   time. This per-fetcher initial value seeds `FetcherConfig` only at first
   registration — the `INSERT ... ON CONFLICT DO NOTHING` semantics preserve
-  operator overrides across redeployments. An owning fetcher specification
-  may also use the class value as its delay outside a run, where no runtime
-  configuration snapshot exists. Fetchers that target external APIs with
+  operator overrides across redeployments. The class value is also the delay
+  of an invocation outside a run that applies one ([Request
+  Delay](#request-delay)). Fetchers that target external APIs with
   rate limits MUST declare a non-zero `default_request_delay` to ensure
   safe behavior on a fresh deployment without manual operator
   intervention.
+
+#### Request Delay
+
+`request_delay` is the minimum interval, in seconds, between two consecutive
+external requests of one fetcher invocation. An invocation is one periodic
+run, one on-demand `fetch_single()`, or one `catch_up()`. Every fetcher applies
+it as follows:
+
+- **Spacing**: consecutive requests of one invocation are separated by at least
+  the delay, including requests of different phases, pages, or collections. No
+  wait precedes the first request of an invocation, and a zero delay never
+  waits.
+- **Value**: a periodic run uses `request_delay` from its runtime configuration
+  snapshot ([Runtime Configuration Snapshot](#runtime-configuration-snapshot)).
+  An invocation outside a run has no snapshot: it applies a delay only where
+  the owning fetcher specification states so, and then uses the class
+  `default_request_delay`.
+- **One request**: the shared transport retries of a request
+  ([Transport-Level Retry](networking.md#transport-level-retry)), and any other
+  attempt or retry that the owning fetcher or integration specification
+  defines as part of the same request or operation, belong to that request.
+  The delay does not separate them.
+
+The owning fetcher specification defines which requests its invocations send,
+whether an invocation outside a run applies the delay, any attempts that form
+one request, and how its waits relate to the locks it holds.
 
 ### FetcherAuditEvent
 

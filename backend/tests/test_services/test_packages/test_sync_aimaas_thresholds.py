@@ -8,7 +8,8 @@ Handling, and Metrics), docs/features/packages/
 product-lifecycle-transitions.md (Integration with AIMAAS Synchronization),
 docs/features/platform/fetcher-infrastructure.md (BaseFetcher Base Class:
 execution-session transaction contract, Finalization, Outcome and effect
-accounting; Error Message Sanitization; Registry; Fetcher Discovery),
+accounting; Error Message Sanitization; Registry; Fetcher Discovery;
+FetcherConfig: Request Delay),
 docs/conventions.md (Transaction Hygiene Rules: no broker I/O inside a
 transaction), docs/features/platform/testing-strategy.md (Fetcher Outcome
 and Effect Accounting), and docs/features/tickets/ticket-audit-log.md
@@ -1005,41 +1006,108 @@ class TestPublication:
         assert PRODUCTS_ENDPOINT_PATH == "entity/products"
         assert THRESHOLDS_ENDPOINT_PATH == "entity/cvss-threshold"
 
-    async def test_configured_request_delay_is_applied_between_pages(
-        self, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+    @staticmethod
+    def _record_sleeps(
+        monkeypatch: pytest.MonkeyPatch, events: list[tuple[str, str]]
     ) -> None:
-        sleeps: list[float] = []
+        """Record every request-delay wait of the run, in order with its
+        HTTP requests: within a collection and between the collections."""
 
         async def sleep(delay: float) -> None:
-            sleeps.append(delay)
+            events.append(("sleep", repr(delay)))
 
-        monkeypatch.setattr(aimaas_listing, "asyncio", SimpleNamespace(sleep=sleep))
-        products = {pid: f"cpe:/o:example:p-{pid}:1" for pid in range(1, 251)}
-        fetcher = _fetcher(_router(products, dict.fromkeys(range(1, 151), 7.0)))
+        recorder = SimpleNamespace(sleep=sleep)
+        monkeypatch.setattr(aimaas_listing, "asyncio", recorder)
+        monkeypatch.setattr(sync_module, "asyncio", recorder)
+
+    @staticmethod
+    async def _execute_with_delay(
+        db: AsyncSession,
+        router: AimaasRouter,
+        request_delay: float,
+    ) -> None:
+        fetcher = _fetcher(router)
         fetcher.config = FetcherRunConfig(
-            hard_time_limit_seconds=3600, request_delay=0.25, custom_settings={}
+            hard_time_limit_seconds=3600,
+            request_delay=request_delay,
+            custom_settings={},
         )
         try:
-            await fetcher.execute(db_session)
+            await fetcher.execute(db)
         finally:
             await fetcher._teardown_http_client()
 
-        assert sleeps == [0.25, 0.25, 0.25]  # products pages 2-3, thresholds 2
+    async def test_configured_request_delay_separates_every_consecutive_request(
+        self, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        events: list[tuple[str, str]] = []
+        self._record_sleeps(monkeypatch, events)
+        products = {pid: f"cpe:/o:example:p-{pid}:1" for pid in range(1, 251)}
+        router = _router(products, dict.fromkeys(range(1, 151), 7.0), events=events)
+
+        await self._execute_with_delay(db_session, router, 0.25)
+
+        product_pages = [
+            f"{AIMAAS_TEST_PRODUCTS_ENDPOINT}?all_fields=true&size=100&page={page}"
+            for page in (1, 2, 3)
+        ]
+        threshold_pages = [
+            f"{AIMAAS_TEST_THRESHOLDS_ENDPOINT}?size=100&page={page}" for page in (1, 2)
+        ]
+        wait = ("sleep", "0.25")
+        assert events == [
+            ("http", product_pages[0]),
+            wait,
+            ("http", product_pages[1]),
+            wait,
+            ("http", product_pages[2]),
+            wait,  # Between the two collections.
+            ("http", threshold_pages[0]),
+            wait,
+            ("http", threshold_pages[1]),
+        ]
+
+    async def test_single_page_collections_are_separated_by_the_delay(
+        self, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        events: list[tuple[str, str]] = []
+        self._record_sleeps(monkeypatch, events)
+        router = _router({1: "cpe:/o:example:a:1"}, {1: 7.0}, events=events)
+
+        await self._execute_with_delay(db_session, router, 2.0)
+
+        assert events == [
+            (
+                "http",
+                f"{AIMAAS_TEST_PRODUCTS_ENDPOINT}?all_fields=true&size=100&page=1",
+            ),
+            ("sleep", "2.0"),
+            ("http", f"{AIMAAS_TEST_THRESHOLDS_ENDPOINT}?size=100&page=1"),
+        ]
+
+    async def test_zero_request_delay_never_waits(
+        self, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        events: list[tuple[str, str]] = []
+        self._record_sleeps(monkeypatch, events)
+        products = {pid: f"cpe:/o:example:p-{pid}:1" for pid in range(1, 251)}
+        router = _router(products, dict.fromkeys(range(1, 151), 7.0), events=events)
+
+        await self._execute_with_delay(db_session, router, 0)
+
+        assert [kind for kind, _ in events] == ["http"] * 5
 
     async def test_without_run_config_no_delay_is_applied(
         self, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        sleeps: list[float] = []
-
-        async def sleep(delay: float) -> None:
-            sleeps.append(delay)
-
-        monkeypatch.setattr(aimaas_listing, "asyncio", SimpleNamespace(sleep=sleep))
+        events: list[tuple[str, str]] = []
+        self._record_sleeps(monkeypatch, events)
         products = {pid: f"cpe:/o:example:p-{pid}:1" for pid in range(1, 251)}
+        router = _router(products, dict.fromkeys(range(1, 151), 7.0), events=events)
 
-        await _publish(db_session, products, dict.fromkeys(range(1, 151), 7.0))
+        await _execute(db_session, router)
 
-        assert sleeps == []
+        assert [kind for kind, _ in events] == ["http"] * 5
 
 
 # ---------------------------------------------------------------------------
