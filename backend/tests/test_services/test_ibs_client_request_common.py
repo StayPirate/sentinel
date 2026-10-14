@@ -291,6 +291,44 @@ class TestXmlSafety:
         assert result.value is not None
 
     @pytest.mark.parametrize("name", _NAMES)
+    async def test_large_document_is_parsed_without_a_cap(
+        self, server: IBSServer, name: str
+    ) -> None:
+        count = 10_000
+        if name == "search":
+            entries = "".join(f'<request id="{n}"/>' for n in range(1, count + 1))
+            body = f'<collection matches="{count}">{entries}</collection>'
+        elif name == "detail":
+            actions = "".join(
+                f'<action type="maintenance_release"><source project='
+                f'"SUSE:Maintenance:1" package="p{n}"/><target project="SUSE:T" '
+                f'package="p{n}.1"/></action>'
+                for n in range(count)
+            )
+            body = _DETAIL_DOC.decode().replace("<action ", actions + "<action ", 1)
+        elif name == "diff":
+            issues = "".join(
+                f'<issue state="added" tracker="bnc" name="{n}"/>' for n in range(count)
+            )
+            body = f"<sourcediff><issues>{issues}</issues></sourcediff>"
+        else:
+            entries = "".join(
+                f'<revision rev="{n}"><srcmd5>{_SUM}</srcmd5><time>{n}</time>'
+                "</revision>"
+                for n in range(1, count + 1)
+            )
+            body = f"<revisionlist>{entries}</revisionlist>"
+        result = await _run(server, name, xml_response(body.encode()))
+        assert result.value is not None
+        sizes = {
+            "search": lambda v: len(v.request_numbers),
+            "detail": lambda v: len(v.actions) - 1,
+            "diff": lambda v: len(v.issues),
+            "history": lambda v: len(v.entries),
+        }
+        assert sizes[name](result.value) == count
+
+    @pytest.mark.parametrize("name", _NAMES)
     async def test_document_split_into_single_bytes_is_parsed(
         self, server: IBSServer, name: str
     ) -> None:
@@ -308,31 +346,31 @@ _INADMISSIBLE: Final = {
     "surrogate_pair_reference": b"&#xD83D;&#xDE00;",
 }
 _FIELDS: Final = {
-    "search": [b'matches="1"', b'id="920001"'],
-    "detail": [
-        b'request id="920001"',
-        b'type="maintenance_incident"',
-        b'project="SUSE:Maintenance:REQUEST:920001"',
-        b'package="curl.x"',
-        b'rev="1"',
-        b'project="SUSE:Maintenance"',
-        b'releaseproject="SUSE:SLE-15-SP6:Update"',
-        b'name="new"',
-        b'created="2026-10-01T05:20:43"',
-        b'when="2026-10-01T09:16:55"',
-    ],
-    "diff": [
-        b'state="added"',
-        b'tracker="cve"',
-        b'name="2026-1"',
-        b'label="CVE-2026-1"',
-    ],
-    "history": [
-        b'rev="1"',
-        b"<srcmd5>" + _SUM.encode(),
-        b"<time>1700000000",
-        b"<requestid>920001",
-    ],
+    "search": {"matches": b'matches="1"', "request_id": b'id="920001"'},
+    "detail": {
+        "request_id": b'request id="920001"',
+        "action_type": b'type="maintenance_incident"',
+        "source_project": b'project="SUSE:Maintenance:REQUEST:920001"',
+        "source_package": b'package="curl.x"',
+        "source_rev": b'rev="1"',
+        "target_project": b'project="SUSE:Maintenance"',
+        "target_releaseproject": b'releaseproject="SUSE:SLE-15-SP6:Update"',
+        "state_name": b'name="new"',
+        "state_created": b'created="2026-10-01T05:20:43"',
+        "state_when": b'when="2026-10-01T09:16:55"',
+    },
+    "diff": {
+        "state": b'state="added"',
+        "tracker": b'tracker="cve"',
+        "name": b'name="2026-1"',
+        "label": b'label="CVE-2026-1"',
+    },
+    "history": {
+        "rev": b'rev="1"',
+        "srcmd5": b"<srcmd5>" + _SUM.encode(),
+        "time": b"<time>1700000000",
+        "requestid": b"<requestid>920001",
+    },
 }
 
 
@@ -341,22 +379,14 @@ def _inadmissible_cases() -> Iterator[tuple[str, str, bytes]]:
     and as a character reference, appended to every consumed value."""
     for name, fields in _FIELDS.items():
         document = _OPERATIONS[name].document
-        for field in fields:
+        for field_id, field in fields.items():
             assert document.count(field) == 1, (name, field)
-            if field.endswith(b'"'):
-                for case, value in _INADMISSIBLE.items():
-                    yield (
-                        name,
-                        f"{field.split(b'=')[0].decode()}-{case}",
-                        document.replace(field, field[:-1] + value + b'"'),
-                    )
-            else:
-                for case, value in _INADMISSIBLE.items():
-                    yield (
-                        name,
-                        f"{field.decode().lstrip('<').split('>')[0]}-{case}",
-                        document.replace(field, field + value),
-                    )
+            for case, value in _INADMISSIBLE.items():
+                if field.endswith(b'"'):
+                    changed = document.replace(field, field[:-1] + value + b'"')
+                else:
+                    changed = document.replace(field, field + value)
+                yield name, f"{field_id}-{case}", changed
 
 
 _CASES: Final = list(_inadmissible_cases())
@@ -476,7 +506,8 @@ class TestPrivacy:
                 assert not_requested.incomplete_reason == "outside_suse_namespace"
                 rendered.append(repr(not_requested))
                 for name in _NAMES:
-                    _serve(server, name, xml_response(b"<broken"))
+                    broken = f'<r a="{_MARKER}" b="{_PERSONAL}"><'.encode()
+                    _serve(server, name, xml_response(broken))
                     rendered.append(repr(await _OPERATIONS[name].call(client)))
 
         signature = signed_requests(server)[0].headers["authorization"]

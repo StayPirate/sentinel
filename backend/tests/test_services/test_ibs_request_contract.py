@@ -105,6 +105,7 @@ _ALLOWED: Final = {
     "requestid": set(),
     "status": {"code", "origin"},
 }
+_TEXT_ELEMENTS: Final = frozenset({"srcmd5", "time", "requestid"})
 _DIFF_BASE: Final = [
     ("cmd", "diff"),
     ("view", "xml"),
@@ -218,6 +219,9 @@ class TestFixtureInventory:
         for element in _root(name).iter():
             assert element.tag in _ALLOWED, element.tag
             assert set(element.attrib) <= _ALLOWED[element.tag], element.tag
+            if element.tag not in _TEXT_ELEMENTS:
+                assert (element.text or "").strip() == "", element.tag
+            assert (element.tail or "").strip() == "", element.tag
 
     @pytest.mark.parametrize("name", REQUEST_FIXTURES)
     def test_no_project_outside_the_suse_namespaces_remains(self, name: str) -> None:

@@ -225,9 +225,11 @@ class TestInputValidation:
         self, server: IBSServer, project: str, package: str, revision: Any
     ) -> None:
         async with ibs_client(username="") as client:
-            with pytest.raises(ValueError, match=r"\S"):
+            with pytest.raises(ValueError, match=r"\S") as raised:
                 await client.get_source_history(project, package, revision=revision)
         assert server.requests == []
+        assert "home:" not in str(raised.value)
+        assert package not in str(raised.value) or package == ""
 
     async def test_credentials_are_checked_after_input_and_before_http(
         self, server: IBSServer

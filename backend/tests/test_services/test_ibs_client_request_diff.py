@@ -230,6 +230,10 @@ class TestLiveDiffs:
             server, action, codestream_package="sentinel-nonexistent-pkg"
         )
         assert result == RequestEvidenceResult(incomplete_reason="not_found")
+        assert _sent(server) == (
+            request_fixture_record("diff_error_unknown_package")["path"],
+            request_fixture_query("diff_error_unknown_package"),
+        )
 
     async def test_live_removed_staging_project_is_incomplete(
         self, server: IBSServer

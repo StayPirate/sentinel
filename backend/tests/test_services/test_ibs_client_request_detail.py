@@ -336,6 +336,11 @@ class TestState:
             f'<state name="new" created="2026-10-01T05:20:43.5" when="{_WHEN}"/>',
             f'<state name="new" created="2026-10-01 05:20:43" when="{_WHEN}"/>',
             f'<state name="new" created="{_CREATED}+25:00" when="{_WHEN}"/>',
+            f'<state name="new" created="0001-01-01T00:00:00+01:00" when="{_WHEN}"/>',
+            (
+                f'<state name="new" created="{_CREATED}" '
+                'when="9999-12-31T23:59:59-01:00"/>'
+            ),
             f'<state name="new" created="" when="{_WHEN}"/>',
             f'<state name="superseded" created="{_CREATED}" when="{_WHEN}"/>',
             (
@@ -370,6 +375,8 @@ class TestState:
             "fractional_seconds",
             "space_separator",
             "invalid_offset",
+            "offset_below_range",
+            "offset_beyond_range",
             "empty_created",
             "superseded_without_successor",
             "superseded_by_itself",

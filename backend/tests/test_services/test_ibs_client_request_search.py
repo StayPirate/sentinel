@@ -308,9 +308,13 @@ class TestInputValidation:
         self, server: IBSServer, args: tuple[Any, ...], kwargs: dict[str, Any]
     ) -> None:
         async with ibs_client(username="") as client:
-            with pytest.raises(ValueError, match=r"\S"):
+            with pytest.raises(ValueError, match=r"\S") as raised:
                 await client.search_request_ids(*args, **kwargs)
         assert server.requests == []
+        for key in ("source_package_prefix", "target_package_prefix"):
+            prefix = kwargs.get(key)
+            if prefix:
+                assert prefix not in str(raised.value)
 
     async def test_credentials_are_checked_after_input_and_before_http(
         self, server: IBSServer
