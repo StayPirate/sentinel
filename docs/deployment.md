@@ -1939,10 +1939,10 @@ pass:
 
 It builds no image. The official `python:<minor>-slim` base image is
 published only from a minor's final release, so an image check here
-would run only in the short period between that release and the bump,
-whose pull request builds and smoke-tests the image through the blocking
-image gate of `ci.yml` (see `docs/conventions.md`, Version Bump
-Checklist).
+would run only between that release and the bump, whose pull request
+builds and smoke-tests the image through the blocking image gate of
+`ci.yml` (see `docs/features/platform/testing-strategy.md`, CI Pipeline;
+`docs/conventions.md`, Version Bump Checklist).
 
 **Why this exists.** Python runtime bumps follow the Version Bump
 Checklist in `docs/conventions.md` (Runtime Version), which is a

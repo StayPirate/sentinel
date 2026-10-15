@@ -138,8 +138,11 @@ jobs:
       # filter so the local process system suite runs in the same
       # invocation. See docs/features/platform/testing-strategy.md
       # (Parallel Execution; Local Process System Testing, Execution).
+      # A step timeout fails only this step, so the type check below still
+      # runs after a hung suite; the job timeout would cancel it instead.
       - name: Run default in-process and local process system suites against next Python version
         if: steps.sync.outcome == 'success'
+        timeout-minutes: 20
         env:
           NEXT_PYTHON: ${{ steps.python-version.outputs.next }}
         run: uv run --python "${NEXT_PYTHON}" pytest -m "not image" -n 4 --max-worker-restart 0 -v

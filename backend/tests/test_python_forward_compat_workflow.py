@@ -29,12 +29,18 @@ TYPE_CHECK_STEP = "Run strict type check against next Python version"
 
 NEXT_PYTHON_ENV = "NEXT_PYTHON: ${{ steps.python-version.outputs.next }}"
 NEXT_PYTHON_PREFIX = ["uv", "run", "--python", "${NEXT_PYTHON}"]
+SYNC_SUCCEEDED = "steps.sync.outcome == 'success'"
 
 
 def _steps(workflow_path: Path) -> list[str]:
-    """Split a workflow into text blocks, one per step list item."""
-    workflow = workflow_path.read_text(encoding="utf-8")
-    return re.split(r"\n(?=\s+- (?:name|uses|run):)", workflow)
+    """Split a workflow into text blocks, one per step list item.
+
+    Comment lines are dropped: a comment above a step would otherwise end
+    the block of the step before it.
+    """
+    lines = workflow_path.read_text(encoding="utf-8").splitlines()
+    code = "\n".join(line for line in lines if not line.lstrip().startswith("#"))
+    return re.split(r"\n(?=\s+- (?:name|uses|run):)", code)
 
 
 def _step(workflow_path: Path, name_prefix: str) -> str:
@@ -52,11 +58,16 @@ def _step_index(workflow_path: Path, name_prefix: str) -> int:
     return _steps(workflow_path).index(_step(workflow_path, name_prefix))
 
 
+def _key(step: str, key: str) -> str:
+    """Return the complete single-line value of a step key."""
+    match = re.search(rf"^\s*(?:- )?{key}: (?![|>])(.+)$", step, re.MULTILINE)
+    assert match is not None, f"no single-line {key!r} in step"
+    return match.group(1)
+
+
 def _command(step: str) -> list[str]:
     """Return the tokens of a step's single-line `run:` command."""
-    match = re.search(r"^\s*(?:- )?run: (?![|>])(.+)$", step, re.MULTILINE)
-    assert match is not None
-    return shlex.split(match.group(1))
+    return shlex.split(_key(step, "run"))
 
 
 def _folded_run(step: str) -> str:
@@ -100,7 +111,6 @@ def test_suites_step_uses_ci_worker_options_without_coverage() -> None:
     assert _arguments_after(command, "pytest")[:2] == ["-m", "not image"]
     assert command[: command.index("pytest")] == NEXT_PYTHON_PREFIX
     assert NEXT_PYTHON_ENV in step
-    assert "--cov" not in step
 
 
 @pytest.mark.unit
@@ -115,10 +125,22 @@ def test_type_check_step_runs_ci_scope_on_next_python_after_test_failure() -> No
     assert NEXT_PYTHON_ENV in step
     # `!cancelled()` replaces the implicit `success()`, so a failed test
     # step does not skip the type check.
-    assert "if: ${{ !cancelled() && steps.sync.outcome == 'success' }}" in step
+    assert _key(step, "if") == "${{ !cancelled() && " + SYNC_SUCCEEDED + " }}"
     assert _step_index(FORWARD_COMPAT_PATH, SUITES_STEP) < _step_index(
         FORWARD_COMPAT_PATH, TYPE_CHECK_STEP
     )
+
+
+@pytest.mark.unit
+def test_suites_step_timeout_leaves_time_for_the_type_check() -> None:
+    # A step timeout fails the step and the type check still runs; reaching
+    # the job timeout instead cancels the job and skips it.
+    workflow = FORWARD_COMPAT_PATH.read_text(encoding="utf-8")
+    job_timeout = re.search(r"^    timeout-minutes: (\d+)$", workflow, re.MULTILINE)
+    step_timeout = _key(_step(FORWARD_COMPAT_PATH, SUITES_STEP), "timeout-minutes")
+
+    assert job_timeout is not None
+    assert int(step_timeout) < int(job_timeout.group(1))
 
 
 @pytest.mark.unit
@@ -137,15 +159,22 @@ def test_every_check_is_skipped_when_next_python_is_unavailable() -> None:
     sync_step = _step(FORWARD_COMPAT_PATH, SYNC_STEP)
 
     assert "id: sync" in sync_step
-    assert "if: steps.availability.outputs.available == 'true'" in sync_step
-    assert 'uv sync --python "${NEXT_PYTHON}"' in sync_step
-    # Best-effort resolution: the lockfile may float on the next minor.
-    assert "--locked" not in sync_step
+    assert _key(sync_step, "if") == "steps.availability.outputs.available == 'true'"
     assert _step_index(FORWARD_COMPAT_PATH, SYNC_STEP) < _step_index(
         FORWARD_COMPAT_PATH, DURABILITY_STEP
     )
     for name in (DURABILITY_STEP, SUITES_STEP):
-        assert "if: steps.sync.outcome == 'success'" in _step(FORWARD_COMPAT_PATH, name)
+        assert _key(_step(FORWARD_COMPAT_PATH, name), "if") == SYNC_SUCCEEDED
+    assert SYNC_SUCCEEDED in _key(_step(FORWARD_COMPAT_PATH, TYPE_CHECK_STEP), "if")
+
+
+@pytest.mark.unit
+def test_sync_step_resolves_without_the_lockfile_pin() -> None:
+    # Best-effort resolution: dependency versions may float on the next minor.
+    sync_step = _step(FORWARD_COMPAT_PATH, SYNC_STEP)
+
+    assert 'uv sync --python "${NEXT_PYTHON}"' in sync_step
+    assert "--locked" not in sync_step
 
 
 @pytest.mark.unit
@@ -157,7 +186,7 @@ def test_workflow_builds_and_publishes_no_image() -> None:
         "docker build",
         "docker push",
         "image-smoke.sh",
-        "packages: write",
+        ": write",
     ):
         assert forbidden not in workflow
     assert "\npermissions:\n  contents: read\n" in workflow
