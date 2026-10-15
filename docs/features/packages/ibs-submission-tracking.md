@@ -788,8 +788,9 @@ logged only when it is a `SUSE:` project.
 
 `ibs_request_run_completed` is emitted once by every periodic fetcher
 invocation that returns normally, including an empty run, and once by every
-catch-up in which at least one selected scope reached a terminal outcome,
-before any all-failed exception; the catch-up adds `ticket_id`. `selected`
+catch-up that selects at least one scope and attempts all of them, before any
+all-failed exception; the catch-up adds `ticket_id`. An invocation ended by a
+whole-run signal or an ambiguous scope commit emits none. `selected`
 counts the distinct selected scopes and the other fields their terminal
 outcomes, so `created`, `updated`, and `no_op` together are the succeeded
 scopes. `ibs_request_catch_up_dispatch_failed` is emitted once when the
