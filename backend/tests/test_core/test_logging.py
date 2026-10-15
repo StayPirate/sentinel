@@ -635,6 +635,7 @@ class TestCollectSecretValues:
             database_url="postgresql+asyncpg://svc:fictional-db-pass@db.example.test/db",
             redis_url="redis://:fictional-redis-pass@cache.example.test:6379/0",
             celery_broker_url=_BROKER_URL,
+            ibs_rabbitmq_url="amqps://svc:fictional-mq-pass@mq.example.test",
         )
 
         values = _collect_secret_values(settings)
@@ -646,6 +647,7 @@ class TestCollectSecretValues:
             "fictional-db-pass",
             "fictional-redis-pass",
             _BROKER_URL_USERINFO_PART,
+            "fictional-mq-pass",
         }
 
     def test_values_are_derived_from_field_classification(self) -> None:
@@ -686,6 +688,7 @@ class TestCollectSecretValues:
             database_url="postgresql+asyncpg://svc@db.example.test/db",
             redis_url="redis://cache.example.test:6379/0",
             celery_broker_url="redis://cache.example.test:6379/1",
+            ibs_rabbitmq_url="amqps://mq.example.test",
         )
         assert _collect_secret_values(settings) == ["a" * 32]
 

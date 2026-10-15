@@ -138,6 +138,15 @@ class Settings(BaseSettings):
     ibs_ssh_private_key: SecretStr = SecretStr("")
     ibs_download_base_url: str = "https://download.suse.de/ibs"
 
+    # IBS RabbitMQ consumer (credential-bearing URL: docs/conventions.md,
+    # Secret Field Typing)
+    ibs_rabbitmq_url: str = Field(
+        default="amqps://suse:suse@rabbit.suse.de", repr=False
+    )
+    ibs_rabbitmq_enabled: bool = True
+    ibs_rabbitmq_reconnect_initial: int = 5
+    ibs_rabbitmq_reconnect_max: int = 300
+
     # SMELT / AIMAAS
     smelt_api_url: str = "https://smelt.suse.de/api"
     aimaas_api_url: str = "https://aimaas.suse.de/api"
@@ -338,6 +347,75 @@ class Settings(BaseSettings):
         Authentication).
         """
         return _validate_https_api_prefix(value, "IBS_API_URL")
+
+    @field_validator("ibs_rabbitmq_url")
+    @classmethod
+    def _validate_ibs_rabbitmq_url(cls, value: str) -> str:
+        """Validate IBS_RABBITMQ_URL at startup.
+
+        AMQPS with a non-empty host and a valid port; no query or fragment,
+        so URL parameters cannot override the consumer's fixed constants
+        (heartbeat, TLS options); user information and a virtual host path
+        are permitted. See docs/features/integrations/ibs-rabbitmq-integration.md
+        (Configuration). The value may embed credentials: every message
+        names only the variable.
+        """
+        prefix = "Invalid IBS_RABBITMQ_URL"
+
+        if any(char.isspace() or not char.isprintable() for char in value):
+            msg = f"{prefix}: malformed URL."
+            raise ValueError(msg)
+        if "?" in value or "#" in value:
+            msg = f"{prefix}: query or fragment components are not permitted."
+            raise ValueError(msg)
+
+        try:
+            parsed = urlsplit(value)
+            hostname = parsed.hostname
+            port = parsed.port
+        except ValueError:
+            msg = f"{prefix}: malformed URL."
+            raise ValueError(msg) from None
+        if port is None and parsed.netloc.endswith(":"):
+            msg = f"{prefix}: malformed URL."
+            raise ValueError(msg)
+
+        if parsed.scheme.lower() != "amqps":
+            msg = f"{prefix}: the scheme must be amqps."
+            raise ValueError(msg)
+        if not hostname:
+            msg = f"{prefix}: a non-empty hostname is required."
+            raise ValueError(msg)
+        return value
+
+    @model_validator(mode="after")
+    def _validate_ibs_rabbitmq_reconnect(self) -> Settings:
+        """Validate the IBS RabbitMQ reconnect delays at startup.
+
+        Both are positive seconds and the cap is not below the initial
+        delay (docs/features/integrations/ibs-rabbitmq-integration.md,
+        Configuration). Every role fails startup on an invalid pair, even
+        when the consumer is disabled.
+        """
+        if self.ibs_rabbitmq_reconnect_initial < 1:
+            msg = (
+                "Invalid IBS_RABBITMQ_RECONNECT_INITIAL: must be a positive "
+                "number of seconds."
+            )
+            raise ValueError(msg)
+        if self.ibs_rabbitmq_reconnect_max < 1:
+            msg = (
+                "Invalid IBS_RABBITMQ_RECONNECT_MAX: must be a positive number "
+                "of seconds."
+            )
+            raise ValueError(msg)
+        if self.ibs_rabbitmq_reconnect_max < self.ibs_rabbitmq_reconnect_initial:
+            msg = (
+                "Invalid IBS_RABBITMQ_RECONNECT_MAX: must be greater than or "
+                "equal to IBS_RABBITMQ_RECONNECT_INITIAL."
+            )
+            raise ValueError(msg)
+        return self
 
     @field_validator("ibs_username")
     @classmethod

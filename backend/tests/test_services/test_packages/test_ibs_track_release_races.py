@@ -72,6 +72,7 @@ from app.services.packages.ibs_track_release import (
     TrackReleaseCandidate,
     reconcile_ibs_track_releases,
 )
+from app.services.ticket_convergence_registry import register_ticket_convergence
 from tests.support.database import assert_lock_wait
 from tests.support.ibs_api import status_response, xml_response
 from tests.support.ibs_keys import fictional_settings_value
@@ -1296,3 +1297,155 @@ class TestSanitizedLogs:
             "keyId",
         ):
             assert text not in rendered
+
+
+# ---------------------------------------------------------------------------
+# Consumer mode (Shared Reconciliation Boundary: Consumer mode)
+# ---------------------------------------------------------------------------
+
+
+async def _consumer_reconcile(
+    ibs: FakeIBS, candidates: list[TrackReleaseCandidate]
+) -> dict[uuid.UUID, str]:
+    """One consumer-mode invocation: no fetcher name, hook, or delay."""
+    async with ibs.client() as client:
+        outcomes = await reconcile_ibs_track_releases(
+            candidates, client=client, forbid_convergence_effects=True
+        )
+    return kinds(outcomes)
+
+
+async def _stale_resolved(world: TrackWorld) -> tuple[Track, Track]:
+    """An `Analyzed` Ticket whose `example` track is the evidence track
+    (its Product released) and whose `example-libs` track stays open with
+    an actionable unreleased Product, so the gate after the `FIXED` is not
+    `Resolved`."""
+    seed = Seed(world.session, world)
+    ticket = await seed.ticket(TicketStatus.ANALYZED, assessed=True)
+    fixed = await seed.track(ticket, status=PackageStatus.AFFECTED)
+    await seed.product(fixed, released_at=RELEASED_AT)
+    still_open = await seed.track(
+        ticket, package_name=SIBLING_PACKAGE, status=PackageStatus.AFFECTED
+    )
+    await seed.product(still_open)
+    await seed.commit()
+    return fixed, still_open
+
+
+def _stale_resolution(
+    monkeypatch: pytest.MonkeyPatch, world: TrackWorld, ticket_id: uuid.UUID
+) -> None:
+    """Persist a stale `Resolved` after selection, before the local unit."""
+    _concurrently(
+        monkeypatch,
+        world,
+        update(Ticket)
+        .where(Ticket.id == ticket_id)
+        .values(status=TicketStatus.RESOLVED.value),
+    )
+
+
+def _consumer_failed(track: Track) -> dict[str, Any]:
+    """`ibs_track_release_track_failed` without `fetcher_name`."""
+    entry = track_failed(track, "ticket_convergence_required")
+    del entry["fetcher_name"]
+    return entry
+
+
+class TestConsumerMode:
+    async def test_unit_registering_an_effect_rolls_back_and_siblings_commit(
+        self,
+        world: TrackWorld,
+        ibs: FakeIBS,
+        publication: Publish,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Only the second Ticket's unit registers: it fails with
+        `ticket_convergence_required`, keeps its status and checkpoint, and
+        has no event; the siblings commit; nothing is published."""
+        first, second, third = await _three(world, ibs)
+        original = package_service.set_track_status
+        registered: list[uuid.UUID] = []
+
+        async def registering(db: AsyncSession, **kwargs: Any) -> Any:
+            result = await original(db, **kwargs)
+            if kwargs["track_id"] == second.id:
+                register_ticket_convergence(db, kwargs["ticket_id"])
+                registered.append(kwargs["ticket_id"])
+            return result
+
+        monkeypatch.setattr(package_service, "set_track_status", registering)
+
+        with capture_logs() as logs:
+            outcomes = await _consumer_reconcile(
+                ibs, [first.candidate(), second.candidate(), third.candidate()]
+            )
+
+        assert outcomes == {
+            first.id: "updated",
+            second.id: "failed",
+            third.id: "updated",
+        }
+        assert registered == [second.ticket_id]
+        assert logged(logs, TRACK_FAILED) == [_consumer_failed(second)]
+        assert publication.calls == []
+        assert await track_status(world, second) == PackageStatus.ANALYSIS.value
+        assert await checkpoint_of(world, second) is None
+        assert await events_of(world, second.ticket_id) == []
+        for committed in (first, third):
+            assert await events_of(world, committed.ticket_id) == [
+                committed.fixed_event()
+            ]
+            assert await checkpoint_srcmd5(world, committed) == CURRENT
+
+    async def test_stale_resolved_regression_rolls_back_without_publication(
+        self,
+        world: TrackWorld,
+        ibs: FakeIBS,
+        publication: Publish,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Selected while `Analyzed`; a stale `Resolved` is persisted before
+        the unit; the `FIXED` would regress it and register convergence:
+        consumer mode rolls the unit back."""
+        fixed, still_open = await _stale_resolved(world)
+        _evidence(ibs, fixed)
+        _stale_resolution(monkeypatch, world, fixed.ticket_id)
+
+        with capture_logs() as logs:
+            outcomes = await _consumer_reconcile(ibs, [fixed.candidate()])
+
+        assert outcomes == {fixed.id: "failed"}
+        assert logged(logs, TRACK_FAILED) == [_consumer_failed(fixed)]
+        assert publication.calls == []
+        assert await ticket_status(world, fixed.ticket_id) == (
+            TicketStatus.RESOLVED.value
+        )
+        assert await track_status(world, fixed) == PackageStatus.AFFECTED.value
+        assert await track_status(world, still_open) == PackageStatus.AFFECTED.value
+        assert await checkpoint_of(world, fixed) is None
+        assert await events_of(world, fixed.ticket_id) == []
+
+    async def test_same_regression_commits_and_publishes_for_the_fetcher(
+        self,
+        world: TrackWorld,
+        ibs: FakeIBS,
+        publication: Publish,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Contrast: outside consumer mode the same unit commits, regresses
+        the Ticket, and publishes its Ticket convergence after the commit,
+        which is why the consumer must not commit it."""
+        fixed, _ = await _stale_resolved(world)
+        _evidence(ibs, fixed)
+        _stale_resolution(monkeypatch, world, fixed.ticket_id)
+
+        outcomes = await reconcile(ibs, [fixed.candidate()])
+
+        assert kinds(outcomes) == {fixed.id: "updated"}
+        assert published(publication.calls) == [fixed.ticket_id]
+        assert await ticket_status(world, fixed.ticket_id) in (
+            TicketStatus.ANALYSIS.value,
+            TicketStatus.ANALYZED.value,
+        )
+        assert await checkpoint_srcmd5(world, fixed) == CURRENT
