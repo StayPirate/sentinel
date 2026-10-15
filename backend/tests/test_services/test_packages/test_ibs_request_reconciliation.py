@@ -41,7 +41,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any, ClassVar, Final
@@ -892,39 +892,63 @@ class TestEvidencePersistence:
         assert (await requests_of(world, number))[number][3] == LATER_AT
         assert await delivery(world, scope) == IN_PROGRESS.value
 
-    async def test_conflicting_acceptinfo_fails_and_writes_nothing(
-        self, world: RequestWorld, fake: FakeRequests
+    @pytest.mark.parametrize(
+        ("field", "retained_value"),
+        [
+            pytest.param("source_project", "SUSE:Maintenance:1", id="source-project"),
+            pytest.param(
+                "source_package",
+                "example-other.SUSE_SLE-15_Update",
+                id="source-package",
+            ),
+            pytest.param(
+                "target_release_project", OTHER_CODESTREAM, id="target-release-project"
+            ),
+            pytest.param("logical_package", "example-other", id="logical-package"),
+            pytest.param("incident_number", 1, id="incident-number"),
+            pytest.param("accepted_revision", "9", id="accepted-revision"),
+            pytest.param("accepted_srcmd5", checksum("retained"), id="accepted-srcmd5"),
+        ],
+    )
+    async def test_conflicting_release_provenance_fails_and_writes_nothing(
+        self,
+        world: RequestWorld,
+        fake: FakeRequests,
+        field: str,
+        retained_value: object,
     ) -> None:
-        """The retained accepted RR action carries another `srcmd5` than its
-        current detail, whose release is otherwise proven."""
+        """The retained accepted RR action carries another non-null value of
+        an immutable field than its current detail, whose release is
+        otherwise proven (Data Model > IBSRequestAction). The target project
+        and package are its identity, and its codestream is bound to the
+        target project, so they cannot conflict."""
         seed = RequestSeed(world)
         scope = await seed.track(
             await seed.ticket(), package=unique_package(), delivery=IN_PROGRESS
         )
         number, incident = world.number(), next_incident()
-        retained_srcmd5 = checksum(f"retained-{number}")
-        current_srcmd5 = checksum(f"current-{number}")
-        await seed.evidence(
-            number,
-            ACCEPTED,
+        srcmd5 = checksum(f"current-{number}")
+        current = replace(
             release(
                 scope.package_name,
                 incident,
-                accept=Accept(rev=RELEASE_REV, srcmd5=retained_srcmd5),
+                accept=Accept(rev=RELEASE_REV, srcmd5=srcmd5),
             ),
+            release_project=CODESTREAM,
+        )
+        await seed.evidence(
+            number,
+            ACCEPTED,
+            current,
             tracks=[scope],
+            retained_action={field: retained_value},
         )
         await seed.commit()
-        current = release(
-            scope.package_name,
-            incident,
-            accept=Accept(rev=RELEASE_REV, srcmd5=current_srcmd5),
-        )
         fake.request(number, ACCEPTED, current)
         fake.history(
             CODESTREAM,
             f"{scope.package_name}.{incident}",
-            [(int(RELEASE_REV), current_srcmd5, number)],
+            [(int(RELEASE_REV), srcmd5, number)],
             revision=RELEASE_REV,
         )
         fake.action_diff(
@@ -943,7 +967,72 @@ class TestEvidencePersistence:
             failed_entry(scope, "conflicting_provenance", request_number=number)
         ]
         assert await stored_actions(world, number) == before
-        assert before[0].accepted_srcmd5 == retained_srcmd5
+        assert getattr(before[0], field) == retained_value
+        assert await delivery(world, scope) == IN_PROGRESS.value
+
+    @pytest.mark.parametrize(
+        ("field", "retained_value"),
+        [
+            pytest.param("logical_package", "example-other", id="logical-package"),
+            pytest.param("incident_number", 1, id="incident-number"),
+            pytest.param("accepted_revision", "9", id="accepted-revision"),
+            pytest.param("accepted_srcmd5", checksum("retained"), id="accepted-srcmd5"),
+        ],
+    )
+    async def test_conflicting_submission_provenance_fails_and_writes_nothing(
+        self,
+        world: RequestWorld,
+        fake: FakeRequests,
+        field: str,
+        retained_value: object,
+    ) -> None:
+        """The retained correlated SR action carries another non-null value of
+        an immutable field than its current accepted detail, whose incident
+        history makes it effective (Data Model > IBSRequestAction). Its
+        source fields and target release project are its identity, and its
+        codestream is bound to the target release project, so they cannot
+        conflict; its target project and package take the latest value."""
+        seed = RequestSeed(world)
+        scope = await seed.track(
+            await seed.ticket(), package=unique_package(), delivery=IN_PROGRESS
+        )
+        number = world.number()
+        await seed.evidence(
+            number,
+            REVIEW,
+            submission(scope.package_name, number),
+            tracks=[scope],
+            retained_action={field: retained_value},
+        )
+        await seed.commit()
+        incident = next_incident()
+        srcmd5 = checksum(f"sr-commit-{number}")
+        accepted = submission(
+            scope.package_name,
+            number,
+            incident=incident,
+            accept=Accept(rev="2", srcmd5=srcmd5, xsrcmd5=checksum(f"x-{number}")),
+        )
+        fake.request(number, ACCEPTED, accepted, when=LATER)
+        fake.history(
+            f"SUSE:Maintenance:{incident}",
+            f"{scope.package_name}.{origin(CODESTREAM)}",
+            [(1, checksum("branch"), None), (2, srcmd5, number)],
+        )
+        fake.quiet(scope.package_name)
+        before = await stored_actions(world, number)
+        requests_before = await requests_of(world, number)
+
+        with capture_logs() as logs:
+            outcomes = await reconcile(fake, [scope])
+
+        assert kinds(outcomes) == {scope.track_id: "failed"}
+        assert logged(logs, SCOPE_FAILED) == [
+            failed_entry(scope, "conflicting_provenance", request_number=number)
+        ]
+        assert await stored_actions(world, number) == before
+        assert getattr(before[0], field) == retained_value
+        assert await requests_of(world, number) == requests_before
         assert await delivery(world, scope) == IN_PROGRESS.value
 
     async def test_changed_semantic_identity_creates_a_distinct_action(

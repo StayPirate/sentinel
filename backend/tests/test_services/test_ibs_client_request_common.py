@@ -405,6 +405,13 @@ def _acceptinfo_cases() -> Iterator[tuple[str, bytes]]:
             b"</action>", b'<acceptinfo opackage="x' + value + b'"/></action>'
         )
         yield f"acceptinfo_opackage-{case}", document
+    target = b'releaseproject="SUSE:SLE-15-SP6:Update"/>'
+    assert _DETAIL_DOC.count(target) == 1
+    for case, value in _INADMISSIBLE.items():
+        document = _DETAIL_DOC.replace(
+            target, target[:-2] + b' package="x' + value + b'"/>'
+        )
+        yield f"target_package-{case}", document
     for case, value in _INADMISSIBLE.items():
         document = _DETAIL_DOC.replace(
             b'name="new"',
