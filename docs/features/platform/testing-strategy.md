@@ -904,7 +904,8 @@ shape.
 | `asyncio.run()` boundary inventory | `backend/tests/test_architecture/test_asyncio_run_inventory.py` | Every direct `asyncio.run(...)` call site in `backend/app/tasks/` (by module and enclosing function) is enumerated via AST and compared against a reviewed inventory maintained in the test module. A new, unclassified call site fails the test — not because direct `asyncio.run()` is forbidden, but because a long-lived Celery process repeating it needs an explicit lifecycle classification (disposes the shared pooled engine before returning; a documented one-shot or independently safe lifecycle) per `docs/conventions.md` (Cross-loop pooled connection lifecycle). Adding the new call site to the inventory with its classification is the required action, not a workaround |
 | Process-spawning boundary | `backend/tests/test_architecture/test_git_subprocess_boundary.py` | Every process-spawning call in `backend/app/` (`subprocess` functions and classes, `asyncio.create_subprocess_exec`/`create_subprocess_shell`, event-loop `subprocess_exec`/`subprocess_shell`, `pty.spawn`, and the `os` process functions such as `os.system`, `os.popen`, `os.fork*`, `os.exec*`, `os.spawn*`, and `os.posix_spawn*`) is enumerated via AST, including calls through aliased imports, and must occur only in `app/services/git_operations.py`, the single module allowed to invoke `git` (`docs/features/platform/git-fetcher-infrastructure.md`, Implementation Location). Inside that module the only allowed call is `asyncio.create_subprocess_exec` (Module Invariants, Rule 2: an argument list, never a shell). Also asserts that no module in `backend/app/` imports a Python Git library (`git`, `pygit2`, `dulwich`) and that `backend/pyproject.toml` declares none (Runtime Dependencies, "No Python Git library is used"). A new process-spawning module is a reviewed exception added to the test, not a workaround |
 | Git fetcher template | `backend/tests/test_architecture/test_git_fetcher_template.py` | After production fetcher discovery, every concrete `BaseGitFetcher` subclass in `FETCHER_REGISTRY` inherits `execute()` and `queue = "git"` unchanged, implements `process_item()` and `_construct_candidate_paths()`, declares `repo_url`, `delta_path_prefix`, and `recovery_path_prefix` as non-empty strings, and declares `clone_dir_name` as a single path component that no other production Git fetcher uses (`docs/features/platform/git-fetcher-infrastructure.md`, Class Attributes, Template Method: `execute()`, Inherited Utility Methods, Concurrency Rules rule 5). `BaseGitFetcher` has no `__init_subclass__` of its own, so this test is the enforcement point. It passes vacuously while no production Git fetcher exists; a self-test proves that each check detects a violating class |
-| CVE fetcher discovery completeness | `backend/tests/test_architecture/test_cve_fetcher_discovery_completeness.py` | For each process role (API, general worker, Git worker, Beat), a fresh interpreter imports the role's unmodified production entry module and proves that every `CVESourceType` member maps to exactly one concrete production class from `app.services.tickets` registered in `FETCHER_REGISTRY` under its `name`, and that no test-only class appears in either registry (`docs/features/platform/cve-fetcher-infrastructure.md`, `__init_subclass__` Validation, Uniqueness tracking). It also reads the role commands of the `backend/Dockerfile` CMD, `docker-compose.smoke.yml`, and `docs/deployment.md` and proves that each loads the production entry module of its role; only the command spelling is read, not the document layout. In-process tests prove that the assertion detects a missing member and a test-only owner |
+| CVE fetcher discovery completeness | `backend/tests/test_architecture/test_cve_fetcher_discovery_completeness.py` | For each process role (API, general worker, Git worker, Beat), a fresh interpreter imports the role's unmodified production entry module and proves that every `CVESourceType` member maps to exactly one concrete production class from `app.services.tickets` registered in `FETCHER_REGISTRY` under its `name`, and that no test-only class appears in either registry (`docs/features/platform/cve-fetcher-infrastructure.md`, `__init_subclass__` Validation, Uniqueness tracking). It also reads the role commands of the `backend/Dockerfile` CMD, `docker-compose.smoke.yml`, and `docs/deployment.md` and proves that each loads the production entry module of its role; the IBS RabbitMQ consumer command `python -m app.ibs_consumer` is recognized as a role without the fetcher registry, whose import boundary is enforced by the row below. Only the command spelling is read, not the document layout. In-process tests prove that the assertion detects a missing member and a test-only owner |
+| IBS consumer runtime independence | `backend/tests/test_architecture/test_ibs_consumer_runtime_independence.py` | A fresh interpreter imports the unmodified consumer entry module `app.ibs_consumer` and proves that no `app.celery_app`, `app.tasks` module, `app.services.fetcher_discovery`, `redbeat` module, or concrete fetcher module is loaded and that `FETCHER_REGISTRY` is empty (`docs/features/integrations/ibs-rabbitmq-integration.md`, Runtime Independence). A self-test proves that the check detects a forbidden import |
 | CLI user resolution and input bounds | `backend/tests/test_architecture/test_cli_user_resolution.py` | Over every module in `app/cli/`: no reference (import, attribute access, or name) to `get_user`, `resolve_user_identifier`, or `user_identifier_condition` — the API's UUID-or-username resolution — so every CLI username lookup uses the username-only read (`docs/conventions.md`, Command Design — Username normalization and resolution). Also asserts that the CLI `--full-name` length bound (`docs/features/identity/user-management.md`) equals the `User.full_name` column length (`docs/data-model.md`, User) and the `max_length` the API request schemas apply to `full_name`, so the CLI, column, and schema bounds cannot drift apart |
 | OpenCode command discovery | `backend/tests/test_opencode_agent_permissions.py` | Every project command definition is a direct child of `.opencode/commands/`. OpenCode recursively registers Markdown files below that directory, so nested reference documents would become unintended slash commands |
 
@@ -1528,6 +1529,14 @@ evidence appropriate to each active role:
   answer, so it is not evidence for a specific role.
 - **Beat:** bounded evidence shows startup bootstrap and schedule reconciliation
   completed; merely observing the Beat process still running is insufficient.
+- **IBS RabbitMQ consumer:** bounded evidence shows its structured startup
+  event (`ibs_consumer_started`), which follows the PostgreSQL verification
+  and precedes the first RabbitMQ connection attempt, then its first
+  scheduled reconnect (`ibs_consumer_reconnect_scheduled`), and the container
+  is still running afterward. The smoke stack runs the consumer enabled with
+  `IBS_RABBITMQ_URL` pointing at an in-stack endpoint that refuses
+  connections, so it stays in its reconnect path deterministically and without
+  external network access.
 
 Readiness MUST NOT use arbitrary fixed sleeps, invent a fake Beat ping, enable
 a Celery result backend, or make a Redis key the authoritative record that a
@@ -1612,9 +1621,10 @@ artifact facts without duplicating focused behavior tests:
   disposable failed-migration ordering scenario;
 - external `/health`, `/ready`, and `/openapi.json` availability through the
   candidate's default API command;
-- startup of each implemented API, worker, Git worker, and Beat role from the
-  same image, with representative worker task registration, the queue each
-  worker role consumes, and Beat post-reconciliation readiness;
+- startup of each implemented API, worker, Git worker, Beat, and IBS RabbitMQ
+  consumer role from the same image, with representative worker task
+  registration, the queue each worker role consumes, Beat post-reconciliation
+  readiness, and the consumer's startup event;
 - one representative broker-delivered task producing a durable PostgreSQL
   outcome without a Celery result backend; and
 - only the smallest justified process-command-specific startup failure, in a
@@ -1655,7 +1665,7 @@ infrastructure.
 |----------|-------|
 | Location | `backend/tests/system/` |
 | Marker | `@pytest.mark.system` |
-| Isolation | Spawns real worker and Beat processes against test PostgreSQL and test Redis. Does NOT use the `db_session` rollback fixture for subprocess-committed rows |
+| Isolation | Spawns real worker, Beat, and IBS RabbitMQ consumer processes against test PostgreSQL and test Redis. Does NOT use the `db_session` rollback fixture for subprocess-committed rows |
 | Default run | **Excluded** from an unadorned `pytest` — `addopts` excludes both `image` and `system` markers. The pre-push hook and CI select it explicitly (see Execution) |
 | Coverage | Subprocess execution is not observable by the pytest-host tracer and is never measured. In the coverage-measured CI invocation, the test's pytest-host code is measured like any other test's |
 
@@ -1834,6 +1844,20 @@ The image suite retains only the artifact-specific remainder, such as startup
 of a packaged role or physical exclusion of the test-only fetcher source from
 the shipped image. It does not retain detailed process behavior solely because
 that behavior was once exercised in a container.
+
+### IBS RabbitMQ Consumer Signal Handling
+
+The suite also starts the unmodified consumer entry module
+(`python -m app.ibs_consumer`) as a real process, because operating-system
+signal delivery to its event loop cannot be proved in process. The process
+receives the same explicit environment rules as the worker and Beat processes
+(see Registration Boundary), with `DATABASE_URL` pointing at the worker's test
+database and `IBS_RABBITMQ_URL` at a local port that refuses connections. For
+SIGTERM and for SIGINT, the test waits with a monotonic deadline for the
+consumer's startup event and its first scheduled reconnect, sends the signal
+during the backoff wait, and requires exit code 0 well before that wait would
+end. It needs no broker, no fetcher, and no cleanup beyond terminating a
+process that outlives its deadline.
 
 ### Automation
 

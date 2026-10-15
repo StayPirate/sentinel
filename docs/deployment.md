@@ -201,6 +201,13 @@ cd backend && uv run celery -A app.celery_app worker -Q git --pool=prefork -n gi
 cd backend && uv run celery -A app.celery_app beat
 # Note: the redbeat scheduler class is configured in the Celery app
 # settings (beat_scheduler). No --scheduler CLI flag is needed.
+
+# Start the IBS RabbitMQ consumer (separate terminal; optional) — the same
+# command as in production. It needs the SUSE network for rabbit.suse.de and
+# IBS_USERNAME/IBS_SSH_PRIVATE_KEY for its IBS API requests; without network
+# access it stays in its reconnect loop. IBS_RABBITMQ_ENABLED=false makes it
+# exit immediately.
+cd backend && uv run python -m app.ibs_consumer
 ```
 
 #### Local Environment Variables
@@ -1113,6 +1120,10 @@ fetch, and catch-up — see
 host. Local development runs the same two commands (see
 [Quick Start](#quick-start)).
 
+The IBS RabbitMQ consumer is started as `python -m app.ibs_consumer` (entry
+module `backend/app/ibs_consumer.py`); it is neither a Celery process nor a
+`sentinel` CLI command (see [Singleton Processes](#singleton-processes)).
+
 **One-shot jobs:**
 
 - Alembic migration job — see [Database Migrations](#database-migrations)
@@ -1129,8 +1140,9 @@ enforce singleton constraints unless a future design introduces
 distributed locking or leader election.
 
 The IBS RabbitMQ consumer is a standalone process, not a Celery worker. It
-does not import the Celery application or fetcher registry, consume or publish
-Celery messages, or depend on `CELERY_BROKER_URL`, Redbeat, or a Celery result
+does not import the Celery application or fetcher discovery and never
+populates the fetcher registry; it does not consume or publish Celery
+messages, or depend on `CELERY_BROKER_URL`, Redbeat, or a Celery result
 backend. PostgreSQL is required for authoritative selection and reconciliation.
 Redis is non-authoritative and is used only through `REDIS_URL` for the
 best-effort consumer heartbeat.
@@ -1138,12 +1150,24 @@ best-effort consumer heartbeat.
 When enabled, the consumer validates configuration, verifies PostgreSQL, starts
 the best-effort heartbeat, and then connects and establishes its fixed AMQP
 topology. Transient RabbitMQ failures reconnect with exponential backoff from 5
-seconds to a 300-second cap; permanent TLS, authentication, authorization, or
+seconds to a 300-second cap by default (`IBS_RABBITMQ_RECONNECT_INITIAL`,
+`IBS_RABBITMQ_RECONNECT_MAX`); permanent TLS, authentication, authorization, or
 topology failures exit non-zero for operator correction and orchestrator
 restart. On SIGTERM or SIGINT, the consumer stops new deliveries, gives its one
 in-flight handler at most 30 seconds to finish, then cancels incomplete work and
-closes AMQP resources best-effort. `IBS_RABBITMQ_ENABLED=false` exits cleanly
-without connecting to PostgreSQL, Redis, IBS, or RabbitMQ.
+closes AMQP resources best-effort; a completed graceful shutdown exits with
+code 0. `IBS_RABBITMQ_ENABLED=false` exits cleanly with code 0 without
+connecting to PostgreSQL, Redis, IBS, or RabbitMQ, so a deployment that
+disables the consumer either does not deploy it or runs it with a restart
+policy that does not restart a successful exit.
+
+The consumer's stop grace period — the time the orchestrator waits between
+SIGTERM and SIGKILL — must exceed the 30-second handler deadline plus
+best-effort resource closure. Use at least **60 seconds**: Docker's default of
+10 seconds and Kubernetes' default `terminationGracePeriodSeconds` of 30
+seconds are insufficient. A SIGKILL during the deadline interrupts the
+in-flight delivery without settlement; committed work remains and polling
+recovers the rest.
 
 ### Celery Worker Pool Requirement
 

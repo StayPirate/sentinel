@@ -204,15 +204,20 @@ signature derived from it is, so the header-value rule in
 
 | Env Var | Type | Default | Description | Defined in |
 |---------|------|---------|-------------|------------|
-| `IBS_RABBITMQ_URL` | string | `amqps://suse:suse@rabbit.suse.de` | Credential-bearing RabbitMQ connection URL. May embed credentials; excluded from settings representations and never logged | `docs/features/integrations/ibs-rabbitmq-integration.md` |
+| `IBS_RABBITMQ_URL` | string | `amqps://suse:suse@rabbit.suse.de` | Credential-bearing RabbitMQ connection URL. May embed credentials; excluded from settings representations and never logged. Must use the `amqps` scheme with a non-empty host and a valid port and contain no query, fragment, whitespace, or control character; user information and a virtual host path are permitted | `docs/features/integrations/ibs-rabbitmq-integration.md` |
 | `IBS_RABBITMQ_ENABLED` | bool | `true` | Enables the standalone consumer process and controls the status API's synthesized `disabled` state | `docs/features/integrations/ibs-rabbitmq-integration.md` |
 | `IBS_RABBITMQ_RECONNECT_INITIAL` | positive int | `5` | Initial transient reconnect delay in seconds | `docs/features/integrations/ibs-rabbitmq-integration.md` |
 | `IBS_RABBITMQ_RECONNECT_MAX` | positive int | `300` | Transient reconnect delay cap in seconds; must be greater than or equal to `IBS_RABBITMQ_RECONNECT_INITIAL` | `docs/features/integrations/ibs-rabbitmq-integration.md` |
 
-The exchange, queue properties, bindings, AMQP heartbeat, QoS, and shutdown
-deadline are fixed integration constants. The consumer binds exactly
-`suse.obs.package.commit`, `suse.obs.request.create`, and
-`suse.obs.request.state_change`; there is no routing-key environment variable.
+An invalid value of any of these variables fails startup of every process
+role, including the API, workers, and Beat, even when
+`IBS_RABBITMQ_ENABLED=false`; the error names only the variable.
+
+The exchange, queue properties, bindings, AMQP heartbeat, QoS, client
+connection name, and shutdown deadline are fixed integration constants. The
+consumer binds exactly `suse.obs.package.commit`, `suse.obs.request.create`,
+and `suse.obs.request.state_change`; there is no routing-key environment
+variable.
 It requires `DATABASE_URL` for authoritative domain work, uses `REDIS_URL` only
 for best-effort heartbeat publication, and does not read or depend on
 `CELERY_BROKER_URL`.
