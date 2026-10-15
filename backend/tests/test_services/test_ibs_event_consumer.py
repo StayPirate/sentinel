@@ -35,13 +35,15 @@ from typing import Any, cast
 
 import aiormq
 import pytest
+from redis import exceptions as redis_exceptions
 from structlog.contextvars import get_contextvars, merge_contextvars
 from structlog.testing import capture_logs
 
 from app.config import Settings
 from app.config import settings as app_settings
+from app.core.enums import IBSConsumerErrorCategory, IBSConsumerStatus
 from app.core.exceptions import TLSConfigurationError
-from app.services import ibs_event_consumer
+from app.services import ibs_consumer_status, ibs_event_consumer
 from app.services.ibs_event_consumer import (
     SHUTDOWN_DEADLINE_SECONDS,
     IBSEventConsumer,
@@ -50,10 +52,14 @@ from app.services.ibs_event_consumer import (
 from app.services.ibs_event_decoding import DeliveryOutcome, DeliveryResult
 from tests.support.ibs_consumer import (
     BLOCK,
+    FAILED_RESULT,
     FakeBroker,
     FakeClient,
+    FakeClock,
     FakeDelivery,
     FakeEpoch,
+    FakeHeartbeatStore,
+    FakeRefreshTimer,
     FakeTimer,
     Handled,
 )
@@ -111,6 +117,9 @@ class Harness:
     handled: Handled
     contexts: list[ssl.SSLContext]
     disposed: list[str]
+    store: FakeHeartbeatStore = field(default_factory=FakeHeartbeatStore)
+    refresh: FakeRefreshTimer = field(default_factory=FakeRefreshTimer)
+    clock: FakeClock = field(default_factory=FakeClock)
     consumer: IBSEventConsumer | None = None
     task: asyncio.Task[int] | None = None
 
@@ -122,6 +131,9 @@ class Harness:
             session_factory=cast(Any, self.sessions),
             dispose_engine=self._dispose,
             timer=self.timer,
+            heartbeat_store=self.store,
+            heartbeat_timer=self.refresh,
+            clock=self.clock,
             handle_signals=False,
         )
         self.task = asyncio.create_task(self.consumer.run())
@@ -264,6 +276,9 @@ class TestStartup:
             session_factory=cast(Any, harness.sessions),
             dispose_engine=harness._dispose,
             timer=harness.timer,
+            heartbeat_store=harness.store,
+            heartbeat_timer=harness.refresh,
+            clock=harness.clock,
             handle_signals=False,
         )
 
@@ -311,6 +326,9 @@ class TestStartup:
             session_factory=cast(Any, harness.sessions),
             dispose_engine=harness._dispose,
             timer=harness.timer,
+            heartbeat_store=harness.store,
+            heartbeat_timer=harness.refresh,
+            clock=harness.clock,
         )
         task = asyncio.create_task(consumer.run())
         await harness.broker.wait_connected()
@@ -749,6 +767,7 @@ class TestDeliveries:
                     DeliveryOutcome.FAILED,
                     "track_failed",
                     {"track_count": 2, "failed_track_count": 1},
+                    IBSConsumerErrorCategory.PACKAGE_RECONCILIATION_FAILED,
                 ),
                 "ibs_consumer_delivery_failed",
                 "error",
@@ -1114,6 +1133,9 @@ class TestCorrelationReset:
             session_factory=cast(Any, harness.sessions),
             dispose_engine=harness._dispose,
             timer=harness.timer,
+            heartbeat_store=harness.store,
+            heartbeat_timer=harness.refresh,
+            clock=harness.clock,
             handle_signals=False,
         )
         consumer._client = cast(Any, harness.client)
@@ -1124,7 +1146,7 @@ class TestCorrelationReset:
         [
             DeliveryResult(DeliveryOutcome.PROCESSED),
             DeliveryResult(DeliveryOutcome.MALFORMED, "invalid_json"),
-            DeliveryResult(DeliveryOutcome.FAILED, "track_failed"),
+            FAILED_RESULT,
         ],
         ids=lambda result: result.outcome.value,
     )
@@ -1171,3 +1193,535 @@ class TestCorrelationReset:
             await self._consumer(harness)._handle(FakeDelivery(), epoch)
 
         assert "ibs_event_id" not in get_contextvars()
+
+
+# ---------------------------------------------------------------------------
+# Heartbeat (Startup steps 3 and 5, Reconnection status writes, Settlement
+# Policy counters, Graceful Shutdown step 5, Fatal and Transient Failures)
+# ---------------------------------------------------------------------------
+
+_STARTED = "2026-09-08T14:00:00Z"  # START truncated to whole seconds.
+
+
+def _published(**expected: Any) -> Callable[[dict[str, Any]], bool]:
+    """A predicate matching a written document by a subset of its fields."""
+    return lambda document: all(document[k] == v for k, v in expected.items())
+
+
+class TestHeartbeatStatus:
+    async def test_reconnecting_is_written_before_the_initial_attempt(
+        self, harness: Harness
+    ) -> None:
+        """Startup step 5 starts the writer before step 6 connects: a
+        refusing or hanging broker is reported `reconnecting`."""
+        harness.store.events = harness.broker.events
+        harness.broker.script = [BLOCK]
+
+        harness.start()
+        async with asyncio.timeout(_WAIT):
+            await harness.broker.attempted.wait()
+        document = await harness.store.wait_for(_published(status="reconnecting"))
+
+        assert harness.broker.events[:2] == ["heartbeat:reconnecting", "attempt"]
+        assert document == {
+            "status": "reconnecting",
+            "heartbeat_at": _STARTED,
+            "process_started_at": _STARTED,
+            "status_since": _STARTED,
+            "events_received": 0,
+            "events_relevant": 0,
+            "events_processed": 0,
+            "processing_failed": 0,
+            "reconnect_attempts": 0,
+            "next_retry_seconds": None,
+            "last_error": None,
+            "last_error_at": None,
+        }
+        assert await harness.stop() == 0
+
+    async def test_failed_attempts_record_the_wait_and_count_reconnects(
+        self, harness: Harness
+    ) -> None:
+        harness.broker.script = [OSError(), OSError()]
+        harness.timer.blocking = lambda _seconds: True
+        store, clock = harness.store, harness.clock
+
+        harness.start()
+        clock.advance(3)
+        first_wait = await store.wait_for(_published(next_retry_seconds=5))
+        assert first_wait["status"] == "reconnecting"
+        assert first_wait["status_since"] == _STARTED  # No status change.
+        assert first_wait["reconnect_attempts"] == 0  # The initial attempt.
+        assert first_wait["last_error"] == "rabbitmq_connection_failed"
+        assert first_wait["last_error_at"] == "2026-09-08T14:00:03Z"
+
+        clock.advance(5)
+        harness.timer.release()
+        second_wait = await store.wait_for(_published(next_retry_seconds=10))
+        assert second_wait["reconnect_attempts"] == 1
+        assert second_wait["last_error_at"] == "2026-09-08T14:00:08Z"
+
+        clock.advance(10)
+        harness.timer.release()
+        connected = await store.wait_for(_published(status="connected"))
+
+        assert connected["reconnect_attempts"] == 2
+        assert connected["next_retry_seconds"] is None
+        assert connected["status_since"] == "2026-09-08T14:00:18Z"
+        assert connected["heartbeat_at"] == "2026-09-08T14:00:18Z"
+        # A successful connection keeps the last failure.
+        assert connected["last_error"] == "rabbitmq_connection_failed"
+        assert connected["last_error_at"] == "2026-09-08T14:00:08Z"
+        assert await harness.stop() == 0
+
+    async def test_an_attempt_clears_the_scheduled_wait(self, harness: Harness) -> None:
+        """While an attempt runs no wait is scheduled, and the reconnect
+        attempt is counted when it starts."""
+        harness.broker.script = [OSError(), BLOCK]
+
+        harness.start()
+        async with asyncio.timeout(_WAIT):
+            await _until(lambda: len(harness.broker.urls) == 2)
+        attempting = await harness.store.wait_for(_published(reconnect_attempts=1))
+
+        assert attempting["status"] == "reconnecting"
+        assert attempting["next_retry_seconds"] is None
+        assert await harness.stop() == 0
+
+    @pytest.mark.parametrize(
+        "reason", ["connection_lost", "channel_lost", "consumer_cancelled"]
+    )
+    async def test_loss_reports_disconnected_then_reconnecting(
+        self, harness: Harness, reason: str
+    ) -> None:
+        """A lost connection, channel, or broker consumer is reported alike:
+        `disconnected` during the cleanup, then `reconnecting` with the
+        scheduled wait, then `connected` again."""
+        harness.timer.blocking = lambda _seconds: True
+        store, clock = harness.store, harness.clock
+        harness.start()
+        epoch = await harness.broker.wait_connected()
+        await store.wait_for(_published(status="connected"))
+
+        clock.advance(60)
+        epoch.close_gate = asyncio.Event()
+        epoch.lose(reason)
+        disconnected = await store.wait_for(_published(status="disconnected"))
+        epoch.close_gate.set()
+        waiting = await store.wait_for(_published(next_retry_seconds=5))
+        harness.timer.release()
+        await harness.broker.wait_connected(2)
+        reconnected = await store.wait_for(
+            _published(status="connected", reconnect_attempts=1)
+        )
+
+        assert disconnected["status_since"] == "2026-09-08T14:01:00Z"
+        assert disconnected["last_error"] == "rabbitmq_connection_lost"
+        assert disconnected["last_error_at"] == "2026-09-08T14:01:00Z"
+        assert disconnected["next_retry_seconds"] is None
+        assert disconnected["reconnect_attempts"] == 0
+        assert waiting["status"] == "reconnecting"
+        assert waiting["reconnect_attempts"] == 0  # Counted when it starts.
+        assert reconnected["last_error"] == "rabbitmq_connection_lost"
+        assert store.statuses == [
+            "reconnecting",
+            "connected",
+            "disconnected",
+            "reconnecting",
+            "connected",
+        ]
+        assert await harness.stop() == 0
+
+    async def test_refresh_rewrites_the_complete_value_every_30_seconds(
+        self, harness: Harness
+    ) -> None:
+        store = harness.store
+        harness.start()
+        await harness.broker.wait_connected()
+        await store.wait_for(_published(status="connected"))
+        writes = len(store.values)
+
+        harness.clock.advance(30)
+        harness.refresh.fire()
+        refreshed = await store.wait_for(
+            _published(heartbeat_at="2026-09-08T14:00:30Z")
+        )
+
+        assert len(store.values) == writes + 1
+        assert refreshed["status"] == "connected"
+        assert refreshed["status_since"] == _STARTED
+        assert set(harness.refresh.calls) == {30.0}
+        assert await harness.stop() == 0
+
+    async def test_counters_start_at_zero_in_every_process(
+        self, harness: Harness
+    ) -> None:
+        harness.start()
+        await harness.broker.wait_connected()
+        harness.broker.deliver()
+        await _until(
+            lambda: harness.consumer is not None and bool(harness.handled.finished)
+        )
+        assert await harness.stop() == 0
+        assert harness.consumer is not None
+        assert harness.consumer.status.events_received == 1
+
+        restarted = IBSEventConsumer(_settings(), clock=harness.clock)
+
+        status = restarted.status
+        assert (
+            status.events_received,
+            status.events_relevant,
+            status.events_processed,
+            status.processing_failed,
+            status.reconnect_attempts,
+        ) == (0, 0, 0, 0, 0)
+        assert status.status is IBSConsumerStatus.RECONNECTING
+        assert status.last_error is None
+
+
+class TestHeartbeatCounters:
+    @pytest.mark.parametrize(
+        ("result", "counters", "last_error"),
+        [
+            (
+                DeliveryResult(DeliveryOutcome.PROCESSED),
+                (1, 1, 1, 0),
+                None,
+            ),
+            (DeliveryResult(DeliveryOutcome.IRRELEVANT), (1, 0, 0, 0), None),
+            (
+                DeliveryResult(DeliveryOutcome.MALFORMED, "invalid_json"),
+                (1, 0, 0, 0),
+                None,
+            ),
+            (FAILED_RESULT, (1, 1, 0, 1), "package_reconciliation_failed"),
+            (
+                DeliveryResult(
+                    DeliveryOutcome.FAILED,
+                    "selection_failed",
+                    error_category=IBSConsumerErrorCategory.PACKAGE_RECONCILIATION_FAILED,
+                ),
+                (1, 1, 0, 1),
+                "package_reconciliation_failed",
+            ),
+        ],
+        ids=[
+            "processed",
+            "irrelevant",
+            "malformed",
+            "track-failed",
+            "selection-failed",
+        ],
+    )
+    async def test_each_outcome_has_its_exact_counter_effect(
+        self,
+        harness: Harness,
+        result: DeliveryResult,
+        counters: tuple[int, int, int, int],
+        last_error: str | None,
+    ) -> None:
+        """Processed (also an idempotent no-op) counts relevant and
+        processed; irrelevant and malformed count only `events_received`;
+        every terminal failure, including one before any track is selected,
+        counts relevant and failed and sets `last_error`. The counters are
+        published by the next write."""
+        harness.handled.result = result
+        harness.start()
+        epoch = await harness.broker.wait_connected()
+        harness.clock.advance(4)
+        harness.broker.deliver()
+        await _until(lambda: len(epoch.acks) == 1)
+
+        harness.refresh.fire()
+        document = await harness.store.wait_for(_published(events_received=1))
+
+        assert (
+            document["events_received"],
+            document["events_relevant"],
+            document["events_processed"],
+            document["processing_failed"],
+        ) == counters
+        assert document["last_error"] == last_error
+        assert document["last_error_at"] == (
+            "2026-09-08T14:00:04Z" if last_error else None
+        )
+        assert document["status"] == "connected"
+        assert await harness.stop() == 0
+
+    async def test_real_decoding_failure_paths_count_only_received(
+        self, harness: Harness, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from app.services.packages.ibs_event_handlers import handle_delivery
+
+        monkeypatch.setattr(ibs_event_consumer, "handle_delivery", handle_delivery)
+        harness.start()
+        epoch = await harness.broker.wait_connected()
+        harness.broker.deliver(FakeDelivery(routing_key="suse.obs.metrics"))
+        harness.broker.deliver(FakeDelivery(body=b"not json"))
+        await _until(lambda: len(epoch.acks) == 2)
+
+        status = harness.consumer.status if harness.consumer else None
+        assert status is not None
+        assert (status.events_received, status.events_relevant) == (2, 0)
+        assert status.last_error is None
+        assert await harness.stop() == 0
+
+    async def test_committed_success_is_counted_when_the_channel_died_first(
+        self, harness: Harness
+    ) -> None:
+        harness.start()
+        epoch = await harness.broker.wait_connected()
+        harness.handled.on_call = lambda: epoch.lose("channel_lost")
+        harness.broker.deliver()
+        await harness.broker.wait_connected(2)
+
+        assert epoch.acks == []
+        assert harness.consumer is not None
+        status = harness.consumer.status
+        assert (status.events_received, status.events_processed) == (1, 1)
+        assert status.last_error is IBSConsumerErrorCategory.RABBITMQ_CONNECTION_LOST
+        assert await harness.stop() == 0
+
+    async def test_cancelled_delivery_counts_only_received(
+        self, harness: Harness
+    ) -> None:
+        harness.handled.gate = asyncio.Event()
+        harness.start()
+        epoch = await harness.broker.wait_connected()
+        harness.broker.deliver()
+        await _until(lambda: len(harness.handled.calls) == 1)
+        epoch.lose("connection_lost")
+        await harness.broker.wait_connected(2)
+
+        assert harness.consumer is not None
+        status = harness.consumer.status
+        assert (status.events_received, status.events_relevant) == (1, 0)
+        assert await harness.stop() == 0
+
+    async def test_counters_and_last_error_survive_success_and_reconnects(
+        self, harness: Harness
+    ) -> None:
+        harness.handled.result = FAILED_RESULT
+        harness.start()
+        epoch = await harness.broker.wait_connected()
+        harness.clock.advance(2)
+        harness.broker.deliver()
+        await _until(lambda: len(epoch.acks) == 1)
+
+        harness.handled.result = DeliveryResult(DeliveryOutcome.PROCESSED)
+        harness.clock.advance(2)
+        harness.broker.deliver()
+        await _until(lambda: len(epoch.acks) == 2)
+        harness.refresh.fire()
+        after_success = await harness.store.wait_for(_published(events_received=2))
+        assert after_success["last_error"] == "package_reconciliation_failed"
+        assert after_success["last_error_at"] == "2026-09-08T14:00:02Z"
+
+        epoch.lose("connection_lost")
+        second = await harness.broker.wait_connected(2)
+        second_epoch_delivery = FakeDelivery()
+        harness.broker.deliver(second_epoch_delivery)
+        await _until(lambda: len(second.acks) == 1)
+
+        assert harness.consumer is not None
+        status = harness.consumer.status
+        assert (
+            status.events_received,
+            status.events_relevant,
+            status.events_processed,
+            status.processing_failed,
+        ) == (3, 3, 2, 1)
+        assert status.last_error is IBSConsumerErrorCategory.RABBITMQ_CONNECTION_LOST
+        assert await harness.stop() == 0
+
+
+class TestHeartbeatDegradation:
+    @pytest.mark.parametrize(
+        "error",
+        [
+            redis_exceptions.ConnectionError("fictional refused"),
+            redis_exceptions.TimeoutError("fictional timeout"),
+            redis_exceptions.ResponseError(
+                "OOM command not allowed when used memory > 'maxmemory'."
+            ),
+        ],
+        ids=["connection", "timeout", "oom"],
+    )
+    async def test_write_failure_logs_one_bounded_warning_and_changes_nothing(
+        self, harness: Harness, error: Exception
+    ) -> None:
+        harness.store.error = error
+
+        with capture_logs() as logs:
+            harness.start()
+            epoch = await harness.broker.wait_connected()
+            harness.broker.deliver()
+            await _until(lambda: len(epoch.acks) == 1)
+            code = await harness.stop()
+
+        assert code == 0
+        failures = [
+            e for e in logs if e["event"] == "ibs_consumer_heartbeat_write_failed"
+        ]
+        assert failures
+        assert harness.store.attempts == len(failures)
+        assert all(
+            e
+            == {
+                "event": "ibs_consumer_heartbeat_write_failed",
+                "log_level": "warning",
+                "error_type": type(error).__name__,
+            }
+            for e in failures
+        )
+        assert "fictional" not in repr(logs)
+        assert "ibs_consumer_fatal" not in _events(logs)
+        assert harness.consumer is not None
+        assert harness.consumer.status.events_processed == 1
+
+    async def test_startup_succeeds_without_redis(self, harness: Harness) -> None:
+        harness.store.error = redis_exceptions.ConnectionError("fictional refused")
+
+        with capture_logs() as logs:
+            harness.start()
+            await harness.broker.wait_connected()
+
+        assert "ibs_consumer_started" in _events(logs)
+        assert await harness.stop() == 0
+
+    async def test_hanging_write_is_bounded_and_delays_no_reconnect(
+        self, harness: Harness, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(ibs_consumer_status, "WRITE_TIMEOUT_SECONDS", 0.01)
+        harness.store.gate = asyncio.Event()  # Never opened: Redis hangs.
+        harness.broker.script = [OSError(), OSError()]
+
+        with capture_logs() as logs:
+            harness.start()
+            await harness.broker.wait_connected()
+            await _until(lambda: "ibs_consumer_heartbeat_write_failed" in _events(logs))
+            code = await harness.stop()
+
+        assert code == 0
+        assert harness.timer.calls == [5, 10]
+        assert {
+            e["error_type"]
+            for e in logs
+            if e["event"] == "ibs_consumer_heartbeat_write_failed"
+        } == {"TimeoutError"}
+
+    async def test_hanging_write_delays_no_shutdown(self, harness: Harness) -> None:
+        """Shutdown step 5 cancels an in-flight write."""
+        harness.start()
+        await harness.broker.wait_connected()
+        harness.store.gate = asyncio.Event()  # Never opened.
+        harness.refresh.fire()
+        await _until(lambda: harness.store.attempts >= 2)
+
+        assert await harness.stop() == 0
+
+    async def test_writer_that_ignores_cancellation_is_abandoned_at_its_bound(
+        self, harness: Harness, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(ibs_consumer_status, "WRITER_STOP_TIMEOUT_SECONDS", 0.01)
+        released = asyncio.Event()
+        harness.start()
+        await harness.broker.wait_connected()
+
+        async def stubborn(value: str) -> None:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                await released.wait()
+
+        assert harness.consumer is not None
+        harness.consumer._writer._store = stubborn
+        harness.refresh.fire()
+        await asyncio.sleep(0)
+        try:
+            assert await harness.stop() == 0
+        finally:
+            released.set()
+            await asyncio.sleep(0)
+
+
+class TestHeartbeatShutdownAndFatal:
+    async def test_shutdown_stops_the_writer_before_closing_without_a_final_write(
+        self, harness: Harness
+    ) -> None:
+        harness.start()
+        epoch = await harness.broker.wait_connected()
+        await harness.store.wait_for(_published(status="connected"))
+        assert harness.consumer is not None
+        writer = harness.consumer._writer
+        observed: list[bool] = []
+        epoch.on_close = lambda: observed.append(
+            writer._task is not None and writer._task.done()
+        )
+        writes = len(harness.store.values)
+
+        assert await harness.stop() == 0
+
+        assert observed == [True]
+        assert len(harness.store.values) == writes
+        assert harness.store.last["status"] == "connected"
+
+    async def test_writer_failure_is_fatal_and_cleans_up(
+        self, harness: Harness
+    ) -> None:
+        harness.handled.gate = asyncio.Event()
+        harness.start()
+        epoch = await harness.broker.wait_connected()
+        harness.broker.deliver()
+        await _until(lambda: len(harness.handled.calls) == 1)
+
+        harness.store.error = RuntimeError("fictional bug")
+        with capture_logs() as logs:
+            harness.refresh.fire()
+            code = await harness.result()
+
+        assert code == 1
+        assert _entry(logs, "ibs_consumer_fatal")["reason_category"] == (
+            "unexpected_error"
+        )
+        assert "ibs_consumer_stopped" not in _events(logs)
+        assert epoch.acks == []
+        assert epoch.closed
+        assert harness.client.closed == 1
+        assert harness.disposed == ["engine"]
+
+    async def test_memory_error_in_the_writer_is_fatal(self, harness: Harness) -> None:
+        harness.store.error = MemoryError()
+
+        with capture_logs() as logs:
+            harness.start()
+            code = await harness.result()
+
+        assert code == 1
+        assert _entry(logs, "ibs_consumer_fatal")["reason_category"] == "memory_error"
+        assert harness.disposed == ["engine"]
+
+    async def test_heartbeat_carries_no_secret_or_identity(
+        self, harness: Harness
+    ) -> None:
+        harness.handled.result = FAILED_RESULT
+        harness.start()
+        epoch = await harness.broker.wait_connected()
+        harness.broker.deliver()
+        await _until(lambda: len(epoch.acks) == 1)
+        harness.refresh.fire()
+        await harness.store.wait_for(_published(processing_failed=1))
+        assert await harness.stop() == 0
+
+        written = "".join(harness.store.values)
+        for forbidden in (
+            "mq-password-not-for-production",
+            "mq.example.test",
+            "svc",
+            "SUSE:",
+            "example-pkg",
+            "example-user",
+            "track_failed",
+        ):
+            assert forbidden not in written

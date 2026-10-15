@@ -16,20 +16,29 @@
 - `Handled` replaces `handle_delivery()`: it records each call with the
   bound `ibs_event_id` and returns the scripted result, optionally after a
   gate that the test opens.
+- `FakeHeartbeatStore` replaces the Redis heartbeat write: it records each
+  complete value, optionally after a gate, or raises a scripted error.
+- `FakeRefreshTimer` replaces the heartbeat refresh wait: it never ends on
+  its own, so the writer writes only on a state change, until `fire()`
+  ends the current waits as if 30 seconds had passed.
+- `FakeClock` is a settable wall clock.
 
-No real sleep, socket, broker, or database is used.
+No real sleep, socket, broker, Redis, or database is used.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import ssl
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from typing import Any, Final
 
 import structlog
 
+from app.core.enums import IBSConsumerErrorCategory
 from app.services.ibs_event_consumer import DeliverySink
 from app.services.ibs_event_decoding import (
     PACKAGE_COMMIT_ROUTING_KEY,
@@ -62,6 +71,8 @@ class FakeEpoch:
     consumer_cancelled: bool = False
     closed: bool = False
     ack_error: BaseException | None = None
+    close_gate: asyncio.Event | None = None
+    on_close: Callable[[], None] | None = None
 
     def lose(self, reason: str = "connection_lost") -> None:
         if not self.lost.is_set():
@@ -79,6 +90,10 @@ class FakeEpoch:
         self.events.append("cancel_consumer")
 
     async def close(self) -> None:
+        if self.on_close is not None:
+            self.on_close()
+        if self.close_gate is not None:
+            await self.close_gate.wait()
         self.closed = True
         self.events.append("close")
 
@@ -156,6 +171,108 @@ class FakeClient:
 
     async def aclose(self) -> None:
         self.closed += 1
+
+
+FAILED_RESULT: Final = DeliveryResult(
+    DeliveryOutcome.FAILED,
+    "track_failed",
+    {"project": "SUSE:SLE-15-SP6:Update", "track_count": 2, "failed_track_count": 1},
+    IBSConsumerErrorCategory.PACKAGE_RECONCILIATION_FAILED,
+)
+"""A `handle_delivery()` failure as it reaches the lifecycle."""
+
+
+@dataclass(eq=False)
+class FakeHeartbeatStore:
+    """The heartbeat store: `values` holds every written value in order."""
+
+    values: list[str] = field(default_factory=list)
+    attempts: int = 0
+    error: BaseException | None = None
+    gate: asyncio.Event | None = None
+    written: asyncio.Event = field(default_factory=asyncio.Event)
+    events: list[str] | None = None
+
+    async def __call__(self, value: str) -> None:
+        self.attempts += 1
+        if self.events is not None:
+            self.events.append(f"heartbeat:{json.loads(value)['status']}")
+        if self.gate is not None:
+            await self.gate.wait()
+        if self.error is not None:
+            raise self.error
+        self.values.append(value)
+        self.written.set()
+
+    @property
+    def documents(self) -> list[dict[str, Any]]:
+        return [json.loads(value) for value in self.values]
+
+    @property
+    def statuses(self) -> list[str]:
+        """The `status` of each write, consecutive repeats collapsed."""
+        collapsed: list[str] = []
+        for document in self.documents:
+            if not collapsed or collapsed[-1] != document["status"]:
+                collapsed.append(document["status"])
+        return collapsed
+
+    @property
+    def last(self) -> dict[str, Any]:
+        return self.documents[-1]
+
+    async def wait_for(
+        self, predicate: Callable[[dict[str, Any]], bool]
+    ) -> dict[str, Any]:
+        """The first written document (from now on or earlier) that
+        satisfies `predicate` (bounded)."""
+        async with asyncio.timeout(5):
+            while True:
+                for document in self.documents:
+                    if predicate(document):
+                        return document
+                self.written.clear()
+                await self.written.wait()
+
+
+@dataclass(eq=False)
+class FakeRefreshTimer:
+    calls: list[float] = field(default_factory=list)
+    _waiters: list[asyncio.Future[None]] = field(default_factory=list)
+    _fired: bool = False
+
+    async def __call__(self, seconds: float) -> None:
+        self.calls.append(seconds)
+        if self._fired:
+            self._fired = False
+            return
+        waiter: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        self._waiters.append(waiter)
+        await waiter
+
+    def fire(self) -> None:
+        """End the current wait, as if the refresh interval had passed; when
+        no wait is pending yet, the next wait ends at once instead."""
+        pending = [waiter for waiter in self._waiters if not waiter.done()]
+        self._waiters.clear()
+        for waiter in pending:
+            waiter.set_result(None)
+        self._fired = not pending
+
+
+START: Final = datetime(2026, 9, 8, 14, 0, 0, 250_000, tzinfo=UTC)
+"""The fictional process start of the lifecycle tests (not a whole second)."""
+
+
+@dataclass(eq=False)
+class FakeClock:
+    now: datetime = START
+
+    def __call__(self) -> datetime:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += timedelta(seconds=seconds)
 
 
 @dataclass(eq=False)

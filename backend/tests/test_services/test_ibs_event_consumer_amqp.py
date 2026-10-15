@@ -48,6 +48,7 @@ from cryptography.x509.oid import NameOID
 from pamqp import base, commands
 
 from app.config import Settings
+from app.core.enums import IBSConsumerErrorCategory
 from app.services import ibs_event_consumer
 from app.services.ibs_event_consumer import (
     Delivery,
@@ -69,7 +70,13 @@ from tests.support.amqp_server import (
     ServerConnection,
     channel_close,
 )
-from tests.support.ibs_consumer import COMMIT_BODY, FakeClient, FakeTimer
+from tests.support.ibs_consumer import (
+    COMMIT_BODY,
+    FakeClient,
+    FakeHeartbeatStore,
+    FakeRefreshTimer,
+    FakeTimer,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -716,6 +723,7 @@ async def test_consumer_acks_reconnects_after_broker_cancel_and_shuts_down(
         return None
 
     timer = FakeTimer()
+    store = FakeHeartbeatStore()
     consumer = IBSEventConsumer(
         Settings(
             _env_file=None, jwt_secret_key="a" * 32, ibs_rabbitmq_url=_SETTINGS_URL
@@ -725,6 +733,8 @@ async def test_consumer_acks_reconnects_after_broker_cancel_and_shuts_down(
         session_factory=cast(Any, _Sessions()),
         dispose_engine=dispose,
         timer=timer,
+        heartbeat_store=store,
+        heartbeat_timer=FakeRefreshTimer(),
         handle_signals=False,
     )
     task = asyncio.create_task(consumer.run())
@@ -772,3 +782,11 @@ async def test_consumer_acks_reconnects_after_broker_cancel_and_shuts_down(
     assert second.names()[-3:] == ["Basic.Cancel", "Channel.Close", "Connection.Close"]
     assert len(first.methods(commands.Basic.Ack)) == 1
     assert len(second.methods(commands.Basic.Ack)) == 1
+    # The heartbeat followed the real lifecycle: the broker cancel is a lost
+    # connection, the reconnect is counted, and both deliveries are processed.
+    assert store.statuses[:2] == ["reconnecting", "connected"]
+    assert store.statuses[-1] == "connected"
+    status = consumer.status
+    assert (status.events_received, status.events_processed) == (2, 2)
+    assert status.reconnect_attempts == 1
+    assert status.last_error is IBSConsumerErrorCategory.RABBITMQ_CONNECTION_LOST

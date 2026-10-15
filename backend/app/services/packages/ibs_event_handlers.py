@@ -9,9 +9,10 @@ exception boundary) and docs/features/packages/ibs-track-release-detection.md
 
 - `handle_delivery()` decodes one delivery
   (`app.services.ibs_event_decoding`), dispatches it by routing key, and
-  returns its bounded `DeliveryResult`. It never settles, logs the
-  delivery events, or binds the correlation ID; the consumer lifecycle
-  owns those.
+  returns its bounded `DeliveryResult`, with the heartbeat `last_error`
+  category of its routing key on a failure (`FAILURE_CATEGORIES`). It never
+  settles, logs the delivery events, counts, or binds the correlation ID;
+  the consumer lifecycle owns those.
 - `parse_package_commit()` consumes only `project` and `package`: each a
   non-empty JSON string, not whitespace-only, without an inadmissible
   character (docs/conventions.md, External String Admissibility), and not
@@ -38,9 +39,10 @@ committed.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Final
 
+from app.core.enums import IBSConsumerErrorCategory
 from app.core.external_strings import contains_inadmissible_character
 from app.database import async_session_factory
 from app.services.ibs_client import IBSClient, is_valid_ibs_name
@@ -172,6 +174,12 @@ HANDLERS: Final[dict[str, Handler]] = {
 }
 """The application handler of every bound routing key."""
 
+FAILURE_CATEGORIES: Final[dict[str, IBSConsumerErrorCategory]] = {
+    PACKAGE_COMMIT_ROUTING_KEY: IBSConsumerErrorCategory.PACKAGE_RECONCILIATION_FAILED,
+}
+"""The heartbeat `last_error` category of a failed delivery of every bound
+routing key (Heartbeat Storage)."""
+
 
 async def handle_delivery(
     routing_key: str | None,
@@ -182,18 +190,26 @@ async def handle_delivery(
 ) -> DeliveryResult:
     """Decode, validate, and handle one delivery in one application attempt.
 
-    Returns `malformed` with its reason for an encoding or schema violation
-    (no database or IBS work), otherwise the handler's result; an
-    unclassified `Exception` other than `MemoryError` becomes `failed` with
-    `unexpected_error`. `MemoryError`, cancellation, and other
-    `BaseException` propagate.
+    Returns `malformed` with its reason for an unbound routing key or an
+    encoding or schema violation (no database or IBS work), otherwise the
+    handler's result; an unclassified `Exception` other than `MemoryError`
+    becomes `failed` with `unexpected_error`. Every `failed` result carries
+    the `last_error` category of its routing key (`FAILURE_CATEGORIES`).
+    `MemoryError`, cancellation, and other `BaseException` propagate.
     """
+    if routing_key is None or routing_key not in HANDLERS:
+        return DeliveryResult(
+            DeliveryOutcome.MALFORMED, MalformedReason.UNSUPPORTED_ROUTING_KEY.value
+        )
     try:
         event = decode_delivery(routing_key, content_type, body)
-        return await HANDLERS[event.routing_key](event, client)
+        result = await HANDLERS[routing_key](event, client)
     except MalformedDeliveryError as malformed:
         return DeliveryResult(DeliveryOutcome.MALFORMED, malformed.reason.value)
     except MemoryError:
         raise
     except Exception:
-        return DeliveryResult(DeliveryOutcome.FAILED, UNEXPECTED_ERROR_CATEGORY)
+        result = DeliveryResult(DeliveryOutcome.FAILED, UNEXPECTED_ERROR_CATEGORY)
+    if result.outcome is DeliveryOutcome.FAILED:
+        return replace(result, error_category=FAILURE_CATEGORIES[routing_key])
+    return result

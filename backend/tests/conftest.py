@@ -96,6 +96,7 @@ from app.models import (
 from app.services import (
     cve_service,
     cvss_recalculation_coordination,
+    ibs_consumer_status,
     local_auth_service,
     session_service,
 )
@@ -741,12 +742,13 @@ async def redis_client(
     `session_service.get_session_redis_url` (session liveness cache,
     invalidation purge), `local_auth_service.get_lockout_redis_url`
     (login lockout counter), `cve_service.get_fetch_pending_redis_url`
-    (per-CVE source-status pending overlay), and
+    (per-CVE source-status pending overlay),
     `cvss_recalculation_coordination.get_cvss_recalculation_redis_url`
-    (CVSS recalculation lease) — so they observe this same instance during
-    the test. Teardown restores every override, flushes again, and
-    closes the client. Cleanup/provisioning failures fail the test
-    rather than skip.
+    (CVSS recalculation lease), and
+    `ibs_consumer_status.get_ibs_consumer_status_redis_url` (IBS consumer
+    heartbeat) — so they observe this same instance during the test.
+    Teardown restores every override, flushes again, and closes the client.
+    Cleanup/provisioning failures fail the test rather than skip.
     """
     client = redis_asyncio.Redis.from_url(_redis_test_url, decode_responses=True)
     await client.flushdb()
@@ -764,6 +766,11 @@ async def redis_client(
     monkeypatch.setattr(
         cvss_recalculation_coordination,
         "get_cvss_recalculation_redis_url",
+        lambda: _redis_test_url,
+    )
+    monkeypatch.setattr(
+        ibs_consumer_status,
+        "get_ibs_consumer_status_redis_url",
         lambda: _redis_test_url,
     )
     try:

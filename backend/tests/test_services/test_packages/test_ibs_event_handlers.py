@@ -39,7 +39,12 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from structlog.testing import capture_logs
 
-from app.core.enums import PackageStatus, TicketStatus, WorkflowType
+from app.core.enums import (
+    IBSConsumerErrorCategory,
+    PackageStatus,
+    TicketStatus,
+    WorkflowType,
+)
 from app.models.ticket import Ticket
 from app.models.track_release_checkpoint import TrackReleaseCheckpoint
 from app.services import package_service, task_publication
@@ -55,6 +60,7 @@ from app.services.ibs_event_decoding import (
 )
 from app.services.packages import ibs_event_handlers
 from app.services.packages.ibs_event_handlers import (
+    FAILURE_CATEGORIES,
     HANDLERS,
     PackageCommit,
     handle_delivery,
@@ -101,6 +107,7 @@ from tests.support.ticket_mutations import EVAL, RELEASED_AT
 Factory = Callable[[], Awaitable[AsyncSession]]
 
 _SCHEMA_REASONS = {"invalid_project", "invalid_package"}
+_PACKAGE_FAILED = IBSConsumerErrorCategory.PACKAGE_RECONCILIATION_FAILED
 
 
 def _commit_body(project: str = PROJECT, package: str = PACKAGE, **extra: Any) -> bytes:
@@ -203,6 +210,46 @@ class TestDispatch:
     def test_every_bound_routing_key_has_one_handler(self) -> None:
         assert set(HANDLERS) == set(BOUND_ROUTING_KEYS)
 
+    def test_every_bound_routing_key_has_one_failure_category(self) -> None:
+        assert FAILURE_CATEGORIES == {PACKAGE_COMMIT_ROUTING_KEY: _PACKAGE_FAILED}
+        assert set(FAILURE_CATEGORIES) == set(BOUND_ROUTING_KEYS)
+
+    @pytest.mark.parametrize("routing_key", [None, "suse.obs.metrics"])
+    async def test_unbound_routing_key_is_malformed_before_decoding(
+        self, routing_key: str | None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def no_decoding(*_: Any) -> None:
+            raise AssertionError("an unbound routing key is never decoded")
+
+        monkeypatch.setattr(ibs_event_handlers, "decode_delivery", no_decoding)
+
+        result = await handle_delivery(
+            routing_key, CONTENT_TYPE, _commit_body(), client=cast(IBSClient, object())
+        )
+
+        assert result == DeliveryResult(
+            DeliveryOutcome.MALFORMED, "unsupported_routing_key"
+        )
+
+    async def test_unclassified_decoding_exception_is_a_categorized_failure(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def broken(*_: Any) -> None:
+            raise RuntimeError("fictional bug")
+
+        monkeypatch.setattr(ibs_event_handlers, "decode_delivery", broken)
+
+        result = await handle_delivery(
+            PACKAGE_COMMIT_ROUTING_KEY,
+            CONTENT_TYPE,
+            _commit_body(),
+            client=cast(IBSClient, object()),
+        )
+
+        assert result == DeliveryResult(
+            DeliveryOutcome.FAILED, "unexpected_error", error_category=_PACKAGE_FAILED
+        )
+
     @pytest.mark.parametrize("case", _malformed_cases(), ids=lambda case: case.id)
     async def test_malformed_delivery_does_no_database_or_ibs_work(
         self, case: HostileCase, monkeypatch: pytest.MonkeyPatch
@@ -237,7 +284,9 @@ class TestDispatch:
             client=cast(IBSClient, object()),
         )
 
-        assert result == DeliveryResult(DeliveryOutcome.FAILED, "unexpected_error")
+        assert result == DeliveryResult(
+            DeliveryOutcome.FAILED, "unexpected_error", error_category=_PACKAGE_FAILED
+        )
 
     @pytest.mark.parametrize(
         "error", [MemoryError(), asyncio.CancelledError(), KeyboardInterrupt()]
@@ -477,6 +526,7 @@ class TestReconciliation:
             DeliveryOutcome.FAILED,
             "track_failed",
             {**_IDENTITY, "track_count": 2, "failed_track_count": 2},
+            _PACKAGE_FAILED,
         )
         for track in tracks:
             assert await checkpoint_srcmd5(world, track) == CHECKPOINT
@@ -505,6 +555,7 @@ class TestReconciliation:
             DeliveryOutcome.FAILED,
             "track_failed",
             {**_IDENTITY, "track_count": 2, "failed_track_count": 1},
+            _PACKAGE_FAILED,
         )
         assert await events_of(world, first.ticket_id) == [first.fixed_event()]
         assert await events_of(world, second.ticket_id) == []
@@ -594,7 +645,7 @@ class TestExceptionBoundary:
         result = await _handle(ibs, _commit_body())
 
         assert result == DeliveryResult(
-            DeliveryOutcome.FAILED, "selection_failed", _IDENTITY
+            DeliveryOutcome.FAILED, "selection_failed", _IDENTITY, _PACKAGE_FAILED
         )
         assert ibs.served == []
 
@@ -636,6 +687,7 @@ class TestExceptionBoundary:
             DeliveryOutcome.FAILED,
             "reconciliation_failed",
             {**_IDENTITY, "track_count": 3},
+            _PACKAGE_FAILED,
         )
         assert len(units.sessions) == 2
         assert units.closed == units.sessions
@@ -670,6 +722,7 @@ class TestExceptionBoundary:
 
         assert result.outcome is DeliveryOutcome.FAILED
         assert result.reason_category == "reconciliation_failed"
+        assert result.error_category is _PACKAGE_FAILED
         assert units.closed == units.sessions
         assert await events_of(world, track.ticket_id) == []
 
