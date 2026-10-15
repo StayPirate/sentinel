@@ -1181,13 +1181,16 @@ Python version:
 
 ```dockerfile
 ARG PYTHON_VERSION=3.14
-FROM python:${PYTHON_VERSION}-slim AS builder
+ARG PYTHON_BASE_DIGEST=sha256:...
+FROM python:${PYTHON_VERSION}-slim@${PYTHON_BASE_DIGEST} AS builder
 ...
-FROM python:${PYTHON_VERSION}-slim AS runtime
+FROM python:${PYTHON_VERSION}-slim@${PYTHON_BASE_DIGEST} AS runtime
 ```
 
 The default value MUST match `backend/.python-version`. A CI drift-check
 step verifies this automatically — a mismatch fails the build.
+`PYTHON_BASE_DIGEST` pins the base image by digest (see
+`docs/deployment.md`, Container Build Conventions, Base image pinning).
 
 #### Version Bump Checklist
 
@@ -1205,9 +1208,14 @@ When upgrading to a new Python minor version:
    the new minor (e.g., `3.14`).
 3. **Align `requires-python`**: update `backend/pyproject.toml`
    `requires-python` to `>=3.<new-minor>`.
-4. **Update Dockerfile default**: change `ARG PYTHON_VERSION=...` in
-   `backend/Dockerfile` to match. (The drift-check will catch this if
-   forgotten.)
+4. **Update Dockerfile defaults**: change `ARG PYTHON_VERSION=...` in
+   `backend/Dockerfile` to match (the drift-check will catch this if
+   forgotten), and change `ARG PYTHON_BASE_DIGEST=...` to the digest of
+   the new `python:<new-minor>-slim` image (e.g. from `docker buildx
+   imagetools inspect python:<new-minor>-slim`). The digest takes
+   precedence over the tag, so a stale digest keeps the previous minor's
+   base image (see `docs/deployment.md`, Container Build Conventions,
+   Base image pinning).
 5. **Run the full test suite locally** on the new interpreter. Pay
    attention to `DeprecationWarning` output.
 6. **Temporary CI matrix** (optional but recommended): for the PR that
