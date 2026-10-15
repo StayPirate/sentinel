@@ -598,6 +598,19 @@ class TestExceptionBoundary:
         )
         assert ibs.served == []
 
+    async def test_memory_error_in_the_selection_propagates(
+        self, world: TrackWorld, ibs: FakeIBS, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        async def exhausted(*_: Any, **__: Any) -> list[TrackReleaseCandidate]:
+            raise MemoryError
+
+        monkeypatch.setattr(
+            ibs_event_handlers, "load_track_release_candidates", exhausted
+        )
+
+        with pytest.raises(MemoryError):
+            await _handle(ibs, _commit_body())
+
     @pytest.mark.parametrize("ambiguous", [False, True], ids=["failed", "ambiguous"])
     async def test_commit_failure_ends_the_delivery_and_keeps_earlier_units(
         self,
