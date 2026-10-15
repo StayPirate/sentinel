@@ -1487,3 +1487,170 @@ class TestCorsOriginsParsing:
         monkeypatch.delenv("CORS_ORIGINS", raising=False)
         s = Settings(_env_file=None)
         assert s.cors_origins == ["http://localhost:5173"]
+
+
+_MQ_PASSWORD = "mq-password-not-for-production"
+
+
+def _mq_settings(monkeypatch: pytest.MonkeyPatch, **env: str) -> Settings:
+    monkeypatch.setenv("JWT_SECRET_KEY", "a" * 32)
+    for name in (
+        "IBS_RABBITMQ_URL",
+        "IBS_RABBITMQ_ENABLED",
+        "IBS_RABBITMQ_RECONNECT_INITIAL",
+        "IBS_RABBITMQ_RECONNECT_MAX",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    return Settings(_env_file=None)
+
+
+@pytest.mark.unit
+class TestIbsRabbitmqSettings:
+    """The IBS RabbitMQ consumer settings
+    (docs/features/integrations/ibs-rabbitmq-integration.md, Configuration;
+    docs/configuration.md, IBS RabbitMQ Consumer). Every role shares
+    `Settings`, so an invalid value fails startup of every role even when
+    the consumer is disabled."""
+
+    def test_defaults(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        s = _mq_settings(monkeypatch)
+
+        assert s.ibs_rabbitmq_url == "amqps://suse:suse@rabbit.suse.de"
+        assert s.ibs_rabbitmq_enabled is True
+        assert s.ibs_rabbitmq_reconnect_initial == 5
+        assert s.ibs_rabbitmq_reconnect_max == 300
+
+    def test_url_is_excluded_from_the_representation(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        url = f"amqps://svc:{_MQ_PASSWORD}@mq.example.test"
+        s = _mq_settings(monkeypatch, IBS_RABBITMQ_URL=url)
+
+        assert _MQ_PASSWORD not in repr(s)
+        assert not Settings.model_fields["ibs_rabbitmq_url"].repr
+
+    def test_fixed_constants_have_no_setting(self) -> None:
+        assert {
+            name for name in Settings.model_fields if name.startswith("ibs_rabbitmq_")
+        } == {
+            "ibs_rabbitmq_url",
+            "ibs_rabbitmq_enabled",
+            "ibs_rabbitmq_reconnect_initial",
+            "ibs_rabbitmq_reconnect_max",
+        }
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "amqps://suse:suse@rabbit.suse.de",
+            "amqps://rabbit.suse.de",
+            "AMQPS://rabbit.suse.de",
+            "amqps://svc:p%40ss@mq.example.test:5671",
+            "amqps://svc:pass@mq.example.test:5671/",
+            "amqps://svc:pass@mq.example.test/example-vhost",
+            "amqps://svc@[2001:db8::1]:5671",
+        ],
+    )
+    def test_accepted_urls_are_kept_unchanged(
+        self, monkeypatch: pytest.MonkeyPatch, url: str
+    ) -> None:
+        assert _mq_settings(monkeypatch, IBS_RABBITMQ_URL=url).ibs_rabbitmq_url == url
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "amqp://mq.example.test",
+            "https://mq.example.test",
+            "mq.example.test",
+            "",
+            "amqps://",
+            "amqps://:5671",
+            f"amqps://svc:{_MQ_PASSWORD}@",
+            f"amqps://svc:{_MQ_PASSWORD}@mq.example.test?heartbeat=0",
+            f"amqps://svc:{_MQ_PASSWORD}@mq.example.test/?no_verify_ssl=1",
+            f"amqps://svc:{_MQ_PASSWORD}@mq.example.test#fragment",
+            f"amqps://svc:{_MQ_PASSWORD}@mq.example.test:notaport",
+            f"amqps://svc:{_MQ_PASSWORD}@mq.example.test:99999",
+            f"amqps://svc:{_MQ_PASSWORD}@mq.example.test:",
+            f"amqps://svc:{_MQ_PASSWORD}@[::1",
+            f"amqps://svc:{_MQ_PASSWORD}@mq.example.test /vhost",
+            f" amqps://svc:{_MQ_PASSWORD}@mq.example.test",
+            f"amqps://svc:{_MQ_PASSWORD}@mq.example.test\n",
+        ],
+    )
+    def test_rejected_url_names_only_the_variable(
+        self, monkeypatch: pytest.MonkeyPatch, url: str
+    ) -> None:
+        with pytest.raises(ValidationError, match="IBS_RABBITMQ_URL") as raised:
+            _mq_settings(monkeypatch, IBS_RABBITMQ_URL=url)
+
+        rendered = str(raised.value) + "".join(traceback.format_exception(raised.value))
+        assert _MQ_PASSWORD not in rendered
+
+    def test_control_character_is_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="IBS_RABBITMQ_URL"):
+            Settings(
+                _env_file=None,
+                jwt_secret_key="a" * 32,
+                ibs_rabbitmq_url="amqps://mq.example.test\x00",
+            )
+
+    @pytest.mark.parametrize(
+        ("initial", "maximum"),
+        [("5", "300"), ("1", "1"), ("300", "300"), ("7", "8")],
+    )
+    def test_accepted_reconnect_pairs(
+        self, monkeypatch: pytest.MonkeyPatch, initial: str, maximum: str
+    ) -> None:
+        s = _mq_settings(
+            monkeypatch,
+            IBS_RABBITMQ_RECONNECT_INITIAL=initial,
+            IBS_RABBITMQ_RECONNECT_MAX=maximum,
+        )
+
+        assert (s.ibs_rabbitmq_reconnect_initial, s.ibs_rabbitmq_reconnect_max) == (
+            int(initial),
+            int(maximum),
+        )
+
+    @pytest.mark.parametrize(
+        ("initial", "maximum", "variable"),
+        [
+            ("0", "300", "IBS_RABBITMQ_RECONNECT_INITIAL"),
+            ("-5", "300", "IBS_RABBITMQ_RECONNECT_INITIAL"),
+            ("5", "0", "IBS_RABBITMQ_RECONNECT_MAX"),
+            ("5", "-1", "IBS_RABBITMQ_RECONNECT_MAX"),
+            ("10", "9", "IBS_RABBITMQ_RECONNECT_MAX"),
+        ],
+    )
+    def test_rejected_reconnect_pairs_name_the_variable(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        initial: str,
+        maximum: str,
+        variable: str,
+    ) -> None:
+        with pytest.raises(ValidationError, match=variable):
+            _mq_settings(
+                monkeypatch,
+                IBS_RABBITMQ_RECONNECT_INITIAL=initial,
+                IBS_RABBITMQ_RECONNECT_MAX=maximum,
+            )
+
+    def test_invalid_value_fails_even_when_the_consumer_is_disabled(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        with pytest.raises(ValidationError, match="IBS_RABBITMQ_URL"):
+            _mq_settings(
+                monkeypatch,
+                IBS_RABBITMQ_ENABLED="false",
+                IBS_RABBITMQ_URL="amqp://mq.example.test",
+            )
+
+    def test_disabled_flag_is_parsed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        assert (
+            _mq_settings(monkeypatch, IBS_RABBITMQ_ENABLED="false").ibs_rabbitmq_enabled
+            is False
+        )
