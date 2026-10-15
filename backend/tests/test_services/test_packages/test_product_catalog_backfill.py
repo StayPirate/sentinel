@@ -23,6 +23,11 @@ Owning specifications:
   handling convention) and docs/features/platform/testing-strategy.md
   (Concurrency Testing: explicit cleanup of committed rows; Audit Trail
   Testing).
+- docs/features/packages/product-catalog.md (Product Catalog Backfill: the
+  IBS-track request catch-up paragraph) with package-service.md
+  (`add_package_to_ticket()` step 9; Architectural Test Requirement
+  "Package-add request catch-up") and ibs-submission-tracking.md
+  (Accelerators > Package Addition; Structured Logs).
 
 The workflow owns its sessions, so it receives a recording factory over
 `real_session_factory` (index 0 is the selection session, then one session
@@ -33,7 +38,10 @@ test database; each test owns all of them. SMELT is the in-process
 `PackageSmelt` fake, routed per package name, behind the substituted
 `create_http_client()` of the backfill module; `task_publication.publish_task`
 is substituted by a recorder, and the orchestrator's own client factory
-fails the test if a pair does not use the shared client.
+fails the test if a pair does not use the shared client. A pair that
+creates at least one IBS track publishes exactly one `run_catch_up` for
+`sync_ibs_requests` (`request_catch_up()`); every other pair outcome
+publishes nothing.
 
 Unless a test states otherwise: a Ticket is a committed unassigned
 CVE-less `Analysis` Ticket with `severity_manual = High`; a catalog Product
@@ -49,15 +57,16 @@ from __future__ import annotations
 import asyncio
 import inspect
 import uuid
-from collections.abc import AsyncIterator, Callable, MutableMapping
+from collections.abc import AsyncIterator, Awaitable, Callable, MutableMapping
 from dataclasses import dataclass, field
 from typing import Any, cast
 
 import httpx
 import pytest
+from celery.exceptions import OperationalError as BrokerOperationalError
 from celery.exceptions import SoftTimeLimitExceeded
 from sqlalchemy import event, func, select, update
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import DBAPIError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from structlog.testing import capture_logs
 
@@ -94,6 +103,7 @@ from app.services.ticket_convergence_registry import (
 )
 from tests.support.package_addition import (
     MAINTAINED_PATH,
+    REQUEST_CATCH_UP_FAILED,
     PackageSmelt,
     Pause,
     Respond,
@@ -104,6 +114,8 @@ from tests.support.package_addition import (
     not_found,
     publish,
     reply,
+    request_catch_up,
+    request_catch_up_failed,
 )
 from tests.support.package_records import (
     NEW_TRACK,
@@ -186,12 +198,20 @@ def _environment(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @dataclass
 class _Publish:
-    """Substitute for `task_publication.publish_task` recording each call."""
+    """Substitute for `task_publication.publish_task` recording each call;
+    `on_call` is awaited inside the attempt, and `error` is then raised."""
 
     calls: list[dict[str, Any]] = field(default_factory=list)
+    on_call: Callable[[dict[str, Any]], Awaitable[None]] | None = None
+    error: BaseException | None = None
 
     async def __call__(self, task_name: str, **options: Any) -> None:
-        self.calls.append({"task_name": task_name, **options})
+        call = {"task_name": task_name, **options}
+        self.calls.append(call)
+        if self.on_call is not None:
+            await self.on_call(call)
+        if self.error is not None:
+            raise self.error
 
 
 @pytest.fixture(autouse=True)
@@ -204,16 +224,26 @@ def published(monkeypatch: pytest.MonkeyPatch) -> _Publish:
 class _Sessions:
     """Session factory passed to the workflow: delegates to the real factory
     and records every session it opens (index 0 is the selection, then one
-    per pair). `hooks[index]` instruments one session before use."""
+    per pair) and whether its `close()` was awaited (`closed[index]`).
+    `hooks[index]` instruments one session before use."""
 
     def __init__(self, factory: async_sessionmaker[AsyncSession]) -> None:
         self._factory = factory
         self.sessions: list[AsyncSession] = []
+        self.closed: list[bool] = []
         self.hooks: dict[int, Callable[[AsyncSession], None]] = {}
 
     def __call__(self) -> AsyncSession:
         index = len(self.sessions)
         session = self._factory()
+        self.closed.append(False)
+        close = session.close
+
+        async def _close() -> None:
+            self.closed[index] = True
+            await close()
+
+        setattr(session, "close", _close)  # noqa: B010
         if index in self.hooks:
             self.hooks[index](session)
         self.sessions.append(session)
@@ -746,7 +776,9 @@ class TestPairOutcomes:
         Product, and a previously omitted Git track is created with its
         Product: one system `package_added` with the backfill comment, the
         existing track keeps its affectedness and delivery, the unassigned
-        Ticket stays unassigned, and nothing is published."""
+        Ticket stays unassigned, and nothing is published (a Product below
+        an existing IBS track and a new Git track register no request
+        catch-up)."""
         await world.user(role=Role.VULNERABILITY_ANALYST)
         ticket = await _ticket(world)
         p1, p2, p3 = [await _current_product(world) for _ in range(3)]
@@ -808,7 +840,8 @@ class TestPairOutcomes:
         """#785 D3: a backfill pair that creates a new `ANALYSIS` track on an
         `Analyzed` Ticket regresses it to `Analysis` through normal
         reconciliation, but registers no Ticket convergence effect and
-        publishes nothing."""
+        publishes nothing (the new track is a Git track, so no request
+        catch-up either)."""
         ticket = await _ticket(world, status=TicketStatus.ANALYZED)
         p1, p2 = await _current_product(world), await _current_product(world)
         (a,) = _names("a")
@@ -858,7 +891,7 @@ class TestPairOutcomes:
         """Two complete package trees: `a` gains the association of the
         maintainer M (one system `package_maintainer_added`, no
         `package_added`, no assignment or reconciliation), `b` is a pure
-        no-op; both are no-op pairs."""
+        no-op; both are no-op pairs and publish nothing."""
         m = await world.user(role=Role.RESTRICTED_ANALYST)
         ticket = await _ticket(world)
         p1, p2 = await _current_product(world), await _current_product(world)
@@ -886,6 +919,7 @@ class TestPairOutcomes:
             [(a, m.id)],
         )
         assert m.email not in repr(logs)
+        assert published.calls == []
 
     async def test_repeated_backfill_is_idempotent(
         self,
@@ -986,8 +1020,9 @@ class TestPairOutcomes:
         on the maintained request. The locked guard raises
         `PackageAlreadyExcludedError`: the pair is rolled back without a
         failure warning and counted as skipped-excluded (the fetched
-        maintainer is not associated), and the next package `b` is still
-        processed."""
+        maintainer is not associated and nothing is published), and the
+        next package `b` is still processed: its new IBS track publishes the
+        one request catch-up."""
         m = await world.user(role=Role.RESTRICTED_ANALYST)
         ticket = await _ticket(world)
         p1, p2 = await _current_product(world), await _current_product(world)
@@ -1027,7 +1062,7 @@ class TestPairOutcomes:
             {a: Tree(SEEDED_AT, {}, {}), b: _created(p2)},
             [],
         )
-        assert published.calls == []
+        assert published.calls == [request_catch_up(ticket.id)]
 
 
 # ---------------------------------------------------------------------------
@@ -1064,7 +1099,9 @@ class TestPairFailures:
         name, the exception class, and for SMELT unavailability the bounded
         category, and counted as failed; the next pair still commits its
         tree. No log carries the SMELT body, a maintainer email, a URL, or
-        exception text.
+        exception text. Only the succeeding pair's new IBS track publishes a
+        request catch-up; the failed pair, including a failed commit,
+        publishes nothing.
 
         `catalog-not-ready` starts with no Product at all; the second
         pair's maintained request publishes the first current Product.
@@ -1170,7 +1207,7 @@ class TestPairFailures:
             {failing: EMPTY_TREE, succeeding: _created(products[0])},
             [],
         )
-        assert published.calls == []
+        assert published.calls == [request_catch_up(ticket.id)]
 
     async def test_later_failure_does_not_roll_back_earlier_pairs(
         self,
@@ -1241,7 +1278,8 @@ class TestControlSignals:
         signal propagates unchanged, that pair is rolled back and its
         session closed, the first pair stays committed, the third is never
         attempted, the shared client is closed, and no failure or
-        completion line is logged."""
+        completion line is logged. Only the committed first pair published
+        its request catch-up."""
         ticket = await _ticket(world)
         p1, p2, p3 = [await _current_product(world) for _ in range(3)]
         a, b, c = _names("a", "b", "c")
@@ -1283,7 +1321,7 @@ class TestControlSignals:
             {a: _created(p1), b: EMPTY_TREE, c: EMPTY_TREE},
             [],
         )
-        assert published.calls == []
+        assert published.calls == [request_catch_up(ticket.id)]
 
     async def test_cancellation_during_a_smelt_request_propagates_after_cleanup(
         self,
@@ -1349,7 +1387,8 @@ class TestCompletionLine:
         while the second Ticket's pair `d` waits on its maintained request,
         an independent session resolves that Ticket and excludes the third
         Ticket's package `e`. The completion line and the returned summary
-        carry one count of every outcome."""
+        carry one count of every outcome, and only the record-creating
+        pair `a` (a new IBS track) publishes a request catch-up."""
         first_id, second_id, third_id = sorted(uuid.uuid4() for _ in range(3))
         first = await _ticket(world, ticket_id=first_id)
         second = await _ticket(world, ticket_id=second_id)
@@ -1414,7 +1453,179 @@ class TestCompletionLine:
         assert (await _committed(world, third.id, e)).trees == {
             e: Tree(SEEDED_AT, {}, {})
         }
-        assert published.calls == []
+        assert published.calls == [request_catch_up(first.id)]
+
+
+# ---------------------------------------------------------------------------
+# Package-add request catch-up (Product Catalog Backfill: the IBS-track
+# request catch-up paragraph; package-service.md, `add_package_to_ticket()`
+# step 9 and Error handling (Step 9))
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+class TestRequestCatchUp:
+    async def test_each_ibs_track_creating_pair_publishes_after_commit_and_close(
+        self,
+        world: CommittedWorld,
+        sessions: _Sessions,
+        published: _Publish,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Five pairs over two Tickets in UUID order: on the first Ticket,
+        `a` creates an IBS track, `b` only gains the maintainer M (no-op),
+        `c` only gains a Product below its existing IBS track, and `d` only
+        creates a Git track; on the second Ticket, `e` creates an IBS track.
+        Exactly `a` and `e` publish one request catch-up each, in pair
+        order. At each publication the pair's session is closed, an
+        independent session acquires `FOR UPDATE NOWAIT` on the pair's
+        Ticket, and the pair's tree is committed."""
+        m = await world.user(role=Role.RESTRICTED_ANALYST)
+        first_id, second_id = sorted(uuid.uuid4() for _ in range(2))
+        first = await _ticket(world, ticket_id=first_id)
+        second = await _ticket(world, ticket_id=second_id)
+        p1, p2, p3, p4, p5, p6 = [await _current_product(world) for _ in range(6)]
+        a, b, c, d, e = _names("a", "b", "c", "d", "e")
+        await _package(world, first, a)
+        await _package(world, first, b, tree=((IBS_REF, p2),))
+        await _package(world, first, c, tree=((IBS_REF, p3),))
+        await _package(world, first, d)
+        await _package(world, second, e)
+        smelt = _Smelt(
+            {
+                a: _resolves(codestream(IBS_REF, "SLE_15", p1.cpe)),
+                b: _resolves(codestream(IBS_REF, "SLE_15", p2.cpe), emails=(m.email,)),
+                c: _resolves(codestream(IBS_REF, "SLE_15", p3.cpe, p4.cpe)),
+                d: _resolves(codestream(GIT_REF, "SLFO", p5.cpe)),
+                e: _resolves(codestream(IBS_REF, "SLE_15", p6.cpe)),
+            }
+        )
+        smelt.install(monkeypatch)
+        package_of = {first.id: a, second.id: e}
+        observed: list[tuple[int, bool, bool, Tree | None]] = []
+
+        async def observe(call: dict[str, Any]) -> None:
+            ticket_id = uuid.UUID(call["kwargs"]["ticket_id"])
+            probe = await world.open_session()
+            try:
+                await probe.execute(
+                    select(Ticket.id)
+                    .where(Ticket.id == ticket_id)
+                    .with_for_update(nowait=True)
+                )
+                unlocked = True
+            except DBAPIError:
+                unlocked = False
+            await probe.rollback()
+            tree = await package_tree(probe, ticket_id, package_of[ticket_id])
+            await probe.rollback()
+            index = len(sessions.sessions) - 1
+            observed.append((index, sessions.closed[index], unlocked, tree))
+
+        published.on_call = observe
+
+        with capture_logs() as logs:
+            summary = await _backfill(sessions)
+
+        assert summary == ProductCatalogBackfillSummary(5, 4, 1, 0, 0, 0)
+        assert _backfill_logs(logs) == [
+            _completed(candidates=5, record_creating=4, no_op=1)
+        ]
+        assert published.calls == [
+            request_catch_up(first.id),
+            request_catch_up(second.id),
+        ]
+        assert observed == [
+            (1, True, True, _created(p1)),
+            (5, True, True, _created(p6)),
+        ]
+        assert (await _committed(world, first.id, b, c, d)).trees == {
+            b: _seeded_tree(p2),
+            c: Tree(
+                None,
+                {IBS_REF: TrackState("ibs", "ANALYSIS", "PENDING", None)},
+                {
+                    (IBS_REF, p3.id): OccurrenceState(True, False, None, None),
+                    (IBS_REF, p4.id): new_occurrence(True),
+                },
+            ),
+            d: Tree(
+                None,
+                {GIT_REF: NEW_TRACK[WorkflowType.GIT]},
+                {(GIT_REF, p5.id): new_occurrence(True)},
+            ),
+        }
+        assert [
+            entry for entry in logs if entry["event"] == REQUEST_CATCH_UP_FAILED
+        ] == []
+
+    @pytest.mark.parametrize(
+        "make_error",
+        [
+            pytest.param(
+                lambda: BrokerOperationalError(
+                    f"amqp://sentinel:{MARKER}@broker.example.test//"
+                ),
+                id="broker-operational",
+            ),
+        ],
+    )
+    async def test_publication_failure_leaves_the_pair_outcome_and_counts_unchanged(
+        self,
+        world: CommittedWorld,
+        sessions: _Sessions,
+        published: _Publish,
+        monkeypatch: pytest.MonkeyPatch,
+        make_error: Callable[[], Exception],
+    ) -> None:
+        """Every catch-up publication raises. Both IBS-track-creating pairs
+        stay committed and record-creating, each logs exactly one sanitized
+        `ibs_request_catch_up_dispatch_failed` WARNING (no pair failure, no
+        generic callback error), the second pair still runs, and the
+        completion line and summary are those of a fully successful run."""
+        ticket = await _ticket(world)
+        p1, p2 = await _current_product(world), await _current_product(world)
+        a, b = _names("a", "b")
+        await _package(world, ticket, a)
+        await _package(world, ticket, b)
+        error = make_error()
+        published.error = error
+        _Smelt(
+            {
+                a: _resolves(codestream(IBS_REF, "SLE_15", p1.cpe)),
+                b: _resolves(codestream(IBS_REF, "SLE_15", p2.cpe)),
+            }
+        ).install(monkeypatch)
+
+        with capture_logs() as logs:
+            summary = await _backfill(sessions)
+
+        failed_publication = request_catch_up_failed(ticket.id, type(error).__name__)
+        assert [
+            entry
+            for entry in logs
+            if entry["event"] == REQUEST_CATCH_UP_FAILED
+            or entry["event"] == "post_commit_callback_failed"
+            or str(entry["event"]).startswith("product_catalog_backfill")
+        ] == [
+            failed_publication,
+            failed_publication,
+            _completed(candidates=2, record_creating=2),
+        ]
+        assert summary == ProductCatalogBackfillSummary(2, 2, 0, 0, 0, 0)
+        assert published.calls == [request_catch_up(ticket.id)] * 2
+        assert await _committed(world, ticket.id, a, b) == _Committed(
+            (ANALYSIS, None),
+            [
+                package_added_event(a, None, BACKFILL),
+                package_added_event(b, None, BACKFILL),
+            ],
+            {a: _created(p1), b: _created(p2)},
+            [],
+        )
+        rendered = repr(logs)
+        for forbidden in (MARKER, "broker.example.test", "amqp://"):
+            assert forbidden not in rendered
 
 
 # ---------------------------------------------------------------------------
@@ -1436,7 +1647,8 @@ class TestOverlappingInvocations:
         the first pair's maintainership request, then serialize on the
         Ticket lock: each tree row, association, and event exists exactly
         once, each invocation used its own one client, and both complete
-        (one creates the tree, the other observes it as a no-op)."""
+        (one creates the tree, the other observes it as a no-op); only the
+        pair that created `a`'s IBS track publishes a request catch-up."""
         m1, m2 = [await world.user(role=Role.RESTRICTED_ANALYST) for _ in range(2)]
         ticket = await _ticket(world)
         p1, p2 = await _current_product(world), await _current_product(world)
@@ -1496,7 +1708,7 @@ class TestOverlappingInvocations:
         )
         assert state.trees == {a: _created(p1), b: _seeded_tree(p2)}
         assert state.maintainers == sorted([(a, m1.id), (b, m2.id)])
-        assert published.calls == []
+        assert published.calls == [request_catch_up(ticket.id)]
 
 
 # ---------------------------------------------------------------------------

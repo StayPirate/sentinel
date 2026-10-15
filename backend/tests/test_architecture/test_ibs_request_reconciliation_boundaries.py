@@ -17,15 +17,24 @@ boundaries.
   never write or end their transaction.
 - The lock-free observation module (`ibs_request_observation.py`) has no
   database dependency at all.
+- The fetcher module `sync_ibs_requests.py` takes no row lock, opens no
+  session of its own, and uses the session it is given only for the scope
+  read and the commit that ends it; it never uses `BaseFetcher.http_client`
+  (ibs-submission-tracking.md, Fetcher: sync_ibs_requests > Algorithm;
+  Accelerators > Ticket Convergence; fetcher-infrastructure.md, Per-Ticket
+  Catch-Up > Interface contract: no direct Ticket lock, the passed session
+  is for read-only queries only).
 
 The behavior is proven by
-`tests/test_services/test_packages/test_ibs_request_reconciliation*.py`;
-these checks keep a later edit from crossing the boundaries.
+`tests/test_services/test_packages/test_ibs_request_reconciliation*.py` and
+`test_sync_ibs_requests.py`; these checks keep a later edit from crossing
+the boundaries.
 """
 
 from __future__ import annotations
 
 import ast
+import re
 from pathlib import Path
 from typing import Final
 
@@ -36,6 +45,12 @@ from tests.support.module_imports import APP_ROOT, imported_modules
 _PACKAGES = APP_ROOT / "services" / "packages"
 _BOUNDARY = _PACKAGES / "ibs_request_reconciliation.py"
 _OBSERVATION = _PACKAGES / "ibs_request_observation.py"
+_FETCHER = _PACKAGES / "sync_ibs_requests.py"
+_FETCHER_CLASS: Final = "SyncIbsRequests"
+_FETCHER_METHODS: Final = ("execute", "catch_up")
+_SCOPE_READER: Final = "load_ibs_request_scopes"
+
+_FOR_UPDATE: Final = re.compile(r"\bfor\s+(no\s+key\s+)?update\b", re.IGNORECASE)
 
 _LOCKING: Final = "_reconcile_scope"
 _APPLY: Final = "_Reconciliation._apply"
@@ -238,3 +253,104 @@ class TestObservationModule:
             or module.startswith(("sqlalchemy.", "app.database", "app.models"))
         } == set()
         assert "with_for_update" not in _referenced_names(_tree(_OBSERVATION))
+
+
+def _docstrings(tree: ast.AST) -> set[ast.AST]:
+    found: set[ast.AST] = set()
+    for node in ast.walk(tree):
+        if isinstance(
+            node, ast.Module | ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef
+        ):
+            body = node.body
+            if (
+                body
+                and isinstance(body[0], ast.Expr)
+                and isinstance(body[0].value, ast.Constant)
+                and isinstance(body[0].value.value, str)
+            ):
+                found.add(body[0].value)
+    return found
+
+
+def _fetcher_method(name: str) -> ast.FunctionDef | ast.AsyncFunctionDef:
+    return _functions(_tree(_FETCHER))[f"{_FETCHER_CLASS}.{name}"]
+
+
+def _passes_session(call: ast.Call) -> bool:
+    return any(
+        isinstance(node, ast.Name) and node.id == "session"
+        for argument in (*call.args, *(keyword.value for keyword in call.keywords))
+        for node in ast.walk(argument)
+    )
+
+
+@pytest.mark.unit
+class TestFetcherReadsOnly:
+    def test_module_takes_no_row_lock(self) -> None:
+        tree = _tree(_FETCHER)
+        docstrings = _docstrings(tree)
+
+        assert "with_for_update" not in _referenced_names(tree)
+        assert [
+            node.lineno
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and node not in docstrings
+            and _FOR_UPDATE.search(node.value)
+        ] == []
+
+    def test_imports_no_sqlalchemy_write_construct_or_model(self) -> None:
+        imported = {
+            alias.name
+            for node in ast.walk(_tree(_FETCHER))
+            if isinstance(node, ast.ImportFrom)
+            and (node.module or "").startswith("sqlalchemy")
+            for alias in node.names
+        }
+
+        assert imported & {"select", "update", "insert", "delete", "text"} == set()
+        assert [
+            module
+            for module in imported_modules(_FETCHER, "app.services.packages")
+            if module == "app.models" or module.startswith("app.models.")
+        ] == []
+
+    @pytest.mark.parametrize("method", _FETCHER_METHODS)
+    def test_the_passed_session_only_reads_scopes_and_ends_the_read(
+        self, method: str
+    ) -> None:
+        """The only method called on `session` is `commit()`, and the only
+        call it is passed to is the scope reader."""
+        body = _fetcher_method(method)
+        calls = [node for node in ast.walk(body) if isinstance(node, ast.Call)]
+        on_session = {
+            call.func.attr
+            for call in calls
+            if isinstance(call.func, ast.Attribute)
+            and isinstance(call.func.value, ast.Name)
+            and call.func.value.id == "session"
+        }
+        receivers = {
+            call.func.id if isinstance(call.func, ast.Name) else ast.unparse(call.func)
+            for call in calls
+            if _passes_session(call)
+        }
+
+        assert on_session == {"commit"}
+        assert receivers == {_SCOPE_READER}
+
+    def test_module_calls_no_other_session_operation(self) -> None:
+        assert _called_attributes(_tree(_FETCHER)) & (
+            _WRITES | {"close", "with_for_update"}
+        ) == {"commit"}
+
+    def test_module_opens_no_session_and_uses_no_fetcher_http_client(self) -> None:
+        """Only the boundary opens the snapshot and unit sessions, and IBS is
+        requested through the fetcher's own `IBSClient`; neither
+        `BaseFetcher.http_client` nor another HTTP client is used."""
+        names = _referenced_names(_tree(_FETCHER))
+
+        assert names & {"async_session_factory", "get_async_session"} == set()
+        assert names & {"http_client", "_http_client", "create_http_client"} == set()
+        assert names & {"httpx", "task_publication", "publish_task", "redis"} == set()

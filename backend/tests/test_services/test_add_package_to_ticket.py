@@ -7,7 +7,9 @@ Owning specifications:
 - docs/features/packages/package-service.md (Architecture: Transaction
   ownership, Acting user convention, Consumer caller context and Ticket
   accessibility, Module invariant: I/O-then-Lock pattern; Auto-Assignment
-  Rule; `add_package_to_ticket()` steps 1-8 and 10, Idempotency, Escaping
+  Rule; `add_package_to_ticket()` steps 1-8 and 10 (step 9, the package-add
+  request catch-up, is in
+  `tests/test_services/test_package_add_request_catch_up.py`), Idempotency, Escaping
   exceptions, Public error precedence, Error handling; Service Exceptions;
   Architectural Test Requirement: Atomic consumer accessibility (the
   single-session parts), Maintainership acquisition, Package creation
@@ -67,6 +69,7 @@ from structlog.testing import capture_logs
 from app.config import settings
 from app.core.enums import PackageStatus, Role, Scope, TicketStatus, WorkflowType
 from app.core.exceptions import TicketNotFoundError, TicketNotMutableError
+from app.database import detach_post_commit_callbacks
 from app.models.product import Product
 from app.models.system_setting import SystemSetting
 from app.models.ticket import Ticket
@@ -1807,7 +1810,9 @@ class TestIOThenLock:
         free preliminary read runs (none for a system call); the
         orchestrator's own catalog reads are lock-free; every row lock
         belongs to the delegated boundary, entered after maintainership.
-        No Redis, broker, or post-commit callback work occurs."""
+        No Redis or broker work occurs: the new IBS track only registers
+        the one step-9 post-commit callback, which is not run here
+        (`tests/test_services/test_package_add_request_catch_up.py`)."""
         brokered: list[str] = []
 
         async def _redis(*args: Any, **kwargs: Any) -> Any:
@@ -1860,7 +1865,7 @@ class TestIOThenLock:
         delegated = [text for kind, text in events[entered:] if kind == "sql"]
         assert any(m in t for t in delegated for m in LOCK_MARKERS)
         assert brokered == []
-        assert not db_session.info.get("post_commit_callbacks")
+        assert len(detach_post_commit_callbacks(db_session)) == 1
 
 
 # ---------------------------------------------------------------------------

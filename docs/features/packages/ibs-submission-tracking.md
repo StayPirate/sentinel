@@ -754,20 +754,27 @@ for current state, idempotency, or provenance.
 
 ### Structured Logs
 
-The shared reconciliation logs these events. Standard correlation fields are
-added by the logging infrastructure and are not repeated here.
+The shared reconciliation, the [fetcher](#fetcher-sync_ibs_requests), and the
+[package-addition accelerator](#package-addition) log these events. Standard
+correlation fields are added by the logging infrastructure and are not
+repeated here.
 
 | Event | Level | Required fields | Optional fields |
 |---|---|---|---|
-| `ibs_request_scope_failed` | WARNING | `ticket_id`, `track_id`, `package_name`, `reason_category` | `codestream`, `request_number`, `http_status` |
+| `ibs_request_scope_failed` | WARNING | `ticket_id`, `track_id`, `package_name`, `reason_category` | `codestream`, `request_number`, `http_status`, `fetcher_name` |
 | `ibs_request_scope_stale` | WARNING | `ticket_id`, `track_id`, `package_name`, `reason_category` | `codestream` |
 | `ibs_request_issue_ignored` | WARNING | `package_name`, `reason_category="invalid_cve_label"` | `codestream`, `request_number` |
+| `ibs_request_run_completed` | INFO | `selected`, `created`, `updated`, `no_op`, `failed` | `ticket_id` |
+| `ibs_request_catch_up_dispatch_failed` | WARNING | `ticket_id`, `fetcher_name`, `cause` | — |
 
 `ibs_request_scope_failed` is emitted once for every scope whose observation is
 incomplete or failed or whose local transaction fails, including each scope
 that depends on an incomplete or failed shared artifact. `request_number` names
 the request whose evidence made the scope incomplete or failed, when there is
-one; `http_status` accompanies `reason_category="http_status"`.
+one; `http_status` accompanies `reason_category="http_status"`. `fetcher_name`
+accompanies it when the fetcher or its catch-up invokes the reconciliation, so
+every failed catch-up item carries the fields that the generic catch-up
+contract requires.
 `ibs_request_scope_stale` is emitted once for a scope that becomes stale or
 inapplicable under the locked revalidation of [Algorithm](#algorithm) step 5,
 which is a successful no-op: `reason_category` is `ticket_not_operable` when
@@ -778,6 +785,17 @@ current release evidence diff that contains a `cve` issue in state `added` or
 is not positive evidence (`../integrations/ibs-integration.md`, Request Action
 Diff). `request_number` accompanies a request action diff. `codestream` is
 logged only when it is a `SUSE:` project.
+
+`ibs_request_run_completed` is emitted once by every periodic fetcher
+invocation that returns normally, including an empty run, and once by every
+catch-up that selects at least one scope and attempts all of them, before any
+all-failed exception; the catch-up adds `ticket_id`. An invocation ended by a
+whole-run signal or an ambiguous scope commit emits none. `selected`
+counts the distinct selected scopes and the other fields their terminal
+outcomes, so `created`, `updated`, and `no_op` together are the succeeded
+scopes. `ibs_request_catch_up_dispatch_failed` is emitted once when the
+publication of the [package-addition catch-up](#package-addition) fails;
+`fetcher_name` is `sync_ibs_requests` and `cause` is the exception class name.
 
 `reason_category` is a bounded internal classification, never upstream text.
 It distinguishes at least:
@@ -817,10 +835,15 @@ one best-effort post-commit invocation of the existing generic
 Git tracks, maintainers, or no package-tree rows registers no request catch-up.
 
 The catch-up observes committed package-tree state. Publication failure is
-logged with sanitized Ticket and operation identity and does not roll back the
-package addition. The daily complete fetcher remains the permanent recovery
-owner. There is no `correlate_submission_request` or
-dedicated submission-correlation or discovery Celery task.
+logged with sanitized Ticket and operation identity
+(`ibs_request_catch_up_dispatch_failed`, [Structured Logs](#structured-logs))
+and does not roll back the package addition. A Ticket convergence package unit
+does not attempt the catch-up: the convergence roster publishes it once after
+every package unit ([Ticket Convergence](#ticket-convergence);
+`package-service.md`, `run_ticket_convergence()` workflow). The daily complete
+fetcher remains the permanent recovery owner. There is no
+`correlate_submission_request` or dedicated submission-correlation or discovery
+Celery task.
 
 ### Ticket Convergence
 
@@ -938,7 +961,7 @@ what a long-gap run can prove; incomplete scopes preserve prior delivery.
 | A newer authoritative request observation has already committed when the scope locks the request ([Algorithm](#algorithm) step 6) | Roll back that scope, increment `record_failed` once with the category `stale_request_observation`, and continue; a later run or catch-up observes the request again. |
 | A definitely failed scope commit, which the database reports as rejected | A local transaction failure of that scope: it is rolled back, `record_failed` is incremented once with the category `database`, and processing continues. |
 | An ambiguous scope commit, whose outcome is unknown, such as a connection failure during `COMMIT` | The invocation ends: that scope records no terminal outcome or effect metric, the exception reaches `BaseFetcher`, which finalizes the run as failure, and scopes committed earlier remain committed. |
-| Scope enumeration or another whole-run database prerequisite fails | Raise so `BaseFetcher` finalizes the run as failure. Public `error_message` uses the infrastructure's sanitized generic category; restricted error fields retain diagnostics. |
+| Scope enumeration or another whole-run database prerequisite fails | Raise so `BaseFetcher` finalizes the run as failure. A scope-enumeration failure raises `FetcherError` with the sanitized public `error_message` `"Failed to enumerate IBS request scopes"`; another whole-run database prerequisite, such as the step-1 snapshot read, uses the infrastructure's sanitized generic category. Restricted error fields retain diagnostics. |
 | Every selected scope fails | Return normally after counting failures; `BaseFetcher` records run failure because no selected scope succeeded. |
 | Some scopes complete and some fail | Return normally; `BaseFetcher` records a partial run from the mixed terminal outcomes, including when every successful scope was a no-op. |
 | Soft or hard run time limit | `SoftTimeLimitExceeded` reaches `BaseFetcher`; it records the sanitized timeout failure. The worker enforces the hard limit. No cursor advances. Scopes committed before the limit remain committed; scopes not yet attempted keep their state until a later run reconciles them. |
@@ -991,9 +1014,14 @@ including an empty run.
 
 The per-ticket `catch_up()` sub-operation creates no `FetcherRun` and reports no
 fetcher metrics, as required by the generic catch-up contract. Its per-item logs
-identify terminal failures; partial success returns normally, while an
-all-scopes infrastructure failure may propagate to `run_catch_up` for its
-shared bounded retry policy.
+identify terminal failures; partial success, including stale or inapplicable
+no-ops, returns normally. When every selected scope fails, the catch-up raises
+`FetcherError` with the sanitized message
+`"All {failed} IBS request reconciliations failed"`. That exception is not
+retryable under `run_catch_up`: every IBS request failure, including missing
+credentials and rejected authentication, has already been classified per
+scope, and the daily fetcher retries every selected scope. An ambiguous scope
+commit propagates unchanged rather than counting toward that decision.
 
 ## Public API
 

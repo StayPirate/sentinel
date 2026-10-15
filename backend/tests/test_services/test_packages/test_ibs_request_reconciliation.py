@@ -78,6 +78,7 @@ from app.services.packages.ibs_request_reconciliation import (
     IBSRequestScope,
     load_ibs_request_scopes,
     read_retained_actions,
+    reconcile_ibs_requests,
 )
 from tests.support.ibs_api import status_response, xml_response
 from tests.support.ibs_product_release import UnitSessions
@@ -1976,6 +1977,67 @@ class TestLogsAndPrivacy:
         persisted = repr(await stored_actions(world, number, described_number))
         assert MARKER not in persisted
         assert "home:" not in persisted
+
+    @pytest.mark.parametrize(
+        "fetcher_name",
+        [
+            pytest.param(None, id="without-fetcher-name"),
+            pytest.param("sync_ibs_requests", id="with-fetcher-name"),
+        ],
+    )
+    @pytest.mark.parametrize("failure", ["incomplete-observation", "local-failure"])
+    async def test_scope_failed_carries_fetcher_name_only_when_given(
+        self,
+        world: RequestWorld,
+        fake: FakeRequests,
+        monkeypatch: pytest.MonkeyPatch,
+        fetcher_name: str | None,
+        failure: str,
+    ) -> None:
+        """Structured Logs: the optional `fetcher_name` of
+        `ibs_request_scope_failed` accompanies every failed scope of an
+        invocation that names its fetcher, and is absent otherwise; the
+        stale and other events never carry it."""
+        incomplete = failure == "incomplete-observation"
+        seed = RequestSeed(world)
+        scope = await seed.track(
+            await seed.ticket(),
+            package=unique_package(),
+            delivery=IN_PROGRESS if incomplete else PENDING,
+        )
+        number, action = await correlated(seed, scope)
+        await seed.commit()
+        if incomplete:
+            fake.respond("GET", f"/request/{number}", [], 404)
+            fake.quiet(scope.package_name)
+            expected = failed_entry(scope, "not_found", request_number=number)
+        else:
+            # The correlated SR is still open: a complete positive whose
+            # delivery mutation is rejected inside the locked unit.
+            fake.request(number, REVIEW, action)
+            fake.quiet(scope.package_name)
+
+            async def rejecting(db: AsyncSession, **kwargs: Any) -> Any:
+                raise package_service.InvalidDeliveryStatusTransition(
+                    PENDING, kwargs["delivery_status"]
+                )
+
+            monkeypatch.setattr(package_service, "set_track_delivery_status", rejecting)
+            expected = failed_entry(scope, "invalid_delivery_transition")
+        if fetcher_name is not None:
+            expected["fetcher_name"] = fetcher_name
+
+        with capture_logs() as logs:
+            async with fake.client() as client:
+                outcomes = await reconcile_ibs_requests(
+                    [scope], client=client, fetcher_name=fetcher_name
+                )
+
+        assert kinds(outcomes) == {scope.track_id: "failed"}
+        assert logged(logs, SCOPE_FAILED) == [expected]
+        assert [e for e in logs if "fetcher_name" in e] == (
+            [expected] if fetcher_name is not None else []
+        )
 
 
 # ---------------------------------------------------------------------------

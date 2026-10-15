@@ -1204,7 +1204,11 @@ TICKET_NOT_FOUND` with no local side effect. The complete sequence is in
 - **Step 9 (post-commit effect)**: best-effort. The API transaction
   dependency or other workflow owner executes these effects only after its
   caller-owned transaction commits. Failures do not roll back the created
-  records.
+  records. Post-ingest CVE package resolution and Product catalog backfill
+  execute them after each unit's commit and session close. Ticket convergence
+  does not execute them, because its catch-up roster publishes the same
+  catch-up after every package unit
+  ([`run_ticket_convergence()` workflow](#run_ticket_convergence-workflow)).
   If generic catch-up publication fails (for example, Redis is unavailable),
   log a sanitized warning and continue. The complete daily
   `sync_ibs_requests` fetcher is the permanent recovery owner for the new IBS
@@ -1494,7 +1498,11 @@ After the status-transition transaction commits, the workflow:
    commit. A package unit's registered Ticket convergence effects are detached
    and attempted once after that unit's commit and session close and before the
    next package, because this workflow is itself an automatic best-effort owner
-   (`ticket-service.md`, Publication policies).
+   (`ticket-service.md`, Publication policies). A package unit does not attempt
+   the request catch-up that `add_package_to_ticket()` registers for a new IBS
+   track (step 9): step 4 publishes the `sync_ibs_requests` catch-up once, with
+   the complete roster, after every package unit, so that catch-up observes
+   every IBS track the units created.
 3. Logs each package-specific resolution or validation failure with the
    sanitized cause, `ticket_id`, package name, and `celery_task_id`, then
    continues. A failed package does not roll back successful siblings.
@@ -2119,7 +2127,10 @@ transitions. The test must cover:
   `run_catch_up("sync_ibs_requests", ticket_id)` publication when at least one
   IBS track is created, no publication for every documented non-triggering
   outcome, no publication before commit, and best-effort failure without
-  rollback; no dedicated submission task is used
+  rollback; the API transaction dependency, post-ingest, and Product catalog
+  backfill owners attempt it after their commit, while a Ticket convergence
+  package unit does not and its roster publishes the catch-up once after every
+  package; no dedicated submission task is used
 - **Ticket convergence workflow**: enumerate included and soft-deleted package
   markers; run SMELT target and maintainership resolution for every package;
   commit successful packages independently; isolate every package-specific

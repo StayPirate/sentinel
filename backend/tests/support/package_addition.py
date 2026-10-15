@@ -20,7 +20,12 @@ Resolution). These helpers provide:
   earlier, historical one;
 - `add()`, which calls the orchestrator as the user-facing package
   addition (`actor`, effective `scope`, `NULL` comment) or a system
-  workflow (`None`, the canonical comment) would, with the fake client.
+  workflow (`None`, the canonical comment) would, with the fake client;
+- `request_catch_up()` and `request_catch_up_failed()`, the exact recorded
+  publication and WARNING of the step-9 package-add IBS request catch-up
+  (package-service.md, `add_package_to_ticket()` step 9;
+  ibs-submission-tracking.md, Accelerators > Package Addition and
+  Structured Logs).
 
 `SNAPSHOT_AT` lies far in the future, so a published Product is current
 whatever other Products a test seeds through `catalog_product()` (whose
@@ -28,8 +33,11 @@ whatever other Products a test seeds through `catalog_product()` (whose
 (`smelt.example.test`, `cpe:/o:example:...`, `example.com` emails).
 
 Consumers: `tests/test_services/test_add_package_to_ticket.py`,
-`tests/test_services/test_add_package_to_ticket_races.py`, and
-`tests/test_services/test_new_to_analysis_promotion.py`.
+`tests/test_services/test_add_package_to_ticket_races.py`,
+`tests/test_services/test_new_to_analysis_promotion.py`, and
+`tests/test_services/test_package_add_request_catch_up.py`; the catch-up
+expectations also serve the owner tests of the API, post-ingest, and
+Product catalog backfill workflows.
 """
 
 from __future__ import annotations
@@ -67,6 +75,9 @@ Respond = Callable[[httpx.Request], httpx.Response | Awaitable[httpx.Response]]
 
 MAINTAINED_PATH = "/experimental/v2/maintained/"
 MAINTAINERSHIP_SUFFIX = "/maintainership"
+
+REQUEST_CATCH_UP_FAILED = "ibs_request_catch_up_dispatch_failed"
+"""The WARNING of a failed package-add request catch-up publication."""
 
 
 # ---------------------------------------------------------------------------
@@ -308,3 +319,32 @@ async def add(
             allow_excluded_reresolution=reresolution,
             http_client=client,
         )
+
+
+# ---------------------------------------------------------------------------
+# Package-add request catch-up (step 9)
+# ---------------------------------------------------------------------------
+
+
+def request_catch_up(ticket_id: uuid.UUID, queue: str | None = None) -> dict[str, Any]:
+    """The one `task_publication.publish_task` call, as recorded
+    `{"task_name": ..., **options}`, of the generic
+    `run_catch_up("sync_ibs_requests", ticket_id)` with the fetcher class's
+    `queue` (`None` today)."""
+    return {
+        "task_name": "run_catch_up",
+        "kwargs": {"fetcher_name": "sync_ibs_requests", "ticket_id": str(ticket_id)},
+        "queue": queue,
+    }
+
+
+def request_catch_up_failed(ticket_id: uuid.UUID, cause: str) -> dict[str, Any]:
+    """The complete sanitized WARNING of a failed catch-up publication: the
+    Ticket UUID, the fetcher name, and the exception class name only."""
+    return {
+        "event": REQUEST_CATCH_UP_FAILED,
+        "log_level": "warning",
+        "ticket_id": str(ticket_id),
+        "fetcher_name": "sync_ibs_requests",
+        "cause": cause,
+    }

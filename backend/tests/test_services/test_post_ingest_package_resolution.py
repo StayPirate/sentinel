@@ -10,9 +10,14 @@ Owning specifications:
   resolution: Deterministic candidate resolution; Per-package workflow and
   transactions with its outcome table; Resource lifecycle; Audit and
   observability; `add_package_to_ticket()` `audit_comment`,
-  `active_ticket_only`, and `allow_excluded_reresolution`; Architectural
-  Test Requirement bullets "Maintainership acquisition" and "Package audit
-  comments").
+  `active_ticket_only`, and `allow_excluded_reresolution`; step 9, the
+  package-add IBS request catch-up that a unit attempts after its commit,
+  session close, and Ticket-lock release (Per-package workflow and
+  transactions step 4); Architectural Test Requirement bullets
+  "Maintainership acquisition", "Package audit comments", and "Package-add
+  request catch-up").
+- docs/features/packages/ibs-submission-tracking.md (Accelerators >
+  Package Addition; Structured Logs: `ibs_request_catch_up_dispatch_failed`).
 - docs/features/tickets/ticket-audit-log.md (`package_added` with
   `user_id = NULL` and the `CVE package resolution` comment;
   `package_maintainer_added`; the workflow creates no event of its own).
@@ -35,7 +40,9 @@ one ordered event list shared with the `Smelt` fake. Every test seeds a
 `CommittedWorld` whose rows are deleted explicitly at teardown. SMELT is the
 in-process fake behind the substituted `package_service.create_http_client()`;
 creating a client without installing it fails the test.
-`task_publication.publish_task` is substituted by a recorder.
+`task_publication.publish_task` is substituted by a recorder: a unit that
+creates at least one IBS track publishes exactly one `run_catch_up` for
+`sync_ibs_requests` (`request_catch_up()`), any other outcome none.
 
 Unless a test states otherwise: a Ticket is a committed unassigned CVE-less
 `Analysis` Ticket with `severity_manual = High`; a catalog Product is in
@@ -55,14 +62,17 @@ from typing import Any
 
 import httpx
 import pytest
+from celery.exceptions import OperationalError as BrokerOperationalError
 from celery.exceptions import SoftTimeLimitExceeded
-from sqlalchemy.exc import OperationalError
+from sqlalchemy import select
+from sqlalchemy.exc import DBAPIError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from structlog.testing import capture_logs
 
 from app.core.enums import PackageStatus, Role, TicketStatus, WorkflowType
 from app.models.fetcher_run import FetcherRun
 from app.models.product import Product
+from app.models.ticket import Ticket
 from app.services import (
     package_service,
     ticket_convergence_registry,
@@ -75,11 +85,14 @@ from app.services.package_service import (
 )
 from app.services.ticket_audit_log import TicketAuditLog
 from tests.support.package_addition import (
+    REQUEST_CATCH_UP_FAILED,
     codestream,
     fail,
     maintained,
     not_found,
     reply,
+    request_catch_up,
+    request_catch_up_failed,
 )
 from tests.support.package_records import (
     NEW_TRACK,
@@ -87,6 +100,7 @@ from tests.support.package_records import (
     Tree,
     maintainer_event,
     new_occurrence,
+    package_tree,
 )
 from tests.support.package_records_races import (
     GIT_REF,
@@ -327,8 +341,9 @@ class TestSuccessfulUnits:
         a fresh session and the one shared client as a system invocation
         with the exact comment, active-only mode, and the excluded-package
         guard, and is committed and closed before the next package's first
-        request. One `completed` event, no publication, no `FetcherRun`,
-        and no engine disposal."""
+        request. One `completed` event, exactly one step-9 request catch-up
+        (for `a`'s new IBS track; the no-op and maintainer-only units
+        publish nothing), no `FetcherRun`, and no engine disposal."""
         m = await world.user(role=Role.RESTRICTED_ANALYST)
         ticket = await seed_ticket(world)
         p1, p2, p3 = [await current_product(world) for _ in range(3)]
@@ -395,7 +410,7 @@ class TestSuccessfulUnits:
             {a: created_tree(p1), b: seeded_tree(p2), c: seeded_tree(p3)},
             [(c, m.id)],
         )
-        assert published.calls == []
+        assert published.calls == [request_catch_up(ticket.id)]
         assert disposals == []
         assert await count_rows(world, FetcherRun) == runs_before
         assert_private(logs, a, b, c, m.email, m.username)
@@ -444,7 +459,8 @@ class TestSuccessfulUnits:
     ) -> None:
         """A new `ANALYSIS` track on an `Analyzed` Ticket regresses it to
         `Analysis` through ordinary reconciliation, but registers no Ticket
-        convergence effect and publishes nothing (issue #786, Convergence)."""
+        convergence effect: the only publication is the step-9 request
+        catch-up of the new IBS track (issue #786, Convergence)."""
         ticket = await seed_ticket(world, status=TicketStatus.ANALYZED)
         p1, p2 = await current_product(world), await current_product(world)
         existing, a = package_names("existing", "a")
@@ -477,7 +493,7 @@ class TestSuccessfulUnits:
             {a: created_tree(p2)},
         )
         assert registered == []
-        assert published.calls == []
+        assert published.calls == [request_catch_up(ticket.id)]
 
 
 # ---------------------------------------------------------------------------
@@ -509,7 +525,8 @@ class TestOutcomeTable:
         and closed before the second package `b` is requested, and `b`
         commits its tree. An expected skip (excluded, no match) completes
         normally; an isolated failure logs its cause (and the bounded SMELT
-        category) and makes the invocation partial.
+        category) and makes the invocation partial. Only `b`'s new IBS
+        track publishes the step-9 request catch-up; `a` publishes nothing.
 
         `excluded` is a committed directly excluded marker for which SMELT
         resolves a target and a maintainer: the locked guard skips it
@@ -599,7 +616,7 @@ class TestOutcomeTable:
             },
             [],
         )
-        assert published.calls == []
+        assert published.calls == [request_catch_up(ticket.id)]
         assert_private(logs, a, b, m.email, m.username)
 
     async def test_only_expected_skips_and_no_ops_complete_without_partial(
@@ -662,7 +679,9 @@ class TestTerminalFailures:
         after the real locked writes. The unit is rolled back and closed,
         one `failed` event preserves the earlier outcome and the
         not-attempted remainder, the exception propagates unchanged, `a`
-        stays committed, and `c` is never requested."""
+        stays committed, and `c` is never requested. Only the committed
+        `a` publishes its step-9 request catch-up: the failed unit `b`,
+        including a failed commit, publishes nothing."""
         ticket = await seed_ticket(world)
         p1, p2, p3 = [await current_product(world) for _ in range(3)]
         a, b, c = package_names("a", "b", "c")
@@ -731,7 +750,7 @@ class TestTerminalFailures:
         assert await committed(world, ticket.id, a, b, c) == Committed(
             (ANALYSIS, None), [added(a)], {a: created_tree(p1), b: None, c: None}, []
         )
-        assert published.calls == []
+        assert published.calls == [request_catch_up(ticket.id)]
         assert disposals == []
         assert_private(logs, a, b, c)
 
@@ -820,14 +839,15 @@ class TestInactiveTermination:
         self,
         world: CommittedWorld,
         sessions: Sessions,
+        published: Publish,
         monkeypatch: pytest.MonkeyPatch,
         status: TicketStatus,
     ) -> None:
         """There is no unlocked status precheck: for a Ticket inactive from
         the start, the first package's SMELT requests are made (diagnostic
-        only), then the locked skip terminates without mutation, audit, or
-        maintainer association, and the second package is never
-        requested."""
+        only), then the locked skip terminates without mutation, audit,
+        maintainer association, or publication, and the second package is
+        never requested."""
         m = await world.user(role=Role.RESTRICTED_ANALYST)
         original = await seed_ticket(world)
         ticket = await seed_ticket(
@@ -850,6 +870,7 @@ class TestInactiveTermination:
         assert await committed(world, ticket.id, a, b) == Committed(
             (status.value, None), [], {a: None, b: None}, []
         )
+        assert published.calls == []
 
     async def test_inactive_after_an_isolated_failure_is_not_partial(
         self,
@@ -906,7 +927,8 @@ class TestControlSignals:
         """`b` raises the signal after its locked writes: the signal
         propagates unchanged, `b` is closed without commit, `a` stays
         committed, `c` is never attempted, the shared client is closed, and
-        no workflow event is logged."""
+        no workflow event is logged. Only `a`'s committed IBS track
+        published its step-9 request catch-up."""
         ticket = await seed_ticket(world)
         p1, p2, p3 = [await current_product(world) for _ in range(3)]
         a, b, c = package_names("a", "b", "c")
@@ -933,7 +955,7 @@ class TestControlSignals:
         assert await committed(world, ticket.id, a, b, c) == Committed(
             (ANALYSIS, None), [added(a)], {a: created_tree(p1), b: None, c: None}, []
         )
-        assert published.calls == []
+        assert published.calls == [request_catch_up(ticket.id)]
         assert disposals == []
 
     @pytest.mark.parametrize(
@@ -1093,47 +1115,242 @@ class TestControlSignals:
         )
 
 
+# ---------------------------------------------------------------------------
+# Package-add request catch-up (Per-package workflow and transactions step 4;
+# `add_package_to_ticket()` step 9; testing-strategy.md, Post-Ingest Package
+# Resolution: the catch-up follows the commit and lock release, and its
+# publication failure cannot roll back or fail the committed unit)
+# ---------------------------------------------------------------------------
+
+
+def _git_tree(product: Product) -> Tree:
+    """An included marker with a new `GIT_REF` track holding one new
+    eligible occurrence."""
+    return Tree(
+        None,
+        {GIT_REF: NEW_TRACK[WorkflowType.GIT]},
+        {(GIT_REF, product.id): new_occurrence(True)},
+    )
+
+
 @pytest.mark.integration
-async def test_git_track_creation_publishes_nothing(
-    world: CommittedWorld,
-    sessions: Sessions,
-    published: Publish,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A unit that creates both an IBS and a Git track commits them with
-    one `package_added` and still publishes nothing: the workflow detaches
-    no post-commit effect of its own (issue #786, Convergence)."""
-    ticket = await seed_ticket(world)
-    p1, p2 = await current_product(world), await current_product(world)
-    (a,) = package_names("a")
-    smelt = Smelt(
-        {
-            a: resolves(
-                codestream(IBS_REF, "SLE_15", p1.cpe),
-                codestream(GIT_REF, "SLFO", p2.cpe),
-            )
-        }
-    )
-    smelt.install(monkeypatch)
+class TestRequestCatchUp:
+    async def test_ibs_and_git_track_creation_publishes_one_request_catch_up(
+        self,
+        world: CommittedWorld,
+        sessions: Sessions,
+        published: Publish,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A unit that creates both an IBS and a Git track commits them with
+        one `package_added` and publishes exactly one request catch-up for
+        the Ticket, with the default queue; the workflow detaches no Ticket
+        convergence effect (issue #786, Convergence)."""
+        ticket = await seed_ticket(world)
+        p1, p2 = await current_product(world), await current_product(world)
+        (a,) = package_names("a")
+        smelt = Smelt(
+            {
+                a: resolves(
+                    codestream(IBS_REF, "SLE_15", p1.cpe),
+                    codestream(GIT_REF, "SLFO", p2.cpe),
+                )
+            }
+        )
+        smelt.install(monkeypatch)
 
-    await resolve(sessions, ticket.id, a)
+        await resolve(sessions, ticket.id, a)
 
-    assert await committed(world, ticket.id, a) == Committed(
-        (ANALYSIS, None),
-        [added(a)],
-        {
-            a: Tree(
-                None,
-                {
-                    IBS_REF: NEW_TRACK[WorkflowType.IBS],
-                    GIT_REF: NEW_TRACK[WorkflowType.GIT],
-                },
-                {
-                    (IBS_REF, p1.id): new_occurrence(True),
-                    (GIT_REF, p2.id): new_occurrence(True),
-                },
-            )
-        },
-        [],
+        assert await committed(world, ticket.id, a) == Committed(
+            (ANALYSIS, None),
+            [added(a)],
+            {
+                a: Tree(
+                    None,
+                    {
+                        IBS_REF: NEW_TRACK[WorkflowType.IBS],
+                        GIT_REF: NEW_TRACK[WorkflowType.GIT],
+                    },
+                    {
+                        (IBS_REF, p1.id): new_occurrence(True),
+                        (GIT_REF, p2.id): new_occurrence(True),
+                    },
+                )
+            },
+            [],
+        )
+        assert published.calls == [request_catch_up(ticket.id)]
+
+    async def test_git_only_track_creation_publishes_nothing(
+        self,
+        world: CommittedWorld,
+        sessions: Sessions,
+        published: Publish,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A package-tree change that creates only a Git track commits it
+        and completes normally without any publication."""
+        ticket = await seed_ticket(world)
+        product = await current_product(world)
+        (a,) = package_names("a")
+        smelt = Smelt({a: resolves(codestream(GIT_REF, "SLFO", product.cpe))})
+        smelt.install(monkeypatch)
+
+        with capture_logs() as logs:
+            await resolve(sessions, ticket.id, a)
+
+        assert workflow_logs(logs) == [completed(ticket.id, 1, package_tree_changed=1)]
+        assert await committed(world, ticket.id, a) == Committed(
+            (ANALYSIS, None), [added(a)], {a: _git_tree(product)}, []
+        )
+        assert published.calls == []
+
+    async def test_each_ibs_track_creating_unit_publishes_after_commit_and_release(
+        self,
+        world: CommittedWorld,
+        sessions: Sessions,
+        published: Publish,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """`a` and `c` create an IBS track, `b` is a complete-tree no-op.
+        Each creating unit publishes exactly one request catch-up, in
+        processing order, only after its commit and session close and
+        before the next package's first request; `b` publishes nothing. At
+        each publication an independent session acquires `FOR UPDATE
+        NOWAIT` on the Ticket row (the unit's lock is released) and reads
+        the unit's committed tree."""
+        ticket = await seed_ticket(world)
+        p1, p2, p3 = [await current_product(world) for _ in range(3)]
+        a, b, c = package_names("a", "b", "c")
+        await commit_package(world, ticket, b, tree=((IBS_REF, p2),))
+        published.events = sessions.events
+        observed: list[tuple[bool, dict[str, Tree | None]]] = []
+
+        async def observe(call: dict[str, Any]) -> None:
+            probe = await world.open_session()
+            try:
+                await probe.execute(
+                    select(Ticket.id)
+                    .where(Ticket.id == ticket.id)
+                    .with_for_update(nowait=True)
+                )
+                unlocked = True
+            except DBAPIError:
+                unlocked = False
+            await probe.rollback()
+            trees = {
+                name: await package_tree(probe, ticket.id, name) for name in (a, c)
+            }
+            await probe.rollback()
+            observed.append((unlocked, trees))
+
+        published.on_call = observe
+        Smelt(
+            {
+                a: resolves(codestream(IBS_REF, "SLE_15", p1.cpe)),
+                b: resolves(codestream(IBS_REF, "SLE_15", p2.cpe)),
+                c: resolves(codestream(IBS_REF, "SLE_15", p3.cpe)),
+            },
+            sessions.events,
+        ).install(monkeypatch)
+
+        with capture_logs() as logs:
+            await resolve(sessions, ticket.id, c, b, a)
+
+        assert sessions.events == [
+            *http_events(a),
+            ("commit", "0"),
+            ("close", "0"),
+            ("publish", "run_catch_up"),
+            *http_events(b),
+            ("commit", "1"),
+            ("close", "1"),
+            *http_events(c),
+            ("commit", "2"),
+            ("close", "2"),
+            ("publish", "run_catch_up"),
+        ]
+        assert published.calls == [request_catch_up(ticket.id)] * 2
+        assert observed == [
+            (True, {a: created_tree(p1), c: None}),
+            (True, {a: created_tree(p1), c: created_tree(p3)}),
+        ]
+        assert workflow_logs(logs) == [
+            completed(ticket.id, 3, package_tree_changed=2, package_tree_no_op=1)
+        ]
+        assert [e for e in logs if e["event"] == REQUEST_CATCH_UP_FAILED] == []
+
+    @pytest.mark.parametrize(
+        "make_error",
+        [
+            pytest.param(
+                lambda: BrokerOperationalError(
+                    f"amqp://sentinel:{MARKER}@broker.example.test//"
+                ),
+                id="broker-operational",
+            ),
+        ],
     )
-    assert published.calls == []
+    async def test_publication_failure_is_logged_and_never_fails_the_unit(
+        self,
+        world: CommittedWorld,
+        sessions: Sessions,
+        published: Publish,
+        monkeypatch: pytest.MonkeyPatch,
+        make_error: Callable[[], Exception],
+    ) -> None:
+        """Every catch-up publication raises. Each of the two creating units
+        stays committed and logs exactly one sanitized
+        `ibs_request_catch_up_dispatch_failed` WARNING; the next package
+        still runs, the aggregate terminal event and its counts are those
+        of a fully successful invocation, no generic callback error is
+        logged, and no exception text reaches a log."""
+        ticket = await seed_ticket(world)
+        p1, p2 = await current_product(world), await current_product(world)
+        a, b = package_names("a", "b")
+        error = make_error()
+        published.events = sessions.events
+        published.error = error
+        Smelt(
+            {
+                a: resolves(codestream(IBS_REF, "SLE_15", p1.cpe)),
+                b: resolves(codestream(IBS_REF, "SLE_15", p2.cpe)),
+            },
+            sessions.events,
+        ).install(monkeypatch)
+
+        with capture_logs() as logs:
+            await resolve(sessions, ticket.id, a, b)
+
+        failed_publication = request_catch_up_failed(ticket.id, type(error).__name__)
+        assert [
+            e
+            for e in logs
+            if e["event"] == REQUEST_CATCH_UP_FAILED
+            or str(e["event"]).startswith("ticket_package_resolution_")
+            or e["event"] == "post_commit_callback_failed"
+        ] == [
+            failed_publication,
+            failed_publication,
+            completed(ticket.id, 2, package_tree_changed=2),
+        ]
+        assert sessions.events == [
+            *http_events(a),
+            ("commit", "0"),
+            ("close", "0"),
+            ("publish", "run_catch_up"),
+            *http_events(b),
+            ("commit", "1"),
+            ("close", "1"),
+            ("publish", "run_catch_up"),
+        ]
+        assert published.calls == [request_catch_up(ticket.id)] * 2
+        assert await committed(world, ticket.id, a, b) == Committed(
+            (ANALYSIS, None),
+            [added(a), added(b)],
+            {a: created_tree(p1), b: created_tree(p2)},
+            [],
+        )
+        rendered = repr(logs)
+        for forbidden in (MARKER, "broker.example.test", "amqp://"):
+            assert forbidden not in rendered

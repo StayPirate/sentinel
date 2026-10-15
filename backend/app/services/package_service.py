@@ -115,6 +115,7 @@ from app.core.exceptions import (
 )
 from app.core.external_strings import contains_inadmissible_character
 from app.core.identifiers import format_ticket_id, parse_ticket_id
+from app.database import detach_post_commit_callbacks, register_post_commit_callback
 from app.models.cve_cvss_assessment import CVECVSSAssessment
 from app.models.product import Product
 from app.models.ticket import Ticket
@@ -3273,6 +3274,10 @@ with their persisted `workflow_type`, the step-10 new-track signal)."""
 PARTIAL_RESOLUTION_EVENT: Final = "package_target_resolution_partial"
 HTTP_CLIENT_NAME: Final = "add_package_to_ticket"
 
+REQUEST_CATCH_UP_DISPATCH_FAILED_EVENT: Final = "ibs_request_catch_up_dispatch_failed"
+"""The sanitized WARNING of a failed package-add request catch-up
+publication (ibs-submission-tracking.md, Structured Logs)."""
+
 
 async def add_package_to_ticket(
     db: AsyncSession,
@@ -3289,10 +3294,10 @@ async def add_package_to_ticket(
     """Resolve a package through SMELT and add its package tree to a Ticket.
 
     Orchestration (package-service.md, `add_package_to_ticket()` steps
-    1-8 and 10; step 9, the package-add IBS request catch-up, belongs to
-    the M6 submission-tracking area). I/O-then-Lock: this function
-    acquires no row lock; the only locks are those of the delegated
-    `add_package_records()`, taken after every SMELT request.
+    1-10; ibs-submission-tracking.md, Accelerators > Package Addition).
+    I/O-then-Lock: this function acquires no row lock; the only locks are
+    those of the delegated `add_package_records()`, taken after every SMELT
+    request.
 
     Q1: a user-attributed call passes the authenticated `acting_user_id`,
     the consumer `caller` identifying it, and `audit_comment=None`; a
@@ -3322,9 +3327,16 @@ async def add_package_to_ticket(
     yield an empty email set (the client logs its own sanitized warning);
     (8) delegation to `add_package_records()`, which re-evaluates
     accessibility under the Ticket lock and performs every write, event,
-    assignment, and reconciliation. Never commits, logs a SMELT body,
-    email, username, URL, or raw exception text, or performs Redis or
-    broker I/O.
+    assignment, and reconciliation; (9) when the delegated result created
+    at least one track whose persisted `workflow_type` is `ibs`, registers
+    exactly one best-effort `run_catch_up("sync_ibs_requests", ticket_id)`
+    publication through `register_post_commit_callback()`, which the
+    transaction owner runs only after its commit (`get_db()`, or the
+    post-ingest and Product catalog backfill owners through
+    `detach_post_commit_callbacks()`); a package-only, Product-only,
+    Git-only, maintainer-only, no-op, or `active_ticket_only`-skipped
+    result registers nothing. Never commits, logs a SMELT body, email,
+    username, URL, or raw exception text, or performs Redis or broker I/O.
 
     Q4: returns the delegated `AddPackageResult`.
 
@@ -3359,7 +3371,7 @@ async def add_package_to_ticket(
             db, http_client, ticket_id=ticket_id, package_name=package_name
         )
 
-    return await add_package_records(
+    result = await add_package_records(
         db,
         ticket_id=ticket_id,
         package_name=package_name,
@@ -3371,6 +3383,49 @@ async def add_package_to_ticket(
         active_ticket_only=active_ticket_only,
         allow_excluded_reresolution=allow_excluded_reresolution,
     )
+    # Step 9: only `package_tree_changed` lists created tracks.
+    if any(track.workflow_type is WorkflowType.IBS for track in result.created_tracks):
+
+        async def _publish() -> None:
+            await _publish_request_catch_up(ticket_id)
+
+        register_post_commit_callback(db, _publish)
+    return result
+
+
+async def _publish_request_catch_up(ticket_id: uuid.UUID) -> None:
+    """Publish the package-add IBS request catch-up, best effort.
+
+    `add_package_to_ticket()` step 9 (ibs-submission-tracking.md,
+    Accelerators > Package Addition), run by the transaction owner after
+    its commit with no transaction or row lock open: one `run_catch_up`
+    publication for `sync_ibs_requests` and the Ticket, with that fetcher
+    class's queue (`None` keeps the default route). A publication failure
+    is logged once as `ibs_request_catch_up_dispatch_failed` (Ticket UUID,
+    fetcher name, exception class) and absorbed, so it never rolls back or
+    fails the committed package addition and never reaches the owner's
+    generic callback log; the daily fetcher remains the recovery owner.
+    `SoftTimeLimitExceeded`, `MemoryError`, and cancellation propagate.
+    """
+    # Deferred: the fetcher module imports this module through the request
+    # reconciliation boundary.
+    from app.services.packages.sync_ibs_requests import SyncIbsRequests
+
+    try:
+        await task_publication.publish_task(
+            RUN_CATCH_UP_TASK,
+            kwargs={"fetcher_name": SyncIbsRequests.name, "ticket_id": str(ticket_id)},
+            queue=SyncIbsRequests.queue,
+        )
+    except SoftTimeLimitExceeded, MemoryError:
+        raise
+    except Exception as exc:
+        logger.warning(
+            REQUEST_CATCH_UP_DISPATCH_FAILED_EVENT,
+            ticket_id=str(ticket_id),
+            fetcher_name=SyncIbsRequests.name,
+            cause=type(exc).__name__,
+        )
 
 
 async def _require_preliminary_access(
@@ -3789,7 +3844,9 @@ async def _post_ingest_package_unit(
     Ticket is rolled back with nothing committed. Every other exception
     propagates after a best-effort rollback; a rollback failure while
     handling an expected or isolated outcome propagates as a database
-    failure.
+    failure. After a successful commit, the unit's registered step-9
+    request catch-up is detached and attempted once the session is closed
+    and the Ticket lock released; it absorbs its own publication failure.
     """
     async with session_factory() as session:
         try:
@@ -3828,6 +3885,9 @@ async def _post_ingest_package_unit(
         except Exception:
             await _rollback_after_failure(session)
             raise
+        callbacks = detach_post_commit_callbacks(session)
+    for callback in callbacks:
+        await callback()
     return result.outcome
 
 
@@ -3872,7 +3932,10 @@ async def run_post_ingest_package_resolution(
     client and, per name in code-point order, calls
     `add_package_to_ticket()` in a fresh session as a system invocation
     with the `CVE package resolution` comment, `active_ticket_only` true,
-    and the excluded-package guard, then commits and closes; (3) an
+    and the excluded-package guard, then commits and closes, and only then
+    attempts the unit's step-9 IBS request catch-up, whose publication
+    failure is logged and never fails the unit or changes the aggregate
+    event (step 4); (3) an
     excluded package or a SMELT no-match is an expected skip, a
     targets-unresolved, catalog-not-ready, or SMELT-unavailable outcome an
     isolated package failure, each rolled back and logged; (4) a locked
@@ -3881,12 +3944,11 @@ async def run_post_ingest_package_resolution(
     `ticket_package_resolution_completed`, or `..._partial` after an
     isolated failure. Creates no audit event of its own (delegated
     `package_added` and `package_maintainer_added` only), no `FetcherRun`,
-    progress row, Redis key, or task publication. A unit cannot register a
-    Ticket convergence effect (it mutates only `New`, `Analysis`, or
-    `Analyzed` Tickets, while registration needs an `Ignored`,
-    `Duplicated`, or `Resolved` source), so nothing is detached or
-    published; the package-add IBS request catch-up (step 4) belongs to
-    the IBS submission-tracking workflow.
+    progress row, Redis key, or task publication other than that
+    catch-up. A unit cannot register a Ticket convergence effect (it
+    mutates only `New`, `Analysis`, or `Analyzed` Tickets, while
+    registration needs an `Ignored`, `Duplicated`, or `Resolved` source),
+    so no convergence effect is detached or published.
 
     Q4: returns `None`.
 
@@ -4086,7 +4148,10 @@ async def _converge_package(
     roll back the unit and are logged; a manual-zone re-entry is a stale
     no-op. Every other exception escapes with the unit not committed or
     its commit outcome unconfirmed; a drain exception escapes after the
-    unit committed.
+    unit committed. The step-9 request catch-up that
+    `add_package_to_ticket()` registers for a new IBS track is never run
+    (its session is discarded): the roster publishes the
+    `sync_ibs_requests` catch-up once after every package.
     """
     try:
         validate_package_name(package_name)
@@ -4191,7 +4256,8 @@ async def run_ticket_convergence(
     system attribution, the `Ticket convergence` comment, and
     re-resolution mode in a fresh session sharing one HTTP client, then
     flushes, commits, closes, and drains that unit's registered Ticket
-    convergence effects before the next package; (3) a package-specific
+    convergence effects before the next package, without attempting its
+    step-9 request catch-up, which step 4 subsumes; (3) a package-specific
     failure rolls back that unit, is logged, and the next package
     proceeds; `TicketNotMutableError` rolls back the unit as a stale
     no-op; (4) after every package, publishes `run_catch_up` for every

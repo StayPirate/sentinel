@@ -18,7 +18,7 @@ Owning specifications:
 - docs/features/packages/package-service.md (Post-ingest CVE package
   resolution: Task boundary and arguments, Per-package workflow and
   transactions, Audit and observability; `add_package_to_ticket()` steps
-  2-8; `add_package_records()` steps 10-13; Record Creation Logic) and
+  2-9; `add_package_records()` steps 10-13; Record Creation Logic) and
   docs/features/packages/package-model.md (SMELT Query for Package
   Resolution: `codestream.name` is the track reference, `SLE_15` maps to
   `ibs`, exact CPE match against the current Product catalog snapshot;
@@ -119,7 +119,7 @@ from tests.support.fetch_single_cve import (
     fictional_cve_id,
     pending_key,
 )
-from tests.support.package_addition import SNAPSHOT_AT, reply
+from tests.support.package_addition import SNAPSHOT_AT, reply, request_catch_up
 from tests.support.package_records import (
     NEW_TRACK,
     Tree,
@@ -620,9 +620,10 @@ def test_published_fetch_ingests_and_resolves_the_package_tree(
     assert workflow_logs(resolve_logs) == [
         completed(target.ticket_id, 1, package_tree_changed=1)
     ]
-    # The new-IBS-track catch-up (add_package_to_ticket() step 9) is not
-    # implemented yet, and a package unit registers no convergence effect.
-    assert len(pipeline.published.calls) == 2
+    # The unit's two new IBS tracks publish one package-add request catch-up
+    # (add_package_to_ticket() step 9); a package unit registers no
+    # convergence effect.
+    assert pipeline.published.calls[2:] == [request_catch_up(target.ticket_id)]
 
     ltss = target.products[SLES_LTSS_12_SP5]
     ltss_extended = target.products[SLES_LTSS_ES_12_SP5]
