@@ -149,12 +149,27 @@ def install_environment(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @dataclass
 class Publish:
-    """Substitute for `task_publication.publish_task` recording each call."""
+    """Substitute for `task_publication.publish_task` recording each call.
+
+    When set, `events` receives `("publish", task_name)` (the `Sessions` and
+    `Smelt` event list, to order a publication against commits, closes, and
+    requests), `on_call` is awaited inside the attempt, and `error` is then
+    raised."""
 
     calls: list[dict[str, Any]] = field(default_factory=list)
+    events: list[Event] | None = None
+    on_call: Callable[[dict[str, Any]], Awaitable[None]] | None = None
+    error: BaseException | None = None
 
     async def __call__(self, task_name: str, **options: Any) -> None:
-        self.calls.append({"task_name": task_name, **options})
+        call = {"task_name": task_name, **options}
+        self.calls.append(call)
+        if self.events is not None:
+            self.events.append(("publish", task_name))
+        if self.on_call is not None:
+            await self.on_call(call)
+        if self.error is not None:
+            raise self.error
 
 
 def record_publications(monkeypatch: pytest.MonkeyPatch) -> Publish:

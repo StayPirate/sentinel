@@ -17,7 +17,11 @@ best-effort side effect (e.g. a Redis cache purge) to run strictly
 after the request's transaction commits — see docs/conventions.md
 (Transaction Hygiene Rules). A minimal standalone FastAPI app with a
 fake session (rather than a real database) isolates the ordering
-behavior under test from any real I/O.
+behavior under test from any real I/O. `detach_post_commit_callbacks()`,
+which lets a workflow owner that commits its own session (rather than
+`get_db()`) take the registered callbacks and run them itself after its
+commit and session close (docs/conventions.md, Caller-Owned Service
+Transactions), is covered on the same fake session.
 
 Also covers the `scope="function"` requirement itself
 (docs/conventions.md, API Transaction Dependency Scope): the tests
@@ -36,14 +40,20 @@ the same signal a real ASGI server (uvicorn) would act on.
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator, Callable, MutableMapping
-from typing import Annotated, Any
+from typing import Annotated, Any, cast
 
 import pytest
 from fastapi import Depends, FastAPI, HTTPException
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import database
-from app.database import engine, get_db, register_post_commit_callback
+from app.database import (
+    detach_post_commit_callbacks,
+    engine,
+    get_db,
+    register_post_commit_callback,
+)
 
 
 class _FakeSession:
@@ -245,6 +255,49 @@ class TestPostCommitCallbacks:
         response = await fake_client.get("/ok", params={"fail": "true"})
         assert response.status_code == 500
         assert order == ["rollback"]
+
+
+@pytest.mark.unit
+class TestDetachPostCommitCallbacks:
+    """`detach_post_commit_callbacks()` hands the registered callbacks to a
+    workflow owner that commits its own session: it returns and removes
+    them without running them, so each runs at most once."""
+
+    @staticmethod
+    def _session(order: list[str]) -> AsyncSession:
+        return cast(AsyncSession, _FakeSession(order))
+
+    async def test_returns_the_callbacks_in_registration_order_and_removes_them(
+        self, order: list[str]
+    ) -> None:
+        session = self._session(order)
+
+        async def _first() -> None:
+            order.append("first")
+
+        async def _second() -> None:
+            order.append("second")
+
+        register_post_commit_callback(session, _first)
+        register_post_commit_callback(session, _second)
+
+        detached = detach_post_commit_callbacks(session)
+
+        assert detached == [_first, _second]
+        assert order == []
+        assert detach_post_commit_callbacks(session) == []
+        for callback in detached:
+            await callback()
+        assert order == ["first", "second"]
+
+    def test_without_a_registered_callback_returns_an_empty_list(
+        self, order: list[str]
+    ) -> None:
+        session = self._session(order)
+
+        assert detach_post_commit_callbacks(session) == []
+        assert detach_post_commit_callbacks(session) == []
+        assert order == []
 
 
 class _FailingCommitFakeSession(_FakeSession):

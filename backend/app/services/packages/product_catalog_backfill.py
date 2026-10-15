@@ -22,14 +22,16 @@ selection, the per-pair units, and the completion log:
    other `Exception`, including a commit failure, rolls back that pair,
    logs one sanitized warning, and is counted as failed. Cancellation,
    `SoftTimeLimitExceeded`, and `MemoryError` propagate after cleanup.
-4. One completion log carries the six counts.
+4. After a pair commits and its session closes, the pair's step-9 IBS
+   request catch-up registered by `add_package_to_ticket()` (at least one
+   new IBS track) is attempted once; its publication failure is logged by
+   the callback and changes neither the pair outcome nor the counts.
+5. One completion log carries the six counts.
 
 A pair never registers a Ticket convergence effect (its locked mutation
 proceeds only for an active Ticket, while registration needs an
 `Ignored`, `Duplicated`, or `Resolved` source status), so the workflow
-detaches and publishes nothing; the package-add IBS request catch-up
-(`add_package_to_ticket()` step 9) belongs to the IBS submission-tracking
-workflow and is not published here.
+detaches and publishes no convergence effect.
 """
 
 from __future__ import annotations
@@ -46,6 +48,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.enums import ACTIVE_TICKET_STATUSES
+from app.database import detach_post_commit_callbacks
 from app.models.ticket import Ticket
 from app.models.ticket_package import TicketPackage
 from app.services.http_client import create_http_client
@@ -151,7 +154,10 @@ async def _backfill_pair(
     """One independent pair unit; `None` is a skipped-excluded pair.
 
     Returns the committed semantic outcome. A non-signal `Exception`
-    escapes after the rollback, for the caller to count and log.
+    escapes after the rollback, for the caller to count and log. After a
+    successful commit, the pair's registered step-9 request catch-up is
+    attempted once the session is closed; it absorbs its own publication
+    failure.
     """
     async with session_factory() as session:
         try:
@@ -175,6 +181,9 @@ async def _backfill_pair(
         except Exception:
             await _rollback(session)
             raise
+        callbacks = detach_post_commit_callbacks(session)
+    for callback in callbacks:
+        await callback()
     return result.outcome
 
 
@@ -194,14 +203,16 @@ async def run_product_catalog_backfill(
     Q3: (1) selects the pairs in one read-only session closed before any
     I/O; (2) when there is at least one pair, opens one shared-factory HTTP
     client and processes the pairs in order, each in a fresh session that
-    commits and closes; (3) classifies each pair as record-creating,
-    no-op, skipped-inactive, skipped-excluded (an exclusion committed
-    after selection), or failed (any other `Exception`, rolled back and
-    logged once with Ticket UUID, package name, exception class, and the
-    bounded SMELT category); (4) logs one completion line. Creates no
-    audit event of its own (delegated `package_added` and
+    commits and closes, then attempts the pair's step-9 IBS request
+    catch-up when it created an IBS track; (3) classifies each pair as
+    record-creating, no-op, skipped-inactive, skipped-excluded (an
+    exclusion committed after selection), or failed (any other
+    `Exception`, rolled back and logged once with Ticket UUID, package
+    name, exception class, and the bounded SMELT category); a catch-up
+    publication failure changes neither; (4) logs one completion line.
+    Creates no audit event of its own (delegated `package_added` and
     `package_maintainer_added` events only), no `FetcherRun`, progress
-    row, Redis key, or task publication.
+    row, Redis key, or task publication other than that catch-up.
 
     Q4: returns the completion counts, also logged once.
 

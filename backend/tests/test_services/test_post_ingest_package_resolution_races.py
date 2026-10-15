@@ -6,7 +6,8 @@ Owning specifications:
 
 - docs/features/packages/package-service.md (Post-ingest CVE package
   resolution: Per-package workflow and transactions — no unlocked
-  Ticket-status precheck, `active_ticket_only` termination; Idempotency,
+  Ticket-status precheck, `active_ticket_only` termination, the step-4
+  request catch-up of a committed IBS-track-creating unit only; Idempotency,
   delivery, and recovery; Resource lifecycle on cancellation).
 - docs/features/platform/testing-strategy.md (Post-Ingest Package
   Resolution: duplicate, concurrent, and reordered full invocations
@@ -47,6 +48,7 @@ from tests.support.package_addition import (
     maintained,
     maintainership,
     reply,
+    request_catch_up,
 )
 from tests.support.package_records import (
     maintainer_event,
@@ -152,7 +154,9 @@ class TestInactiveRace:
         """`a` commits; while `b` waits on its maintained request an
         independent session makes the Ticket inactive. Under the Ticket lock
         `b` commits nothing (rolled back and closed), `c` is never
-        requested, and one `inactive` event replaces `completed`."""
+        requested, and one `inactive` event replaces `completed`. Only the
+        committed `a` publishes its step-9 request catch-up; the inactive
+        skip of `b` publishes nothing."""
         m = await world.user(role=Role.RESTRICTED_ANALYST)
         ticket = await seed_ticket(world)
         p1, p2, p3 = [await current_product(world) for _ in range(3)]
@@ -200,7 +204,7 @@ class TestInactiveRace:
             {a: created_tree(p1), b: None, c: None},
             [],
         )
-        assert published.calls == []
+        assert published.calls == [request_catch_up(ticket.id)]
         assert_private(logs, a, b, c, m.email)
 
 
@@ -319,7 +323,8 @@ class TestIdempotencyAndRecovery:
         atomicity tests), each
         invocation used its own one client, and both complete with one
         package-tree change, one maintainer-only unit, and two no-ops in
-        total."""
+        total; only the one unit that created `a`'s IBS track publishes a
+        step-9 request catch-up."""
         m1, m2 = [await world.user(role=Role.RESTRICTED_ANALYST) for _ in range(2)]
         ticket = await seed_ticket(world)
         p1, p2 = await current_product(world), await current_product(world)
@@ -371,7 +376,7 @@ class TestIdempotencyAndRecovery:
         )
         assert state.trees == {a: created_tree(p1), b: seeded_tree(p2)}
         assert state.maintainers == sorted([(a, m1.id), (b, m2.id)])
-        assert published.calls == []
+        assert published.calls == [request_catch_up(ticket.id)]
 
     async def test_unprocessed_suffix_is_recovered_by_a_later_full_delivery(
         self,

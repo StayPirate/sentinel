@@ -1205,7 +1205,9 @@ async def add_ticket_package(
     I/O and re-evaluates accessibility under the Ticket lock afterwards.
     The handler passes the authenticated actor and caller with public-add
     semantics and performs no package lookup; a `Resolved` regression it
-    causes is published after commit by the API convergence drain.
+    causes is published after commit by the API convergence drain, and the
+    IBS request catch-up of a new IBS track by the post-commit callback
+    the service registers (`get_db()` runs it only after its commit).
     """
     try:
         result = await package_service.add_package_to_ticket(

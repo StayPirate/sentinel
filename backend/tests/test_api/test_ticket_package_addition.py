@@ -20,13 +20,19 @@ Owning specifications:
   Authentication, authorization, and anti-enumeration, Ticket identifier
   coverage; Ticket Convergence Publication Handoff, automatic API owner;
   Concurrency Testing; Audit Trail Testing).
+- docs/features/packages/package-service.md (`add_package_to_ticket()`
+  step 9 and Error handling (Step 9): the API transaction dependency runs
+  the package-add IBS request catch-up only after its commit) and
+  ibs-submission-tracking.md (Accelerators > Package Addition; Structured
+  Logs: `ibs_request_catch_up_dispatch_failed`).
 
 These tests cover the HTTP boundary only: authentication and the
 `manage_packages` check before any Ticket lookup, the identical not-found
 bodies, request validation before any SMELT request, the documented
 success bodies, the mapping of every service exception (with fixed,
 sanitized details) in the documented public precedence, the drain of a
-`Resolved` regression by the API transaction owner, and OpenAPI. The
+`Resolved` regression and the step-9 request catch-up of a new IBS track by
+the API transaction owner, and OpenAPI. The
 orchestrator matrices (every SMELT failure category, every guard and
 outcome combination, the complete race matrix) are proven in
 `tests/test_services/test_add_package_to_ticket.py` and
@@ -85,6 +91,7 @@ import redis.asyncio as redis_asyncio
 from celery.exceptions import OperationalError as BrokerOperationalError
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import delete, select
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession, async_sessionmaker
 from structlog.contextvars import merge_contextvars
 from structlog.testing import capture_logs
@@ -95,6 +102,7 @@ from app.config import settings
 from app.core.enums import (
     Role,
     SessionCreationReason,
+    Severity,
     TicketStatus,
     WorkflowType,
 )
@@ -110,6 +118,7 @@ from app.services.session_service import create_session
 from tests.support.cvss_chain import DEFAULT_VERSION
 from tests.support.inadmissible import INADMISSIBLE_CHARACTERS
 from tests.support.package_addition import (
+    REQUEST_CATCH_UP_FAILED,
     PackageSmelt,
     Pause,
     Respond,
@@ -120,6 +129,8 @@ from tests.support.package_addition import (
     not_found,
     publish,
     reply,
+    request_catch_up,
+    request_catch_up_failed,
 )
 from tests.support.package_records import (
     NEW_TRACK,
@@ -220,6 +231,7 @@ ALREADY_EXCLUDED = {
 FEATURE_EVENTS = {
     "ticket_convergence_publication_failed",
     "ticket_convergence_dispatch_failed",
+    REQUEST_CATCH_UP_FAILED,
     "post_commit_callback_failed",
 }
 """The feature-owned and generic callback events these tests account for."""
@@ -326,17 +338,22 @@ class _RequestSessions:
 
 @dataclass
 class _Publish:
-    """Substitute for `task_publication.publish_task` recording each call."""
+    """Substitute for `task_publication.publish_task` recording each call;
+    `on_call` is awaited inside the attempt, before `error` is raised."""
 
     sessions: _RequestSessions | None = None
     error: BaseException | None = None
     calls: list[dict[str, Any]] = field(default_factory=list)
     in_transaction: list[bool] = field(default_factory=list)
+    on_call: Callable[[dict[str, Any]], Awaitable[None]] | None = None
 
     async def __call__(self, task_name: str, **options: Any) -> None:
-        self.calls.append({"task_name": task_name, **options})
+        call = {"task_name": task_name, **options}
+        self.calls.append(call)
         if self.sessions is not None:
             self.in_transaction.append(self.sessions.any_in_transaction())
+        if self.on_call is not None:
+            await self.on_call(call)
         if self.error is not None:
             raise self.error
 
@@ -869,7 +886,9 @@ class TestSuccess:
     ) -> None:
         """package-model.md, Idempotency: the repeat performs both SMELT
         requests again, reports every resolved record as skipped with zero
-        created counts, and changes nothing."""
+        created counts, and changes nothing. The first addition's new IBS
+        track published the one request catch-up; the no-op repeat
+        publishes nothing more."""
         caller = await api.caller(Role.VULNERABILITY_ANALYST)
         ticket = await cveless(ticket_factory, assignee_id=caller.user.id)
         p1, p2, p3 = await _current(api.db, 3)
@@ -880,6 +899,7 @@ class TestSuccess:
         )
         first = await api.post(ticket, caller=caller)
         assert first.status_code == 201, first.text
+        assert broker.calls == [request_catch_up(ticket.id)]
         after_first = await _state(api.db, ticket)
 
         repeated = await api.post(ticket, caller=caller)
@@ -888,10 +908,10 @@ class TestSuccess:
         assert repeated.json() == _data(0, 2, 0, 3)
         assert api.smelt.kinds == BOTH * 2
         assert await _state(api.db, ticket) == after_first
-        assert broker.calls == []
+        assert broker.calls == [request_catch_up(ticket.id)]
 
     async def test_maintainer_only_outcome_exposes_no_maintainer_in_the_body(
-        self, api: _Api, ticket_factory: TicketFactory
+        self, api: _Api, ticket_factory: TicketFactory, broker: _Publish
     ) -> None:
         """package-maintainership.md, Locked mutation and Testing
         Requirements: the package tree is already complete and SMELT now
@@ -899,7 +919,8 @@ class TestSuccess:
         fields with zero created counts and contains no maintainer
         identity or count; the only effect is the association with one
         system `package_maintainer_added`, without auto-assignment of the
-        unassigned Ticket (package-service.md, Auto-Assignment Rule)."""
+        unassigned Ticket (package-service.md, Auto-Assignment Rule), and
+        no request catch-up is published."""
         caller = await api.caller(Role.VULNERABILITY_ANALYST)
         maintainer = await seed_user(
             api.db, username="erin.maintainer", email="erin.maintainer@example.com"
@@ -929,6 +950,7 @@ class TestSuccess:
         assert await maintainers(api.db, ticket.id) == [(PKG, maintainer.id)]
         assert await tree_rows(api.db, ticket.id) == tree_before
         assert await ticket_row(api.db, ticket.id) == (ANALYSIS, None)
+        assert broker.calls == []
 
     @pytest.mark.parametrize("character", INADMISSIBLE_CHARACTERS)
     async def test_inadmissible_maintainer_email_adds_the_package_without_maintainer(
@@ -1278,6 +1300,9 @@ class TestConvergence:
     async def test_resolved_regression_publishes_one_root_task_after_commit(
         self, api: _Api, ticket_factory: TicketFactory, broker: _Publish
     ) -> None:
+        """After the commit, the convergence drain (registered first, by the
+        router dependency) publishes the one root task, then the new IBS
+        track's request catch-up follows; neither runs in a transaction."""
         caller, ticket = await self._resolved_world(api, ticket_factory)
 
         with capture_logs() as logs:
@@ -1285,10 +1310,14 @@ class TestConvergence:
 
         assert response.status_code == 201, response.text
         assert response.json() == _data(1, 0, 1, 0)
-        assert broker.ticket_ids() == [("run_ticket_convergence", str(ticket.id))]
+        assert broker.ticket_ids() == [
+            ("run_ticket_convergence", str(ticket.id)),
+            ("run_catch_up", str(ticket.id)),
+        ]
         assert set(broker.calls[0]) == {"task_name", "kwargs", "task_id"}
         assert uuid.UUID(broker.calls[0]["task_id"]).version == 7
-        assert broker.in_transaction == [False]
+        assert broker.calls[1] == request_catch_up(ticket.id)
+        assert broker.in_transaction == [False, False]
         assert await ticket_row(api.db, ticket.id) == (ANALYSIS, caller.user.id)
         assert await ticket_events_by_id(api.db, ticket.id) == [
             package_added_event(PKG, caller.user),
@@ -1299,6 +1328,9 @@ class TestConvergence:
     async def test_broker_operational_error_keeps_the_201_with_one_sanitized_log(
         self, api: _Api, ticket_factory: TicketFactory, broker: _Publish
     ) -> None:
+        """The broker refuses both publications: each is attempted once and
+        logged once by its own owner (the convergence ERROR, then the
+        request catch-up WARNING), without the generic callback error."""
         caller, ticket = await self._resolved_world(api, ticket_factory)
         broker.error = BrokerOperationalError(f"{BROKER_URL} connection refused")
 
@@ -1307,10 +1339,18 @@ class TestConvergence:
 
         assert response.status_code == 201, response.text
         assert response.json() == _data(1, 0, 1, 0)
-        assert broker.ticket_ids() == [("run_ticket_convergence", str(ticket.id))]
+        assert broker.ticket_ids() == [
+            ("run_ticket_convergence", str(ticket.id)),
+            ("run_catch_up", str(ticket.id)),
+        ]
         assert await ticket_row(api.db, ticket.id) == (ANALYSIS, caller.user.id)
+        request_id = response.headers["X-Request-ID"]
         assert _feature_logs(logs) == [
-            _publication_failed(ticket.id, response.headers["X-Request-ID"])
+            _publication_failed(ticket.id, request_id),
+            {
+                **request_catch_up_failed(ticket.id, "OperationalError"),
+                "request_id": request_id,
+            },
         ]
         rendered = repr(logs) + response.text
         for fragment in (
@@ -1319,6 +1359,199 @@ class TestConvergence:
             "connection refused",
         ):
             assert fragment not in rendered
+
+
+# ---------------------------------------------------------------------------
+# 7b. Package-add IBS request catch-up through the API transaction owner
+# (package-service.md, `add_package_to_ticket()` step 9 and Error handling
+# (Step 9); ibs-submission-tracking.md, Accelerators > Package Addition)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.e2e
+class TestRequestCatchUp:
+    async def test_ibs_track_addition_publishes_one_catch_up_after_commit(
+        self, committed: _Committed
+    ) -> None:
+        """A new IBS track (beside a new Git track) publishes exactly one
+        request catch-up with the default queue, and only after `get_db()`
+        committed: at the attempt no request session is in a transaction,
+        and an independent session reads the committed tree and acquires
+        `FOR UPDATE NOWAIT` on the Ticket row. No feature log."""
+        world = committed.world
+        user = await world.user(role=Role.VULNERABILITY_ANALYST)
+        headers = await committed.headers(user)
+        ticket = await world.ticket(
+            cve_id=None, severity_manual=Severity.HIGH, assignee_id=user.id
+        )
+        p1 = await committed.current_product()
+        p2 = await committed.current_product()
+        pkg = _race_name()
+        _serve(
+            committed.smelt,
+            codestream(IBS_REF, "SLE_15", p1.cpe),
+            codestream(GIT_REF, "SLFO", p2.cpe),
+        )
+        observed: list[tuple[bool, Tree | None]] = []
+
+        async def observe(call: dict[str, Any]) -> None:
+            probe = await world.open_session()
+            try:
+                await probe.execute(
+                    select(Ticket.id)
+                    .where(Ticket.id == ticket.id)
+                    .with_for_update(nowait=True)
+                )
+                unlocked = True
+            except DBAPIError:
+                unlocked = False
+            await probe.rollback()
+            observed.append((unlocked, await package_tree(probe, ticket.id, pkg)))
+            await probe.rollback()
+
+        committed.broker.on_call = observe
+
+        with capture_logs() as logs:
+            response = await committed.client.post(
+                _url(ticket), json={"package_name": pkg}, headers=headers
+            )
+
+        assert response.status_code == 201, response.text
+        assert response.json() == _data(2, 0, 2, 0, package_name=pkg)
+        assert committed.broker.calls == [request_catch_up(ticket.id)]
+        assert committed.broker.in_transaction == [False]
+        assert observed == [
+            (
+                True,
+                Tree(
+                    None,
+                    {
+                        IBS_REF: NEW_TRACK[WorkflowType.IBS],
+                        GIT_REF: NEW_TRACK[WorkflowType.GIT],
+                    },
+                    {
+                        (IBS_REF, p1.id): new_occurrence(True),
+                        (GIT_REF, p2.id): new_occurrence(True),
+                    },
+                ),
+            )
+        ]
+        assert _feature_logs(logs) == []
+
+    @pytest.mark.parametrize(
+        "make_error",
+        [
+            pytest.param(
+                lambda: BrokerOperationalError(f"{BROKER_URL} connection refused"),
+                id="broker-operational",
+            ),
+            pytest.param(lambda: RuntimeError(MARKER), id="runtime"),
+        ],
+    )
+    async def test_publication_failure_keeps_the_201_with_one_warning(
+        self,
+        api: _Api,
+        ticket_factory: TicketFactory,
+        broker: _Publish,
+        make_error: Callable[[], Exception],
+    ) -> None:
+        """A failed catch-up publication changes neither the 201 body nor
+        the committed addition: exactly one sanitized
+        `ibs_request_catch_up_dispatch_failed` WARNING (with the bound
+        request correlation) and no generic `post_commit_callback_failed`
+        ERROR; no exception text reaches a log or the response."""
+        caller = await api.caller(Role.VULNERABILITY_ANALYST)
+        ticket = await cveless(ticket_factory, assignee_id=caller.user.id)
+        (product,) = await _current(api.db)
+        _serve(api.smelt, codestream(IBS_REF, "SLE_15", product.cpe))
+        error = make_error()
+        broker.error = error
+
+        with capture_logs(processors=[merge_contextvars]) as logs:
+            response = await api.post(ticket, caller=caller)
+
+        assert response.status_code == 201, response.text
+        assert response.json() == _data(1, 0, 1, 0)
+        assert broker.calls == [request_catch_up(ticket.id)]
+        assert _feature_logs(logs) == [
+            {
+                **request_catch_up_failed(ticket.id, type(error).__name__),
+                "request_id": response.headers["X-Request-ID"],
+            }
+        ]
+        assert await package_tree(api.db, ticket.id, PKG) == Tree(
+            None,
+            {IBS_REF: NEW_TRACK[WorkflowType.IBS]},
+            {(IBS_REF, product.id): new_occurrence(True)},
+        )
+        assert await ticket_events_by_id(api.db, ticket.id) == [
+            package_added_event(PKG, caller.user)
+        ]
+        rendered = repr(logs) + response.text
+        for fragment in (MARKER, "fictional-secret", "broker.example.test"):
+            assert fragment not in rendered
+
+    @pytest.mark.parametrize(
+        "case",
+        [
+            "git-only",
+            "product-only",
+            "already-excluded",
+            "targets-unresolved",
+            "not-mutable",
+        ],
+    )
+    async def test_request_without_a_new_ibs_track_publishes_nothing(
+        self,
+        api: _Api,
+        ticket_factory: TicketFactory,
+        broker: _Publish,
+        case: str,
+    ) -> None:
+        """A 201 that creates only a Git track or only a Product below an
+        existing IBS track, and the error responses `409
+        PACKAGE_ALREADY_EXCLUDED`, `422 PACKAGE_TARGETS_UNRESOLVED`, and
+        `409 TICKET_NOT_MUTABLE` publish nothing and log no catch-up
+        event (the no-op repeat and the maintainer-only outcome are in
+        `TestSuccess`)."""
+        caller = await api.caller(Role.VULNERABILITY_ANALYST)
+        ticket = (
+            await ticket_factory(status=TicketStatus.IGNORED.value)
+            if case == "not-mutable"
+            else await cveless(ticket_factory, assignee_id=caller.user.id)
+        )
+        p1, p2 = await _current(api.db, 2)
+        if case in {"product-only", "already-excluded"}:
+            package = await seed_package(
+                api.db, ticket.id, PKG, excluded=case == "already-excluded"
+            )
+            await seed_occurrence(
+                api.db, await seed_track(api.db, package, IBS_REF), p1
+            )
+        entry, expected = {
+            "git-only": (codestream(GIT_REF, "SLFO", p1.cpe), (201, _data(1, 0, 1, 0))),
+            "product-only": (
+                codestream(IBS_REF, "SLE_15", p1.cpe, p2.cpe),
+                (201, _data(0, 1, 1, 1)),
+            ),
+            "already-excluded": (
+                codestream(IBS_REF, "SLE_15", p1.cpe),
+                (409, ALREADY_EXCLUDED),
+            ),
+            "targets-unresolved": (
+                codestream(IBS_REF, "SLE_15", ABSENT),
+                (422, TARGETS_UNRESOLVED),
+            ),
+            "not-mutable": (codestream(IBS_REF, "SLE_15", p1.cpe), (409, NOT_MUTABLE)),
+        }[case]
+        _serve(api.smelt, entry)
+
+        with capture_logs() as logs:
+            response = await api.post(ticket, caller=caller)
+
+        assert (response.status_code, response.json()) == expected
+        assert broker.calls == []
+        assert _feature_logs(logs) == []
 
 
 # ---------------------------------------------------------------------------

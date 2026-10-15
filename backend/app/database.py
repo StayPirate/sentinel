@@ -63,6 +63,23 @@ def register_post_commit_callback(
     callbacks.append(callback)
 
 
+def detach_post_commit_callbacks(
+    session: AsyncSession,
+) -> list[Callable[[], Awaitable[None]]]:
+    """Remove and return the callbacks registered on `session`.
+
+    For a workflow owner that commits its own session instead of using
+    `get_db()` (`docs/conventions.md`, Caller-Owned Service Transactions):
+    after its commit succeeds it detaches the callbacks and awaits them
+    once its session is closed, never after a rollback. A second call
+    returns an empty list, so each callback runs at most once.
+    """
+    callbacks: list[Callable[[], Awaitable[None]]] = session.info.pop(
+        _POST_COMMIT_CALLBACKS_KEY, []
+    )
+    return callbacks
+
+
 async def get_db() -> AsyncGenerator[AsyncSession]:
     """Dependency that provides a database session.
 

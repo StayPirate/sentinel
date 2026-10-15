@@ -32,7 +32,11 @@ rows are deleted explicitly at teardown. SMELT is the in-process
 `PackageSmelt` fake, routed per package name, behind the substituted
 `create_http_client()`; `task_publication.publish_task` is substituted by
 a recorder; the fetcher registries are isolated and emptied, so the
-catch-up roster contains only the probe fetchers a test defines.
+catch-up roster contains only the probe fetchers a test defines (one test
+re-registers the real `SyncIbsRequests` to prove that a unit's step-9
+request catch-up is subsumed by the roster: package-service.md,
+`add_package_to_ticket()` Error handling (Step 9); Architectural Test
+Requirement "Package-add request catch-up").
 
 Unless a test states otherwise: a Ticket is the committed unassigned
 CVE-less `Analysis` Ticket with `severity_manual = High`; a catalog
@@ -76,6 +80,7 @@ from app.core.enums import (
     TicketStatus,
     WorkflowType,
 )
+from app.database import detach_post_commit_callbacks
 from app.models.fetcher_run import FetcherRun
 from app.models.product import Product
 from app.models.ticket import Ticket
@@ -90,9 +95,11 @@ from app.services.package_service import (
     run_ticket_convergence,
     ticket_convergence_failure_phase,
 )
+from app.services.packages.sync_ibs_requests import SyncIbsRequests
 from app.services.ticket_visibility import TicketCaller, ticket_visibility_condition
 from tests.support.package_addition import (
     MAINTAINED_PATH,
+    REQUEST_CATCH_UP_FAILED,
     PackageSmelt,
     Pause,
     Respond,
@@ -102,6 +109,7 @@ from tests.support.package_addition import (
     not_found,
     publish,
     reply,
+    request_catch_up,
 )
 from tests.support.package_exclusion import (
     MARKER_NOW,
@@ -1377,6 +1385,66 @@ class TestCatchUpRoster:
         assert raised.value is signal
         assert len(published.calls) == 1
         assert _convergence_logs(logs) == []
+
+    async def test_new_ibs_tracks_publish_only_the_one_roster_request_catch_up(
+        self,
+        world: CommittedWorld,
+        sessions: _Sessions,
+        published: _Publish,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """package-service.md, `run_ticket_convergence()` step 2 and
+        `add_package_to_ticket()` Error handling (Step 9): with the real
+        `SyncIbsRequests` as the roster, two units that each create a new
+        IBS track publish nothing per unit. Each unit's registered step-9
+        callback is left unrun on its discarded session, and the only
+        `sync_ibs_requests` publication is the single roster one after both
+        units committed."""
+        FETCHER_REGISTRY[SyncIbsRequests.name] = SyncIbsRequests
+        ticket = await _ticket(world)
+        p1, p2 = await _current_product(world), await _current_product(world)
+        a, b = _names("a", "b")
+        await _package(world, ticket, a)
+        await _package(world, ticket, b)
+        events: list[tuple[str, str]] = []
+        sessions.events = events
+        published.events = events
+        _Smelt(
+            {
+                a: _resolves(codestream(IBS_REF, "SLE_15", p1.cpe)),
+                b: _resolves(codestream(IBS_REF, "SLE_15", p2.cpe)),
+            },
+            events,
+        ).install(monkeypatch)
+
+        with capture_logs() as logs:
+            await run_ticket_convergence(
+                ticket_id=ticket.id, session_factory=sessions.maker()
+            )
+
+        assert events == [
+            ("http", f"maintained:{a}"),
+            ("http", f"maintainership:{a}"),
+            ("commit", "1"),
+            ("http", f"maintained:{b}"),
+            ("http", f"maintainership:{b}"),
+            ("commit", "2"),
+            ("publish", "run_catch_up"),
+        ]
+        assert published.calls == [request_catch_up(ticket.id)]
+        assert [len(detach_post_commit_callbacks(s)) for s in sessions.sessions] == [
+            0,
+            1,
+            1,
+        ]
+        assert _convergence_logs(logs) == [
+            _completed(ticket.id, packages=2, converged=2, catch_ups=1)
+        ]
+        assert [e for e in logs if e["event"] == REQUEST_CATCH_UP_FAILED] == []
+        assert (await _committed(world, ticket.id, a, b)).trees == {
+            a: _created(p1),
+            b: _created(p2),
+        }
 
 
 # ---------------------------------------------------------------------------
