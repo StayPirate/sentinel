@@ -32,7 +32,9 @@
 # publication before those services land. `worker`, `git-worker`, and `beat`
 # are active (Celery runtime — see
 # docs/features/platform/fetcher-infrastructure.md and
-# docs/features/platform/git-fetcher-infrastructure.md, Worker Affinity).
+# docs/features/platform/git-fetcher-infrastructure.md, Worker Affinity), and
+# so is `ibs-consumer` (standalone IBS RabbitMQ consumer — see
+# docs/features/integrations/ibs-rabbitmq-integration.md).
 
 x-app-common: &app-common
   image: ${IMAGE_SMOKE_IMAGE_ID:?IMAGE_SMOKE_IMAGE_ID is required}
@@ -221,6 +223,32 @@ services:
       timeout: 10s
       retries: 5
       start_period: 30s
+
+  # IBS RabbitMQ consumer: a standalone process, not a Celery role, started
+  # with the documented command (docs/deployment.md, Container Images).
+  # IBS_RABBITMQ_URL points at an in-stack endpoint that refuses connections
+  # (the redis service has no listener on 5671; the credentials are
+  # fictional), so the consumer stays in its reconnect loop without external
+  # network access. It has no ping mechanism, so, like `beat`, the runner
+  # performs a separate bounded readiness phase against this exact container:
+  # it requires the structured startup and reconnect events. The stop grace
+  # period follows docs/deployment.md (Singleton Processes); startup ordering
+  # follows `worker`.
+  ibs-consumer:
+    <<: *app-common
+    command: ["python", "-m", "app.ibs_consumer"]
+    environment:
+      <<: *app-environment
+      IBS_RABBITMQ_URL: amqps://example:example@redis:5671
+      TZ: UTC
+    stop_grace_period: 60s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
 
 volumes:
   git-clones:

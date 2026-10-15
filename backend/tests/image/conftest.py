@@ -307,6 +307,61 @@ def compose_exec(
 
 
 @pytest.fixture(scope="session")
+def compose_logs(
+    image_smoke_context: ImageSmokeContext,
+) -> Callable[[str], str]:
+    """Return the prefix- and color-free logs of one service from the
+    invocation's project."""
+
+    def _logs(service: str) -> str:
+        result = _run_compose_bounded(
+            [
+                *image_smoke_context.common_args,
+                "logs",
+                "--no-color",
+                "--no-log-prefix",
+                service,
+            ],
+            timeout=_DEFAULT_EXEC_TIMEOUT,
+        )
+        assert result.returncode == 0, (
+            f"logs for {service} failed (stdout={result.stdout!r}, "
+            f"stderr={result.stderr!r})"
+        )
+        return result.stdout + result.stderr
+
+    return _logs
+
+
+@pytest.fixture(scope="session")
+def compose_service_state(
+    image_smoke_context: ImageSmokeContext,
+) -> Callable[[str], str]:
+    """Return `<state>|<exit code>` of one service from the invocation's
+    project, including a stopped container."""
+
+    def _state(service: str) -> str:
+        result = _run_compose_bounded(
+            [
+                *image_smoke_context.common_args,
+                "ps",
+                "--all",
+                "--format",
+                "{{.State}}|{{.ExitCode}}",
+                service,
+            ],
+            timeout=_DEFAULT_EXEC_TIMEOUT,
+        )
+        assert result.returncode == 0, (
+            f"state of {service} failed (stdout={result.stdout!r}, "
+            f"stderr={result.stderr!r})"
+        )
+        return result.stdout.strip()
+
+    return _state
+
+
+@pytest.fixture(scope="session")
 def celery_node_inspect(
     compose_exec: Callable[..., subprocess.CompletedProcess[str]],
 ) -> Callable[[str, str, str], Any]:

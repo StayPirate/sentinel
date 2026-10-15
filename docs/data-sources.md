@@ -592,13 +592,18 @@ recovery.
     (default host `rabbit.suse.de`, port 5671). The full URL is excluded from
     settings representations and is never logged
   - OBS: `amqps://opensuse:opensuse@rabbit.opensuse.org`
-  - Both use the existing `pubsub` exchange. Sentinel declares it as type
-    `topic` with `passive=True` and `durable=True`, creates one server-named
-    exclusive non-durable auto-delete queue per connection, requests a
-    60-second AMQP heartbeat, applies per-consumer prefetch 1, and creates
-    exactly three fixed, non-wildcard bindings: `suse.obs.package.commit`,
-    `suse.obs.request.create`, and `suse.obs.request.state_change`. Sentinel
-    never creates or modifies the exchange and never publishes to it
+  - Both use the existing `pubsub` exchange. Sentinel declares it with
+    `passive=True` and the expected type `topic` and `durable=True`, creates
+    one server-named exclusive non-durable auto-delete queue per connection,
+    requests a 60-second AMQP heartbeat, applies per-consumer prefetch 1, and
+    creates exactly three fixed, non-wildcard bindings:
+    `suse.obs.package.commit`, `suse.obs.request.create`, and
+    `suse.obs.request.state_change`. Sentinel never creates or modifies the
+    exchange and never publishes to it. A passive declaration verifies only
+    that the exchange exists and is accessible, not its type or durability; a
+    fanout or argument-less-headers `pubsub` would stop the routing-key
+    filtering (see `docs/features/integrations/ibs-rabbitmq-integration.md`,
+    Known Limitations)
 - **Integration status**: **Active**. Sentinel consumes
   `suse.obs.package.commit`, `suse.obs.request.create`, and
   `suse.obs.request.state_change` events from IBS for near-real-time track and
@@ -610,6 +615,46 @@ recovery.
   remains available. Product-level release detection does not consume RabbitMQ
   events and remains polling-only. See
   `docs/features/integrations/ibs-rabbitmq-integration.md` for the full specification
+- **Contract verification**: sanitized, read-only, structure-only
+  verification against `rabbit.suse.de` (RabbitMQ 4.1.5) through the default
+  shared account, with no publication and only a passive exchange declaration:
+  - between 2026-09-04 and 2026-10-15, with aio-pika 9.6.2 and aiormq 6.9.4:
+    dedicated `suse.obs.package.commit` captures of 72 hours and 1 hour
+    (11,434 deliveries), sampled wildcard inventories, a topology probe of the
+    exact specified topology, and IBS source-info correlation;
+  - on 2026-10-15, with aio-pika 10.1.1 and aiormq 7.2.2, the TLS, topology,
+    failure-classification, and package-commit shapes again, and a 57-minute
+    run of the consumer itself against a throwaway database with
+    SSH-signature IBS API access, including a stalled connection that the
+    client heartbeat detected after 183 seconds and a reconnection with a
+    fresh queue.
+
+  Verified: AMQPS on port 5671 with the combined trust store (the committed
+  SUSE CA alone verifies the chain; an empty or certifi-only store fails, and
+  a host name outside the certificate fails hostname verification); a
+  60-second heartbeat; the passive `pubsub` declaration, while a missing
+  exchange closes only the channel with `NOT_FOUND`; the server-named
+  exclusive queue; per-consumer prefetch 1 with one delivery in flight; exact
+  bindings delivering only their routing key; the broker capabilities
+  `consumer_cancel_notify` and `per_consumer_qos`; an authentication rejection
+  as `ACCESS_REFUSED` during the handshake; content type
+  `application/octet-stream`, no content encoding, empty headers, and
+  `redelivered = false` on every delivery; strict UTF-8 JSON object bodies;
+  and `project` and `package` as non-empty strings without surrounding
+  whitespace, control characters, or non-ASCII characters, equal to the IBS
+  source-info identity. The other package-commit members are `rev`, `user`,
+  `files`, `comment`, and a string `requestid`; `srcmd5` and `sender` never
+  occur. Documentation-only: exchange durability and type at the declaration
+  level (topic routing is confirmed behaviorally only), broker queue policies
+  on server-named queues, the broker's own heartbeat timeout,
+  `connection.blocked`, broker consumer cancellation causes other than queue
+  deletion, the authorization refusals (`ACCESS_REFUSED` on a channel or
+  connection), the `NOT_ALLOWED` connection refusal, and topology
+  `PRECONDITION_FAILED` replies, which are classified from the client
+  library's source and wire-level tests, the
+  aiormq 7.2.2 broker-cancellation callback, which is covered by a
+  wire-level test (queue deletion was observed with aiormq 6.9.4 only), and
+  the stability of the publisher's content type
 - **Documentation**: https://rabbit.opensuse.org (OBS),
   https://github.com/openSUSE/suse_msg/blob/master/amqp_infra.md,
   OBS event types: https://github.com/openSUSE/open-build-service/tree/master/src/api/app/models/event

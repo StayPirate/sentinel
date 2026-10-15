@@ -40,6 +40,8 @@ dependencies = [
     "celery-redbeat>=2.4.2",
     "email-validator>=2.3.0",
     "click>=8.5.0",
+    "aio-pika>=10.1.1",
+    "aiormq>=7.2.2",
 ]
 
 [project.scripts]

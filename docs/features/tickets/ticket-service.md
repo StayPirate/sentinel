@@ -1293,7 +1293,11 @@ of `run_ticket_convergence()`. The owner commits and releases its row locks,
 atomically detaches the complete sequence, and attempts each effect once in
 registered order before beginning its next unit or dependent post-commit
 handoff. An owner may close or reuse its session according to its owning
-contract because the publisher performs no database work.
+contract because the publisher performs no database work. The IBS RabbitMQ
+consumer is not a publishing owner: it never publishes, and its package-commit
+path rolls back a unit that would register an effect
+(`../packages/ibs-track-release-detection.md`, Shared Reconciliation
+Boundary).
 
 The automatic adapter calls the database-free publisher. A normal return leaves
 the committed unit and its existing outcome accounting unchanged. A

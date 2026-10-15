@@ -21,6 +21,7 @@ INFRA_PULL_TIMEOUT="${IMAGE_SMOKE_INFRA_PULL_TIMEOUT-300}"
 LOCAL_BUILD_TIMEOUT="${IMAGE_SMOKE_LOCAL_BUILD_TIMEOUT-900}"
 STARTUP_TIMEOUT="${IMAGE_SMOKE_STARTUP_TIMEOUT-300}"
 BEAT_READINESS_TIMEOUT="${IMAGE_SMOKE_BEAT_READINESS_TIMEOUT-45}"
+IBS_CONSUMER_READINESS_TIMEOUT="${IMAGE_SMOKE_IBS_CONSUMER_READINESS_TIMEOUT-45}"
 PORT_DISCOVERY_TIMEOUT="${IMAGE_SMOKE_PORT_DISCOVERY_TIMEOUT-30}"
 IMAGE_VERIFICATION_TIMEOUT="${IMAGE_SMOKE_IMAGE_VERIFICATION_TIMEOUT-30}"
 PYTEST_TIMEOUT="${IMAGE_SMOKE_PYTEST_TIMEOUT-600}"
@@ -66,6 +67,7 @@ validate_bounds() {
         validate_positive_bound IMAGE_SMOKE_LOCAL_BUILD_TIMEOUT "${LOCAL_BUILD_TIMEOUT}" &&
         validate_positive_bound IMAGE_SMOKE_STARTUP_TIMEOUT "${STARTUP_TIMEOUT}" &&
         validate_positive_bound IMAGE_SMOKE_BEAT_READINESS_TIMEOUT "${BEAT_READINESS_TIMEOUT}" &&
+        validate_positive_bound IMAGE_SMOKE_IBS_CONSUMER_READINESS_TIMEOUT "${IBS_CONSUMER_READINESS_TIMEOUT}" &&
         validate_positive_bound IMAGE_SMOKE_PORT_DISCOVERY_TIMEOUT "${PORT_DISCOVERY_TIMEOUT}" &&
         validate_positive_bound IMAGE_SMOKE_IMAGE_VERIFICATION_TIMEOUT "${IMAGE_VERIFICATION_TIMEOUT}" &&
         validate_positive_bound IMAGE_SMOKE_PYTEST_TIMEOUT "${PYTEST_TIMEOUT}" &&
@@ -337,6 +339,51 @@ print("BEAT-READY")
     ' bash "${container}"
 }
 
+wait_for_ibs_consumer_readiness() {
+    local container status
+    if capture_bounded container ibs-consumer-container "${IMAGE_VERIFICATION_TIMEOUT}" \
+        docker compose -p "${COMPOSE_PROJECT}" -f "${SMOKE_COMPOSE}" \
+        ps --all -q ibs-consumer; then
+        :
+    else
+        status=$?
+        echo "Error: cannot resolve the IBS consumer container in project '${COMPOSE_PROJECT}'." >&2
+        return "${status}"
+    fi
+    if [[ ! "${container}" =~ ^[0-9a-f]{12,64}$ ]]; then
+        echo "Error: invalid or missing IBS consumer container ID '${container}'." >&2
+        return 1
+    fi
+
+    # The startup event follows the PostgreSQL verification; the reconnect
+    # event proves the first RabbitMQ attempt ran against the refusing endpoint.
+    # shellcheck disable=SC2016  # inner Bash receives the container as $1
+    run_bounded ibs-consumer-readiness "${IBS_CONSUMER_READINESS_TIMEOUT}" bash -c '
+        set -euo pipefail
+        container="$1"
+        while true; do
+            running="$(docker inspect --format "{{.State.Running}}" "${container}")"
+            if [[ "${running}" != "true" ]]; then
+                echo "Error: IBS consumer container ${container} exited before readiness." >&2
+                exit 1
+            fi
+            logs="$(docker logs --timestamps --tail 200 "${container}" 2>&1)"
+            if [[ "${logs}" == *ibs_consumer_started* &&
+                "${logs}" == *ibs_consumer_reconnect_scheduled* ]]; then
+                break
+            fi
+            sleep 1
+        done
+
+        running="$(docker inspect --format "{{.State.Running}}" "${container}")"
+        if [[ "${running}" != "true" ]]; then
+            echo "Error: IBS consumer container ${container} exited after its startup events." >&2
+            exit 1
+        fi
+        echo "IBS-CONSUMER-READY"
+    ' bash "${container}"
+}
+
 discover_api_port() {
     local mapping port status
     if capture_bounded mapping port-discovery "${PORT_DISCOVERY_TIMEOUT}" \
@@ -364,8 +411,9 @@ discover_api_port() {
 verify_role_images() {
     local role container actual status
     # Every application role in docker-compose.smoke.yml; worker and
-    # git-worker readiness is their per-node Compose healthcheck (up --wait).
-    for role in api migrate worker git-worker beat; do
+    # git-worker readiness is their per-node Compose healthcheck (up --wait),
+    # Beat and IBS consumer readiness are separate runner phases.
+    for role in api migrate worker git-worker beat ibs-consumer; do
         if capture_bounded container "image-verification-${role}-container" \
             "${IMAGE_VERIFICATION_TIMEOUT}" docker compose \
             -p "${COMPOSE_PROJECT}" -f "${SMOKE_COMPOSE}" \
@@ -613,6 +661,12 @@ main() {
             status=0
             wait_for_beat_readiness || status=$?
             ((status == 0)) || record_failure "${status}" beat-readiness
+        fi
+
+        if ((PRIMARY_STATUS == 0)); then
+            status=0
+            wait_for_ibs_consumer_readiness || status=$?
+            ((status == 0)) || record_failure "${status}" ibs-consumer-readiness
         fi
 
         if ((PRIMARY_STATUS == 0)); then

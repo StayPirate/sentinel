@@ -487,7 +487,8 @@ internal CA.
     created and closed by the task workflow per invocation
   - `IBSClient`: once per workflow invocation in Celery roles; once per
     process lifetime in the IBS RabbitMQ consumer
-  - `IBSEventConsumer` (AMQPS): once per process lifetime
+  - `IBSEventConsumer` (AMQPS): once per connection attempt — it builds a
+    fresh context for every attempt (see the rotation table below)
 - **If file is corrupt or unparseable**: `build_tls_context()` raises
   `TLSConfigurationError` with the file path and parse error detail.
   The calling component handles this error according to its own

@@ -21,6 +21,7 @@ ROLE_CONTAINERS = {
     "worker": "cccccccccccc",
     "git-worker": "eeeeeeeeeeee",
     "beat": "dddddddddddd",
+    "ibs-consumer": "ffffffffffff",
 }
 
 PYTHON_STUB = r"""#!/usr/bin/env bash
@@ -50,6 +51,13 @@ times_out=0
 if [[ -n "${TIMEOUT_LABEL_PREFIX:-}" &&
       "${label}" == "${TIMEOUT_LABEL_PREFIX}"* ]]; then
     times_out=1
+fi
+if [[ "${BOUNDED_LABEL:-}" == "${label}" ]]; then
+    status=0
+    /usr/bin/timeout "${timeout}" "$@" || status=$?
+    ((status != 124)) ||
+        printf "Timeout: label='%s' timeout=%ss\n" "${label}" "${timeout}" >&2
+    exit "${status}"
 fi
 if ((times_out)); then
     if [[ "${label}" == "pytest" && -n "${REGISTER_DISPOSABLE:-}" ]]; then
@@ -120,9 +128,21 @@ if [[ "${1:-}" == "inspect" ]]; then
         cccccccccccc) role=worker ;;
         dddddddddddd) role=beat ;;
         eeeeeeeeeeee) role=git-worker ;;
+        ffffffffffff) role=ibs-consumer ;;
         *) role=unknown ;;
     esac
-    if [[ "$*" == *"{{.State.Running}}"* ]]; then
+    if [[ "$*" == *"{{.State.Running}}"* && "${role}" == "ibs-consumer" ]]; then
+        count_file="${IMAGE_SMOKE_STATE_DIR}/consumer-running-count"
+        count=0
+        [[ ! -f "${count_file}" ]] || read -r count < "${count_file}"
+        count=$((count + 1))
+        printf '%s\n' "${count}" > "${count_file}"
+        if ((count > 1)); then
+            printf '%s\n' "${CONSUMER_RUNNING_AFTER_READY:-true}"
+        else
+            printf '%s\n' "${CONSUMER_RUNNING:-true}"
+        fi
+    elif [[ "$*" == *"{{.State.Running}}"* ]]; then
         printf '%s\n' "${BEAT_RUNNING:-true}"
     elif [[ "${ROLE_MISMATCH:-}" == "${role}" ]]; then
         printf '%s\n' "${mismatch_id}"
@@ -134,7 +154,14 @@ if [[ "${1:-}" == "inspect" ]]; then
     exit 0
 fi
 if [[ "${1:-}" == "logs" ]]; then
-    [[ "${BEAT_LOG_READY:-1}" == "1" ]] && printf 'beat_startup_completed\n'
+    if [[ "${*: -1}" == "ffffffffffff" ]]; then
+        [[ "${CONSUMER_STARTED_LOG:-1}" != "1" ]] ||
+            printf '{"event": "ibs_consumer_started"}\n'
+        [[ "${CONSUMER_RECONNECT_LOG:-1}" != "1" ]] ||
+            printf '{"event": "ibs_consumer_reconnect_scheduled"}\n'
+    else
+        [[ "${BEAT_LOG_READY:-1}" == "1" ]] && printf 'beat_startup_completed\n'
+    fi
     exit 0
 fi
 if [[ "${1:-}" == "exec" ]]; then
@@ -165,9 +192,10 @@ if [[ "${1:-}" == "compose" ]]; then
             elif [[ "$*" == *"-q git-worker"* ]]; then printf 'eeeeeeeeeeee\n'
             elif [[ "$*" == *"-q worker"* ]]; then printf 'cccccccccccc\n'
             elif [[ "$*" == *"-q beat"* ]]; then printf 'dddddddddddd\n'
+            elif [[ "$*" == *"-q ibs-consumer"* ]]; then printf 'ffffffffffff\n'
             elif [[ "$*" == *"-q"* ]]; then
                 printf '%s\n' aaaaaaaaaaaa bbbbbbbbbbbb cccccccccccc \
-                    dddddddddddd eeeeeeeeeeee
+                    dddddddddddd eeeeeeeeeeee ffffffffffff
             else
                 printf '{"Project":"%s","State":"running"}\n' "${project}"
             fi
@@ -210,7 +238,7 @@ def _write_executable(path: Path, content: str) -> None:
 def _prepare_bin(tmp_path: Path, *, docker: bool = True, python: bool = True) -> Path:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(parents=True)
-    for command in ("bash", "dirname", "mktemp", "rm", "tr"):
+    for command in ("bash", "dirname", "mktemp", "rm", "sleep", "tr"):
         target = Path("/usr/bin") / command
         bin_dir.joinpath(command).symlink_to(target)
     if python:
@@ -819,6 +847,11 @@ def test_pytest_failure_precedes_later_reference_drift(tmp_path: Path) -> None:
             "IMAGE_SMOKE_BEAT_READINESS_TIMEOUT",
             "beat-readiness",
         ),
+        (
+            "ibs-consumer-readiness",
+            "IMAGE_SMOKE_IBS_CONSUMER_READINESS_TIMEOUT",
+            "ibs-consumer-readiness",
+        ),
         ("port-discovery", "IMAGE_SMOKE_PORT_DISCOVERY_TIMEOUT", "port-discovery"),
         (
             "image-verification-api-container",
@@ -917,6 +950,78 @@ def test_missing_static_beat_entry_fails_before_pytest(tmp_path: Path) -> None:
 
     assert result.returncode == 6
     assert "phase=beat-readiness exit=6" in result.stderr
+    assert not any(call.startswith("uv ") for call in calls)
+
+
+@pytest.mark.unit
+def test_ibs_consumer_readiness_requires_current_container_events(
+    tmp_path: Path,
+) -> None:
+    result, calls = _run_script(tmp_path, "--no-build")
+
+    assert result.returncode == 0, result.stderr
+    consumer_container = next(
+        call for call in calls if " ps --all -q ibs-consumer" in call
+    )
+    assert "sentinel-smoke-" in consumer_container
+    running_checks = [
+        call
+        for call in calls
+        if call == "docker inspect --format {{.State.Running}} ffffffffffff"
+    ]
+    assert len(running_checks) == 2
+    assert "docker logs --timestamps --tail 200 ffffffffffff" in calls
+    readiness_labels = [
+        call.split()[1]
+        for call in _supervisor_calls(calls)
+        if call.split()[1]
+        in {"beat-readiness", "ibs-consumer-readiness", "port-discovery"}
+    ]
+    assert readiness_labels == [
+        "beat-readiness",
+        "ibs-consumer-readiness",
+        "port-discovery",
+    ]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"CONSUMER_RUNNING": "false"}, "exited before readiness"),
+        ({"CONSUMER_RUNNING_AFTER_READY": "false"}, "exited after its startup"),
+    ],
+)
+def test_ibs_consumer_container_exit_fails_before_pytest(
+    tmp_path: Path, overrides: dict[str, str], message: str
+) -> None:
+    result, calls = _run_script(tmp_path, "--no-build", env_overrides=overrides)
+
+    assert result.returncode == 1
+    assert "phase=ibs-consumer-readiness exit=1" in result.stderr
+    assert message in result.stderr
+    assert not any(call.startswith("uv ") for call in calls)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("missing", ["CONSUMER_STARTED_LOG", "CONSUMER_RECONNECT_LOG"])
+def test_missing_ibs_consumer_event_times_out_before_pytest(
+    tmp_path: Path, missing: str
+) -> None:
+    """The real polling loop runs under a finite bound and needs both events."""
+    result, calls = _run_script(
+        tmp_path,
+        "--no-build",
+        env_overrides={
+            missing: "0",
+            "BOUNDED_LABEL": "ibs-consumer-readiness",
+            "IMAGE_SMOKE_IBS_CONSUMER_READINESS_TIMEOUT": "2",
+        },
+    )
+
+    assert result.returncode == 124
+    assert "phase=ibs-consumer-readiness exit=124" in result.stderr
+    assert "docker logs --timestamps --tail 200 ffffffffffff" in calls
     assert not any(call.startswith("uv ") for call in calls)
 
 

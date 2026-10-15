@@ -72,14 +72,21 @@ After each connection, the consumer establishes exactly this topology:
 
 | Resource | Required declaration |
 |---|---|
-| Exchange | Name `pubsub`, type `topic`, `passive=True`, `durable=True` |
+| Exchange | Name `pubsub`, `passive=True`, with the expected type `topic` and `durable=True` as declaration arguments |
 | Queue | Server-named (`name=""`), `exclusive=True`, `durable=False`, `auto_delete=True` |
 | QoS | Per-consumer `prefetch_count=1` |
 
 The exchange is IBS-managed. Sentinel must not create, modify, or publish to
-it. The server-named queue exists only for the current AMQP connection. It is
-deleted when that connection ends, so messages published while the queue is
-absent are not recoverable from RabbitMQ.
+it. A passive declaration verifies only that `pubsub` exists and is accessible:
+RabbitMQ checks neither its type nor its durability (see
+[Known Limitations](#known-limitations)). The server-named queue exists only
+for the current AMQP connection. It is deleted when that connection ends, so
+messages published while the queue is absent are not recoverable from
+RabbitMQ.
+
+The connection announces the fixed client connection name
+`sentinel-ibs-consumer` so that broker operators can identify it. It is a
+constant, not a setting.
 
 The consumer creates exactly three bindings, with no wildcards:
 
@@ -102,14 +109,28 @@ All three routing keys use AMQP content type `application/octet-stream`; the
 body is UTF-8 encoded JSON. The consumer:
 
 1. verifies the routing key is one of the three fixed bindings;
-2. requires content type `application/octet-stream`;
+2. requires the content type to equal `application/octet-stream` exactly:
+   case-sensitive and without parameters;
 3. decodes the complete body as strict UTF-8;
-4. parses one complete JSON value; and
+4. parses exactly one complete JSON text under RFC 8259; and
 5. requires the root value to be a JSON object.
 
-An unsupported routing key, different content type, invalid UTF-8, malformed
-JSON, or non-object root is a malformed delivery. Raw message bytes and parsed
-payloads are never logged or persisted.
+An unsupported routing key, an absent or different content type, invalid
+UTF-8, malformed JSON, or a non-object root is a malformed delivery. The
+content type is the IBS publisher's default for every event family rather than
+an explicit upstream contract; a different, differently cased, or
+parameterized value therefore identifies a different publisher, and the
+consumer does not guess the encoding. AMQP `content_encoding` is ignored.
+
+Malformed JSON includes an empty body, a byte order mark, trailing content
+after the value, more than one value, the non-standard literals `NaN`,
+`Infinity`, and `-Infinity` anywhere in the document, and a value the parser
+cannot represent, such as nesting deeper than its limit or an integer with too
+many digits. JSON whitespace around the value is permitted. A duplicated
+member name in the root object makes the delivery malformed only when the
+handler of its routing key consumes that member; duplicated unconsumed members
+are accepted. No size limit applies beyond the broker's own limits. Raw
+message bytes and parsed payloads are never logged or persisted.
 
 AMQP `message_id`, `correlation_id`, and timestamp are not required and are not
 used. Delivery tags and `redelivered` are transport metadata only. They are not
@@ -129,12 +150,16 @@ The consumer validates and consumes only these payload fields:
 | `project` | Non-empty JSON string |
 | `package` | Non-empty JSON string |
 
-Whitespace-only values are invalid, and so is a value containing U+0000 under
-External String Admissibility (`docs/conventions.md`), because both values are
-exact-match query parameters. An invalid value makes the delivery malformed.
-Every other payload field is ignored without validation. In particular, `rev`,
-`requestid`, `srcmd5`, sender, user, comment, and file data are neither
-consumed nor persisted.
+Whitespace-only values are invalid, and so is a value containing an
+inadmissible character (U+0000 or a surrogate code point) under External
+String Admissibility (`docs/conventions.md`), because both values are
+exact-match query parameters. Either member appearing more than once in the
+root object is invalid. An invalid value makes the delivery malformed. A
+non-empty value with leading or trailing whitespace is not trimmed: it is
+valid and matches no represented track exactly. Every other payload field is
+ignored without validation, including its type, size, and characters. In
+particular, `rev`, `requestid`, `srcmd5`, sender, user, comment, and file data
+are neither consumed nor persisted.
 
 `project` and `package` form a wake-up identity only. They do not prove a
 source revision or release. For a valid event, the handler:
@@ -143,14 +168,23 @@ source revision or release. For a valid event, the handler:
    `ibs-track-release-detection.md` and whose IBS project and logical package
    exactly equal `project` and `package`;
 2. treats an empty selection as irrelevant and performs no IBS HTTP request;
-3. passes the selected track IDs to `reconcile_ibs_track_releases()`; and
+3. passes the selected track IDs to `reconcile_ibs_track_releases()` in its
+   consumer mode, with the process-wide IBS client, no metric hook, no request
+   delay, and no fetcher name; and
 4. considers the delivery successful only when every selected track has an
    `updated` or `no_op` outcome.
 
 A `failed` track outcome makes the delivery a terminal application failure,
 even if sibling tracks committed successfully. Successfully committed sibling
 outcomes are retained. The failed track keeps its prior checkpoint and is
-recoverable through a later event or the polling owner.
+recoverable through a later event or the polling owner, except a consumer-mode
+failure, whose recovery owner is described below.
+
+Consumer mode exists because the consumer never publishes Celery tasks
+([Non-Goals](#non-goals)): a selected track whose local unit would register a
+Ticket convergence effect is rolled back and reported `failed` instead of
+committed. Its recovery owner is defined in `ibs-track-release-detection.md`
+(Shared Reconciliation Boundary).
 
 The handler performs no reverse-link fan-out. An event for an unrepresented
 linked target, snapshot package, or related package is irrelevant. The
@@ -214,6 +248,13 @@ UUID, routing key, and bounded reason category. They must not contain raw
 payloads, credentials, actor fields, comments, descriptions, file lists,
 upstream exception text that can contain response data, or another personal
 identifier.
+
+A package-commit `project` and `package` are a sanitized identity only when
+`project` starts with `SUSE:`. A project outside the `SUSE:` namespace, such
+as a personal `home:` project, is a personal identifier
+(`ibs-submission-tracking.md`, Security and Privacy): neither it nor its
+package is logged. A valid irrelevant delivery is logged at DEBUG only. The
+consumer's events are listed in [Structured Logs](#structured-logs).
 
 ### One-Attempt Rule
 
@@ -283,12 +324,18 @@ counters retain that successful outcome even though no ACK can be sent.
 
 The consumer, implemented as `IBSEventConsumer`, runs as a standalone
 long-lived process from the same Sentinel image as the other process roles. Its
-entrypoint imports only the configuration,
-logging, database, Redis-heartbeat, AMQP, IBS-client, and owning service
-boundaries it needs.
+entry module is `backend/app/ibs_consumer.py`, started as
+`python -m app.ibs_consumer`; it runs one `asyncio.run()` for the process
+lifetime and disposes the database engine before exiting. It is not a
+`sentinel` CLI command: the CLI's minimal logging, signal handling, and exit
+codes serve short-lived commands
+(`docs/features/platform/cli-infrastructure.md`). The entrypoint imports only
+the configuration, logging, database, Redis-heartbeat, AMQP, IBS-client, and
+owning service boundaries it needs.
 
 The process must not import the Celery application, fetcher discovery for its
-side effects, or any Celery task module. It does not consume or publish Celery
+side effects, any concrete fetcher module, or any Celery task module, and it
+never populates the fetcher registry. It does not consume or publish Celery
 messages and has no runtime dependency on `CELERY_BROKER_URL`, a Celery result
 backend, Redbeat, the fetcher registry, or broker publication. Celery timezone
 and Redbeat lock-sentinel validation are not consumer startup steps.
@@ -301,13 +348,20 @@ publication through `REDIS_URL`.
 
 The process performs these steps in order:
 
-1. Load and validate consumer, TLS, database, Redis, and logging configuration.
+1. Load and validate the consumer, TLS, database, Redis, and logging settings,
+   then configure logging, so every later lifecycle event uses the structured
+   pipeline. The CA file itself is read only when a TLS context is built (step
+   4 and every connection attempt); a corrupt or unparseable one is the fatal
+   TLS configuration condition of
+   [Fatal and Transient Failures](#fatal-and-transient-failures).
 2. If `IBS_RABBITMQ_ENABLED=false`, log an INFO lifecycle event and exit with
    code 0. Do not connect to PostgreSQL, Redis, IBS, or RabbitMQ.
-3. Configure logging and initialize process-scoped heartbeat state and counters.
+3. Initialize process-scoped heartbeat state and counters.
 4. Verify PostgreSQL connectivity with a bounded `SELECT 1`. Failure is
    CRITICAL and terminates with a non-zero exit; the consumer cannot perform
-   domain reconciliation without PostgreSQL.
+   domain reconciliation without PostgreSQL. After a successful check, create
+   the process-wide IBS client (`ibs-integration.md`, IBSClient), shared by
+   every connection and closed at shutdown, and log the INFO startup event.
 5. Start the best-effort heartbeat loop. Initial RabbitMQ connection attempts
    are represented as `reconnecting`, so an unavailable broker is
    distinguishable from a dead consumer process.
@@ -322,9 +376,14 @@ failure logs a WARNING and leaves event processing enabled.
 ### Reconnection
 
 Transient RabbitMQ failures use exponential backoff beginning at 5 seconds and
-capped at 300 seconds. Once capped, attempts continue every 300 seconds until
-shutdown or successful connection. Each attempt builds a fresh TLS context so
-a rotated CA file can be picked up without process restart.
+capped at 300 seconds (`IBS_RABBITMQ_RECONNECT_INITIAL` and
+`IBS_RABBITMQ_RECONNECT_MAX`). The initial connection attempt starts without a
+wait. After a failed attempt, or after the loss of an established connection,
+channel, or broker consumer, the consumer waits the current delay before the
+next attempt and then doubles the delay up to the cap. Once capped, attempts
+continue at the cap until shutdown or successful connection. Each
+attempt builds a fresh TLS context so a rotated CA file can be picked up
+without process restart.
 
 SIGTERM or SIGINT interrupts an in-progress reconnect backoff wait immediately;
 shutdown never waits for the remaining delay.
@@ -332,8 +391,8 @@ shutdown never waits for the remaining delay.
 The consumer writes `disconnected` immediately after an established connection
 is lost. It writes `reconnecting` when reconnection begins and while waiting or
 attempting. A successful connection, topology setup, and consumer start changes
-the status to `connected` and resets the delay to 5 seconds. Process counters,
-including `reconnect_attempts`, do not reset.
+the status to `connected` and resets the delay to the initial delay. Process
+counters, including `reconnect_attempts`, do not reset.
 
 `reconnect_attempts` increments whenever a reconnect attempt starts after the
 initial connection attempt has failed or an established connection has been
@@ -347,10 +406,10 @@ Failure classification is explicit:
 |---|---|
 | Corrupt/unparseable local CA file or another local TLS-context configuration error | Fatal; log CRITICAL and exit non-zero |
 | TLS certificate or hostname verification failure | Fatal; never disable verification or reconnect indefinitely |
-| RabbitMQ authentication or authorization rejection | Fatal; log CRITICAL without credentials and exit non-zero |
-| Passive `pubsub` declaration reports a missing exchange | Fatal topology error; exit non-zero |
-| Exchange type/durability mismatch, queue/QoS/binding precondition failure, or incompatible topology | Fatal topology error; exit non-zero |
-| DNS, TCP, timeout, broker-unavailable, heartbeat-timeout, connection-reset, channel-loss, or broker cancellation without a permanent protocol rejection | Transient; clean up and reconnect with backoff |
+| RabbitMQ authentication rejection or authorization refusal (`ACCESS_REFUSED`) | Fatal; log CRITICAL without credentials and exit non-zero |
+| During topology setup, the passive `pubsub` declaration reports a missing exchange (a channel-level `NOT_FOUND`; the connection stays open) | Fatal topology error; exit non-zero |
+| During topology setup, a queue, QoS, or binding precondition failure (`PRECONDITION_FAILED`) | Fatal topology error; exit non-zero |
+| DNS, TCP, timeout, broker-unavailable, heartbeat-timeout, connection-reset, channel-loss (including a broker channel close after consumption started), broker cancellation, or a connection refusal the broker can lift by itself (`NOT_ALLOWED`, for example a reached connection limit or a virtual host that is down; `NOT_ALLOWED` does not distinguish a missing or refused virtual host, which therefore also retries at the cap) | Transient; clean up and reconnect with backoff |
 | PostgreSQL unavailable during startup | Fatal startup failure; exit non-zero |
 | PostgreSQL, IBS REST, validation, or local reconciliation failure for one live-channel delivery | Terminal application failure for that delivery; roll back incomplete work, ACK, and continue |
 | Redis heartbeat write failure | Monitoring degradation; log WARNING and continue without pausing consumption |
@@ -360,6 +419,23 @@ system-only context and warn. A resulting certificate-verification failure is
 fatal. Fatal errors rely on the deployment orchestrator to restart after an
 operator or infrastructure correction; they do not enter the internal
 reconnect loop.
+
+Every `Exception` other than `MemoryError` raised by a delivery's application
+processing — its decoding, the consumer's own selection and handler code, or a
+shared reconciliation boundary, for example a definitely failed or ambiguous
+commit, a rollback failure, or a PostgreSQL failure — is a terminal
+application failure of that delivery: no further unit of the delivery runs,
+the incomplete transaction is rolled back and its session closed, the delivery
+is ACKed on a live channel with a bounded reason category, and consumption
+continues. Units committed earlier remain committed. `MemoryError` during a
+delivery, and an exception outside a delivery's application processing that
+this table does not classify, are fatal: the consumer logs CRITICAL, makes no
+settlement for an in-flight delivery, closes its resources best-effort, and
+exits non-zero; an unsettled delivery is lost and polling recovers it.
+Cancellation follows
+[Connection Loss and Consumer Cancellation](#connection-loss-and-consumer-cancellation)
+and [Graceful Shutdown](#graceful-shutdown); any other `BaseException`
+propagates and ends the process.
 
 ### Graceful Shutdown
 
@@ -379,7 +455,19 @@ If the in-flight handler finishes within the deadline, it applies the ordinary
 ACK policy. If the channel dies during shutdown, the dead-channel rule applies:
 no settlement is attempted. Shutdown does not wait for queued deliveries in the
 exclusive queue and must complete after the fixed handler deadline plus
-best-effort resource closure.
+best-effort resource closure, which also closes the process-wide IBS client
+and disposes the database engine. A graceful shutdown exits with code 0, also
+when the deadline cancelled the handler. A signal received during a connection
+attempt or topology setup interrupts it immediately; one received during the
+bounded startup PostgreSQL check takes effect when the check ends. A repeated
+signal during shutdown is ignored. Every connection handshake, channel open,
+topology operation, and closure step is bounded by a fixed integration
+constant, so the orchestrator's stop grace period can exceed the handler
+deadline plus that closure (`docs/deployment.md`, Singleton Processes). The
+cleanup of a handler cancelled at the deadline (step 4) is best-effort and not
+covered by these bounds: if it hangs, the orchestrator ends the process after
+its stop grace period, committed work remains, and polling recovers the
+rest.
 
 ## Configuration
 
@@ -390,13 +478,24 @@ best-effort resource closure.
 | `IBS_RABBITMQ_RECONNECT_INITIAL` | positive integer seconds | `5` | Initial transient reconnect delay |
 | `IBS_RABBITMQ_RECONNECT_MAX` | positive integer seconds | `300` | Reconnect delay cap; must be greater than or equal to the initial delay |
 
+`IBS_RABBITMQ_URL` must use the `amqps` scheme, name a non-empty host, and
+contain no query or fragment, so that URL parameters cannot override the fixed
+constants below; user information and a virtual host path are permitted, and
+whitespace, control characters, and an invalid port are rejected. An invalid
+URL, a non-positive reconnect delay, or a cap below the initial delay fails
+startup of every process role that loads the shared settings — API, workers,
+Beat, and the consumer — even when `IBS_RABBITMQ_ENABLED=false`, so a bad
+value never stays latent until the consumer is enabled. The error names only
+the variable and never contains its value.
+
 `DATABASE_URL`, `REDIS_URL`, and `SUSE_CA_CERT_PATH` retain their cross-cutting
 contracts. `REDIS_URL` is the only Redis URL used by the heartbeat. The
 consumer does not read `CELERY_BROKER_URL`.
 
 The exchange name, exchange type, queue properties, three routing keys,
-60-second AMQP heartbeat, prefetch count, and 30-second shutdown deadline are
-fixed integration constants, not environment variables.
+60-second AMQP heartbeat, prefetch count, client connection name, and
+30-second shutdown deadline are fixed integration constants, not environment
+variables.
 
 ## Monitoring and Observability
 
@@ -596,12 +695,61 @@ The `unreachable` response has the same null field values as `disabled`, with
 | Duplicate or out-of-order delivery | Current-state no-op and ACK | None required |
 | IBS HTTP failure after shared retries, or an IBS API credentials-not-configured or authentication failure | Roll back incomplete work, count failure, ACK | Corresponding periodic fetcher or later event |
 | PostgreSQL failure during delivery | Roll back, count failure, ACK | Corresponding periodic fetcher or later event |
-| Partial per-track package reconciliation | Keep committed siblings, count delivery failure, ACK | Track fetcher or later event for failed tracks |
+| Partial per-track package reconciliation | Keep committed siblings, count delivery failure, ACK | Track fetcher or later event for failed tracks; for a consumer-mode convergence failure, the owner in `ibs-track-release-detection.md` (Shared Reconciliation Boundary) |
 | Partial per-track request reconciliation | Keep committed siblings, count delivery failure, ACK | Request fetcher or later event for failed tracks |
 | Connection loss or broker cancellation | Cancel handler, no dead-channel settlement, reconnect with a new queue | Corresponding periodic fetcher for lost messages |
 | Redis unavailable | Continue consumption; heartbeat/status degrades | Next heartbeat write after Redis recovers |
 | Fatal TLS, RabbitMQ authentication, exchange, or topology condition | Exit non-zero | Operator correction and orchestrator restart |
+| `MemoryError`, or an unclassified exception outside a delivery's application processing | CRITICAL; no settlement; best-effort closure; exit non-zero | Orchestrator restart; corresponding periodic fetcher for the lost delivery |
 | Consumer or corresponding fetcher disabled | No event acceleration or polling recovery from that component | Operator re-enables the component |
+
+### Structured Logs
+
+Consumer logs use these event names and fields. Standard correlation fields
+are added by the logging infrastructure and are not repeated here; delivery
+events carry `ibs_event_id`, lifecycle events never do.
+
+| Event | Level | Required fields | Optional fields |
+|---|---|---|---|
+| `ibs_consumer_disabled` | INFO | — | — |
+| `ibs_consumer_started` | INFO | — | — |
+| `ibs_consumer_startup_failed` | CRITICAL | `reason_category` | — |
+| `ibs_consumer_connected` | INFO | — | — |
+| `ibs_consumer_connection_failed` | WARNING | `reason_category` | — |
+| `ibs_consumer_connection_lost` | WARNING | `reason_category` | — |
+| `ibs_consumer_reconnect_scheduled` | INFO | `delay_seconds` | — |
+| `ibs_consumer_fatal` | CRITICAL | `reason_category` | — |
+| `ibs_consumer_delivery_malformed` | WARNING | `reason_category` | `routing_key` |
+| `ibs_consumer_delivery_irrelevant` | DEBUG | `routing_key` | `project`, `package` |
+| `ibs_consumer_delivery_processed` | INFO | `routing_key`, `track_count` | `project`, `package` |
+| `ibs_consumer_delivery_failed` | ERROR | `routing_key`, `reason_category` | `project`, `package`, `track_count`, `failed_track_count` |
+| `ibs_consumer_delivery_cancelled` | WARNING | — | `routing_key` |
+| `ibs_consumer_shutdown_started` | INFO | — | — |
+| `ibs_consumer_shutdown_deadline_exceeded` | WARNING | — | — |
+| `ibs_consumer_stopped` | INFO | — | — |
+
+`ibs_consumer_started` follows the PostgreSQL verification and the IBS client
+creation and precedes the first connection attempt; it is the process's
+readiness evidence (`docs/features/platform/testing-strategy.md`, Process
+Readiness). `routing_key` appears only when it is one of the fixed bindings,
+and `project` and `package` only under the `SUSE:` rule of
+[Correlation Scope](#correlation-scope). `reason_category` is a bounded
+internal classification, never upstream or exception text. At minimum it
+distinguishes:
+
+- startup: PostgreSQL unavailable;
+- connection failure: network, timeout, TLS handshake, and AMQP protocol or
+  broker errors;
+- connection loss: connection lost, channel lost, and broker consumer
+  cancellation;
+- fatal: invalid TLS configuration, TLS verification failure, authentication
+  rejection, access refused, missing exchange, topology precondition failure,
+  memory exhaustion, and an unexpected exception;
+- malformed delivery: unsupported routing key, unsupported content type,
+  invalid UTF-8, invalid JSON, non-object root, and invalid `project` or
+  `package`; and
+- failed delivery: a failed track outcome, a selection failure, a failure
+  propagated by the reconciliation boundary, and an unexpected exception.
 
 ## Security
 
@@ -624,12 +772,18 @@ The `unreachable` response has the same null field values as `disabled`, with
 
 Implementation tests must cover:
 
-- passive durable topic-exchange declaration, server-named exclusive
-  non-durable auto-delete queue, exact bindings, heartbeat 60, and prefetch 1;
+- passive `pubsub` declaration with the expected `topic` and durable
+  arguments, server-named exclusive non-durable auto-delete queue, exact
+  bindings, heartbeat 60, and prefetch 1;
 - rejection and ACK of unsupported routing keys, wrong content type, invalid
   UTF-8, malformed JSON, non-object JSON, and invalid required field types;
 - package parsing that consumes only non-empty `project` and `package` and
   ignores all other fields;
+- consumer-mode package reconciliation: a unit that would register a Ticket
+  convergence effect fails without commit, audit event, or publication;
+- the delivery exception boundary: every propagated failure ends the delivery
+  with one ACK and consumption continues, while `MemoryError` exits non-zero
+  without settlement;
 - request parsing that consumes only a positive integer `number`, point-fetches
   current REST truth, and never trusts event state or actions;
 - sequential handling and absence of a second in-flight delivery;
@@ -677,6 +831,15 @@ Implementation tests must cover:
 - The consumer cannot reconcile a package, track, or Product that Sentinel has
   not already represented. Package-tree recovery remains outside this
   integration.
+- The passive declaration cannot detect an exchange of another type or
+  durability. If IBS replaced `pubsub` with a non-topic exchange of the same
+  name, the consumer would still start: a fanout exchange, or a headers
+  exchange whose argument-less bindings match every message, would deliver
+  every event family, which the routing-key check discards as malformed, while
+  a direct exchange would route the exact bindings unchanged. Topic routing
+  was confirmed behaviorally during contract verification
+  (`docs/data-sources.md`, IBS/OBS RabbitMQ Event Bus), and polling remains
+  the recovery owner.
 
 ## Cross-References
 

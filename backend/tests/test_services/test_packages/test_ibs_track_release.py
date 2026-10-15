@@ -366,6 +366,54 @@ class TestSelection:
                 await load_track_release_candidates(db_session, ticket_id=missing) == []
             )
 
+    async def test_package_commit_identity_selects_exact_matches_only(
+        self, db_session: AsyncSession
+    ) -> None:
+        """The package-commit selection (RabbitMQ Package-Commit
+        Acceleration): the Scope plus exact IBS project and logical
+        package; no linked target, related package, other project, Git
+        track, final status, inactive or CVE-less Ticket, and no trimming
+        or case folding."""
+        seed = Seed(db_session)
+        package = f"example-{uuid.uuid4().hex[:8]}"
+        ticket = await seed.ticket()
+        match = await seed.track(ticket, package_name=package)
+        await seed.track(ticket, package_name=package, project=OTHER_PROJECT)
+        await seed.track(
+            await seed.ticket(),
+            package_name=package,
+            project=PROJECT,
+            workflow=WorkflowType.GIT,
+        )
+        await seed.track(
+            await seed.ticket(), package_name=package, status=PackageStatus.FIXED
+        )
+        await seed.track(ticket, package_name=f"{package}-debuginfo")
+        await seed.track(ticket, package_name=f"{package}.12345")
+        await seed.track(await seed.ticket(TicketStatus.RESOLVED), package_name=package)
+        await seed.track(await seed.ticket(with_cve=False), package_name=package)
+        second = await seed.track(await seed.ticket(), package_name=package)
+
+        selected = await load_track_release_candidates(
+            db_session, project=PROJECT, package_name=package
+        )
+
+        assert selected == sorted(
+            [match.candidate(), second.candidate()], key=lambda c: c.track_id
+        )
+        for project, name in (
+            (PROJECT.lower(), package),
+            (f" {PROJECT}", package),
+            (PROJECT, package.upper()),
+            (PROJECT, f"{package} "),
+        ):
+            assert (
+                await load_track_release_candidates(
+                    db_session, project=project, package_name=name
+                )
+                == []
+            )
+
     async def test_selection_writes_and_locks_nothing(
         self, db_session: AsyncSession
     ) -> None:

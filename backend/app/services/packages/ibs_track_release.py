@@ -6,14 +6,16 @@ Shared Reconciliation Boundary; Scheduled Reconciliation Algorithm steps
 Outcome, and Checkpoint Concurrency; First Observation and VA Correction;
 Unavailable History Fallback; Error Handling and its Structured Logs) for
 the periodic fetcher and the per-Ticket catch-up of
-`detect_ibs_track_releases`:
+`detect_ibs_track_releases` and for the IBS RabbitMQ package-commit path
+(RabbitMQ Package-Commit Acceleration):
 
 - `load_track_release_candidates()` is the read-only candidate selection:
   IBS tracks in `ANALYSIS` or `AFFECTED` of an active Ticket with a CVE,
   each with its semantic locator and the snapshot used for external-work
   grouping (Ticket CVE, logical package, IBS project, checkpoint). VA
   exclusion, lifecycle, EOL, eligibility, delivery, and actionability never
-  narrow the scope.
+  narrow the scope. The package-commit path narrows it to one exact IBS
+  project and logical package.
 - `reconcile_ibs_track_releases()` is the I/O orchestration and never takes
   a lock. It requests targeted source info per IBS project (in partitions
   of at most `SOURCE_INFO_PARTITION_SIZE` packages), records unchanged-source
@@ -41,7 +43,11 @@ session is closed. Committed Ticket convergence effects are drained after
 the close; a broker operational error is absorbed by the automatic policy
 and any other drain exception propagates. A commit exception or ambiguous
 commit outcome propagates without an outcome and terminates the
-invocation. Known IBS request failures and `SQLAlchemyError` before
+invocation. In consumer mode (`forbid_convergence_effects`), a unit that
+registered a Ticket convergence effect rolls back and fails with
+`ticket_convergence_required` instead of committing, so the drain of a
+consumer invocation never publishes (Shared Reconciliation Boundary,
+Consumer mode). Known IBS request failures and `SQLAlchemyError` before
 finalization become per-track failures; every other exception, including
 `SoftTimeLimitExceeded`, `MemoryError`, and cancellation, propagates.
 """
@@ -82,6 +88,9 @@ from app.services.ibs_client import (
     is_valid_ibs_name,
 )
 from app.services.ticket_convergence_publication import drain_ticket_convergence
+from app.services.ticket_convergence_registry import (
+    pending_ticket_convergence_effects,
+)
 from app.services.ticket_mutations import ensure_ticket_operable
 
 logger = structlog.get_logger(__name__)
@@ -105,6 +114,7 @@ STALE_CHECKPOINT_CATEGORY: Final = "stale_checkpoint"
 SYSTEM_TARGET_REJECTED_CATEGORY: Final = "system_target_rejected"
 DATABASE_CATEGORY: Final = "database"
 INVALID_IDENTITY_CATEGORY: Final = "invalid_identity"
+TICKET_CONVERGENCE_REQUIRED_CATEGORY: Final = "ticket_convergence_required"
 
 SOURCE_INFO_PARTITION_SIZE: Final = 100
 """Most logical packages requested by one targeted source-info request."""
@@ -166,7 +176,11 @@ _DiffKey = tuple[str, str, str, str]
 
 
 async def load_track_release_candidates(
-    db: AsyncSession, *, ticket_id: uuid.UUID | None = None
+    db: AsyncSession,
+    *,
+    ticket_id: uuid.UUID | None = None,
+    project: str | None = None,
+    package_name: str | None = None,
 ) -> list[TrackReleaseCandidate]:
     """The tracks in the detector's Scope, ordered by track ID.
 
@@ -175,7 +189,10 @@ async def load_track_release_candidates(
     `ANALYSIS` or `AFFECTED` of an active Ticket that has a CVE, including
     excluded and EOL records, with its checkpoint when one exists; with
     `ticket_id`, only that Ticket's tracks (none for a missing, inactive,
-    or CVE-less Ticket). Database exceptions propagate.
+    or CVE-less Ticket); with `project` and/or `package_name`, only tracks
+    whose `TicketPackageTrack.reference` and `TicketPackage.package_name`
+    equal them exactly (the package-commit selection; no trimming or case
+    folding). Database exceptions propagate.
     """
     statement = (
         select(
@@ -204,6 +221,10 @@ async def load_track_release_candidates(
     )
     if ticket_id is not None:
         statement = statement.where(Ticket.id == ticket_id)
+    if project is not None:
+        statement = statement.where(TicketPackageTrack.reference == project)
+    if package_name is not None:
+        statement = statement.where(TicketPackage.package_name == package_name)
     rows = (await db.execute(statement)).all()
     return [
         TrackReleaseCandidate(
@@ -231,9 +252,10 @@ async def reconcile_ibs_track_releases(
     candidates: Iterable[TrackReleaseCandidate],
     *,
     client: IBSClient,
-    fetcher_name: str,
+    fetcher_name: str | None = None,
     on_outcome: TrackReleaseOutcomeHook | None = None,
     request_delay: float = 0.0,
+    forbid_convergence_effects: bool = False,
 ) -> list[TrackReleaseOutcome]:
     """Reconcile the selected tracks against their expanded IBS source state.
 
@@ -242,11 +264,13 @@ async def reconcile_ibs_track_releases(
 
     Q1: `candidates` come from `load_track_release_candidates()` (or an
     equivalent selection); duplicate track IDs are processed once.
-    `client` is the caller's open `IBSClient`; `fetcher_name` identifies
-    the caller in per-track logs; `on_outcome`, when given, receives each
-    terminal outcome exactly once; `request_delay` is the seconds waited
-    before every source-info or diff request except the first (Request
-    Delay), never while a local transaction is open.
+    `client` is the caller's open `IBSClient`; `fetcher_name`, when given,
+    identifies the calling fetcher in per-track logs (the RabbitMQ consumer
+    passes none); `on_outcome`, when given, receives each terminal outcome
+    exactly once; `request_delay` is the seconds waited before every
+    source-info or diff request except the first (Request Delay), never
+    while a local transaction is open; `forbid_convergence_effects` selects
+    consumer mode.
 
     Q2: acquires no lock and performs IBS I/O only outside every local
     transaction; each local unit serializes on the Ticket row lock in
@@ -273,7 +297,10 @@ async def reconcile_ibs_track_releases(
     `Ignored`/`Duplicated` Ticket is a `no_op` with one
     `ibs_track_release_track_stale`; a changed scope, a changed predecessor,
     a rejected system target, or a `SQLAlchemyError` before commit is
-    `failed`. Every failed track emits one `ibs_track_release_track_failed`.
+    `failed`. In consumer mode, a unit with a pending Ticket convergence
+    effect after its flush rolls back and is `failed`
+    (`ticket_convergence_required`). Every failed track emits one
+    `ibs_track_release_track_failed`.
 
     Q4: returns one outcome per distinct selected track (no ordering
     guarantee). Creates no audit event itself.
@@ -294,6 +321,7 @@ async def reconcile_ibs_track_releases(
         fetcher_name=fetcher_name,
         hook=on_outcome,
         request_delay=request_delay,
+        forbid_convergence_effects=forbid_convergence_effects,
     )
     if selected:
         await run.execute([selected[key] for key in sorted(selected)])
@@ -305,9 +333,10 @@ class _Reconciliation:
     """The state of one boundary invocation."""
 
     client: IBSClient
-    fetcher_name: str
+    fetcher_name: str | None
     hook: TrackReleaseOutcomeHook | None
     request_delay: float
+    forbid_convergence_effects: bool
     outcomes: list[TrackReleaseOutcome] = field(default_factory=list)
     requested: bool = False
 
@@ -496,10 +525,17 @@ class _Reconciliation:
                 kind = "failed"
             else:
                 if result in ("updated", "advanced"):
-                    # A commit exception propagates: never a per-track outcome.
-                    await unit.commit()
-                    committed = True
-                    kind = "updated" if result == "updated" else "no_op"
+                    if self._forbidden_effect_pending(unit):
+                        # Consumer mode: the effect could never be published.
+                        await unit.rollback()
+                        self._log_failed(track, TICKET_CONVERGENCE_REQUIRED_CATEGORY)
+                        kind = "failed"
+                    else:
+                        # A commit exception propagates: never a per-track
+                        # outcome.
+                        await unit.commit()
+                        committed = True
+                        kind = "updated" if result == "updated" else "no_op"
                 else:
                     await unit.rollback()
                     if result == "already_complete":
@@ -513,18 +549,28 @@ class _Reconciliation:
         if committed:
             await drain_ticket_convergence(unit)
 
+    def _forbidden_effect_pending(self, unit: AsyncSession) -> bool:
+        """In consumer mode, whether the flushed unit registered a Ticket
+        convergence effect that the consumer could never publish."""
+        return self.forbid_convergence_effects and bool(
+            pending_ticket_convergence_effects(unit)
+        )
+
     def _fail(self, track: TrackReleaseCandidate, category: str) -> None:
         self._log_failed(track, category)
         self._finish(track, "failed")
 
     def _log_failed(self, track: TrackReleaseCandidate, category: str) -> None:
+        caller = (
+            {} if self.fetcher_name is None else {"fetcher_name": self.fetcher_name}
+        )
         logger.warning(
             TRACK_FAILED_EVENT,
             codestream=track.project,
             package_name=track.package_name,
             track_id=str(track.track_id),
             ticket_id=str(track.ticket_id),
-            fetcher_name=self.fetcher_name,
+            **caller,
             reason_category=category,
         )
 

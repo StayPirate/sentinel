@@ -75,7 +75,8 @@ def test_packaged_migrations_reach_head_seed_without_drift(
 def test_failed_migration_prevents_every_runtime_role_from_starting(
     isolated_compose_stack: IsolatedComposeStack,
 ) -> None:
-    """A disposable failed migration gates API, worker, Git worker, and Beat."""
+    """A disposable failed migration gates API, worker, Git worker, Beat, and
+    the IBS RabbitMQ consumer."""
     override = (
         "services:\n"
         "  api:\n"
@@ -85,7 +86,9 @@ def test_failed_migration_prevents_every_runtime_role_from_starting(
         '"nonexistent_revision_id_smoke_test"]\n'
     )
 
-    result = isolated_compose_stack.up(override, "api", "worker", "git-worker", "beat")
+    result = isolated_compose_stack.up(
+        override, "api", "worker", "git-worker", "beat", "ibs-consumer"
+    )
     assert result.returncode != 0, (
         f"expected non-zero exit when migrate fails "
         f"(stdout={result.stdout!r} stderr={result.stderr!r})"
@@ -99,7 +102,7 @@ def test_failed_migration_prevents_every_runtime_role_from_starting(
     assert "Can't locate revision identified by" in migrate_logs, migrate_logs
     assert "nonexistent_revision_id_smoke_test" in migrate_logs, migrate_logs
 
-    for service in ("api", "worker", "git-worker", "beat"):
+    for service in ("api", "worker", "git-worker", "beat", "ibs-consumer"):
         state = isolated_compose_stack.service_state(service)
         assert state.returncode == 0, state.stderr
         assert not state.stdout.strip().startswith("running|"), (

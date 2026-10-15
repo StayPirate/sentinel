@@ -145,11 +145,31 @@ one result:
 |---|---|
 | `updated` | This invocation transitioned the track to `FIXED` and committed its checkpoint |
 | `no_op` | No domain update was required: current source was already examined, a valid examination produced no transition, the track had become final, or concurrent work had already accepted the same state |
-| `failed` | External validation or a pre-finalization per-track local operation did not complete; the prior checkpoint was retained. Commit exception/ambiguity is a whole-invocation failure, not this outcome |
+| `failed` | External validation or a pre-finalization per-track local operation did not complete, or, in consumer mode, the local unit would have registered a Ticket convergence effect; the prior checkpoint was retained. Commit exception/ambiguity is a whole-invocation failure, not this outcome |
 
 The result sequence preserves no input ordering guarantee. Callers use it only
 to determine per-track metrics and whether all event-selected outcomes
 completed; it is not persisted or exposed through an API.
+
+**Consumer mode.** The RabbitMQ package-commit path invokes the boundary in
+consumer mode because the consumer never publishes Celery tasks
+(`../integrations/ibs-rabbitmq-integration.md`, Non-Goals and Runtime
+Independence). A system `FIXED` registers a Ticket convergence effect only
+when Ticket reconciliation regresses a `Resolved` Ticket: a Ticket selected
+while active becomes `Resolved` before the local unit, and the gate evaluated
+with current inputs no longer holds, for example because a lifecycle
+correction made an EOL Product actionable again after the stale `Resolved`
+was persisted. In consumer mode the boundary checks the unit's pending effects
+after its flush and before its commit; a unit with a pending effect rolls back
+and returns `failed` with `reason_category = ticket_convergence_required`. Its
+checkpoint, track, and Ticket are unchanged, no audit event is created, and
+nothing is published, so the post-commit drain of a consumer-mode invocation
+never publishes. The recovery owner is `evaluate_lifecycle_transitions`
+(scheduled or manually triggered), which reconciles the stale gate and
+registers Ticket convergence; its track catch-up then applies the same
+evidence. Later package commits do not select the track while its Ticket
+remains `Resolved`. The scheduled fetcher and catch-up never use consumer
+mode.
 
 This is a system-only idempotent operation. It creates no audit event directly;
 an effective status transition delegates its one event to `package_service`.
@@ -260,7 +280,8 @@ For one track, the local transaction then:
    final, leaves affectedness unchanged; and
 6. creates or advances the checkpoint to the examined current expanded
    `srcmd5`, flushes the complete local unit, then commits once and closes the
-   session.
+   session. In consumer mode, a unit with a pending Ticket convergence effect
+   rolls back instead (Shared Reconciliation Boundary).
 
 The status mutation, its service-owned `track_status_changed` event, Ticket
 status reconciliation, and checkpoint advancement are atomic. If any one of
@@ -374,6 +395,10 @@ package identity only to select existing eligible tracks with the exact same
 authoritative current `srcmd5` through source info and invokes the shared
 reconciliation boundary.
 
+The path invokes the boundary in consumer mode (Shared Reconciliation
+Boundary) with no metric hook, no request delay, and no fetcher name; the
+detector's structured logs then omit `fetcher_name`.
+
 An event package with no exact represented Sentinel package is ignored. This
 includes related packages and internal linked targets such as snapshot package
 names. Sentinel does not perform reverse-link fan-out. A target change that
@@ -452,6 +477,7 @@ HTTP status codes, and bounded reason categories may be logged.
 | Ticket becomes `Ignored` or `Duplicated` | Roll back local work and return a successful stale/inapplicable no-op for that track; keep its checkpoint | Later qualifying Ticket convergence |
 | Track disappears, no longer belongs to the expected Ticket/package scope, or loses its Ticket CVE association | Fail the selected track and do not advance its checkpoint | Corrected invocation, catch-up, event, manual run, or scheduled run |
 | Concurrent checkpoint predecessor changed | Already-complete no-op, re-evaluate, or fail without writing stale state | Current or later invocation |
+| Consumer-mode unit would register a Ticket convergence effect | Roll back the unit; `failed` with `ticket_convergence_required`; keep the checkpoint; no audit event or publication | `evaluate_lifecycle_transitions` (scheduled or manually triggered), then Ticket convergence and its track catch-up |
 | Status becomes final during I/O | Leave status unchanged; accept examined checkpoint | None |
 | No matching CVE evidence | Leave status unchanged; accept examined checkpoint | None |
 | Commit exception or ambiguous commit outcome | Abort the invocation; do not classify the track as failed or attempt convergence publication | Establish the database outcome; use the explicit complete Ticket rerun if the commit succeeded and publication was lost |
@@ -478,7 +504,7 @@ added by the logging infrastructure and are not repeated here.
 | `ibs_track_release_diff_failed` | WARNING | `codestream`, `package_name`, `affected_track_count`, `reason_category` | `http_status` |
 | `ibs_track_release_issue_ignored` | WARNING | `codestream`, `package_name`, `reason_category="invalid_cve_label"` | — |
 | `ibs_track_release_history_unavailable` | WARNING | `codestream`, `package_name`, `track_id`, `reason_category` | `http_status` |
-| `ibs_track_release_track_failed` | WARNING | `codestream`, `package_name`, `track_id`, `ticket_id`, `fetcher_name`, `reason_category` | — |
+| `ibs_track_release_track_failed` | WARNING | `codestream`, `package_name`, `track_id`, `ticket_id`, `reason_category` | `fetcher_name` (absent for the RabbitMQ consumer) |
 | `ibs_track_release_track_stale` | WARNING | `codestream`, `package_name`, `track_id`, `ticket_id`, `reason_category="ticket_not_operable"` | — |
 
 `reason_category` is a bounded internal classification, not an upstream error
@@ -486,8 +512,9 @@ string. At minimum it distinguishes transport, HTTP status, malformed XML,
 interrupted response, missing package, duplicate package, upstream package
 error, invalid source checksum, invalid issue structure, invalid CVE label,
 history unavailable, scope changed, Ticket not operable, stale checkpoint,
-database/audit failure, IBS API credentials not configured, and each bounded
-`IBSAuthenticationError` reason (`unsupported_challenge`,
+database/audit failure, a Ticket convergence effect in consumer mode
+(`ticket_convergence_required`), IBS API credentials not configured, and each
+bounded `IBSAuthenticationError` reason (`unsupported_challenge`,
 `signature_rejected`). Shared request failures produce one request-level log;
 the metric still counts each affected track once. The detector does not log raw
 CVE label text when it is invalid.
@@ -529,6 +556,10 @@ including its unsigned and signed attempts
 Authentication](../integrations/ibs-integration.md#request-authentication)), is
 one request. A request starts only after the preceding per-track transaction
 has closed, so the detector never waits while a Ticket lock is held.
+RabbitMQ package-commit processing applies no request delay: one delivery
+selects the tracks of one package, and sequential delivery processing already
+spaces its requests
+([RabbitMQ Package-Commit Acceleration](#rabbitmq-package-commit-acceleration)).
 
 ### Metrics and Run Status
 
@@ -603,6 +634,11 @@ Future implementation tests must cover:
   outcomes with exact succeeded, failed, created, and updated counters;
 - concurrent polling, catch-up, event, and retry anti-regression using
   independent database sessions;
+- consumer mode: a unit that registers a Ticket convergence effect, both
+  injected and through a stale `Resolved` regression, rolls back, fails with
+  `ticket_convergence_required`, keeps its checkpoint, creates no audit event,
+  and publishes nothing, while sibling units commit; and the optional
+  `fetcher_name`;
 - status and Ticket-state races under the Ticket lock;
 - no external HTTP, Redis, or task publication while a Ticket lock is held;
 - the request delay: no wait before the first IBS request, the run's
