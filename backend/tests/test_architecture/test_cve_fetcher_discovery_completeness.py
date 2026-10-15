@@ -1,5 +1,6 @@
 """Structural test: production discovery is complete for every CVE source in
-the startup path of every process role.
+the startup path of every fetcher-registry process role, and every process
+role command loads its production entry module.
 
 See `docs/features/platform/cve-fetcher-infrastructure.md` (`__init_subclass__`
 Validation, "Uniqueness tracking — `_CVE_SOURCE_TYPE_MAP`"),
@@ -20,9 +21,14 @@ checks. The proof has three parts:
   no `tests` module was loaded and applies `assert_complete_cve_discovery()`
   (`tests/support/cve_discovery.py`) to the live registries.
 - Role commands: the Dockerfile CMD, the smoke Compose service commands, and
-  every `uvicorn <module>:` and `celery -A <module>` occurrence in
-  `docs/deployment.md` name those entry modules, and together cover all four
-  roles. The document is read for command spelling only, never for its shape.
+  every `uvicorn <module>:`, `celery -A <module>`, and `python -m app.<module>`
+  occurrence in `docs/deployment.md` name those entry modules, and together
+  cover all five roles. The IBS RabbitMQ consumer (`python -m
+  app.ibs_consumer`) is a role without the fetcher registry, so it has no
+  startup-path discovery proof; its import boundary is enforced by
+  `test_ibs_consumer_runtime_independence.py`. A `python -m app.cli` command
+  is a CLI invocation, not a role command. The document is read for command
+  spelling only, never for its shape.
 - Helper self-test: manipulated copies of the registries, and one test-only
   fetcher registered under `isolated_fetcher_registries`, prove each check
   fails; the production registries pass.
@@ -63,7 +69,12 @@ _ROLE_TARGETS: Final = {
     "git-worker": "app.celery_app",
     "beat": "app.celery_app",
 }
-"""The production entry target each process role loads."""
+"""The production entry target each fetcher-registry process role loads."""
+
+_CONSUMER_ROLE: Final = "ibs-consumer"
+_CONSUMER_TARGET: Final = "app.ibs_consumer"
+"""The entry module of the IBS RabbitMQ consumer, a role without the fetcher
+registry (not part of the startup-path discovery proof)."""
 
 # ---------------------------------------------------------------------------
 # Startup paths
@@ -143,6 +154,10 @@ _CELERY_COMMAND: Final = re.compile(
     r"(?P<options>(?:\s+-[^\s`]+(?:\s+[^\s`#-][^\s`]*)?)*)"
 )
 _CELERY_WITHOUT_APP: Final = re.compile(r"(?<![\w-])celery\s+(?:worker|beat)\b")
+# `python -m app.cli ...` runs the operator CLI, not a process role.
+_PYTHON_MODULE_COMMAND: Final = re.compile(
+    r"(?<![\w-])python\s+-m\s+(?P<module>(?!app\.cli\b)app(?:\.\w+)+)"
+)
 _FENCED_BLOCK: Final = re.compile(
     r"^[ \t]*```[^\n]*\n(.*?)^[ \t]*```", re.MULTILINE | re.DOTALL
 )
@@ -153,10 +168,12 @@ _PROPERTY_INDENT: Final = 4
 
 
 def command_role(argv: Sequence[str]) -> tuple[str, str | None]:
-    """The entry target and process role of one `uvicorn` or `celery`
-    command; the role is `None` for any other Celery command."""
+    """The entry target and process role of one `uvicorn`, `celery`, or
+    `python -m` command; the role is `None` for any other Celery command."""
     if argv[0] == "uvicorn":
         return argv[1], "api"
+    if argv[0] == "python" and len(argv) >= 3 and argv[1] == "-m":
+        return argv[2], _CONSUMER_ROLE
     if argv[0] == "celery" and "-A" in argv[:-2]:
         index = argv.index("-A")
         target, subcommand = argv[index + 1], argv[index + 2]
@@ -166,7 +183,7 @@ def command_role(argv: Sequence[str]) -> tuple[str, str | None]:
         if subcommand == "worker":
             return target, {(): "worker", ("git",): "git-worker"}.get(queues)
         return target, "beat" if subcommand == "beat" and not queues else None
-    msg = f"not a uvicorn or celery -A command: {list(argv)}"
+    msg = f"not a uvicorn, celery -A, or python -m command: {list(argv)}"
     raise ValueError(msg)
 
 
@@ -175,7 +192,11 @@ def _assert_production_targets(commands: Sequence[Sequence[str]]) -> set[str]:
     roles: set[str] = set()
     for argv in commands:
         target, role = command_role(argv)
-        expected = _ROLE_TARGETS["api" if argv[0] == "uvicorn" else "worker"]
+        expected = {
+            "uvicorn": _ROLE_TARGETS["api"],
+            "celery": _ROLE_TARGETS["worker"],
+            "python": _CONSUMER_TARGET,
+        }[argv[0]]
         assert target == expected, f"{shlex.join(argv)!r} does not load {expected}"
         if role is not None:
             roles.add(role)
@@ -249,12 +270,16 @@ def _celery_commands_without_app(text: str) -> list[str]:
 
 
 def _deployment_commands(text: str) -> list[list[str]]:
-    """Every `uvicorn <module>:<app>` and `celery -A <module> ...`
-    occurrence, wherever it appears in the document."""
+    """Every `uvicorn <module>:<app>`, `celery -A <module> ...`, and
+    `python -m app.<module>` occurrence other than the CLI, wherever it
+    appears in the document."""
     commands = [["uvicorn", m["target"]] for m in _UVICORN_COMMAND.finditer(text)]
     commands += [
         ["celery", "-A", m["app"], m["subcommand"], *m["options"].split()]
         for m in _CELERY_COMMAND.finditer(text)
+    ]
+    commands += [
+        ["python", "-m", m["module"]] for m in _PYTHON_MODULE_COMMAND.finditer(text)
     ]
     return commands
 
@@ -277,7 +302,11 @@ class TestRoleCommands:
         assert command_role(shlex.split("celery -A x beat")) == ("x", "beat")
         assert command_role(shlex.split("celery -A x worker -Q other")) == ("x", None)
         assert command_role(shlex.split("celery -A x inspect ping")) == ("x", None)
-        with pytest.raises(ValueError, match="not a uvicorn or celery -A command"):
+        assert command_role(["python", "-m", "app.ibs_consumer"]) == (
+            "app.ibs_consumer",
+            "ibs-consumer",
+        )
+        with pytest.raises(ValueError, match="not a uvicorn, celery -A, or python -m"):
             command_role(["alembic", "upgrade", "head"])
 
     def test_dockerfile_cmd_runs_the_api_entry_module(self) -> None:
@@ -294,15 +323,17 @@ class TestRoleCommands:
             argv = commands[role]
             assert argv is not None, f"{role} declares no command"
             assert command_role(argv) == (_ROLE_TARGETS[role], role)
+        assert commands[_CONSUMER_ROLE] == ["python", "-m", _CONSUMER_TARGET]
         process_commands = [
             argv
             for argv in commands.values()
-            if argv is not None and argv[0] in {"uvicorn", "celery"}
+            if argv is not None and argv[0] in {"uvicorn", "celery", "python"}
         ]
         assert _assert_production_targets(process_commands) == {
             "worker",
             "git-worker",
             "beat",
+            _CONSUMER_ROLE,
         }
 
     def test_deployment_doc_role_commands_load_the_production_entry_modules(
@@ -312,7 +343,7 @@ class TestRoleCommands:
 
         roles = _assert_production_targets(_deployment_commands(text))
 
-        assert roles >= set(_ROLE_TARGETS)
+        assert roles >= {*_ROLE_TARGETS, _CONSUMER_ROLE}
         assert _celery_commands_without_app(text) == []
 
     def test_command_without_app_is_found_only_in_code(self) -> None:
@@ -334,9 +365,13 @@ class TestRoleCommands:
         text = (
             "```bash\ncd backend && uv run uvicorn app.main:app --reload\n"
             "uv run celery -A app.celery_app worker --pool=prefork\n"
-            "# Start Beat\nuv run celery -A app.celery_app beat\n```\n"
+            "# Start Beat\nuv run celery -A app.celery_app beat\n"
+            "cd backend && uv run python -m app.ibs_consumer\n"
+            "cd backend && uv run python -m app.cli manage-user create \\\n```\n"
             "The Git worker is started as `celery -A app.celery_app worker\n"
             "-Q git --pool=prefork -n git@%h` and consumes only `git`.\n"
+            "The consumer is started as `python\n-m app.ibs_consumer` (entry\n"
+            "module), never as `python -m app.cli`.\n"
             "| API server (uvicorn) | HTTP |\n"
         )
 
@@ -345,12 +380,21 @@ class TestRoleCommands:
             ("app.celery_app", "worker"),
             ("app.celery_app", "beat"),
             ("app.celery_app", "git-worker"),
+            ("app.ibs_consumer", "ibs-consumer"),
+            ("app.ibs_consumer", "ibs-consumer"),
         ]
 
     def test_a_non_production_entry_module_is_rejected(self) -> None:
         commands = _deployment_commands("`celery -A tests.support.example worker`")
 
         with pytest.raises(AssertionError, match=r"does not load app\.celery_app"):
+            _assert_production_targets(commands)
+
+    def test_a_wrong_consumer_entry_module_is_rejected(self) -> None:
+        commands = _deployment_commands("`uv run python -m app.consumer`")
+
+        assert commands == [["python", "-m", "app.consumer"]]
+        with pytest.raises(AssertionError, match=r"does not load app\.ibs_consumer"):
             _assert_production_targets(commands)
 
 
