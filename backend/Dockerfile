@@ -21,7 +21,7 @@ FROM python:${PYTHON_VERSION}-slim@${PYTHON_BASE_DIGEST} AS builder
 # The tag documents the version; the digest guarantees immutability (see
 # docs/deployment.md, Container Build Conventions → uv image pinning).
 # Renovate updates tag and digest together.
-COPY --from=ghcr.io/astral-sh/uv:0.12.23@sha256:61d393e44e249f2e4b526b6c7ddcecce245946826e608e11c93ad4f5bba55b21 /uv /bin/uv
+COPY --from=ghcr.io/astral-sh/uv:0.13.1@sha256:4a1f3666816dafadd20ceb71eac9a7d56d7ef30279f7d64048519ab901ada336 /uv /bin/uv
 
 # Use the Python interpreter already present in this base image instead
 # of letting uv download its own managed interpreter
