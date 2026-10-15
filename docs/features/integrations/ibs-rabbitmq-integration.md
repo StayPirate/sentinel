@@ -283,10 +283,17 @@ terminal outcomes:
 | Routing key or payload is malformed/unsupported | Log sanitized warning; no relevant/processed/failed increment | ACK |
 | Application processing fails after the one attempt | Increment `events_relevant` and `processing_failed`, set `last_error`, log sanitized error | ACK |
 
-`events_received` increments once when handling begins, before decoding. A
-request is counted as relevant only when authoritative reconciliation selects
-at least one represented track scope. A package event is relevant only when its
-exact project/package identity selects at least one eligible represented track.
+`events_received` increments once when handling begins, before decoding. The
+relevance rules govern successful outcomes: a request is counted as relevant
+only when authoritative reconciliation selects at least one represented track
+scope, and a package event is relevant only when its exact project/package
+identity selects at least one eligible represented track. Every terminal
+application failure ([Fatal and Transient Failures](#fatal-and-transient-failures))
+counts as relevant and failed and sets `last_error`, including a lookup or
+selection failure before any track scope is selected, so an IBS or PostgreSQL
+outage stays visible and `processing_failed` never exceeds `events_relevant`.
+The outcome counters are updated as soon as the application attempt ends,
+before settlement.
 
 ACK of a failed delivery means only that this transient delivery will not be
 retried by RabbitMQ. It does not mark failed domain work complete. The owning
@@ -388,15 +395,19 @@ without process restart.
 SIGTERM or SIGINT interrupts an in-progress reconnect backoff wait immediately;
 shutdown never waits for the remaining delay.
 
-The consumer writes `disconnected` immediately after an established connection
-is lost. It writes `reconnecting` when reconnection begins and while waiting or
-attempting. A successful connection, topology setup, and consumer start changes
-the status to `connected` and resets the delay to the initial delay. Process
-counters, including `reconnect_attempts`, do not reset.
+The consumer writes `disconnected` immediately after an established
+connection, its channel, or its broker consumer is lost
+([Connection Loss and Consumer Cancellation](#connection-loss-and-consumer-cancellation)
+treats the three identically). It writes `reconnecting` when reconnection
+begins and while waiting or attempting. A successful connection, topology
+setup, and consumer start changes the status to `connected` and resets the
+delay to the initial delay. Process counters, including `reconnect_attempts`,
+do not reset.
 
 `reconnect_attempts` increments whenever a reconnect attempt starts after the
-initial connection attempt has failed or an established connection has been
-lost. The initial connection attempt itself is not a reconnect attempt.
+initial connection attempt has failed or an established connection, channel,
+or broker consumer has been lost. The initial connection attempt itself is not
+a reconnect attempt.
 
 ### Fatal and Transient Failures
 
@@ -448,7 +459,8 @@ On SIGTERM or SIGINT, the consumer:
    normal transaction and settlement;
 4. if the deadline expires, cancels the handler, rolls back incomplete local
    work, resets its correlation context, and makes no deliberate NACK/requeue;
-5. stops the heartbeat loop; and
+5. stops the heartbeat loop without a final write, so the last written value
+   expires through its TTL and the status API then reports `unreachable`; and
 6. closes the queue channel and AMQP connection best-effort.
 
 If the in-flight handler finishes within the deadline, it applies the ordinary
@@ -506,9 +518,12 @@ The consumer writes the application-owned Redis key
 
 Each heartbeat is one atomic Redis `SET` of the complete JSON document with an
 expiry of **60 seconds**. The consumer refreshes it every **30 seconds** and
-also writes immediately after every consumer status change. It never updates
-individual fields or extends the TTL separately from writing the complete
-value.
+also writes immediately after every change of `status`, `reconnect_attempts`,
+or `next_retry_seconds`; delivery counters and a delivery `last_error` are
+published by the next write. It never updates individual fields or extends the
+TTL separately from writing the complete value. Writes run beside connection
+handling and delivery processing and never delay them: a value superseded
+before its write starts is published only through its successor.
 
 The JSON value has this exact schema:
 
@@ -519,20 +534,28 @@ The JSON value has this exact schema:
 | `process_started_at` | UTC datetime | Consumer process start time; constant for the process |
 | `status_since` | UTC datetime | Time the current `status` began |
 | `events_received` | non-negative integer | Deliveries whose handlers started |
-| `events_relevant` | non-negative integer | Deliveries selecting at least one authoritative represented track scope |
+| `events_relevant` | non-negative integer | Successful deliveries that selected at least one authoritative represented track scope, plus every delivery with a terminal application failure |
 | `events_processed` | non-negative integer | Relevant deliveries completed successfully, including idempotent no-ops |
-| `processing_failed` | non-negative integer | Relevant deliveries with a terminal application failure |
+| `processing_failed` | non-negative integer | Deliveries with a terminal application failure, including a failure before any track scope was selected |
 | `reconnect_attempts` | non-negative integer | Reconnect attempts started after the initial connection attempt |
 | `next_retry_seconds` | non-negative integer or null | Current scheduled reconnect delay; null when connected or no retry wait is scheduled |
 | `last_error` | string or null | Most recent bounded error category from the table below |
 | `last_error_at` | UTC datetime or null | Time `last_error` was recorded; null exactly when `last_error` is null |
 
+A UTC datetime is an RFC 3339 date-time with an uppercase `T`, at most six
+fractional-second digits, and the offset `Z` or `+00:00`; the consumer writes
+whole seconds with `Z`.
+
 Allowed `last_error` categories are:
 
-- `rabbitmq_connection_failed`
-- `rabbitmq_connection_lost`
-- `package_reconciliation_failed`
-- `request_reconciliation_failed`
+- `rabbitmq_connection_failed`: a transient failure of the initial or a
+  reconnect attempt;
+- `rabbitmq_connection_lost`: the loss of an established connection, its
+  channel, or its broker consumer;
+- `package_reconciliation_failed`: a terminal application failure of a
+  package-commit delivery; and
+- `request_reconciliation_failed`: a terminal application failure of a
+  request-event delivery.
 
 The category and timestamp retain the latest process-lifetime failure until a
 later failure replaces them or the process restarts. They are not cleared by a
@@ -567,17 +590,18 @@ Example connected heartbeat:
 }
 ```
 
-Every Redis operation catches `RedisError`. A failed write logs one bounded
-WARNING and leaves the in-memory status and counters available for the next
-scheduled write. Redis unavailability never changes domain processing or AMQP
-settlement.
+Every Redis operation catches `RedisError`. A failed write, including one that
+exceeds its fixed time bound, logs one bounded WARNING
+(`ibs_consumer_heartbeat_write_failed`) and leaves the in-memory status and
+counters available for the next scheduled write. Redis unavailability never
+changes domain processing or AMQP settlement.
 
 ### Consumer States
 
 | Status | Producer | Meaning |
 |---|---|---|
 | `connected` | Consumer | Connection, topology, and broker consumer are active |
-| `disconnected` | Consumer | An established connection was just lost and cleanup precedes reconnect |
+| `disconnected` | Consumer | An established connection, channel, or broker consumer was just lost and cleanup precedes reconnect |
 | `reconnecting` | Consumer | Initial connection recovery or a reconnect attempt/wait is active |
 | `disabled` | Status API | `IBS_RABBITMQ_ENABLED=false`; no consumer is expected to run |
 | `unreachable` | Status API | Consumer liveness cannot be established from a valid fresh heartbeat |
@@ -610,11 +634,13 @@ envelope and HTTP 200 for every operational status.
 
 Valid timestamp ordering requires
 `process_started_at <= status_since <= heartbeat_at`. Counters must satisfy the
-non-negative integer types above. `events_processed` and `processing_failed`
+non-negative integer types above; a JSON boolean or a number with a fraction
+or exponent is not an integer. `events_processed` and `processing_failed`
 must each be no greater than `events_relevant`, and `events_relevant` must be no
-greater than `events_received`. Unknown status or error-category values make
-the heartbeat invalid. Additional JSON fields are ignored; missing required
-fields are invalid.
+greater than `events_received`. `next_retry_seconds` must be null when `status`
+is `connected`, and `last_error_at` must be null exactly when `last_error` is
+null. Unknown status or error-category values make the heartbeat invalid.
+Additional JSON fields are ignored; missing required fields are invalid.
 
 The endpoint does not return `REDIS_UNAVAILABLE`: inability to read Redis is a
 successful observation that consumer liveness cannot be confirmed, as allowed
@@ -724,6 +750,7 @@ events carry `ibs_event_id`, lifecycle events never do.
 | `ibs_consumer_delivery_processed` | INFO | `routing_key`, `track_count` | `project`, `package` |
 | `ibs_consumer_delivery_failed` | ERROR | `routing_key`, `reason_category` | `project`, `package`, `track_count`, `failed_track_count` |
 | `ibs_consumer_delivery_cancelled` | WARNING | — | `routing_key` |
+| `ibs_consumer_heartbeat_write_failed` | WARNING | `error_type` | — |
 | `ibs_consumer_shutdown_started` | INFO | — | — |
 | `ibs_consumer_shutdown_deadline_exceeded` | WARNING | — | — |
 | `ibs_consumer_stopped` | INFO | — | — |
@@ -733,9 +760,9 @@ creation and precedes the first connection attempt; it is the process's
 readiness evidence (`docs/features/platform/testing-strategy.md`, Process
 Readiness). `routing_key` appears only when it is one of the fixed bindings,
 and `project` and `package` only under the `SUSE:` rule of
-[Correlation Scope](#correlation-scope). `reason_category` is a bounded
-internal classification, never upstream or exception text. At minimum it
-distinguishes:
+[Correlation Scope](#correlation-scope). `error_type` is the exception class
+name only. `reason_category` is a bounded internal classification, never
+upstream or exception text. At minimum it distinguishes:
 
 - startup: PostgreSQL unavailable;
 - connection failure: network, timeout, TLS handshake, and AMQP protocol or

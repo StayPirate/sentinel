@@ -128,6 +128,7 @@ otherwise apply their anonymous behavior. Read-only access to platform data:
 - View tickets, CVEs, products, packages, and ticket package trees
 - View ticket references, CVSS assessments, and submission/release requests
 - View fetcher dashboard (list, detail, charts, run history, error messages)
+- View IBS consumer status
 
 ### Authenticated
 
@@ -222,6 +223,7 @@ Any logged-in user, regardless of role. Includes all Public access plus:
 | View CVSS assessments | Public |
 | View submission/release requests | Public |
 | View fetcher dashboard | Public |
+| View IBS consumer status | Public |
 
 These application read operations use optional authentication. Authentication
 bootstrap/recovery endpoints and infrastructure probes remain Public without

@@ -1356,6 +1356,10 @@ timestamps for several security and correctness mechanisms:
 - Cache TTL calculations (discovery document, JWKS)
 - IBS API request signatures, which IBS may reject when their signed
   `created` timestamp differs from its own clock
+- IBS consumer heartbeat freshness: `GET /api/v1/ibs-consumer/status`
+  compares the timestamps written by the consumer process with the API
+  process's clock and reports `unreachable` for a heartbeat dated in the
+  future or more than 60 seconds old
 
 Clock skew between instances can shorten or lengthen time-based windows
 unpredictably. For example, if the instance generating an SSO state has
