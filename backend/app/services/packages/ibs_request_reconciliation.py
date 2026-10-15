@@ -431,6 +431,7 @@ async def reconcile_ibs_requests(
     client: IBSClient,
     on_outcome: IBSRequestOutcomeHook | None = None,
     request_delay: float = 0.0,
+    fetcher_name: str | None = None,
 ) -> list[IBSRequestOutcome]:
     """Reconcile the selected scopes against current IBS request evidence.
 
@@ -443,7 +444,9 @@ async def reconcile_ibs_requests(
     `client` is the caller's open `IBSClient`; `on_outcome`, when given,
     receives each terminal outcome exactly once; `request_delay` is the
     seconds waited before every IBS request of the invocation except the
-    first, never while a local transaction is open.
+    first, never while a local transaction is open; `fetcher_name`, when
+    given, is added to every `ibs_request_scope_failed` (the fetcher and
+    its catch-up; Structured Logs).
 
     Q2: acquires no lock; reads the step-1 snapshot of every scope before
     the first IBS request, and each local unit serializes on the Ticket row
@@ -474,7 +477,7 @@ async def reconcile_ibs_requests(
     selected: dict[uuid.UUID, IBSRequestScope] = {}
     for scope in scopes:
         selected.setdefault(scope.track_id, scope)
-    run = _Reconciliation(hook=on_outcome)
+    run = _Reconciliation(hook=on_outcome, fetcher_name=fetcher_name)
     if selected:
         ordered = [selected[key] for key in sorted(selected)]
         snapshots = await _read_snapshots(ordered)
@@ -504,6 +507,7 @@ class _Reconciliation:
     """The outcomes of one boundary invocation."""
 
     hook: IBSRequestOutcomeHook | None
+    fetcher_name: str | None = None
     outcomes: list[IBSRequestOutcome] = field(default_factory=list)
 
     async def reconcile(
@@ -581,6 +585,8 @@ class _Reconciliation:
             fields["request_number"] = request_number
         if http_status is not None:
             fields["http_status"] = http_status
+        if self.fetcher_name is not None:
+            fields["fetcher_name"] = self.fetcher_name
         logger.warning(SCOPE_FAILED_EVENT, reason_category=category, **fields)
 
     def _log_stale(self, scope: IBSRequestScope, category: str) -> None:
