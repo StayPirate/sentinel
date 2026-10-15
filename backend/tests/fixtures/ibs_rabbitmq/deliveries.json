@@ -1,0 +1,72 @@
+{
+  "description": "Sanitized IBS RabbitMQ deliveries. Every value is fictional; the routing keys, AMQP properties, member sets, member order, value types, and compact JSON serialization are the observed ones. `body` is the exact UTF-8 text of the delivery body.",
+  "captured": {
+    "source": "rabbit.suse.de:5671, exchange pubsub (topic), RabbitMQ 4.1.5, default shared account, read-only",
+    "dedicated_package_commit_captures": "2026-09-04 to 2026-09-07 (72.4 h) and 2026-10-15 (1 h): 11,434 deliveries; observed_share_percent is computed over the 9,620 deliveries of the September capture",
+    "reverified": "2026-10-15 with aio-pika 10.1.1 and aiormq 7.2.2",
+    "clients": "aio-pika 9.6.2 / aiormq 6.9.4 and aio-pika 10.1.1 / aiormq 7.2.2",
+    "never_observed_members": [
+      "srcmd5",
+      "sender"
+    ]
+  },
+  "properties": {
+    "content_type": "application/octet-stream",
+    "content_encoding": null,
+    "delivery_mode": 2,
+    "priority": 0,
+    "headers": {},
+    "cluster_id": "",
+    "redelivered": false,
+    "message_id": null,
+    "correlation_id": null,
+    "timestamp": null,
+    "app_id": null,
+    "type": null,
+    "user_id": null,
+    "expiration": null,
+    "reply_to": null
+  },
+  "deliveries": {
+    "package_commit_files": {
+      "routing_key": "suse.obs.package.commit",
+      "observed_share_percent": 42.5,
+      "body": "{\"project\":\"SUSE:SLE-15-SP6:Update\",\"package\":\"example-pkg\",\"user\":\"example-user\",\"files\":\"Modified:\\n  example-pkg.changes\\n  example-pkg.spec\\n\\n\",\"rev\":\"42\"}"
+    },
+    "package_commit_comment_files": {
+      "routing_key": "suse.obs.package.commit",
+      "observed_share_percent": 35.0,
+      "body": "{\"project\":\"SUSE:SLE-15-SP6:Update\",\"package\":\"example-pkg\",\"comment\":\"Example change description\",\"user\":\"example-user\",\"files\":\"Added:\\n  example-pkg-1.2.3.tar.xz\\n\\n\",\"rev\":\"43\"}"
+    },
+    "package_commit_comment_files_requestid": {
+      "routing_key": "suse.obs.package.commit",
+      "observed_share_percent": 15.4,
+      "body": "{\"project\":\"SUSE:SLE-15-SP6:Update\",\"package\":\"example-pkg\",\"comment\":\"Example change description\",\"user\":\"example-user\",\"files\":\"Modified:\\n  example-pkg.changes\\n\\n\",\"rev\":\"44\",\"requestid\":\"123456\"}"
+    },
+    "package_commit_comment": {
+      "routing_key": "suse.obs.package.commit",
+      "observed_share_percent": 4.3,
+      "body": "{\"project\":\"SUSE:SLE-15-SP6:Update\",\"package\":\"example-pkg\",\"comment\":\"Example change description\",\"user\":\"example-user\",\"rev\":\"45\"}"
+    },
+    "package_commit_bare": {
+      "routing_key": "suse.obs.package.commit",
+      "observed_share_percent": 2.8,
+      "body": "{\"project\":\"SUSE:SLE-15-SP6:Update\",\"package\":\"example-pkg\",\"user\":\"example-user\",\"rev\":\"46\"}"
+    },
+    "package_commit_comment_requestid": {
+      "routing_key": "suse.obs.package.commit",
+      "observed_share_percent": 0.01,
+      "body": "{\"project\":\"SUSE:SLE-15-SP6:Update\",\"package\":\"example-pkg\",\"comment\":\"Example change description\",\"user\":\"example-user\",\"rev\":\"47\",\"requestid\":\"123457\"}"
+    },
+    "package_commit_home_project": {
+      "routing_key": "suse.obs.package.commit",
+      "note": "A personal home: project (16-84 % of commit events); never represented, never logged.",
+      "body": "{\"project\":\"home:example-user\",\"package\":\"example-pkg\",\"user\":\"example-user\",\"files\":\"Added:\\n  example-pkg.spec\\n\\n\",\"rev\":\"1\"}"
+    },
+    "metrics_line_protocol": {
+      "routing_key": "suse.obs.metrics",
+      "note": "Unbound event family with the same content type and a non-JSON Influx line protocol body.",
+      "body": "example_requests,host=example.test,status=200 count=1i 1760486400000000000\n"
+    }
+  }
+}
