@@ -405,6 +405,16 @@ def proven(package: str, rr: AcceptedRelease) -> Observation:
     )
 
 
+UNAVAILABLE_RELEASE_DIFFS: Final = [
+    pytest.param(status_response(400), "rejected", id="http-400"),
+    pytest.param(status_response(404), "not_found", id="http-404"),
+    pytest.param(
+        xml_response(b"<sourcediff><issues>"), "malformed_xml", id="malformed"
+    ),
+]
+"""Release diff responses that are incomplete evidence, with the reason."""
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -1674,6 +1684,76 @@ class TestReleaseScan:
         assert not searched(fake)
 
     @pytest.mark.parametrize(
+        ("revisions", "responder", "reason"),
+        [
+            pytest.param((), status_response(404), "not_found", id="http-404"),
+            pytest.param((), None, "history_unavailable", id="empty"),
+            pytest.param((2,), None, "history_unavailable", id="not-from-revision-1"),
+            pytest.param((1, 3), None, "history_unavailable", id="gap"),
+        ],
+    )
+    async def test_unavailable_codestream_history_is_incomplete(
+        self,
+        fake: FakeRequests,
+        package: str,
+        revisions: tuple[int, ...],
+        responder: Responder | None,
+        reason: str,
+    ) -> None:
+        """The scan needs the complete unpaged codestream history; an
+        unavailable or incomplete one is incomplete evidence, never a
+        no-match (Request Discovery and Detail; Release Discovery step 2)."""
+        fake.release_evidence(CODESTREAM, package, cve_issue(TICKET_CVE))
+        fake.history(
+            CODESTREAM,
+            package,
+            [(revision, checksum(f"link-{revision}"), None) for revision in revisions],
+            responder=responder,
+        )
+        serve_searches(fake, package)
+
+        exc = await unusable(fake, scope(package=package))
+
+        assert (exc.reason_category, exc.request_number, exc.failed) == (
+            reason,
+            None,
+            False,
+        )
+        assert history_requests(fake) == [
+            (f"/source/{CODESTREAM}/{package}/_history", ())
+        ]
+        assert not searched(fake)
+
+    @pytest.mark.parametrize(("responder", "reason"), UNAVAILABLE_RELEASE_DIFFS)
+    async def test_unavailable_release_diff_is_incomplete(
+        self, fake: FakeRequests, package: str, responder: Responder, reason: str
+    ) -> None:
+        """The release diff of an accepted release action found by the scan
+        is checked before its exact lookup; when it is unavailable, the
+        observation is incomplete (Release Discovery step 2)."""
+        rr = accepted_release(package)
+        fake.release_evidence(CODESTREAM, package, cve_issue(TICKET_CVE))
+        codestream_history(fake, package, rr.number)
+        fake.request(rr.number, ACCEPTED, rr.action)
+        fake.action_diff(
+            rr.number, rr.action, codestream_package=package, responder=responder
+        )
+        serve_searches(fake, package)
+
+        exc = await unusable(fake, scope(package=package))
+
+        assert (exc.reason_category, exc.request_number, exc.failed) == (
+            reason,
+            rr.number,
+            False,
+        )
+        assert action_diff_paths(fake) == [f"/source/{CODESTREAM}/{rr.target_package}"]
+        assert history_requests(fake) == [
+            (f"/source/{CODESTREAM}/{package}/_history", ())
+        ]
+        assert not searched(fake)
+
+    @pytest.mark.parametrize(
         ("lookup", "reason"),
         [
             pytest.param("other-srcmd5", "release_proof_failed", id="other-srcmd5"),
@@ -1899,6 +1979,48 @@ class TestReleaseProofFirst:
             stale.number,
             False,
         )
+        assert source_info_requested(fake)
+        assert not searched(fake)
+
+    @pytest.mark.parametrize(("responder", "reason"), UNAVAILABLE_RELEASE_DIFFS)
+    async def test_unavailable_release_diff_of_a_correlated_proof_is_incomplete(
+        self, fake: FakeRequests, package: str, responder: Responder, reason: str
+    ) -> None:
+        """The release diff is required for the proof even when the action
+        is already correlated; with a valid lookup but an unavailable diff
+        and no other proof, the observation is incomplete (Accepted RR
+        Provenance)."""
+        rr = accepted_release(package)
+        fake.request(rr.number, ACCEPTED, rr.action)
+        fake.history(
+            CODESTREAM,
+            rr.target_package,
+            [(int(RELEASE_REV), rr.srcmd5, rr.number)],
+            revision=RELEASE_REV,
+        )
+        fake.action_diff(
+            rr.number, rr.action, codestream_package=package, responder=responder
+        )
+        fake.quiet(package)
+
+        exc = await unusable(
+            fake,
+            scope(package=package),
+            snapshot(correlated=[retained(rr.number, ACCEPTED, rr.action)]),
+        )
+
+        assert (exc.reason_category, exc.request_number, exc.failed) == (
+            reason,
+            rr.number,
+            False,
+        )
+        assert history_requests(fake) == [
+            (
+                f"/source/{CODESTREAM}/{rr.target_package}/_history",
+                (("rev", RELEASE_REV),),
+            )
+        ]
+        assert action_diff_paths(fake) == [f"/source/{CODESTREAM}/{rr.target_package}"]
         assert source_info_requested(fake)
         assert not searched(fake)
 
