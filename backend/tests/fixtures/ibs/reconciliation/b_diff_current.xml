@@ -1,0 +1,49 @@
+<sourcediff>
+  <issues>
+    <issue state="added" tracker="cve" name="2005-3393" label="CVE-2005-3393" />
+    <issue state="added" tracker="cve" name="2005-3409" label="CVE-2005-3409" />
+    <issue state="added" tracker="cve" name="2006-1629" label="CVE-2006-1629" />
+    <issue state="added" tracker="cve" name="2006-4339" label="CVE-2006-4339" />
+    <issue state="added" tracker="cve" name="2014-8104" label="CVE-2014-8104" />
+    <issue state="added" tracker="cve" name="2017-12166" label="CVE-2017-12166" />
+    <issue state="added" tracker="cve" name="2017-7521" label="CVE-2017-7521" />
+    <issue state="added" tracker="cve" name="2017-7522" label="CVE-2017-7522" />
+    <issue state="added" tracker="cve" name="2018-7544" label="CVE-2018-7544" />
+    <issue state="added" tracker="cve" name="2018-9336" label="CVE-2018-9336" />
+    <issue state="added" tracker="cve" name="2020-11810" label="CVE-2020-11810" />
+    <issue state="added" tracker="cve" name="2020-15078" label="CVE-2020-15078" />
+    <issue state="added" tracker="cve" name="2022-0547" label="CVE-2022-0547" />
+    <issue state="added" tracker="bnc" name="1044223" label="bsc#1044223" />
+    <issue state="added" tracker="bnc" name="1045489" label="bsc#1045489" />
+    <issue state="added" tracker="bnc" name="1060877" label="bsc#1060877" />
+    <issue state="added" tracker="bnc" name="1069468" label="bsc#1069468" />
+    <issue state="added" tracker="bnc" name="1085803" label="bsc#1085803" />
+    <issue state="added" tracker="bnc" name="1090839" label="bsc#1090839" />
+    <issue state="added" tracker="bnc" name="1169925" label="bsc#1169925" />
+    <issue state="added" tracker="bnc" name="1185279" label="bsc#1185279" />
+    <issue state="added" tracker="bnc" name="1197341" label="bsc#1197341" />
+    <issue state="added" tracker="bnc" name="334773" label="bsc#334773" />
+    <issue state="added" tracker="bnc" name="394353" label="bsc#394353" />
+    <issue state="added" tracker="bnc" name="394360" label="bsc#394360" />
+    <issue state="added" tracker="bnc" name="435421" label="bsc#435421" />
+    <issue state="added" tracker="bnc" name="450390" label="bsc#450390" />
+    <issue state="added" tracker="bnc" name="487558" label="bsc#487558" />
+    <issue state="added" tracker="bnc" name="522279" label="bsc#522279" />
+    <issue state="added" tracker="bnc" name="552440" label="bsc#552440" />
+    <issue state="added" tracker="bnc" name="559041" label="bsc#559041" />
+    <issue state="added" tracker="bnc" name="675406" label="bsc#675406" />
+    <issue state="added" tracker="bnc" name="679153" label="bsc#679153" />
+    <issue state="added" tracker="bnc" name="692440" label="bsc#692440" />
+    <issue state="added" tracker="bnc" name="710270" label="bsc#710270" />
+    <issue state="added" tracker="bnc" name="781106" label="bsc#781106" />
+    <issue state="added" tracker="bnc" name="848070" label="bsc#848070" />
+    <issue state="added" tracker="bnc" name="907764" label="bsc#907764" />
+    <issue state="added" tracker="bnc" name="914166" label="bsc#914166" />
+    <issue state="added" tracker="bnc" name="934237" label="bsc#934237" />
+    <issue state="added" tracker="bnc" name="941569" label="bsc#941569" />
+    <issue state="added" tracker="bnc" name="959511" label="bsc#959511" />
+    <issue state="added" tracker="bnc" name="959714" label="bsc#959714" />
+    <issue state="added" tracker="bnc" name="988522" label="bsc#988522" />
+    <issue state="added" tracker="fate" name="305289" label="fate#305289" />
+  </issues>
+</sourcediff>

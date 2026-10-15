@@ -1,0 +1,31 @@
+<request id="960037">
+  <action type="maintenance_incident">
+    <source project="SUSE:Maintenance:REQUEST:960037" package="kernel-source.SUSE_SLE-15-SP6_Update" rev="b919a84662498ca35151b58974ae03da" />
+    <target project="SUSE:Maintenance:81003" package="kernel-source.SUSE_SLE-15-SP6_Update" releaseproject="SUSE:SLE-15-SP6:Update" />
+    <acceptinfo rev="2" srcmd5="6092f0eb289e39b9385a64367e6d2804" xsrcmd5="b919a84662498ca35151b58974ae03da" osrcmd5="a40c432ba5e29094c8a5b7daff6cf920" oxsrcmd5="04a5cc9375d4d0e8dfe74919291cea1d" />
+  </action>
+  <action type="maintenance_incident">
+    <source project="SUSE:Maintenance:REQUEST:960037" package="kernel-livepatch-SLE15-SP6_Update_31.SUSE_SLE-15-SP6_Update" rev="e354521a45a07973c2059e488a0ba00f" />
+    <target project="SUSE:Maintenance:81003" package="kernel-livepatch-SLE15-SP6_Update_31.SUSE_SLE-15-SP6_Update" releaseproject="SUSE:SLE-15-SP6:Update" />
+    <acceptinfo rev="2" srcmd5="683e30f8e84122b98ea793959e6d8cdb" xsrcmd5="e354521a45a07973c2059e488a0ba00f" osrcmd5="c1b738e7fd305c9f23924f339e3338f4" oxsrcmd5="f4642348a1e3dd1ce4cca195533f7fc8" />
+  </action>
+  <action type="maintenance_incident">
+    <source project="SUSE:Maintenance:REQUEST:960037" package="SLE-Module-Live-Patching_15-SP6_ppc64le.SUSE_Channels" rev="0984502431fb98363294dd976a3e4905" />
+    <target project="SUSE:Maintenance:81003" package="SLE-Module-Live-Patching_15-SP6_ppc64le.SUSE_Channels" releaseproject="SUSE:SLE-15-SP6:Update" />
+    <acceptinfo rev="3" srcmd5="a133a4d38bd333d213a9e97a4631ad42" xsrcmd5="0984502431fb98363294dd976a3e4905" osrcmd5="0df17b428ed311b17894cf9cf07c2e16" oxsrcmd5="eb37be40d3df9e94241dc77cbeec1664" />
+  </action>
+  <action type="maintenance_incident">
+    <source project="SUSE:Maintenance:REQUEST:960037" package="SLE-Module-Live-Patching_15-SP6_s390x.SUSE_Channels" rev="aa29b836737e281a307325458b5a0128" />
+    <target project="SUSE:Maintenance:81003" package="SLE-Module-Live-Patching_15-SP6_s390x.SUSE_Channels" releaseproject="SUSE:SLE-15-SP6:Update" />
+    <acceptinfo rev="3" srcmd5="94c00abec210078872ef4fb43ad70024" xsrcmd5="aa29b836737e281a307325458b5a0128" osrcmd5="018cf63869e2809a6bc4e0ba0e4d5d37" oxsrcmd5="8d6f9b5a322a35297b21076bbfe79a4e" />
+  </action>
+  <action type="maintenance_incident">
+    <source project="SUSE:Maintenance:REQUEST:960037" package="SLE-Module-Live-Patching_15-SP6_x86_64.SUSE_Channels" rev="6aa04478f83a9c8d1d0f7b959798e2aa" />
+    <target project="SUSE:Maintenance:81003" package="SLE-Module-Live-Patching_15-SP6_x86_64.SUSE_Channels" releaseproject="SUSE:SLE-15-SP6:Update" />
+    <acceptinfo rev="3" srcmd5="c59e44a087a2f3fbd1edbc7bafbb37f8" xsrcmd5="6aa04478f83a9c8d1d0f7b959798e2aa" osrcmd5="8a6f923760f25d3e04083158b4e229cb" oxsrcmd5="b4ab19f77314dee841514ed77e38a869" />
+  </action>
+  <action type="delete">
+    <target project="SUSE:Maintenance:REQUEST:960037" />
+  </action>
+  <state name="accepted" created="2026-09-04T20:04:34" when="2026-09-07T09:00:36" />
+</request>

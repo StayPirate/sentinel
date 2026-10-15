@@ -1,0 +1,471 @@
+{
+  "api_url": "https://api.suse.de",
+  "captured_at": "2026-10-14",
+  "documents": {
+    "a_diff_current.xml": {
+      "method": "POST",
+      "path": "/source/SUSE:SLE-15-SP6:Update/openvpn",
+      "query": [
+        [
+          "cmd",
+          "diff"
+        ],
+        [
+          "view",
+          "xml"
+        ],
+        [
+          "onlyissues",
+          "1"
+        ],
+        [
+          "expand",
+          "1"
+        ],
+        [
+          "orev",
+          "0"
+        ],
+        [
+          "rev",
+          "1ddcd93164a57556fdd622291f8d67b7"
+        ]
+      ],
+      "status": 200
+    },
+    "a_sourceinfo_current.xml": {
+      "method": "GET",
+      "path": "/source/SUSE:SLE-15-SP6:Update",
+      "query": [
+        [
+          "view",
+          "info"
+        ],
+        [
+          "nofilename",
+          "1"
+        ],
+        [
+          "package",
+          "openvpn"
+        ]
+      ],
+      "status": 200
+    },
+    "b_diff_current.xml": {
+      "method": "POST",
+      "path": "/source/SUSE:SLE-15:Update/openvpn",
+      "query": [
+        [
+          "cmd",
+          "diff"
+        ],
+        [
+          "view",
+          "xml"
+        ],
+        [
+          "onlyissues",
+          "1"
+        ],
+        [
+          "expand",
+          "1"
+        ],
+        [
+          "orev",
+          "0"
+        ],
+        [
+          "rev",
+          "03962e1675e76405a9edd3de65af4311"
+        ]
+      ],
+      "status": 200
+    },
+    "b_diff_rr_accepted.xml": {
+      "method": "POST",
+      "path": "/source/SUSE:SLE-15:Update/openvpn.81001",
+      "query": [
+        [
+          "cmd",
+          "diff"
+        ],
+        [
+          "view",
+          "xml"
+        ],
+        [
+          "withissues",
+          "1"
+        ],
+        [
+          "onlyissues",
+          "1"
+        ],
+        [
+          "rev",
+          "8e11b182dbbc1eb37c819641423fc714"
+        ],
+        [
+          "orev",
+          "d29d6903e47dd65676c60aa59639c8ba"
+        ],
+        [
+          "oproject",
+          "SUSE:SLE-15:Update"
+        ],
+        [
+          "opackage",
+          "openvpn.81002"
+        ]
+      ],
+      "status": 200
+    },
+    "b_diff_sr_accepted.xml": {
+      "method": "POST",
+      "path": "/source/SUSE:Maintenance:81001/openvpn.SUSE_SLE-15_Update",
+      "query": [
+        [
+          "cmd",
+          "diff"
+        ],
+        [
+          "view",
+          "xml"
+        ],
+        [
+          "withissues",
+          "1"
+        ],
+        [
+          "onlyissues",
+          "1"
+        ],
+        [
+          "rev",
+          "1b2964afeb050d888b6260226cccca5b"
+        ],
+        [
+          "orev",
+          "38b6d8d92db1ffa2b326bae0dda9c14d"
+        ]
+      ],
+      "status": 200
+    },
+    "b_history_codestream.xml": {
+      "method": "GET",
+      "path": "/source/SUSE:SLE-15:Update/openvpn/_history",
+      "query": [],
+      "status": 200
+    },
+    "b_history_incident.xml": {
+      "method": "GET",
+      "path": "/source/SUSE:Maintenance:81001/openvpn.SUSE_SLE-15_Update/_history",
+      "query": [],
+      "status": 200
+    },
+    "b_history_lookup.xml": {
+      "method": "GET",
+      "path": "/source/SUSE:SLE-15:Update/openvpn.81001/_history",
+      "query": [
+        [
+          "rev",
+          "1"
+        ]
+      ],
+      "status": 200
+    },
+    "b_request_rr_accepted.xml": {
+      "method": "GET",
+      "path": "/request/960003",
+      "query": [],
+      "status": 200
+    },
+    "b_request_sr_accepted.xml": {
+      "method": "GET",
+      "path": "/request/960004",
+      "query": [],
+      "status": 200
+    },
+    "b_sourceinfo_current.xml": {
+      "method": "GET",
+      "path": "/source/SUSE:SLE-15:Update",
+      "query": [
+        [
+          "view",
+          "info"
+        ],
+        [
+          "nofilename",
+          "1"
+        ],
+        [
+          "package",
+          "openvpn"
+        ]
+      ],
+      "status": 200
+    },
+    "c_diff_rr_default_base.xml": {
+      "method": "POST",
+      "path": "/source/SUSE:SLE-15-SP6:Update/kernel-default-base.81003",
+      "query": [
+        [
+          "cmd",
+          "diff"
+        ],
+        [
+          "view",
+          "xml"
+        ],
+        [
+          "withissues",
+          "1"
+        ],
+        [
+          "onlyissues",
+          "1"
+        ],
+        [
+          "rev",
+          "fa2c75a865d25a6483dd274d9086dad5"
+        ],
+        [
+          "orev",
+          "fa2c75a865d25a6483dd274d9086dad5"
+        ],
+        [
+          "oproject",
+          "SUSE:SLE-15-SP6:Update"
+        ],
+        [
+          "opackage",
+          "kernel-default-base.81004"
+        ]
+      ],
+      "status": 200
+    },
+    "c_diff_rr_source.xml": {
+      "method": "POST",
+      "path": "/source/SUSE:SLE-15-SP6:Update/kernel-source.81003",
+      "query": [
+        [
+          "cmd",
+          "diff"
+        ],
+        [
+          "view",
+          "xml"
+        ],
+        [
+          "withissues",
+          "1"
+        ],
+        [
+          "onlyissues",
+          "1"
+        ],
+        [
+          "rev",
+          "5ee80e50f0fa38d25266f0f7cfbc6c93"
+        ],
+        [
+          "orev",
+          "9c5b5108381c41d154de9143d36b9811"
+        ],
+        [
+          "oproject",
+          "SUSE:SLE-15-SP6:Update"
+        ],
+        [
+          "opackage",
+          "kernel-source.81004"
+        ]
+      ],
+      "status": 200
+    },
+    "c_diff_rr_source_newer.xml": {
+      "method": "POST",
+      "path": "/source/SUSE:SLE-15-SP6:Update/kernel-source.81005",
+      "query": [
+        [
+          "cmd",
+          "diff"
+        ],
+        [
+          "view",
+          "xml"
+        ],
+        [
+          "withissues",
+          "1"
+        ],
+        [
+          "onlyissues",
+          "1"
+        ],
+        [
+          "rev",
+          "29f695541dab1457f73813836c051389"
+        ],
+        [
+          "orev",
+          "5ee80e50f0fa38d25266f0f7cfbc6c93"
+        ],
+        [
+          "oproject",
+          "SUSE:SLE-15-SP6:Update"
+        ],
+        [
+          "opackage",
+          "kernel-source.81003"
+        ]
+      ],
+      "status": 200
+    },
+    "c_diff_sr_first.xml": {
+      "method": "POST",
+      "path": "/source/SUSE:Maintenance:81003/kernel-source.SUSE_SLE-15-SP6_Update",
+      "query": [
+        [
+          "cmd",
+          "diff"
+        ],
+        [
+          "view",
+          "xml"
+        ],
+        [
+          "withissues",
+          "1"
+        ],
+        [
+          "onlyissues",
+          "1"
+        ],
+        [
+          "rev",
+          "b919a84662498ca35151b58974ae03da"
+        ],
+        [
+          "orev",
+          "04a5cc9375d4d0e8dfe74919291cea1d"
+        ]
+      ],
+      "status": 200
+    },
+    "c_diff_sr_second.xml": {
+      "method": "POST",
+      "path": "/source/SUSE:Maintenance:81003/kernel-source.SUSE_SLE-15-SP6_Update",
+      "query": [
+        [
+          "cmd",
+          "diff"
+        ],
+        [
+          "view",
+          "xml"
+        ],
+        [
+          "withissues",
+          "1"
+        ],
+        [
+          "onlyissues",
+          "1"
+        ],
+        [
+          "rev",
+          "746a342ea71cb515e95bb7c0aea22ffb"
+        ],
+        [
+          "orev",
+          "04a5cc9375d4d0e8dfe74919291cea1d"
+        ]
+      ],
+      "status": 200
+    },
+    "c_history_codestream_default.xml": {
+      "method": "GET",
+      "path": "/source/SUSE:SLE-15-SP6:Update/kernel-default/_history",
+      "query": [],
+      "status": 200
+    },
+    "c_history_codestream_source.xml": {
+      "method": "GET",
+      "path": "/source/SUSE:SLE-15-SP6:Update/kernel-source/_history",
+      "query": [],
+      "status": 200
+    },
+    "c_history_incident_default_base.xml": {
+      "method": "GET",
+      "path": "/source/SUSE:Maintenance:81003/kernel-default-base.SUSE_SLE-15-SP6_Update/_history",
+      "query": [],
+      "status": 200
+    },
+    "c_history_incident_source.xml": {
+      "method": "GET",
+      "path": "/source/SUSE:Maintenance:81003/kernel-source.SUSE_SLE-15-SP6_Update/_history",
+      "query": [],
+      "status": 200
+    },
+    "c_history_lookup_default_base.xml": {
+      "method": "GET",
+      "path": "/source/SUSE:SLE-15-SP6:Update/kernel-default-base.81003/_history",
+      "query": [
+        [
+          "rev",
+          "1"
+        ]
+      ],
+      "status": 200
+    },
+    "c_history_lookup_source.xml": {
+      "method": "GET",
+      "path": "/source/SUSE:SLE-15-SP6:Update/kernel-source.81003/_history",
+      "query": [
+        [
+          "rev",
+          "1"
+        ]
+      ],
+      "status": 200
+    },
+    "c_history_lookup_source_newer.xml": {
+      "method": "GET",
+      "path": "/source/SUSE:SLE-15-SP6:Update/kernel-source.81005/_history",
+      "query": [
+        [
+          "rev",
+          "1"
+        ]
+      ],
+      "status": 200
+    },
+    "c_request_rr_accepted.xml": {
+      "method": "GET",
+      "path": "/request/960035",
+      "query": [],
+      "status": 200
+    },
+    "c_request_rr_newer.xml": {
+      "method": "GET",
+      "path": "/request/960036",
+      "query": [],
+      "status": 200
+    },
+    "c_request_sr_first.xml": {
+      "method": "GET",
+      "path": "/request/960037",
+      "query": [],
+      "status": 200
+    },
+    "c_request_sr_second.xml": {
+      "method": "GET",
+      "path": "/request/960038",
+      "query": [],
+      "status": 200
+    }
+  }
+}

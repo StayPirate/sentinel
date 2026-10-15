@@ -1,0 +1,11 @@
+<request id="960038">
+  <action type="maintenance_incident">
+    <source project="SUSE:Maintenance:REQUEST:960038" package="kernel-source.SUSE_SLE-15-SP6_Update" rev="c2abeb1783c8b08372718b3401b70144" />
+    <target project="SUSE:Maintenance:81003" package="kernel-source.SUSE_SLE-15-SP6_Update" releaseproject="SUSE:SLE-15-SP6:Update" />
+    <acceptinfo rev="4" srcmd5="c2abeb1783c8b08372718b3401b70144" xsrcmd5="746a342ea71cb515e95bb7c0aea22ffb" osrcmd5="a40c432ba5e29094c8a5b7daff6cf920" oxsrcmd5="04a5cc9375d4d0e8dfe74919291cea1d" />
+  </action>
+  <action type="delete">
+    <target project="SUSE:Maintenance:REQUEST:960038" />
+  </action>
+  <state name="accepted" created="2026-09-11T17:49:15" when="2026-09-14T05:42:35" />
+</request>
