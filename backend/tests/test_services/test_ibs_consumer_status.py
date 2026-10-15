@@ -1345,6 +1345,32 @@ class TestGetIBSConsumerStatus:
         assert view.heartbeat is None
         assert fake.closed == 1
 
+    async def test_clock_is_read_after_the_get(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A heartbeat written while the `GET` is in flight is never judged to
+        be in the future: freshness uses the clock read after the read."""
+        monkeypatch.setattr(settings, "ibs_rabbitmq_enabled", True)
+        order: list[str] = []
+        written_during_get = _with(heartbeat_at="2026-09-08T15:42:40Z")
+
+        class _Racing(_FakeRedis):
+            async def get(self, key: str) -> bytes | None:
+                order.append("get")
+                return await super().get(key)
+
+        def now() -> datetime:
+            order.append("clock")
+            return _NOW
+
+        _install(monkeypatch, _Racing(value=_encode(written_during_get)))
+        monkeypatch.setattr(ibs_consumer_status, "utc_now", now)
+
+        view = await get_ibs_consumer_status()
+
+        assert order == ["get", "clock"]
+        assert view.status is IBSConsumerStatus.CONNECTED
+
     async def test_close_failure_does_not_affect_the_observation(
         self, enabled: None, monkeypatch: pytest.MonkeyPatch
     ) -> None:

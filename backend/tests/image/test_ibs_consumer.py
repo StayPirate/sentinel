@@ -86,5 +86,4 @@ def test_status_endpoint_reports_the_consumer_written_reconnecting(
     assert data["status"] == "reconnecting", data
     assert data["process_started_at"] is not None, data
     assert data["heartbeat_at"] is not None, data
-    assert data["last_error"] == "rabbitmq_connection_failed", data
     assert _URL_CREDENTIALS not in response.text

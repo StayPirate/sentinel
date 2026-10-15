@@ -1396,22 +1396,12 @@ class TestHeartbeatCounters:
                 None,
             ),
             (FAILED_RESULT, (1, 1, 0, 1), "package_reconciliation_failed"),
-            (
-                DeliveryResult(
-                    DeliveryOutcome.FAILED,
-                    "selection_failed",
-                    error_category=IBSConsumerErrorCategory.PACKAGE_RECONCILIATION_FAILED,
-                ),
-                (1, 1, 0, 1),
-                "package_reconciliation_failed",
-            ),
         ],
         ids=[
             "processed",
             "irrelevant",
             "malformed",
-            "track-failed",
-            "selection-failed",
+            "failed",
         ],
     )
     async def test_each_outcome_has_its_exact_counter_effect(
@@ -1423,8 +1413,10 @@ class TestHeartbeatCounters:
     ) -> None:
         """Processed (also an idempotent no-op) counts relevant and
         processed; irrelevant and malformed count only `events_received`;
-        every terminal failure, including one before any track is selected,
-        counts relevant and failed and sets `last_error`. The counters are
+        every terminal failure counts relevant and failed and sets
+        `last_error` — the lifecycle never reads the failure's reason, so a
+        failure before any track is selected (`selection_failed`, proven
+        failed by the handler tests) counts the same. The counters are
         published by the next write."""
         harness.handled.result = result
         harness.start()
@@ -1551,6 +1543,8 @@ class TestHeartbeatDegradation:
     async def test_write_failure_logs_one_bounded_warning_and_changes_nothing(
         self, harness: Harness, error: Exception
     ) -> None:
+        """Startup needs no Redis, and every failed write logs one bounded
+        WARNING while connection handling, processing, and the ACK proceed."""
         harness.store.error = error
 
         with capture_logs() as logs:
@@ -1561,6 +1555,7 @@ class TestHeartbeatDegradation:
             code = await harness.stop()
 
         assert code == 0
+        assert "ibs_consumer_started" in _events(logs)
         failures = [
             e for e in logs if e["event"] == "ibs_consumer_heartbeat_write_failed"
         ]
@@ -1580,70 +1575,78 @@ class TestHeartbeatDegradation:
         assert harness.consumer is not None
         assert harness.consumer.status.events_processed == 1
 
-    async def test_startup_succeeds_without_redis(self, harness: Harness) -> None:
-        harness.store.error = redis_exceptions.ConnectionError("fictional refused")
-
-        with capture_logs() as logs:
-            harness.start()
-            await harness.broker.wait_connected()
-
-        assert "ibs_consumer_started" in _events(logs)
-        assert await harness.stop() == 0
-
-    async def test_hanging_write_is_bounded_and_delays_no_reconnect(
+    async def test_hanging_write_delays_neither_reconnect_nor_delivery(
         self, harness: Harness, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr(ibs_consumer_status, "WRITE_TIMEOUT_SECONDS", 0.01)
+        """The first write never returns (its bound is far beyond the test's
+        waits), yet the failed attempts, the reconnects, and a delivery and
+        its ACK all complete: the lifecycle never awaits the writer."""
+        monkeypatch.setattr(ibs_consumer_status, "WRITE_TIMEOUT_SECONDS", 3600.0)
         harness.store.gate = asyncio.Event()  # Never opened: Redis hangs.
         harness.broker.script = [OSError(), OSError()]
 
-        with capture_logs() as logs:
-            harness.start()
-            await harness.broker.wait_connected()
-            await _until(lambda: "ibs_consumer_heartbeat_write_failed" in _events(logs))
-            code = await harness.stop()
+        harness.start()
+        epoch = await harness.broker.wait_connected()
+        harness.broker.deliver()
+        await _until(lambda: len(epoch.acks) == 1)
 
-        assert code == 0
         assert harness.timer.calls == [5, 10]
-        assert {
-            e["error_type"]
-            for e in logs
-            if e["event"] == "ibs_consumer_heartbeat_write_failed"
-        } == {"TimeoutError"}
+        assert harness.store.attempts == 1
+        assert harness.store.values == []
+        assert await harness.stop() == 0
 
-    async def test_hanging_write_delays_no_shutdown(self, harness: Harness) -> None:
-        """Shutdown step 5 cancels an in-flight write."""
+    async def test_hanging_write_delays_no_shutdown(
+        self, harness: Harness, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Shutdown step 5 cancels an in-flight write whose bound is far
+        beyond the test's waits."""
+        monkeypatch.setattr(ibs_consumer_status, "WRITE_TIMEOUT_SECONDS", 3600.0)
         harness.start()
         await harness.broker.wait_connected()
+        await harness.store.wait_for(_published(status="connected"))
         harness.store.gate = asyncio.Event()  # Never opened.
         harness.refresh.fire()
-        await _until(lambda: harness.store.attempts >= 2)
+        await _until(lambda: harness.store.attempts >= 3)
 
         assert await harness.stop() == 0
+        assert harness.consumer is not None
+        assert harness.consumer._writer._task is not None
+        assert harness.consumer._writer._task.cancelled()
 
     async def test_writer_that_ignores_cancellation_is_abandoned_at_its_bound(
         self, harness: Harness, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(ibs_consumer_status, "WRITER_STOP_TIMEOUT_SECONDS", 0.01)
+        entered = asyncio.Event()
         released = asyncio.Event()
         harness.start()
         await harness.broker.wait_connected()
 
         async def stubborn(value: str) -> None:
-            try:
-                await asyncio.Event().wait()
-            except asyncio.CancelledError:
-                await released.wait()
+            entered.set()
+            while not released.is_set():
+                with contextlib.suppress(asyncio.CancelledError):
+                    await released.wait()
 
         assert harness.consumer is not None
-        harness.consumer._writer._store = stubborn
+        writer = harness.consumer._writer
+        writer._store = stubborn
         harness.refresh.fire()
-        await asyncio.sleep(0)
+        async with asyncio.timeout(_WAIT):
+            await entered.wait()
         try:
             assert await harness.stop() == 0
+            assert writer._task is not None
+            assert not writer._task.done()
         finally:
             released.set()
-            await asyncio.sleep(0)
+            task = writer._task
+            if task is not None:
+                # Cancel until the released writer reaches its next wait.
+                async with asyncio.timeout(_WAIT):
+                    while not task.done():
+                        task.cancel()
+                        await asyncio.sleep(0)
 
 
 class TestHeartbeatShutdownAndFatal:

@@ -14,10 +14,10 @@ These tests cover the HTTP contract: the envelope and wire format of every
 status, HTTP 200 for every operational status (never `REDIS_UNAVAILABLE`),
 the absence of stale fields beside `unreachable`, optional authentication,
 ignored query parameters, response sanitization, the route inventory, and
-OpenAPI. The heartbeat validation matrix lives in
-`tests/test_services/test_ibs_consumer_status.py`; this module repeats a
-representative case per rejection kind because the handler owns the
-all-null `unreachable` response assembly.
+OpenAPI. The heartbeat validation matrix and every `RedisError` kind live in
+`tests/test_services/test_ibs_consumer_status.py`; this module shows the
+all-null `unreachable` response once per kind of cause (absent, malformed,
+stale, Redis failure), since the handler assembles it identically for all.
 
 Every test that can reach Redis requests `redis_client`, sets
 `IBS_RABBITMQ_ENABLED` explicitly, and fixes the status read's clock.
@@ -229,37 +229,10 @@ class TestUnreachableStatus:
         "value",
         [
             pytest.param(None, id="absent-key"),
-            pytest.param(b"consumer is fine", id="non-json"),
-            pytest.param(b'["connected"]', id="non-object"),
-            pytest.param(
-                _encode(
-                    {k: v for k, v in _CONNECTED.items() if k != "events_received"}
-                ),
-                id="missing-field",
-            ),
-            pytest.param(_encode(_with(events_processed="338")), id="counter-type"),
-            pytest.param(_encode(_with(status="paused")), id="unknown-status"),
-            pytest.param(
-                _encode(_with(last_error="disk_full")), id="unknown-last-error"
-            ),
-            pytest.param(
-                _encode(_with(heartbeat_at="2026-09-08T15:42:41Z")),
-                id="future-heartbeat_at",
-            ),
-            pytest.param(
-                _encode(_with(status_since="2026-09-08T13:59:59Z")),
-                id="invalid-ordering",
-            ),
+            pytest.param(b"consumer is fine", id="malformed"),
             pytest.param(
                 _encode(_with(heartbeat_at="2026-09-08T15:41:39Z")),
                 id="stale-61-seconds",
-            ),
-            pytest.param(
-                _encode(_with(last_error_at=None)), id="mismatched-last-error-at"
-            ),
-            pytest.param(_encode(_with(events_relevant=12848)), id="counter-invariant"),
-            pytest.param(
-                _encode(_with(next_retry_seconds=5)), id="connected-with-next-retry"
             ),
         ],
     )
@@ -278,32 +251,18 @@ class TestUnreachableStatus:
         assert response.status_code == 200
         assert response.json() == _null_body("unreachable")
 
-    @pytest.mark.parametrize(
-        "error",
-        [
-            pytest.param(
-                redis_exceptions.ConnectionError("fictional refused"), id="connection"
-            ),
-            pytest.param(
-                redis_exceptions.TimeoutError("fictional timeout"), id="timeout"
-            ),
-            pytest.param(
-                redis_exceptions.ResponseError("OOM command not allowed"),
-                id="oom-response",
-            ),
-        ],
-    )
     async def test_redis_error_returns_200_unreachable_never_redis_unavailable(
         self,
         client: AsyncClient,
         redis_client: redis_asyncio.Redis,
         enabled: None,
         monkeypatch: pytest.MonkeyPatch,
-        error: redis_exceptions.RedisError,
     ) -> None:
+        """Each `RedisError` kind is covered at the service boundary
+        (`TestGetIBSConsumerStatus`); the HTTP contract is shown once."""
         await _store(redis_client, _encode(_CONNECTED))
         failing = AsyncMock()
-        failing.get.side_effect = error
+        failing.get.side_effect = redis_exceptions.ConnectionError("fictional refused")
         monkeypatch.setattr(ibs_consumer_status, "_new_redis_client", lambda: failing)
 
         response = await client.get(_PATH)
