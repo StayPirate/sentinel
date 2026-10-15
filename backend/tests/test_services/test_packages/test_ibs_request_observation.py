@@ -29,7 +29,7 @@ baseline and no retained evidence.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any, Final
@@ -1054,6 +1054,36 @@ class TestActionScopedEvidence:
         )
         assert action_diff_paths(fake) == []
 
+    async def test_release_action_diff_logs_its_target_codestream(
+        self, fake: FakeRequests, package: str
+    ) -> None:
+        number = next_number()
+        action = release(package, next_incident())
+        fake.request(number, REVIEW, action)
+        fake.action_diff(
+            number,
+            action,
+            issue(None),
+            cve_issue(TICKET_CVE),
+            codestream_package=package,
+        )
+        fake.quiet(package, open_releases=[number])
+
+        with capture_logs() as logs:
+            observation = await observe(fake, scope(package=package))
+
+        assert observation.derived is DeliveryStatus.IN_PROGRESS
+        assert issue_logs(logs) == [
+            {
+                "event": ISSUE_IGNORED,
+                "log_level": "warning",
+                "package_name": package,
+                "codestream": CODESTREAM,
+                "request_number": number,
+                "reason_category": "invalid_cve_label",
+            }
+        ]
+
 
 class TestEffectiveSubmission:
     """Effective SR and Required Roots root 7 for an accepted matching
@@ -1361,6 +1391,26 @@ class TestEffectiveSubmission:
 
         assert observation == Observation(DeliveryStatus.PENDING, (), ())
         assert detail_numbers(fake) == []
+
+    async def test_incident_project_outside_suse_is_incomplete_without_history(
+        self, fake: FakeRequests, package: str
+    ) -> None:
+        """An accepted correlated SR whose target project is outside `SUSE:`
+        (stored as `_redacted_`) has no requestable incident history."""
+        sr = accepted_submission(package)
+        action = replace(sr.action, target_project="home:example-user:incident")
+        fake.request(sr.number, ACCEPTED, action)
+        fake.quiet(package)
+
+        exc = await unusable(
+            fake, scope(package=package), correlated_open_form(package, sr)
+        )
+
+        assert (exc.reason_category, exc.request_number) == (
+            "outside_suse_namespace",
+            sr.number,
+        )
+        assert history_requests(fake) == []
 
 
 class TestCurrentReleaseEvidence:
@@ -1761,6 +1811,23 @@ class TestReleaseScan:
         assert not searched(fake)
         assert in_flight.number not in detail_numbers(fake)
 
+    async def test_entry_of_a_request_without_release_actions_is_skipped(
+        self, fake: FakeRequests, package: str
+    ) -> None:
+        """A codestream revision carrying a submission request is not a
+        release; the scan continues with the next older entry."""
+        rr = accepted_release(package)
+        sr_number = next_number()
+        fake.request(sr_number, ACCEPTED, submission(package, sr_number))
+        fake.release_evidence(CODESTREAM, package, cve_issue(TICKET_CVE))
+        codestream_history(fake, package, rr.number, sr_number)
+        serve_release(fake, package, rr, cve_issue(TICKET_CVE))
+
+        observation = await observe(fake, scope(package=package))
+
+        assert observation == proven(package, rr)
+        assert detail_numbers(fake) == [sr_number, rr.number]
+
 
 class TestReleaseProofFirst:
     """Required Roots and Accepted RR Provenance: the proof applied first to
@@ -1900,6 +1967,45 @@ class TestReleaseProofFirst:
         assert observation == Observation(DeliveryStatus.IN_PROGRESS, (), ())
         assert detail_numbers(fake) == [rr.number]
         assert action_diff_paths(fake) == [f"/source/{CODESTREAM}/{rr.target_package}"]
+
+    async def test_correlated_release_absent_from_current_detail_is_no_evidence(
+        self, fake: FakeRequests, package: str
+    ) -> None:
+        """The retained correlated action no longer exists in the request's
+        current detail (another semantic identity): it proves nothing."""
+        rr = accepted_release(package)
+        changed = replace(rr.action, target_package=f"{package}-other.{rr.incident}")
+        fake.request(rr.number, ACCEPTED, changed)
+        fake.quiet(package)
+
+        observation = await observe(
+            fake,
+            scope(package=package),
+            snapshot(correlated=[retained(rr.number, ACCEPTED, rr.action)]),
+        )
+
+        assert observation == Observation(DeliveryStatus.PENDING, (), ())
+        assert action_diff_paths(fake) == []
+
+    async def test_failed_request_of_a_correlated_proof_fails_the_scope(
+        self, fake: FakeRequests, package: str
+    ) -> None:
+        rr = accepted_release(package)
+        fake.respond("GET", f"/request/{rr.number}", [], 500)
+        fake.quiet(package)
+
+        exc = await unusable(
+            fake,
+            scope(package=package),
+            snapshot(correlated=[retained(rr.number, ACCEPTED, rr.action)]),
+        )
+
+        assert (exc.reason_category, exc.http_status, exc.failed) == (
+            "http_status",
+            500,
+            True,
+        )
+        assert not source_info_requested(fake)
 
 
 class TestReleasedBaseline:
@@ -2041,6 +2147,106 @@ class TestInFlightSubmission:
             flight.number,
             True,
         )
+
+    async def test_in_flight_sr_not_effective_is_correlated_without_progress(
+        self, fake: FakeRequests, package: str
+    ) -> None:
+        """Its incident history is complete, but a later SR without the CVE
+        replaced its contents: correlated, no progress."""
+        flight = accepted_submission(package)
+        later = accepted_submission(package, incident=flight.incident)
+        fake.request(flight.number, ACCEPTED, flight.action)
+        fake.request(later.number, ACCEPTED, later.action)
+        fake.action_diff(
+            flight.number,
+            flight.action,
+            cve_issue(TICKET_CVE),
+            codestream_package=package,
+        )
+        fake.action_diff(
+            later.number,
+            later.action,
+            cve_issue(OTHER_CVE),
+            codestream_package=package,
+        )
+        fake.history(
+            flight.project,
+            flight.physical,
+            incident_history(
+                (checksum("branch"), None),
+                (flight.srcmd5, flight.number),
+                (later.srcmd5, later.number),
+            ),
+        )
+        fake.quiet(package)
+
+        observation = await observe(
+            fake,
+            scope(package=package),
+            snapshot(in_flight=[retained(flight.number, ACCEPTED, flight.action)]),
+        )
+
+        assert observation == Observation(
+            DeliveryStatus.PENDING,
+            (request_write(flight.number, ACCEPTED),),
+            (
+                action_write(
+                    flight.number, flight.action, package=package, state=ACCEPTED
+                ),
+            ),
+        )
+
+    @pytest.mark.parametrize("history", [True, False], ids=["complete", "404"])
+    async def test_in_flight_sr_reached_strictly_is_not_treated_leniently(
+        self, fake: FakeRequests, package: str, history: bool
+    ) -> None:
+        """The in-flight SR is also the successor of a superseded open SR:
+        it is evaluated once, strictly, so its unavailable incident history
+        makes the observation incomplete instead of being ignored."""
+        flight = accepted_submission(package)
+        predecessor = next_number()
+        fake.request(
+            predecessor,
+            SUPERSEDED,
+            submission(package, predecessor),
+            superseded_by=flight.number,
+        )
+        fake.request(flight.number, ACCEPTED, flight.action)
+        fake.action_diff(
+            flight.number,
+            flight.action,
+            cve_issue(TICKET_CVE),
+            codestream_package=package,
+        )
+        if history:
+            fake.history(
+                flight.project,
+                flight.physical,
+                incident_history(
+                    (checksum("branch"), None), (flight.srcmd5, flight.number)
+                ),
+            )
+        else:
+            fake.history(
+                flight.project, flight.physical, responder=status_response(404)
+            )
+        fake.quiet(package, open_submissions=[predecessor])
+        state = snapshot(in_flight=[retained(flight.number, ACCEPTED, flight.action)])
+
+        if not history:
+            exc = await unusable(fake, scope(package=package), state)
+            assert (exc.reason_category, exc.request_number) == (
+                "not_found",
+                flight.number,
+            )
+            return
+        observation = await observe(fake, scope(package=package), state)
+
+        assert observation.derived is DeliveryStatus.IN_PROGRESS
+        assert [write.request_number for write in observation.actions] == [
+            flight.number
+        ]
+        assert len(history_requests(fake)) == 1
 
 
 def shared_evidence(fake: FakeRequests, package: str) -> tuple[int, Action]:

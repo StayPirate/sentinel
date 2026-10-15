@@ -1164,6 +1164,36 @@ class TestEvidencePersistence:
         assert len(await stored_actions(world, number)) == 1
         assert [row.request_number for row in await evidence(world, scope)] == [number]
 
+    async def test_identity_still_absent_after_the_reload_fails_the_scope(
+        self,
+        world: RequestWorld,
+        fake: FakeRequests,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The insert met an existing identity that the reload cannot find
+        (inconsistent locked state): the scope fails and writes nothing."""
+        seed = RequestSeed(world)
+        scope = await seed.track(await seed.ticket(), package=unique_package())
+        number, action = await correlated(seed, scope)
+        await seed.commit()
+        fake.request(number, REVIEW, action)
+        fake.quiet(scope.package_name)
+
+        async def always_misses(db: AsyncSession, request_ids: Any) -> Any:
+            return {}
+
+        monkeypatch.setattr(ibs_request_reconciliation, "_lock_actions", always_misses)
+
+        with capture_logs() as logs:
+            outcomes = await reconcile(fake, [scope])
+
+        assert kinds(outcomes) == {scope.track_id: "failed"}
+        assert logged(logs, SCOPE_FAILED) == [
+            failed_entry(scope, "conflicting_provenance", request_number=number)
+        ]
+        assert len(await stored_actions(world, number)) == 1
+        assert await delivery(world, scope) == PENDING.value
+
     async def test_multi_action_request_persists_only_its_relevant_action(
         self, world: RequestWorld, fake: FakeRequests
     ) -> None:
@@ -1486,6 +1516,29 @@ class TestStaleScopes:
 # 5. Outcomes, hook, and failures (Algorithm step 10; Fetcher > Error
 #    Handling and Metrics)
 # ---------------------------------------------------------------------------
+
+
+class TestMissingTicket:
+    async def test_scope_of_a_missing_ticket_is_a_stale_no_op(
+        self, world: RequestWorld, fake: FakeRequests
+    ) -> None:
+        """A scope whose Ticket (and track) no longer exist: no IBS request,
+        then a stale `scope_changed` no-op under the locked revalidation."""
+        scope = IBSRequestScope(
+            ticket_id=uuid.uuid4(),
+            cve_id=f"CVE-2099-{committed_number() % 10**8:08d}",
+            package_id=uuid.uuid4(),
+            package_name=unique_package(),
+            track_id=uuid.uuid4(),
+            codestream=CODESTREAM,
+        )
+
+        with capture_logs() as logs:
+            outcomes = await reconcile(fake, [scope])
+
+        assert kinds(outcomes) == {scope.track_id: "no_op"}
+        assert fake.server.requests == []
+        assert logged(logs, SCOPE_STALE) == [stale_entry(scope, "scope_changed")]
 
 
 class TestOutcomesAndFailures:
