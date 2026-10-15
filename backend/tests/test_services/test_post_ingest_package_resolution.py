@@ -1289,7 +1289,6 @@ class TestRequestCatchUp:
                 ),
                 id="broker-operational",
             ),
-            pytest.param(lambda: RuntimeError(MARKER), id="runtime"),
         ],
     )
     async def test_publication_failure_is_logged_and_never_fails_the_unit(

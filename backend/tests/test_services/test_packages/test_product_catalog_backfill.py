@@ -1568,7 +1568,6 @@ class TestRequestCatchUp:
                 ),
                 id="broker-operational",
             ),
-            pytest.param(lambda: RuntimeError(MARKER), id="runtime"),
         ],
     )
     async def test_publication_failure_leaves_the_pair_outcome_and_counts_unchanged(

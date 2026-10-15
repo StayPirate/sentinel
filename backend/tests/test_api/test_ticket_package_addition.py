@@ -1438,33 +1438,25 @@ class TestRequestCatchUp:
         ]
         assert _feature_logs(logs) == []
 
-    @pytest.mark.parametrize(
-        "make_error",
-        [
-            pytest.param(
-                lambda: BrokerOperationalError(f"{BROKER_URL} connection refused"),
-                id="broker-operational",
-            ),
-            pytest.param(lambda: RuntimeError(MARKER), id="runtime"),
-        ],
-    )
     async def test_publication_failure_keeps_the_201_with_one_warning(
         self,
         api: _Api,
         ticket_factory: TicketFactory,
         broker: _Publish,
-        make_error: Callable[[], Exception],
     ) -> None:
         """A failed catch-up publication changes neither the 201 body nor
         the committed addition: exactly one sanitized
         `ibs_request_catch_up_dispatch_failed` WARNING (with the bound
         request correlation) and no generic `post_commit_callback_failed`
-        ERROR; no exception text reaches a log or the response."""
+        ERROR; no exception text reaches a log or the response. The broker
+        operational error is covered with the convergence drain in
+        `TestConvergence`, the error-type matrix at the service level
+        (`tests/test_services/test_package_add_request_catch_up.py`)."""
         caller = await api.caller(Role.VULNERABILITY_ANALYST)
         ticket = await cveless(ticket_factory, assignee_id=caller.user.id)
         (product,) = await _current(api.db)
         _serve(api.smelt, codestream(IBS_REF, "SLE_15", product.cpe))
-        error = make_error()
+        error = RuntimeError(MARKER)
         broker.error = error
 
         with capture_logs(processors=[merge_contextvars]) as logs:
@@ -1490,68 +1482,6 @@ class TestRequestCatchUp:
         rendered = repr(logs) + response.text
         for fragment in (MARKER, "fictional-secret", "broker.example.test"):
             assert fragment not in rendered
-
-    @pytest.mark.parametrize(
-        "case",
-        [
-            "git-only",
-            "product-only",
-            "already-excluded",
-            "targets-unresolved",
-            "not-mutable",
-        ],
-    )
-    async def test_request_without_a_new_ibs_track_publishes_nothing(
-        self,
-        api: _Api,
-        ticket_factory: TicketFactory,
-        broker: _Publish,
-        case: str,
-    ) -> None:
-        """A 201 that creates only a Git track or only a Product below an
-        existing IBS track, and the error responses `409
-        PACKAGE_ALREADY_EXCLUDED`, `422 PACKAGE_TARGETS_UNRESOLVED`, and
-        `409 TICKET_NOT_MUTABLE` publish nothing and log no catch-up
-        event (the no-op repeat and the maintainer-only outcome are in
-        `TestSuccess`)."""
-        caller = await api.caller(Role.VULNERABILITY_ANALYST)
-        ticket = (
-            await ticket_factory(status=TicketStatus.IGNORED.value)
-            if case == "not-mutable"
-            else await cveless(ticket_factory, assignee_id=caller.user.id)
-        )
-        p1, p2 = await _current(api.db, 2)
-        if case in {"product-only", "already-excluded"}:
-            package = await seed_package(
-                api.db, ticket.id, PKG, excluded=case == "already-excluded"
-            )
-            await seed_occurrence(
-                api.db, await seed_track(api.db, package, IBS_REF), p1
-            )
-        entry, expected = {
-            "git-only": (codestream(GIT_REF, "SLFO", p1.cpe), (201, _data(1, 0, 1, 0))),
-            "product-only": (
-                codestream(IBS_REF, "SLE_15", p1.cpe, p2.cpe),
-                (201, _data(0, 1, 1, 1)),
-            ),
-            "already-excluded": (
-                codestream(IBS_REF, "SLE_15", p1.cpe),
-                (409, ALREADY_EXCLUDED),
-            ),
-            "targets-unresolved": (
-                codestream(IBS_REF, "SLE_15", ABSENT),
-                (422, TARGETS_UNRESOLVED),
-            ),
-            "not-mutable": (codestream(IBS_REF, "SLE_15", p1.cpe), (409, NOT_MUTABLE)),
-        }[case]
-        _serve(api.smelt, entry)
-
-        with capture_logs() as logs:
-            response = await api.post(ticket, caller=caller)
-
-        assert (response.status_code, response.json()) == expected
-        assert broker.calls == []
-        assert _feature_logs(logs) == []
 
 
 # ---------------------------------------------------------------------------

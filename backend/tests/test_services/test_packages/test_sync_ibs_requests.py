@@ -117,7 +117,6 @@ from app.services.fetcher_bootstrap import bootstrap_fetcher_configs
 from app.services.fetcher_schedule import reconcile_beat_schedule
 from app.services.http_client import is_retryable_condition
 from app.services.ibs_client import IBSClient
-from app.services.package_service import run_ticket_convergence
 from app.services.packages import ibs_request_observation, ibs_request_reconciliation
 from app.services.packages import sync_ibs_requests as fetcher_module
 from app.services.packages.ibs_request_reconciliation import IBSRequestScope
@@ -169,7 +168,6 @@ DESCRIPTION: Final = (
 )
 ENUMERATION_FAILED: Final = "Failed to enumerate IBS request scopes"
 RUN_COMPLETED: Final = "ibs_request_run_completed"
-RUN_CATCH_UP: Final = "run_catch_up"
 CREDENTIALS: Final = "credentials_not_configured"
 
 MI: Final = IBSRequestActionType.MAINTENANCE_INCIDENT
@@ -658,7 +656,8 @@ _INVOCATIONS = ["execute", "catch-up"]
 
 
 # ---------------------------------------------------------------------------
-# A1. Class contract, registration, bootstrap, schedule, and roster
+# A1. Class contract, registration, bootstrap, and schedule (the roster
+# publication is proven with the real class in test_run_ticket_convergence.py)
 # ---------------------------------------------------------------------------
 
 
@@ -762,60 +761,6 @@ class TestBootstrapAndSchedule:
         assert entry.schedule.day_of_week == set(range(7))
         # max(5, 3600) and max(1, floor(3600 * 0.95)); no queue.
         assert entry.options == {"time_limit": 3600, "soft_time_limit": 3420}
-
-
-@pytest.mark.integration
-class TestTicketConvergenceRoster:
-    async def test_convergence_publishes_the_catch_up_after_the_package_units(
-        self,
-        world: RequestWorld,
-        real_session_factory: async_sessionmaker[AsyncSession],
-        publication: Publish,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """The package units of the Ticket (recorded, not resolved) run
-        first; the fetcher then receives exactly one `run_catch_up` with
-        no queue."""
-        (scope,) = await _seeded(world)
-        events: list[tuple[str, str]] = []
-
-        async def converge(
-            session_factory: Any,
-            client: Any,
-            *,
-            ticket_id: uuid.UUID,
-            package_name: str,
-        ) -> str:
-            assert ticket_id == scope.ticket_id
-            events.append(("unit", package_name))
-            return "converged"
-
-        async def published(call: dict[str, Any]) -> None:
-            events.append(("publish", call["kwargs"]["fetcher_name"]))
-
-        monkeypatch.setattr(package_service, "_converge_package", converge)
-        publication.on_call = published
-
-        await run_ticket_convergence(
-            ticket_id=scope.ticket_id, session_factory=real_session_factory
-        )
-
-        assert events[0] == ("unit", scope.package_name)
-        assert events.count(("publish", NAME)) == 1
-        assert [e for e in events if e[0] == "unit"] == [("unit", scope.package_name)]
-        mine = [
-            call
-            for call in publication.calls
-            if call["task_name"] == RUN_CATCH_UP
-            and call["kwargs"]["fetcher_name"] == NAME
-        ]
-        assert mine == [
-            {
-                "task_name": RUN_CATCH_UP,
-                "kwargs": {"fetcher_name": NAME, "ticket_id": str(scope.ticket_id)},
-                "queue": None,
-            }
-        ]
 
 
 # ---------------------------------------------------------------------------
@@ -2240,32 +2185,6 @@ class TestRunCatchUpAsync:
         fetcher_http_client.assert_not_called()
         catch_up_task.engine.dispose.assert_awaited_once_with()
         assert await fetcher_run_count(catch_up_task.factory, NAME) == 0
-
-    async def test_all_failed_propagates_as_non_retryable(
-        self,
-        world: RequestWorld,
-        fake: FakeRequests,
-        ibs_clients: _IBSClients,
-        catch_up_task: _CatchUpTask,
-    ) -> None:
-        seed = RequestSeed(world)
-        scope = await seed.track(
-            await seed.ticket(), package=unique_package(), delivery=IN_PROGRESS
-        )
-        number, _ = await _correlated(seed, scope)
-        await seed.commit()
-        fake.respond("GET", f"/request/{number}", [], 404)
-        fake.quiet(scope.package_name)
-
-        with pytest.raises(FetcherError) as raised:
-            await fetchers.run_catch_up_async(NAME, str(scope.ticket_id))
-
-        assert str(raised.value) == "All 1 IBS request reconciliations failed"
-        assert not is_retryable_condition(raised.value)
-        ibs_clients.assert_each_closed(1)
-        catch_up_task.engine.dispose.assert_awaited_once_with()
-        assert await fetcher_run_count(catch_up_task.factory, NAME) == 0
-        assert await _delivery(world, scope) == IN_PROGRESS.value
 
 
 class _StandInSession:

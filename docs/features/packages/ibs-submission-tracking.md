@@ -837,9 +837,13 @@ Git tracks, maintainers, or no package-tree rows registers no request catch-up.
 The catch-up observes committed package-tree state. Publication failure is
 logged with sanitized Ticket and operation identity
 (`ibs_request_catch_up_dispatch_failed`, [Structured Logs](#structured-logs))
-and does not roll back the package addition. The daily complete fetcher remains the permanent recovery
-owner. There is no `correlate_submission_request` or
-dedicated submission-correlation or discovery Celery task.
+and does not roll back the package addition. A Ticket convergence package unit
+does not attempt the catch-up: the convergence roster publishes it once after
+every package unit ([Ticket Convergence](#ticket-convergence);
+`package-service.md`, `run_ticket_convergence()` workflow). The daily complete
+fetcher remains the permanent recovery owner. There is no
+`correlate_submission_request` or dedicated submission-correlation or discovery
+Celery task.
 
 ### Ticket Convergence
 
