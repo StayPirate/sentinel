@@ -921,7 +921,10 @@ class TestEvidencePersistence:
         an immutable field than its current detail, whose release is
         otherwise proven (Data Model > IBSRequestAction). The target project
         and package are its identity, and its codestream is bound to the
-        target project, so they cannot conflict."""
+        target project, so they cannot conflict. The source project, incident
+        number, and logical package of a resolved release follow from its
+        target package, so those retained values stand for a stored row that
+        differs from the current derivation."""
         seed = RequestSeed(world)
         scope = await seed.track(
             await seed.ticket(), package=unique_package(), delivery=IN_PROGRESS
