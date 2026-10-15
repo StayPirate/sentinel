@@ -1,10 +1,12 @@
 name: Python Next
 
-# Weekly, non-blocking run of the backend test suite against the next
+# Weekly, non-blocking run of the backend test suites (default in-process
+# and local process system) and the strict type check against the next
 # Python minor version (one above backend/.python-version). See
 # docs/deployment.md (Python Forward-Compatibility Check) for the full
-# rationale, and docs/conventions.md (Version Bump Checklist) for the
-# manual bump procedure this workflow provides early warning for.
+# rationale, including why no image is built here, and
+# docs/conventions.md (Version Bump Checklist) for the manual bump
+# procedure this workflow provides early warning for.
 #
 # This workflow reports forward-compatibility failures through its native
 # Actions status and logs. It never touches build-images.yml or the publish
@@ -28,7 +30,7 @@ jobs:
   forward-compat:
     name: Test Against Next Python Version
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: backend
@@ -101,16 +103,51 @@ jobs:
           fi
 
       # Any failure below (interpreter installation, dependency resolution,
-      # or an actual test failure) fails the workflow so its native status
-      # badge reflects the forward-compatibility result. Unlike ci.yml's
-      # reproducible backend-test job, this run intentionally allows
+      # a test failure, or a type error) fails the workflow so its native
+      # status badge reflects the forward-compatibility result. Unlike
+      # ci.yml's reproducible jobs, this run intentionally allows
       # re-resolution (`uv sync` without `--locked`) since the goal is to
-      # surface breakage against a still-unreleased interpreter, and coverage
-      # gating is not a concern here (no `--cov` flags).
-      - name: Run test suite against next Python version
+      # surface breakage against a still-unreleased interpreter.
+      - name: Install next Python version and sync dependencies
+        id: sync
         if: steps.availability.outputs.available == 'true'
+        env:
+          NEXT_PYTHON: ${{ steps.python-version.outputs.next }}
         run: |
           set -euo pipefail
-          uv python install "${{ steps.python-version.outputs.next }}"
-          uv sync --python "${{ steps.python-version.outputs.next }}"
-          uv run --python "${{ steps.python-version.outputs.next }}" pytest -v
+          uv python install "${NEXT_PYTHON}"
+          uv sync --python "${NEXT_PYTHON}"
+
+      # Same as ci.yml's backend-test job: the service container is
+      # discarded with the job. See docs/features/platform/testing-strategy.md
+      # (Parallel Execution; CI Pipeline).
+      - name: Disable durability on the ephemeral PostgreSQL service
+        if: steps.sync.outcome == 'success'
+        env:
+          POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
+        run: >-
+          docker exec "${POSTGRES_CONTAINER}"
+          psql -v ON_ERROR_STOP=1 -U sentinel -d sentinel_test
+          -c "ALTER SYSTEM SET fsync = off"
+          -c "ALTER SYSTEM SET synchronous_commit = off"
+          -c "ALTER SYSTEM SET full_page_writes = off"
+          -c "SELECT pg_reload_conf()"
+
+      # The worker options of ci.yml's backend-test invocation, without
+      # coverage: -m "not image" overrides the pyproject default marker
+      # filter so the local process system suite runs in the same
+      # invocation. See docs/features/platform/testing-strategy.md
+      # (Parallel Execution; Local Process System Testing, Execution).
+      - name: Run default in-process and local process system suites against next Python version
+        if: steps.sync.outcome == 'success'
+        env:
+          NEXT_PYTHON: ${{ steps.python-version.outputs.next }}
+        run: uv run --python "${NEXT_PYTHON}" pytest -m "not image" -n 4 --max-worker-restart 0 -v
+
+      # Runs even when the test step failed, so the logs report both
+      # results; skipped only when the environment could not be prepared.
+      - name: Run strict type check against next Python version
+        if: ${{ !cancelled() && steps.sync.outcome == 'success' }}
+        env:
+          NEXT_PYTHON: ${{ steps.python-version.outputs.next }}
+        run: uv run --python "${NEXT_PYTHON}" mypy app tests alembic

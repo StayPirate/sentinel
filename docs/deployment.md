@@ -402,7 +402,7 @@ they feed in [Environments](#environments).
 | `build-images.yml` | `workflow_run` after a successful CI run on `master`; push of a `v*` tag | Builds the backend image once, runs the image smoke and SBOM gates, and publishes the same digest to `ghcr.io`; version-tag runs also publish release SBOM and provenance attestations | Yes (publish gate) |
 | `deploy-api-docs.yml` | Push of a `v*` tag | Publishes the OpenAPI contract and API documentation site to GitHub Pages | Yes (release path) |
 | `image-scan.yml` | Weekly schedule, manual | Scans the published image for OS-level vulnerabilities and opens, updates, or closes a tracking issue | No |
-| `python-forward-compat.yml` | Weekly schedule, manual | Runs the test suite on the next Python minor version and reports the result through its Actions status and logs | No |
+| `python-forward-compat.yml` | Weekly schedule, manual | Runs the default in-process and local process system suites and the strict type check on the next Python minor version and reports the result through its Actions status and logs | No |
 | `renovate-validation.yml` | Pull request opened, synchronized, or reopened; manual | Validates `renovate.jsonc` and performs a read-only Renovate dependency lookup in a pinned container | No |
 | `cleanup-images.yml` | Weekly schedule, manual | Bounds the pool of untagged image versions in the registry | No |
 | `scorecard.yml` | Push to `master`, weekly schedule, manual | Runs the official OpenSSF Scorecard action and publishes results to Code Scanning and the public Scorecard dataset | No |
@@ -1917,13 +1917,32 @@ base-digest refresh and remains open until then; this delay is accepted.
 ### Python Forward-Compatibility Check
 
 A weekly scheduled workflow
-(`.github/workflows/python-forward-compat.yml`) runs the backend test
-suite against the **next** Python minor version — one above the
+(`.github/workflows/python-forward-compat.yml`) runs backend checks
+against the **next** Python minor version — one above the
 current `backend/.python-version` target — using `uv python install`
 to fetch the interpreter (including the latest available pre-release
 build, if that is the newest published build for that minor) and `uv
 sync` / `uv run` with a `--python` override. It also supports manual
 dispatch for on-demand checks between scheduled runs.
+
+**Checks.** The workflow runs two of the checks the runtime bump must
+pass:
+
+- the default in-process suite and the local process system suite, in
+  one parallel invocation with the worker options and PostgreSQL
+  durability settings of the `ci.yml` backend-test job, without
+  coverage measurement (see `docs/features/platform/testing-strategy.md`,
+  Parallel Execution and Local Process System Testing); and
+- the strict type check over the scope of the CI gate (see
+  `docs/conventions.md`, Static Type Checking), which runs even when the
+  test run fails.
+
+It builds no image. The official `python:<minor>-slim` base image is
+published only from a minor's final release, so an image check here
+would run only in the short period between that release and the bump,
+whose pull request builds and smoke-tests the image through the blocking
+image gate of `ci.yml` (see `docs/conventions.md`, Version Bump
+Checklist).
 
 **Why this exists.** Python runtime bumps follow the Version Bump
 Checklist in `docs/conventions.md` (Runtime Version), which is a
@@ -1934,7 +1953,7 @@ workflow turns that into an early-warning signal, surfacing breakage
 weeks or months before the bump PR is opened.
 
 **Deliberately non-blocking.** A compatibility failure makes the workflow
-fail so its native Actions status and README badge reflect the test result,
+fail so its native Actions status and README badge reflect the result,
 but the workflow is not part of the publish path (`build-images.yml` is
 untouched) and is never a required status check. The next Python minor
 version is frequently a pre-release during most of its development cycle,
@@ -1945,21 +1964,22 @@ publication gate.
 minor may have no published build at all yet (not even an alpha). The
 workflow checks this first via `uv python list <next> --only-downloads`
 before attempting anything else. If no build is available, the run
-exits successfully with an informational `::notice::` — no test is
+exits successfully with an informational `::notice::` — no check is
 attempted. This avoids a false-positive
 failure signal for a condition that carries no compatibility
 information.
 
-**Best-effort resolution.** Unlike the reproducible `backend-test` job
-in `ci.yml` (which uses `uv sync --locked` against the committed
-lockfile), this workflow runs `uv sync` without `--locked` — it
+**Best-effort resolution.** Unlike the reproducible `backend-test` and
+`backend-typecheck` jobs in `ci.yml` (which use `uv sync --locked`
+against the committed lockfile), this workflow runs `uv sync` without `--locked` — it
 intentionally allows dependency resolution to float against the new
 interpreter, since the goal is to detect whether the current
 dependency set *can* resolve and pass on the next version, not to
 reproduce a pinned environment.
 
 **Delivery.** Once a build is available, a failure during interpreter
-installation, dependency resolution, or the test run fails the workflow.
+installation, dependency resolution, the test run, or the type check
+fails the workflow.
 The native Actions status drives the README badge, while the workflow logs
 provide the tested version and failure details. The workflow does not create
 or update tracking issues.
