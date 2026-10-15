@@ -29,14 +29,22 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import gc
+import ipaddress
 import socket
 import ssl
 from collections.abc import AsyncIterator, Awaitable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any, cast
 
 import aiormq
 import pytest
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.x509.oid import NameOID
 from pamqp import base, commands
 
 from app.config import Settings
@@ -121,11 +129,24 @@ class Client:
         return epoch, await self.broker.connection()
 
 
+@pytest.fixture(autouse=True)
+async def _collect_abandoned_connections() -> AsyncIterator[None]:
+    """aio-pika leaves the `Connection` of a failed `connect()` unclosed; its
+    finalizer schedules `close()` on the running loop. Collect it while this
+    test's loop runs, not during a later test that has no running loop."""
+    yield
+    gc.collect()
+    for _ in range(3):
+        await asyncio.sleep(0)
+
+
 @pytest.fixture
 async def broker() -> AsyncIterator[FakeAmqpServer]:
     async with FakeAmqpServer() as server:
         yield server
     for connection in server.connections:
+        # Consume-only and ACK-only on the wire.
+        assert connection.methods(commands.Basic.Publish) == []
         assert connection.methods(commands.Basic.Nack) == []
         assert connection.methods(commands.Basic.Reject) == []
 
@@ -504,6 +525,141 @@ class TestFailures:
 
         assert isinstance(raised.value.__cause__, OSError)
         assert classify_connection_error(raised.value) == (False, "network_error")
+
+
+# ---------------------------------------------------------------------------
+# TLS: the adapter's context secures the AMQPS transport
+# ---------------------------------------------------------------------------
+
+
+def _name(common_name: str) -> x509.Name:
+    return x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, common_name)])
+
+
+def _fictional_pki(directory: Path, *, server_name: str) -> tuple[Path, Path, Path]:
+    """A fictional CA and a server certificate for `server_name` (and, when
+    it is `localhost`, 127.0.0.1); returns the CA, certificate, and key
+    paths."""
+    now = datetime.now(UTC)
+    ca_key = ec.generate_private_key(ec.SECP256R1())
+    ca = (
+        x509.CertificateBuilder()
+        .subject_name(_name("Example Test CA"))
+        .issuer_name(_name("Example Test CA"))
+        .public_key(ca_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(minutes=5))
+        .not_valid_after(now + timedelta(hours=1))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=True,
+                content_commitment=False,
+                key_encipherment=False,
+                data_encipherment=False,
+                key_agreement=False,
+                key_cert_sign=True,
+                crl_sign=True,
+                encipher_only=False,
+                decipher_only=False,
+            ),
+            critical=True,
+        )
+        .add_extension(
+            x509.SubjectKeyIdentifier.from_public_key(ca_key.public_key()),
+            critical=False,
+        )
+        .sign(ca_key, hashes.SHA256())
+    )
+    key = ec.generate_private_key(ec.SECP256R1())
+    names: list[x509.GeneralName] = [x509.DNSName(server_name)]
+    if server_name == "localhost":
+        names.append(x509.IPAddress(ipaddress.ip_address("127.0.0.1")))
+    leaf = (
+        x509.CertificateBuilder()
+        .subject_name(_name(server_name))
+        .issuer_name(ca.subject)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(minutes=5))
+        .not_valid_after(now + timedelta(hours=1))
+        .add_extension(x509.SubjectAlternativeName(names), critical=False)
+        .add_extension(
+            x509.ExtendedKeyUsage([x509.oid.ExtendedKeyUsageOID.SERVER_AUTH]),
+            critical=False,
+        )
+        .add_extension(
+            x509.AuthorityKeyIdentifier.from_issuer_public_key(ca_key.public_key()),
+            critical=False,
+        )
+        .sign(ca_key, hashes.SHA256())
+    )
+    ca_path = directory / "ca.pem"
+    cert_path = directory / "server.pem"
+    key_path = directory / "server.key"
+    ca_path.write_bytes(ca.public_bytes(serialization.Encoding.PEM))
+    cert_path.write_bytes(leaf.public_bytes(serialization.Encoding.PEM))
+    key_path.write_bytes(
+        key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+    )
+    return ca_path, cert_path, key_path
+
+
+def _server_context(cert: Path, key: Path) -> ssl.SSLContext:
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(cert, key)
+    return context
+
+
+def _trusting(ca: Path) -> ssl.SSLContext:
+    """A client context like `build_tls_context()`: system CAs plus `ca`."""
+    context = ssl.create_default_context()
+    context.load_verify_locations(cafile=ca)
+    return context
+
+
+class TestTls:
+    async def test_trusted_server_is_reached_through_the_given_context(
+        self, tmp_path: Path
+    ) -> None:
+        ca, cert, key = _fictional_pki(tmp_path, server_name="localhost")
+
+        async with FakeAmqpServer(tls=_server_context(cert, key)) as broker:
+            async with asyncio.timeout(WAIT_SECONDS):
+                epoch = await connect_amqp(
+                    broker.tls_url("localhost"), _trusting(ca), Sink()
+                )
+            server = await broker.connection()
+            await server.wait_for(commands.Basic.Consume)
+            await epoch.close()
+
+        assert server.methods(commands.Connection.StartOk)
+
+    @pytest.mark.parametrize(
+        ("server_name", "trusted"),
+        [("localhost", False), ("mq.example.test", True)],
+        ids=["untrusted-chain", "hostname-mismatch"],
+    )
+    async def test_certificate_verification_failure_is_fatal(
+        self, tmp_path: Path, server_name: str, trusted: bool
+    ) -> None:
+        ca, cert, key = _fictional_pki(tmp_path, server_name=server_name)
+        context = _trusting(ca) if trusted else ssl.create_default_context()
+
+        async with FakeAmqpServer(tls=_server_context(cert, key)) as broker:
+            with pytest.raises(aiormq.exceptions.AMQPConnectionError) as raised:
+                async with asyncio.timeout(WAIT_SECONDS):
+                    await connect_amqp(broker.tls_url("localhost"), context, Sink())
+
+        assert isinstance(raised.value.__cause__, ssl.SSLCertVerificationError)
+        assert classify_connection_error(raised.value) == (
+            True,
+            "tls_verification_failed",
+        )
 
 
 # ---------------------------------------------------------------------------

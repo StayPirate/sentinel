@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import re
 import signal
 import ssl
@@ -37,7 +38,6 @@ import pytest
 from structlog.contextvars import get_contextvars, merge_contextvars
 from structlog.testing import capture_logs
 
-from app import ibs_consumer
 from app.config import Settings
 from app.config import settings as app_settings
 from app.core.exceptions import TLSConfigurationError
@@ -53,6 +53,7 @@ from tests.support.ibs_consumer import (
     FakeBroker,
     FakeClient,
     FakeDelivery,
+    FakeEpoch,
     FakeTimer,
     Handled,
 )
@@ -249,6 +250,34 @@ class TestStartup:
     # Reconnection
     # ---------------------------------------------------------------------------
 
+    async def test_invalid_ca_at_client_creation_is_a_fatal_tls_error(
+        self, harness: Harness, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+    ) -> None:
+        """The real `IBSClient` builds its TLS context from a corrupt
+        `SUSE_CA_CERT_PATH` before the first connection attempt."""
+        corrupt = tmp_path / "corrupt.crt"
+        corrupt.write_text("-----BEGIN CERTIFICATE-----\nnot base64\n")
+        monkeypatch.setattr(app_settings, "suse_ca_cert_path", str(corrupt))
+        consumer = IBSEventConsumer(
+            _settings(),
+            connect=harness.broker,
+            session_factory=cast(Any, harness.sessions),
+            dispose_engine=harness._dispose,
+            timer=harness.timer,
+            handle_signals=False,
+        )
+
+        with capture_logs() as logs:
+            code = await asyncio.wait_for(consumer.run(), _WAIT)
+
+        assert code == 1
+        assert _entry(logs, "ibs_consumer_fatal")["reason_category"] == (
+            "tls_configuration_invalid"
+        )
+        assert "ibs_consumer_started" not in _events(logs)
+        assert harness.broker.urls == []
+        assert harness.disposed == ["engine"]
+
     async def test_memory_error_in_the_check_is_fatal(self, harness: Harness) -> None:
         harness.sessions.error = MemoryError()
 
@@ -429,10 +458,18 @@ _CLASSIFIED: list[tuple[str, Callable[[], BaseException], bool, str]] = [
         "access_refused",
     ),
     (
-        "vhost-not-allowed",
+        "not-allowed",
+        # RabbitMQ also refuses with NOT_ALLOWED for a reached connection
+        # limit or a virtual host that is down: transient, not fatal.
         lambda: aiormq.exceptions.ConnectionNotAllowed("NOT_ALLOWED"),
-        True,
-        "access_refused",
+        False,
+        "amqp_error",
+    ),
+    (
+        "connection-530",
+        lambda: aiormq.exceptions.ConnectionClosed(530, "NOT_ALLOWED"),
+        False,
+        "amqp_error",
     ),
     (
         "connection-403",
@@ -916,8 +953,19 @@ class TestCancelAndWait:
         with contextlib.suppress(asyncio.CancelledError):
             await target
 
-    async def test_default_timer_sleeps(self) -> None:
-        await ibs_event_consumer._sleep(0)
+    async def test_default_timer_is_an_asyncio_sleep(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        slept: list[float] = []
+
+        async def recorded(seconds: float) -> None:
+            slept.append(seconds)
+
+        monkeypatch.setattr(asyncio, "sleep", recorded)
+
+        await ibs_event_consumer._sleep(7.0)
+
+        assert slept == [7.0]
 
 
 # ---------------------------------------------------------------------------
@@ -1004,6 +1052,35 @@ class TestShutdown:
         assert "ibs_consumer_shutdown_deadline_exceeded" not in _events(logs)
         assert len(harness.broker.epochs) == 1
 
+    async def test_repeated_signal_is_ignored(self, harness: Harness) -> None:
+        with capture_logs() as logs:
+            harness.start()
+            await harness.broker.wait_connected()
+            await _until(lambda: "ibs_consumer_connected" in _events(logs))
+            assert harness.consumer is not None
+            harness.consumer.request_shutdown()
+            harness.consumer.request_shutdown()
+            code = await harness.result()
+
+        assert code == 0
+        assert _events(logs).count("ibs_consumer_shutdown_started") == 1
+
+    async def test_hanging_client_and_engine_closure_are_bounded(
+        self, harness: Harness, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(ibs_event_consumer, "CLOSE_TIMEOUT_SECONDS", 0.01)
+
+        async def hang() -> None:
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(harness.client, "aclose", hang)
+        harness._dispose = hang  # type: ignore[method-assign]
+
+        harness.start()
+        await harness.broker.wait_connected()
+
+        assert await harness.stop() == 0
+
     async def test_idle_shutdown_cancels_the_consumer_and_closes(
         self, harness: Harness
     ) -> None:
@@ -1019,51 +1096,78 @@ class TestShutdown:
 
 
 # ---------------------------------------------------------------------------
-# Entry module
+# Correlation reset (in the calling context)
 # ---------------------------------------------------------------------------
 
 
-@dataclass(eq=False)
-class _Recorder:
-    calls: list[str] = field(default_factory=list)
+class TestCorrelationReset:
+    """`_handle()` resets `ibs_event_id` in `finally` for every outcome, so
+    the ID cannot leak into the context that awaits it (logging.md, Reset
+    requirement)."""
 
+    @staticmethod
+    def _consumer(harness: Harness) -> IBSEventConsumer:
+        consumer = IBSEventConsumer(
+            _settings(),
+            connect=harness.broker,
+            client_factory=cast(Any, lambda: harness.client),
+            session_factory=cast(Any, harness.sessions),
+            dispose_engine=harness._dispose,
+            timer=harness.timer,
+            handle_signals=False,
+        )
+        consumer._client = cast(Any, harness.client)
+        return consumer
 
-@pytest.fixture
-def entry(monkeypatch: pytest.MonkeyPatch) -> _Recorder:
-    recorder = _Recorder()
-    monkeypatch.setattr(
-        ibs_consumer, "configure_logging", lambda _s: recorder.calls.append("logging")
+    @pytest.mark.parametrize(
+        "result",
+        [
+            DeliveryResult(DeliveryOutcome.PROCESSED),
+            DeliveryResult(DeliveryOutcome.MALFORMED, "invalid_json"),
+            DeliveryResult(DeliveryOutcome.FAILED, "track_failed"),
+        ],
+        ids=lambda result: result.outcome.value,
     )
-
-    class _Consumer:
-        def __init__(self, settings: Settings) -> None:
-            recorder.calls.append("consumer")
-
-        async def run(self) -> int:
-            recorder.calls.append("run")
-            return 7
-
-    monkeypatch.setattr(ibs_consumer, "IBSEventConsumer", _Consumer)
-    return recorder
-
-
-class TestEntryModule:
-    def test_disabled_logs_after_configuring_logging_and_exits_zero(
-        self, entry: _Recorder, monkeypatch: pytest.MonkeyPatch
+    async def test_outcome_leaves_no_correlation_behind(
+        self, harness: Harness, result: DeliveryResult
     ) -> None:
-        monkeypatch.setattr(app_settings, "ibs_rabbitmq_enabled", False)
+        harness.handled.result = result
+        epoch = FakeEpoch(harness.broker.events)
 
-        with capture_logs() as logs:
-            code = ibs_consumer.main()
+        await self._consumer(harness)._handle(FakeDelivery(), epoch)
 
-        assert code == 0
-        assert entry.calls == ["logging"]
-        assert logs == [{"event": "ibs_consumer_disabled", "log_level": "info"}]
+        assert _UUID7.fullmatch(harness.handled.calls[0]["ibs_event_id"])
+        assert "ibs_event_id" not in get_contextvars()
+        assert len(epoch.acks) == 1
 
-    def test_enabled_runs_the_consumer_in_one_event_loop(
-        self, entry: _Recorder, monkeypatch: pytest.MonkeyPatch
+    async def test_cancellation_leaves_no_correlation_behind(
+        self, harness: Harness
     ) -> None:
-        monkeypatch.setattr(app_settings, "ibs_rabbitmq_enabled", True)
+        """Cancelled in its own task: the task's context is inspected after
+        the cancellation completes."""
+        harness.handled.gate = asyncio.Event()
+        epoch = FakeEpoch(harness.broker.events)
+        context = contextvars.copy_context()
+        handling = asyncio.get_running_loop().create_task(
+            self._consumer(harness)._handle(FakeDelivery(), epoch), context=context
+        )
+        await _until(lambda: len(harness.handled.calls) == 1)
+        assert "ibs_event_id" in context.run(get_contextvars)
 
-        assert ibs_consumer.main() == 7
-        assert entry.calls == ["logging", "consumer", "run"]
+        handling.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await handling
+
+        assert "ibs_event_id" not in context.run(get_contextvars)
+        assert epoch.acks == []
+
+    async def test_exception_leaves_no_correlation_behind(
+        self, harness: Harness
+    ) -> None:
+        harness.handled.error = MemoryError()
+        epoch = FakeEpoch(harness.broker.events)
+
+        with pytest.raises(MemoryError):
+            await self._consumer(harness)._handle(FakeDelivery(), epoch)
+
+        assert "ibs_event_id" not in get_contextvars()

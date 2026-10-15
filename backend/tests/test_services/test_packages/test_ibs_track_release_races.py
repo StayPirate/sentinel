@@ -1,7 +1,7 @@
 """Independent-session tests for the IBS track release reconciliation
 boundary (backend/app/services/packages/ibs_track_release.py): races,
-per-track failure conversion, the commit, the per-outcome hook, and the
-Ticket convergence drain.
+per-track failure conversion, the commit, the per-outcome hook, the
+Ticket convergence drain, and consumer mode.
 
 Owning specifications:
 
@@ -33,8 +33,9 @@ Selection and the boundary body are covered by
 setup: a `TrackWorld` with explicit teardown, `TrackUnitSessions`
 replacing the boundary's `async_session_factory`, a
 `task_publication.publish_task` recorder, and a real `IBSClient` over the
-fake IBS API. A system `FIXED` never registers a Ticket convergence
-effect by itself, so the drain tests wrap
+fake IBS API. A system `FIXED` registers a Ticket convergence effect by
+itself only when it regresses a stale `Resolved` Ticket (reproduced by the
+consumer-mode tests), so the drain tests wrap
 `package_service.set_track_status()` to register one for its Ticket after
 the real call. Concurrent changes are committed by an independent session
 after every IBS request of the track's diff and before its local unit

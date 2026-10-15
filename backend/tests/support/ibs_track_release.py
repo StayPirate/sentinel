@@ -29,8 +29,9 @@ reconciliation boundary tests
   IBS request of a track's diff and before that track's local unit takes
   the Ticket lock.
 - `register_after_fixed()` makes `set_track_status()` also register a
-  Ticket convergence effect (a system `FIXED` never registers one by
-  itself); `Publish` and `published` come from
+  Ticket convergence effect (a system `FIXED` registers one by itself only
+  when it regresses a stale `Resolved` Ticket); `Publish` and `published`
+  come from
   `tests/support/ibs_product_release.py`.
 - `Outcomes` is the per-outcome hook recorder.
 
@@ -732,8 +733,8 @@ def before_local_unit(
 def register_after_fixed(monkeypatch: pytest.MonkeyPatch) -> list[uuid.UUID]:
     """Make every `set_track_status()` call also register a Ticket
     convergence effect for its Ticket after the real call (a system
-    `FIXED` never registers one by itself). Returns the registered
-    Tickets."""
+    `FIXED` registers one by itself only when it regresses a stale
+    `Resolved` Ticket). Returns the registered Tickets."""
     original = package_service.set_track_status
     registered: list[uuid.UUID] = []
 

@@ -15,6 +15,7 @@ speaks the server side of AMQP 0-9-1 through pamqp. Each accepted client is a
 - can push frames at any time: a delivery, a broker `Basic.Cancel`, a
   `Channel.Close`, a `Connection.Close`, or an abrupt TCP close.
 
+`FakeAmqpServer.tls`, when set, makes the listener TLS-only.
 `FakeAmqpServer.replies` scripts the reply to a method type for every
 connection: a `Channel.Close` or `Connection.Close` replaces the normal
 reply, and `None` suppresses any reply. Every wait is bounded by
@@ -26,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import secrets
+import ssl
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from types import TracebackType
@@ -230,6 +232,8 @@ class FakeAmqpServer:
     """The listener; use as `async with FakeAmqpServer() as server`."""
 
     replies: dict[type[base.Frame], base.Frame | None] = field(default_factory=dict)
+    tls: ssl.SSLContext | None = None
+    """A server TLS context: the listener then accepts only TLS clients."""
     connections: list[ServerConnection] = field(default_factory=list)
     _server: asyncio.Server | None = None
     _changed: asyncio.Condition = field(default_factory=asyncio.Condition)
@@ -260,8 +264,14 @@ class FakeAmqpServer:
             self._changed.notify_all()
         await connection.serve(reader)
 
+    def tls_url(self, host: str) -> str:
+        """An `amqps://` URL for `host` (which must resolve to 127.0.0.1)."""
+        return f"amqps://example:example@{host}:{self.port}/"
+
     async def __aenter__(self) -> Self:
-        self._server = await asyncio.start_server(self._accept, "127.0.0.1", 0)
+        self._server = await asyncio.start_server(
+            self._accept, "127.0.0.1", 0, ssl=self.tls
+        )
         return self
 
     async def __aexit__(

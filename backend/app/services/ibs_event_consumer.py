@@ -24,14 +24,16 @@ Logs) for the standalone process started by `app/ibs_consumer.py`:
   epoch is closed best-effort, and the consumer reconnects after the
   current backoff delay (initial delay doubled up to the cap; the first
   attempt never waits; the delay resets after a successful start).
-- Fatal conditions (TLS configuration or verification, authentication or
-  authorization rejection, a missing exchange, a topology precondition
-  failure, `MemoryError`, or an exception outside a delivery that the
-  lifecycle does not classify) log CRITICAL and exit 1 without reconnecting.
+- Fatal conditions (TLS configuration or verification, authentication
+  rejection or `ACCESS_REFUSED`, a missing exchange, a topology
+  precondition failure, `MemoryError`, or an exception outside a delivery's
+  application processing that the lifecycle does not classify) log CRITICAL
+  and exit 1 without reconnecting.
 - SIGTERM/SIGINT stops new deliveries, cancels the broker consumer without
   waiting (the channel stays open for the in-flight handler), gives that
   handler at most 30 seconds, then cancels it, and exits 0 after closing the
-  epoch; a backoff wait or connection attempt in progress is interrupted.
+  epoch; a backoff wait or connection attempt in progress is interrupted,
+  and a repeated signal is ignored. Every closure step is bounded.
 
 Every exit closes the `IBSClient` and disposes the database engine
 best-effort. The module imports no Celery application, task module, fetcher
@@ -88,7 +90,7 @@ CONNECT_TIMEOUT_SECONDS: Final = 30.0
 """Bound of one connection handshake (TCP, TLS, and AMQP)."""
 
 OPERATION_TIMEOUT_SECONDS: Final = 30.0
-"""Bound of each topology and consume RPC."""
+"""Bound of the channel open and of each topology and consume RPC."""
 
 CLOSE_TIMEOUT_SECONDS: Final = 5.0
 """Bound of each best-effort channel, connection, or client closure."""
@@ -130,8 +132,10 @@ TOPOLOGY_PRECONDITION_FAILED: Final = "topology_precondition_failed"
 MEMORY_ERROR: Final = "memory_error"
 UNEXPECTED_ERROR: Final = "unexpected_error"
 
-_ACCESS_REFUSED_REPLY_CODES: Final = frozenset({403, 530})
-"""Connection-close reply codes of an authorization rejection."""
+_ACCESS_REFUSED_REPLY_CODE: Final = 403
+"""`ACCESS_REFUSED`: an authorization rejection. `NOT_ALLOWED` (530) is
+not fatal: RabbitMQ also uses it for refusals it lifts by itself, such as a
+reached connection limit or a virtual host that is down."""
 
 _SETTLEMENT_ERRORS: Final = (aiormq.exceptions.AMQPError, RuntimeError, OSError)
 """Errors of an ACK attempt on a channel that died after the liveness
@@ -254,7 +258,8 @@ async def connect_amqp(
     epoch = _AioPikaEpoch(connection)
     try:
         connection.close_callbacks.add(lambda *_: epoch.lose(CONNECTION_LOST))
-        channel = await connection.channel(publisher_confirms=False)
+        async with asyncio.timeout(OPERATION_TIMEOUT_SECONDS):
+            channel = await connection.channel(publisher_confirms=False)
         epoch.channel = channel
         channel.close_callbacks.add(lambda *_: epoch.lose(CHANNEL_LOST))
         underlay = await channel.get_underlay_channel()
@@ -347,13 +352,10 @@ def classify_connection_error(error: BaseException) -> tuple[bool, str]:
         | aiormq.exceptions.AuthenticationError,
     ):
         return True, AUTHENTICATION_REJECTED
-    if isinstance(
-        error,
-        aiormq.exceptions.ChannelAccessRefused | aiormq.exceptions.ConnectionNotAllowed,
-    ) or (
+    if isinstance(error, aiormq.exceptions.ChannelAccessRefused) or (
         isinstance(error, aiormq.exceptions.ConnectionClosed)
         and bool(error.args)
-        and error.args[0] in _ACCESS_REFUSED_REPLY_CODES
+        and error.args[0] == _ACCESS_REFUSED_REPLY_CODE
     ):
         return True, ACCESS_REFUSED
     if isinstance(error, aiormq.exceptions.ChannelNotFoundEntity):
@@ -478,7 +480,11 @@ class IBSEventConsumer:
                     STARTUP_FAILED_EVENT, reason_category=POSTGRESQL_UNAVAILABLE
                 )
                 return 1
-            self._client = self._client_factory()
+            try:
+                self._client = self._client_factory()
+            except TLSConfigurationError:
+                # The client builds its TLS context from SUSE_CA_CERT_PATH.
+                raise FatalConsumerError(TLS_CONFIGURATION_INVALID) from None
             logger.info(STARTED_EVENT)
             await self._consume_until_shutdown()
             code = 0
@@ -507,7 +513,8 @@ class IBSEventConsumer:
                 async with asyncio.timeout(CLOSE_TIMEOUT_SECONDS):
                     await client.aclose()
         with contextlib.suppress(Exception):
-            await self._dispose_engine()
+            async with asyncio.timeout(CLOSE_TIMEOUT_SECONDS):
+                await self._dispose_engine()
 
     async def _until_shutdown(
         self, awaitable: Awaitable[Any]
