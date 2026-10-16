@@ -1684,7 +1684,8 @@ class TestAffectedVersionScopes:
             (entry.version, entry.program_files) for entry in entries
         )
         assert repeated.action is UNCHANGED
-        assert await _scope(db_session, created.cve, "cna") == rows
+        # Every row shares `product`, so compare as sorted `(id, ctid)` sets.
+        assert sorted(await _scope(db_session, created.cve, "cna")) == sorted(rows)
 
     async def test_identical_entries_collapse_to_one_row(
         self, db_session: AsyncSession

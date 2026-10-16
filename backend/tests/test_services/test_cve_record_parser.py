@@ -625,14 +625,11 @@ class TestAffectedFields:
 
     def test_unbounded_fields_accept_long_values(self) -> None:
         long = "x" * 5000
-        element = _element(
-            product=long,
-            versions=[_version(version=long, lessThan=long)],
-        )
+        element = _element(versions=[_version(version=long, lessThan=long)])
 
         (entry,) = parse_affected_versions([element])
 
-        assert (entry.product, entry.version, entry.version_end) == (long, long, long)
+        assert (entry.version, entry.version_end) == (long, long)
 
     def test_ecosystem_key_in_element_is_ignored(self) -> None:
         element = _element(ecosystem="PyPI", versions=[_version()])
@@ -860,6 +857,20 @@ class TestAffectedInvalidInput:
         assert len(entries) == 2
         assert entries[1] == SIBLING_ENTRY
         assert entries[0].product == PRODUCT
+
+    def test_product_over_bound_skips_every_version_of_the_element(self) -> None:
+        """`product` is copied into every version entry, so its bound keeps
+        the output linear in the input."""
+        bound = 2048
+        at_bound = _element(product="p" * bound, versions=[_version()])
+        over = _element(
+            product="p" * (bound + 1),
+            versions=[_version(version="1.0"), _version(version="2.0")],
+        )
+
+        entries = parse_affected_versions([at_bound, over, SIBLING])
+
+        assert [e.product for e in entries] == ["p" * bound, "example-sibling"]
 
     def test_first_cpe_over_bound_skips_the_element(self) -> None:
         bound = 2048

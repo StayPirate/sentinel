@@ -115,7 +115,7 @@ class AffectedVersionEntry(_PayloadModel):
     """One entry of a CVE JSON 5.x `affected[].versions[]` array."""
 
     vendor: str | None = Field(None, max_length=512)
-    product: str | None = None
+    product: str | None = Field(None, max_length=2048)
     package_url: str | None = Field(None, max_length=2048)
     collection_url: str | None = Field(None, max_length=2048)
     package_name: str | None = Field(None, max_length=2048)

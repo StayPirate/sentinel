@@ -102,6 +102,7 @@ from app.core.enums import (
 )
 from app.core.external_strings import contains_inadmissible_character
 from app.services.cve_ingest import (
+    PROGRAM_FILE_MAX_LENGTH,
     AffectedVersionEntry,
     CVEIngestPayload,
     CWEEntry,
@@ -533,7 +534,7 @@ def _consumed_strings(record: _Record) -> list[tuple[str, str, int | None]]:
             for cpe in e.cpes or []:
                 add("cpes[]", cpe, entry("cpe"))
             for path in e.program_files or []:
-                add("programFiles[]", path, None)
+                add("programFiles[]", path, PROGRAM_FILE_MAX_LENGTH)
             for v in e.versions or []:
                 add("version", v.version, entry("version"))
                 add("versionType", v.version_type, entry("version_type"))
@@ -1214,12 +1215,14 @@ class TestExternalStringAdmissibility:
         assert bounded == {
             "title",
             "vendor",
+            "product",
             "repo",
             "packageURL",
             "collectionURL",
             "packageName",
             "defaultStatus",
             "cpes[]",
+            "programFiles[]",
             "versionType",
             "status",
             "vectorString",

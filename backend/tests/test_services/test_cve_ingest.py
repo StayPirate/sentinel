@@ -317,6 +317,7 @@ _STRING_BOUNDS: list[tuple[type[BaseModel], str, int]] = [
     (CVEIngestPayload, "title", 256),
     (CWEEntry, "source", 100),
     (AffectedVersionEntry, "vendor", 512),
+    (AffectedVersionEntry, "product", 2048),
     (AffectedVersionEntry, "package_url", 2048),
     (AffectedVersionEntry, "collection_url", 2048),
     (AffectedVersionEntry, "package_name", 2048),
@@ -336,7 +337,6 @@ _STRING_BOUNDS: list[tuple[type[BaseModel], str, int]] = [
 
 _UNBOUNDED: list[tuple[type[BaseModel], str]] = [
     (CVEIngestPayload, "description"),
-    (AffectedVersionEntry, "product"),
     (AffectedVersionEntry, "version"),
     (AffectedVersionEntry, "version_end"),
 ]
@@ -517,7 +517,6 @@ _LEAK_MARKER = "FICTIONAL-SECRET-MARKER-0000"
 _UNCONSTRAINED_CASES: list[tuple[type[BaseModel], str, bool]] = [
     (CVEIngestPayload, "description", False),
     (CVEIngestPayload, "resolved_packages", True),
-    (AffectedVersionEntry, "product", False),
     (AffectedVersionEntry, "version", False),
     (AffectedVersionEntry, "version_end", False),
 ]
