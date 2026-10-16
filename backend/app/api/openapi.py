@@ -147,13 +147,12 @@ def document_dependency_responses(
     for context in fastapi_routing.iter_route_contexts(routes):
         if not isinstance(context.original_route, APIRoute):
             continue
-        if not context.include_in_schema or context.path_format is None:
-            continue
         derived = dependency_responses(context.dependant)
         if not derived:
             continue
         for method in context.methods or ():
-            operation = paths.get(context.path_format, {}).get(method.lower())
+            # A route excluded from the schema has no operation to document.
+            operation = paths.get(context.path_format or "", {}).get(method.lower())
             if operation is None:
                 continue
             responses: dict[str, Any] = operation.setdefault("responses", {})

@@ -94,6 +94,10 @@ def _build_app(*, include_v1_responses: bool = True) -> SentinelAPI:
     async def lower_bound() -> None:
         """Only `from_date`."""
 
+    @router.get("/hidden", include_in_schema=False)
+    async def hidden(principal: CurrentUser) -> None:
+        """Derives a 401, but has no operation to document it on."""
+
     @router.get(
         "/own-403",
         responses={
@@ -210,6 +214,24 @@ class TestDependencyDerivedResponses:
         ]
 
         assert schemas["ErrorResponse"]["required"] == ["code", "detail"]
+
+    def test_route_excluded_from_the_schema_is_skipped(self) -> None:
+        """Its derived 401 has no operation to go on; generation does not
+        fail and adds nothing for it."""
+        assert "/api/v1/hidden" not in _build_app().openapi()["paths"]
+
+    def test_error_schema_is_not_added_when_nothing_is_derived(self) -> None:
+        router = APIRouter(prefix="/api/v1")
+
+        @router.get("/public")
+        async def public() -> None:
+            """No credential processing."""
+
+        test_app = SentinelAPI()
+        test_app.include_router(router)
+
+        schemas = test_app.openapi().get("components", {}).get("schemas", {})
+        assert "ErrorResponse" not in schemas
 
 
 @pytest.mark.unit
