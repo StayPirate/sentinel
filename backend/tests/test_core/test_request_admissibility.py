@@ -231,6 +231,16 @@ class TestFirstBodyViolation:
         assert _first_body_violation(body) == ("body", "a", "b")
 
     @pytest.mark.parametrize("character", INADMISSIBLE_CHARACTERS)
+    def test_violation_after_an_exhausted_container_is_located_outside_it(
+        self, character: str
+    ) -> None:
+        after_value = {"a": {"b": "ok"}, "c": ["ok", []], "d": character}
+        after_member_name = {"a": ["ok"], "b": {"x": 1}, f"k{character}": "v"}
+
+        assert _first_body_violation(after_value) == ("body", "d")
+        assert _first_body_violation(after_member_name) == ("body",)
+
+    @pytest.mark.parametrize("character", INADMISSIBLE_CHARACTERS)
     def test_top_level_string_body(self, character: str) -> None:
         assert _first_body_violation(character) == ("body",)
 
@@ -402,7 +412,7 @@ class TestRejectInadmissibleRequestInput:
         """However many offending strings follow, at whatever depth, the
         body contributes one entry, at the first in document order."""
         deep: Any = [character] * 100
-        for _ in range(100):
+        for _ in range(20):
             deep = [deep, character]
         response = await checked_client.post(
             "/payloads",

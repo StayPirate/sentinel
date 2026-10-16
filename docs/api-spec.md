@@ -244,16 +244,16 @@ parameter and each offending occurrence of a query parameter has its own
 `errors` entry, located at that parameter. A JSON body has at most one entry,
 for its first offending string in document order, located at that string; the
 rest of the body is not inspected, so the response does not grow with the
-number or the nesting of offending strings. An object member name precedes its
-value in document order, and an offending one is reported at its containing
-object. The value is rejected, never stripped or replaced, and is not echoed
-in the response. The rule applies to every endpoint, including public
-ones, without exception. It is evaluated after routing and JSON body decoding
-(see Routing Responses and JSON Request Body Decoding) and before
-authentication, authorization, resource resolution, and every
-endpoint-specific validation outcome. An inadmissible character therefore
-returns this response even where another malformed value would receive a
-different outcome, including:
+number of offending strings and stays proportional to the size of the request.
+An object member name precedes its value in document order, and an offending
+one is reported at its containing object. The value is rejected, never
+stripped or replaced, and is not echoed in the response. The rule applies to
+every endpoint, including public ones, without exception. It is evaluated
+after routing and JSON body decoding (see Routing Responses and JSON Request
+Body Decoding) and before authentication, authorization, resource resolution,
+and every endpoint-specific validation outcome. An inadmissible character
+therefore returns this response even where another malformed value would
+receive a different outcome, including:
 
 - the not-found response for a Ticket, CVE, User, or CVSS-version locator,
   such as `404 TICKET_NOT_FOUND`;

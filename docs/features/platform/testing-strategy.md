@@ -2110,23 +2110,25 @@ string value, list item, nested value, object member name, and undeclared
 member. A surrogate code point is covered for the body input kinds, both as an
 unpaired JSON escape and as its UTF-8-style encoding in the body bytes; path
 and query parameters cannot carry one. Each path or query violation must
-produce its own `errors` entry at the documented location, and a body exactly
-one entry, at its first offending string in document order, however many
-offending strings follow it and at whatever depth; an offending member name
-precedes its value. Tests of the body walk itself prove, without timing and
-without the JSON decoder, that its memory does not grow with the product of a
-body's width and depth. The tests must also prove that undeclared query
-parameters and non-string parameters are not inspected, that a correctly
-paired surrogate escape is accepted, and that the offending value is not
-echoed and does not prevent the response from rendering. Through the
-registered application, end-to-end tests prove for representative real
-endpoints that each input kind returns `422 VALIDATION_ERROR` with no database
-error, no write, and no authentication-side effect, and that the response
-precedes authentication and the scoped Ticket not-found response. For local
-login, they prove that a surrogate code point in the password returns the same
-`422 VALIDATION_ERROR` for an existing and an unknown username without
-changing the lockout counter. An endpoint relying only on the shared check
-needs no endpoint-specific inadmissible-character test.
+produce its own `errors` entry at the documented location. A body must produce
+exactly one entry, at its first offending string in document order, however
+many offending strings follow it and at whatever depth, with an offending
+member name reported at its containing object before its value and a string
+after a nested container located outside that container. Tests of the body
+walk itself prove, without timing and without the JSON decoder, that its
+memory does not grow with the product of a body's width and depth. The tests
+must also prove that undeclared query parameters and non-string parameters
+are not inspected, that a correctly paired surrogate escape is accepted, and
+that the offending value is not echoed and does not prevent the response from
+rendering. Through the registered application, end-to-end tests prove for
+representative real endpoints that each input kind returns
+`422 VALIDATION_ERROR` with no database error, no write, and no
+authentication-side effect, and that the response precedes authentication and
+the scoped Ticket not-found response. For local login, they prove that a
+surrogate code point in the password returns the same `422 VALIDATION_ERROR`
+for an existing and an unknown username without changing the lockout counter.
+An endpoint relying only on the shared check needs no endpoint-specific
+inadmissible-character test.
 
 ### Routing and JSON Request Body Decoding Responses
 
