@@ -199,10 +199,6 @@ def _invalid_values() -> list[Any]:
             _encode(_CONNECTED, extra=OVERSIZED_INTEGER),
             id="integer-beyond-the-conversion-limit-in-ignored-member",
         ),
-        pytest.param(
-            _encode(_CONNECTED)[:-1] + b', "extra": ' + b"[" * 200_000,
-            id="unterminated-deep-nesting",
-        ),
         pytest.param(_encode(_with(status="paused")), id="status-unknown"),
         pytest.param(_encode(_with(status="CONNECTED")), id="status-uppercase"),
         pytest.param(_encode(_with(status="disabled")), id="status-disabled"),

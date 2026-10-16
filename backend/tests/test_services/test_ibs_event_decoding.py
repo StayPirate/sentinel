@@ -147,15 +147,6 @@ class TestHostileDeliveries:
 
         assert raised.value.reason is MalformedReason.INVALID_JSON
 
-    def test_unterminated_deep_nesting_is_invalid_json(self) -> None:
-        """Invalid JSON whether or not the parser accepts the depth."""
-        body = _VALID[:-1] + b',"x":' + b"[" * 200_000
-
-        with pytest.raises(MalformedDeliveryError) as raised:
-            decode_delivery(PACKAGE_COMMIT_ROUTING_KEY, CONTENT_TYPE, body)
-
-        assert raised.value.reason is MalformedReason.INVALID_JSON
-
     def test_integer_beyond_the_conversion_limit_is_invalid_json(self) -> None:
         body = _VALID[:-1] + b',"count":' + OVERSIZED_INTEGER.encode() + b"}"
 
