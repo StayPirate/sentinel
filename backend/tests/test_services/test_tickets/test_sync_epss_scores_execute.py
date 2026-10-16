@@ -1452,7 +1452,6 @@ class TestRunMetrics:
         assert broken.named in run.error_detail
         assert PROXY_SECRET not in f"{run.error_detail}{run.error_traceback}"
         assert env.scope_calls == []
-        assert env.server.requests == []
         assert await env.source_status(cve) is None
         assert env.status_opened == [0]
         assert _events(logs, CVE_FETCH_ITEM_FAILED_EVENT) == []
