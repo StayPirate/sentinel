@@ -1532,10 +1532,13 @@ content-coding default; neither can be overridden via
 TLS verification settings (`verify`, `ssl_context`) may be overridden
 but trigger a WARNING-level log at client creation time. Other options
 (timeout, limits) replace defaults at the top-level kwarg level (not
-deep-merged). The transport is not an override: the factory always
-builds its own, which carries the transport-level retry and the
-response content-coding policy (`networking.md`, Transport-Level Retry
-and HTTP Response Compression).
+deep-merged). Routing is not an override: the factory always builds its
+own transport, which carries the transport-level retry and the response
+content-coding policy, and takes proxies only from the environment, so
+`transport`, `mounts`, `proxy`, and `trust_env` options raise `TypeError`
+when the client is created (`networking.md`, Override Safety,
+Transport-Level Retry, HTTP Response Compression, and Proxy
+Configuration).
 
 ### `fetch_single()` and `catch_up()` Lifecycle
 

@@ -43,6 +43,7 @@ import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Final, NamedTuple
 
@@ -78,6 +79,12 @@ from app.services.base_fetcher import FetcherError, FetcherRunConfig
 from app.services.tickets import sync_redhat_cves as sync_module
 from app.services.tickets.sync_redhat_cves import SyncRedhatCves
 from tests.support.cve_ingest import IngestionWorld
+from tests.support.http_client_errors import (
+    CONFIGURATION_ERRORS,
+    PROXY_SECRET,
+    ConfigurationError,
+    break_shared_client,
+)
 from tests.support.inadmissible import INADMISSIBLE_CHARACTERS
 from tests.support.json_decoding import (
     NESTED_ARRAY,
@@ -1101,3 +1108,33 @@ class TestRunMetrics:
         assert run.error_message == "Unexpected error"
         assert await env.source_status(cve) is None
         assert env.status_opened == [0]
+
+    @pytest.mark.parametrize("kind", CONFIGURATION_ERRORS)
+    async def test_client_configuration_error_fails_the_run_before_the_scope(
+        self,
+        env: Env,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        kind: ConfigurationError,
+    ) -> None:
+        """The client is created before the scope snapshot, so no CVE is
+        selected, requested, or given a status and the run names the
+        cause (cve-fetcher-infrastructure.md, template 1)."""
+        cve = await env.active_cve(UNCHANGED_BODY)
+        fetcher, run_id = await env.run_row()
+        await fetcher._teardown_http_client()
+        broken = break_shared_client(kind, monkeypatch, tmp_path)
+
+        with capture_logs() as logs, pytest.raises(broken.error):
+            await fetcher.run(run_id=run_id, config=_RUN_CONFIG)
+
+        run = await env.run_outcome(run_id)
+        assert _outcome(run) == ("failure", 0, 0, 0, 0)
+        assert run.error_message == "Unexpected error"
+        assert run.error_detail is not None
+        assert broken.named in run.error_detail
+        assert PROXY_SECRET not in f"{run.error_detail}{run.error_traceback}"
+        assert env.scope_calls == []
+        assert await env.source_status(cve) is None
+        assert env.status_opened == [0]
+        assert _events(logs, CVE_FETCH_ITEM_FAILED_EVENT) == []

@@ -3,16 +3,21 @@
 Provides the cross-cutting HTTP client used by all outgoing network
 connections from fetchers, `IBSClient`, and any future consumer, plus
 the TLS trust store used by both HTTP and non-HTTP protocols (AMQPS).
-See `docs/features/platform/networking.md` for the full specification
-this module implements.
+No other application module creates an HTTP client or transport. See
+`docs/features/platform/networking.md` for the full specification this
+module implements.
 """
 
 from __future__ import annotations
 
 import asyncio
 import email.utils
+import ipaddress
+import os
+import re
 import ssl
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as get_version
@@ -168,8 +173,9 @@ def _parse_retry_after(value: str) -> float | None:
 
 
 class _RetryTransport(httpx.AsyncBaseTransport):
-    """Wraps an `httpx.AsyncHTTPTransport` with the transport-level retry
-    policy specified in `docs/features/platform/networking.md`.
+    """Wraps the network transport (`_network_transport()`) with the
+    transport-level retry policy specified in
+    `docs/features/platform/networking.md`.
 
     httpx's built-in transport retry (`retries` parameter) is deliberately
     not used by the wrapped transport (`retries=0` is enforced) — it only
@@ -319,10 +325,188 @@ class _ContentCodingTransport(httpx.AsyncBaseTransport):
 
 
 # ---------------------------------------------------------------------------
+# Proxy routing
+# ---------------------------------------------------------------------------
+
+# URL scheme -> the variable naming its proxy.
+_PROXY_VARIABLES: tuple[tuple[str, str], ...] = (
+    ("https", "HTTPS_PROXY"),
+    ("http", "HTTP_PROXY"),
+)
+_NO_PROXY_VARIABLE = "NO_PROXY"
+_PROXY_URL_SCHEMES = frozenset({"http", "https"})
+
+# A `NO_PROXY` domain name: dot-separated labels, already lowercased.
+_NO_PROXY_DOMAIN = re.compile(r"[a-z0-9_-]+(?:\.[a-z0-9_-]+)*")
+
+
+def _environment_variable(name: str) -> tuple[str, str] | None:
+    """The `(variable, value)` read for a proxy variable, or `None`.
+
+    The lowercase name is read first, then the uppercase one, as curl
+    does; an empty value counts as unset.
+    """
+    for variable in (name.lower(), name):
+        value = os.environ.get(variable)
+        if value:
+            return variable, value
+    return None
+
+
+def _environment_proxy(
+    variable: str, value: str, trust_store: ssl.SSLContext | None
+) -> httpx.Proxy:
+    """The proxy that `value`, read from `variable`, configures.
+
+    A value without a scheme means `http://`; userinfo becomes HTTP Basic
+    proxy authentication. The TLS connection to an `https://` proxy is
+    verified with the shared trust store: `trust_store`, the client's own
+    context, or a new one when the caller overrode `verify`. Raises
+    `ValueError` for any other scheme, a missing host, or an unparseable
+    value; the message names the variable, never the value, which may hold
+    credentials.
+    """
+    try:
+        url = httpx.URL(value if "://" in value else f"http://{value}")
+        valid = url.scheme in _PROXY_URL_SCHEMES and bool(url.host)
+    except httpx.InvalidURL, ValueError:
+        # `url.host` decodes the IDNA host name and may raise `ValueError`.
+        valid = False
+    if not valid:
+        raise ValueError(
+            f"{variable} is not a valid proxy URL: only http:// and https:// "
+            "proxies are supported"
+        )
+    ssl_context = None
+    if url.scheme == "https":
+        ssl_context = build_tls_context() if trust_store is None else trust_store
+    return httpx.Proxy(url, ssl_context=ssl_context)
+
+
+@dataclass(frozen=True)
+class _NoProxy:
+    """The hosts a `NO_PROXY` value exempts from the proxies: IP-literal
+    hosts within `networks`, each of `domains` and its subdomains, and the
+    subdomains of each of `subdomains_of` (written with a leading `.` or
+    `*.`)."""
+
+    networks: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]
+    domains: tuple[str, ...]
+    subdomains_of: tuple[str, ...]
+
+    @classmethod
+    def parse(cls, value: str) -> _NoProxy | None:
+        """The rules of `value`; `None` when an entry is `*`, which exempts
+        every host. An entry that is neither an IP address or network
+        (IPv6 optionally in brackets) nor a domain name, such as one with a
+        port or a scheme, is ignored."""
+        networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
+        domains: list[str] = []
+        subdomains_of: list[str] = []
+        for raw_entry in value.lower().split(","):
+            entry = raw_entry.strip()
+            if entry == "*":
+                return None
+            bracketed = entry.startswith("[") and entry.endswith("]")
+            try:
+                networks.append(
+                    ipaddress.ip_network(
+                        entry[1:-1] if bracketed else entry, strict=False
+                    )
+                )
+                continue
+            except ValueError:
+                pass
+            entry = entry.removeprefix("*") if entry.startswith("*.") else entry
+            domain = entry.removeprefix(".")
+            if _NO_PROXY_DOMAIN.fullmatch(domain):
+                (subdomains_of if entry.startswith(".") else domains).append(domain)
+        return cls(tuple(networks), tuple(domains), tuple(subdomains_of))
+
+    def matches(self, url: httpx.URL) -> bool:
+        """Whether a request to `url` is exempt. Network entries match only
+        IP-literal hosts, and domain entries only host names."""
+        host = url.raw_host.decode("ascii")
+        try:
+            address = ipaddress.ip_address(host)
+        except ValueError:
+            return any(
+                host == domain or host.endswith(f".{domain}") for domain in self.domains
+            ) or any(host.endswith(f".{domain}") for domain in self.subdomains_of)
+        return any(address in network for network in self.networks)
+
+
+class _ProxyRouteTransport(httpx.AsyncBaseTransport):
+    """Sends a request through the proxy configured for its URL scheme, or
+    directly when none is or `NO_PROXY` exempts its host, as specified in
+    `docs/features/platform/networking.md` (Proxy Configuration).
+
+    The network layer under the retry transport, so the transport-level
+    retry and the response content-coding policy apply on every route.
+    """
+
+    def __init__(
+        self,
+        direct: httpx.AsyncBaseTransport,
+        proxies: dict[str, httpx.AsyncBaseTransport],
+        no_proxy: _NoProxy,
+    ) -> None:
+        self._direct = direct
+        self._proxies = proxies
+        self._no_proxy = no_proxy
+
+    async def aclose(self) -> None:
+        for transport in (self._direct, *self._proxies.values()):
+            await transport.aclose()
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        proxy = self._proxies.get(request.url.scheme)
+        if proxy is None or self._no_proxy.matches(request.url):
+            return await self._direct.handle_async_request(request)
+        return await proxy.handle_async_request(request)
+
+
+def _network_transport(
+    *,
+    verify: ssl.SSLContext | bool,
+    limits: httpx.Limits,
+    trust_store: ssl.SSLContext | None,
+) -> httpx.AsyncBaseTransport:
+    """The direct connection pool, or, when the environment configures a
+    proxy, a router over it and one pool per proxy. Every pool has the same
+    TLS verification and limits, and httpx's built-in retry disabled.
+    The proxy variables are read, and validated, on every call;
+    `trust_store` is the client's shared trust-store context, `None` when
+    the caller overrode `verify`."""
+    proxies = {
+        scheme: _environment_proxy(*configured, trust_store)
+        for scheme, name in _PROXY_VARIABLES
+        if (configured := _environment_variable(name)) is not None
+    }
+    no_proxy_variable = _environment_variable(_NO_PROXY_VARIABLE)
+    no_proxy = _NoProxy.parse(no_proxy_variable[1] if no_proxy_variable else "")
+
+    def pool(proxy: httpx.Proxy | None = None) -> httpx.AsyncBaseTransport:
+        return httpx.AsyncHTTPTransport(
+            verify=verify, limits=limits, retries=0, proxy=proxy
+        )
+
+    if not proxies or no_proxy is None:
+        return pool()
+    return _ProxyRouteTransport(
+        pool(), {scheme: pool(proxy) for scheme, proxy in proxies.items()}, no_proxy
+    )
+
+
+# ---------------------------------------------------------------------------
 # HTTP client factory
 # ---------------------------------------------------------------------------
 
 _PROJECT_URL = "https://github.com/StayPirate/sentinel"
+
+# `httpx.AsyncClient` arguments that would route requests around the shared
+# transport stack or configure proxies outside the environment.
+_ROUTING_OVERRIDES = frozenset({"mounts", "proxy", "transport", "trust_env"})
 
 
 def _resolve_platform_version() -> str:
@@ -357,8 +541,17 @@ def create_http_client(
             "Override Safety" below for protected settings.
 
     Applies all cross-cutting defaults (User-Agent, timeouts, TLS,
-    compression, Accept header, transport-level retry). Keyword
-    arguments override individual defaults.
+    compression, Accept header, transport-level retry, proxies from the
+    environment). Keyword arguments override individual defaults.
+
+    Raises:
+        TypeError: a `transport`, `mounts`, `proxy`, or `trust_env`
+            override; requests always use the shared transport stack, and
+            proxies come only from the environment.
+        ValueError: a proxy variable holds an unsupported or invalid URL;
+            the message names the variable, never its value.
+        TLSConfigurationError: the SUSE CA file is corrupt (see
+            `build_tls_context()`).
 
     Override safety:
         - User-Agent is always built from the standard template. Any
@@ -372,7 +565,16 @@ def create_http_client(
           including `name` for traceability.
         - A `follow_redirects=True` override emits a WARNING-level log
           including `name` for traceability (credential-forwarding risk).
+        - Routing is not overridable: see `TypeError` above.
     """
+    rejected = sorted(_ROUTING_OVERRIDES.intersection(overrides))
+    if rejected:
+        raise TypeError(
+            f"create_http_client() does not accept {', '.join(rejected)}: "
+            "requests always use the shared transport stack, and proxies "
+            "come only from the environment"
+        )
+
     headers = httpx.Headers(overrides.pop("headers", None) or {})
     if "accept" not in headers:
         headers["accept"] = "application/json"
@@ -381,6 +583,7 @@ def create_http_client(
 
     verify_override = overrides.pop("verify", None)
     verify: ssl.SSLContext | bool
+    trust_store: ssl.SSLContext | None = None
     if verify_override is not None:
         logger.warning(
             "tls_verify_overridden",
@@ -389,7 +592,7 @@ def create_http_client(
         )
         verify = verify_override
     else:
-        verify = build_tls_context()
+        verify = trust_store = build_tls_context()
 
     if overrides.get("follow_redirects", False):
         logger.warning(
@@ -409,9 +612,9 @@ def create_http_client(
         httpx.Limits(max_connections=100, max_keepalive_connections=20),
     )
 
-    inner_transport = httpx.AsyncHTTPTransport(verify=verify, limits=limits, retries=0)
+    network = _network_transport(verify=verify, limits=limits, trust_store=trust_store)
     transport = _ContentCodingTransport(
-        _RetryTransport(inner_transport, retry_non_idempotent=retry_non_idempotent)
+        _RetryTransport(network, retry_non_idempotent=retry_non_idempotent)
     )
 
     return httpx.AsyncClient(

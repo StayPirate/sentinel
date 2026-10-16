@@ -167,9 +167,13 @@ class SyncEpssScores(BaseCVEFetcher):
         Scope snapshot: the in-scope CVE-ID set is queried once at the
         start of execute(). New tickets created mid-run are covered by
         the default catch_up() mechanism and on-demand fetch_single().
+
+        The shared HTTP client is created before the scope snapshot, so a
+        client configuration error fails the run, not every CVE.
         """
         self._last_assessed_date = None
         request_delay = self.config.request_delay if self.config is not None else 0.0
+        _ = self.http_client
         cve_ids = await self._get_active_ticket_cve_ids(session)
         staleness_checked = False
         consecutive_failures = 0
