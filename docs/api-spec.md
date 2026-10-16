@@ -189,6 +189,28 @@ query input. A parameter name used by another endpoint does not become valid
 globally; for example, an endpoint that declares fixed ordering but no
 `sort_by` parameter ignores a supplied `sort_by` value.
 
+### JSON Request Body Decoding
+
+An endpoint that declares a JSON request body decodes a non-empty body sent
+with the content type `application/json` or `application/*+json`. A body that
+cannot be decoded returns the global `422 VALIDATION_ERROR` with exactly one
+`errors` entry, of type `json_invalid` with the message `JSON decode error`:
+
+- a syntax error is located at `["body", <position>]`, where `<position>` is
+  the character offset of the error; and
+- a body whose bytes are not validly encoded text, that nests deeper than the
+  decoder's limit, or that contains an integer with more digits than the
+  interpreter's integer-string conversion limit is located at `["body"]`.
+
+The deepest nesting the decoder accepts depends on the server's runtime
+environment and is not part of the API contract (see `docs/conventions.md`,
+External JSON Decoding). Decoding follows routing (see Routing Responses) and
+precedes schema validation, every shared request-input constraint,
+authentication, authorization, resource resolution, and every
+endpoint-specific outcome, so a body that cannot be decoded is the only error
+reported. A body sent with another content type, or to an endpoint that
+declares none, is not decoded as JSON.
+
 ### Inadmissible Characters in Request Input
 
 No string supplied in a request may contain an inadmissible character: U+0000
@@ -545,6 +567,19 @@ Fields:
   field beside `code` and `detail` (see
   [tickets.md](features/tickets/tickets.md#cve-resolution-behavior))
 
+Every error response uses this structure, on every path, including the
+framework-generated responses defined in Routing Responses and JSON Request
+Body Decoding. The only error responses outside it are:
+
+- the probe responses of `/health` and `/ready`, defined in
+  `docs/features/platform/health-endpoints.md`;
+- the rejection of a disallowed CORS preflight request, which browsers do not
+  expose to scripts;
+- a response produced before the request reaches the application, for example
+  by the HTTP server or a reverse proxy; and
+- the diagnostic response that replaces `500 INTERNAL_ERROR` when `DEBUG` is
+  enabled (`docs/configuration.md`).
+
 #### Error Code Categories
 
 Error codes are grouped by prefix:
@@ -563,6 +598,7 @@ Error codes are grouped by prefix:
 | `FETCHER_*` | Fetcher operations | `FETCHER_NOT_FOUND`, `FETCHER_ALREADY_RUNNING`, `FETCHER_DEREGISTERED`, `FETCHER_DISABLED`, `FETCHER_SETTING_UNKNOWN`, `FETCHER_SETTING_INVALID` |
 | `USER_*` | User operations | `USER_NOT_FOUND`, `USER_ALREADY_EXISTS`, `USER_INACTIVE`, `USER_EXTERNAL_STATUS_READONLY`, `USER_EXTERNAL_FIELD_READONLY`, `USER_EXTERNAL_PASSWORD_FORBIDDEN`, `USER_SELF_ROLE_REMOVAL`, `USER_SELF_DEACTIVATION`, `USER_PASSWORD_POLICY_VIOLATION` |
 | `DATE_RANGE_*` | Date range filter validation | `DATE_RANGE_INVERTED`, `DATE_RANGE_TOO_WIDE` |
+| `ROUTE_*` | Request routing (see Routing Responses) | `ROUTE_NOT_FOUND`, `ROUTE_METHOD_NOT_ALLOWED` |
 | `INTERNAL_*` | Framework | `INTERNAL_ERROR` |
 | `<DEPENDENCY>_UNAVAILABLE` | Infrastructure dependency availability (external service or broker unavailable, including unconfirmed task publication) | `REDIS_UNAVAILABLE`, `SMELT_UNAVAILABLE`, `CELERY_UNAVAILABLE`, `PROVISIONING_UNAVAILABLE`, `SSO_UNAVAILABLE` |
 
@@ -625,7 +661,7 @@ document only endpoint-specific errors; global responses are not repeated.
 |--------|--------------------------|------------------------------------------------|--------------------------------|
 | 401    | `AUTH_NOT_AUTHENTICATED` | Credential required but absent, or selected credential invalid | Authentication dependency |
 | 403    | `AUTH_INSUFFICIENT_PERMISSION` | User authenticated but lacks required capability | `require_capability` dependency |
-| 422    | `VALIDATION_ERROR`       | Request body/query/path fails schema validation or a shared request-input constraint (see Request Conventions) | FastAPI automatic (Pydantic) or a shared app-level dependency |
+| 422    | `VALIDATION_ERROR`       | JSON request body cannot be decoded, request body/query/path fails schema validation, or a shared request-input constraint fails (see Request Conventions) | Body decoding, FastAPI automatic (Pydantic), or a shared app-level dependency |
 | 500    | `INTERNAL_ERROR`         | Unhandled server error                         | Framework                      |
 
 Notes:
@@ -681,6 +717,35 @@ produces only the responses derivable from its access level and path
 the table lists only endpoint-specific errors — global and scoped
 responses are always implicit and derivable from context. Per-endpoint
 reference lines are not used.
+
+### Routing Responses
+
+Routing selects the endpoint for a request from its path and method. A request
+for which routing selects no endpoint receives one of these responses, on every
+path, including paths outside `/api/v1/`:
+
+| Status | Code | Condition |
+|--------|------|-----------|
+| 404 | `ROUTE_NOT_FOUND` | No endpoint path matches the request path |
+| 405 | `ROUTE_METHOD_NOT_ALLOWED` | At least one endpoint path matches the request path, but none for the request method |
+
+- The `405` response carries an `Allow` header listing every method that has
+  an endpoint for the request path.
+- A request path that matches no endpoint path, but would match one with a
+  trailing slash added or removed, is redirected with `307 Temporary Redirect`
+  to that path, keeping the method; the redirected request is routed as usual.
+- Routing precedes JSON body decoding, every shared request-input constraint,
+  authentication, and authorization, so neither response depends on the body
+  or the credentials sent.
+- A path parameter matches any non-empty value of its path segment, so a
+  malformed value reaches the endpoint, which applies its own outcome.
+  `ROUTE_NOT_FOUND` therefore reports only an unknown path. It is distinct
+  from the not-found response of an existing endpoint, such as `404
+  TICKET_NOT_FOUND` or `404 RESOURCE_NOT_FOUND`, which reports a missing
+  resource at a valid path.
+
+Routing responses are not endpoint responses: they are not listed in endpoint
+error tables and are not part of Response Applicability Derivation.
 
 ### Scoped Responses
 

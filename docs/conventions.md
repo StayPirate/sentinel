@@ -1179,8 +1179,8 @@ back from Redis — and that the parser cannot represent is **invalid JSON**:
   (`docs/deployment.md`, Python Interpreter Limits). It bounds every
   conversion of an external decimal string, not only JSON.
 - Not covered: consumer-supplied API request bodies, which
-  `docs/api-spec.md` governs; resources bundled with the application
-  package, such as the CPE mapping
+  `docs/api-spec.md` (JSON Request Body Decoding) governs; resources bundled
+  with the application package, such as the CPE mapping
   (`docs/features/packages/cpe-package-mapping.md`); a value the same code
   has just serialized; and decoding inside a library's own protocol, such
   as a JWT or a Celery message.

@@ -11,7 +11,11 @@ production `AppError` handler (`_app_error_handler`): the standard
 `{"code", "detail"}` envelope plus the top-level fields of
 `AppError.extra` (`existing_ticket_id` of `TICKET_CVE_CONFLICT`,
 `docs/api-spec.md`, Response Format), with `code` and `detail` always
-taken from the exception.
+taken from the exception. Also covers the fallback of the production
+`HTTPException` handler (`_http_exception_handler`): a framework error
+other than routing or body decoding renders and logs as an unhandled
+exception; its routing and body-decoding responses are covered end to end
+in `tests/test_api/test_framework_errors.py`.
 
 A minimal standalone FastAPI app registers the real, imported handler
 function (not a re-implementation) plus one route that deliberately
@@ -46,10 +50,15 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import delete, select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 import app.main as main_module
 from app.core.errors import AppError, ErrorCode
-from app.main import _app_error_handler, _unhandled_exception_handler
+from app.main import (
+    _app_error_handler,
+    _http_exception_handler,
+    _unhandled_exception_handler,
+)
 from app.models.fetcher_config import FetcherConfig
 from app.models.setting_audit_event import SettingAuditEvent
 from app.models.system_setting import SystemSetting
@@ -134,6 +143,45 @@ class TestUnhandledExceptionHandler:
             await error_client.get("/boom")
 
         assert "RuntimeError" in caplog.text
+
+
+def _build_http_exception_app() -> FastAPI:
+    """A standalone app registering the real `_http_exception_handler`,
+    with a route raising a framework error the handler does not map."""
+    test_app = FastAPI()
+    test_app.exception_handler(StarletteHTTPException)(_http_exception_handler)
+
+    @test_app.get("/unmapped")
+    async def unmapped() -> None:
+        raise StarletteHTTPException(status_code=401, detail=_SENSITIVE_DETAIL)
+
+    return test_app
+
+
+@pytest.mark.unit
+class TestHTTPExceptionHandlerFallback:
+    """A framework `HTTPException` other than 400, 404, or 405 is
+    unexpected and renders as the generic `500 INTERNAL_ERROR`
+    (`docs/api-spec.md`, Global Responses)."""
+
+    async def test_renders_the_generic_500_and_logs_it(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        async with AsyncClient(
+            transport=ASGITransport(app=_build_http_exception_app()),
+            base_url="http://test",
+        ) as client:
+            with caplog.at_level("ERROR"):
+                response = await client.get("/unmapped")
+
+        assert response.status_code == 500
+        assert response.json() == {
+            "code": ErrorCode.INTERNAL_ERROR.value,
+            "detail": "An unexpected error occurred.",
+        }
+        assert _SENSITIVE_DETAIL not in response.text
+        assert "unhandled_exception" in caplog.text
+        assert "HTTPException" in caplog.text
 
 
 def _build_app_error_app() -> FastAPI:

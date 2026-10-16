@@ -12,11 +12,13 @@ pre-declared for unimplemented features.
 
 `AppError` is the exception API-layer code raises to produce this
 envelope; it is translated to a JSON response by the global exception
-handler registered in `app.main`. `RequestValidationError` (422) and
+handler registered in `app.main`. `RequestValidationError` (422), the
+framework's own `HTTPException` (routing and body decoding), and
 unhandled exceptions (500) are handled by their own dedicated handlers
 there — see `docs/conventions.md` (Transaction and Locking) and
-`docs/api-spec.md` (Global Responses) for the endpoints/handlers that
-produce each of those two responses.
+`docs/api-spec.md` (Global Responses, Routing Responses, JSON Request
+Body Decoding) for the endpoints/handlers that produce each of those
+responses.
 """
 
 from __future__ import annotations
@@ -86,6 +88,8 @@ class ErrorCode(StrEnum):
     CVSS_RECALC_ALREADY_IN_PROGRESS = "CVSS_RECALC_ALREADY_IN_PROGRESS"
     DATE_RANGE_INVERTED = "DATE_RANGE_INVERTED"
     DATE_RANGE_TOO_WIDE = "DATE_RANGE_TOO_WIDE"
+    ROUTE_NOT_FOUND = "ROUTE_NOT_FOUND"
+    ROUTE_METHOD_NOT_ALLOWED = "ROUTE_METHOD_NOT_ALLOWED"
     FETCHER_NOT_FOUND = "FETCHER_NOT_FOUND"
     FETCHER_DEREGISTERED = "FETCHER_DEREGISTERED"
     FETCHER_DISABLED = "FETCHER_DISABLED"

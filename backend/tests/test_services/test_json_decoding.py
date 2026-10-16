@@ -1,6 +1,7 @@
 """Tests for the external JSON decoding boundary
-(backend/app/services/json_decoding.py) and its test support
-(tests/support/json_decoding.py).
+(backend/app/services/json_decoding.py) and the JSON decoding test support
+(tests/support/json_decoding.py), including its request-body parser
+replacement.
 
 Owning convention: docs/conventions.md (External JSON Decoding); mandatory
 scenario: docs/features/platform/testing-strategy.md (External JSON
@@ -16,6 +17,7 @@ import sys
 from typing import Any, NoReturn
 
 import pytest
+from starlette.requests import Request
 
 from app.services.json_decoding import JSONNestingError, decode_json
 from tests.support.json_decoding import (
@@ -23,6 +25,7 @@ from tests.support.json_decoding import (
     NESTING_RUN,
     OVERSIZED_INTEGER,
     limit_parser_nesting,
+    limit_request_body_nesting,
 )
 
 pytestmark = pytest.mark.unit
@@ -154,3 +157,27 @@ class TestSupport:
             ("a", 2),
         ]
         assert decode_json(shallow.encode()) is not None
+
+
+def _request_with_body(body: bytes) -> Request:
+    async def receive() -> dict[str, Any]:
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    return Request({"type": "http", "method": "POST", "headers": []}, receive)
+
+
+class TestRequestBodySupport:
+    async def test_limited_request_body_parser_rejects_the_nesting_run(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        limit_request_body_nesting(monkeypatch)
+
+        with pytest.raises(RecursionError):
+            await _request_with_body(('{"x": ' + NESTED_ARRAY + "}").encode()).json()
+
+    async def test_limited_request_body_parser_decodes_other_bodies(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        limit_request_body_nesting(monkeypatch)
+
+        assert await _request_with_body(b'{"a": [1, "x"]}').json() == {"a": [1, "x"]}

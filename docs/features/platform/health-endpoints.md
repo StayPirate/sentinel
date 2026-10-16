@@ -9,7 +9,10 @@ it is ready to serve production traffic (readiness).
 
 Both endpoints are registered at the application root (outside `/api/v1/`)
 because they are infrastructure concerns, not domain API. They require no
-authentication and do not follow the standard API response envelope.
+authentication and do not follow the standard API response envelope. The
+exemption covers only the `GET` responses documented below: another method, or
+a path below either endpoint, receives the routing responses of
+`docs/api-spec.md` (Routing Responses) in the standard error envelope.
 
 ## Endpoints
 
@@ -213,5 +216,6 @@ timeouts:
   operational configuration)
 - `docs/features/platform/networking.md` — TLS Trust Store (SUSE CA
   deliberately excluded from readiness checks)
-- `docs/api-spec.md` — Response Conventions (explains why these endpoints
-  do NOT follow the `/api/v1/` envelope format)
+- `docs/api-spec.md` — Response Format (lists these probe responses among the
+  exceptions to the error envelope) and Routing Responses (another method or
+  an unknown path below these endpoints)

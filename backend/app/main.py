@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Sequence
 from contextlib import asynccontextmanager
+from http import HTTPMethod
 from importlib.metadata import version as get_version
+from typing import Any, Final
 
 import structlog
 from fastapi import Depends, FastAPI, Request
@@ -12,6 +14,8 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.routing import Match
 
 from app.api import health
 from app.api.dependencies import drain_ticket_convergence_after_commit
@@ -116,31 +120,39 @@ async def _app_error_handler(request: Request, exc: AppError) -> JSONResponse:
     )
 
 
-@app.exception_handler(RequestValidationError)
-async def _validation_error_handler(
-    request: Request, exc: RequestValidationError
-) -> JSONResponse:
-    """Render Pydantic/FastAPI request validation failures as the
-    standard `422 VALIDATION_ERROR` envelope — see `docs/api-spec.md`
-    (Response Format, Global Responses).
+def _validation_error_response(errors: Sequence[Any]) -> JSONResponse:
+    """Render the standard `422 VALIDATION_ERROR` envelope for Pydantic-
+    shaped `errors` — see `docs/api-spec.md` (Response Format, Global
+    Responses).
 
-    Only `loc`, `msg`, and `type` are projected from each Pydantic
-    error dict. Pydantic v2's `errors()` also includes an `input` key
-    with the raw offending value (and sometimes `ctx`), which is not
-    part of the documented `errors` element schema and could echo
-    sensitive request data (e.g. a password field) back to the client.
+    Only `loc`, `msg`, and `type` are projected from each error dict, and
+    before encoding. Pydantic v2's `errors()` also includes an `input` key
+    with the raw offending value (and sometimes `ctx`), which is not part
+    of the documented `errors` element schema, could echo sensitive
+    request data (e.g. a password field) back to the client, and may nest
+    deeper than the interpreter recursion limit, which encoding it would
+    exceed (a `500` instead of this `422`).
     """
     return JSONResponse(
         status_code=422,
         content={
             "code": ErrorCode.VALIDATION_ERROR.value,
             "detail": "Request validation failed",
-            "errors": [
-                {"loc": e["loc"], "msg": e["msg"], "type": e["type"]}
-                for e in jsonable_encoder(exc.errors())
-            ],
+            "errors": jsonable_encoder(
+                [{"loc": e["loc"], "msg": e["msg"], "type": e["type"]} for e in errors]
+            ),
         },
     )
+
+
+@app.exception_handler(RequestValidationError)
+async def _validation_error_handler(
+    request: Request, exc: RequestValidationError
+) -> JSONResponse:
+    """Render Pydantic/FastAPI request validation failures, including a
+    JSON body with a syntax error (`json_invalid`), as the standard
+    `422 VALIDATION_ERROR` envelope (`_validation_error_response`)."""
+    return _validation_error_response(exc.errors())
 
 
 @app.exception_handler(Exception)
@@ -158,6 +170,86 @@ async def _unhandled_exception_handler(
             "detail": "An unexpected error occurred.",
         },
     )
+
+
+# The single `errors` entry for a JSON body that FastAPI could not read or
+# decode: the `type` and `msg` FastAPI itself reports for a JSON syntax error
+# (`docs/api-spec.md`, JSON Request Body Decoding).
+_UNDECODABLE_BODY_ERROR: Final = {
+    "loc": ("body",),
+    "msg": "JSON decode error",
+    "type": "json_invalid",
+}
+
+
+def _allowed_methods(request: Request) -> list[str]:
+    """The methods that have an endpoint for the request path, for the
+    `Allow` header of `405 ROUTE_METHOD_NOT_ALLOWED` (`docs/api-spec.md`,
+    Routing Responses).
+
+    Starlette's own header names only the methods of the first route whose
+    path matches, so a path served by several routes (`GET` and `POST
+    /api/v1/tickets`) would advertise one. Instead, the router is asked,
+    as Starlette does for its trailing-slash redirect, whether a copy of
+    the request scope with each standard method fully matches a route.
+    """
+    routes = request.app.router.routes
+    allowed: list[str] = []
+    for method in HTTPMethod:
+        probe = dict(request.scope)
+        probe["method"] = method.value
+        if any(route.matches(probe)[0] is Match.FULL for route in routes):
+            allowed.append(method.value)
+    return allowed
+
+
+@app.exception_handler(StarletteHTTPException)
+async def _http_exception_handler(
+    request: Request, exc: StarletteHTTPException
+) -> JSONResponse:
+    """Render the errors the framework raises itself as the standard
+    envelope, on every path — see `docs/api-spec.md` (Response Format).
+
+    Sentinel code raises `AppError`, never `HTTPException`, so these come
+    only from routing and from reading the request body:
+
+    - 404: no endpoint path matches the request path → `404
+      ROUTE_NOT_FOUND` (Routing Responses).
+    - 405: endpoint paths match, but none for the method → `405
+      ROUTE_METHOD_NOT_ALLOWED`, with an `Allow` header naming every
+      method that has an endpoint for the path (`_allowed_methods`).
+    - 400: FastAPI could not read or decode the request body — bytes that
+      are not validly encoded text, nesting or an integer beyond the
+      parser's limits, or a client that disconnected mid-body; a JSON
+      syntax error arrives as `RequestValidationError` instead → the
+      global `422 VALIDATION_ERROR` with one `json_invalid` entry at
+      `["body"]` (JSON Request Body Decoding), whatever the cause, so the
+      outcome never depends on the decoder's environment-dependent depth
+      limit.
+
+    Any other status is unexpected and is rendered and logged as an
+    unhandled exception (`_unhandled_exception_handler`).
+    """
+    if exc.status_code == 404:
+        return JSONResponse(
+            status_code=404,
+            content={
+                "code": ErrorCode.ROUTE_NOT_FOUND.value,
+                "detail": "No endpoint matches the request path.",
+            },
+        )
+    if exc.status_code == 405:
+        return JSONResponse(
+            status_code=405,
+            content={
+                "code": ErrorCode.ROUTE_METHOD_NOT_ALLOWED.value,
+                "detail": "No endpoint at the request path accepts this method.",
+            },
+            headers={"Allow": ", ".join(_allowed_methods(request))},
+        )
+    if exc.status_code == 400:
+        return _validation_error_response([_UNDECODABLE_BODY_ERROR])
+    return await _unhandled_exception_handler(request, exc)
 
 
 app.include_router(health.router)
