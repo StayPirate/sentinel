@@ -167,7 +167,10 @@ _BAD_COUNTERS: Final = {
     "null": "null",
 }
 
-_DEEP: Final = 100_000
+_DEEP: Final = 1_000_000
+"""Array nesting far beyond the JSON parser's recursion limit, whose exact
+value depends on the interpreter build and its C stack (CPython 3.14.8
+accepts 100,000 levels)."""
 
 
 def _invalid_values() -> list[Any]:
