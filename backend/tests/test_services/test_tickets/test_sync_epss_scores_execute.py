@@ -86,6 +86,7 @@ from tests.support.epss import (
     envelope,
     raising,
     status,
+    undecodable,
 )
 from tests.support.inadmissible import INADMISSIBLE_CHARACTERS
 from tests.support.json_decoding import (
@@ -425,6 +426,8 @@ async def _planned(env: Env, plan: Plan) -> list[CVE]:
             env.respond(cve, raising(httpx.ReadTimeout("timed out")))
         elif outcome == "json":
             env.respond(cve, status(200, b"{"))
+        elif outcome == "undecodable":
+            env.respond(cve, undecodable(200))
         elif outcome == "schema":
             env.respond(cve, body(envelope(entry_for(cve.cve_id, epss="2.0"))))
         else:
@@ -945,6 +948,7 @@ class TestConsecutiveFailures:
             ["503", "503", "403", "503", "503"],
             ["503", "503", "schema", "503", "503"],
             ["503", "503", "json", "503", "503"],
+            ["503", "503", "undecodable", "503", "503"],
         ],
         ids=[
             "unchanged",
@@ -954,6 +958,7 @@ class TestConsecutiveFailures:
             "http_403",
             "data_quality",
             "unparseable",
+            "undecodable",
         ],
     )
     async def test_reachability_resets_the_counter(

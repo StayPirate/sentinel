@@ -1531,8 +1531,11 @@ content-coding default; neither can be overridden via
 `http_client_options` (see `networking.md`, Override Safety).
 TLS verification settings (`verify`, `ssl_context`) may be overridden
 but trigger a WARNING-level log at client creation time. Other options
-(timeout, limits, transport) replace defaults at the top-level kwarg
-level (not deep-merged).
+(timeout, limits) replace defaults at the top-level kwarg level (not
+deep-merged). The transport is not an override: the factory always
+builds its own, which carries the transport-level retry and the
+response content-coding policy (`networking.md`, Transport-Level Retry
+and HTTP Response Compression).
 
 ### `fetch_single()` and `catch_up()` Lifecycle
 

@@ -115,6 +115,21 @@ def status(code: int, content: bytes = b"") -> Responder:
     return respond
 
 
+def undecodable(code: int) -> Responder:
+    """A responder whose unread body declares `gzip` but is not gzip, so
+    reading it raises `httpx.DecodingError`."""
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            code,
+            headers={"Content-Encoding": "gzip"},
+            stream=httpx.ByteStream(b"not gzip"),
+            request=request,
+        )
+
+    return respond
+
+
 def body(value: Any) -> Responder:
     """A responder that serves the JSON `value` with HTTP 200."""
 

@@ -85,6 +85,7 @@ from tests.support.redhat import (
     load_cve_fixture,
     raising,
     redhat_cve_url,
+    undecodable,
 )
 
 NAME: Final = "sync_redhat_cves"
@@ -532,6 +533,24 @@ class TestErrorPropagation:
         )
 
         assert isinstance(error, ValueError)
+        assert not is_retryable_condition(error)
+        assert not is_infrastructure_failure(error)
+        assert ingestion.calls == 0
+
+    @pytest.mark.parametrize("code", [200, 404, 503])
+    async def test_undecodable_body_is_non_retryable_whatever_the_status(
+        self,
+        code: int,
+        fetcher: SyncRedhatCves,
+        server: RedhatServer,
+        ingestion: Ingestion,
+    ) -> None:
+        """The request reads the body before the status is checked, so an
+        undecodable body fails even a 404 (networking.md, HTTP Response
+        Compression)."""
+        error = await _raised(fetcher, server, undecodable(code))
+
+        assert isinstance(error, httpx.DecodingError)
         assert not is_retryable_condition(error)
         assert not is_infrastructure_failure(error)
         assert ingestion.calls == 0

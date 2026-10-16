@@ -95,6 +95,21 @@ def raising(error: Exception) -> Responder:
     return respond
 
 
+def undecodable(code: int) -> Responder:
+    """A responder whose unread body declares `gzip` but is not gzip, so
+    reading it raises `httpx.DecodingError`."""
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            code,
+            headers={"Content-Encoding": "gzip"},
+            stream=httpx.ByteStream(b"not gzip"),
+            request=request,
+        )
+
+    return respond
+
+
 class RedhatServer:
     """A fake Red Hat per-CVE endpoint for `httpx.MockTransport`.
 

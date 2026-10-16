@@ -526,6 +526,17 @@ FAILED_RESPONSES: Final[list[tuple[Any, str, int | None]]] = [
     (raising(httpx.ConnectError(SECRET)), "transport", None),
     (raising(httpx.ReadTimeout(SECRET)), "transport", None),
     (raising(httpx.RemoteProtocolError(SECRET)), "transport", None),
+    # A body that cannot be decoded fails the request before its status
+    # reaches the fetcher.
+    (
+        lambda request: httpx.Response(
+            200,
+            headers={"Content-Encoding": "gzip"},
+            stream=httpx.ByteStream(SECRET.encode()),
+        ),
+        "invalid_body",
+        None,
+    ),
     (status(200, b"{"), "invalid_body", 200),
     # Rejected by the limited parser that every failed-response case runs
     # with (External JSON Decoding).
@@ -564,6 +575,7 @@ FAILED_IDS: Final = [
     "connect",
     "read_timeout",
     "protocol",
+    "undecodable_body",
     "truncated_json",
     "nesting_beyond_the_parser_limit",
     "integer_beyond_the_conversion_limit",
