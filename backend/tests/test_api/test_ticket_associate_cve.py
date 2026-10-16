@@ -2674,10 +2674,15 @@ class TestOpenApiContract:
         responses = self._operation()["responses"]
 
         assert {"200", "400", "404", "409", "422"} <= set(responses)
-        for status in ("400", "404", "422"):
+        for status in ("400", "404"):
             assert self._ref_name(self._content_schema(responses[status])) == (
                 "ErrorResponse"
             ), status
+        invalid = self._content_schema(responses["422"])
+        assert sorted(self._ref_name(v) for v in invalid["anyOf"]) == [
+            "ErrorResponse",
+            "ValidationErrorResponse",
+        ]
         assert "TICKET_CVE_ALREADY_SET" in responses["400"]["description"]
         assert "TICKET_NOT_FOUND" in responses["404"]["description"]
         conflict = self._content_schema(responses["409"])

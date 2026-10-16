@@ -19,6 +19,24 @@ class ErrorResponse(BaseModel):
     detail: str
 
 
+class ValidationErrorItem(BaseModel):
+    """One element of the `errors` array of a `422 VALIDATION_ERROR`
+    body (`docs/api-spec.md`, Response Format)."""
+
+    loc: list[str | int] = Field(
+        description='Path to the invalid input, e.g. `["body", "field_name"]`.'
+    )
+    msg: str = Field(description="Human-readable message.")
+    type: str = Field(description="Stable machine-readable error type.")
+
+
+class ValidationErrorResponse(ErrorResponse):
+    """The `422 VALIDATION_ERROR` body: the standard envelope plus the
+    field-level `errors` array (`docs/api-spec.md`, Response Format)."""
+
+    errors: list[ValidationErrorItem]
+
+
 class TicketCVEConflictErrorResponse(ErrorResponse):
     """The `409 TICKET_CVE_CONFLICT` body: the standard envelope plus the
     conflicting Ticket's identity (`docs/api-spec.md`, Response Format;

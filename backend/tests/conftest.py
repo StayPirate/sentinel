@@ -108,6 +108,10 @@ from app.services.tickets import sync_nvd_cves
 from tests.support.audit_models import SampleAuditEvent
 from tests.support.database import create_database, drop_database
 from tests.support.logging_state import preserved_logging_state
+from tests.support.openapi_contract import (
+    ResponseContractCheck,
+    response_contract_check,
+)
 from tests.support.parallel import (
     ENGINE_MAX_OVERFLOW,
     ENGINE_POOL_SIZE,
@@ -663,6 +667,36 @@ def _empty_nvd_source_cache() -> Iterator[None]:
     sync_nvd_cves._shared_source_cache.clear()
     yield
     sync_nvd_cves._shared_source_cache.clear()
+
+
+@pytest.fixture(scope="session", autouse=True)
+def openapi_response_contract() -> Iterator[ResponseContractCheck]:
+    """Check every response of the registered application against its
+    OpenAPI document for the whole session, whichever client sends the
+    request — see `tests.support.openapi_contract` and
+    docs/features/platform/testing-strategy.md (OpenAPI Response Contract
+    Check). Pure in-process state: no database or Redis access.
+    """
+    with response_contract_check(app) as check:
+        yield check
+
+
+@pytest.fixture(autouse=True)
+def _documented_responses_only(
+    openapi_response_contract: ResponseContractCheck,
+) -> Iterator[None]:
+    """Fail a test, at teardown, when the application returned a response
+    its OpenAPI document does not describe during the test, including its
+    fixtures' requests. Set up before, and torn down after, every
+    function-scoped fixture that sends a request.
+    """
+    openapi_response_contract.violations.clear()
+    yield
+    violations = list(openapi_response_contract.violations)
+    openapi_response_contract.violations.clear()
+    assert not violations, (
+        "Responses not described by the OpenAPI document:\n" + "\n".join(violations)
+    )
 
 
 @pytest.fixture

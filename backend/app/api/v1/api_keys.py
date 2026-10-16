@@ -41,7 +41,7 @@ from app.schemas.api_key import (
     CreatedApiKeyResponse,
 )
 from app.schemas.common import PaginationMeta, UserReference
-from app.schemas.errors import ErrorResponse
+from app.schemas.errors import ErrorResponse, ValidationErrorResponse
 from app.services import api_key_service
 from app.services.api_key_service import (
     ApiKeyInvalidExpiryError,
@@ -243,24 +243,33 @@ async def list_my_api_keys(
     responses={
         400: {
             "model": ErrorResponse,
-            "description": "Expiration is not strictly in the future.",
+            "description": (
+                "`AUTH_API_KEY_INVALID_EXPIRY`: the expiration is not strictly "
+                "in the future."
+            ),
         },
         403: {
             "model": ErrorResponse,
             "description": (
-                "Request is authenticated by API key instead of a JWT session."
+                "`AUTH_SESSION_REQUIRED`: the request is authenticated by an API "
+                "key instead of a JWT session."
             ),
         },
         409: {
             "model": ErrorResponse,
             "description": (
-                "Owner became inactive before creation acquired the user "
-                "lock, or a non-revoked key already uses this name."
+                "`USER_INACTIVE`: the owner became inactive before creation "
+                "acquired the user lock. `AUTH_API_KEY_NAME_CONFLICT`: a "
+                "non-revoked key already uses this name."
             ),
         },
         422: {
-            "model": ErrorResponse,
-            "description": "Normalized name violates the API Key Name Rule.",
+            "model": ValidationErrorResponse | ErrorResponse,
+            "description": (
+                "`AUTH_API_KEY_NAME_INVALID`: the normalized name violates the "
+                "API Key Name Rule. `VALIDATION_ERROR`: the request body is "
+                "invalid."
+            ),
         },
     },
 )
@@ -323,7 +332,10 @@ async def create_api_key(
     responses={
         404: {
             "model": ErrorResponse,
-            "description": "Key does not exist or belongs to another user.",
+            "description": (
+                "`AUTH_API_KEY_NOT_FOUND`: the key does not exist or belongs to "
+                "another user."
+            ),
         },
     },
 )
@@ -407,7 +419,7 @@ async def list_all_api_keys(
     responses={
         404: {
             "model": ErrorResponse,
-            "description": "Key does not exist.",
+            "description": "`AUTH_API_KEY_NOT_FOUND`: the key does not exist.",
         },
     },
 )

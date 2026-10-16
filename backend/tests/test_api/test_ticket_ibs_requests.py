@@ -1413,12 +1413,12 @@ class TestOpenApiContract:
 
     @pytest.mark.parametrize("endpoint", ENDPOINTS)
     def test_documented_responses(self, endpoint: _Endpoint) -> None:
-        """200, the scoped `TICKET_NOT_FOUND`, and FastAPI's 422; no
-        endpoint-specific error (ibs-submission-tracking.md, List Release
-        Requests)."""
+        """200, the scoped `TICKET_NOT_FOUND`, and the global 401, 422, and
+        500; no endpoint-specific error (ibs-submission-tracking.md, List
+        Release Requests)."""
         responses = self._operation(endpoint)["responses"]
 
-        assert set(responses) == {"200", "404", "422"}
+        assert set(responses) == {"200", "401", "404", "422", "500"}
         assert self._ref_name(responses["200"]["content"]) == endpoint.list_schema
         assert self._ref_name(responses["404"]["content"]) == "ErrorResponse"
         assert "TICKET_NOT_FOUND" in responses["404"]["description"]

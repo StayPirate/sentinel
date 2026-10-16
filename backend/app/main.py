@@ -19,6 +19,7 @@ from starlette.routing import Match
 
 from app.api import health
 from app.api.dependencies import drain_ticket_convergence_after_commit
+from app.api.openapi import API_V1_RESPONSES, SentinelAPI
 from app.api.v1 import (
     api_keys,
     auth,
@@ -76,7 +77,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     yield
 
 
-app = FastAPI(
+# `SentinelAPI` documents the dependency-derived global responses in the
+# OpenAPI document (`app/api/openapi.py`).
+app = SentinelAPI(
     title="Sentinel",
     description="Security update management platform for SUSE/openSUSE distributions",
     version=get_version("sentinel"),
@@ -257,7 +260,8 @@ app.include_router(health.router)
 # Every `/api/v1` route drains the Ticket convergence effects registered in
 # its request transaction after `get_db()` commits
 # (`drain_ticket_convergence_after_commit`; enforced for every route using
-# `get_db` by `tests/test_api_conventions.py`).
+# `get_db` by `tests/test_api_conventions.py`), and documents the global
+# `422` and `500` responses (`API_V1_RESPONSES`).
 _API_V1_DEPENDENCIES = [Depends(drain_ticket_convergence_after_commit)]
 for _router in (
     auth.router,
@@ -276,4 +280,6 @@ for _router in (
     products.router,
     maintainer.router,
 ):
-    app.include_router(_router, dependencies=_API_V1_DEPENDENCIES)
+    app.include_router(
+        _router, dependencies=_API_V1_DEPENDENCIES, responses=API_V1_RESPONSES
+    )

@@ -772,8 +772,13 @@ class TestOpenApiContract:
 
         assert self._ref_name(responses["200"]["content"]) == "CVSSAssessmentResponse"
         assert self._ref_name(responses["201"]["content"]) == "CVSSAssessmentResponse"
-        for code in ("404", "409", "422"):
+        for code in ("404", "409"):
             assert self._ref_name(responses[code]["content"]) == "ErrorResponse"
+        invalid = responses["422"]["content"]["application/json"]["schema"]
+        assert sorted(v["$ref"].rsplit("/", 1)[-1] for v in invalid["anyOf"]) == [
+            "ErrorResponse",
+            "ValidationErrorResponse",
+        ]
         assert "CVE_NOT_FOUND" in responses["404"]["description"]
         assert "TICKET_NOT_MUTABLE" in responses["409"]["description"]
         assert "CVSS_INVALID_VECTOR" in responses["422"]["description"]

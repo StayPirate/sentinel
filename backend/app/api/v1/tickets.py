@@ -80,7 +80,11 @@ from app.schemas.common import PaginationMeta, UserReference
 from app.schemas.cve import (
     CVESummary,
 )
-from app.schemas.errors import ErrorResponse, TicketCVEConflictErrorResponse
+from app.schemas.errors import (
+    ErrorResponse,
+    TicketCVEConflictErrorResponse,
+    ValidationErrorResponse,
+)
 from app.schemas.ticket import (
     TicketAccessGrantDataResponse,
     TicketAccessGrantListResponse,
@@ -462,7 +466,7 @@ def _severity_derived_error() -> AppError:
             ),
         },
         422: {
-            "model": ErrorResponse,
+            "model": ValidationErrorResponse | ErrorResponse,
             "description": (
                 "`CVE_INVALID_FORMAT`: `cve_id` does not match "
                 "`^CVE-[0-9]{4}-[0-9]{4,}$` or exceeds 20 characters. "
@@ -544,8 +548,8 @@ async def create_ticket(
         404: {
             "model": ErrorResponse,
             "description": (
-                "Ticket identifier is malformed, does not exist, or identifies "
-                "a Ticket inaccessible to the caller."
+                "`TICKET_NOT_FOUND`: Ticket identifier is malformed, does not "
+                "exist, or identifies a Ticket inaccessible to the caller."
             ),
         },
     },
@@ -685,12 +689,12 @@ async def set_ticket_severity(
             ),
         },
         422: {
-            "model": ErrorResponse,
+            "model": ValidationErrorResponse | ErrorResponse,
             "description": (
                 "`CVE_INVALID_FORMAT`: `cve_id` does not match "
                 "`^CVE-[0-9]{4}-[0-9]{4,}$` or exceeds 20 characters. "
-                "`VALIDATION_ERROR`: `cve_id` is missing, `null`, or not a "
-                "string."
+                "`VALIDATION_ERROR`: the request fails validation, for example "
+                "`cve_id` is missing, `null`, or not a string."
             ),
         },
     },
@@ -1065,10 +1069,11 @@ async def ignore_ticket(
             ),
         },
         422: {
-            "model": ErrorResponse,
+            "model": ValidationErrorResponse,
             "description": (
-                "`VALIDATION_ERROR`: `duplicate_of_ticket_id` is missing, "
-                "`null`, not a string, or not a canonical `SNTL-{n}` identifier."
+                "`VALIDATION_ERROR`: the request fails validation, for example "
+                "`duplicate_of_ticket_id` is missing, `null`, not a string, or "
+                "not a canonical `SNTL-{n}` identifier."
             ),
         },
     },

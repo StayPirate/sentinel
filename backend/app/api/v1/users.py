@@ -33,7 +33,7 @@ from app.database import DatabaseSession, register_post_commit_callback
 from app.models.user import User
 from app.schemas.auth import CurrentUserData, CurrentUserResponse
 from app.schemas.common import PaginationMeta
-from app.schemas.errors import ErrorResponse
+from app.schemas.errors import ErrorResponse, ValidationErrorResponse
 from app.schemas.user import (
     AdminPasswordResetRequest,
     AdminUserCreateRequest,
@@ -333,7 +333,9 @@ async def get_current_user_profile(
     responses={
         404: {
             "model": ErrorResponse,
-            "description": "No user found matching the given UUID or username.",
+            "description": (
+                "`USER_NOT_FOUND`: no user matches the given UUID or username."
+            ),
         },
     },
 )
@@ -384,15 +386,25 @@ async def get_user(
     responses={
         403: {
             "model": ErrorResponse,
-            "description": "Request authenticated by API key instead of JWT session.",
+            "description": (
+                "`AUTH_SESSION_REQUIRED`: the request is authenticated by an API "
+                "key instead of a JWT session."
+            ),
         },
         409: {
             "model": ErrorResponse,
-            "description": "Normalized username or email already in use.",
+            "description": (
+                "`USER_ALREADY_EXISTS`: the normalized username or email is "
+                "already in use."
+            ),
         },
         422: {
-            "model": ErrorResponse,
-            "description": "Password does not meet the 16-128 character policy.",
+            "model": ValidationErrorResponse | ErrorResponse,
+            "description": (
+                "`USER_PASSWORD_POLICY_VIOLATION`: the password does not meet "
+                "the 16-128 character policy. `VALIDATION_ERROR`: the request "
+                "body is invalid."
+            ),
         },
     },
 )
@@ -449,12 +461,15 @@ async def create_user_admin(
     responses={
         404: {
             "model": ErrorResponse,
-            "description": "No user found matching the given UUID or username.",
+            "description": (
+                "`USER_NOT_FOUND`: no user matches the given UUID or username."
+            ),
         },
         409: {
             "model": ErrorResponse,
             "description": (
-                "Normalized email already in use, or the target is an external user."
+                "`USER_ALREADY_EXISTS`: the normalized email is already in use. "
+                "`USER_EXTERNAL_FIELD_READONLY`: the target is an external user."
             ),
         },
     },
@@ -543,11 +558,15 @@ async def update_user_admin(
     responses={
         404: {
             "model": ErrorResponse,
-            "description": "No user found matching the given UUID or username.",
+            "description": (
+                "`USER_NOT_FOUND`: no user matches the given UUID or username."
+            ),
         },
         409: {
             "model": ErrorResponse,
-            "description": "Target is an external user.",
+            "description": (
+                "`USER_EXTERNAL_STATUS_READONLY`: the target is an external user."
+            ),
         },
     },
 )
@@ -596,20 +615,23 @@ async def reactivate_user_admin(
     responses={
         404: {
             "model": ErrorResponse,
-            "description": "No user found matching the given UUID or username.",
+            "description": (
+                "`USER_NOT_FOUND`: no user matches the given UUID or username."
+            ),
         },
         409: {
             "model": ErrorResponse,
             "description": (
-                "The request would remove the authenticated administrator's "
-                "final admin role origin."
+                "`USER_SELF_ROLE_REMOVAL`: the request would remove the "
+                "authenticated administrator's final admin role origin."
             ),
         },
         422: {
-            "model": ErrorResponse,
+            "model": ValidationErrorResponse,
             "description": (
-                "Explicit null, unknown or repeated role values, wrong types, or "
-                "a role present in both 'add' and 'remove'."
+                "`VALIDATION_ERROR`: the request fails validation, for example "
+                "an explicit null, unknown or repeated role values, wrong "
+                "types, or a role present in both 'add' and 'remove'."
             ),
         },
     },
@@ -667,19 +689,30 @@ async def set_user_roles_admin(
     responses={
         403: {
             "model": ErrorResponse,
-            "description": "Request authenticated by API key instead of JWT session.",
+            "description": (
+                "`AUTH_SESSION_REQUIRED`: the request is authenticated by an API "
+                "key instead of a JWT session."
+            ),
         },
         404: {
             "model": ErrorResponse,
-            "description": "No user found matching the given UUID or username.",
+            "description": (
+                "`USER_NOT_FOUND`: no user matches the given UUID or username."
+            ),
         },
         409: {
             "model": ErrorResponse,
-            "description": "Target is an external user.",
+            "description": (
+                "`USER_EXTERNAL_PASSWORD_FORBIDDEN`: the target is an external user."
+            ),
         },
         422: {
-            "model": ErrorResponse,
-            "description": "Password does not meet the 16-128 character policy.",
+            "model": ValidationErrorResponse | ErrorResponse,
+            "description": (
+                "`USER_PASSWORD_POLICY_VIOLATION`: the password does not meet "
+                "the 16-128 character policy. `VALIDATION_ERROR`: the request "
+                "fails validation."
+            ),
         },
     },
 )
@@ -758,13 +791,16 @@ async def reset_user_password_admin(
     responses={
         404: {
             "model": ErrorResponse,
-            "description": "No user found matching the given UUID or username.",
+            "description": (
+                "`USER_NOT_FOUND`: no user matches the given UUID or username."
+            ),
         },
         409: {
             "model": ErrorResponse,
             "description": (
-                "Target is an active external user, or the authenticated "
-                "administrator's own account."
+                "`USER_EXTERNAL_STATUS_READONLY`: the target is an active "
+                "external user. `USER_SELF_DEACTIVATION`: the target is the "
+                "authenticated administrator's own account."
             ),
         },
     },
@@ -835,13 +871,16 @@ async def deactivate_user_admin(
     responses={
         404: {
             "model": ErrorResponse,
-            "description": "No user found matching the given UUID or username.",
+            "description": (
+                "`USER_NOT_FOUND`: no user matches the given UUID or username."
+            ),
         },
         409: {
             "model": ErrorResponse,
             "description": (
-                "Target is an active external user, or the authenticated "
-                "administrator's own account."
+                "`USER_EXTERNAL_STATUS_READONLY`: the target is an active "
+                "external user. `USER_SELF_DEACTIVATION`: the target is the "
+                "authenticated administrator's own account."
             ),
         },
     },
@@ -903,7 +942,9 @@ async def get_deactivation_impact_admin(
     responses={
         404: {
             "model": ErrorResponse,
-            "description": "No user found matching the given UUID or username.",
+            "description": (
+                "`USER_NOT_FOUND`: no user matches the given UUID or username."
+            ),
         },
     },
 )

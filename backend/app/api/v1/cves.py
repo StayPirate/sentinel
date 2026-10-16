@@ -94,7 +94,7 @@ from app.schemas.cvss import (
     CVSSAssessmentResponse,
     SUSECVSSAssessmentRequest,
 )
-from app.schemas.errors import ErrorResponse
+from app.schemas.errors import ErrorResponse, ValidationErrorResponse
 from app.services import cve_service, ticket_mutations
 from app.services.cve_projection import CVEDetailProjection
 from app.services.cve_service import (
@@ -644,8 +644,9 @@ async def list_cves(
         404: {
             "model": ErrorResponse,
             "description": (
-                "CVE-ID is malformed, does not exist, or identifies a CVE "
-                "associated with a Ticket inaccessible to the caller."
+                "`CVE_NOT_FOUND`: CVE-ID is malformed, does not exist, or "
+                "identifies a CVE associated with a Ticket inaccessible to the "
+                "caller."
             ),
         },
     },
@@ -687,8 +688,9 @@ async def get_cve(
         404: {
             "model": ErrorResponse,
             "description": (
-                "CVE-ID is malformed, does not exist, or identifies a CVE "
-                "associated with a Ticket inaccessible to the caller."
+                "`CVE_NOT_FOUND`: CVE-ID is malformed, does not exist, or "
+                "identifies a CVE associated with a Ticket inaccessible to the "
+                "caller."
             ),
         },
     },
@@ -804,8 +806,9 @@ def get_cve_source_status_session_factory() -> async_sessionmaker[AsyncSession]:
         404: {
             "model": ErrorResponse,
             "description": (
-                "CVE-ID is malformed, does not exist, or identifies a CVE "
-                "associated with a Ticket inaccessible to the caller."
+                "`CVE_NOT_FOUND`: CVE-ID is malformed, does not exist, or "
+                "identifies a CVE associated with a Ticket inaccessible to the "
+                "caller."
             ),
         },
     },
@@ -851,8 +854,9 @@ async def get_cve_source_status(
         404: {
             "model": ErrorResponse,
             "description": (
-                "CVE-ID is malformed, does not exist, or identifies a CVE "
-                "associated with a Ticket inaccessible to the caller."
+                "`CVE_NOT_FOUND`: CVE-ID is malformed, does not exist, or "
+                "identifies a CVE associated with a Ticket inaccessible to the "
+                "caller."
             ),
         },
     },
@@ -911,11 +915,11 @@ async def get_cve_cvss_assessments(
             ),
         },
         422: {
-            "model": ErrorResponse,
+            "model": ValidationErrorResponse | ErrorResponse,
             "description": (
                 "`CVSS_INVALID_VECTOR`: the string passes the schema checks but "
                 "violates the accepted Base-vector contract. `VALIDATION_ERROR`: "
-                "the body fails schema validation."
+                "the request fails validation."
             ),
         },
     },
@@ -1105,7 +1109,7 @@ def serialize_cve_refetch_result(result: FetchDispatchResult) -> CVERefetchResul
             ),
         },
         422: {
-            "model": ErrorResponse,
+            "model": ValidationErrorResponse | ErrorResponse,
             "description": (
                 "`CVE_INVALID_SOURCE`: `source` is not a registered source that "
                 "supports single-CVE fetch. `VALIDATION_ERROR`: a request input "

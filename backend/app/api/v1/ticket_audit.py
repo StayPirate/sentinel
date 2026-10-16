@@ -93,8 +93,8 @@ def _serialize_event(event: TicketEventItem) -> TicketAuditEventData:
         404: {
             "model": ErrorResponse,
             "description": (
-                "Ticket identifier is malformed, does not exist, or identifies "
-                "a Ticket inaccessible to the caller."
+                "`TICKET_NOT_FOUND`: Ticket identifier is malformed, does not "
+                "exist, or identifies a Ticket inaccessible to the caller."
             ),
         },
     },

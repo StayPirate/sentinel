@@ -951,7 +951,9 @@ POST /api/v1/auth/logout
 
 **`Access: Authenticated`**
 
-Global responses per `api-spec.md` do not apply (custom authentication handling — see below).
+The global `401` of `api-spec.md` comes from the endpoint's own credential
+handling rather than the shared authentication dependency (see below); the
+other global responses apply.
 
 **Authentication**: this endpoint does NOT use the standard
 `get_current_user` middleware (which would reject requests with an

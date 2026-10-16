@@ -83,12 +83,15 @@ def _clear_session_cookie(response: Response) -> None:
     responses={
         401: {
             "model": ErrorResponse,
-            "description": "Invalid username or password.",
+            "description": (
+                "`AUTH_INVALID_CREDENTIALS`: invalid username or password."
+            ),
         },
         429: {
             "model": ErrorResponse,
             "description": (
-                "Account temporarily locked due to too many failed attempts."
+                "`AUTH_ACCOUNT_LOCKED`: the account is temporarily locked after "
+                "too many failed attempts."
             ),
             "headers": {
                 "Retry-After": {
@@ -145,7 +148,20 @@ async def login(body: LoginRequest, db: DatabaseSession) -> Response:
     responses={
         400: {
             "model": ErrorResponse,
-            "description": "Called with an API key credential instead of a JWT.",
+            "description": (
+                "`AUTH_LOGOUT_NOT_APPLICABLE`: called with an API key credential "
+                "instead of a JWT."
+            ),
+        },
+        # Logout validates its credential itself instead of through
+        # `get_current_user`, so this 401 is not derived from its
+        # dependencies (`app/api/openapi.py`).
+        401: {
+            "model": ErrorResponse,
+            "description": (
+                "`AUTH_NOT_AUTHENTICATED`: no credential was sent, or it is not "
+                "a validly signed JWT."
+            ),
         },
     },
 )

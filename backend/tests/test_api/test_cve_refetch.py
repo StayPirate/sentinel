@@ -1119,12 +1119,17 @@ class TestOpenApiContract:
         for code, errors in (
             ("404", ["CVE_NOT_FOUND"]),
             ("409", ["FETCHER_DISABLED"]),
-            ("422", ["CVE_INVALID_SOURCE"]),
             ("503", ["CVE_FETCH_FAILED", "CELERY_UNAVAILABLE"]),
         ):
             assert self._ref_name(responses[code]) == "ErrorResponse"
             for error in errors:
                 assert error in responses[code]["description"]
+        invalid = responses["422"]["content"]["application/json"]["schema"]
+        assert sorted(v["$ref"].rsplit("/", 1)[-1] for v in invalid["anyOf"]) == [
+            "ErrorResponse",
+            "ValidationErrorResponse",
+        ]
+        assert "CVE_INVALID_SOURCE" in responses["422"]["description"]
         assert "TICKET_NOT_MUTABLE" not in str(responses)
 
     def test_result_schema_has_exactly_four_required_string_arrays(self) -> None:

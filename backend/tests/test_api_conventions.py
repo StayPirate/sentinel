@@ -31,12 +31,14 @@ forbids. That cross-reference remains with `@docs-reviewer` /
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from types import UnionType
 from typing import Annotated, Any, Literal, Union, get_args, get_origin
 
 import pytest
+from fastapi import FastAPI
 from fastapi import routing as fastapi_routing
 from fastapi.dependencies.models import Dependant
 from fastapi.routing import APIRoute
@@ -44,8 +46,11 @@ from pydantic import BaseModel, Field, Strict
 from pydantic.fields import FieldInfo
 
 from app.api.dependencies import drain_ticket_convergence_after_commit
+from app.api.openapi import API_V1_RESPONSES
+from app.core.errors import ErrorCode
 from app.database import get_db
 from app.main import app
+from app.schemas.errors import ErrorResponse
 
 # Endpoints intentionally outside the `/api/v1/` prefix — public,
 # non-versioned operational endpoints. See
@@ -267,6 +272,239 @@ class TestResponseEnvelopeFormat:
                     "standard response envelope)"
                 )
         assert not violations, "\n".join(violations)
+
+
+def _schema_branches(
+    openapi_schema: dict[str, Any], schema: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """The resolved alternatives of `schema`: the members of an `anyOf` or
+    `oneOf`, at any depth, or `schema` itself."""
+    resolved = _resolve_schema_ref(openapi_schema, schema)
+    for keyword in ("anyOf", "oneOf"):
+        if keyword in resolved:
+            return [
+                branch
+                for alternative in resolved[keyword]
+                for branch in _schema_branches(openapi_schema, alternative)
+            ]
+    return [resolved]
+
+
+def _is_error_envelope(schema: dict[str, Any]) -> bool:
+    """Whether `schema` is the standard error envelope: an object that
+    requires string `code` and `detail` members."""
+    properties = schema.get("properties", {})
+    return {"code", "detail"} <= set(schema.get("required", ())) and all(
+        properties.get(name, {}).get("type") == "string" for name in ("code", "detail")
+    )
+
+
+def _is_validation_error_envelope(schema: dict[str, Any]) -> bool:
+    """Whether `schema` is the `422 VALIDATION_ERROR` body: the envelope
+    plus a required `errors` array."""
+    return (
+        _is_error_envelope(schema)
+        and "errors" in schema.get("required", ())
+        and schema["properties"]["errors"].get("type") == "array"
+    )
+
+
+def _documented_operations(
+    openapi_schema: dict[str, Any],
+) -> Iterable[tuple[str, dict[str, Any]]]:
+    """`("METHOD /path", operation)` for every operation of
+    `openapi_schema`, except the documented health exemption."""
+    for path, path_item in openapi_schema.get("paths", {}).items():
+        if path in _PREFIX_EXEMPT_PATHS:
+            continue
+        for method, operation in path_item.items():
+            yield f"{method.upper()} {path}", operation
+
+
+def _json_schema(response: dict[str, Any]) -> dict[str, Any] | None:
+    schema: dict[str, Any] | None = (
+        response.get("content", {}).get("application/json", {}).get("schema")
+    )
+    return schema
+
+
+def _error_envelope_violations(openapi_schema: dict[str, Any]) -> list[str]:
+    """Every documented 4xx or 5xx response whose schema, or one of whose
+    alternatives, is not the standard error envelope."""
+    violations: list[str] = []
+    for operation_name, operation in _documented_operations(openapi_schema):
+        for status, response in operation.get("responses", {}).items():
+            if not status.startswith(("4", "5")):
+                continue
+            schema = _json_schema(response)
+            if schema is None or not all(
+                _is_error_envelope(branch)
+                for branch in _schema_branches(openapi_schema, schema)
+            ):
+                violations.append(
+                    f"{operation_name} documents {status} without the standard "
+                    "error envelope"
+                )
+    return violations
+
+
+def _global_response_violations(openapi_schema: dict[str, Any]) -> list[str]:
+    """Every operation that does not document the `422 VALIDATION_ERROR`
+    body among its 422 alternatives, or does not document a 500."""
+    violations: list[str] = []
+    for operation_name, operation in _documented_operations(openapi_schema):
+        responses = operation.get("responses", {})
+        invalid = _json_schema(responses.get("422", {}))
+        if invalid is None or not any(
+            _is_validation_error_envelope(branch)
+            for branch in _schema_branches(openapi_schema, invalid)
+        ):
+            violations.append(
+                f"{operation_name} does not document the 422 VALIDATION_ERROR "
+                "body with its 'errors' array"
+            )
+        if "500" not in responses:
+            violations.append(f"{operation_name} does not document the 500")
+    return violations
+
+
+# A backticked UPPER_SNAKE_CASE token with at least one underscore: how an
+# error description names a code (`docs/conventions.md`, FastAPI
+# Conventions).
+_CODE_PATTERN = re.compile(r"`([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+)`")
+_REGISTERED_CODES = frozenset(code.value for code in ErrorCode)
+
+
+def _error_code_naming_violations(openapi_schema: dict[str, Any]) -> list[str]:
+    """Every documented 4xx or 5xx response whose description names no
+    error code, or names a code that is not registered."""
+    violations: list[str] = []
+    for operation_name, operation in _documented_operations(openapi_schema):
+        for status, response in operation.get("responses", {}).items():
+            if not status.startswith(("4", "5")):
+                continue
+            named = _CODE_PATTERN.findall(response.get("description", ""))
+            if not named:
+                violations.append(
+                    f"{operation_name} documents {status} without naming its "
+                    "error codes"
+                )
+            violations.extend(
+                f"{operation_name} documents {status} with the unregistered code {code}"
+                for code in named
+                if code not in _REGISTERED_CODES
+            )
+    return violations
+
+
+@pytest.mark.unit
+class TestErrorResponseDocumentation:
+    """The OpenAPI document describes the error bodies the application
+    returns.
+
+    See `docs/api-spec.md` (Response Format, Global Responses): every
+    error response uses the standard envelope, and every `/api/v1`
+    operation can return the global `422 VALIDATION_ERROR`, whose body
+    carries the `errors` array, and `500 INTERNAL_ERROR`. A route-level
+    `422` declaration replaces the shared one (`app/api/openapi.py`), so
+    it must keep the validation body among its alternatives. The
+    `/health`/`/ready` exemption applies: their probe responses are
+    outside the envelope (`docs/features/platform/health-endpoints.md`).
+    The schema types `code` as a string, so each description names the
+    codes of its status (`docs/api-spec.md`, Derived Responses in the
+    OpenAPI Document); the OpenAPI response contract check proves, for
+    every response the tests receive, that its code is among them.
+    """
+
+    def test_every_documented_error_response_uses_the_envelope(self) -> None:
+        violations = _error_envelope_violations(app.openapi())
+        assert not violations, "\n".join(violations)
+
+    def test_every_operation_documents_the_global_422_and_500(self) -> None:
+        violations = _global_response_violations(app.openapi())
+        assert not violations, "\n".join(violations)
+
+    def test_every_documented_error_response_names_registered_codes(self) -> None:
+        violations = _error_code_naming_violations(app.openapi())
+        assert not violations, "\n".join(violations)
+
+    def test_detection_covers_defaults_unions_and_route_level_overrides(
+        self,
+    ) -> None:
+        """Guards the checkers themselves against passing vacuously."""
+
+        class _NotEnvelope(BaseModel):
+            message: str
+
+        test_app = FastAPI()
+
+        @test_app.get("/api/v1/framework-default/{item_id}")
+        async def framework_default(item_id: int) -> None:
+            """FastAPI's own 422 body, and no 500."""
+
+        @test_app.get(
+            "/api/v1/union",
+            responses={
+                **API_V1_RESPONSES,
+                404: {"model": ErrorResponse | _NotEnvelope},
+            },
+        )
+        async def union() -> None:
+            """A 404 alternative outside the envelope."""
+
+        @test_app.post(
+            "/api/v1/overridden",
+            responses={**API_V1_RESPONSES, 422: {"model": ErrorResponse}},
+        )
+        async def overridden() -> None:
+            """A route-level 422 without the validation body."""
+
+        @test_app.get("/api/v1/compliant", responses=API_V1_RESPONSES)
+        async def compliant() -> None:
+            """The shared declaration."""
+
+        @test_app.get(
+            "/api/v1/unnamed",
+            responses={
+                **API_V1_RESPONSES,
+                404: {"model": ErrorResponse, "description": "No such item."},
+                409: {
+                    "model": ErrorResponse,
+                    "description": "`ITEM_VANISHED`: the item is gone.",
+                },
+            },
+        )
+        async def unnamed() -> None:
+            """A description naming no code, and one naming an unregistered
+            code."""
+
+        @test_app.get("/health")
+        async def exempt() -> None:
+            """The documented health exemption."""
+
+        openapi_schema = test_app.openapi()
+
+        assert _error_envelope_violations(openapi_schema) == [
+            "GET /api/v1/framework-default/{item_id} documents 422 without the "
+            "standard error envelope",
+            "GET /api/v1/union documents 404 without the standard error envelope",
+        ]
+        assert _global_response_violations(openapi_schema) == [
+            "GET /api/v1/framework-default/{item_id} does not document the 422 "
+            "VALIDATION_ERROR body with its 'errors' array",
+            "GET /api/v1/framework-default/{item_id} does not document the 500",
+            "POST /api/v1/overridden does not document the 422 VALIDATION_ERROR "
+            "body with its 'errors' array",
+        ]
+        assert [
+            violation
+            for violation in _error_code_naming_violations(openapi_schema)
+            if "/unnamed" in violation
+        ] == [
+            "GET /api/v1/unnamed documents 404 without naming its error codes",
+            "GET /api/v1/unnamed documents 409 with the unregistered code "
+            "ITEM_VANISHED",
+        ]
 
 
 _JSON_SCALAR_TYPES = (bool, int, float)
