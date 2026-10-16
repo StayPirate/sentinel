@@ -2103,21 +2103,25 @@ through the registered application MUST prove:
   the methods served there. The test derives the paths and methods from the
   registered routes, so a new endpoint is covered without a new test;
 - the trailing-slash `307` redirect;
-- `422 VALIDATION_ERROR` with one `json_invalid` entry, before authentication
-  and with no authentication side effect, for a body that is syntactically
-  malformed, that is not validly encoded text, that contains an integer beyond
-  the default conversion limit, and that nests beyond the parser's limit. The
-  integer relies on the pinned limit (Test Independence). The nesting is
-  forced through `backend/tests/support/json_decoding.py`, whose request-body
-  parser replacement rejects the same run of `[` characters as in External
-  JSON Decoding, whatever the stack size; and
+- `422 VALIDATION_ERROR` with one `json_invalid` entry, with no
+  authentication side effect, for a body that is syntactically malformed,
+  that cannot be decoded as text, that contains an integer beyond the default
+  conversion limit, and that nests beyond the parser's limit; all of them fail
+  in the same decoding step, so a representative body proves that the
+  response precedes authentication on a protected endpoint. The integer
+  relies on the pinned limit (Test Independence). The nesting is forced
+  through `backend/tests/support/json_decoding.py`, whose request-body parser
+  replacement rejects the same run of `[` characters as in External JSON
+  Decoding, whatever the stack size; and
 - that a declared body field nested deeper than the interpreter's recursion
   limit returns `422 VALIDATION_ERROR`, never `500 INTERNAL_ERROR`, asserting
   only the status and code, which are the same whether or not the parser
   accepts that depth.
 
-Tests of the handler itself prove that any other framework-generated error
-returns `500 INTERNAL_ERROR` and is logged.
+Tests of the handlers themselves prove, whatever the stack size, that a
+validation error's `input` nested deeper than the recursion limit is never
+encoded, and that any other framework-generated error returns `500
+INTERNAL_ERROR` and is logged.
 
 ### CVE Ingestion Persistence
 

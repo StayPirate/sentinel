@@ -11,10 +11,12 @@ production `AppError` handler (`_app_error_handler`): the standard
 `{"code", "detail"}` envelope plus the top-level fields of
 `AppError.extra` (`existing_ticket_id` of `TICKET_CVE_CONFLICT`,
 `docs/api-spec.md`, Response Format), with `code` and `detail` always
-taken from the exception. Also covers the fallback of the production
-`HTTPException` handler (`_http_exception_handler`): a framework error
-other than routing or body decoding renders and logs as an unhandled
-exception; its routing and body-decoding responses are covered end to end
+taken from the exception. Also covers the production
+`RequestValidationError` handler (`_validation_error_handler`), which never
+encodes an error's `input`, however deeply nested, and the fallback of the
+production `HTTPException` handler (`_http_exception_handler`): a framework
+error other than routing or body decoding renders and logs as an unhandled
+exception. The routing and body-decoding responses are covered end to end
 in `tests/test_api/test_framework_errors.py`.
 
 A minimal standalone FastAPI app registers the real, imported handler
@@ -42,10 +44,13 @@ cleans it up explicitly (see
 
 from __future__ import annotations
 
+import sys
 from collections.abc import AsyncGenerator, Generator
+from typing import Any
 
 import pytest
 from fastapi import FastAPI
+from fastapi.exceptions import RequestValidationError
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import delete, select
 from sqlalchemy.exc import OperationalError
@@ -58,6 +63,7 @@ from app.main import (
     _app_error_handler,
     _http_exception_handler,
     _unhandled_exception_handler,
+    _validation_error_handler,
 )
 from app.models.fetcher_config import FetcherConfig
 from app.models.setting_audit_event import SettingAuditEvent
@@ -143,6 +149,68 @@ class TestUnhandledExceptionHandler:
             await error_client.get("/boom")
 
         assert "RuntimeError" in caplog.text
+
+
+def _nested_list(depth: int) -> list[Any]:
+    """A list nested `depth` levels deep, built without recursion."""
+    root: list[Any] = []
+    current = root
+    for _ in range(depth - 1):
+        child: list[Any] = []
+        current.append(child)
+        current = child
+    return root
+
+
+def _build_validation_error_app() -> FastAPI:
+    """A standalone app registering the real `_validation_error_handler`,
+    with a route raising the error Pydantic reports for a deeply nested
+    value in a string field."""
+    test_app = FastAPI()
+    test_app.exception_handler(RequestValidationError)(_validation_error_handler)
+
+    @test_app.get("/deep")
+    async def deep() -> None:
+        raise RequestValidationError(
+            [
+                {
+                    "loc": ("body", "username"),
+                    "msg": "Input should be a valid string",
+                    "type": "string_type",
+                    "input": _nested_list(2 * sys.getrecursionlimit()),
+                }
+            ]
+        )
+
+    return test_app
+
+
+@pytest.mark.unit
+class TestValidationErrorHandler:
+    async def test_input_nested_beyond_the_recursion_limit_is_never_encoded(
+        self,
+    ) -> None:
+        """Encoding the `input` before projecting `loc`, `msg`, and `type`
+        exceeded the interpreter recursion limit (a `500`), whatever the
+        stack size."""
+        async with AsyncClient(
+            transport=ASGITransport(app=_build_validation_error_app()),
+            base_url="http://test",
+        ) as client:
+            response = await client.get("/deep")
+
+        assert response.status_code == 422
+        assert response.json() == {
+            "code": ErrorCode.VALIDATION_ERROR.value,
+            "detail": "Request validation failed",
+            "errors": [
+                {
+                    "loc": ["body", "username"],
+                    "msg": "Input should be a valid string",
+                    "type": "string_type",
+                }
+            ],
+        }
 
 
 def _build_http_exception_app() -> FastAPI:

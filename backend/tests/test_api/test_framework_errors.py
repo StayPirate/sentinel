@@ -5,8 +5,9 @@ Response Format) for the contracts and
 `docs/features/platform/testing-strategy.md` (Routing and JSON Request Body
 Decoding Responses) for the mandatory scenario. Every case goes through the
 registered application, whose `HTTPException` and `RequestValidationError`
-handlers (`app/main.py`) render the standard error envelope. The handler's
-fallback for any other framework error is covered in `tests/test_main.py`.
+handlers (`app/main.py`) render the standard error envelope. The handlers'
+own tests, including the fallback for any other framework error, are in
+`tests/test_main.py`.
 """
 
 from __future__ import annotations
@@ -141,38 +142,23 @@ class TestMethodNotAllowed:
 
         assert observed == expected
 
-    async def test_path_served_by_several_routes_allows_all_their_methods(
-        self, client: AsyncClient
-    ) -> None:
-        """Starlette's own header named only the first matching route's
-        methods (`Allow: GET` here)."""
-        response = await client.delete("/api/v1/tickets")
-
-        assert response.status_code == 405
-        assert response.headers["allow"] == "GET, POST"
-        assert response.json() == _METHOD_NOT_ALLOWED
-
-    async def test_health_probe_rejects_another_method_in_the_envelope(
-        self, client: AsyncClient
-    ) -> None:
-        """The envelope exemption covers only the documented `GET`
-        responses (`docs/features/platform/health-endpoints.md`)."""
-        response = await client.post("/ready")
-
-        assert response.status_code == 405
-        assert response.headers["allow"] == "GET"
-        assert response.json() == _METHOD_NOT_ALLOWED
-
 
 @pytest.mark.e2e
 class TestUndecodableBody:
-    async def test_syntax_error_keeps_its_position(self, client: AsyncClient) -> None:
+    async def test_syntax_error_keeps_its_position(
+        self, client: AsyncClient, redis_client: redis_asyncio.Redis
+    ) -> None:
+        """The trailing data follows complete login credentials, which a
+        lenient decoder would pass to local login."""
+        document = b'{"username": "fictional-user", "password": "irrelevant"}'
+
         response = await client.post(
-            _LOGIN, content=b'{"username":', headers=_JSON_HEADERS
+            _LOGIN, content=document + b" x", headers=_JSON_HEADERS
         )
 
         assert response.status_code == 422
-        assert response.json() == _json_invalid(["body", 12])
+        assert response.json() == _json_invalid(["body", len(document) + 1])
+        assert await redis_client.keys("login_attempts:*") == []
 
     @pytest.mark.parametrize(
         "body",
@@ -202,7 +188,10 @@ class TestUndecodableBody:
         assert await redis_client.keys("login_attempts:*") == []
 
     async def test_nesting_beyond_the_parser_limit_is_rejected(
-        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+        self,
+        client: AsyncClient,
+        redis_client: redis_asyncio.Redis,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """The real parser accepts `NESTED_ARRAY`, so the field reaches schema
         validation; the replacement parser rejects it as nesting beyond its
@@ -217,6 +206,7 @@ class TestUndecodableBody:
         assert [error["type"] for error in accepted.json()["errors"]] == ["string_type"]
         assert rejected.status_code == 422
         assert rejected.json() == _json_invalid(["body"])
+        assert await redis_client.keys("login_attempts:*") == []
 
     async def test_rejection_precedes_authentication(self, client: AsyncClient) -> None:
         """Ticket creation requires a capability; this anonymous request

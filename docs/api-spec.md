@@ -198,9 +198,11 @@ cannot be decoded returns the global `422 VALIDATION_ERROR` with exactly one
 
 - a syntax error is located at `["body", <position>]`, where `<position>` is
   the character offset of the error; and
-- a body whose bytes are not validly encoded text, that nests deeper than the
-  decoder's limit, or that contains an integer with more digits than the
-  interpreter's integer-string conversion limit is located at `["body"]`.
+- a body whose bytes the decoder cannot decode as text, that nests deeper than
+  the decoder's limit, or that contains an integer with more digits than the
+  interpreter's integer-string conversion limit is located at `["body"]`. The
+  UTF-8-style encoding of a surrogate code point is decoded and then rejected
+  under Inadmissible Characters in Request Input.
 
 The deepest nesting the decoder accepts depends on the server's runtime
 environment and is not part of the API contract (see `docs/conventions.md`,
@@ -208,8 +210,8 @@ External JSON Decoding). Decoding follows routing (see Routing Responses) and
 precedes schema validation, every shared request-input constraint,
 authentication, authorization, resource resolution, and every
 endpoint-specific outcome, so a body that cannot be decoded is the only error
-reported. A body sent with another content type, or to an endpoint that
-declares none, is not decoded as JSON.
+reported. A body sent without a content type or with another content type, or
+to an endpoint that declares none, is not decoded as JSON.
 
 ### Inadmissible Characters in Request Input
 
@@ -242,10 +244,12 @@ per offending string, located at that string. An offending object member name
 is reported at its containing object, and that member's value is not inspected
 further. The value is rejected, never stripped or replaced, and is not echoed
 in the response. The rule applies to every endpoint, including public
-ones, without exception. It is evaluated before authentication, authorization,
-resource resolution, and every endpoint-specific validation outcome. An
-inadmissible character therefore returns this response even where another
-malformed value would receive a different outcome, including:
+ones, without exception. It is evaluated after routing and JSON body decoding
+(see Routing Responses and JSON Request Body Decoding) and before
+authentication, authorization, resource resolution, and every
+endpoint-specific validation outcome. An inadmissible character therefore
+returns this response even where another malformed value would receive a
+different outcome, including:
 
 - the not-found response for a Ticket, CVE, User, or CVSS-version locator,
   such as `404 TICKET_NOT_FOUND`;
@@ -599,7 +603,7 @@ Error codes are grouped by prefix:
 | `USER_*` | User operations | `USER_NOT_FOUND`, `USER_ALREADY_EXISTS`, `USER_INACTIVE`, `USER_EXTERNAL_STATUS_READONLY`, `USER_EXTERNAL_FIELD_READONLY`, `USER_EXTERNAL_PASSWORD_FORBIDDEN`, `USER_SELF_ROLE_REMOVAL`, `USER_SELF_DEACTIVATION`, `USER_PASSWORD_POLICY_VIOLATION` |
 | `DATE_RANGE_*` | Date range filter validation | `DATE_RANGE_INVERTED`, `DATE_RANGE_TOO_WIDE` |
 | `ROUTE_*` | Request routing (see Routing Responses) | `ROUTE_NOT_FOUND`, `ROUTE_METHOD_NOT_ALLOWED` |
-| `INTERNAL_*` | Framework | `INTERNAL_ERROR` |
+| `INTERNAL_*` | Unhandled server error | `INTERNAL_ERROR` |
 | `<DEPENDENCY>_UNAVAILABLE` | Infrastructure dependency availability (external service or broker unavailable, including unconfirmed task publication) | `REDIS_UNAVAILABLE`, `SMELT_UNAVAILABLE`, `CELERY_UNAVAILABLE`, `PROVISIONING_UNAVAILABLE`, `SSO_UNAVAILABLE` |
 
 Rules:
@@ -721,13 +725,14 @@ reference lines are not used.
 ### Routing Responses
 
 Routing selects the endpoint for a request from its path and method. A request
-for which routing selects no endpoint receives one of these responses, on every
-path, including paths outside `/api/v1/`:
+for which routing selects no endpoint receives one of these responses, or the
+trailing-slash redirect described below, on every path, including paths outside
+`/api/v1/`:
 
-| Status | Code | Condition |
-|--------|------|-----------|
-| 404 | `ROUTE_NOT_FOUND` | No endpoint path matches the request path |
-| 405 | `ROUTE_METHOD_NOT_ALLOWED` | At least one endpoint path matches the request path, but none for the request method |
+| Status | Code | Detail | Condition |
+|--------|------|--------|-----------|
+| 404 | `ROUTE_NOT_FOUND` | `No endpoint matches the request path.` | No endpoint path matches the request path |
+| 405 | `ROUTE_METHOD_NOT_ALLOWED` | `No endpoint at the request path accepts this method.` | At least one endpoint path matches the request path, but none for the request method |
 
 - The `405` response carries an `Allow` header listing every method that has
   an endpoint for the request path.
@@ -738,8 +743,10 @@ path, including paths outside `/api/v1/`:
   authentication, and authorization, so neither response depends on the body
   or the credentials sent.
 - A path parameter matches any non-empty value of its path segment, so a
-  malformed value reaches the endpoint, which applies its own outcome.
-  `ROUTE_NOT_FOUND` therefore reports only an unknown path. It is distinct
+  malformed value reaches the endpoint, which applies its own outcome. Routing
+  matches the percent-decoded path, so an encoded `/` (`%2F`) separates
+  segments like a literal one. `ROUTE_NOT_FOUND` therefore reports only an
+  unknown path. It is distinct
   from the not-found response of an existing endpoint, such as `404
   TICKET_NOT_FOUND` or `404 RESOURCE_NOT_FOUND`, which reports a missing
   resource at a valid path.
