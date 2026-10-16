@@ -17,6 +17,7 @@ applies automatically to every current and future endpoint.
 from __future__ import annotations
 
 import email.message
+from collections.abc import Iterator
 from typing import Any
 
 from fastapi import Request, params
@@ -35,11 +36,6 @@ from app.core.route_params import declared_string_param_names
 # mechanisms report an inadmissible character identically.
 _ERROR_MESSAGE = f"Value error, {INADMISSIBLE_CHARACTER_MESSAGE}"
 _ERROR_TYPE = "value_error"
-
-# Stack marker for an object member name containing an inadmissible
-# character, so its error is emitted in document order relative to its
-# siblings' values.
-_INADMISSIBLE_MEMBER_NAME = object()
 
 
 def _error(loc: tuple[str | int, ...]) -> dict[str, Any]:
@@ -75,40 +71,48 @@ def _body_is_decoded_json(request: Request, route: APIRoute) -> bool:
     return subtype == "json" or subtype.endswith("+json")
 
 
-def _body_errors(body: Any) -> list[dict[str, Any]]:
-    """One error per JSON string containing an inadmissible character, at
-    any depth.
+def _first_body_violation(body: Any) -> tuple[str | int, ...] | None:
+    """The location of the first JSON string, in document order, that
+    contains an inadmissible character; `None` when there is none.
 
-    Walks iteratively so a deeply nested body that the JSON decoder
-    accepted cannot exhaust the interpreter recursion limit here. An object
-    member name containing an inadmissible character is reported at its
-    containing object (the name itself is never echoed in a `loc`, which
-    could not even be rendered for a surrogate code point), and that
-    member's value is not inspected further. Errors are in document order.
+    An object member name precedes its value. One containing an
+    inadmissible character is located at its containing object: the name
+    itself is never echoed in a `loc`, which could not even be rendered
+    for a surrogate code point.
+
+    Walks depth-first without recursion, so a deeply nested body that the
+    JSON decoder accepted cannot exhaust the interpreter recursion limit
+    here. Only the open containers' iterators and the current path are
+    kept, and a location is built only for the violation found, so time
+    is linear in the size of the body and extra memory in its depth.
     """
-    errors: list[dict[str, Any]] = []
-    stack: list[tuple[tuple[str | int, ...], Any]] = [(("body",), body)]
-    while stack:
-        loc, value = stack.pop()
-        if value is _INADMISSIBLE_MEMBER_NAME:
-            errors.append(_error(loc))
-        elif isinstance(value, str):
+    # `path[i + 1]` is the segment of the member of `members[i]` being
+    # inspected; `path[0]` locates the body itself.
+    path: list[str | int] = ["body"]
+    members: list[Iterator[tuple[str | int, Any]]] = []
+    value = body
+    while True:
+        if isinstance(value, str):
             if contains_inadmissible_character(value):
-                errors.append(_error(loc))
-        elif isinstance(value, list):
-            stack.extend(
-                ((*loc, index), item)
-                for index, item in reversed(list(enumerate(value)))
-            )
+                return tuple(path)
         elif isinstance(value, dict):
-            members: list[tuple[tuple[str | int, ...], Any]] = []
-            for key, item in value.items():
-                if contains_inadmissible_character(key):
-                    members.append((loc, _INADMISSIBLE_MEMBER_NAME))
-                else:
-                    members.append(((*loc, key), item))
-            stack.extend(reversed(members))
-    return errors
+            members.append(iter(value.items()))
+            path.append("")
+        elif isinstance(value, list):
+            members.append(enumerate(value))
+            path.append(0)
+        while members:
+            member = next(members[-1], None)
+            if member is not None:
+                break
+            members.pop()
+            path.pop()
+        else:
+            return None
+        segment, value = member
+        if isinstance(segment, str) and contains_inadmissible_character(segment):
+            return tuple(path[:-1])
+        path[-1] = segment
 
 
 async def reject_inadmissible_request_input(request: Request) -> None:
@@ -124,15 +128,17 @@ async def reject_inadmissible_request_input(request: Request) -> None:
     Q3: checks, in this order, every declared string-shaped path parameter
     (already percent-decoded by Starlette), every raw occurrence of every
     declared string-shaped query parameter at any dependency nesting depth,
-    and every string value and object member name of a decoded JSON body.
-    Undeclared query parameters, non-string parameters, headers, cookies,
-    and non-JSON bodies are never inspected. A request with no violation is
-    a no-op.
+    and the string values and object member names of a decoded JSON body,
+    in document order up to the first violation. Undeclared query
+    parameters, non-string parameters, headers, cookies, and non-JSON
+    bodies are never inspected. A request with no violation is a no-op.
 
     Q6: raises `RequestValidationError` — rendered as the standard `422
     VALIDATION_ERROR` envelope by the handler registered in `app.main` —
-    carrying one Pydantic-shaped error per offending value, located at that
-    value. The value is never included in the error. Otherwise infallible.
+    carrying one Pydantic-shaped error per offending path parameter and
+    query parameter occurrence, then at most one for the body's first
+    offending string, each located at its value. The value is never
+    included in the error. Otherwise infallible.
     """
     route = request.scope.get("route")
     if not isinstance(route, APIRoute):
@@ -148,6 +154,8 @@ async def reject_inadmissible_request_input(request: Request) -> None:
             if contains_inadmissible_character(value):
                 errors.append(_error(("query", name)))
     if _body_is_decoded_json(request, route) and await request.body():
-        errors.extend(_body_errors(await request.json()))
+        location = _first_body_violation(await request.json())
+        if location is not None:
+            errors.append(_error(location))
     if errors:
         raise RequestValidationError(errors)
