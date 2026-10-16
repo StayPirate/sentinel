@@ -173,11 +173,15 @@ or persisted failure counter.
 ## HTTP and Redirect Contract
 
 Requests use `Accept-Encoding: identity` so HTTP content coding cannot hide the
-bounded repository representation. A `repomd.xml` response must have base media
+bounded repository representation. A response that nevertheless declares a
+content coding — any `Content-Encoding` element other than `identity` or empty,
+compared case-insensitively — fails the repository as a content-type failure
+before its body is read. A `repomd.xml` response must have base media
 type `application/xml` or `text/xml`. An updateinfo artifact must have base media
 type `application/gzip` or `application/x-gzip` and gzip magic bytes. Media-type
-parameters are permitted and ignored after syntactic validation. A compatible
-media type never substitutes for structural, checksum, or size validation.
+parameters are permitted and ignored after syntactic validation, which takes
+time linear in the header length. A compatible media type never substitutes for
+structural, checksum, or size validation.
 
 The shared no-redirect default remains in force. The detector may manually
 accept at most one redirect for the updateinfo artifact only when all of
@@ -632,9 +636,12 @@ Future implementation tests must cover:
   including credential absence on every request;
 - repomd namespace/cardinality, checksum algorithms, declared and actual sizes,
   R1/R2 equality, one restart, and repeated snapshot change;
-- every resource ceiling, `Content-Length` shape, media type, magic, gzip CRC,
-  truncation, concatenated members, trailing bytes, ratio overflow, DTD/entity,
-  depth/count overflow, parser finalization, and interrupted body;
+- every resource ceiling, `Content-Length` shape, declared content coding,
+  media type, magic, gzip CRC, truncation, concatenated members, trailing
+  bytes, ratio overflow, DTD/entity, depth/count overflow, parser
+  finalization, and interrupted body;
+- a long media-type header that cannot match, rejected in time linear in its
+  length;
 - stable security, non-security with CVE, retracted, malformed, empty-package,
   duplicate-ID, conflicting-ID, duplicate-reference, and duplicate-package
   advisories;

@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import email.utils
 import ssl
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as get_version
@@ -251,6 +252,73 @@ class _RetryTransport(httpx.AsyncBaseTransport):
 
 
 # ---------------------------------------------------------------------------
+# Response content coding
+# ---------------------------------------------------------------------------
+
+# The content codings the shared client requests and decodes, each with the
+# Python standard library. A response may apply at most one of them.
+ACCEPT_ENCODING = "gzip, deflate"
+_DECODABLE_CODINGS = frozenset({"gzip", "deflate"})
+_REJECTED_CODING_MESSAGE = "Response content coding is outside the shared policy"
+
+
+def response_content_codings(headers: httpx.Headers) -> list[str]:
+    """The content codings a response declares, in the order applied.
+
+    Every `Content-Encoding` field and comma-separated element counts,
+    normalized as httpx does when it selects decoders (stripped,
+    lowercased); empty elements and `identity` are not codings.
+    """
+    codings = (
+        value.strip().lower()
+        for value in headers.get_list("content-encoding", split_commas=True)
+    )
+    return [coding for coding in codings if coding not in ("", "identity")]
+
+
+class _RejectedBodyStream(httpx.AsyncByteStream):
+    """A response body that raises `httpx.DecodingError` when read, before
+    any byte is received or decoded. Closing it closes the original body,
+    which releases the connection."""
+
+    def __init__(self, stream: httpx.AsyncByteStream, request: httpx.Request) -> None:
+        self._stream = stream
+        self._request = request
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        raise httpx.DecodingError(_REJECTED_CODING_MESSAGE, request=self._request)
+        yield b""  # pragma: no cover - makes this an async generator
+
+    async def aclose(self) -> None:
+        await self._stream.aclose()
+
+
+class _ContentCodingTransport(httpx.AsyncBaseTransport):
+    """Applies the response content-coding policy specified in
+    `docs/features/platform/networking.md` (HTTP Response Compression).
+
+    A final response that declares more than one content coding, or one
+    other than `gzip` or `deflate`, keeps its status and headers, but its
+    body fails when read. Wraps the retry transport, so only the response
+    returned to the caller is inspected.
+    """
+
+    def __init__(self, inner: httpx.AsyncBaseTransport) -> None:
+        self._inner = inner
+
+    async def aclose(self) -> None:
+        await self._inner.aclose()
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        response = await self._inner.handle_async_request(request)
+        codings = response_content_codings(response.headers)
+        if len(codings) > 1 or not _DECODABLE_CODINGS.issuperset(codings):
+            assert isinstance(response.stream, httpx.AsyncByteStream)
+            response.stream = _RejectedBodyStream(response.stream, request)
+        return response
+
+
+# ---------------------------------------------------------------------------
 # HTTP client factory
 # ---------------------------------------------------------------------------
 
@@ -296,6 +364,9 @@ def create_http_client(
         - User-Agent is always built from the standard template. Any
           `user-agent` key in a `headers` override is dropped and
           replaced with the template-generated value.
+        - Accept-Encoding is always `ACCEPT_ENCODING`, the codings the
+          response content-coding policy permits; any `accept-encoding`
+          key in a `headers` override is replaced.
         - A `verify` or `ssl_context`-equivalent override that disables
           or replaces TLS verification emits a WARNING-level log
           including `name` for traceability.
@@ -305,6 +376,7 @@ def create_http_client(
     headers = httpx.Headers(overrides.pop("headers", None) or {})
     if "accept" not in headers:
         headers["accept"] = "application/json"
+    headers["accept-encoding"] = ACCEPT_ENCODING
     headers["user-agent"] = _build_user_agent(name)
 
     verify_override = overrides.pop("verify", None)
@@ -338,8 +410,8 @@ def create_http_client(
     )
 
     inner_transport = httpx.AsyncHTTPTransport(verify=verify, limits=limits, retries=0)
-    transport = _RetryTransport(
-        inner_transport, retry_non_idempotent=retry_non_idempotent
+    transport = _ContentCodingTransport(
+        _RetryTransport(inner_transport, retry_non_idempotent=retry_non_idempotent)
     )
 
     return httpx.AsyncClient(

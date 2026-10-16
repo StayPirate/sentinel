@@ -11,9 +11,14 @@ passed explicitly.
 from __future__ import annotations
 
 import asyncio
+import gzip
 import ssl
+import tracemalloc
+import zlib
+from collections.abc import AsyncIterator, Callable
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 from unittest.mock import AsyncMock
 
 import httpx
@@ -240,8 +245,7 @@ class TestCreateHttpClientOverrideSafety:
     async def test_limits_default(self) -> None:
         client = hc.create_http_client("test_component")
         try:
-            transport = client._transport
-            assert isinstance(transport, hc._RetryTransport)
+            transport = _retry_transport(client)
             pool = transport._inner._pool  # type: ignore[attr-defined]
             assert pool._max_connections == 100
             assert pool._max_keepalive_connections == 20
@@ -254,8 +258,7 @@ class TestCreateHttpClientOverrideSafety:
             limits=httpx.Limits(max_connections=5, max_keepalive_connections=2),
         )
         try:
-            transport = client._transport
-            assert isinstance(transport, hc._RetryTransport)
+            transport = _retry_transport(client)
             pool = transport._inner._pool  # type: ignore[attr-defined]
             assert pool._max_connections == 5
             assert pool._max_keepalive_connections == 2
@@ -266,21 +269,319 @@ class TestCreateHttpClientOverrideSafety:
         """The client returned by the factory actually uses
         `_RetryTransport` — guards against a regression where the retry
         policy silently stops being applied (e.g., accidentally
-        re-enabling httpx's built-in transport retry instead)."""
+        re-enabling httpx's built-in transport retry instead). The
+        content-coding policy wraps it, so it inspects only the response
+        returned to the caller."""
         client = hc.create_http_client("test_component")
         try:
-            assert isinstance(client._transport, hc._RetryTransport)
+            assert isinstance(client._transport, hc._ContentCodingTransport)
+            assert isinstance(client._transport._inner, hc._RetryTransport)
         finally:
             await client.aclose()
 
     async def test_retry_non_idempotent_is_forwarded_to_transport(self) -> None:
         client = hc.create_http_client("test_component", retry_non_idempotent=True)
         try:
-            transport = client._transport
-            assert isinstance(transport, hc._RetryTransport)
-            assert transport._retry_non_idempotent is True
+            assert _retry_transport(client)._retry_non_idempotent is True
         finally:
             await client.aclose()
+
+
+def _retry_transport(client: httpx.AsyncClient) -> hc._RetryTransport:
+    """The factory's retry transport, inside the content-coding policy."""
+    transport = client._transport
+    assert isinstance(transport, hc._ContentCodingTransport)
+    assert isinstance(transport._inner, hc._RetryTransport)
+    return transport._inner
+
+
+# ---------------------------------------------------------------------------
+# Response content coding
+# ---------------------------------------------------------------------------
+
+_URL: Final = "https://example.suse.de/resource"
+_PAYLOAD: Final = b'{"fictional": "payload"}'
+_MIB: Final = 1024 * 1024
+
+
+class _NetworkBody(httpx.AsyncByteStream):
+    """An unread response body, as from a real transport, that records
+    how many chunks were received and whether it was closed."""
+
+    def __init__(self, data: bytes) -> None:
+        self._data = data
+        self.chunks_received = 0
+        self.closed = False
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        for offset in range(0, len(self._data), 64 * 1024):
+            self.chunks_received += 1
+            yield self._data[offset : offset + 64 * 1024]
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+@dataclass
+class _Network:
+    """The network behind a factory client: every request receives a
+    fresh response with the configured status, headers, and body."""
+
+    status: int = 200
+    headers: list[tuple[str, str]] = field(default_factory=list)
+    content: bytes = _PAYLOAD
+    requests: list[httpx.Request] = field(default_factory=list)
+    bodies: list[_NetworkBody] = field(default_factory=list)
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        body = _NetworkBody(self.content)
+        self.bodies.append(body)
+        return httpx.Response(self.status, headers=self.headers, stream=body)
+
+    def declare(self, values: list[str]) -> None:
+        """One `Content-Encoding` field per value."""
+        self.headers = [("Content-Encoding", value) for value in values]
+
+
+@pytest.fixture
+def network(monkeypatch: pytest.MonkeyPatch) -> _Network:
+    """Replaces only the factory's network transport, so the
+    content-coding policy and the retry transport are the production
+    ones."""
+    served = _Network()
+    monkeypatch.setattr(
+        httpx, "AsyncHTTPTransport", lambda **_: httpx.MockTransport(served)
+    )
+    return served
+
+
+def _gzip(data: bytes) -> bytes:
+    return gzip.compress(data, mtime=0)
+
+
+def _zeros_gzip(size: int) -> bytes:
+    """One gzip member of `size` zero bytes, built without holding them."""
+    compressor = zlib.compressobj(9, zlib.DEFLATED, 31)
+    parts = [compressor.compress(bytes(_MIB)) for _ in range(size // _MIB)]
+    return b"".join([*parts, compressor.flush()])
+
+
+def _innermost_open_size(data: bytes, layers: int) -> int:
+    """The size `data` decodes to through `layers` gzip layers, counted
+    without holding the innermost output."""
+    for _ in range(layers - 1):
+        data = gzip.decompress(data)
+    decompressor = zlib.decompressobj(31)
+    size = 0
+    while data:
+        size += len(decompressor.decompress(data, _MIB))
+        data = decompressor.unconsumed_tail
+    return size + len(decompressor.flush())
+
+
+# Values a response may declare: at most one of gzip and deflate, matched
+# as httpx matches decoders; identity and empty elements are no coding.
+_PERMITTED_CODINGS: Final = [
+    pytest.param([], lambda data: data, id="absent"),
+    pytest.param(["identity"], lambda data: data, id="identity"),
+    pytest.param([""], lambda data: data, id="empty"),
+    pytest.param(["gzip"], _gzip, id="gzip"),
+    pytest.param([" GZip "], _gzip, id="gzip-case-whitespace"),
+    pytest.param(["deflate"], zlib.compress, id="deflate"),
+    pytest.param(["identity, gzip"], _gzip, id="identity-element"),
+    pytest.param(["gzip", "identity"], _gzip, id="identity-field"),
+    pytest.param([", gzip ,"], _gzip, id="empty-elements"),
+]
+_REJECTED_CODINGS: Final = [
+    pytest.param(["gzip, gzip"], id="stacked-gzip"),
+    pytest.param(["gzip", "gzip"], id="stacked-fields"),
+    pytest.param(["deflate, gzip"], id="deflate-then-gzip"),
+    pytest.param(["gzip, identity, gzip"], id="stacked-around-identity"),
+    pytest.param(["br"], id="br"),
+    pytest.param(["zstd"], id="zstd"),
+    pytest.param(["x-gzip"], id="x-gzip"),
+    pytest.param(["compress"], id="compress"),
+    pytest.param(["fictional-coding"], id="unknown"),
+    pytest.param(["gzip, br"], id="gzip-then-br"),
+]
+
+
+@pytest.mark.unit
+class TestResponseContentCodings:
+    @pytest.mark.parametrize(
+        ("values", "expected"),
+        [
+            pytest.param([], [], id="absent"),
+            pytest.param(["gzip"], ["gzip"], id="one"),
+            pytest.param([" GZip "], ["gzip"], id="case-and-whitespace"),
+            pytest.param(["identity", "IDENTITY"], [], id="identity"),
+            pytest.param(["", " , "], [], id="empty-elements"),
+            pytest.param(["identity, deflate"], ["deflate"], id="identity-dropped"),
+            pytest.param(["gzip, br"], ["gzip", "br"], id="list-in-order"),
+            pytest.param(["gzip", "zstd"], ["gzip", "zstd"], id="fields-in-order"),
+        ],
+    )
+    def test_declared_codings_are_listed_in_order(
+        self, values: list[str], expected: list[str]
+    ) -> None:
+        headers = httpx.Headers([("Content-Encoding", value) for value in values])
+        assert hc.response_content_codings(headers) == expected
+
+
+@pytest.mark.unit
+class TestContentCodingPolicy:
+    async def test_accept_encoding_advertises_the_permitted_codings(
+        self, network: _Network
+    ) -> None:
+        async with hc.create_http_client("test_component") as client:
+            await client.get(_URL)
+
+        [request] = network.requests
+        assert request.headers.get_list("accept-encoding") == ["gzip, deflate"]
+
+    async def test_accept_encoding_override_is_replaced(
+        self, network: _Network
+    ) -> None:
+        async with hc.create_http_client(
+            "test_component", headers={"Accept-Encoding": "br, zstd"}
+        ) as client:
+            assert client.headers.get_list("accept-encoding") == ["gzip, deflate"]
+            await client.get(_URL)
+
+        [request] = network.requests
+        assert request.headers.get_list("accept-encoding") == ["gzip, deflate"]
+
+    @pytest.mark.parametrize(("values", "encode"), _PERMITTED_CODINGS)
+    async def test_permitted_coding_is_decoded(
+        self,
+        network: _Network,
+        values: list[str],
+        encode: Callable[[bytes], bytes],
+    ) -> None:
+        network.declare(values)
+        network.content = encode(_PAYLOAD)
+
+        async with hc.create_http_client("test_component") as client:
+            response = await client.get(_URL)
+            async with client.stream("GET", _URL) as streamed:
+                chunks = [chunk async for chunk in streamed.aiter_bytes()]
+
+        assert response.content == _PAYLOAD
+        assert b"".join(chunks) == _PAYLOAD
+
+    @pytest.mark.parametrize("values", _REJECTED_CODINGS)
+    async def test_rejected_coding_fails_on_read_before_any_byte(
+        self, network: _Network, values: list[str]
+    ) -> None:
+        network.declare(values)
+        network.content = _gzip(_gzip(_PAYLOAD))
+
+        async with hc.create_http_client("test_component") as client:
+            with pytest.raises(httpx.DecodingError) as raised:
+                await client.get(_URL)
+
+        [body] = network.bodies
+        assert body.chunks_received == 0
+        assert body.closed
+        assert raised.value.request.url == _URL
+        # The bounded message never echoes the declared value.
+        assert all(value.strip() not in str(raised.value) for value in values)
+
+    @pytest.mark.parametrize("values", _REJECTED_CODINGS)
+    async def test_rejected_coding_keeps_status_and_headers_until_read(
+        self, network: _Network, values: list[str]
+    ) -> None:
+        network.declare(values)
+
+        async with (
+            hc.create_http_client("test_component") as client,
+            client.stream("GET", _URL) as response,
+        ):
+            assert response.status_code == 200
+            assert response.headers.get_list("content-encoding") == values
+            with pytest.raises(httpx.DecodingError):
+                async for _ in response.aiter_bytes():
+                    pass
+
+        [body] = network.bodies
+        assert body.chunks_received == 0
+        assert body.closed
+
+    async def test_rejected_coding_also_fails_a_raw_read(
+        self, network: _Network
+    ) -> None:
+        """The undecoded body is rejected too, so a reader that decodes
+        the payload itself must check the declared coding first."""
+        network.declare(["gzip, gzip"])
+
+        async with (
+            hc.create_http_client("test_component") as client,
+            client.stream("GET", _URL) as response,
+        ):
+            with pytest.raises(httpx.DecodingError):
+                async for _ in response.aiter_raw():
+                    pass
+
+        assert network.bodies[0].chunks_received == 0
+
+    async def test_unread_error_response_keeps_its_http_status_error(
+        self, network: _Network
+    ) -> None:
+        network.status = 404
+        network.declare(["gzip, gzip"])
+
+        async with (
+            hc.create_http_client("test_component") as client,
+            client.stream("GET", _URL) as response,
+        ):
+            with pytest.raises(httpx.HTTPStatusError):
+                response.raise_for_status()
+
+        assert network.bodies[0].chunks_received == 0
+        assert network.bodies[0].closed
+
+    async def test_stacked_gzip_bomb_is_never_decoded(self, network: _Network) -> None:
+        """Regression: three gzip layers of a few hundred bytes decode to
+        64 MiB, and each further layer multiplies that again. The policy
+        rejects them before any byte is received, so memory stays flat.
+        Traced memory, unlike timing, is machine-independent."""
+        bomb = _gzip(_gzip(_zeros_gzip(64 * _MIB)))
+        assert len(bomb) < 1024
+        assert _innermost_open_size(bomb, layers=3) == 64 * _MIB
+        network.declare(["gzip, gzip, gzip"])
+        network.content = bomb
+
+        async with hc.create_http_client("test_component") as client:
+            started = not tracemalloc.is_tracing()
+            if started:
+                tracemalloc.start()
+            try:
+                tracemalloc.reset_peak()
+                baseline = tracemalloc.get_traced_memory()[0]
+                with pytest.raises(httpx.DecodingError):
+                    await client.get(_URL)
+                peak = tracemalloc.get_traced_memory()[1] - baseline
+            finally:
+                if started:
+                    tracemalloc.stop()
+
+        assert peak < _MIB
+        assert network.bodies[0].chunks_received == 0
+
+    async def test_rejection_is_a_data_quality_failure(self, network: _Network) -> None:
+        """Like any undecodable body, a rejected coding is neither an
+        infrastructure failure nor retryable (Infrastructure Failure
+        Classification)."""
+        network.declare(["br"])
+
+        async with hc.create_http_client("test_component") as client:
+            with pytest.raises(httpx.DecodingError) as raised:
+                await client.get(_URL)
+
+        assert len(network.requests) == 1
+        assert hc.is_infrastructure_failure(raised.value) is False
+        assert hc.is_retryable_condition(raised.value) is False
 
 
 # ---------------------------------------------------------------------------

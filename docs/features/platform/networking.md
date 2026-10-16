@@ -50,13 +50,16 @@ def create_http_client(name: str, **overrides) -> httpx.AsyncClient:
 
 #### Override Safety
 
-Three settings receive special protection in the factory:
+Four settings receive special protection in the factory:
 
 - **User-Agent**: always built from the standard template using the
   `name` parameter. Not overridable via `http_client_options` or
   `**overrides` — any `user-agent` key in headers or top-level
   `headers` override is silently dropped and replaced with the
   template-generated value.
+- **Accept-Encoding**: always `gzip, deflate`, the content codings the
+  shared response policy permits (see "HTTP Response Compression"). Any
+  `accept-encoding` key in a `headers` override is replaced.
 - **TLS verify / ssl_context**: overridable via `**overrides` or
   `http_client_options`, but every override that sets `verify=False`
   or provides a custom `ssl_context` emits a WARNING-level log at
@@ -85,7 +88,7 @@ Three settings receive special protection in the factory:
 | Max connections | 100 | `http_client_options` (limits) |
 | Max keepalive connections | 20 | `http_client_options` (limits) |
 | Accept | `application/json` | `http_client_options` (headers) |
-| Accept-Encoding | `gzip, deflate` (httpx built-in) | — |
+| Accept-Encoding | `gzip, deflate`; see "HTTP Response Compression" | Not overridable (see "Override Safety") |
 | TLS | Combined trust store (system CAs + SUSE CA), verify enabled | `http_client_options` / `**overrides` (emits WARNING — see "Override Safety") |
 | Transport retry | See "Transport-Level Retry" below | `http_client_options` |
 | Redirect following | False (no redirects followed) | `http_client_options` (emits WARNING — see "Override Safety") |
@@ -272,7 +275,7 @@ new subclasses within those families are automatically covered.
 | `httpx.RemoteProtocolError` | `True` | Server sent malformed HTTP — no parseable response available |
 | `httpx.HTTPStatusError` with `status_code >= 500` | `True` | Server in persistent fault state (post-transport-retry exhaustion) |
 | `httpx.HTTPStatusError` with `status_code < 500` | `False` | Server responded with client error (4xx) — proves reachability |
-| `httpx.DecodingError` | `False` | HTTP response received (headers/status OK), body encoding corrupted — data-quality |
+| `httpx.DecodingError` | `False` | HTTP response received (headers/status OK), body encoding corrupted or outside the content-coding policy (see "HTTP Response Compression") — data-quality |
 | `httpx.TooManyRedirects` | `False` | Server responded with 3xx redirects — redirect loop proves reachability |
 | `httpx.LocalProtocolError` | `False` | Client-side programming error — not an external API issue |
 | `httpx.UnsupportedProtocol` | `False` | Programming error (invalid URL scheme) — not a runtime issue |
@@ -366,10 +369,36 @@ wrappers for on-demand and catch-up operations).
 
 #### HTTP Response Compression
 
-The HTTP client sends `Accept-Encoding: gzip, deflate` by default (httpx
-built-in behavior using Python standard library codecs). Responses are
-decompressed transparently. Brotli (`br`) additionally supported if the
-`brotli` package is installed. No per-fetcher configuration needed.
+The shared client sends `Accept-Encoding: gzip, deflate` on every request. The
+factory sets this value itself instead of inheriting the httpx default, which
+changes with the optional compression packages installed, and a caller cannot
+override it (see "Override Safety"). Responses are decompressed transparently
+with Python standard-library codecs. No per-fetcher configuration is needed.
+
+A response may apply at most one content coding, and only `gzip` or
+`deflate`. Its codings are taken from every `Content-Encoding` field and
+comma-separated element, compared case-insensitively after trimming
+whitespace; `identity` and empty elements are not codings. A final response
+that declares more than one coding, or any other coding — for example `br`,
+`zstd`, `x-gzip`, `compress`, or an unknown value — keeps its status and
+headers, but reading its body, decoded or raw, raises `httpx.DecodingError`
+before any body byte is received or decoded. Closing the response releases its
+connection. A caller that does not read the body of an error response keeps
+its HTTP status outcome; a caller that reads the body observes the same
+`DecodingError` as for a corrupt compressed body, a data-quality failure (see
+Infrastructure Failure Classification), and applies the outcome its owning
+specification defines for an undecodable response.
+
+The policy bounds decoding, not transfer. One standard-library layer expands
+the received bytes by at most about 1,032:1, the limit of the deflate format
+that both codings use, so the decoded size grows only linearly with the bytes
+received; stacked codings, which multiply that factor for every layer, are what
+the policy excludes. The number of bytes received is not limited.
+
+A consumer that decodes a compressed payload itself requests
+`Accept-Encoding: identity` and rejects any declared coding before reading the
+body, as its owning specification defines (for example the IBS Product release
+detector, `docs/features/packages/ibs-product-release-detection.md`).
 
 #### Proxy Configuration
 

@@ -81,6 +81,8 @@ No issues identified.
 
 **Status**: RESOLVED — Won't fix: risk accepted. The threat model relies on developer-curated endpoints (NVD, GitHub, CISA, SMELT, IBS, AIMAAS) with low compromise likelihood. Implicit protections (30s read timeout, container memory limits, Celery run_timeout) provide sufficient defense-in-depth for this risk level. (2026-07-03)
 
+**Re-evaluated** (2026-10-16, #994): the accepted risk does not extend to decoded size. Stacked content codings let a body of a few hundred bytes decode to tens of MiB, and each further layer multiplies that, so neither the read timeout nor container memory bounds it; the same exposure applies to the API process, which uses the shared client for SMELT during package addition. The shared client now permits at most one `gzip` or `deflate` coding and rejects any other before decoding (`networking.md`, HTTP Response Compression), so decoded size grows only linearly with the bytes received. A limit on the received body itself remains unnecessary on the original grounds.
+
 ---
 
 ## API Conventions
