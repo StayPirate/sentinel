@@ -835,6 +835,33 @@ class TestPhase1ErrorPropagation:
         assert not is_infrastructure_failure(error)
         assert ingestion.calls == 0
 
+    @pytest.mark.parametrize("code", [200, 404, 503])
+    async def test_undecodable_body_is_non_retryable_whatever_the_status(
+        self,
+        code: int,
+        fetcher: SyncOsvAdvisories,
+        server: OsvServer,
+        ingestion: Ingestion,
+    ) -> None:
+        """The request reads the body before the status is checked, so an
+        undecodable body fails even a 404 (networking.md, HTTP Response
+        Compression)."""
+        error = await _raised(
+            fetcher,
+            server,
+            lambda request: httpx.Response(
+                code,
+                headers={"Content-Encoding": "gzip"},
+                stream=httpx.ByteStream(b"not gzip"),
+                request=request,
+            ),
+        )
+
+        assert isinstance(error, httpx.DecodingError)
+        assert not is_retryable_condition(error)
+        assert not is_infrastructure_failure(error)
+        assert ingestion.calls == 0
+
     @pytest.mark.parametrize(
         "body",
         [
