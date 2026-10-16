@@ -46,6 +46,7 @@ For architectural decisions and design constraints, see
   - [Startup Ordering](#startup-ordering)
   - [Git Worker Volume](#git-worker-volume)
   - [Timezone and Locale Requirements](#timezone-and-locale-requirements)
+  - [Python Interpreter Limits](#python-interpreter-limits)
   - [Clock Synchronization](#clock-synchronization)
 - [Operations](#operations)
   - [Database Migrations](#database-migrations)
@@ -1351,6 +1352,21 @@ TZ=UTC
 LC_ALL=C
 GIT_TERMINAL_PROMPT=0
 ```
+
+### Python Interpreter Limits
+
+All Sentinel runtime processes (see [Container Images](#container-images))
+MUST run with CPython's default integer-string conversion limit
+(`sys.int_info.default_max_str_digits`, 4300 digits). A deployment MUST NOT
+override it with `PYTHONINTMAXSTRDIGITS` or `-X int_max_str_digits`; the
+image sets neither. An external JSON integer longer than the limit is
+invalid JSON (`docs/conventions.md`, External JSON Decoding), and the same
+limit bounds every other conversion of an external decimal string and its
+quadratic cost.
+
+No stack-size setting is required: the deepest JSON nesting the parser
+accepts depends on the process and thread stack size and is not part of any
+contract.
 
 ### Clock Synchronization
 

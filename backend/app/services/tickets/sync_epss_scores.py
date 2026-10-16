@@ -43,6 +43,7 @@ from app.services.base_cve_fetcher import (
 from app.services.base_fetcher import FetcherError
 from app.services.cve_ingest import CVEIngestPayload, EPSSEntry
 from app.services.http_client import is_infrastructure_failure
+from app.services.json_decoding import decode_json
 from app.services.tickets import epss_score_record
 
 logger = structlog.get_logger(__name__)
@@ -144,7 +145,7 @@ class SyncEpssScores(BaseCVEFetcher):
         if response.status_code != 200:
             response.raise_for_status()
             raise EpssResponseError()
-        return response.json()
+        return decode_json(response.content)
 
     def _extract_entry(self, body: object) -> EPSSEntry | None:
         """Validate and convert the entry, or `None` for an empty `data`.

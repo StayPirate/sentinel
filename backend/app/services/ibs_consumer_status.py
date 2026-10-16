@@ -57,6 +57,7 @@ from app.core.enums import (
     IBSConsumerErrorCategory,
     IBSConsumerStatus,
 )
+from app.services.json_decoding import decode_json
 
 logger = structlog.get_logger(__name__)
 
@@ -255,13 +256,14 @@ def parse_heartbeat(raw: bytes) -> HeartbeatDocument | None:
     future timestamps are judged by `evaluate_heartbeat()`.
     """
     try:
-        members = json.loads(raw.decode("utf-8"), parse_constant=_reject_constant)
+        members = decode_json(raw.decode("utf-8"), parse_constant=_reject_constant)
         if not isinstance(members, dict):
             return None
         return _document_from(members)
-    except ValueError, KeyError, RecursionError:
-        # Invalid UTF-8 or JSON, an invalid or missing field, an unknown
-        # status or category, a violated invariant, or excessive nesting.
+    except ValueError, KeyError:
+        # Invalid UTF-8 or JSON (including a value the parser cannot
+        # represent), an invalid or missing field, an unknown status or
+        # category, or a violated invariant.
         return None
 
 

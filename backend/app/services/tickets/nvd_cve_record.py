@@ -29,7 +29,6 @@ message renders the input.
 
 from __future__ import annotations
 
-import json
 import re
 import uuid
 from collections.abc import Mapping, Sequence
@@ -50,6 +49,7 @@ from app.services.cve_ingest import (
     CWEEntry,
 )
 from app.services.cvss import is_reserved_provider_name, validate_external_cvss_vector
+from app.services.json_decoding import decode_json
 from app.services.reference_service import AutomaticReferenceInput
 from app.services.ticket_mutations_errors import InvalidCVSSVectorError
 
@@ -390,10 +390,10 @@ def select_cpe_matches(configurations: object) -> CpeSelection:
 def _decode(content: bytes) -> object:
     """Strict UTF-8 JSON; raises `NvdPageError` when it does not decode."""
     try:
-        return json.loads(content.decode("utf-8"))
-    except ValueError, RecursionError:
-        # `UnicodeDecodeError` and `JSONDecodeError` are `ValueError`s; the
-        # latter keeps the document, so the cause is not chained.
+        return decode_json(content.decode("utf-8"))
+    except ValueError:
+        # Every decoding failure is a `ValueError` (External JSON Decoding);
+        # `JSONDecodeError` keeps the document, so the cause is not chained.
         raise NvdPageError from None
 
 

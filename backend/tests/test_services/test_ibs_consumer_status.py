@@ -50,6 +50,11 @@ from app.services.ibs_consumer_status import (
     parse_heartbeat,
     write_heartbeat_value,
 )
+from tests.support.json_decoding import (
+    NESTED_ARRAY,
+    OVERSIZED_INTEGER,
+    limit_parser_nesting,
+)
 
 _NOW: Final = datetime(2026, 9, 8, 15, 42, 40, tzinfo=UTC)
 """The fixed evaluation instant: ten seconds after the example heartbeat."""
@@ -167,11 +172,6 @@ _BAD_COUNTERS: Final = {
     "null": "null",
 }
 
-_DEEP: Final = 1_000_000
-"""Array nesting far beyond the JSON parser's recursion limit, whose exact
-value depends on the interpreter build and its C stack (CPython 3.14.8
-accepts 100,000 levels)."""
-
 
 def _invalid_values() -> list[Any]:
     valid = _encode(_CONNECTED)
@@ -196,8 +196,8 @@ def _invalid_values() -> list[Any]:
             id="negative-infinity-in-ignored-member",
         ),
         pytest.param(
-            _encode(_CONNECTED, extra="[" * _DEEP + "]" * _DEEP),
-            id="nesting-beyond-parser-recursion",
+            _encode(_CONNECTED, extra=OVERSIZED_INTEGER),
+            id="integer-beyond-the-conversion-limit-in-ignored-member",
         ),
         pytest.param(_encode(_with(status="paused")), id="status-unknown"),
         pytest.param(_encode(_with(status="CONNECTED")), id="status-uppercase"),
@@ -385,6 +385,19 @@ class TestParseHeartbeat:
 
     @pytest.mark.parametrize("raw", _invalid_values())
     def test_parse_invalid_value_returns_none(self, raw: bytes) -> None:
+        assert parse_heartbeat(raw) is None
+        assert evaluate_heartbeat(raw, now=_NOW) is None
+
+    def test_parse_nesting_beyond_the_parser_limit_returns_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Nesting in an ignored member that the parser cannot represent
+        makes the value invalid (External JSON Decoding)."""
+        raw = _encode(_CONNECTED, extra=NESTED_ARRAY)
+        assert parse_heartbeat(raw) == _expected_document(_CONNECTED)
+
+        limit_parser_nesting(monkeypatch)
+
         assert parse_heartbeat(raw) is None
         assert evaluate_heartbeat(raw, now=_NOW) is None
 

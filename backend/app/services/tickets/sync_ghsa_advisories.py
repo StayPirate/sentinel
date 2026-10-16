@@ -52,6 +52,7 @@ from app.services.base_cve_fetcher import (
     CVENotInSource,
 )
 from app.services.base_fetcher import FetcherError
+from app.services.json_decoding import decode_json
 from app.services.tickets import ghsa_advisory_record
 
 logger = structlog.get_logger(__name__)
@@ -166,7 +167,7 @@ class SyncGhsaAdvisories(BaseCVEFetcher):
         if response.status_code != 200:
             response.raise_for_status()
             raise GhsaResponseError()
-        document = response.json()
+        document = decode_json(response.content)
         if not isinstance(document, list):
             raise GhsaResponseError()
         if not document:
@@ -357,8 +358,8 @@ def _raise_chained(response: httpx.Response, message: str) -> None:
 def _page_elements(response: httpx.Response) -> list[object]:
     """Algorithm step 6.c: the advisory array of one page."""
     try:
-        document = response.json()
-    except (ValueError, RecursionError) as e:
+        document = decode_json(response.content)
+    except ValueError as e:
         raise FetcherError(UNPARSEABLE_RESPONSE) from e
     if not isinstance(document, list):
         raise FetcherError(UNPARSEABLE_RESPONSE)

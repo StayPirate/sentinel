@@ -28,6 +28,7 @@ import structlog
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.services.base_fetcher import FetcherError
+from app.services.json_decoding import decode_json
 
 logger = structlog.get_logger(__name__)
 
@@ -183,7 +184,7 @@ async def _get_page(client: httpx.AsyncClient, url: str, page: int) -> Any:
         raise FetcherError(f"SMELT returned HTTP {status_code}") from exc
 
     try:
-        return response.json()
+        return decode_json(response.content)
     except ValueError:
         invalid = InvalidProductListingError(f"page {page}: body is not valid JSON")
         _log_invalid(page, invalid)

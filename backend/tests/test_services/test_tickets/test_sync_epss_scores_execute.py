@@ -88,6 +88,11 @@ from tests.support.epss import (
     status,
 )
 from tests.support.inadmissible import INADMISSIBLE_CHARACTERS
+from tests.support.json_decoding import (
+    NESTED_ARRAY,
+    OVERSIZED_INTEGER,
+    limit_parser_nesting,
+)
 
 SessionFactory = Callable[[], Awaitable[AsyncSession]]
 
@@ -734,6 +739,14 @@ class TestItemFailure:
             (status(503, FAILURE_TEXT.encode()), "HTTPStatusError"),
             (status(200, f"{{{FAILURE_TEXT}".encode()), "JSONDecodeError"),
             (
+                status(200, ('{"x": ' + NESTED_ARRAY + "}").encode()),
+                "JSONNestingError",
+            ),
+            (
+                status(200, b'{"n": ' + OVERSIZED_INTEGER.encode() + b"}"),
+                "ValueError",
+            ),
+            (
                 body(envelope(entry_for("CVE-2099-48001", percentile=FAILURE_TEXT))),
                 "ValidationError",
             ),
@@ -758,6 +771,8 @@ class TestItemFailure:
             "rate_limited",
             "server_error",
             "json",
+            "nesting_beyond_the_parser_limit",
+            "integer_beyond_the_conversion_limit",
             "schema",
             "out_of_range",
             "two_entries",
@@ -766,8 +781,16 @@ class TestItemFailure:
         ],
     )
     async def test_event_names_only_the_exception_class(
-        self, responder: Responder, cause: str, env: Env, batch: Batch
+        self,
+        responder: Responder,
+        cause: str,
+        env: Env,
+        batch: Batch,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        # The limited parser rejects only the nesting case (External JSON
+        # Decoding).
+        limit_parser_nesting(monkeypatch)
         cve = await env.active_cve()
         env.respond(cve, responder)
 

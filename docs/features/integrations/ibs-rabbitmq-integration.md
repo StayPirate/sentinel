@@ -126,7 +126,8 @@ Malformed JSON includes an empty body, a byte order mark, trailing content
 after the value, more than one value, the non-standard literals `NaN`,
 `Infinity`, and `-Infinity` anywhere in the document, and a value the parser
 cannot represent, such as nesting deeper than its limit or an integer with too
-many digits. JSON whitespace around the value is permitted. A duplicated
+many digits (`docs/conventions.md`, External JSON Decoding). JSON whitespace
+around the value is permitted. A duplicated
 member name in the root object makes the delivery malformed only when the
 handler of its routing key consumes that member; duplicated unconsumed members
 are accepted. No size limit applies beyond the broker's own limits. Raw

@@ -44,6 +44,7 @@
   - [Testing Conventions](#testing-conventions)
   - [External Integration Contract Verification](#external-integration-contract-verification)
   - [External String Admissibility](#external-string-admissibility)
+  - [External JSON Decoding](#external-json-decoding)
   - [Runtime Version](#runtime-version)
     - [Source of Truth](#source-of-truth)
     - [Dockerfile Convention](#dockerfile-convention)
@@ -1140,6 +1141,53 @@ input is not an external source under this rule; it follows `docs/api-spec.md`
 (Inadmissible Characters in Request Input). The mandatory test scenario is
 defined in `docs/features/platform/testing-strategy.md` (External String
 Admissibility).
+
+### External JSON Decoding
+
+The standard-library JSON parser cannot represent two kinds of syntactically
+valid JSON text:
+
+- Nesting deeper than its limit. The parser raises `RecursionError`, not
+  `json.JSONDecodeError`, and the limit depends on the C stack that remains
+  in the decoding thread. It therefore varies with the process stack size,
+  the thread, and the interpreter build: a document accepted on one machine
+  or thread can be rejected on another.
+- An integer with more digits than the interpreter's integer-string
+  conversion limit. The parser raises a plain `ValueError`.
+
+A JSON document that Sentinel decodes from outside its process — an HTTP
+response body, a repository file, a message-bus payload, or a value read
+back from Redis — and that the parser cannot represent is **invalid JSON**:
+
+- The owning contract's existing outcome for malformed, unparseable, or
+  invalid JSON applies at that contract's existing granularity. The rule
+  adds no separate outcome. A specification that names `JSONDecodeError` as
+  an example of an unparseable body covers these failures as well.
+- The document is decoded only through `decode_json()` in
+  `backend/app/services/json_decoding.py`. It passes the document and the
+  caller's options to the standard-library parser unchanged, adds no limit
+  or check, and converts `RecursionError` into `JSONNestingError`, a
+  `ValueError`. Every decoding failure — syntax, text encoding, the integer
+  limit, nesting, or a `ValueError` raised by a caller's hook — is therefore
+  a `ValueError`; `MemoryError` propagates. Text encoding, byte order mark,
+  non-standard constant, and duplicate-member rules remain with the owning
+  contract.
+- The deepest accepted nesting is not part of any contract. No contract,
+  test, or fixture relies on a document being accepted or rejected because
+  of its depth.
+- The integer limit is CPython's default, which the runtime never overrides
+  (`docs/deployment.md`, Python Interpreter Limits). It bounds every
+  conversion of an external decimal string, not only JSON.
+- Not covered: consumer-supplied API request bodies, which
+  `docs/api-spec.md` governs; resources bundled with the application
+  package, such as the CPE mapping
+  (`docs/features/packages/cpe-package-mapping.md`); a value the same code
+  has just serialized; and decoding inside a library's own protocol, such
+  as a JWT or a Celery message.
+
+A structural test enforces the single decoding boundary. The mandatory test
+scenario is defined in `docs/features/platform/testing-strategy.md`
+(External JSON Decoding).
 
 ### Runtime Version
 

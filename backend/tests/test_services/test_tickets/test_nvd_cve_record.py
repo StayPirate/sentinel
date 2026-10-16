@@ -73,6 +73,11 @@ from app.services.tickets.nvd_cve_record import (
 )
 from tests.support import nvd as nvd_support
 from tests.support.inadmissible import INADMISSIBLE_CHARACTERS, NUL, SURROGATE
+from tests.support.json_decoding import (
+    NESTED_ARRAY,
+    OVERSIZED_INTEGER,
+    limit_parser_nesting,
+)
 from tests.support.module_imports import APP_ROOT, forbidden_imports, imported_modules
 from tests.support.nvd import (
     CISA_ADP_SOURCE_IDENTIFIER,
@@ -349,7 +354,9 @@ class TestParsePage:
             pytest.param(b"null", id="null-root"),
             pytest.param(b"[" * 100_000 + b"]" * 100_000, id="deep-nesting"),
             pytest.param(
-                b'{"totalResults": ' + b"9" * 5000 + b', "vulnerabilities": []}',
+                b'{"totalResults": '
+                + OVERSIZED_INTEGER.encode()
+                + b', "vulnerabilities": []}',
                 id="oversized-integer",
             ),
             pytest.param(_page(totalResults=ABSENT), id="total-absent"),
@@ -365,6 +372,21 @@ class TestParsePage:
         ],
     )
     def test_body_that_is_not_a_page_fails(self, content: bytes) -> None:
+        with pytest.raises(NvdPageError) as caught:
+            parse_page(content)
+
+        assert str(caught.value) == PAGE_MESSAGE
+
+    def test_nesting_beyond_the_parser_limit_fails(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Nesting in an unconsumed member: a page within the parser's
+        limit, unparseable beyond it (External JSON Decoding)."""
+        content = _page()[:-1] + b', "x": ' + NESTED_ARRAY.encode() + b"}"
+        assert parse_page(content).total_results == 1
+
+        limit_parser_nesting(monkeypatch)
+
         with pytest.raises(NvdPageError) as caught:
             parse_page(content)
 
@@ -545,6 +567,10 @@ class TestSourceCache:
             pytest.param(b"null", id="null-root"),
             pytest.param(b"[" * 100_000 + b"]" * 100_000, id="deep-nesting"),
             pytest.param(
+                b'{"totalResults": ' + OVERSIZED_INTEGER.encode() + b"}",
+                id="oversized-integer",
+            ),
+            pytest.param(
                 _source_page(_source(), totalResults=ABSENT), id="total-absent"
             ),
             pytest.param(_source_page(_source(), totalResults="1"), id="total-string"),
@@ -570,6 +596,22 @@ class TestSourceCache:
         ],
     )
     def test_unparseable_body_enters_degraded_mode(self, content: bytes) -> None:
+        assert build_source_cache(content) == NvdSourceCache(
+            names=None, malformed_entries=0, incomplete=False
+        )
+
+    def test_nesting_beyond_the_parser_limit_enters_degraded_mode(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Nesting in an unconsumed member: a cache within the parser's
+        limit, degraded mode beyond it (External JSON Decoding)."""
+        content = (
+            _source_page(_source())[:-1] + b', "x": ' + NESTED_ARRAY.encode() + b"}"
+        )
+        assert build_source_cache(content).names == {CNA_SOURCE: CNA_NAME}
+
+        limit_parser_nesting(monkeypatch)
+
         assert build_source_cache(content) == NvdSourceCache(
             names=None, malformed_entries=0, incomplete=False
         )
@@ -3015,6 +3057,7 @@ class TestModuleBoundary:
             "app.core.identifiers",
             "app.services.cve_ingest",
             "app.services.cvss",
+            "app.services.json_decoding",
             "app.services.reference_service",
             "app.services.ticket_mutations_errors",
         }

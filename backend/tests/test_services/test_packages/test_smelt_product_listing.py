@@ -32,6 +32,11 @@ from app.services.packages.smelt_product_listing import (
     fetch_product_listing,
 )
 from tests.support.inadmissible import NUL, SURROGATE
+from tests.support.json_decoding import (
+    NESTED_ARRAY,
+    OVERSIZED_INTEGER,
+    limit_parser_nesting,
+)
 from tests.support.smelt import (
     SMELT_TEST_API_URL,
     SMELT_TEST_ENDPOINT,
@@ -530,6 +535,38 @@ class TestEnvelopeRejected:
         )
 
         await _fetch_invalid(server)
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            ('{"x": ' + NESTED_ARRAY + "}").encode(),
+            b'{"x": ' + OVERSIZED_INTEGER.encode() + b"}",
+        ],
+        ids=["nesting-beyond-the-parser-limit", "integer-beyond-the-conversion-limit"],
+    )
+    async def test_json_the_parser_cannot_represent_is_not_valid_json(
+        self, body: bytes, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """External JSON Decoding: the documented invalid-response message
+        and log, whatever the stack size (the limited parser rejects the
+        nesting; the integer limit is pinned)."""
+        limit_parser_nesting(monkeypatch)
+        server = _three_pages()
+        server.responses[2] = lambda request: httpx.Response(200, content=body)
+
+        with capture_logs() as logs:
+            error = await _fetch_invalid(server)
+
+        assert str(error.__cause__) == "page 2: body is not valid JSON"
+        assert logs == [
+            {
+                "event": "smelt_product_catalog_response_invalid",
+                "log_level": "warning",
+                "page": 2,
+                "category": "page 2: body is not valid JSON",
+            }
+        ]
+        assert server.requested_pages == [1, 2]
 
     async def test_undecodable_body_is_an_invalid_response(self) -> None:
         """`httpx.DecodingError` maps to the invalid-response message (D2),

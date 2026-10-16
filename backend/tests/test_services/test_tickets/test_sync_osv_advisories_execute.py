@@ -87,6 +87,11 @@ from app.services.tickets.sync_osv_advisories import (
 )
 from tests.support.cve_ingest import IngestionWorld
 from tests.support.inadmissible import NUL, SURROGATE
+from tests.support.json_decoding import (
+    NESTED_ARRAY,
+    OVERSIZED_INTEGER,
+    limit_parser_nesting,
+)
 from tests.support.osv import OsvServer, raising, status
 
 SessionFactory = Callable[[], Awaitable[AsyncSession]]
@@ -724,6 +729,18 @@ class TestItemFailure:
             (None, status(403, FAILURE_TEXT.encode()), "HTTPStatusError", None),
             (None, status(429), "HTTPStatusError", None),
             (None, status(200, b"{"), "JSONDecodeError", None),
+            (
+                None,
+                status(200, ('{"x": ' + NESTED_ARRAY + "}").encode()),
+                "JSONNestingError",
+                None,
+            ),
+            (
+                None,
+                status(200, b'{"n": ' + OVERSIZED_INTEGER.encode() + b"}"),
+                "ValueError",
+                None,
+            ),
             (None, status(200, b"[1]"), "ValidationError", None),
             (None, status(204), "OsvResponseError", None),
             (None, raising(httpx.ConnectError(FAILURE_TEXT)), "ConnectError", None),
@@ -735,6 +752,8 @@ class TestItemFailure:
             "forbidden",
             "rate_limited",
             "json",
+            "nesting_beyond_the_parser_limit",
+            "integer_beyond_the_conversion_limit",
             "schema",
             "unexpected_2xx",
             "connect",
@@ -751,7 +770,11 @@ class TestItemFailure:
         character: str | None,
         env: Env,
         batch: Batch,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        # The limited parser rejects only the nesting case (External JSON
+        # Decoding).
+        limit_parser_nesting(monkeypatch)
         cve = await env.active_cve(body)
         if responder is not None:
             env.respond(cve, responder)

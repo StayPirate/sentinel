@@ -35,6 +35,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.core.external_strings import contains_inadmissible_character
 from app.services.base_fetcher import FetcherError
+from app.services.json_decoding import decode_json
 
 logger = structlog.get_logger(__name__)
 
@@ -211,7 +212,7 @@ async def _get_page(
         raise FetcherError(f"AIMAAS returned HTTP {status_code}") from exc
 
     try:
-        return response.json()
+        return decode_json(response.content)
     except ValueError:
         invalid = InvalidAimaasListingError(f"page {page}: body is not valid JSON")
         _log_invalid(collection, page, invalid)

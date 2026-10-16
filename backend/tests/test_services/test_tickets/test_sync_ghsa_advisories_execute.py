@@ -111,6 +111,7 @@ from app.services.base_cve_fetcher import (
 )
 from app.services.base_fetcher import FetcherError, FetcherRunConfig
 from app.services.cve_ingest import UpsertAction
+from app.services.json_decoding import JSONNestingError
 from app.services.tickets import ghsa_advisory_record
 from app.services.tickets import sync_ghsa_advisories as sync_module
 from app.services.tickets.sync_ghsa_advisories import (
@@ -141,6 +142,11 @@ from tests.support.ghsa import (
 )
 from tests.support.ghsa import body as json_body
 from tests.support.inadmissible import INADMISSIBLE_CHARACTERS, SURROGATE
+from tests.support.json_decoding import (
+    NESTED_ARRAY,
+    OVERSIZED_INTEGER,
+    limit_parser_nesting,
+)
 from tests.support.ticket_mutations import EventRow, ticket_events_by_id
 
 SessionFactory = Callable[[], Awaitable[AsyncSession]]
@@ -1199,19 +1205,6 @@ class TestThrottle:
 # ---------------------------------------------------------------------------
 
 
-class _TooDeeplyNestedResponse(httpx.Response):
-    """A body whose decoding exhausts the recursion limit. The depth at
-    which CPython's JSON decoder raises `RecursionError` depends on the
-    interpreter build and stack size, so the outcome is forced here."""
-
-    def json(self, **kwargs: Any) -> Any:
-        raise RecursionError("maximum recursion depth exceeded")
-
-
-def _too_deeply_nested(request: httpx.Request) -> httpx.Response:
-    return _TooDeeplyNestedResponse(200, content=b"[[[]]]", request=request)
-
-
 def _with_status(code: int) -> Responder:
     def respond(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
@@ -1286,7 +1279,17 @@ _PAGE_FAILURES: Final[list[tuple[Responder, str, type[BaseException] | None]]] =
         UNPARSEABLE_RESPONSE,
         UnicodeDecodeError,
     ),
-    (_too_deeply_nested, UNPARSEABLE_RESPONSE, RecursionError),
+    # Rejected by the limited parser that every page-failure case runs with.
+    (
+        status(200, ("[" + NESTED_ARRAY + "]").encode()),
+        UNPARSEABLE_RESPONSE,
+        JSONNestingError,
+    ),
+    (
+        status(200, b"[" + OVERSIZED_INTEGER.encode() + b"]"),
+        UNPARSEABLE_RESPONSE,
+        ValueError,
+    ),
     (
         json_body({"cve_id": "CVE-2099-0001", "summary": FAILURE_TEXT}),
         UNPARSEABLE_RESPONSE,
@@ -1319,7 +1322,8 @@ _PAGE_FAILURE_IDS: Final = [
     "empty_body",
     "html",
     "invalid_utf8",
-    "too_deeply_nested",
+    "nesting_beyond_the_parser_limit",
+    "integer_beyond_the_conversion_limit",
     "object_root",
     "string_root",
     "null_root",
@@ -1358,6 +1362,7 @@ class TestPageFailures:
         batch: Batch,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        limit_parser_nesting(monkeypatch)
         env.server.page_responses[0] = responder
         trace = _trace(monkeypatch, batch)
 
@@ -1385,7 +1390,9 @@ class TestPageFailures:
         message: str,
         cause: type[BaseException] | None,
         env: Env,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        limit_parser_nesting(monkeypatch)
         await env.seed_run("success", datetime.now(UTC) - timedelta(hours=1))
         env.server.page_responses[0] = responder
 
