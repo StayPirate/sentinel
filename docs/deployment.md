@@ -1139,6 +1139,16 @@ Local environments run one instance of each. Kubernetes deployments must
 enforce singleton constraints unless a future design introduces
 distributed locking or leader election.
 
+For the IBS RabbitMQ consumer, one replica alone does not prevent an overlap:
+the default rolling update starts the new pod before the old one stops, so
+two consumers overlap from the new pod's start until the old one completes
+its graceful shutdown. Deploy it with the `Recreate` strategy, or an
+equivalent that stops the old instance before starting the new one. The
+overlap corrupts no data, because event processing is idempotent, but it
+duplicates IBS requests and makes the status reported by
+`GET /api/v1/ibs-consumer/status` alternate between the two processes; the
+short gap that `Recreate` introduces is covered by the periodic fetchers.
+
 The IBS RabbitMQ consumer is a standalone process, not a Celery worker. It
 does not import the Celery application or fetcher discovery and never
 populates the fetcher registry; it does not consume or publish Celery
