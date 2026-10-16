@@ -669,6 +669,34 @@ def _empty_nvd_source_cache() -> Iterator[None]:
     sync_nvd_cves._shared_source_cache.clear()
 
 
+_PROXY_VARIABLES = (
+    "HTTPS_PROXY",
+    "HTTP_PROXY",
+    "NO_PROXY",
+    "https_proxy",
+    "http_proxy",
+    "no_proxy",
+)
+
+
+@pytest.fixture(autouse=True)
+def _without_proxy_variables() -> Iterator[None]:
+    """Remove the proxy variables the shared HTTP client reads before every
+    test (docs/features/platform/networking.md, Proxy Configuration), so a
+    proxy configured in the developer's environment never routes a test's
+    request; a test of proxy routing sets them itself — see
+    docs/features/platform/testing-strategy.md (Test Independence).
+
+    Uses its own `MonkeyPatch` rather than the `monkeypatch` fixture, which
+    an autouse fixture would set up first for every test and therefore
+    tear down last, after the test module's own fixtures.
+    """
+    with pytest.MonkeyPatch.context() as patch:
+        for variable in _PROXY_VARIABLES:
+            patch.delenv(variable, raising=False)
+        yield
+
+
 @pytest.fixture(scope="session", autouse=True)
 def openapi_response_contract() -> Iterator[ResponseContractCheck]:
     """Check every response of the registered application against its

@@ -29,6 +29,12 @@ infrastructure provides two layers:
    (BaseFetcher HTTP Client Integration) for the lazy property, override
    mechanism, and lifecycle details.
 
+No other application module creates an httpx client or network transport,
+calls an httpx top-level request function, or uses another HTTP client
+library, so every outgoing HTTP request receives the shared behavior below.
+A structural test enforces this boundary
+(`docs/features/platform/testing-strategy.md`, Structural Tests).
+
 ### Factory Module
 
 Location: `backend/app/services/http_client.py`
@@ -43,14 +49,14 @@ def create_http_client(name: str, **overrides) -> httpx.AsyncClient:
               in WARNING-level logs for TLS override traceability.
 
     Applies all cross-cutting defaults (User-Agent, timeouts, TLS,
-    compression, Accept header, transport-level retry). Keyword
-    arguments override individual defaults.
+    compression, Accept header, transport-level retry, proxies from the
+    environment). Keyword arguments override individual defaults.
     """
 ```
 
 #### Override Safety
 
-Four settings receive special protection in the factory:
+Five settings receive special protection in the factory:
 
 - **User-Agent**: always built from the standard template using the
   `name` parameter. Not overridable via `http_client_options` or
@@ -76,6 +82,11 @@ Four settings receive special protection in the factory:
   API request signatures and session cookies, NVD API key, GitHub
   token) in request headers; automatic redirect following could
   forward these to untrusted hosts.
+- **Routing**: not overridable. A `transport`, `mounts`, `proxy`, or
+  `trust_env` override raises `TypeError` at client creation. Every request
+  uses the factory's own transport stack, which carries the transport-level
+  retry and the response content-coding policy, and proxies come only from
+  the environment (see "Proxy Configuration").
 
 ### Default Configuration
 
@@ -93,7 +104,7 @@ Four settings receive special protection in the factory:
 | TLS | Combined trust store (system CAs + SUSE CA), verify enabled | `http_client_options` / `**overrides` (emits WARNING — see "Override Safety") |
 | Transport retry | See "Transport-Level Retry" below | `http_client_options` |
 | Redirect following | False (no redirects followed) | `http_client_options` (emits WARNING — see "Override Safety") |
-| Proxy | Standard env vars (`HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY`) | System-level |
+| Proxy | Standard env vars (`HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY`); see "Proxy Configuration" | Environment only; not overridable (see "Override Safety") |
 
 Connection pool note: all current consumers make sequential requests
 within a single task (one HTTP request at a time per client instance).
@@ -408,20 +419,65 @@ detector, `docs/features/packages/ibs-product-release-detection.md`).
 
 #### Proxy Configuration
 
-The shared HTTP client respects the standard `HTTPS_PROXY`, `HTTP_PROXY`,
-and `NO_PROXY` environment variables for proxy configuration. No
-application-level proxy settings exist. These are system-level variables
-set at the container or host level.
+The shared HTTP client sends requests through a forward proxy configured by
+the standard `HTTPS_PROXY`, `HTTP_PROXY`, and `NO_PROXY` environment
+variables. No application-level proxy settings exist, and no factory
+override configures a proxy (see "Override Safety"). These are system-level
+variables, set at the container or host level for every process role that
+makes outgoing HTTP requests: the Celery workers (fetchers and
+`IBSClient`), the IBS RabbitMQ consumer (`IBSClient`), and the API server
+(SMELT requests during package addition).
 
-Since fetchers execute within Celery worker processes (separate containers
-from the API server), these variables must be present in the worker
-container environment — not only in the API container. httpx reads them
-from `os.environ` at client instantiation time; no application-level
-forwarding is needed.
+**Reading**: the factory reads the variables each time it creates a
+client, so a changed value applies to the next client. For each variable
+the lowercase name (`https_proxy`, `http_proxy`, `no_proxy`) is read first,
+then the uppercase one; an empty value counts as unset. `ALL_PROXY` and
+other proxy variables are not read.
 
-If the deployment uses a TLS-intercepting proxy, the proxy's CA
-certificate must be present in the system CA bundle (standard procedure,
-no Sentinel-specific configuration needed).
+**Routing**: a request to an `https` URL uses the `HTTPS_PROXY` proxy, and a
+request to an `http` URL the `HTTP_PROXY` proxy. A request is sent directly
+when no proxy is configured for its scheme or when `NO_PROXY` exempts its
+host. Every route keeps the shared behavior: TLS verification of the origin
+with the shared trust store, the connection limits (applied to each route's
+own connection pool), the transport-level retry, and the response
+content-coding policy. A request to an `https` origin is tunneled through
+the proxy with `CONNECT`, so the origin certificate is verified end to end;
+a request to an `http` origin is forwarded by the proxy.
+
+**Proxy URL**: `http://` or `https://`, with a host and an optional port; a
+value without a scheme means `http://`. Userinfo in the URL is sent to the
+proxy as HTTP Basic authentication. The TLS connection to an `https://`
+proxy is verified with the shared trust store (`build_tls_context()`),
+whatever the caller's `verify` override. Any other value — another scheme
+such as `socks5://`, a URL without a host, or an unparseable value — makes
+client creation raise `ValueError` that names the variable but never its
+value, which may contain credentials. The client never falls back to a
+direct connection. Like a corrupt `SUSE_CA_CERT_PATH`, this is a
+configuration error, not a transient condition; no caller handles it
+specifically, so it follows each caller's handling of an unexpected
+exception.
+
+**`NO_PROXY`**: a comma-separated list; each entry is trimmed and compared
+case-insensitively.
+
+| Entry | Exempts |
+|-------|---------|
+| `*`, alone or as any entry | Every host: no request uses a proxy |
+| Domain name, e.g. `example.com` | That host and its subdomains |
+| Domain name with a leading `.` or `*.`, e.g. `.example.com` | Its subdomains only |
+| IP address or CIDR network, e.g. `192.0.2.10`, `198.51.100.0/24`, `2001:db8::/32`; an IPv6 address may be in brackets | A host written as an IP address within it |
+
+Domain entries match only host names, and IP entries only hosts written as
+IP addresses; no name is resolved to decide. Any other entry, including
+one with a port or a scheme, is ignored, so the requests it may have meant
+to exempt use the proxy.
+
+**TLS-intercepting proxy**: the proxy's CA certificate must be in the
+system CA bundle, which `build_tls_context()` loads as its base (Trust
+Store Layering, layer 1); no Sentinel-specific configuration exists.
+
+**Scope**: proxy support for the `git` subprocess (`BaseGitFetcher`) and
+for the AMQP connections of `IBSEventConsumer` is outside this contract.
 
 #### Redirect Policy
 

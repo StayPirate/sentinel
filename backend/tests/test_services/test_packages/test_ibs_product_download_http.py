@@ -582,20 +582,10 @@ def _shared_client(
     """A real `create_http_client` client whose network transport is `server`.
 
     The shared retry transport is real; its backoff sleep is recorded
-    instead of awaited. Environment proxies are cleared so no proxy mount
-    bypasses the substituted transport.
+    instead of awaited.
     """
     sleep = AsyncMock()
     monkeypatch.setattr(http_client, "asyncio", SimpleNamespace(sleep=sleep))
-    for variable in (
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
-        "ALL_PROXY",
-        "http_proxy",
-        "https_proxy",
-        "all_proxy",
-    ):
-        monkeypatch.delenv(variable, raising=False)
     monkeypatch.setattr(httpx, "AsyncHTTPTransport", lambda **_: server.transport())
     return http_client.create_http_client("ibs-product-download-test"), sleep
 

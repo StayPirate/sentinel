@@ -809,27 +809,14 @@ class TestHttpStatusFailure:
         assert logs == []
 
 
-_PROXY_VARIABLES = (
-    "HTTP_PROXY",
-    "HTTPS_PROXY",
-    "ALL_PROXY",
-    "http_proxy",
-    "https_proxy",
-    "all_proxy",
-)
-
-
 def _real_shared_client(
     monkeypatch: pytest.MonkeyPatch, handler: Callable[[httpx.Request], httpx.Response]
 ) -> httpx.AsyncClient:
     """A `create_http_client` client whose innermost transport is `handler`.
 
     The shared factory and its retry transport are real; only the network
-    transport it wraps is substituted. Environment proxies are cleared so
-    that no proxy mount bypasses the substituted transport.
+    transport it wraps is substituted.
     """
-    for variable in _PROXY_VARIABLES:
-        monkeypatch.delenv(variable, raising=False)
     monkeypatch.setattr(
         httpx, "AsyncHTTPTransport", lambda **_: httpx.MockTransport(handler)
     )

@@ -577,6 +577,461 @@ class TestContentCodingPolicy:
 
 
 # ---------------------------------------------------------------------------
+# Proxy routing
+# ---------------------------------------------------------------------------
+
+_PROXY: Final = "http://proxy.example.test:3128"
+_HTTP_PROXY: Final = "http://http-proxy.example.test:8080"
+
+
+class _Pool(httpx.AsyncBaseTransport):
+    """A connection pool the factory created: its arguments, the requests
+    sent through it, and their scripted outcomes (200 when unscripted)."""
+
+    def __init__(self, **options: Any) -> None:
+        self.options = options
+        self.proxy: httpx.Proxy | None = options.get("proxy")
+        self.requests: list[httpx.Request] = []
+        self.script: list[httpx.Response | Exception] = []
+        self.closed = False
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        outcome = self.script.pop(0) if self.script else httpx.Response(200)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+@dataclass
+class _Pools:
+    created: list[_Pool] = field(default_factory=list)
+
+    def create(self, **options: Any) -> _Pool:
+        pool = _Pool(**options)
+        self.created.append(pool)
+        return pool
+
+    @property
+    def direct(self) -> _Pool:
+        [pool] = [pool for pool in self.created if pool.proxy is None]
+        return pool
+
+    def through(self, proxy_url: str) -> _Pool:
+        [pool] = [
+            pool
+            for pool in self.created
+            if pool.proxy is not None and pool.proxy.url == proxy_url
+        ]
+        return pool
+
+    def route(self, url: str) -> str:
+        """`direct` or the proxy URL of the one pool that sent `url`."""
+        [pool] = [
+            pool
+            for pool in self.created
+            if any(request.url == url for request in pool.requests)
+        ]
+        return "direct" if pool.proxy is None else str(pool.proxy.url)
+
+
+@pytest.fixture
+def pools(monkeypatch: pytest.MonkeyPatch) -> _Pools:
+    """Replaces only the factory's connection pools, recording each one, so
+    the routing, retry, and content-coding layers are the production ones."""
+    created = _Pools()
+    monkeypatch.setattr(httpx, "AsyncHTTPTransport", created.create)
+    return created
+
+
+@pytest.mark.unit
+class TestProxyRouting:
+    async def test_without_proxy_variables_every_request_is_direct(
+        self, pools: _Pools
+    ) -> None:
+        async with hc.create_http_client("test_component") as client:
+            await client.get("https://origin.example.test/")
+            await client.get("http://origin.example.test/")
+
+        [pool] = pools.created
+        assert pool.proxy is None
+        assert len(pool.requests) == 2
+
+    @pytest.mark.parametrize(
+        ("variable", "proxied", "direct"),
+        [
+            (
+                "HTTPS_PROXY",
+                "https://origin.example.test/",
+                "http://origin.example.test/",
+            ),
+            (
+                "https_proxy",
+                "https://origin.example.test/",
+                "http://origin.example.test/",
+            ),
+            (
+                "HTTP_PROXY",
+                "http://origin.example.test/",
+                "https://origin.example.test/",
+            ),
+            (
+                "http_proxy",
+                "http://origin.example.test/",
+                "https://origin.example.test/",
+            ),
+        ],
+    )
+    async def test_proxy_variable_routes_its_scheme_only(
+        self,
+        pools: _Pools,
+        monkeypatch: pytest.MonkeyPatch,
+        variable: str,
+        proxied: str,
+        direct: str,
+    ) -> None:
+        monkeypatch.setenv(variable, _PROXY)
+
+        async with hc.create_http_client("test_component") as client:
+            await client.get(proxied)
+            await client.get(direct)
+
+        assert pools.route(proxied) == _PROXY
+        assert pools.route(direct) == "direct"
+
+    async def test_each_scheme_uses_its_own_proxy(
+        self, pools: _Pools, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("HTTPS_PROXY", _PROXY)
+        monkeypatch.setenv("HTTP_PROXY", _HTTP_PROXY)
+
+        async with hc.create_http_client("test_component") as client:
+            await client.get("https://origin.example.test/")
+            await client.get("http://origin.example.test/")
+
+        assert pools.route("https://origin.example.test/") == _PROXY
+        assert pools.route("http://origin.example.test/") == _HTTP_PROXY
+
+    @pytest.mark.parametrize(
+        ("environment", "expected"),
+        [
+            pytest.param(
+                {"HTTPS_PROXY": _HTTP_PROXY, "https_proxy": _PROXY},
+                _PROXY,
+                id="lowercase-first",
+            ),
+            pytest.param(
+                {"HTTPS_PROXY": _PROXY, "https_proxy": ""},
+                _PROXY,
+                id="empty-lowercase-is-unset",
+            ),
+            pytest.param({"HTTPS_PROXY": ""}, "direct", id="empty-is-unset"),
+        ],
+    )
+    async def test_variable_precedence(
+        self,
+        pools: _Pools,
+        monkeypatch: pytest.MonkeyPatch,
+        environment: dict[str, str],
+        expected: str,
+    ) -> None:
+        for variable, value in environment.items():
+            monkeypatch.setenv(variable, value)
+
+        async with hc.create_http_client("test_component") as client:
+            await client.get("https://origin.example.test/")
+
+        assert pools.route("https://origin.example.test/") == expected
+
+    async def test_variables_are_read_when_each_client_is_created(
+        self, pools: _Pools, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        before = hc.create_http_client("test_component")
+        monkeypatch.setenv("HTTPS_PROXY", _PROXY)
+        after = hc.create_http_client("test_component")
+        async with before, after:
+            await before.get("https://before.example.test/")
+            await after.get("https://after.example.test/")
+
+        assert pools.route("https://before.example.test/") == "direct"
+        assert pools.route("https://after.example.test/") == _PROXY
+
+    async def test_value_without_scheme_is_an_http_proxy_with_basic_auth(
+        self, pools: _Pools, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(
+            "HTTPS_PROXY", "fictional-user:fictional-secret@proxy.example.test:3128"
+        )
+
+        async with hc.create_http_client("test_component"):
+            pass
+
+        proxy = pools.through(_PROXY).proxy
+        assert proxy is not None
+        assert proxy.auth == ("fictional-user", "fictional-secret")
+        assert proxy.ssl_context is None
+
+    async def test_https_proxy_is_verified_with_the_shared_trust_store(
+        self, pools: _Pools, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Even when the caller disables origin verification."""
+        built: list[ssl.SSLContext] = []
+
+        def build() -> ssl.SSLContext:
+            built.append(ssl.create_default_context())
+            return built[-1]
+
+        monkeypatch.setattr(hc, "build_tls_context", build)
+        monkeypatch.setenv("HTTPS_PROXY", "https://proxy.example.test:3129")
+
+        async with hc.create_http_client("test_component", verify=False):
+            pass
+
+        proxy = pools.through("https://proxy.example.test:3129").proxy
+        assert proxy is not None
+        assert proxy.ssl_context is not None
+        assert built == [proxy.ssl_context]
+        assert proxy.ssl_context.verify_mode == ssl.CERT_REQUIRED
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            pytest.param(
+                "socks5://fictional-user:fictional-secret@proxy.example.test:1080",
+                id="socks",
+            ),
+            pytest.param("ftp://fictional-secret.example.test", id="other-scheme"),
+            pytest.param("http://fictional-user:fictional-secret@/", id="no-host"),
+            pytest.param("http://proxy.example.test:fictional-secret", id="bad-port"),
+        ],
+    )
+    @pytest.mark.parametrize("variable", ["HTTPS_PROXY", "http_proxy"])
+    async def test_invalid_proxy_fails_client_creation_without_its_value(
+        self,
+        pools: _Pools,
+        monkeypatch: pytest.MonkeyPatch,
+        variable: str,
+        value: str,
+    ) -> None:
+        """Never a direct fallback; the value may hold credentials."""
+        monkeypatch.setenv(variable, value)
+
+        with pytest.raises(ValueError, match=f"^{variable} is not a valid") as raised:
+            hc.create_http_client("test_component")
+
+        assert "fictional-secret" not in str(raised.value)
+        assert raised.value.__context__ is None
+        assert pools.created == []
+
+    async def test_closing_the_client_closes_every_pool(
+        self, pools: _Pools, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("HTTPS_PROXY", _PROXY)
+        monkeypatch.setenv("HTTP_PROXY", _HTTP_PROXY)
+
+        async with hc.create_http_client("test_component"):
+            pass
+
+        assert len(pools.created) == 3
+        assert all(pool.closed for pool in pools.created)
+
+    async def test_every_pool_has_the_client_tls_and_limits_without_builtin_retry(
+        self, pools: _Pools, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("HTTPS_PROXY", _PROXY)
+        monkeypatch.setenv("HTTP_PROXY", _HTTP_PROXY)
+        limits = httpx.Limits(max_connections=5, max_keepalive_connections=2)
+
+        async with hc.create_http_client("test_component", limits=limits):
+            pass
+
+        verify = pools.direct.options["verify"]
+        assert isinstance(verify, ssl.SSLContext)
+        assert all(pool.options["verify"] is verify for pool in pools.created)
+        assert all(pool.options["limits"] is limits for pool in pools.created)
+        assert all(pool.options["retries"] == 0 for pool in pools.created)
+
+
+_NO_PROXY_CASES: Final = [
+    pytest.param(
+        "origin.example.test", "https://origin.example.test/", True, id="host"
+    ),
+    pytest.param(
+        "example.test", "https://api.origin.example.test/", True, id="subdomain"
+    ),
+    pytest.param(
+        "example.test", "http://api.origin.example.test/", True, id="http-scheme"
+    ),
+    pytest.param("example.test", "https://notexample.test/", False, id="suffix-only"),
+    pytest.param(
+        ".example.test", "https://api.example.test/", True, id="dot-subdomain"
+    ),
+    pytest.param(".example.test", "https://example.test/", False, id="dot-not-domain"),
+    pytest.param("*.example.test", "https://api.example.test/", True, id="star-dot"),
+    pytest.param(
+        "*.example.test", "https://example.test/", False, id="star-not-domain"
+    ),
+    pytest.param("EXAMPLE.Test", "https://api.example.test/", True, id="case"),
+    pytest.param(
+        " other.test , example.test ", "https://example.test/", True, id="list"
+    ),
+    pytest.param("192.0.2.10", "https://192.0.2.10/", True, id="ipv4"),
+    pytest.param("192.0.2.10", "https://192.0.2.11/", False, id="other-ipv4"),
+    pytest.param("198.51.100.0/24", "https://198.51.100.7/", True, id="cidr"),
+    pytest.param("2001:db8::/32", "https://[2001:db8::1]/", True, id="ipv6-cidr"),
+    pytest.param("[2001:db8::1]", "https://[2001:db8::1]:8443/", True, id="ipv6"),
+    pytest.param("2.10", "https://192.0.2.10/", False, id="domain-not-ip"),
+    pytest.param(
+        "192.0.2.0/24", "https://192.0.2.example.test/", False, id="ip-not-name"
+    ),
+    pytest.param("*", "https://origin.example.test/", True, id="star"),
+    pytest.param(
+        "other.test, *", "https://origin.example.test/", True, id="star-in-list"
+    ),
+    pytest.param(
+        "origin.example.test:443", "https://origin.example.test/", False, id="port"
+    ),
+    pytest.param(
+        "https://origin.example.test",
+        "https://origin.example.test/",
+        False,
+        id="scheme",
+    ),
+    pytest.param("10.0.0.0/33", "https://10.0.0.1/", False, id="invalid-network"),
+    pytest.param(",", "https://origin.example.test/", False, id="empty-entries"),
+]
+
+
+@pytest.mark.unit
+class TestNoProxy:
+    @pytest.mark.parametrize(("no_proxy", "url", "exempt"), _NO_PROXY_CASES)
+    async def test_no_proxy_entry(
+        self,
+        pools: _Pools,
+        monkeypatch: pytest.MonkeyPatch,
+        no_proxy: str,
+        url: str,
+        exempt: bool,
+    ) -> None:
+        """An entry it does not recognize is ignored: the request is
+        proxied, never unexpectedly direct."""
+        monkeypatch.setenv("HTTPS_PROXY", _PROXY)
+        monkeypatch.setenv("HTTP_PROXY", _PROXY)
+        monkeypatch.setenv("NO_PROXY", no_proxy)
+
+        async with hc.create_http_client("test_component") as client:
+            await client.get(url)
+
+        assert pools.route(url) == ("direct" if exempt else _PROXY)
+
+    async def test_lowercase_no_proxy_is_read_first(
+        self, pools: _Pools, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("HTTPS_PROXY", _PROXY)
+        monkeypatch.setenv("NO_PROXY", "other.example.test")
+        monkeypatch.setenv("no_proxy", "origin.example.test")
+
+        async with hc.create_http_client("test_component") as client:
+            await client.get("https://origin.example.test/")
+            await client.get("https://other.example.test/")
+
+        assert pools.route("https://origin.example.test/") == "direct"
+        assert pools.route("https://other.example.test/") == _PROXY
+
+    async def test_star_creates_no_proxy_pool(
+        self, pools: _Pools, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("HTTPS_PROXY", _PROXY)
+        monkeypatch.setenv("NO_PROXY", "*")
+
+        async with hc.create_http_client("test_component"):
+            pass
+
+        assert [pool.proxy for pool in pools.created] == [None]
+
+
+@pytest.mark.unit
+class TestProxiedRequestPolicies:
+    """A proxied request keeps the transport-level retry and the response
+    content-coding policy."""
+
+    @pytest.fixture(autouse=True)
+    def _proxy(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("HTTPS_PROXY", _PROXY)
+
+    async def test_5xx_is_retried_through_the_proxy(
+        self, pools: _Pools, mock_sleep: AsyncMock
+    ) -> None:
+        async with hc.create_http_client("test_component") as client:
+            pools.through(_PROXY).script = [httpx.Response(503), httpx.Response(503)]
+            response = await client.get(_URL)
+
+        assert response.status_code == 200
+        assert len(pools.through(_PROXY).requests) == 3
+        assert pools.direct.requests == []
+        assert [call.args[0] for call in mock_sleep.await_args_list] == [1.0, 2.0]
+
+    @pytest.mark.parametrize(("method", "attempts"), [("GET", 4), ("POST", 1)])
+    async def test_proxy_error_is_retried_for_idempotent_methods_only(
+        self, pools: _Pools, mock_sleep: AsyncMock, method: str, attempts: int
+    ) -> None:
+        async with hc.create_http_client("test_component") as client:
+            pools.through(_PROXY).script = [
+                httpx.ProxyError("fictional tunnel refusal") for _ in range(4)
+            ]
+            with pytest.raises(httpx.ProxyError):
+                await client.request(method, _URL)
+
+        assert len(pools.through(_PROXY).requests) == attempts
+
+    async def test_proxied_response_coding_policy_applies(self, pools: _Pools) -> None:
+        async with hc.create_http_client("test_component") as client:
+            pools.through(_PROXY).script = [
+                httpx.Response(
+                    200,
+                    headers={"Content-Encoding": "gzip"},
+                    stream=_NetworkBody(_gzip(_PAYLOAD)),
+                ),
+                httpx.Response(
+                    200, headers={"Content-Encoding": "br"}, stream=_NetworkBody(b"x")
+                ),
+            ]
+            decoded = await client.get(_URL)
+            with pytest.raises(httpx.DecodingError):
+                await client.get(_URL)
+
+        assert decoded.content == _PAYLOAD
+        assert pools.direct.requests == []
+
+
+@pytest.mark.unit
+class TestRoutingOverridesRejected:
+    @pytest.mark.parametrize(
+        ("option", "value"),
+        [
+            ("transport", httpx.MockTransport(lambda request: httpx.Response(200))),
+            (
+                "mounts",
+                {"all://": httpx.MockTransport(lambda request: httpx.Response(200))},
+            ),
+            ("proxy", _PROXY),
+            ("trust_env", False),
+        ],
+    )
+    async def test_routing_override_raises_type_error(
+        self, pools: _Pools, option: str, value: Any
+    ) -> None:
+        overrides: dict[str, Any] = {option: value}
+        with pytest.raises(TypeError, match=option):
+            hc.create_http_client("test_component", **overrides)
+
+        assert pools.created == []
+
+
+# ---------------------------------------------------------------------------
 # Retry-After parsing
 # ---------------------------------------------------------------------------
 

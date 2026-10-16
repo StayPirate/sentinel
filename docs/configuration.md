@@ -260,15 +260,17 @@ rather than trimmed.
 
 ## Standard Environment Variables (Non-Sentinel)
 
-These are standard system-level variables respected by the HTTP client
-library (httpx). They are NOT Sentinel-specific and are typically set at
-the container or system level.
+These are standard system-level variables. They are NOT Sentinel-specific
+and are typically set at the container or system level. The shared HTTP
+client reads each proxy variable by its lowercase name first, then the
+uppercase one, when it creates a client; an empty value counts as unset.
+`ALL_PROXY` is not read.
 
 | Env Var | Type | Default | Description | Defined in |
 |---------|------|---------|-------------|------------|
-| `HTTPS_PROXY` | string | (none) | Proxy URL for outgoing HTTPS connections. Respected by all HTTP clients | `docs/features/platform/networking.md` |
-| `HTTP_PROXY` | string | (none) | Proxy URL for outgoing HTTP connections | `docs/features/platform/networking.md` |
-| `NO_PROXY` | string | (none) | Comma-separated hosts that bypass the proxy | `docs/features/platform/networking.md` |
+| `HTTPS_PROXY` | string | (none) | Proxy URL (`http://` or `https://`; no scheme means `http://`) for the shared HTTP client's requests to `https` URLs, in every process role. Any other value, such as a `socks5://` URL, fails client creation; requests never fall back to a direct connection | `docs/features/platform/networking.md` |
+| `HTTP_PROXY` | string | (none) | Proxy URL, as for `HTTPS_PROXY`, for the shared HTTP client's requests to `http` URLs | `docs/features/platform/networking.md` |
+| `NO_PROXY` | string | (none) | Comma-separated domain names, IP addresses, or CIDR networks whose hosts bypass the proxy; `*` bypasses it for every host. Unrecognized entries, such as one with a port, are ignored | `docs/features/platform/networking.md` |
 | `LC_ALL` | string | (none) | Locale override. Set to `C` in `git_operations.py` subprocess calls (code-level guarantee). Recommended as `C` at container level for defense-in-depth | `docs/features/platform/git-fetcher-infrastructure.md` |
 | `GIT_TERMINAL_PROMPT` | string | (none) | Git prompt control. Set to `0` in `git_operations.py` subprocess calls (code-level guarantee). Prevents interactive prompts that would block async workers | `docs/features/platform/git-fetcher-infrastructure.md` |
 | `TZ` | string | (none) | Timezone. Set to `UTC` in `git_operations.py` subprocess calls and recommended at container level (see `docs/deployment.md`, Timezone and Locale Requirements) | `docs/features/platform/git-fetcher-infrastructure.md`, `docs/deployment.md` |

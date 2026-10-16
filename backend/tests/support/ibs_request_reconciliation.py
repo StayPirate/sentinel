@@ -543,19 +543,9 @@ class FakeRequests:
 
 
 def install_fake_requests(monkeypatch: pytest.MonkeyPatch) -> FakeRequests:
-    """The fake IBS API behind every `IBSClient` the test creates: no proxy,
-    the network transport replaced, retry backoff sleeps recorded."""
+    """The fake IBS API behind every `IBSClient` the test creates: the
+    network transport replaced, retry backoff sleeps recorded."""
     server = IBSServer(public_key=fictional_ed25519_key().public_key())
-    for variable in (
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
-        "ALL_PROXY",
-        "http_proxy",
-        "https_proxy",
-        "all_proxy",
-    ):
-        monkeypatch.delenv(variable, raising=False)
-
     monkeypatch.setattr(http_client, "asyncio", SimpleNamespace(sleep=AsyncMock()))
     monkeypatch.setattr(httpx, "AsyncHTTPTransport", lambda **_: server.transport())
     return FakeRequests(server)

@@ -38,8 +38,8 @@ Every `IBSClient` is the production client built from the application
 settings, which are pointed at the fictional `TEST_API_URL` with the
 account `jdoe` and a fictional key (or left empty for the
 credentials-not-configured case), behind the authenticating fake IBS API
-of `FakeRequests` (`install_fake_requests()`: no proxy, the network
-transport replaced, transport retry backoff not slept). The fetcher
+of `FakeRequests` (`install_fake_requests()`: the network transport
+replaced, transport retry backoff not slept). The fetcher
 module's `IBSClient` name is replaced by `_IBSClients`, which constructs
 that real client and records each construction and completed `aclose()`.
 `base_fetcher.create_http_client` is replaced by a spy that fails if
