@@ -239,10 +239,14 @@ type validation. Request headers and cookies are not covered, and neither is a
 body sent to an endpoint that declares none or with a content type the endpoint
 does not decode as JSON.
 
-A violation returns the global `422 VALIDATION_ERROR`, with one `errors` entry
-per offending string, located at that string. An offending object member name
-is reported at its containing object, and that member's value is not inspected
-further. The value is rejected, never stripped or replaced, and is not echoed
+A violation returns the global `422 VALIDATION_ERROR`. Each offending path
+parameter and each offending occurrence of a query parameter has its own
+`errors` entry, located at that parameter. A JSON body has at most one entry,
+for its first offending string in document order, located at that string; the
+rest of the body is not inspected, so the response does not grow with the
+number or the nesting of offending strings. An object member name precedes its
+value in document order, and an offending one is reported at its containing
+object. The value is rejected, never stripped or replaced, and is not echoed
 in the response. The rule applies to every endpoint, including public
 ones, without exception. It is evaluated after routing and JSON body decoding
 (see Routing Responses and JSON Request Body Decoding) and before
