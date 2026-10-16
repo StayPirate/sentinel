@@ -10,12 +10,16 @@ with the document, whichever client sent the request
 (`docs/features/platform/testing-strategy.md`, OpenAPI Response Contract
 Check):
 
-- the status code must be documented for the operation; and
+- the status code must be documented for the operation;
 - the body must match the documented media type and JSON schema, every
   object being closed: a member the schema does not declare is a mismatch.
   Pydantic omits `additionalProperties`, which JSON Schema reads as "any
   other member is allowed", so a body carrying an undocumented member would
-  otherwise pass.
+  otherwise pass; and
+- the description of the documented response must name the error `code` of
+  the body, written as `` `CODE` `` (`docs/api-spec.md`, Derived Responses
+  in the OpenAPI Document): the schema types `code` as a string, so the
+  description is where a client learns which codes a status carries.
 
 A request that selects no documented operation, such as a routing response
 (`docs/api-spec.md`, Routing Responses) or `/openapi.json`, is not checked,
@@ -224,6 +228,14 @@ class ResponseContractCheck:
             self.violations.append(
                 f"{where} {status} with a body that does not match the "
                 f"documented schema at {error.json_path}: {error.message}"
+            )
+            return
+        code = body.get("code") if isinstance(body, dict) else None
+        description: str = responses[key].get("description", "")
+        if isinstance(code, str) and f"`{code}`" not in description:
+            self.violations.append(
+                f"{where} {status} {code}, which the description of the "
+                f"documented response does not name: {description!r}"
             )
 
     def _operation(self, method: str, path: str) -> tuple[str, dict[str, Any]] | None:

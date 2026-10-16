@@ -406,18 +406,21 @@ exemption removal there so it is not forgotten.
   in the OpenAPI Document) as follows. An endpoint declares its scoped
   responses and the codes of its error table in `responses=`, with the
   `ErrorResponse` model, a subclass, or a union of them, and a description
-  of the form
-  `` `CODE`: condition. `` for each code. It does not declare the global or
-  shared responses: `app/api/openapi.py` declares `422` and `500` for every
-  router included under `/api/v1/` and derives `401`, `403`, and
-  `400 DATE_RANGE_INVERTED` from each route's dependency graph. A route-level
-  declaration of a status replaces the shared `422` and keeps precedence over
-  a derived response, whose condition is appended to its description, so a
-  route-level `422` uses `ValidationErrorResponse | ErrorResponse`. An
+  that names each code of the status in the form `` `CODE`: condition. ``.
+  It does not declare the global or shared responses: `app/api/openapi.py`
+  declares `422` and `500` for every router included under `/api/v1/` and
+  derives `401`, `403`, and `400 DATE_RANGE_INVERTED` from each route's
+  dependency graph. A route-level declaration of a status replaces the
+  shared `422`, so a route-level `422` names `VALIDATION_ERROR` and admits
+  `ValidationErrorResponse`, in a union with `ErrorResponse` when the status
+  also has a dedicated code. A route-level declaration keeps precedence over
+  a derived response, whose condition is appended to its description. An
   endpoint that produces a global response without the shared dependency,
   such as logout's `401`, declares it itself. Structural tests in
-  `backend/tests/test_api_conventions.py` and the OpenAPI response contract
-  check (`docs/features/platform/testing-strategy.md`) enforce the result
+  `backend/tests/test_api_conventions.py` check the envelope, the shared
+  responses, and that each description names a registered code; the OpenAPI
+  response contract check (`docs/features/platform/testing-strategy.md`)
+  checks every response the tests receive against the document
 - **User identifier resolution**: parameters that identify a user follow
   `docs/api-spec.md` (User Identifier Resolution), including its distinction
   between target resources and optional list filters. API dependencies may

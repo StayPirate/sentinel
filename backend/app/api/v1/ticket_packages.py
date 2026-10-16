@@ -204,8 +204,8 @@ def serialize_package(package: PackageProjection) -> PackageDetail:
         404: {
             "model": ErrorResponse,
             "description": (
-                "Ticket identifier is malformed, does not exist, or identifies "
-                "a Ticket inaccessible to the caller."
+                "`TICKET_NOT_FOUND`: Ticket identifier is malformed, does not "
+                "exist, or identifies a Ticket inaccessible to the caller."
             ),
         },
     },
@@ -869,7 +869,8 @@ def _restore_responses(level: str, path: str) -> dict[int | str, dict[str, Any]]
             "description": (
                 f"`PACKAGE_NOT_EXCLUDED`: the {level} is not directly excluded "
                 "(an exclusion inherited from an ancestor does not count). "
-                "`VALIDATION_ERROR`: a nested identifier is not a UUID."
+                "`VALIDATION_ERROR`: the request fails validation, for example "
+                "a nested identifier is not a UUID."
             ),
         },
     }
@@ -1175,7 +1176,7 @@ def _package_addition_error(status_code: int, code: ErrorCode, detail: str) -> A
                 "for the package. `PACKAGE_TARGETS_UNRESOLVED`: SMELT returned "
                 "codestreams, but no target of a supported codestream matches a "
                 "Product of the current catalog snapshot. `VALIDATION_ERROR`: "
-                "the request body is invalid."
+                "the request fails validation."
             ),
         },
         503: {

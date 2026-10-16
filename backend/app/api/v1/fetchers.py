@@ -786,8 +786,8 @@ def _build_update_payload(body: FetcherConfigUpdateRequest) -> UpdateConfigPaylo
                 "`FETCHER_SETTING_UNKNOWN`: `custom_settings` contains an "
                 "unknown key. `FETCHER_SETTING_INVALID`: a submitted "
                 "`custom_settings` value has the wrong JSON type, or the merged "
-                "settings fail validation. `VALIDATION_ERROR`: the request body "
-                "is invalid."
+                "settings fail validation. `VALIDATION_ERROR`: the request fails "
+                "validation."
             ),
         },
     },

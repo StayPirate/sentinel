@@ -31,6 +31,7 @@ forbids. That cross-reference remains with `@docs-reviewer` /
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from types import UnionType
@@ -46,6 +47,7 @@ from pydantic.fields import FieldInfo
 
 from app.api.dependencies import drain_ticket_convergence_after_commit
 from app.api.openapi import API_V1_RESPONSES
+from app.core.errors import ErrorCode
 from app.database import get_db
 from app.main import app
 from app.schemas.errors import ErrorResponse
@@ -366,6 +368,35 @@ def _global_response_violations(openapi_schema: dict[str, Any]) -> list[str]:
     return violations
 
 
+# A backticked UPPER_SNAKE_CASE token with at least one underscore: how an
+# error description names a code (`docs/conventions.md`, FastAPI
+# Conventions).
+_CODE_PATTERN = re.compile(r"`([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+)`")
+_REGISTERED_CODES = frozenset(code.value for code in ErrorCode)
+
+
+def _error_code_naming_violations(openapi_schema: dict[str, Any]) -> list[str]:
+    """Every documented 4xx or 5xx response whose description names no
+    error code, or names a code that is not registered."""
+    violations: list[str] = []
+    for operation_name, operation in _documented_operations(openapi_schema):
+        for status, response in operation.get("responses", {}).items():
+            if not status.startswith(("4", "5")):
+                continue
+            named = _CODE_PATTERN.findall(response.get("description", ""))
+            if not named:
+                violations.append(
+                    f"{operation_name} documents {status} without naming its "
+                    "error codes"
+                )
+            violations.extend(
+                f"{operation_name} documents {status} with the unregistered code {code}"
+                for code in named
+                if code not in _REGISTERED_CODES
+            )
+    return violations
+
+
 @pytest.mark.unit
 class TestErrorResponseDocumentation:
     """The OpenAPI document describes the error bodies the application
@@ -379,6 +410,10 @@ class TestErrorResponseDocumentation:
     it must keep the validation body among its alternatives. The
     `/health`/`/ready` exemption applies: their probe responses are
     outside the envelope (`docs/features/platform/health-endpoints.md`).
+    The schema types `code` as a string, so each description names the
+    codes of its status (`docs/api-spec.md`, Derived Responses in the
+    OpenAPI Document); the OpenAPI response contract check proves, for
+    every response the tests receive, that its code is among them.
     """
 
     def test_every_documented_error_response_uses_the_envelope(self) -> None:
@@ -387,6 +422,10 @@ class TestErrorResponseDocumentation:
 
     def test_every_operation_documents_the_global_422_and_500(self) -> None:
         violations = _global_response_violations(app.openapi())
+        assert not violations, "\n".join(violations)
+
+    def test_every_documented_error_response_names_registered_codes(self) -> None:
+        violations = _error_code_naming_violations(app.openapi())
         assert not violations, "\n".join(violations)
 
     def test_detection_covers_defaults_unions_and_route_level_overrides(
@@ -424,6 +463,21 @@ class TestErrorResponseDocumentation:
         async def compliant() -> None:
             """The shared declaration."""
 
+        @test_app.get(
+            "/api/v1/unnamed",
+            responses={
+                **API_V1_RESPONSES,
+                404: {"model": ErrorResponse, "description": "No such item."},
+                409: {
+                    "model": ErrorResponse,
+                    "description": "`ITEM_VANISHED`: the item is gone.",
+                },
+            },
+        )
+        async def unnamed() -> None:
+            """A description naming no code, and one naming an unregistered
+            code."""
+
         @test_app.get("/health")
         async def exempt() -> None:
             """The documented health exemption."""
@@ -441,6 +495,15 @@ class TestErrorResponseDocumentation:
             "GET /api/v1/framework-default/{item_id} does not document the 500",
             "POST /api/v1/overridden does not document the 422 VALIDATION_ERROR "
             "body with its 'errors' array",
+        ]
+        assert [
+            violation
+            for violation in _error_code_naming_violations(openapi_schema)
+            if "/unnamed" in violation
+        ] == [
+            "GET /api/v1/unnamed documents 404 without naming its error codes",
+            "GET /api/v1/unnamed documents 409 with the unregistered code "
+            "ITEM_VANISHED",
         ]
 
 

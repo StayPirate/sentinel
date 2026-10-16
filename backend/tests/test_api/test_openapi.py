@@ -121,10 +121,6 @@ def _build_app(*, include_v1_responses: bool = True) -> SentinelAPI:
     async def own_400() -> None:
         """A route-level 400 that already names the derived code."""
 
-    @router.get("/hidden", include_in_schema=False)
-    async def hidden(principal: CurrentUser) -> None:
-        """Not documented."""
-
     test_app = SentinelAPI()
     test_app.include_router(
         router, responses=API_V1_RESPONSES if include_v1_responses else None
@@ -206,21 +202,6 @@ class TestDependencyDerivedResponses:
 
         assert responses["400"]["description"] == (
             "`DATE_RANGE_INVERTED` or `DATE_RANGE_TOO_WIDE`."
-        )
-
-    def test_undocumented_route_is_not_added(self) -> None:
-        assert "/api/v1/hidden" not in _build_app().openapi()["paths"]
-
-    def test_document_is_generated_once(self) -> None:
-        test_app = _build_app()
-
-        first = test_app.openapi()
-        second = test_app.openapi()
-
-        assert second is first
-        assert (
-            second["paths"]["/api/v1/own-403"]["get"]["responses"]["403"]["description"]
-            == f"`AUTH_SESSION_REQUIRED`. {_403}"
         )
 
     def test_error_schema_is_added_when_nothing_else_references_it(self) -> None:

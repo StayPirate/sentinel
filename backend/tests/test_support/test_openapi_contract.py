@@ -56,6 +56,10 @@ _RESPONSES: dict[str, Any] = {
     "wrong-type": JSONResponse({"name": 1}),
     "wrong-media-type": PlainTextResponse("first"),
     "not-json": Response(b"{", status_code=404, media_type="application/json"),
+    "body-without-documented-content": JSONResponse({}, status_code=204),
+    "unnamed-code": JSONResponse(
+        {"code": "ITEM_GONE", "detail": "Gone."}, status_code=404
+    ),
 }
 
 
@@ -67,7 +71,10 @@ def _build_app() -> FastAPI:
     @test_app.get(
         "/items/{case}",
         response_model=_Item,
-        responses={404: {"model": _Error}, 204: {"description": "No content"}},
+        responses={
+            404: {"model": _Error, "description": "`ITEM_NOT_FOUND`: no such item."},
+            204: {"description": "No content"},
+        },
     )
     async def get_item(case: str) -> Any:
         if case == "crash":
@@ -127,6 +134,18 @@ class TestResponseContractCheck:
                 id="media-type",
             ),
             pytest.param("not-json", "with a body that is not JSON", id="not-json"),
+            pytest.param(
+                "body-without-documented-content",
+                "returned 204 with a body, but the response is documented "
+                "without content",
+                id="body-without-content",
+            ),
+            pytest.param(
+                "unnamed-code",
+                "returned 404 ITEM_GONE, which the description of the documented "
+                "response does not name",
+                id="unnamed-code",
+            ),
         ],
     )
     async def test_undocumented_response_is_recorded(
