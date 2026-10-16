@@ -196,6 +196,12 @@ class TestErrorCode:
         Timeline Data, Date range constraint)."""
         assert ErrorCode.DATE_RANGE_TOO_WIDE == "DATE_RANGE_TOO_WIDE"
 
+    def test_routing_error_codes_are_registered(self) -> None:
+        """See docs/api-spec.md (Error Code Categories, Routing
+        Responses)."""
+        assert ErrorCode.ROUTE_NOT_FOUND == "ROUTE_NOT_FOUND"
+        assert ErrorCode.ROUTE_METHOD_NOT_ALLOWED == "ROUTE_METHOD_NOT_ALLOWED"
+
     def test_fetcher_not_found_is_registered(self) -> None:
         """See docs/features/platform/fetcher-operations.md (Fetcher
         Operations Service, Service Exceptions)."""
