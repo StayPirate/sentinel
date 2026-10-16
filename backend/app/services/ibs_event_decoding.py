@@ -15,7 +15,8 @@ outcomes; Structured Logs reason categories):
   it repeats, so each routing key's parser can reject a duplicated member it
   consumes while accepting duplicated unconsumed members.
 - `DeliveryOutcome` and `DeliveryResult` are the bounded per-delivery
-  classification that drives settlement and the delivery log events.
+  classification that drives settlement, the delivery log events, and the
+  heartbeat counters and `last_error`.
 
 Pure functions without I/O; `MemoryError` propagates.
 """
@@ -28,6 +29,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Final
+
+from app.core.enums import IBSConsumerErrorCategory
 
 PACKAGE_COMMIT_ROUTING_KEY: Final = "suse.obs.package.commit"
 
@@ -88,12 +91,15 @@ class DeliveryResult:
     """One delivery's outcome, its bounded reason, and its log fields.
 
     `fields` holds only bounded values allowed in the delivery log events
-    (a sanitized identity and counts).
+    (a sanitized identity and counts). `error_category` is the heartbeat
+    `last_error` category of a `failed` delivery, set by `handle_delivery()`
+    for every `failed` result and `None` otherwise.
     """
 
     outcome: DeliveryOutcome
     reason_category: str | None = None
     fields: Mapping[str, str | int] = field(default_factory=dict)
+    error_category: IBSConsumerErrorCategory | None = None
 
 
 class _JSONObject(dict[str, Any]):

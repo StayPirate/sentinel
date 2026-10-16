@@ -213,11 +213,12 @@ async def _patch_celery_app(
 @pytest.mark.e2e
 class TestRouteInventory:
     def test_only_the_eight_endpoints_are_registered(self) -> None:
-        """No IBS consumer endpoint is introduced by this work item —
-        see fetcher-operations.md (Scope). Route discovery uses
-        `iter_route_contexts()` — see `tests/test_api_conventions.py`
-        for why `app.routes` alone does not expose routes included via
-        `include_router()`.
+        """The eight fetcher operations of fetcher-operations.md (Scope);
+        `GET /api/v1/ibs-consumer/status` is owned by
+        ibs-rabbitmq-integration.md and lives outside `/api/v1/fetchers`.
+        Route discovery uses `iter_route_contexts()` — see
+        `tests/test_api_conventions.py` for why `app.routes` alone does not
+        expose routes included via `include_router()`.
         """
         fetcher_routes = {
             (context.path, method)
@@ -1385,26 +1386,6 @@ class TestTriggerFetcherEndpoint:
             assert "203.0.113.5" not in response.text
         finally:
             await _cleanup_trigger_fetcher_rows(real_session_factory, fetcher_name)
-
-
-# ---------------------------------------------------------------------------
-# Out-of-scope endpoints
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.e2e
-class TestOutOfScopeEndpoints:
-    """No IBS consumer endpoint is introduced by this work item — see
-    `docs/features/platform/fetcher-operations.md` (Scope). Verified
-    here in addition to `TestRouteInventory` since a client request to
-    an unregistered path is the actually-observable contract at the
-    HTTP layer."""
-
-    async def test_ibs_consumer_status_endpoint_not_found(
-        self, client: AsyncClient
-    ) -> None:
-        response = await client.get("/api/v1/ibs-consumer/status")
-        assert response.status_code == 404
 
 
 # ---------------------------------------------------------------------------

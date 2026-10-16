@@ -35,10 +35,21 @@ Logs) for the standalone process started by `app/ibs_consumer.py`:
   epoch; a backoff wait or connection attempt in progress is interrupted,
   and a repeated signal is ignored. Every closure step is bounded.
 
+- The process status (`app.services.ibs_consumer_status`) is created with
+  the consumer (Startup step 3) and starts `reconnecting`; its writer task
+  starts after `ibs_consumer_started` (step 5). Every connection attempt,
+  transient failure, scheduled wait, successful start, and loss updates it
+  (`reconnect_attempts` counts every attempt after the initial one), and
+  each delivery counts `events_received` when its handling starts and its
+  outcome as soon as the application attempt returns, before settlement.
+  The lifecycle never awaits Redis. The writer stops without a final write
+  before the epoch closes at shutdown (step 5) and on every other exit; a
+  writer that fails with anything but a Redis write failure ends the
+  process like an unexpected exception.
+
 Every exit closes the `IBSClient` and disposes the database engine
 best-effort. The module imports no Celery application, task module, fetcher
-discovery, or concrete fetcher. Redis, the heartbeat, and the status counters
-are not part of this module.
+discovery, or concrete fetcher.
 """
 
 from __future__ import annotations
@@ -50,6 +61,7 @@ import ssl
 import uuid
 from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Final, Protocol
 
 import aio_pika
@@ -70,6 +82,13 @@ from app.core.exceptions import TLSConfigurationError
 from app.database import async_session_factory, engine
 from app.services.http_client import build_tls_context
 from app.services.ibs_client import IBSClient
+from app.services.ibs_consumer_status import (
+    ConsumerStatusState,
+    HeartbeatStore,
+    HeartbeatWriter,
+    utc_now,
+    write_heartbeat_value,
+)
 from app.services.ibs_event_decoding import (
     BOUND_ROUTING_KEYS,
     DeliveryOutcome,
@@ -420,8 +439,10 @@ class IBSEventConsumer:
     """The standalone IBS RabbitMQ consumer process (see module docstring).
 
     `connect`, `client_factory`, `session_factory`, `dispose_engine`,
-    `timer`, and `handle_signals` are replaceable for tests; production uses
-    the defaults.
+    `timer` (backoff and shutdown deadline), `heartbeat_store`,
+    `heartbeat_timer` (heartbeat refresh), `clock`, and `handle_signals`
+    are replaceable for tests; production uses the defaults. Constructing
+    the consumer initializes its process status (Startup step 3).
     """
 
     def __init__(
@@ -433,6 +454,9 @@ class IBSEventConsumer:
         session_factory: async_sessionmaker[AsyncSession] = async_session_factory,
         dispose_engine: Callable[[], Awaitable[None]] = engine.dispose,
         timer: Timer = _sleep,
+        heartbeat_store: HeartbeatStore = write_heartbeat_value,
+        heartbeat_timer: Timer = _sleep,
+        clock: Callable[[], datetime] = utc_now,
         handle_signals: bool = True,
     ) -> None:
         self._settings = settings
@@ -444,6 +468,15 @@ class IBSEventConsumer:
         self._handle_signals = handle_signals
         self._shutdown = asyncio.Event()
         self._client: IBSClient | None = None
+        self._status = ConsumerStatusState(clock)
+        self._writer = HeartbeatWriter(
+            self._status, store=heartbeat_store, timer=heartbeat_timer
+        )
+
+    @property
+    def status(self) -> ConsumerStatusState:
+        """The process status published by the heartbeat."""
+        return self._status
 
     def request_shutdown(self) -> None:
         """Start a graceful shutdown (SIGTERM/SIGINT); idempotent."""
@@ -486,7 +519,7 @@ class IBSEventConsumer:
                 # The client builds its TLS context from SUSE_CA_CERT_PATH.
                 raise FatalConsumerError(TLS_CONFIGURATION_INVALID) from None
             logger.info(STARTED_EVENT)
-            await self._consume_until_shutdown()
+            await self._consume_with_heartbeat()
             code = 0
         except FatalConsumerError as fatal:
             logger.critical(FATAL_EVENT, reason_category=fatal.reason)
@@ -506,7 +539,9 @@ class IBSEventConsumer:
                 await session.execute(text("SELECT 1"))
 
     async def _release(self) -> None:
-        """Close the IBS client and dispose the engine, best-effort."""
+        """Stop the heartbeat writer, close the IBS client, and dispose the
+        engine, best-effort."""
+        await self._writer.stop()
         client, self._client = self._client, None
         if client is not None:
             with contextlib.suppress(Exception):
@@ -535,6 +570,35 @@ class IBSEventConsumer:
         await _cancel_and_wait(work)
         return None
 
+    async def _consume_with_heartbeat(self) -> None:
+        """Start the heartbeat writer (Startup step 5), then consume until
+        shutdown.
+
+        The writer task is supervised: if it ends with an exception (it
+        never returns otherwise and is cancelled only by `stop()`), the
+        consumption is cancelled with its normal cleanup and that exception
+        is raised, which `_run()` reports as fatal.
+        """
+        writer = self._writer.start()
+        consuming = asyncio.ensure_future(self._consume_until_shutdown())
+
+        def on_writer_done(task: asyncio.Task[None]) -> None:
+            if not task.cancelled() and task.exception() is not None:
+                consuming.cancel()
+
+        writer.add_done_callback(on_writer_done)
+        try:
+            await consuming
+        except asyncio.CancelledError:
+            current = asyncio.current_task()
+            if (
+                (current is None or not current.cancelling())
+                and writer.done()
+                and not writer.cancelled()
+            ):
+                writer.result()  # Raises the writer's exception.
+            raise
+
     async def _consume_until_shutdown(self) -> None:
         initial = float(self._settings.ibs_rabbitmq_reconnect_initial)
         cap = float(self._settings.ibs_rabbitmq_reconnect_max)
@@ -543,16 +607,19 @@ class IBSEventConsumer:
         while not self._shutdown.is_set():
             if not first:
                 logger.info(RECONNECT_SCHEDULED_EVENT, delay_seconds=int(delay))
+                self._status.retry_scheduled(int(delay))
                 waited = await self._until_shutdown(self._timer(delay))
                 if waited is None or self._shutdown.is_set():
                     return
                 delay = min(delay * 2, cap)
+            self._status.attempt_started(reconnect=not first)
             first = False
             inbox: asyncio.Queue[Delivery] = asyncio.Queue()
             epoch = await self._open_epoch(inbox)
             if epoch is None:
                 continue
             logger.info(CONNECTED_EVENT)
+            self._status.connected()
             delay = initial
             if not await self._consume(epoch, inbox):
                 return
@@ -587,6 +654,7 @@ class IBSEventConsumer:
         if fatal:
             raise FatalConsumerError(reason)
         logger.warning(CONNECTION_FAILED_EVENT, reason_category=reason)
+        self._status.connection_failed()
         return None
 
     async def _consume(self, epoch: Epoch, inbox: asyncio.Queue[Delivery]) -> bool:
@@ -622,6 +690,7 @@ class IBSEventConsumer:
                     logger.warning(
                         CONNECTION_LOST_EVENT, reason_category=epoch.loss_reason
                     )
+                    self._status.connection_lost()
                     if handler is not None:
                         await _cancel_and_wait(handler)
                         handler = None
@@ -666,22 +735,24 @@ class IBSEventConsumer:
                 if not lost.done():
                     logger.warning(SHUTDOWN_DEADLINE_EXCEEDED_EVENT)
                 await _cancel_and_wait(handler)
+        await self._writer.stop()  # Step 5: no final write.
         await epoch.close()
 
     async def _handle(self, delivery: Delivery, epoch: Epoch) -> None:
-        """One delivery: correlation, one application attempt, the delivery
-        log event, and the ACK on a live channel."""
+        """One delivery: correlation, one application attempt, the counters,
+        the delivery log event, and the ACK on a live channel."""
         assert self._client is not None
         tokens = structlog.contextvars.bind_contextvars(ibs_event_id=str(uuid.uuid7()))
         try:
             try:
+                self._status.delivery_started()
                 result = await handle_delivery(
                     delivery.routing_key,
                     delivery.content_type,
                     delivery.body,
                     client=self._client,
                 )
-                _log_result(delivery, result)
+                self._record_result(delivery, result)
                 if epoch.lost.is_set():
                     return  # Dead channel: no settlement.
                 try:
@@ -694,24 +765,32 @@ class IBSEventConsumer:
         finally:
             structlog.contextvars.reset_contextvars(**tokens)
 
+    def _record_result(self, delivery: Delivery, result: DeliveryResult) -> None:
+        """Count one delivery outcome and log its delivery event.
 
-def _log_result(delivery: Delivery, result: DeliveryResult) -> None:
-    routing = _bound_routing_key(delivery)
-    match result.outcome:
-        case DeliveryOutcome.MALFORMED:
-            logger.warning(
-                DELIVERY_MALFORMED_EVENT,
-                reason_category=result.reason_category,
-                **routing,
-            )
-        case DeliveryOutcome.IRRELEVANT:
-            logger.debug(DELIVERY_IRRELEVANT_EVENT, **routing, **result.fields)
-        case DeliveryOutcome.PROCESSED:
-            logger.info(DELIVERY_PROCESSED_EVENT, **routing, **result.fields)
-        case DeliveryOutcome.FAILED:
-            logger.error(
-                DELIVERY_FAILED_EVENT,
-                **routing,
-                reason_category=result.reason_category,
-                **result.fields,
-            )
+        Processed: relevant and processed. Failed: relevant and failed, with
+        its `last_error` category. Irrelevant and malformed: no counter.
+        """
+        routing = _bound_routing_key(delivery)
+        match result.outcome:
+            case DeliveryOutcome.MALFORMED:
+                logger.warning(
+                    DELIVERY_MALFORMED_EVENT,
+                    reason_category=result.reason_category,
+                    **routing,
+                )
+            case DeliveryOutcome.IRRELEVANT:
+                logger.debug(DELIVERY_IRRELEVANT_EVENT, **routing, **result.fields)
+            case DeliveryOutcome.PROCESSED:
+                self._status.delivery_succeeded()
+                logger.info(DELIVERY_PROCESSED_EVENT, **routing, **result.fields)
+            case DeliveryOutcome.FAILED:
+                # `handle_delivery()` sets the category of every failure.
+                assert result.error_category is not None
+                self._status.delivery_failed(result.error_category)
+                logger.error(
+                    DELIVERY_FAILED_EVENT,
+                    **routing,
+                    reason_category=result.reason_category,
+                    **result.fields,
+                )

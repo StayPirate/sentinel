@@ -1,30 +1,37 @@
-"""OCI artifact probe for the IBS RabbitMQ consumer role.
+"""OCI artifact probes for the IBS RabbitMQ consumer role.
 
 Focused and system tests own the consumer's connection classification,
-reconnect delays, delivery handling, heartbeat, signal handling, and log
-sanitization. This check verifies only the artifact facts of the role: the
-documented command `python -m app.ibs_consumer` starts from the candidate
-image, passes its PostgreSQL verification, logs its startup event, and stays
-in its reconnect loop against the smoke stack's refusing endpoint without
-exposing the URL credentials.
+reconnect delays, delivery handling, heartbeat contents and validation,
+signal handling, and log sanitization. These checks verify only the artifact
+facts of the role: the documented command `python -m app.ibs_consumer` starts
+from the candidate image, passes its PostgreSQL verification, logs its
+startup event, and stays in its reconnect loop against the smoke stack's
+refusing endpoint without exposing the URL credentials; and the API role
+reports the consumer-written `reconnecting` heartbeat through the packaged
+Redis topology.
 
 See ``docs/features/platform/testing-strategy.md`` (Process Readiness;
 Representative Gate Evidence) and
 ``docs/features/integrations/ibs-rabbitmq-integration.md`` (Startup;
-Reconnection; Structured Logs).
+Reconnection; Structured Logs; Status API).
 """
 
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Callable
 from typing import Any
 
+import httpx
 import pytest
 
 _SERVICE = "ibs-consumer"
 # The fictional user information of IBS_RABBITMQ_URL in docker-compose.smoke.yml.
 _URL_CREDENTIALS = "example:example"
+# Bound of the status observation: the readiness phase already saw the first
+# reconnect, so the immediate heartbeat write precedes this test.
+_STATUS_TIMEOUT_SECONDS = 30.0
 
 
 def _json_records(logs: str) -> list[dict[str, Any]]:
@@ -61,3 +68,22 @@ def test_ibs_consumer_starts_and_stays_in_its_reconnect_loop(
 
     state = compose_service_state(_SERVICE)
     assert state.startswith("running|"), state
+
+
+@pytest.mark.image
+def test_status_endpoint_reports_the_consumer_written_reconnecting(
+    http_client: httpx.Client,
+) -> None:
+    deadline = time.monotonic() + _STATUS_TIMEOUT_SECONDS
+    while True:
+        response = http_client.get("/api/v1/ibs-consumer/status")
+        assert response.status_code == 200, response.text
+        data = response.json()["data"]
+        if data["status"] == "reconnecting" or time.monotonic() >= deadline:
+            break
+        time.sleep(0.5)
+
+    assert data["status"] == "reconnecting", data
+    assert data["process_started_at"] is not None, data
+    assert data["heartbeat_at"] is not None, data
+    assert _URL_CREDENTIALS not in response.text

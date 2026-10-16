@@ -83,6 +83,49 @@ class HealthCheckStatus(StrEnum):
     UNREACHABLE = "unreachable"
 
 
+class IBSConsumerStatus(StrEnum):
+    """Status of the IBS RabbitMQ consumer process.
+
+    Category B — classification (Python Enum only; never stored in the
+    database — the heartbeat lives only in Redis). The consumer writes
+    `connected`, `disconnected`, and `reconnecting`; the status API
+    synthesizes `disabled` and `unreachable`. See
+    `docs/features/integrations/ibs-rabbitmq-integration.md` (Consumer
+    States).
+    """
+
+    CONNECTED = "connected"
+    DISCONNECTED = "disconnected"
+    RECONNECTING = "reconnecting"
+    DISABLED = "disabled"
+    UNREACHABLE = "unreachable"
+
+
+CONSUMER_WRITTEN_IBS_CONSUMER_STATUSES: Final[frozenset[IBSConsumerStatus]] = frozenset(
+    {
+        IBSConsumerStatus.CONNECTED,
+        IBSConsumerStatus.DISCONNECTED,
+        IBSConsumerStatus.RECONNECTING,
+    }
+)
+"""The statuses a valid heartbeat may carry; `disabled` and `unreachable`
+are never written by the consumer."""
+
+
+class IBSConsumerErrorCategory(StrEnum):
+    """The bounded `last_error` category of the IBS consumer heartbeat.
+
+    Category B — classification (Python Enum only; never stored in the
+    database). See `docs/features/integrations/ibs-rabbitmq-integration.md`
+    (Heartbeat Storage).
+    """
+
+    RABBITMQ_CONNECTION_FAILED = "rabbitmq_connection_failed"
+    RABBITMQ_CONNECTION_LOST = "rabbitmq_connection_lost"
+    PACKAGE_RECONCILIATION_FAILED = "package_reconciliation_failed"
+    REQUEST_RECONCILIATION_FAILED = "request_reconciliation_failed"
+
+
 class IdentityAuditEventType(StrEnum):
     """Classifies the action recorded in an `IdentityAuditEvent`.
 

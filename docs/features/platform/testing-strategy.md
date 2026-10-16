@@ -1624,7 +1624,10 @@ artifact facts without duplicating focused behavior tests:
 - startup of each implemented API, worker, Git worker, Beat, and IBS RabbitMQ
   consumer role from the same image, with representative worker task
   registration, the queue each worker role consumes, Beat post-reconciliation
-  readiness, and the consumer's startup event;
+  readiness, the consumer's startup event, and the consumer-written
+  `reconnecting` status observed through `GET /api/v1/ibs-consumer/status`,
+  which proves the consumer and API roles share the heartbeat through the
+  packaged Redis topology;
 - one representative broker-delivered task producing a durable PostgreSQL
   outcome without a Celery result backend; and
 - only the smallest justified process-command-specific startup failure, in a
