@@ -94,6 +94,7 @@ from tests.support.epss import (
     raising,
     scored_entry,
     status,
+    undecodable,
 )
 from tests.support.fetch_single_cve import fictional_cve_id
 from tests.support.inadmissible import INADMISSIBLE_CHARACTERS
@@ -521,6 +522,24 @@ class TestErrorPropagation:
 
         assert isinstance(error, ValueError)
         assert not isinstance(error, ValidationError)
+        assert not is_retryable_condition(error)
+        assert not is_infrastructure_failure(error)
+        assert ingestion.calls == []
+
+    @pytest.mark.parametrize("code", [200, 503])
+    async def test_undecodable_body_is_a_non_retryable_decoding_error(
+        self,
+        code: int,
+        fetcher: SyncEpssScores,
+        server: EpssServer,
+        ingestion: Ingestion,
+    ) -> None:
+        """The request reads the body before the status is checked, so an
+        undecodable body fails whatever the status (networking.md, HTTP
+        Response Compression)."""
+        error = await _raised(fetcher, server, undecodable(code))
+
+        assert isinstance(error, httpx.DecodingError)
         assert not is_retryable_condition(error)
         assert not is_infrastructure_failure(error)
         assert ingestion.calls == []

@@ -7,7 +7,8 @@ Old Revision, Service Layer > IBSClient, Security);
 docs/features/packages/ibs-track-release-detection.md (Source-Info
 Validation, Source-Diff Validation, XML and Response Safety);
 docs/features/platform/networking.md (Transport-Level Retry, Method Safety,
-Redirect Policy); docs/conventions.md (External String Admissibility).
+HTTP Response Compression, Redirect Policy); docs/conventions.md (External
+String Admissibility).
 
 Clients and the fake IBS API come from `tests/support/ibs_client_fixtures.py`:
 only the network transport is replaced, so the shared retry transport, the
@@ -17,6 +18,7 @@ authentication flow, and the cookie jar are the production ones.
 from __future__ import annotations
 
 import asyncio
+import gzip
 import logging
 from collections.abc import Iterator
 from typing import Any, Final
@@ -1419,6 +1421,48 @@ class TestXmlSafety:
         with pytest.raises(IBSResponseDataError) as raised:
             await _run(server, operation, corrupt)
         assert raised.value.reason == "malformed_xml"
+
+    @pytest.mark.parametrize("operation", _OPERATIONS)
+    async def test_one_gzip_layer_is_decoded(
+        self, server: IBSServer, operation: str
+    ) -> None:
+        result = await _run(server, operation, _gzip_layers(operation, 1))
+        assert result == _VALID_RESULTS[operation]
+
+    @pytest.mark.parametrize("operation", _OPERATIONS)
+    async def test_stacked_gzip_layers_are_malformed_xml(
+        self, server: IBSServer, operation: str
+    ) -> None:
+        """The same valid document under two gzip layers is rejected by
+        the shared client's content-coding policy, which fails the read
+        (networking.md, HTTP Response Compression)."""
+        with pytest.raises(IBSResponseDataError) as raised:
+            await _run(server, operation, _gzip_layers(operation, 2))
+        assert raised.value.reason == "malformed_xml"
+
+
+_VALID_DOCUMENTS: Final = {
+    "source_info": f"<sourceinfolist>{_entry('a')}</sourceinfolist>".encode(),
+    "diff": b'<sourcediff key="0"><old/><new/><files/><issues/></sourcediff>',
+}
+_VALID_RESULTS: Final[dict[str, object]] = {
+    "source_info": {"a": SourceInfoResult(source_info=SourceInfo("a", "0" * 32))},
+    "diff": [],
+}
+
+
+def _gzip_layers(operation: str, layers: int) -> Responder:
+    """The operation's valid document under `layers` gzip codings."""
+    body = _VALID_DOCUMENTS[operation]
+    for _ in range(layers):
+        body = gzip.compress(body, mtime=0)
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        response = chunked_response([body])(request)
+        response.headers["content-encoding"] = ", ".join(["gzip"] * layers)
+        return response
+
+    return respond
 
 
 def _inadmissible_documents() -> Iterator[tuple[str, str, bytes]]:

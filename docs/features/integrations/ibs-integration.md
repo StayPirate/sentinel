@@ -312,7 +312,10 @@ Both source-info and source-diff XML are processed incrementally with DTDs,
 external entities, and parser network access disabled. Sentinel does not impose
 an arbitrary response-byte or issue-count cap, but never accepts a truncated or
 partially parsed document. The shared request and fetcher-run timeouts remain
-the execution bounds.
+the execution bounds. Decompression is bounded by the shared client's
+content-coding policy (`docs/features/platform/networking.md`, HTTP Response
+Compression): a body declaring a coding the policy rejects fails when read, as
+malformed XML.
 
 ##### Unavailable Old Revision
 

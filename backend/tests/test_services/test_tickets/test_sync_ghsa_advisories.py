@@ -796,13 +796,26 @@ class TestErrorPropagation:
         assert not is_retryable_condition(error)
         assert ingestion.calls == 0
 
-    async def test_undecodable_body_is_non_retryable(
-        self, fetcher: SyncGhsaAdvisories, server: GhsaServer, ingestion: Ingestion
+    @pytest.mark.parametrize("code", [200, 401, 503])
+    async def test_undecodable_body_is_non_retryable_whatever_the_status(
+        self,
+        code: int,
+        fetcher: SyncGhsaAdvisories,
+        server: GhsaServer,
+        ingestion: Ingestion,
     ) -> None:
+        """The request reads the body before the status is checked, so
+        even a 401 is not an authentication failure (networking.md, HTTP
+        Response Compression)."""
         error = await _raised(
             fetcher,
             server,
-            status(200, b"not gzip", headers={"Content-Encoding": "gzip"}),
+            lambda request: httpx.Response(
+                code,
+                headers={"Content-Encoding": "gzip"},
+                stream=httpx.ByteStream(b"not gzip"),
+                request=request,
+            ),
         )
 
         assert isinstance(error, httpx.DecodingError)

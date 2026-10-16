@@ -9,8 +9,9 @@ detector invocation, without any database, Redis, or filesystem access:
 - Repository Traversal: current associations first, retained historical
   associations only after every current one completed without a match,
   deterministic order, and the stop rules of the outcome table;
-- HTTP and Redirect Contract: `Accept-Encoding: identity`, media types,
-  and at most one manually validated 302 of the updateinfo artifact to
+- HTTP and Redirect Contract: `Accept-Encoding: identity`, no declared
+  content coding, media types, and at most one manually validated 302 of
+  the updateinfo artifact to
   `dist.suse.de` with an identical path (`repomd.xml` is never
   redirected); no credential, `Authorization` header, or cookie is sent
   on any request;
@@ -55,7 +56,7 @@ import httpx
 import structlog
 
 from app.config import settings
-from app.services.http_client import INFRA_FAILURE_TYPES
+from app.services.http_client import INFRA_FAILURE_TYPES, response_content_codings
 from app.services.packages.ibs_repodata import (
     CHECKSUM_ALGORITHMS,
     REPOMD_MAX_BYTES,
@@ -87,12 +88,19 @@ _INVALID_LOCATION_ERROR: Final = "Invalid URL in location header"
 _DECOMPRESS_CHUNK: Final = 1024 * 1024
 
 # RFC 9110 media-type grammar: type "/" subtype *( OWS ";" OWS parameter ).
+# The quantifiers on whitespace and on the parameter repetition are
+# possessive: they never give back what they matched, so a value that does
+# not match fails in time linear in its length instead of trying every
+# split of its whitespace between repetitions. The accepted values are
+# unchanged: whitespace can be followed only by ";" or a parameter name,
+# and a repetition only by another one or the end of the value.
 _TOKEN: Final = r"[!#$%&'*+.^_`|~0-9A-Za-z-]+"
 _QUOTED: Final = (
     r'"(?:[\t \x21\x23-\x5b\x5d-\x7e\x80-\xff]|\\[\t \x21-\x7e\x80-\xff])*"'
 )
 _MEDIA_TYPE: Final = re.compile(
-    rf"({_TOKEN})/({_TOKEN})(?:[ \t]*;[ \t]*(?:{_TOKEN}=(?:{_TOKEN}|{_QUOTED}))?)*"
+    rf"({_TOKEN})/({_TOKEN})"
+    rf"(?:[ \t]*+;[ \t]*+(?:{_TOKEN}=(?:{_TOKEN}|{_QUOTED}))?)*+"
 )
 _SAFE_PATH_SEGMENT: Final = re.compile(r"[^\x00-\x20\x7f-\xff%\\/]+")
 
@@ -314,7 +322,7 @@ class ProductRepositoryDownloads:
                 raise RepositoryDataError(
                     "http_status", http_status=response.status_code
                 )
-            _check_media_type(response, _REPOMD_MEDIA_TYPES)
+            _check_representation(response, _REPOMD_MEDIA_TYPES)
             length = _content_length(response)
             if length is not None and length > REPOMD_MAX_BYTES:
                 raise RepositoryDataError("resource_limit")
@@ -345,7 +353,7 @@ class ProductRepositoryDownloads:
                 raise RepositoryDataError(
                     "http_status", http_status=response.status_code
                 )
-            _check_media_type(response, _UPDATEINFO_MEDIA_TYPES)
+            _check_representation(response, _UPDATEINFO_MEDIA_TYPES)
             length = _content_length(response)
             if length is not None:
                 if length > UPDATEINFO_MAX_COMPRESSED_BYTES:
@@ -461,7 +469,13 @@ def _is_safe_path(path: str) -> bool:
     )
 
 
-def _check_media_type(response: httpx.Response, accepted: frozenset[str]) -> None:
+def _check_representation(response: httpx.Response, accepted: frozenset[str]) -> None:
+    """Fail as `content_type` unless the body declares no content coding
+    and its base media type is in `accepted`. Checked before the body is
+    read, so the shared client's read-time rejection of a content coding
+    it does not permit never reaches `_read_body`."""
+    if response_content_codings(response.headers):
+        raise RepositoryDataError("content_type")
     values = response.headers.get_list("content-type")
     if len(values) != 1:
         raise RepositoryDataError("content_type")

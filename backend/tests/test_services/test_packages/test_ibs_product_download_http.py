@@ -7,7 +7,8 @@ Consistency; the failure rows of Repository Traversal; Fetcher: Request
 Delay), docs/features/
 integrations/ibs-integration.md (Origins and Authentication, Business Rule 1,
 Security), docs/features/platform/networking.md (Transport-Level Retry before
-classification; Redirect Policy, IBS Product-repodata exception), and
+classification; HTTP Response Compression; Redirect Policy, IBS
+Product-repodata exception), and
 docs/conventions.md (External String Admissibility: an inadmissible
 character in `repomd.xml` or updateinfo is the repository's XML failure).
 
@@ -22,8 +23,12 @@ No network, database, or Redis is used.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import gzip
 import hashlib
+import itertools
+import re
+import signal
 from collections.abc import Callable, Iterator
 from types import SimpleNamespace
 from typing import Final
@@ -775,6 +780,176 @@ class TestMediaType:
         server = _server(Artifact(compressed=compressed, open_bytes=MATCH_DOCUMENT))
 
         _assert_incomplete(await _observe(server), "content_type")
+
+
+# The media-type pattern as it was before its quantifiers became possessive:
+# the reference for the values the check accepts.
+_T: Final = r"[!#$%&'*+.^_`|~0-9A-Za-z-]+"
+_Q: Final = r'"(?:[\t \x21\x23-\x5b\x5d-\x7e\x80-\xff]|\\[\t \x21-\x7e\x80-\xff])*"'
+_GREEDY_MEDIA_TYPE: Final = re.compile(
+    rf"({_T})/({_T})(?:[ \t]*;[ \t]*(?:{_T}=(?:{_T}|{_Q}))?)*"
+)
+_GRAMMAR_ALPHABET: Final = (" ", "\t", ";", "=", "/", "a", '"', "\\", "\x80")
+# About 300 KB: rejected in milliseconds in linear time, while quadratic
+# time would need about 10**10 steps and exponential time never ends.
+_ADVERSARIAL_PARAMETERS: Final = " ; " * 100_000
+
+
+class _MatchTimeoutError(Exception):
+    pass
+
+
+@contextlib.contextmanager
+def _alarm(seconds: float) -> Iterator[None]:
+    """Interrupt the block after `seconds`; `re` checks signals while it
+    backtracks, so a runaway match fails the test instead of hanging it."""
+
+    def interrupt(signum: int, frame: object) -> None:
+        raise _MatchTimeoutError
+
+    previous = signal.signal(signal.SIGALRM, interrupt)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+
+
+class TestMediaTypeGrammar:
+    def test_accepts_and_rejects_exactly_the_previous_values(self) -> None:
+        """Every value over the grammar's delimiters, up to five characters
+        after a complete media type, a type and "/", or nothing, matches as
+        before, with the same type and subtype."""
+        for prefix in ("a/b", "a/", ""):
+            for length in range(6):
+                for suffix in itertools.product(_GRAMMAR_ALPHABET, repeat=length):
+                    value = prefix + "".join(suffix)
+                    expected = _GREEDY_MEDIA_TYPE.fullmatch(value)
+                    actual = ibs_product_download._MEDIA_TYPE.fullmatch(value)
+                    assert (actual and actual.groups()) == (
+                        expected and expected.groups()
+                    ), repr(value)
+
+    def test_unmatched_value_is_rejected_in_linear_time(self) -> None:
+        """Regression: with greedy whitespace, each added " ; " roughly
+        tripled the time to reject this value, so one of about 100 bytes
+        never finished. The alarm only turns a super-linear regression into
+        a failure instead of a hang."""
+        accepted = "application/gzip" + _ADVERSARIAL_PARAMETERS
+        with _alarm(seconds=30):
+            assert ibs_product_download._MEDIA_TYPE.fullmatch(accepted + "=") is None
+            assert ibs_product_download._MEDIA_TYPE.fullmatch(accepted) is not None
+
+    async def test_unmatched_header_fails_the_repository_as_content_type(
+        self,
+    ) -> None:
+        item = _artifact()
+        server = _server(item)
+        header = "application/gzip" + _ADVERSARIAL_PARAMETERS + "="
+        server.script(
+            _dist_url(server, item),
+            lambda _: gzip_response(item.compressed, content_type=header),
+        )
+
+        with _alarm(seconds=30):
+            outcome = await _observe(server)
+
+        _assert_incomplete(outcome, "content_type")
+
+
+# ---------------------------------------------------------------------------
+# Content coding
+# ---------------------------------------------------------------------------
+
+_DECLARED_CODINGS: Final = [
+    pytest.param("gzip", id="gzip"),
+    pytest.param("GZIP", id="gzip-case"),
+    pytest.param("deflate", id="deflate"),
+    pytest.param("br", id="br"),
+    pytest.param("x-gzip", id="x-gzip"),
+    pytest.param("gzip, gzip", id="stacked"),
+    pytest.param("identity, gzip", id="identity-then-gzip"),
+]
+
+
+def _coded(
+    server: DownloadServer, item: Artifact, resource: str, coding: str
+) -> StreamedBody:
+    """Serve `resource` declaring `coding`; return its unread body."""
+    headers = [("Content-Encoding", coding)]
+    if resource == "repomd":
+        body = StreamedBody([_repomd(item)])
+        server.script(_repomd_url(server), _stream(body, REPOMD_TYPE, headers))
+    else:
+        body = StreamedBody([item.compressed])
+        server.script(
+            _dist_url(server, item), _stream(body, "application/x-gzip", headers)
+        )
+    return body
+
+
+class TestContentCoding:
+    @pytest.mark.parametrize("coding", _DECLARED_CODINGS)
+    @pytest.mark.parametrize("resource", ["repomd", "artifact"])
+    async def test_declared_coding_is_content_type_before_reading(
+        self, resource: str, coding: str
+    ) -> None:
+        item = _artifact()
+        server = _server(item)
+        body = _coded(server, item, resource, coding)
+
+        _assert_incomplete(await _observe(server), "content_type")
+        assert body.yielded == 0
+
+    @pytest.mark.parametrize(
+        "coding",
+        [pytest.param("gzip, gzip", id="stacked"), pytest.param("br", id="br")],
+    )
+    @pytest.mark.parametrize("resource", ["repomd", "artifact"])
+    async def test_coding_the_shared_client_rejects_stays_content_type(
+        self, monkeypatch: pytest.MonkeyPatch, resource: str, coding: str
+    ) -> None:
+        """Through the shared factory client, whose content-coding policy
+        would fail the read, the boundary still classifies the response
+        before reading it; no `httpx.DecodingError` escapes."""
+        item = _artifact()
+        server = _server(item)
+        body = _coded(server, item, resource, coding)
+        client, _ = _shared_client(monkeypatch, server)
+
+        _assert_incomplete(await _observe(server, client), "content_type")
+        assert body.yielded == 0
+
+    @pytest.mark.parametrize(
+        "values",
+        [
+            pytest.param(["identity"], id="identity"),
+            pytest.param(["IDENTITY"], id="identity-case"),
+            pytest.param([""], id="empty"),
+            pytest.param(["identity, identity"], id="identity-list"),
+            pytest.param(["identity", "identity"], id="identity-fields"),
+        ],
+    )
+    async def test_identity_is_no_coding(self, values: list[str]) -> None:
+        item = _artifact()
+        server = _server(item)
+        headers = [("Content-Encoding", value) for value in values]
+        repomd = _repomd(item)
+        server.script(
+            _repomd_url(server),
+            lambda _: unread_response(
+                200, [("Content-Type", REPOMD_TYPE), *headers], repomd
+            ),
+        )
+        server.script(
+            _dist_url(server, item),
+            lambda _: unread_response(
+                200, [("Content-Type", "application/x-gzip"), *headers], item.compressed
+            ),
+        )
+
+        _assert_matched(await _observe(server))
 
 
 # ---------------------------------------------------------------------------

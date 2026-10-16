@@ -296,6 +296,10 @@ class SyncOsvAdvisories(BaseCVEFetcher):
             return _SubRequest(record_id)
         try:
             response = await requests.get(record_id)
+        except httpx.DecodingError:
+            # The body is read before the status reaches the fetcher.
+            self._log_skip(cve_id, record_id, "invalid_body", None)
+            return _SubRequest(record_id)
         except httpx.HTTPError:
             self._log_skip(cve_id, record_id, "transport", None)
             return _SubRequest(record_id)

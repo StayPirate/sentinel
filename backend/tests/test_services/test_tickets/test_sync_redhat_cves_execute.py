@@ -84,7 +84,7 @@ from tests.support.json_decoding import (
     OVERSIZED_INTEGER,
     limit_parser_nesting,
 )
-from tests.support.redhat import RedhatServer, raising
+from tests.support.redhat import RedhatServer, raising, undecodable
 
 SessionFactory = Callable[[], Awaitable[AsyncSession]]
 
@@ -793,6 +793,8 @@ async def _planned(env: Env, plan: Plan) -> list[CVE]:
             env.respond(cve, raising(httpx.ReadTimeout("timed out")))
         elif outcome == "json":
             env.respond(cve, lambda request: httpx.Response(200, content=b"{"))
+        elif outcome == "undecodable":
+            env.respond(cve, undecodable(200))
         else:
             env.status(cve, int(outcome))
     return ordered
@@ -845,8 +847,16 @@ class TestConsecutiveFailures:
             ["503", "503", "403", "503", "503"],
             ["503", "503", "429", "503", "503"],
             ["503", "503", "json", "503", "503"],
+            ["503", "503", "undecodable", "503", "503"],
         ],
-        ids=["success", "missing", "http_403", "http_429", "unparseable"],
+        ids=[
+            "success",
+            "missing",
+            "http_403",
+            "http_429",
+            "unparseable",
+            "undecodable",
+        ],
     )
     async def test_reachability_resets_the_counter(
         self, plan: Plan, env: Env, batch: Batch
