@@ -35,6 +35,7 @@ from typing import Any, cast
 
 import aiormq
 import pytest
+from pydantic import SecretStr
 from redis import exceptions as redis_exceptions
 from structlog.contextvars import get_contextvars, merge_contextvars
 from structlog.testing import capture_logs
@@ -44,6 +45,7 @@ from app.config import settings as app_settings
 from app.core.enums import IBSConsumerErrorCategory, IBSConsumerStatus
 from app.core.exceptions import TLSConfigurationError
 from app.services import ibs_consumer_status, ibs_event_consumer
+from app.services.ibs_client import IBSClient
 from app.services.ibs_event_consumer import (
     SHUTDOWN_DEADLINE_SECONDS,
     IBSEventConsumer,
@@ -1458,6 +1460,69 @@ class TestHeartbeatCounters:
         assert (status.events_received, status.events_relevant) == (2, 0)
         assert status.last_error is None
         assert await harness.stop() == 0
+
+    async def test_request_lookup_failure_counts_with_the_request_category(
+        self, harness: Harness, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The real request path with an unconfigured process-wide client:
+        the point lookup fails before any HTTP request, the delivery counts
+        relevant and failed with `request_reconciliation_failed` and is
+        ACKed once, and consumption continues with a malformed `number`,
+        which counts only as received."""
+        from app.services.packages.ibs_event_handlers import handle_delivery
+
+        monkeypatch.setattr(ibs_event_consumer, "handle_delivery", handle_delivery)
+        harness.client = cast(
+            Any,
+            IBSClient(
+                api_url="https://ibs.example.test",
+                username="",
+                ssh_private_key=SecretStr(""),
+            ),
+        )
+        create = FakeDelivery(
+            routing_key="suse.obs.request.create",
+            body=b'{"author":"example-user","id":9100001,"number":400001}',
+        )
+        malformed = FakeDelivery(
+            routing_key="suse.obs.request.state_change", body=b'{"number":1.0}'
+        )
+
+        with capture_logs() as logs:
+            harness.start()
+            epoch = await harness.broker.wait_connected()
+            harness.broker.deliver(create)
+            harness.broker.deliver(malformed)
+            await _until(lambda: len(epoch.acks) == 2)
+            assert await harness.stop() == 0
+
+        assert epoch.acks == [create, malformed]
+        assert harness.consumer is not None
+        status = harness.consumer.status
+        assert (
+            status.events_received,
+            status.events_relevant,
+            status.events_processed,
+            status.processing_failed,
+        ) == (2, 1, 0, 1)
+        assert (
+            status.last_error is IBSConsumerErrorCategory.REQUEST_RECONCILIATION_FAILED
+        )
+        assert _entry(logs, "ibs_consumer_delivery_failed") == {
+            "event": "ibs_consumer_delivery_failed",
+            "log_level": "error",
+            "routing_key": "suse.obs.request.create",
+            "reason_category": "credentials_not_configured",
+            "request_number": 400001,
+        }
+        assert _entry(logs, "ibs_consumer_delivery_malformed") == {
+            "event": "ibs_consumer_delivery_malformed",
+            "log_level": "warning",
+            "routing_key": "suse.obs.request.state_change",
+            "reason_category": "invalid_number",
+        }
+        assert "example-user" not in repr(logs)
+        assert "9100001" not in repr(logs)
 
     async def test_committed_success_is_counted_when_the_channel_died_first(
         self, harness: Harness

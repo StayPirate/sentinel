@@ -6,8 +6,9 @@ Owning specification: docs/features/integrations/ibs-rabbitmq-integration.md
 type, strict UTF-8, exactly one RFC 8259 JSON text, an object root, ignored
 content encoding, duplicated members, no size limit). The synthetic cases
 come from `tests/fixtures/ibs_rabbitmq/hostile_deliveries.json`; schema
-reasons (`invalid_project`, `invalid_package`) belong to the package-commit
-parser and are covered in `test_packages/test_ibs_event_handlers.py`.
+reasons (`invalid_project`, `invalid_package`, `invalid_number`) belong to
+the package-commit and request parsers and are covered in
+`test_packages/test_ibs_event_handlers.py`.
 """
 
 from __future__ import annotations
@@ -18,6 +19,8 @@ from app.services.ibs_event_decoding import (
     BOUND_ROUTING_KEYS,
     CONTENT_TYPE,
     PACKAGE_COMMIT_ROUTING_KEY,
+    REQUEST_CREATE_ROUTING_KEY,
+    REQUEST_STATE_CHANGE_ROUTING_KEY,
     MalformedDeliveryError,
     MalformedReason,
     decode_delivery,
@@ -26,8 +29,8 @@ from tests.support.ibs_rabbitmq import (
     HOME_PROJECT_FIXTURE,
     METRICS_FIXTURE,
     PACKAGE_COMMIT_FIXTURES,
-    REQUEST_CREATE,
-    REQUEST_STATE_CHANGE,
+    REQUEST_FIXTURES,
+    REVIEWS_DONE_FIXTURE,
     HostileCase,
     hostile_cases,
     load_delivery,
@@ -54,24 +57,12 @@ _VALID = (
 )
 
 
-def _package_path_cases() -> list[HostileCase]:
-    """The cases outside the request families, whose handlers do not exist
-    yet."""
-    return [
-        case
-        for case in hostile_cases()
-        if case.delivery.routing_key not in (REQUEST_CREATE, REQUEST_STATE_CHANGE)
-    ]
-
-
 def _decoding_cases() -> list[HostileCase]:
-    return [case for case in _package_path_cases() if case.reason in _DECODING_REASONS]
+    return [case for case in hostile_cases() if case.reason in _DECODING_REASONS]
 
 
 def _decodable_cases() -> list[HostileCase]:
-    return [
-        case for case in _package_path_cases() if case.reason not in _DECODING_REASONS
-    ]
+    return [case for case in hostile_cases() if case.reason not in _DECODING_REASONS]
 
 
 def _decode(case: HostileCase) -> object:
@@ -80,10 +71,17 @@ def _decode(case: HostileCase) -> object:
 
 
 class TestBindings:
-    def test_package_commit_is_the_only_binding_until_request_handlers_exist(
-        self,
-    ) -> None:
-        assert BOUND_ROUTING_KEYS == (PACKAGE_COMMIT_ROUTING_KEY,)
+    def test_exactly_the_three_fixed_keys_are_bound_in_binding_order(self) -> None:
+        assert BOUND_ROUTING_KEYS == (
+            PACKAGE_COMMIT_ROUTING_KEY,
+            REQUEST_CREATE_ROUTING_KEY,
+            REQUEST_STATE_CHANGE_ROUTING_KEY,
+        )
+        assert BOUND_ROUTING_KEYS == (
+            "suse.obs.package.commit",
+            "suse.obs.request.create",
+            "suse.obs.request.state_change",
+        )
         assert CONTENT_TYPE == "application/octet-stream"
 
 
@@ -102,8 +100,24 @@ class TestObservedDeliveries:
         assert set(event.members) >= {"project", "package"}
         assert event.duplicated == frozenset()
 
-    def test_unbound_metrics_family_is_an_unsupported_routing_key(self) -> None:
-        delivery = load_delivery(METRICS_FIXTURE)
+    @pytest.mark.parametrize("name", REQUEST_FIXTURES)
+    def test_every_observed_request_event_decodes_to_its_object(
+        self, name: str
+    ) -> None:
+        delivery = load_delivery(name)
+
+        event = decode_delivery(
+            delivery.routing_key, delivery.content_type, delivery.body
+        )
+
+        assert event.routing_key == delivery.routing_key
+        assert event.routing_key in BOUND_ROUTING_KEYS
+        assert "number" in event.members
+        assert event.duplicated == frozenset()
+
+    @pytest.mark.parametrize("name", [METRICS_FIXTURE, REVIEWS_DONE_FIXTURE])
+    def test_unbound_family_is_an_unsupported_routing_key(self, name: str) -> None:
+        delivery = load_delivery(name)
 
         with pytest.raises(MalformedDeliveryError) as raised:
             decode_delivery(delivery.routing_key, delivery.content_type, delivery.body)
