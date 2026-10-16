@@ -57,9 +57,10 @@ Four settings receive special protection in the factory:
   `**overrides` — any `user-agent` key in headers or top-level
   `headers` override is silently dropped and replaced with the
   template-generated value.
-- **Accept-Encoding**: always `gzip, deflate`, the content codings the
-  shared response policy permits (see "HTTP Response Compression"). Any
-  `accept-encoding` key in a `headers` override is replaced.
+- **Accept-Encoding**: the client default is always `gzip, deflate`, the
+  content codings the shared response policy permits (see "HTTP Response
+  Compression"). Any `accept-encoding` key in a `headers` override is
+  replaced.
 - **TLS verify / ssl_context**: overridable via `**overrides` or
   `http_client_options`, but every override that sets `verify=False`
   or provides a custom `ssl_context` emits a WARNING-level log at
@@ -275,7 +276,7 @@ new subclasses within those families are automatically covered.
 | `httpx.RemoteProtocolError` | `True` | Server sent malformed HTTP — no parseable response available |
 | `httpx.HTTPStatusError` with `status_code >= 500` | `True` | Server in persistent fault state (post-transport-retry exhaustion) |
 | `httpx.HTTPStatusError` with `status_code < 500` | `False` | Server responded with client error (4xx) — proves reachability |
-| `httpx.DecodingError` | `False` | HTTP response received (headers/status OK), body encoding corrupted or outside the content-coding policy (see "HTTP Response Compression") — data-quality |
+| `httpx.DecodingError` | `False` | HTTP response received (headers and status parsed), body encoding corrupted or outside the content-coding policy (see "HTTP Response Compression") — data-quality |
 | `httpx.TooManyRedirects` | `False` | Server responded with 3xx redirects — redirect loop proves reachability |
 | `httpx.LocalProtocolError` | `False` | Client-side programming error — not an external API issue |
 | `httpx.UnsupportedProtocol` | `False` | Programming error (invalid URL scheme) — not a runtime issue |
@@ -369,11 +370,14 @@ wrappers for on-demand and catch-up operations).
 
 #### HTTP Response Compression
 
-The shared client sends `Accept-Encoding: gzip, deflate` on every request. The
-factory sets this value itself instead of inheriting the httpx default, which
-changes with the optional compression packages installed, and a caller cannot
-override it (see "Override Safety"). Responses are decompressed transparently
-with Python standard-library codecs. No per-fetcher configuration is needed.
+The shared client's default `Accept-Encoding` request header is
+`gzip, deflate`. The factory sets this value itself instead of inheriting the
+httpx default, which changes with the optional compression packages installed,
+and a factory `headers` override cannot replace it (see "Override Safety"). A
+single request may still set its own value, as the consumers described at the
+end of this section do; the response policy below applies whatever the request
+asked. Responses are decompressed transparently with Python standard-library
+codecs. No per-fetcher configuration is needed.
 
 A response may apply at most one content coding, and only `gzip` or
 `deflate`. Its codings are taken from every `Content-Encoding` field and
@@ -383,10 +387,12 @@ that declares more than one coding, or any other coding — for example `br`,
 `zstd`, `x-gzip`, `compress`, or an unknown value — keeps its status and
 headers, but reading its body, decoded or raw, raises `httpx.DecodingError`
 before any body byte is received or decoded. Closing the response releases its
-connection. A caller that does not read the body of an error response keeps
-its HTTP status outcome; a caller that reads the body observes the same
-`DecodingError` as for a corrupt compressed body, a data-quality failure (see
-Infrastructure Failure Classification), and applies the outcome its owning
+connection. A streamed response whose body the caller does not read, such as an
+error response checked by status alone, keeps its HTTP status outcome. A
+non-streaming request reads the body before it returns, so its caller observes
+the `DecodingError` whatever the status, as for a corrupt compressed body. In
+both reading cases the error is a data-quality failure (see Infrastructure
+Failure Classification), and the caller applies the outcome its owning
 specification defines for an undecodable response.
 
 The policy bounds decoding, not transfer. One standard-library layer expands

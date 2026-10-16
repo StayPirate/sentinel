@@ -789,7 +789,10 @@ _Q: Final = r'"(?:[\t \x21\x23-\x5b\x5d-\x7e\x80-\xff]|\\[\t \x21-\x7e\x80-\xff]
 _GREEDY_MEDIA_TYPE: Final = re.compile(
     rf"({_T})/({_T})(?:[ \t]*;[ \t]*(?:{_T}=(?:{_T}|{_Q}))?)*"
 )
-_GRAMMAR_ALPHABET: Final = (" ", "\t", ";", "=", "a", '"', "\\", "\x80")
+_GRAMMAR_ALPHABET: Final = (" ", "\t", ";", "=", "/", "a", '"', "\\", "\x80")
+# About 300 KB: rejected in milliseconds in linear time, while quadratic
+# time would need about 10**10 steps and exponential time never ends.
+_ADVERSARIAL_PARAMETERS: Final = " ; " * 100_000
 
 
 class _MatchTimeoutError(Exception):
@@ -816,8 +819,8 @@ def _alarm(seconds: float) -> Iterator[None]:
 class TestMediaTypeGrammar:
     def test_accepts_and_rejects_exactly_the_previous_values(self) -> None:
         """Every value over the grammar's delimiters, up to five characters
-        after a type, a subtype, or nothing, matches as before, with the
-        same type and subtype."""
+        after a complete media type, a type and "/", or nothing, matches as
+        before, with the same type and subtype."""
         for prefix in ("a/b", "a/", ""):
             for length in range(6):
                 for suffix in itertools.product(_GRAMMAR_ALPHABET, repeat=length):
@@ -831,9 +834,9 @@ class TestMediaTypeGrammar:
     def test_unmatched_value_is_rejected_in_linear_time(self) -> None:
         """Regression: with greedy whitespace, each added " ; " roughly
         tripled the time to reject this value, so one of about 100 bytes
-        never finished. A thousand repetitions now take microseconds; the
-        alarm only turns a regression into a failure instead of a hang."""
-        accepted = "application/gzip" + " ; " * 1000
+        never finished. The alarm only turns a super-linear regression into
+        a failure instead of a hang."""
+        accepted = "application/gzip" + _ADVERSARIAL_PARAMETERS
         with _alarm(seconds=30):
             assert ibs_product_download._MEDIA_TYPE.fullmatch(accepted + "=") is None
             assert ibs_product_download._MEDIA_TYPE.fullmatch(accepted) is not None
@@ -843,7 +846,7 @@ class TestMediaTypeGrammar:
     ) -> None:
         item = _artifact()
         server = _server(item)
-        header = "application/gzip" + " ; " * 1000 + "="
+        header = "application/gzip" + _ADVERSARIAL_PARAMETERS + "="
         server.script(
             _dist_url(server, item),
             lambda _: gzip_response(item.compressed, content_type=header),

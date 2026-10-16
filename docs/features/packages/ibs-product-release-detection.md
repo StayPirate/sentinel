@@ -174,9 +174,9 @@ or persisted failure counter.
 
 Requests use `Accept-Encoding: identity` so HTTP content coding cannot hide the
 bounded repository representation. A response that nevertheless declares a
-content coding — any `Content-Encoding` element other than `identity` or empty,
-compared case-insensitively — fails the repository as a content-type failure
-before its body is read. A `repomd.xml` response must have base media
+content coding, as `networking.md` (HTTP Response Compression) defines one,
+fails the repository as a content-type failure before its body is read. A
+`repomd.xml` response must have base media
 type `application/xml` or `text/xml`. An updateinfo artifact must have base media
 type `application/gzip` or `application/x-gzip` and gzip magic bytes. Media-type
 parameters are permitted and ignored after syntactic validation, which takes

@@ -1430,11 +1430,11 @@ class TestXmlSafety:
         assert result == _VALID_RESULTS[operation]
 
     @pytest.mark.parametrize("operation", _OPERATIONS)
-    async def test_stacked_gzip_layers_are_malformed_without_decoding(
+    async def test_stacked_gzip_layers_are_malformed_xml(
         self, server: IBSServer, operation: str
     ) -> None:
         """The same valid document under two gzip layers is rejected by
-        the shared client's content-coding policy before it is decoded
+        the shared client's content-coding policy, which fails the read
         (networking.md, HTTP Response Compression)."""
         with pytest.raises(IBSResponseDataError) as raised:
             await _run(server, operation, _gzip_layers(operation, 2))

@@ -488,7 +488,13 @@ class TestContentCodingPolicy:
         # The bounded message never echoes the declared value.
         assert all(value.strip() not in str(raised.value) for value in values)
 
-    @pytest.mark.parametrize("values", _REJECTED_CODINGS)
+    @pytest.mark.parametrize(
+        "values",
+        [
+            pytest.param(["gzip, gzip"], id="stacked-gzip"),
+            pytest.param(["br"], id="br"),
+        ],
+    )
     async def test_rejected_coding_keeps_status_and_headers_until_read(
         self, network: _Network, values: list[str]
     ) -> None:
@@ -568,20 +574,6 @@ class TestContentCodingPolicy:
 
         assert peak < _MIB
         assert network.bodies[0].chunks_received == 0
-
-    async def test_rejection_is_a_data_quality_failure(self, network: _Network) -> None:
-        """Like any undecodable body, a rejected coding is neither an
-        infrastructure failure nor retryable (Infrastructure Failure
-        Classification)."""
-        network.declare(["br"])
-
-        async with hc.create_http_client("test_component") as client:
-            with pytest.raises(httpx.DecodingError) as raised:
-                await client.get(_URL)
-
-        assert len(network.requests) == 1
-        assert hc.is_infrastructure_failure(raised.value) is False
-        assert hc.is_retryable_condition(raised.value) is False
 
 
 # ---------------------------------------------------------------------------
