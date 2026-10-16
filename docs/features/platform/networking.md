@@ -424,9 +424,9 @@ the standard `HTTPS_PROXY`, `HTTP_PROXY`, and `NO_PROXY` environment
 variables. No application-level proxy settings exist, and no factory
 override configures a proxy (see "Override Safety"). These are system-level
 variables, set at the container or host level for every process role that
-makes outgoing HTTP requests: the Celery workers (fetchers and
-`IBSClient`), the IBS RabbitMQ consumer (`IBSClient`), and the API server
-(SMELT requests during package addition).
+makes outgoing HTTP requests: the Celery workers (fetchers, `IBSClient`,
+and the SMELT requests of package tasks), the IBS RabbitMQ consumer
+(`IBSClient`), and the API server (SMELT requests during package addition).
 
 **Reading**: the factory reads the variables each time it creates a
 client, so a changed value applies to the next client. For each variable
@@ -441,14 +441,19 @@ host. Every route keeps the shared behavior: TLS verification of the origin
 with the shared trust store, the connection limits (applied to each route's
 own connection pool), the transport-level retry, and the response
 content-coding policy. A request to an `https` origin is tunneled through
-the proxy with `CONNECT`, so the origin certificate is verified end to end;
-a request to an `http` origin is forwarded by the proxy.
+the proxy with `CONNECT`, and the certificate presented inside the tunnel
+is verified as for a direct request, which a TLS-intercepting proxy
+satisfies only with a trusted CA (see below); a request to an `http` origin
+is forwarded by the proxy.
 
 **Proxy URL**: `http://` or `https://`, with a host and an optional port; a
 value without a scheme means `http://`. Userinfo in the URL is sent to the
 proxy as HTTP Basic authentication. The TLS connection to an `https://`
-proxy is verified with the shared trust store (`build_tls_context()`),
-whatever the caller's `verify` override. Any other value — another scheme
+proxy is verified with the shared trust store, whatever the caller's
+`verify` override: the client's own `build_tls_context()` context, or,
+when the caller overrides `verify`, one the factory builds for the proxy,
+so a missing or corrupt `SUSE_CA_CERT_PATH` then has the effects described
+in TLS Trust Store Configuration as well. Any other value — another scheme
 such as `socks5://`, a URL without a host, or an unparseable value — makes
 client creation raise `ValueError` that names the variable but never its
 value, which may contain credentials. The client never falls back to a

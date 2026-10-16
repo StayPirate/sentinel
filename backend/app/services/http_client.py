@@ -353,27 +353,33 @@ def _environment_variable(name: str) -> tuple[str, str] | None:
     return None
 
 
-def _environment_proxy(variable: str, value: str) -> httpx.Proxy:
+def _environment_proxy(
+    variable: str, value: str, trust_store: ssl.SSLContext | None
+) -> httpx.Proxy:
     """The proxy that `value`, read from `variable`, configures.
 
     A value without a scheme means `http://`; userinfo becomes HTTP Basic
     proxy authentication. The TLS connection to an `https://` proxy is
-    verified with the shared trust store. Raises `ValueError` for any
-    other scheme, a missing host, or an unparseable value; the message
-    names the variable, never the value, which may hold credentials.
+    verified with the shared trust store: `trust_store`, the client's own
+    context, or a new one when the caller overrode `verify`. Raises
+    `ValueError` for any other scheme, a missing host, or an unparseable
+    value; the message names the variable, never the value, which may hold
+    credentials.
     """
     try:
-        url: httpx.URL | None = httpx.URL(
-            value if "://" in value else f"http://{value}"
-        )
-    except httpx.InvalidURL:
-        url = None
-    if url is None or url.scheme not in _PROXY_URL_SCHEMES or not url.host:
+        url = httpx.URL(value if "://" in value else f"http://{value}")
+        valid = url.scheme in _PROXY_URL_SCHEMES and bool(url.host)
+    except httpx.InvalidURL, ValueError:
+        # `url.host` decodes the IDNA host name and may raise `ValueError`.
+        valid = False
+    if not valid:
         raise ValueError(
             f"{variable} is not a valid proxy URL: only http:// and https:// "
             "proxies are supported"
         )
-    ssl_context = build_tls_context() if url.scheme == "https" else None
+    ssl_context = None
+    if url.scheme == "https":
+        ssl_context = build_tls_context() if trust_store is None else trust_store
     return httpx.Proxy(url, ssl_context=ssl_context)
 
 
@@ -461,14 +467,19 @@ class _ProxyRouteTransport(httpx.AsyncBaseTransport):
 
 
 def _network_transport(
-    *, verify: ssl.SSLContext | bool, limits: httpx.Limits
+    *,
+    verify: ssl.SSLContext | bool,
+    limits: httpx.Limits,
+    trust_store: ssl.SSLContext | None,
 ) -> httpx.AsyncBaseTransport:
     """The direct connection pool, or, when the environment configures a
     proxy, a router over it and one pool per proxy. Every pool has the same
     TLS verification and limits, and httpx's built-in retry disabled.
-    The proxy variables are read, and validated, on every call."""
+    The proxy variables are read, and validated, on every call;
+    `trust_store` is the client's shared trust-store context, `None` when
+    the caller overrode `verify`."""
     proxies = {
-        scheme: _environment_proxy(*configured)
+        scheme: _environment_proxy(*configured, trust_store)
         for scheme, name in _PROXY_VARIABLES
         if (configured := _environment_variable(name)) is not None
     }
@@ -572,6 +583,7 @@ def create_http_client(
 
     verify_override = overrides.pop("verify", None)
     verify: ssl.SSLContext | bool
+    trust_store: ssl.SSLContext | None = None
     if verify_override is not None:
         logger.warning(
             "tls_verify_overridden",
@@ -580,7 +592,7 @@ def create_http_client(
         )
         verify = verify_override
     else:
-        verify = build_tls_context()
+        verify = trust_store = build_tls_context()
 
     if overrides.get("follow_redirects", False):
         logger.warning(
@@ -600,7 +612,7 @@ def create_http_client(
         httpx.Limits(max_connections=100, max_keepalive_connections=20),
     )
 
-    network = _network_transport(verify=verify, limits=limits)
+    network = _network_transport(verify=verify, limits=limits, trust_store=trust_store)
     transport = _ContentCodingTransport(
         _RetryTransport(network, retry_non_idempotent=retry_non_idempotent)
     )

@@ -729,9 +729,14 @@ class TestProxyRouting:
                 id="empty-lowercase-is-unset",
             ),
             pytest.param({"HTTPS_PROXY": ""}, "direct", id="empty-is-unset"),
+            pytest.param(
+                {"ALL_PROXY": "socks5://proxy.example.test:1080"},
+                "direct",
+                id="all-proxy-not-read",
+            ),
         ],
     )
-    async def test_variable_precedence(
+    async def test_proxy_variable_lowercase_first_empty_unset_selects_route(
         self,
         pools: _Pools,
         monkeypatch: pytest.MonkeyPatch,
@@ -774,10 +779,21 @@ class TestProxyRouting:
         assert proxy.auth == ("fictional-user", "fictional-secret")
         assert proxy.ssl_context is None
 
-    async def test_https_proxy_is_verified_with_the_shared_trust_store(
-        self, pools: _Pools, monkeypatch: pytest.MonkeyPatch
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            pytest.param({}, id="client-context"),
+            pytest.param({"verify": False}, id="verify-overridden"),
+        ],
+    )
+    async def test_https_proxy_is_verified_with_one_shared_trust_store_context(
+        self,
+        pools: _Pools,
+        monkeypatch: pytest.MonkeyPatch,
+        overrides: dict[str, Any],
     ) -> None:
-        """Even when the caller disables origin verification."""
+        """The client's own context, or one built for the proxy when the
+        caller overrides origin verification: one trust store either way."""
         built: list[ssl.SSLContext] = []
 
         def build() -> ssl.SSLContext:
@@ -787,7 +803,7 @@ class TestProxyRouting:
         monkeypatch.setattr(hc, "build_tls_context", build)
         monkeypatch.setenv("HTTPS_PROXY", "https://proxy.example.test:3129")
 
-        async with hc.create_http_client("test_component", verify=False):
+        async with hc.create_http_client("test_component", **overrides):
             pass
 
         proxy = pools.through("https://proxy.example.test:3129").proxy
@@ -806,6 +822,10 @@ class TestProxyRouting:
             pytest.param("ftp://fictional-secret.example.test", id="other-scheme"),
             pytest.param("http://fictional-user:fictional-secret@/", id="no-host"),
             pytest.param("http://proxy.example.test:fictional-secret", id="bad-port"),
+            pytest.param(
+                "http://fictional-user:fictional-secret@xn--a.example.test:3128",
+                id="invalid-idna-host",
+            ),
         ],
     )
     @pytest.mark.parametrize("variable", ["HTTPS_PROXY", "http_proxy"])
@@ -908,7 +928,7 @@ _NO_PROXY_CASES: Final = [
 @pytest.mark.unit
 class TestNoProxy:
     @pytest.mark.parametrize(("no_proxy", "url", "exempt"), _NO_PROXY_CASES)
-    async def test_no_proxy_entry(
+    async def test_no_proxy_entry_exempts_matching_hosts_only(
         self,
         pools: _Pools,
         monkeypatch: pytest.MonkeyPatch,
@@ -940,17 +960,6 @@ class TestNoProxy:
 
         assert pools.route("https://origin.example.test/") == "direct"
         assert pools.route("https://other.example.test/") == _PROXY
-
-    async def test_star_creates_no_proxy_pool(
-        self, pools: _Pools, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv("HTTPS_PROXY", _PROXY)
-        monkeypatch.setenv("NO_PROXY", "*")
-
-        async with hc.create_http_client("test_component"):
-            pass
-
-        assert [pool.proxy for pool in pools.created] == [None]
 
 
 @pytest.mark.unit

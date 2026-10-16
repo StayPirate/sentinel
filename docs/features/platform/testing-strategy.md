@@ -1042,8 +1042,8 @@ The proxy environment variables that the shared HTTP client reads
 (`docs/features/platform/networking.md`, Proxy Configuration) come from the
 developer's environment. An autouse fixture in `backend/tests/conftest.py`
 removes `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY`, and their lowercase forms
-before every test, so no configured proxy routes a test's request; a test
-of proxy routing sets them itself.
+before every test, so no configured proxy routes a request of the shared
+client during a test; a test of proxy routing sets them itself.
 
 The interpreter's integer-string conversion limit is process-wide state that
 the environment can override (`PYTHONINTMAXSTRDIGITS`, `-X int_max_str_digits`).
