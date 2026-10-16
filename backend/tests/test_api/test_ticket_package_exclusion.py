@@ -1597,7 +1597,11 @@ class TestOpenApiContract:
             assert "PACKAGE_ALREADY_EXCLUDED" in responses["409"]["description"]
         else:
             assert "PACKAGE_ALREADY_EXCLUDED" not in responses["409"]["description"]
-            assert self._ref_name(responses["422"]["content"]) == "ErrorResponse"
+            invalid = responses["422"]["content"]["application/json"]["schema"]
+            assert sorted(v["$ref"].rsplit("/", 1)[-1] for v in invalid["anyOf"]) == [
+                "ErrorResponse",
+                "ValidationErrorResponse",
+            ]
             assert "PACKAGE_NOT_EXCLUDED" in responses["422"]["description"]
 
     @LEVELS

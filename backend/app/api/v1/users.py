@@ -33,7 +33,7 @@ from app.database import DatabaseSession, register_post_commit_callback
 from app.models.user import User
 from app.schemas.auth import CurrentUserData, CurrentUserResponse
 from app.schemas.common import PaginationMeta
-from app.schemas.errors import ErrorResponse
+from app.schemas.errors import ErrorResponse, ValidationErrorResponse
 from app.schemas.user import (
     AdminPasswordResetRequest,
     AdminUserCreateRequest,
@@ -391,8 +391,12 @@ async def get_user(
             "description": "Normalized username or email already in use.",
         },
         422: {
-            "model": ErrorResponse,
-            "description": "Password does not meet the 16-128 character policy.",
+            "model": ValidationErrorResponse | ErrorResponse,
+            "description": (
+                "`USER_PASSWORD_POLICY_VIOLATION`: the password does not meet "
+                "the 16-128 character policy. `VALIDATION_ERROR`: the request "
+                "body is invalid."
+            ),
         },
     },
 )
@@ -606,10 +610,11 @@ async def reactivate_user_admin(
             ),
         },
         422: {
-            "model": ErrorResponse,
+            "model": ValidationErrorResponse,
             "description": (
-                "Explicit null, unknown or repeated role values, wrong types, or "
-                "a role present in both 'add' and 'remove'."
+                "`VALIDATION_ERROR`: explicit null, unknown or repeated role "
+                "values, wrong types, or a role present in both 'add' and "
+                "'remove'."
             ),
         },
     },
@@ -678,8 +683,12 @@ async def set_user_roles_admin(
             "description": "Target is an external user.",
         },
         422: {
-            "model": ErrorResponse,
-            "description": "Password does not meet the 16-128 character policy.",
+            "model": ValidationErrorResponse | ErrorResponse,
+            "description": (
+                "`USER_PASSWORD_POLICY_VIOLATION`: the password does not meet "
+                "the 16-128 character policy. `VALIDATION_ERROR`: the request "
+                "body is invalid."
+            ),
         },
     },
 )

@@ -51,7 +51,7 @@ from app.core.exceptions import TicketNotFoundError, TicketNotMutableError
 from app.core.permissions import get_capabilities
 from app.database import DatabaseSession
 from app.schemas.common import PaginationMeta
-from app.schemas.errors import ErrorResponse
+from app.schemas.errors import ErrorResponse, ValidationErrorResponse
 from app.schemas.package import (
     PackageAdditionRequest,
     PackageAdditionResponse,
@@ -865,7 +865,7 @@ def _restore_responses(level: str, path: str) -> dict[int | str, dict[str, Any]]
         },
         409: _NOT_MUTABLE_RESPONSE,
         422: {
-            "model": ErrorResponse,
+            "model": ValidationErrorResponse | ErrorResponse,
             "description": (
                 f"`PACKAGE_NOT_EXCLUDED`: the {level} is not directly excluded "
                 "(an exclusion inherited from an ancestor does not count). "
@@ -1169,7 +1169,7 @@ def _package_addition_error(status_code: int, code: ErrorCode, detail: str) -> A
             ),
         },
         422: {
-            "model": ErrorResponse,
+            "model": ValidationErrorResponse | ErrorResponse,
             "description": (
                 "`PACKAGE_NOT_FOUND_IN_SMELT`: SMELT maintains no codestream "
                 "for the package. `PACKAGE_TARGETS_UNRESOLVED`: SMELT returned "

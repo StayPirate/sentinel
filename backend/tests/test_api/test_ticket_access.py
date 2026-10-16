@@ -1115,9 +1115,17 @@ class TestOpenApiContract:
     @pytest.mark.parametrize(
         ("endpoint", "codes"),
         [
-            pytest.param(LIST, {"200", "404", "409", "422"}, id="list"),
-            pytest.param(GRANT, {"200", "201", "404", "409", "422"}, id="grant"),
-            pytest.param(REVOKE, {"204", "404", "409", "422"}, id="revoke"),
+            pytest.param(
+                LIST, {"200", "401", "403", "404", "409", "422", "500"}, id="list"
+            ),
+            pytest.param(
+                GRANT,
+                {"200", "201", "401", "403", "404", "409", "422", "500"},
+                id="grant",
+            ),
+            pytest.param(
+                REVOKE, {"204", "401", "403", "404", "409", "422", "500"}, id="revoke"
+            ),
         ],
     )
     def test_documented_responses(self, endpoint: _Endpoint, codes: set[str]) -> None:

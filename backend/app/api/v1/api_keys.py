@@ -41,7 +41,7 @@ from app.schemas.api_key import (
     CreatedApiKeyResponse,
 )
 from app.schemas.common import PaginationMeta, UserReference
-from app.schemas.errors import ErrorResponse
+from app.schemas.errors import ErrorResponse, ValidationErrorResponse
 from app.services import api_key_service
 from app.services.api_key_service import (
     ApiKeyInvalidExpiryError,
@@ -259,8 +259,12 @@ async def list_my_api_keys(
             ),
         },
         422: {
-            "model": ErrorResponse,
-            "description": "Normalized name violates the API Key Name Rule.",
+            "model": ValidationErrorResponse | ErrorResponse,
+            "description": (
+                "`AUTH_API_KEY_NAME_INVALID`: the normalized name violates the "
+                "API Key Name Rule. `VALIDATION_ERROR`: the request body is "
+                "invalid."
+            ),
         },
     },
 )

@@ -94,7 +94,7 @@ from app.schemas.cvss import (
     CVSSAssessmentResponse,
     SUSECVSSAssessmentRequest,
 )
-from app.schemas.errors import ErrorResponse
+from app.schemas.errors import ErrorResponse, ValidationErrorResponse
 from app.services import cve_service, ticket_mutations
 from app.services.cve_projection import CVEDetailProjection
 from app.services.cve_service import (
@@ -911,7 +911,7 @@ async def get_cve_cvss_assessments(
             ),
         },
         422: {
-            "model": ErrorResponse,
+            "model": ValidationErrorResponse | ErrorResponse,
             "description": (
                 "`CVSS_INVALID_VECTOR`: the string passes the schema checks but "
                 "violates the accepted Base-vector contract. `VALIDATION_ERROR`: "
@@ -1105,7 +1105,7 @@ def serialize_cve_refetch_result(result: FetchDispatchResult) -> CVERefetchResul
             ),
         },
         422: {
-            "model": ErrorResponse,
+            "model": ValidationErrorResponse | ErrorResponse,
             "description": (
                 "`CVE_INVALID_SOURCE`: `source` is not a registered source that "
                 "supports single-CVE fetch. `VALIDATION_ERROR`: a request input "

@@ -1761,7 +1761,8 @@ class TestOpenApiContract:
     ) -> None:
         response = self._operation()["responses"][status]
 
-        ref: str = response["content"]["application/json"]["schema"]["$ref"]
-        assert ref.rsplit("/", 1)[-1] == "ErrorResponse"
+        schema = response["content"]["application/json"]["schema"]
+        refs = {b["$ref"].rsplit("/", 1)[-1] for b in schema.get("anyOf", [schema])}
+        assert "ErrorResponse" in refs
         for code in codes:
             assert code in response["description"]

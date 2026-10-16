@@ -1351,7 +1351,10 @@ class TestOpenApiContract:
         assert "TICKET_CVE_CONFLICT" in responses["409"]["description"]
         assert "TICKET_SEVERITY_DERIVED" in responses["409"]["description"]
         invalid = responses["422"]["content"]["application/json"]["schema"]
-        assert self._ref_name(invalid) == "ErrorResponse"
+        assert sorted(self._ref_name(v) for v in invalid["anyOf"]) == [
+            "ErrorResponse",
+            "ValidationErrorResponse",
+        ]
         assert "CVE_INVALID_FORMAT" in responses["422"]["description"]
 
     def test_conflict_schema_requires_the_existing_ticket_identifier(self) -> None:

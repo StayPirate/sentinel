@@ -712,8 +712,9 @@ class TestOpenApiContract:
         responses = self._operation()["responses"]
 
         assert self._ref_name(responses["200"]["content"]) == "TicketDetailResponse"
-        for code in ("400", "404", "409", "422"):
+        for code in ("400", "404", "409"):
             assert self._ref_name(responses[code]["content"]) == "ErrorResponse"
+        assert self._ref_name(responses["422"]["content"]) == "ValidationErrorResponse"
         assert "TICKET_SELF_DUPLICATE" in responses["400"]["description"]
         assert "TICKET_NOT_FOUND" in responses["404"]["description"]
         for code in (

@@ -80,7 +80,11 @@ from app.schemas.common import PaginationMeta, UserReference
 from app.schemas.cve import (
     CVESummary,
 )
-from app.schemas.errors import ErrorResponse, TicketCVEConflictErrorResponse
+from app.schemas.errors import (
+    ErrorResponse,
+    TicketCVEConflictErrorResponse,
+    ValidationErrorResponse,
+)
 from app.schemas.ticket import (
     TicketAccessGrantDataResponse,
     TicketAccessGrantListResponse,
@@ -462,7 +466,7 @@ def _severity_derived_error() -> AppError:
             ),
         },
         422: {
-            "model": ErrorResponse,
+            "model": ValidationErrorResponse | ErrorResponse,
             "description": (
                 "`CVE_INVALID_FORMAT`: `cve_id` does not match "
                 "`^CVE-[0-9]{4}-[0-9]{4,}$` or exceeds 20 characters. "
@@ -685,7 +689,7 @@ async def set_ticket_severity(
             ),
         },
         422: {
-            "model": ErrorResponse,
+            "model": ValidationErrorResponse | ErrorResponse,
             "description": (
                 "`CVE_INVALID_FORMAT`: `cve_id` does not match "
                 "`^CVE-[0-9]{4}-[0-9]{4,}$` or exceeds 20 characters. "
@@ -1065,7 +1069,7 @@ async def ignore_ticket(
             ),
         },
         422: {
-            "model": ErrorResponse,
+            "model": ValidationErrorResponse,
             "description": (
                 "`VALIDATION_ERROR`: `duplicate_of_ticket_id` is missing, "
                 "`null`, not a string, or not a canonical `SNTL-{n}` identifier."

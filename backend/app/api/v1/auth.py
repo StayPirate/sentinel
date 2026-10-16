@@ -147,6 +147,16 @@ async def login(body: LoginRequest, db: DatabaseSession) -> Response:
             "model": ErrorResponse,
             "description": "Called with an API key credential instead of a JWT.",
         },
+        # Logout validates its credential itself instead of through
+        # `get_current_user`, so this 401 is not derived from its
+        # dependencies (`app/api/openapi.py`).
+        401: {
+            "model": ErrorResponse,
+            "description": (
+                "`AUTH_NOT_AUTHENTICATED`: no credential was sent, or it is not "
+                "a validly signed JWT."
+            ),
+        },
     },
 )
 async def logout(request: Request, db: DatabaseSession) -> Response:

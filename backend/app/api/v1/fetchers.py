@@ -47,6 +47,7 @@ from app.database import (
 )
 from app.models.fetcher_audit_event import FetcherAuditEvent
 from app.schemas.common import PaginationMeta, UserReference
+from app.schemas.errors import ErrorResponse, ValidationErrorResponse
 from app.schemas.fetcher import (
     FetcherAuditEventData,
     FetcherAuditListResponse,
@@ -97,6 +98,17 @@ router = APIRouter(prefix="/api/v1", tags=["Fetchers"])
 # Timeline Data, "Date range constraint").
 _TIMELINE_MAX_SECONDS = 1825 * 86400
 _TIMELINE_DEFAULT_LOOKBACK = timedelta(days=7)
+
+# Endpoint-specific error responses (fetcher-operations.md, the Error
+# responses table of each endpoint).
+_NOT_FOUND_DESCRIPTION = "`FETCHER_NOT_FOUND`: no fetcher with this name exists."
+_NOT_FOUND_RESPONSE: dict[int | str, dict[str, Any]] = {
+    404: {"model": ErrorResponse, "description": _NOT_FOUND_DESCRIPTION},
+}
+_DEREGISTERED_DESCRIPTION = (
+    "`FETCHER_DEREGISTERED`: the fetcher exists in the database, but its code "
+    "was removed."
+)
 
 
 # ---------------------------------------------------------------------------
@@ -438,6 +450,7 @@ async def list_fetchers(
         "Returns a paginated, fixed reverse-chronological list of runs for "
         "the named fetcher. Supports filtering by status and date range."
     ),
+    responses=_NOT_FOUND_RESPONSE,
 )
 async def list_fetcher_runs(
     fetcher_name: str,
@@ -477,6 +490,15 @@ async def list_fetcher_runs(
         "Returns full detail for a single run. Raw error detail and "
         "traceback are present only for callers with manage_fetchers."
     ),
+    responses={
+        404: {
+            "model": ErrorResponse,
+            "description": (
+                "`FETCHER_NOT_FOUND`: no fetcher with this name exists, or the "
+                "run was not found for this fetcher."
+            ),
+        },
+    },
 )
 async def get_fetcher_run(
     fetcher_name: str,
@@ -516,6 +538,15 @@ async def get_fetcher_run(
         "Returns time-series run data and disabled periods for chart "
         "rendering, bounded by an optional date range (maximum 1825 days)."
     ),
+    responses={
+        400: {
+            "model": ErrorResponse,
+            "description": (
+                "`DATE_RANGE_TOO_WIDE`: the requested interval exceeds 1825 days."
+            ),
+        },
+        **_NOT_FOUND_RESPONSE,
+    },
 )
 async def get_fetcher_timeline(
     fetcher_name: str,
@@ -592,6 +623,24 @@ def get_fetcher_trigger_session_factory() -> async_sessionmaker[AsyncSession]:
         "'queued'; poll GET .../runs/{run_id} for progress. Requires the "
         "manage_fetchers capability."
     ),
+    responses={
+        **_NOT_FOUND_RESPONSE,
+        409: {
+            "model": ErrorResponse,
+            "description": (
+                f"{_DEREGISTERED_DESCRIPTION} `FETCHER_DISABLED`: the fetcher "
+                "is disabled. `FETCHER_ALREADY_RUNNING`: a non-stale queued or "
+                "running run exists."
+            ),
+        },
+        503: {
+            "model": ErrorResponse,
+            "description": (
+                "`CELERY_UNAVAILABLE`: the run could not be dispatched to the "
+                "task broker."
+            ),
+        },
+    },
 )
 async def trigger_fetcher(
     fetcher_name: str,
@@ -641,6 +690,7 @@ async def trigger_fetcher(
         "fetcher-specific custom settings and the generated settings "
         "schema. Requires the manage_fetchers capability."
     ),
+    responses=_NOT_FOUND_RESPONSE,
 )
 async def get_fetcher_config(
     fetcher_name: str,
@@ -721,6 +771,26 @@ def _build_update_payload(body: FetcherConfigUpdateRequest) -> UpdateConfigPaylo
         "Schedule-affecting changes are propagated to redbeat after commit "
         "on a best-effort basis. Requires the manage_fetchers capability."
     ),
+    responses={
+        **_NOT_FOUND_RESPONSE,
+        409: {
+            "model": ErrorResponse,
+            "description": (
+                f"{_DEREGISTERED_DESCRIPTION} `FETCHER_ALREADY_RUNNING`: "
+                "`run_timeout` changes while a non-stale run is active."
+            ),
+        },
+        422: {
+            "model": ValidationErrorResponse | ErrorResponse,
+            "description": (
+                "`FETCHER_SETTING_UNKNOWN`: `custom_settings` contains an "
+                "unknown key. `FETCHER_SETTING_INVALID`: a submitted "
+                "`custom_settings` value has the wrong JSON type, or the merged "
+                "settings fail validation. `VALIDATION_ERROR`: the request body "
+                "is invalid."
+            ),
+        },
+    },
 )
 async def update_fetcher_config(
     fetcher_name: str,
@@ -788,6 +858,7 @@ async def update_fetcher_config(
         "event type, actor, and date range. Requires the manage_fetchers "
         "capability."
     ),
+    responses=_NOT_FOUND_RESPONSE,
 )
 async def list_fetcher_audit_events(
     fetcher_name: str,

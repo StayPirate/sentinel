@@ -402,6 +402,22 @@ exemption removal there so it is not forgotten.
 - All endpoints must have OpenAPI documentation through at least a summary or
   description
 - Use appropriate HTTP status codes and response models
+- **OpenAPI error responses**: implement `docs/api-spec.md` (Derived Responses
+  in the OpenAPI Document) as follows. An endpoint declares its scoped
+  responses and the codes of its error table in `responses=`, with the
+  `ErrorResponse` model, a subclass, or a union of them, and a description
+  of the form
+  `` `CODE`: condition. `` for each code. It does not declare the global or
+  shared responses: `app/api/openapi.py` declares `422` and `500` for every
+  router included under `/api/v1/` and derives `401`, `403`, and
+  `400 DATE_RANGE_INVERTED` from each route's dependency graph. A route-level
+  declaration of a status replaces the shared `422` and keeps precedence over
+  a derived response, whose condition is appended to its description, so a
+  route-level `422` uses `ValidationErrorResponse | ErrorResponse`. An
+  endpoint that produces a global response without the shared dependency,
+  such as logout's `401`, declares it itself. Structural tests in
+  `backend/tests/test_api_conventions.py` and the OpenAPI response contract
+  check (`docs/features/platform/testing-strategy.md`) enforce the result
 - **User identifier resolution**: parameters that identify a user follow
   `docs/api-spec.md` (User Identifier Resolution), including its distinction
   between target resources and optional list filters. API dependencies may

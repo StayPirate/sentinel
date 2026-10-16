@@ -678,6 +678,8 @@ Notes:
   reason — no information about the failure cause is disclosed
 - The 422 response uses Pydantic's native format with the `errors` array
   populated with field-level details
+- The OpenAPI document describes these responses for every operation they
+  apply to (see Derived Responses in the OpenAPI Document)
 - The 403 response detail is always `"Insufficient permissions"` — it
   MUST NOT disclose which capability was required
 
@@ -974,6 +976,27 @@ of non-standard behavior.
 Section-level declarations (e.g., "Global responses per api-spec.md
 apply to all endpoints in this section") are not necessary and MUST NOT
 be used — the derivation rules apply uniformly by access level and path.
+
+#### Derived Responses in the OpenAPI Document
+
+The OpenAPI document is the machine-readable contract for API clients, so
+it documents for every operation under `/api/v1/` the responses derived
+above, each with the standard error envelope as its schema:
+
+- `422 VALIDATION_ERROR`, whose schema includes the `errors` array, and
+  `500 INTERNAL_ERROR`, for every operation;
+- `401 AUTH_NOT_AUTHENTICATED` for an operation that processes
+  authentication, `403 AUTH_INSUFFICIENT_PERMISSION` for one that declares a
+  capability, and `400 DATE_RANGE_INVERTED` for one that declares both date
+  range parameters; and
+- its scoped responses and the codes of its endpoint error table.
+
+When several codes share a status, the response description names each code
+and the schema admits each body: for example, the `422` of an endpoint with a
+dedicated validation code admits both its body and the `VALIDATION_ERROR`
+body. A genuine exception documents the responses it actually returns.
+Routing responses are not documented per operation, and the probe responses
+of `/health` and `/ready` follow `docs/features/platform/health-endpoints.md`.
 
 ## Identifier Resolution
 
