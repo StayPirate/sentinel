@@ -36,7 +36,7 @@ import uuid
 from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta, timezone
 from types import SimpleNamespace
-from typing import Any, get_args
+from typing import Annotated, Any, get_args, get_origin
 
 import pytest
 from pydantic import BaseModel, ValidationError
@@ -317,6 +317,7 @@ _STRING_BOUNDS: list[tuple[type[BaseModel], str, int]] = [
     (CVEIngestPayload, "title", 256),
     (CWEEntry, "source", 100),
     (AffectedVersionEntry, "vendor", 512),
+    (AffectedVersionEntry, "product", 2048),
     (AffectedVersionEntry, "package_url", 2048),
     (AffectedVersionEntry, "collection_url", 2048),
     (AffectedVersionEntry, "package_name", 2048),
@@ -336,7 +337,6 @@ _STRING_BOUNDS: list[tuple[type[BaseModel], str, int]] = [
 
 _UNBOUNDED: list[tuple[type[BaseModel], str]] = [
     (CVEIngestPayload, "description"),
-    (AffectedVersionEntry, "product"),
     (AffectedVersionEntry, "version"),
     (AffectedVersionEntry, "version_end"),
 ]
@@ -378,6 +378,15 @@ class TestFieldBounds:
         value = "x" * 100_000
 
         assert getattr(_build(model, **{field: value}), field) == value
+
+    def test_program_files_item_at_maximum_length_is_accepted(self) -> None:
+        files = ["src/example.c", "f" * 1024]
+
+        assert _entry(program_files=files).program_files == files
+
+    def test_program_files_item_over_maximum_length_is_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="string_too_long"):
+            _entry(program_files=["src/example.c", "f" * 1025])
 
     def test_cwe_id_at_maximum_length_is_accepted(self) -> None:
         cwe_id = "CWE-" + "1" * 16
@@ -468,14 +477,25 @@ class TestFieldBounds:
             CPEMatchEntry(criteria=_CPE, vulnerable=True, match_criteria_id="nope")
 
 
+def _is_str(annotation: Any) -> bool:
+    """`str`, also with `Annotated` constraints."""
+    if get_origin(annotation) is Annotated:
+        annotation = get_args(annotation)[0]
+    return annotation is str
+
+
 def _string_fields(model: type[BaseModel]) -> list[tuple[str, bool]]:
-    """`(field, is_list)` for every `str` and `list[str]` field of `model`."""
+    """`(field, is_list)` for every `str` and `list[str]` field of `model`,
+    including a list of constrained strings."""
     fields = []
     for name, info in model.model_fields.items():
         members = get_args(info.annotation) or (info.annotation,)
         if str in members:
             fields.append((name, False))
-        elif list[str] in members:
+        elif any(
+            get_origin(member) is list and _is_str(get_args(member)[0])
+            for member in members
+        ):
             fields.append((name, True))
     return fields
 
@@ -497,10 +517,8 @@ _LEAK_MARKER = "FICTIONAL-SECRET-MARKER-0000"
 _UNCONSTRAINED_CASES: list[tuple[type[BaseModel], str, bool]] = [
     (CVEIngestPayload, "description", False),
     (CVEIngestPayload, "resolved_packages", True),
-    (AffectedVersionEntry, "product", False),
     (AffectedVersionEntry, "version", False),
     (AffectedVersionEntry, "version_end", False),
-    (AffectedVersionEntry, "program_files", True),
 ]
 
 

@@ -1876,7 +1876,10 @@ async def _apply_affected_version_operation(
 
     The complete current set is compared with the snapshot before any
     physical change, so an equal replacement, a repeated empty
-    replacement, or removal of an absent scope is a no-op.
+    replacement, or removal of an absent scope is a no-op. The entries are
+    inserted as one executemany of a single-row INSERT, so a snapshot of
+    any size stays below the driver's per-statement parameter limit, which
+    one multi-row INSERT of a large scope would exceed.
     """
     scope = and_(
         CVEAffectedVersion.cve_id == cve_id,
@@ -1897,16 +1900,15 @@ async def _apply_affected_version_operation(
     )
     if operation.operation is AffectedVersionOperation.REPLACE and operation.entries:
         await db.execute(
-            pg_insert(CVEAffectedVersion).values(
-                [
-                    {
-                        "cve_id": cve_id,
-                        "source_container": operation.source_container,
-                        **{n: getattr(entry, n) for n in AFFECTED_VERSION_FIELDS},
-                    }
-                    for entry in operation.entries
-                ]
-            )
+            pg_insert(CVEAffectedVersion),
+            [
+                {
+                    "cve_id": cve_id,
+                    "source_container": operation.source_container,
+                    **{n: getattr(entry, n) for n in AFFECTED_VERSION_FIELDS},
+                }
+                for entry in operation.entries
+            ],
         )
     return True
 

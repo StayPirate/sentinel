@@ -107,11 +107,15 @@ class CWEEntry(_PayloadModel):
     source: str = Field(max_length=100)
 
 
+PROGRAM_FILE_MAX_LENGTH: Final = 1024
+"""`maxLength` of a CVE JSON 5.x `programFiles` item."""
+
+
 class AffectedVersionEntry(_PayloadModel):
     """One entry of a CVE JSON 5.x `affected[].versions[]` array."""
 
     vendor: str | None = Field(None, max_length=512)
-    product: str | None = None
+    product: str | None = Field(None, max_length=2048)
     package_url: str | None = Field(None, max_length=2048)
     collection_url: str | None = Field(None, max_length=2048)
     package_name: str | None = Field(None, max_length=2048)
@@ -120,7 +124,9 @@ class AffectedVersionEntry(_PayloadModel):
     version_type: str | None = Field(None, max_length=128)
     version_end: str | None = None
     version_end_inclusive: bool | None = None
-    program_files: list[str] | None = None
+    program_files: (
+        list[Annotated[str, Field(max_length=PROGRAM_FILE_MAX_LENGTH)]] | None
+    ) = None
     cpe: str | None = Field(None, max_length=2048)
     ecosystem: str | None = Field(None, max_length=50)
     status: str | None = Field(None, max_length=20)

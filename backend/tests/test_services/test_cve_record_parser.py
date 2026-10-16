@@ -10,7 +10,9 @@ docs/features/tickets/cve-service.md (Canonical Payload Duplicate
 Handling; CVEIngestPayload Schema). The decisions recorded on issue #876
 (type-strict field access, optional SSVC/KEV fields, the package-coordinate
 sentinel refinement, the date-time forms, exact SSVC enums with last-entry
-selection, and last-occurrence affected deduplication) are pinned here.
+selection, and last-occurrence affected deduplication) and on issue #993
+(the per-invocation `programFiles` budget and the 1024-character item bound)
+are pinned here.
 
 Robustness against mutated input, External String Admissibility, and the
 module boundary are covered by `test_cve_record_parser_robustness.py`.
@@ -21,6 +23,7 @@ minimal fictional objects. No database, network, or log is involved.
 
 from __future__ import annotations
 
+import tracemalloc
 from datetime import UTC, date, datetime, timedelta
 from typing import Any, Final
 
@@ -46,6 +49,7 @@ from app.services.cve_ingest import (
 )
 from app.services.cve_record_parser import (
     CVSS_VECTOR_KEYS,
+    PROGRAM_FILES_BUDGET,
     extract_cve_state,
     extract_dates,
     parse_affected_versions,
@@ -621,16 +625,11 @@ class TestAffectedFields:
 
     def test_unbounded_fields_accept_long_values(self) -> None:
         long = "x" * 5000
-        element = _element(
-            product=long,
-            programFiles=[long],
-            versions=[_version(version=long, lessThan=long)],
-        )
+        element = _element(versions=[_version(version=long, lessThan=long)])
 
         (entry,) = parse_affected_versions([element])
 
-        assert (entry.product, entry.version, entry.version_end) == (long, long, long)
-        assert entry.program_files == [long]
+        assert (entry.version, entry.version_end) == (long, long)
 
     def test_ecosystem_key_in_element_is_ignored(self) -> None:
         element = _element(ecosystem="PyPI", versions=[_version()])
@@ -859,6 +858,20 @@ class TestAffectedInvalidInput:
         assert entries[1] == SIBLING_ENTRY
         assert entries[0].product == PRODUCT
 
+    def test_product_over_bound_skips_every_version_of_the_element(self) -> None:
+        """`product` is copied into every version entry, so its bound keeps
+        the output linear in the input."""
+        bound = 2048
+        at_bound = _element(product="p" * bound, versions=[_version()])
+        over = _element(
+            product="p" * (bound + 1),
+            versions=[_version(version="1.0"), _version(version="2.0")],
+        )
+
+        entries = parse_affected_versions([at_bound, over, SIBLING])
+
+        assert [e.product for e in entries] == ["p" * bound, "example-sibling"]
+
     def test_first_cpe_over_bound_skips_the_element(self) -> None:
         bound = 2048
         at_bound = _element(cpes=["c" * bound])
@@ -977,6 +990,125 @@ class TestAffectedInvalidInput:
         element = _element(programFiles=program_files)
 
         assert parse_affected_versions([element, SIBLING]) == [SIBLING_ENTRY]
+
+    def test_program_file_over_bound_skips_the_element(self) -> None:
+        bound = 1024
+        at_bound = _element(programFiles=["f" * bound])
+        over = _element(
+            product="example-over",
+            programFiles=["src/example.c", "f" * (bound + 1)],
+            versions=[_version(version="1.0"), _version(version="2.0")],
+        )
+
+        entries = parse_affected_versions([at_bound, over, SIBLING])
+
+        assert [e.product for e in entries] == [PRODUCT, "example-sibling"]
+        assert entries[0].program_files == ["f" * bound]
+
+    def test_invalid_program_file_skips_the_element_beyond_the_budget(self) -> None:
+        """The items are validated whether or not the budget lets the
+        entries carry them."""
+        over_budget = _element(
+            programFiles=[f"src/{i}.c" for i in range(PROGRAM_FILES_BUDGET + 1)]
+        )
+        invalid = _element(
+            product="example-invalid", programFiles=["f" * 1025], versions=[_version()]
+        )
+
+        entries = parse_affected_versions([over_budget, invalid, SIBLING])
+
+        assert [e.product for e in entries] == [PRODUCT, "example-sibling"]
+        assert [e.program_files for e in entries] == [None, None]
+
+
+class TestAffectedProgramFilesBudget:
+    """Step 7: the `programFiles` items carried by one invocation's entries
+    are bounded, so the output grows linearly with the input."""
+
+    @staticmethod
+    def _grid(files: int, versions: int, **fields: Any) -> dict[str, Any]:
+        return _element(
+            programFiles=[f"src/file{i}.c" for i in range(files)],
+            versions=[_version(version=f"1.{i}") for i in range(versions)],
+            **fields,
+        )
+
+    @pytest.mark.parametrize(
+        ("files", "versions"),
+        [(PROGRAM_FILES_BUDGET, 1), (100, 100), (1, PROGRAM_FILES_BUDGET)],
+    )
+    def test_items_at_the_budget_are_attached_to_every_entry(
+        self, files: int, versions: int
+    ) -> None:
+        entries = parse_affected_versions([self._grid(files, versions)])
+
+        expected = [f"src/file{i}.c" for i in range(files)]
+        assert len(entries) == versions
+        assert all(entry.program_files == expected for entry in entries)
+
+    @pytest.mark.parametrize(
+        ("files", "versions"),
+        [(PROGRAM_FILES_BUDGET + 1, 1), (101, 100), (2_000, 2_000)],
+    )
+    def test_items_over_the_budget_are_dropped_from_every_entry(
+        self, files: int, versions: int
+    ) -> None:
+        entries = parse_affected_versions([self._grid(files, versions), SIBLING])
+
+        assert len(entries) == versions + 1
+        assert all(entry.program_files is None for entry in entries)
+        assert [e.version for e in entries[:-1]] == [f"1.{i}" for i in range(versions)]
+        assert entries[-1] == SIBLING_ENTRY
+
+    def test_budget_sums_every_element_of_the_invocation(self) -> None:
+        first = self._grid(100, 100, product="example-first")
+        second = self._grid(1, 1, product="example-second")
+        at_budget = parse_affected_versions([first])
+
+        over_budget = parse_affected_versions([first, second])
+
+        assert all(entry.program_files is not None for entry in at_budget)
+        assert len(over_budget) == 101
+        assert all(entry.program_files is None for entry in over_budget)
+
+    def test_budget_counts_only_the_entries_retained_by_deduplication(
+        self,
+    ) -> None:
+        """A later duplicate replaces an earlier entry together with its
+        files, so the replaced entry no longer counts."""
+        first = self._grid(PROGRAM_FILES_BUDGET, 1)
+        second = self._grid(1, 1)
+
+        (entry,) = parse_affected_versions([first, second])
+
+        assert entry.program_files == ["src/file0.c"]
+
+    def test_entries_without_program_files_count_zero(self) -> None:
+        without = _element(
+            product="example-without",
+            versions=[_version(version=f"2.{i}") for i in range(5)],
+        )
+        entries = parse_affected_versions(
+            [self._grid(PROGRAM_FILES_BUDGET, 1), without]
+        )
+
+        assert entries[0].program_files is not None
+        assert all(entry.program_files is None for entry in entries[1:])
+
+    def test_parsing_memory_does_not_grow_with_files_times_versions(self) -> None:
+        """Peak traced memory, not timing: copying N files into M entries
+        would peak at about 33 MiB for N = M = 2,000."""
+        element = self._grid(2_000, 2_000)
+
+        tracemalloc.start()
+        try:
+            entries = parse_affected_versions([element])
+            peak = tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+
+        assert len(entries) == 2_000
+        assert peak < 8 * 2**20
 
 
 class TestAffectedFixtures:

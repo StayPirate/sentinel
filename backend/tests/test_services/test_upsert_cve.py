@@ -1648,6 +1648,45 @@ class TestAffectedVersionScopes:
         assert await _scope(db_session, cve, "adp:Example") == unobserved
         assert await _scope(db_session, cve, "ghsa") == equal
 
+    async def test_replacement_beyond_one_statement_parameter_limit_stores_all(
+        self, db_session: AsyncSession
+    ) -> None:
+        # One multi-row INSERT binds `id`, `cve_id`, `source_container`, and
+        # every content field per row; asyncpg rejects more than 32,767
+        # arguments per statement, so this snapshot would not fit in one.
+        entries = [
+            av_entry(
+                vendor="Example",
+                product="Example",
+                version=f"1.{index}",
+                program_files=["src/example.c"] if index % 2 else None,
+            )
+            for index in range(4_000)
+        ]
+        assert len(entries) * (3 + len(ENTRY_COLUMNS)) > 32_767
+        payload = CVEIngestPayload(
+            affected_version_operations=[replace("cna", *entries)]
+        )
+
+        created = await _upsert(db_session, payload=payload)
+        rows = await _scope(db_session, created.cve, "cna")
+        stored = (
+            await db_session.execute(
+                select(
+                    CVEAffectedVersion.version, CVEAffectedVersion.program_files
+                ).where(CVEAffectedVersion.cve_id == created.cve.id)
+            )
+        ).all()
+        repeated = await _upsert(db_session, payload=payload)
+
+        assert created.action is CREATED
+        assert sorted((r[0], r[1]) for r in stored) == sorted(
+            (entry.version, entry.program_files) for entry in entries
+        )
+        assert repeated.action is UNCHANGED
+        # Every row shares `product`, so compare as sorted `(id, ctid)` sets.
+        assert sorted(await _scope(db_session, created.cve, "cna")) == sorted(rows)
+
     async def test_identical_entries_collapse_to_one_row(
         self, db_session: AsyncSession
     ) -> None:
