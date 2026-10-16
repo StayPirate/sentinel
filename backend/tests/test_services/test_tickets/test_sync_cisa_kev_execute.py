@@ -97,6 +97,7 @@ from app.services.cve_ingest import (
     KEVEntry,
     UpsertAction,
 )
+from app.services.json_decoding import JSONNestingError
 from app.services.tickets import cisa_kev_catalog
 from app.services.tickets.cisa_kev_catalog import KevCatalogStructureError
 from app.services.tickets.sync_cisa_kev import (
@@ -119,6 +120,11 @@ from tests.support.cisa_kev import (
 )
 from tests.support.cve_ingest import IngestionWorld
 from tests.support.inadmissible import INADMISSIBLE_CHARACTERS, SURROGATE
+from tests.support.json_decoding import (
+    NESTED_ARRAY,
+    OVERSIZED_INTEGER,
+    limit_parser_nesting,
+)
 from tests.support.ticket_mutations import EventRow, ticket_events_by_id
 
 SessionFactory = Callable[[], Awaitable[AsyncSession]]
@@ -703,19 +709,6 @@ def _outcome(run: FetcherRun) -> tuple[str, int, int, int, int]:
 # ---------------------------------------------------------------------------
 
 
-class _TooDeeplyNestedResponse(httpx.Response):
-    """A body whose decoding exhausts the recursion limit. The depth at
-    which CPython's JSON decoder raises `RecursionError` depends on the
-    interpreter build and stack size, so the outcome is forced here."""
-
-    def json(self, **kwargs: Any) -> Any:
-        raise RecursionError("maximum recursion depth exceeded")
-
-
-def _too_deeply_nested(request: httpx.Request) -> httpx.Response:
-    return _TooDeeplyNestedResponse(200, content=b"[[[]]]", request=request)
-
-
 _FATAL_CASES: Final[
     list[tuple[Responder | None, Any, str, type[BaseException] | None]]
 ] = [
@@ -808,10 +801,17 @@ _FATAL_CASES: Final[
         httpx.DecodingError,
     ),
     (
-        _too_deeply_nested,
+        # Rejected by the limited parser that every fatal case runs with.
+        raw_body(('{"vulnerabilities": [], "x": ' + NESTED_ARRAY + "}").encode()),
         None,
         "CISA KEV feed returned unparseable response",
-        RecursionError,
+        JSONNestingError,
+    ),
+    (
+        raw_body(b'{"vulnerabilities": [], "n": ' + OVERSIZED_INTEGER.encode() + b"}"),
+        None,
+        "CISA KEV feed returned unparseable response",
+        ValueError,
     ),
     (None, [], "CISA KEV feed has unexpected structure", KevCatalogStructureError),
     (
@@ -877,7 +877,8 @@ _FATAL_IDS: Final = [
     "non_utf8",
     "empty_body",
     "undecodable_content_encoding",
-    "too_deeply_nested",
+    "nesting_beyond_the_parser_limit",
+    "integer_beyond_the_conversion_limit",
     "root_empty_list",
     "root_list",
     "root_string",
@@ -890,7 +891,15 @@ _FATAL_IDS: Final = [
 ]
 
 
-def _serve_fatal(env: Env, responder: Responder | None, document: Any) -> None:
+def _serve_fatal(
+    env: Env,
+    responder: Responder | None,
+    document: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Serve one fatal case with the limited parser (External JSON
+    Decoding): only the nesting case contains its nesting run."""
+    limit_parser_nesting(monkeypatch)
     if responder is not None:
         env.server.response = responder
     else:
@@ -912,7 +921,7 @@ class TestFatalFeedErrors:
         batch: Batch,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        _serve_fatal(env, responder, document)
+        _serve_fatal(env, responder, document, monkeypatch)
         trace = _trace(monkeypatch, batch)
         upserts = _spy_upsert(monkeypatch)
 
@@ -950,9 +959,10 @@ class TestFatalFeedErrors:
         message: str,
         cause: type[BaseException] | None,
         env: Env,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         cve = await env.cve()
-        _serve_fatal(env, responder, document)
+        _serve_fatal(env, responder, document, monkeypatch)
         fetcher, run_id = await env.run_row()
 
         with pytest.raises(FetcherError):

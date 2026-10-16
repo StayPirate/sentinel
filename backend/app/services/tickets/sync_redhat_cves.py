@@ -45,6 +45,7 @@ from app.services.base_cve_fetcher import (
 from app.services.base_fetcher import FetcherError
 from app.services.cve_ingest import CVEIngestPayload, CVSSAssessmentEntry, CWEEntry
 from app.services.http_client import is_infrastructure_failure
+from app.services.json_decoding import decode_json
 from app.services.tickets import redhat_cve_record
 from app.services.tickets.redhat_cve_record import RedhatExtraction
 
@@ -158,7 +159,7 @@ class SyncRedhatCves(BaseCVEFetcher):
         if response.status_code != 200:
             response.raise_for_status()
             raise RedhatResponseError()
-        record = redhat_cve_record.parse_response(response.json())
+        record = redhat_cve_record.parse_response(decode_json(response.content))
         return redhat_cve_record.extract(record)
 
     async def execute(self, session: AsyncSession) -> None:

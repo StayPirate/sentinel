@@ -30,6 +30,11 @@ from tests.support.ibs_rabbitmq import (
     hostile_cases,
     load_delivery,
 )
+from tests.support.json_decoding import (
+    NESTED_ARRAY,
+    OVERSIZED_INTEGER,
+    limit_parser_nesting,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -127,14 +132,24 @@ class TestHostileDeliveries:
 
         assert raised.value.reason is MalformedReason.UNSUPPORTED_CONTENT_TYPE
 
-    def test_nesting_beyond_the_parser_limit_is_invalid_json(self) -> None:
-        depth = 200_000
-        body = (
-            b'{"project":"SUSE:SLE-15-SP6:Update","package":"example-pkg","x":'
-            + b"[" * depth
-            + b"]" * depth
-            + b"}"
-        )
+    def test_nesting_beyond_the_parser_limit_is_invalid_json(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Nesting in an unconsumed member: accepted within the parser's
+        limit, invalid JSON beyond it (External JSON Decoding)."""
+        body = _VALID[:-1] + b',"x":' + NESTED_ARRAY.encode() + b"}"
+        assert decode_delivery(PACKAGE_COMMIT_ROUTING_KEY, CONTENT_TYPE, body)
+
+        limit_parser_nesting(monkeypatch)
+
+        with pytest.raises(MalformedDeliveryError) as raised:
+            decode_delivery(PACKAGE_COMMIT_ROUTING_KEY, CONTENT_TYPE, body)
+
+        assert raised.value.reason is MalformedReason.INVALID_JSON
+
+    def test_unterminated_deep_nesting_is_invalid_json(self) -> None:
+        """Invalid JSON whether or not the parser accepts the depth."""
+        body = _VALID[:-1] + b',"x":' + b"[" * 200_000
 
         with pytest.raises(MalformedDeliveryError) as raised:
             decode_delivery(PACKAGE_COMMIT_ROUTING_KEY, CONTENT_TYPE, body)
@@ -142,7 +157,7 @@ class TestHostileDeliveries:
         assert raised.value.reason is MalformedReason.INVALID_JSON
 
     def test_integer_beyond_the_conversion_limit_is_invalid_json(self) -> None:
-        body = _VALID[:-1] + b',"count":' + b"9" * 10_000 + b"}"
+        body = _VALID[:-1] + b',"count":' + OVERSIZED_INTEGER.encode() + b"}"
 
         with pytest.raises(MalformedDeliveryError) as raised:
             decode_delivery(PACKAGE_COMMIT_ROUTING_KEY, CONTENT_TYPE, body)

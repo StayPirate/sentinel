@@ -33,7 +33,6 @@ row lock while awaiting it.
 
 from __future__ import annotations
 
-import json
 from typing import Any, Literal
 from urllib.parse import quote
 from uuid import UUID
@@ -45,6 +44,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from app.config import settings
 from app.core.external_strings import AdmissibleStr
 from app.services.http_client import INFRA_FAILURE_TYPES
+from app.services.json_decoding import decode_json
 
 logger = structlog.get_logger(__name__)
 
@@ -210,10 +210,10 @@ async def _read_json(response: httpx.Response) -> Any:
             "envelope", status_code=status_code, error_type=type(exc).__name__
         ) from None
     try:
-        return json.loads(content)
-    except (ValueError, RecursionError) as exc:
-        # ValueError covers JSONDecodeError and UnicodeDecodeError;
-        # RecursionError covers pathologically nested untrusted JSON.
+        return decode_json(content)
+    except ValueError as exc:
+        # Every decoding failure (External JSON Decoding), including
+        # JSONDecodeError, UnicodeDecodeError, and JSONNestingError.
         raise _UnavailableError(
             "envelope", status_code=status_code, error_type=type(exc).__name__
         ) from None

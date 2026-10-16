@@ -93,6 +93,11 @@ from app.services.tickets.sync_osv_advisories import (
 )
 from tests.support.fetch_single_cve import fictional_cve_id
 from tests.support.inadmissible import INADMISSIBLE_CHARACTERS, SURROGATE
+from tests.support.json_decoding import (
+    NESTED_ARRAY,
+    OVERSIZED_INTEGER,
+    limit_parser_nesting,
+)
 from tests.support.osv import (
     ALIAS_NOT_FOUND_FIXTURE,
     OSV_HOST,
@@ -522,6 +527,14 @@ FAILED_RESPONSES: Final[list[tuple[Any, str, int | None]]] = [
     (raising(httpx.ReadTimeout(SECRET)), "transport", None),
     (raising(httpx.RemoteProtocolError(SECRET)), "transport", None),
     (status(200, b"{"), "invalid_body", 200),
+    # Rejected by the limited parser that every failed-response case runs
+    # with (External JSON Decoding).
+    (status(200, ('{"x": ' + NESTED_ARRAY + "}").encode()), "invalid_body", 200),
+    (
+        status(200, b'{"n": ' + OVERSIZED_INTEGER.encode() + b"}"),
+        "invalid_body",
+        200,
+    ),
     (status(200, b""), "invalid_body", 200),
     (status(200, b"\xff\xfe\xfd"), "invalid_body", 200),
     (status(200, f"<html>{SECRET}</html>".encode()), "invalid_body", 200),
@@ -552,6 +565,8 @@ FAILED_IDS: Final = [
     "read_timeout",
     "protocol",
     "truncated_json",
+    "nesting_beyond_the_parser_limit",
+    "integer_beyond_the_conversion_limit",
     "empty_body",
     "invalid_utf8",
     "html",
@@ -881,7 +896,9 @@ class TestFailedSubRequests:
         fetcher: SyncOsvAdvisories,
         server: OsvServer,
         ingestion: Ingestion,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        limit_parser_nesting(monkeypatch)
         cve_id = _listing(server, [ALIAS])
         server.responses[ALIAS] = responder
 
@@ -1525,8 +1542,10 @@ class TestScopeCompleteness:
         fetcher: SyncOsvAdvisories,
         server: OsvServer,
         ingestion: Ingestion,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         await _seed(db_session, target, fetcher, server)
+        limit_parser_nesting(monkeypatch)
         server.bodies[target.cve_id] = {"affected": [], "aliases": [ALIAS_2, ALIAS]}
         server.bodies[ALIAS_2] = _alias_body(target.cve_id, _package("other"))
         server.responses[ALIAS] = responder

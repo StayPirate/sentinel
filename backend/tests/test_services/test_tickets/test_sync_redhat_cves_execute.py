@@ -79,6 +79,11 @@ from app.services.tickets import sync_redhat_cves as sync_module
 from app.services.tickets.sync_redhat_cves import SyncRedhatCves
 from tests.support.cve_ingest import IngestionWorld
 from tests.support.inadmissible import INADMISSIBLE_CHARACTERS
+from tests.support.json_decoding import (
+    NESTED_ARRAY,
+    OVERSIZED_INTEGER,
+    limit_parser_nesting,
+)
 from tests.support.redhat import RedhatServer, raising
 
 SessionFactory = Callable[[], Awaitable[AsyncSession]]
@@ -629,15 +634,43 @@ class TestItemFailure:
         [
             (lambda request: httpx.Response(403), "HTTPStatusError"),
             (lambda request: httpx.Response(200, content=b"{"), "JSONDecodeError"),
+            (
+                lambda request: httpx.Response(
+                    200, content=('{"x": ' + NESTED_ARRAY + "}").encode()
+                ),
+                "JSONNestingError",
+            ),
+            (
+                lambda request: httpx.Response(
+                    200, content=b'{"n": ' + OVERSIZED_INTEGER.encode() + b"}"
+                ),
+                "ValueError",
+            ),
             (lambda request: httpx.Response(200, json=[1]), "ValidationError"),
             (lambda request: httpx.Response(204), "RedhatResponseError"),
             (raising(httpx.ConnectError(FAILURE_TEXT)), "ConnectError"),
         ],
-        ids=["forbidden", "json", "schema", "unexpected_2xx", "connect"],
+        ids=[
+            "forbidden",
+            "json",
+            "nesting_beyond_the_parser_limit",
+            "integer_beyond_the_conversion_limit",
+            "schema",
+            "unexpected_2xx",
+            "connect",
+        ],
     )
     async def test_event_names_only_the_exception_class(
-        self, responder: Any, cause: str, env: Env, batch: Batch
+        self,
+        responder: Any,
+        cause: str,
+        env: Env,
+        batch: Batch,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        # The limited parser rejects only the nesting case (External JSON
+        # Decoding).
+        limit_parser_nesting(monkeypatch)
         cve = await env.active_cve()
         env.respond(cve, responder)
 

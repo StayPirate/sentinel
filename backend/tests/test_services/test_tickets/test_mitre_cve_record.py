@@ -71,6 +71,11 @@ from app.services.tickets.mitre_cve_record import (
 )
 from tests.support import mitre as mitre_support
 from tests.support.inadmissible import INADMISSIBLE_CHARACTERS, NUL, SURROGATE
+from tests.support.json_decoding import (
+    NESTED_ARRAY,
+    OVERSIZED_INTEGER,
+    limit_parser_nesting,
+)
 from tests.support.mitre import (
     ALL_RECORDS,
     load_raw_record,
@@ -360,7 +365,7 @@ class TestDecode:
             b'"CVE-2026-0001"',
             b"null",
             b"[" * 100_000 + b"]" * 100_000,
-            b'{"n": ' + b"9" * 5000 + b"}",
+            b'{"n": ' + OVERSIZED_INTEGER.encode() + b"}",
         ],
         ids=[
             "empty",
@@ -379,6 +384,19 @@ class TestDecode:
     def test_undecodable_content_fails(self, content: bytes) -> None:
         with pytest.raises(MitreRecordDecodeError):
             map_record(PATH, content)
+
+    def test_nesting_beyond_the_parser_limit_fails(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Nesting in an unconsumed member: mapped within the parser's limit,
+        undecodable beyond it (External JSON Decoding)."""
+        content = json.dumps(_record())[:-1] + ', "x": ' + NESTED_ARRAY + "}"
+        assert map_record(PATH, content.encode()).payload == _payload(_record())
+
+        limit_parser_nesting(monkeypatch)
+
+        with pytest.raises(MitreRecordDecodeError):
+            map_record(PATH, content.encode())
 
     def test_error_message_and_cause_carry_no_content(self) -> None:
         with pytest.raises(MitreRecordDecodeError) as caught:
@@ -1765,6 +1783,7 @@ class TestModuleBoundary:
             "app.core.identifiers",
             "app.services.cve_record_parser",
             "app.services.cve_ingest",
+            "app.services.json_decoding",
             "app.services.reference_service",
         }
 

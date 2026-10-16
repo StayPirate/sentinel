@@ -35,7 +35,6 @@ belongs to the import cycle of `base_cve_fetcher`.
 from __future__ import annotations
 
 import asyncio
-import json
 from asyncio import CancelledError
 from dataclasses import dataclass
 from typing import ClassVar, Final, Literal
@@ -63,6 +62,7 @@ from app.services.cve_ingest import (
     ExternalIdentifierEntry,
 )
 from app.services.http_client import is_infrastructure_failure
+from app.services.json_decoding import decode_json
 from app.services.tickets import osv_vulnerability_record
 from app.services.tickets.osv_vulnerability_record import (
     OsvAliasRecord,
@@ -267,7 +267,9 @@ class SyncOsvAdvisories(BaseCVEFetcher):
         if response.status_code != 200:
             response.raise_for_status()
             raise OsvResponseError()
-        record = osv_vulnerability_record.parse_cve_record(response.json())
+        record = osv_vulnerability_record.parse_cve_record(
+            decode_json(response.content)
+        )
         if not osv_vulnerability_record.has_extractable_data(record):
             raise CVENotInSource()
 
@@ -304,8 +306,14 @@ class SyncOsvAdvisories(BaseCVEFetcher):
             self._log_skip(cve_id, record_id, "http_status", response.status_code)
             return _SubRequest(record_id)
         try:
-            record = osv_vulnerability_record.parse_alias_record(response.json())
-        except json.JSONDecodeError, UnicodeDecodeError, ValidationError:
+            document = decode_json(response.content)
+        except ValueError:
+            # Every decoding failure (External JSON Decoding).
+            self._log_skip(cve_id, record_id, "invalid_body", 200)
+            return _SubRequest(record_id)
+        try:
+            record = osv_vulnerability_record.parse_alias_record(document)
+        except ValidationError:
             self._log_skip(cve_id, record_id, "invalid_body", 200)
             return _SubRequest(record_id)
         return _SubRequest(record_id, record)

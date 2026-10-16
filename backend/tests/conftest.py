@@ -9,6 +9,7 @@ import asyncio
 import atexit
 import itertools
 import os
+import sys
 from collections.abc import AsyncGenerator, Awaitable, Callable, Iterator
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -120,6 +121,12 @@ from tests.support.parallel import (
     worker_database_url,
     worker_id,
 )
+
+# The runtime keeps CPython's default integer-string conversion limit
+# (docs/deployment.md, Python Interpreter Limits); pin it so that an
+# environment override (`PYTHONINTMAXSTRDIGITS`, `-X int_max_str_digits`)
+# cannot change a test outcome (docs/conventions.md, External JSON Decoding).
+sys.set_int_max_str_digits(sys.int_info.default_max_str_digits)
 
 # Fictional bcrypt-shaped value — never a real hash (see AGENTS.md Guardrail 23)
 _FICTIONAL_PASSWORD_HASH = "$2b$12$" + "a" * 53

@@ -44,7 +44,7 @@ from structlog.testing import capture_logs
 from app.config import settings
 from app.core.enums import WorkflowType
 from app.models.ticket_package_track import TicketPackageTrack
-from app.services import http_client
+from app.services import http_client, json_decoding
 from app.services.packages import smelt_maintained
 from app.services.packages.smelt_maintained import (
     REFERENCE_MAX_LENGTH,
@@ -59,6 +59,11 @@ from app.services.packages.smelt_maintained import (
     maintained_package_url,
 )
 from tests.support.inadmissible import INADMISSIBLE_CHARACTERS, NUL, SURROGATE
+from tests.support.json_decoding import (
+    NESTED_ARRAY,
+    OVERSIZED_INTEGER,
+    limit_parser_nesting,
+)
 from tests.support.smelt import (
     MAINTAINED_NOT_FOUND_FIXTURES,
     MAINTAINED_SUCCESS_FIXTURES,
@@ -602,6 +607,18 @@ _ENVELOPE_200: list[tuple[str, tuple[Respond, str | None]]] = [
         "invalid-utf8",
         (_raw(200, b'{"status": "success", "data": "\xc3\x28"}'), "UnicodeDecodeError"),
     ),
+    (
+        "integer-beyond-the-conversion-limit",
+        (
+            _raw(
+                200,
+                b'{"status": "success", "data": [], "n": '
+                + OVERSIZED_INTEGER.encode()
+                + b"}",
+            ),
+            "ValueError",
+        ),
+    ),
     ("non-object-list", (_json(200, [_sle_entry()]), None)),
     ("non-object-string", (_json(200, "success"), None)),
     ("non-object-number", (_json(200, 200), None)),
@@ -690,22 +707,22 @@ class TestEnvelopeAndPairing:
 
         _assert_unavailable(outcome, "schema", status_code=200)
 
-    async def test_recursion_error_while_decoding_is_envelope_unavailable(
+    async def test_nesting_beyond_the_parser_limit_is_envelope_unavailable(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        def loads(content: bytes) -> Any:
-            raise RecursionError("maximum recursion depth exceeded")
+        """Nesting in an unconsumed member that the parser cannot represent
+        is invalid JSON (External JSON Decoding)."""
+        body = json.dumps(_success(_sle_entry()))[:-1] + ', "x": ' + NESTED_ARRAY + "}"
+        limit_parser_nesting(monkeypatch)
 
-        monkeypatch.setattr(smelt_maintained, "json", SimpleNamespace(loads=loads))
-
-        outcome = await _fetch(_json(200, _success(_sle_entry())))
+        outcome = await _fetch(_raw(200, body.encode()))
 
         _assert_unavailable(
-            outcome, "envelope", status_code=200, error_type="RecursionError"
+            outcome, "envelope", status_code=200, error_type="JSONNestingError"
         )
 
     async def test_deeply_nested_json_is_envelope_unavailable(self) -> None:
-        # Whether the decoder exhausts its depth guard (RecursionError) or
+        # Whether the decoder exhausts its depth limit (JSONNestingError) or
         # reaches the unterminated end (JSONDecodeError) depends on the
         # interpreter's available C stack; the outcome is the same.
         outcome = await _fetch(_raw(200, b"[" * 100_000))
@@ -714,7 +731,7 @@ class TestEnvelopeAndPairing:
         assert outcome.error is not None
         assert outcome.error.category == "envelope"
         assert outcome.error.status_code == 200
-        assert outcome.error.error_type in {"RecursionError", "JSONDecodeError"}
+        assert outcome.error.error_type in {"JSONNestingError", "JSONDecodeError"}
         assert outcome.logs == []
 
 
@@ -1550,10 +1567,10 @@ class TestPropagation:
     async def test_memory_error_during_json_decoding_propagates(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        def loads(content: bytes) -> Any:
+        def loads(document: bytes, **options: Any) -> Any:
             raise MemoryError
 
-        monkeypatch.setattr(smelt_maintained, "json", SimpleNamespace(loads=loads))
+        monkeypatch.setattr(json_decoding, "json", SimpleNamespace(loads=loads))
 
         with capture_logs() as logs, pytest.raises(MemoryError):
             await _fetch(_json(200, _success(_sle_entry())))

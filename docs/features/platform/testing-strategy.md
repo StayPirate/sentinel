@@ -903,6 +903,7 @@ shape.
 | API session ownership | `backend/tests/test_architecture/test_api_session_ownership.py` | Over every module in `app/api/` (excluding `app/api/health.py`, whose readiness probe never uses the `get_db` yield-dependency at all — it opens its own read-only, no-commit session directly for its `SELECT 1` check, so the `scope="function"` rule does not apply to it): no direct reference to `async_session_factory` and no direct `.commit()`/`.rollback()` call — both would bypass the `DatabaseSession` dependency and its `scope="function"` ordering guarantee (`docs/conventions.md`, API Transaction Dependency Scope) invisibly to the route-dependency-graph check above |
 | `asyncio.run()` boundary inventory | `backend/tests/test_architecture/test_asyncio_run_inventory.py` | Every direct `asyncio.run(...)` call site in `backend/app/tasks/` (by module and enclosing function) is enumerated via AST and compared against a reviewed inventory maintained in the test module. A new, unclassified call site fails the test — not because direct `asyncio.run()` is forbidden, but because a long-lived Celery process repeating it needs an explicit lifecycle classification (disposes the shared pooled engine before returning; a documented one-shot or independently safe lifecycle) per `docs/conventions.md` (Cross-loop pooled connection lifecycle). Adding the new call site to the inventory with its classification is the required action, not a workaround |
 | Process-spawning boundary | `backend/tests/test_architecture/test_git_subprocess_boundary.py` | Every process-spawning call in `backend/app/` (`subprocess` functions and classes, `asyncio.create_subprocess_exec`/`create_subprocess_shell`, event-loop `subprocess_exec`/`subprocess_shell`, `pty.spawn`, and the `os` process functions such as `os.system`, `os.popen`, `os.fork*`, `os.exec*`, `os.spawn*`, and `os.posix_spawn*`) is enumerated via AST, including calls through aliased imports, and must occur only in `app/services/git_operations.py`, the single module allowed to invoke `git` (`docs/features/platform/git-fetcher-infrastructure.md`, Implementation Location). Inside that module the only allowed call is `asyncio.create_subprocess_exec` (Module Invariants, Rule 2: an argument list, never a shell). Also asserts that no module in `backend/app/` imports a Python Git library (`git`, `pygit2`, `dulwich`) and that `backend/pyproject.toml` declares none (Runtime Dependencies, "No Python Git library is used"). A new process-spawning module is a reviewed exception added to the test, not a workaround |
+| JSON decoding boundary | `backend/tests/test_architecture/test_json_decoding_boundary.py` | Every JSON decoding reference in `backend/app/` — `json.loads`, `json.load`, `json.JSONDecoder`, and `raw_decode`; a `.json()` call, the `httpx` and Starlette body decoders; Pydantic `model_validate_json`, `validate_json`, and `pydantic_core.from_json`; and an import of a third-party JSON library — is enumerated via AST, including aliased imports, and must occur only in `app/services/json_decoding.py` (`docs/conventions.md`, External JSON Decoding). The reviewed exceptions listed in the test are the consumer-supplied request body in `app/core/request_admissibility.py`, the bundled CPE mapping in `app/services/cpe_mapping.py`, and the re-validation of a value the same code has just serialized in `app/services/fetcher_operations.py`; each is pinned to its exact references. A self-test proves that each detected form is found. A new decoding site is a reviewed exception added to the test, not a workaround |
 | Git fetcher template | `backend/tests/test_architecture/test_git_fetcher_template.py` | After production fetcher discovery, every concrete `BaseGitFetcher` subclass in `FETCHER_REGISTRY` inherits `execute()` and `queue = "git"` unchanged, implements `process_item()` and `_construct_candidate_paths()`, declares `repo_url`, `delta_path_prefix`, and `recovery_path_prefix` as non-empty strings, and declares `clone_dir_name` as a single path component that no other production Git fetcher uses (`docs/features/platform/git-fetcher-infrastructure.md`, Class Attributes, Template Method: `execute()`, Inherited Utility Methods, Concurrency Rules rule 5). `BaseGitFetcher` has no `__init_subclass__` of its own, so this test is the enforcement point. It passes vacuously while no production Git fetcher exists; a self-test proves that each check detects a violating class |
 | CVE fetcher discovery completeness | `backend/tests/test_architecture/test_cve_fetcher_discovery_completeness.py` | For each process role (API, general worker, Git worker, Beat), a fresh interpreter imports the role's unmodified production entry module and proves that every `CVESourceType` member maps to exactly one concrete production class from `app.services.tickets` registered in `FETCHER_REGISTRY` under its `name`, and that no test-only class appears in either registry (`docs/features/platform/cve-fetcher-infrastructure.md`, `__init_subclass__` Validation, Uniqueness tracking). It also reads the role commands of the `backend/Dockerfile` CMD, `docker-compose.smoke.yml`, and `docs/deployment.md` and proves that each loads the production entry module of its role; the IBS RabbitMQ consumer command `python -m app.ibs_consumer` is recognized as a role without the fetcher registry, whose import boundary is enforced by the row below. Only the command spelling is read, not the document layout. In-process tests prove that the assertion detects a missing member and a test-only owner |
 | IBS consumer runtime independence | `backend/tests/test_architecture/test_ibs_consumer_runtime_independence.py` | A fresh interpreter imports the unmodified consumer entry module `app.ibs_consumer` and proves that no `app.celery_app`, `app.tasks` module, `app.services.fetcher_discovery`, `redbeat` module, or concrete fetcher module is loaded and that `FETCHER_REGISTRY` is empty (`docs/features/integrations/ibs-rabbitmq-integration.md`, Runtime Independence). A self-test proves that the check detects a forbidden import |
@@ -2032,6 +2033,31 @@ shared check may be covered by one parametrized test. The tests of the shared
 check itself also prove that a high surrogate code point followed by a low one
 is rejected and that a supplementary character, such as one decoded from a
 correctly paired surrogate escape, is admissible.
+
+### External JSON Decoding
+
+When a consumer of external JSON governed by `docs/conventions.md` (External
+JSON Decoding) is implemented or changed, its tests MUST prove that the owning
+contract's invalid-JSON outcome occurs at its documented granularity, with no
+write from the rejected unit, for each of:
+
+- nesting beyond the parser's limit, forced through
+  `backend/tests/support/json_decoding.py`. Its replacement parser rejects
+  every document that contains a run of 64 consecutive `[` characters as the
+  real parser rejects deep nesting, whatever the stack size, and decodes any
+  other document unchanged; and
+- an integer with more digits than the default conversion limit, as a real
+  input. The test session pins CPython's default limit, so the input is
+  rejected whatever the environment.
+
+A test may also decode a real deeply nested document only when its expected
+outcome is the same whether or not the parser accepts that depth, for example
+an array root where an object is required or an unterminated document. No test
+expects a document to be accepted or rejected because of its depth alone.
+Entry points that share one decoding call may be covered once. The tests of
+`decode_json()` itself prove that a `RecursionError` raised while parsing
+becomes `JSONNestingError`, that the integer limit is a `ValueError`, that
+the caller's options reach the parser, and that `MemoryError` propagates.
 
 ### Inadmissible Characters in Request Input
 

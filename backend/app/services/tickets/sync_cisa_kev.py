@@ -47,6 +47,7 @@ from app.services.base_cve_fetcher import (
 )
 from app.services.base_fetcher import FetcherError
 from app.services.cve_ingest import CVEIngestPayload
+from app.services.json_decoding import decode_json
 from app.services.tickets import cisa_kev_catalog
 from app.services.tickets.cisa_kev_catalog import KevCatalog
 
@@ -121,8 +122,8 @@ class SyncCisaKev(BaseCVEFetcher):
                 raise FetcherError(message) from e
             raise FetcherError(message)
         try:
-            document = response.json()
-        except (ValueError, RecursionError) as e:
+            document = decode_json(response.content)
+        except ValueError as e:
             raise FetcherError("CISA KEV feed returned unparseable response") from e
         try:
             return cisa_kev_catalog.parse_catalog(document)

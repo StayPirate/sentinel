@@ -23,7 +23,6 @@ Pure functions without I/O; `MemoryError` propagates.
 
 from __future__ import annotations
 
-import json
 from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -31,6 +30,7 @@ from enum import StrEnum
 from typing import Any, Final
 
 from app.core.enums import IBSConsumerErrorCategory
+from app.services.json_decoding import decode_json
 
 PACKAGE_COMMIT_ROUTING_KEY: Final = "suse.obs.package.commit"
 
@@ -141,12 +141,12 @@ def decode_delivery(
     except UnicodeDecodeError:
         raise MalformedDeliveryError(MalformedReason.INVALID_UTF8) from None
     try:
-        value = json.loads(
+        value = decode_json(
             text, object_pairs_hook=_JSONObject, parse_constant=_reject_constant
         )
-    except ValueError, RecursionError:
+    except ValueError:
         # JSONDecodeError, a rejected constant, the integer digit limit, or
-        # nesting beyond the parser's recursion limit.
+        # nesting beyond the parser's limit (External JSON Decoding).
         raise MalformedDeliveryError(MalformedReason.INVALID_JSON) from None
     if not isinstance(value, _JSONObject):
         raise MalformedDeliveryError(MalformedReason.NON_OBJECT_ROOT)

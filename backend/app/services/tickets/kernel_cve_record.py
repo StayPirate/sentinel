@@ -18,7 +18,6 @@ for a `title` or description containing an inadmissible character
 
 from __future__ import annotations
 
-import json
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -39,6 +38,7 @@ from app.services.cve_record_parser import (
     parse_title,
     validate_cve_id,
 )
+from app.services.json_decoding import decode_json
 from app.services.reference_service import AutomaticReferenceInput
 
 PROVIDER_NAME: Final = "Linux"
@@ -148,10 +148,10 @@ def map_record(path: str, content: bytes) -> KernelRecord:
 def _decode(content: bytes) -> dict[str, Any]:
     """Strict UTF-8 JSON whose root is an object."""
     try:
-        record = json.loads(content.decode("utf-8"))
-    except ValueError, RecursionError:
-        # `UnicodeDecodeError` and `JSONDecodeError` are `ValueError`s; the
-        # latter keeps the document, so the cause is not chained.
+        record = decode_json(content.decode("utf-8"))
+    except ValueError:
+        # Every decoding failure is a `ValueError` (External JSON Decoding);
+        # `JSONDecodeError` keeps the document, so the cause is not chained.
         raise KernelRecordDecodeError from None
     if not isinstance(record, dict):
         raise KernelRecordDecodeError

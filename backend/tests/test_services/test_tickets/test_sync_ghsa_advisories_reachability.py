@@ -99,6 +99,7 @@ from app.services.cve_service import FetchSingleRetry
 from app.services.fetcher_bootstrap import bootstrap_fetcher_configs
 from app.services.fetcher_schedule import reconcile_beat_schedule
 from app.services.http_client import is_infrastructure_failure, is_retryable_condition
+from app.services.json_decoding import JSONNestingError
 from app.services.ticket_visibility import TicketCaller
 from app.services.tickets import ghsa_advisory_record
 from app.services.tickets import sync_ghsa_advisories as sync_module
@@ -130,6 +131,11 @@ from tests.support.fetch_single_cve import (
 )
 from tests.support.ghsa import GhsaServer, Responder, raising, status
 from tests.support.ghsa import body as json_body
+from tests.support.json_decoding import (
+    NESTED_ARRAY,
+    OVERSIZED_INTEGER,
+    limit_parser_nesting,
+)
 
 SessionFactory = Callable[[], Awaitable[AsyncSession]]
 
@@ -539,6 +545,12 @@ def _respond(server: GhsaServer, cve: CVE, kind: str) -> None:
         "http_302": status(302, headers={"Location": "https://github.com/"}),
         "http_204": status(204),
         "invalid_json": status(200, b"{"),
+        "nesting_beyond_the_parser_limit": status(
+            200, ("[" + NESTED_ARRAY + "]").encode()
+        ),
+        "integer_beyond_the_conversion_limit": status(
+            200, b"[" + OVERSIZED_INTEGER.encode() + b"]"
+        ),
         "undecodable": status(200, b"not gzip", headers={"Content-Encoding": "gzip"}),
         "object_root": json_body({"cve_id": cve.cve_id}),
         "non_object_first": json_body([cve.cve_id]),
@@ -555,6 +567,8 @@ _NON_RETRYABLE: Final[list[tuple[str, type[BaseException], str]]] = [
     ("http_302", httpx.HTTPStatusError, "HTTPStatusError"),
     ("http_204", GhsaResponseError, "GhsaResponseError"),
     ("invalid_json", ValueError, "JSONDecodeError"),
+    ("nesting_beyond_the_parser_limit", JSONNestingError, "JSONNestingError"),
+    ("integer_beyond_the_conversion_limit", ValueError, "ValueError"),
     ("undecodable", httpx.DecodingError, "DecodingError"),
     ("object_root", GhsaResponseError, "GhsaResponseError"),
     ("non_object_first", GhsaResponseError, "GhsaResponseError"),
@@ -678,7 +692,11 @@ class TestOnDemandFetch:
         world: IngestionWorld,
         on_demand: FetchSingleHarness,
         server: ClientServer,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        # The limited parser rejects only the nesting case (External JSON
+        # Decoding).
+        limit_parser_nesting(monkeypatch)
         cve, _ = await _active_cve(world)
         _respond(server, cve, kind)
         token = await on_demand.marker(cve.cve_id, GHSA.value)

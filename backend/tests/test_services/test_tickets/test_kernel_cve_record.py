@@ -47,6 +47,11 @@ from app.services.tickets.kernel_cve_record import (
     map_record,
 )
 from tests.support.inadmissible import INADMISSIBLE_CHARACTERS
+from tests.support.json_decoding import (
+    NESTED_ARRAY,
+    OVERSIZED_INTEGER,
+    limit_parser_nesting,
+)
 from tests.support.kernel import (
     ALL_RECORDS,
     load_raw_record,
@@ -264,7 +269,7 @@ class TestDecode:
             b"null",
             b"42",
             b"[" * 100_000 + b"]" * 100_000,
-            b'{"n": ' + b"9" * 5000 + b"}",
+            b'{"n": ' + OVERSIZED_INTEGER.encode() + b"}",
         ],
         ids=[
             "empty",
@@ -285,6 +290,19 @@ class TestDecode:
     def test_undecodable_content_fails(self, content: bytes) -> None:
         with pytest.raises(KernelRecordDecodeError):
             map_record(PUBLISHED_PATH, content)
+
+    def test_nesting_beyond_the_parser_limit_fails(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Nesting in an unconsumed member: mapped within the parser's limit,
+        undecodable beyond it (External JSON Decoding)."""
+        content = json.dumps(_record())[:-1] + ', "x": ' + NESTED_ARRAY + "}"
+        assert map_record(PUBLISHED_PATH, content.encode()) == _map(_record())
+
+        limit_parser_nesting(monkeypatch)
+
+        with pytest.raises(KernelRecordDecodeError):
+            map_record(PUBLISHED_PATH, content.encode())
 
     def test_error_message_and_cause_carry_no_content(self) -> None:
         secret = b'{"title": "Example-Secret-Input-Value"'
@@ -1004,6 +1022,7 @@ class TestModuleBoundary:
             "app.core.identifiers",
             "app.services.cve_record_parser",
             "app.services.cve_ingest",
+            "app.services.json_decoding",
             "app.services.reference_service",
         }
 
