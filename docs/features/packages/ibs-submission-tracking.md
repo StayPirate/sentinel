@@ -353,7 +353,9 @@ Discovery is bounded, with these accepted limitations:
 - An open SR whose source package does not start with `{L}.`, such as an SR
   submitted directly from a `SUSE:` codestream or GA project or from a source
   outside the `SUSE:` namespace, is not found by the search. A request wake-up
-  can still select it.
+  for it reconciles the scopes it selects over these same roots and does not
+  add the woken request as a root, so such an SR is observed only once one of
+  these roots reaches it.
 - The diff of an open SR whose source is outside the `SUSE:` namespace is never
   available (`../integrations/ibs-integration.md`, Request Action Diff), so the
   scopes that require it stay incomplete while the SR is open.
@@ -866,13 +868,16 @@ broader package-tree recovery limitation remains owned by `package-model.md` and
 Both `suse.obs.request.create` and `suse.obs.request.state_change` are
 acceleration signals only. For either routing key the consumer:
 
-1. Decodes the UTF-8 JSON body and validates only a positive numeric `number`.
+1. Decodes the UTF-8 JSON body and validates only `number`, an integer from 1
+   to 2,147,483,647 (`../integrations/ibs-rabbitmq-integration.md`, Request
+   Create and State Change). Any other value is a malformed delivery without
+   an IBS request.
 2. Ignores event state, timestamps, actors, action content, action order, and
    RabbitMQ delivery metadata for domain decisions.
 3. Point-fetches current request detail by public request number.
 4. Selects every active-Ticket IBS track represented by validated current
-   actions and retained exact roots, including all relevant actions in a
-   multi-action request.
+   actions and by the retained actions of that request number (its retained
+   exact roots), including all relevant actions in a multi-action request.
 5. Invokes the shared authoritative reconciliation inline for each selected
    scope, with independent transactions. The detail of step 3 only selects
    scopes; the reconciliation obtains its own evidence after its step 1
@@ -880,11 +885,12 @@ acceleration signals only. For either routing key the consumer:
 
 The event handler does not publish a Celery correlation or discovery task.
 Duplicate and out-of-order deliveries converge through current detail and
-idempotent reconciliation. If point lookup or reconciliation fails after the
-shared bounded HTTP transport retries, the consumer rolls back incomplete local
-work, records the sanitized failure, acknowledges according to the RabbitMQ
-integration contract, and continues. The next complete fetcher run owns
-recovery while required evidence remains upstream.
+idempotent reconciliation. If the point lookup fails after the shared bounded
+HTTP transport retries or returns incomplete detail, or the reconciliation
+fails, the consumer rolls back incomplete local work, records the sanitized
+failure, acknowledges according to the RabbitMQ integration contract, and
+continues. The next complete fetcher run owns recovery while required evidence
+remains upstream.
 
 Step 4 selects scopes by the
 [Package and Codestream Identity](#package-and-codestream-identity) of validated

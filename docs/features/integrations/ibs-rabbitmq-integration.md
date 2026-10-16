@@ -199,11 +199,17 @@ Routing keys:
 - `suse.obs.request.create`
 - `suse.obs.request.state_change`
 
-Both handlers validate and consume only `number`, which must be a positive JSON
-integer. Boolean values, strings, zero, negative values, and fractional numbers
-are invalid. All other event fields are ignored without validation, including
-state, timestamps, actor fields, action arrays, action order, and event-only
-action IDs.
+Both handlers validate and consume only `number`, the public request number,
+which must be a JSON integer from 1 to 2,147,483,647 written without a fraction
+or exponent. Boolean values, strings, null, zero, negative values, numbers with
+a fraction or exponent (`400001.0`, `4e5`), and values above 2,147,483,647 are
+invalid; a larger value cannot be represented in `IBSRequest.request_number`
+(`docs/data-model.md`), so such an event is malformed and causes no IBS
+request. `number` appearing more than once in the root object is invalid. An
+invalid value makes the delivery malformed. All other event fields are ignored
+without validation, including the event `id` (an internal identifier that
+differs from the request number), state, timestamps, actor fields, action
+arrays, action order, and event-only action IDs.
 
 For a valid request number, the handler performs one inline application-level
 reconciliation attempt:
@@ -211,8 +217,13 @@ reconciliation attempt:
 1. point-fetch the current request detail from the IBS REST API by `number`;
 2. validate the complete current REST representation under
    `docs/features/integrations/ibs-integration.md`; and
-3. invoke the shared authoritative request reconciliation from
-   `ibs-submission-tracking.md` for that request number.
+3. invoke the shared authoritative request reconciliation for the track scopes
+   that the request selects, as defined in `ibs-submission-tracking.md`
+   (RabbitMQ Request Wake-Ups).
+
+A point lookup that fails or returns incomplete detail, including HTTP 404 for
+a request that is not yet visible through REST, is a terminal application
+failure of the delivery: no scope is selected and no reconciliation runs.
 
 The shared HTTP transport applies its bounded timeout and retry policy before
 an HTTP failure reaches this handler. The consumer does not add an outer retry,
@@ -285,14 +296,16 @@ terminal outcomes:
 | Application processing fails after the one attempt | Increment `events_relevant` and `processing_failed`, set `last_error`, log sanitized error | ACK |
 
 `events_received` increments once when handling begins, before decoding. The
-relevance rules govern successful outcomes: a request is counted as relevant
-only when authoritative reconciliation selects at least one represented track
-scope, and a package event is relevant only when its exact project/package
-identity selects at least one eligible represented track. Every terminal
-application failure ([Fatal and Transient Failures](#fatal-and-transient-failures))
-counts as relevant and failed and sets `last_error`, including a lookup or
-selection failure before any track scope is selected, so an IBS or PostgreSQL
-outage stays visible and `processing_failed` never exceeds `events_relevant`.
+relevance rules govern successful outcomes: a request event is counted as
+relevant only when its wake-up selects at least one represented track scope
+from current REST detail and retained evidence
+(`ibs-submission-tracking.md`, RabbitMQ Request Wake-Ups), and a package event
+is relevant only when its exact project/package identity selects at least one
+eligible represented track. Every terminal application failure
+([Fatal and Transient Failures](#fatal-and-transient-failures)) counts as
+relevant and failed and sets `last_error`, including a lookup or selection
+failure before any track scope is selected, so an IBS or PostgreSQL outage
+stays visible and `processing_failed` never exceeds `events_relevant`.
 The outcome counters are updated as soon as the application attempt ends,
 before settlement.
 
@@ -720,7 +733,7 @@ The `unreachable` response has the same null field values as `disabled`, with
 | Malformed or unsupported delivery | Sanitized warning and ACK | None required; poison input is discarded |
 | Valid irrelevant delivery | ACK | None required |
 | Duplicate or out-of-order delivery | Current-state no-op and ACK | None required |
-| IBS HTTP failure after shared retries, or an IBS API credentials-not-configured or authentication failure | Roll back incomplete work, count failure, ACK | Corresponding periodic fetcher or later event |
+| IBS HTTP failure after shared retries, incomplete request point detail (including HTTP 404 before REST visibility), or an IBS API credentials-not-configured or authentication failure | Roll back incomplete work, count failure, ACK | Corresponding periodic fetcher or later event |
 | PostgreSQL failure during delivery | Roll back, count failure, ACK | Corresponding periodic fetcher or later event |
 | Partial per-track package reconciliation | Keep committed siblings, count delivery failure, ACK | Track fetcher or later event for failed tracks; for a consumer-mode convergence failure, the owner in `ibs-track-release-detection.md` (Shared Reconciliation Boundary) |
 | Partial per-track request reconciliation | Keep committed siblings, count delivery failure, ACK | Request fetcher or later event for failed tracks |
@@ -747,9 +760,9 @@ events carry `ibs_event_id`, lifecycle events never do.
 | `ibs_consumer_reconnect_scheduled` | INFO | `delay_seconds` | — |
 | `ibs_consumer_fatal` | CRITICAL | `reason_category` | — |
 | `ibs_consumer_delivery_malformed` | WARNING | `reason_category` | `routing_key` |
-| `ibs_consumer_delivery_irrelevant` | DEBUG | `routing_key` | `project`, `package` |
-| `ibs_consumer_delivery_processed` | INFO | `routing_key`, `track_count` | `project`, `package` |
-| `ibs_consumer_delivery_failed` | ERROR | `routing_key`, `reason_category` | `project`, `package`, `track_count`, `failed_track_count` |
+| `ibs_consumer_delivery_irrelevant` | DEBUG | `routing_key` | `project`, `package`, `request_number` |
+| `ibs_consumer_delivery_processed` | INFO | `routing_key`, `track_count` | `project`, `package`, `request_number` |
+| `ibs_consumer_delivery_failed` | ERROR | `routing_key`, `reason_category` | `project`, `package`, `request_number`, `http_status`, `track_count`, `failed_track_count` |
 | `ibs_consumer_delivery_cancelled` | WARNING | — | `routing_key` |
 | `ibs_consumer_heartbeat_write_failed` | WARNING | `error_type` | — |
 | `ibs_consumer_shutdown_started` | INFO | — | — |
@@ -761,7 +774,11 @@ creation and precedes the first connection attempt; it is the process's
 readiness evidence (`docs/features/platform/testing-strategy.md`, Process
 Readiness). `routing_key` appears only when it is one of the fixed bindings,
 and `project` and `package` only under the `SUSE:` rule of
-[Correlation Scope](#correlation-scope). `error_type` is the exception class
+[Correlation Scope](#correlation-scope). `request_number` is the validated
+`number` of a request event. `track_count` counts the selected tracks, which
+for a request event are its selected track scopes, and `failed_track_count`
+those with a `failed` outcome. `http_status` accompanies a failed point lookup
+whose `reason_category` is `http_status`. `error_type` is the exception class
 name only. `reason_category` is a bounded internal classification, never
 upstream or exception text. At minimum it distinguishes:
 
@@ -774,10 +791,14 @@ upstream or exception text. At minimum it distinguishes:
   rejection, access refused, missing exchange, topology precondition failure,
   memory exhaustion, and an unexpected exception;
 - malformed delivery: unsupported routing key, unsupported content type,
-  invalid UTF-8, invalid JSON, non-object root, and invalid `project` or
-  `package`; and
+  invalid UTF-8, invalid JSON, non-object root, invalid `project` or
+  `package`, and invalid `number`; and
 - failed delivery: a failed track outcome, a selection failure, a failure
-  propagated by the reconciliation boundary, and an unexpected exception.
+  propagated by the reconciliation boundary, and an unexpected exception; for
+  a request event, a failed or incomplete point lookup also uses the bounded
+  category of the IBS request operation that caused it
+  (`ibs-submission-tracking.md`, Structured Logs), such as `not_found`,
+  `http_status`, `transport`, or `credentials_not_configured`.
 
 ## Security
 
@@ -812,8 +833,9 @@ Implementation tests must cover:
 - the delivery exception boundary: every propagated failure ends the delivery
   with one ACK and consumption continues, while `MemoryError` exits non-zero
   without settlement;
-- request parsing that consumes only a positive integer `number`, point-fetches
-  current REST truth, and never trusts event state or actions;
+- request parsing that consumes only `number`, an integer from 1 to
+  2,147,483,647 without a fraction or exponent and not repeated, point-fetches
+  current REST truth, and never trusts the event `id`, state, or actions;
 - sequential handling and absence of a second in-flight delivery;
 - one application attempt after shared HTTP retries, with no NACK, reject,
   requeue, in-memory retry, Celery task, or broker publication;

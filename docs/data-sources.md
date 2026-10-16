@@ -531,10 +531,12 @@ recovery.
 
   **Request events (maintenance/submit requests):**
   - `*.obs.request.create` — new request created. Sentinel consumes only the
-    positive numeric public `number` as a wake-up identity. **Consumed**
+    positive numeric public `number` as a wake-up identity, never the
+    internal event `id`. **Consumed**
   - `*.obs.request.state_change` — conclusive request state changed. Sentinel
-    consumes only the positive numeric public `number`; event state, action
-    arrays, order, timestamps, and actor data are ignored. **Consumed**
+    consumes only the positive numeric public `number`; the event `id`, event
+    state, action arrays, order, timestamps, and actor data are ignored.
+    **Consumed**
   - `*.obs.request.change` — request metadata changed; not consumed as a
     request-lifecycle signal
   - `*.obs.request.reviews_done` — all reviews for a request completed
@@ -627,7 +629,12 @@ recovery.
     run of the consumer itself against a throwaway database with
     SSH-signature IBS API access, including a stalled connection that the
     client heartbeat detected after 183 seconds and a reconnection with a
-    fresh queue.
+    fresh queue;
+  - between 2026-09-04 and 2026-10-15, with aio-pika 9.6.2 and aiormq 6.9.4:
+    dedicated `suse.obs.request.#` captures of 72 hours and 1 hour (157
+    `suse.obs.request.create` and 195 `suse.obs.request.state_change`
+    deliveries), a topology probe of the exact three bindings, and IBS request
+    point-detail correlation of 13 events.
 
   Verified: AMQPS on port 5671 with the combined trust store (the committed
   SUSE CA alone verifies the chain; an empty or certifi-only store fails, and
@@ -644,7 +651,18 @@ recovery.
   whitespace, control characters, or non-ASCII characters, equal to the IBS
   source-info identity. The other package-commit members are `rev`, `user`,
   `files`, `comment`, and a string `requestid`; `srcmd5` and `sender` never
-  occur. Documentation-only: exchange durability and type at the declaration
+  occur. Request events have the same encoding with compact JSON bodies;
+  `number` is a positive JSON integer no greater than 2,147,483,647 in every
+  event and equals the `id` of the `<request>` that `GET /request/{number}`
+  returns, with the same action count, while the event `id` is a different
+  internal identifier. Six requests were visible through REST 0.10 to 0.41
+  seconds after their event, in the event's state. IBS publishes some
+  `create` events twice with byte-identical bodies, no `state_change`
+  preceded its request's `create`, and a `review` to `new` transition is
+  published as `suse.obs.request.reviews_done`, not as `state_change`; the
+  ignored members are `author`, `comment`, `description`, `duration`, `id`,
+  `namespace`, `oldstate`, `state`, `when`, `who`, and the action array.
+  Documentation-only: exchange durability and type at the declaration
   level (topic routing is confirmed behaviorally only), broker queue policies
   on server-named queues, the broker's own heartbeat timeout,
   `connection.blocked`, broker consumer cancellation causes other than queue
@@ -653,8 +671,10 @@ recovery.
   `PRECONDITION_FAILED` replies, which are classified from the client
   library's source and wire-level tests, the
   aiormq 7.2.2 broker-cancellation callback, which is covered by a
-  wire-level test (queue deletion was observed with aiormq 6.9.4 only), and
-  the stability of the publisher's content type
+  wire-level test (queue deletion was observed with aiormq 6.9.4 only),
+  request reopen events, the `deleted` request state, the semantics of
+  `suse.obs.request.change`, REST visibility of a request beyond the sampled
+  lookups, and the stability of the publisher's content type
 - **Documentation**: https://rabbit.opensuse.org (OBS),
   https://github.com/openSUSE/suse_msg/blob/master/amqp_infra.md,
   OBS event types: https://github.com/openSUSE/open-build-service/tree/master/src/api/app/models/event
