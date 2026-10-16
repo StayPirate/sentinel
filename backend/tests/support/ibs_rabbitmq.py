@@ -6,11 +6,14 @@ Event Bus):
 
 - `deliveries.json`: the observed AMQP properties and one delivery per
   observed `suse.obs.package.commit` member set, a personal `home:` project,
-  and the unbound non-JSON `suse.obs.metrics` family. Every value is
-  fictional; routing keys, properties, member sets and order, value types,
-  and the compact JSON serialization are the observed ones.
+  the unbound non-JSON `suse.obs.metrics` family, and the observed shapes of
+  `suse.obs.request.create`, `suse.obs.request.state_change`, and the
+  unbound `suse.obs.request.reviews_done`. Every value is fictional; routing
+  keys, properties, member sets and order, value types, and the compact JSON
+  serialization are the observed ones.
 - `hostile_deliveries.json`: synthetic malformed and edge-case deliveries,
-  each with its expected outcome.
+  each with its expected outcome: a package-commit identity or a request
+  `number` when valid.
 
 `Delivery` carries the parts of one delivery the consumer reads: routing
 key, content type, content encoding, and the exact body bytes.
@@ -41,6 +44,24 @@ PACKAGE_COMMIT_FIXTURES: Final = (
 HOME_PROJECT_FIXTURE: Final = "package_commit_home_project"
 METRICS_FIXTURE: Final = "metrics_line_protocol"
 
+REQUEST_CREATE: Final = "suse.obs.request.create"
+REQUEST_STATE_CHANGE: Final = "suse.obs.request.state_change"
+REQUEST_REVIEWS_DONE: Final = "suse.obs.request.reviews_done"
+
+REQUEST_FIXTURES: Final = (
+    "request_create_multi_action",
+    "request_create_without_description",
+    "request_create_delete_only",
+    "request_state_change_accepted",
+    "request_state_change_superseded",
+)
+"""The observed shapes of the two bound request families."""
+
+DUPLICATE_CREATE_FIXTURE: Final = "request_create_delete_only"
+"""A create shape that IBS published twice with byte-identical bodies."""
+
+REVIEWS_DONE_FIXTURE: Final = "request_reviews_done"
+
 
 @dataclass(frozen=True, slots=True)
 class Delivery:
@@ -62,6 +83,7 @@ class HostileCase:
     reason: str | None
     project: str | None
     package: str | None
+    number: int | None
 
 
 @cache
@@ -115,6 +137,7 @@ def hostile_cases() -> tuple[HostileCase, ...]:
                 reason=expected.get("reason"),
                 project=expected.get("project"),
                 package=expected.get("package"),
+                number=expected.get("number"),
             )
         )
     return tuple(cases)

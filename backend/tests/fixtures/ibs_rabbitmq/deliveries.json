@@ -8,7 +8,8 @@
     "never_observed_members": [
       "srcmd5",
       "sender"
-    ]
+    ],
+    "dedicated_request_captures": "suse.obs.request.#: 2026-09-04 to 2026-09-07 (71.7 h) and 2026-10-15 (1 h): 157 suse.obs.request.create and 195 suse.obs.request.state_change deliveries; member order and serialization re-analyzed structure-only on 2026-10-17"
   },
   "properties": {
     "content_type": "application/octet-stream",
@@ -67,6 +68,36 @@
       "routing_key": "suse.obs.metrics",
       "note": "Unbound event family with the same content type and a non-JSON Influx line protocol body.",
       "body": "example_requests,host=example.test,status=200 count=1i 1760486400000000000\n"
+    },
+    "request_create_multi_action": {
+      "routing_key": "suse.obs.request.create",
+      "note": "A submission request: a delete action for its staging project and a maintenance_incident action from a personal branch; the event id differs from the request number.",
+      "body": "{\"author\":\"example-user\",\"description\":\"Example update description\",\"id\":9100001,\"number\":400001,\"actions\":[{\"action_id\":9200001,\"type\":\"delete\",\"targetproject\":\"SUSE:Maintenance:REQUEST:400001\",\"makeoriginolder\":false},{\"action_id\":9200002,\"type\":\"maintenance_incident\",\"sourceproject\":\"home:example-user:branches:SUSE:SLE-15-SP6:Update\",\"sourcepackage\":\"example-pkg\",\"sourcerevision\":\"3\",\"targetproject\":\"SUSE:Maintenance\",\"target_releaseproject\":\"SUSE:SLE-15-SP6:Update\",\"makeoriginolder\":false}],\"state\":\"review\",\"when\":\"2026-10-15T09:00:00\",\"who\":\"example-user\",\"namespace\":\"SUSE\"}"
+    },
+    "request_create_without_description": {
+      "routing_key": "suse.obs.request.create",
+      "note": "A create event without description (2 % of the observed create events).",
+      "body": "{\"author\":\"example-user\",\"id\":9100002,\"number\":400002,\"actions\":[{\"action_id\":9200003,\"type\":\"maintenance_release\",\"sourceproject\":\"SUSE:Maintenance:45001\",\"sourcepackage\":\"example-pkg.SUSE_SLE-15-SP6_Update\",\"targetproject\":\"SUSE:SLE-15-SP6:Update\",\"targetpackage\":\"example-pkg.45001\",\"makeoriginolder\":false}],\"state\":\"new\",\"when\":\"2026-10-15T09:05:00\",\"who\":\"example-user\",\"namespace\":\"SUSE\"}"
+    },
+    "request_create_delete_only": {
+      "routing_key": "suse.obs.request.create",
+      "note": "A delete-only request in state new; IBS published some of these twice with byte-identical bodies.",
+      "body": "{\"author\":\"example-user\",\"description\":\"Example cleanup description\",\"id\":9100003,\"number\":400003,\"actions\":[{\"action_id\":9200004,\"type\":\"delete\",\"targetproject\":\"SUSE:Maintenance:REQUEST:400003\",\"makeoriginolder\":false}],\"state\":\"new\",\"when\":\"2026-10-15T09:10:00\",\"who\":\"example-user\",\"namespace\":\"SUSE\"}"
+    },
+    "request_state_change_accepted": {
+      "routing_key": "suse.obs.request.state_change",
+      "note": "An accepted release request with five maintenance_release actions, including patchinfo.",
+      "body": "{\"author\":\"example-user\",\"comment\":\"Example acceptance comment\",\"description\":\"Example release description\",\"id\":9100004,\"number\":400004,\"actions\":[{\"action_id\":9200005,\"type\":\"maintenance_release\",\"sourceproject\":\"SUSE:Maintenance:45001\",\"sourcepackage\":\"example-pkg.SUSE_SLE-15-SP6_Update\",\"targetproject\":\"SUSE:SLE-15-SP6:Update\",\"targetpackage\":\"example-pkg.45001\",\"makeoriginolder\":false},{\"action_id\":9200006,\"type\":\"maintenance_release\",\"sourceproject\":\"SUSE:Maintenance:45001\",\"sourcepackage\":\"example-pkg.SUSE_SLE-15-SP7_Update\",\"targetproject\":\"SUSE:SLE-15-SP7:Update\",\"targetpackage\":\"example-pkg.45001\",\"makeoriginolder\":false},{\"action_id\":9200007,\"type\":\"maintenance_release\",\"sourceproject\":\"SUSE:Maintenance:45001\",\"sourcepackage\":\"example-lib.SUSE_SLE-15-SP6_Update\",\"targetproject\":\"SUSE:SLE-15-SP6:Update\",\"targetpackage\":\"example-lib.45001\",\"makeoriginolder\":false},{\"action_id\":9200008,\"type\":\"maintenance_release\",\"sourceproject\":\"SUSE:Maintenance:45001\",\"sourcepackage\":\"patchinfo.SUSE_SLE-15-SP6_Update\",\"targetproject\":\"SUSE:SLE-15-SP6:Update\",\"targetpackage\":\"patchinfo.45001\",\"makeoriginolder\":false},{\"action_id\":9200009,\"type\":\"maintenance_release\",\"sourceproject\":\"SUSE:Maintenance:45001\",\"sourcepackage\":\"patchinfo.SUSE_SLE-15-SP7_Update\",\"targetproject\":\"SUSE:SLE-15-SP7:Update\",\"targetpackage\":\"patchinfo.45001\",\"makeoriginolder\":false}],\"state\":\"accepted\",\"oldstate\":\"new\",\"when\":\"2026-10-15T10:00:00\",\"who\":\"example-user\",\"namespace\":\"SUSE\",\"duration\":3600}"
+    },
+    "request_state_change_superseded": {
+      "routing_key": "suse.obs.request.state_change",
+      "note": "A declined submission request superseded later; an empty comment as observed.",
+      "body": "{\"author\":\"example-user\",\"comment\":\"\",\"description\":\"Example update description\",\"id\":9100005,\"number\":400005,\"actions\":[{\"action_id\":9200010,\"type\":\"maintenance_incident\",\"sourceproject\":\"home:example-user:branches:SUSE:SLE-15-SP6:Update\",\"sourcepackage\":\"example-pkg\",\"sourcerevision\":\"3\",\"targetproject\":\"SUSE:Maintenance\",\"target_releaseproject\":\"SUSE:SLE-15-SP6:Update\",\"makeoriginolder\":false}],\"state\":\"superseded\",\"oldstate\":\"declined\",\"when\":\"2026-10-15T10:30:00\",\"who\":\"example-user\",\"namespace\":\"SUSE\",\"duration\":7200}"
+    },
+    "request_reviews_done": {
+      "routing_key": "suse.obs.request.reviews_done",
+      "note": "Unbound request family with a valid shape; the review-to-new transition is published only as this event.",
+      "body": "{\"author\":\"example-user\",\"comment\":\"Example review comment\",\"description\":\"Example update description\",\"id\":9100006,\"number\":400006,\"actions\":[{\"action_id\":9200011,\"type\":\"maintenance_incident\",\"sourceproject\":\"home:example-user:branches:SUSE:SLE-15-SP6:Update\",\"sourcepackage\":\"example-pkg\",\"sourcerevision\":\"3\",\"targetproject\":\"SUSE:Maintenance\",\"target_releaseproject\":\"SUSE:SLE-15-SP6:Update\",\"makeoriginolder\":false}],\"state\":\"new\",\"when\":\"2026-10-15T11:00:00\",\"who\":\"example-user\",\"namespace\":\"SUSE\"}"
     }
   }
 }

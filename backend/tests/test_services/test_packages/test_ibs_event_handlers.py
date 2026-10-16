@@ -73,6 +73,8 @@ from tests.support.ibs_product_release import Publish
 from tests.support.ibs_rabbitmq import (
     HOME_PROJECT_FIXTURE,
     PACKAGE_COMMIT_FIXTURES,
+    REQUEST_CREATE,
+    REQUEST_STATE_CHANGE,
     HostileCase,
     hostile_cases,
     load_delivery,
@@ -110,6 +112,16 @@ _SCHEMA_REASONS = {"invalid_project", "invalid_package"}
 _PACKAGE_FAILED = IBSConsumerErrorCategory.PACKAGE_RECONCILIATION_FAILED
 
 
+def _package_path_cases() -> list[HostileCase]:
+    """The cases outside the request families, whose handlers do not exist
+    yet."""
+    return [
+        case
+        for case in hostile_cases()
+        if case.delivery.routing_key not in (REQUEST_CREATE, REQUEST_STATE_CHANGE)
+    ]
+
+
 def _commit_body(project: str = PROJECT, package: str = PACKAGE, **extra: Any) -> bytes:
     """A compact package-commit body in the observed member order."""
     body = {"project": project, "package": package, "user": "example-user"}
@@ -126,15 +138,15 @@ def _parse(case: HostileCase) -> PackageCommit:
 
 
 def _schema_cases() -> list[HostileCase]:
-    return [case for case in hostile_cases() if case.reason in _SCHEMA_REASONS]
+    return [case for case in _package_path_cases() if case.reason in _SCHEMA_REASONS]
 
 
 def _valid_cases() -> list[HostileCase]:
-    return [case for case in hostile_cases() if case.outcome == "valid"]
+    return [case for case in _package_path_cases() if case.outcome == "valid"]
 
 
 def _malformed_cases() -> list[HostileCase]:
-    return [case for case in hostile_cases() if case.outcome == "malformed"]
+    return [case for case in _package_path_cases() if case.outcome == "malformed"]
 
 
 # ---------------------------------------------------------------------------

@@ -26,6 +26,8 @@ from tests.support.ibs_rabbitmq import (
     HOME_PROJECT_FIXTURE,
     METRICS_FIXTURE,
     PACKAGE_COMMIT_FIXTURES,
+    REQUEST_CREATE,
+    REQUEST_STATE_CHANGE,
     HostileCase,
     hostile_cases,
     load_delivery,
@@ -52,12 +54,24 @@ _VALID = (
 )
 
 
+def _package_path_cases() -> list[HostileCase]:
+    """The cases outside the request families, whose handlers do not exist
+    yet."""
+    return [
+        case
+        for case in hostile_cases()
+        if case.delivery.routing_key not in (REQUEST_CREATE, REQUEST_STATE_CHANGE)
+    ]
+
+
 def _decoding_cases() -> list[HostileCase]:
-    return [case for case in hostile_cases() if case.reason in _DECODING_REASONS]
+    return [case for case in _package_path_cases() if case.reason in _DECODING_REASONS]
 
 
 def _decodable_cases() -> list[HostileCase]:
-    return [case for case in hostile_cases() if case.reason not in _DECODING_REASONS]
+    return [
+        case for case in _package_path_cases() if case.reason not in _DECODING_REASONS
+    ]
 
 
 def _decode(case: HostileCase) -> object:
