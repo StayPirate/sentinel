@@ -2189,7 +2189,9 @@ cover this complete matrix:
 - Affected-version scopes cover unobserved, non-empty replacement, observed
   empty replacement, explicit removal, equal replacement, repeated empty/remove
   no-op, and multiple scopes where one operation cannot change another. Empty
-  and removed scopes leave no marker row.
+  and removed scopes leave no marker row. A replacement with more entries than
+  one multi-row INSERT statement could bind under the driver's parameter limit
+  stores every entry, and repeating it is a no-op.
 - `UpsertResult.action` covers serialized insert winner `created`; every global
   and child effective change as `updated`; all-equal/retained input as
   `unchanged`; and exclusion of source-status timestamps, Ticket creation,

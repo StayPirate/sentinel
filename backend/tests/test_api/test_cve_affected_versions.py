@@ -26,19 +26,22 @@ from sqlalchemy import delete, event
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import SESSION_COOKIE_NAME
-from app.core.enums import Role
+from app.core.enums import CVESourceType, Role
 from app.main import app
 from app.models.cve import CVE
 from app.models.ticket import Ticket
 from app.models.ticket_access_grant import TicketAccessGrant
 from app.models.user import User
 from app.services import cve_service
+from app.services.cve_ingest import CVEIngestPayload
 from app.services.cve_service import (
     CVEAffectedVersionEntryProjection,
     CVEAffectedVersionGroupProjection,
     CVEAffectedVersionsResult,
+    upsert_cve,
 )
 from app.services.ticket_visibility import ANONYMOUS_CALLER, TicketCaller
+from tests.support.cve_ingest import av_entry, replace
 
 Factory = Callable[..., Awaitable[Any]]
 
@@ -182,6 +185,31 @@ class TestGetCVEAffectedVersions:
 
         assert response.status_code == 200
         assert response.json() == {"data": []}
+
+    async def test_ingested_scope_beyond_one_insert_statement_is_returned_whole(
+        self, client: AsyncClient, db_session: AsyncSession
+    ) -> None:
+        """A scope with more entries than one multi-row INSERT can bind is
+        ingested and served complete, without a row cap."""
+        entries = [
+            av_entry(vendor="Example", product="Example", version=f"1.{index:04d}")
+            for index in range(2_500)
+        ]
+        await upsert_cve(
+            db_session,
+            "CVE-2099-70003",
+            CVESourceType.MITRE,
+            CVEIngestPayload(affected_version_operations=[replace("cna", *entries)]),
+        )
+
+        response = await client.get(_url("CVE-2099-70003"))
+
+        assert response.status_code == 200
+        (group,) = response.json()["data"]
+        assert group["source_container"] == "cna"
+        assert [entry["version"] for entry in group["entries"]] == [
+            f"1.{index:04d}" for index in range(2_500)
+        ]
 
     async def test_every_not_found_cause_is_identical_for_both_callers(
         self,

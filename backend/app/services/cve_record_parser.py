@@ -57,6 +57,10 @@ CVSS_VECTOR_KEYS: Final[tuple[str, ...]] = (
 )
 """The `metrics[]` keys inspected by `parse_cvss_assessments`, in order."""
 
+PROGRAM_FILES_BUDGET: Final = 10_000
+"""Most `programFiles` items that the entries of one `parse_affected_versions`
+call carry in total (step 7)."""
+
 _SENTINELS: Final = frozenset({"n/a", ""})
 """Values of `vendor`, `product`, and `version` normalized to `None`."""
 
@@ -129,11 +133,18 @@ def _first_cpe(element: Mapping[str, Any]) -> str | None:
 
 
 def _program_files(element: Mapping[str, Any]) -> list[str] | None:
+    """The element's `programFiles`, validated once against the
+    `AffectedVersionEntry.program_files` item rules; any rejected item makes
+    the element unparseable (Input Validation)."""
     files = element.get("programFiles")
     if files is None:
         return None
     if not isinstance(files, list) or not all(isinstance(f, str) for f in files):
         raise _UnparseableError
+    try:
+        AffectedVersionEntry(program_files=files)
+    except ValidationError:
+        raise _UnparseableError from None
     return files
 
 
@@ -194,23 +205,39 @@ def parse_affected_versions(affected: object) -> list[AffectedVersionEntry]:
 
     Duplicates by the affected-version entry conflict key keep the last
     occurrence. An unparseable element or version, and every entry the
-    `AffectedVersionEntry` model rejects, is skipped.
+    `AffectedVersionEntry` model rejects, is skipped. Each entry carries its
+    element's `programFiles` only when the items over all returned entries
+    fit `PROGRAM_FILES_BUDGET`; otherwise no entry carries them (step 7).
+    The entries are built without the files and the files are attached
+    after deduplication, so the cost stays linear in the array size.
     """
-    by_key: dict[tuple[Any, ...], AffectedVersionEntry] = {}
+    by_key: dict[tuple[Any, ...], tuple[AffectedVersionEntry, list[str] | None]] = {}
     for element in _objects(affected):
         try:
-            entries = _element_entries(element)
+            files, entries = _element_entries(element)
         except _UnparseableError:
             continue
         for entry in entries:
             key = affected_version_key(entry)
             by_key.pop(key, None)
-            by_key[key] = entry
-    return list(by_key.values())
+            by_key[key] = (entry, files)
+    retained = list(by_key.values())
+    total = sum(len(files) for _, files in retained if files is not None)
+    if total > PROGRAM_FILES_BUDGET:
+        return [entry for entry, _ in retained]
+    return [
+        entry
+        if files is None
+        else entry.model_copy(update={"program_files": list(files)})
+        for entry, files in retained
+    ]
 
 
-def _element_entries(element: Mapping[str, Any]) -> list[AffectedVersionEntry]:
-    """The entries of one `affected[]` element (steps 1-5)."""
+def _element_entries(
+    element: Mapping[str, Any],
+) -> tuple[list[str] | None, list[AffectedVersionEntry]]:
+    """The validated `programFiles` and the entries, without them, of one
+    `affected[]` element (steps 1-5)."""
     vendor = _sentinel_normalized(_optional_str(element, "vendor"))
     product = _sentinel_normalized(_optional_str(element, "product"))
     common: dict[str, Any] = {
@@ -222,18 +249,18 @@ def _element_entries(element: Mapping[str, Any]) -> list[AffectedVersionEntry]:
         "package_name": _optional_str(element, "packageName"),
         "default_status": _optional_str(element, "defaultStatus"),
         "cpe": _first_cpe(element),
-        "program_files": _program_files(element),
     }
+    files = _program_files(element)
     if (
         vendor is None
         and product is None
         and not any(common[field] for field in _PACKAGE_COORDINATES)
     ):
-        return []
+        return files, []
     versions = element.get("versions")
     if versions is None or versions == []:
         entry = _entry(common)
-        return [] if entry is None else [entry]
+        return files, [] if entry is None else [entry]
     if not isinstance(versions, list):
         raise _UnparseableError
     entries: list[AffectedVersionEntry] = []
@@ -245,7 +272,7 @@ def _element_entries(element: Mapping[str, Any]) -> list[AffectedVersionEntry]:
         entry = _entry(common | fields)
         if entry is not None:
             entries.append(entry)
-    return entries
+    return files, entries
 
 
 def _version_fields(version: Mapping[str, Any]) -> dict[str, Any]:
