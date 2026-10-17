@@ -12,7 +12,6 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "Framework :: FastAPI",
     "Intended Audience :: System Administrators",
-    "License :: OSI Approved :: Apache Software License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.14",
@@ -68,12 +67,18 @@ dev = [
     "types-jsonschema>=4.26.0.20261006",
 ]
 
+# uv builds the project with the uv_build backend bundled in its own binary,
+# without downloading a build backend, only while this range is compatible
+# with the running uv version. Renovate moves it together with the uv version
+# pinned in backend/Dockerfile (see docs/deployment.md, Container Build
+# Conventions → uv image pinning).
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["uv_build>=0.13,<0.14"]
+build-backend = "uv_build"
 
-[tool.hatch.build.targets.wheel]
-packages = ["app"]
+[tool.uv.build-backend]
+module-name = "app"
+module-root = ""
 
 [tool.ruff]
 line-length = 88
