@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from typing import Any, Literal
@@ -84,6 +85,10 @@ _DEFAULT_RUN_TIMEOUT = 3600
 _BROKER_PUBLICATION_FAILURE_MESSAGE = (
     "Manual run could not be dispatched to the task broker"
 )
+
+# Message of a submitted `custom_settings` value whose JSON type differs
+# from its declared field's (`_strict_setting_type_error()`).
+_WRONG_SETTING_TYPE = "Input has the wrong JSON type for this setting"
 
 
 # ---------------------------------------------------------------------------
@@ -473,7 +478,13 @@ def _strict_setting_type_error(key: str, annotation: Any, value: Any) -> str | N
     (`docs/features/platform/fetcher-operations.md`,
     `update_fetcher_config`, step 6, Custom settings type check).
 
-    `value` is JSON-decoded request data, so it is re-encoded and
+    `value` is JSON-decoded request data. Every `Settings` field is a
+    scalar (`docs/features/platform/fetcher-infrastructure.md`,
+    Import-time validation), so an array or object has the wrong JSON
+    type whatever it contains and is rejected without being inspected
+    or re-encoded, however deeply it nests. `NaN`, `Infinity`, and
+    `-Infinity`, which the request decoder accepts, are not JSON
+    numbers and are rejected too. Any other value is re-encoded and
     validated in Pydantic's strict *JSON* mode: unlike strict Python
     mode, that mode keeps `StrEnum`/`IntEnum` members valid in their
     JSON form while rejecting cross-type coercion (`"500"` for an
@@ -485,6 +496,10 @@ def _strict_setting_type_error(key: str, annotation: Any, value: Any) -> str | N
     Field constraints are left to the merged-state validation. Returns
     a `key: message` string on failure, `None` when the type matches.
     """
+    if not isinstance(value, str | int | float) or (
+        isinstance(value, float) and not math.isfinite(value)
+    ):
+        return f"{key}: {_WRONG_SETTING_TYPE}"
     try:
         validated = TypeAdapter(annotation).validate_json(
             json.dumps(value), strict=True
@@ -494,7 +509,7 @@ def _strict_setting_type_error(key: str, annotation: Any, value: Any) -> str | N
     if isinstance(value, bool) != isinstance(validated, bool) or (
         isinstance(value, float) and not isinstance(validated, float)
     ):
-        return f"{key}: Input has the wrong JSON type for this setting"
+        return f"{key}: {_WRONG_SETTING_TYPE}"
     return None
 
 

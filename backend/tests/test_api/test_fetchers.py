@@ -14,9 +14,15 @@ from __future__ import annotations
 
 import hashlib
 import secrets
-from collections.abc import AsyncGenerator, Awaitable, Callable, Generator
+from collections.abc import (
+    AsyncGenerator,
+    Awaitable,
+    Callable,
+    Generator,
+    MutableMapping,
+)
 from datetime import UTC, datetime, timedelta
-from typing import Any, cast
+from typing import Any, Final, cast
 from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID, uuid4
 
@@ -26,12 +32,13 @@ from celery import Celery
 from celery.schedules import crontab
 from fastapi import routing as fastapi_routing
 from fastapi.routing import APIRoute
-from httpx import ASGITransport, AsyncClient
+from httpx import ASGITransport, AsyncClient, Response
 from pydantic import BaseModel, Field
 from redbeat import RedBeatSchedulerEntry
 from redis.exceptions import RedisError
 from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from structlog.testing import capture_logs
 
 import app.api.v1.fetchers as fetchers_module
 import app.services.fetcher_schedule as fetcher_schedule_module
@@ -191,6 +198,35 @@ def _register(*stubs: type[Any]) -> None:
     FETCHER_REGISTRY.clear()
     for stub in stubs:
         FETCHER_REGISTRY[stub.name] = stub
+
+
+_OUT_OF_RANGE_BOUNDS: Final = [
+    ("from_date", "9999-12-31T23:59:59-00:01"),
+    ("from_date", "0001-01-01T00:00:00+23:59"),
+    ("to_date", "9999-12-31T23:59:59-23:59"),
+    ("to_date", "0001-01-01T00:00:00+00:01"),
+]
+"""Date bounds whose offset moves the UTC instant outside the representable
+range (`docs/api-spec.md`, Date Range Interpretation)."""
+
+
+def _assert_out_of_range_response(response: Response, field: str) -> None:
+    assert response.status_code == 422
+    assert response.json() == {
+        "code": "VALIDATION_ERROR",
+        "detail": "Request validation failed",
+        "errors": [
+            {
+                "loc": ["query", field],
+                "msg": "Value is out of the representable datetime range.",
+                "type": "value_error",
+            }
+        ],
+    }
+
+
+def _error_logs(logs: list[MutableMapping[str, Any]]) -> list[MutableMapping[str, Any]]:
+    return [entry for entry in logs if entry["log_level"] == "error"]
 
 
 @pytest_asyncio.fixture(autouse=True)
@@ -566,6 +602,49 @@ class TestListFetcherRunsEndpoint:
         )
         assert response.status_code == 422
 
+    @pytest.mark.parametrize(("field", "value"), _OUT_OF_RANGE_BOUNDS)
+    async def test_out_of_range_single_bound_returns_422_without_error_log(
+        self,
+        client: AsyncClient,
+        fetcher_config_factory: FetcherConfigFactory,
+        field: str,
+        value: str,
+    ) -> None:
+        """A single bound skips the inversion check and would otherwise
+        first be normalized in the service (`docs/api-spec.md`, Date Range
+        Interpretation)."""
+        config = await fetcher_config_factory()
+
+        with capture_logs() as logs:
+            response = await client.get(
+                f"/api/v1/fetchers/{config.fetcher_name}/runs", params={field: value}
+            )
+
+        _assert_out_of_range_response(response, field)
+        assert _error_logs(logs) == []
+
+    async def test_representable_extreme_bounds_reach_the_database(
+        self,
+        client: AsyncClient,
+        fetcher_config_factory: FetcherConfigFactory,
+        fetcher_run_factory: FetcherRunFactory,
+    ) -> None:
+        config = await fetcher_config_factory()
+        run = await fetcher_run_factory(
+            fetcher_name=config.fetcher_name, status="success"
+        )
+
+        response = await client.get(
+            f"/api/v1/fetchers/{config.fetcher_name}/runs",
+            params={
+                "from_date": "0001-01-01T00:00:00-23:59",
+                "to_date": "9999-12-31T23:59:59+23:59",
+            },
+        )
+
+        assert response.status_code == 200
+        assert [item["id"] for item in response.json()["data"]] == [str(run.id)]
+
     async def test_inverted_range_returns_400(
         self, client: AsyncClient, fetcher_config_factory: FetcherConfigFactory
     ) -> None:
@@ -937,6 +1016,45 @@ class TestGetFetcherTimelineEndpoint:
 
         assert response.status_code == 400
         assert response.json()["code"] == "DATE_RANGE_TOO_WIDE"
+
+    @pytest.mark.parametrize(("field", "value"), _OUT_OF_RANGE_BOUNDS)
+    async def test_out_of_range_single_bound_returns_422_without_error_log(
+        self,
+        client: AsyncClient,
+        fetcher_config_factory: FetcherConfigFactory,
+        field: str,
+        value: str,
+    ) -> None:
+        """The handler itself normalizes the bounds before the width
+        check (`docs/api-spec.md`, Date Range Interpretation)."""
+        config = await fetcher_config_factory()
+
+        with capture_logs() as logs:
+            response = await client.get(
+                f"/api/v1/fetchers/{config.fetcher_name}/timeline",
+                params={field: value},
+            )
+
+        _assert_out_of_range_response(response, field)
+        assert _error_logs(logs) == []
+
+    async def test_representable_extreme_bounds_reach_the_database(
+        self,
+        client: AsyncClient,
+        fetcher_config_factory: FetcherConfigFactory,
+    ) -> None:
+        config = await fetcher_config_factory()
+
+        response = await client.get(
+            f"/api/v1/fetchers/{config.fetcher_name}/timeline",
+            params={
+                "from_date": "9999-12-31T00:00:00+23:59",
+                "to_date": "9999-12-31T23:59:59.999999",
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.json()["data"]["points"] == []
 
     async def test_exactly_1825_days_is_accepted(
         self, client: AsyncClient, fetcher_config_factory: FetcherConfigFactory
@@ -1906,6 +2024,74 @@ class TestUpdateFetcherConfigEndpoint:
             f"/api/v1/fetchers/{config.fetcher_name}/config"
         )
         assert follow_up.json()["data"]["custom_settings"] == {}
+
+    @pytest.mark.parametrize(
+        "raw_value", ["[500]", '{"value": 500}', "NaN", "Infinity", "-Infinity"]
+    )
+    async def test_container_or_non_finite_custom_setting_returns_setting_invalid(
+        self,
+        admin_client: AsyncClient,
+        fetcher_config_factory: FetcherConfigFactory,
+        raw_value: str,
+    ) -> None:
+        """Representative wiring of the scalar-only rule: an array, an
+        object, or a non-standard constant the request decoder accepts
+        reaches the service and is rejected as the wrong JSON type
+        (`fetcher-operations.md`, Custom settings type check). The
+        complete matrix, including depth independence, is owned by the
+        service tests."""
+        _register(_StubFetcherWithSettings)
+        config = await fetcher_config_factory(
+            fetcher_name=_StubFetcherWithSettings.name
+        )
+
+        with capture_logs() as logs:
+            response = await admin_client.patch(
+                f"/api/v1/fetchers/{config.fetcher_name}/config",
+                content=f'{{"custom_settings": {{"results_per_page": {raw_value}}}}}',
+                headers={"Content-Type": "application/json"},
+            )
+
+        assert response.status_code == 422
+        assert response.json() == {
+            "code": "FETCHER_SETTING_INVALID",
+            "detail": (
+                "results_per_page: Input has the wrong JSON type for this setting"
+            ),
+        }
+        assert _error_logs(logs) == []
+        follow_up = await admin_client.get(
+            f"/api/v1/fetchers/{config.fetcher_name}/config"
+        )
+        assert follow_up.json()["data"]["custom_settings"] == {}
+
+    async def test_deeply_nested_custom_setting_returns_422_not_500(
+        self,
+        admin_client: AsyncClient,
+        fetcher_config_factory: FetcherConfigFactory,
+    ) -> None:
+        """An object nested deeper than the JSON encoder accepts on a usual
+        stack, though not necessarily deeper than the request decoder
+        does. Only the status is asserted, and no ERROR is logged: the
+        decoder either rejects the body (`json_invalid`) or the service
+        rejects the value (`FETCHER_SETTING_INVALID`), whatever the stack
+        size (`docs/api-spec.md`, JSON Request Body Decoding)."""
+        _register(_StubFetcherWithSettings)
+        config = await fetcher_config_factory(
+            fetcher_name=_StubFetcherWithSettings.name
+        )
+        depth = 50_000
+        value = '{"a":' * depth + "1" + "}" * depth
+
+        with capture_logs() as logs:
+            response = await admin_client.patch(
+                f"/api/v1/fetchers/{config.fetcher_name}/config",
+                content=f'{{"custom_settings": {{"results_per_page": {value}}}}}',
+                headers={"Content-Type": "application/json"},
+            )
+
+        assert response.status_code == 422
+        assert _error_logs(logs) == []
 
     async def test_schedule_override_explicit_null_reverts_to_default(
         self,

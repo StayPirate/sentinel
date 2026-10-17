@@ -30,6 +30,7 @@ import pytest
 from httpx import AsyncClient
 from sqlalchemy import delete, event
 from sqlalchemy.ext.asyncio import AsyncSession
+from structlog.testing import capture_logs
 
 from app.api.dependencies import SESSION_COOKIE_NAME
 from app.core.enums import (
@@ -853,6 +854,14 @@ _SHARED_INVALID: Final = [
     ({"from_date": "2024-13-01"}, "from_date"),
     ({"from_date": "1700000000"}, "from_date"),
     ({"to_date": "yesterday"}, "to_date"),
+    ({"from_date": "9999-12-31T23:59:59-00:01"}, "from_date"),
+    ({"to_date": "0001-01-01T00:00:00+00:01"}, "to_date"),
+]
+_OUT_OF_RANGE_BOUNDS: Final = [
+    ("from_date", "9999-12-31T23:59:59-23:59"),
+    ("from_date", "0001-01-01T00:00:00+23:59"),
+    ("to_date", "9999-12-31T23:59:59-23:59"),
+    ("to_date", "0001-01-01T00:00:00+23:59"),
 ]
 _INVALID_CASES: Final = [
     *[(path, params, field) for path in _LISTS for params, field in _SHARED_INVALID],
@@ -932,6 +941,58 @@ class TestRequestValidation:
         assert response.status_code == 400
         assert response.json()["code"] == "DATE_RANGE_INVERTED"
         spies[_SERVICE_FUNCTION[path]].assert_not_awaited()
+
+    @pytest.mark.parametrize("path", _LISTS)
+    @pytest.mark.parametrize(("field", "value"), _OUT_OF_RANGE_BOUNDS)
+    async def test_out_of_range_bound_returns_422_without_error_log(
+        self, client: AsyncClient, path: str, field: str, value: str
+    ) -> None:
+        """An anonymous request whose single bound's offset moves its UTC
+        instant outside the representable range is malformed
+        (`docs/api-spec.md`, Date Range Interpretation): the global `422`,
+        never a logged `500`."""
+        with capture_logs() as logs:
+            response = await client.get(path, params={field: value})
+
+        assert response.status_code == 422
+        assert response.json() == {
+            "code": "VALIDATION_ERROR",
+            "detail": "Request validation failed",
+            "errors": [
+                {
+                    "loc": ["query", field],
+                    "msg": "Value is out of the representable datetime range.",
+                    "type": "value_error",
+                }
+            ],
+        }
+        assert [entry for entry in logs if entry["log_level"] == "error"] == []
+
+    @pytest.mark.parametrize("path", _LISTS)
+    async def test_representable_extreme_bounds_reach_the_database(
+        self,
+        client: AsyncClient,
+        cve_factory: Factory,
+        cve_source_factory: Factory,
+        path: str,
+    ) -> None:
+        cve = await cve_factory(published_date=datetime(2099, 3, 1, tzinfo=UTC))
+        await cve_source_factory(cve_id=cve.id)
+
+        for params in (
+            {"from_date": "0001-01-01", "to_date": "9999-12-31"},
+            {
+                "from_date": "0001-01-01T00:00:00Z",
+                "to_date": "9999-12-31T23:59:59.999999Z",
+            },
+            {
+                "from_date": "0001-01-01T00:00:00-23:59",
+                "to_date": "9999-12-31T23:59:59+23:59",
+            },
+        ):
+            response = await client.get(path, params=params)
+            assert response.status_code == 200, (params, response.text)
+            assert response.json()["meta"]["total"] == 1, params
 
     @pytest.mark.parametrize("path", _LISTS)
     async def test_equal_bounds_and_boundary_page_sizes_are_accepted(

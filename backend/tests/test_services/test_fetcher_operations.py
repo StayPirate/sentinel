@@ -24,11 +24,12 @@ Strategy).
 from __future__ import annotations
 
 import asyncio
+import math
 import threading
 from collections.abc import AsyncGenerator, Awaitable, Callable, Generator
 from datetime import UTC, datetime, timedelta
 from enum import IntEnum, StrEnum
-from typing import Any, Literal, cast
+from typing import Any, Final, Literal, cast
 from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID, uuid4
 
@@ -179,6 +180,10 @@ class _TypedSettingsFetcherStub:
 
 
 _TypedSettingsFetcher = cast("type[BaseFetcher]", _TypedSettingsFetcherStub)
+
+_WRONG_SETTING_TYPE: Final = "Input has the wrong JSON type for this setting"
+"""Message of a submitted `custom_settings` value of the wrong JSON type,
+after its `key: ` prefix."""
 
 
 def _register(*stubs: type[Any]) -> None:
@@ -2497,6 +2502,84 @@ class TestUpdateFetcherConfigBehavior:
             )
 
         assert str(exc_info.value).startswith(f"{key}: ")
+        assert config.custom_settings == {}
+        events = (await db_session.execute(select(FetcherAuditEvent))).scalars()
+        assert events.all() == []
+
+    @pytest.mark.parametrize(
+        ("key", "value"),
+        [
+            ("count", [500]),
+            ("count", []),
+            ("label", {"value": "custom"}),
+            ("flag", {}),
+            ("ratio", math.nan),
+            ("ratio", math.inf),
+            ("ratio", -math.inf),
+            ("count", math.inf),
+        ],
+    )
+    async def test_container_or_non_finite_custom_setting_raises_wrong_type(
+        self,
+        db_session: AsyncSession,
+        fetcher_config_factory: FetcherConfigFactory,
+        user_factory: UserFactory,
+        key: str,
+        value: Any,
+    ) -> None:
+        """Every `Settings` field is a scalar, so a JSON array or object
+        has the wrong JSON type whatever it contains, and `NaN`,
+        `Infinity`, and `-Infinity`, which the request decoder accepts,
+        are not JSON numbers (`fetcher-operations.md`,
+        `update_fetcher_config`, step 6, Custom settings type check).
+        `ratio` is an unconstrained `float`, so no later validation would
+        reject a non-finite value. Nothing is persisted or audited."""
+        _register(_TypedSettingsFetcher)
+        config = await fetcher_config_factory(fetcher_name=_TypedSettingsFetcher.name)
+        admin = await user_factory()
+
+        with pytest.raises(FetcherSettingInvalidError) as exc_info:
+            await update_fetcher_config(
+                db_session,
+                fetcher_name=config.fetcher_name,
+                user_id=admin.id,
+                payload=UpdateConfigPayload(custom_settings={key: value}),
+            )
+
+        assert str(exc_info.value) == f"{key}: {_WRONG_SETTING_TYPE}"
+        assert config.custom_settings == {}
+        events = (await db_session.execute(select(FetcherAuditEvent))).scalars()
+        assert events.all() == []
+
+    async def test_deeply_nested_custom_setting_raises_wrong_type(
+        self,
+        db_session: AsyncSession,
+        fetcher_config_factory: FetcherConfigFactory,
+        user_factory: UserFactory,
+    ) -> None:
+        """An array or object is rejected without being inspected or
+        re-encoded, so its depth never matters. The value is built here
+        without the JSON parser or encoder and nests far deeper than
+        either accepts on a usual stack, yet the outcome is the shallow
+        object's, whatever the stack size (`docs/conventions.md`,
+        External JSON Decoding: the accepted depth is part of no
+        contract)."""
+        _register(_TypedSettingsFetcher)
+        config = await fetcher_config_factory(fetcher_name=_TypedSettingsFetcher.name)
+        admin = await user_factory()
+        value: Any = "custom"
+        for _ in range(100_000):
+            value = {"value": value}
+
+        with pytest.raises(FetcherSettingInvalidError) as exc_info:
+            await update_fetcher_config(
+                db_session,
+                fetcher_name=config.fetcher_name,
+                user_id=admin.id,
+                payload=UpdateConfigPayload(custom_settings={"label": value}),
+            )
+
+        assert str(exc_info.value) == f"label: {_WRONG_SETTING_TYPE}"
         assert config.custom_settings == {}
         events = (await db_session.execute(select(FetcherAuditEvent))).scalars()
         assert events.all() == []
