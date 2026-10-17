@@ -26,6 +26,7 @@ from app.config import settings
 from tests.test_migrations.conftest import isolated_alembic_config, run_sync
 
 _PREVIOUS_HEAD = "a43e3dc6f490"
+_REVISION = "4b4f7187b541"
 
 # Every table with a UUID primary key (`docs/data-model.md`, Notes).
 _UUID_PK_TABLES: tuple[str, ...] = (
@@ -85,9 +86,9 @@ class TestUuidV7PrimaryKeysMigration:
                 f"the migration, got {before[table_name]!r}"
             )
 
-        # 2. Upgrade to head — every UUID PK column gets
-        # server_default=uuidv7().
-        command.upgrade(cfg, "head")
+        # 2. Upgrade to the revision under test — every UUID PK column
+        # gets server_default=uuidv7().
+        command.upgrade(cfg, _REVISION)
         after = _inspect(alembic_test_database_url)
         for table_name in _UUID_PK_TABLES:
             assert after[table_name] == "uuidv7()", (
@@ -105,9 +106,9 @@ class TestUuidV7PrimaryKeysMigration:
                 f"downgrade, got {downgraded[table_name]!r}"
             )
 
-        # 4. Re-upgrade to head — idempotent: server_default restored on
-        # every UUID PK column, no errors.
-        command.upgrade(cfg, "head")
+        # 4. Re-upgrade to the revision under test — idempotent:
+        # server_default restored on every UUID PK column, no errors.
+        command.upgrade(cfg, _REVISION)
         reupgraded = _inspect(alembic_test_database_url)
         for table_name in _UUID_PK_TABLES:
             assert reupgraded[table_name] == "uuidv7()", (
@@ -125,7 +126,7 @@ class TestUuidV7PrimaryKeysMigration:
         database — this is the migration's safety-net purpose."""
         monkeypatch.setattr(settings, "database_url", alembic_test_database_url)
         cfg = isolated_alembic_config()
-        command.upgrade(cfg, "head")
+        command.upgrade(cfg, _REVISION)
 
         async def _insert_and_fetch() -> str:
             from sqlalchemy import text

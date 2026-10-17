@@ -28,6 +28,7 @@ from app.config import settings
 from tests.test_migrations.conftest import isolated_alembic_config, run_sync
 
 _PREVIOUS_HEAD = "4b4f7187b541"
+_REVISION = "a4f22788de31"
 
 
 class _RunRow(TypedDict):
@@ -231,10 +232,10 @@ class TestQueuedFetcherRunStatusMigration:
         assert len(seeded_rows) == 2
         assert all(row["started_at"] is not None for row in seeded_rows)
 
-        # 2. Upgrade to head — `started_at` becomes nullable, the CHECK
-        # constraint accepts `queued`, and the new composite index
-        # exists.
-        command.upgrade(cfg, "head")
+        # 2. Upgrade to the revision under test — `started_at` becomes
+        # nullable, the CHECK constraint accepts `queued`, and the new
+        # composite index exists.
+        command.upgrade(cfg, _REVISION)
         after_checks, after_indexes, after_nullable = _inspect(
             alembic_test_database_url
         )
@@ -339,9 +340,9 @@ class TestQueuedFetcherRunStatusMigration:
         with pytest.raises(IntegrityError, match="chk_fetcher_run_status_valid"):
             run_sync(_attempt_insert_queued_row(alembic_test_database_url))
 
-        # 4. Re-upgrade to head — idempotent: no errors, schema facts
-        # match step 2 again.
-        command.upgrade(cfg, "head")
+        # 4. Re-upgrade to the revision under test — idempotent: no
+        # errors, schema facts match step 2 again.
+        command.upgrade(cfg, _REVISION)
         reupgraded_checks, reupgraded_indexes, reupgraded_nullable = _inspect(
             alembic_test_database_url
         )

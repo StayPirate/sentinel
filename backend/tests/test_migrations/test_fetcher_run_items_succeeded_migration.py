@@ -1,5 +1,6 @@
 """Integration tests for the fetcher-run `items_succeeded` Alembic
-migration (backend/alembic/versions/*_add_items_succeeded_to_fetcher_run.py).
+migration
+(backend/alembic/versions/ace650c9f7a8_add_items_succeeded_to_fetcher_run.py).
 
 Verifies the migration cycle mandated by
 `docs/features/platform/fetcher-infrastructure.md` (Data Model —
@@ -28,6 +29,7 @@ from app.config import settings
 from tests.test_migrations.conftest import isolated_alembic_config, run_sync
 
 _PREVIOUS_HEAD = "2972274112d2"
+_REVISION = "ace650c9f7a8"
 _FETCHER_NAME = "items_succeeded_migration_test_fetcher"
 _COUNTER_COLUMNS = (
     "items_succeeded",
@@ -179,10 +181,10 @@ class TestFetcherRunItemsSucceededMigration:
 
         run_sync(_seed_pre_migration_rows(alembic_test_database_url))
 
-        # 2. Upgrade to head — `items_succeeded` exists as NOT NULL with
-        # a zero server default, and the three existing counters gain
-        # the documented zero server default.
-        command.upgrade(cfg, "head")
+        # 2. Upgrade to the revision under test — `items_succeeded`
+        # exists as NOT NULL with a zero server default, and the three
+        # existing counters gain the documented zero server default.
+        command.upgrade(cfg, _REVISION)
         after = _columns(alembic_test_database_url)
         for column_name in _COUNTER_COLUMNS:
             assert after[column_name]["nullable"] is False
@@ -209,10 +211,10 @@ class TestFetcherRunItemsSucceededMigration:
             assert downgraded[column_name]["nullable"] is False
             assert downgraded[column_name]["default"] is None
 
-        # 4. Re-upgrade to head — idempotent: the specified shape and
-        # defaults are restored; the previously populated value is gone
-        # with the dropped column.
-        command.upgrade(cfg, "head")
+        # 4. Re-upgrade to the revision under test — idempotent: the
+        # specified shape and defaults are restored; the previously
+        # populated value is gone with the dropped column.
+        command.upgrade(cfg, _REVISION)
         reupgraded = _columns(alembic_test_database_url)
         for column_name in _COUNTER_COLUMNS:
             assert reupgraded[column_name]["nullable"] is False
