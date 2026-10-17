@@ -1,5 +1,39 @@
 # Changelog
 
+## [0.10.0](https://github.com/StayPirate/sentinel/compare/v0.9.0...v0.10.0) (2026-10-17)
+
+
+### Features
+
+* add IBS Product release detection ([#935](https://github.com/StayPirate/sentinel/issues/935)) ([4073d0b](https://github.com/StayPirate/sentinel/commit/4073d0beb01fc53b361883fed15b7b7a36771a5c)), closes [#923](https://github.com/StayPirate/sentinel/issues/923)
+* add IBS request synchronization ([#967](https://github.com/StayPirate/sentinel/issues/967)) ([6cdf69a](https://github.com/StayPirate/sentinel/commit/6cdf69a58d75a1bde3d11b01357771b80bc175fc)), closes [#947](https://github.com/StayPirate/sentinel/issues/947)
+* add IBS track release detection ([#937](https://github.com/StayPirate/sentinel/issues/937)) ([814e5e1](https://github.com/StayPirate/sentinel/commit/814e5e18317ef9131eef43088e8b508d5f8b77f1)), closes [#925](https://github.com/StayPirate/sentinel/issues/925)
+* add set_track_delivery_status() and align the IBS action schema ([#964](https://github.com/StayPirate/sentinel/issues/964)) ([70ff8bd](https://github.com/StayPirate/sentinel/commit/70ff8bdc3794e4d2dc26bbf068a688cf91be3d4b)), closes [#946](https://github.com/StayPirate/sentinel/issues/946)
+* add the IBS client with source info and source diff ([#936](https://github.com/StayPirate/sentinel/issues/936)) ([9a16af9](https://github.com/StayPirate/sentinel/commit/9a16af9844375c306b808c29fbb7cb62e469a05c))
+* add the IBS consumer heartbeat and status endpoint ([#985](https://github.com/StayPirate/sentinel/issues/985)) ([d8eb25c](https://github.com/StayPirate/sentinel/commit/d8eb25c1492f40c8f47496e3b23d53f0e1092060))
+* add the IBS Product repository download boundary ([#933](https://github.com/StayPirate/sentinel/issues/933)) ([18ce97c](https://github.com/StayPirate/sentinel/commit/18ce97cae0156d644e661d1775381e81ea90e238))
+* add the IBS RabbitMQ consumer with package-commit acceleration ([#982](https://github.com/StayPirate/sentinel/issues/982)) ([12d7c97](https://github.com/StayPirate/sentinel/commit/12d7c976a5a7d95cf2c434e99b7e07d8de85d8ae))
+* add the IBS RabbitMQ request wake-ups ([#1001](https://github.com/StayPirate/sentinel/issues/1001)) ([e1a8753](https://github.com/StayPirate/sentinel/commit/e1a875338c02e34a8bdf4ab6d155640c3037f1d4))
+* add the IBS request search, detail, diff, and history operations ([#962](https://github.com/StayPirate/sentinel/issues/962)) ([019852c](https://github.com/StayPirate/sentinel/commit/019852cf6938b622be9fb3cf7c26c90160cac4f4)), closes [#945](https://github.com/StayPirate/sentinel/issues/945)
+* add the IBS submission and release request lists ([#961](https://github.com/StayPirate/sentinel/issues/961)) ([f8feb1f](https://github.com/StayPirate/sentinel/commit/f8feb1f692f473c15a070cc8bdcb89541f57321c))
+* add the shared IBS request reconciliation ([#965](https://github.com/StayPirate/sentinel/issues/965)) ([eca7c11](https://github.com/StayPirate/sentinel/commit/eca7c11526f94e5ab0d523d838f50d6641f7d598))
+
+
+### Bug Fixes
+
+* apply request_delay in the IBS release detectors ([#950](https://github.com/StayPirate/sentinel/issues/950)) ([709acab](https://github.com/StayPirate/sentinel/commit/709acab94245979891eccccad66ddf7c1c9583d0))
+* bound affected-version expansion in CVE record ingestion ([#997](https://github.com/StayPirate/sentinel/issues/997)) ([c21177b](https://github.com/StayPirate/sentinel/commit/c21177b71874f2322ea019eb5ceba14084a1b4af)), closes [#993](https://github.com/StayPirate/sentinel/issues/993)
+* bound decoding and media-type parsing of external HTTP responses ([#999](https://github.com/StayPirate/sentinel/issues/999)) ([7334a5c](https://github.com/StayPirate/sentinel/commit/7334a5c8ad3bc9c42168fd2ac63a8cb169aa3d18)), closes [#994](https://github.com/StayPirate/sentinel/issues/994)
+* consolidate the fetcher request-delay contract ([#957](https://github.com/StayPirate/sentinel/issues/957)) ([7a74be4](https://github.com/StayPirate/sentinel/commit/7a74be448ad360781e51ab6e2b4b9a4acea3a4a0))
+* **deps:** refresh lock file for dnspython and opentelemetry fixes ([d8b95f3](https://github.com/StayPirate/sentinel/commit/d8b95f37de32e2bae81d3885f3b8c63c6365b3b1))
+* document the actual error responses in the OpenAPI contract ([#992](https://github.com/StayPirate/sentinel/issues/992)) ([fdd2c23](https://github.com/StayPirate/sentinel/commit/fdd2c236b2665f72a113eda8c79fe6a2ceafa9ac))
+* handle JSON beyond the parser's limits consistently ([#988](https://github.com/StayPirate/sentinel/issues/988)) ([dc1e179](https://github.com/StayPirate/sentinel/commit/dc1e179311987051638cbc3d74d8cb8ede887c64)), closes [#986](https://github.com/StayPirate/sentinel/issues/986)
+* make the request-input admissibility check linear in body size ([#996](https://github.com/StayPirate/sentinel/issues/996)) ([5849992](https://github.com/StayPirate/sentinel/commit/5849992f2ce7df08582e9bdcecc0d66a2a5e6a20))
+* make the shared HTTP client honor the proxy environment variables ([#1000](https://github.com/StayPirate/sentinel/issues/1000)) ([1a3ff25](https://github.com/StayPirate/sentinel/commit/1a3ff2536599d2d3cee5541c9e051d5ec2452b85)), closes [#998](https://github.com/StayPirate/sentinel/issues/998)
+* return 422, not 500, for out-of-range dates and deep settings ([#1003](https://github.com/StayPirate/sentinel/issues/1003)) ([3cca5b1](https://github.com/StayPirate/sentinel/commit/3cca5b1209da688a18da397f31ad63d6b797c3b1)), closes [#995](https://github.com/StayPirate/sentinel/issues/995)
+* return framework-generated API errors in the standard envelope ([#991](https://github.com/StayPirate/sentinel/issues/991)) ([9a60e46](https://github.com/StayPirate/sentinel/commit/9a60e463ed4a77afea101fb72c38846337896046))
+* terminate git's process group when interrupted during start ([#927](https://github.com/StayPirate/sentinel/issues/927)) ([9940351](https://github.com/StayPirate/sentinel/commit/9940351e4a3b90bde540a259231644262951ba65)), closes [#926](https://github.com/StayPirate/sentinel/issues/926)
+
 ## [0.9.0](https://github.com/StayPirate/sentinel/compare/v0.8.0...v0.9.0) (2026-10-11)
 
 
