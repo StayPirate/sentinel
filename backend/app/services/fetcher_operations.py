@@ -484,9 +484,9 @@ def _strict_setting_type_error(key: str, annotation: Any, value: Any) -> str | N
     type whatever it contains and is rejected without being inspected
     or re-encoded, however deeply it nests. `NaN`, `Infinity`, and
     `-Infinity`, which the request decoder accepts, are not JSON
-    numbers, and a number beyond the finite float range (`1e400`)
-    decodes to an infinity; `jsonb` can store neither, so both are
-    rejected too. Any other value is re-encoded and
+    numbers, and a number with a fraction or exponent beyond the finite
+    float range (`1e400`) decodes to an infinity; `jsonb` can store
+    neither, so both are rejected too. Any other value is re-encoded and
     validated in Pydantic's strict *JSON* mode: unlike strict Python
     mode, that mode keeps `StrEnum`/`IntEnum` members valid in their
     JSON form while rejecting cross-type coercion (`"500"` for an

@@ -408,10 +408,11 @@ is in the registry but has no `FetcherConfig` row (bootstrap prerequisite
      rejected. Every `Settings` field is a scalar, so a JSON array or
      object is rejected whatever it contains and however deeply it
      nests. `NaN`, `Infinity`, and `-Infinity` are not JSON numbers, and
-     a number beyond the finite floating-point range, such as `1e400`,
-     has no finite value; both are rejected for every field. A violation
-     raises `FetcherSettingInvalidError`. The check covers only the
-     submitted values; field constraints are enforced by the merged-state
+     a number with a fraction or exponent beyond the finite
+     floating-point range, such as `1e400`, decodes to an infinity; both
+     are rejected for every field. A violation raises
+     `FetcherSettingInvalidError`. The check covers only the submitted
+     values; field constraints are enforced by the merged-state
      validation below.
    - **Custom settings canonicalization**: each non-null submitted key
      is validated by constructing the fetcher's `Settings` model over
