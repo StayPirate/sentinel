@@ -376,6 +376,9 @@ that accept date range parameters.
 both date range parameters. Like global responses, it is not repeated in
 per-endpoint error tables. Malformed date/datetime values remain schema
 validation failures and produce the global `422 VALIDATION_ERROR` response.
+A datetime whose offset moves its UTC instant outside the representable range,
+`0001-01-01T00:00:00Z` through `9999-12-31T23:59:59.999999Z` (for example
+`9999-12-31T23:59:59-01:00`), is malformed.
 
 **Maximum range constraint**: endpoints that return unbounded datasets
 without pagination (e.g., chart/timeline data) SHOULD declare a maximum

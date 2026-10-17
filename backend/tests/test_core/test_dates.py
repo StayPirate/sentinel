@@ -62,6 +62,61 @@ class TestParseDateRangeBound:
             parse_date_range_bound("to_date", "garbage")
         assert exc_info.value.errors()[0]["loc"] == ["query", "to_date"]
 
+    @pytest.mark.parametrize("field_name", ["from_date", "to_date"])
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            pytest.param("9999-12-31T23:59:59-00:01", id="above-by-one-minute"),
+            pytest.param("9999-12-31T23:59:59-23:59", id="above-by-largest-offset"),
+            pytest.param("0001-01-01T00:00:00+00:01", id="below-by-one-minute"),
+            pytest.param("0001-01-01T00:00:00+23:59", id="below-by-largest-offset"),
+        ],
+    )
+    def test_offset_moving_utc_instant_out_of_range_raises_request_validation_error(
+        self, field_name: str, raw: str
+    ) -> None:
+        """`astimezone()` signals an out-of-range UTC instant with
+        `OverflowError`, not `ValueError`; the value is malformed
+        (`docs/api-spec.md`, Date Range Interpretation)."""
+        with pytest.raises(RequestValidationError) as exc_info:
+            parse_date_range_bound(field_name, raw)
+        assert exc_info.value.errors() == [
+            {
+                "loc": ["query", field_name],
+                "msg": "Value is out of the representable datetime range.",
+                "type": "value_error",
+            }
+        ]
+
+    @pytest.mark.parametrize(
+        ("raw", "utc"),
+        [
+            (
+                "9999-12-31T23:59:59.999999+00:00",
+                datetime(9999, 12, 31, 23, 59, 59, 999999, tzinfo=UTC),
+            ),
+            (
+                "9999-12-31T23:59:59.999999",
+                datetime(9999, 12, 31, 23, 59, 59, 999999, tzinfo=UTC),
+            ),
+            (
+                "9999-12-31T23:59:59+23:59",
+                datetime(9999, 12, 31, 0, 0, 59, tzinfo=UTC),
+            ),
+            ("0001-01-01T00:00:00Z", datetime(1, 1, 1, tzinfo=UTC)),
+            ("0001-01-01T00:00:00-23:59", datetime(1, 1, 1, 23, 59, tzinfo=UTC)),
+        ],
+    )
+    def test_representable_extreme_is_accepted_as_parsed_and_normalizes(
+        self, raw: str, utc: datetime
+    ) -> None:
+        parsed = parse_date_range_bound("from_date", raw)
+        expected = datetime.fromisoformat(raw)
+        assert isinstance(parsed, datetime)
+        assert (parsed, parsed.tzinfo) == (expected, expected.tzinfo)
+        assert normalize_date_bound(parsed, end_of_day=False) == utc
+        assert normalize_date_bound(parsed, end_of_day=True) == utc
+
 
 @pytest.mark.unit
 class TestNormalizeDateBound:
@@ -84,6 +139,14 @@ class TestNormalizeDateBound:
         aware = datetime.fromisoformat("2025-01-15T14:30:00+02:00")
         result = normalize_date_bound(aware, end_of_day=False)
         assert result == datetime(2025, 1, 15, 12, 30, 0, tzinfo=UTC)
+
+    def test_extreme_dates_expand_within_range(self) -> None:
+        assert normalize_date_bound(date(1, 1, 1), end_of_day=False) == datetime(
+            1, 1, 1, tzinfo=UTC
+        )
+        assert normalize_date_bound(date(9999, 12, 31), end_of_day=True) == datetime(
+            9999, 12, 31, 23, 59, 59, 999999, tzinfo=UTC
+        )
 
 
 @pytest.mark.unit
@@ -128,3 +191,9 @@ class TestValidateDateRangeOrder:
         datetime earlier that same day is not inverted."""
         naive = datetime(2025, 1, 15, 8, 0, 0)  # noqa: DTZ001
         validate_date_range_order(naive, date(2025, 1, 15))
+
+    def test_representable_extreme_bounds_are_ordered(self) -> None:
+        validate_date_range_order(
+            parse_date_range_bound("from_date", "0001-01-01T00:00:00-23:59"),
+            parse_date_range_bound("to_date", "9999-12-31T23:59:59+23:59"),
+        )

@@ -32,12 +32,17 @@ def parse_date_range_bound(field_name: str, raw: str | None) -> date | datetime 
     `datetime.fromisoformat()`. Rejects any other input, including a
     pure numeric string — which Pydantic's default `datetime` coercion
     would otherwise silently accept as a Unix epoch timestamp, diverging
-    from the documented ISO-8601-only contract.
+    from the documented ISO-8601-only contract. Also rejects a datetime
+    whose offset moves its UTC instant outside the representable range
+    (`0001-01-01T00:00:00Z` to `9999-12-31T23:59:59.999999Z`), which
+    `astimezone()` signals with `OverflowError` rather than `ValueError`,
+    so every accepted value normalizes to UTC without failing. The
+    accepted value is returned as parsed, offset included.
 
     Q6: raises `RequestValidationError` — rendered as the standard `422
     VALIDATION_ERROR` envelope by the handler registered in `app.main`
     — for a value that is neither a valid ISO 8601 date nor datetime
-    string. Otherwise infallible.
+    string, or whose UTC instant is out of range. Otherwise infallible.
     """
     if raw is None:
         return None
@@ -46,17 +51,25 @@ def parse_date_range_bound(field_name: str, raw: str | None) -> date | datetime 
     except ValueError:
         pass
     try:
-        return datetime.fromisoformat(raw)
+        parsed = datetime.fromisoformat(raw)
     except ValueError:
-        raise RequestValidationError(
-            [
-                {
-                    "loc": ["query", field_name],
-                    "msg": "Value must be a valid ISO 8601 date or datetime string.",
-                    "type": "value_error",
-                }
-            ]
+        raise _invalid_bound(
+            field_name, "Value must be a valid ISO 8601 date or datetime string."
         ) from None
+    if parsed.tzinfo is not None:
+        try:
+            parsed.astimezone(UTC)
+        except OverflowError:
+            raise _invalid_bound(
+                field_name, "Value is out of the representable datetime range."
+            ) from None
+    return parsed
+
+
+def _invalid_bound(field_name: str, message: str) -> RequestValidationError:
+    return RequestValidationError(
+        [{"loc": ["query", field_name], "msg": message, "type": "value_error"}]
+    )
 
 
 def normalize_date_bound(value: date | datetime, *, end_of_day: bool) -> datetime:
@@ -66,6 +79,8 @@ def normalize_date_bound(value: date | datetime, *, end_of_day: bool) -> datetim
     (`23:59:59.999999`) of that UTC day, per `end_of_day`. A naive
     `datetime` is interpreted as UTC. An offset-aware `datetime` is
     converted to UTC. See `docs/api-spec.md` (Date Range Interpretation).
+    Infallible for a value accepted by `parse_date_range_bound()`, which
+    rejects an offset whose conversion would overflow.
     """
     if isinstance(value, datetime):
         if value.tzinfo is None:
@@ -80,9 +95,9 @@ def validate_date_range_order(
 ) -> None:
     """Raise the global `400 DATE_RANGE_INVERTED` response when inverted.
 
-    Q1: `from_date`/`to_date` are the endpoint's already-parsed optional
-    date-range bounds (schema validation for malformed values has already
-    passed by the time this is called).
+    Q1: `from_date`/`to_date` are the endpoint's optional date-range
+    bounds as accepted by `parse_date_range_bound()`, which has already
+    rejected malformed and out-of-range values.
 
     Q3: a no-op when either bound is absent — inversion is only defined
     when both bounds are present. Otherwise normalizes both bounds per
