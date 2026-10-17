@@ -925,7 +925,7 @@ produces and what a version-tag build produces:
 | Tag | Produced by | Meaning |
 |-----|-------------|---------|
 | `master` | Every merge to `master` (`workflow_run` trigger, via `type=ref,event=branch`) | Latest CI-green `master` HEAD. Not a release artifact — content changes on every merge |
-| `latest` | Highest semver tag pushed so far (`push: tags: v*` trigger, via `docker/metadata-action`'s default `flavor: latest=auto`) | The version of the most recent version-tag build. Only ever produced by a version-tag build |
+| `latest` | Every non-prerelease version tag push (`push: tags: v*` trigger, via `docker/metadata-action`'s default `flavor: latest=auto`) | The version of the most recent version-tag build. Only ever produced by a version-tag build |
 | `X.Y.Z` | Version tag push (`push: tags: v*`) | The exact release version. Final once the version's GitHub Release is published (see Release Publication and Immutability) |
 | `X.Y` | Version tag push (`push: tags: v*`) | Floating pointer to the latest patch release within that minor version |
 
@@ -1077,8 +1077,8 @@ Reusing the resolved `name@sha256:digest` value closes the window between
 verification and deployment and keeps an existing deployment on the verified
 artifact.
 
-Verification checks the Sigstore-backed signer identity, predicate type, and
-subject digest. Build provenance establishes which repository commit and
+Verification checks the Sigstore-backed signer identity, source ref, predicate
+type, and subject digest. Build provenance establishes which repository commit and
 workflow run asserted that digest; it does not prove reproducibility or by
 itself enumerate every build input. Consumers needing the signed material
 offline can take the bundle release assets, or download the attestation bundle
@@ -1132,7 +1132,7 @@ Repair of a failed version-tag run:
 | The release-metadata job fails while the GitHub Release is a draft | Re-run failed jobs. The rerun reuses the build job's digest and SBOM artifact, may add equivalent attestations for the same digest, and replaces the draft's same-named assets |
 | The seven-day SBOM workflow artifact expired while the GitHub Release is a draft | Re-run all jobs. The rebuild produces a new digest, with the same consequences as a rebuild after a build-job failure |
 | The release-metadata job fails because release-please created the tag but no draft release | Re-run the release-please workflow, which creates the missing draft, then re-run failed jobs |
-| Publication of the draft is refused although all three assets are attached | A maintainer publishes the draft with their own credentials (`gh release edit v<version> --draft=false`) |
+| Publication of the draft is refused although all three assets are attached | A maintainer resolves the `X.Y.Z` tag to its digest, confirms that the attached provenance bundle attests that digest (`gh attestation verify "oci://<image>@<digest>" --bundle sentinel-<version>.provenance.sigstore.json --repo StayPirate/sentinel --source-ref refs/tags/v<version>`), and publishes the draft with their own credentials (`gh release edit v<version> --draft=false`) |
 | The GitHub Release is already published | Nothing to repair: a rerun of either job fails at the guard, before any push or attestation, and names the published release |
 
 ### API Documentation Publication
