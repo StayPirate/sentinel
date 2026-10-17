@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from typing import Any, cast
 
 import pytest
@@ -76,7 +76,10 @@ from app.services.packages.ibs_event_handlers import (
     parse_request_number,
     request_identities,
 )
-from app.services.packages.ibs_track_release import TrackReleaseCandidate
+from app.services.packages.ibs_track_release import (
+    TrackReleaseCandidate,
+    TrackReleaseOutcome,
+)
 from tests.support.ibs_api import status_response
 from tests.support.ibs_product_release import Publish
 from tests.support.ibs_rabbitmq import (
@@ -104,6 +107,7 @@ from tests.support.ibs_track_release import (
     PROJECT,
     SIBLING_PACKAGE,
     TRACK_FAILED,
+    WAIT,
     FakeIBS,
     Seed,
     Track,
@@ -112,11 +116,13 @@ from tests.support.ibs_track_release import (
     before_local_unit,
     checkpoint_srcmd5,
     events_of,
+    hold_after,
     install_ibs,
     install_units,
     issue,
     logged,
     reconcile,
+    ticket_locked,
     ticket_status,
     track_status,
 )
@@ -770,6 +776,38 @@ class TestReconciliation:
         assert await events_of(world, second.ticket_id) == []
         assert await checkpoint_srcmd5(world, second) is None
 
+    async def test_boundary_runs_in_consumer_mode_without_delay_or_hook(
+        self, world: TrackWorld, ibs: FakeIBS, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """RabbitMQ Package-Commit Acceleration and Request Delay: the
+        selected tracks reach the boundary with the process-wide client in
+        consumer mode, and with no metric hook, request delay, or fetcher
+        name."""
+        (track,) = await _tracks(world)
+        calls: list[tuple[list[TrackReleaseCandidate], dict[str, Any]]] = []
+
+        async def recorded(
+            candidates: Iterable[TrackReleaseCandidate], **kwargs: Any
+        ) -> list[TrackReleaseOutcome]:
+            selected = list(candidates)
+            calls.append((selected, kwargs))
+            return [TrackReleaseOutcome(c.track_id, "no_op") for c in selected]
+
+        monkeypatch.setattr(
+            ibs_event_handlers, "reconcile_ibs_track_releases", recorded
+        )
+
+        async with ibs.client() as client:
+            result = await handle_delivery(
+                PACKAGE_COMMIT_ROUTING_KEY, CONTENT_TYPE, _commit_body(), client=client
+            )
+
+            ((candidates, kwargs),) = calls
+            assert [candidate.track_id for candidate in candidates] == [track.id]
+            assert kwargs == {"client": client, "forbid_convergence_effects": True}
+        assert result.outcome is DeliveryOutcome.PROCESSED
+        assert ibs.served == []
+
     async def test_missing_credentials_fail_the_delivery_without_a_request(
         self, world: TrackWorld, ibs: FakeIBS
     ) -> None:
@@ -965,6 +1003,36 @@ class TestExceptionBoundary:
         with pytest.raises(MemoryError):
             await _handle(ibs, _commit_body())
 
+        assert await checkpoint_srcmd5(world, track) is None
+
+    async def test_cancellation_inside_an_open_unit_rolls_it_back(
+        self,
+        world: TrackWorld,
+        ibs: FakeIBS,
+        units: TrackUnitSessions,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Connection Loss and Consumer Cancellation step 3 (also Graceful
+        Shutdown step 4): the delivery is cancelled while its unit holds the
+        Ticket lock with the `FIXED` transition and its event flushed. The
+        cancellation propagates, the unit rolls back and its session closes,
+        the lock is released, and the database is unchanged."""
+        (track,) = await _tracks(world)
+        _evidence(ibs, track)
+        holding = hold_after(monkeypatch, "set_track_status")
+        handling = asyncio.create_task(_handle(ibs, _commit_body()))
+        await asyncio.wait_for(holding.wait(), timeout=WAIT)
+        assert await ticket_locked(world, track.ticket_id)
+
+        handling.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await handling
+
+        assert len(units.sessions) == 1
+        assert units.closed == units.sessions
+        assert not await ticket_locked(world, track.ticket_id)
+        assert await track_status(world, track) == PackageStatus.ANALYSIS.value
+        assert await events_of(world, track.ticket_id) == []
         assert await checkpoint_srcmd5(world, track) is None
 
 

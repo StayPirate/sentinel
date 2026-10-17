@@ -1672,6 +1672,31 @@ class TestCatchUp:
         for spy in metric_helpers.values():
             spy.assert_not_called()
 
+    async def test_unit_with_a_convergence_effect_commits_and_publishes(
+        self,
+        world: TrackWorld,
+        ibs: FakeIBS,
+        publication: Publish,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Catch-up never uses consumer mode (Shared Reconciliation Boundary):
+        a unit that registers a Ticket convergence effect commits its
+        transition, and the effect is published after the close."""
+        (track,) = await _seeded(world)
+        _evidence(ibs, track)
+        register_after_fixed(monkeypatch)
+
+        with capture_logs() as logs:
+            await DetectIbsTrackReleases().catch_up(
+                str(track.ticket_id), await world.open_session()
+            )
+
+        assert logged(logs, TRACK_FAILED) == []
+        assert published(publication.calls) == [track.ticket_id]
+        assert await track_status(world, track) == PackageStatus.FIXED.value
+        assert await events_of(world, track.ticket_id) == [track.fixed_event()]
+        assert await checkpoint_srcmd5(world, track) == CURRENT
+
     async def test_only_the_tickets_tracks_are_processed(
         self, world: TrackWorld, ibs: FakeIBS
     ) -> None:

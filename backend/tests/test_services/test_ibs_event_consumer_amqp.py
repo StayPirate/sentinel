@@ -16,8 +16,10 @@ method frame the client sends, so the tests assert the exact wire contract:
 the handshake properties, the topology and its order, ACK-only settlement
 (the `broker` fixture fails any test whose client sent `Basic.Nack` or
 `Basic.Reject`), the broker-side `Basic.Cancel`, channel and connection
-loss, and the fatal and transient failure classification of the library's
-real exceptions. The lifecycle itself is covered with a replaceable
+loss, the fatal and transient failure classification of the library's
+real exceptions, and the fixed bounds of the handshake, every topology
+operation, and the closure (withheld broker replies against patched
+constants). The lifecycle itself is covered with a replaceable
 connector by `test_ibs_event_consumer.py`; one end-to-end test here runs
 `IBSEventConsumer` over the real adapter.
 
@@ -541,6 +543,89 @@ class TestFailures:
 
         assert isinstance(raised.value.__cause__, OSError)
         assert classify_connection_error(raised.value) == (False, "network_error")
+
+
+# ---------------------------------------------------------------------------
+# Bounded steps (Graceful Shutdown: every connection handshake, channel open,
+# topology operation, and closure step is bounded by a fixed constant)
+# ---------------------------------------------------------------------------
+
+_BOUND = 0.2
+"""The patched value of each fixed bound: far below `WAIT_SECONDS`, so a
+step that is not bounded by its constant fails the test's own guard."""
+
+
+async def _bounded[T](awaitable: Awaitable[T]) -> asyncio.Future[T]:
+    """Run `awaitable` until it finishes; fail when it outlives
+    `WAIT_SECONDS` (a hang, not the step's own bound)."""
+    task = asyncio.ensure_future(awaitable)
+    done, _ = await asyncio.wait({task}, timeout=WAIT_SECONDS)
+    if not done:
+        task.cancel()
+        with contextlib.suppress(BaseException):
+            await task
+        pytest.fail("the step was not bounded by its fixed constant")
+    return task
+
+
+class TestBounds:
+    @pytest.mark.parametrize(
+        ("method", "opened"),
+        [
+            pytest.param(commands.Connection.StartOk, False, id="handshake-tune"),
+            pytest.param(commands.Connection.Open, False, id="handshake-open"),
+            pytest.param(commands.Channel.Open, True, id="channel-open"),
+            pytest.param(commands.Exchange.Declare, True, id="exchange-declare"),
+            pytest.param(commands.Queue.Declare, True, id="queue-declare"),
+            pytest.param(commands.Basic.Qos, True, id="qos"),
+            pytest.param(commands.Queue.Bind, True, id="bind"),
+            pytest.param(commands.Basic.Consume, True, id="consume"),
+        ],
+    )
+    async def test_withheld_reply_is_bounded_and_transient(
+        self,
+        broker: FakeAmqpServer,
+        monkeypatch: pytest.MonkeyPatch,
+        method: type[base.Frame],
+        opened: bool,
+    ) -> None:
+        """The broker never answers one handshake or topology method: the
+        attempt fails with a transient `timeout` within the step's bound, and
+        the partial connection is closed; after the handshake, the adapter
+        closes it with `Connection.Close`."""
+        monkeypatch.setattr(ibs_event_consumer, "CONNECT_TIMEOUT_SECONDS", _BOUND)
+        monkeypatch.setattr(ibs_event_consumer, "OPERATION_TIMEOUT_SECONDS", _BOUND)
+        broker.replies[method] = None
+
+        attempt = await _bounded(connect_amqp(broker.url, _tls_context(), Sink()))
+
+        error = attempt.exception()
+        assert isinstance(error, TimeoutError)
+        assert classify_connection_error(error) == (False, "timeout")
+        server = await broker.connection()
+        await server.wait_closed()
+        assert len(server.methods(method)) == 1
+        if opened:
+            assert server.names()[-1] == "Connection.Close"
+
+    async def test_withheld_close_replies_are_bounded(
+        self, broker: FakeAmqpServer, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The broker answers neither `Channel.Close` nor `Connection.Close`:
+        the channel closure, which would otherwise wait indefinitely, ends at
+        its bound, the connection closure still follows (aiormq does not
+        wait for `Connection.CloseOk`), and `close()` never raises."""
+        monkeypatch.setattr(ibs_event_consumer, "CLOSE_TIMEOUT_SECONDS", _BOUND)
+        epoch = await connect_amqp(broker.url, _tls_context(), Sink())
+        server = await broker.connection()
+        broker.replies[commands.Channel.Close] = None
+        broker.replies[commands.Connection.Close] = None
+
+        closing = await _bounded(epoch.close())
+
+        assert closing.exception() is None
+        await server.wait_for(commands.Connection.Close)
+        assert server.names()[-2:] == ["Channel.Close", "Connection.Close"]
 
 
 # ---------------------------------------------------------------------------
