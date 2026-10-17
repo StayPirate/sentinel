@@ -18,7 +18,8 @@ speaks the server side of AMQP 0-9-1 through pamqp. Each accepted client is a
 `FakeAmqpServer.tls`, when set, makes the listener TLS-only.
 `FakeAmqpServer.replies` scripts the reply to a method type for every
 connection: a `Channel.Close` or `Connection.Close` replaces the normal
-reply, and `None` suppresses any reply. Every wait is bounded by
+reply, and `None` suppresses any reply (a withheld `Connection.CloseOk` also
+keeps the TCP connection open). Every wait is bounded by
 `WAIT_SECONDS`. Leaving the `async with` block aborts every client socket and
 closes the listener.
 """
@@ -214,8 +215,8 @@ class ServerConnection:
                 if reply is not None:
                     connection_close = isinstance(reply, commands.Connection.Close)
                     self.send(0 if connection_close else channel, reply)
-                if isinstance(
-                    frame, commands.Connection.Close | commands.Connection.CloseOk
+                if isinstance(frame, commands.Connection.CloseOk) or (
+                    isinstance(frame, commands.Connection.Close) and reply is not None
                 ):
                     self.writer.close()
         except asyncio.IncompleteReadError, ConnectionError:

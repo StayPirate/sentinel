@@ -15,9 +15,12 @@
 - `FakeClient` stands in for the process-wide `IBSClient`.
 - `Handled` replaces `handle_delivery()`: it records each call with the
   bound `ibs_event_id` and returns the scripted result, optionally after a
-  gate that the test opens.
+  gate that the test opens. When it is cancelled at that gate and
+  `cleanup_gate` is set, its cleanup (the rollback and session closure of
+  the real handler) lasts until the test opens `cleanup_gate`.
 - `FakeHeartbeatStore` replaces the Redis heartbeat write: it records each
-  complete value, optionally after a gate, or raises a scripted error.
+  complete value, optionally after a gate, or raises a scripted error;
+  `on_write` runs at the start of every write.
 - `FakeRefreshTimer` replaces the heartbeat refresh wait: it never ends on
   its own, so the writer writes only on a state change, until `fire()`
   ends the current waits as if 30 seconds had passed.
@@ -192,8 +195,11 @@ class FakeHeartbeatStore:
     gate: asyncio.Event | None = None
     written: asyncio.Event = field(default_factory=asyncio.Event)
     events: list[str] | None = None
+    on_write: Callable[[], None] | None = None
 
     async def __call__(self, value: str) -> None:
+        if self.on_write is not None:
+            self.on_write()
         self.attempts += 1
         if self.events is not None:
             self.events.append(f"heartbeat:{json.loads(value)['status']}")
@@ -292,6 +298,8 @@ class Handled:
     finished: list[str] = field(default_factory=list)
     on_call: Callable[[], None] | None = None
     events: list[str] | None = None
+    cleanup_gate: asyncio.Event | None = None
+    cleaning: asyncio.Event = field(default_factory=asyncio.Event)
 
     async def __call__(
         self,
@@ -316,8 +324,20 @@ class Handled:
         if self.on_call is not None:
             self.on_call()
         if self.gate is not None:
-            await self.gate.wait()
+            try:
+                await self.gate.wait()
+            except asyncio.CancelledError:
+                await self._clean_up()
+                raise
         if self.error is not None:
             raise self.error
         self.finished.append(context.get("ibs_event_id", ""))
         return self.result
+
+    async def _clean_up(self) -> None:
+        if self.cleanup_gate is None:
+            return
+        self.cleaning.set()
+        await self.cleanup_gate.wait()
+        if self.events is not None:
+            self.events.append("cleanup")

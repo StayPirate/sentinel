@@ -47,13 +47,13 @@ from app.core.exceptions import TLSConfigurationError
 from app.services import ibs_consumer_status, ibs_event_consumer
 from app.services.ibs_client import IBSClient
 from app.services.ibs_event_consumer import (
-    SHUTDOWN_DEADLINE_SECONDS,
     IBSEventConsumer,
     classify_connection_error,
 )
 from app.services.ibs_event_decoding import DeliveryOutcome, DeliveryResult
 from tests.support.ibs_consumer import (
     BLOCK,
+    COMMIT_BODY,
     FAILED_RESULT,
     FakeBroker,
     FakeClient,
@@ -73,6 +73,9 @@ _UUID7 = re.compile(
 )
 _URL = "amqps://svc:mq-password-not-for-production@mq.example.test"
 _WAIT = 5.0
+_DEADLINE = 30.0
+"""The specified handler shutdown deadline (Graceful Shutdown step 3), as a
+literal so a changed production constant fails the shutdown tests."""
 
 
 def _settings(*, initial: int = 5, maximum: int = 300) -> Settings:
@@ -87,11 +90,14 @@ def _settings(*, initial: int = 5, maximum: int = 300) -> Settings:
 
 @dataclass(eq=False)
 class FakeSessions:
-    """The PostgreSQL check's session factory."""
+    """The PostgreSQL check's session factory: the check lasts until `gate`
+    opens, when set, then raises `error` or completes."""
 
     error: BaseException | None = None
     hang: bool = False
+    gate: asyncio.Event | None = None
     statements: list[str] = field(default_factory=list)
+    completed: int = 0
 
     def __call__(self) -> FakeSessions:
         return self
@@ -106,8 +112,11 @@ class FakeSessions:
         self.statements.append(str(statement))
         if self.hang:
             await asyncio.Event().wait()
+        if self.gate is not None:
+            await self.gate.wait()
         if self.error is not None:
             raise self.error
+        self.completed += 1
 
 
 @dataclass(eq=False)
@@ -122,6 +131,8 @@ class Harness:
     store: FakeHeartbeatStore = field(default_factory=FakeHeartbeatStore)
     refresh: FakeRefreshTimer = field(default_factory=FakeRefreshTimer)
     clock: FakeClock = field(default_factory=FakeClock)
+    client_factory: Callable[[], Any] | None = None
+    """Replaces the default factory, which always returns `client`."""
     consumer: IBSEventConsumer | None = None
     task: asyncio.Task[int] | None = None
 
@@ -129,7 +140,7 @@ class Harness:
         self.consumer = IBSEventConsumer(
             settings or _settings(),
             connect=self.broker,
-            client_factory=cast(Any, lambda: self.client),
+            client_factory=cast(Any, self.client_factory or (lambda: self.client)),
             session_factory=cast(Any, self.sessions),
             dispose_engine=self._dispose,
             timer=self.timer,
@@ -240,6 +251,28 @@ class TestStartup:
         harness.start()
 
         assert await harness.result() == 1
+        assert harness.broker.urls == []
+
+    async def test_signal_during_the_check_takes_effect_when_it_ends(
+        self, harness: Harness
+    ) -> None:
+        """Graceful Shutdown: a signal received during the bounded startup
+        PostgreSQL check does not interrupt it; when the check ends, the
+        consumer exits 0 without a connection attempt."""
+        harness.sessions.gate = asyncio.Event()
+        harness.start()
+        await _until(lambda: harness.sessions.statements == ["SELECT 1"])
+        assert harness.consumer is not None
+        assert harness.task is not None
+
+        harness.consumer.request_shutdown()
+        for _ in range(10):
+            await asyncio.sleep(0)
+        assert not harness.task.done()
+        harness.sessions.gate.set()
+
+        assert await harness.result() == 0
+        assert harness.sessions.completed == 1
         assert harness.broker.urls == []
 
     async def test_started_follows_the_check_and_precedes_the_first_attempt(
@@ -931,6 +964,191 @@ class TestDeliveries:
         assert harness.handled.finished == []
         assert harness.client.closed == 1
 
+    async def test_deliveries_of_a_lost_epoch_are_never_handled(
+        self, harness: Harness
+    ) -> None:
+        """Connection Loss and Consumer Cancellation step 1: a delivery
+        still queued behind the in-flight one, and one arriving through the
+        lost epoch after the reconnect, are never handled; only the new
+        epoch's delivery is."""
+        harness.handled.gate = asyncio.Event()
+        harness.start()
+        first = await harness.broker.wait_connected()
+        harness.broker.deliver()
+        harness.broker.deliver(FakeDelivery(body=b'{"queued":1}'))
+        await _until(lambda: len(harness.handled.calls) == 1)
+
+        first.lose("connection_lost")
+        second = await harness.broker.wait_connected(2)
+        harness.handled.gate.set()
+        harness.broker.sinks[0](FakeDelivery(body=b'{"late":1}'))
+        current = FakeDelivery(body=b'{"current":1}')
+        harness.broker.deliver(current)
+        await _until(lambda: len(second.acks) == 1)
+
+        assert [call["body"] for call in harness.handled.calls] == [
+            COMMIT_BODY,
+            b'{"current":1}',
+        ]
+        assert first.acks == []
+        assert second.acks == [current]
+        assert await harness.stop() == 0
+
+    async def test_one_client_serves_every_delivery_across_reconnects(
+        self, harness: Harness
+    ) -> None:
+        """Startup step 4: the client factory runs once per process, and that
+        one client reaches the handler of every delivery of every epoch and
+        is closed once."""
+        created: list[FakeClient] = []
+
+        def create() -> FakeClient:
+            created.append(FakeClient())
+            return created[-1]
+
+        harness.client_factory = create
+        harness.start()
+        first = await harness.broker.wait_connected()
+        harness.broker.deliver()
+        await _until(lambda: len(first.acks) == 1)
+        first.lose("connection_lost")
+        second = await harness.broker.wait_connected(2)
+        harness.broker.deliver()
+        await _until(lambda: len(second.acks) == 1)
+
+        assert await harness.stop() == 0
+        (client,) = created
+        assert len(harness.handled.calls) == 2
+        assert all(call["client"] is client for call in harness.handled.calls)
+        assert client.closed == 1
+
+    async def test_other_base_exception_propagates_out_of_the_lifecycle(
+        self, harness: Harness
+    ) -> None:
+        """Fatal and Transient Failures: a `BaseException` that is neither an
+        `Exception` nor cancellation ends the process by propagating, with
+        no settlement and no reconnect."""
+        harness.handled.error = _Interrupt()
+        harness.start()
+        epoch = await harness.broker.wait_connected()
+        harness.broker.deliver()
+
+        with pytest.raises(_Interrupt):
+            await harness.result()
+
+        assert epoch.acks == []
+        assert len(harness.broker.urls) == 1
+        assert harness.timer.calls == []
+
+    async def test_unclassified_ack_exception_is_fatal(self, harness: Harness) -> None:
+        """Fatal and Transient Failures: an exception of the settlement, which
+        is outside the delivery's application processing and is not a
+        dead-channel error, is fatal: CRITICAL, exit 1, no reconnect, and
+        best-effort closure."""
+        harness.start()
+        epoch = await harness.broker.wait_connected()
+        epoch.ack_error = ValueError("fictional bug")
+
+        with capture_logs() as logs:
+            harness.broker.deliver()
+            code = await harness.result()
+
+        assert code == 1
+        assert _entry(logs, "ibs_consumer_fatal") == {
+            "event": "ibs_consumer_fatal",
+            "log_level": "critical",
+            "reason_category": "unexpected_error",
+        }
+        assert "ibs_consumer_stopped" not in _events(logs)
+        assert "fictional bug" not in repr(logs)
+        assert epoch.acks == []
+        assert epoch.closed
+        assert len(harness.broker.urls) == 1
+        assert harness.timer.calls == []
+        assert harness.client.closed == 1
+        assert harness.disposed == ["engine"]
+
+
+class _Interrupt(BaseException):
+    """A `BaseException` that is neither an `Exception` nor cancellation.
+
+    `KeyboardInterrupt` and `SystemExit` are not used: asyncio re-raises
+    them out of the event loop, which this suite shares across tests.
+    """
+
+
+class TestHandlerCleanup:
+    """The cancelled handler's cleanup (the real handler's rollback and
+    session closure) is awaited before the epoch closes, the consumer
+    reconnects, or the shutdown completes (Connection Loss and Consumer
+    Cancellation steps 2-3; Graceful Shutdown step 4)."""
+
+    async def test_loss_awaits_the_cleanup_before_closing_and_reconnecting(
+        self, harness: Harness
+    ) -> None:
+        events = harness.broker.events
+        handled = harness.handled
+        handled.events = events
+        handled.gate = asyncio.Event()
+        handled.cleanup_gate = asyncio.Event()
+        harness.start()
+        epoch = await harness.broker.wait_connected()
+        harness.broker.deliver()
+        await _until(lambda: len(handled.calls) == 1)
+
+        epoch.lose("channel_lost")
+        async with asyncio.timeout(_WAIT):
+            await handled.cleaning.wait()
+        for _ in range(10):
+            await asyncio.sleep(0)
+        assert not epoch.closed
+        assert len(harness.broker.urls) == 1
+
+        handled.cleanup_gate.set()
+        await harness.broker.wait_connected(2)
+
+        assert events[events.index("handle") :] == [
+            "handle",
+            "cleanup",
+            "close",
+            "attempt",
+            "connected",
+        ]
+        assert await harness.stop() == 0
+
+    async def test_deadline_awaits_the_cleanup_before_closing(
+        self, harness: Harness
+    ) -> None:
+        events = harness.broker.events
+        handled = harness.handled
+        handled.events = events
+        handled.gate = asyncio.Event()
+        handled.cleanup_gate = asyncio.Event()
+        harness.start()
+        epoch = await harness.broker.wait_connected()
+        harness.broker.deliver()
+        await _until(lambda: len(handled.calls) == 1)
+        assert harness.consumer is not None
+        assert harness.task is not None
+
+        harness.consumer.request_shutdown()
+        async with asyncio.timeout(_WAIT):
+            await handled.cleaning.wait()
+        for _ in range(10):
+            await asyncio.sleep(0)
+        assert not epoch.closed
+        assert not harness.task.done()
+
+        handled.cleanup_gate.set()
+
+        assert await harness.result() == 0
+        assert events[events.index("handle") :] == [
+            "handle",
+            "cancel_consumer",
+            "cleanup",
+            "close",
+        ]
+
 
 class TestCancelAndWait:
     async def test_abandoned_task_outcomes_are_discarded(self) -> None:
@@ -998,15 +1216,20 @@ class TestShutdown:
     async def test_in_flight_handler_completes_within_the_deadline(
         self, harness: Harness
     ) -> None:
+        """Only the in-flight delivery completes: neither one queued before
+        the signal nor one arriving after it is handled (steps 1 and 3;
+        shutdown does not wait for queued deliveries)."""
         events = harness.broker.events
         gate = asyncio.Event()
         harness.handled.gate = gate
-        harness.timer.blocking = lambda seconds: seconds == SHUTDOWN_DEADLINE_SECONDS
+        harness.timer.blocking = lambda seconds: seconds == _DEADLINE
+        in_flight = FakeDelivery()
 
         with capture_logs() as logs:
             harness.start()
             epoch = await harness.broker.wait_connected()
-            harness.broker.deliver()
+            harness.broker.deliver(in_flight)
+            harness.broker.deliver(FakeDelivery(body=b'{"queued":1}'))
             await _until(lambda: len(harness.handled.calls) == 1)
             assert harness.consumer is not None
             harness.consumer.request_shutdown()
@@ -1016,7 +1239,7 @@ class TestShutdown:
             code = await harness.result()
 
         assert code == 0
-        assert len(epoch.acks) == 1
+        assert epoch.acks == [in_flight]
         assert len(harness.handled.calls) == 1
         assert events[events.index("connected") :] == [
             "connected",
@@ -1024,7 +1247,7 @@ class TestShutdown:
             "ack",
             "close",
         ]
-        assert harness.timer.calls == [SHUTDOWN_DEADLINE_SECONDS]
+        assert harness.timer.calls == [_DEADLINE]
         assert "ibs_consumer_shutdown_started" in _events(logs)
         assert _events(logs)[-1] == "ibs_consumer_stopped"
         assert "ibs_consumer_shutdown_deadline_exceeded" not in _events(logs)
@@ -1046,7 +1269,7 @@ class TestShutdown:
         assert code == 0
         assert epoch.acks == []
         assert epoch.closed
-        assert harness.timer.calls == [SHUTDOWN_DEADLINE_SECONDS]
+        assert harness.timer.calls == [_DEADLINE]
         assert "ibs_consumer_shutdown_deadline_exceeded" in _events(logs)
         assert "ibs_consumer_delivery_cancelled" in _events(logs)
 
@@ -1054,7 +1277,7 @@ class TestShutdown:
         self, harness: Harness
     ) -> None:
         harness.handled.gate = asyncio.Event()
-        harness.timer.blocking = lambda seconds: seconds == SHUTDOWN_DEADLINE_SECONDS
+        harness.timer.blocking = lambda seconds: seconds == _DEADLINE
 
         with capture_logs() as logs:
             harness.start()
@@ -1116,6 +1339,49 @@ class TestShutdown:
         assert harness.timer.calls == []
 
 
+_LIFECYCLE_LEVELS = {
+    "ibs_consumer_started": "info",
+    "ibs_consumer_connected": "info",
+    "ibs_consumer_connection_failed": "warning",
+    "ibs_consumer_connection_lost": "warning",
+    "ibs_consumer_reconnect_scheduled": "info",
+    "ibs_consumer_delivery_cancelled": "warning",
+    "ibs_consumer_shutdown_started": "info",
+    "ibs_consumer_shutdown_deadline_exceeded": "warning",
+    "ibs_consumer_stopped": "info",
+}
+"""The level of each lifecycle event of the Structured Logs table that the
+run below emits (the other events' levels are asserted where they occur)."""
+
+
+class TestLifecycleLogs:
+    async def test_lifecycle_events_have_their_specified_levels(
+        self, harness: Harness
+    ) -> None:
+        """A failed attempt, a connection, a loss during a delivery, a
+        reconnect, and a shutdown whose deadline cancels the handler: each
+        event is emitted at its Structured Logs level, every time."""
+        harness.broker.script = [OSError()]
+        harness.handled.gate = asyncio.Event()
+
+        with capture_logs() as logs:
+            harness.start()
+            first = await harness.broker.wait_connected()
+            harness.broker.deliver()
+            await _until(lambda: len(harness.handled.calls) == 1)
+            first.lose("connection_lost")
+            await harness.broker.wait_connected(2)
+            harness.broker.deliver()
+            await _until(lambda: len(harness.handled.calls) == 2)
+            assert await harness.stop() == 0
+
+        levels: dict[str, set[str]] = {}
+        for entry in logs:
+            if entry["event"] in _LIFECYCLE_LEVELS:
+                levels.setdefault(entry["event"], set()).add(entry["log_level"])
+        assert levels == {name: {level} for name, level in _LIFECYCLE_LEVELS.items()}
+
+
 # ---------------------------------------------------------------------------
 # Correlation reset (in the calling context)
 # ---------------------------------------------------------------------------
@@ -1147,6 +1413,7 @@ class TestCorrelationReset:
         "result",
         [
             DeliveryResult(DeliveryOutcome.PROCESSED),
+            DeliveryResult(DeliveryOutcome.IRRELEVANT),
             DeliveryResult(DeliveryOutcome.MALFORMED, "invalid_json"),
             FAILED_RESULT,
         ],
@@ -1240,6 +1507,52 @@ class TestHeartbeatStatus:
             "last_error_at": None,
         }
         assert await harness.stop() == 0
+
+    async def test_first_write_follows_the_started_event(
+        self, harness: Harness
+    ) -> None:
+        """Startup step 5 follows step 4, whose INFO event is
+        `ibs_consumer_started`, although the check takes several event-loop
+        turns."""
+        logged_at_write: list[list[str]] = []
+        harness.sessions.gate = asyncio.Event()
+
+        with capture_logs() as logs:
+            harness.store.on_write = lambda: logged_at_write.append(_events(logs))
+            harness.start()
+            await _until(lambda: harness.sessions.statements == ["SELECT 1"])
+            for _ in range(10):
+                await asyncio.sleep(0)
+            harness.sessions.gate.set()
+            await harness.store.wait_for(_published(status="reconnecting"))
+            assert await harness.stop() == 0
+
+        assert logged_at_write[0][:1] == ["ibs_consumer_started"]
+
+    @pytest.mark.parametrize("failure", ["postgresql", "tls"])
+    async def test_failed_startup_step_4_writes_no_heartbeat(
+        self, harness: Harness, failure: str
+    ) -> None:
+        """A PostgreSQL check failure, or a TLS configuration failure when the
+        IBS client is created, ends the process before step 5: no heartbeat
+        is written, although the check takes several event-loop turns."""
+        harness.sessions.gate = asyncio.Event()
+        if failure == "postgresql":
+            harness.sessions.error = OSError("fictional refused")
+        else:
+
+            def corrupt() -> FakeClient:
+                raise TLSConfigurationError(path="certs/example.crt", detail="bad")
+
+            harness.client_factory = corrupt
+        harness.start()
+        await _until(lambda: harness.sessions.statements == ["SELECT 1"])
+        for _ in range(10):
+            await asyncio.sleep(0)
+        harness.sessions.gate.set()
+
+        assert await harness.result() == 1
+        assert harness.store.attempts == 0
 
     async def test_failed_attempts_record_the_wait_and_count_reconnects(
         self, harness: Harness

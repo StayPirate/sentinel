@@ -33,6 +33,10 @@ reconciliation boundary tests
   when it regresses a stale `Resolved` Ticket); `Publish` and `published`
   come from
   `tests/support/ibs_product_release.py`.
+- `hold_after()` makes a `package_service` mutation flush and then wait
+  until it is cancelled, inside the caller's open unit (Ticket lock held,
+  writes sent); `ticket_locked()` probes whether another transaction holds
+  a Ticket row lock.
 - `Outcomes` is the per-outcome hook recorder.
 
 All data is fictional: CVE identifiers `CVE-2099-NNNNNNNN`, packages
@@ -40,12 +44,15 @@ All data is fictional: CVE identifiers `CVE-2099-NNNNNNNN`, packages
 with a fictional key derived at run time.
 
 Consumers: `tests/test_services/test_packages/test_ibs_track_release.py`,
-`tests/test_services/test_packages/test_ibs_track_release_races.py`, and
-`tests/test_services/test_packages/test_detect_ibs_track_releases.py`.
+`tests/test_services/test_packages/test_ibs_track_release_races.py`,
+`tests/test_services/test_packages/test_detect_ibs_track_releases.py`, and
+the RabbitMQ handler tests (`test_ibs_event_handlers.py`,
+`test_ibs_request_wake_ups.py`).
 """
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import uuid
 from collections import defaultdict
@@ -60,6 +67,7 @@ import httpx
 import pytest
 from pydantic import SecretStr
 from sqlalchemy import delete, event, select
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import Session
 
@@ -739,6 +747,38 @@ def register_after_fixed(monkeypatch: pytest.MonkeyPatch) -> list[uuid.UUID]:
 
     monkeypatch.setattr(package_service, "set_track_status", registering)
     return registered
+
+
+def hold_after(monkeypatch: pytest.MonkeyPatch, name: str) -> asyncio.Event:
+    """Make `package_service.<name>(db, ...)` run, flush its writes, and then
+    wait until it is cancelled, inside the caller's open unit (after the
+    Ticket lock). Returns the event set when the call starts waiting."""
+    original = getattr(package_service, name)
+    holding = asyncio.Event()
+
+    async def held(db: AsyncSession, **kwargs: Any) -> Any:
+        await original(db, **kwargs)
+        await db.flush()
+        holding.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(package_service, name, held)
+    return holding
+
+
+async def ticket_locked(world: TrackWorld, ticket_id: uuid.UUID) -> bool:
+    """Whether another transaction holds a lock on the Ticket row (`FOR
+    UPDATE NOWAIT` from the probe session, released at once)."""
+    probe = await world.probe()
+    try:
+        await probe.execute(
+            select(Ticket.id).where(Ticket.id == ticket_id).with_for_update(nowait=True)
+        )
+    except DBAPIError:
+        await probe.rollback()
+        return True
+    await probe.rollback()
+    return False
 
 
 # ---------------------------------------------------------------------------

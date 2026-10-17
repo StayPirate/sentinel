@@ -24,6 +24,10 @@ boundaries.
   no direct Ticket lock, the passed session is for read-only queries
   only). It opens no session of its own and never uses
   `BaseFetcher.http_client`.
+- Neither the detector modules nor the RabbitMQ event handlers
+  (`ibs_event_handlers.py`) contain a package addition or record creation
+  path; the handlers import no model and call no method on their read-only
+  selection sessions (ibs-rabbitmq-integration.md, Non-Goals).
 
 Each detector module is listed in `_LOCK_OWNERS` with the functions
 allowed to take a row lock (the fetcher module joins with none). The
@@ -47,6 +51,7 @@ from tests.support.module_imports import APP_ROOT, imported_modules
 _PACKAGES = APP_ROOT / "services" / "packages"
 _BOUNDARY = _PACKAGES / "ibs_track_release.py"
 _FETCHER = _PACKAGES / "detect_ibs_track_releases.py"
+_HANDLERS = _PACKAGES / "ibs_event_handlers.py"
 
 _LOCKING: Final = "_reconcile_track"
 _APPLY: Final = "_Reconciliation._apply"
@@ -319,15 +324,25 @@ class TestFetcherReadsOnly:
         assert names & (_IO_NAMES - {"IBSClient", "client"}) == set()
 
 
+_DOMAIN_MODULES = [
+    pytest.param(path, id=path.name) for path in (_BOUNDARY, _FETCHER, _HANDLERS)
+]
+"""The detector modules and the RabbitMQ event handlers, whose package-commit
+path selects existing tracks only."""
+
+
 @pytest.mark.unit
 class TestNoDomainCreation:
     """ibs-track-release-detection.md, Scope: the detector never calls
     `add_package_to_ticket()` and never creates a CVE, Ticket, package,
     track, or Product occurrence; its only own write is the operational
     `TrackReleaseCheckpoint` (the affectedness mutation and its event
-    belong to `package_service.set_track_status()`)."""
+    belong to `package_service.set_track_status()`). The RabbitMQ event
+    handlers create no domain record either
+    (ibs-rabbitmq-integration.md, Non-Goals; ibs-integration.md, Business
+    Rules 6): every write belongs to the boundaries they invoke."""
 
-    @pytest.mark.parametrize("path", _MODULES)
+    @pytest.mark.parametrize("path", _DOMAIN_MODULES)
     def test_no_package_addition_or_record_creation_path(self, path: Path) -> None:
         names = _referenced_names(_tree(path))
 
@@ -376,3 +391,25 @@ class TestNoDomainCreation:
         ]
 
         assert adds == [_LOCKING]
+
+    def test_event_handlers_import_no_model_and_write_through_no_session(
+        self,
+    ) -> None:
+        """The handlers' only sessions are the read-only selections they pass
+        to the boundaries' selection functions."""
+        tree = _tree(_HANDLERS)
+        session_calls = {
+            node.func.attr
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "session"
+        }
+
+        assert [
+            module
+            for module in imported_modules(_HANDLERS, "app.services.packages")
+            if module == "app.models" or module.startswith("app.models.")
+        ] == []
+        assert session_calls == set()

@@ -150,6 +150,9 @@ def _datetime_variants(name: str) -> list[Any]:
         "other-offset": json.dumps(other_offset),
         "minus-zero-offset": json.dumps(valid[:-1] + "-00:00"),
         "lowercase-z": json.dumps(valid[:-1] + "z"),
+        # `datetime.fromisoformat()` accepts both separators below.
+        "lowercase-t": json.dumps(valid.replace("T", "t")),
+        "space-separator": json.dumps(valid.replace("T", " ")),
         "date-only": json.dumps(valid[:10]),
         "basic-format": json.dumps(valid.replace("-", "").replace(":", "")),
         "month-13": json.dumps(valid[:5] + "13" + valid[7:]),

@@ -46,6 +46,7 @@ import pytest
 from sqlalchemy import select, update
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.orm import object_mapper
 from structlog.testing import capture_logs
 
 from app.core.enums import (
@@ -58,7 +59,7 @@ from app.core.enums import (
 from app.models.ibs_request import IBSRequest
 from app.models.ibs_request_action import IBSRequestAction
 from app.models.ibs_request_action_track import IBSRequestActionTrack
-from app.services import task_publication
+from app.services import package_service, task_publication
 from app.services.ibs_event_decoding import (
     CONTENT_TYPE,
     REQUEST_CREATE_ROUTING_KEY,
@@ -97,7 +98,14 @@ from tests.support.ibs_request_reconciliation import (
     submission,
     unique_package,
 )
-from tests.support.ibs_track_release import events_of, logged, raising
+from tests.support.ibs_track_release import (
+    WAIT,
+    events_of,
+    hold_after,
+    logged,
+    raising,
+    ticket_locked,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -340,6 +348,52 @@ async def evidence_rows(world: RequestWorld, number: int) -> tuple[int, int, int
     return len(requests), len(actions), len(correlations)
 
 
+Columns = dict[str, Any]
+
+
+def _columns(row: object) -> Columns:
+    return {
+        attribute.key: getattr(row, attribute.key)
+        for attribute in object_mapper(row).column_attrs
+    }
+
+
+async def persisted(
+    world: RequestWorld, number: int
+) -> tuple[Columns, list[Columns], list[Columns]]:
+    """Every column of the committed request `number`, of its actions, and
+    of their correlations."""
+    probe = await world.probe()
+    request = (
+        await probe.scalars(
+            select(IBSRequest).where(IBSRequest.request_number == number)
+        )
+    ).one()
+    actions = (
+        await probe.scalars(
+            select(IBSRequestAction).where(
+                IBSRequestAction.ibs_request_id == request.id
+            )
+        )
+    ).all()
+    correlations = (
+        await probe.scalars(
+            select(IBSRequestActionTrack).where(
+                IBSRequestActionTrack.ibs_request_action_id.in_(
+                    [action.id for action in actions]
+                )
+            )
+        )
+    ).all()
+    values = (
+        _columns(request),
+        [_columns(action) for action in actions],
+        [_columns(correlation) for correlation in correlations],
+    )
+    await probe.rollback()
+    return values
+
+
 def processed(number: int, track_count: int = 1) -> DeliveryResult:
     return DeliveryResult(
         DeliveryOutcome.PROCESSED,
@@ -542,6 +596,42 @@ class TestSelection:
         assert result.outcome is DeliveryOutcome.IRRELEVANT
         assert reconciliations.calls == []
         assert fake.paths() == [f"/request/{number}"]
+
+    async def test_woken_request_is_not_added_as_a_root(
+        self, world: RequestWorld, fake: FakeRequests
+    ) -> None:
+        """Required Roots (the request wake-up limitation): the woken open SR
+        selects its scope, but the open-submission search does not return
+        it, so the reconciliation over the scope's own roots never observes
+        it: no request row or correlation, unchanged delivery, and neither
+        its detail nor its positive diff is requested by the boundary."""
+        (scope,) = await scopes_of(world, (unique_package(), CODESTREAM))
+        assert scope.cve_id is not None
+        number = world.number()
+        action = submission(scope.package_name, number)
+        fake.request(number, REVIEW, action)
+        fake.action_diff(
+            number,
+            action,
+            cve_issue(scope.cve_id),
+            codestream_package=scope.package_name,
+        )
+        fake.quiet(scope.package_name)
+
+        result = await wake(fake, number)
+
+        assert result == processed(number)
+        assert await evidence_rows(world, number) == (0, 0, 0)
+        assert await delivery(world, scope) == DeliveryStatus.PENDING.value
+        assert sorted(fake.paths()) == sorted(
+            [
+                f"/request/{number}",
+                "/search/request/id",
+                "/search/request/id",
+                f"/source/{CODESTREAM}",
+                f"/source/{CODESTREAM}/{scope.package_name}",
+            ]
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -779,6 +869,71 @@ class TestExceptionBoundary:
         assert await correlated_numbers(world, scopes[0]) == [number]
         assert await correlated_numbers(world, scopes[2]) == []
         assert units.closed == units.sessions
+
+    async def test_rollback_failure_ends_the_delivery(
+        self,
+        world: RequestWorld,
+        fake: FakeRequests,
+        units: UnitSessions,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The unit fails with a database error and its rollback fails too:
+        the boundary propagates the rollback failure, which ends the delivery
+        as `reconciliation_failed` (the lifecycle ACKs every failed result
+        and continues, test_ibs_event_consumer.py); the session is closed and
+        nothing is committed."""
+        (scope,) = await scopes_of(world, (unique_package(), CODESTREAM))
+        number, _ = open_submission(fake, world, scope)
+        original = package_service.set_track_delivery_status
+
+        async def failing(db: AsyncSession, **kwargs: Any) -> Any:
+            await original(db, **kwargs)
+
+            async def broken_rollback() -> None:
+                raise OperationalError("ROLLBACK", None, Exception())
+
+            monkeypatch.setattr(db, "rollback", broken_rollback)
+            raise OperationalError("UPDATE", None, Exception())
+
+        monkeypatch.setattr(package_service, "set_track_delivery_status", failing)
+
+        result = await wake(fake, number)
+
+        assert result == failed(number, "reconciliation_failed", track_count=1)
+        assert units.closed == units.sessions
+        assert await evidence_rows(world, number) == (0, 0, 0)
+        assert await delivery(world, scope) == DeliveryStatus.PENDING.value
+
+    async def test_cancellation_inside_an_open_unit_rolls_it_back(
+        self,
+        world: RequestWorld,
+        fake: FakeRequests,
+        units: UnitSessions,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Connection Loss and Consumer Cancellation step 3 (also Graceful
+        Shutdown step 4): the delivery is cancelled while its unit holds the
+        Ticket lock with the request, action, correlation, and delivery
+        writes flushed. The cancellation propagates, the unit rolls back and
+        its session closes, the lock is released, and nothing is
+        committed."""
+        (scope,) = await scopes_of(world, (unique_package(), CODESTREAM))
+        number, _ = open_submission(fake, world, scope)
+        holding = hold_after(monkeypatch, "set_track_delivery_status")
+        # Registered with the world: a failure before the cancel below must
+        # not leave the held lock blocking the teardown.
+        handling = world.start(world.session, wake(fake, number))
+        await asyncio.wait_for(holding.wait(), timeout=WAIT)
+        assert await ticket_locked(world, scope.ticket_id)
+
+        handling.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await handling
+
+        assert units.closed == units.sessions
+        assert not await ticket_locked(world, scope.ticket_id)
+        assert await evidence_rows(world, number) == (0, 0, 0)
+        assert await delivery(world, scope) == DeliveryStatus.PENDING.value
 
     async def test_unexpected_lookup_exception_fails_the_delivery(
         self, world: RequestWorld, fake: FakeRequests, monkeypatch: pytest.MonkeyPatch
@@ -1053,3 +1208,31 @@ class TestPrivacy:
             "home:" not in path and "example-user" not in path for path in fake.paths()
         )
         assert await evidence_rows(world, number) == (0, 0, 0)
+
+    async def test_rows_written_from_a_hostile_event_carry_no_event_value(
+        self, world: RequestWorld, fake: FakeRequests
+    ) -> None:
+        """A hostile state-change event wakes an open SR that is persisted as
+        a request, an action, and a correlation. Every column of those rows
+        comes from current REST detail; none carries the event's actor,
+        author, comment, description, personal project, action claims, or
+        raw payload (ibs-submission-tracking.md, Testing Requirements:
+        persistence assertions)."""
+        (scope,) = await scopes_of(world, (unique_package(), CODESTREAM))
+        number, action = open_submission(fake, world, scope)
+        body = event_body(number, routing_key=STATE_CHANGE, state="accepted")
+
+        result = await wake(fake, number, routing_key=STATE_CHANGE, body=body)
+
+        assert result == processed(number)
+        request, actions, correlations = await persisted(world, number)
+        (stored,) = actions
+        assert len(correlations) == 1
+        assert request["state"] == REVIEW.value
+        assert request["upstream_updated_at"] == WHEN_AT
+        assert stored["source_project"] == action.source_project
+        assert stored["source_package"] == action.source_package
+        rendered = repr([request, *actions, *correlations])
+        for forbidden in (MARKER, "example-user", "home:", "example-other", "9200001"):
+            assert forbidden not in rendered
+        assert body.decode() not in rendered
