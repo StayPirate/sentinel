@@ -1524,8 +1524,10 @@ alembic revision --autogenerate -m "description"
 **Recovery strategy: fix-forward.** Sentinel does not support `alembic
 downgrade` in production. When a migration fails, the operator corrects
 the root cause (network issue, disk space, code bug) and re-runs
-`alembic upgrade head`. Migrations are not required to implement a
-functional `downgrade()` function.
+`alembic upgrade head`. Each migration's `downgrade()` exists for
+development only: it is verified by the revision's migration test
+(`docs/features/platform/testing-strategy.md`, Migration Tests) and is
+never a production recovery path.
 
 **PostgreSQL transactional DDL.** PostgreSQL executes DDL statements
 (`CREATE TABLE`, `ALTER TABLE`, `DROP COLUMN`, etc.) inside

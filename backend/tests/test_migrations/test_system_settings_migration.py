@@ -3,9 +3,11 @@
 
 Verifies the migration cycle mandated by
 `docs/features/platform/system-settings.md` (Bootstrap) and the P2-14
-tracking issue acceptance criteria: upgrade from the previous head,
-`alembic check` reports no drift, the seed is idempotent and preserves
-a custom value, and downgrade/re-upgrade round-trips cleanly.
+tracking issue acceptance criteria: upgrade from the previous head
+creates both tables and the seed, the seed is idempotent and preserves
+a custom value, and downgrade/re-upgrade round-trips cleanly. Drift
+between the models and the migration chain is verified by `alembic
+check` in CI, not here (see the note in the cycle test).
 
 See `tests/test_migrations/conftest.py` for the shared Alembic test
 infrastructure (dedicated database fixture, isolated config helper)
@@ -25,6 +27,7 @@ from app.config import settings
 from tests.test_migrations.conftest import isolated_alembic_config, run_sync
 
 _PREVIOUS_HEAD = "4e3e94583e96"
+_REVISION = "c1ad47607809"
 
 
 class _SchemaFacts(TypedDict):
@@ -100,9 +103,9 @@ class TestSystemSettingsMigration:
         assert "system_setting" not in before["tables"]
         assert "setting_audit_event" not in before["tables"]
 
-        # 2. Upgrade to head — creates both tables and seeds the
-        # `default_cvss_version` baseline row.
-        command.upgrade(cfg, "head")
+        # 2. Upgrade to the revision under test — creates both tables
+        # and seeds the `default_cvss_version` baseline row.
+        command.upgrade(cfg, _REVISION)
         after = _inspect(alembic_test_database_url)
         assert "system_setting" in after["tables"]
         assert "setting_audit_event" in after["tables"]
@@ -137,8 +140,9 @@ class TestSystemSettingsMigration:
         assert "system_setting" not in downgraded["tables"]
         assert "setting_audit_event" not in downgraded["tables"]
 
-        # 5. Re-upgrade to head — idempotent: no errors, seed restored.
-        command.upgrade(cfg, "head")
+        # 4. Re-upgrade to the revision under test — idempotent: no
+        # errors, seed restored.
+        command.upgrade(cfg, _REVISION)
         reupgraded = _inspect(alembic_test_database_url)
         assert "system_setting" in reupgraded["tables"]
         assert reupgraded["seed_value"] == "3.1"
@@ -151,7 +155,7 @@ class TestSystemSettingsMigration:
         monkeypatch.setattr(settings, "database_url", alembic_test_database_url)
         cfg = isolated_alembic_config()
 
-        command.upgrade(cfg, "head")
+        command.upgrade(cfg, _REVISION)
         assert _inspect(alembic_test_database_url)["seed_value"] == "3.1"
 
         async def _set_custom_value() -> None:

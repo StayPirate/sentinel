@@ -61,7 +61,7 @@ dev = [
     "pytest-xdist>=3.8.0",
     "httpx>=0.28.0",
     "ruff>=0.16.3",
-    "mypy>=1.14.0",
+    "mypy>=2.4.0",
     "testcontainers[postgres]>=4.15.0",
     "jsonschema>=4.26.0",
     "types-jsonschema>=4.26.0.20261006",
@@ -115,6 +115,10 @@ skips = ["B101"]  # skip assert warnings (used in tests/app code)
 strict = true
 plugins = ["pydantic.mypy"]
 enable_error_code = ["unused-awaitable", "ignore-without-code"]
+# One worker process per CPU, at most 8; MYPY_NUM_WORKERS overrides it,
+# e.g. 0 for a sequential run (see docs/conventions.md, Static Type
+# Checking).
+num_workers = "auto"
 
 # Libraries without bundled type stubs or py.typed markers. Each entry
 # MUST be revisited when the library gains type support, or when the

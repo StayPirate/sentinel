@@ -240,8 +240,11 @@ Two provisioning modes, selected automatically:
 At the start of each test session, the test engine runs
 `Base.metadata.create_all()` to create all tables from SQLAlchemy model
 definitions. This is faster than running Alembic migrations and
-sufficient for correctness — the Alembic drift check (see Execution
-Model, CI) separately verifies that migrations stay in sync with models.
+sufficient for tests of application behavior, but it verifies no
+migration. The Alembic drift check compares the schema the migration
+chain produces with the models, and the migration tests verify what each
+revision does to an existing database (see Alembic Drift Check and
+Migration Tests below).
 A single-process session creates the tables in the harness database and
 drops them at the end; each parallel worker creates them in its own
 database (see Parallel Execution).
@@ -339,6 +342,71 @@ Alembic migration. The check runs `alembic check` (or equivalent
 autogenerate dry-run) and fails the build if differences are detected.
 This ensures that developers who add or modify models also create the
 matching migration.
+
+### Migration Tests
+
+Every Alembic revision has a migration test suite in
+`backend/tests/test_migrations/`, added in the same change as the
+revision. The suite verifies what the revision does to a database at the
+previous revision, including rows that already exist there. Its tests
+are integration tests (`@pytest.mark.integration`) and synchronous (see
+Sync Entry-Point Tests), because the Alembic environment bridges into the
+async engine with its own `asyncio.run()` call. They run real `alembic`
+commands against the dedicated empty database of the
+`alembic_test_database_url` fixture, never against the harness database,
+whose schema comes from `create_all()`.
+
+A suite declares the revision under test in the module-level string
+constant `_REVISION` and runs this cycle:
+
+1. **Previous revision.** Upgrade to the revision that `_REVISION`
+   follows. When `_REVISION` changes an existing table in a way that can
+   fail on, or change, its rows — for example it adds a `NOT NULL`
+   column or a column with a default, changes a column's type or
+   nullability, adds a constraint that existing rows must satisfy, or
+   migrates data — insert representative rows with SQL that uses only
+   columns and values valid at the previous revision. A revision that
+   only creates tables or non-unique indexes needs no rows.
+2. **Upgrade.** Upgrade to `_REVISION`, never to `head`, and assert the
+   schema facts it introduces and the resulting state of the inserted
+   rows. Pinning the target keeps the suite independent of later
+   revisions, which their own suites verify. The assertions include what
+   the drift check cannot detect, such as a CHECK expression under an
+   unchanged name, a partial-index predicate, the value existing rows
+   receive, and rows the revision inserts.
+3. **Downgrade and re-upgrade.** Downgrade to the previous revision,
+   assert its schema and the state in which the downgrade leaves the
+   inserted rows, then upgrade to `_REVISION` again.
+
+Every revision implements a working `downgrade()`. It exists for
+development only (`docs/conventions.md`, Enum Storage Strategy,
+migration reversibility note): Sentinel never downgrades a production
+database (`docs/deployment.md`, Migration Failure Recovery). A downgrade
+may therefore convert or discard data that the previous schema cannot
+represent; the suite asserts that result.
+
+The revisions from the empty database through the identity audit table
+are the only exception: `test_identity_migrations.py` verifies them as
+one chain, upgrading from `base` to the last of them and downgrading
+back to `base`, without inserted rows. The structural test in the
+"Migration test suites" row of Structural Tests names them and enforces
+the mechanical part of this convention; whether a suite inserts the rows
+its revision needs is checked in review.
+
+The other controls on migrations have different boundaries:
+
+- The Alembic drift check upgrades through the whole chain and compares
+  the resulting schema with the models, as far as Alembic autogenerate
+  compares them. It does not compare CHECK expressions under an
+  unchanged name, partial-index predicates, or data, and it never runs
+  `downgrade()`.
+- The image suite runs the migration job from the candidate image on a
+  fresh database and verifies migration-gated startup (see
+  Representative Gate Evidence). It verifies the packaged artifact, not
+  the behavior of a revision.
+- A migration test verifies one revision on a database at the previous
+  revision, and its downgrade. It does not compare the schema with the
+  models.
 
 ### Concurrency Testing
 
@@ -894,6 +962,7 @@ shape.
 | Module | Location | What it enforces |
 |---|---|---|
 | Model conventions | `backend/tests/test_architecture/test_model_conventions.py` | Over every table in `Base.metadata`: primary key column type is UUID (`docs/conventions.md`, SQLAlchemy Conventions), except the small, explicit per-table exception list documented in `docs/data-model.md` (Notes) for natural-key configuration tables (e.g. `SystemSetting.key`); every UUID primary key column declares both `default=uuid.uuid7` and `server_default=text("uuidv7()")` (`docs/conventions.md`, SQLAlchemy Conventions); every `DateTime` column is timezone-aware, i.e. `DateTime(timezone=True)` (`docs/conventions.md`, Timestamps & Timezones); no PostgreSQL ENUM type (`sa.Enum`/`postgresql.ENUM`) is used (`docs/conventions.md`, Enum Storage Strategy); every `ON DELETE CASCADE` foreign key's columns lead the primary key, a unique constraint, or a non-partial index (`docs/data-model.md`, Notes), with no exception list |
+| Migration test suites | `backend/tests/test_architecture/test_migration_suites.py` | Every `test_*.py` module in `backend/tests/test_migrations/` declares a module-level string constant `_REVISION` that names an existing Alembic revision, calls `command.upgrade()` with it, and contains no Alembic head target (`head`, `heads`, `<branch>@head`, or a relative form such as `head-1`) as a string literal; every revision in the script directory is the `_REVISION` of a suite, except the identity chain revisions the test lists (see Database Strategy, Migration Tests). Whether a suite inserts the rows its revision needs is not checked. A self-test proves that each check detects a violation |
 | Audit immutability | `backend/tests/test_architecture/test_audit_immutability.py` | Over every service module in `app/services/`: no `sqlalchemy.update()` or `sqlalchemy.delete()` call targets a model whose class inherits `AuditEventMixin` (`docs/features/platform/audit-trail-infrastructure.md`, Immutability). Discovers audit event models dynamically via `AuditEventMixin.__subclasses__()`, so it starts enforcing automatically as each concrete audit trail (ticket, identity, setting, fetcher) is implemented — no update to this test is needed when a new trail is added |
 | Layer dependencies | `backend/tests/test_architecture/test_layer_dependencies.py` | The dependency direction of the Backend Layer Architecture table in `docs/architecture.md` — a module in a given layer does not import a layer that is not listed as an allowed dependency for it. Both runtime and type-checking-only (`TYPE_CHECKING`-guarded) imports are checked, since either represents a coupling the architecture forbids |
 | Ticket accessibility boundaries | `backend/tests/test_architecture/test_ticket_accessibility.py` | Core imports no Model or Service modules; API modules contain no business ORM query or Ticket-visibility predicate; every new or changed protected read delegates to a service-owned model-aware operation; and authorization or mutation code never queries Ticket audit history as current visibility state. Behavioral tests, rather than an attempted semantic static comparison, prove every consumer implements the complete canonical predicate |
@@ -1260,7 +1329,8 @@ Repository-level git hooks provide fast feedback before commits reach
 CI. Configured as shell scripts in `.githooks/` and activated
 per-repository via `core.hooksPath` (see activation steps below):
 
-- **pre-commit**: ruff check + ruff format check + mypy strict type check +
+- **pre-commit**: ruff check + ruff format check + mypy strict type check
+  (in parallel workers, see `docs/conventions.md`, Static Type Checking) +
   the unit suite as a fast gate, run in parallel workers without test
   containers (`pytest -m unit -n auto --maxprocesses 8
   --max-worker-restart 0`, see Parallel Execution) + `gitleaks git
@@ -4527,7 +4597,8 @@ comprehensive test coverage:
 
 2. **Create test files**: mirror the `app/` structure. Service tests in
    `test_services/`, API tests in `test_api/`, model tests in
-   `test_models/`.
+   `test_models/`. A new Alembic revision also gets its suite in
+   `test_migrations/` (see Database Strategy, Migration Tests).
 
 3. **Mark tests**: apply `@pytest.mark.unit`, `@pytest.mark.integration`,
    or `@pytest.mark.e2e` to each test function or class.
@@ -4568,14 +4639,17 @@ comprehensive test coverage:
 
 - `docs/conventions.md` — Testing Conventions (style rules, naming),
   Transaction and Locking (pessimistic locking pattern), Redis (error
-  ownership and async I/O)
+  ownership and async I/O), Enum Storage Strategy (migration
+  reversibility note, verified by the migration tests)
 - `docs/architecture.md` — Single Docker image, multiple entrypoints
   (shared by the image smoke suite's compose services); Backend Layer
   Architecture (dependency direction enforced by structural tests)
 - `docs/api-spec.md` — Base URL, Mutation Patterns, Audit Trail
   Endpoint Naming (route conventions enforced by structural tests)
 - `docs/deployment.md` — Container Images (process roles), Release
-  Process (build/publish pipeline gated by the image smoke suite)
+  Process (build/publish pipeline gated by the image smoke suite),
+  Migration Failure Recovery (no production downgrade; development
+  `downgrade()` verified by the migration tests)
 - `docs/features/platform/audit-trail-infrastructure.md` — Audit Trail
   Index, `BaseAuditLog`, atomicity rules, immutability
 - `docs/features/tickets/ticket-audit-log.md` — TicketAuditEvent

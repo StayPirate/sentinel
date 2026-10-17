@@ -5,9 +5,10 @@ migration
 Verifies the migration cycle mandated by
 `docs/features/platform/fetcher-infrastructure.md` (Data Model) and the
 P3-01 tracking issue acceptance criteria: upgrade from the previous
-head, schema facts (columns, CHECK constraint, foreign keys, indexes)
+head, schema facts (tables, CHECK constraint, foreign keys, indexes)
 match the approved data model, and downgrade/re-upgrade round-trips
-cleanly.
+cleanly. Later changes to these tables are verified by the suites of
+their own revisions.
 
 See `tests/test_migrations/conftest.py` for the shared Alembic test
 infrastructure (dedicated database fixture, isolated config helper)
@@ -27,6 +28,7 @@ from app.config import settings
 from tests.test_migrations.conftest import isolated_alembic_config, run_sync
 
 _PREVIOUS_HEAD = "c1ad47607809"
+_REVISION = "a43e3dc6f490"
 
 
 class _SchemaFacts(TypedDict):
@@ -37,7 +39,6 @@ class _SchemaFacts(TypedDict):
     fetcher_run_checks: set[str]
     fetcher_run_indexes: dict[str, dict[str, Any]]
     fetcher_run_fks: list[dict[str, Any]]
-    fetcher_run_columns: dict[str, dict[str, Any]]
     fetcher_audit_event_indexes: dict[str, dict[str, Any]]
     fetcher_audit_event_fks: list[dict[str, Any]]
 
@@ -67,11 +68,6 @@ async def _inspect_schema(database_url: str) -> _SchemaFacts:
                     if "fetcher_run" in tables
                     else []
                 )
-                run_columns = (
-                    {col["name"]: col for col in insp.get_columns("fetcher_run")}
-                    if "fetcher_run" in tables
-                    else {}
-                )
                 audit_indexes = (
                     {
                         idx["name"]: idx
@@ -90,7 +86,6 @@ async def _inspect_schema(database_url: str) -> _SchemaFacts:
                     "fetcher_run_checks": run_checks,
                     "fetcher_run_indexes": run_indexes,
                     "fetcher_run_fks": run_fks,
-                    "fetcher_run_columns": run_columns,
                     "fetcher_audit_event_indexes": audit_indexes,
                     "fetcher_audit_event_fks": audit_fks,
                 }
@@ -122,9 +117,9 @@ class TestFetcherPersistenceMigration:
         assert "fetcher_run" not in before["tables"]
         assert "fetcher_audit_event" not in before["tables"]
 
-        # 2. Upgrade to head — creates all three tables with their
-        # constraints and indexes.
-        command.upgrade(cfg, "head")
+        # 2. Upgrade to the revision under test — creates all three
+        # tables with their constraints and indexes.
+        command.upgrade(cfg, _REVISION)
         after = _inspect(alembic_test_database_url)
         assert "fetcher_config" in after["tables"]
         assert "fetcher_run" in after["tables"]
@@ -137,18 +132,6 @@ class TestFetcherPersistenceMigration:
             "ix_fetcher_run_fetcher_name_started_at"
         ]
         assert composite_index["column_names"] == ["fetcher_name", "started_at"]
-
-        # Added by the later `queued` lifecycle migration
-        # (a4f22788de31): `started_at` is nullable and a second
-        # composite index supports created_at-based ordering — see
-        # `docs/features/platform/fetcher-infrastructure.md` (Data
-        # Model — FetcherRun, Indexes).
-        assert "ix_fetcher_run_fetcher_name_created_at" in after["fetcher_run_indexes"]
-        created_at_index = after["fetcher_run_indexes"][
-            "ix_fetcher_run_fetcher_name_created_at"
-        ]
-        assert created_at_index["column_names"] == ["fetcher_name", "created_at"]
-        assert after["fetcher_run_columns"]["started_at"]["nullable"] is True
 
         run_fk_tables = {fk["referred_table"] for fk in after["fetcher_run_fks"]}
         assert run_fk_tables == {"fetcher_config", "user"}
@@ -200,8 +183,9 @@ class TestFetcherPersistenceMigration:
         assert "fetcher_run" not in downgraded["tables"]
         assert "fetcher_audit_event" not in downgraded["tables"]
 
-        # 4. Re-upgrade to head — idempotent: no errors.
-        command.upgrade(cfg, "head")
+        # 4. Re-upgrade to the revision under test — idempotent: no
+        # errors.
+        command.upgrade(cfg, _REVISION)
         reupgraded = _inspect(alembic_test_database_url)
         assert "fetcher_config" in reupgraded["tables"]
         assert "fetcher_run" in reupgraded["tables"]
