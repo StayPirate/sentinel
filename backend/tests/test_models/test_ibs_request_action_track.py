@@ -4,9 +4,9 @@
 See docs/data-model.md (IBSRequestActionTrack, IBS Request Evidence
 Retention, Notes: timestamp exceptions) and
 docs/features/packages/ibs-submission-tracking.md (Data Model >
-IBSRequestActionTrack, Retention and Deletion, RabbitMQ Request Wake-Ups
-step 4). Only the persistence contract is covered here; the correlation
-upsert and delivery derivation are IBS submission tracking behavior.
+IBSRequestActionTrack, Retention and Deletion). Only the persistence
+contract is covered here; the correlation upsert and delivery derivation are
+IBS submission tracking behavior.
 """
 
 from __future__ import annotations
