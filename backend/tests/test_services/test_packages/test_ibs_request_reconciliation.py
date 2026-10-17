@@ -78,6 +78,7 @@ from app.services.packages.ibs_request_reconciliation import (
     IBSRequestScope,
     load_ibs_request_scopes,
     read_retained_actions,
+    read_retained_identities,
     reconcile_ibs_requests,
 )
 from tests.support.ibs_api import status_response, xml_response
@@ -107,6 +108,7 @@ from tests.support.ibs_request_reconciliation import (
     install_request_units,
     kinds,
     next_incident,
+    next_number,
     origin,
     proven_release,
     reconcile,
@@ -599,6 +601,99 @@ class TestScopeSelection:
 
         assert len(scopes) == 1
         assert recorder.statements
+        assert recorder.writes() == []
+        assert recorder.row_locks() == []
+
+    async def test_identity_form_selects_exactly_the_matching_active_ibs_tracks(
+        self, db_session: AsyncSession
+    ) -> None:
+        """The request wake-up form: exact `(package, codestream)` pairs,
+        CVE-less Tickets included, Git tracks and inactive Tickets never."""
+        first, second = unique_package(), unique_package()
+        seed = Seed(db_session)
+        ticket = await seed.ticket()
+        matching = await seed.track(ticket, package_name=first, project=CODESTREAM)
+        crossed = await seed.track(ticket, package_name=first, project=OTHER_CODESTREAM)
+        other = await seed.track(ticket, package_name=second, project=CODESTREAM)
+        cveless = await seed.track(
+            await seed.ticket(with_cve=False), package_name=first, project=CODESTREAM
+        )
+        git = await seed.track(
+            await seed.ticket(),
+            package_name=first,
+            project=CODESTREAM,
+            workflow=WorkflowType.GIT,
+        )
+        inactive = await seed.track(
+            await seed.ticket(TicketStatus.RESOLVED),
+            package_name=first,
+            project=CODESTREAM,
+        )
+        case_variant = await seed.track(
+            await seed.ticket(), package_name=first.upper(), project=CODESTREAM
+        )
+
+        with StatementRecorder(db_session) as recorder:
+            scopes = await load_ibs_request_scopes(
+                db_session,
+                identities={(first, CODESTREAM), (second, OTHER_CODESTREAM)},
+            )
+
+        assert scopes == sorted(
+            [scope_of(matching), scope_of(cveless)], key=lambda s: s.track_id
+        )
+        assert {crossed.id, other.id, git.id, inactive.id, case_variant.id}.isdisjoint(
+            s.track_id for s in scopes
+        )
+        assert recorder.writes() == []
+        assert recorder.row_locks() == []
+
+    async def test_empty_identities_select_nothing_without_a_query(
+        self, db_session: AsyncSession
+    ) -> None:
+        seed = Seed(db_session)
+        await seed.track(await seed.ticket())
+
+        with StatementRecorder(db_session) as recorder:
+            scopes = await load_ibs_request_scopes(db_session, identities=set())
+
+        assert scopes == []
+        assert recorder.statements == []
+
+    async def test_retained_identities_of_one_request_number(
+        self, db_session: AsyncSession
+    ) -> None:
+        """Every retained action of the request, distinct, whatever its
+        type or correlation; another request's actions never."""
+        first, second = unique_package(), unique_package()
+        number, other_number = committed_number(), committed_number()
+        incident = next_incident()
+        await seed_evidence(db_session, number, REVIEW, release(first, incident))
+        await seed_evidence(
+            db_session,
+            number,
+            REVIEW,
+            release(first, incident, codestream=OTHER_CODESTREAM),
+        )
+        await seed_evidence(db_session, number, REVIEW, release(second, incident))
+        await seed_evidence(
+            db_session, other_number, REVIEW, submission(unique_package(), other_number)
+        )
+
+        with StatementRecorder(db_session) as recorder:
+            identities = await read_retained_identities(
+                db_session, request_number=number
+            )
+
+        assert identities == {
+            (first, CODESTREAM),
+            (first, OTHER_CODESTREAM),
+            (second, CODESTREAM),
+        }
+        assert (
+            await read_retained_identities(db_session, request_number=next_number())
+            == set()
+        )
         assert recorder.writes() == []
         assert recorder.row_locks() == []
 
@@ -2350,6 +2445,65 @@ class TestRetainedRootIndex:
         assert "ix_ibs_request_action_logical_package_codestream_name" in "\n".join(
             row[0] for row in plan.all()
         )
+
+    async def test_retained_identity_reader_can_use_the_request_action_index(
+        self, db_session: AsyncSession, package: str
+    ) -> None:
+        """The request wake-up's retained exact roots of one request number
+        (data-model.md, `ix_ibs_request_action_ibs_request_id`)."""
+        for _ in range(INDEX_POPULATION):
+            other = committed_number()
+            await seed_evidence(
+                db_session, other, REVIEW, submission(unique_package(), other)
+            )
+        number = committed_number()
+        await seed_evidence(db_session, number, REVIEW, submission(package, number))
+        await db_session.execute(text("ANALYZE ibs_request"))
+        await db_session.execute(text("ANALYZE ibs_request_action"))
+
+        with StatementRecorder(db_session) as recorder:
+            identities = await read_retained_identities(
+                db_session, request_number=number
+            )
+
+        assert identities == {(package, CODESTREAM)}
+        (statement,) = recorder.statements
+        plan = await _plan(db_session, statement, recorder.parameters[0])
+        assert "ix_ibs_request_action_ibs_request_id" in plan
+
+    async def test_identity_selection_can_use_the_package_name_index(
+        self, db_session: AsyncSession, package: str
+    ) -> None:
+        """The request wake-up's track selection by exact package and
+        codestream (data-model.md, `ix_ticket_package_package_name`)."""
+        seed = Seed(db_session)
+        for _ in range(INDEX_POPULATION):
+            await seed.track(await seed.ticket(), package_name=unique_package())
+        track = await seed.track(
+            await seed.ticket(), package_name=package, project=CODESTREAM
+        )
+        await db_session.execute(text("ANALYZE ticket"))
+        await db_session.execute(text("ANALYZE ticket_package"))
+        await db_session.execute(text("ANALYZE ticket_package_track"))
+
+        with StatementRecorder(db_session) as recorder:
+            scopes = await load_ibs_request_scopes(
+                db_session, identities={(package, CODESTREAM)}
+            )
+
+        assert [scope.track_id for scope in scopes] == [track.id]
+        (statement,) = recorder.statements
+        plan = await _plan(db_session, statement, recorder.parameters[0])
+        assert "ix_ticket_package_package_name" in plan
+
+
+async def _plan(db: AsyncSession, statement: str, parameters: Any) -> str:
+    """The `EXPLAIN` of a recorded statement with sequential scans disabled
+    for the rest of the test transaction."""
+    connection = await db.connection()
+    await connection.exec_driver_sql("SET LOCAL enable_seqscan = off")
+    plan = await connection.exec_driver_sql(f"EXPLAIN {statement}", parameters)
+    return "\n".join(row[0] for row in plan.all())
 
 
 # ---------------------------------------------------------------------------

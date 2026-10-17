@@ -33,8 +33,14 @@ from app.core.enums import IBSConsumerErrorCategory
 from app.services.json_decoding import decode_json
 
 PACKAGE_COMMIT_ROUTING_KEY: Final = "suse.obs.package.commit"
+REQUEST_CREATE_ROUTING_KEY: Final = "suse.obs.request.create"
+REQUEST_STATE_CHANGE_ROUTING_KEY: Final = "suse.obs.request.state_change"
 
-BOUND_ROUTING_KEYS: Final = (PACKAGE_COMMIT_ROUTING_KEY,)
+BOUND_ROUTING_KEYS: Final = (
+    PACKAGE_COMMIT_ROUTING_KEY,
+    REQUEST_CREATE_ROUTING_KEY,
+    REQUEST_STATE_CHANGE_ROUTING_KEY,
+)
 """The fixed exact bindings of the consumer, in binding order."""
 
 CONTENT_TYPE: Final = "application/octet-stream"
@@ -51,6 +57,7 @@ class MalformedReason(StrEnum):
     NON_OBJECT_ROOT = "non_object_root"
     INVALID_PROJECT = "invalid_project"
     INVALID_PACKAGE = "invalid_package"
+    INVALID_NUMBER = "invalid_number"
 
 
 class MalformedDeliveryError(Exception):

@@ -10,7 +10,9 @@ the package-add catch-up, and the RabbitMQ request wake-ups:
 - `load_ibs_request_scopes()` is the read-only scope selection: every IBS
   track of an active Ticket, in every affectedness, delivery, exclusion,
   actionability, eligibility, and lifecycle state, including CVE-less
-  Tickets; Git tracks are never selected.
+  Tickets; Git tracks are never selected. A request wake-up restricts it to
+  exact `(logical package, codestream)` identities, which include those
+  `read_retained_identities()` reads for one request number.
 - `reconcile_ibs_requests()` is the orchestration and never takes a lock.
   It reads the step-1 snapshot of every scope in one read-only session that
   is closed before the first IBS request, observes each scope through
@@ -42,12 +44,12 @@ from __future__ import annotations
 
 import uuid
 from collections import defaultdict
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Collection, Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Final, Literal
 
 import structlog
-from sqlalchemy import select, update
+from sqlalchemy import select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -94,6 +96,7 @@ __all__ = [
     "IBSRequestScope",
     "load_ibs_request_scopes",
     "read_retained_actions",
+    "read_retained_identities",
     "reconcile_ibs_requests",
 ]
 
@@ -152,7 +155,10 @@ IBSRequestOutcomeHook = Callable[[IBSRequestOutcome], None]
 
 
 async def load_ibs_request_scopes(
-    db: AsyncSession, *, ticket_id: uuid.UUID | None = None
+    db: AsyncSession,
+    *,
+    ticket_id: uuid.UUID | None = None,
+    identities: Collection[tuple[str, str]] | None = None,
 ) -> list[IBSRequestScope]:
     """The IBS track scopes of active Tickets, ordered by track ID.
 
@@ -161,9 +167,15 @@ async def load_ibs_request_scopes(
     `New`, `Analysis`, or `Analyzed`, whatever its affectedness, delivery,
     exclusion, actionability, eligibility, or lifecycle, including tracks of
     CVE-less Tickets (`cve_id = None`). With `ticket_id`, only that Ticket's
-    tracks (none for a missing or inactive Ticket). Database exceptions
+    tracks (none for a missing or inactive Ticket). With `identities`
+    (`(logical package, codestream)` pairs; the request wake-up selection),
+    only tracks whose `TicketPackage.package_name` and
+    `TicketPackageTrack.reference` equal one pair exactly; an empty
+    collection selects nothing without a query. Database exceptions
     propagate.
     """
+    if identities is not None and not identities:
+        return []
     statement = (
         select(
             Ticket.id,
@@ -185,6 +197,14 @@ async def load_ibs_request_scopes(
     )
     if ticket_id is not None:
         statement = statement.where(Ticket.id == ticket_id)
+    if identities is not None:
+        pairs = sorted(set(identities))
+        # The package-name predicate serves `ix_ticket_package_package_name`;
+        # the row-value predicate keeps only the exact pairs.
+        statement = statement.where(
+            TicketPackage.package_name.in_(sorted({name for name, _ in pairs})),
+            tuple_(TicketPackage.package_name, TicketPackageTrack.reference).in_(pairs),
+        )
     rows = (await db.execute(statement)).all()
     return [
         IBSRequestScope(
@@ -286,6 +306,25 @@ async def read_retained_actions(
         )
     ).all()
     return [_retained(row) for row in rows]
+
+
+async def read_retained_identities(
+    db: AsyncSession, *, request_number: int
+) -> set[tuple[str, str]]:
+    """The distinct `(logical_package, codestream_name)` of the retained
+    actions of one request number (its retained exact roots), served by
+    the unique `request_number` and `ix_ibs_request_action_ibs_request_id`;
+    empty when the request is not retained. Category B; database
+    exceptions propagate."""
+    rows = (
+        await db.execute(
+            select(IBSRequestAction.logical_package, IBSRequestAction.codestream_name)
+            .join(IBSRequest, IBSRequest.id == IBSRequestAction.ibs_request_id)
+            .where(IBSRequest.request_number == request_number)
+            .distinct()
+        )
+    ).all()
+    return {(package, codestream) for package, codestream in rows}
 
 
 @dataclass(frozen=True, slots=True)

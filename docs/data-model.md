@@ -2071,11 +2071,11 @@ lookup while preserving the same pair uniqueness.
 
 - `ix_ibs_request_action_track_ibs_request_action_id`: non-unique B-tree index
   on `ibs_request_action_id`. The unique constraint deliberately leads with the
-  track, so this index serves the action-to-track lookup that selects every
-  track represented by a request's current actions and retained exact roots in
-  RabbitMQ request wake-ups
-  (`docs/features/packages/ibs-submission-tracking.md`) and loading of the
-  action-to-track relationship.
+  track, so this index serves loading of the action-to-track relationship.
+  RabbitMQ request wake-ups do not use it: they select tracks by the package
+  and codestream identity of current and retained actions
+  (`docs/features/packages/ibs-submission-tracking.md`, RabbitMQ Request
+  Wake-Ups).
 
 One action can correlate to multiple tracks, and multiple actions can correlate
 to one track. The request-to-action and action-to-track relationships are

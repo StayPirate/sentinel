@@ -88,6 +88,8 @@ _TOPOLOGY = [
     "Queue.Declare",
     "Basic.Qos",
     "Queue.Bind",
+    "Queue.Bind",
+    "Queue.Bind",
     "Basic.Consume",
 ]
 
@@ -253,16 +255,23 @@ class TestTopology:
         assert qos.prefetch_count == 1
         assert qos.global_ is False
 
-    async def test_server_named_queue_is_bound_once_to_the_package_commit_key(
+    async def test_server_named_queue_is_bound_to_exactly_the_three_fixed_keys(
         self, client: Client
     ) -> None:
         _, server = await client.connected()
 
-        (bind,) = server.methods(commands.Queue.Bind)
+        binds = server.methods(commands.Queue.Bind)
         assert server.queue_name is not None
-        assert bind.queue == server.queue_name
-        assert bind.exchange == "pubsub"
-        assert bind.routing_key == "suse.obs.package.commit"
+        assert [bind.routing_key for bind in binds] == [
+            "suse.obs.package.commit",
+            "suse.obs.request.create",
+            "suse.obs.request.state_change",
+        ]
+        for bind in binds:
+            assert bind.queue == server.queue_name
+            assert bind.exchange == "pubsub"
+            assert bind.nowait is False
+            assert bind.arguments == {}
 
     async def test_consumer_reads_the_server_named_queue_with_manual_ack(
         self, client: Client
@@ -773,7 +782,7 @@ async def test_consumer_acks_reconnects_after_broker_cancel_and_shuts_down(
     # Reconnection created a fresh server-named queue and bindings.
     assert second.queue_name is not None
     assert second.queue_name != first.queue_name
-    assert len(second.methods(commands.Queue.Bind)) == 1
+    assert len(second.methods(commands.Queue.Bind)) == 3
     # Graceful shutdown: nowait consumer cancel, then channel and connection.
     await second.wait_closed()
     (cancel,) = second.methods(commands.Basic.Cancel)

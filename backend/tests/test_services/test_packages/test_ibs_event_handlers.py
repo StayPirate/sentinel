@@ -4,11 +4,11 @@
 Owning specifications:
 
 - docs/features/integrations/ibs-rabbitmq-integration.md (Ownership
-  Boundaries; Message Encoding; Consumed Events > Package Commit;
-  Per-Delivery Processing > Correlation Scope (sanitized identity),
-  One-Attempt Rule, Settlement Policy outcomes; Fatal and Transient
-  Failures: the delivery exception boundary; Error and Recovery Summary;
-  Security; Testing Requirements).
+  Boundaries; Message Encoding; Consumed Events > Package Commit, Request
+  Create and State Change (parsing and dispatch); Per-Delivery Processing
+  > Correlation Scope (sanitized identity), One-Attempt Rule, Settlement
+  Policy outcomes; Fatal and Transient Failures: the delivery exception
+  boundary; Error and Recovery Summary; Security; Testing Requirements).
 - docs/features/packages/ibs-track-release-detection.md (RabbitMQ
   Package-Commit Acceleration; Shared Reconciliation Boundary: consumer
   mode; Checkpoint Concurrency (event part); Audit and Transaction
@@ -19,7 +19,10 @@ Owning specifications:
   Admissibility; Concurrency Testing; Audit Trail Testing).
 
 Unit classes use the hostile and observed fixtures of
-`tests/fixtures/ibs_rabbitmq/`. Integration classes share the setup of
+`tests/fixtures/ibs_rabbitmq/`; they include the request `number` parser
+and the identity of current request actions (ibs-submission-tracking.md,
+Package and Codestream Identity), whose integration matrix is
+`test_ibs_request_wake_ups.py`. Integration classes share the setup of
 `test_ibs_track_release.py`: a `TrackWorld` with explicit teardown, the
 boundary's unit sessions and the handler's selection session over
 `real_session_factory`, a recorder for `task_publication.publish_task`,
@@ -41,6 +44,7 @@ from structlog.testing import capture_logs
 
 from app.core.enums import (
     IBSConsumerErrorCategory,
+    IBSRequestState,
     PackageStatus,
     TicketStatus,
     WorkflowType,
@@ -48,13 +52,16 @@ from app.core.enums import (
 from app.models.ticket import Ticket
 from app.models.track_release_checkpoint import TrackReleaseCheckpoint
 from app.services import package_service, task_publication
-from app.services.ibs_client import IBSClient
+from app.services.ibs_client import IBSClient, IBSRequestDetail
 from app.services.ibs_event_decoding import (
     BOUND_ROUTING_KEYS,
     CONTENT_TYPE,
     PACKAGE_COMMIT_ROUTING_KEY,
+    REQUEST_CREATE_ROUTING_KEY,
+    REQUEST_STATE_CHANGE_ROUTING_KEY,
     DeliveryOutcome,
     DeliveryResult,
+    EventObject,
     MalformedDeliveryError,
     decode_delivery,
 )
@@ -66,6 +73,8 @@ from app.services.packages.ibs_event_handlers import (
     handle_delivery,
     log_identity,
     parse_package_commit,
+    parse_request_number,
+    request_identities,
 )
 from app.services.packages.ibs_track_release import TrackReleaseCandidate
 from tests.support.ibs_api import status_response
@@ -73,9 +82,18 @@ from tests.support.ibs_product_release import Publish
 from tests.support.ibs_rabbitmq import (
     HOME_PROJECT_FIXTURE,
     PACKAGE_COMMIT_FIXTURES,
+    REQUEST_FIXTURES,
     HostileCase,
     hostile_cases,
     load_delivery,
+)
+from tests.support.ibs_request_reconciliation import (
+    CREATED_AT,
+    WHEN_AT,
+    Accept,
+    Action,
+    release,
+    submission,
 )
 from tests.support.ibs_track_release import (
     CHECKPOINT,
@@ -108,6 +126,8 @@ Factory = Callable[[], Awaitable[AsyncSession]]
 
 _SCHEMA_REASONS = {"invalid_project", "invalid_package"}
 _PACKAGE_FAILED = IBSConsumerErrorCategory.PACKAGE_RECONCILIATION_FAILED
+_REQUEST_FAILED = IBSConsumerErrorCategory.REQUEST_RECONCILIATION_FAILED
+_REQUEST_KEYS = (REQUEST_CREATE_ROUTING_KEY, REQUEST_STATE_CHANGE_ROUTING_KEY)
 
 
 def _commit_body(project: str = PROJECT, package: str = PACKAGE, **extra: Any) -> bytes:
@@ -130,11 +150,31 @@ def _schema_cases() -> list[HostileCase]:
 
 
 def _valid_cases() -> list[HostileCase]:
-    return [case for case in hostile_cases() if case.outcome == "valid"]
+    """The valid package-commit cases."""
+    return [
+        case
+        for case in hostile_cases()
+        if case.outcome == "valid" and case.number is None
+    ]
 
 
 def _malformed_cases() -> list[HostileCase]:
     return [case for case in hostile_cases() if case.outcome == "malformed"]
+
+
+def _number_cases() -> list[HostileCase]:
+    return [case for case in hostile_cases() if case.reason == "invalid_number"]
+
+
+def _valid_request_cases() -> list[HostileCase]:
+    return [case for case in hostile_cases() if case.number is not None]
+
+
+def _parse_number(case: HostileCase) -> int:
+    delivery = case.delivery
+    return parse_request_number(
+        decode_delivery(delivery.routing_key, delivery.content_type, delivery.body)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -205,13 +245,162 @@ class TestLogIdentity:
         assert log_identity(PackageCommit(project, package)) == {}
 
 
+class _RecordingMembers(dict[str, Any]):
+    """Root members that record every member name the parser reads."""
+
+    def __init__(self, *args: Any) -> None:
+        super().__init__(*args)
+        self.read: list[str] = []
+
+    def get(self, key: str, default: Any = None) -> Any:
+        self.read.append(key)
+        return super().get(key, default)
+
+    def __getitem__(self, key: str) -> Any:
+        self.read.append(key)
+        return super().__getitem__(key)
+
+
+@pytest.mark.unit
+class TestParseRequestNumber:
+    @pytest.mark.parametrize("name", REQUEST_FIXTURES)
+    def test_observed_events_yield_their_number_not_the_event_id(
+        self, name: str
+    ) -> None:
+        delivery = load_delivery(name)
+        body = json.loads(delivery.body)
+
+        number = parse_request_number(
+            decode_delivery(delivery.routing_key, delivery.content_type, delivery.body)
+        )
+
+        assert number == body["number"]
+        assert number != body["id"]
+
+    @pytest.mark.parametrize("case", _number_cases(), ids=lambda case: case.id)
+    def test_invalid_number_raises_invalid_number(self, case: HostileCase) -> None:
+        with pytest.raises(MalformedDeliveryError) as raised:
+            _parse_number(case)
+
+        assert raised.value.reason.value == "invalid_number"
+
+    @pytest.mark.parametrize("case", _valid_request_cases(), ids=lambda case: case.id)
+    def test_valid_cases_keep_the_exact_number(self, case: HostileCase) -> None:
+        assert _parse_number(case) == case.number
+
+    def test_only_number_is_read(self) -> None:
+        members = _RecordingMembers(
+            {"number": 400001, "id": 400002, "state": "accepted", "actions": "x"}
+        )
+        event = EventObject(
+            routing_key=REQUEST_CREATE_ROUTING_KEY,
+            members=members,
+            duplicated=frozenset({"id", "state"}),
+        )
+
+        assert parse_request_number(event) == 400001
+        assert members.read == ["number"]
+
+
+def _detail(state: IBSRequestState, *actions: Action) -> IBSRequestDetail:
+    return IBSRequestDetail(
+        request_number=400001,
+        state=state,
+        upstream_created_at=CREATED_AT,
+        upstream_updated_at=WHEN_AT,
+        superseded_by_request_number=None,
+        actions=tuple(action.detail(400001) for action in actions),
+    )
+
+
+_CODESTREAM = "SUSE:SLE-15-SP6:Update"
+_OTHER_CODESTREAM = "SUSE:SLE-15-SP7:Update"
+
+
+@pytest.mark.unit
+class TestRequestIdentities:
+    def test_open_submission_names_its_logical_package_and_release_project(
+        self,
+    ) -> None:
+        detail = _detail(IBSRequestState.REVIEW, submission("example-pkg", 400001))
+
+        assert request_identities(detail) == {("example-pkg", _CODESTREAM)}
+
+    def test_accepted_submission_uses_its_incident_target_package(self) -> None:
+        action = submission("example-pkg", 400001, incident=45001, accept=Accept())
+
+        assert request_identities(_detail(IBSRequestState.ACCEPTED, action)) == {
+            ("example-pkg", _CODESTREAM)
+        }
+
+    def test_multi_action_request_names_every_identity_once(self) -> None:
+        detail = _detail(
+            IBSRequestState.NEW,
+            release("example-pkg", 45001),
+            release("example-pkg", 45001, codestream=_OTHER_CODESTREAM),
+            release("example-lib", 45001),
+            release("example-lib", 45001, target_package="example-lib.45001"),
+        )
+
+        assert request_identities(detail) == {
+            ("example-pkg", _CODESTREAM),
+            ("example-pkg", _OTHER_CODESTREAM),
+            ("example-lib", _CODESTREAM),
+        }
+
+    @pytest.mark.parametrize(
+        "action",
+        [
+            release(
+                "example-pkg", 45001, source_project="SUSE:Maintenance:REQUEST:45001"
+            ),
+            release("example-pkg", 45001, target_package="example-pkg.45002"),
+            release("example-pkg", 45001, target_package="example-pkg"),
+            submission(
+                "example-pkg",
+                400001,
+                source_package=f".{_CODESTREAM}".replace(":", "_"),
+            ),
+        ],
+        ids=[
+            "release-staging-source",
+            "release-other-suffix",
+            "release-no-suffix",
+            "empty",
+        ],
+    )
+    def test_unresolved_or_empty_identity_names_nothing(self, action: Action) -> None:
+        assert request_identities(_detail(IBSRequestState.NEW, action)) == set()
+
+    def test_patchinfo_and_case_variants_keep_their_exact_names(self) -> None:
+        """They match only a track of exactly that name, so no represented
+        package of another spelling is selected."""
+        detail = _detail(
+            IBSRequestState.NEW,
+            release("patchinfo", 45001),
+            submission("Example-Pkg", 400001),
+        )
+
+        assert request_identities(detail) == {
+            ("patchinfo", _CODESTREAM),
+            ("Example-Pkg", _CODESTREAM),
+        }
+
+    def test_request_without_supported_actions_names_nothing(self) -> None:
+        assert request_identities(_detail(IBSRequestState.NEW)) == set()
+
+
 @pytest.mark.unit
 class TestDispatch:
     def test_every_bound_routing_key_has_one_handler(self) -> None:
         assert set(HANDLERS) == set(BOUND_ROUTING_KEYS)
 
     def test_every_bound_routing_key_has_one_failure_category(self) -> None:
-        assert FAILURE_CATEGORIES == {PACKAGE_COMMIT_ROUTING_KEY: _PACKAGE_FAILED}
+        assert FAILURE_CATEGORIES == {
+            PACKAGE_COMMIT_ROUTING_KEY: _PACKAGE_FAILED,
+            REQUEST_CREATE_ROUTING_KEY: _REQUEST_FAILED,
+            REQUEST_STATE_CHANGE_ROUTING_KEY: _REQUEST_FAILED,
+        }
         assert set(FAILURE_CATEGORIES) == set(BOUND_ROUTING_KEYS)
 
     @pytest.mark.parametrize("routing_key", [None, "suse.obs.metrics"])
@@ -286,6 +475,26 @@ class TestDispatch:
 
         assert result == DeliveryResult(
             DeliveryOutcome.FAILED, "unexpected_error", error_category=_PACKAGE_FAILED
+        )
+
+    @pytest.mark.parametrize("routing_key", _REQUEST_KEYS)
+    async def test_request_dispatch_failure_carries_the_request_category(
+        self, routing_key: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        async def broken(*_: Any) -> DeliveryResult:
+            raise RuntimeError("fictional bug")
+
+        monkeypatch.setitem(HANDLERS, routing_key, broken)
+
+        result = await handle_delivery(
+            routing_key,
+            CONTENT_TYPE,
+            b'{"number":400001}',
+            client=cast(IBSClient, object()),
+        )
+
+        assert result == DeliveryResult(
+            DeliveryOutcome.FAILED, "unexpected_error", error_category=_REQUEST_FAILED
         )
 
     @pytest.mark.parametrize(
