@@ -20,7 +20,9 @@ FROM python:${PYTHON_VERSION}-slim@${PYTHON_BASE_DIGEST} AS builder
 # `version:` input of astral-sh/setup-uv in .github/workflows/ci.yml).
 # The tag documents the version; the digest guarantees immutability (see
 # docs/deployment.md, Container Build Conventions → uv image pinning).
-# Renovate updates tag and digest together.
+# The binary also provides the uv_build backend that builds the project;
+# the uv_build range in pyproject.toml must stay compatible with it.
+# Renovate updates tag, digest, and that range together.
 COPY --from=ghcr.io/astral-sh/uv:0.13.1@sha256:4a1f3666816dafadd20ceb71eac9a7d56d7ef30279f7d64048519ab901ada336 /uv /bin/uv
 
 # Use the Python interpreter already present in this base image instead
@@ -38,9 +40,13 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-install-project --no-dev --no-editable
 
 # Copy application source and install the project itself (non-editable).
+# --offline: every dependency is already installed, and the project is
+# built by the uv_build backend bundled in the pinned uv binary. A
+# configuration that would download a build backend instead (for example
+# a uv_build range incompatible with the pinned uv) fails the build.
 COPY app/ app/
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --locked --no-dev --no-editable
+    uv sync --locked --offline --no-dev --no-editable
 
 # Stage 2: Runtime
 FROM python:${PYTHON_VERSION}-slim@${PYTHON_BASE_DIGEST} AS runtime

@@ -476,7 +476,9 @@ new version falls outside it. Minor and patch updates are grouped into one
 weekly PR; each major update gets its own PR. Weekly lock file
 maintenance regenerates `backend/uv.lock` in a separate PR, which keeps
 transitive dependencies current because the manager extracts only direct
-dependencies.
+dependencies. The `[build-system]` `uv_build` requirement is the exception:
+it is a bounded range outside `backend/uv.lock`, updated together with the
+`uv` binary (see Container Build Conventions, uv image pinning).
 
 Known vulnerabilities in the locked Python dependency set are handled by
 three complementary mechanisms:
@@ -656,6 +658,19 @@ step in the workflows. Renovate's `dockerfile`
 manager updates the tag and digest together, and a `packageRule` in
 `renovate.jsonc` groups that update with the workflow `version:` inputs
 into a single PR so CI and the image never diverge.
+
+The same binary is also the project's build backend:
+`backend/pyproject.toml` declares `uv_build` with a range bounded to the
+minor version of the pinned `uv` (`uv_build>=X.Y,<X.(Y+1)`). While that
+range is compatible with the running `uv`, uv builds the project with the
+backend bundled in its own binary instead of downloading one from PyPI,
+so the pinned image digest also determines the build backend. The range
+belongs to the same Renovate group (`pep621` manager, normalized package
+name `uv-build`) and moves together with the binary. The `builder` stage
+installs the project with `uv sync --offline` after the dependency layer
+has installed every dependency, so a configuration under which uv would
+download a build backend — for example a range ahead of the pinned
+binary — fails the image build instead of fetching an unpinned backend.
 
 **Test code exclusion.** The runtime image MUST NOT contain test code.
 `backend/tests/` is excluded by `.dockerignore` and is never copied

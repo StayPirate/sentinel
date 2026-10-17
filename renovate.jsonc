@@ -141,8 +141,8 @@
       "commitMessagePrefix": "chore(deps):"
     },
     {
-      "description": "Keep the uv version used by astral-sh/setup-uv (CI) and the uv binary copied into the Docker image (COPY --from) in sync — see backend/Dockerfile comment",
-      "matchPackageNames": ["astral-sh/uv", "ghcr.io/astral-sh/uv"],
+      "description": "Keep the uv version used by astral-sh/setup-uv (CI), the uv binary copied into the Docker image (COPY --from), and the uv_build range in backend/pyproject.toml [build-system] (the backend bundled in that binary; pep621 normalizes the name to uv-build) in sync — see backend/Dockerfile comment",
+      "matchPackageNames": ["astral-sh/uv", "ghcr.io/astral-sh/uv", "uv-build"],
       "groupName": "uv version (CI + Docker image)"
     }
   ]

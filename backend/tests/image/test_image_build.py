@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import subprocess
+import tomllib
 from collections.abc import Callable
+from pathlib import Path
 
 import httpx
 import pytest
+
+PYPROJECT_PATH = Path(__file__).resolve().parents[2] / "pyproject.toml"
 
 _RUNTIME_MANIFEST_SCRIPT = """
 import shutil
@@ -96,7 +100,14 @@ def test_runtime_manifest_is_complete_non_root_and_excludes_test_code(
         f"stdout={metadata.stdout!r} stderr={metadata.stderr!r}"
     )
     installed_version = metadata.stdout.strip()
-    assert installed_version, "installed package metadata returned an empty version"
+    # The build backend writes the installed metadata; it must carry the
+    # version declared by the source of truth.
+    declared = tomllib.loads(PYPROJECT_PATH.read_text(encoding="utf-8"))
+    declared_version = declared["project"]["version"]
+    assert installed_version == declared_version, (
+        f"installed package version {installed_version!r} differs from "
+        f"backend/pyproject.toml version {declared_version!r}"
+    )
 
     commands = (
         ("sentinel", "--version"),
