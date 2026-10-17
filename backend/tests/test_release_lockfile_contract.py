@@ -93,6 +93,18 @@ def test_release_please_config_exposes_only_features_and_fixes() -> None:
 
 
 @pytest.mark.unit
+def test_release_please_config_creates_a_tagged_draft_release() -> None:
+    # docs/deployment.md (Release Publication and Immutability): the release
+    # stays a draft until build-images.yml attaches its assets and publishes
+    # it. The tag must still be created immediately, because its push starts
+    # build-images.yml and release-please finds the previous release by it.
+    package_config = _release_package_config()
+
+    assert package_config["draft"] is True
+    assert package_config["force-tag-creation"] is True
+
+
+@pytest.mark.unit
 def test_release_please_config_pins_the_uv_lock_updater() -> None:
     package_config = _release_package_config()
 

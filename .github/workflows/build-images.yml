@@ -131,6 +131,17 @@ jobs:
           overwrite: true
           retention-days: 7
 
+      # A published GitHub Release is final (docs/deployment.md, Release
+      # Publication and Immutability). Checked immediately before the first
+      # registry push so that no rerun can move the X.Y.Z tag of a published
+      # release. Draft releases pass: a rerun may rebuild them.
+      - name: Verify release is unpublished
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: ./scripts/check-release-unpublished.sh
+
       # Only reached if the smoke and SBOM gates passed. Publish the SAME local
       # image artifact by re-tagging it with each metadata-action tag and
       # pushing. No second docker/build-push-action build is performed, so
@@ -163,6 +174,14 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # Rerunning this job for an already published release must not add
+      # attestations or touch its assets.
+      - name: Verify release is unpublished
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: ./scripts/check-release-unpublished.sh
+
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: ${{ needs.build-backend.outputs.sbom-artifact-name }}
@@ -175,6 +194,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Attest release SBOM
+        id: attest-sbom
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-name: ${{ needs.build-backend.outputs.image-name }}
@@ -184,6 +204,7 @@ jobs:
           create-storage-record: false
 
       - name: Attest release build provenance
+        id: attest-provenance
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-name: ${{ needs.build-backend.outputs.image-name }}
@@ -191,8 +212,13 @@ jobs:
           push-to-registry: true
           create-storage-record: false
 
-      - name: Upload SBOM to GitHub Release
+      # Last step: attaches the SBOM and both attestation bundles to the
+      # draft release created by release-please, then publishes it.
+      - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
           SBOM_PATH: ${{ runner.temp }}/release-sbom/${{ needs.build-backend.outputs.sbom-file-name }}
-        run: gh release upload "${GITHUB_REF_NAME}" "${SBOM_PATH}" --clobber
+          SBOM_BUNDLE_PATH: ${{ steps.attest-sbom.outputs.bundle-path }}
+          PROVENANCE_BUNDLE_PATH: ${{ steps.attest-provenance.outputs.bundle-path }}
+        run: ./scripts/publish-release.sh

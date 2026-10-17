@@ -319,8 +319,10 @@ def test_sbom_gate_precedes_push_and_release_metadata_depends_on_build() -> None
     assert "needs: build-backend" in workflow
     assert workflow.count("create-storage-record: false") == 2
     assert workflow.count("push-to-registry: true") == 2
-    assert "gh release upload" in workflow
-    assert "--clobber" in workflow
+    # Release assets are uploaded only by scripts/publish-release.sh, which
+    # publishes the draft after the upload (test_publish_release_script.py).
+    assert "gh release" not in workflow
+    assert workflow.count("run: ./scripts/publish-release.sh") == 1
 
 
 @pytest.mark.unit
@@ -397,3 +399,111 @@ def test_sbom_subject_name_is_normalized_for_ghcr() -> None:
     workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
 
     assert '"${REGISTRY}/${IMAGE_NAME,,}"' in workflow
+
+
+GUARD_STEP_NAME = "name: Verify release is unpublished"
+GUARD_RUN = "run: ./scripts/check-release-unpublished.sh"
+PUBLISH_RELEASE_RUN = "run: ./scripts/publish-release.sh"
+_JOB_MARKER = re.compile(r"^ {2}[a-z][a-z0-9-]*:$")
+
+
+def _job_steps(job_key: str) -> list[str]:
+    """Return the text of each top-level step of one job, in order."""
+    lines = WORKFLOW_PATH.read_text(encoding="utf-8").splitlines()
+    start = lines.index(f"  {job_key}:")
+    later_jobs = [
+        index
+        for index, line in enumerate(lines)
+        if index > start and _JOB_MARKER.match(line)
+    ]
+    job_lines = lines[start : later_jobs[0] if later_jobs else len(lines)]
+    boundaries = _step_start_indices(job_lines)
+    return [
+        "\n".join(_step_block(job_lines, boundary, boundaries))
+        for boundary in boundaries
+    ]
+
+
+def _step_index(steps: list[str], marker: str) -> int:
+    matches = [index for index, step in enumerate(steps) if marker in step]
+    assert len(matches) == 1, f"Expected exactly one step containing {marker!r}"
+    return matches[0]
+
+
+@pytest.mark.unit
+def test_build_job_guards_published_release_immediately_before_push() -> None:
+    # docs/deployment.md (Release Publication and Immutability): a rerun must
+    # fail before the first registry push once the GitHub Release is
+    # published, so the X.Y.Z tag of a published release never moves.
+    steps = _job_steps("build-backend")
+
+    guard_index = _step_index(steps, GUARD_STEP_NAME)
+    assert _step_index(steps, STEP_NAME_MARKER) == guard_index + 1
+    guard = steps[guard_index]
+    assert "if: startsWith(github.ref, 'refs/tags/v')" in guard
+    assert "GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}" in guard
+    assert "RELEASE_TAG: ${{ github.ref_name }}" in guard
+    assert GUARD_RUN in guard
+
+
+@pytest.mark.unit
+def test_release_metadata_job_guards_published_release_before_attesting() -> None:
+    steps = _job_steps("publish-release-metadata")
+
+    guard_index = _step_index(steps, GUARD_STEP_NAME)
+    attest_indices = [
+        index for index, step in enumerate(steps) if "uses: actions/attest@" in step
+    ]
+    assert "uses: actions/checkout@" in steps[0]
+    assert guard_index == 1
+    assert len(attest_indices) == 2
+    assert guard_index < min(attest_indices)
+    guard = steps[guard_index]
+    assert "GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}" in guard
+    assert "RELEASE_TAG: ${{ github.ref_name }}" in guard
+    assert GUARD_RUN in guard
+
+
+@pytest.mark.unit
+def test_release_publication_is_the_last_step_and_uses_attestation_bundles() -> None:
+    steps = _job_steps("publish-release-metadata")
+
+    sbom_attestation = steps[_step_index(steps, "name: Attest release SBOM")]
+    provenance_attestation = steps[
+        _step_index(steps, "name: Attest release build provenance")
+    ]
+    assert "id: attest-sbom" in sbom_attestation
+    assert "sbom-path:" in sbom_attestation
+    assert "id: attest-provenance" in provenance_attestation
+    assert "sbom-path:" not in provenance_attestation
+
+    publication = steps[-1]
+    assert "name: Publish GitHub Release" in publication
+    assert PUBLISH_RELEASE_RUN in publication
+    assert "GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}" in publication
+    assert "RELEASE_TAG: ${{ github.ref_name }}" in publication
+    assert (
+        "SBOM_PATH: ${{ runner.temp }}/release-sbom/"
+        "${{ needs.build-backend.outputs.sbom-file-name }}" in publication
+    )
+    assert (
+        "SBOM_BUNDLE_PATH: ${{ steps.attest-sbom.outputs.bundle-path }}" in publication
+    )
+    assert (
+        "PROVENANCE_BUNDLE_PATH: ${{ steps.attest-provenance.outputs.bundle-path }}"
+        in publication
+    )
+
+
+@pytest.mark.unit
+def test_release_scripts_receive_workflow_values_only_through_environment() -> None:
+    workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+    run_lines = [
+        line.strip()
+        for line in workflow.splitlines()
+        if "check-release-unpublished.sh" in line or "publish-release.sh" in line
+    ]
+
+    assert run_lines.count(GUARD_RUN) == 2
+    assert run_lines.count(PUBLISH_RELEASE_RUN) == 1
+    assert len(run_lines) == 3
