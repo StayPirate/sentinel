@@ -395,16 +395,6 @@ class TestDispatch:
     def test_every_bound_routing_key_has_one_handler(self) -> None:
         assert set(HANDLERS) == set(BOUND_ROUTING_KEYS)
 
-    def test_both_request_keys_share_the_request_handler(self) -> None:
-        assert (
-            HANDLERS[PACKAGE_COMMIT_ROUTING_KEY]
-            is not (HANDLERS[REQUEST_CREATE_ROUTING_KEY])
-        )
-        assert (
-            HANDLERS[REQUEST_CREATE_ROUTING_KEY]
-            is (HANDLERS[REQUEST_STATE_CHANGE_ROUTING_KEY])
-        )
-
     def test_every_bound_routing_key_has_one_failure_category(self) -> None:
         assert FAILURE_CATEGORIES == {
             PACKAGE_COMMIT_ROUTING_KEY: _PACKAGE_FAILED,

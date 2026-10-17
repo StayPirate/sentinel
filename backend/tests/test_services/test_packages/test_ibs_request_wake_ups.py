@@ -116,11 +116,11 @@ MARKER: Final = "fictional-private-marker"
 HOME_PROJECT: Final = "home:example-user:branches:SUSE:SLE-15-SP6:Update"
 """A fictional personal project outside the `SUSE:` namespace."""
 LATER_AT: Final = WHEN_AT.replace(day=2)
+"""A current-state time newer than the seeded `WHEN_AT`."""
 DELETE_ACTION: Final = (
     '<action type="delete"><target project="SUSE:Maintenance:REQUEST:1"/></action>'
 )
 """An action of a type Sentinel ignores."""
-"""A current-state time newer than the seeded `WHEN_AT`."""
 
 
 # ---------------------------------------------------------------------------
@@ -429,12 +429,21 @@ class TestSelection:
     async def test_retained_actions_of_the_request_number_select_their_scopes(
         self, world: RequestWorld, fake: FakeRequests, reconciliations: Reconciliations
     ) -> None:
-        """The current detail no longer names the retained identity (another
-        action type replaced it); the retained action still selects. A
-        retained action of another request number never does."""
-        retained_package, foreign_package = unique_package(), unique_package()
-        retained_scope, foreign_scope = await scopes_of(
-            world, (retained_package, CODESTREAM), (foreign_package, CODESTREAM)
+        """The current detail no longer names the retained identity (its
+        submission was replaced by an ignored action type) but names another
+        represented package: the selection is the union of the retained and
+        the current identities. A retained action of another request number
+        never selects."""
+        retained_package, current_package, foreign_package = (
+            unique_package(),
+            unique_package(),
+            unique_package(),
+        )
+        retained_scope, current_scope, foreign_scope = await scopes_of(
+            world,
+            (retained_package, CODESTREAM),
+            (current_package, CODESTREAM),
+            (foreign_package, CODESTREAM),
         )
         number, foreign = world.number(), world.number()
         seed = RequestSeed(world)
@@ -444,13 +453,16 @@ class TestSelection:
         fake.request(
             number,
             DECLINED,
+            submission(current_package, number),
             extra_actions=[DELETE_ACTION],
         )
 
         result = await wake(fake, number, routing_key=STATE_CHANGE)
 
-        assert result == processed(number)
-        assert reconciliations.scopes == [retained_scope]
+        assert result == processed(number, 2)
+        assert sorted(reconciliations.scopes, key=lambda s: s.track_id) == sorted(
+            [retained_scope, current_scope], key=lambda s: s.track_id
+        )
         assert foreign_scope not in reconciliations.scopes
 
     @pytest.mark.parametrize(
@@ -668,11 +680,16 @@ class TestExceptionBoundary:
         assert await wake(fake, number) == failed(number, "signature_rejected")
 
     @pytest.mark.parametrize(
-        ("responder", "reason", "extra"),
+        ("responder", "reason", "extra", "attempts"),
         [
-            (status_response(404), "not_found", {}),
-            (status_response(503, b"<status/>"), "http_status", {"http_status": 503}),
-            (raising(httpx.ConnectError("fictional refusal")), "transport", {}),
+            (status_response(404), "not_found", {}, 1),
+            (
+                status_response(503, b"<status/>"),
+                "http_status",
+                {"http_status": 503},
+                4,
+            ),
+            (raising(httpx.ConnectError("fictional refusal")), "transport", {}, 4),
         ],
         ids=["not-visible-yet-404", "http-503", "transport"],
     )
@@ -684,7 +701,11 @@ class TestExceptionBoundary:
         responder: Any,
         reason: str,
         extra: dict[str, int],
+        attempts: int,
     ) -> None:
+        """One application attempt: only the shared transport's retries
+        (one attempt and three retries for a 5xx or a transport error, none
+        for a 404) and no outer retry."""
         (scope,) = await scopes_of(world, (unique_package(), CODESTREAM))
         number = world.number()
         fake.raw_request(number, responder)
@@ -692,6 +713,7 @@ class TestExceptionBoundary:
         result = await wake(fake, number)
 
         assert result == failed(number, reason, **extra)
+        assert detail_paths(fake, number) == [f"/request/{number}"] * attempts
         assert reconciliations.calls == []
         assert await delivery(world, scope) == DeliveryStatus.PENDING.value
 
@@ -779,23 +801,27 @@ class TestExceptionBoundary:
         ],
         ids=["lookup", "selection", "boundary"],
     )
-    async def test_memory_error_propagates(
+    @pytest.mark.parametrize(
+        "error", [MemoryError, asyncio.CancelledError], ids=["memory", "cancelled"]
+    )
+    async def test_memory_error_and_cancellation_propagate(
         self,
         world: RequestWorld,
         fake: FakeRequests,
         monkeypatch: pytest.MonkeyPatch,
         target: tuple[Any, str],
+        error: type[BaseException],
     ) -> None:
         (scope,) = await scopes_of(world, (unique_package(), CODESTREAM))
         number = world.number()
         fake.request(number, REVIEW, submission(scope.package_name, number))
 
-        async def exhausted(*_: Any, **__: Any) -> Any:
-            raise MemoryError
+        async def raising_error(*_: Any, **__: Any) -> Any:
+            raise error
 
-        monkeypatch.setattr(*target, exhausted)
+        monkeypatch.setattr(*target, raising_error)
 
-        with pytest.raises(MemoryError):
+        with pytest.raises(error):
             await wake(fake, number)
 
 
@@ -948,27 +974,38 @@ class TestNoEventOrPublication:
         publication: Publish,
         path: str,
     ) -> None:
+        """Each path reaches its exact outcome, including an effective
+        delivery change, and none creates a Ticket event or publishes."""
         (scope,) = await scopes_of(world, (unique_package(), CODESTREAM))
         number = world.number()
+        expected_delivery = DeliveryStatus.PENDING
         match path:
             case "created" | "no-op":
                 number, _ = open_submission(fake, world, scope)
                 if path == "no-op":
                     await wake(fake, number)
+                expected = processed(number)
+                expected_delivery = DeliveryStatus.IN_PROGRESS
             case "irrelevant":
                 fake.request(number, REVIEW, submission(unique_package(), number))
+                expected = DeliveryResult(
+                    DeliveryOutcome.IRRELEVANT, fields={"request_number": number}
+                )
             case "lookup-failed":
                 fake.respond("GET", f"/request/{number}", [], 404)
+                expected = failed(number, "not_found")
             case _:
+                # No search or release evidence is routed: the scope's
+                # observation is incomplete.
                 fake.request(number, REVIEW, submission(scope.package_name, number))
+                expected = failed(
+                    number, "track_failed", track_count=1, failed_track_count=1
+                )
 
         result = await wake(fake, number)
 
-        assert result.outcome in {
-            DeliveryOutcome.PROCESSED,
-            DeliveryOutcome.IRRELEVANT,
-            DeliveryOutcome.FAILED,
-        }
+        assert result == expected
+        assert await delivery(world, scope) == expected_delivery.value
         assert await events_of(world, scope.ticket_id) == []
         assert publication.calls == []
 
