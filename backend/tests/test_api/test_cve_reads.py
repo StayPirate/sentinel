@@ -854,15 +854,13 @@ _SHARED_INVALID: Final = [
     ({"from_date": "2024-13-01"}, "from_date"),
     ({"from_date": "1700000000"}, "from_date"),
     ({"to_date": "yesterday"}, "to_date"),
-    ({"from_date": "9999-12-31T23:59:59-00:01"}, "from_date"),
-    ({"to_date": "0001-01-01T00:00:00+00:01"}, "to_date"),
 ]
 _OUT_OF_RANGE_BOUNDS: Final = [
-    ("from_date", "9999-12-31T23:59:59-23:59"),
     ("from_date", "0001-01-01T00:00:00+23:59"),
     ("to_date", "9999-12-31T23:59:59-23:59"),
-    ("to_date", "0001-01-01T00:00:00+23:59"),
 ]
+"""One bound per parameter whose offset moves the UTC instant outside the
+representable range; the parser's complete matrix is in `test_dates.py`."""
 _INVALID_CASES: Final = [
     *[(path, params, field) for path in _LISTS for params, field in _SHARED_INVALID],
     (_CVES, {"search": "x" * 501}, "search"),

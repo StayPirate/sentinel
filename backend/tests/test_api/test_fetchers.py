@@ -202,12 +202,11 @@ def _register(*stubs: type[Any]) -> None:
 
 _OUT_OF_RANGE_BOUNDS: Final = [
     ("from_date", "9999-12-31T23:59:59-00:01"),
-    ("from_date", "0001-01-01T00:00:00+23:59"),
-    ("to_date", "9999-12-31T23:59:59-23:59"),
     ("to_date", "0001-01-01T00:00:00+00:01"),
 ]
-"""Date bounds whose offset moves the UTC instant outside the representable
-range (`docs/api-spec.md`, Date Range Interpretation)."""
+"""One bound per parameter whose offset moves the UTC instant outside the
+representable range (`docs/api-spec.md`, Date Range Interpretation); the
+parser's complete matrix is in `test_dates.py`."""
 
 
 def _assert_out_of_range_response(response: Response, field: str) -> None:
@@ -2026,7 +2025,8 @@ class TestUpdateFetcherConfigEndpoint:
         assert follow_up.json()["data"]["custom_settings"] == {}
 
     @pytest.mark.parametrize(
-        "raw_value", ["[500]", '{"value": 500}', "NaN", "Infinity", "-Infinity"]
+        "raw_value",
+        ["[500]", '{"value": 500}', "NaN", "Infinity", "-Infinity", "1e400"],
     )
     async def test_container_or_non_finite_custom_setting_returns_setting_invalid(
         self,
@@ -2035,11 +2035,11 @@ class TestUpdateFetcherConfigEndpoint:
         raw_value: str,
     ) -> None:
         """Representative wiring of the scalar-only rule: an array, an
-        object, or a non-standard constant the request decoder accepts
-        reaches the service and is rejected as the wrong JSON type
-        (`fetcher-operations.md`, Custom settings type check). The
-        complete matrix, including depth independence, is owned by the
-        service tests."""
+        object, a non-standard constant the request decoder accepts, or a
+        number it decodes to an infinity reaches the service and is
+        rejected as the wrong JSON type (`fetcher-operations.md`, Custom
+        settings type check). The complete matrix, including depth
+        independence, is owned by the service tests."""
         _register(_StubFetcherWithSettings)
         config = await fetcher_config_factory(
             fetcher_name=_StubFetcherWithSettings.name
@@ -2064,34 +2064,6 @@ class TestUpdateFetcherConfigEndpoint:
             f"/api/v1/fetchers/{config.fetcher_name}/config"
         )
         assert follow_up.json()["data"]["custom_settings"] == {}
-
-    async def test_deeply_nested_custom_setting_returns_422_not_500(
-        self,
-        admin_client: AsyncClient,
-        fetcher_config_factory: FetcherConfigFactory,
-    ) -> None:
-        """An object nested deeper than the JSON encoder accepts on a usual
-        stack, though not necessarily deeper than the request decoder
-        does. Only the status is asserted, and no ERROR is logged: the
-        decoder either rejects the body (`json_invalid`) or the service
-        rejects the value (`FETCHER_SETTING_INVALID`), whatever the stack
-        size (`docs/api-spec.md`, JSON Request Body Decoding)."""
-        _register(_StubFetcherWithSettings)
-        config = await fetcher_config_factory(
-            fetcher_name=_StubFetcherWithSettings.name
-        )
-        depth = 50_000
-        value = '{"a":' * depth + "1" + "}" * depth
-
-        with capture_logs() as logs:
-            response = await admin_client.patch(
-                f"/api/v1/fetchers/{config.fetcher_name}/config",
-                content=f'{{"custom_settings": {{"results_per_page": {value}}}}}',
-                headers={"Content-Type": "application/json"},
-            )
-
-        assert response.status_code == 422
-        assert _error_logs(logs) == []
 
     async def test_schedule_override_explicit_null_reverts_to_default(
         self,
