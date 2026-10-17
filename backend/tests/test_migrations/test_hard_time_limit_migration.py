@@ -26,6 +26,7 @@ from app.config import settings
 from tests.test_migrations.conftest import isolated_alembic_config, run_sync
 
 _PREVIOUS_HEAD = "a4f22788de31"
+_REVISION = "2972274112d2"
 
 
 async def _seed_pre_migration_rows(database_url: str) -> None:
@@ -181,10 +182,10 @@ class TestHardTimeLimitMigration:
         assert len(seeded_statuses) == 3
         assert set(seeded_statuses) == {"queued", "running", "success"}
 
-        # 2. Upgrade to head — the nullable column now exists, and no
-        # backfill occurred: every pre-existing row (regardless of
-        # status) has a NULL value.
-        command.upgrade(cfg, "head")
+        # 2. Upgrade to the revision under test — the nullable column
+        # now exists, and no backfill occurred: every pre-existing row
+        # (regardless of status) has a NULL value.
+        command.upgrade(cfg, _REVISION)
         after_columns = _inspect(alembic_test_database_url)
         assert "hard_time_limit_seconds" in after_columns
         assert after_columns["hard_time_limit_seconds"]["nullable"] is True
@@ -209,10 +210,11 @@ class TestHardTimeLimitMigration:
         downgraded_columns = _inspect(alembic_test_database_url)
         assert "hard_time_limit_seconds" not in downgraded_columns
 
-        # 4. Re-upgrade to head — idempotent: no errors, schema facts
-        # match step 2 again (column re-added as NULL for every row,
-        # including the one that previously carried a value).
-        command.upgrade(cfg, "head")
+        # 4. Re-upgrade to the revision under test — idempotent: no
+        # errors, schema facts match step 2 again (column re-added as
+        # NULL for every row, including the one that previously carried
+        # a value).
+        command.upgrade(cfg, _REVISION)
         reupgraded_columns = _inspect(alembic_test_database_url)
         assert "hard_time_limit_seconds" in reupgraded_columns
         assert reupgraded_columns["hard_time_limit_seconds"]["nullable"] is True

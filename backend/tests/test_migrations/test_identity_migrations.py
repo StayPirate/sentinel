@@ -18,7 +18,7 @@ from alembic import command
 from app.config import settings
 from tests.test_migrations.conftest import isolated_alembic_config, run_sync
 
-_IDENTITY_HEAD = "4e3e94583e96"
+_REVISION = "4e3e94583e96"
 _IDENTITY_TABLES = {
     "user",
     "user_role",
@@ -117,12 +117,12 @@ class TestIdentityMigrations:
         monkeypatch.setattr(settings, "database_url", alembic_test_database_url)
         cfg = isolated_alembic_config()
 
-        command.upgrade(cfg, _IDENTITY_HEAD)
+        command.upgrade(cfg, _REVISION)
         _assert_identity_schema(_inspect(alembic_test_database_url))
 
         command.downgrade(cfg, "base")
         downgraded = _inspect(alembic_test_database_url)
         assert _IDENTITY_TABLES.isdisjoint(downgraded["tables"])
 
-        command.upgrade(cfg, _IDENTITY_HEAD)
+        command.upgrade(cfg, _REVISION)
         _assert_identity_schema(_inspect(alembic_test_database_url))
