@@ -2,8 +2,8 @@
 
 See `docs/data-model.md` (IBSRequestActionTrack, IBS Request Evidence
 Retention, Notes) and `docs/features/packages/ibs-submission-tracking.md`
-(Data Model > IBSRequestActionTrack, Retention and Deletion, RabbitMQ Request
-Wake-Ups step 4) for the full specification. This module implements only the
+(Data Model > IBSRequestActionTrack, Retention and Deletion) for the full
+specification. This module implements only the
 persistence record; the correlation upsert and delivery derivation belong to
 IBS submission tracking.
 """

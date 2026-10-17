@@ -797,8 +797,8 @@ upstream or exception text. At minimum it distinguishes:
   propagated by the reconciliation boundary, and an unexpected exception; for
   a request event, a failed or incomplete point lookup also uses the bounded
   category of the IBS request operation that caused it
-  (`ibs-submission-tracking.md`, Structured Logs), such as `not_found`,
-  `http_status`, `transport`, or `credentials_not_configured`.
+  (`ibs-submission-tracking.md`, Structured Logs), such as `http_status`,
+  `transport`, or `credentials_not_configured`.
 
 ## Security
 

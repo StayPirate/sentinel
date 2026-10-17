@@ -653,9 +653,10 @@ recovery.
   `files`, `comment`, and a string `requestid`; `srcmd5` and `sender` never
   occur. Request events have the same encoding with compact JSON bodies;
   `number` is a positive JSON integer no greater than 2,147,483,647 in every
-  event and equals the `id` of the `<request>` that `GET /request/{number}`
-  returns, with the same action count, while the event `id` is a different
-  internal identifier. Six requests were visible through REST 0.10 to 0.41
+  event and, in each of the 13 correlated events, equals the `id` of the
+  `<request>` that `GET /request/{number}` returns, with the same action
+  count, while the event `id` is a different internal identifier in every
+  event. Six requests were visible through REST 0.10 to 0.41
   seconds after their event, in the event's state. IBS publishes some
   `create` events twice with byte-identical bodies, no `state_change`
   preceded its request's `create`, and a `review` to `new` transition is
