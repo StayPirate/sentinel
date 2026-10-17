@@ -1,8 +1,8 @@
 """Shared Alembic test infrastructure for `tests/test_migrations/`.
 
 Every migration test suite in this package exercises the real `alembic`
-commands (`command.upgrade()`, `command.downgrade()`, `command.check()`)
-against a dedicated, empty PostgreSQL database created on the same
+commands (`command.upgrade()`, `command.downgrade()`) against a
+dedicated, empty PostgreSQL database created on the same
 server as the shared test harness — not against the harness's own
 database (which already has every table created via
 `Base.metadata.create_all()`, bypassing Alembic entirely; see

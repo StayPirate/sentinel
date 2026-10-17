@@ -1526,9 +1526,8 @@ downgrade` in production. When a migration fails, the operator corrects
 the root cause (network issue, disk space, code bug) and re-runs
 `alembic upgrade head`. Each migration's `downgrade()` exists for
 development only: it is verified by the revision's migration test
-(`docs/features/platform/testing-strategy.md`, Migration Tests), may
-discard data that the previous schema cannot represent, and is never a
-production recovery path.
+(`docs/features/platform/testing-strategy.md`, Migration Tests) and is
+never a production recovery path.
 
 **PostgreSQL transactional DDL.** PostgreSQL executes DDL statements
 (`CREATE TABLE`, `ALTER TABLE`, `DROP COLUMN`, etc.) inside

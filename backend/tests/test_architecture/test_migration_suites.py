@@ -24,16 +24,11 @@ from alembic.script import ScriptDirectory
 _BACKEND_DIR = Path(__file__).resolve().parents[2]
 _SUITES_DIR = _BACKEND_DIR / "tests" / "test_migrations"
 
-# Revisions verified as part of a chain by a suite pinned to a later
-# revision, keyed by revision with the covering suite as value. The
-# identity suite upgrades from the empty database to its `_REVISION` and
+# Revisions verified as part of a chain by `test_identity_migrations.py`,
+# which upgrades from the empty database to its `_REVISION` and
 # downgrades to `base`, so it exercises each of these revisions. Every
-# other revision has its own suite; this list does not grow.
-_CHAIN_COVERED_REVISIONS: dict[str, str] = {
-    "92bb900c55ff": "test_identity_migrations.py",
-    "1327f6343056": "test_identity_migrations.py",
-    "81fad13a4b63": "test_identity_migrations.py",
-}
+# other revision has its own suite; this set does not grow.
+_CHAIN_COVERED_REVISIONS = frozenset({"92bb900c55ff", "1327f6343056", "81fad13a4b63"})
 
 # Alembic's symbolic head targets: `head`, `heads`, `<branch>@head`, and
 # relative forms such as `head-1`.
@@ -108,17 +103,17 @@ def _suite_findings(suite: _Suite, revisions: set[str]) -> list[str]:
 def _coverage_findings(
     suites: Iterable[_Suite],
     revisions: set[str],
-    chain_covered: dict[str, str],
+    chain_covered: frozenset[str],
 ) -> list[str]:
     pinned = {suite.revision for suite in suites if suite.revision is not None}
     findings = [
         f"revision {revision} has no suite pinned to it"
-        for revision in sorted(revisions - pinned - chain_covered.keys())
+        for revision in sorted(revisions - pinned - chain_covered)
     ]
     findings.extend(
         f"chain-covered revision {revision} is stale: it is not a revision or "
         "it has its own suite"
-        for revision in sorted(chain_covered.keys() - (revisions - pinned))
+        for revision in sorted(chain_covered - (revisions - pinned))
     )
     return findings
 
@@ -163,7 +158,7 @@ def test_every_revision_has_a_pinned_migration_suite() -> None:
 _COMPLIANT_SUITE = '''
 """Upgrade from the previous head to the revision under test."""
 _PREVIOUS_HEAD = "aaaa"
-_REVISION = "bbbb"
+_REVISION: str = "bbbb"
 
 
 def test_cycle() -> None:
@@ -239,11 +234,7 @@ def test_suite_findings_detect_violation(source: str, expected: str) -> None:
 def test_coverage_findings_detect_unpinned_and_stale_revisions() -> None:
     suites = [_Suite("test_b.py", "bbbb", True, ())]
     revisions = {"aaaa", "bbbb", "cccc"}
-    chain_covered = {
-        "aaaa": "test_b.py",
-        "bbbb": "test_b.py",
-        "dddd": "test_b.py",
-    }
+    chain_covered = frozenset({"aaaa", "bbbb", "dddd"})
 
     assert _coverage_findings(suites, revisions, chain_covered) == [
         "revision cccc has no suite pinned to it",

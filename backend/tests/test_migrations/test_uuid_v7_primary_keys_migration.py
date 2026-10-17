@@ -28,7 +28,8 @@ from tests.test_migrations.conftest import isolated_alembic_config, run_sync
 _PREVIOUS_HEAD = "a43e3dc6f490"
 _REVISION = "4b4f7187b541"
 
-# Every table with a UUID primary key (`docs/data-model.md`, Notes).
+# Every table with a UUID primary key at the revision under test
+# (`docs/data-model.md`, Notes).
 _UUID_PK_TABLES: tuple[str, ...] = (
     "user",
     "api_key",

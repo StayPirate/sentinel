@@ -375,8 +375,8 @@ constant `_REVISION` and runs this cycle:
    unchanged name, a partial-index predicate, the value existing rows
    receive, and rows the revision inserts.
 3. **Downgrade and re-upgrade.** Downgrade to the previous revision,
-   assert its schema and the documented state of the rows, then upgrade
-   to `_REVISION` again.
+   assert its schema and the state in which the downgrade leaves the
+   inserted rows, then upgrade to `_REVISION` again.
 
 Every revision implements a working `downgrade()`. It exists for
 development only (`docs/conventions.md`, Enum Storage Strategy,
