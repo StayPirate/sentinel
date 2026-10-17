@@ -341,7 +341,9 @@ def _priority(value: str | None) -> TicketPriority | None:
     return TicketPriority(value) if value is not None else None
 
 
-def _project(row: Row[Any], *, evaluation_instant: datetime) -> TicketDetailProjection:
+def _project(
+    row: Row[*tuple[Any, ...]], *, evaluation_instant: datetime
+) -> TicketDetailProjection:
     """Assemble the projection from one `_detail_statement()` row.
 
     The Ticket-level due dates and the per-track dates share the same
@@ -738,7 +740,7 @@ def _ordered(
     return sort_key.desc().nulls_last(), ticket_id.desc()
 
 
-def _summary(row: Row[Any]) -> TicketSummaryProjection:
+def _summary(row: Row[*tuple[Any, ...]]) -> TicketSummaryProjection:
     """Assemble one summary from a list-statement row. Pure."""
     status = TicketStatus(row.status)
     severity = Severity(row.severity) if row.severity is not None else None
@@ -781,7 +783,7 @@ def _summary(row: Row[Any]) -> TicketSummaryProjection:
     )
 
 
-def _due_dates(row: Row[Any]) -> DueDates | None:
+def _due_dates(row: Row[*tuple[Any, ...]]) -> DueDates | None:
     """The row's SQL-derived Ticket-level due dates; all five are `NULL`
     together exactly when no SLA applies."""
     if row.triage_due_at is None:

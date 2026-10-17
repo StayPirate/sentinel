@@ -177,7 +177,7 @@ class TestAssertLockWait:
 
         async def _unrelated() -> int:
             await asyncio.sleep(0.05)
-            return (await waiter.execute(text("SELECT 1"))).scalar_one()
+            return int((await waiter.execute(text("SELECT 1"))).scalar_one())
 
         task = row.start(_unrelated())
         started = time.monotonic()

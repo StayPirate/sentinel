@@ -48,6 +48,7 @@ from app.services import package_service, ticket_mutations, ticket_service, user
 from tests.support.ticket_api import (
     FORBIDDEN,
     INVALID_LOCATORS,
+    MALFORMED_UUID,
     MAX_SEQUENCE,
     NOT_FOUND,
     NOT_MUTABLE,
@@ -57,6 +58,7 @@ from tests.support.ticket_api import (
     committed_app_client,
     event_count,
     locator,
+    malformed_uuid_error,
     ticket_row,
     validation_error,
 )
@@ -364,13 +366,6 @@ _LITERAL_ERROR = {
 }
 
 
-def _uuid_error(name: str) -> dict[str, Any]:
-    return {"loc": ["path", name], "msg": _UUID_MESSAGE, "type": "uuid_parsing"}
-
-
-_UUID_MESSAGE = "Input should be a valid UUID, invalid character: found `n` at 1"
-
-
 @pytest.mark.e2e
 class TestRequestValidation:
     @pytest.mark.parametrize("role", _CAPABLE_ROLES)
@@ -450,11 +445,11 @@ class TestRequestValidation:
     @pytest.mark.parametrize(
         ("level", "errors"),
         [
-            pytest.param("package", [_uuid_error("package_id")], id="package"),
-            pytest.param("track", [_uuid_error("track_id")], id="track"),
+            pytest.param("package", [malformed_uuid_error("package_id")], id="package"),
+            pytest.param("track", [malformed_uuid_error("track_id")], id="track"),
             pytest.param(
                 "both",
-                [_uuid_error("package_id"), _uuid_error("track_id")],
+                [malformed_uuid_error("package_id"), malformed_uuid_error("track_id")],
                 id="both",
             ),
         ],
@@ -481,8 +476,8 @@ class TestRequestValidation:
         tree = await build()
         before = await _snapshot(db_session, tree)
         resolver, mutation = _forbid_lookups(monkeypatch)
-        package_id = "not-a-uuid" if level in ("package", "both") else tree.package.id
-        track_id = "not-a-uuid" if level in ("track", "both") else tree.track.id
+        package_id = MALFORMED_UUID if level in ("package", "both") else tree.package.id
+        track_id = MALFORMED_UUID if level in ("track", "both") else tree.track.id
 
         for ticket in (tree.ticket, f"SNTL-{MAX_SEQUENCE}"):
             response = await authenticated_client.patch(
@@ -507,13 +502,13 @@ class TestRequestValidation:
         resolver, mutation = _forbid_lookups(monkeypatch)
 
         response = await authenticated_client.patch(
-            _url(tree.ticket, "not-a-uuid", "not-a-uuid"), json={"status": "FIXED"}
+            _url(tree.ticket, MALFORMED_UUID, MALFORMED_UUID), json={"status": "FIXED"}
         )
 
         assert response.status_code == 422
         assert response.json() == validation_error(
-            _uuid_error("package_id"),
-            _uuid_error("track_id"),
+            malformed_uuid_error("package_id"),
+            malformed_uuid_error("track_id"),
             _LITERAL_ERROR,
         )
         resolver.assert_not_awaited()

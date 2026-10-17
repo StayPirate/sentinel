@@ -74,6 +74,7 @@ from app.services import reference_service, user_service
 from tests.support.ticket_api import (
     FORBIDDEN,
     INVALID_LOCATORS,
+    MALFORMED_UUID,
     MAX_SEQUENCE,
     NOT_FOUND,
     UNAUTHENTICATED,
@@ -81,6 +82,7 @@ from tests.support.ticket_api import (
     committed_app_client,
     event_count,
     locator,
+    malformed_uuid_error,
     ticket_row,
     validation_error,
 )
@@ -103,12 +105,6 @@ _CONFLICT: Final = {
 
 _AUTOMATIC_SOURCE: Final = "sync_nvd_cves"
 """A stable fetcher name owning an automatic reference (data-sources.md)."""
-
-_MALFORMED_UUID_ERROR: Final = {
-    "loc": ["path", "reference_id"],
-    "msg": "Input should be a valid UUID, invalid character: found `n` at 1",
-    "type": "uuid_parsing",
-}
 
 ReferenceRow = tuple[Any, ...]
 """A persisted reference as `(id, url, title, description, type, source,
@@ -626,10 +622,10 @@ class TestReferenceNotFound:
         ticket: Ticket = await ticket_factory()
         spies = _forbid_service(monkeypatch)
 
-        response = await endpoint.send(authenticated_client, ticket, "not-a-uuid")
+        response = await endpoint.send(authenticated_client, ticket, MALFORMED_UUID)
 
         assert response.status_code == 422
-        assert response.json() == validation_error(_MALFORMED_UUID_ERROR)
+        assert response.json() == validation_error(malformed_uuid_error("reference_id"))
         _assert_unused(spies)
 
 

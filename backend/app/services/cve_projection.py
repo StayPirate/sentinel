@@ -276,7 +276,7 @@ def _external_identifiers(
     )
 
 
-def cve_detail_from_row(row: Row[Any]) -> CVEDetailProjection | None:
+def cve_detail_from_row(row: Row[*tuple[Any, ...]]) -> CVEDetailProjection | None:
     """Assemble the projection from a row selecting `cve_detail_columns()`.
 
     Returns `None` when the row has no CVE (`cve_pk` is `NULL`, for

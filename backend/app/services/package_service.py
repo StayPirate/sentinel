@@ -428,7 +428,7 @@ def ticket_tree_context_columns(
     )
 
 
-def ticket_tree_context_from_row(row: Row[Any]) -> TicketTreeContext:
+def ticket_tree_context_from_row(row: Row[*tuple[Any, ...]]) -> TicketTreeContext:
     """Build the Ticket context from a row selecting `ticket_tree_context_columns()`."""
     severity = row.tree_ticket_severity
     return TicketTreeContext(
@@ -750,7 +750,7 @@ def _search_order(
     return key.desc(), package_id.desc()
 
 
-def _search_item(row: Row[Any]) -> PackageSearchItem:
+def _search_item(row: Row[*tuple[Any, ...]]) -> PackageSearchItem:
     """Assemble one search item from a search-statement row. Pure."""
     return PackageSearchItem(
         id=row.package_pk,

@@ -327,7 +327,7 @@ def _ticket_columns() -> tuple[ColumnElement[Any], ...]:
     )
 
 
-def item_from_row(row: Row[Any]) -> MaintainerWorkItem:
+def item_from_row(row: Row[*tuple[Any, ...]]) -> MaintainerWorkItem:
     """Assemble one workbench item from a workbench statement row. Pure."""
     return MaintainerWorkItem(
         package_name=row.package_name,

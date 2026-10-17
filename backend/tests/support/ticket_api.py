@@ -38,6 +38,7 @@ from typing import Any
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from pydantic import TypeAdapter, ValidationError
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -109,6 +110,33 @@ def validation_error(*errors: dict[str, Any]) -> dict[str, Any]:
         "code": "VALIDATION_ERROR",
         "detail": "Request validation failed",
         "errors": list(errors),
+    }
+
+
+MALFORMED_UUID = "not-a-uuid"
+"""A path identifier that fails UUID validation; see `malformed_uuid_error()`."""
+
+
+def _malformed_uuid_message() -> str:
+    try:
+        TypeAdapter(uuid.UUID).validate_python(MALFORMED_UUID)
+    except ValidationError as exc:
+        return exc.errors()[0]["msg"]
+    raise AssertionError(f"{MALFORMED_UUID!r} unexpectedly validated as a UUID")
+
+
+def malformed_uuid_error(name: str) -> dict[str, Any]:
+    """The `VALIDATION_ERROR` item for `MALFORMED_UUID` in path parameter `name`.
+
+    `type` is the stable contract (docs/api-spec.md, error response `errors`);
+    `msg` is the human-readable message Pydantic produces for the same input,
+    so the complete body is still compared while the library may reword it
+    (pydantic-core 2.50 made the reported position zero-based).
+    """
+    return {
+        "loc": ["path", name],
+        "msg": _malformed_uuid_message(),
+        "type": "uuid_parsing",
     }
 
 
