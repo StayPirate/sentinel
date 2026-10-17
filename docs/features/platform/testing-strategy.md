@@ -1260,7 +1260,8 @@ Repository-level git hooks provide fast feedback before commits reach
 CI. Configured as shell scripts in `.githooks/` and activated
 per-repository via `core.hooksPath` (see activation steps below):
 
-- **pre-commit**: ruff check + ruff format check + mypy strict type check +
+- **pre-commit**: ruff check + ruff format check + mypy strict type check
+  (in parallel workers, see `docs/conventions.md`, Static Type Checking) +
   the unit suite as a fast gate, run in parallel workers without test
   containers (`pytest -m unit -n auto --maxprocesses 8
   --max-worker-restart 0`, see Parallel Execution) + `gitleaks git

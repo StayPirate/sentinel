@@ -374,6 +374,16 @@ implementation to full implementation — whichever comes first. When a
 tracking issue for that feature area already exists, note the pending
 exemption removal there so it is not forgotten.
 
+**Parallel checking**: the type checker runs independent modules in
+parallel worker processes, one per available CPU and at most 8. The
+setting lives in the type checker's configuration, so every invocation —
+CI, the pre-commit hook, `make typecheck`, and manual runs — uses it
+without per-invocation flags. Parallel and sequential runs report the
+same diagnostics; only their output order may differ. Each worker adds
+memory, so a developer on a constrained machine may lower the count or
+run sequentially by setting `MYPY_NUM_WORKERS` (`0` disables parallel
+checking) without changing the shared configuration.
+
 ### Naming
 
 - **Files**: `snake_case.py`
