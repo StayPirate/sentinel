@@ -925,13 +925,15 @@ produces and what a version-tag build produces:
 | Tag | Produced by | Meaning |
 |-----|-------------|---------|
 | `master` | Every merge to `master` (`workflow_run` trigger, via `type=ref,event=branch`) | Latest CI-green `master` HEAD. Not a release artifact — content changes on every merge |
-| `latest` | Highest semver tag pushed so far (`push: tags: v*` trigger, via `docker/metadata-action`'s default `flavor: latest=auto`) | The most recently published release. Only ever produced by a version-tag build |
+| `latest` | Highest semver tag pushed so far (`push: tags: v*` trigger, via `docker/metadata-action`'s default `flavor: latest=auto`) | The version of the most recent version-tag build. Only ever produced by a version-tag build |
 | `X.Y.Z` | Version tag push (`push: tags: v*`) | The exact release version. Final once the version's GitHub Release is published (see Release Publication and Immutability) |
 | `X.Y` | Version tag push (`push: tags: v*`) | Floating pointer to the latest patch release within that minor version |
 
-`latest` and `X.Y` move when a version-tag build pushes its image, which
-precedes publication of the GitHub Release by the duration of the
-release-metadata job.
+`latest` and `X.Y` move when a version-tag build pushes its image, before
+its GitHub Release is published. Until that release is published —
+indefinitely, if the release-metadata job fails and is not repaired — they
+point to an unreleased version, so a consumer resolving a floating tag
+confirms that the matching GitHub Release is published.
 
 **Why `master` never produces `latest`**: `docker/metadata-action` derives
 `latest` exclusively from its semver `flavor: latest=auto` default, which
@@ -942,8 +944,8 @@ path only matches the `type=ref,event=branch` rule, producing the
 `latest` independently, racing each other with no deterministic winner
 and leaving `latest` pointing at `master` HEAD after every subsequent
 merge instead of the last release. `latest` is therefore reliable for
-consumers (e.g., `image-scan.yml`, manual deployments) that expect it to
-track "the last release," not "the tip of master."
+consumers (e.g., `image-scan.yml`) that expect it to track "the last
+version-tag build," not "the tip of master."
 
 ### Release Supply-Chain Artifacts
 
@@ -953,8 +955,8 @@ records for the released OCI image:
 | Record | Meaning | Publication |
 |--------|---------|-------------|
 | CycloneDX SBOM | Inventory of components found in the final runtime image | `sentinel-<version>.sbom.cdx.json` asset on the corresponding GitHub Release; `<version>` omits the tag's `v` prefix, for example `sentinel-1.2.3.sbom.cdx.json` |
-| Signed SBOM attestation | Authenticated claim that the CycloneDX document describes the named image digest | GitHub Artifact Attestations and an OCI attestation associated with the image in GHCR |
-| Signed build provenance | Authenticated SLSA provenance identifying the source repository, commit, workflow, and workflow run that asserted the image digest | GitHub Artifact Attestations and an OCI attestation associated with the image in GHCR |
+| Signed SBOM attestation | Authenticated claim that the CycloneDX document describes the named image digest | GitHub Artifact Attestations, an OCI attestation associated with the image in GHCR, and the `sentinel-<version>.sbom.sigstore.json` bundle asset on the GitHub Release |
+| Signed build provenance | Authenticated SLSA provenance identifying the source repository, commit, workflow, and workflow run that asserted the image digest | GitHub Artifact Attestations, an OCI attestation associated with the image in GHCR, and the `sentinel-<version>.provenance.sigstore.json` bundle asset on the GitHub Release |
 
 The immutable subject of both attestations is
 `ghcr.io/<owner>/<repository>@sha256:<digest>`, never `latest`, `master`, or
@@ -1011,8 +1013,9 @@ release-asset upload, and publication of the GitHub Release run in a separate
 release-metadata job. Release Publication and Immutability below defines when a
 version is final and how a failed run is repaired.
 
-Both attestations are stored in GitHub's Attestations API and as OCI referrers
-alongside the subject image in GHCR. The API copy supports normal repository-
+Both attestations are stored in GitHub's Attestations API, as OCI referrers
+alongside the subject image in GHCR, and as the Sigstore bundle release assets
+described above. The API copy supports normal repository-
 scoped verification; the OCI copy supports registry-native discovery and
 verification and can travel with tooling that preserves OCI referrers. Sentinel
 does not request a GitHub artifact storage record because that feature applies
@@ -1032,22 +1035,26 @@ authenticated GitHub CLI (`gh`).
 ```bash
 set -euo pipefail
 
-TAGGED_IMAGE="ghcr.io/staypirate/sentinel:0.6.0"
+VERSION="0.6.0"
+TAGGED_IMAGE="ghcr.io/staypirate/sentinel:${VERSION}"
 IMAGE_NAME="${TAGGED_IMAGE%:*}"
 DIGEST="$(docker buildx imagetools inspect "$TAGGED_IMAGE" \
   --format '{{json .Manifest}}' | jq -er '.digest')"
 IMAGE="${IMAGE_NAME}@${DIGEST}"
 docker pull "$IMAGE"
 
-# Verify SLSA build provenance from Sentinel's release workflow.
+# Verify SLSA build provenance from Sentinel's release workflow, built from
+# this version's tag.
 gh attestation verify "oci://$IMAGE" \
   --repo StayPirate/sentinel \
-  --signer-workflow StayPirate/sentinel/.github/workflows/build-images.yml
+  --signer-workflow StayPirate/sentinel/.github/workflows/build-images.yml \
+  --source-ref "refs/tags/v${VERSION}"
 
 # Verify the signed CycloneDX SBOM claim.
 gh attestation verify "oci://$IMAGE" \
   --repo StayPirate/sentinel \
   --signer-workflow StayPirate/sentinel/.github/workflows/build-images.yml \
+  --source-ref "refs/tags/v${VERSION}" \
   --predicate-type https://cyclonedx.org/bom
 
 # Configure every runtime role to use this exact $IMAGE value for deployment.
@@ -1063,9 +1070,12 @@ An exact-version tag such as `0.6.0` expresses release identity. The release
 workflow never moves it after the GitHub Release is published (see Release
 Publication and Immutability), but the registry itself does not enforce tag
 immutability: the tag remains a lookup reference that an actor with package
-write access could repoint. Reusing the resolved `name@sha256:digest` value
-closes that window between verification and deployment and keeps an existing
-deployment on the verified artifact.
+write access could repoint. `--source-ref` rejects a digest that another
+version's build attested, and verifying with the published release's bundle
+asset rejects any digest other than the one attested for that release.
+Reusing the resolved `name@sha256:digest` value closes the window between
+verification and deployment and keeps an existing deployment on the verified
+artifact.
 
 Verification checks the Sigstore-backed signer identity, predicate type, and
 subject digest. Build provenance establishes which repository commit and
@@ -1101,14 +1111,16 @@ Publication is the finality boundary:
   tag: the build job immediately before its first registry push, the
   release-metadata job before it creates any attestation. An error while
   listing releases also fails the guard. A correction ships as a new patch
-  release; there is no override.
+  release; there is no override. A rerun executes the workflow definition of
+  the original run's commit, so the guard protects the releases whose tagged
+  commit contains it.
 
-The repository enables GitHub release immutability (Settings → General →
-Releases → Enable release immutability). It locks the Git tag and the assets of
-every release published while it is enabled and generates the release
-attestation described above; it does not protect registry tags, which the
-guard covers. A release published without immutability is not a failure — its
-image tags remain guarded — but the release-metadata job emits a warning
+GitHub release immutability (Settings → General → Releases → Enable release
+immutability) MUST be enabled for the repository. It locks the Git tag and the
+assets of every release published while it is enabled and generates the
+release attestation described above; it does not protect registry tags, which
+the guard covers. A release published without immutability is not a failure —
+its image tags remain guarded — but the release-metadata job emits a warning
 annotation so that the missing setting is visible.
 
 Repair of a failed version-tag run:
@@ -1116,9 +1128,11 @@ Repair of a failed version-tag run:
 | Situation | Repair |
 |-----------|--------|
 | The build job fails before its first push | Re-run failed jobs |
-| The build job fails after pushing, or the release-metadata job fails, while the GitHub Release is a draft | Re-run failed jobs. The rerun reuses the build job's digest and SBOM artifact, may add equivalent attestations for the same digest, and replaces the draft's same-named assets |
-| The seven-day SBOM workflow artifact expired while the GitHub Release is a draft | Re-run all jobs. The rebuild produces a new digest; the superseded digest was never part of a published release, loses its tags, and is removed by untagged retention |
+| The build job fails after pushing, while the GitHub Release is a draft | Re-run failed jobs. The rerun rebuilds the image and points its tags to a new digest; the superseded digest was never part of a published release, loses its tags, and is removed by untagged retention |
+| The release-metadata job fails while the GitHub Release is a draft | Re-run failed jobs. The rerun reuses the build job's digest and SBOM artifact, may add equivalent attestations for the same digest, and replaces the draft's same-named assets |
+| The seven-day SBOM workflow artifact expired while the GitHub Release is a draft | Re-run all jobs. The rebuild produces a new digest, with the same consequences as a rebuild after a build-job failure |
 | The release-metadata job fails because release-please created the tag but no draft release | Re-run the release-please workflow, which creates the missing draft, then re-run failed jobs |
+| Publication of the draft is refused although all three assets are attached | A maintainer publishes the draft with their own credentials (`gh release edit v<version> --draft=false`) |
 | The GitHub Release is already published | Nothing to repair: a rerun of either job fails at the guard, before any push or attestation, and names the published release |
 
 ### API Documentation Publication

@@ -117,8 +117,8 @@ Each versioned container release includes a CycloneDX SBOM plus signed SBOM and
 build-provenance attestations bound to the immutable image digest. Download the
 SBOM and the Sigstore bundles of both attestations from the GitHub Release
 assets and verify the image attestations with `gh attestation verify`. A
-published release is final: the release workflow never replaces its image
-tags or assets. See
+published release is final: the release workflow never replaces its
+exact-version image tag or its assets. See
 [Release Supply-Chain Artifacts](docs/deployment.md#release-supply-chain-artifacts)
 for artifact meanings, locations, scope, limitations, and tested verification
 commands.

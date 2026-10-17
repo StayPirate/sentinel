@@ -40,7 +40,12 @@ def _release(tag: str, *, draft: bool) -> dict[str, Any]:
 
 
 def _pages(*pages: list[dict[str, Any]]) -> str:
-    """Render `gh api --paginate` output: one JSON array per page."""
+    """Render paginated output as one JSON array per page.
+
+    Non-interactive `gh api --paginate` merges the pages into a single array;
+    a single page therefore covers that shape, and several pages cover the
+    concatenated shape the script accepts as well.
+    """
     return "".join(json.dumps(page) for page in pages)
 
 

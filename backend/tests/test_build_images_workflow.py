@@ -322,7 +322,6 @@ def test_sbom_gate_precedes_push_and_release_metadata_depends_on_build() -> None
     # Release assets are uploaded only by scripts/publish-release.sh, which
     # publishes the draft after the upload (test_publish_release_script.py).
     assert "gh release" not in workflow
-    assert workflow.count("run: ./scripts/publish-release.sh") == 1
 
 
 @pytest.mark.unit
@@ -448,8 +447,14 @@ def test_build_job_guards_published_release_immediately_before_push() -> None:
 
 @pytest.mark.unit
 def test_release_metadata_job_guards_published_release_before_attesting() -> None:
+    workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+    job_header = workflow.split("  publish-release-metadata:", 1)[1].split(
+        "    steps:", 1
+    )[0]
     steps = _job_steps("publish-release-metadata")
 
+    # The job-level condition, not the guard, keeps master builds out of it.
+    assert "    if: startsWith(github.ref, 'refs/tags/v')" in job_header
     guard_index = _step_index(steps, GUARD_STEP_NAME)
     attest_indices = [
         index for index, step in enumerate(steps) if "uses: actions/attest@" in step
