@@ -1653,10 +1653,13 @@ The gate MUST:
 The release workflow performs the same two validation mechanisms after its smoke
 gate and before pushing the image. Structural unit tests verify workflow
 permissions, release-only publication conditions, fixed artifact naming,
-step ordering, digest consistency, and fail-fast behavior. These tests mock
-publication commands; the first version-tag execution after implementation is
-the end-to-end verification of GitHub OIDC signing, the Attestations API, GHCR
-OCI attachment, and GitHub Release asset upload.
+step ordering, digest consistency, and fail-fast behavior. Script tests verify
+the published-release guard (`docs/deployment.md`, Release Publication and
+Immutability) and the release-asset upload that precedes publication of the
+draft GitHub Release. These tests mock publication commands; the first
+version-tag execution after a change to these steps is the end-to-end
+verification of GitHub OIDC signing, the Attestations API, GHCR OCI
+attachment, GitHub Release asset upload, and draft-release publication.
 
 ### Representative Gate Evidence
 
