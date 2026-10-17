@@ -66,6 +66,7 @@ from tests.support.suse_cvss import V31_MEDIUM
 from tests.support.ticket_api import (
     FORBIDDEN,
     INVALID_LOCATORS,
+    MALFORMED_UUID,
     MAX_SEQUENCE,
     NOT_FOUND,
     NOT_MUTABLE,
@@ -75,6 +76,7 @@ from tests.support.ticket_api import (
     committed_app_client,
     event_count,
     locator,
+    malformed_uuid_error,
     ticket_row,
     validation_error,
 )
@@ -436,12 +438,7 @@ class TestAuthenticationAndCapability:
 # Request validation (global 422) on an accessible Ticket
 # ---------------------------------------------------------------------------
 
-_UUID_MESSAGE = "Input should be a valid UUID, invalid character: found `n` at 1"
 _BOOL_MESSAGE = "Input should be a valid boolean"
-
-
-def _uuid_error(name: str) -> dict[str, Any]:
-    return {"loc": ["path", name], "msg": _UUID_MESSAGE, "type": "uuid_parsing"}
 
 
 def _bool_error() -> dict[str, Any]:
@@ -547,17 +544,19 @@ class TestRequestValidation:
         mutation = AsyncMock()
         monkeypatch.setattr(package_service, "set_product_eligibility", mutation)
         url = tree.url(
-            package_id="not-a-uuid" if "package_id" in levels else None,
-            track_id="not-a-uuid" if "track_id" in levels else None,
+            package_id=MALFORMED_UUID if "package_id" in levels else None,
+            track_id=MALFORMED_UUID if "track_id" in levels else None,
             occurrence_id=(
-                "not-a-uuid" if "ticket_package_product_id" in levels else None
+                MALFORMED_UUID if "ticket_package_product_id" in levels else None
             ),
         )
 
         response = await authenticated_client.patch(url, json={"eligible": False})
 
         assert response.status_code == 422
-        assert response.json() == validation_error(*[_uuid_error(n) for n in levels])
+        assert response.json() == validation_error(
+            *[malformed_uuid_error(n) for n in levels]
+        )
         mutation.assert_not_awaited()
         assert await _snapshot(db_session, tree) == before
 
@@ -571,12 +570,12 @@ class TestRequestValidation:
         tree = await build()
 
         response = await authenticated_client.patch(
-            tree.url(occurrence_id="not-a-uuid"), json={"eligible": "true"}
+            tree.url(occurrence_id=MALFORMED_UUID), json={"eligible": "true"}
         )
 
         assert response.status_code == 422
         assert response.json() == validation_error(
-            _uuid_error("ticket_package_product_id"), _bool_error()
+            malformed_uuid_error("ticket_package_product_id"), _bool_error()
         )
 
     async def test_ticket_not_found_precedes_body_and_nested_path_validation(

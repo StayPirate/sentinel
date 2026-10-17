@@ -83,6 +83,7 @@ from tests.support.package_exclusion import (
 from tests.support.ticket_api import (
     FORBIDDEN,
     INVALID_LOCATORS,
+    MALFORMED_UUID,
     MAX_SEQUENCE,
     NOT_FOUND,
     NOT_MUTABLE,
@@ -92,6 +93,7 @@ from tests.support.ticket_api import (
     committed_app_client,
     event_count,
     locator,
+    malformed_uuid_error,
     ticket_row,
     validation_error,
 )
@@ -522,13 +524,6 @@ class TestAuthenticationAndCapability:
 # Nested path validation (global 422) and its ordering after the Ticket check
 # ---------------------------------------------------------------------------
 
-_UUID_MESSAGE = "Input should be a valid UUID, invalid character: found `n` at 1"
-
-
-def _uuid_error(name: str) -> dict[str, Any]:
-    return {"loc": ["path", name], "msg": _UUID_MESSAGE, "type": "uuid_parsing"}
-
-
 _MALFORMED_CASES = [
     pytest.param(Level.PACKAGE, ("package_id",), id="package-package_id"),
     pytest.param(Level.TRACK, ("package_id",), id="track-package_id"),
@@ -571,17 +566,19 @@ class TestPathValidation:
         url = tree.url(
             level,
             direction,
-            package_id="not-a-uuid" if "package_id" in names else None,
-            track_id="not-a-uuid" if "track_id" in names else None,
+            package_id=MALFORMED_UUID if "package_id" in names else None,
+            track_id=MALFORMED_UUID if "track_id" in names else None,
             occurrence_id=(
-                "not-a-uuid" if "ticket_package_product_id" in names else None
+                MALFORMED_UUID if "ticket_package_product_id" in names else None
             ),
         )
 
         response = await authenticated_client.post(url)
 
         assert response.status_code == 422
-        assert response.json() == validation_error(*[_uuid_error(n) for n in names])
+        assert response.json() == validation_error(
+            *[malformed_uuid_error(n) for n in names]
+        )
         _assert_unused(spies)
         assert await _snapshot(db_session, tree) == before
 

@@ -309,7 +309,7 @@ def _cve_accessibility_condition(caller: TicketCaller) -> ColumnElement[bool]:
     return or_(Ticket.id.is_(None), ticket_visibility_condition(caller))
 
 
-type _StoredAssessment = Row[Any] | CVECVSSAssessment
+type _StoredAssessment = Row[*tuple[Any, ...]] | CVECVSSAssessment
 """A persisted assessment: a row of the one-statement read (the assessment
 `id` labeled `id`) or a `CVECVSSAssessment` instance."""
 
@@ -444,7 +444,7 @@ async def get_cvss_assessments(
         .outerjoin(CVECVSSAssessment, CVECVSSAssessment.cve_id == CVE.id)
         .where(CVE.cve_id == cve_id, _cve_accessibility_condition(caller))
     )
-    rows: Sequence[Row[Any]] = (await db.execute(statement)).all()
+    rows: Sequence[Row[*tuple[Any, ...]]] = (await db.execute(statement)).all()
     if not rows:
         raise CVENotFoundError()
 
@@ -1031,7 +1031,9 @@ def _affected_version_order(
     return tuple((value is None, value or "") for value in values)
 
 
-def _affected_version_entry(row: Row[Any]) -> CVEAffectedVersionEntryProjection:
+def _affected_version_entry(
+    row: Row[*tuple[Any, ...]],
+) -> CVEAffectedVersionEntryProjection:
     values = {name: getattr(row, name) for name in AFFECTED_VERSION_FIELDS}
     program_files = values["program_files"]
     if program_files is not None:

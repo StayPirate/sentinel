@@ -33,10 +33,10 @@ def _app_imports(module: str) -> set[str]:
     return {m for m in modules if m == "app" or m.startswith("app.")}
 
 
-def _row(**values: Any) -> Row[Any]:
+def _row(**values: Any) -> Row[*tuple[Any, ...]]:
     """A stand-in for a result row: `cve_detail_from_row()` reads only
     attributes, so a namespace exercises the pure assembly without I/O."""
-    return cast("Row[Any]", SimpleNamespace(**values))
+    return cast("Row[*tuple[Any, ...]]", SimpleNamespace(**values))
 
 
 @pytest.mark.unit
