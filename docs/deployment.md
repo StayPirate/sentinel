@@ -1137,7 +1137,7 @@ Repair of a failed version-tag run:
 
 ### API Documentation Publication
 
-On every version release (version tag push), the OpenAPI contract and an
+On every version tag push, the OpenAPI contract and an
 interactive API documentation site are published to GitHub Pages. API
 consumers — including the frontend application developed in a separate
 repository — depend on this publication as the authoritative,

@@ -20,6 +20,12 @@ import pytest
 SCRIPT_PATH = (
     Path(__file__).resolve().parents[2] / "scripts" / "check-release-unpublished.sh"
 )
+# One real `GET /repos/{owner}/{repo}/releases?per_page=2` page, recorded
+# during implementation with the author and repository owner replaced by
+# fictional identifiers and the release notes shortened.
+RELEASES_FIXTURE = (
+    Path(__file__).resolve().parent / "fixtures" / "github" / "releases_page.json"
+)
 
 # Prints the canned API response and logs every invocation.
 GH_STUB = """\
@@ -80,6 +86,55 @@ def _run_guard(
         [str(SCRIPT_PATH)], env=env, capture_output=True, text=True, check=False
     )
     return result, log_path.read_text(encoding="utf-8").splitlines()
+
+
+@pytest.mark.unit
+def test_recorded_release_listing_has_the_consumed_fields() -> None:
+    releases = json.loads(RELEASES_FIXTURE.read_text(encoding="utf-8"))
+
+    assert isinstance(releases, list)
+    assert releases
+    for release in releases:
+        assert isinstance(release["tag_name"], str)
+        assert isinstance(release["draft"], bool)
+        assert release["html_url"].endswith(f"/releases/tag/{release['tag_name']}")
+
+
+@pytest.mark.unit
+def test_guard_rejects_a_release_published_in_the_recorded_listing(
+    tmp_path: Path,
+) -> None:
+    result, _ = _run_guard(
+        tmp_path, response=RELEASES_FIXTURE.read_text(encoding="utf-8"), tag="v0.9.0"
+    )
+
+    assert result.returncode != 0
+    assert (
+        "https://github.com/example-owner/sentinel/releases/tag/v0.9.0" in result.stderr
+    )
+
+
+@pytest.mark.unit
+def test_guard_passes_for_a_tag_absent_from_the_recorded_listing(
+    tmp_path: Path,
+) -> None:
+    result, _ = _run_guard(
+        tmp_path, response=RELEASES_FIXTURE.read_text(encoding="utf-8"), tag="v0.10.0"
+    )
+
+    assert result.returncode == 0
+
+
+@pytest.mark.unit
+def test_guard_passes_when_the_recorded_release_is_a_draft(tmp_path: Path) -> None:
+    releases = json.loads(RELEASES_FIXTURE.read_text(encoding="utf-8"))
+    for release in releases:
+        if release["tag_name"] == "v0.9.0":
+            release["draft"] = True
+
+    result, _ = _run_guard(tmp_path, response=json.dumps(releases), tag="v0.9.0")
+
+    assert result.returncode == 0
 
 
 @pytest.mark.unit
