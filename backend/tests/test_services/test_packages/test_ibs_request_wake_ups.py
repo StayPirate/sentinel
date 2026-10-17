@@ -920,7 +920,9 @@ class TestExceptionBoundary:
         (scope,) = await scopes_of(world, (unique_package(), CODESTREAM))
         number, _ = open_submission(fake, world, scope)
         holding = hold_after(monkeypatch, "set_track_delivery_status")
-        handling = asyncio.create_task(wake(fake, number))
+        # Registered with the world: a failure before the cancel below must
+        # not leave the held lock blocking the teardown.
+        handling = world.start(world.session, wake(fake, number))
         await asyncio.wait_for(holding.wait(), timeout=WAIT)
         assert await ticket_locked(world, scope.ticket_id)
 

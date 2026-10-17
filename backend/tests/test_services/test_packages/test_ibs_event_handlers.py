@@ -1020,7 +1020,9 @@ class TestExceptionBoundary:
         (track,) = await _tracks(world)
         _evidence(ibs, track)
         holding = hold_after(monkeypatch, "set_track_status")
-        handling = asyncio.create_task(_handle(ibs, _commit_body()))
+        # Registered with the world: a failure before the cancel below must
+        # not leave the held lock blocking the teardown.
+        handling = world.start(world.session, _handle(ibs, _commit_body()))
         await asyncio.wait_for(holding.wait(), timeout=WAIT)
         assert await ticket_locked(world, track.ticket_id)
 

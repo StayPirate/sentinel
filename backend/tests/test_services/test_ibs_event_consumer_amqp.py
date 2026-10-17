@@ -554,6 +554,9 @@ _BOUND = 0.2
 """The patched value of each fixed bound: far below `WAIT_SECONDS`, so a
 step that is not bounded by its constant fails the test's own guard."""
 
+_CONNECT = "CONNECT_TIMEOUT_SECONDS"
+_OPERATION = "OPERATION_TIMEOUT_SECONDS"
+
 
 async def _bounded[T](awaitable: Awaitable[T]) -> asyncio.Future[T]:
     """Run `awaitable` until it finishes; fail when it outlives
@@ -570,16 +573,16 @@ async def _bounded[T](awaitable: Awaitable[T]) -> asyncio.Future[T]:
 
 class TestBounds:
     @pytest.mark.parametrize(
-        ("method", "opened"),
+        ("method", "constant"),
         [
-            pytest.param(commands.Connection.StartOk, False, id="handshake-tune"),
-            pytest.param(commands.Connection.Open, False, id="handshake-open"),
-            pytest.param(commands.Channel.Open, True, id="channel-open"),
-            pytest.param(commands.Exchange.Declare, True, id="exchange-declare"),
-            pytest.param(commands.Queue.Declare, True, id="queue-declare"),
-            pytest.param(commands.Basic.Qos, True, id="qos"),
-            pytest.param(commands.Queue.Bind, True, id="bind"),
-            pytest.param(commands.Basic.Consume, True, id="consume"),
+            pytest.param(commands.Connection.StartOk, _CONNECT, id="handshake-tune"),
+            pytest.param(commands.Connection.Open, _CONNECT, id="handshake-open"),
+            pytest.param(commands.Channel.Open, _OPERATION, id="channel-open"),
+            pytest.param(commands.Exchange.Declare, _OPERATION, id="exchange-declare"),
+            pytest.param(commands.Queue.Declare, _OPERATION, id="queue-declare"),
+            pytest.param(commands.Basic.Qos, _OPERATION, id="qos"),
+            pytest.param(commands.Queue.Bind, _OPERATION, id="bind"),
+            pytest.param(commands.Basic.Consume, _OPERATION, id="consume"),
         ],
     )
     async def test_withheld_reply_is_bounded_and_transient(
@@ -587,14 +590,14 @@ class TestBounds:
         broker: FakeAmqpServer,
         monkeypatch: pytest.MonkeyPatch,
         method: type[base.Frame],
-        opened: bool,
+        constant: str,
     ) -> None:
         """The broker never answers one handshake or topology method: the
-        attempt fails with a transient `timeout` within the step's bound, and
-        the partial connection is closed; after the handshake, the adapter
-        closes it with `Connection.Close`."""
-        monkeypatch.setattr(ibs_event_consumer, "CONNECT_TIMEOUT_SECONDS", _BOUND)
-        monkeypatch.setattr(ibs_event_consumer, "OPERATION_TIMEOUT_SECONDS", _BOUND)
+        attempt fails with a transient `timeout` within the bound of that
+        step's constant (only that one is shortened), and the partial
+        connection is closed; after the handshake, the adapter closes it with
+        `Connection.Close`."""
+        monkeypatch.setattr(ibs_event_consumer, constant, _BOUND)
         broker.replies[method] = None
 
         attempt = await _bounded(connect_amqp(broker.url, _tls_context(), Sink()))
@@ -605,7 +608,7 @@ class TestBounds:
         server = await broker.connection()
         await server.wait_closed()
         assert len(server.methods(method)) == 1
-        if opened:
+        if constant == _OPERATION:
             assert server.names()[-1] == "Connection.Close"
 
     async def test_withheld_close_replies_are_bounded(
