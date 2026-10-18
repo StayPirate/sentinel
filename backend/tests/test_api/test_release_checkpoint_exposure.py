@@ -129,7 +129,15 @@ class TestOpenAPIResponsesDeclareNoCheckpoint:
                 "/api/v1/cves": {
                     "get": {
                         "responses": {
-                            "200": {"content": {"application/json": {"schema": {}}}}
+                            "200": {
+                                "content": {
+                                    "application/json": {
+                                        "schema": {
+                                            "properties": {"release_checkpoint": {}}
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 },

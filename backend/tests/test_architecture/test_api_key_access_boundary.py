@@ -28,8 +28,9 @@ inside functions:
 Blind spots: a reference by string, such as `getattr(models, "ApiKey")`, a
 loader option or relationship named by a string, an attribute name held in
 a variable (`getattr(user, name)`, `setattr(...)`), a `**` expansion that
-forwards the model or its attributes, a relative import, and SQL text
-(`text("... api_keys ...")`) are not detected.
+forwards the model or its attributes, a relative import, SQL text
+(`text("... api_keys ...")`), and an attribute write on, or the deletion of,
+an `ApiKey` instance obtained from the service are not detected.
 """
 
 from __future__ import annotations
