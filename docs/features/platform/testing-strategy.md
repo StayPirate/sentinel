@@ -3673,8 +3673,9 @@ scenarios are required:
 - `user_id` (UUID) is present in session lifecycle logs when the actor
   is known
 - A rejected JWT (failed validation, missing or inactive session, missing or
-  inactive user) emits no application log record under mandatory, optional,
-  and logout authentication
+  inactive user) emits no rejection log record under mandatory and optional
+  authentication, and neither does a JWT that the logout endpoint fails to
+  decode
 
 **Audit trail boundaries:**
 

@@ -102,12 +102,13 @@ def _service_events(caplog: pytest.LogCaptureFixture) -> list[dict[str, Any]]:
 
 
 def _login_failed_fields(caplog: pytest.LogCaptureFixture) -> list[dict[str, Any]]:
-    """The call-site fields of every captured `login_failed` record."""
-    return [
-        _call_site_fields(event)
-        for event in _service_events(caplog)
-        if event["event"] == "login_failed"
+    """The call-site fields of every captured `login_failed` record, each
+    emitted at INFO (local-authentication.md, Login outcome logging)."""
+    records = [
+        event for event in _service_events(caplog) if event["event"] == "login_failed"
     ]
+    assert [event["level"] for event in records] == ["info"] * len(records)
+    return [_call_site_fields(event) for event in records]
 
 
 def _call_site_fields(event: dict[str, Any]) -> dict[str, Any]:

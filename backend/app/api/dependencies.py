@@ -273,14 +273,15 @@ class _LimiterEntry:
 class KeyedWarningLimiter:
     """Per-instance, per-key rate limiter for an API key WARNING.
 
-    Bounds: at most one WARNING per 60 seconds per key: a 10,000-entry
-    maximum with LRU eviction on overflow, and a 5-minute inactivity
-    eviction — see `docs/features/identity/authentication.md` (API key
-    validation, step 2). Not designed for cross-task concurrency control
-    (a single asyncio event loop serializes calls to `record()` within
-    one server process); multiple worker processes each maintain
-    independent state ("with N instances, the worst case is N WARNINGs
-    per minute per IP").
+    Bounds: at most one WARNING per 60 seconds per key (an ASGI peer
+    address or an `ApiKey.id`): a 10,000-entry maximum with LRU eviction
+    on overflow, and a 5-minute inactivity eviction — see
+    `docs/features/identity/authentication.md` (API key validation, step 2
+    and Rejected-key warning). Not designed for cross-task concurrency
+    control (a single asyncio event loop serializes calls to `record()`
+    within one server process); multiple worker processes each maintain
+    independent state, so with N instances the worst case is N WARNINGs
+    per minute per key.
     """
 
     def __init__(self) -> None:

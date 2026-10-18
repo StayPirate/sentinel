@@ -772,7 +772,7 @@ If a credential is selected, execute shared steps 3-7 without modification:
   returning 401;
 - malformed, invalid, expired, or otherwise rejected JWTs, and JWTs whose user
   is missing or inactive, return the same generic 401 as mandatory
-  authentication, with no application log record.
+  authentication, and the rejection is not logged (see JWT validation).
 
 The optional dependency creates no audit event. Its successful JWT and API-key
 effects retain the audit boundaries specified by their shared sub-flows.
@@ -796,9 +796,11 @@ stale credentials cannot block those probe, bootstrap, or recovery paths.
 4. On success, return the `user_id` from the `sub` claim.
 
 A rejected JWT — any failed step above, or a missing or inactive user at
-Shared Credential Resolution step 5 — emits no application log record, because
-token expiry and `JWT_SECRET_KEY` rotation make such rejections routine. The
-logout endpoint's restricted decoding follows the same rule.
+Shared Credential Resolution step 5 — is not logged: the rejection emits no
+log record of its own, because token expiry and `JWT_SECRET_KEY` rotation make
+such rejections routine. The Redis-outage WARNING of the step-3 liveness check
+still applies (see Session liveness check). The logout endpoint's restricted
+decoding follows the same rule.
 
 ### API key validation
 

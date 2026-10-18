@@ -175,12 +175,15 @@ commit failure, or a lockout-gate failure other than a `RedisError` — emits no
 
 `invalid_input`, `locked`, and `unknown_user` therefore never carry
 `user_id`; `invalid_input` and `locked` never carry `attempt_count`; and on
-the Redis fail-open path no record carries `attempt_count`:
+the Redis fail-open path no record carries `attempt_count`. For example, a
+wrong password, an unknown username, a blocked attempt, and a wrong password
+during a Redis outage:
 
 ```json
 {"event": "login_failed", "reason": "invalid_password", "user_id": "550e8400-...", "attempt_count": 2}
 {"event": "login_failed", "reason": "unknown_user", "attempt_count": 2}
 {"event": "login_failed", "reason": "locked"}
+{"event": "login_failed", "reason": "invalid_password", "user_id": "550e8400-..."}
 ```
 
 The record never contains the attempted username (raw or normalized), the
@@ -471,7 +474,7 @@ session behavior.
 
 - **Generic error messages**: the login endpoint never reveals whether a
   username exists. All failure cases return the same 401 message.
-- **Failed-login logging**: every login that creates no Session emits
+- **Failed-login logging**: every rejected login (401 or 429) emits
   `login_failed` (see Login outcome logging), including blocked attempts and
   attempts during a Redis outage, so password spraying across usernames and
   brute force during fail-open remain visible to operators although

@@ -685,26 +685,28 @@ class TestRecordRejectedKeyAttempt:
             for record in _dependency_events(caplog, "api_key_rejected")
         ] == [str(first.id), str(second.id)]
 
-    def test_independent_of_the_unknown_key_limiter(
-        self, caplog: pytest.LogCaptureFixture
+    def test_unknown_key_peers_cannot_evict_a_rejected_key_entry(
+        self, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """At the same instant both warnings emit, and neither limiter
-        holds the other's key."""
+        """The two limiters keep independent state: with room for a single
+        entry, lookup misses from new peer addresses do not evict the
+        rejected key's entry, so its second rejection inside the window
+        stays suppressed."""
+        monkeypatch.setattr(dependencies, "_LIMITER_MAX_ENTRIES", 1)
         key = self._key()
-        request = TestRecordUnknownKeyAttempt._FakeRequest(
-            client=TestRecordUnknownKeyAttempt._FakeClient(host="203.0.113.5")
-        )
         now = datetime.now(UTC)
 
         with caplog.at_level(logging.WARNING, logger="app.api.dependencies"):
-            dependencies._record_unknown_key_attempt(cast(Request, request), now)
             self._record(key, ApiKeyRejectionReason.REVOKED, now)
-            dependencies._record_unknown_key_attempt(cast(Request, request), now)
+            for host in ("203.0.113.5", "203.0.113.6"):
+                request = TestRecordUnknownKeyAttempt._FakeRequest(
+                    client=TestRecordUnknownKeyAttempt._FakeClient(host=host)
+                )
+                dependencies._record_unknown_key_attempt(cast(Request, request), now)
+            self._record(key, ApiKeyRejectionReason.REVOKED, now + timedelta(seconds=1))
 
-        assert len(_dependency_events(caplog, "api_key_validation_failed")) == 1
+        assert len(_dependency_events(caplog, "api_key_validation_failed")) == 2
         assert len(_dependency_events(caplog, "api_key_rejected")) == 1
-        assert set(dependencies._unknown_key_limiter._entries) == {"203.0.113.5"}
-        assert set(dependencies._rejected_key_limiter._entries) == {str(key.id)}
 
 
 # ---------------------------------------------------------------------------
@@ -962,100 +964,6 @@ class TestGetCurrentUserJwt:
             "code": "AUTH_NOT_AUTHENTICATED",
             "detail": "Authentication required",
         }
-
-    async def test_malformed_jwt_returns_generic_401(
-        self, dep_client: AsyncClient
-    ) -> None:
-        response = await dep_client.get(
-            "/whoami", headers={"Authorization": "Bearer not-a-real-token"}
-        )
-
-        assert response.status_code == 401
-        assert response.json() == {
-            "code": "AUTH_NOT_AUTHENTICATED",
-            "detail": "Authentication required",
-        }
-
-    async def test_inactive_session_returns_generic_401(
-        self,
-        dep_client: AsyncClient,
-        db_session: AsyncSession,
-        user_factory: Callable[..., Awaitable[User]],
-        redis_client: redis_asyncio.Redis,
-    ) -> None:
-        user = await user_factory()
-        created = await create_session(
-            db_session,
-            user,
-            SessionCreationReason.LOCAL_LOGIN,
-            expected_password_hash=None,
-        )
-        assert created is not None
-        created.session.is_active = False
-        await db_session.flush()
-
-        response = await dep_client.get(
-            "/whoami", headers={"Authorization": f"Bearer {created.token}"}
-        )
-
-        assert response.status_code == 401
-
-    async def test_inactive_user_returns_generic_401(
-        self,
-        dep_client: AsyncClient,
-        db_session: AsyncSession,
-        user_factory: Callable[..., Awaitable[User]],
-        redis_client: redis_asyncio.Redis,
-    ) -> None:
-        user = await user_factory()
-        created = await create_session(
-            db_session,
-            user,
-            SessionCreationReason.LOCAL_LOGIN,
-            expected_password_hash=None,
-        )
-        assert created is not None
-        # The session must be created while the user is active; deactivate
-        # afterwards so the dependency loads an inactive user with a still
-        # active Session and must reject it.
-        user.active = False
-        await db_session.flush()
-
-        response = await dep_client.get(
-            "/whoami", headers={"Authorization": f"Bearer {created.token}"}
-        )
-
-        assert response.status_code == 401
-
-    async def test_missing_user_returns_generic_401(
-        self,
-        dep_client: AsyncClient,
-        db_session: AsyncSession,
-        user_factory: Callable[..., Awaitable[User]],
-        redis_client: redis_asyncio.Redis,
-    ) -> None:
-        user = await user_factory()
-        created = await create_session(
-            db_session,
-            user,
-            SessionCreationReason.LOCAL_LOGIN,
-            expected_password_hash=None,
-        )
-        assert created is not None
-        issued = issue_token(
-            user_id=uuid.uuid4(),
-            session_id=created.session.id,
-            issued_at=datetime.now(UTC),
-            session_deadline=created.session.expires_at,
-            jwt_expiry_hours=settings.jwt_expiry_hours,
-            secret_key=settings.jwt_secret_key.get_secret_value(),
-        )
-
-        response = await dep_client.get(
-            "/whoami", headers={"Authorization": f"Bearer {issued.token}"}
-        )
-
-        assert response.status_code == 401
 
 
 @pytest.mark.e2e
@@ -1394,7 +1302,9 @@ class TestAuthenticateApiKeyExpirationBoundary:
 # share the same `_resolve_principal()` selection/validation path — the
 # rejection-matrix scenarios below are the optional-path counterparts of
 # `TestGetCurrentUserJwt`/`TestGetCurrentUserApiKey` above and prove the two
-# dependencies never diverge on a selected credential.
+# dependencies never diverge on a selected credential. The rejected-JWT
+# matrix (malformed, expired, inactive session, inactive or missing user)
+# runs against both dependencies in `TestRejectedJwtIsNotLogged`.
 
 
 @pytest.mark.e2e
@@ -1645,19 +1555,6 @@ class TestGetOptionalCurrentUserRejection:
     anonymous access — see authentication.md,
     `get_optional_current_user`."""
 
-    async def test_malformed_jwt_returns_generic_401(
-        self, dep_client: AsyncClient
-    ) -> None:
-        response = await dep_client.get(
-            "/optional-whoami", headers={"Authorization": "Bearer not-a-real-token"}
-        )
-
-        assert response.status_code == 401
-        assert response.json() == {
-            "code": "AUTH_NOT_AUTHENTICATED",
-            "detail": "Authentication required",
-        }
-
     async def test_invalid_non_empty_bearer_does_not_fall_back_to_valid_cookie(
         self,
         dep_client: AsyncClient,
@@ -1678,87 +1575,6 @@ class TestGetOptionalCurrentUserRejection:
         response = await dep_client.get(
             "/optional-whoami",
             headers={"Authorization": "Bearer not-a-real-token"},
-        )
-
-        assert response.status_code == 401
-
-    async def test_inactive_session_returns_generic_401(
-        self,
-        dep_client: AsyncClient,
-        db_session: AsyncSession,
-        user_factory: Callable[..., Awaitable[User]],
-        redis_client: redis_asyncio.Redis,
-    ) -> None:
-        user = await user_factory()
-        created = await create_session(
-            db_session,
-            user,
-            SessionCreationReason.LOCAL_LOGIN,
-            expected_password_hash=None,
-        )
-        assert created is not None
-        created.session.is_active = False
-        await db_session.flush()
-
-        response = await dep_client.get(
-            "/optional-whoami", headers={"Authorization": f"Bearer {created.token}"}
-        )
-
-        assert response.status_code == 401
-
-    async def test_inactive_user_returns_generic_401(
-        self,
-        dep_client: AsyncClient,
-        db_session: AsyncSession,
-        user_factory: Callable[..., Awaitable[User]],
-        redis_client: redis_asyncio.Redis,
-    ) -> None:
-        user = await user_factory()
-        created = await create_session(
-            db_session,
-            user,
-            SessionCreationReason.LOCAL_LOGIN,
-            expected_password_hash=None,
-        )
-        assert created is not None
-        # The session must be created while the user is active; deactivate
-        # afterwards so the dependency loads an inactive user with a still
-        # active Session and must reject it.
-        user.active = False
-        await db_session.flush()
-
-        response = await dep_client.get(
-            "/optional-whoami", headers={"Authorization": f"Bearer {created.token}"}
-        )
-
-        assert response.status_code == 401
-
-    async def test_missing_user_returns_generic_401(
-        self,
-        dep_client: AsyncClient,
-        db_session: AsyncSession,
-        user_factory: Callable[..., Awaitable[User]],
-        redis_client: redis_asyncio.Redis,
-    ) -> None:
-        user = await user_factory()
-        created = await create_session(
-            db_session,
-            user,
-            SessionCreationReason.LOCAL_LOGIN,
-            expected_password_hash=None,
-        )
-        assert created is not None
-        issued = issue_token(
-            user_id=uuid.uuid4(),
-            session_id=created.session.id,
-            issued_at=datetime.now(UTC),
-            session_deadline=created.session.expires_at,
-            jwt_expiry_hours=settings.jwt_expiry_hours,
-            secret_key=settings.jwt_secret_key.get_secret_value(),
-        )
-
-        response = await dep_client.get(
-            "/optional-whoami", headers={"Authorization": f"Bearer {issued.token}"}
         )
 
         assert response.status_code == 401
@@ -1849,10 +1665,11 @@ class TestGetOptionalCurrentUserRejection:
 
 @pytest.mark.e2e
 class TestRejectedJwtIsNotLogged:
-    """A rejected JWT emits no application log record under mandatory or
+    """A rejected JWT emits no log record of its own under mandatory or
     optional authentication — token expiry and `JWT_SECRET_KEY` rotation
     make such rejections routine (authentication.md, JWT validation;
-    `get_optional_current_user`)."""
+    `get_optional_current_user`). Redis is available, so the liveness
+    check's outage warning cannot appear either."""
 
     @staticmethod
     async def _rejected_token(
