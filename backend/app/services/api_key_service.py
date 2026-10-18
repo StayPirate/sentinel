@@ -55,6 +55,7 @@ from app.core.exceptions import InactiveUserError, ServiceError, UserNotFoundErr
 from app.models.api_key import ApiKey
 from app.models.user import User
 from app.services.identity_audit_log import IdentityAuditLog
+from app.services.user_identifier import user_identifier_condition
 
 logger = structlog.get_logger(__name__)
 
@@ -290,24 +291,6 @@ def _sort_clauses(
     if sort_order is SortOrder.ASC:
         return [nullslast(ApiKey.last_used_at.asc()), ApiKey.id.asc()]
     return [nullslast(ApiKey.last_used_at.desc()), ApiKey.id.desc()]
-
-
-async def _resolve_owner_id(session: AsyncSession, owner: str) -> UUID | None:
-    """Resolve an admin list `owner` filter value to a `User.id`.
-
-    A UUID-shaped value is used directly as the filter — a
-    non-existent user ID naturally matches zero `ApiKey` rows, which is
-    observably identical to an explicit "no such user" result. A
-    non-UUID value is resolved via an exact, case-sensitive `username`
-    lookup; `None` is returned when it matches no user, which the
-    caller must render as an empty page rather than an unfiltered one.
-    """
-    try:
-        return UUID(owner)
-    except ValueError:
-        pass
-    result = await session.execute(select(User.id).where(User.username == owner))
-    return result.scalar_one_or_none()
 
 
 async def _has_conflicting_name(
@@ -723,10 +706,14 @@ async def list_all_keys(
 
     filters: list[ColumnElement[bool]] = []
     if owner is not None:
-        owner_id = await _resolve_owner_id(session, owner)
-        if owner_id is None:
-            return ApiKeyWithOwnerPage(items=[], total=0, page=page, per_page=per_page)
-        filters.append(ApiKey.user_id == owner_id)
+        # The single user-domain matching policy, inside both statements
+        # (`user-service.md`, `resolve_user_identifier()`, composable form).
+        # Uncorrelated and join-free like `identity_audit_log.list_events()`:
+        # it never binds to an outer `User` and never multiplies rows.
+        owner_ids = (
+            select(User.id).where(user_identifier_condition(owner)).correlate(None)
+        )
+        filters.append(ApiKey.user_id.in_(owner_ids))
     if status is not None:
         filters.append(_status_predicate(status, resolved_now))
 

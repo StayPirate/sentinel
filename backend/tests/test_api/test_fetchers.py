@@ -1498,7 +1498,10 @@ class TestTriggerFetcherEndpoint:
                 f"/api/v1/fetchers/{fetcher_name}/trigger"
             )
             assert response.status_code == 503
-            assert response.json()["code"] == "CELERY_UNAVAILABLE"
+            assert response.json() == {
+                "code": "CELERY_UNAVAILABLE",
+                "detail": "Manual run could not be dispatched to the task broker",
+            }
             assert "supersecret" not in response.text
             assert "203.0.113.5" not in response.text
         finally:

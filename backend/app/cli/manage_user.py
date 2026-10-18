@@ -18,7 +18,6 @@ never loads application settings or opens a database connection.
 from __future__ import annotations
 
 import asyncio
-import re
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -35,6 +34,7 @@ from app.cli._runtime import bootstrap, get_session_factory
 from app.core.enums import Role, UserType
 from app.core.passwords import MAX_PASSWORD_LENGTH, MIN_PASSWORD_LENGTH
 from app.core.permissions import role_from_wire, role_to_wire
+from app.core.usernames import RESERVED_USERNAMES, USERNAME_PATTERN
 
 if TYPE_CHECKING:
     from uuid import UUID
@@ -44,12 +44,6 @@ if TYPE_CHECKING:
     from app.models.user import User
     from app.models.user_role import UserRole
     from app.services.user_service import RoleUpdateResult
-
-# Username Format (docs/conventions.md): 1-64 characters, starts with a
-# letter, lowercase letters/numbers/dots/hyphens/underscores only. Mirrors
-# the convention directly rather than importing user_service's private
-# `_USERNAME_PATTERN`, since that name is internal to the service module.
-_USERNAME_PATTERN = re.compile(r"^[a-z][a-z0-9._-]{0,63}$")
 
 # `--full-name` bound (docs/features/identity/user-management.md, `create`
 # and `update`): the `User.full_name` column length, which the API schemas
@@ -102,7 +96,7 @@ def _parse_roles_or_exit(role_values: tuple[str, ...]) -> list[Role]:
 def _normalize_username_or_exit(username: str) -> str:
     """Trim/lowercase `username` and validate its format, or exit 1."""
     normalized = username.strip().lower()
-    if not _USERNAME_PATTERN.fullmatch(normalized):
+    if not USERNAME_PATTERN.fullmatch(normalized):
         click.echo(
             f"Error: Invalid username '{normalized}'. Username must be "
             "1-64 characters, start with a letter, and contain only "
@@ -177,6 +171,10 @@ def create(
     bootstrap()
 
     normalized_username = _normalize_username_or_exit(username)
+    # Creation only: lookups keep reporting a reserved value as unknown.
+    if normalized_username in RESERVED_USERNAMES:
+        click.echo(f"Error: Username '{normalized_username}' is reserved.", err=True)
+        raise SystemExit(1)
     parsed_roles = _parse_roles_or_exit(roles)
     normalized_email = _normalize_email_or_exit(email)
     _check_full_name_length_or_exit(full_name)

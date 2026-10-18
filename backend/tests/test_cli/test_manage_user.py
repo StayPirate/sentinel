@@ -783,6 +783,49 @@ def test_create_invalid_username_exits_one_before_prompting(
 
 
 @pytest.mark.integration
+@pytest.mark.parametrize("value", ["me", " ME "])
+def test_create_reserved_username_exits_one_before_prompting(
+    monkeypatch: pytest.MonkeyPatch,
+    cli_session_factory: async_sessionmaker[AsyncSession],
+    value: str,
+) -> None:
+    """The reserved username is rejected right after normalization: before
+    the role and email validation (both deliberately invalid here), the
+    TTY check (TTY is deliberately not allowed), the password prompt, and
+    any database access."""
+
+    def _forbidden_factory() -> async_sessionmaker[AsyncSession]:
+        raise AssertionError("the command must not access the database")
+
+    def _forbidden_prompt() -> str:
+        raise AssertionError("the command must not prompt for a password")
+
+    monkeypatch.setattr(manage_user_module, "get_session_factory", _forbidden_factory)
+    monkeypatch.setattr(
+        manage_user_module, "prompt_password_with_confirmation", _forbidden_prompt
+    )
+    monkeypatch.setattr(manage_user_module, "is_interactive_terminal", lambda: False)
+
+    result = _invoke(
+        [
+            "manage-user",
+            "create",
+            "--username",
+            value,
+            "--email",
+            "not-an-email",
+            "--role",
+            "bogus",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    assert result.stderr == "Error: Username 'me' is reserved.\n"
+    assert asyncio.run(_fetch_user(cli_session_factory, "me")) is None
+
+
+@pytest.mark.integration
 def test_create_invalid_role_exits_one(
     monkeypatch: pytest.MonkeyPatch,
     cli_session_factory: async_sessionmaker[AsyncSession],
@@ -1376,6 +1419,19 @@ def test_show_not_found_exits_one(
     result = _invoke(["manage-user", "show", "--username", "doesnotexistatall"])
     assert result.exit_code == 1
     assert result.stderr.strip() == "Error: User 'doesnotexistatall' not found."
+
+
+@pytest.mark.integration
+def test_show_reserved_username_reports_unknown_user(
+    monkeypatch: pytest.MonkeyPatch,
+    cli_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Only `create` applies the reservation; a lookup of `me` matches no
+    user and reports the usual unknown-user message."""
+    _inject_session_factory(monkeypatch, cli_session_factory)
+    result = _invoke(["manage-user", "show", "--username", "me"])
+    assert result.exit_code == 1
+    assert result.stderr.strip() == "Error: User 'me' not found."
 
 
 @pytest.mark.integration

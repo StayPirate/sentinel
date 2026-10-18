@@ -260,6 +260,20 @@ class TestNormalizeUsername:
             user_service._normalize_username("1-invalid-secret-username")
         assert "1-invalid-secret-username" not in str(exc_info.value)
 
+    @pytest.mark.parametrize("username", ["me", "ME", " Me "])
+    def test_reserved_username_rejected_after_normalization(
+        self, username: str
+    ) -> None:
+        """`me` is reserved (docs/conventions.md, Username Format) and is
+        checked against the normalized value, so case and surrounding
+        whitespace do not bypass it."""
+        with pytest.raises(UsernameFormatError):
+            user_service._normalize_username(username)
+
+    @pytest.mark.parametrize("username", ["me2", "meta", "m.e", "me_"])
+    def test_reservation_is_exact_not_a_prefix(self, username: str) -> None:
+        assert user_service._normalize_username(username) == username
+
 
 # ---------------------------------------------------------------------------
 # _normalize_and_validate_email()
@@ -442,6 +456,31 @@ class TestCreateUser:
                 password=_VALID_PASSWORD,
                 acting_user_id=None,
             )
+
+    async def test_reserved_username_raises_without_user_or_audit_event(
+        self, db_session: AsyncSession
+    ) -> None:
+        events_before = set(
+            (await db_session.execute(select(IdentityAuditEvent.id))).scalars()
+        )
+
+        with pytest.raises(UsernameFormatError):
+            await create_user(
+                db_session,
+                username=" ME ",
+                email="reserved-name@example.com",
+                password=_VALID_PASSWORD,
+                acting_user_id=None,
+            )
+
+        rows = await db_session.execute(
+            select(User).where(User.email == "reserved-name@example.com")
+        )
+        assert rows.scalars().all() == []
+        events_after = set(
+            (await db_session.execute(select(IdentityAuditEvent.id))).scalars()
+        )
+        assert events_after == events_before
 
     async def test_invalid_email_format_raises(self, db_session: AsyncSession) -> None:
         with pytest.raises(EmailFormatError):
@@ -1141,6 +1180,18 @@ class TestUpdateUser:
             await update_user(
                 db_session, target.id, acting_user_id=None, username="1-invalid"
             )
+
+    async def test_reserved_username_raises_and_keeps_the_username(
+        self, db_session: AsyncSession, user_factory: Callable[..., Awaitable[User]]
+    ) -> None:
+        target = await user_factory(username="jdoe")
+
+        with pytest.raises(UsernameFormatError):
+            await update_user(db_session, target.id, acting_user_id=None, username="ME")
+
+        await db_session.refresh(target)
+        assert target.username == "jdoe"
+        assert await _audit_events_for(db_session, target.id) == []
 
     async def test_duplicate_username_raises_conflict(
         self, db_session: AsyncSession, user_factory: Callable[..., Awaitable[User]]

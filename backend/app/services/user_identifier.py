@@ -1,10 +1,11 @@
 """The single UUID-or-username matching condition on `User`.
 
 Leaf module of the user domain: it imports only Models and SQLAlchemy and
-must never import another service. It exists so that shared infrastructure
-imported by `user_service` itself (for example `BaseAuditLog`, reached through
-`user_service` -> `identity_audit_log` -> `base_audit_log`) can reuse the
-matching rules without a dependency cycle. `user_service` re-exports
+must never import another service. It exists so that services imported by
+`user_service` itself (for example `BaseAuditLog`, reached through
+`user_service` -> `identity_audit_log` -> `base_audit_log`, and
+`api_key_service`) can reuse the matching rules without a dependency cycle.
+`user_service` re-exports
 `user_identifier_condition()` as the public user-domain boundary described in
 `docs/features/identity/user-service.md` (Read Operations,
 `resolve_user_identifier()`); consumers outside that cycle import it from

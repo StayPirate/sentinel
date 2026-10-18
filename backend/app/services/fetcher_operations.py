@@ -79,9 +79,11 @@ _DEFAULT_RUN_TIMEOUT = 3600
 
 # Sanitized, fixed detail message for a manual trigger's Celery
 # publication failure — see `docs/features/platform/fetcher-operations.md`
-# (`trigger_fetcher`, Publication Failure Path). Never includes the raw
-# broker exception string, which routinely contains hostname, IP, port,
-# a Redis URI, or credentials.
+# (`trigger_fetcher`, Publication Failure Path; Trigger Fetcher, 503 response
+# body). Both the persisted run `error_message` and the
+# `FetcherBrokerUnavailableError` message, which is the 503 detail, use it.
+# Never includes the raw broker exception string, which routinely contains
+# hostname, IP, port, a Redis URI, or credentials.
 _BROKER_PUBLICATION_FAILURE_MESSAGE = (
     "Manual run could not be dispatched to the task broker"
 )
@@ -150,7 +152,7 @@ class FetcherBrokerUnavailableError(FetcherOperationsServiceError):
     Ambiguous Broker Acknowledgement)."""
 
     def __init__(self) -> None:
-        super().__init__("Manual run could not be dispatched to the task broker.")
+        super().__init__(_BROKER_PUBLICATION_FAILURE_MESSAGE)
 
 
 class FetcherSettingUnknownError(FetcherOperationsServiceError):

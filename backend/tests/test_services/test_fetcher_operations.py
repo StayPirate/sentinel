@@ -4284,6 +4284,9 @@ class TestTriggerFetcherBrokerFailure:
                 celery_app=celery_test_app,
             )
 
+        assert str(exc_info.value) == (
+            "Manual run could not be dispatched to the task broker"
+        )
         assert "supersecret" not in str(exc_info.value)
         assert "203.0.113.5" not in str(exc_info.value)
 

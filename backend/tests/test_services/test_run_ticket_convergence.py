@@ -806,8 +806,9 @@ class TestUnitIsolation:
         `catalog-not-ready` starts with no Product at all; the second
         unit's maintained request publishes the first current Product, so
         that unit passes the readiness gate. `invalid-package-name` is a
-        persisted `..` marker, which cannot form one URL path segment and
-        fails before any request."""
+        persisted `..` marker, which is outside the public package-name
+        grammar and fails before its unit opens a session or sends any
+        request."""
         (fetcher,) = _roster_names("only")
         _participant(fetcher, "git")
         ticket = await _ticket(world)
@@ -861,6 +862,7 @@ class TestUnitIsolation:
             [] if failure == "invalid-package-name" else [("maintained", failing)]
         )
         assert smelt.requests == [*failing_requests, *_both(succeeding)]
+        assert len(sessions.sessions) == (2 if failure == "invalid-package-name" else 3)
         assert _convergence_logs(logs) == [
             _package_failed(ticket.id, failing, cause),
             _completed(ticket.id, packages=2, converged=1, failed=1, catch_ups=1),
@@ -874,6 +876,66 @@ class TestUnitIsolation:
                 failing: EMPTY_TREE,
                 succeeding: _created(products[0]),
             },
+            [],
+        )
+
+    @pytest.mark.parametrize(
+        "invalid",
+        ["x", "-fictional", "fictional.", "fictional pkg", "fictional-é", ".."],
+        ids=[
+            "one-character",
+            "leading-hyphen",
+            "trailing-dot",
+            "space",
+            "non-ascii",
+            "dot-dot",
+        ],
+    )
+    async def test_persisted_name_outside_the_grammar_fails_before_its_unit(
+        self,
+        world: CommittedWorld,
+        sessions: _Sessions,
+        published: _Publish,
+        monkeypatch: pytest.MonkeyPatch,
+        invalid: str,
+    ) -> None:
+        """A persisted name outside the public package-name grammar fails
+        its unit with the package-input `ValueError` before the unit's
+        session opens and without a SMELT request, even when it is a
+        non-empty single path segment; the next package still commits.
+        Its SMELT answer is a 500, so a request for it would surface as a
+        different failure."""
+        (fetcher,) = _roster_names("only")
+        _participant(fetcher, "git")
+        ticket = await _ticket(world)
+        (valid,) = _names("b")
+        await _package(world, ticket, invalid)
+        await _package(world, ticket, valid)
+        product = await _current_product(world)
+        smelt = _Smelt(
+            {
+                invalid: _Answer(reply(500, {})),
+                valid: _resolves(codestream(IBS_REF, "SLE_15", product.cpe)),
+            }
+        )
+        smelt.install(monkeypatch)
+
+        with capture_logs() as logs:
+            await run_ticket_convergence(
+                ticket_id=ticket.id, session_factory=sessions.maker()
+            )
+
+        assert smelt.requests == _both(valid)
+        assert len(sessions.sessions) == 2
+        assert _convergence_logs(logs) == [
+            _package_failed(ticket.id, invalid, "ValueError"),
+            _completed(ticket.id, packages=2, converged=1, failed=1, catch_ups=1),
+        ]
+        assert published.calls == [_catch_up(fetcher, ticket.id, "git")]
+        assert await _committed(world, ticket.id, invalid, valid) == _Committed(
+            (ANALYSIS, None),
+            [package_added_event(valid, None, CONVERGENCE)],
+            {invalid: EMPTY_TREE, valid: _created(product)},
             [],
         )
 
@@ -951,10 +1013,10 @@ class TestUnitIsolation:
         published: _Publish,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Only the package-input `ValueError` (a persisted name that cannot
-        form one path segment) is isolated; a `ValueError` raised inside a
-        valid unit is an internal contract failure that escapes to the
-        wrapper retry with the `package_resolution` phase."""
+        """Only the package-input `ValueError` (a persisted name outside the
+        public package-name grammar) is isolated; a `ValueError` raised
+        inside a valid unit is an internal contract failure that escapes to
+        the wrapper retry with the `package_resolution` phase."""
         (fetcher,) = _roster_names("only")
         _participant(fetcher, None)
         ticket = await _ticket(world)

@@ -4072,8 +4072,9 @@ _ISOLATED_PACKAGE_FAILURES: Final = (
 )
 """Package-specific resolution failures isolated per unit (package-service.md,
 `run_ticket_convergence()` workflow; #781 K10 (b)). The package-input
-`ValueError` is isolated separately by validating the persisted name before
-the unit, so an internal `ValueError` still escapes."""
+`ValueError` is isolated separately by validating the persisted name against
+the public package-name grammar before the unit, so an internal `ValueError`
+still escapes."""
 
 
 class TicketConvergencePhase(StrEnum):
@@ -4134,6 +4135,17 @@ def _log_package_failure(
     )
 
 
+def _validate_persisted_package_name(package_name: str) -> None:
+    """Reject a persisted name outside the public package-name grammar.
+
+    The grammar subsumes `validate_package_name()`: it rejects `""`, `.`,
+    and `..`, which cannot form one SMELT URL path segment.
+    """
+    if PACKAGE_NAME_GRAMMAR.fullmatch(package_name) is None:
+        msg = "package_name is outside the public package-name grammar"
+        raise ValueError(msg)
+
+
 async def _converge_package(
     session_factory: async_sessionmaker[AsyncSession],
     http_client: httpx.AsyncClient,
@@ -4143,8 +4155,9 @@ async def _converge_package(
 ) -> Literal["converged", "failed", "stale"]:
     """One independent package unit: re-resolve, flush, commit, close, drain.
 
-    A persisted name that cannot form a package path segment (the
-    package-input `ValueError`) and package-specific resolution failures
+    A persisted name outside the public package-name grammar (the
+    package-input `ValueError`, detected before the unit's session opens
+    and without a SMELT request) and package-specific resolution failures
     roll back the unit and are logged; a manual-zone re-entry is a stale
     no-op. Every other exception escapes with the unit not committed or
     its commit outcome unconfirmed; a drain exception escapes after the
@@ -4154,7 +4167,7 @@ async def _converge_package(
     `sync_ibs_requests` catch-up once after every package.
     """
     try:
-        validate_package_name(package_name)
+        _validate_persisted_package_name(package_name)
     except ValueError as exc:
         _log_package_failure(ticket_id, package_name, exc)
         return "failed"

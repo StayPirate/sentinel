@@ -8,9 +8,8 @@ these schemas implement.
 
 from __future__ import annotations
 
-import re
 from datetime import datetime
-from typing import Any, Final
+from typing import Any
 from uuid import UUID
 
 from email_validator import EmailNotValidError, validate_email
@@ -18,18 +17,8 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.core.enums import SortOrder, UserSortField
 from app.core.permissions import role_from_wire
+from app.core.usernames import RESERVED_USERNAMES, USERNAME_PATTERN
 from app.schemas.common import PaginationMeta
-
-# Username Format (docs/conventions.md): 1-64 characters, starts with a
-# letter, lowercase letters/numbers/dots/hyphens/underscores only.
-# Duplicated from `app.services.user_service` deliberately — this is a
-# boundary defense-in-depth check (see `user_service.create_user()`,
-# "Defense in depth, not a single guarantee"): the request schema
-# rejects a malformed username with the generic 422 `VALIDATION_ERROR`
-# before it ever reaches the service, which is the sole guaranteed
-# validation point (also reached by external provisioning, which has no
-# Pydantic boundary in front of it).
-_USERNAME_PATTERN: Final = re.compile(r"^[a-z][a-z0-9._-]{0,63}$")
 
 
 class UserListQuery(BaseModel):
@@ -116,20 +105,28 @@ class UserListResponse(BaseModel):
 def _normalize_username_field(value: Any) -> Any:
     """Shared `username` normalize-and-validate step for admin request
     schemas. Trims and lowercases, then validates against the Username
-    Format pattern. Raises `ValueError` for a non-string value (including
-    explicit `null`) or a syntactically invalid username — Pydantic
+    Format pattern and reserved names (`app.core.usernames`). Raises
+    `ValueError` for a non-string value (including explicit `null`), a
+    syntactically invalid username, or a reserved one — Pydantic
     converts `ValueError` (unlike `TypeError`) raised inside a validator
     to the standard 422 `VALIDATION_ERROR` response.
+
+    A boundary defense-in-depth check (see `user_service.create_user()`,
+    "Defense in depth, not a single guarantee"): the service remains the
+    sole guaranteed validation point, also reached by external
+    provisioning, which has no Pydantic boundary in front of it.
     """
     if not isinstance(value, str):
         raise ValueError("username must be a string.")
     normalized = value.strip().lower()
-    if not _USERNAME_PATTERN.fullmatch(normalized):
+    if not USERNAME_PATTERN.fullmatch(normalized):
         raise ValueError(
             "Username must be 1-64 characters, start with a letter, and "
             "contain only lowercase letters, numbers, dots, hyphens, and "
             "underscores."
         )
+    if normalized in RESERVED_USERNAMES:
+        raise ValueError("Username is reserved.")
     return normalized
 
 

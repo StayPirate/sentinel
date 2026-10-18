@@ -1632,9 +1632,9 @@ class TestListAllKeys:
         self, db_session: AsyncSession
     ) -> None:
         """A syntactically valid UUID that matches no user must return an
-        empty page — this is a structurally distinct code path from the
-        username-miss case above (`_resolve_owner_id` uses the UUID
-        directly as a filter rather than looking up the user first)."""
+        empty page — a UUID-parsable value is matched by `User.id` only,
+        never by username, so this is a different branch of the shared
+        matching condition than the username-miss case above."""
         page = await list_all_keys(
             db_session,
             owner=str(uuid.uuid4()),
@@ -1646,6 +1646,94 @@ class TestListAllKeys:
         )
         assert page.items == []
         assert page.total == 0
+
+    @pytest.mark.parametrize(
+        ("identifier_key", "expected_owner"),
+        [
+            ("shared_uuid", "id_owner"),
+            ("shared_uuid_upper", "id_owner"),
+            ("plain_uuid", "plain"),
+            ("plain_username", "plain"),
+            ("plain_username_upper", None),
+            ("unknown_uuid", None),
+            ("unknown_username", None),
+        ],
+    )
+    async def test_owner_filter_shares_identifier_matching(
+        self,
+        db_session: AsyncSession,
+        user_factory: Callable[..., Awaitable[User]],
+        api_key_factory: Callable[..., Awaitable[ApiKey]],
+        identifier_key: str,
+        expected_owner: str | None,
+    ) -> None:
+        """The owner filter applies the single user-domain matching policy
+        (`docs/features/identity/user-service.md`,
+        `resolve_user_identifier()`): a username shaped like another
+        user's ID selects that ID owner, because a UUID-parsable value is
+        always matched by `User.id`."""
+        # Letter-leading, so its text is also a format-valid username.
+        shared = uuid.UUID("a" + uuid.uuid4().hex[1:])
+        users = {
+            "id_owner": await user_factory(id=shared, username="parity.idowner"),
+            "name_owner": await user_factory(username=str(shared)),
+            "plain": await user_factory(username="parity.plain"),
+        }
+        for user in users.values():
+            await api_key_factory(user_id=user.id)
+        identifier = {
+            "shared_uuid": str(shared),
+            "shared_uuid_upper": str(shared).upper(),
+            "plain_uuid": str(users["plain"].id),
+            "plain_username": "parity.plain",
+            "plain_username_upper": "PARITY.PLAIN",
+            "unknown_uuid": str(uuid.uuid4()),
+            "unknown_username": "no-such-user",
+        }[identifier_key]
+        expected: set[uuid.UUID] = (
+            set() if expected_owner is None else {users[expected_owner].id}
+        )
+
+        page = await list_all_keys(
+            db_session,
+            owner=identifier,
+            status=None,
+            page=1,
+            per_page=20,
+            sort_by=ApiKeySortField.CREATED_AT,
+            sort_order=SortOrder.DESC,
+        )
+
+        assert {item.api_key.user_id for item in page.items} == expected
+        assert len(page.items) == page.total == len(expected)
+
+    async def test_owner_filter_page_beyond_last_returns_empty_items_with_total(
+        self,
+        db_session: AsyncSession,
+        user_factory: Callable[..., Awaitable[User]],
+        api_key_factory: Callable[..., Awaitable[ApiKey]],
+    ) -> None:
+        """The owner filter applies to the count statement independently of
+        the data statement: a page past the owner's last key is empty but
+        still reports the owner's total, not the global one."""
+        owner = await user_factory()
+        other = await user_factory()
+        await api_key_factory(user_id=owner.id, name="k1")
+        await api_key_factory(user_id=owner.id, name="k2")
+        await api_key_factory(user_id=other.id, name="k3")
+
+        page = await list_all_keys(
+            db_session,
+            owner=owner.username,
+            status=None,
+            page=3,
+            per_page=1,
+            sort_by=ApiKeySortField.CREATED_AT,
+            sort_order=SortOrder.DESC,
+        )
+
+        assert page.items == []
+        assert page.total == 2
 
     @pytest.mark.parametrize(
         ("status_filter", "expected_name"),
