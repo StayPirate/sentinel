@@ -646,7 +646,9 @@ Future implementation tests must cover:
   periodic run, the class `default_request_delay` in catch-up, no wait for a
   zero delay, and no wait while a Ticket lock is held;
 - exactly one service-owned audit event for an effective transition and none
-  for checkpoint-only or idempotent outcomes; and
+  for checkpoint-only or idempotent outcomes;
+- no Ticket or package API response declares a checkpoint field or contains a
+  persisted checkpoint `srcmd5` (Track Release Checkpoint); and
 - sanitized logs and public fetcher errors with no raw response, credential, or
   personal data.
 

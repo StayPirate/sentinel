@@ -168,7 +168,7 @@ mutation ownership and identity audit events:
 |---|---|
 | `User.last_login_at` | Authentication session-creation workflow |
 | `ApiKey.last_used_at` | `api_key_service.update_last_used_at()` |
-| `User.synced_at` | External provisioning synchronization workflow through `update_user()` |
+| `User.synced_at` | External provisioning synchronization workflow: the initial value through `create_user()` and updates through `update_user()` |
 
 These boundaries may update only the named metadata field without a lifecycle
 audit event. They do not authorize direct modification of any other user or
