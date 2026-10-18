@@ -583,7 +583,8 @@ omit it; the function then captures one date at entry for its complete chain.
 
 - Ticket must be operable (`ensure_ticket_operable`)
 - Ticket must have `cve_id IS NULL` (else `TicketCVEAlreadySetError`)
-- CVE Resolution Behavior applies (on-demand fetch, conflict check)
+- CVE Resolution Behavior applies (placeholder creation if unknown, conflict
+  check, and the post-commit freshness refresh of step 14)
 
 **Behavioral steps**:
 

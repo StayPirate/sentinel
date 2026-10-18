@@ -109,9 +109,9 @@ Five settings receive special protection in the factory:
 
 Connection pool note: every consumer makes sequential requests (one HTTP
 request at a time per client instance). The pool exists for keepalive
-connection reuse between sequential requests to the same host, not for managing parallelism. These limits
-match httpx defaults and provide ample headroom for future consumers
-with higher concurrency needs.
+connection reuse between sequential requests to the same host, not for
+managing parallelism. These limits match httpx defaults and provide ample
+headroom for future consumers with higher concurrency needs.
 
 #### User-Agent
 

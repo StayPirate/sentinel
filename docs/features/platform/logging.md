@@ -328,18 +328,17 @@ reserved for the CLI Output Contract (`docs/conventions.md`) without
 requiring any CLI-specific logging configuration.
 
 When CLI processes invoke shared service or utility code that uses
-`structlog.get_logger()`, a minimal structlog configuration MUST be
-applied by the CLI command bootstrap
-(`docs/features/platform/cli-infrastructure.md`, Root Command Group &
-Bootstrap). This configuration routes structlog output through stdlib
-`logging` to stderr, uses plain-text format (not JSON, not colorized
-console), and sets the level to WARNING or above — so that DEBUG/INFO messages from service code do not pollute
-CLI output. Correlation IDs (`request_id`, `celery_task_id`,
-`fetcher_run_id`, `ibs_event_id`) are not bound in CLI processes and are
-omitted from log records. The configuration applies the same Redaction
-Processor as the runtime pipeline (see Secrets and PII Discipline).
-stdout remains reserved exclusively for CLI Output Contract output
-(`docs/conventions.md`).
+`structlog.get_logger()`, a minimal structlog configuration MUST be applied by
+the CLI command bootstrap (`docs/features/platform/cli-infrastructure.md`,
+Root Command Group & Bootstrap). This configuration routes structlog output
+through stdlib `logging` to stderr, uses plain-text format (not JSON, not
+colorized console), and sets the level to WARNING or above — so that
+DEBUG/INFO messages from service code do not pollute CLI output. Correlation
+IDs (`request_id`, `celery_task_id`, `fetcher_run_id`, `ibs_event_id`) are not
+bound in CLI processes and are omitted from log records. The configuration
+applies the same Redaction Processor as the runtime pipeline (see Secrets and
+PII Discipline). stdout remains reserved exclusively for CLI Output Contract
+output (`docs/conventions.md`).
 
 Alembic keeps its own independent logging configuration
 (`alembic.ini`, `fileConfig`), because it is a one-shot migration tool
@@ -545,9 +544,9 @@ Logging configuration and correlation-ID propagation are tested as follows:
   with a plain-text stderr message.
 - **Correlation ID propagation**: a dedicated test verifying the ASGI
   middleware adopts the client-supplied `X-Request-ID` when it passes
-  validation and generates a UUIDv7 otherwise, and that the value appears both in the
-  response header and in log records emitted during that request
-  (using `structlog.testing.capture_logs` or equivalent).
+  validation and generates a UUIDv7 otherwise, and that the value appears both
+  in the response header and in log records emitted during that request (using
+  `structlog.testing.capture_logs` or equivalent).
 - **Reset behavior**: tests verifying that `request_id`/
   `celery_task_id`/`fetcher_run_id` do not leak into log records emitted
   by a subsequent, unrelated unit of work in the same process (relevant

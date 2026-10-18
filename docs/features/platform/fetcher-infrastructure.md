@@ -3401,17 +3401,16 @@ Worker Pool Requirement) for the deployment-wide requirement and
 "Worker Startup Handler" above for the startup validation that enforces
 it.
 
-This invariant is guaranteed by persisting the effective hard time limit
-on the `FetcherRun` row itself (see "Per-Run Hard Time Limit" below).
-Stale evaluation always reads the per-run value when available. For a
-`running` row whose `hard_time_limit_seconds` is `NULL`, stale
-evaluation falls back to the fetcher's current `FetcherConfig.run_timeout` — an approximation that may be
-inexact if the config was changed since the run started, but is the
-best available signal and preferable to treating the row as
-permanently non-stale (which would block the fetcher's single-instance
-slot indefinitely). Subsequent configuration changes cannot produce a
-divergence for newly adopted runs because their persisted value is
-immutable.
+This invariant is guaranteed by persisting the effective hard time limit on
+the `FetcherRun` row itself (see "Per-Run Hard Time Limit" below). Stale
+evaluation always reads the per-run value when available. For a `running` row
+whose `hard_time_limit_seconds` is `NULL`, stale evaluation falls back to the
+fetcher's current `FetcherConfig.run_timeout` — an approximation that may be
+inexact if the config was changed since the run started, but is the best
+available signal and preferable to treating the row as permanently non-stale
+(which would block the fetcher's single-instance slot indefinitely).
+Subsequent configuration changes cannot produce a divergence for newly adopted
+runs because their persisted value is immutable.
 
 **Manual path protection (Active Guard)**: the
 `update_fetcher_config()` Run Timeout Active Guard
@@ -3820,17 +3819,17 @@ timestamp and `user_id`. If the same PATCH also changes `enabled` to
 
 ## Data Retention
 
-`FetcherRun` records are retained indefinitely. Each run adds one row; at
-the default schedules (one to eight runs per fetcher per day), the table
-grows by approximately 15,000 rows per year — negligible for
-PostgreSQL. No cleanup task or retention policy is necessary. Orphaned runs (stuck in `queued` or `running` status due to
-an unpublished trigger or an unclean process termination) are resolved
-by the existing Stale Run Detection mechanism at the next scheduled
-acquisition, manual trigger attempt, or `run_timeout` PATCH — see
-`docs/features/platform/fetcher-operations.md` ("Process Crash Between
+`FetcherRun` records are retained indefinitely. Each run adds one row; at the
+default schedules (one to eight runs per fetcher per day), the table grows by
+approximately 15,000 rows per year — negligible for PostgreSQL. No cleanup
+task or retention policy is necessary. Orphaned runs (stuck in `queued` or
+`running` status due to an unpublished trigger or an unclean process
+termination) are resolved by the existing Stale Run Detection mechanism at the
+next scheduled acquisition, manual trigger attempt, or `run_timeout` PATCH —
+see `docs/features/platform/fetcher-operations.md` ("Process Crash Between
 Commit and Enqueue") for the one case where none of these occurs: a
-**deregistered** fetcher, whose orphaned row remains visible as
-`stale: true` until the fetcher is re-registered.
+**deregistered** fetcher, whose orphaned row remains visible as `stale: true`
+until the fetcher is re-registered.
 
 **Manual purge**: if an operator needs to reduce table size for
 operational reasons (disaster recovery, database refresh), a simple

@@ -665,8 +665,7 @@ shape. These include the unavailable-`orev` and unavailable-`rev` 400
 responses, the 404 `no such revision` response, and the unknown-package 404
 response. A change to code that parses these responses re-verifies them live
 under `../../conventions.md` (External Integration Contract Verification).
-Shapes
-verified only through OBS source inspection are recorded in
+Shapes verified only through OBS source inspection are recorded in
 `../integrations/ibs-integration.md` (Track-Release Contract Verification
 Status).
 

@@ -400,15 +400,14 @@ exist:
   publicly. This endpoint is entity-scoped (always filtered by
   `ticket_id`) and does not expose cross-entity audit data.
 
-- **Identity audit log — self-service**
-  (`GET /api/v1/users/me/audit-log`): **Authenticated**, scoped to
-  `target_user_id = current_user.id`. Users can view events that affect
-  their own account (role changes, password resets, API key operations,
-  and field changes from external sync, which only external provisioning
-  produces). The actor field is anonymized to `"system"`, `"self"`, or
-  `"admin"` to prevent identification of the specific administrator. The full, unmasked audit log remains
-  restricted to users with `manage_users` capability at
-  `GET /api/v1/admin/identity/audit-log`.
+- **Identity audit log — self-service** (`GET /api/v1/users/me/audit-log`):
+  **Authenticated**, scoped to `target_user_id = current_user.id`. Users can
+  view events that affect their own account (role changes, password resets,
+  API key operations, and field changes from external sync, which only
+  external provisioning produces). The actor field is anonymized to
+  `"system"`, `"self"`, or `"admin"` to prevent identification of the specific
+  administrator. The full, unmasked audit log remains restricted to users with
+  `manage_users` capability at `GET /api/v1/admin/identity/audit-log`.
 
 The self-service pattern (authenticated access with implicit user
 scoping and actor anonymization) is reusable for future audit trails
