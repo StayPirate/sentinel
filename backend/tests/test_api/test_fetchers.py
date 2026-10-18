@@ -2382,10 +2382,9 @@ class TestListFetcherAuditEventsEndpoint:
     async def test_all_invalid_event_types_still_checks_fetcher_existence(
         self, admin_client: AsyncClient
     ) -> None:
-        """Regression for the fix in this work item: an entirely
-        invalid `event_type` filter must not mask a nonexistent
-        fetcher behind an empty `200` — the existence check always
-        runs first."""
+        """Regression: an entirely invalid `event_type` filter must not
+        mask a nonexistent fetcher behind an empty `200` — the existence
+        check always runs first."""
         FETCHER_REGISTRY.clear()
         response = await admin_client.get(
             "/api/v1/fetchers/no-such-fetcher/audit-log",
