@@ -1,7 +1,7 @@
 """Package-centric operations: package-tree queries, eligibility, and mutations.
 
 See `docs/features/packages/package-service.md` for the full
-specification. This module currently implements the package-tree query
+specification. This module implements the package-tree query
 (Query Operations > `get_ticket_packages()`) in its standalone consumer
 mode and its composed mode, the synchronous manual-zone-exit
 eligibility convergence (`converge_manual_zone_exit_eligibility()`),
@@ -32,8 +32,8 @@ persisted package marker in independent units and dispatches the
 per-Ticket catch-up roster, and the post-ingest CVE package resolution
 workflow `run_post_ingest_package_resolution()` with its task argument
 validation (`parse_post_ingest_arguments()`). This module never imports
-`ticket_service`; it consumes the `ticket_mutations`
-primitives, which never import it back.
+`ticket_service`; it consumes the `ticket_mutations` primitives, which never
+import it back.
 
 Every operation accepts the caller's `AsyncSession` and never commits or
 rolls back; database exceptions propagate unchanged (Transaction

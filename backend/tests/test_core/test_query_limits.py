@@ -4,10 +4,9 @@
 See `docs/api-spec.md` (Query Parameter Length Limit, Undeclared Query
 Parameters) for the authoritative contract under test.
 
-This work item introduces no domain endpoint for these tests — a
-minimal standalone FastAPI app (`_build_test_app()`) exercises the real
-dependency through the actual ASGI/HTTP layer, mirroring the pattern in
-`tests/test_api/test_dependencies.py` (`_build_test_app()`).
+A minimal standalone FastAPI app (`_build_test_app()`) exercises the
+real dependency through the actual ASGI/HTTP layer, mirroring the pattern
+in `tests/test_api/test_dependencies.py` (`_build_test_app()`).
 """
 
 from __future__ import annotations

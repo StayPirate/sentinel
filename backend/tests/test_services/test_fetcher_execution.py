@@ -600,8 +600,8 @@ class TestAcquireFetcherRunStaleBoundary:
     do not set `hard_time_limit_seconds` (defaults to `NULL`), so these
     tests exercise the NULL-fallback path of `is_run_stale()` /
     `resolve_effective_hard_limit()`: staleness is evaluated against
-    the locked `FetcherConfig.run_timeout`, since the row predates (or
-    never received) its own persisted hard limit."""
+    the locked `FetcherConfig.run_timeout`, since the row has no
+    persisted hard limit."""
 
     async def test_elapsed_equal_to_threshold_is_not_stale(
         self,

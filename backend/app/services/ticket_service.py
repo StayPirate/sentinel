@@ -1,7 +1,7 @@
 """Ticket reads, lifecycle operations, and cross-domain Ticket compositions.
 
 See `docs/features/tickets/ticket-service.md` for the full
-specification. This module currently implements the consumer-facing
+specification. This module implements the consumer-facing
 Ticket locator resolution (Ticket Query Operations > Ticket locator
 resolution), the Ticket list (`list_tickets()`), and the Ticket detail
 read in its consumer and mutation-assembly modes (Ticket Query

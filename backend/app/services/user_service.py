@@ -13,11 +13,11 @@ inactive, and unassigns active Tickets in one caller-owned transaction;
 role-mapping operations (`sync_role_mapping()`,
 `delete_role_mapping_roles()`) belong to the deferred external
 provisioning (`docs/features/identity/identity-provisioning.md`) and are
-not implemented. `resolve_user_identifier()`
-and `get_user_roles()` back the shared authentication/authorization
-dependencies. `list_users()` and `get_user()` provide the paginated
-directory and full profile reads; `get_user_by_username()` is the
-username-only profile read used by CLI commands.
+not implemented. `resolve_user_identifier()` and `get_user_roles()` back
+the shared authentication/authorization dependencies. `list_users()` and
+`get_user()` provide the paginated directory and full profile reads;
+`get_user_by_username()` is the username-only profile read used by CLI
+commands.
 
 Module-level defaults (`docs/conventions.md`, Function Specification
 Completeness): every mutating function in this module participates in the

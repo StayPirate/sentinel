@@ -2,12 +2,11 @@
 FastAPI dependencies (backend/app/api/dependencies.py).
 
 See docs/features/identity/authentication.md (Authenticated Principal,
-Middleware: get_current_user, API key validation, Session-Only
+Authentication Dependencies, API key validation, Session-Only
 Authentication Dependency) and docs/features/identity/rbac.md
 (require_capability() Dependency) for the contract under test.
 
-This work item (#117) introduces no domain endpoint — a minimal
-standalone FastAPI app (`_build_test_app()`) exercises the real
+A minimal standalone FastAPI app (`_build_test_app()`) exercises the real
 dependencies through the actual ASGI/HTTP layer without touching the
 production `app`'s route table.
 """
