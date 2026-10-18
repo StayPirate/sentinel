@@ -1,38 +1,35 @@
 """Structural tests enforcing the Backend Layer Architecture dependency
-direction defined in `docs/architecture.md`.
+rules defined in `docs/architecture.md`.
 
-Each layer may only import from the layers listed in its "May depend
-on" column of the Backend Layer Architecture table. Imports of shared
-foundational modules that are not part of the seven-layer table
-(`app.config`, `app.database`, the `app.main` entry point) are always
-allowed — they are leaf infrastructure, not one of the layers whose
-direction this test enforces.
+Every module under `app/` is checked, for runtime and type-checking-only
+imports alike:
+
+- a module in a layer imports only the layers listed in the "May depend
+  on" column of the layer table;
+- a Core module imports no application module outside Core, including
+  the infrastructure modules outside the layer table;
+- `app.config` imports only Core, and `app.database` only `app.config`;
+- no application module imports the entry points `app.main` or
+  `app.ibs_consumer`.
+
+The layers other than Core may also import `app.config`, `app.database`,
+and `app.celery_app`; the entry points compose the application and may
+import any layer.
 """
 
 from __future__ import annotations
 
 import ast
+from collections.abc import Iterable
 from pathlib import Path
 
 import pytest
 
 APP_ROOT = Path(__file__).resolve().parents[2] / "app"
 
-# Directory name (relative to APP_ROOT) -> dotted module prefix, for
-# each layer in the Backend Layer Architecture table.
-LAYER_DIRS: dict[str, str] = {
-    "api": "app.api",
-    "cli": "app.cli",
-    "services": "app.services",
-    "models": "app.models",
-    "schemas": "app.schemas",
-    "core": "app.core",
-    "tasks": "app.tasks",
-}
-
-# The "May depend on" column of the Backend Layer Architecture table.
-# A layer may always import from itself (intra-layer imports); that is
-# enforced separately and not repeated here.
+# Each layer of the Backend Layer Architecture table, by dotted module
+# prefix, mapped to its "May depend on" column. A layer may always import
+# from itself (intra-layer imports).
 ALLOWED_DEPENDENCIES: dict[str, set[str]] = {
     "app.api": {"app.services", "app.schemas", "app.models", "app.core"},
     "app.cli": {"app.services", "app.models", "app.core"},
@@ -43,15 +40,38 @@ ALLOWED_DEPENDENCIES: dict[str, set[str]] = {
     "app.tasks": {"app.services", "app.core"},
 }
 
+# The infrastructure modules outside the layer table.
+INFRASTRUCTURE_MODULES: tuple[str, ...] = (
+    "app.config",
+    "app.database",
+    "app.main",
+    "app.celery_app",
+    "app.ibs_consumer",
+)
 
-def _iter_python_files(directory: Path) -> list[Path]:
-    """Every `.py` file under `directory`, or an empty list if the
-    layer directory does not exist yet (e.g. `app/cli/` has not been
-    created yet — the test then simply has nothing to check for it).
-    """
-    if not directory.is_dir():
-        return []
-    return sorted(directory.rglob("*.py"))
+# Infrastructure modules whose own imports are restricted, mapped to what
+# each may import besides itself.
+INFRASTRUCTURE_ALLOWED_DEPENDENCIES: dict[str, set[str]] = {
+    "app.config": {"app.core"},
+    "app.database": {"app.config"},
+}
+
+# Entry points that no application module imports.
+NEVER_IMPORTED_ENTRY_POINTS = frozenset({"app.main", "app.ibs_consumer"})
+
+
+def _application_files() -> list[Path]:
+    """Every `.py` file under `app/`, including the top-level modules."""
+    return sorted(APP_ROOT.rglob("*.py"))
+
+
+def _module_name(file_path: Path) -> str:
+    """The dotted module name of `file_path`; a package's `__init__.py`
+    is named after its package."""
+    parts = file_path.relative_to(APP_ROOT.parent).with_suffix("").parts
+    if parts[-1] == "__init__":
+        parts = parts[:-1]
+    return ".".join(parts)
 
 
 def _containing_package(file_path: Path) -> str:
@@ -85,12 +105,12 @@ def _imported_app_modules(source: str, package: str) -> set[str]:
 
     Uses a full AST walk (`ast.walk`, not just top-level statements) so
     that imports guarded by `if TYPE_CHECKING:` or nested inside
-    functions are still caught — a cross-layer coupling is a violation
+    functions are still caught — a forbidden coupling is a violation
     whether it is a runtime dependency or a type-only one. Relative
     imports (`from . import x`, `from .. import x`) are resolved to
     their absolute form using `package` (the dotted path of the
     importing file's own package) before the `app.` prefix check, so a
-    cross-layer relative import cannot silently bypass this test.
+    forbidden relative import cannot silently bypass this test.
 
     Two `ast.ImportFrom` shapes require distinct handling:
 
@@ -134,36 +154,64 @@ def _imported_app_modules(source: str, package: str) -> set[str]:
     return modules
 
 
-def _layer_of(module: str) -> str | None:
-    """The layer prefix (e.g. `app.services`) `module` belongs to, or
-    `None` if `module` is outside the seven-layer table — shared
-    infrastructure such as `app.config` or `app.database`, which is
-    always allowed regardless of the importing layer.
+def _component_of(module: str) -> str | None:
+    """The layer prefix (e.g. `app.services`) or infrastructure module
+    (e.g. `app.config`) that `module` belongs to, or `None` for a module
+    that is neither, such as the `app` package itself.
     """
-    for prefix in LAYER_DIRS.values():
+    for prefix in (*ALLOWED_DEPENDENCIES, *INFRASTRUCTURE_MODULES):
         if module == prefix or module.startswith(prefix + "."):
             return prefix
     return None
 
 
-def _iter_layer_violations() -> list[str]:
+def _dependency_violations(importer: str, imported: Iterable[str]) -> list[str]:
+    """Every dependency rule (see the module docstring) that the module
+    `importer` breaks by importing the `imported` application modules."""
+    source = _component_of(importer)
     violations: list[str] = []
-    for dir_name, layer_prefix in LAYER_DIRS.items():
-        for path in _iter_python_files(APP_ROOT / dir_name):
-            source = path.read_text(encoding="utf-8")
-            package = _containing_package(path)
-            for module in _imported_app_modules(source, package):
-                imported_layer = _layer_of(module)
-                if imported_layer is None:
-                    continue  # shared infrastructure, always allowed
-                if imported_layer == layer_prefix:
-                    continue  # intra-layer import, always allowed
-                if imported_layer not in ALLOWED_DEPENDENCIES[layer_prefix]:
-                    violations.append(
-                        f"{path.relative_to(APP_ROOT.parent)}: layer "
-                        f"'{layer_prefix}' must not import from layer "
-                        f"'{imported_layer}' (imports '{module}')"
-                    )
+    for module in sorted(imported):
+        target = _component_of(module)
+        if target == source:
+            continue  # intra-component import, always allowed
+        if target in NEVER_IMPORTED_ENTRY_POINTS:
+            reason = f"no application module may import the entry point '{target}'"
+        elif source is None:
+            continue
+        elif source == "app.core":
+            reason = "Core must not import an application module outside Core"
+        elif source in INFRASTRUCTURE_ALLOWED_DEPENDENCIES:
+            allowed = INFRASTRUCTURE_ALLOWED_DEPENDENCIES[source]
+            if target in allowed:
+                continue
+            reason = f"'{source}' may import only {', '.join(sorted(allowed))}"
+        elif source in ALLOWED_DEPENDENCIES and target in ALLOWED_DEPENDENCIES:
+            if target in ALLOWED_DEPENDENCIES[source]:
+                continue
+            reason = f"layer '{source}' must not import from layer '{target}'"
+        else:
+            continue
+        violations.append(f"{reason} (imports '{module}')")
+    return violations
+
+
+def _synthetic_violations(importer: str, source: str) -> list[str]:
+    """The violations of a synthetic regular module `importer` whose
+    content is `source`."""
+    package = importer.rpartition(".")[0]
+    return _dependency_violations(importer, _imported_app_modules(source, package))
+
+
+def _iter_dependency_violations() -> list[str]:
+    violations: list[str] = []
+    for path in _application_files():
+        imported = _imported_app_modules(
+            path.read_text(encoding="utf-8"), _containing_package(path)
+        )
+        violations.extend(
+            f"{path.relative_to(APP_ROOT.parent)}: {violation}"
+            for violation in _dependency_violations(_module_name(path), imported)
+        )
     return violations
 
 
@@ -218,17 +266,16 @@ class TestImportedAppModulesDetector:
         modules = _imported_app_modules(source, package="app.services")
         assert modules == {"app.services", "app.services.ticket_mutations"}
 
-    def test_parent_package_import_of_shared_infrastructure_is_not_a_layer(
+    def test_parent_package_import_of_infrastructure_resolves_to_its_module(
         self,
     ) -> None:
-        # `from app import config` resolves to "app.config", which is
-        # not one of the seven layers — `_layer_of()` returns None for
-        # it (shared infrastructure, always allowed). The detector still
-        # reports the module; layer classification is a separate step.
+        # `from app import config` resolves to "app.config", the
+        # infrastructure module outside the layer table; classifying it
+        # is a separate step.
         source = "from app import config"
         modules = _imported_app_modules(source, package="app.api")
         assert "app.config" in modules
-        assert _layer_of("app.config") is None
+        assert _component_of("app.config") == "app.config"
 
     def test_ignores_unrelated_third_party_import(self) -> None:
         source = "from fastapi import APIRouter"
@@ -237,13 +284,94 @@ class TestImportedAppModulesDetector:
 
 
 @pytest.mark.unit
-class TestLayerDependencyDirection:
-    """Enforce the dependency direction of the Backend Layer
-    Architecture table (`docs/architecture.md`).
+class TestDependencyRuleDetection:
+    """Self-tests of `_dependency_violations()` over synthetic modules:
+    each rule detects a violation, and the allowed imports pass."""
+
+    @pytest.mark.parametrize(
+        ("importer", "source"),
+        [
+            ("app.core.logging", "from app.config import Settings"),
+            (
+                "app.core.logging",
+                "from typing import TYPE_CHECKING\n"
+                "if TYPE_CHECKING:\n"
+                "    from app.config import Settings\n",
+            ),
+            ("app.core.logging", "from app import database"),
+            ("app.core.logging", "from .. import config"),
+            ("app.core.jwt", "import app.services.user_service"),
+            ("app.services.example", "from app.main import app"),
+            ("app.cli.example", "def run() -> None:\n    import app.ibs_consumer\n"),
+            ("app.celery_app", "from app.ibs_consumer import main"),
+            ("app.config", "from app.database import engine"),
+            ("app.config", "from app.services import settings"),
+            ("app.database", "from app.core.enums import Role"),
+            ("app.services.example", "from app.api import dependencies"),
+        ],
+        ids=[
+            "core-imports-config",
+            "core-imports-config-type-only",
+            "core-imports-database-from-parent-package",
+            "core-imports-config-relatively",
+            "core-imports-layer",
+            "layer-imports-main",
+            "layer-imports-ibs-consumer-in-function",
+            "entry-point-imports-ibs-consumer",
+            "config-imports-database",
+            "config-imports-layer",
+            "database-imports-core",
+            "layer-imports-disallowed-layer",
+        ],
+    )
+    def test_forbidden_import_is_detected(self, importer: str, source: str) -> None:
+        assert _synthetic_violations(importer, source)
+
+    @pytest.mark.parametrize(
+        ("importer", "source"),
+        [
+            ("app.core.logging", "from app.core.enums import Role\nfrom . import jwt"),
+            (
+                "app.services.example",
+                "from app.config import settings\n"
+                "from app.database import Base\n"
+                "from app.celery_app import celery_app\n",
+            ),
+            ("app.tasks.example", "from app.services import x\nfrom app.core import y"),
+            ("app.config", "from app.core.ibs_ssh_key import load_ibs_ssh_private_key"),
+            ("app.database", "from app.config import settings"),
+            (
+                "app.main",
+                "from app.api.v1 import tickets\n"
+                "from app.services import fetcher_discovery\n"
+                "from app.database import async_session_factory\n",
+            ),
+        ],
+        ids=[
+            "core-imports-core",
+            "layer-imports-infrastructure",
+            "layer-imports-allowed-layer",
+            "config-imports-core",
+            "database-imports-config",
+            "entry-point-imports-layers",
+        ],
+    )
+    def test_allowed_import_is_not_reported(self, importer: str, source: str) -> None:
+        assert _synthetic_violations(importer, source) == []
+
+
+@pytest.mark.unit
+class TestDependencyRules:
+    """Enforce the dependency rules of the Backend Layer Architecture
+    (`docs/architecture.md`) over every module under `app/`.
     """
 
-    def test_no_layer_imports_a_disallowed_layer(self) -> None:
-        violations = _iter_layer_violations()
-        assert not violations, "Layer dependency violations found:\n" + "\n".join(
+    def test_every_infrastructure_module_is_checked(self) -> None:
+        modules = {_module_name(path) for path in _application_files()}
+        assert set(INFRASTRUCTURE_MODULES) <= modules
+
+    def test_no_module_breaks_a_dependency_rule(self) -> None:
+        violations = _iter_dependency_violations()
+        assert not violations, "Dependency rule violations found:\n" + "\n".join(
             violations
         )
