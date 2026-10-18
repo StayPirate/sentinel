@@ -6,7 +6,7 @@ import logging
 import re
 from pathlib import PurePosixPath
 from typing import Annotated, Any
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 from pydantic import (
     BeforeValidator,
@@ -506,6 +506,34 @@ class Settings(BaseSettings):
                 " / ".join(empty),
             )
         return self
+
+    def secret_values(self) -> list[str]:
+        """Return the non-empty configured secret values, sorted.
+
+        Derived from the field classification of docs/conventions.md
+        (Secret Field Typing): the value of every `SecretStr` field and the
+        percent-decoded password component of every credential-bearing URL
+        field (a `str` declared with `repr=False`), so a new field
+        classified per that convention is covered without further changes.
+        The Redaction Processor masks these values and applies its own
+        length threshold (docs/features/platform/logging.md, Redaction
+        Processor).
+        """
+        values: set[str] = set()
+        for name, field in type(self).model_fields.items():
+            value = getattr(self, name)
+            if isinstance(value, SecretStr):
+                values.add(value.get_secret_value())
+            elif not field.repr and isinstance(value, str):
+                try:
+                    password = urlsplit(value).password
+                except ValueError:
+                    # Malformed URL: the URI userinfo masking still applies.
+                    continue
+                if password:
+                    values.add(unquote(password))
+        values.discard("")
+        return sorted(values)
 
 
 settings = Settings()
