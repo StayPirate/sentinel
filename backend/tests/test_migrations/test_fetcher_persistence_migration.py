@@ -110,7 +110,7 @@ class TestFetcherPersistenceMigration:
         cfg = isolated_alembic_config()
 
         # 1. Upgrade to the previous head — the schema state before
-        # this work item's migration.
+        # this module's migration (`_REVISION`).
         command.upgrade(cfg, _PREVIOUS_HEAD)
         before = _inspect(alembic_test_database_url)
         assert "fetcher_config" not in before["tables"]

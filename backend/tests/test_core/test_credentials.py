@@ -1,7 +1,7 @@
 """Tests for shared credential extraction (backend/app/core/credentials.py).
 
-See docs/features/identity/authentication.md (Middleware:
-`get_current_user`, Credential resolution) for the precedence contract
+See docs/features/identity/authentication.md (Authentication
+Dependencies, Shared Credential Resolution) for the precedence contract
 under test.
 """
 

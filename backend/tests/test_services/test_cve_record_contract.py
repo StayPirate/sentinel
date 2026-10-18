@@ -9,8 +9,9 @@ Remains Source-Specific, Schema Version Handling) and the payload bounds of
 sanitized live records (docs/conventions.md, External Integration Contract
 Verification; captures documented in `tests/support/cve_record.py`). Every
 consumed field is asserted for name, nesting, type, and nullability through
-a strict test-local typed model; no production parser exists yet, and the
-model is independent of the one it will define.
+a strict test-local typed model, kept independent of the production parser
+(`app/services/cve_record_parser.py`) so that a parser defect cannot hide a
+contract change.
 
 Live verification on 2026-10-08, full scans of both repositories:
 

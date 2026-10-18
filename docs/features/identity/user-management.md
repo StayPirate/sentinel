@@ -13,8 +13,8 @@ Local users serve three primary use cases:
    application workflow without depending on the SUSE internal network
 2. **AI agents and automation**: dedicated accounts for AI agents or
    bots that operate as independent identities with their own audit
-   trail (see `docs/features/identity/authentication.md`, Use Cases: Bots and
-   AI Agents)
+   trail (see `docs/features/identity/api-key-management.md`, Use Cases,
+   Dedicated Automation Identity)
 3. **Environments without SSO**: deployments outside the SUSE corporate
    network where `id.suse.com` is not reachable
 
@@ -86,7 +86,9 @@ interactive terminal (password input).` and exits with code 1.
    If invalid, exits with error:
    `"Error: Invalid username '{value}'. Username must be 1-64 characters,
    start with a letter, and contain only lowercase letters, numbers, dots,
-   hyphens, and underscores."`
+   hyphens, and underscores."` If the normalized username is reserved
+   (`docs/conventions.md`, Username Format), exits with error:
+   `"Error: Username '{value}' is reserved."`
 2. For each `--role` provided, validates that it is a recognized role. If
    not, exits with error:
    `"Error: Invalid role '{value}'. Valid roles are: {list}."`
@@ -937,15 +939,16 @@ Dependency).
 
 | Field | Type | Required | Null | Semantics |
 |---|---|---|---|---|
-| `username` | string | Yes | No | Trimmed, lowercased, and validated per Username Format |
+| `username` | string | Yes | No | Trimmed, lowercased, and validated per Username Format, which reserves `me` |
 | `email` | string | Yes | No | Trimmed and lowercased before format and uniqueness validation |
 | `full_name` | string | No | Yes | Optional display name; omitted or NULL stores NULL |
 | `password` | string | Yes | No | 16-128 characters; never logged or returned |
 | `roles` | array of Role values | No | No | Initial manual roles; defaults to `[]`, and duplicates are rejected by request validation |
 
 Missing required fields, explicit NULL for `username`, `email`, `password`, or
-`roles`, malformed username/email, unknown role values, duplicate role values,
-and wrong field types return the global HTTP 422 `VALIDATION_ERROR` response.
+`roles`, a malformed or reserved username, a malformed email, unknown role
+values, duplicate role values, and wrong field types return the global HTTP
+422 `VALIDATION_ERROR` response.
 Password policy failure is domain validation and returns the error below.
 
 **Behavior**:
@@ -1063,8 +1066,8 @@ Request validation is strict so client mistakes surface instead of being
 silently normalized:
 
 - an omitted field is equivalent to an empty array;
-- an absent request body is equivalent to `{}` (both fields omitted) and is
-  a valid no-op;
+- an absent request body and a literal JSON `null` body are each
+  equivalent to `{}` (both fields omitted) and are a valid no-op;
 - an empty array is valid;
 - explicit `null` for either field returns the global HTTP 422
   `VALIDATION_ERROR`;

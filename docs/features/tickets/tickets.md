@@ -83,8 +83,8 @@ A ticket may optionally be associated with a CVE.
 - The UNIQUE constraint ensures that a CVE can be associated with at most
   one ticket (1:0..1 relationship)
 - Tickets created from CVE ingestion have `cve_id` set at creation time
-- Tickets created manually or from external sources (e.g., bug trackers)
-  start without a CVE
+- Tickets created manually start without a CVE unless the creating user
+  supplies one
 
 ### CVE Resolution Behavior
 
@@ -147,9 +147,12 @@ service-layer contract (locking, audit events, status evaluation).
 
 ### Automatic: CVE Ingestion
 
-When a CVE is ingested from an external source (NVD, MITRE, or future
-sources), a ticket is created automatically. See
-`docs/features/tickets/cve-tracking.md` for the full ingestion flow.
+When `cve_service.upsert_cve()` ingests data for a CVE that has no Ticket,
+it creates the Ticket automatically, whichever CVE source supplied the data
+(see `cve-service.md`, Ticket Creation Decision). New CVE-IDs arrive from
+the sources that ingest every changed record (NVD, MITRE, the Linux Kernel
+CNA, and GHSA); the other sources process only CVEs already in Sentinel.
+See `docs/features/tickets/cve-tracking.md` for the full ingestion flow.
 
 - `cve_id`: set to the ingested CVE
 - `status`: `New`
@@ -184,17 +187,12 @@ service-layer contract (audit events, CVE uniqueness handling).
 
 **`Capability: create_ticket`**
 
-### Future: External Sources
+### Automatic Creation Scope
 
-The data model supports automatic ticket creation from external systems
-(e.g., internal bug trackers). These tickets are created without a CVE
-and follow the same rules as automatic creation:
-
-- `cve_id`: `NULL`
-- `status`: `New`
-- `assignee_id`: `NULL`
-
-Specific integrations will be defined in separate feature specifications.
+CVE ingestion is the only automatic creation source; a Ticket without a CVE
+is created only manually. A further automatic source requires its own
+feature specification and `TicketCreationSource` value (see
+[ticket-service.md](ticket-service.md#create_ticket)).
 
 ## Severity Resolution
 
@@ -1273,7 +1271,7 @@ or remove grant provenance.
 | Field | Type | Description |
 |-------|------|-------------|
 | `cve_id` | string | CVE identifier (e.g., `CVE-2024-1234`) |
-| `title` | string \| null | Brief summary from CNA (max 256 chars). Null if not provided by the CNA |
+| `title` | string \| null | Brief summary (max 256 chars): the CNA title or the GitHub advisory summary, whichever source wrote last. Null if no source provides one |
 | `description` | string \| null | Vulnerability description |
 
 **CVEDetail** — expanded CVE representation for detail views:
@@ -1281,7 +1279,7 @@ or remove grant provenance.
 | Field | Type | Description |
 |-------|------|-------------|
 | `cve_id` | string | CVE identifier (e.g., `CVE-2024-1234`) |
-| `title` | string \| null | Brief summary from CNA (max 256 chars). Null if not provided by the CNA |
+| `title` | string \| null | Brief summary (max 256 chars): the CNA title or the GitHub advisory summary, whichever source wrote last. Null if no source provides one |
 | `description` | string \| null | Vulnerability description |
 | `published_date` | datetime \| null | Date published (UTC) |
 | `modified_date` | datetime \| null | Date last modified (UTC) |
@@ -2274,8 +2272,9 @@ table:
   association) — see
   [Confidential Tickets](#confidential-tickets)
 - Creating tickets: `create_ticket` capability
-- Assigning, changing status, associating CVE, setting manual severity:
-  `triage_ticket` capability
+- Assigning, changing status, associating CVE, setting manual severity, and
+  setting, changing, or clearing the priority override: `triage_ticket`
+  capability
 - Refetching an accessible CVE: `triage_ticket` capability
 - Rerunning complete Ticket convergence: `triage_ticket` OR
   `manage_fetchers`, plus ordinary Ticket visibility

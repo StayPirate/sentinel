@@ -464,7 +464,7 @@ a natural English compound noun: "sync NVD CVEs", "detect IBS releases".
 | Source | External system |
 |--------|----------------|
 | `nvd` | NIST NVD |
-| `mitre` | MITRE CVE Services |
+| `mitre` | MITRE CVE List (cvelistV5) |
 | `redhat` | Red Hat Security Data API |
 | `kernel` | Linux Kernel CNA |
 | `ghsa` | GitHub Advisory Database |
@@ -870,7 +870,7 @@ Note: for NVD, MITRE, and kernel CVE fetchers, `execute()` is global
 on-demand discovery. The default `catch_up()` inherited from
 `BaseCVEFetcher` gives them Ticket convergence support for free.
 
-#### Fetchers that do NOT need `catch_up()` (global scope)
+#### Fetchers that do NOT need `catch_up()`
 
 | Fetcher | Why no catch-up needed |
 |---|---|
@@ -878,6 +878,7 @@ on-demand discovery. The default `catch_up()` inherited from
 | `sync_aimaas_lifecycle` | Syncs all product lifecycle dates |
 | `sync_aimaas_thresholds` | Syncs all CVSS thresholds |
 | `sync_cisa_kev` | Syncs entire KEV catalog (`supports_fetch_single = False` → `participates_in_catch_up` derived as `False`) |
+| `evaluate_failed_cve_sources` | Retries failed `CVESource` records of CVEs with an active Ticket on every run; the participating CVE fetchers' own catch-up already refetches a converged Ticket's CVE (`cve-source-failure-retry.md`) |
 
 Note: `sync_cisa_kev` inherits from `BaseCVEFetcher` but is excluded from
 catch-up because its `supports_fetch_single = False` attribute causes
@@ -2182,8 +2183,13 @@ signal handler** registered in the Celery app module.
 - **Error handling**: the handler first verifies the redbeat
   distributed lock was actually acquired (see Lock Acquisition
   Verification below), then wraps the bootstrap + reconciliation
-  sequence in a `try/except` with `sys.exit(1)` on any failure — lock
-  verification, bootstrap, or reconciliation (explicit fail-fast).
+  sequence in a `try/except`. Any failure — lock verification,
+  bootstrap, or reconciliation — logs CRITICAL `beat_startup_failed`
+  with `stage` (`"lock_verification"`, or
+  `"bootstrap_and_reconciliation"` for every later failure),
+  `error_type` (the exception class name), and `error` (the exception
+  message), then calls `sys.exit(1)` (explicit fail-fast). A successful
+  startup logs INFO `beat_startup_completed`.
 - **Scheduler unchanged**: the `beat_scheduler` Celery setting remains
   `'redbeat.RedBeatScheduler'` (stock, unmodified). No custom scheduler
   subclass is introduced.
@@ -2278,9 +2284,8 @@ To close this gap, Sentinel's `beat_init` handler checks
 receiver (step 4a above), before calling `bootstrap_fetcher_configs()`
 or `reconcile_beat_schedule()`. If the lock was not acquired:
 
-- Beat logs a CRITICAL error:
-  `"CRITICAL: Celery Beat startup failed — redbeat distributed lock
-  was not acquired. Beat will not start."`
+- Beat logs CRITICAL `beat_startup_failed` with
+  `stage="lock_verification"` (see Wiring Mechanism, Error handling)
 - Beat exits with a non-zero exit code
 - The orchestrator restarts Beat according to its restart policy; the
   retry re-attempts lock acquisition from scratch
@@ -2385,10 +2390,10 @@ If PostgreSQL is unreachable during startup reconciliation:
 - Beat MUST NOT start with stale redbeat entries. Using outdated schedules
   is dangerous: a disabled fetcher might still have an entry from before
   the disable, or a schedule change might not be reflected.
-- Beat logs a CRITICAL error:
-  `"CRITICAL: Celery Beat startup failed — cannot read FetcherConfig from
-  PostgreSQL: {error}. Redbeat schedule not reconciled. Beat will not
-  start."`
+- Beat logs CRITICAL `beat_startup_failed` with
+  `stage="bootstrap_and_reconciliation"`, `error_type`, and `error`
+  (see Wiring Mechanism, Error handling); the redbeat schedule is not
+  reconciled
 - Beat exits with a non-zero exit code
 - The orchestrator (Docker/Kubernetes) will restart Beat according to its
   restart policy. On the next attempt, if PostgreSQL is reachable,
@@ -2401,9 +2406,8 @@ restart. Failing fast ensures that the system is either correct or stopped
 
 **Error classes covered**: this fail-fast applies to any database-level
 error during step 1: connection failures, authentication errors, missing
-schema (migrations not yet applied), or query errors. The `{error}`
-placeholder contains the specific exception message for operator
-diagnosis.
+schema (migrations not yet applied), or query errors. The `error` field
+contains the specific exception message for operator diagnosis.
 
 #### Startup Failure: Redis Error During Reconciliation
 
@@ -2419,10 +2423,11 @@ be wrapped in error handling with **fail-on-first-error** semantics: if
 any individual Redis write or delete operation fails, reconciliation
 aborts immediately without attempting remaining operations. Behavior:
 
-- Beat logs a CRITICAL error:
-  `"CRITICAL: Celery Beat reconciliation failed — Redis error during
-  schedule sync: {error}. Partial reconciliation may have occurred.
-  Beat will not start."`
+- Beat logs CRITICAL `beat_startup_failed` with
+  `stage="bootstrap_and_reconciliation"`, `error_type`, and `error`
+  (see Wiring Mechanism, Error handling). Entries written or deleted
+  before the failing operation remain, so the schedule may be partially
+  reconciled
 - Beat exits with a non-zero exit code
 - The orchestrator restarts Beat. On the next attempt, the full
   reconciliation runs from scratch (step 2 unconditionally overwrites,
@@ -3221,8 +3226,8 @@ transaction owned by the `run_fetcher` task wrapper):
    row's own status — Queued Stale Threshold from `created_at` if
    `queued`, Running Stale Threshold from `started_at` using the row's
    own `hard_time_limit_seconds` if `running` — falling back to the
-   locked `FetcherConfig.run_timeout` when the column is `NULL` for
-   historical rows; see "Stale Run Detection"):
+   locked `FetcherConfig.run_timeout` when the column is `NULL`; see
+   "Stale Run Detection"):
    - **No active run**: continue to step 6.
    - **Active run exists and is NOT stale**:
      - Scheduled trigger: discard silently (log INFO, no `FetcherRun`
@@ -3396,18 +3401,16 @@ Worker Pool Requirement) for the deployment-wide requirement and
 "Worker Startup Handler" above for the startup validation that enforces
 it.
 
-This invariant is guaranteed by persisting the effective hard time limit
-on the `FetcherRun` row itself (see "Per-Run Hard Time Limit" below).
-Stale evaluation always reads the per-run value when available. For
-historical `running` rows where `hard_time_limit_seconds` is `NULL`
-(predating the column), stale evaluation falls back to the fetcher's
-current `FetcherConfig.run_timeout` — an approximation that may be
-inexact if the config was changed since the run started, but is the
-best available signal and preferable to treating the row as
-permanently non-stale (which would block the fetcher's single-instance
-slot indefinitely). Subsequent configuration changes cannot produce a
-divergence for newly adopted runs because their persisted value is
-immutable.
+This invariant is guaranteed by persisting the effective hard time limit on
+the `FetcherRun` row itself (see "Per-Run Hard Time Limit" below). Stale
+evaluation always reads the per-run value when available. For a `running` row
+whose `hard_time_limit_seconds` is `NULL`, stale evaluation falls back to the
+fetcher's current `FetcherConfig.run_timeout` — an approximation that may be
+inexact if the config was changed since the run started, but is the best
+available signal and preferable to treating the row as permanently non-stale
+(which would block the fetcher's single-instance slot indefinitely).
+Subsequent configuration changes cannot produce a divergence for newly adopted
+runs because their persisted value is immutable.
 
 **Manual path protection (Active Guard)**: the
 `update_fetcher_config()` Run Timeout Active Guard
@@ -3457,9 +3460,8 @@ under which the worker process executes. This value is:
   - `SoftTimeLimitExceeded` error sanitization message
   - The `stale` field in API responses for `running` runs
 - **NULL** for runs that are never adopted (`queued` rows finalized as
-  `failure` without execution) and for historical rows that predate
-  this column. Historical rows with a NULL value use the runtime
-  fallback defined in the Running Stale Threshold section.
+  `failure` without execution). A `running` row with a NULL value uses the
+  runtime fallback defined in the Running Stale Threshold section.
 
 The runtime configuration snapshot (`FetcherRunConfig`) passed to
 `BaseFetcher.run()` carries the per-run value as its own
@@ -3536,7 +3538,7 @@ the dashboard charts.
 | error_traceback | TEXT | nullable | Full Python traceback (`manage_fetchers` capability required for visibility) |
 | triggered_by | VARCHAR(20) | NOT NULL | `schedule`, `manual` |
 | triggered_by_user_id | UUID | FK(user.id), nullable | User who triggered the run (only for `manual`) |
-| hard_time_limit_seconds | INTEGER | nullable | The effective Celery hard time limit (in seconds) under which the worker executes this run. Persisted atomically at adoption (scheduled INSERT or manual `queued -> running` UPDATE). `NULL` while `status = queued` (not yet adopted), for runs finalized as `failure` without adoption, and for historical rows that predate this column. Used for Running Stale Threshold evaluation, stale finalization message, and `SoftTimeLimitExceeded` diagnostics. Not exposed via the API |
+| hard_time_limit_seconds | INTEGER | nullable | The effective Celery hard time limit (in seconds) under which the worker executes this run. Persisted atomically at adoption (scheduled INSERT or manual `queued -> running` UPDATE). `NULL` while `status = queued` (not yet adopted) and for runs finalized as `failure` without adoption; a `running` row with `NULL` uses the fallback in Stale Run Detection. Used for Running Stale Threshold evaluation, stale finalization message, and `SoftTimeLimitExceeded` diagnostics. Not exposed via the API |
 | cursor | JSONB | nullable | Fetcher-defined checkpoint for the next run. Generic: may contain a commit SHA, timestamp, offset, page token, or any structured cursor. Written when the final run status is `success` or `partial`; read by the next run to determine the starting point. See `docs/features/platform/git-fetcher-infrastructure.md` (Cursor Persistence) for the git-specific usage pattern |
 | created_at | TIMESTAMPTZ | NOT NULL, DEFAULT | Record creation timestamp — for a manual run, this is also the moment the trigger was accepted and the run entered `queued` |
 
@@ -3574,9 +3576,6 @@ the dashboard charts.
   in-memory counters are persisted together during finalization. Queued and
   running rows retain their database defaults of zero, even while a worker has
   processed units internally.
-- `items_succeeded` has no nullable historical compatibility state or backfill
-  contract. Sentinel has no live instance or production database, so the column
-  is introduced directly as `INTEGER NOT NULL DEFAULT 0`.
 - The cursor value must be a JSON-serializable dict. `BaseFetcher.run()`
   validates via `json.dumps()` before writing; a non-serializable value
   raises `TypeError` and the run fails without persisting a cursor.
@@ -3820,17 +3819,17 @@ timestamp and `user_id`. If the same PATCH also changes `enabled` to
 
 ## Data Retention
 
-`FetcherRun` records are retained indefinitely. At ~15 fetchers with 1–4
-executions per day, the table grows by approximately 20,000 rows per
-year — negligible for PostgreSQL. No cleanup task or retention policy is
-necessary. Orphaned runs (stuck in `queued` or `running` status due to
-an unpublished trigger or an unclean process termination) are resolved
-by the existing Stale Run Detection mechanism at the next scheduled
-acquisition, manual trigger attempt, or `run_timeout` PATCH — see
-`docs/features/platform/fetcher-operations.md` ("Process Crash Between
+`FetcherRun` records are retained indefinitely. Each run adds one row; at the
+default schedules (one to eight runs per fetcher per day), the table grows by
+approximately 15,000 rows per year — negligible for PostgreSQL. No cleanup
+task or retention policy is necessary. Orphaned runs (stuck in `queued` or
+`running` status due to an unpublished trigger or an unclean process
+termination) are resolved by the existing Stale Run Detection mechanism at the
+next scheduled acquisition, manual trigger attempt, or `run_timeout` PATCH —
+see `docs/features/platform/fetcher-operations.md` ("Process Crash Between
 Commit and Enqueue") for the one case where none of these occurs: a
-**deregistered** fetcher, whose orphaned row remains visible as
-`stale: true` until the fetcher is re-registered.
+**deregistered** fetcher, whose orphaned row remains visible as `stale: true`
+until the fetcher is re-registered.
 
 **Manual purge**: if an operator needs to reduce table size for
 operational reasons (disaster recovery, database refresh), a simple

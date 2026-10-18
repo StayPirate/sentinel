@@ -170,13 +170,16 @@ timeouts:
   uses `CELERY_BROKER_URL`; consumer liveness is reported by its separate
   status endpoint.
 
-- **SUSE CA certificate NOT included**: the CA is a dependency of Celery
-  workers and the IBS RabbitMQ consumer, not of the API server process.
-  The API server never connects to SUSE internal services directly.
-  Including a worker prerequisite in the API readiness probe would create
-  inappropriate coupling between independent processes. The fetcher
-  dashboard already surfaces certificate-related failures with adequate
-  visibility.
+- **SUSE CA certificate NOT included**: the API server reaches a
+  SUSE-internal service only through the SMELT requests of package addition
+  (`POST /api/v1/tickets/{ticket_id}/packages`). A CA problem fails those
+  requests and the background components that use the CA, not the API's
+  ability to serve other traffic, so removing every API instance from
+  rotation for it would turn a fault confined to one operation into a full
+  API outage. A missing CA file only logs a WARNING (see
+  `docs/features/platform/networking.md`, TLS Trust Store Configuration).
+  The fetcher dashboard already surfaces certificate-related fetcher
+  failures with adequate visibility.
 
 - **No "degraded" status**: the readiness probe is binary by design
   (ready / not ready). Kubernetes does not support a third state. If a
@@ -214,8 +217,8 @@ timeouts:
 
 - `docs/deployment.md` — Health Checks (architectural intent and
   operational configuration)
-- `docs/features/platform/networking.md` — TLS Trust Store (SUSE CA
-  deliberately excluded from readiness checks)
+- `docs/features/platform/networking.md` — TLS Trust Store Configuration
+  (SUSE CA handling; the CA is not a readiness check)
 - `docs/api-spec.md` — Response Format (lists these probe responses among the
   exceptions to the error envelope) and Routing Responses (another method or
   an unknown path below these endpoints)

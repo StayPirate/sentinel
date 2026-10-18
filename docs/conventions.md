@@ -233,6 +233,14 @@ database. Any entry point that accepts a username for user creation MUST
 normalize it (trim whitespace, lowercase) and validate the format before
 storage.
 
+The username `me` is reserved and never assigned: `GET /api/v1/users/me`
+addresses the authenticated user and takes precedence over
+`GET /api/v1/users/{user}`, so a user with that username could not be read by
+username (`docs/api-spec.md`, User Identifier Resolution). Any entry point
+that creates a user or changes a username MUST reject a value whose normalized
+form is reserved, as it rejects a malformed username. Lookups do not apply the
+reservation: a reserved value matches no user.
+
 ### Timestamps & Timezones
 
 Sentinel follows the **"UTC everywhere, local display"** convention:
@@ -2145,8 +2153,8 @@ behavior, or whether a given planning artifact still exists.
 
 - "Phase" as a generic English word for a step within an algorithm,
   transaction, or lifecycle (e.g., "Phase 1 — lock and validate roots",
-  "run() phase 4", or a product/domain lifecycle stage such as
-  "Local-only phase (current)")
+  "run() phase 4", or a product/domain lifecycle stage such as the
+  "extended support phase" of a Product)
 - A scope statement expressed purely in ownership terms, with a
   cross-reference to the actual owning spec (e.g., "The
   `GET /api/v1/ibs-consumer/status` endpoint is defined in

@@ -6,6 +6,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import jwt
 import pytest
@@ -87,6 +88,25 @@ async def _created_session(
     )
     assert created is not None
     return created.session, created.token
+
+
+def _app_log_events(caplog: pytest.LogCaptureFixture) -> list[dict[str, Any]]:
+    """The structured event dicts of every captured `app.*` record."""
+    return [
+        record.msg
+        for record in caplog.records
+        if record.name.startswith("app.") and isinstance(record.msg, dict)
+    ]
+
+
+def _login_outcome_events(caplog: pytest.LogCaptureFixture) -> list[dict[str, Any]]:
+    """The login outcome records (local-authentication.md, Login outcome
+    logging): `session_created` or `login_failed`."""
+    return [
+        event
+        for event in _app_log_events(caplog)
+        if event["event"] in {"session_created", "login_failed"}
+    ]
 
 
 def _expired_token(session: Session) -> str:
@@ -200,6 +220,34 @@ class TestLogout:
             "code": "AUTH_NOT_AUTHENTICATED",
             "detail": "Authentication required",
         }
+
+    @pytest.mark.parametrize(
+        "token",
+        [
+            "malformed-token",
+            jwt.encode(
+                {"sub": str(uuid.uuid4()), "iss": ISSUER},
+                "fictional-other-signing-secret-value",
+                algorithm=ALGORITHM,
+            ),
+        ],
+        ids=["malformed", "foreign_signature"],
+    )
+    async def test_rejected_jwt_emits_no_application_log_record(
+        self,
+        auth_client: AsyncClient,
+        caplog: pytest.LogCaptureFixture,
+        token: str,
+    ) -> None:
+        """Logout's restricted decoding logs no rejected JWT
+        (authentication.md, JWT validation)."""
+        with caplog.at_level("DEBUG"):
+            response = await auth_client.post(
+                "/api/v1/auth/logout", headers={"Authorization": f"Bearer {token}"}
+            )
+
+        assert response.status_code == 401
+        assert _app_log_events(caplog) == []
 
     async def test_api_key_returns_logout_not_applicable(
         self, auth_client: AsyncClient
@@ -640,6 +688,112 @@ class TestLogin:
 
         assert response.status_code == 200
         assert await redis_client.get(f"login_attempts:{user.username}") is None
+
+    @pytest.mark.parametrize(
+        ("case", "expected_status", "expected_event", "expected_reason"),
+        [
+            ("success", 200, "session_created", "local_login"),
+            ("wrong_password", 401, "login_failed", "invalid_password"),
+            ("unknown_user", 401, "login_failed", "unknown_user"),
+            ("overlong_input", 401, "login_failed", "invalid_input"),
+            ("locked", 429, "login_failed", "locked"),
+        ],
+    )
+    async def test_each_login_request_emits_exactly_one_outcome_record(
+        self,
+        auth_client: AsyncClient,
+        local_user_factory: Callable[..., Awaitable[tuple[User, str]]],
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        case: str,
+        expected_status: int,
+        expected_event: str,
+        expected_reason: str,
+    ) -> None:
+        """local-authentication.md, Login outcome logging: one
+        `session_created` or one `login_failed` per request reaching step 1.
+        The lockout precondition is set through the Redis gate directly
+        (see `auth_client`)."""
+        user, password = await local_user_factory()
+        username = user.username
+        if case == "wrong_password":
+            password = "wrong-password-value"
+        elif case == "unknown_user":
+            username = "nosuchuser"
+        elif case == "overlong_input":
+            password = "x" * 129
+        elif case == "locked":
+            monkeypatch.setattr(settings, "login_max_attempts", 1)
+            await guard_and_increment(username)
+
+        with caplog.at_level("INFO"):
+            response = await auth_client.post(
+                "/api/v1/auth/login",
+                json={"username": username, "password": password},
+            )
+
+        assert response.status_code == expected_status
+        outcomes = _login_outcome_events(caplog)
+        assert [outcome["event"] for outcome in outcomes] == [expected_event]
+        assert outcomes[0]["reason"] == expected_reason
+
+    @pytest.mark.usefixtures("auth_client")
+    async def test_login_failed_excludes_user_agent_client_ip_and_username(
+        self,
+        local_user_factory: Callable[..., Awaitable[tuple[User, str]]],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """The record carries no User-Agent, client IP, or attempted
+        username; a dedicated client sets a fictional ASGI peer address
+        (the `auth_client` fixture installs the database override)."""
+        user, _password = await local_user_factory(username="asmith")
+        # Read before the request: the failed request rolls back the
+        # fixture's savepoint (see `auth_client`).
+        user_id = str(user.id)
+        user_agent = "FictionalBrowser/9.1 (ExampleOS; test-agent)"
+        client_ip = "203.0.113.47"
+
+        async with AsyncClient(
+            transport=ASGITransport(app=app, client=(client_ip, 51234)),
+            base_url="http://test",
+        ) as client:
+            with caplog.at_level("INFO"):
+                response = await client.post(
+                    "/api/v1/auth/login",
+                    json={"username": "  ASmith  ", "password": "wrong-password-value"},
+                    headers={"User-Agent": user_agent},
+                )
+
+        assert response.status_code == 401
+        failures = [
+            event
+            for event in _login_outcome_events(caplog)
+            if event["event"] == "login_failed"
+        ]
+        assert len(failures) == 1
+        assert failures[0]["reason"] == "invalid_password"
+        assert failures[0]["user_id"] == user_id
+        record_text = repr(failures[0])
+        for value in (
+            user_agent,
+            client_ip,
+            "ASmith",
+            "asmith",
+            "wrong-password-value",
+        ):
+            assert value not in record_text, f"forbidden value in record: {value!r}"
+
+    async def test_schema_invalid_request_emits_no_outcome_record(
+        self, auth_client: AsyncClient, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A 422 never reaches login step 1, so it emits neither outcome."""
+        with caplog.at_level("INFO"):
+            response = await auth_client.post(
+                "/api/v1/auth/login", json={"username": "jdoe"}
+            )
+
+        assert response.status_code == 422
+        assert _login_outcome_events(caplog) == []
 
     async def test_login_route_is_public_and_documents_error_responses(self) -> None:
         openapi = app.openapi()

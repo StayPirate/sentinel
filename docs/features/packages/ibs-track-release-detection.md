@@ -455,8 +455,11 @@ No detector-specific endpoint or durable catch-up progress state is introduced.
 
 The IBS client's incremental parsing, DTD/entity prohibition, complete-document
 validation, and no-arbitrary-cap contract are defined in
-`../integrations/ibs-integration.md`. For this detector, the parser retains only
-requested source-info entries and canonical labels needed by dependent tracks.
+`../integrations/ibs-integration.md`. For this detector, the source-info parser
+retains only requested entries; `get_diff_issues()` returns every validated
+issue of the diff, and the detector then retains only the canonical CVE labels
+relevant to dependent tracks (step 6 of
+[Scheduled Reconciliation Algorithm](#scheduled-reconciliation-algorithm)).
 A timeout, interrupted body, malformed document, or parser failure invalidates
 the affected request and leaves dependent checkpoints unchanged.
 
@@ -594,7 +597,7 @@ override state.
 
 ## Testing Requirements
 
-Future implementation tests must cover:
+Implementation tests must cover:
 
 - strict active-Ticket, CVE-present, and `workflow_type = ibs` selection;
 - no Ticket/package/track/Product creation and no call to
@@ -646,18 +649,23 @@ Future implementation tests must cover:
   periodic run, the class `default_request_delay` in catch-up, no wait for a
   zero delay, and no wait while a Ticket lock is held;
 - exactly one service-owned audit event for an effective transition and none
-  for checkpoint-only or idempotent outcomes; and
+  for checkpoint-only or idempotent outcomes;
+- no Ticket or package API response declares a checkpoint field or contains a
+  persisted checkpoint `srcmd5` (Track Release Checkpoint); and
 - sanitized logs and public fetcher errors with no raw response, credential, or
   personal data.
 
 ## External Contract Verification
 
-Verified behavior and remaining implementation gates are summarized in
-`../integrations/ibs-integration.md` and `../../data-sources.md`. Before parser
-implementation, retain a sanitized live fixture for every consumed source-info
-and diff shape. These include the unavailable-`orev` and unavailable-`rev` 400
+Verified behavior and the remaining unverified details are recorded in
+`../integrations/ibs-integration.md` (Track-Release Contract Verification
+Status) and `../../data-sources.md` (IBS (Internal Build Service)). Contract
+tests load a sanitized live fixture for every consumed source-info and diff
+shape. These include the unavailable-`orev` and unavailable-`rev` 400
 responses, the 404 `no such revision` response, and the unknown-package 404
-response. Shapes verified only through OBS source inspection are recorded in
+response. A change to code that parses these responses re-verifies them live
+under `../../conventions.md` (External Integration Contract Verification).
+Shapes verified only through OBS source inspection are recorded in
 `../integrations/ibs-integration.md` (Track-Release Contract Verification
 Status).
 
@@ -665,10 +673,10 @@ Sanitized aggregate verification on 2026-09-08 covered 9,620 deployed
 `suse.obs.package.commit` deliveries. Every delivery had non-empty string
 `project` and `package` values, every observed `rev` was a string, no payload
 contained `srcmd5`, and 3,000 deliveries repeated a previously observed
-byte-equivalent payload. This closes the package-commit parser evidence gate.
-The detector consumes only `project` and `package`; the event remains a wake-up
-hint, while source info supplies authoritative current `srcmd5`. Event `rev`,
-delivery order, and duplicate delivery are not checkpoint authority.
+byte-equivalent payload. The detector consumes only `project` and `package`;
+the event remains a wake-up hint, while source info supplies authoritative
+current `srcmd5`. Event `rev`, delivery order, and duplicate delivery are not
+checkpoint authority.
 
 ## Cross-references
 

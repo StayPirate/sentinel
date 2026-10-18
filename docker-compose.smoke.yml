@@ -23,18 +23,15 @@
 # docs/features/platform/testing-strategy.md, Image / Container Smoke
 # Testing).
 #
-# PHASED SERVICES: services whose underlying code does not yet exist are
-# commented out and are uncommented by the change that implements the
-# corresponding process role, together with its smoke assertion (see
-# docs/features/platform/testing-strategy.md, Image / Container Smoke
-# Testing — Artifact-Risk Rule). Keeping them commented lets the argument-free
-# `up --wait` stay green so the CI gate does not block `latest`
-# publication before those services land. `worker`, `git-worker`, and `beat`
-# are active (Celery runtime — see
-# docs/features/platform/fetcher-infrastructure.md and
-# docs/features/platform/git-fetcher-infrastructure.md, Worker Affinity), and
-# so is `ibs-consumer` (standalone IBS RabbitMQ consumer — see
-# docs/features/integrations/ibs-rabbitmq-integration.md).
+# SERVICES: every documented process role has an active service: `api`,
+# the one-shot `migrate` job, `worker`, `git-worker`, and `beat` (Celery
+# runtime — see docs/features/platform/fetcher-infrastructure.md and
+# docs/features/platform/git-fetcher-infrastructure.md, Worker Affinity),
+# and `ibs-consumer` (standalone IBS RabbitMQ consumer — see
+# docs/features/integrations/ibs-rabbitmq-integration.md). A change that
+# adds a process role adds its service here together with its smoke
+# assertion (see docs/features/platform/testing-strategy.md, Image /
+# Container Smoke Testing — Artifact-Risk Rule).
 
 x-app-common: &app-common
   image: ${IMAGE_SMOKE_IMAGE_ID:?IMAGE_SMOKE_IMAGE_ID is required}

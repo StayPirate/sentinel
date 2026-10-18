@@ -2,12 +2,11 @@
 FastAPI dependencies (backend/app/api/dependencies.py).
 
 See docs/features/identity/authentication.md (Authenticated Principal,
-Middleware: get_current_user, API key validation, Session-Only
+Authentication Dependencies, API key validation, Session-Only
 Authentication Dependency) and docs/features/identity/rbac.md
 (require_capability() Dependency) for the contract under test.
 
-This work item (#117) introduces no domain endpoint — a minimal
-standalone FastAPI app (`_build_test_app()`) exercises the real
+A minimal standalone FastAPI app (`_build_test_app()`) exercises the real
 dependencies through the actual ASGI/HTTP layer without touching the
 production `app`'s route table.
 """
@@ -21,7 +20,7 @@ import logging
 import secrets
 import uuid
 from collections.abc import AsyncGenerator, Awaitable, Callable
-from dataclasses import FrozenInstanceError, fields
+from dataclasses import FrozenInstanceError, dataclass, fields
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, cast
 from unittest.mock import AsyncMock
@@ -40,17 +39,23 @@ from app.api.dependencies import (
     AuthenticatedPrincipal,
     AuthenticatedTicketCaller,
     CurrentUser,
+    KeyedWarningLimiter,
     LastUsedDebouncer,
     OptionalCurrentUser,
     OptionalTicketCaller,
-    UnknownKeyWarningLimiter,
     require_accessible_ticket,
     require_any_capability,
     require_capability,
     require_session_authentication,
 )
 from app.config import settings
-from app.core.enums import Capability, CredentialKind, Role, SessionCreationReason
+from app.core.enums import (
+    ApiKeyRejectionReason,
+    Capability,
+    CredentialKind,
+    Role,
+    SessionCreationReason,
+)
 from app.core.errors import AppError, ErrorCode
 from app.core.identifiers import format_ticket_id
 from app.core.jwt import issue_token
@@ -84,11 +89,118 @@ def _dependency_log_text(caplog: pytest.LogCaptureFixture) -> str:
     )
 
 
+def _dependency_events(
+    caplog: pytest.LogCaptureFixture, event: str
+) -> list[dict[str, Any]]:
+    """The structured event dicts named `event` among the records of
+    `app.api.dependencies`."""
+    return [
+        record.msg
+        for record in caplog.records
+        if record.name == "app.api.dependencies"
+        and isinstance(record.msg, dict)
+        and record.msg.get("event") == event
+    ]
+
+
+def _app_records(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    """Every captured application (`app.*`) record."""
+    return [record for record in caplog.records if record.name.startswith("app.")]
+
+
 def _make_api_key_credential() -> tuple[str, str]:
     """Return `(plaintext_token, sha256_hex_digest)` for a synthetic key."""
     token = "stl_ak_" + secrets.token_hex(16)
     digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
     return token, digest
+
+
+# A fictional ASGI peer address (RFC 5737 documentation range).
+_FICTIONAL_PEER = "198.51.100.23"
+
+
+# Matched-key rejection cases and the `reason` each must log
+# (authentication.md, API key validation, Rejected-key warning).
+_REJECTED_KEY_REASONS = {
+    "revoked": "revoked",
+    "expired": "expired",
+    "revoked_and_expired": "revoked",
+    "inactive_owner": "owner_inactive",
+    "missing_owner": "owner_inactive",
+}
+
+
+@dataclass(frozen=True)
+class _RejectedKey:
+    """A presented key matching a stored key that must be rejected, with
+    the values its `api_key_rejected` record must and must not carry."""
+
+    token: str
+    digest: str
+    key_id: str
+    owner_id: str
+    reason: str
+    identifying_values: tuple[str, ...]
+
+
+async def _arrange_rejected_key(
+    case: str,
+    user_factory: Callable[..., Awaitable[User]],
+    api_key_factory: Callable[..., Awaitable[ApiKey]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> _RejectedKey:
+    """Create the key of `case` (a `_REJECTED_KEY_REASONS` key). A missing
+    owner is simulated by making the owner lookup return None, the
+    defensive guard for an `ApiKey.user_id` referencing no User row."""
+    now = datetime.now(UTC)
+    owner = await user_factory(active=case != "inactive_owner")
+    token, digest = _make_api_key_credential()
+    overrides: dict[str, Any] = {}
+    if case in {"revoked", "revoked_and_expired"}:
+        overrides["revoked_at"] = now
+    if case in {"expired", "revoked_and_expired"}:
+        overrides["expires_at"] = now - timedelta(days=1)
+    key = await api_key_factory(user_id=owner.id, key_hash=digest, **overrides)
+    monkeypatch.setattr(dependencies._last_used_debouncer, "touch", AsyncMock())
+    if case == "missing_owner":
+        monkeypatch.setattr(
+            user_service, "get_user_by_id", AsyncMock(return_value=None)
+        )
+    return _RejectedKey(
+        token=token,
+        digest=digest,
+        key_id=str(key.id),
+        owner_id=str(owner.id),
+        reason=_REJECTED_KEY_REASONS[case],
+        identifying_values=(key.prefix, key.name, owner.username, owner.email),
+    )
+
+
+def _assert_single_rejected_key_warning(
+    caplog: pytest.LogCaptureFixture, rejected: _RejectedKey
+) -> None:
+    """Exactly one `api_key_rejected` with the key's internal identifiers
+    and `reason`, no `api_key_validation_failed`, and none of the
+    presented key, its digest, the key prefix or name, the owner's
+    username or email, or the ASGI peer address in this module's logs."""
+    records = _dependency_events(caplog, "api_key_rejected")
+    assert len(records) == 1
+    assert (
+        records[0]["key_id"],
+        records[0]["user_id"],
+        records[0]["reason"],
+        records[0]["suppressed_count"],
+    ) == (rejected.key_id, rejected.owner_id, rejected.reason, 0)
+    assert _dependency_events(caplog, "api_key_validation_failed") == []
+    text = _dependency_log_text(caplog)
+    for value in (
+        rejected.token,
+        rejected.digest,
+        "stl_ak_",
+        _FICTIONAL_PEER,
+        *rejected.identifying_values,
+    ):
+        assert value not in text, f"forbidden value in log: {value!r}"
 
 
 @pytest.fixture(autouse=True)
@@ -98,7 +210,8 @@ def _reset_authentication_state() -> None:
     reset (docs/features/platform/testing-strategy.md, Test
     Independence). Autouse is scoped to this test module only.
     """
-    dependencies._unknown_key_limiter = UnknownKeyWarningLimiter()
+    dependencies._unknown_key_limiter = KeyedWarningLimiter()
+    dependencies._rejected_key_limiter = KeyedWarningLimiter()
     dependencies._last_used_debouncer = LastUsedDebouncer()
 
 
@@ -227,6 +340,20 @@ async def dep_client(
         yield client
 
 
+@pytest.fixture
+async def peer_client(
+    test_app: FastAPI, dep_client: AsyncClient
+) -> AsyncGenerator[AsyncClient]:
+    """`dep_client` (whose fixture installs the database override) seen
+    from the fictional ASGI peer address `_FICTIONAL_PEER`, so a test can
+    prove that address absent from a log record."""
+    async with AsyncClient(
+        transport=ASGITransport(app=test_app, client=(_FICTIONAL_PEER, 50123)),
+        base_url="http://test",
+    ) as client:
+        yield client
+
+
 # ---------------------------------------------------------------------------
 # AuthenticatedPrincipal
 # ---------------------------------------------------------------------------
@@ -307,18 +434,23 @@ class TestErrorFactories:
 
 
 # ---------------------------------------------------------------------------
-# UnknownKeyWarningLimiter
+# KeyedWarningLimiter
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
-class TestUnknownKeyWarningLimiter:
+class TestKeyedWarningLimiter:
+    """The shared per-key limiter of both API key warnings, exercised
+    with peer-address keys (the unknown-key granularity); the
+    rejected-key granularity is covered by
+    `TestRecordRejectedKeyAttempt`."""
+
     def test_first_attempt_returns_zero_suppressed(self) -> None:
-        limiter = UnknownKeyWarningLimiter()
+        limiter = KeyedWarningLimiter()
         assert limiter.record("203.0.113.5", datetime.now(UTC)) == 0
 
     def test_within_window_suppresses_and_accumulates(self) -> None:
-        limiter = UnknownKeyWarningLimiter()
+        limiter = KeyedWarningLimiter()
         now = datetime.now(UTC)
         limiter.record("203.0.113.5", now)
 
@@ -326,7 +458,7 @@ class TestUnknownKeyWarningLimiter:
         assert limiter.record("203.0.113.5", now + timedelta(seconds=20)) is None
 
     def test_after_window_elapses_emits_with_suppressed_count(self) -> None:
-        limiter = UnknownKeyWarningLimiter()
+        limiter = KeyedWarningLimiter()
         now = datetime.now(UTC)
         limiter.record("203.0.113.5", now)
         limiter.record("203.0.113.5", now + timedelta(seconds=10))
@@ -337,21 +469,21 @@ class TestUnknownKeyWarningLimiter:
         assert emitted == 2
 
     def test_window_boundary_at_exactly_60_seconds_emits(self) -> None:
-        limiter = UnknownKeyWarningLimiter()
+        limiter = KeyedWarningLimiter()
         now = datetime.now(UTC)
         limiter.record("203.0.113.5", now)
 
         assert limiter.record("203.0.113.5", now + timedelta(seconds=60)) == 0
 
     def test_distinct_peers_are_independent(self) -> None:
-        limiter = UnknownKeyWarningLimiter()
+        limiter = KeyedWarningLimiter()
         now = datetime.now(UTC)
         limiter.record("203.0.113.5", now)
 
         assert limiter.record("198.51.100.7", now) == 0
 
     def test_inactivity_eviction_resets_state(self) -> None:
-        limiter = UnknownKeyWarningLimiter()
+        limiter = KeyedWarningLimiter()
         now = datetime.now(UTC)
         limiter.record("203.0.113.5", now)
 
@@ -362,7 +494,7 @@ class TestUnknownKeyWarningLimiter:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(dependencies, "_LIMITER_MAX_ENTRIES", 2)
-        limiter = UnknownKeyWarningLimiter()
+        limiter = KeyedWarningLimiter()
         now = datetime.now(UTC)
         limiter.record("peer-a", now)
         limiter.record("peer-b", now)
@@ -424,6 +556,156 @@ class TestRecordUnknownKeyAttempt:
             )
 
         assert _dependency_log_text(caplog) == ""
+
+
+@pytest.mark.unit
+class TestRecordRejectedKeyAttempt:
+    """`_record_rejected_key_attempt()` — the rate-limited
+    `api_key_rejected` WARNING (authentication.md, API key validation,
+    Rejected-key warning), driven with a controlled `now` and a transient
+    `ApiKey`, without HTTP."""
+
+    @staticmethod
+    def _key() -> ApiKey:
+        return ApiKey(
+            id=uuid.uuid4(),
+            user_id=uuid.uuid4(),
+            key_hash=f"{7:064x}",
+            prefix="stl_ak_0a1b2",
+            name="build-pipeline",
+        )
+
+    @staticmethod
+    def _record(key: ApiKey, reason: ApiKeyRejectionReason, now: datetime) -> None:
+        dependencies._record_rejected_key_attempt(key, reason, now)
+
+    def test_emits_exactly_the_documented_fields(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        key = self._key()
+
+        with caplog.at_level(logging.WARNING, logger="app.api.dependencies"):
+            self._record(key, ApiKeyRejectionReason.REVOKED, datetime.now(UTC))
+
+        records = _dependency_events(caplog, "api_key_rejected")
+        assert len(records) == 1
+        event_dict = records[0]
+        assert event_dict["level"] == "warning"
+        # Pipeline keys aside (`_build_test_app()` binds no `request_id`),
+        # the record carries exactly the documented fields.
+        assert set(event_dict) == {
+            "event",
+            "key_id",
+            "user_id",
+            "reason",
+            "suppressed_count",
+            "logger",
+            "level",
+            "timestamp",
+            "app",
+        }
+        assert (
+            event_dict["key_id"],
+            event_dict["user_id"],
+            event_dict["reason"],
+            event_dict["suppressed_count"],
+        ) == (str(key.id), str(key.user_id), "revoked", 0)
+
+    def test_second_attempt_within_window_is_not_logged(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        key = self._key()
+        now = datetime.now(UTC)
+
+        with caplog.at_level(logging.WARNING, logger="app.api.dependencies"):
+            self._record(key, ApiKeyRejectionReason.EXPIRED, now)
+            caplog.clear()
+            self._record(
+                key, ApiKeyRejectionReason.EXPIRED, now + timedelta(seconds=59)
+            )
+
+        assert _dependency_events(caplog, "api_key_rejected") == []
+
+    def test_after_window_reports_suppressed_count(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        key = self._key()
+        now = datetime.now(UTC)
+
+        with caplog.at_level(logging.WARNING, logger="app.api.dependencies"):
+            for offset in (0, 10, 20, 60):
+                self._record(
+                    key,
+                    ApiKeyRejectionReason.OWNER_INACTIVE,
+                    now + timedelta(seconds=offset),
+                )
+
+        assert [
+            record["suppressed_count"]
+            for record in _dependency_events(caplog, "api_key_rejected")
+        ] == [0, 2]
+
+    def test_suppressed_count_aggregates_reasons_and_record_carries_emitting_reason(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Every rejection of the key counts toward its window whatever
+        the reason; the emitted record carries the reason of the call
+        that emits it."""
+        key = self._key()
+        now = datetime.now(UTC)
+        attempts = [
+            (0, ApiKeyRejectionReason.REVOKED),
+            (10, ApiKeyRejectionReason.EXPIRED),
+            (20, ApiKeyRejectionReason.OWNER_INACTIVE),
+            (61, ApiKeyRejectionReason.EXPIRED),
+        ]
+
+        with caplog.at_level(logging.WARNING, logger="app.api.dependencies"):
+            for offset, reason in attempts:
+                self._record(key, reason, now + timedelta(seconds=offset))
+
+        assert [
+            (record["reason"], record["suppressed_count"])
+            for record in _dependency_events(caplog, "api_key_rejected")
+        ] == [("revoked", 0), ("expired", 2)]
+
+    def test_distinct_keys_are_independent(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        first, second = self._key(), self._key()
+        now = datetime.now(UTC)
+
+        with caplog.at_level(logging.WARNING, logger="app.api.dependencies"):
+            self._record(first, ApiKeyRejectionReason.REVOKED, now)
+            self._record(second, ApiKeyRejectionReason.REVOKED, now)
+
+        assert [
+            record["key_id"]
+            for record in _dependency_events(caplog, "api_key_rejected")
+        ] == [str(first.id), str(second.id)]
+
+    def test_unknown_key_peers_cannot_evict_a_rejected_key_entry(
+        self, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The two limiters keep independent state: with room for a single
+        entry, lookup misses from new peer addresses do not evict the
+        rejected key's entry, so its second rejection inside the window
+        stays suppressed."""
+        monkeypatch.setattr(dependencies, "_LIMITER_MAX_ENTRIES", 1)
+        key = self._key()
+        now = datetime.now(UTC)
+
+        with caplog.at_level(logging.WARNING, logger="app.api.dependencies"):
+            self._record(key, ApiKeyRejectionReason.REVOKED, now)
+            for host in ("203.0.113.5", "203.0.113.6"):
+                request = TestRecordUnknownKeyAttempt._FakeRequest(
+                    client=TestRecordUnknownKeyAttempt._FakeClient(host=host)
+                )
+                dependencies._record_unknown_key_attempt(cast(Request, request), now)
+            self._record(key, ApiKeyRejectionReason.REVOKED, now + timedelta(seconds=1))
+
+        assert len(_dependency_events(caplog, "api_key_validation_failed")) == 2
+        assert len(_dependency_events(caplog, "api_key_rejected")) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -682,100 +964,6 @@ class TestGetCurrentUserJwt:
             "detail": "Authentication required",
         }
 
-    async def test_malformed_jwt_returns_generic_401(
-        self, dep_client: AsyncClient
-    ) -> None:
-        response = await dep_client.get(
-            "/whoami", headers={"Authorization": "Bearer not-a-real-token"}
-        )
-
-        assert response.status_code == 401
-        assert response.json() == {
-            "code": "AUTH_NOT_AUTHENTICATED",
-            "detail": "Authentication required",
-        }
-
-    async def test_inactive_session_returns_generic_401(
-        self,
-        dep_client: AsyncClient,
-        db_session: AsyncSession,
-        user_factory: Callable[..., Awaitable[User]],
-        redis_client: redis_asyncio.Redis,
-    ) -> None:
-        user = await user_factory()
-        created = await create_session(
-            db_session,
-            user,
-            SessionCreationReason.LOCAL_LOGIN,
-            expected_password_hash=None,
-        )
-        assert created is not None
-        created.session.is_active = False
-        await db_session.flush()
-
-        response = await dep_client.get(
-            "/whoami", headers={"Authorization": f"Bearer {created.token}"}
-        )
-
-        assert response.status_code == 401
-
-    async def test_inactive_user_returns_generic_401(
-        self,
-        dep_client: AsyncClient,
-        db_session: AsyncSession,
-        user_factory: Callable[..., Awaitable[User]],
-        redis_client: redis_asyncio.Redis,
-    ) -> None:
-        user = await user_factory()
-        created = await create_session(
-            db_session,
-            user,
-            SessionCreationReason.LOCAL_LOGIN,
-            expected_password_hash=None,
-        )
-        assert created is not None
-        # The session must be created while the user is active; deactivate
-        # afterwards so the dependency loads an inactive user with a still
-        # active Session and must reject it.
-        user.active = False
-        await db_session.flush()
-
-        response = await dep_client.get(
-            "/whoami", headers={"Authorization": f"Bearer {created.token}"}
-        )
-
-        assert response.status_code == 401
-
-    async def test_missing_user_returns_generic_401(
-        self,
-        dep_client: AsyncClient,
-        db_session: AsyncSession,
-        user_factory: Callable[..., Awaitable[User]],
-        redis_client: redis_asyncio.Redis,
-    ) -> None:
-        user = await user_factory()
-        created = await create_session(
-            db_session,
-            user,
-            SessionCreationReason.LOCAL_LOGIN,
-            expected_password_hash=None,
-        )
-        assert created is not None
-        issued = issue_token(
-            user_id=uuid.uuid4(),
-            session_id=created.session.id,
-            issued_at=datetime.now(UTC),
-            session_deadline=created.session.expires_at,
-            jwt_expiry_hours=settings.jwt_expiry_hours,
-            secret_key=settings.jwt_secret_key.get_secret_value(),
-        )
-
-        response = await dep_client.get(
-            "/whoami", headers={"Authorization": f"Bearer {issued.token}"}
-        )
-
-        assert response.status_code == 401
-
 
 @pytest.mark.e2e
 class TestSlidingRefresh:
@@ -901,20 +1089,25 @@ class TestGetCurrentUserApiKey:
         user_factory: Callable[..., Awaitable[User]],
         api_key_factory: Callable[..., Awaitable[ApiKey]],
         monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
         user = await user_factory()
         token, digest = _make_api_key_credential()
         await api_key_factory(user_id=user.id, key_hash=digest)
         monkeypatch.setattr(dependencies._last_used_debouncer, "touch", AsyncMock())
 
-        response = await dep_client.get(
-            "/whoami", headers={"Authorization": f"Bearer {token}"}
-        )
+        with caplog.at_level(logging.WARNING, logger="app.api.dependencies"):
+            response = await dep_client.get(
+                "/whoami", headers={"Authorization": f"Bearer {token}"}
+            )
 
         assert response.status_code == 200
         body = response.json()
         assert body["user_id"] == str(user.id)
         assert body["credential_kind"] == "api_key"
+        # A valid key emits neither API key warning.
+        assert _dependency_events(caplog, "api_key_rejected") == []
+        assert _dependency_events(caplog, "api_key_validation_failed") == []
 
     async def test_successful_auth_touches_last_used(
         self,
@@ -959,6 +1152,8 @@ class TestGetCurrentUserApiKey:
         }
         text = _dependency_log_text(caplog)
         assert "api_key_validation_failed" in text
+        # A lookup miss never emits the matched-key warning.
+        assert _dependency_events(caplog, "api_key_rejected") == []
 
         # Complete secrets/PII exclusion contract (authentication.md, API
         # key validation, step 2): the log MUST NOT include the presented
@@ -997,100 +1192,103 @@ class TestGetCurrentUserApiKey:
             "app",
         }
 
-    async def test_revoked_key_returns_generic_401_without_warning(
+    @pytest.mark.parametrize("case", list(_REJECTED_KEY_REASONS))
+    async def test_rejected_key_returns_generic_401_with_rejected_key_warning(
         self,
-        dep_client: AsyncClient,
-        db_session: AsyncSession,
-        user_factory: Callable[..., Awaitable[User]],
-        api_key_factory: Callable[..., Awaitable[ApiKey]],
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        user = await user_factory()
-        token, digest = _make_api_key_credential()
-        await api_key_factory(
-            user_id=user.id, key_hash=digest, revoked_at=datetime.now(UTC)
-        )
-
-        with caplog.at_level(logging.WARNING, logger="app.api.dependencies"):
-            response = await dep_client.get(
-                "/whoami", headers={"Authorization": f"Bearer {token}"}
-            )
-
-        assert response.status_code == 401
-        assert "api_key_validation_failed" not in _dependency_log_text(caplog)
-
-    async def test_expired_key_returns_generic_401_without_warning(
-        self,
-        dep_client: AsyncClient,
-        db_session: AsyncSession,
-        user_factory: Callable[..., Awaitable[User]],
-        api_key_factory: Callable[..., Awaitable[ApiKey]],
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        user = await user_factory()
-        token, digest = _make_api_key_credential()
-        await api_key_factory(
-            user_id=user.id,
-            key_hash=digest,
-            expires_at=datetime.now(UTC) - timedelta(days=1),
-        )
-
-        with caplog.at_level(logging.WARNING, logger="app.api.dependencies"):
-            response = await dep_client.get(
-                "/whoami", headers={"Authorization": f"Bearer {token}"}
-            )
-
-        assert response.status_code == 401
-        assert "api_key_validation_failed" not in _dependency_log_text(caplog)
-
-    async def test_inactive_owner_returns_generic_401(
-        self,
-        dep_client: AsyncClient,
-        db_session: AsyncSession,
+        peer_client: AsyncClient,
         user_factory: Callable[..., Awaitable[User]],
         api_key_factory: Callable[..., Awaitable[ApiKey]],
         monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        case: str,
     ) -> None:
-        user = await user_factory(active=False)
-        token, digest = _make_api_key_credential()
-        await api_key_factory(user_id=user.id, key_hash=digest)
-        monkeypatch.setattr(dependencies._last_used_debouncer, "touch", AsyncMock())
-
-        response = await dep_client.get(
-            "/whoami", headers={"Authorization": f"Bearer {token}"}
+        """A matched key that is revoked (also when its expiration has
+        passed), expired, or owned by an inactive or missing user (the
+        defensive guard for an `ApiKey.user_id` referencing no User row)
+        returns the generic 401 and emits one `api_key_rejected` — never
+        `api_key_validation_failed` — with only internal identifiers
+        (authentication.md, API key validation, Rejected-key warning)."""
+        rejected = await _arrange_rejected_key(
+            case, user_factory, api_key_factory, monkeypatch
         )
 
-        assert response.status_code == 401
-
-    async def test_missing_user_returns_generic_401(
-        self,
-        dep_client: AsyncClient,
-        db_session: AsyncSession,
-        user_factory: Callable[..., Awaitable[User]],
-        api_key_factory: Callable[..., Awaitable[ApiKey]],
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Defensive guard: if the ApiKey.user_id references no User row
-        (e.g. FK violation, data inconsistency), return the generic 401
-        — matching the JWT path's test_missing_user_returns_generic_401.
-        """
-        user = await user_factory()
-        token, digest = _make_api_key_credential()
-        await api_key_factory(user_id=user.id, key_hash=digest)
-        monkeypatch.setattr(dependencies._last_used_debouncer, "touch", AsyncMock())
-        monkeypatch.setattr(
-            user_service, "get_user_by_id", AsyncMock(return_value=None)
-        )
-
-        response = await dep_client.get(
-            "/whoami", headers={"Authorization": f"Bearer {token}"}
-        )
+        with caplog.at_level(logging.WARNING, logger="app.api.dependencies"):
+            response = await peer_client.get(
+                "/whoami", headers={"Authorization": f"Bearer {rejected.token}"}
+            )
 
         assert response.status_code == 401
         assert response.json() == {
             "code": "AUTH_NOT_AUTHENTICATED",
             "detail": "Authentication required",
         }
+        _assert_single_rejected_key_warning(caplog, rejected)
+
+    async def test_repeated_rejection_within_window_logs_once_and_always_401(
+        self,
+        dep_client: AsyncClient,
+        db_session: AsyncSession,
+        user_factory: Callable[..., Awaitable[User]],
+        api_key_factory: Callable[..., Awaitable[ApiKey]],
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Denial is never rate-limited — only the log emission is. The
+        fixture rows are committed to the test savepoint first, so the
+        rollback of each failed request cannot undo them (see
+        `tests/test_api/test_auth.py`, `auth_client`)."""
+        rejected = await _arrange_rejected_key(
+            "revoked", user_factory, api_key_factory, monkeypatch
+        )
+        await db_session.commit()
+
+        with caplog.at_level(logging.WARNING, logger="app.api.dependencies"):
+            responses = [
+                await dep_client.get(
+                    "/whoami", headers={"Authorization": f"Bearer {rejected.token}"}
+                )
+                for _ in range(3)
+            ]
+
+        assert [response.status_code for response in responses] == [401, 401, 401]
+        assert len(_dependency_events(caplog, "api_key_rejected")) == 1
+        assert _dependency_events(caplog, "api_key_validation_failed") == []
+
+
+@pytest.mark.integration
+class TestAuthenticateApiKeyExpirationBoundary:
+    """`_authenticate_api_key()` called directly with a controlled `now`."""
+
+    async def test_expiration_equal_to_now_is_rejected_as_expired(
+        self,
+        db_session: AsyncSession,
+        user_factory: Callable[..., Awaitable[User]],
+        api_key_factory: Callable[..., Awaitable[ApiKey]],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Step 4 rejects when `expires_at <= now`, so a key at exactly its
+        expiration instant reports `expired`."""
+        owner = await user_factory()
+        token, digest = _make_api_key_credential()
+        expires_at = datetime.now(UTC) + timedelta(hours=1)
+        key = await api_key_factory(
+            user_id=owner.id, key_hash=digest, expires_at=expires_at
+        )
+
+        with (
+            caplog.at_level(logging.WARNING, logger="app.api.dependencies"),
+            pytest.raises(AppError) as exc_info,
+        ):
+            await dependencies._authenticate_api_key(
+                db_session, cast(Request, None), token, expires_at
+            )
+
+        assert exc_info.value.status_code == 401
+        assert exc_info.value.code == ErrorCode.AUTH_NOT_AUTHENTICATED
+        records = _dependency_events(caplog, "api_key_rejected")
+        assert [(r["key_id"], r["reason"]) for r in records] == [
+            (str(key.id), "expired")
+        ]
 
 
 # ---------------------------------------------------------------------------
@@ -1103,7 +1301,9 @@ class TestGetCurrentUserApiKey:
 # share the same `_resolve_principal()` selection/validation path — the
 # rejection-matrix scenarios below are the optional-path counterparts of
 # `TestGetCurrentUserJwt`/`TestGetCurrentUserApiKey` above and prove the two
-# dependencies never diverge on a selected credential.
+# dependencies never diverge on a selected credential. The rejected-JWT
+# matrix (malformed, expired, inactive session, inactive or missing user)
+# runs against both dependencies in `TestRejectedJwtIsNotLogged`.
 
 
 @pytest.mark.e2e
@@ -1136,14 +1336,17 @@ class TestGetOptionalCurrentUserAnonymous:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Absence of a credential must short-circuit before any user
-        lookup, `last_used_at` touch, or unknown-key warning — each
-        side effect is made to fail loudly if invoked."""
+        lookup, `last_used_at` touch, or API key warning — each side
+        effect is made to fail loudly if invoked."""
 
         async def _fail_get_user_by_id(*args: Any, **kwargs: Any) -> User:
             raise AssertionError("user lookup must not occur when anonymous")
 
         def _fail_record_unknown_key(*args: Any, **kwargs: Any) -> None:
             raise AssertionError("unknown-key warning must not occur when anonymous")
+
+        def _fail_record_rejected_key(*args: Any, **kwargs: Any) -> None:
+            raise AssertionError("rejected-key warning must not occur when anonymous")
 
         monkeypatch.setattr(user_service, "get_user_by_id", _fail_get_user_by_id)
         monkeypatch.setattr(
@@ -1153,6 +1356,9 @@ class TestGetOptionalCurrentUserAnonymous:
         )
         monkeypatch.setattr(
             dependencies, "_record_unknown_key_attempt", _fail_record_unknown_key
+        )
+        monkeypatch.setattr(
+            dependencies, "_record_rejected_key_attempt", _fail_record_rejected_key
         )
 
         response = await dep_client.get("/optional-whoami")
@@ -1348,19 +1554,6 @@ class TestGetOptionalCurrentUserRejection:
     anonymous access — see authentication.md,
     `get_optional_current_user`."""
 
-    async def test_malformed_jwt_returns_generic_401(
-        self, dep_client: AsyncClient
-    ) -> None:
-        response = await dep_client.get(
-            "/optional-whoami", headers={"Authorization": "Bearer not-a-real-token"}
-        )
-
-        assert response.status_code == 401
-        assert response.json() == {
-            "code": "AUTH_NOT_AUTHENTICATED",
-            "detail": "Authentication required",
-        }
-
     async def test_invalid_non_empty_bearer_does_not_fall_back_to_valid_cookie(
         self,
         dep_client: AsyncClient,
@@ -1385,87 +1578,6 @@ class TestGetOptionalCurrentUserRejection:
 
         assert response.status_code == 401
 
-    async def test_inactive_session_returns_generic_401(
-        self,
-        dep_client: AsyncClient,
-        db_session: AsyncSession,
-        user_factory: Callable[..., Awaitable[User]],
-        redis_client: redis_asyncio.Redis,
-    ) -> None:
-        user = await user_factory()
-        created = await create_session(
-            db_session,
-            user,
-            SessionCreationReason.LOCAL_LOGIN,
-            expected_password_hash=None,
-        )
-        assert created is not None
-        created.session.is_active = False
-        await db_session.flush()
-
-        response = await dep_client.get(
-            "/optional-whoami", headers={"Authorization": f"Bearer {created.token}"}
-        )
-
-        assert response.status_code == 401
-
-    async def test_inactive_user_returns_generic_401(
-        self,
-        dep_client: AsyncClient,
-        db_session: AsyncSession,
-        user_factory: Callable[..., Awaitable[User]],
-        redis_client: redis_asyncio.Redis,
-    ) -> None:
-        user = await user_factory()
-        created = await create_session(
-            db_session,
-            user,
-            SessionCreationReason.LOCAL_LOGIN,
-            expected_password_hash=None,
-        )
-        assert created is not None
-        # The session must be created while the user is active; deactivate
-        # afterwards so the dependency loads an inactive user with a still
-        # active Session and must reject it.
-        user.active = False
-        await db_session.flush()
-
-        response = await dep_client.get(
-            "/optional-whoami", headers={"Authorization": f"Bearer {created.token}"}
-        )
-
-        assert response.status_code == 401
-
-    async def test_missing_user_returns_generic_401(
-        self,
-        dep_client: AsyncClient,
-        db_session: AsyncSession,
-        user_factory: Callable[..., Awaitable[User]],
-        redis_client: redis_asyncio.Redis,
-    ) -> None:
-        user = await user_factory()
-        created = await create_session(
-            db_session,
-            user,
-            SessionCreationReason.LOCAL_LOGIN,
-            expected_password_hash=None,
-        )
-        assert created is not None
-        issued = issue_token(
-            user_id=uuid.uuid4(),
-            session_id=created.session.id,
-            issued_at=datetime.now(UTC),
-            session_deadline=created.session.expires_at,
-            jwt_expiry_hours=settings.jwt_expiry_hours,
-            secret_key=settings.jwt_secret_key.get_secret_value(),
-        )
-
-        response = await dep_client.get(
-            "/optional-whoami", headers={"Authorization": f"Bearer {issued.token}"}
-        )
-
-        assert response.status_code == 401
-
     async def test_unknown_api_key_returns_generic_401_with_warning(
         self,
         dep_client: AsyncClient,
@@ -1484,71 +1596,36 @@ class TestGetOptionalCurrentUserRejection:
             "detail": "Authentication required",
         }
         assert "api_key_validation_failed" in _dependency_log_text(caplog)
+        assert _dependency_events(caplog, "api_key_rejected") == []
 
-    async def test_revoked_api_key_returns_generic_401_without_warning(
+    @pytest.mark.parametrize("case", ["revoked", "expired", "inactive_owner"])
+    async def test_rejected_api_key_returns_generic_401_with_rejected_key_warning(
         self,
-        dep_client: AsyncClient,
-        db_session: AsyncSession,
-        user_factory: Callable[..., Awaitable[User]],
-        api_key_factory: Callable[..., Awaitable[ApiKey]],
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        user = await user_factory()
-        token, digest = _make_api_key_credential()
-        await api_key_factory(
-            user_id=user.id, key_hash=digest, revoked_at=datetime.now(UTC)
-        )
-
-        with caplog.at_level(logging.WARNING, logger="app.api.dependencies"):
-            response = await dep_client.get(
-                "/optional-whoami", headers={"Authorization": f"Bearer {token}"}
-            )
-
-        assert response.status_code == 401
-        assert "api_key_validation_failed" not in _dependency_log_text(caplog)
-
-    async def test_expired_api_key_returns_generic_401_without_warning(
-        self,
-        dep_client: AsyncClient,
-        db_session: AsyncSession,
-        user_factory: Callable[..., Awaitable[User]],
-        api_key_factory: Callable[..., Awaitable[ApiKey]],
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        user = await user_factory()
-        token, digest = _make_api_key_credential()
-        await api_key_factory(
-            user_id=user.id,
-            key_hash=digest,
-            expires_at=datetime.now(UTC) - timedelta(days=1),
-        )
-
-        with caplog.at_level(logging.WARNING, logger="app.api.dependencies"):
-            response = await dep_client.get(
-                "/optional-whoami", headers={"Authorization": f"Bearer {token}"}
-            )
-
-        assert response.status_code == 401
-        assert "api_key_validation_failed" not in _dependency_log_text(caplog)
-
-    async def test_inactive_api_key_owner_returns_generic_401(
-        self,
-        dep_client: AsyncClient,
-        db_session: AsyncSession,
+        peer_client: AsyncClient,
         user_factory: Callable[..., Awaitable[User]],
         api_key_factory: Callable[..., Awaitable[ApiKey]],
         monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        case: str,
     ) -> None:
-        user = await user_factory(active=False)
-        token, digest = _make_api_key_credential()
-        await api_key_factory(user_id=user.id, key_hash=digest)
-        monkeypatch.setattr(dependencies._last_used_debouncer, "touch", AsyncMock())
-
-        response = await dep_client.get(
-            "/optional-whoami", headers={"Authorization": f"Bearer {token}"}
+        """The same `api_key_rejected` path as mandatory authentication
+        (authentication.md, `get_optional_current_user`)."""
+        rejected = await _arrange_rejected_key(
+            case, user_factory, api_key_factory, monkeypatch
         )
 
+        with caplog.at_level(logging.WARNING, logger="app.api.dependencies"):
+            response = await peer_client.get(
+                "/optional-whoami",
+                headers={"Authorization": f"Bearer {rejected.token}"},
+            )
+
         assert response.status_code == 401
+        assert response.json() == {
+            "code": "AUTH_NOT_AUTHENTICATED",
+            "detail": "Authentication required",
+        }
+        _assert_single_rejected_key_warning(caplog, rejected)
 
     async def test_database_failure_propagates_rather_than_anonymous(
         self,
@@ -1583,6 +1660,84 @@ class TestGetOptionalCurrentUserRejection:
                 "/optional-whoami",
                 headers={"Authorization": f"Bearer {created.token}"},
             )
+
+
+@pytest.mark.e2e
+class TestRejectedJwtIsNotLogged:
+    """A rejected JWT emits no log record of its own under mandatory or
+    optional authentication — token expiry and `JWT_SECRET_KEY` rotation
+    make such rejections routine (authentication.md, JWT validation;
+    `get_optional_current_user`). Redis is available, so the liveness
+    check's outage warning cannot appear either."""
+
+    @staticmethod
+    async def _rejected_token(
+        kind: str,
+        db_session: AsyncSession,
+        user_factory: Callable[..., Awaitable[User]],
+    ) -> str:
+        if kind == "malformed":
+            return "not-a-real-token"
+        user = await user_factory()
+        created = await create_session(
+            db_session,
+            user,
+            SessionCreationReason.LOCAL_LOGIN,
+            expected_password_hash=None,
+        )
+        assert created is not None
+        if kind == "inactive_session":
+            created.session.is_active = False
+        elif kind == "inactive_user":
+            user.active = False
+        await db_session.flush()
+        if kind in {"inactive_session", "inactive_user"}:
+            return created.token
+        issued_at = datetime.now(UTC)
+        user_id = user.id
+        if kind == "expired":
+            issued_at -= timedelta(hours=settings.jwt_expiry_hours + 1)
+        else:
+            assert kind == "missing_user"
+            user_id = uuid.uuid4()
+        return issue_token(
+            user_id=user_id,
+            session_id=created.session.id,
+            issued_at=issued_at,
+            session_deadline=created.session.expires_at,
+            jwt_expiry_hours=settings.jwt_expiry_hours,
+            secret_key=settings.jwt_secret_key.get_secret_value(),
+        ).token
+
+    @pytest.mark.parametrize("path", ["/whoami", "/optional-whoami"])
+    @pytest.mark.parametrize(
+        "kind",
+        ["malformed", "expired", "inactive_session", "inactive_user", "missing_user"],
+    )
+    async def test_rejected_jwt_returns_401_without_log_record(
+        self,
+        dep_client: AsyncClient,
+        db_session: AsyncSession,
+        user_factory: Callable[..., Awaitable[User]],
+        redis_client: redis_asyncio.Redis,
+        caplog: pytest.LogCaptureFixture,
+        kind: str,
+        path: str,
+    ) -> None:
+        token = await self._rejected_token(kind, db_session, user_factory)
+
+        with caplog.at_level(logging.DEBUG):
+            caplog.clear()
+            response = await dep_client.get(
+                path, headers={"Authorization": f"Bearer {token}"}
+            )
+
+        assert response.status_code == 401
+        assert response.json() == {
+            "code": "AUTH_NOT_AUTHENTICATED",
+            "detail": "Authentication required",
+        }
+        assert _app_records(caplog) == []
 
 
 # ---------------------------------------------------------------------------

@@ -225,6 +225,13 @@ so no grace period is required. (2026-08-09)
 
 **Status**: RESOLVED — Accepted as-is. Rate limiting fail-open during Redis outage is an acceptable tradeoff for an internal tool on a trusted network. Failed login attempts are logged at WARNING level regardless. (2026-05-05)
 
+**Superseded**: The premise "Failed login attempts are logged at WARNING level
+regardless" was never specified or implemented. Every failed local login now
+emits `login_failed` at INFO, including on the Redis fail-open path, where
+`attempt_count` is omitted and the lockout transition cannot fire; see
+`docs/features/identity/local-authentication.md` (Login outcome logging). The
+fail-open tradeoff itself is unchanged. (2026-10-18)
+
 ### AUTH-SEC-02 — HS256 symmetric key — any reader can forge tokens (Medium)
 
 **Status**: RESOLVED — HS256 accepted as a conscious tradeoff for an internal tool with a small deployment surface. All processes sharing `JWT_SECRET_KEY` are within the same trust boundary. (2026-05-05)

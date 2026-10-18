@@ -99,10 +99,11 @@ parsed and canonicalized according to this specification before review.
 There is no automated sync. The committed file is the sole runtime
 source of truth; AIMAAS is not a Sentinel runtime dependency.
 
-Every deployed mapping file MUST conform to the canonical grammar before
-the loader and CI validation are enabled for it. Repository work that
-introduces validation is responsible for normalizing any pre-existing
-non-canonical entries in the same change.
+Every committed mapping file MUST conform to the canonical grammar. The
+loader rejects a non-conforming file (Resolution Function, Validation rules),
+and the CI validation below rejects it before deployment. A change that
+tightens the grammar or the validation normalizes every existing entry in the
+same change.
 
 **Operational workflow for mapping changes**: when a mapping entry is
 added or modified, the person making the change SHOULD:

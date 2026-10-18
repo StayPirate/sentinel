@@ -232,7 +232,6 @@ class TestResponseValidation:
         with pytest.raises(ValidationError):
             parse_advisory(_advisory(**fields))
 
-    @pytest.mark.parametrize("field", ["published_at", "updated_at"])
     @pytest.mark.parametrize(
         "value",
         [
@@ -258,13 +257,10 @@ class TestResponseValidation:
             "invalid_month",
         ],
     )
-    def test_invalid_date_time_is_a_schema_mismatch(
-        self, field: str, value: Any
-    ) -> None:
+    def test_invalid_date_time_is_a_schema_mismatch(self, value: Any) -> None:
         with pytest.raises(ValidationError):
-            parse_advisory(_advisory(**{field: value}))
+            parse_advisory(_advisory(updated_at=value))
 
-    @pytest.mark.parametrize("field", ["published_at", "updated_at"])
     @pytest.mark.parametrize("character", INADMISSIBLE_CHARACTERS)
     @pytest.mark.parametrize(
         "template",
@@ -279,12 +275,12 @@ class TestResponseValidation:
         ids=["trailing", "leading", "separator", "before_zone", "after_offset", "only"],
     )
     def test_inadmissible_character_in_a_date_time_is_a_schema_mismatch(
-        self, field: str, template: str, character: str
+        self, template: str, character: str
     ) -> None:
         """`fromisoformat` would accept either character as the date/time
         separator (External String Admissibility)."""
         with pytest.raises(ValidationError):
-            parse_advisory(_advisory(**{field: template.format(character)}))
+            parse_advisory(_advisory(updated_at=template.format(character)))
 
     @pytest.mark.parametrize(
         ("value", "expected"),
@@ -304,12 +300,11 @@ class TestResponseValidation:
     def test_date_time_with_an_offset_is_an_aware_instant(
         self, value: str, expected: datetime
     ) -> None:
-        advisory = parse_advisory(_advisory(published_at=value, updated_at=value))
+        advisory = parse_advisory(_advisory(updated_at=value))
 
-        assert advisory.published_at == expected
         assert advisory.updated_at == expected
-        assert advisory.published_at is not None
-        assert advisory.published_at.utcoffset() is not None
+        assert advisory.updated_at is not None
+        assert advisory.updated_at.utcoffset() is not None
 
     @pytest.mark.parametrize(
         "field",
@@ -348,7 +343,6 @@ class TestResponseValidation:
         "body",
         [
             _advisory(summary=[SECRET_INPUT]),
-            _advisory(published_at=SECRET_INPUT),
             _advisory(updated_at=f"2024-06-19T{SECRET_INPUT}"),
             _advisory(references=SECRET_INPUT),
             _advisory(references=[SECRET_INPUT, 1]),
@@ -362,7 +356,6 @@ class TestResponseValidation:
         ],
         ids=[
             "summary_list",
-            "unparseable_published_at",
             "unparseable_updated_at",
             "references_string",
             "references_items",
@@ -468,7 +461,7 @@ class TestGlobalFields:
 
         assert payload.title == "Fictional summary."
         assert payload.description == "Fictional **markdown** description."
-        assert payload.published_date == datetime(2024, 6, 19, 15, 4, 41, tzinfo=UTC)
+        assert "published_date" not in payload.model_fields_set
         assert payload.modified_date == datetime(2026, 9, 24, 14, 45, 27, tzinfo=UTC)
         assert payload.modified_date is not None
         assert payload.modified_date.utcoffset() == timedelta(0)
@@ -488,7 +481,6 @@ class TestGlobalFields:
         [
             ("summary", "title"),
             ("description", "description"),
-            ("published_at", "published_date"),
             ("updated_at", "modified_date"),
         ],
     )
@@ -1400,6 +1392,7 @@ IGNORED_TOP_LEVEL: Final[dict[str, Any]] = {
     "identifiers": [{"type": "GHSA", "value": SECRET_INPUT}],
     "comments": "many",
     "withdrawn_at": 1,
+    "published_at": SECRET_INPUT,
     "nvd_published_at": [],
     "github_reviewed_at": {},
     "url": 1,
@@ -1463,6 +1456,23 @@ class TestIgnoredFields:
         payload = _extract(nvd_published_at="2024-06-19T15:04:41Z").payload
 
         assert "published_date" not in payload.model_fields_set
+
+    @pytest.mark.parametrize(
+        "value",
+        ["2024-06-19T15:04:41Z", None, SECRET_INPUT, "2024-06-19", 1_700_000_000],
+        ids=["date_time", "null", "text", "date_only", "int"],
+    )
+    def test_published_at_is_never_the_published_date(self, value: Any) -> None:
+        """The advisory publication is unconsumed: any value parses and
+        neither sets nor clears `published_date`."""
+        payload = _extract(
+            published_at=value, updated_at="2026-09-24T16:45:27Z"
+        ).payload
+
+        assert "published_date" not in payload.model_fields_set
+        assert payload.published_date is None
+        assert payload.modified_date == datetime(2026, 9, 24, 16, 45, 27, tzinfo=UTC)
+        assert SECRET_INPUT not in payload.model_dump_json()
 
 
 # ---------------------------------------------------------------------------
@@ -1669,7 +1679,7 @@ class TestLiveFixtures:
         assert isinstance(payload, CVEIngestPayload)
         assert payload.title == body["summary"]
         assert payload.description == body["description"]
-        assert payload.published_date == _iso(body["published_at"])
+        assert "published_date" not in payload.model_fields_set
         assert payload.modified_date == _iso(body["updated_at"])
         entries = _entries(extraction)
         assert len(entries) == len(body["vulnerabilities"])

@@ -26,7 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import settings
 from app.core.credentials import API_KEY_PREFIX, extract_credential
-from app.core.enums import Capability, CredentialKind, Role
+from app.core.enums import ApiKeyRejectionReason, Capability, CredentialKind, Role
 from app.core.errors import AppError, ErrorCode
 from app.core.exceptions import CVENotFoundError, TicketNotFoundError
 from app.core.jwt import InvalidTokenError, decode_and_validate, refresh_token
@@ -36,6 +36,7 @@ from app.database import (
     async_session_factory,
     register_post_commit_callback,
 )
+from app.models.api_key import ApiKey
 from app.models.user import User
 from app.services import api_key_service, cve_service, ticket_service, user_service
 from app.services.cve_service import ResolvedCVE
@@ -246,14 +247,15 @@ class AuthenticatedPrincipal:
 
 
 # ---------------------------------------------------------------------------
-# Unknown API key warning limiter
+# API key warning limiters
 # ---------------------------------------------------------------------------
 #
 # See `docs/features/identity/authentication.md` (API key validation,
-# step 2): a bounded, per-instance, per-ASGI-peer-address rate limiter
-# for the `api_key_validation_failed` WARNING emitted on a hash lookup
-# miss only. Denial (the HTTP 401 response) is never rate-limited —
-# only the log emission is suppressed.
+# step 2 and Rejected-key warning): bounded, per-instance rate limiters
+# for the `api_key_validation_failed` WARNING of a hash lookup miss
+# (keyed by ASGI peer address) and the `api_key_rejected` WARNING of a
+# matched but rejected key (keyed by `ApiKey.id`). Denial (the HTTP 401
+# response) is never rate-limited — only the log emission is suppressed.
 
 _LIMITER_WINDOW_SECONDS = 60
 _LIMITER_INACTIVITY_SECONDS = 300
@@ -268,17 +270,18 @@ class _LimiterEntry:
     suppressed_count: int
 
 
-class UnknownKeyWarningLimiter:
-    """Per-instance, per-peer rate limiter for the unknown-API-key WARNING.
+class KeyedWarningLimiter:
+    """Per-instance, per-key rate limiter for an API key WARNING.
 
-    Bounds: at most one WARNING per 60 seconds per ASGI peer address: a
-    10,000-entry maximum with LRU eviction on overflow, and a 5-minute
-    inactivity eviction — see `docs/features/identity/authentication.md`
-    (API key validation, step 2). Not designed for cross-task
-    concurrency control (a single asyncio event loop serializes calls
-    to `record()` within one server process); multiple worker processes
-    each maintain independent state ("with N instances, the worst case
-    is N WARNINGs per minute per IP").
+    Bounds: at most one WARNING per 60 seconds per key (an ASGI peer
+    address or an `ApiKey.id`): a 10,000-entry maximum with LRU eviction
+    on overflow, and a 5-minute inactivity eviction — see
+    `docs/features/identity/authentication.md` (API key validation, step 2
+    and Rejected-key warning). Not designed for cross-task concurrency
+    control (a single asyncio event loop serializes calls to `record()`
+    within one server process); multiple worker processes each maintain
+    independent state, so with N instances the worst case is N WARNINGs
+    per minute per key.
     """
 
     def __init__(self) -> None:
@@ -288,27 +291,27 @@ class UnknownKeyWarningLimiter:
         # the front and stop at the first entry that is still fresh.
         self._entries: OrderedDict[str, _LimiterEntry] = OrderedDict()
 
-    def record(self, peer: str, now: datetime) -> int | None:
-        """Register one failed lookup from `peer` at `now`.
+    def record(self, key: str, now: datetime) -> int | None:
+        """Register one rejected attempt for `key` at `now`.
 
         Returns the `suppressed_count` to log when a WARNING should be
         emitted for this call, or `None` when emission is suppressed
         (within the 60-second window of a previous emission for the
-        same peer).
+        same key).
         """
         self._evict_inactive(now)
 
-        entry = self._entries.get(peer)
+        entry = self._entries.get(key)
         if entry is None:
             if len(self._entries) >= _LIMITER_MAX_ENTRIES:
                 self._entries.popitem(last=False)
-            self._entries[peer] = _LimiterEntry(
+            self._entries[key] = _LimiterEntry(
                 last_emitted_at=now, last_seen_at=now, suppressed_count=0
             )
             return 0
 
         entry.last_seen_at = now
-        self._entries.move_to_end(peer)
+        self._entries.move_to_end(key)
         if (now - entry.last_emitted_at).total_seconds() >= _LIMITER_WINDOW_SECONDS:
             emitted = entry.suppressed_count
             entry.last_emitted_at = now
@@ -319,15 +322,18 @@ class UnknownKeyWarningLimiter:
 
     def _evict_inactive(self, now: datetime) -> None:
         while self._entries:
-            peer, entry = next(iter(self._entries.items()))
+            key, entry = next(iter(self._entries.items()))
             if (now - entry.last_seen_at).total_seconds() < _LIMITER_INACTIVITY_SECONDS:
                 break
-            del self._entries[peer]
+            del self._entries[key]
 
 
-# Module-level singleton — one limiter per server process, matching the
-# "per-instance in-memory dictionary (no Redis)" storage contract.
-_unknown_key_limiter = UnknownKeyWarningLimiter()
+# Module-level singletons — one limiter of each kind per server process,
+# matching the "per-instance in-memory dictionary (no Redis)" storage
+# contract. Separate instances keep the two states independent: spoofed
+# peer addresses cannot evict rejected-key entries.
+_unknown_key_limiter = KeyedWarningLimiter()
+_rejected_key_limiter = KeyedWarningLimiter()
 
 
 def _record_unknown_key_attempt(request: Request, now: datetime) -> None:
@@ -345,6 +351,29 @@ def _record_unknown_key_attempt(request: Request, now: datetime) -> None:
         logger.warning(
             "api_key_validation_failed",
             source_ip=peer,
+            suppressed_count=suppressed_count,
+        )
+
+
+def _record_rejected_key_attempt(
+    api_key: ApiKey, reason: ApiKeyRejectionReason, now: datetime
+) -> None:
+    """Update the limiter for a matched but rejected key and emit the
+    rate-limited `api_key_rejected` WARNING when not suppressed.
+
+    Keyed by `ApiKey.id`, so every rejection of the key counts toward its
+    window whatever the reason; the emitted record carries this request's
+    reason. Only internal identifiers are logged — never the prefix, name,
+    presented key, digest, username, or source IP (authentication.md, API
+    key validation, Rejected-key warning).
+    """
+    suppressed_count = _rejected_key_limiter.record(str(api_key.id), now)
+    if suppressed_count is not None:
+        logger.warning(
+            "api_key_rejected",
+            key_id=str(api_key.id),
+            user_id=str(api_key.user_id),
+            reason=reason.value,
             suppressed_count=suppressed_count,
         )
 
@@ -495,18 +524,23 @@ async def _authenticate_api_key(
         _record_unknown_key_attempt(request, now)
         raise unauthenticated_error()
 
-    # Revoked and expired keys never authorize and never emit the
-    # unknown-key warning (lookup miss only) — authentication.md, API
-    # key validation, steps 3-4.
+    # A matched key that is revoked, expired, or owned by a missing or
+    # inactive user never authorizes and emits the rejected-key warning,
+    # never the unknown-key one — authentication.md, API key validation,
+    # steps 3-4 and Rejected-key warning; Shared Credential Resolution
+    # step 5.
     if api_key.revoked_at is not None:
+        _record_rejected_key_attempt(api_key, ApiKeyRejectionReason.REVOKED, now)
         raise unauthenticated_error()
     if api_key.expires_at is not None and api_key.expires_at <= now:
+        _record_rejected_key_attempt(api_key, ApiKeyRejectionReason.EXPIRED, now)
         raise unauthenticated_error()
 
     await _last_used_debouncer.touch(api_key.id, now)
 
     user = await user_service.get_user_by_id(db, api_key.user_id)
     if user is None or not user.active:
+        _record_rejected_key_attempt(api_key, ApiKeyRejectionReason.OWNER_INACTIVE, now)
         raise unauthenticated_error()
     return user
 

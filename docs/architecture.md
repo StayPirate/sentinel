@@ -241,6 +241,24 @@ order does not imply additional dependencies.
   accessibility responsibilities use the existing Service and API layers; they
   do not introduce another layer.
 
+**Infrastructure modules outside the table.** These modules are not layers:
+
+| Module | Role |
+|---|---|
+| `app.config` | The `Settings` singleton; imports only Core |
+| `app.database` | Async engine, session factory, ORM declarative base, API session dependency, and post-commit callbacks; imports only `app.config` |
+| `app.main` | API server entry point (FastAPI application) |
+| `app.celery_app` | Celery application and the entry point of the worker, Git worker, and Beat roles |
+| `app.ibs_consumer` | IBS RabbitMQ consumer entry point |
+
+Every layer except Core may import `app.config` and `app.database`; Core
+imports neither, as stated above. `app.celery_app` is imported only to
+register, publish, or inspect Celery work. The entry points compose the
+application and may import any layer. No application module imports `app.main`
+or `app.ibs_consumer`, and `app.ibs_consumer` never loads `app.celery_app`
+(`docs/features/integrations/ibs-rabbitmq-integration.md`, Runtime
+Independence).
+
 ---
 
 ## Integration Patterns
@@ -263,6 +281,9 @@ contracts without changing that classification:
 
 **Event-driven integrations.** The IBS integration additionally uses a
 continuous AMQP consumer connected to the IBS RabbitMQ message bus for
-near-real-time package commit and submission-state events. A periodic fetcher
-runs alongside it to recover events missed during consumer downtime. See
+near-real-time package commit and submission-state events. Two periodic
+fetchers remain the correctness and recovery owners for events missed during
+consumer downtime or failed processing: `detect_ibs_track_releases` (track
+release reconciliation) and `sync_ibs_requests` (submission and
+release-request reconciliation). See
 `docs/features/integrations/ibs-rabbitmq-integration.md`.

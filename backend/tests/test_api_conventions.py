@@ -35,7 +35,7 @@ import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from types import UnionType
-from typing import Annotated, Any, Literal, Union, get_args, get_origin
+from typing import Annotated, Any, Final, Literal, Union, get_args, get_origin
 
 import pytest
 from fastapi import FastAPI
@@ -48,6 +48,7 @@ from pydantic.fields import FieldInfo
 from app.api.dependencies import drain_ticket_convergence_after_commit
 from app.api.openapi import API_V1_RESPONSES
 from app.core.errors import ErrorCode
+from app.core.usernames import RESERVED_USERNAMES
 from app.database import get_db
 from app.main import app
 from app.schemas.errors import ErrorResponse
@@ -220,6 +221,157 @@ class TestAuditLogEndpointNaming:
             if "audit" in info.path.lower() and not info.path.endswith("/audit-log")
         ]
         assert not violations, "\n".join(violations)
+
+
+def _user_position_literals(paths: Iterable[str]) -> set[str]:
+    """Literal segments at the position of a `{user}` path parameter: the
+    segment that follows the same leading segments as the parameter, such
+    as `me` in `/api/v1/users/me` beside `/api/v1/users/{user}`. Leading
+    path parameters match each other whatever their names, as in routing."""
+
+    def shape(segments: tuple[str, ...]) -> tuple[str, ...]:
+        return tuple("{}" if part.startswith("{") else part for part in segments)
+
+    split = [tuple(path.strip("/").split("/")) for path in paths]
+    prefixes = {
+        shape(segments[:index])
+        for segments in split
+        for index, segment in enumerate(segments)
+        if segment == "{user}"
+    }
+    return {
+        segments[len(prefix)]
+        for segments in split
+        for prefix in prefixes
+        if len(segments) > len(prefix)
+        and shape(segments[: len(prefix)]) == prefix
+        and not segments[len(prefix)].startswith("{")
+    }
+
+
+@pytest.mark.unit
+class TestUserPathReservation:
+    """Every literal segment at a `{user}` position is a reserved username.
+
+    See `docs/api-spec.md` (User Identifier Resolution): a literal segment
+    there takes precedence over the parameter, so a user holding that
+    username could not be addressed by username unless the username is
+    reserved (`docs/conventions.md`, Username Format).
+    """
+
+    def test_every_literal_segment_at_a_user_position_is_reserved(self) -> None:
+        literals = _user_position_literals(info.path for info in _api_routes())
+
+        assert "me" in literals, "the existing `/api/v1/users/me` is not detected"
+        unreserved = sorted(literals - RESERVED_USERNAMES)
+        assert not unreserved, (
+            f"Literal segments {unreserved} sit at a `{{user}}` position but are "
+            "not in `app.core.usernames.RESERVED_USERNAMES`"
+        )
+
+    def test_detection_covers_nested_positions_and_parameter_names(self) -> None:
+        paths = [
+            "/api/v1/users/{user}",
+            "/api/v1/users/me/audit-log",
+            "/api/v1/users/search",
+            "/api/v1/admin/users",
+            "/api/v1/admin/users/{user}/roles",
+            "/api/v1/tickets/{ticket_id}/access/{user}",
+            "/api/v1/tickets/{id}/access/bulk",
+        ]
+
+        assert _user_position_literals(paths) == {"me", "search", "bulk"}
+
+
+# docs/api-spec.md (Pagination): the inclusive bounds of each parameter.
+_PAGINATION_BOUNDS: Final = {"page": (1, 2_147_483_647), "per_page": (1, 100)}
+
+
+def _pagination_bound_violations(openapi_schema: dict[str, Any]) -> list[str]:
+    """Every operation declaring a `page` query parameter, with each
+    pagination parameter whose OpenAPI bounds differ from the contract."""
+    violations: list[str] = []
+    for path, item in openapi_schema.get("paths", {}).items():
+        for method, operation in item.items():
+            if not isinstance(operation, dict):
+                continue
+            parameters = {
+                parameter["name"]: parameter.get("schema", {})
+                for parameter in operation.get("parameters", [])
+                if parameter.get("in") == "query"
+            }
+            if "page" not in parameters:
+                continue
+            for name, bounds in _PAGINATION_BOUNDS.items():
+                schema = parameters.get(name, {})
+                if (schema.get("minimum"), schema.get("maximum")) != bounds:
+                    violations.append(f"{method.upper()} {path}: {name} {schema}")
+    return violations
+
+
+@pytest.mark.unit
+class TestPaginationParameterBounds:
+    """Every paginated operation bounds `page` to 1-2147483647 and
+    `per_page` to 1-100, rejecting other values with the global 422.
+
+    See `docs/api-spec.md` (Pagination).
+    """
+
+    def test_every_paginated_operation_declares_the_bounds(self) -> None:
+        openapi_schema = app.openapi()
+        paginated = [
+            path
+            for path, item in openapi_schema["paths"].items()
+            for operation in item.values()
+            if isinstance(operation, dict)
+            and any(
+                parameter.get("in") == "query" and parameter["name"] == "page"
+                for parameter in operation.get("parameters", [])
+            )
+        ]
+
+        assert paginated, "no paginated operation found"
+        violations = _pagination_bound_violations(openapi_schema)
+        assert not violations, "\n".join(violations)
+
+    def test_detection_reports_missing_and_wrong_bounds(self) -> None:
+        def operation(**schemas: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "parameters": [
+                    {"name": name, "in": "query", "schema": schema}
+                    for name, schema in schemas.items()
+                ]
+            }
+
+        document = {
+            "paths": {
+                "/ok": {
+                    "get": operation(
+                        page={"minimum": 1, "maximum": 2_147_483_647},
+                        per_page={"minimum": 1, "maximum": 100},
+                    )
+                },
+                "/unbounded": {
+                    "get": operation(
+                        page={"minimum": 1},
+                        per_page={"minimum": 1, "maximum": 1000},
+                    )
+                },
+                "/no-per-page": {
+                    "get": operation(page={"minimum": 1, "maximum": 2_147_483_647})
+                },
+                "/unpaginated": {"get": operation(per_page={})},
+            }
+        }
+
+        assert [
+            violation.split(" {")[0]
+            for violation in _pagination_bound_violations(document)
+        ] == [
+            "GET /unbounded: page",
+            "GET /unbounded: per_page",
+            "GET /no-per-page: per_page",
+        ]
 
 
 @pytest.mark.unit

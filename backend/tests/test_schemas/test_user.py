@@ -276,6 +276,15 @@ class TestAdminUserCreateRequest:
         request = AdminUserCreateRequest(**_make_create_kwargs(username="JDoe"))
         assert request.username == "jdoe"
 
+    @pytest.mark.parametrize("username", ["me", "ME", " Me "])
+    def test_reserved_username_is_rejected(self, username: str) -> None:
+        with pytest.raises(ValidationError, match=r"Username is reserved\."):
+            AdminUserCreateRequest(**_make_create_kwargs(username=username))
+
+    def test_username_with_reserved_prefix_is_accepted(self) -> None:
+        request = AdminUserCreateRequest(**_make_create_kwargs(username="meta"))
+        assert request.username == "meta"
+
     def test_explicit_null_username_is_rejected(self) -> None:
         with pytest.raises(ValidationError):
             AdminUserCreateRequest(**_make_create_kwargs(username=None))

@@ -758,16 +758,21 @@ class TestListAllApiKeys:
         assert response.json()["meta"] == {"total": 0, "page": 1, "per_page": 20}
 
     async def test_unknown_owner_returns_empty_page(
-        self, admin_user_and_client: tuple[User, AsyncClient]
+        self,
+        admin_user_and_client: tuple[User, AsyncClient],
+        api_key_factory: Callable[..., Awaitable[ApiKey]],
     ) -> None:
-        _admin_user, client = admin_user_and_client
+        admin_user, client = admin_user_and_client
+        await api_key_factory(user_id=admin_user.id)
 
         response = await client.get(
             "/api/v1/admin/api-keys", params={"owner": str(uuid4())}
         )
 
         assert response.status_code == 200
-        assert response.json()["meta"] == {"total": 0, "page": 1, "per_page": 20}
+        body = response.json()
+        assert body["data"] == []
+        assert body["meta"] == {"total": 0, "page": 1, "per_page": 20}
 
     async def test_invalid_status_filter_returns_empty_page(
         self,

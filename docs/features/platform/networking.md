@@ -4,7 +4,8 @@
 
 Cross-cutting HTTP client and TLS trust store infrastructure used by
 all Sentinel components that make outgoing network connections: fetchers
-(via BaseFetcher), IBSClient, and IBSEventConsumer (AMQP).
+(via BaseFetcher), IBSClient, the SMELT requests of package addition and
+of the package tasks, and IBSEventConsumer (AMQP).
 
 Scope boundary: this spec covers the shared HTTP client factory and TLS
 trust store configuration. Protocol-level reconnection logic, connection
@@ -19,8 +20,8 @@ infrastructure provides two layers:
 
 1. **Standalone factory module** (`backend/app/services/http_client.py`):
    creates a pre-configured httpx `AsyncClient` with all cross-cutting
-   defaults. Any component can call this factory — fetchers, `IBSClient`,
-   or future consumers.
+   defaults. Any component can call this factory; the callers outside
+   `BaseFetcher` are listed in Non-Fetcher Components.
 
 2. **BaseFetcher integration**: `BaseFetcher` exposes a `self.http_client`
    lazy property that internally calls the standalone factory. Fetcher
@@ -106,12 +107,11 @@ Five settings receive special protection in the factory:
 | Redirect following | False (no redirects followed) | `http_client_options` (emits WARNING — see "Override Safety") |
 | Proxy | Standard env vars (`HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY`); see "Proxy Configuration" | Environment only; not overridable (see "Override Safety") |
 
-Connection pool note: all current consumers make sequential requests
-within a single task (one HTTP request at a time per client instance).
-The pool exists for keepalive connection reuse between sequential
-requests to the same host, not for managing parallelism. These limits
-match httpx defaults and provide ample headroom for future consumers
-with higher concurrency needs.
+Connection pool note: every consumer makes sequential requests (one HTTP
+request at a time per client instance). The pool exists for keepalive
+connection reuse between sequential requests to the same host, not for
+managing parallelism. These limits match httpx defaults and provide ample
+headroom for future consumers with higher concurrency needs.
 
 #### User-Agent
 
@@ -527,13 +527,16 @@ redirect behavior for another integration.
 
 ### Non-Fetcher Components
 
-`IBSClient` calls the standalone factory directly and manages its own
-client lifecycle independently of `BaseFetcher`:
+Components outside `BaseFetcher` call the standalone factory directly,
+passing their own `name`, and manage their own client lifecycle. A client
+never crosses an event loop.
+
+`IBSClient`:
 
 - One client per workflow invocation: in Celery roles each task
   invocation runs its own event loop, creates the client on it, and closes
   it before returning; the IBS RabbitMQ consumer uses one client for its
-  single-loop process. A client never crosses an event loop
+  single-loop process
 - Connection pooling within one client lifetime
 - Uses `Accept: application/xml` override (from JSON default)
 - TLS validated via the same combined trust store
@@ -542,6 +545,19 @@ client lifecycle independently of `BaseFetcher`:
 - A rotated CA is picked up by the next client: the next workflow
   invocation in Celery roles, a process restart for the consumer (see
   "Certificate rotation" below)
+
+The SMELT requests of `add_package_to_ticket()`
+(`docs/features/packages/package-service.md`) use the factory defaults:
+
+- The API server creates one client per package-addition request
+  (`POST /api/v1/tickets/{ticket_id}/packages`) and closes it before the
+  response is sent
+- The `resolve_ticket_packages`, `run_ticket_convergence`, and
+  `backfill_product_catalog` tasks each create one client on the task's
+  event loop, share it across the packages of the invocation, and close it
+  before returning
+- A rotated CA is picked up by the next client: the next request or task
+  invocation
 
 ## TLS Trust Store Configuration
 
@@ -579,8 +595,11 @@ internal CA.
     created lazily and closed by the task wrapper per call
   - Standalone `run_catch_up` tasks: once per task — same pattern as
     `fetch_single_cve`
-  - Standalone `resolve_ticket_packages` tasks: once per task — the client is
-    created and closed by the task workflow per invocation
+  - Standalone `resolve_ticket_packages`, `run_ticket_convergence`, and
+    `backfill_product_catalog` tasks: once per task — the client is created
+    and closed by the task workflow per invocation
+  - API package addition: once per `POST /api/v1/tickets/{ticket_id}/packages`
+    request
   - `IBSClient`: once per workflow invocation in Celery roles; once per
     process lifetime in the IBS RabbitMQ consumer
   - `IBSEventConsumer` (AMQPS): once per connection attempt — it builds a
@@ -617,7 +636,7 @@ reason correctly about missing-CA behavior and certificate rotation.
 the shared HTTP client — does not consult the system trust store for its
 default verification: `verify=True` (the default) builds its context from
 the `certifi` bundle, which does not include the SUSE CA. Without layer 2,
-every fetcher and `IBSClient` request to a SUSE-internal host would fail
+every shared-client request to a SUSE-internal host would fail
 TLS verification regardless of what is installed system-wide. Layer 2 is
 also the only layer available outside containers (local development runs
 from `backend/` with no system-wide install).
@@ -647,6 +666,7 @@ outage. In local development or a custom image without the
 | Fetchers (httpx via `create_http_client()`) | 2 | Next run, no restart |
 | `IBSEventConsumer` (AMQPS) | 2 | Next reconnection attempt, no restart |
 | `IBSClient` (httpx client, one per workflow invocation) | 2 | Next workflow invocation in Celery roles, no restart; process restart in the IBS RabbitMQ consumer |
+| SMELT package clients (API package addition, package tasks) | 2 | Next request or task invocation, no restart |
 | Git subprocess and other OpenSSL-default-verify clients | 1 | Image rebuild (`SUSE_CA_CERT_PATH` overrides only layer 2 — a mounted replacement file does not reach layer 1) |
 
 No git-based fetcher currently clones from a SUSE-internal host (both
@@ -689,7 +709,7 @@ by each component and documented in its respective spec.
 
 | Protocol | Component | Trust Store Source |
 |----------|-----------|-------------------|
-| HTTPS | Shared HTTP client (all fetchers, IBSClient) | `build_tls_context()` via `create_http_client()` |
+| HTTPS | Shared HTTP client (all fetchers, IBSClient, SMELT package clients) | `build_tls_context()` via `create_http_client()` |
 | AMQPS | `IBSEventConsumer` | `build_tls_context()` passed to aio-pika/aiormq |
 | Git over HTTPS | `git` subprocess (`BaseGitFetcher`) | Container system trust store (layer 1 — see Trust Store Layering). Not yet exercised: no current git-based fetcher clones from a SUSE-internal host |
 

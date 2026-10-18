@@ -10,12 +10,14 @@ helpers it composes on final `vulnerability_analyst` origin loss.
 `deactivate_user()` revokes API keys, invalidates Sessions, marks the User
 inactive, and unassigns active Tickets in one caller-owned transaction;
 `get_deactivation_impact()` is its read-only advisory preview. The bulk
-role-mapping operations remain out of scope and are added when their
-owning work item is implemented. `resolve_user_identifier()`
-and `get_user_roles()` back the shared authentication/authorization
-dependencies. `list_users()` and `get_user()` provide the paginated
-directory and full profile reads; `get_user_by_username()` is the
-username-only profile read used by CLI commands.
+role-mapping operations (`sync_role_mapping()`,
+`delete_role_mapping_roles()`) belong to the deferred external
+provisioning (`docs/features/identity/identity-provisioning.md`) and are
+not implemented. `resolve_user_identifier()` and `get_user_roles()` back
+the shared authentication/authorization dependencies. `list_users()` and
+`get_user()` provide the paginated directory and full profile reads;
+`get_user_by_username()` is the username-only profile read used by CLI
+commands.
 
 Module-level defaults (`docs/conventions.md`, Function Specification
 Completeness): every mutating function in this module participates in the
@@ -30,7 +32,6 @@ acquire no lock.
 from __future__ import annotations
 
 import asyncio
-import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Final, Literal
@@ -65,6 +66,7 @@ from app.core.enums import (
 from app.core.exceptions import ServiceError, UserNotFoundError
 from app.core.passwords import PasswordValidationError, hash_password, validate_password
 from app.core.permissions import role_to_wire
+from app.core.usernames import RESERVED_USERNAMES, USERNAME_PATTERN
 from app.models.session import Session
 from app.models.ticket import Ticket
 from app.models.user import User
@@ -85,10 +87,6 @@ from app.services.user_identifier import (
 )
 
 logger = structlog.get_logger(__name__)
-
-# Username Format (docs/conventions.md): 1-64 characters, starts with a
-# letter, lowercase letters/numbers/dots/hyphens/underscores only.
-_USERNAME_PATTERN: Final = re.compile(r"^[a-z][a-z0-9._-]{0,63}$")
 
 # The three UNIQUE constraints on `user` that a conflicting create/update can
 # violate (docs/data-model.md, User) — verified against the actual database
@@ -156,7 +154,8 @@ class UserConflictError(UserServiceError):
 
 
 class UsernameFormatError(UserServiceError):
-    """A candidate username does not match the Username Format rules.
+    """A candidate username does not match the Username Format rules or is
+    reserved.
 
     The message never includes the rejected value. Unreachable through the
     API in practice — the request schema already rejects a malformed
@@ -701,11 +700,11 @@ def _normalize_username(username: str) -> str:
     """Trim, lowercase, and validate `username` against the Username Format.
 
     Raises `UsernameFormatError` for a value that is empty after trimming,
-    exceeds 64 characters, does not start with a letter, or contains any
-    character outside `[a-z0-9._-]`.
+    exceeds 64 characters, does not start with a letter, contains any
+    character outside `[a-z0-9._-]`, or is reserved.
     """
     normalized = username.strip().lower()
-    if not _USERNAME_PATTERN.fullmatch(normalized):
+    if not USERNAME_PATTERN.fullmatch(normalized) or normalized in RESERVED_USERNAMES:
         raise UsernameFormatError()
     return normalized
 

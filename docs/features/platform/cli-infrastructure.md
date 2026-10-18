@@ -37,7 +37,7 @@ explicit per-command opt-in.
 | Spec | Relationship |
 |------|--------------|
 | `docs/conventions.md` (CLI Conventions) | Authoritative contract this spec implements: framework, Output Contract, exit codes, naming. |
-| `docs/features/platform/logging.md` (Scope of this pipeline) | Defines the minimal structlog-to-stderr configuration this spec's bootstrap sequence applies at root group initialization. |
+| `docs/features/platform/logging.md` (Scope of this pipeline) | Defines the minimal structlog-to-stderr configuration this spec's command bootstrap applies (Root Command Group & Bootstrap, step 4). |
 | `docs/features/platform/testing-strategy.md` (Mandatory Test Scenarios → CLI Commands, Sync Entry-Point Tests) | Defines the mandatory CLI test scenarios and the synchronous test function requirement; this spec defines the harness those tests run against. |
 | `docs/features/identity/user-management.md` | Consumer: `manage-user` command group delegates to async services via the pattern defined here. |
 | `docs/features/identity/api-key-management.md` | Consumer: owns the `api-key` command group behavior and delegates to async services via the pattern defined here. |
@@ -53,7 +53,7 @@ explicit per-command opt-in.
 | Console script | `sentinel`, registered via `[project.scripts]` in `backend/pyproject.toml` (`sentinel = "app.cli:main"`) |
 | Module invocation | `python -m app.cli ...`, backed by `backend/app/cli/__main__.py` delegating to the same `main()` entry point |
 | Code location | `backend/app/cli/` (subpackage under `backend/app/`) |
-| Group assembly | `backend/app/cli/__init__.py` defines a root Click group (`cli`) and registers each command group (`manage-user`, `fetcher`, `api-key`, and any future group) via `cli.add_command(...)`; the exported `main()` wrapper performs eager-option handling, fail-fast bootstrap, signal setup, the argument-encoding check (Root Command Group & Bootstrap), and invokes `cli.main(standalone_mode=False)` |
+| Group assembly | `backend/app/cli/__init__.py` defines a root Click group (`cli`) and registers each command group (`manage-user`, `fetcher`, `api-key`, and any future group) via `cli.add_command(...)`; the exported `main()` wrapper installs the signal handlers, performs the argument-encoding check, invokes `cli.main(standalone_mode=False)`, and maps exceptions to exit codes; each command performs the fail-fast bootstrap (Root Command Group & Bootstrap) |
 
 Each command group (`manage-user`, `fetcher`, `api-key`) is implemented as
 its own Click `Group` in a dedicated module under `backend/app/cli/`
@@ -70,27 +70,34 @@ modules that transitively instantiate settings are deferred until after eager
 
 ## Root Command Group & Bootstrap
 
-The root group (`sentinel`) performs the following steps, in order, before
-dispatching to the invoked subcommand:
+Every invocation performs the following steps, in order, before the invoked
+command's own logic:
 
-1. Parse `--version` (prints the value from
+1. **Entry point.** Before Click parses any argument, the `main()` entry
+   point installs the `SIGINT` and `SIGTERM` handlers defined in Signal
+   Handling, then applies the Argument encoding check below.
+2. **Eager options.** `main()` invokes the root group with
+   `standalone_mode=False`. `--version` (prints the value from
    `importlib.metadata.version("sentinel")` and exits 0, per the existing
-   pattern in `backend/app/main.py`) and help at every command level. Version
-   and help are eager: `sentinel --help`, `sentinel <group> --help`, and
+   pattern in `backend/app/main.py`) and help at every command level are
+   eager: `sentinel --help`, `sentinel <group> --help`, and
    `sentinel <group> <command> --help` exit 0 without loading application
    settings, opening database or Redis connections, or importing modules that
-   instantiate settings.
-2. Load the `Settings` singleton from `backend/app/config.py` inside the entry
-   point's fail-fast boundary. `app.cli` package import and command registration
-   MUST remain lightweight enough to preserve step 1 even though
+   instantiate settings. The root and group callbacks perform no bootstrap,
+   because Click invokes a group's callback before it parses the child
+   command's own `--help`.
+3. **Command bootstrap: `Settings`.** As its first statement, every command
+   callback loads the `Settings` singleton from `backend/app/config.py`
+   inside a fail-fast boundary. `app.cli` package import and command
+   registration MUST remain lightweight enough to preserve step 2 even though
    `app.config` instantiates `Settings` at module import. If that import or
    initialization raises (invalid configuration), the boundary prints a
    plain-text `Error: ...` message to stderr and exits with code 2 (system
    error), without a traceback. This is consistent with the fail-fast
    precedents in `docs/conventions.md` (Runtime Version) and `logging.md`
    (Startup Validation).
-3. Install the `SIGINT` and `SIGTERM` handlers defined in Signal Handling.
-4. Apply the minimal structlog-to-stderr configuration required by
+4. **Command bootstrap: logging.** The same bootstrap then applies the
+   minimal structlog-to-stderr configuration required by
    `docs/features/platform/logging.md` (§"Scope of this pipeline"): route
    structlog output through stdlib `logging` to stderr, plain-text format,
    level `WARNING` or above. This ensures DEBUG/INFO messages from shared
@@ -98,16 +105,15 @@ dispatching to the invoked subcommand:
    remains reserved exclusively for the CLI Output Contract. No
    correlation IDs (`request_id`, `celery_task_id`, `fetcher_run_id`,
    `ibs_event_id`) are bound in this context.
-5. Dispatch to the invoked subcommand.
+5. The command's own logic runs.
 
-**Argument encoding**: right after installing the signal handlers (step 3)
-and before Click parses any argument — therefore before eager
-`--help`/`--version` (step 1), `Settings` loading, logging configuration, and
-dispatch — the `main()` entry point rejects a command-line argument that is
-not valid UTF-8. On
-POSIX, Python decodes undecodable argument bytes into lone surrogate code
-points, which are not valid UTF-8 and would otherwise reach PostgreSQL and
-fail there as a system error. The entry point prints
+**Argument encoding**: in step 1, after installing the signal handlers and
+before Click parses any argument — therefore before eager
+`--help`/`--version`, `Settings` loading, logging configuration, and the
+command — the `main()` entry point rejects a command-line argument that is
+not valid UTF-8. On POSIX, Python decodes undecodable argument bytes into
+lone surrogate code points, which are not valid UTF-8 and would otherwise
+reach PostgreSQL and fail there as a system error. The entry point prints
 `Error: Command-line arguments must be valid UTF-8.` to stderr, without
 echoing the argument, and exits with code 1 (user error), without loading
 `Settings` or opening any connection. Valid non-ASCII UTF-8 arguments are
@@ -119,16 +125,16 @@ beyond what is described above.
 
 **Q2 (guards)**: an argument that is not valid UTF-8 aborts before argument
 parsing (exit 1, Argument encoding above). `Settings` validation failure
-aborts before any subcommand executes (exit 2). No other root-level guard
-exists — per-command guards (e.g., configuration guards, see below) are
-evaluated by each subcommand.
+aborts the command bootstrap before the command's own logic runs (exit 2,
+step 3). Every other guard (e.g., configuration guards, see below) is
+evaluated by each command.
 
-**Q3 (behavior)**: as enumerated in the five steps above, plus the Argument
-encoding check; no other root group behavior exists.
+**Q3 (behavior)**: as enumerated in the five steps above, including the
+Argument encoding check; no other root behavior exists.
 
-**Q6 (exceptions)**: `Settings` validation exceptions are caught at this
-level and converted to the exit-2 path described in step 2. All other
-exceptions propagate to the per-command error handling described in
+**Q6 (exceptions)**: `Settings` validation exceptions are caught by the
+command bootstrap and converted to the exit-2 path described in step 3. All
+other exceptions propagate to the per-command error handling described in
 "Error Handling & Exit Code Mapping" below.
 
 ## Database Session Management
@@ -310,11 +316,11 @@ Every CLI command is wrapped by a single, unified exception mapper that
 maps exceptions to the exit codes defined in `docs/conventions.md` (CLI
 Output Contract, Exit Codes table). This mapper is implemented once, as
 a top-level `try/except` in the exported `main()` entry-point wrapper around
-the root Click group invocation, so individual
-command specs do not need to restate this mapping.
+the root Click group invocation, so individual command specs do not need to
+restate this mapping.
 
-The root group invokes Click with `standalone_mode=False`. In this
-mode, Click does not perform its own `sys.exit()` calls, does not print
+The `main()` entry point invokes the root group with `standalone_mode=False`.
+In this mode, Click does not perform its own `sys.exit()` calls, does not print
 "Aborted!", and re-raises `click.ClickException` and `click.Abort` to
 the caller instead of handling them internally — giving the mapper
 below full and exclusive control over exit codes and messages for every
@@ -363,13 +369,13 @@ are emitted directly by command code at the point of detection.
 
 ## Signal Handling
 
-The root Click group installs signal handlers for `SIGINT` and `SIGTERM`
+The `main()` entry point installs signal handlers for `SIGINT` and `SIGTERM`
 that guarantee the exit codes mandated by `docs/conventions.md` (CLI
 Output Contract, Exit Codes table):
 
 | Signal | Trigger | Exit code | Behavior |
 |---|---|---|---|
-| `SIGINT` | Operator presses Ctrl+C | 130 | The root group installs an explicit `signal.signal(signal.SIGINT, ...)` handler that raises `SystemExit(130)` directly, at the OS signal level, before Click's own EOFError/KeyboardInterrupt-to-`Abort` conversion (see Error Handling & Exit Code Mapping) has a chance to run. This is necessary because Click internally converts both Ctrl+C (`KeyboardInterrupt`) and Ctrl+D/EOF during a prompt into the same `click.Abort` exception, making the two indistinguishable by the time either would reach the exception mapper. Intercepting SIGINT at the signal level ensures Ctrl+C reliably produces exit 130 regardless of whether a prompt is active, while Ctrl+D during a prompt still flows through Click's own EOFError→`Abort` path (mapper's `Aborted.` / exit 0). No cleanup beyond what the interrupted database session's own `__exit__`/`finally` already performs. |
+| `SIGINT` | Operator presses Ctrl+C | 130 | The `main()` entry point installs an explicit `signal.signal(signal.SIGINT, ...)` handler that raises `SystemExit(130)` directly, at the OS signal level, before Click's own EOFError/KeyboardInterrupt-to-`Abort` conversion (see Error Handling & Exit Code Mapping) has a chance to run. This is necessary because Click internally converts both Ctrl+C (`KeyboardInterrupt`) and Ctrl+D/EOF during a prompt into the same `click.Abort` exception, making the two indistinguishable by the time either would reach the exception mapper. Intercepting SIGINT at the signal level ensures Ctrl+C reliably produces exit 130 regardless of whether a prompt is active, while Ctrl+D during a prompt still flows through Click's own EOFError→`Abort` path (mapper's `Aborted.` / exit 0). No cleanup beyond what the interrupted database session's own `__exit__`/`finally` already performs. |
 | `SIGTERM` | Process manager requests shutdown | 143 | A handler is registered that raises a `SystemExit(143)`-equivalent signal at the next Python bytecode boundary. Because `SystemExit` is a `BaseException` subclass, it is not caught by the `Exception`-scoped mapper described in Error Handling & Exit Code Mapping, and propagates cleanly to terminate the process with code 143. No mid-transaction partial commit is attempted — an in-flight database transaction is left to roll back via the session's own `__aexit__`/`finally` handling, consistent with normal exception-driven rollback. |
 
 Commands are not expected to perform custom cleanup beyond what their

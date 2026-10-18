@@ -79,9 +79,11 @@ _DEFAULT_RUN_TIMEOUT = 3600
 
 # Sanitized, fixed detail message for a manual trigger's Celery
 # publication failure — see `docs/features/platform/fetcher-operations.md`
-# (`trigger_fetcher`, Publication Failure Path). Never includes the raw
-# broker exception string, which routinely contains hostname, IP, port,
-# a Redis URI, or credentials.
+# (`trigger_fetcher`, Publication Failure Path; Trigger Fetcher, 503 response
+# body). Both the persisted run `error_message` and the
+# `FetcherBrokerUnavailableError` message, which is the 503 detail, use it.
+# Never includes the raw broker exception string, which routinely contains
+# hostname, IP, port, a Redis URI, or credentials.
 _BROKER_PUBLICATION_FAILURE_MESSAGE = (
     "Manual run could not be dispatched to the task broker"
 )
@@ -150,7 +152,7 @@ class FetcherBrokerUnavailableError(FetcherOperationsServiceError):
     Ambiguous Broker Acknowledgement)."""
 
     def __init__(self) -> None:
-        super().__init__("Manual run could not be dispatched to the task broker.")
+        super().__init__(_BROKER_PUBLICATION_FAILURE_MESSAGE)
 
 
 class FetcherSettingUnknownError(FetcherOperationsServiceError):
@@ -524,8 +526,8 @@ def _build_run_summary(
     `fallback_run_timeout` is the fetcher's current
     `FetcherConfig.run_timeout` (or the code-level default for an
     unbootstrapped registered fetcher) — used only when `run`'s own
-    `hard_time_limit_seconds` is `NULL` (a historical row predating the
-    column). See `resolve_effective_hard_limit()`.
+    `hard_time_limit_seconds` is `NULL`. See
+    `resolve_effective_hard_limit()`.
     """
     return FetcherRunSummary(
         id=run.id,
@@ -581,8 +583,8 @@ async def _ensure_fetcher_exists(db: AsyncSession, fetcher_name: str) -> None:
 async def _resolve_fallback_run_timeout(db: AsyncSession, fetcher_name: str) -> int:
     """Read `fetcher_name`'s current `FetcherConfig.run_timeout`, used
     as the stale-evaluation fallback for `running` rows whose own
-    `hard_time_limit_seconds` is `NULL` (historical rows predating the
-    column — see `resolve_effective_hard_limit()`).
+    `hard_time_limit_seconds` is `NULL` (see
+    `resolve_effective_hard_limit()`).
 
     Assumes `fetcher_name` has already been validated to exist (see
     `_ensure_fetcher_exists`). A registered fetcher with no

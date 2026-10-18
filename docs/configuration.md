@@ -49,7 +49,7 @@ policy, and container resource limits.
 
 | Env Var | Type | Default | Description | Defined in |
 |---------|------|---------|-------------|------------|
-| `APP_NAME` | string | `sentinel` | Application name (used in logs, health endpoint) | — |
+| `APP_NAME` | string | `sentinel` | Application name, emitted as the `app` field of every runtime structured log record (`docs/features/platform/logging.md`, Standard Log Record Schema) | — |
 | `DEBUG` | bool | `false` | Enable verbose error responses (stack traces in API errors). Does not affect logging — see `docs/features/platform/logging.md` | — |
 | `CORS_ORIGINS` | list (comma-separated) | `http://localhost:5173` | Allowed CORS origins for API consumers | — |
 

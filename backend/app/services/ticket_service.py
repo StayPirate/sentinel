@@ -1,7 +1,7 @@
 """Ticket reads, lifecycle operations, and cross-domain Ticket compositions.
 
 See `docs/features/tickets/ticket-service.md` for the full
-specification. This module currently implements the consumer-facing
+specification. This module implements the consumer-facing
 Ticket locator resolution (Ticket Query Operations > Ticket locator
 resolution), the Ticket list (`list_tickets()`), and the Ticket detail
 read in its consumer and mutation-assembly modes (Ticket Query
@@ -18,8 +18,7 @@ reconciliation, and the Confidentiality Management operations
 `set_confidentiality()`, `set_coordinated_release_date()`, and the
 explicit access grants (`grant_access()`, `revoke_access()`,
 `list_access_grants()`), and the explicit operator Ticket convergence
-dispatch (`dispatch_ticket_convergence()`); the remaining operations are
-added by their owning work items.
+dispatch (`dispatch_ticket_convergence()`).
 
 Every operation accepts the caller's `AsyncSession` and never commits or
 rolls back; database exceptions propagate unchanged (Transaction

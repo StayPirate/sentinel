@@ -28,7 +28,7 @@ def _print_version(ctx: click.Context, param: click.Parameter, value: bool) -> N
     """Eager `--version` callback: print the installed package version
     and exit 0, without loading application settings or opening any
     connection — see `docs/features/platform/cli-infrastructure.md`
-    (Root Command Group & Bootstrap, step 1)."""
+    (Root Command Group & Bootstrap, step 2)."""
     if not value or ctx.resilient_parsing:
         return
     click.echo(get_version("sentinel"))

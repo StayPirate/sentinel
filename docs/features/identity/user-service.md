@@ -168,7 +168,7 @@ mutation ownership and identity audit events:
 |---|---|
 | `User.last_login_at` | Authentication session-creation workflow |
 | `ApiKey.last_used_at` | `api_key_service.update_last_used_at()` |
-| `User.synced_at` | External provisioning synchronization workflow through `update_user()` |
+| `User.synced_at` | External provisioning synchronization workflow: the initial value through `create_user()` and updates through `update_user()` |
 
 These boundaries may update only the named metadata field without a lifecycle
 audit event. They do not authorize direct modification of any other user or
@@ -518,8 +518,8 @@ Creates a new User record with optional initial roles.
 **Behavior**:
 
 1. Normalize `username` (trim whitespace, lowercase) and validate format
-   per `docs/conventions.md` (Username Format). If invalid, raise
-   `UsernameFormatError`
+   per `docs/conventions.md` (Username Format), including the reserved
+   username. If invalid or reserved, raise `UsernameFormatError`
 2. Normalize `email` by trimming leading and trailing whitespace and converting
    the entire string — local part and domain alike — to lowercase (see
    `docs/data-model.md`, `User.email`: stored as lowercase). Validate the
@@ -633,13 +633,14 @@ their own business rules.
    no source of truth for local users.
 4. **Username validation** (if `username` is provided): normalize and
    validate the format per the rules in `docs/conventions.md` (section
-   "Username Format"). If invalid, raise `UsernameFormatError`. Verify
-   uniqueness in the database (excluding the current user, including
-   inactive users). If violated, raise `UserConflictError`. For external
-   users, this step is reached only by the sync process (human callers
-   are already blocked at step 2). External synchronization adds
-   `detail = {"source": "external_sync"}` to `username_changed`; a future
-   authenticated/manual caller uses `detail = NULL`
+   "Username Format"), including the reserved username. If invalid or
+   reserved, raise `UsernameFormatError`. Verify uniqueness in the database
+   (excluding the current user, including inactive users). If violated,
+   raise `UserConflictError`. For external users, this step is reached only
+   by the sync process (human callers are already blocked at step 2).
+   External synchronization adds `detail = {"source": "external_sync"}` to
+   `username_changed`; a future authenticated/manual caller uses
+   `detail = NULL`
 5. If `email` is provided, reject `None`; normalize it the same way as
    `create_user()` (trim whitespace, lowercase the entire string, validate
    format with `email-validator` — `check_deliverability=False` — raising
@@ -896,8 +897,8 @@ the group and removes records for users no longer in the group.
 This function centralizes all bulk role operations triggered by external
 group membership. It is called by the external sync process and by the
 Create Role Mapping endpoint when a new mapping is created (see
-`identity-provisioning.md`). During the local-only phase, this function
-has no callers.
+`identity-provisioning.md`). While external provisioning is not active,
+this function has no callers.
 
 **Parameters**:
 
@@ -1654,13 +1655,13 @@ the response.
 
 | Exception | Raised when | Handling |
 |-----------|-------------|----------|
-| `UsernameFormatError` | Username does not match format rules | CLI: stderr message + exit 1; External sync: logged as warning, user skipped |
+| `UsernameFormatError` | Username does not match format rules or is reserved | CLI: stderr message + exit 1; External sync: logged as warning, user skipped |
 | `EmailFormatError` | Email does not pass `email-validator` format validation | CLI: stderr message + exit 1; External sync: logged as warning, user skipped |
 
 These are not listed in the API-facing table above because the API request
 schemas for `create_user()`/`update_user()` callers (Pydantic) already reject
-a malformed username or email with the global 422 `VALIDATION_ERROR`
-response before the service is reached — see
+a malformed or reserved username or a malformed email with the global 422
+`VALIDATION_ERROR` response before the service is reached — see
 `docs/features/identity/user-management.md`. `UsernameFormatError` and
 `EmailFormatError` are reachable in practice only through CLI and external
 synchronization, which have no such boundary in front of the service.

@@ -739,9 +739,10 @@ class TestGetCurrentUserProfile:
         client: AsyncClient,
         user_factory: Callable[..., Awaitable[User]],
     ) -> None:
-        """A stored user literally named `me` must not capture the
-        static `/users/me` route — but the public `/users/{user}` route
-        remains reachable for that username."""
+        """The username `me` is reserved, so a user literally named `me`
+        can only exist through a direct insert that bypasses the service;
+        even then it must not capture the static `/users/me` route, which
+        still wins."""
         await user_factory(username="me")
 
         response = await client.get("/api/v1/users/me")
@@ -972,6 +973,25 @@ class TestCreateUserAdmin:
 
         assert response.status_code == 422
         assert response.json()["code"] == "VALIDATION_ERROR"
+
+    async def test_reserved_username_returns_422(
+        self,
+        admin_user_and_client: tuple[User, AsyncClient],
+        db_session: AsyncSession,
+    ) -> None:
+        _admin, client = admin_user_and_client
+
+        response = await client.post(
+            "/api/v1/admin/users",
+            json=_create_payload(username="me", email="reserved-me@example.com"),
+        )
+
+        assert response.status_code == 422
+        assert response.json()["code"] == "VALIDATION_ERROR"
+        rows = await db_session.execute(
+            select(User).where(User.email == "reserved-me@example.com")
+        )
+        assert rows.scalars().all() == []
 
     async def test_malformed_email_returns_422(
         self, admin_user_and_client: tuple[User, AsyncClient]

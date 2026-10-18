@@ -1336,10 +1336,11 @@ non-paginated JSend envelope.
 - A connection failure, timeout, proxy error, or remote-protocol error after
   the shared transport retries are exhausted maps to `SmeltUnavailableError`.
   No HTTP response exists to inspect in these cases.
-- Sentinel MUST parse the JSON body regardless of HTTP status and check the
-  JSend `status` field before applying the catch-all rule below. A 404 with
-  a valid `status: "error"` body is a package-not-found, not an availability
-  failure.
+- Sentinel parses the body of an HTTP 200 or 404 response as JSON and checks
+  the JSend `status` field before applying the catch-all rule below. A 404
+  with a valid `status: "error"` body is a package-not-found, not an
+  availability failure. The body of any other HTTP status is not read: the
+  status alone maps it to `SmeltUnavailableError`.
 - Sentinel recognizes only the JSend `status` values `success` and `error` in
   this endpoint's responses. Any other value — including JSend `fail`, which
   this experimental endpoint does not document a use for — is unrecognized.
@@ -1482,20 +1483,20 @@ The following event types are defined:
 
 | Action | `event_type` | `user_id` | Details recorded |
 |--------|-------------|-----------|------------------|
-| Authorized user adds or completes package tree | `package_added` | Acting user | `package_name` |
-| Package auto-added or completed | `package_added` | `NULL` | `package_name`; exact `comment` is `CVE package resolution`, `Product catalog backfill`, or `Ticket convergence` |
-| Active User acquired as package maintainer | `package_maintainer_added` | `NULL` | Target username in `new_value`; package name in `detail` |
-| Authorized user soft-deletes package | `package_excluded` | Acting user | `package_name` |
-| Authorized user soft-deletes track | `track_excluded` | Acting user | `track_name`, `package_name` |
-| Authorized user soft-deletes product | `product_excluded` | Acting user | `track_name`, `package_name`, event-time Product name and CPE |
-| Authorized user restores package | `package_restored` | Acting user | `package_name` |
-| Authorized user restores track | `track_restored` | Acting user | `track_name`, `package_name` |
-| Authorized user restores product | `product_restored` | Acting user | `track_name`, `package_name`, event-time Product name and CPE |
-| User-attributed or system change to track status | `track_status_changed` | Acting user for user-attributed changes; `NULL` for automatic release detection | `track_name`, `package_name`, `old_status`, `new_status` |
-| Authorized user overrides or resets Product eligibility | `product_eligibility_changed` | Acting user | `track_name`, `package_name`, event-time Product name and CPE, `old_eligible`, `new_eligible`, `reason = va_override`, and `override_action` |
-| Ticket created | `ticket_created` | `NULL` | Creation source description |
-| Product release detected | `product_released` | `NULL` | `track_name`, `package_name`, event-time Product name and CPE, `released_at`, `advisory_id` |
-| Product eligibility recalculated | `product_eligibility_changed` | `NULL` | `track_name`, `package_name`, event-time Product name and CPE, `old_eligible`, `new_eligible`, `reason` |
+| Authorized user adds or completes package tree | `package_added` | Acting user | `new_value`: package name |
+| Package auto-added or completed | `package_added` | `NULL` | `new_value`: package name; exact `comment` is `CVE package resolution`, `Product catalog backfill`, or `Ticket convergence` |
+| Active User acquired as package maintainer | `package_maintainer_added` | `NULL` | `new_value`: target username; `detail`: `package` |
+| Authorized user soft-deletes package | `package_excluded` | Acting user | `old_value`: package name |
+| Authorized user soft-deletes track | `track_excluded` | Acting user | `old_value`: track name; `detail`: `track`, `package` |
+| Authorized user soft-deletes product | `product_excluded` | Acting user | `old_value`: event-time Product display name; `detail`: `track`, `package`, `product_name`, `product_cpe` |
+| Authorized user restores package | `package_restored` | Acting user | `new_value`: package name |
+| Authorized user restores track | `track_restored` | Acting user | `new_value`: track name; `detail`: `track`, `package` |
+| Authorized user restores product | `product_restored` | Acting user | `new_value`: event-time Product display name; `detail`: `track`, `package`, `product_name`, `product_cpe` |
+| User-attributed or system change to track status | `track_status_changed` | Acting user for user-attributed changes; `NULL` for automatic release detection | `old_value`/`new_value`: old and new status; `detail`: `track`, `package` |
+| Authorized user overrides or resets Product eligibility | `product_eligibility_changed` | Acting user | `old_value`/`new_value`: old and new eligibility; `detail`: `track`, `package`, `product_name`, `product_cpe`, `reason = va_override`, `override_action` |
+| Ticket created | `ticket_created` | `NULL` for automatic creation; creating user for manual creation | `comment`: `Ticket created manually` or `CVE ingested from {source}` |
+| Product release detected | `product_released` | `NULL` | `new_value`: UTC `released_at`; `detail`: `track`, `package`, `product_name`, `product_cpe`, `advisory_id` |
+| Product eligibility recalculated | `product_eligibility_changed` | `NULL` | `old_value`/`new_value`: old and new eligibility; `detail`: `track`, `package`, `product_name`, `product_cpe`, `reason` |
 
 - `user_id = NULL` indicates an automatic system action. For
   `package_added`, this distinguishes manual additions (acting user) from
@@ -1609,11 +1610,24 @@ The following concerns are workflow-specific (service layer only):
 | Concern | IBS (`ibs`) | Git (`git`) |
 |---------|-------------|-------------|
 | Track + product resolution | SMELT v2 `maintained` (same endpoint) | SMELT v2 `maintained` (same endpoint) |
-| Source retrieval for analysis | IBS API | src.suse.de git API |
 | Release detection (track) | IBS expanded source-state diff with a per-track checkpoint | TBD |
 | Release detection (product) | updateinfo.xml | TBD |
 | Real-time events | IBS RabbitMQ | TBD |
 | Submission tracking (SR/RR) | IBS submission tracking | TBD |
+
+No Git track or Product release detection is specified
+(`git-track-release-detection.md`, `git-product-release-detection.md`), so
+Sentinel never sets a Git track to `FIXED` automatically and never sets
+`released_at` for a Product below a Git track. On a Ticket with a CVE, a Git
+track becomes `FIXED` only through a user-attributed change with
+`admin_ticket_ops` (see [Manual Transitions](#manual-transitions)), and a
+`FIXED` Git track with an actionable eligible Product does not satisfy clause
+(b) of the Resolved gate (`docs/features/tickets/tickets.md`, Gate: Analyzed →
+Resolved). The Ticket can then reach `Resolved` only when every such Product
+leaves `AEP(t)` (exclusion, an `eligible = false` override, automatic
+ineligibility, or EOL) or the track becomes `NOT_AFFECTED` or `WONT_FIX`. Each
+of these records its own domain fact; none records Git publication. On a
+CVE-less Ticket, `FIXED` is resolution-complete without `released_at`.
 
 Maintainership is not represented as workflow-specific because it is
 package-wide within a `TicketPackage`; its discovery and identity rules are in

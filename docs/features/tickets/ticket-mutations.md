@@ -69,18 +69,23 @@ other service boundaries in one transaction when needed.
 
 ### Acting user convention
 
-All operations accept an `acting_user_id: UUID | None` parameter:
+Each operation's own contract fixes whether it takes an actor:
 
-- `UUID` — action performed by an authenticated user (enables
-  auto-assignment on unassigned tickets if the user holds the
-  `vulnerability_analyst` role)
-- `None` — system action (release detection, CVSS sync, product
-  lifecycle transitions). Auto-assignment does not apply
+- `upsert_cvss_assessment()`, `delete_cvss_assessment()`, and
+  `set_severity_manual()` are user-attributed and require
+  `acting_user_id: UUID`, the authenticated user performing the action. An
+  effective mutation auto-assigns an unassigned Ticket to that user when the
+  user is active and holds the `vulnerability_analyst` role
+- `upsert_external_cvss_batch()`, `recalculate_cvss_chain()`,
+  `reconcile_ticket_status()`, and `refresh_priority_auto()` take no actor
+  and never auto-assign. A user-attributed composition that calls one (for
+  example `associate_cve()`) performs its own assignment step
+- `auto_assign_actor()` accepts `acting_user: User | None`; `None` is a
+  system action and never assigns
 
-**API handler rule**: API endpoint handlers MUST always pass the UUID of
-the authenticated user as `acting_user_id`. Passing `None` from an API
-handler is a bug — it would silently bypass auto-assignment. `None` is
-reserved exclusively for system entry points.
+**API handler rule**: API endpoint handlers MUST pass the UUID of the
+authenticated user as `acting_user_id`. System entry points call only the
+operations that take no actor.
 
 #### Authorization responsibility
 
@@ -88,10 +93,10 @@ The module does NOT perform capability checks — this is by design.
 API-layer callers MUST apply the appropriate `require_capability()`
 dependency before invoking any module function; the module trusts that
 the caller has already verified the user's permissions. System callers
-(fetchers, Celery tasks) use `acting_user_id=None` and operate as
-trusted internal processes — capability checks do not apply to them.
-Adding a new caller that passes a non-None `acting_user_id` without
-having verified the corresponding capability is a security bug.
+(fetchers, Celery tasks) call only the operations that take no actor and
+operate as trusted internal processes — capability checks do not apply to
+them. Adding a caller that passes an `acting_user_id` without having
+verified the corresponding capability is a security bug.
 
 Capability is checked by the API before its first service resource lookup. For
 consumer-facing operations, capability does not replace Ticket visibility. The

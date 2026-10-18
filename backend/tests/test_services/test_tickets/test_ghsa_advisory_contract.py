@@ -9,8 +9,9 @@ captured anonymously on 2026-10-08 with Python `urllib` requests
 `X-GitHub-Api-Version: 2022-11-28`; docs/conventions.md, External
 Integration Contract Verification). Every consumed field is asserted for
 name, nesting, type, and nullability through a strict test-local typed
-model; no production parser exists yet, and the model is independent of
-the one it will define.
+model, kept independent of the production parser
+(`app/services/tickets/ghsa_advisory_record.py`) so that a parser defect
+cannot hide a contract change.
 
 Live verification on 2026-10-08 (18 anonymous requests in total):
 
@@ -271,7 +272,6 @@ class _Advisory(TypedDict):
     html_url: str
     summary: str
     description: str | None
-    published_at: _DateTime
     updated_at: _DateTime
     source_code_location: str | None
     references: list[str]
@@ -395,7 +395,6 @@ class TestTypedAdvisory:
             ("html_url", None),
             ("cve_id", 2021),
             ("summary", None),
-            ("published_at", "2026-10-08"),
             ("updated_at", "2026-10-08T00:00:00+00:00"),
             ("source_code_location", 1),
             ("references", "https://advisory.example.invalid/upstream/1"),
@@ -454,8 +453,9 @@ class TestTypedAdvisory:
     def test_dates_parse_as_utc_date_times(self, name: str) -> None:
         advisory = _validated(_advisory(name))
 
-        for value in (advisory["published_at"], advisory["updated_at"]):
-            assert datetime.fromisoformat(value).utcoffset() == timedelta(0)
+        assert datetime.fromisoformat(advisory["updated_at"]).utcoffset() == (
+            timedelta(0)
+        )
 
 
 @pytest.mark.unit
@@ -814,6 +814,7 @@ class TestUnconsumedFields:
 
         assert advisory["type"] == "reviewed"
         assert isinstance(advisory["severity"], str)
+        assert isinstance(advisory["published_at"], str)
         assert isinstance(advisory["comments"], int)
         assert advisory["withdrawn_at"] is None
         assert set(advisory["cvss"]) == {"vector_string", "score"}

@@ -181,7 +181,7 @@ not propagate correctly across `await` boundaries):
 
 | Context | Field | Value source |
 |---------|-------|---------------|
-| API request | `request_id` | Adopts the incoming `X-Request-ID` header if present, otherwise generates a UUID. Realizes the existing contract in `docs/api-spec.md` (Request Tracing) — see "Relationship to the API Request Tracing contract" below. |
+| API request | `request_id` | Adopts the incoming `X-Request-ID` header when it passes validation, otherwise generates a UUIDv7. Realizes the existing contract in `docs/api-spec.md` (Request Tracing) — see "Relationship to the API Request Tracing contract" below. |
 | Celery task | `celery_task_id` | `task.request.id` (Celery's native task identifier), bound via the `task_prerun`/`task_postrun` signals. |
 | Fetcher run | `fetcher_run_id` | Bound by `BaseFetcher.run()` (the non-overridable lifecycle wrapper — see `docs/features/platform/fetcher-infrastructure.md`) after the `FetcherRun` record is acquired. |
 | IBS RabbitMQ delivery | `ibs_event_id` | A new local UUIDv7 generated and bound by the standalone consumer when handling begins. See `docs/features/integrations/ibs-rabbitmq-integration.md` (Correlation Scope). |
@@ -328,17 +328,17 @@ reserved for the CLI Output Contract (`docs/conventions.md`) without
 requiring any CLI-specific logging configuration.
 
 When CLI processes invoke shared service or utility code that uses
-`structlog.get_logger()`, a minimal structlog configuration MUST be
-applied at Click group initialization. This configuration routes
-structlog output through stdlib `logging` to stderr, uses plain-text
-format (not JSON, not colorized console), and sets the level to WARNING
-or above — so that DEBUG/INFO messages from service code do not pollute
-CLI output. Correlation IDs (`request_id`, `celery_task_id`,
-`fetcher_run_id`, `ibs_event_id`) are not bound in CLI processes and are
-omitted from log records. The configuration applies the same Redaction
-Processor as the runtime pipeline (see Secrets and PII Discipline).
-stdout remains reserved exclusively for CLI Output Contract output
-(`docs/conventions.md`).
+`structlog.get_logger()`, a minimal structlog configuration MUST be applied by
+the CLI command bootstrap (`docs/features/platform/cli-infrastructure.md`,
+Root Command Group & Bootstrap). This configuration routes structlog output
+through stdlib `logging` to stderr, uses plain-text format (not JSON, not
+colorized console), and sets the level to WARNING or above — so that
+DEBUG/INFO messages from service code do not pollute CLI output. Correlation
+IDs (`request_id`, `celery_task_id`, `fetcher_run_id`, `ibs_event_id`) are not
+bound in CLI processes and are omitted from log records. The configuration
+applies the same Redaction Processor as the runtime pipeline (see Secrets and
+PII Discipline). stdout remains reserved exclusively for CLI Output Contract
+output (`docs/conventions.md`).
 
 Alembic keeps its own independent logging configuration
 (`alembic.ini`, `fileConfig`), because it is a one-shot migration tool
@@ -533,8 +533,7 @@ contract only.
 
 ## Testing
 
-Once implemented, logging configuration and correlation-ID propagation
-are expected to be tested as follows:
+Logging configuration and correlation-ID propagation are tested as follows:
 
 - **Format/level selection**: unit tests verifying that `LOG_FORMAT=auto`
   resolves to `console` when `sys.stdout.isatty()` is `True` and to
@@ -544,10 +543,10 @@ are expected to be tested as follows:
   `LOG_LEVEL` or `LOG_FORMAT` value causes the process to fail fast
   with a plain-text stderr message.
 - **Correlation ID propagation**: a dedicated test verifying the ASGI
-  middleware adopts the client-supplied `X-Request-ID` when present and
-  generates a UUID otherwise, and that the value appears both in the
-  response header and in log records emitted during that request
-  (using `structlog.testing.capture_logs` or equivalent).
+  middleware adopts the client-supplied `X-Request-ID` when it passes
+  validation and generates a UUIDv7 otherwise, and that the value appears both
+  in the response header and in log records emitted during that request (using
+  `structlog.testing.capture_logs` or equivalent).
 - **Reset behavior**: tests verifying that `request_id`/
   `celery_task_id`/`fetcher_run_id` do not leak into log records emitted
   by a subsequent, unrelated unit of work in the same process (relevant

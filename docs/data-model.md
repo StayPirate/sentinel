@@ -500,10 +500,10 @@ Represents a Common Vulnerability and Exposure entry.
 |----------------|--------------|----------------------|---------------------------------|
 | id             | UUID         | PK                   | Internal identifier             |
 | cve_id         | VARCHAR(20)  | UNIQUE, NOT NULL     | CVE identifier (e.g., CVE-2024-1234) |
-| title          | VARCHAR(256) |                      | Brief summary from the CNA (CVE 5.x `containers.cna.title`). Populated by fetchers that parse CVE JSON 5.x format (`sync_mitre_cves`, `sync_kernel_cves`). Null when the CNA does not provide a title. Max 256 chars per CVE schema specification |
+| title          | VARCHAR(256) |                      | Brief summary of the vulnerability: the CNA title (CVE 5.x `containers.cna.title`, written by `sync_mitre_cves` and `sync_kernel_cves`) or the GitHub advisory `summary` truncated to 256 characters (written by `sync_ghsa_advisories`); the last writer wins (`docs/features/tickets/cve-service.md`, Merge Strategy). Null when no source provides a title. Max 256 chars per CVE schema specification |
 | description    | TEXT         |                      | Vulnerability description       |
 | severity       | VARCHAR(20)  | nullable               | Critical, High, Medium, Low, None - denormalized unified CVE severity from the deterministic CVSS Severity Resolution Cascade. `NULL` means unresolved; `None` means a resolved score of exactly 0.0. See `docs/features/tickets/cvss-scoring.md` |
-| published_date | TIMESTAMPTZ    |                      | Date CVE was published         |
+| published_date | TIMESTAMPTZ    |                      | Date CVE was published. Written only by `sync_mitre_cves` (`cveMetadata.datePublished`) and `sync_nvd_cves` (`published`); every other source omits it |
 | modified_date  | TIMESTAMPTZ    |                      | Date CVE was last modified     |
 | cve_state      | VARCHAR(20)  | NOT NULL, DEFAULT PUBLISHED | CveState: PUBLISHED, REJECTED. Populated by any discovery fetcher: `sync_mitre_cves` (from `cveMetadata.state`), `sync_nvd_cves` (from `vulnStatus = Rejected`), `sync_kernel_cves` (from file path: `published/` vs `rejected/`). `PUBLISHED` requires `date_rejected IS NULL`; the service enforces this invariant. See `docs/features/tickets/cve-tracking.md` for rejection handling rules |
 | date_rejected  | TIMESTAMPTZ  | nullable             | From CVE JSON 5.x `cveMetadata.dateRejected`. May be present only while `cve_state = REJECTED`; any resulting `PUBLISHED` state clears it even when the current source omits the field |
@@ -598,7 +598,7 @@ representations) for the complete boundary-conversion contract.
 | Value | Description |
 |-------|-------------|
 | `"nvd"` | NIST National Vulnerability Database |
-| `"mitre"` | MITRE CVE Services (cvelistV5 repository) |
+| `"mitre"` | MITRE CVE List (cvelistV5 repository) |
 | `"kernel"` | Linux kernel vulnerability tracker (vulns.git) |
 | `"redhat"` | Red Hat Security Data API |
 | `"ghsa"` | GitHub Advisory Database (GitHub CNA) |
@@ -1764,7 +1764,7 @@ Beat, and API server).
 
 Records every execution of a fetcher. Primary data source for the fetcher
 dashboard charts. Records are retained indefinitely (no retention policy).
-Growth rate is approximately 20,000 rows per year. See
+Growth rate is approximately 15,000 rows per year. See
 `docs/features/platform/fetcher-infrastructure.md` for full specification,
 including the full lifecycle state machine and the timestamp semantics
 summarized below.
@@ -1786,7 +1786,7 @@ summarized below.
 | error_traceback      | TEXT        | nullable                 | Full Python traceback (admin-only visibility in API) |
 | triggered_by         | VARCHAR(20) | NOT NULL                 | FetcherRunTriggeredBy: `schedule`, `manual` |
 | triggered_by_user_id | UUID        | FK(user.id), nullable    | Admin who triggered the run (only for `manual`) |
-| hard_time_limit_seconds | INTEGER | nullable                 | Effective Celery hard time limit (seconds) under which the worker executes this run. Persisted atomically at adoption. `NULL` while `status = queued`, for runs finalized without adoption, and for historical rows predating this column. Used for Running Stale Threshold evaluation and `SoftTimeLimitExceeded` diagnostics. Not exposed via the API |
+| hard_time_limit_seconds | INTEGER | nullable                 | Effective Celery hard time limit (seconds) under which the worker executes this run. Persisted atomically at adoption. `NULL` while `status = queued` and for runs finalized without adoption; a `running` row with `NULL` falls back to `FetcherConfig.run_timeout` (`docs/features/platform/fetcher-infrastructure.md`, Stale Run Detection). Used for Running Stale Threshold evaluation and `SoftTimeLimitExceeded` diagnostics. Not exposed via the API |
 | cursor               | JSONB       | nullable                 | Fetcher-defined checkpoint for the next run (e.g., `{"sha": "...", "committed_at": "..."}` for git-based fetchers). Written when the final run status is `success` or `partial`; read by the next run to determine starting point. NULL for fetchers that derive cursors from other fields |
 | created_at           | TIMESTAMPTZ   | NOT NULL, DEFAULT        | Record creation timestamp — for a manual run, this is also the moment the trigger was accepted and the run entered `queued` |
 
@@ -1822,10 +1822,7 @@ The four item counters are finalized-run diagnostics. `items_succeeded` and
 unit; `items_created` and `items_updated` are orthogonal durable effects. The
 database row is not updated with live in-memory counter progress while its
 status is `queued` or `running`, so those states expose the persisted defaults
-of zero. Finalization persists all counters together. `items_succeeded` is
-introduced directly as `INTEGER NOT NULL DEFAULT 0`; Sentinel has no live
-instance or production database requiring a nullable compatibility state or
-historical backfill.
+of zero. Finalization persists all counters together.
 
 #### FetcherRunStatus Enum
 

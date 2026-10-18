@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import functools
+import json
 import logging
+import os
+import subprocess
+import sys
 import traceback
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 import pytest
 from cryptography.hazmat.primitives import serialization
@@ -308,6 +312,114 @@ class TestLogFormatValidation:
         monkeypatch.setenv("LOG_FORMAT", "xml")
         with pytest.raises(ValidationError, match="Invalid LOG_FORMAT"):
             Settings(_env_file=None)
+
+
+_BACKEND_DIR: Final = Path(__file__).resolve().parents[1]
+_INHERITED_OS_ENV_KEYS: Final = ("PATH", "LANG", "LC_ALL", "TZ")
+# Fictional JWT secret — never a real credential (AGENTS.md Guardrail 23).
+_STARTUP_JWT_SECRET_KEY: Final = "startup-test-jwt-secret-key-not-for-production"
+
+_STARTUP_SCRIPT: Final = """\
+import runpy
+import socket
+import sys
+
+
+def _refuse(*args, **kwargs):
+    raise AssertionError("the process opened a connection")
+
+
+socket.socket.connect = _refuse
+socket.socket.connect_ex = _refuse
+socket.create_connection = _refuse
+
+sys.argv = {argv!r}
+runpy.run_module({module!r}, run_name="__main__", alter_sys=True)
+"""
+
+_RUNTIME_ENTRY_POINTS: Final = {
+    "api": (
+        "uvicorn",
+        ["uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "0"],
+    ),
+    # `-A` is resolved before the subcommand, so this is also the startup
+    # path of the Git worker and Beat.
+    "celery": (
+        "celery",
+        ["celery", "-A", "app.celery_app", "worker", "--pool=prefork"],
+    ),
+    "ibs-consumer": ("app.ibs_consumer", ["python"]),
+}
+
+
+def _start(
+    module: str, argv: list[str], variable: str, home: Path
+) -> subprocess.CompletedProcess[str]:
+    """Start an entry point with `variable=bogus` in a hermetic interpreter:
+    outbound connections refused, an explicit minimal environment, and
+    `cwd` `home`, so the relative `backend/.env` is never read."""
+    env = {key: os.environ[key] for key in _INHERITED_OS_ENV_KEYS if key in os.environ}
+    env["HOME"] = str(home)
+    env["PYTHONPATH"] = str(_BACKEND_DIR)
+    env["JWT_SECRET_KEY"] = _STARTUP_JWT_SECRET_KEY
+    env["LOG_FORMAT"] = "json"
+    env[variable] = "bogus"
+    return subprocess.run(
+        [sys.executable, "-c", _STARTUP_SCRIPT.format(argv=argv, module=module)],
+        cwd=home,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+
+
+def _is_json_object(line: str) -> bool:
+    try:
+        return isinstance(json.loads(line), dict)
+    except ValueError:
+        return False
+
+
+@pytest.mark.unit
+class TestInvalidLoggingSettingsFailProcessStartup:
+    """An invalid `LOG_LEVEL` or `LOG_FORMAT` stops every process role with
+    a plain-text stderr message, not through the structured renderer
+    (docs/features/platform/logging.md, Startup Validation; Testing), and
+    the CLI with its documented `Error: ...` line and exit 2
+    (docs/features/platform/cli-infrastructure.md, Root Command Group &
+    Bootstrap, step 3)."""
+
+    @pytest.mark.parametrize("variable", ["LOG_LEVEL", "LOG_FORMAT"])
+    @pytest.mark.parametrize("role", list(_RUNTIME_ENTRY_POINTS))
+    def test_runtime_process_exits_with_a_plain_text_error(
+        self, role: str, variable: str, tmp_path: Path
+    ) -> None:
+        module, argv = _RUNTIME_ENTRY_POINTS[role]
+
+        result = _start(module, argv, variable, tmp_path)
+
+        assert result.returncode != 0, result.stderr
+        assert result.stdout == ""
+        assert f"Invalid {variable}: 'bogus'" in result.stderr
+        assert not [
+            line for line in result.stderr.splitlines() if _is_json_object(line)
+        ]
+
+    @pytest.mark.parametrize("variable", ["LOG_LEVEL", "LOG_FORMAT"])
+    def test_cli_exits_2_with_an_error_line_and_no_traceback(
+        self, variable: str, tmp_path: Path
+    ) -> None:
+        result = _start("app.cli", ["sentinel", "fetcher", "list"], variable, tmp_path)
+
+        assert result.returncode == 2, result.stderr
+        assert result.stdout == ""
+        assert result.stderr.startswith(
+            f"Error: Invalid configuration - {variable.lower()}:"
+        )
+        assert f"Invalid {variable}: 'bogus'" in result.stderr
+        assert "Traceback" not in result.stderr
 
 
 @pytest.mark.unit

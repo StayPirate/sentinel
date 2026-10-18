@@ -19,8 +19,9 @@ from __future__ import annotations
 
 import asyncio
 import gzip
+import inspect
 import logging
-from collections.abc import Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from typing import Any, Final
 from unittest.mock import AsyncMock
 
@@ -29,14 +30,17 @@ import pytest
 from pydantic import SecretStr
 
 from app.config import settings
+from app.core.enums import IBSRequestActionType, IBSRequestState
 from app.services import ibs_client as ibs_client_module
 from app.services.http_client import is_retryable_condition
 from app.services.ibs_client import (
+    AcceptInfo,
     DiffIssue,
     IBSAuthenticationError,
     IBSClient,
     IBSCredentialsNotConfiguredError,
     IBSHistoricalRevisionUnavailable,
+    IBSRequestActionDetail,
     IBSResponseDataError,
     SourceInfo,
     SourceInfoResult,
@@ -44,6 +48,7 @@ from app.services.ibs_client import (
     is_valid_ibs_name,
 )
 from tests.support.ibs_api import (
+    CLOCK,
     FICTIONAL_OREV,
     FICTIONAL_REV,
     LIVE_CHALLENGE,
@@ -51,6 +56,7 @@ from tests.support.ibs_api import (
     LIVE_REALM,
     SESSION_COOKIE_NAME,
     TEST_API_URL,
+    TEST_HOST,
     IBSServer,
     Responder,
     chunked_response,
@@ -71,6 +77,37 @@ _PROJECT_PATH: Final = f"/source/{LIVE_PROJECT}"
 _OLD: Final = "746089c90539b6ff4a924ce513b6b800"
 _NEW: Final = "de84bf76520480292946d884daf7308a"
 _SUDO: Final = "f6cf5398175f44ce4265e2381f6309b2"
+
+_PREFIX: Final = "/fictional-prefix"
+_REQUEST_SUM: Final = "a" * 32
+_REQUEST_ACTION: Final = IBSRequestActionDetail(
+    request_number=920001,
+    action_type=IBSRequestActionType.MAINTENANCE_INCIDENT,
+    source_project="SUSE:Maintenance:REQUEST:920001",
+    source_package="curl.SUSE_SLE-15-SP6_Update",
+    source_revision=_REQUEST_SUM,
+    target_project="SUSE:Maintenance:80001",
+    target_package="curl.SUSE_SLE-15-SP6_Update",
+    target_release_project=LIVE_PROJECT,
+    acceptinfo=AcceptInfo(rev="2", srcmd5=_REQUEST_SUM, xsrcmd5=_REQUEST_SUM),
+)
+_REQUEST_DOCUMENT: Final = (
+    b'<request id="920001"><action type="maintenance_incident">'
+    b'<source project="SUSE:Maintenance:REQUEST:920001" package="curl.x" rev="1"/>'
+    b'<target project="SUSE:Maintenance" releaseproject="SUSE:SLE-15-SP6:Update"/>'
+    b'</action><state name="new" created="2026-10-01T05:20:43" '
+    b'when="2026-10-01T09:16:55"/></request>'
+)
+_ACTION_DIFF_DOCUMENT: Final = (
+    b'<sourcediff><issues><issue state="added" tracker="cve" name="2026-1" '
+    b'label="CVE-2026-1"/></issues></sourcediff>'
+)
+_HISTORY_DOCUMENT: Final = (
+    b'<revisionlist><revision rev="1"><srcmd5>' + _REQUEST_SUM.encode() + b"</srcmd5>"
+    b"<time>1700000000</time><requestid>920001</requestid></revision></revisionlist>"
+)
+
+_Operation = Callable[[IBSClient], Awaitable[object]]
 
 
 def _diff_path(package: str = "pkg") -> str:
@@ -448,15 +485,133 @@ class TestRequestAuthentication:
         assert [r.method for r in server.requests] == ["POST"] * 3
         sleep.assert_awaited_once_with(1.0)
 
-    async def test_redirect_is_not_followed(self, server: IBSServer) -> None:
-        server.intercept = lambda _: httpx.Response(
-            302, headers={"location": "https://elsewhere.example.test/source"}
+    @pytest.mark.parametrize(
+        "target",
+        [
+            f"https://{TEST_HOST}:8443/source/{LIVE_PROJECT}/sudo",
+            f"http://{TEST_HOST}/source/{LIVE_PROJECT}/sudo",
+            f"https://elsewhere.example.test/source/{LIVE_PROJECT}/sudo",
+            f"https://download.ibs.example.test/ibs/source/{LIVE_PROJECT}/sudo",
+        ],
+        ids=["other_port", "other_scheme", "other_host", "download_origin"],
+    )
+    async def test_redirect_never_carries_a_held_session_cookie_off_origin(
+        self, server: IBSServer, target: str
+    ) -> None:
+        """ibs-integration.md, Session Reuse and Request Authentication:
+        redirects are never followed, so a held session cookie reaches only
+        the `IBS_API_URL` origin. The cookie is scoped to the parent domain,
+        the case in which a cookie jar alone would also send it to another
+        port or subdomain."""
+        server.session_cookie_attributes = (
+            "Domain=ibs.example.test; Path=/; Secure; HttpOnly"
+        )
+        server.route(
+            "GET", _PROJECT_PATH, xml_response(load_fixture("sourceinfo_single_linked"))
         )
         async with _client() as client:
+            await client.get_source_info(LIVE_PROJECT, ["openssh"])
+            server.intercept = lambda _: httpx.Response(
+                307, headers={"location": target}
+            )
             with pytest.raises(httpx.HTTPStatusError) as raised:
-                await client.get_source_info(LIVE_PROJECT, ["openssh"])
-        assert raised.value.response.status_code == 302
-        assert [r.url.host for r in server.requests] == ["api.ibs.example.test"]
+                await client.get_diff_issues(LIVE_PROJECT, "sudo", _SUDO, _SUDO)
+
+        assert raised.value.response.status_code == 307
+        _, _, redirected = server.requests
+        assert (
+            redirected.headers["cookie"]
+            == f"{SESSION_COOKIE_NAME}=fictional-session-0001"
+        )
+        assert {(r.url.scheme, r.url.host, r.url.port) for r in server.requests} == {
+            ("https", TEST_HOST, None)
+        }
+
+    async def test_every_operation_sends_the_session_only_to_the_configured_origin(
+        self, server: IBSServer
+    ) -> None:
+        """Every public operation resolves its path under an `IBS_API_URL`
+        with a non-default port and a path prefix, and sends the session
+        cookie established by the first one (ibs-integration.md, Origins
+        and Authentication, Session Reuse)."""
+        operations: dict[str, tuple[str, str, bytes, _Operation]] = {
+            "get_source_info": (
+                "GET",
+                _PROJECT_PATH,
+                load_fixture("sourceinfo_single_linked"),
+                lambda c: c.get_source_info(LIVE_PROJECT, ["openssh"]),
+            ),
+            "get_diff_issues": (
+                "POST",
+                _diff_path("sudo"),
+                load_fixture("diff_empty"),
+                lambda c: c.get_diff_issues(LIVE_PROJECT, "sudo", _SUDO, _SUDO),
+            ),
+            "search_request_ids": (
+                "GET",
+                "/search/request/id",
+                b'<collection matches="1"><request id="920001"/></collection>',
+                lambda c: c.search_request_ids(
+                    IBSRequestActionType.MAINTENANCE_INCIDENT,
+                    states=[IBSRequestState.NEW],
+                    source_package_prefix="curl.",
+                ),
+            ),
+            "get_request": (
+                "GET",
+                "/request/920001",
+                _REQUEST_DOCUMENT,
+                lambda c: c.get_request(920001),
+            ),
+            "get_request_action_diff": (
+                "POST",
+                "/source/SUSE:Maintenance:80001/curl.SUSE_SLE-15-SP6_Update",
+                _ACTION_DIFF_DOCUMENT,
+                lambda c: c.get_request_action_diff(
+                    _REQUEST_ACTION, codestream_package="curl"
+                ),
+            ),
+            "get_source_history": (
+                "GET",
+                f"{_PROJECT_PATH}/curl/_history",
+                _HISTORY_DOCUMENT,
+                lambda c: c.get_source_history(LIVE_PROJECT, "curl"),
+            ),
+        }
+        public = {
+            name
+            for name, _ in inspect.getmembers(IBSClient, inspect.iscoroutinefunction)
+            if not name.startswith("_") and name != "aclose"
+        }
+        assert set(operations) == public, "an IBSClient operation is not exercised"
+
+        for method, path, document, _ in operations.values():
+            server.route(method, f"{_PREFIX}{path}", xml_response(document))
+        client = IBSClient(
+            api_url=f"https://{TEST_HOST}:8443{_PREFIX}",
+            username="jdoe",
+            ssh_private_key=SecretStr(fictional_settings_value()),
+            clock=lambda: CLOCK,
+        )
+        async with client:
+            for _, _, _, call in operations.values():
+                result = await call(client)
+                assert getattr(result, "incomplete_reason", None) is None
+
+        assert len(server.requests) == len(operations) + 1
+        assert len(server.signatures) == 1
+        for request in server.requests:
+            assert (request.url.scheme, request.url.host, request.url.port) == (
+                "https",
+                TEST_HOST,
+                8443,
+            )
+            assert request.url.path.startswith(f"{_PREFIX}/")
+        for request in server.requests[2:]:
+            assert (
+                request.headers["cookie"]
+                == f"{SESSION_COOKIE_NAME}=fictional-session-0001"
+            )
 
     async def test_no_credential_material_in_logs_or_exceptions(
         self, server: IBSServer, caplog: pytest.LogCaptureFixture

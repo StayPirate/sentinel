@@ -295,7 +295,10 @@ async def list_all_keys(
 
 Returns matching keys across all owners with owner records. `owner` accepts
 a user UUID or case-sensitive exact username under the shared User Identifier
-Resolution contract. An unknown owner returns an empty page with `total=0`;
+Resolution contract, applied inside the count and data statements through the
+single user-domain matching policy (`user-service.md`,
+`resolve_user_identifier()`, composable form); the service never duplicates
+its matching rules. An unknown owner returns an empty page with `total=0`;
 it is not an error. Other filtering, sorting, NULL placement, and pagination
 match `list_user_keys()`. No row lock or audit event is created.
 

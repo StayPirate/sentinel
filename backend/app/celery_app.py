@@ -1,12 +1,14 @@
 """Celery application factory and bootstrap.
 
 Constructs the single `Celery` application object shared by every
-Celery-based runtime process (worker, Beat, IBS RabbitMQ consumer — see
-`docs/deployment.md`, Container Images). Validates the mandatory
-startup contracts defined in
-`docs/features/platform/fetcher-infrastructure.md` (Startup
-Validation): UTC timezone and RedBeat distributed lock enabled, both
-via `validate_celery_config()`. The no-result-backend contract is
+Celery-based runtime process (worker, Git worker, and Beat — see
+`docs/deployment.md`, Container Images). The IBS RabbitMQ consumer is not a
+Celery role and never loads this module
+(`docs/features/integrations/ibs-rabbitmq-integration.md`, Runtime
+Independence). Validates the mandatory startup contracts defined in
+`docs/features/platform/fetcher-infrastructure.md` (Startup Validation):
+UTC timezone and RedBeat distributed lock enabled, both via
+`validate_celery_config()`. The no-result-backend contract is
 fixed by construction (`result_backend=None` is hard-coded, with no
 corresponding `Settings` field to misconfigure) rather than actively
 validated.

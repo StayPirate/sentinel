@@ -136,8 +136,7 @@ class TestIsRunStale:
         )
 
     def test_running_uses_fallback_when_hard_limit_is_none(self) -> None:
-        """A `NULL` `hard_time_limit_seconds` (a historical row
-        predating the column) falls back to the live
+        """A `NULL` `hard_time_limit_seconds` falls back to the live
         `FetcherConfig.run_timeout` for threshold evaluation."""
         now = datetime.now(UTC)
         started_at = now - timedelta(seconds=121)
@@ -601,8 +600,8 @@ class TestAcquireFetcherRunStaleBoundary:
     do not set `hard_time_limit_seconds` (defaults to `NULL`), so these
     tests exercise the NULL-fallback path of `is_run_stale()` /
     `resolve_effective_hard_limit()`: staleness is evaluated against
-    the locked `FetcherConfig.run_timeout`, since the row predates (or
-    never received) its own persisted hard limit."""
+    the locked `FetcherConfig.run_timeout`, since the row has no
+    persisted hard limit."""
 
     async def test_elapsed_equal_to_threshold_is_not_stale(
         self,

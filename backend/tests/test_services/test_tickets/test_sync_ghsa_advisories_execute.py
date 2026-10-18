@@ -1554,6 +1554,7 @@ class TestAdvisorySuccess:
         advisory = env.advisory(
             cve_id,
             summary="Fictional title",
+            published_at="2099-01-02T03:04:05Z",
             references=[URL_1],
             vulnerabilities=[_vulnerability("example"), _vulnerability("other")],
         )
@@ -1565,6 +1566,8 @@ class TestAdvisorySuccess:
         cve = await env.cve_named(cve_id)
         assert cve is not None
         assert cve.title == "Fictional title"
+        # The advisory publication is not the CVE publication.
+        assert cve.published_date is None
         [ticket] = await env.tickets(cve)
         assert ticket.status == "New"
         async with env.factory() as session:
@@ -1723,7 +1726,7 @@ class TestAdvisoryFailure:
         failing, later = await env.cve(), await env.cve()
         env.pages(
             [
-                env.advisory(failing.cve_id, published_at=FAILURE_TEXT),
+                env.advisory(failing.cve_id, updated_at=FAILURE_TEXT),
                 env.advisory(later.cve_id),
             ]
         )
@@ -2098,13 +2101,11 @@ def _invalid_members(field_name: str, character: str = "") -> dict[str, Any]:
     members: dict[str, Any] = {"vulnerabilities": [vulnerability]}
     if field_name in {"summary", "description", "ghsa_id", "html_url"}:
         members[field_name] = value
-    elif field_name in {"published_at", "updated_at"}:
+    elif field_name == "updated_at":
         members[field_name] = f"2026-01-01T00:00:00Z{character}"
-    elif field_name in {"published_at_separator", "updated_at_separator"}:
+    elif field_name == "updated_at_separator":
         # `fromisoformat` accepts either character as the date/time separator.
-        members[field_name.removesuffix("_separator")] = (
-            f"2026-01-01{character}00:00:00Z"
-        )
+        members["updated_at"] = f"2026-01-01{character}00:00:00Z"
     elif field_name == "source_code_location":
         members[field_name] = f"https://git.example.invalid/{value}"
     elif field_name == "package_name":
@@ -2156,8 +2157,6 @@ class TestExternalStringAdmissibility:
             "description",
             "ghsa_id",
             "html_url",
-            "published_at",
-            "published_at_separator",
             "updated_at",
             "updated_at_separator",
             "source_code_location",

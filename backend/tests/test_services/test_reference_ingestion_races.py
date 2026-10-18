@@ -45,11 +45,14 @@ row is written by `upsert_references()`), and the single-session merge,
 preparation, and transaction-usability behavior
 (`tests/test_services/test_reference_ingestion.py`).
 
-Deferred to the CVE ingestion workflow tests: the race where `upsert_cve()`
-already holds the Ticket lock through Ticket-associated CVSS processing (so
-manual mutations serialize on that lock), and the per-CVE rollback injected
-after Ticket creation, CVSS/severity, Product eligibility, lifecycle,
-audit, source-success, and an earlier reference write.
+Covered by the CVE ingestion tests: the race where `upsert_cve()` already
+holds the Ticket lock through Ticket-associated CVSS processing, so manual
+mutations serialize on that lock (`TestComposedReferenceRace` in
+`tests/test_services/test_upsert_cve_atomicity.py`), and the per-CVE
+rollback injected after Ticket creation, CVSS/severity, Product
+eligibility, lifecycle, audit, source-success, and an earlier reference
+write (`TestComposedReferences` in
+`tests/test_services/test_upsert_cve_composition.py`).
 
 Every race keeps the first session's transaction open after its call
 returns, proves the second session blocked by the first with

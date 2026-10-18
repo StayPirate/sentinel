@@ -10,7 +10,7 @@ two separate OBS instances:
   products. This is the primary integration for codestream-level release
   detection.
 - **OBS** (public, `build.opensuse.org`): used for openSUSE distributions.
-  Not currently integrated — see Future Considerations.
+  Not currently integrated — see [OBS Public Integration](#obs-public-integration).
 
 ## IBS Integration
 
@@ -912,7 +912,8 @@ IBS-related data is stored in the following tables (see `docs/data-model.md`):
   `srcmd5` successfully examined for one `TicketPackageTrack`. At most one row
   exists per track. Polling, catch-up, and package-commit acceleration share
   this state without using it as Ticket audit history. See
-  `docs/features/integrations/ibs-rabbitmq-integration.md`.
+  `docs/features/packages/ibs-track-release-detection.md` (Track Release
+  Checkpoint).
 - `IBSRequest`: one retained request parent identified by its positive public
   request number, with the exact seven-state IBS value, optional superseding
   request number, upstream UTC timestamps, and separate local row timestamps.
@@ -1026,7 +1027,7 @@ The methods have these escaping outcomes:
 | One requested source-info package missing, duplicated, error-bearing, or carrying an invalid `srcmd5` | A per-package failed result in the returned mapping; valid sibling package results remain usable |
 | `get_diff_issues()` response identifies `old_md5` as unavailable under [Unavailable Old Revision](#unavailable-old-revision) | `IBSHistoricalRevisionUnavailable` |
 | `get_diff_issues()` response contains an issue with an unusable structural shape | `IBSResponseDataError` |
-| `get_diff_issues()` response is valid and contains no qualifying issue | Empty list |
+| `get_diff_issues()` response is valid and contains no issue | Empty list |
 | Request ID search reports inconsistent successful-response completeness or leaves candidate identity ambiguous | Incomplete `RequestEvidenceResult` |
 | Request ID search receives a 4xx other than 401 or 403 after shared rate-limit handling, including a predicate rejection | Incomplete `RequestEvidenceResult`; it never proves a negative |
 | Request detail is 404, has an unknown state or an action type outside the eight IBS types, has an invalid supersession relationship, omits a required supported-action field, has an invalid consumed field or IBS name, or has two supported actions with one semantic identity, including through project replacement | Incomplete `RequestEvidenceResult` |

@@ -707,8 +707,9 @@ required event sequence or explicit no-event outcome. For audited mutations:
     `NULL`, the creation-order position, no event for an unchanged instant or a
     rejected request, and no event when declassification retains the CRD
 
-See Guardrail 6 (Mandatory testing) and Guardrail 11 (Ticket event logging)
-in `AGENTS.md` for enforcement.
+`AGENTS.md` enforces these requirements through Quality and findings
+(mandatory tests) and its audit routing rule, and its Reviewer Trigger Matrix
+assigns every Ticket mutation change to `@ticket-integrity-reviewer`.
 
 ## Data Retention
 

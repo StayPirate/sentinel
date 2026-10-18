@@ -1057,10 +1057,11 @@ async def add_package_to_ticket(
 2. Query the SMELT v2 package-scoped maintained endpoint defined in
    `package-model.md` to resolve all currently maintained tracks and products
    for the given package name (external I/O — no lock held). Do not use the
-   separate paginated maintained sweep operation. Parse the response body
-   regardless of HTTP status and validate the JSON/JSend envelope, HTTP/status
-   pairing, and every applicable codestream and supported-target field before the
-   readiness or Product lookup. Unsupported (`SLFO_IBS`) and unclassified
+   separate paginated maintained sweep operation. For an HTTP 200 or 404
+   response, parse the body and validate the JSON/JSend envelope, HTTP/status
+   pairing, and every applicable codestream and supported-target field before
+   the readiness or Product lookup; any other HTTP status is invalid without
+   reading the body. Unsupported (`SLFO_IBS`) and unclassified
    (`UNKNOWN`) codestreams are skipped during this validation, with their
    warnings, as specified in `package-model.md` (SMELT Query for Package
    Resolution).
@@ -1519,9 +1520,11 @@ resolution is a no-op and catch-up dispatch still proceeds. A package-specific
 resolution or validation failure — `SmeltUnavailableError`,
 `PackageNotFoundInSmeltError`, `PackageTargetsUnresolvedError`, or
 `ProductCatalogNotReadyError` from one `add_package_to_ticket()` unit, or a
-persisted package name that fails the package-name pattern, detected before
-the unit's transaction opens — rolls back that package transaction where one
-was opened, logs the sanitized failure, and does not prevent the next package.
+persisted package name outside the public package-name grammar (Post-ingest
+CVE package resolution, Deterministic candidate resolution), detected before
+the unit's transaction opens and without a SMELT request — rolls back that
+package transaction where one was opened, logs the sanitized failure, and does
+not prevent the next package.
 If `TicketNotMutableError` reports that the Ticket re-entered
 the manual zone during the loop, roll back that package unit and treat it as a
 successful stale/inapplicable no-op rather than a package failure. An

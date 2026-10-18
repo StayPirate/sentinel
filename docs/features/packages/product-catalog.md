@@ -388,7 +388,7 @@ current Product CPE resolution are not blocked.
 
 Product catalog backfill is an on-demand Celery sub-operation of
 `sync_smelt_products`, not an independently scheduled `BaseFetcher`. It is
-unrelated to the reserved `BaseFetcher.catch_up(ticket_id, session)` mechanism
+unrelated to the `BaseFetcher.catch_up(ticket_id, session)` mechanism
 dispatched by Ticket convergence.
 
 Backfill is triggered when the Product catalog snapshot introduces at least

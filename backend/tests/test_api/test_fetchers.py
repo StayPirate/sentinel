@@ -1498,7 +1498,10 @@ class TestTriggerFetcherEndpoint:
                 f"/api/v1/fetchers/{fetcher_name}/trigger"
             )
             assert response.status_code == 503
-            assert response.json()["code"] == "CELERY_UNAVAILABLE"
+            assert response.json() == {
+                "code": "CELERY_UNAVAILABLE",
+                "detail": "Manual run could not be dispatched to the task broker",
+            }
             assert "supersecret" not in response.text
             assert "203.0.113.5" not in response.text
         finally:
@@ -2379,10 +2382,9 @@ class TestListFetcherAuditEventsEndpoint:
     async def test_all_invalid_event_types_still_checks_fetcher_existence(
         self, admin_client: AsyncClient
     ) -> None:
-        """Regression for the fix in this work item: an entirely
-        invalid `event_type` filter must not mask a nonexistent
-        fetcher behind an empty `200` — the existence check always
-        runs first."""
+        """Regression: an entirely invalid `event_type` filter must not
+        mask a nonexistent fetcher behind an empty `200` — the existence
+        check always runs first."""
         FETCHER_REGISTRY.clear()
         response = await admin_client.get(
             "/api/v1/fetchers/no-such-fetcher/audit-log",

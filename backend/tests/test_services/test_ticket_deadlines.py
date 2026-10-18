@@ -8,8 +8,10 @@ at the pure-function level, driven by the shared matrix in
 projection test also consume. The matrix describes persisted evidence; its
 oracle derives the boolean inputs of `resolve_track_milestones()`.
 Workflow-level parts of Requirements 3-4 (start immutability across real
-mutations, manual-zone exit workflows) and Requirements 7-9, 12 are owned by
-the service and API work items; their pure analogues are asserted here.
+mutations, manual-zone exit workflows) are proven by the service tests of
+those workflows, Requirements 7-9 by the Ticket list and workbench tests,
+and Requirement 12 by the Ticket detail, package-tree, and workbench API
+tests; their pure analogues are asserted here.
 """
 
 from __future__ import annotations

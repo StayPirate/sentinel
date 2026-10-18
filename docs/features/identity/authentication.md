@@ -756,8 +756,8 @@ endpoints that explicitly declare `Authentication: Optional` per
 
 If no credential is selected at shared step 2, return `None` without loading a
 user, checking a session, refreshing a JWT, looking up an API key, touching
-`last_used_at`, or emitting `api_key_validation_failed`. The endpoint proceeds
-as an anonymous request.
+`last_used_at`, or emitting `api_key_validation_failed` or `api_key_rejected`.
+The endpoint proceeds as an anonymous request.
 
 If a credential is selected, execute shared steps 3-7 without modification:
 
@@ -767,9 +767,12 @@ If a credential is selected, execute shared steps 3-7 without modification:
   debounced `last_used_at` touch;
 - an unknown API key executes the same rate-limited
   `api_key_validation_failed` WARNING path before returning 401;
-- malformed, invalid, expired, revoked, or otherwise rejected credentials,
-  and credentials whose user is missing or inactive, return the same generic
-  401 as mandatory authentication.
+- a revoked or expired API key, or one whose owner is missing or inactive,
+  executes the same rate-limited `api_key_rejected` WARNING path before
+  returning 401;
+- malformed, invalid, expired, or otherwise rejected JWTs, and JWTs whose user
+  is missing or inactive, return the same generic 401 as mandatory
+  authentication, and the rejection is not logged (see JWT validation).
 
 The optional dependency creates no audit event. Its successful JWT and API-key
 effects retain the audit boundaries specified by their shared sub-flows.
@@ -791,6 +794,13 @@ stale credentials cannot block those probe, bootstrap, or recovery paths.
    `is_active = false` rejects the request (HTTP 401). Use Redis cache
    when available (see Session liveness check).
 4. On success, return the `user_id` from the `sub` claim.
+
+A rejected JWT — any failed step above, or a missing or inactive user at
+Shared Credential Resolution step 5 — is not logged: the rejection emits no
+log record of its own, because token expiry and `JWT_SECRET_KEY` rotation make
+such rejections routine. The Redis-outage WARNING of the step-3 liveness check
+still applies (see Session liveness check). The logout endpoint's restricted
+decoding follows the same rule.
 
 ### API key validation
 
@@ -845,8 +855,9 @@ stale credentials cannot block those probe, bootstrap, or recovery paths.
    - **Multi-instance**: with N instances, the worst case is N WARNINGs
      per minute per IP (one per instance) — acceptable for an internal
      tool.
-3. Verify `revoked_at` is `NULL`.
-4. If `expires_at` is set, reject when `expires_at <= now`.
+3. Verify `revoked_at` is `NULL`; otherwise reject with reason `revoked`.
+4. If `expires_at` is set, reject with reason `expired` when
+   `expires_at <= now`.
 5. Update `last_used_at` to the current timestamp through
    `api_key_service.update_last_used_at()` (debounced: update at
    most once per minute **per server instance** to reduce write
@@ -861,6 +872,33 @@ stale credentials cannot block those probe, bootstrap, or recovery paths.
    with the otherwise valid credential. This metadata creates no
    `IdentityAuditEvent`; see `docs/features/identity/identity-audit-log.md`.
 6. On success, return the `user_id` from the `ApiKey` record.
+
+**Rejected-key warning**: when the digest matches a stored key but the request
+is rejected — at step 3 (`revoked`), at step 4 (`expired`), or because Shared
+Credential Resolution step 5 finds the key's owner missing or inactive
+(`owner_inactive`) — emit the rate-limited WARNING below and fail with the
+generic 401. The checks run in that order, so a revoked key whose expiration
+has passed reports `revoked`.
+
+- **Record**: `event="api_key_rejected"`, `key_id=<ApiKey.id>`,
+  `user_id=<ApiKey.user_id>`, `reason` (`revoked`, `expired`, or
+  `owner_inactive`), and `suppressed_count`. `user_id` is the key's owner
+  reference and is present even when the owner row is missing. The record
+  MUST NOT include the key prefix, key name, presented key, computed hash,
+  username, email, source IP, or other credential material; no PII exception
+  applies.
+- **Rate limiting**: the step-2 log rate limiting applies with the key's
+  `ApiKey.id` as its granularity instead of the ASGI peer address: at most 1
+  WARNING every 60 seconds per key per server instance, with the same
+  `suppressed_count`, storage, eviction, and multi-instance rules and the
+  same always-returned HTTP 401. Every rejection of the key counts toward its
+  window regardless of reason; the emitted record carries the reason of the
+  request that emits it. The limiter state is independent of the unknown-key
+  limiter.
+
+`api_key_validation_failed` is emitted only for a lookup miss and
+`api_key_rejected` only for a matched key, so a request emits at most one of
+them.
 
 API keys do **not** use sessions. They are validated through
 `api_key_service` against the `ApiKey` table on every request.

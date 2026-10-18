@@ -63,8 +63,8 @@ Not applicable, hence not tested here:
   unreachable, because `manage_confidentiality` implies scope `all` under
   the predefined roles; declassification only widens visibility, and the
   CRD is not a visibility input;
-- races with `grant_access()` and `revoke_access()`, owned by the
-  access-grant work item.
+- races with `grant_access()` and `revoke_access()`, covered in
+  `tests/test_services/test_access_grants_atomicity.py`.
 
 Committed rows are deleted explicitly at teardown (testing-strategy.md,
 Concurrency Testing). Every wait is bounded so a regression fails instead
