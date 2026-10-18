@@ -39,6 +39,7 @@ import asyncio
 import copy
 from collections.abc import AsyncIterator, Iterable, Mapping
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any, Final, cast
 
@@ -867,7 +868,7 @@ class TestErrorPropagation:
             {"html_url": ABSENT},
             {"html_url": 1},
             {"summary": [SECRET]},
-            {"published_at": SECRET},
+            {"updated_at": SECRET},
             {"updated_at": "2026-02-30T00:00:00Z"},
             {"references": SECRET},
             {"references": [{"url": SECRET}]},
@@ -884,7 +885,7 @@ class TestErrorPropagation:
             "html_url_absent",
             "html_url_number",
             "summary_list",
-            "published_at_text",
+            "updated_at_text",
             "updated_at_invalid_date",
             "references_string",
             "reference_object",
@@ -1236,6 +1237,7 @@ class TestIngestion:
             _advisory(
                 cve_id,
                 summary="Fictional title",
+                published_at="2099-01-02T03:04:05Z",
                 references=[URL_1],
                 vulnerabilities=[_vulnerability(name) for name in packages]
                 if packages
@@ -1248,6 +1250,8 @@ class TestIngestion:
         cve = await db_session.scalar(select(CVE).where(CVE.cve_id == cve_id))
         assert cve is not None
         assert cve.title == "Fictional title"
+        # The advisory publication is not the CVE publication.
+        assert cve.published_date is None
         [ticket] = (
             await db_session.scalars(select(Ticket).where(Ticket.cve_id == cve.id))
         ).all()
@@ -1272,6 +1276,53 @@ class TestIngestion:
             URL_1,
             HTML_URL,
         ]
+
+    @pytest.mark.parametrize(
+        "published_at",
+        ["2099-03-04T05:06:07Z", None, SECRET],
+        ids=["other_date_time", "null", "malformed"],
+    )
+    async def test_ghsa_never_writes_or_clears_published_date(
+        self,
+        published_at: str | None,
+        db_session: AsyncSession,
+        target: Target,
+        fetcher: SyncGhsaAdvisories,
+        server: GhsaServer,
+    ) -> None:
+        """A `published_date` written by another source survives a GHSA
+        advisory with a different, a null, or a malformed `published_at`,
+        while the mapped globals are replaced (Field Mapping, Global CVE
+        fields; cve-service.md, Merge Strategy)."""
+        published = datetime(2099, 1, 2, 3, 4, 5, tzinfo=UTC)
+        await cve_service.upsert_cve(
+            db_session,
+            target.cve_id,
+            CVESourceType.MITRE,
+            CVEIngestPayload(
+                title="Fictional CNA title",
+                published_date=published,
+                modified_date=datetime(2099, 1, 3, tzinfo=UTC),
+            ),
+        )
+        _serve(
+            server,
+            target.cve_id,
+            _advisory(
+                target.cve_id,
+                summary="Fictional advisory summary",
+                published_at=published_at,
+                updated_at="2099-02-03T04:05:06Z",
+            ),
+        )
+
+        result = await fetcher.fetch_single(target.cve_id, db_session)
+
+        assert result.action is UpsertAction.UPDATED
+        await db_session.refresh(target.cve)
+        assert target.cve.published_date == published
+        assert target.cve.modified_date == datetime(2099, 2, 3, 4, 5, 6, tzinfo=UTC)
+        assert target.cve.title == "Fictional advisory summary"
 
     async def test_updated_without_handoff_then_unchanged(
         self,
@@ -1679,13 +1730,11 @@ def _with_character(cve_id: str, field_name: str, character: str) -> dict[str, A
     members: dict[str, Any] = {"vulnerabilities": [vulnerability]}
     if field_name in {"summary", "description", "ghsa_id", "html_url"}:
         members[field_name] = value
-    elif field_name in {"published_at", "updated_at"}:
+    elif field_name == "updated_at":
         members[field_name] = f"2026-01-01T00:00:00Z{character}"
-    elif field_name in {"published_at_separator", "updated_at_separator"}:
+    elif field_name == "updated_at_separator":
         # `fromisoformat` accepts either character as the date/time separator.
-        members[field_name.removesuffix("_separator")] = (
-            f"2026-01-01{character}00:00:00Z"
-        )
+        members["updated_at"] = f"2026-01-01{character}00:00:00Z"
     elif field_name == "source_code_location":
         members[field_name] = f"https://git.example.invalid/{value}"
     elif field_name == "package_name":
@@ -1705,8 +1754,6 @@ PAYLOAD_FIELDS: Final = [
     "description",
     "ghsa_id",
     "html_url",
-    "published_at",
-    "published_at_separator",
     "updated_at",
     "updated_at_separator",
     "source_code_location",

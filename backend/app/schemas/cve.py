@@ -98,8 +98,9 @@ class CVESummary(BaseModel):
     cve_id: str = Field(description="CVE identifier (e.g. `CVE-2024-1234`).")
     title: str | None = Field(
         description=(
-            "Brief summary from the CNA (at most 256 characters); `null` if "
-            "not provided by the CNA."
+            "Brief summary (at most 256 characters): the CNA title or the "
+            "GitHub advisory summary, whichever source wrote last; `null` if "
+            "no source provides one."
         )
     )
     description: str | None = Field(description="Vulnerability description.")
@@ -115,8 +116,9 @@ class CVEDetail(BaseModel):
     cve_id: str = Field(description="CVE identifier (e.g. `CVE-2024-1234`).")
     title: str | None = Field(
         description=(
-            "Brief summary from the CNA (at most 256 characters); `null` if "
-            "not provided by the CNA."
+            "Brief summary (at most 256 characters): the CNA title or the "
+            "GitHub advisory summary, whichever source wrote last; `null` if "
+            "no source provides one."
         )
     )
     description: str | None = Field(description="Vulnerability description.")
@@ -180,8 +182,9 @@ class CVEListItem(BaseModel):
     cve_id: str = Field(description="CVE identifier (e.g. `CVE-2024-1234`).")
     title: str | None = Field(
         description=(
-            "Brief summary from the CNA (at most 256 characters); `null` if "
-            "not provided by the CNA."
+            "Brief summary (at most 256 characters): the CNA title or the "
+            "GitHub advisory summary, whichever source wrote last; `null` if "
+            "no source provides one."
         )
     )
     description: str | None = Field(description="Vulnerability description.")

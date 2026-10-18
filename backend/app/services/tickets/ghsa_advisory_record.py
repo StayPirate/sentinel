@@ -138,14 +138,15 @@ class GhsaAdvisory(_Model):
     """The consumed fields of one advisory (§ Response Validation).
 
     `model_fields_set` records which presence-sensitive globals (`summary`,
-    `description`, `published_at`, `updated_at`) the advisory carried.
+    `description`, `updated_at`) the advisory carried. `published_at` is the
+    GitHub advisory publication, not the CVE publication, so it is not
+    consumed (§ Field Mapping, Explicitly ignored fields).
     """
 
     ghsa_id: str
     html_url: str
     summary: str | None = None
     description: str | None = None
-    published_at: IsoDateTime | None = None
     updated_at: IsoDateTime | None = None
     source_code_location: str | None = None
     references: list[str] | None = None
@@ -301,8 +302,6 @@ def _global_fields(advisory: GhsaAdvisory) -> dict[str, object]:
         fields["description"] = (
             None if description is None else description[:DESCRIPTION_MAX_LENGTH]
         )
-    if "published_at" in present:
-        fields["published_date"] = advisory.published_at
     if "updated_at" in present:
         fields["modified_date"] = advisory.updated_at
     return fields
