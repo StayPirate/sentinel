@@ -636,11 +636,11 @@ their own business rules.
    "Username Format"), including the reserved username. If invalid or
    reserved, raise `UsernameFormatError`. Verify uniqueness in the database
    (excluding the current user, including inactive users). If violated,
-   raise `UserConflictError`. For external
-   users, this step is reached only by the sync process (human callers
-   are already blocked at step 2). External synchronization adds
-   `detail = {"source": "external_sync"}` to `username_changed`; a future
-   authenticated/manual caller uses `detail = NULL`
+   raise `UserConflictError`. For external users, this step is reached only
+   by the sync process (human callers are already blocked at step 2).
+   External synchronization adds `detail = {"source": "external_sync"}` to
+   `username_changed`; a future authenticated/manual caller uses
+   `detail = NULL`
 5. If `email` is provided, reject `None`; normalize it the same way as
    `create_user()` (trim whitespace, lowercase the entire string, validate
    format with `email-validator` — `check_deliverability=False` — raising

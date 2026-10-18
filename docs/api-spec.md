@@ -1099,10 +1099,10 @@ before resolution is attempted.
 
 `GET /api/v1/users/me` addresses the authenticated caller and takes
 precedence over `GET /api/v1/users/{user}`. The username `me` is therefore
-reserved and never assigned (`docs/conventions.md`, Username Format), so
-`/api/v1/users/{user}` addresses every user by both UUID and username. A
-literal path segment added at the position of a `{user}` path parameter is
-added to the reserved usernames in the same change.
+reserved and never assigned (`docs/conventions.md`, Username Format), so the
+static route never shadows a user's username. A literal path segment added at
+the position of a `{user}` path parameter is added to the reserved usernames
+in the same change.
 
 Implementation note: the owning domain service performs detection and lookup;
 identity consumers use `user_service.resolve_user_identifier()`. API

@@ -226,10 +226,15 @@ class TestAuditLogEndpointNaming:
 def _user_position_literals(paths: Iterable[str]) -> set[str]:
     """Literal segments at the position of a `{user}` path parameter: the
     segment that follows the same leading segments as the parameter, such
-    as `me` in `/api/v1/users/me` beside `/api/v1/users/{user}`."""
+    as `me` in `/api/v1/users/me` beside `/api/v1/users/{user}`. Leading
+    path parameters match each other whatever their names, as in routing."""
+
+    def shape(segments: tuple[str, ...]) -> tuple[str, ...]:
+        return tuple("{}" if part.startswith("{") else part for part in segments)
+
     split = [tuple(path.strip("/").split("/")) for path in paths]
     prefixes = {
-        segments[:index]
+        shape(segments[:index])
         for segments in split
         for index, segment in enumerate(segments)
         if segment == "{user}"
@@ -239,7 +244,7 @@ def _user_position_literals(paths: Iterable[str]) -> set[str]:
         for segments in split
         for prefix in prefixes
         if len(segments) > len(prefix)
-        and segments[: len(prefix)] == prefix
+        and shape(segments[: len(prefix)]) == prefix
         and not segments[len(prefix)].startswith("{")
     }
 
@@ -263,6 +268,19 @@ class TestUserPathReservation:
             f"Literal segments {unreserved} sit at a `{{user}}` position but are "
             "not in `app.core.usernames.RESERVED_USERNAMES`"
         )
+
+    def test_detection_covers_nested_positions_and_parameter_names(self) -> None:
+        paths = [
+            "/api/v1/users/{user}",
+            "/api/v1/users/me/audit-log",
+            "/api/v1/users/search",
+            "/api/v1/admin/users",
+            "/api/v1/admin/users/{user}/roles",
+            "/api/v1/tickets/{ticket_id}/access/{user}",
+            "/api/v1/tickets/{id}/access/bulk",
+        ]
+
+        assert _user_position_literals(paths) == {"me", "search", "bulk"}
 
 
 @pytest.mark.unit
