@@ -464,7 +464,7 @@ a natural English compound noun: "sync NVD CVEs", "detect IBS releases".
 | Source | External system |
 |--------|----------------|
 | `nvd` | NIST NVD |
-| `mitre` | MITRE CVE Services |
+| `mitre` | MITRE CVE List (cvelistV5) |
 | `redhat` | Red Hat Security Data API |
 | `kernel` | Linux Kernel CNA |
 | `ghsa` | GitHub Advisory Database |

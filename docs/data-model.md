@@ -598,7 +598,7 @@ representations) for the complete boundary-conversion contract.
 | Value | Description |
 |-------|-------------|
 | `"nvd"` | NIST National Vulnerability Database |
-| `"mitre"` | MITRE CVE Services (cvelistV5 repository) |
+| `"mitre"` | MITRE CVE List (cvelistV5 repository) |
 | `"kernel"` | Linux kernel vulnerability tracker (vulns.git) |
 | `"redhat"` | Red Hat Security Data API |
 | `"ghsa"` | GitHub Advisory Database (GitHub CNA) |

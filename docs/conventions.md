@@ -2153,8 +2153,8 @@ behavior, or whether a given planning artifact still exists.
 
 - "Phase" as a generic English word for a step within an algorithm,
   transaction, or lifecycle (e.g., "Phase 1 — lock and validate roots",
-  "run() phase 4", or a product/domain lifecycle stage such as
-  "Local-only phase (current)")
+  "run() phase 4", or a product/domain lifecycle stage such as the
+  "extended support phase" of a Product)
 - A scope statement expressed purely in ownership terms, with a
   cross-reference to the actual owning spec (e.g., "The
   `GET /api/v1/ibs-consumer/status` endpoint is defined in
