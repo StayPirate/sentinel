@@ -145,6 +145,61 @@ The 401 error message is intentionally generic and identical for all failure
 cases (user not found, wrong password, inactive user, external user,
 superseded password) to prevent username enumeration.
 
+### Login outcome logging
+
+Every login request that reaches step 1 and ends with HTTP 200, 401, or 429
+emits exactly one outcome log record: `session_created` when step 11 creates
+a Session (see `docs/features/identity/authentication.md`, Session
+creation), and `login_failed` otherwise. A request rejected by shared request
+validation (`422 VALIDATION_ERROR`) never reaches step 1 and emits neither. A
+request that ends in an unexpected exception — a database, token-encoding, or
+commit failure, or a lockout-gate failure other than a `RedisError` — emits no
+`login_failed`; the API logs the exception and returns `500 INTERNAL_ERROR`.
+
+`login_failed` is emitted at INFO with these fields:
+
+| Field | Presence | Value |
+|-------|----------|-------|
+| `reason` | Always | One value of the closed vocabulary below |
+| `user_id` | Only when the step-5 lookup found a user | That user's UUID |
+| `attempt_count` | Only when step 4 returned **Admitted** | The counter value step 4 returned |
+
+| `reason` | Outcome |
+|----------|---------|
+| `invalid_input` | Steps 1-3: overlong password, overlong or empty normalized username |
+| `locked` | Step 4, **Blocked** |
+| `unknown_user` | Step 6 |
+| `ineligible_user` | Step 7: inactive user, external user, or no `password_hash` |
+| `invalid_password` | Step 9 |
+| `revalidation_failed` | Step 11: session creation returned no Session |
+
+`invalid_input`, `locked`, and `unknown_user` therefore never carry
+`user_id`; `invalid_input` and `locked` never carry `attempt_count`; and on
+the Redis fail-open path no record carries `attempt_count`:
+
+```json
+{"event": "login_failed", "reason": "invalid_password", "user_id": "550e8400-...", "attempt_count": 2}
+{"event": "login_failed", "reason": "unknown_user", "attempt_count": 2}
+{"event": "login_failed", "reason": "locked"}
+```
+
+The record never contains the attempted username (raw or normalized), the
+password or any value derived from it, a password hash, the Redis counter
+key, the client IP address, or the User-Agent; `request_id` provides request
+correlation (see `docs/features/platform/logging.md`, Investigability), and
+no PII exception applies.
+
+`login_failed` is emitted from one call site using only values already in
+memory, with no additional database or Redis operation, after the step-8
+verification or the step-6 or step-7 dummy verification where one runs, so
+logging adds no timing difference between existing and unknown usernames.
+When the same request emits the lockout transition event (see Rate Limiting,
+Lockout transition logging), `login_failed` precedes it. The record is not
+rate-limited: each request emits at most one, and per-IP throttling is
+delegated to the reverse proxy (see Security Considerations). Like the
+lockout transition event, it is an operational diagnostic log, not an
+`IdentityAuditEvent`.
+
 ## Password Management
 
 ### Storage
@@ -329,6 +384,10 @@ an existing user, and omits it when the username does not exist:
 {"event": "login_lockout_triggered", "attempt_count": 5}
 ```
 
+The transition event follows the same request's `login_failed` record (see
+Login Endpoint, Login outcome logging). On the Redis fail-open path no counter
+value exists, so no transition event is emitted.
+
 Lockout events are tracked via application logging only (not the
 identity audit trail) because lockout is a transient Redis-only state,
 not a persistent identity mutation.
@@ -373,6 +432,8 @@ not a persistent identity mutation.
   rationale: Sentinel is an internal tool on a trusted network; a
   Redis outage should not lock all users out of the system. The Redis
   connection failure should be logged as a warning for operators.
+  `login_failed` still records each failed attempt, without
+  `attempt_count`.
 - **Configuration bounds**: `LOGIN_MAX_ATTEMPTS` must be >= 1.
   `LOGIN_LOCKOUT_MINUTES` must be >= 1. Values of 0 or negative cause
   the application to refuse to start with an explicit error message
@@ -410,6 +471,13 @@ session behavior.
 
 - **Generic error messages**: the login endpoint never reveals whether a
   username exists. All failure cases return the same 401 message.
+- **Failed-login logging**: every login that creates no Session emits
+  `login_failed` (see Login outcome logging), including blocked attempts and
+  attempts during a Redis outage, so password spraying across usernames and
+  brute force during fail-open remain visible to operators although
+  per-username lockout cannot detect them. Its `reason` and the presence of
+  `user_id` distinguish existing from unknown usernames only in the log
+  stream, which is available to trusted operators, never in a response.
 - **bcrypt with SHA-256 pre-hash**: provides adequate resistance to
   offline brute-force attacks for the local password threat model.
   Negligible memory usage (~4 KB/op) eliminates OOM risk under

@@ -3544,13 +3544,14 @@ scenarios are required:
   absence of database writes
 - Optional authentication returns `None` only when credential selection yields
   no credential, with no user/session/API-key lookup, refresh, `last_used_at`
-  touch, or unknown-key WARNING
+  touch, or API-key WARNING
 - Optional authentication returns the same principal and performs the same JWT
   refresh or API-key operational effects as mandatory authentication for a
   valid selected credential
-- Every selected credential rejection produces the same generic 401 under
-  optional and mandatory authentication: malformed/expired JWT, missing or
-  inactive session, unknown/revoked/expired API key, and missing/inactive user
+- Every selected credential rejection produces the same generic 401 and the
+  same application log outcome under optional and mandatory authentication:
+  malformed/expired JWT, missing or inactive session, unknown/revoked/expired
+  API key, and missing/inactive user
 - A selected invalid non-empty Bearer credential never falls back to a valid
   cookie; empty/whitespace-only Bearer and non-Bearer/unparseable headers retain
   the documented cookie fallback
@@ -3644,16 +3645,36 @@ scenarios are required:
 - Lockout (429) is triggered identically for existing and non-existing
   usernames after `LOGIN_MAX_ATTEMPTS` attempts
 
+**Login outcome logging:**
+
+- Every login request that reaches step 1 and ends with 200, 401, or 429
+  emits exactly one outcome record: `session_created` on success, otherwise
+  one INFO `login_failed`; a request rejected by shared request validation
+  emits neither, and an unexpected exception emits no `login_failed`
+- Each `reason` is produced by its documented step, with `user_id` exactly
+  when the step-5 lookup found a user and `attempt_count` exactly when the
+  lockout gate admitted the attempt; the Redis fail-open path omits
+  `attempt_count` and emits no lockout transition
+- `login_failed` is emitted after the real or dummy verification and performs
+  no additional database or Redis operation
+- At the threshold, `login_failed` precedes `login_lockout_triggered` in the
+  same request, and the transition rule is unchanged
+
 **Log PII discipline:**
 
 - No username, email, session ID, password, or password hash appears in
-  application logs for any authentication path (success, failure,
+  application logs for any authentication path (success, failure, blocked,
   lockout, Redis failure). IP addresses are prohibited except where a
   documented PII exception exists (see
   `docs/features/identity/authentication.md`, API key validation).
+  `login_failed` additionally never contains the raw or normalized attempted
+  username, a password-derived value, the lockout key, or the User-Agent.
   Capture logs via `caplog` and assert absence of personal identifiers
 - `user_id` (UUID) is present in session lifecycle logs when the actor
   is known
+- A rejected JWT (failed validation, missing or inactive session, missing or
+  inactive user) emits no application log record under mandatory, optional,
+  and logout authentication
 
 **Audit trail boundaries:**
 
@@ -4513,10 +4534,22 @@ commands are affected, tests MUST cover:
 
 **Logging and CLI:**
 
-- validation-failure WARNING contains the ASGI peer address
+- unknown-key validation-failure WARNING contains the ASGI peer address
   (`request.client.host`) only under the documented active-defense PII
   exception and never contains prefix, secret, hash, key name, username,
   or email; suppression behavior is tested without HTTP throttling
+- a matched but rejected key emits `api_key_rejected` with `key_id`, the owner
+  `user_id`, `reason` `revoked` (also when its expiration has passed),
+  `expired` (including `expires_at == now`), or `owner_inactive` (including a
+  missing owner row), and `suppressed_count`, and never the prefix, key name,
+  presented key, hash, username, email, or source IP; a matched key never
+  emits `api_key_validation_failed` and an unknown key never emits
+  `api_key_rejected`
+- `api_key_rejected` is rate-limited per key, independently of the unknown-key
+  limiter: at most one record per 60 seconds per key with the documented
+  `suppressed_count` across reasons, distinct keys independent, and the
+  generic 401 returned for every attempt; suppression is tested with a
+  controlled `now` without HTTP throttling
 - active-key anomaly WARNING contains only safe structured fields
 - `api-key list --username` includes key UUID, consistent derived status, and
   `—` for NULL last-use/expiration cells; `api-key revoke --key-id` needs no

@@ -669,7 +669,21 @@ here with the required authorization level and a link to the owning spec.
    `docs/features/identity/authentication.md` (Deactivation ordering,
    Session liveness check) and
    `docs/features/identity/user-service.md`
-6. All authentication events are logged (login, logout, failed attempts)
+6. Authentication outcomes are recorded as operational diagnostic logs that
+   follow `docs/features/platform/logging.md`, never as audit events. Each
+   event is owned by its specification: local login outcomes, including
+   `login_failed` for every login that creates no Session and the lockout
+   transition (`docs/features/identity/local-authentication.md`, Login
+   outcome logging and Rate Limiting / Brute-Force Protection); session
+   creation and invalidation, including logout
+   (`docs/features/identity/authentication.md`, Session operational
+   logging); API-key rejections, `api_key_validation_failed` for an unknown
+   key and `api_key_rejected` for a revoked, expired, or inactive-owner key
+   (`docs/features/identity/authentication.md`, API key validation); and SSO
+   callback and identity-matching outcomes
+   (`docs/features/identity/sso-authentication.md`, Callback processing and
+   Matching rules). A rejected JWT is not logged; see
+   `docs/features/identity/authentication.md` (JWT validation)
 7. Session duration: JWT expires after 72 hours without a request that
    processes authentication. Valid JWT requests using mandatory or optional
    authentication refresh it transparently when eligible. Maximum session
