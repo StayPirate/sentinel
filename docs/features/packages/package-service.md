@@ -1519,9 +1519,11 @@ resolution is a no-op and catch-up dispatch still proceeds. A package-specific
 resolution or validation failure — `SmeltUnavailableError`,
 `PackageNotFoundInSmeltError`, `PackageTargetsUnresolvedError`, or
 `ProductCatalogNotReadyError` from one `add_package_to_ticket()` unit, or a
-persisted package name that fails the package-name pattern, detected before
-the unit's transaction opens — rolls back that package transaction where one
-was opened, logs the sanitized failure, and does not prevent the next package.
+persisted package name outside the public package-name grammar (Post-ingest
+CVE package resolution, Deterministic candidate resolution), detected before
+the unit's transaction opens and without a SMELT request — rolls back that
+package transaction where one was opened, logs the sanitized failure, and does
+not prevent the next package.
 If `TicketNotMutableError` reports that the Ticket re-entered
 the manual zone during the loop, roll back that package unit and treat it as a
 successful stale/inapplicable no-op rather than a package failure. An

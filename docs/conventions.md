@@ -233,6 +233,15 @@ database. Any entry point that accepts a username for user creation MUST
 normalize it (trim whitespace, lowercase) and validate the format before
 storage.
 
+The username `me` is reserved and never assigned: `GET /api/v1/users/me`
+addresses the authenticated user and takes precedence over
+`GET /api/v1/users/{user}`, so a user with that username could not be read by
+username (`docs/api-spec.md`, User Identifier Resolution). Any entry point
+that creates a user or changes a username MUST reject a value whose normalized
+form is reserved, as it rejects a malformed username. Lookups do not apply the
+reservation: a reserved value matches no user. A literal path segment added at
+the position of a `{user}` path parameter is reserved in the same change.
+
 ### Timestamps & Timezones
 
 Sentinel follows the **"UTC everywhere, local display"** convention:

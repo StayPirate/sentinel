@@ -518,8 +518,8 @@ Creates a new User record with optional initial roles.
 **Behavior**:
 
 1. Normalize `username` (trim whitespace, lowercase) and validate format
-   per `docs/conventions.md` (Username Format). If invalid, raise
-   `UsernameFormatError`
+   per `docs/conventions.md` (Username Format), including the reserved
+   username. If invalid or reserved, raise `UsernameFormatError`
 2. Normalize `email` by trimming leading and trailing whitespace and converting
    the entire string — local part and domain alike — to lowercase (see
    `docs/data-model.md`, `User.email`: stored as lowercase). Validate the
@@ -633,7 +633,8 @@ their own business rules.
    no source of truth for local users.
 4. **Username validation** (if `username` is provided): normalize and
    validate the format per the rules in `docs/conventions.md` (section
-   "Username Format"). If invalid, raise `UsernameFormatError`. Verify
+   "Username Format"), including the reserved username. If invalid or
+   reserved, raise `UsernameFormatError`. Verify
    uniqueness in the database (excluding the current user, including
    inactive users). If violated, raise `UserConflictError`. For external
    users, this step is reached only by the sync process (human callers
@@ -1654,12 +1655,13 @@ the response.
 
 | Exception | Raised when | Handling |
 |-----------|-------------|----------|
-| `UsernameFormatError` | Username does not match format rules | CLI: stderr message + exit 1; External sync: logged as warning, user skipped |
+| `UsernameFormatError` | Username does not match format rules or is reserved | CLI: stderr message + exit 1; External sync: logged as warning, user skipped |
 | `EmailFormatError` | Email does not pass `email-validator` format validation | CLI: stderr message + exit 1; External sync: logged as warning, user skipped |
 
 These are not listed in the API-facing table above because the API request
 schemas for `create_user()`/`update_user()` callers (Pydantic) already reject
-a malformed username or email with the global 422 `VALIDATION_ERROR`
+a malformed or reserved username or a malformed email with the global 422
+`VALIDATION_ERROR`
 response before the service is reached — see
 `docs/features/identity/user-management.md`. `UsernameFormatError` and
 `EmailFormatError` are reachable in practice only through CLI and external

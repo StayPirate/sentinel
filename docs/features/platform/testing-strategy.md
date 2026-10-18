@@ -3697,6 +3697,12 @@ or identity audit validation are affected, tests MUST cover:
   ID raises `UserConflictError` with the matching `conflict_field`
 - username, email, password, role, missing-field, explicit-NULL, duplicate-role,
   and password 15/16/128/129 boundaries produce the documented outcomes
+- the reserved username `me` and its case and whitespace variants are rejected
+  by `POST /api/v1/admin/users` (422 `VALIDATION_ERROR`), by
+  `manage-user create` (documented message and exit 1 before the password
+  prompt), and by direct `create_user()`/`update_user()` calls
+  (`UsernameFormatError`), with no user row or audit event; a lookup of `me`
+  reports an unknown user
 - CLI `--full-name` in `manage-user create` and `manage-user update`: exactly
   255 characters is accepted and stored, 256 is rejected with the documented
   message on stderr and exit 1, with no mutating session, no commit, and no
@@ -4336,7 +4342,8 @@ per-CVE contract is implemented or changed, tests MUST cover the contract in
 - the manual trigger returns `202` on `submitted`
 - the manual trigger returns `409` on a held owner or fence
 - the manual trigger returns `503 REDIS_UNAVAILABLE`
-- the manual trigger returns `503 CELERY_UNAVAILABLE` on unconfirmed acceptance
+- the manual trigger returns `503 CELERY_UNAVAILABLE` on unconfirmed acceptance,
+  with the fixed sanitized detail of `fetcher-operations.md` (Trigger Fetcher)
 - a setting-read, database, commit, or fence-release failure before publisher
   invocation uses the ordinary server-error mapping, including global `500
   INTERNAL_ERROR` where applicable, and never `CELERY_UNAVAILABLE`

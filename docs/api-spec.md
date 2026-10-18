@@ -1097,6 +1097,11 @@ The special filter value `none` (used in query parameters like `assignee`)
 is not subject to user resolution — it is handled as a literal keyword
 before resolution is attempted.
 
+`GET /api/v1/users/me` addresses the authenticated caller and takes
+precedence over `GET /api/v1/users/{user}`. The username `me` is therefore
+reserved and never assigned (`docs/conventions.md`, Username Format), so every
+user remains addressable by both UUID and username.
+
 Implementation note: the owning domain service performs detection and lookup;
 identity consumers use `user_service.resolve_user_identifier()`. API
 dependencies may parse or pass through the path value but do not execute the
