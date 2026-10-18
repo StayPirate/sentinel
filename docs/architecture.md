@@ -213,7 +213,7 @@ order does not imply additional dependencies.
 | **Service** | `app/services/` | All business logic and business database operations, including model-aware accessibility predicates and visibility-constrained resource queries. Accept typed parameters and return typed results. | Model, Core |
 | **Schema** | `app/schemas/` | Pydantic models for request/response validation and serialization. | Model (for `from_attributes`), Core |
 | **Model** | `app/models/` | SQLAlchemy ORM models: tables, columns, relationships, constraints. | Core (for enums only) |
-| **Core** | `app/core/` | Cross-cutting concerns: authentication, authorization, configuration, exceptions, and enums. | (no application imports) |
+| **Core** | `app/core/` | Cross-cutting concerns: authentication, authorization, logging, exceptions, and enums. | (no application imports) |
 
 **Key rules and exceptions:**
 
