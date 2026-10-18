@@ -1273,7 +1273,7 @@ or remove grant provenance.
 | Field | Type | Description |
 |-------|------|-------------|
 | `cve_id` | string | CVE identifier (e.g., `CVE-2024-1234`) |
-| `title` | string \| null | Brief summary from CNA (max 256 chars). Null if not provided by the CNA |
+| `title` | string \| null | Brief summary (max 256 chars): the CNA title or the GitHub advisory summary, whichever source wrote last. Null if no source provides one |
 | `description` | string \| null | Vulnerability description |
 
 **CVEDetail** — expanded CVE representation for detail views:
@@ -1281,7 +1281,7 @@ or remove grant provenance.
 | Field | Type | Description |
 |-------|------|-------------|
 | `cve_id` | string | CVE identifier (e.g., `CVE-2024-1234`) |
-| `title` | string \| null | Brief summary from CNA (max 256 chars). Null if not provided by the CNA |
+| `title` | string \| null | Brief summary (max 256 chars): the CNA title or the GitHub advisory summary, whichever source wrote last. Null if no source provides one |
 | `description` | string \| null | Vulnerability description |
 | `published_date` | datetime \| null | Date published (UTC) |
 | `modified_date` | datetime \| null | Date last modified (UTC) |
