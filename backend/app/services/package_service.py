@@ -31,10 +31,8 @@ convergence workflow `run_ticket_convergence()` that re-resolves every
 persisted package marker in independent units and dispatches the
 per-Ticket catch-up roster, and the post-ingest CVE package resolution
 workflow `run_post_ingest_package_resolution()` with its task argument
-validation (`parse_post_ingest_arguments()`); the remaining
-mutation and orchestration operations are added by their owning work
-items. This module
-never imports `ticket_service`; it consumes the `ticket_mutations`
+validation (`parse_post_ingest_arguments()`). This module never imports
+`ticket_service`; it consumes the `ticket_mutations`
 primitives, which never import it back.
 
 Every operation accepts the caller's `AsyncSession` and never commits or

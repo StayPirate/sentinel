@@ -17,10 +17,11 @@ Owning specifications:
 - docs/features/platform/testing-strategy.md (Concurrency Testing; Ticket
   Accessibility: Locked mutations).
 
-The cross-path races against CVE ingestion and two external batches are
-deferred to M3.1 (#669 Deferred). The CVSS/reactivation, association/CVSS,
-and CVSS/override races live in test_manual_zone_exit_atomicity.py,
-test_associate_cve_atomicity.py, and
+The race against CVE ingestion lives in test_upsert_cve_atomicity.py
+(`TestManualCVSSRace`), and the race between two external batches in
+test_upsert_external_cvss_batch_atomicity.py (`TestTwoExternalBatches`).
+The CVSS/reactivation, association/CVSS, and CVSS/override races live in
+test_manual_zone_exit_atomicity.py, test_associate_cve_atomicity.py, and
 test_set_product_eligibility_atomicity.py. Expected values are transcribed
 from the specifications.
 """

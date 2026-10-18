@@ -136,8 +136,7 @@ class TestIsRunStale:
         )
 
     def test_running_uses_fallback_when_hard_limit_is_none(self) -> None:
-        """A `NULL` `hard_time_limit_seconds` (a historical row
-        predating the column) falls back to the live
+        """A `NULL` `hard_time_limit_seconds` falls back to the live
         `FetcherConfig.run_timeout` for threshold evaluation."""
         now = datetime.now(UTC)
         started_at = now - timedelta(seconds=121)

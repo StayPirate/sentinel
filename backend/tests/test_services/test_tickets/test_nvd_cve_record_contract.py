@@ -10,9 +10,9 @@ sanitized live responses of `services.nvd.nist.gov/rest/json/cves/2.0` and
 `/rest/json/source/2.0` captured anonymously on 2026-10-10
 (docs/conventions.md, External Integration Contract Verification). Every
 consumed field is asserted for name, nesting, type, and nullability through
-a strict test-local typed model; no production mapping exists yet, and the
-model is independent of the one `app/services/tickets/nvd_cve_record.py`
-will define.
+a strict test-local typed model, kept independent of the production mapping
+(`app/services/tickets/nvd_cve_record.py`) so that a mapping defect cannot
+hide a contract change.
 
 Live verification on 2026-10-10 (37 anonymous HTTP 200 requests over
 33,114 distinct records and one Source API response; the full evidence,

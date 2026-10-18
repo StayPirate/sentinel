@@ -22,8 +22,8 @@ status and credential against the hash this module verified (see
 `docs/features/identity/authentication.md`, Session creation). A
 locked-current inactive or superseded-credential outcome is mapped to
 the generic invalid-credentials failure. `docs/features/identity/authentication.md`
-(`get_current_user`, Credential resolution, step 5) independently
-re-checks `User.active` on every subsequent authenticated request.
+(Shared Credential Resolution, step 5) independently re-checks
+`User.active` on every subsequent authenticated request.
 """
 
 from __future__ import annotations

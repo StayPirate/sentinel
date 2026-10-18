@@ -9,8 +9,9 @@ captured anonymously on 2026-10-08 with Python `urllib` requests
 `X-GitHub-Api-Version: 2022-11-28`; docs/conventions.md, External
 Integration Contract Verification). Every consumed field is asserted for
 name, nesting, type, and nullability through a strict test-local typed
-model; no production parser exists yet, and the model is independent of
-the one it will define.
+model, kept independent of the production parser
+(`app/services/tickets/ghsa_advisory_record.py`) so that a parser defect
+cannot hide a contract change.
 
 Live verification on 2026-10-08 (18 anonymous requests in total):
 

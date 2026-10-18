@@ -1,11 +1,11 @@
 """Shared Bearer-over-cookie credential extraction.
 
-See `docs/features/identity/authentication.md` (Middleware:
-`get_current_user`, Credential resolution) for the authoritative
+See `docs/features/identity/authentication.md` (Authentication
+Dependencies, Shared Credential Resolution) for the authoritative
 precedence rule this function implements. It is a pure function (no
-FastAPI/Starlette dependency) so it is directly unit-testable and reusable
-by both the logout endpoint (this issue) and the future unified
-`get_current_user` dependency.
+FastAPI/Starlette dependency) so it is directly unit-testable, and it is
+shared by the logout endpoint and by the credential resolution of
+`get_current_user`/`get_optional_current_user` (`app.api.dependencies`).
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from __future__ import annotations
 # JWT) — see `docs/features/identity/api-key-management.md` ("the
 # `stl_ak_` prefix lets the authentication boundary distinguish" a key
 # from a JWT) and `docs/features/identity/authentication.md`,
-# Credential resolution step 3.
+# Shared Credential Resolution step 3.
 API_KEY_PREFIX = "stl_ak_"
 
 

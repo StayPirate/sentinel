@@ -18,8 +18,7 @@ reconciliation, and the Confidentiality Management operations
 `set_confidentiality()`, `set_coordinated_release_date()`, and the
 explicit access grants (`grant_access()`, `revoke_access()`,
 `list_access_grants()`), and the explicit operator Ticket convergence
-dispatch (`dispatch_ticket_convergence()`); the remaining operations are
-added by their owning work items.
+dispatch (`dispatch_ticket_convergence()`).
 
 Every operation accepts the caller's `AsyncSession` and never commits or
 rolls back; database exceptions propagate unchanged (Transaction

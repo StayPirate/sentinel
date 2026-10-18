@@ -9,9 +9,10 @@ validation (`__init_subclass__`), the custom Settings schema, error
 message sanitization, and the BaseFetcher HTTP client integration.
 
 `BaseCVEFetcher` and its source-type registry live in
-`app/services/base_cve_fetcher.py`. Out of scope for this module (owned
-by later work items): `BaseGitFetcher` and any concrete production
-fetcher. The `run_fetcher` and `run_catch_up` Celery tasks and the atomic
+`app/services/base_cve_fetcher.py`, and `BaseGitFetcher` in
+`app/services/base_git_fetcher.py`; concrete fetchers live in their domain
+packages and are imported by `app/services/fetcher_discovery.py`. The
+`run_fetcher` and `run_catch_up` Celery tasks and the atomic
 run acquisition protocol are implemented in `app/tasks/fetchers.py` and
 `app/services/fetcher_execution.py`.
 Config bootstrap (`bootstrap_fetcher_configs()`) is implemented in

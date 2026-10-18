@@ -10,8 +10,10 @@ helpers it composes on final `vulnerability_analyst` origin loss.
 `deactivate_user()` revokes API keys, invalidates Sessions, marks the User
 inactive, and unassigns active Tickets in one caller-owned transaction;
 `get_deactivation_impact()` is its read-only advisory preview. The bulk
-role-mapping operations remain out of scope and are added when their
-owning work item is implemented. `resolve_user_identifier()`
+role-mapping operations (`sync_role_mapping()`,
+`delete_role_mapping_roles()`) belong to the deferred external
+provisioning (`docs/features/identity/identity-provisioning.md`) and are
+not implemented. `resolve_user_identifier()`
 and `get_user_roles()` back the shared authentication/authorization
 dependencies. `list_users()` and `get_user()` provide the paginated
 directory and full profile reads; `get_user_by_username()` is the

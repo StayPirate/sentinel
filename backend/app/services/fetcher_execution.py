@@ -96,8 +96,7 @@ def resolve_effective_hard_limit(
 
     Prefers the run's own persisted `hard_time_limit_seconds`. Falls
     back to `fallback_run_timeout` (the fetcher's current
-    `FetcherConfig.run_timeout`) only when the column is `NULL` —
-    historical rows that predate it. See
+    `FetcherConfig.run_timeout`) only when the column is `NULL`. See
     `docs/features/platform/fetcher-infrastructure.md` (Stale Run
     Detection, Running Stale Threshold).
     """

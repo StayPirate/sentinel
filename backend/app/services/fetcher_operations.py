@@ -526,8 +526,8 @@ def _build_run_summary(
     `fallback_run_timeout` is the fetcher's current
     `FetcherConfig.run_timeout` (or the code-level default for an
     unbootstrapped registered fetcher) — used only when `run`'s own
-    `hard_time_limit_seconds` is `NULL` (a historical row predating the
-    column). See `resolve_effective_hard_limit()`.
+    `hard_time_limit_seconds` is `NULL`. See
+    `resolve_effective_hard_limit()`.
     """
     return FetcherRunSummary(
         id=run.id,
@@ -583,8 +583,8 @@ async def _ensure_fetcher_exists(db: AsyncSession, fetcher_name: str) -> None:
 async def _resolve_fallback_run_timeout(db: AsyncSession, fetcher_name: str) -> int:
     """Read `fetcher_name`'s current `FetcherConfig.run_timeout`, used
     as the stale-evaluation fallback for `running` rows whose own
-    `hard_time_limit_seconds` is `NULL` (historical rows predating the
-    column — see `resolve_effective_hard_limit()`).
+    `hard_time_limit_seconds` is `NULL` (see
+    `resolve_effective_hard_limit()`).
 
     Assumes `fetcher_name` has already been validated to exist (see
     `_ensure_fetcher_exists`). A registered fetcher with no
