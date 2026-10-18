@@ -291,15 +291,18 @@ class IBSServer:
     """Scripted IBS API under `TEST_API_URL` with the live authentication
     behavior: unauthenticated requests receive HTTP 401 with `challenges`;
     a request carrying a verifiable signature, or an issued session cookie,
-    is served from `routes` keyed by `(method, decoded path)`. `intercept`,
-    when set, may answer (or raise for) a request before authentication.
-    `requests` holds header snapshots in arrival order."""
+    is served from `routes` keyed by `(method, decoded path)`, whatever the
+    request origin. `session_cookie_attributes` follow the issued session
+    cookie's value. `intercept`, when set, may answer (or raise for) a
+    request before authentication. `requests` holds header snapshots in
+    arrival order."""
 
     public_key: Ed25519PublicKey
     realm: str = LIVE_REALM
     username: str = "jdoe"
     challenges: list[str] = field(default_factory=lambda: [LIVE_CHALLENGE])
     issue_session: bool = True
+    session_cookie_attributes: str = "Path=/; Secure; HttpOnly"
     reject_signatures: bool = False
     intercept: Callable[[httpx.Request], httpx.Response | None] | None = None
     routes: dict[tuple[str, str], Responder] = field(default_factory=dict)
@@ -345,7 +348,9 @@ class IBSServer:
                 self._issued += 1
                 token = f"fictional-session-{self._issued:04d}"
                 self.sessions.add(token)
-                set_cookie = f"{SESSION_COOKIE_NAME}={token}; Path=/; Secure; HttpOnly"
+                set_cookie = (
+                    f"{SESSION_COOKIE_NAME}={token}; {self.session_cookie_attributes}"
+                )
         responder = self.routes.get((request.method, request.url.path))
         if responder is None:
             response = httpx.Response(404, stream=_Chunks([b'<status code="404"/>']))
