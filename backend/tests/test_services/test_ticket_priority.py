@@ -7,11 +7,13 @@ every Decision Table cell (including the `None` severity label versus SQL
 ignored SSVC values and non-inputs. CVE-less Tickets (Testing Requirement 2)
 are proven in test_ticket_priority_refresh.py `TestCvelessTickets`. Refresh
 points, the override, audit, and the API surface (Requirements 3-9) are
-proven by the service and API tests that persist priority:
+proven by the service and API tests that persist priority, including
 test_ticket_priority_refresh.py, test_set_priority_override.py,
 test_set_priority_override_atomicity.py (Requirement 7),
 test_cvss_recalculation_domain.py (Requirement 8), and the Ticket list
-tests (Requirement 9).
+tests (Requirement 9); each refresh point's position is proven with its
+calling workflow, and the override's HTTP boundary in
+tests/test_api/test_ticket_priority_override.py.
 
 The expected Decision Table is transcribed independently from the
 specification rather than read back from the module.
