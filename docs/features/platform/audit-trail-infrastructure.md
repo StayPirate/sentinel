@@ -185,7 +185,7 @@ no-commit, exception propagation, and caller-owned transaction guarantees
 below.
 
 **Note**: these subclasses define only service-layer attributes (name,
-description, model reference, retention). Database columns (`id`,
+description, model reference). Database columns (`id`,
 `created_at`, `user_id`, and domain-specific columns) are defined in the
 SQLAlchemy models pointed to by `model_class`, which inherit from
 `AuditEventMixin` for the common columns.
@@ -382,6 +382,12 @@ When adding a new audit trail, update this index.
 | Identity | `identity_audit_event` | 14 | Indefinite | `docs/features/identity/identity-audit-log.md` |
 | Setting | `setting_audit_event` | 1 | Indefinite | `docs/features/platform/system-settings.md` |
 
+The Identity count includes `role_mapping_created`, `role_mapping_deleted`,
+and `manager_changed`, and the event variants whose `detail.source` is
+`"external_sync"`. Only external provisioning
+(`docs/features/identity/identity-provisioning.md`, a deferred
+specification) produces them.
+
 ## Access Level
 
 Most audit trail endpoints require a specific capability (typically
@@ -398,7 +404,8 @@ exist:
   (`GET /api/v1/users/me/audit-log`): **Authenticated**, scoped to
   `target_user_id = current_user.id`. Users can view events that affect
   their own account (role changes, password resets, API key operations,
-   field changes from external sync). The actor field is anonymized to
+  and field changes from external sync, which only external provisioning
+  produces). The actor field is anonymized to
   `"system"`, `"self"`, or `"admin"` to prevent identification of the
   specific administrator. The full, unmasked audit log remains
   restricted to users with `manage_users` capability at

@@ -50,10 +50,18 @@ Index of all feature specification domains.
 ### Platform
 
 - [fetcher-infrastructure.md](platform/fetcher-infrastructure.md) — BaseFetcher base class, registry, execution tracking
+- [cve-fetcher-infrastructure.md](platform/cve-fetcher-infrastructure.md) — BaseCVEFetcher base class, CVE fetcher conventions
+- [git-fetcher-infrastructure.md](platform/git-fetcher-infrastructure.md) — BaseGitFetcher base class, git_operations module, delta flow
+- [networking.md](platform/networking.md) — Shared HTTP client (httpx), TLS trust store, SUSE CA
 - [fetcher-operations.md](platform/fetcher-operations.md) — Monitoring, API, and CLI diagnostics for fetchers
 - [audit-trail-infrastructure.md](platform/audit-trail-infrastructure.md) — BaseAuditLog base class, AuditEventMixin
+- [cli-infrastructure.md](platform/cli-infrastructure.md) — Shared CLI mechanism: entry point, bootstrap, session management, error handling, signal handling
 - [system-settings.md](platform/system-settings.md) — System-setting persistence, bootstrap, read/update API, and audit
 - [default-cvss-version-operations.md](platform/default-cvss-version-operations.md) — Default-CVSS impact preview, all-CVE recalculation, observability, and recovery
+- [health-endpoints.md](platform/health-endpoints.md) — Liveness (/health) and readiness (/ready) probes
+- [logging.md](platform/logging.md) — Operational/diagnostic logging model, correlation IDs
+- [cve-record-parser.md](platform/cve-record-parser.md) — Shared CVE Record Format 5.x parser for CVE fetchers
+- [cve-source-failure-retry.md](platform/cve-source-failure-retry.md) — Scheduled retry of per-source CVE fetch failures (`evaluate_failed_cve_sources`)
 - [testing-strategy.md](platform/testing-strategy.md) — Testing methodology, infrastructure, fixtures, and coverage policy
 
 ### Tickets
@@ -62,6 +70,7 @@ Index of all feature specification domains.
 - [ticket-service.md](tickets/ticket-service.md) — Ticket lifecycle operations and cross-domain Ticket compositions
 - [ticket-mutations.md](tickets/ticket-mutations.md) — CVSS/severity mutations and centralized gate primitives
 - [cve-tracking.md](tickets/cve-tracking.md) — CVE tracking feature (business rules, API endpoints, CVE rejection handling)
+- [cve-service.md](tickets/cve-service.md) — CVE record lifecycle and the Ticket creation decision (`cve_service`)
 - [cve-sync-nvd.md](tickets/cve-sync-nvd.md) — NVD fetcher specification
 - [cve-sync-mitre.md](tickets/cve-sync-mitre.md) — MITRE cvelistV5 fetcher specification
 - [cve-sync-kernel.md](tickets/cve-sync-kernel.md) — Linux Kernel CNA fetcher specification
@@ -72,5 +81,6 @@ Index of all feature specification domains.
 - [cve-sync-epss.md](tickets/cve-sync-epss.md) — EPSS score fetcher specification
 - [cvss-scoring.md](tickets/cvss-scoring.md) — Multi-provider CVSS assessments, severity resolution
 - [ticket-priority.md](tickets/ticket-priority.md) — Ticket priority (P1–P4) from severity and exploitation evidence, manual override
+- [ticket-deadlines.md](tickets/ticket-deadlines.md) — Remediation SLA due dates, per-track actor milestones, overdue filter
 - [ticket-audit-log.md](tickets/ticket-audit-log.md) — TicketAuditEvent audit trail, event type contract
 - [ticket-references.md](tickets/ticket-references.md) — External links on tickets (auto-classified by type, manual with manage_references capability)

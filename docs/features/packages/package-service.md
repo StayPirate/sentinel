@@ -1057,10 +1057,11 @@ async def add_package_to_ticket(
 2. Query the SMELT v2 package-scoped maintained endpoint defined in
    `package-model.md` to resolve all currently maintained tracks and products
    for the given package name (external I/O — no lock held). Do not use the
-   separate paginated maintained sweep operation. Parse the response body
-   regardless of HTTP status and validate the JSON/JSend envelope, HTTP/status
-   pairing, and every applicable codestream and supported-target field before the
-   readiness or Product lookup. Unsupported (`SLFO_IBS`) and unclassified
+   separate paginated maintained sweep operation. For an HTTP 200 or 404
+   response, parse the body and validate the JSON/JSend envelope, HTTP/status
+   pairing, and every applicable codestream and supported-target field before
+   the readiness or Product lookup; any other HTTP status is invalid without
+   reading the body. Unsupported (`SLFO_IBS`) and unclassified
    (`UNKNOWN`) codestreams are skipped during this validation, with their
    warnings, as specified in `package-model.md` (SMELT Query for Package
    Resolution).

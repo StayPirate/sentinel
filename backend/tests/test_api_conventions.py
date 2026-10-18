@@ -35,7 +35,7 @@ import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from types import UnionType
-from typing import Annotated, Any, Literal, Union, get_args, get_origin
+from typing import Annotated, Any, Final, Literal, Union, get_args, get_origin
 
 import pytest
 from fastapi import FastAPI
@@ -281,6 +281,87 @@ class TestUserPathReservation:
         ]
 
         assert _user_position_literals(paths) == {"me", "search", "bulk"}
+
+
+# docs/api-spec.md (Pagination): the inclusive bounds of each parameter.
+_PAGINATION_BOUNDS: Final = {"page": (1, 2_147_483_647), "per_page": (1, 100)}
+
+
+def _pagination_bound_violations(openapi_schema: dict[str, Any]) -> list[str]:
+    """Every operation declaring a `page` query parameter, with each
+    pagination parameter whose OpenAPI bounds differ from the contract."""
+    violations: list[str] = []
+    for path, item in openapi_schema.get("paths", {}).items():
+        for method, operation in item.items():
+            if not isinstance(operation, dict):
+                continue
+            parameters = {
+                parameter["name"]: parameter.get("schema", {})
+                for parameter in operation.get("parameters", [])
+                if parameter.get("in") == "query"
+            }
+            if "page" not in parameters:
+                continue
+            for name, bounds in _PAGINATION_BOUNDS.items():
+                schema = parameters.get(name, {})
+                if (schema.get("minimum"), schema.get("maximum")) != bounds:
+                    violations.append(f"{method.upper()} {path}: {name} {schema}")
+    return violations
+
+
+@pytest.mark.unit
+class TestPaginationParameterBounds:
+    """Every paginated operation bounds `page` to 1-2147483647 and
+    `per_page` to 1-100, rejecting other values with the global 422.
+
+    See `docs/api-spec.md` (Pagination).
+    """
+
+    def test_every_paginated_operation_declares_the_bounds(self) -> None:
+        openapi_schema = app.openapi()
+        paginated = [
+            path
+            for path, item in openapi_schema["paths"].items()
+            for operation in item.values()
+            if isinstance(operation, dict)
+            and any(
+                parameter.get("in") == "query" and parameter["name"] == "page"
+                for parameter in operation.get("parameters", [])
+            )
+        ]
+
+        assert paginated, "no paginated operation found"
+        violations = _pagination_bound_violations(openapi_schema)
+        assert not violations, "\n".join(violations)
+
+    def test_detection_reports_missing_and_wrong_bounds(self) -> None:
+        def operation(**schemas: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "parameters": [
+                    {"name": name, "in": "query", "schema": schema}
+                    for name, schema in schemas.items()
+                ]
+            }
+
+        document = {
+            "paths": {
+                "/ok": {
+                    "get": operation(
+                        page={"minimum": 1, "maximum": 2_147_483_647},
+                        per_page={"minimum": 1, "maximum": 100},
+                    )
+                },
+                "/unbounded": {
+                    "get": operation(page={"minimum": 1}, per_page={"minimum": 1})
+                },
+                "/unpaginated": {"get": operation(per_page={})},
+            }
+        }
+
+        assert [
+            violation.split(":")[0]
+            for violation in _pagination_bound_violations(document)
+        ] == ["GET /unbounded", "GET /unbounded"]
 
 
 @pytest.mark.unit

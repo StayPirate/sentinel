@@ -695,18 +695,17 @@ here with the required authorization level and a link to the owning spec.
    unlike unauthenticated users, who see only non-confidential tickets
    with no per-ticket override mechanisms
 9. Admin bootstrap:
-   - **Local-only phase** (current): create a local admin via
+   - **Without external provisioning**: create a local admin via
      `sentinel manage-user create --username bootstrap-admin
      --email bootstrap@example.com --role admin`. This is the only
      bootstrap mechanism available when external provisioning is
      not active.
-   - **With external provisioning** (future): after the initial
-     local admin is created, trigger the external provisioning
-     sync (see `docs/features/identity/identity-provisioning.md`,
-     Bootstrap Sequence), then optionally promote an external user
-     to admin via `sentinel manage-user update --username
-     <username> --add-role admin` and deactivate the bootstrap
-     account.
+   - **With external provisioning** (when
+     `docs/features/identity/identity-provisioning.md` is active): after
+     the initial local admin is created, trigger the external
+     provisioning sync (Bootstrap Sequence), then optionally promote an
+     external user to admin via `sentinel manage-user update --username
+     <username> --add-role admin` and deactivate the bootstrap account.
    For restricted analyst accounts, see Business Rule 14
 10. **Assignment target constraint**: only users holding the
     `vulnerability_analyst` role can be assigned as ticket owners. The

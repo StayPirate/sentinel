@@ -9,6 +9,7 @@ tickets.md              Ticket lifecycle, status gates, API endpoints
 ticket-service.md       ticket_service module contract (Ticket lifecycle operations, cross-domain compositions)
 ticket-mutations.md     ticket_mutations module contract (CVSS/severity mutations, status evaluation primitives)
 cve-tracking.md         CVE tracking feature (business rules, API endpoints, CVE rejection handling)
+cve-service.md          cve_service module contract (CVE record lifecycle, Ticket creation decision)
 cve-sync-nvd.md         NVD fetcher specification
 cve-sync-mitre.md       MITRE cvelistV5 fetcher specification
 cve-sync-kernel.md      Linux Kernel CNA fetcher specification
@@ -41,6 +42,10 @@ ticket-references.md    External links on tickets (auto-classified by type, manu
 - `cve-tracking.md` feeds tickets: each ingested CVE creates a ticket.
   Individual CVE fetcher specs follow common conventions defined in
   `docs/features/platform/cve-fetcher-infrastructure.md` (CVE Fetcher Conventions).
+- `cve-service.md` is the service-layer companion to `cve-tracking.md` — it
+  defines the `cve_service` module contract through which every fetcher and
+  on-demand lookup upserts CVE data and through which the Ticket creation
+  decision is made.
 - `cvss-scoring.md` drives ticket severity and product eligibility
   (consumed by `tickets.md` and `packages/package-model.md`).
 - `ticket-priority.md` derives the informational Ticket priority from resolved

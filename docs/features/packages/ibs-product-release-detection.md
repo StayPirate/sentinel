@@ -622,7 +622,7 @@ produce `failure`, and no failures produce `success`, including an empty run.
 
 ## Testing Requirements
 
-Future implementation tests must cover:
+Implementation tests must cover:
 
 - exact active-Ticket, Ticket-CVE, unreleased, and IBS-workflow selection,
   including excluded, EOL, ineligible, and final-track occurrences;
@@ -673,12 +673,13 @@ Future implementation tests must cover:
 - bounded logs, sanitized public errors, exactly one service-owned positive
   audit event, and no event for every non-mutating outcome.
 
-Implementation-time contract tests must use freshly verified, sanitized
-representative fixtures for current, historical, suffixless, architecture-
-specific, LTSS, ESPOS, source/debug, non-RPM, absent, and no-updateinfo
-repositories. An observed anonymous 403 and hostile malformed upstream payloads
-are not prerequisites for implementation; synthetic fixtures exercise their
-specified behavior.
+Contract tests use sanitized representative fixtures captured from a live
+verification of current, historical, suffixless, architecture-specific, LTSS,
+ESPOS, source/debug, non-RPM, absent, and no-updateinfo repositories, and a
+change to a consumed field refreshes the affected fixtures from a new live
+verification. Hostile malformed upstream payloads, and any specified failure
+shape that no live fixture represents, are exercised through synthetic
+fixtures.
 
 ## External Contract Verification Status
 
@@ -711,11 +712,12 @@ in legacy repositories. Each yields the repository failure, non-match, or
 ignored-advisory outcome defined above.
 
 No hostile upstream document was observed. Hostile documents are defined
-failure shapes, not claims about current repository policy. Implementation must
-freshly verify representative live responses and retain sanitized fixtures as
-required by `docs/conventions.md` (External Integration Contract Verification).
-Any contradiction in a consumed field blocks parser implementation and must be
-resolved in the specification; it does not authorize fallback behavior.
+failure shapes, not claims about current repository policy. A change to a
+consumer of these responses freshly verifies representative live responses and
+retains sanitized fixtures as required by `docs/conventions.md` (External
+Integration Contract Verification). A live response that contradicts a consumed
+field is a specification gap, resolved in this specification before the
+consumer changes; it does not authorize fallback behavior.
 
 ## Cross-references
 

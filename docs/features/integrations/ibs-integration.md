@@ -10,7 +10,7 @@ two separate OBS instances:
   products. This is the primary integration for codestream-level release
   detection.
 - **OBS** (public, `build.opensuse.org`): used for openSUSE distributions.
-  Not currently integrated — see Future Considerations.
+  Not currently integrated — see [OBS Public Integration](#obs-public-integration).
 
 ## IBS Integration
 
@@ -912,7 +912,8 @@ IBS-related data is stored in the following tables (see `docs/data-model.md`):
   `srcmd5` successfully examined for one `TicketPackageTrack`. At most one row
   exists per track. Polling, catch-up, and package-commit acceleration share
   this state without using it as Ticket audit history. See
-  `docs/features/integrations/ibs-rabbitmq-integration.md`.
+  `docs/features/packages/ibs-track-release-detection.md` (Track Release
+  Checkpoint).
 - `IBSRequest`: one retained request parent identified by its positive public
   request number, with the exact seven-state IBS value, optional superseding
   request number, upstream UTC timestamps, and separate local row timestamps.

@@ -1786,7 +1786,7 @@ summarized below.
 | error_traceback      | TEXT        | nullable                 | Full Python traceback (admin-only visibility in API) |
 | triggered_by         | VARCHAR(20) | NOT NULL                 | FetcherRunTriggeredBy: `schedule`, `manual` |
 | triggered_by_user_id | UUID        | FK(user.id), nullable    | Admin who triggered the run (only for `manual`) |
-| hard_time_limit_seconds | INTEGER | nullable                 | Effective Celery hard time limit (seconds) under which the worker executes this run. Persisted atomically at adoption. `NULL` while `status = queued`, for runs finalized without adoption, and for historical rows predating this column. Used for Running Stale Threshold evaluation and `SoftTimeLimitExceeded` diagnostics. Not exposed via the API |
+| hard_time_limit_seconds | INTEGER | nullable                 | Effective Celery hard time limit (seconds) under which the worker executes this run. Persisted atomically at adoption. `NULL` while `status = queued` and for runs finalized without adoption; a `running` row with `NULL` falls back to `FetcherConfig.run_timeout` (`docs/features/platform/fetcher-infrastructure.md`, Stale Run Detection). Used for Running Stale Threshold evaluation and `SoftTimeLimitExceeded` diagnostics. Not exposed via the API |
 | cursor               | JSONB       | nullable                 | Fetcher-defined checkpoint for the next run (e.g., `{"sha": "...", "committed_at": "..."}` for git-based fetchers). Written when the final run status is `success` or `partial`; read by the next run to determine starting point. NULL for fetchers that derive cursors from other fields |
 | created_at           | TIMESTAMPTZ   | NOT NULL, DEFAULT        | Record creation timestamp — for a manual run, this is also the moment the trigger was accepted and the run entered `queued` |
 
@@ -1822,10 +1822,7 @@ The four item counters are finalized-run diagnostics. `items_succeeded` and
 unit; `items_created` and `items_updated` are orthogonal durable effects. The
 database row is not updated with live in-memory counter progress while its
 status is `queued` or `running`, so those states expose the persisted defaults
-of zero. Finalization persists all counters together. `items_succeeded` is
-introduced directly as `INTEGER NOT NULL DEFAULT 0`; Sentinel has no live
-instance or production database requiring a nullable compatibility state or
-historical backfill.
+of zero. Finalization persists all counters together.
 
 #### FetcherRunStatus Enum
 

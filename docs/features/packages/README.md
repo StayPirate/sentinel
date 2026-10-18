@@ -15,6 +15,7 @@ package-model.md                      Status, eligibility, delivery, exclusion, 
 
 package-service.md                       package_service module contract (mutations, orchestration, queries)
 product-catalog.md                       Product/ProductRepository, SMELT/AIMAAS sync, lifecycle phases
+cpe-package-mapping.md                   Static CPE-to-package mapping and resolve_cpe_packages()
 ibs-submission-tracking.md               IBS request-action evidence and authoritative track delivery reconciliation
 package-maintainership.md                Package-wide maintainer acquisition and associations
 maintainer.md                            Maintainer operations (pending fixes, in-progress, completed)
@@ -23,8 +24,9 @@ maintainer.md                            Maintainer operations (pending fixes, i
 ## Relationships
 
 - `package-model.md` is the umbrella spec for the affectedness model.
-  The two release-detection specs and the lifecycle-transitions spec
-  implement specific automation described there.
+  The four release-detection specs (IBS and Git, each at track and Product
+  level; the Git specs define no mechanism) and the lifecycle-transitions spec
+  specify automation described there.
 - `product-catalog.md` owns the Product and ProductRepository entities,
   SMELT product sync, AIMAAS lifecycle/threshold sync, and the
   `GET /api/v1/products` endpoint. `package-model.md` consumes
@@ -34,6 +36,9 @@ maintainer.md                            Maintainer operations (pending fixes, i
   (track status, delivery, product eligibility, soft-delete/restore),
   orchestration (`add_package_to_ticket`), and query operations.
   Depends on `ticket_mutations.reconcile_ticket_status()`.
+- `cpe-package-mapping.md` owns the static CPE-to-package mapping file and
+  `resolve_cpe_packages()`, consumed by the post-ingest CVE package resolution
+  in `package-service.md`.
 - `ibs-submission-tracking.md` owns IBS request/action persistence and track
   delivery reconciliation. Its daily fetcher is the correctness owner;
   package-add and Ticket-convergence catch-up, manual runs, and RabbitMQ request

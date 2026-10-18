@@ -263,6 +263,9 @@ contracts without changing that classification:
 
 **Event-driven integrations.** The IBS integration additionally uses a
 continuous AMQP consumer connected to the IBS RabbitMQ message bus for
-near-real-time package commit and submission-state events. A periodic fetcher
-runs alongside it to recover events missed during consumer downtime. See
+near-real-time package commit and submission-state events. Two periodic
+fetchers remain the correctness and recovery owners for events missed during
+consumer downtime or failed processing: `detect_ibs_track_releases` (track
+release reconciliation) and `sync_ibs_requests` (submission and
+release-request reconciliation). See
 `docs/features/integrations/ibs-rabbitmq-integration.md`.

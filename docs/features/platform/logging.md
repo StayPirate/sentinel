@@ -329,7 +329,9 @@ requiring any CLI-specific logging configuration.
 
 When CLI processes invoke shared service or utility code that uses
 `structlog.get_logger()`, a minimal structlog configuration MUST be
-applied at Click group initialization. This configuration routes
+applied by the CLI command bootstrap
+(`docs/features/platform/cli-infrastructure.md`, Root Command Group &
+Bootstrap). This configuration routes
 structlog output through stdlib `logging` to stderr, uses plain-text
 format (not JSON, not colorized console), and sets the level to WARNING
 or above — so that DEBUG/INFO messages from service code do not pollute
@@ -533,8 +535,7 @@ contract only.
 
 ## Testing
 
-Once implemented, logging configuration and correlation-ID propagation
-are expected to be tested as follows:
+Logging configuration and correlation-ID propagation are tested as follows:
 
 - **Format/level selection**: unit tests verifying that `LOG_FORMAT=auto`
   resolves to `console` when `sys.stdout.isatty()` is `True` and to

@@ -16,7 +16,7 @@ system-settings.md              System-setting persistence, bootstrap, API, audi
 default-cvss-version-operations.md  Default-CVSS preview and recalculation operations
 health-endpoints.md             Liveness (/health) and readiness (/ready) probes
 logging.md                       Operational/diagnostic logging model, correlation IDs
-cve-record-parser.md            Shared CVE record parser for all CVE fetchers
+cve-record-parser.md            Shared CVE Record Format 5.x parser for CVE fetchers
 cve-source-failure-retry.md     Retry policy for per-source CVE fetch failures
 testing-strategy.md             Testing methodology, fixtures, coverage policy
 ```

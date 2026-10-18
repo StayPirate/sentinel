@@ -254,12 +254,10 @@ Passwords are set in two scenarios:
 2. **Password reset** (CLI or admin UI): an admin sets a new password
    for an existing local user
 
-There is no self-service password reset or password change in the
-initial implementation (v1 scoping decision). Users who need a password
-change must request it from an admin. This is acceptable given the
-primary use cases (development environments, bot accounts, deployments
-without SSO) and will be revisited as a follow-up if local user adoption
-grows beyond these scenarios.
+There is no self-service password reset or password change (scoping
+decision). Users who need a password change must request it from an admin.
+This is acceptable given the primary use cases (development environments,
+bot accounts, deployments without SSO).
 
 ### Password validation
 
@@ -270,11 +268,11 @@ grows beyond these scenarios.
 - No complexity rules (uppercase, numbers, symbols) — length is the
   primary defense
 - No breach database check (e.g., HaveIBeenPwned k-anonymity API or
-  local bloom filter) in v1. Rationale: passwords are set by admins (not
+  local bloom filter). Rationale: passwords are set by admins (not
   self-service), the tool is internal, and integrating with external
   breach services or maintaining a local bloom filter adds complexity
-  disproportionate to the threat model. May be reconsidered if
-  self-service password change is added in the future.
+  disproportionate to the threat model. This rationale relies on
+  admin-set passwords and does not cover a self-service password change.
 
 ### CLI commands
 
@@ -524,14 +522,13 @@ session behavior.
   (which can be spoofed by upstream hops). This covers both the
   fail-open scenario (Redis outage) and distributed attacks using many
   usernames from a single IP.
-- **No self-service password change (v1 accepted risk)**: local users
+- **No self-service password change (accepted risk)**: local users
   cannot change their own password. If a user suspects credential
   compromise, they must contact an admin who performs a password reset
   (CLI or admin UI). During the window between compromise detection and
   admin intervention, the old credential remains valid. This is accepted
-  for v1 given the limited use cases (dev environments, bots, no-SSO
-  deployments). A `POST /api/v1/auth/change-password` endpoint (requiring
-  active session + old password) is a planned follow-up.
+  given the limited use cases (dev environments, bots, no-SSO
+  deployments).
 - **No password in JWT**: the JWT contains only user ID (`sub`), session
   ID, and timing claims (`iat`, `exp`, `session_deadline`). Roles are
   loaded from the database on each request, not embedded in the token.

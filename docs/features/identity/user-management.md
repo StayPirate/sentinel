@@ -13,8 +13,8 @@ Local users serve three primary use cases:
    application workflow without depending on the SUSE internal network
 2. **AI agents and automation**: dedicated accounts for AI agents or
    bots that operate as independent identities with their own audit
-   trail (see `docs/features/identity/authentication.md`, Use Cases: Bots and
-   AI Agents)
+   trail (see `docs/features/identity/api-key-management.md`, Use Cases,
+   Dedicated Automation Identity)
 3. **Environments without SSO**: deployments outside the SUSE corporate
    network where `id.suse.com` is not reachable
 
@@ -1066,8 +1066,8 @@ Request validation is strict so client mistakes surface instead of being
 silently normalized:
 
 - an omitted field is equivalent to an empty array;
-- an absent request body is equivalent to `{}` (both fields omitted) and is
-  a valid no-op;
+- an absent request body and a literal JSON `null` body are each
+  equivalent to `{}` (both fields omitted) and are a valid no-op;
 - an empty array is valid;
 - explicit `null` for either field returns the global HTTP 422
   `VALIDATION_ERROR`;

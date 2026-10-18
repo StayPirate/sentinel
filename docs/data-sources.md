@@ -17,7 +17,7 @@ relevant feature specifications in `docs/features/`.
 | Source | Scope | Data Provided | Integration Status |
 |---|---|---|---|
 | NVD | Public | CVE data, CVSS scores, CPE matches | Active |
-| MITRE CVE Services | Public | Early CVE assignments | Active |
+| MITRE CVE List (cvelistV5) | Public | CVE Records, early CVE assignments | Active |
 | Red Hat Security Data | Public | CVSS assessments | Active |
 | SUSE CSAF VEX | Public | SUSE CVSS assessments per CVE | Not integrated |
 | IBS | Internal | Source packages, builds, repos, declarative product channels | Active |
@@ -72,23 +72,27 @@ configurations, and references to advisories and patches.
 > See [cve-sync-nvd.md](features/tickets/cve-sync-nvd.md) for the full
 > fetcher specification.
 
-### MITRE CVE Services
+### MITRE CVE List (cvelistV5)
 
 MITRE Corporation operates the CVE Program and assigns CVE identifiers. The
-CVE Services API provides early access to newly assigned CVEs, often before
-they are enriched by NVD with CVSS scores and CPE configurations. This makes
-MITRE a valuable source for early awareness of new vulnerabilities.
+CVE Program publishes every CVE Record in the `cvelistV5` GitHub repository,
+which it updates from CVE Services shortly after a CNA publishes a record.
+Records often appear there before NVD adds CVSS scores and CPE
+configurations, which makes the repository a valuable source for early
+awareness of new vulnerabilities.
 
-- **Relevant data**: CVE identifiers, descriptions, CNA-provided metadata.
-  Data is typically less enriched than NVD (no CVSS scores from MITRE
-  itself, limited CPE data) but available earlier. The CVE 5.x record
+- **Relevant data**: CVE identifiers, descriptions, and CNA-provided
+  metadata. MITRE itself publishes no CVSS assessment. The CVE 5.x record
   format includes ADP (Authorized Data Publisher) containers with
   additional data from multiple providers, including CISA Vulnrichment
   (SSVC, KEV, CWE)
-- **Access**: `cvelistV5` GitHub repository (bare clone + fetch). Public access
+- **Access**: `cvelistV5` GitHub repository
+  (`https://github.com/CVEProject/cvelistV5.git`, bare clone + fetch).
+  Public access, no authentication. Sentinel does not use the CVE Services
+  REST API (see `cve-sync-mitre.md`)
 - **Integration status**: **Active**
 - **Documentation**: https://www.cve.org/,
-  https://cveawg.mitre.org/api-docs/openapi.json
+  https://github.com/CVEProject/cvelistV5
 
 > See [cve-sync-mitre.md](features/tickets/cve-sync-mitre.md) for the full
 > fetcher specification.
@@ -446,16 +450,18 @@ repositories.
     composition, release provenance, and release actions without acceptinfo
     used by submission tracking.
 
-  Gate status: none of the track-release, authentication, and request-operation
-  contracts has an open verification gate. Verified shapes, fields verified
+  Verification status: every consumed track-release, authentication, and
+  request-operation contract is verified. Verified shapes, fields verified
   only through OBS source inspection, and the remaining unverified details are
   recorded in the Authentication, Track-Release, and Request Contract
   Verification Status sections of
   `docs/features/integrations/ibs-integration.md`
 - **See also**: `docs/features/integrations/ibs-integration.md`,
+  `docs/features/integrations/ibs-rabbitmq-integration.md`,
   `docs/features/packages/package-model.md`,
   `docs/features/packages/ibs-track-release-detection.md`,
-  `docs/features/packages/ibs-product-release-detection.md`
+  `docs/features/packages/ibs-product-release-detection.md`,
+  `docs/features/packages/ibs-submission-tracking.md`
 
 ### OBS (Open Build Service)
 
@@ -1290,9 +1296,9 @@ normalizes all forms to the canonical `bsc#` prefix.
 ## Fetcher Registry
 
 All `BaseFetcher` subclasses are automatically registered in the fetcher
-registry. The table below lists all fetchers — both active and planned —
-with their schedule, authentication requirements, rate limits, and data
-ingested. See `docs/features/platform/fetcher-infrastructure.md` for generic
+registry. The table below lists every fetcher defined by a feature
+specification, with its schedule, authentication requirements, rate limits,
+and data ingested. See `docs/features/platform/fetcher-infrastructure.md` for generic
 `BaseFetcher` infrastructure details,
 `docs/features/platform/cve-fetcher-infrastructure.md` for the
 `BaseCVEFetcher` contract (CVE fetchers), and

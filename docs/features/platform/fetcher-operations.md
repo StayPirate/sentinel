@@ -27,11 +27,9 @@ This specification defines the following fetcher endpoints:
 7. `PATCH /api/v1/fetchers/{fetcher_name}/config` — update config
 8. `GET /api/v1/fetchers/{fetcher_name}/audit-log` — admin audit trail
 
-The run read contract adds `items_succeeded` to the four existing
-`FetcherRun` representations: fetcher-list `last_run`, run-list items, run
-detail, and timeline points. This is an additive v1 response-field change. It
-does not add or change an endpoint, method, query parameter, pagination rule,
-error, authorization requirement, capability, or Permission Map entry.
+The run read contract includes `items_succeeded` in all four `FetcherRun`
+representations: fetcher-list `last_run`, run-list items, run detail, and
+timeline points.
 
 The `GET /api/v1/ibs-consumer/status` endpoint is defined in
 `docs/features/integrations/ibs-rabbitmq-integration.md`, not here. It
@@ -158,8 +156,7 @@ schedule is read to resolve `next_run_at` (see Q3, step 5).
      `now() - started_at > hard_time_limit_seconds + 60` seconds
      (Running Stale Threshold, using the run's own persisted
      `hard_time_limit_seconds` column). If `hard_time_limit_seconds` is
-     `NULL` (historical rows predating the column), fall back to the
-     fetcher's `FetcherConfig.run_timeout`.
+     `NULL`, fall back to the fetcher's `FetcherConfig.run_timeout`.
    - Any terminal status: `false`.
 8. `custom_settings_count`: number of keys in
    `FetcherConfig.custom_settings` JSONB that exist in the current
@@ -376,7 +373,7 @@ is in the registry but has no `FetcherConfig` row (bootstrap prerequisite
    seconds) if `queued`; Running Stale Threshold (`started_at`,
    `hard_time_limit_seconds + 60`) if `running` — using the run's own
    persisted `hard_time_limit_seconds`. If `hard_time_limit_seconds` is
-   `NULL` (historical rows), fall back to the current (pre-PATCH)
+   `NULL`, fall back to the current (pre-PATCH)
    `FetcherConfig.run_timeout`.
    - If **not stale**: raise `FetcherAlreadyRunningError`. The entire
      PATCH fails atomically — no field is modified, no audit event is
@@ -595,8 +592,8 @@ and transactions.
    `queued`, Running Stale Threshold (`started_at`,
    `hard_time_limit_seconds + 60`) if `running` — using the run's own
    persisted `hard_time_limit_seconds` (falling back to
-   `FetcherConfig.run_timeout` for historical rows where the column is
-   `NULL`) — finalize it per
+   `FetcherConfig.run_timeout` when the column is `NULL`) — finalize it
+   per
    `docs/features/platform/fetcher-infrastructure.md` (Stale Run
    Detection) — `status = failure`, specified error message, computed
    fields (a stale `queued` run keeps `started_at` and
@@ -929,9 +926,9 @@ distinction.
     for its own status — `now() - created_at > 600` for `queued`,
     `now() - started_at > hard_time_limit_seconds + 60` for `running`
     (using the run's own persisted limit; falling back to
-    `FetcherConfig.run_timeout` for historical rows where the column is
-    `NULL` — see `docs/features/platform/fetcher-infrastructure.md`,
-    Stale Run Detection). Always `false` for a terminal status.
+    `FetcherConfig.run_timeout` when the column is `NULL` — see
+    `docs/features/platform/fetcher-infrastructure.md`, Stale Run
+    Detection). Always `false` for a terminal status.
   - `triggered_by_user`: User Reference Object when `triggered_by` is
     `manual` AND the caller has `manage_fetchers`. Otherwise `null`.
   - `error_message`: sanitized public message (never contains raw
@@ -1028,8 +1025,8 @@ still appears in its correct chronological position.
   its own status — `now() - created_at > 600` for `queued`,
   `now() - started_at > hard_time_limit_seconds + 60` for `running`
   (using the run's own persisted limit; falling back to
-  `FetcherConfig.run_timeout` for historical rows where the column is
-  `NULL`). Always `false` for a terminal status
+  `FetcherConfig.run_timeout` when the column is `NULL`). Always `false`
+  for a terminal status
 
 **Error responses**:
 
@@ -1639,7 +1636,7 @@ exist. If there are none, the section is omitted.
    - Elapsed formatting: same rules as above.
    - If elapsed exceeds `hard_time_limit_seconds + 60` (the Running
      Stale Threshold — using the run's own persisted limit, falling back
-     to `FetcherConfig.run_timeout` for historical rows), append
+     to `FetcherConfig.run_timeout` when it is `NULL`), append
      `, stale?` — e.g., `running (1h 2m elapsed, stale?)`.
 3. Else if any `FetcherRun` records exist: show the status of the most
    recent `FetcherRun` (by `created_at DESC, id DESC` — not
@@ -1769,17 +1766,10 @@ registered and deregistered).
 **Output channels**: configuration to stdout. `"Error: ..."` messages
 to stderr.
 
-## System Metrics (Future Iteration)
+## Process Resource Metrics
 
-The following metrics are planned for a future iteration and are NOT part
-of the initial implementation:
-
-- Memory usage (start, end, peak) via `psutil`
-- CPU utilization during the run
-- Database connection count
-
-When implemented, these will be stored in a `system_metrics` JSONB column
-on `FetcherRun`.
+`FetcherRun` records no process resource metrics: neither memory usage nor
+CPU utilization during the run, nor a database connection count.
 
 ## Dependencies
 
