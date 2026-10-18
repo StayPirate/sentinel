@@ -239,8 +239,7 @@ addresses the authenticated user and takes precedence over
 username (`docs/api-spec.md`, User Identifier Resolution). Any entry point
 that creates a user or changes a username MUST reject a value whose normalized
 form is reserved, as it rejects a malformed username. Lookups do not apply the
-reservation: a reserved value matches no user. A literal path segment added at
-the position of a `{user}` path parameter is reserved in the same change.
+reservation: a reserved value matches no user.
 
 ### Timestamps & Timezones
 

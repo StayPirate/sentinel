@@ -48,6 +48,7 @@ from pydantic.fields import FieldInfo
 from app.api.dependencies import drain_ticket_convergence_after_commit
 from app.api.openapi import API_V1_RESPONSES
 from app.core.errors import ErrorCode
+from app.core.usernames import RESERVED_USERNAMES
 from app.database import get_db
 from app.main import app
 from app.schemas.errors import ErrorResponse
@@ -220,6 +221,48 @@ class TestAuditLogEndpointNaming:
             if "audit" in info.path.lower() and not info.path.endswith("/audit-log")
         ]
         assert not violations, "\n".join(violations)
+
+
+def _user_position_literals(paths: Iterable[str]) -> set[str]:
+    """Literal segments at the position of a `{user}` path parameter: the
+    segment that follows the same leading segments as the parameter, such
+    as `me` in `/api/v1/users/me` beside `/api/v1/users/{user}`."""
+    split = [tuple(path.strip("/").split("/")) for path in paths]
+    prefixes = {
+        segments[:index]
+        for segments in split
+        for index, segment in enumerate(segments)
+        if segment == "{user}"
+    }
+    return {
+        segments[len(prefix)]
+        for segments in split
+        for prefix in prefixes
+        if len(segments) > len(prefix)
+        and segments[: len(prefix)] == prefix
+        and not segments[len(prefix)].startswith("{")
+    }
+
+
+@pytest.mark.unit
+class TestUserPathReservation:
+    """Every literal segment at a `{user}` position is a reserved username.
+
+    See `docs/api-spec.md` (User Identifier Resolution): a literal segment
+    there takes precedence over the parameter, so a user holding that
+    username could not be addressed by username unless the username is
+    reserved (`docs/conventions.md`, Username Format).
+    """
+
+    def test_every_literal_segment_at_a_user_position_is_reserved(self) -> None:
+        literals = _user_position_literals(info.path for info in _api_routes())
+
+        assert "me" in literals, "the existing `/api/v1/users/me` is not detected"
+        unreserved = sorted(literals - RESERVED_USERNAMES)
+        assert not unreserved, (
+            f"Literal segments {unreserved} sit at a `{{user}}` position but are "
+            "not in `app.core.usernames.RESERVED_USERNAMES`"
+        )
 
 
 @pytest.mark.unit

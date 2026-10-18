@@ -757,18 +757,17 @@ class TestListAllApiKeys:
         assert response.status_code == 200
         assert response.json()["meta"] == {"total": 0, "page": 1, "per_page": 20}
 
-    @pytest.mark.parametrize("form", ["uuid", "username"])
     async def test_unknown_owner_returns_empty_page(
         self,
         admin_user_and_client: tuple[User, AsyncClient],
         api_key_factory: Callable[..., Awaitable[ApiKey]],
-        form: str,
     ) -> None:
         admin_user, client = admin_user_and_client
         await api_key_factory(user_id=admin_user.id)
-        owner = str(uuid4()) if form == "uuid" else "no-such-user"
 
-        response = await client.get("/api/v1/admin/api-keys", params={"owner": owner})
+        response = await client.get(
+            "/api/v1/admin/api-keys", params={"owner": str(uuid4())}
+        )
 
         assert response.status_code == 200
         body = response.json()

@@ -881,15 +881,8 @@ class TestUnitIsolation:
 
     @pytest.mark.parametrize(
         "invalid",
-        ["x", "-fictional", "fictional.", "fictional pkg", "fictional-é", ".."],
-        ids=[
-            "one-character",
-            "leading-hyphen",
-            "trailing-dot",
-            "space",
-            "non-ascii",
-            "dot-dot",
-        ],
+        ["x", "-fictional", "fictional.", "fictional pkg", "fictional-é"],
+        ids=["one-character", "leading-hyphen", "trailing-dot", "space", "non-ascii"],
     )
     async def test_persisted_name_outside_the_grammar_fails_before_its_unit(
         self,
@@ -902,9 +895,10 @@ class TestUnitIsolation:
         """A persisted name outside the public package-name grammar fails
         its unit with the package-input `ValueError` before the unit's
         session opens and without a SMELT request, even when it is a
-        non-empty single path segment; the next package still commits.
-        Its SMELT answer is a 500, so a request for it would surface as a
-        different failure."""
+        non-empty single path segment (the `..` case is covered by
+        `test_package_specific_failure_is_isolated_and_logged`); the other
+        package still commits. Its SMELT answer is a 500, so a request for
+        it would surface as a different failure."""
         (fetcher,) = _roster_names("only")
         _participant(fetcher, "git")
         ticket = await _ticket(world)

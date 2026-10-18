@@ -634,9 +634,9 @@ their own business rules.
 4. **Username validation** (if `username` is provided): normalize and
    validate the format per the rules in `docs/conventions.md` (section
    "Username Format"), including the reserved username. If invalid or
-   reserved, raise `UsernameFormatError`. Verify
-   uniqueness in the database (excluding the current user, including
-   inactive users). If violated, raise `UserConflictError`. For external
+   reserved, raise `UsernameFormatError`. Verify uniqueness in the database
+   (excluding the current user, including inactive users). If violated,
+   raise `UserConflictError`. For external
    users, this step is reached only by the sync process (human callers
    are already blocked at step 2). External synchronization adds
    `detail = {"source": "external_sync"}` to `username_changed`; a future
@@ -1661,8 +1661,7 @@ the response.
 These are not listed in the API-facing table above because the API request
 schemas for `create_user()`/`update_user()` callers (Pydantic) already reject
 a malformed or reserved username or a malformed email with the global 422
-`VALIDATION_ERROR`
-response before the service is reached — see
+`VALIDATION_ERROR` response before the service is reached — see
 `docs/features/identity/user-management.md`. `UsernameFormatError` and
 `EmailFormatError` are reachable in practice only through CLI and external
 synchronization, which have no such boundary in front of the service.

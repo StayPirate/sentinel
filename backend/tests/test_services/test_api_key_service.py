@@ -1613,40 +1613,6 @@ class TestListAllKeys:
         assert mismatched_case_page.items == []
         assert mismatched_case_page.total == 0
 
-    async def test_unknown_owner_returns_empty_page_not_an_error(
-        self, db_session: AsyncSession
-    ) -> None:
-        page = await list_all_keys(
-            db_session,
-            owner="no-such-user",
-            status=None,
-            page=1,
-            per_page=20,
-            sort_by=ApiKeySortField.CREATED_AT,
-            sort_order=SortOrder.DESC,
-        )
-        assert page.items == []
-        assert page.total == 0
-
-    async def test_unknown_owner_uuid_returns_empty_page(
-        self, db_session: AsyncSession
-    ) -> None:
-        """A syntactically valid UUID that matches no user must return an
-        empty page — a UUID-parsable value is matched by `User.id` only,
-        never by username, so this is a different branch of the shared
-        matching condition than the username-miss case above."""
-        page = await list_all_keys(
-            db_session,
-            owner=str(uuid.uuid4()),
-            status=None,
-            page=1,
-            per_page=20,
-            sort_by=ApiKeySortField.CREATED_AT,
-            sort_order=SortOrder.DESC,
-        )
-        assert page.items == []
-        assert page.total == 0
-
     @pytest.mark.parametrize(
         ("identifier_key", "expected_owner"),
         [
@@ -1671,7 +1637,8 @@ class TestListAllKeys:
         (`docs/features/identity/user-service.md`,
         `resolve_user_identifier()`): a username shaped like another
         user's ID selects that ID owner, because a UUID-parsable value is
-        always matched by `User.id`."""
+        always matched by `User.id`. An unknown owner is an empty page with
+        `total=0`, not an error, while other owners' keys exist."""
         # Letter-leading, so its text is also a format-valid username.
         shared = uuid.UUID("a" + uuid.uuid4().hex[1:])
         users = {
