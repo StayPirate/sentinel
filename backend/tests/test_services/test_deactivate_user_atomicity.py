@@ -324,13 +324,18 @@ def _login_at(created: Any) -> datetime:
     return expires_at - timedelta(days=settings.session_max_lifetime_days)
 
 
-def _local_auth_log_text(caplog: pytest.LogCaptureFixture) -> str:
-    """Only the records of `app.services.local_auth_service`."""
-    return "\n".join(
-        record.getMessage()
+def _local_auth_events(
+    caplog: pytest.LogCaptureFixture, event: str
+) -> list[dict[str, Any]]:
+    """The structured event dicts named `event` among the records of
+    `app.services.local_auth_service`."""
+    return [
+        record.msg
         for record in caplog.records
         if record.name == "app.services.local_auth_service"
-    )
+        and isinstance(record.msg, dict)
+        and record.msg.get("event") == event
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -613,9 +618,17 @@ class TestLocalLoginAndDeactivation:
         assert committed.last_login_at is None
         assert committed.identity == [user_deactivated(actor, target, _REASON)]
         assert await redis_client.get(f"login_attempts:{target.username}") == "1"
-        log_text = _local_auth_log_text(caplog)
-        assert log_text.count("login_lockout_triggered") == transitions
-        assert (str(target.id) in log_text) is bool(transitions)
+        # local-authentication.md, Login outcome logging: the failure is
+        # recorded once as `revalidation_failed`, whatever the threshold.
+        failures = _local_auth_events(caplog, "login_failed")
+        assert len(failures) == 1
+        assert failures[0]["reason"] == "revalidation_failed"
+        assert failures[0]["user_id"] == str(target.id)
+        lockouts = _local_auth_events(caplog, "login_lockout_triggered")
+        assert len(lockouts) == transitions
+        assert [lockout["user_id"] for lockout in lockouts] == (
+            [str(target.id)] * transitions
+        )
 
     async def test_session_first_is_invalidated_by_the_deactivation(
         self,

@@ -239,6 +239,37 @@ class SessionInvalidationReason(StrEnum):
     PASSWORD_RESET = "password_reset"  # nosec B105 -- classification value, not a credential
 
 
+class LoginFailureReason(StrEnum):
+    """Why a local login request created no Session.
+
+    Category B — classification (Python Enum only; never stored in the
+    database — used only for the `login_failed` operational log event).
+    See `docs/features/identity/local-authentication.md` (Login outcome
+    logging) for the step each value covers.
+    """
+
+    INVALID_INPUT = "invalid_input"
+    LOCKED = "locked"
+    UNKNOWN_USER = "unknown_user"
+    INELIGIBLE_USER = "ineligible_user"
+    INVALID_PASSWORD = "invalid_password"  # nosec B105 -- classification value, not a credential
+    REVALIDATION_FAILED = "revalidation_failed"
+
+
+class ApiKeyRejectionReason(StrEnum):
+    """Why a presented API key that matches a stored key was rejected.
+
+    Category B — classification (Python Enum only; never stored in the
+    database — used only for the `api_key_rejected` operational log
+    event). See `docs/features/identity/authentication.md` (API key
+    validation, Rejected-key warning).
+    """
+
+    REVOKED = "revoked"
+    EXPIRED = "expired"
+    OWNER_INACTIVE = "owner_inactive"
+
+
 class ApiKeyStatus(StrEnum):
     """Derived, non-persisted lifecycle status of an `ApiKey`.
 

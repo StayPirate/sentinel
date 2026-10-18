@@ -3,8 +3,9 @@
 See `docs/features/identity/local-authentication.md` (Login Endpoint,
 Rate Limiting / Brute-Force Protection) for the authoritative contract
 this module implements: username normalization, the early guards, the
-atomic lockout counter, dummy-bcrypt anti-enumeration, and delegation
-to `session_service.create_session()` on success.
+atomic lockout counter, dummy-bcrypt anti-enumeration, delegation to
+`session_service.create_session()` on success, and the `login_failed`
+outcome log of every other outcome (Login outcome logging).
 
 Module-level defaults (`docs/conventions.md`, Function Specification
 Completeness): every function in this module propagates only
@@ -31,6 +32,7 @@ import asyncio
 import math
 from contextlib import suppress
 from dataclasses import dataclass
+from uuid import UUID
 
 import redis.asyncio as redis_asyncio
 import structlog
@@ -39,7 +41,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.core.enums import SessionCreationReason
+from app.core.enums import LoginFailureReason, SessionCreationReason
 from app.core.passwords import (
     MAX_PASSWORD_LENGTH,
     verify_dummy_password,
@@ -245,26 +247,40 @@ class LoginLocked:
 LocalLoginResult = LoginSuccess | LoginInvalidCredentials | LoginLocked
 
 
-def _invalid_credentials_failure(
-    user: User | None, admitted_count: int | None
-) -> LoginInvalidCredentials:
-    """Build the generic credential failure and emit the lockout
-    transition log when this admitted attempt is the one that reached
-    `LOGIN_MAX_ATTEMPTS` (see local-authentication.md, Lockout transition
-    logging).
+@dataclass(frozen=True)
+class _LoginFailure:
+    """A login outcome that created no Session, with the values its
+    `login_failed` record carries (see local-authentication.md, Login
+    outcome logging).
 
-    Shared by the ordinary step-10 failure path and the
-    locked-current-inactive outcome of step 11: both are lockout-accounted
-    identically, and neither clears the counter. `user` is the step-5
-    lookup result, so `user_id` is included only when the username
+    `user_id` is set only when the step-5 lookup found a user, and
+    `attempt_count` only when the lockout gate admitted the attempt.
+    """
+
+    result: LoginInvalidCredentials | LoginLocked
+    reason: LoginFailureReason
+    user_id: UUID | None = None
+    attempt_count: int | None = None
+
+
+def _log_login_failure(failure: _LoginFailure) -> None:
+    """Emit `login_failed` and, when this admitted attempt is the one that
+    reached `LOGIN_MAX_ATTEMPTS`, the lockout transition event after it.
+
+    The single call site of `login_failed`: it uses only values already
+    in memory and performs no database or Redis I/O (see
+    local-authentication.md, Login outcome logging and Lockout transition
+    logging). Both records carry `user_id` only when the username
     resolved to an existing user.
     """
-    if admitted_count == settings.login_max_attempts:
-        log_kwargs: dict[str, str | int] = {"attempt_count": admitted_count}
-        if user is not None:
-            log_kwargs["user_id"] = str(user.id)
-        logger.info("login_lockout_triggered", **log_kwargs)
-    return LoginInvalidCredentials()
+    fields: dict[str, str | int] = {}
+    if failure.attempt_count is not None:
+        fields["attempt_count"] = failure.attempt_count
+    if failure.user_id is not None:
+        fields["user_id"] = str(failure.user_id)
+    logger.info("login_failed", reason=failure.reason.value, **fields)
+    if failure.attempt_count == settings.login_max_attempts:
+        logger.info("login_lockout_triggered", **fields)
 
 
 async def authenticate_local_user(
@@ -293,11 +309,7 @@ async def authenticate_local_user(
     An eligible user's password is verified with `verify_password()`
     against the stored hash (bcrypt work for both paths is offloaded
     via `asyncio.to_thread()` so it never blocks the event loop). Every
-    failure returns `LoginInvalidCredentials`; when the lockout gate's
-    admitted counter value equals exactly `LOGIN_MAX_ATTEMPTS`, emits
-    the `login_lockout_triggered` INFO event (with `user_id` when the
-    username resolved to an existing user, omitted otherwise) exactly
-    once for that failure. On success, delegates to
+    failure returns `LoginInvalidCredentials`. On success, delegates to
     `session_service.create_session()` with the verified hash as
     `expected_password_hash`, which acquires the User root lock and
     revalidates the locked-current active state and credential, flushes
@@ -305,14 +317,16 @@ async def authenticate_local_user(
     `LoginSuccess`. If `create_session()` returns `None` (a deactivation
     or a password reset committed after the step-7 pre-check or the
     step-8 verification respectively), the outcome is the same generic
-    `LoginInvalidCredentials` failure as step 10 — including the lockout
-    transition rule — with no Session, no `last_login_at` update, and no
-    successful-login counter clear.
+    `LoginInvalidCredentials` failure as step 10, with no Session, no
+    `last_login_at` update, and no successful-login counter clear.
 
     Q4: creates no `IdentityAuditEvent` — local login is outside the
     identity audit trail scope (see authentication.md, Session
-    creation). `login_lockout_triggered` is an application log, not an
-    audit event.
+    creation). Every returned failure emits exactly one INFO
+    `login_failed` record (Login outcome logging), after any real or
+    dummy bcrypt work; when the lockout gate's admitted counter value
+    equals exactly `LOGIN_MAX_ATTEMPTS`, the `login_lockout_triggered`
+    INFO event follows it. Both are application logs, not audit events.
 
     Q5: not idempotent — each invocation independently advances the
     lockout counter (when the gate admits it) and, on success, creates
@@ -320,25 +334,48 @@ async def authenticate_local_user(
 
     Q6: propagates any exception from the underlying database lookup or
     from `session_service.create_session()` (e.g. a flush-time
-    constraint violation or JWT encoding failure). Never raises for a
-    `RedisError` — `guard_and_increment()` catches it and fails open.
+    constraint violation or JWT encoding failure), without emitting
+    `login_failed`. Never raises for a `RedisError` —
+    `guard_and_increment()` catches it and fails open.
     """
+    outcome = await _authenticate(db, username, password)
+    if isinstance(outcome, _LoginFailure):
+        _log_login_failure(outcome)
+        return outcome.result
+    return outcome
+
+
+async def _authenticate(
+    db: AsyncSession, username: str, password: str
+) -> LoginSuccess | _LoginFailure:
+    """The numbered login flow of `authenticate_local_user()`. Returns
+    every failure with its `login_failed` values instead of logging it,
+    so the caller is the single call site of that record."""
     if len(password) > MAX_PASSWORD_LENGTH:
-        return LoginInvalidCredentials()
+        return _LoginFailure(
+            LoginInvalidCredentials(), LoginFailureReason.INVALID_INPUT
+        )
 
     normalized_username = username.strip().lower()
     if not normalized_username or len(normalized_username) > _MAX_USERNAME_LENGTH:
-        return LoginInvalidCredentials()
+        return _LoginFailure(
+            LoginInvalidCredentials(), LoginFailureReason.INVALID_INPUT
+        )
 
     decision = await guard_and_increment(normalized_username)
     if isinstance(decision, LockoutBlocked):
-        return LoginLocked(retry_after_seconds=decision.retry_after_seconds)
+        return _LoginFailure(
+            LoginLocked(retry_after_seconds=decision.retry_after_seconds),
+            LoginFailureReason.LOCKED,
+        )
     admitted_count = (
         decision.attempt_count if isinstance(decision, LockoutAdmitted) else None
     )
 
     result = await db.execute(select(User).where(User.username == normalized_username))
     user = result.scalar_one_or_none()
+    # Read once here, so logging a failure never touches the ORM instance.
+    user_id = user.id if user is not None else None
 
     eligible_user: User | None = None
     stored_hash: str | None = None
@@ -361,7 +398,13 @@ async def authenticate_local_user(
         verified = False
 
     if not verified:
-        return _invalid_credentials_failure(user, admitted_count)
+        if user is None:
+            reason = LoginFailureReason.UNKNOWN_USER
+        elif eligible_user is None:
+            reason = LoginFailureReason.INELIGIBLE_USER
+        else:
+            reason = LoginFailureReason.INVALID_PASSWORD
+        return _LoginFailure(LoginInvalidCredentials(), reason, user_id, admitted_count)
 
     # `verified` is only ever True when `eligible_user` and `stored_hash`
     # were set above.
@@ -378,10 +421,15 @@ async def authenticate_local_user(
         # pre-check or the step-8 verification: the locked revalidation
         # inside `create_session()` observed the inactive current state or
         # a replaced `password_hash` and created no Session. This is the
-        # same generic login failure as step 10 — the lockout transition
-        # is emitted when this admitted attempt reached the threshold, and
-        # no successful-login counter clear is registered.
-        return _invalid_credentials_failure(user, admitted_count)
+        # same generic login failure as step 10 — lockout-accounted
+        # identically — and no successful-login counter clear is
+        # registered.
+        return _LoginFailure(
+            LoginInvalidCredentials(),
+            LoginFailureReason.REVALIDATION_FAILED,
+            user_id,
+            admitted_count,
+        )
     return LoginSuccess(
         created_session=created, normalized_username=normalized_username
     )
