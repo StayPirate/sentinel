@@ -897,8 +897,8 @@ the group and removes records for users no longer in the group.
 This function centralizes all bulk role operations triggered by external
 group membership. It is called by the external sync process and by the
 Create Role Mapping endpoint when a new mapping is created (see
-`identity-provisioning.md`). During the local-only phase, this function
-has no callers.
+`identity-provisioning.md`). While external provisioning is not active,
+this function has no callers.
 
 **Parameters**:
 

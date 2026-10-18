@@ -125,16 +125,16 @@ beyond what is described above.
 
 **Q2 (guards)**: an argument that is not valid UTF-8 aborts before argument
 parsing (exit 1, Argument encoding above). `Settings` validation failure
-aborts before any subcommand executes (exit 2). No other root-level guard
-exists — per-command guards (e.g., configuration guards, see below) are
-evaluated by each subcommand.
+aborts the command bootstrap before the command's own logic runs (exit 2,
+step 3). Every other guard (e.g., configuration guards, see below) is
+evaluated by each command.
 
 **Q3 (behavior)**: as enumerated in the five steps above, including the
 Argument encoding check; no other root behavior exists.
 
 **Q6 (exceptions)**: `Settings` validation exceptions are caught by the
-command bootstrap and converted to the exit-2 path described in step 3. All other
-exceptions propagate to the per-command error handling described in
+command bootstrap and converted to the exit-2 path described in step 3. All
+other exceptions propagate to the per-command error handling described in
 "Error Handling & Exit Code Mapping" below.
 
 ## Database Session Management
@@ -316,11 +316,11 @@ Every CLI command is wrapped by a single, unified exception mapper that
 maps exceptions to the exit codes defined in `docs/conventions.md` (CLI
 Output Contract, Exit Codes table). This mapper is implemented once, as
 a top-level `try/except` in the exported `main()` entry-point wrapper around
-the root Click group invocation, so individual
-command specs do not need to restate this mapping.
+the root Click group invocation, so individual command specs do not need to
+restate this mapping.
 
-The root group invokes Click with `standalone_mode=False`. In this
-mode, Click does not perform its own `sys.exit()` calls, does not print
+The `main()` entry point invokes the root group with `standalone_mode=False`.
+In this mode, Click does not perform its own `sys.exit()` calls, does not print
 "Aborted!", and re-raises `click.ClickException` and `click.Abort` to
 the caller instead of handling them internally — giving the mapper
 below full and exclusive control over exit codes and messages for every

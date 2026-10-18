@@ -108,9 +108,8 @@ Five settings receive special protection in the factory:
 | Proxy | Standard env vars (`HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY`); see "Proxy Configuration" | Environment only; not overridable (see "Override Safety") |
 
 Connection pool note: every consumer makes sequential requests (one HTTP
-request at a time per client instance).
-The pool exists for keepalive connection reuse between sequential
-requests to the same host, not for managing parallelism. These limits
+request at a time per client instance). The pool exists for keepalive
+connection reuse between sequential requests to the same host, not for managing parallelism. These limits
 match httpx defaults and provide ample headroom for future consumers
 with higher concurrency needs.
 

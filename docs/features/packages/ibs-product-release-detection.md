@@ -675,11 +675,10 @@ Implementation tests must cover:
 
 Contract tests use sanitized representative fixtures captured from a live
 verification of current, historical, suffixless, architecture-specific, LTSS,
-ESPOS, source/debug, non-RPM, absent, and no-updateinfo repositories, and a
-change to a consumed field refreshes the affected fixtures from a new live
-verification. Hostile malformed upstream payloads, and any specified failure
-shape that no live fixture represents, are exercised through synthetic
-fixtures.
+ESPOS, source/debug, non-RPM, absent, and no-updateinfo repositories (see
+External Contract Verification Status for re-verification). Hostile malformed
+upstream payloads, and any specified failure shape that no live fixture
+represents, are exercised through synthetic fixtures.
 
 ## External Contract Verification Status
 

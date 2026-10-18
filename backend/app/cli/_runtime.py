@@ -73,7 +73,7 @@ def bootstrap() -> None:
     """Fail-fast `Settings` load plus minimal CLI logging configuration.
 
     Per `docs/features/platform/cli-infrastructure.md` (Root Command Group
-    & Bootstrap, steps 2 and 4), this MUST run before a real command's own
+    & Bootstrap, steps 3 and 4), this MUST run before a real command's own
     logic executes, but MUST NOT run for a `--help`/`--version`
     invocation at any level.
 
@@ -90,7 +90,7 @@ def bootstrap() -> None:
     Raises `SystemExit(2)` directly (bypassing the shared exception
     mapper in `app.cli.main()`) when `Settings` fails to load, printing a
     plain `Error: ...` message with no traceback — see
-    cli-infrastructure.md, Root Command Group & Bootstrap, step 2. A
+    cli-infrastructure.md, Root Command Group & Bootstrap, step 3. A
     `pydantic.ValidationError` is rendered via `_format_validation_error()`
     to avoid leaking credential-bearing settings values (see that
     function's docstring); any other exception is rendered via `str()`,

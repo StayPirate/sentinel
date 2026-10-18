@@ -593,8 +593,7 @@ and transactions.
    `hard_time_limit_seconds + 60`) if `running` — using the run's own
    persisted `hard_time_limit_seconds` (falling back to
    `FetcherConfig.run_timeout` when the column is `NULL`) — finalize it
-   per
-   `docs/features/platform/fetcher-infrastructure.md` (Stale Run
+   per `docs/features/platform/fetcher-infrastructure.md` (Stale Run
    Detection) — `status = failure`, specified error message, computed
    fields (a stale `queued` run keeps `started_at` and
    `duration_seconds` `NULL`). This finalization occurs under the same

@@ -389,7 +389,7 @@ class TestInvalidLoggingSettingsFailProcessStartup:
     (docs/features/platform/logging.md, Startup Validation; Testing), and
     the CLI with its documented `Error: ...` line and exit 2
     (docs/features/platform/cli-infrastructure.md, Root Command Group &
-    Bootstrap, step 2)."""
+    Bootstrap, step 3)."""
 
     @pytest.mark.parametrize("variable", ["LOG_LEVEL", "LOG_FORMAT"])
     @pytest.mark.parametrize("role", list(_RUNTIME_ENTRY_POINTS))

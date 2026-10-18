@@ -1027,7 +1027,7 @@ The methods have these escaping outcomes:
 | One requested source-info package missing, duplicated, error-bearing, or carrying an invalid `srcmd5` | A per-package failed result in the returned mapping; valid sibling package results remain usable |
 | `get_diff_issues()` response identifies `old_md5` as unavailable under [Unavailable Old Revision](#unavailable-old-revision) | `IBSHistoricalRevisionUnavailable` |
 | `get_diff_issues()` response contains an issue with an unusable structural shape | `IBSResponseDataError` |
-| `get_diff_issues()` response is valid and contains no qualifying issue | Empty list |
+| `get_diff_issues()` response is valid and contains no issue | Empty list |
 | Request ID search reports inconsistent successful-response completeness or leaves candidate identity ambiguous | Incomplete `RequestEvidenceResult` |
 | Request ID search receives a 4xx other than 401 or 403 after shared rate-limit handling, including a predicate rejection | Incomplete `RequestEvidenceResult`; it never proves a negative |
 | Request detail is 404, has an unknown state or an action type outside the eight IBS types, has an invalid supersession relationship, omits a required supported-action field, has an invalid consumed field or IBS name, or has two supported actions with one semantic identity, including through project replacement | Incomplete `RequestEvidenceResult` |

@@ -2146,10 +2146,11 @@ for the record schema.
 5. Check Beat logs for the reconciliation summary message ("Beat
    schedule reconciliation complete: ..."). If absent, reconciliation
    failed — check for PostgreSQL connectivity errors above it
-6. If Beat exits repeatedly with "cannot read FetcherConfig from
-   PostgreSQL", ensure the database is reachable before Beat can start
-   successfully (Beat fails fast when PostgreSQL is unavailable at
-   startup)
+6. If Beat exits repeatedly after logging CRITICAL `beat_startup_failed`
+   with `stage="bootstrap_and_reconciliation"`, check its `error_type` and
+   `error`: for a PostgreSQL error, ensure the database is reachable before
+   Beat can start successfully (Beat fails fast when PostgreSQL is
+   unavailable at startup)
 7. If only the Git-based CVE fetchers (`sync_kernel_cves`,
    `sync_mitre_cves`) never run, check that a Git worker consuming the `git`
    queue is running (see [Container Images](#container-images)); the

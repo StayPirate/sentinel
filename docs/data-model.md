@@ -1764,7 +1764,7 @@ Beat, and API server).
 
 Records every execution of a fetcher. Primary data source for the fetcher
 dashboard charts. Records are retained indefinitely (no retention policy).
-Growth rate is approximately 20,000 rows per year. See
+Growth rate is approximately 15,000 rows per year. See
 `docs/features/platform/fetcher-infrastructure.md` for full specification,
 including the full lifecycle state machine and the timestamp semantics
 summarized below.

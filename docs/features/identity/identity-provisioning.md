@@ -3,8 +3,7 @@
 ## Status
 
 **Deferred**. This specification is not yet active. External user
-provisioning will be implemented after the local-only phase, once the
-SCIM integration with SUSEID is finalized.
+provisioning depends on the SCIM integration with SUSEID.
 
 ## Purpose
 

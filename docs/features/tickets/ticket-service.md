@@ -461,9 +461,9 @@ mapping location is an implementation choice.
 
 **Preconditions**:
 
-- If `cve_id` is provided: CVE Resolution Behavior applies (on-demand
-  fetch if unknown, conflict check if already associated with another
-  ticket)
+- If `cve_id` is provided: CVE Resolution Behavior applies (placeholder
+  creation if unknown, conflict check if already associated with another
+  ticket, and the post-commit freshness refresh of step 11)
 - If the API request supplies `is_confidential` (`true` or `false`): the
   acting user must hold `manage_confidentiality` capability (enforced at the
   API layer; see `docs/features/identity/rbac.md`, Business Rule 13)

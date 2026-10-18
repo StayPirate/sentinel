@@ -450,11 +450,10 @@ repositories.
     composition, release provenance, and release actions without acceptinfo
     used by submission tracking.
 
-  Verification status: every consumed track-release, authentication, and
-  request-operation contract is verified. Verified shapes, fields verified
-  only through OBS source inspection, and the remaining unverified details are
-  recorded in the Authentication, Track-Release, and Request Contract
-  Verification Status sections of
+  Verified shapes, fields verified only through OBS source inspection, and
+  the remaining unverified details of the track-release, authentication, and
+  request-operation contracts are recorded in the Authentication,
+  Track-Release, and Request Contract Verification Status sections of
   `docs/features/integrations/ibs-integration.md`
 - **See also**: `docs/features/integrations/ibs-integration.md`,
   `docs/features/integrations/ibs-rabbitmq-integration.md`,
@@ -1298,8 +1297,8 @@ normalizes all forms to the canonical `bsc#` prefix.
 All `BaseFetcher` subclasses are automatically registered in the fetcher
 registry. The table below lists every fetcher defined by a feature
 specification, with its schedule, authentication requirements, rate limits,
-and data ingested. See `docs/features/platform/fetcher-infrastructure.md` for generic
-`BaseFetcher` infrastructure details,
+and data ingested. See `docs/features/platform/fetcher-infrastructure.md` for
+generic `BaseFetcher` infrastructure details,
 `docs/features/platform/cve-fetcher-infrastructure.md` for the
 `BaseCVEFetcher` contract (CVE fetchers), and
 `docs/features/platform/git-fetcher-infrastructure.md` for the

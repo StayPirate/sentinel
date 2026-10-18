@@ -352,16 +352,26 @@ class TestPaginationParameterBounds:
                     )
                 },
                 "/unbounded": {
-                    "get": operation(page={"minimum": 1}, per_page={"minimum": 1})
+                    "get": operation(
+                        page={"minimum": 1},
+                        per_page={"minimum": 1, "maximum": 1000},
+                    )
+                },
+                "/no-per-page": {
+                    "get": operation(page={"minimum": 1, "maximum": 2_147_483_647})
                 },
                 "/unpaginated": {"get": operation(per_page={})},
             }
         }
 
         assert [
-            violation.split(":")[0]
+            violation.split(" {")[0]
             for violation in _pagination_bound_violations(document)
-        ] == ["GET /unbounded", "GET /unbounded"]
+        ] == [
+            "GET /unbounded: page",
+            "GET /unbounded: per_page",
+            "GET /no-per-page: per_page",
+        ]
 
 
 @pytest.mark.unit

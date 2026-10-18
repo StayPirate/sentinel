@@ -8,9 +8,9 @@ management, and role mapping administration.
 
 Application-level logging MAY accompany this audit trail for operational
 monitoring, but the database record is the authoritative historical audit
-source. Current user,
-role, and API-key state remains authoritative in the owning operational tables
-per `docs/features/platform/audit-trail-infrastructure.md` (Operational State
+source. Current user, role, and API-key state remains authoritative in the
+owning operational tables per
+`docs/features/platform/audit-trail-infrastructure.md` (Operational State
 Authority).
 
 ## Data Model

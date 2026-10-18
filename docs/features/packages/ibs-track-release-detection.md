@@ -663,8 +663,9 @@ Status) and `../../data-sources.md` (IBS (Internal Build Service)). Contract
 tests load a sanitized live fixture for every consumed source-info and diff
 shape. These include the unavailable-`orev` and unavailable-`rev` 400
 responses, the 404 `no such revision` response, and the unknown-package 404
-response. A change to a consumed field re-verifies it live under
-`../../conventions.md` (External Integration Contract Verification). Shapes
+response. A change to code that parses these responses re-verifies them live
+under `../../conventions.md` (External Integration Contract Verification).
+Shapes
 verified only through OBS source inspection are recorded in
 `../integrations/ibs-integration.md` (Track-Release Contract Verification
 Status).
