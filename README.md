@@ -52,7 +52,8 @@ services.
 - Build or submit packages (IBS handles builds)
 - Manage product lifecycle or release schedules (SMELT/AIMAAS own this)
 - Provision user identities (deferred to external identity provider)
-- Provide a web UI (frontend will be developed in a separate repository)
+- Provide a web UI (the UI is developed in the separate `sentinel-aura`
+  repository)
 
 ## Architecture
 
