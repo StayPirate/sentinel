@@ -1180,10 +1180,11 @@ as a new release.
 
 Consumers take the contract of a version only from its published GitHub
 Release, under the same rule as its image. The document has no attestation
-of its own, because it describes the API rather than the image; the release
-attestation of a release published with release immutability covers it, so
-`gh release verify-asset v<version> sentinel-<version>.openapi.json` confirms
-that a downloaded copy is the published asset.
+of its own: release immutability locks it with the other assets, and the
+release attestation of a release published with release immutability covers
+it, so `gh release verify-asset v<version> sentinel-<version>.openapi.json
+--repo <owner>/<repository>` confirms that a downloaded copy is the published
+asset.
 
 **GitHub Pages.** `deploy-api-docs.yml` regenerates the document from the
 tagged code on every version tag push, independently of `build-images.yml`.

@@ -158,7 +158,7 @@ commands.
 ## API Documentation
 
 Interactive API documentation (Swagger UI) is published to GitHub Pages on
-every release: **[API Docs](https://staypirate.github.io/sentinel/)**
+every version tag: **[API Docs](https://staypirate.github.io/sentinel/)**
 
 The OpenAPI document of each version is attached to its GitHub Release as
 `sentinel-<version>.openapi.json`; use it to pin the contract of a specific

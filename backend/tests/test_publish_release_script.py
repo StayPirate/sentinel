@@ -264,6 +264,7 @@ def test_publish_rejects_a_missing_or_foreign_attestation_bundle(
         _openapi_document("1.2.4"),
         '{"info": {"version": "1.2.3"}, "paths": {}}',
         '{"openapi": "3.1.0", "paths": {}}',
+        '{"event": "log line"}\n' + _openapi_document("1.2.3"),
     ],
 )
 def test_publish_refuses_without_the_openapi_document_of_the_release(

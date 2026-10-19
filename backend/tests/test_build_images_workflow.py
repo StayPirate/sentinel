@@ -475,6 +475,7 @@ def test_openapi_document_is_extracted_from_the_tested_image_before_any_push() -
 
     assert (
         step_index(job, SMOKE_STEP)
+        < step_index(job, SBOM_STEP)
         < step_index(job, OPENAPI_STEP)
         < step_index(job, RETAIN_OPENAPI_STEP)
         < step_index(job, GUARD_STEP)

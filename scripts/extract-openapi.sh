@@ -26,10 +26,12 @@ main() {
         <"${repo_root}/backend/scripts/generate_openapi.py" \
         >"${output_file}"
 
-    if ! jq -e '
-        (.openapi | type == "string")
-        and (.info.version | type == "string")
-        and (.paths | type == "object")
+    # --slurp: a log line printed before the document must not pass.
+    if ! jq -e --slurp '
+        length == 1
+        and (.[0].openapi | type == "string")
+        and (.[0].info.version | type == "string")
+        and (.[0].paths | type == "object")
     ' "${output_file}" >/dev/null 2>&1; then
         echo "Not an OpenAPI document: ${output_file}" >&2
         return 1

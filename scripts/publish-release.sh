@@ -20,8 +20,10 @@ require_openapi_document() {
     local path="$1"
     local version="$2"
 
-    if ! jq -e --arg version "${version}" \
-        '(.openapi | type == "string") and .info.version == $version' \
+    # --slurp: the file must hold exactly one JSON value.
+    if ! jq -e --slurp --arg version "${version}" \
+        'length == 1 and (.[0].openapi | type == "string")
+            and .[0].info.version == $version' \
         "${path}" >/dev/null 2>&1; then
         echo "Not the OpenAPI document of version ${version}: ${path}" >&2
         return 1

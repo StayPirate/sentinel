@@ -39,12 +39,13 @@ exit "${DOCKER_STUB_EXIT:-0}"
 """
 
 # Runs the program on standard input with the backend's interpreter, from the
-# backend directory, as the image runs it from its application directory.
+# backend directory and with an empty environment, as the image runs it from
+# its application directory without the test settings.
 GENERATOR_STUB = """\
 #!/usr/bin/env bash
 set -euo pipefail
 cd "${GENERATOR_CWD}"
-exec "${GENERATOR_PYTHON}" -
+exec env -i "${GENERATOR_PYTHON}" -
 """
 
 OPENAPI_DOCUMENT = json.dumps(
@@ -132,6 +133,7 @@ def test_extract_propagates_a_docker_failure(tmp_path: Path) -> None:
         '{"info": {"version": "1.2.3"}, "paths": {}}',
         '{"openapi": "3.1.0", "paths": {}}',
         '{"openapi": "3.1.0", "info": {"version": "1.2.3"}}',
+        '{"event": "log line"}\n' + OPENAPI_DOCUMENT,
     ],
 )
 def test_extract_rejects_output_that_is_not_an_openapi_document(

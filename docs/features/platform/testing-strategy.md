@@ -1697,9 +1697,9 @@ and semver tags from ever being published. The tested and published
 artifacts are guaranteed identical — no second build is performed.
 
 The SBOM gate runs only after artifact verification succeeds and scans that
-same candidate identity, from which the OpenAPI document of the release is
-then extracted (`docs/deployment.md`, API Documentation Publication). Image
-smoke, SBOM generation/validation, OpenAPI extraction, and publication
+same candidate identity. The candidate's OpenAPI document is then extracted
+from the same identity (`docs/deployment.md`, API Documentation Publication).
+Image smoke, SBOM generation/validation, OpenAPI extraction, and publication
 therefore form one ordered chain; none may silently substitute a different tag
 resolution, pulled image, or rebuilt artifact.
 
