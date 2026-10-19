@@ -33,7 +33,6 @@ dependencies = [
     "bcrypt>=4.2.0",
     "PyJWT[crypto]>=2.14.0",
     "cryptography>=50.0.2",
-    "python-multipart>=0.0.12",
     "structlog>=26.1.0",
     "cvss>=3.6",
     "celery-redbeat>=2.4.2",
