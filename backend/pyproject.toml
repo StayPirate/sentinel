@@ -21,7 +21,14 @@ classifiers = [
 ]
 dependencies = [
     "fastapi>=0.141.1",
-    "uvicorn[standard]>=0.52.3",
+    # uvicorn's default "auto" event loop and HTTP implementations select
+    # uvloop and httptools when they are installed. They are declared
+    # directly instead of through the uvicorn[standard] extra, which also
+    # installs websockets, PyYAML, and watchfiles that the runtime never
+    # uses (watchfiles backs `uvicorn --reload` and is a dev dependency).
+    "uvicorn>=0.52.3",
+    "uvloop>=0.23.0; sys_platform != 'win32' and sys_platform != 'cygwin' and platform_python_implementation != 'PyPy'",
+    "httptools>=0.9.0",
     "sqlalchemy[asyncio]>=2.1.1",
     "asyncpg>=0.30.0",
     "alembic>=1.20.0",
@@ -31,7 +38,7 @@ dependencies = [
     "redis>=5.2.0",
     "httpx>=0.28.0",
     "bcrypt>=4.2.0",
-    "PyJWT[crypto]>=2.14.0",
+    "PyJWT>=2.14.0",
     "cryptography>=50.0.2",
     "structlog>=26.1.0",
     "cvss>=3.6",
@@ -58,12 +65,12 @@ dev = [
     "pytest-asyncio>=0.24.0",
     "pytest-cov>=6.0.0",
     "pytest-xdist>=3.8.0",
-    "httpx>=0.28.0",
     "ruff>=0.16.3",
     "mypy>=2.4.0",
-    "testcontainers[postgres]>=4.15.0",
+    "testcontainers>=4.15.0",
     "jsonschema>=4.26.0",
     "types-jsonschema>=4.26.0.20261006",
+    "watchfiles>=1.3.0",
 ]
 
 # uv builds the project with the uv_build backend bundled in its own binary,

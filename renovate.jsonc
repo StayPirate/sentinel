@@ -45,6 +45,14 @@
     "**/test/**",
     "**/__fixtures__/**"
   ],
+  // Python dependencies pinned in the PEP 723 inline metadata of the
+  // standalone scripts under scripts/ (e.g. aio-pika in
+  // capture-ibs-rabbitmq.py). The pep723 manager matches no file unless
+  // configured — see docs/deployment.md (Python dependency updates and
+  // vulnerability response).
+  "pep723": {
+    "managerFilePatterns": ["/^scripts/[^/]+\\.py$/"]
+  },
   "customManagers": [
     {
       "customType": "regex",
@@ -101,15 +109,15 @@
       "rangeStrategy": "update-lockfile"
     },
     {
-      "description": "Group Python (backend) minor and patch updates into a single PR",
-      "matchManagers": ["pep621"],
+      "description": "Group Python (backend and PEP 723 script) minor and patch updates into a single PR, so a dependency shared by the backend and a script moves in both together",
+      "matchManagers": ["pep621", "pep723"],
       "matchUpdateTypes": ["minor", "patch"],
       "groupName": "python minor and patch dependencies",
       "commitMessagePrefix": "chore(deps):"
     },
     {
-      "description": "Python (backend) major updates get their own PR",
-      "matchManagers": ["pep621"],
+      "description": "Python (backend and PEP 723 script) major updates get their own PR",
+      "matchManagers": ["pep621", "pep723"],
       "matchUpdateTypes": ["major"],
       "commitMessagePrefix": "chore(deps):"
     },
