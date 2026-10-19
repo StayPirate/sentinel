@@ -9,10 +9,10 @@ import io
 import json
 import logging
 import time
+from dataclasses import dataclass
 
 import pytest
 import structlog
-from pydantic import Field, SecretStr
 
 from app.config import Settings
 from app.core import logging as core_logging
@@ -20,7 +20,6 @@ from app.core.logging import (
     _THIRD_PARTY_LOGGERS,
     REDACTED,
     _build_redaction_processor,
-    _collect_secret_values,
     configure_cli_logging,
     configure_logging,
     resolve_log_format,
@@ -59,6 +58,21 @@ class _FakeStream(io.StringIO):
 
     def isatty(self) -> bool:
         return self._isatty
+
+
+@dataclass(frozen=True)
+class _FakeLoggingSettings:
+    """A `LoggingSettings` that is not the application `Settings`: the
+    pipelines read the configured secret values only from
+    `secret_values()`."""
+
+    secrets: tuple[str, ...]
+    app_name: str = "sentinel-test"
+    log_level: str = "INFO"
+    log_format: str = "json"
+
+    def secret_values(self) -> list[str]:
+        return list(self.secrets)
 
 
 @pytest.mark.unit
@@ -323,6 +337,19 @@ class TestConfigureCliLogging:
         configure_cli_logging(_settings(nvd_api_key=_NVD_SETTING_VALUE))
 
         logging.getLogger("app.test.cli.secret").warning(
+            "request rejected for key %s", _NVD_SETTING_VALUE
+        )
+
+        captured = capsys.readouterr()
+        assert _NVD_SETTING_VALUE not in captured.err
+        assert f"request rejected for key {REDACTED}" in captured.err
+
+    def test_secret_values_of_any_logging_settings_are_redacted(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        configure_cli_logging(_FakeLoggingSettings(secrets=(_NVD_SETTING_VALUE,)))
+
+        logging.getLogger("app.test.cli.protocol").warning(
             "request rejected for key %s", _NVD_SETTING_VALUE
         )
 
@@ -623,81 +650,6 @@ class TestRedactionProcessor:
 
 
 @pytest.mark.unit
-class TestCollectSecretValues:
-    """The exact-value set is derived from the Settings classification
-    (docs/conventions.md, Secret Field Typing)."""
-
-    def test_collects_secretstr_values_and_url_passwords(self) -> None:
-        settings = _settings(
-            jwt_secret_key="j" * 32,
-            nvd_api_key=_NVD_SETTING_VALUE,
-            ibs_ssh_private_key=_IBS_KEY_SETTING_VALUE,
-            database_url="postgresql+asyncpg://svc:fictional-db-pass@db.example.test/db",
-            redis_url="redis://:fictional-redis-pass@cache.example.test:6379/0",
-            celery_broker_url=_BROKER_URL,
-            ibs_rabbitmq_url="amqps://svc:fictional-mq-pass@mq.example.test",
-        )
-
-        values = _collect_secret_values(settings)
-
-        assert set(values) == {
-            "j" * 32,
-            _NVD_SETTING_VALUE,
-            _IBS_KEY_SETTING_VALUE,
-            "fictional-db-pass",
-            "fictional-redis-pass",
-            _BROKER_URL_USERINFO_PART,
-            "fictional-mq-pass",
-        }
-
-    def test_values_are_derived_from_field_classification(self) -> None:
-        """A new field classified per Secret Field Typing is covered
-        without changes to the logging module."""
-
-        class _ExtendedSettings(Settings):
-            extra_token: SecretStr = SecretStr("fictional-extra-token-0001")
-            extra_url: str = Field(
-                default="amqps://svc:fictional-extra-pass@mq.example.test/",
-                repr=False,
-            )
-            extra_public_url: str = "https://svc:public-userinfo@docs.example.test/"
-
-        settings = _ExtendedSettings(_env_file=None, jwt_secret_key="a" * 32)
-
-        values = _collect_secret_values(settings)
-
-        assert "fictional-extra-token-0001" in values
-        assert "fictional-extra-pass" in values
-        assert "public-userinfo" not in values
-
-    def test_url_password_is_percent_decoded(self) -> None:
-        settings = _settings(
-            database_url="postgresql+asyncpg://svc:fictional%40db%2Fpass@db.example.test/db"
-        )
-        assert "fictional@db/pass" in _collect_secret_values(settings)
-
-    def test_github_token_is_collected(self) -> None:
-        settings = _settings(github_token=_GITHUB_TOKEN_VALUE)
-        assert _GITHUB_TOKEN_VALUE in _collect_secret_values(settings)
-
-    def test_empty_values_and_urls_without_password_are_skipped(self) -> None:
-        settings = _settings(
-            nvd_api_key="",
-            github_token="",
-            ibs_ssh_private_key="",
-            database_url="postgresql+asyncpg://svc@db.example.test/db",
-            redis_url="redis://cache.example.test:6379/0",
-            celery_broker_url="redis://cache.example.test:6379/1",
-            ibs_rabbitmq_url="amqps://mq.example.test",
-        )
-        assert _collect_secret_values(settings) == ["a" * 32]
-
-    def test_malformed_url_is_skipped(self) -> None:
-        settings = _settings(redis_url="redis://svc:fict-pass@[::1/0")
-        assert "fict-pass" not in _collect_secret_values(settings)
-
-
-@pytest.mark.unit
 class TestConfigureLoggingRedaction:
     """The redaction processor is wired into the runtime pipeline for
     application records, stdlib-bridged records, and rendered tracebacks."""
@@ -722,6 +674,20 @@ class TestConfigureLoggingRedaction:
         record = json.loads(stream.getvalue().strip())
         assert record["detail"] == f"key {REDACTED} rejected"
         assert record["event"] == "nvd_request_rejected"
+
+    def test_secret_values_of_any_logging_settings_are_redacted(self) -> None:
+        stream = _FakeStream(isatty=False)
+        configure_logging(
+            _FakeLoggingSettings(secrets=(_NVD_SETTING_VALUE,)), stream=stream
+        )
+
+        structlog.get_logger("app.test.redact.protocol").warning(
+            "nvd_request_rejected", detail=f"key {_NVD_SETTING_VALUE} rejected"
+        )
+
+        record = json.loads(stream.getvalue().strip())
+        assert record["detail"] == f"key {REDACTED} rejected"
+        assert record["app"] == "sentinel-test"
 
     def test_github_token_is_redacted_as_value_and_bearer_credential(
         self,

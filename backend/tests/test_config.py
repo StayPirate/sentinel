@@ -15,7 +15,7 @@ from typing import Any, Final
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec, rsa
-from pydantic import SecretStr, ValidationError
+from pydantic import Field, SecretStr, ValidationError
 
 from app.config import Settings, _split_comma
 from tests.support.ibs_keys import (
@@ -1528,6 +1528,100 @@ class TestSecretFieldRedaction:
         s = Settings(_env_file=None)
         dumped = s.model_dump()
         assert dumped["database_url"] == db_url
+
+
+# Fictional credential material used by the secret value tests.
+_NVD_SETTING_VALUE = "fictional-nvd-key-0123456789"
+_GITHUB_TOKEN_VALUE = "fictional-github-token-0123456789"
+_IBS_KEY_SETTING_VALUE = fictional_settings_value()
+_BROKER_URL_USERINFO_PART = "fictional-broker-pass-42"
+
+
+def _secret_settings(**overrides: Any) -> Settings:
+    """Build a Settings instance bypassing the `.env` file. Environment
+    variables still apply, so a test that depends on a field's value
+    passes it explicitly."""
+    return Settings(_env_file=None, **{"jwt_secret_key": "a" * 32, **overrides})
+
+
+@pytest.mark.unit
+class TestSecretValues:
+    """`Settings.secret_values()`, the configured secret values the
+    Redaction Processor masks exactly (docs/features/platform/logging.md,
+    Redaction Processor), is derived from the field classification of
+    docs/conventions.md (Secret Field Typing)."""
+
+    def test_collects_secretstr_values_and_url_passwords(self) -> None:
+        settings = _secret_settings(
+            jwt_secret_key="j" * 32,
+            nvd_api_key=_NVD_SETTING_VALUE,
+            ibs_ssh_private_key=_IBS_KEY_SETTING_VALUE,
+            database_url="postgresql+asyncpg://svc:fictional-db-pass@db.example.test/db",
+            redis_url="redis://:fictional-redis-pass@cache.example.test:6379/0",
+            celery_broker_url=(
+                f"amqps://svc-sentinel:{_BROKER_URL_USERINFO_PART}"
+                "@rabbit.example.test:5671/"
+            ),
+            ibs_rabbitmq_url="amqps://svc:fictional-mq-pass@mq.example.test",
+        )
+
+        values = settings.secret_values()
+
+        assert set(values) == {
+            "j" * 32,
+            _NVD_SETTING_VALUE,
+            _IBS_KEY_SETTING_VALUE,
+            "fictional-db-pass",
+            "fictional-redis-pass",
+            _BROKER_URL_USERINFO_PART,
+            "fictional-mq-pass",
+        }
+
+    def test_values_are_derived_from_field_classification(self) -> None:
+        """A new field classified per Secret Field Typing is covered
+        without further changes."""
+
+        class _ExtendedSettings(Settings):
+            extra_token: SecretStr = SecretStr("fictional-extra-token-0001")
+            extra_url: str = Field(
+                default="amqps://svc:fictional-extra-pass@mq.example.test/",
+                repr=False,
+            )
+            extra_public_url: str = "https://svc:public-userinfo@docs.example.test/"
+
+        settings = _ExtendedSettings(_env_file=None, jwt_secret_key="a" * 32)
+
+        values = settings.secret_values()
+
+        assert "fictional-extra-token-0001" in values
+        assert "fictional-extra-pass" in values
+        assert "public-userinfo" not in values
+
+    def test_url_password_is_percent_decoded(self) -> None:
+        settings = _secret_settings(
+            database_url="postgresql+asyncpg://svc:fictional%40db%2Fpass@db.example.test/db"
+        )
+        assert "fictional@db/pass" in settings.secret_values()
+
+    def test_github_token_is_collected(self) -> None:
+        settings = _secret_settings(github_token=_GITHUB_TOKEN_VALUE)
+        assert _GITHUB_TOKEN_VALUE in settings.secret_values()
+
+    def test_empty_values_and_urls_without_password_are_skipped(self) -> None:
+        settings = _secret_settings(
+            nvd_api_key="",
+            github_token="",
+            ibs_ssh_private_key="",
+            database_url="postgresql+asyncpg://svc@db.example.test/db",
+            redis_url="redis://cache.example.test:6379/0",
+            celery_broker_url="redis://cache.example.test:6379/1",
+            ibs_rabbitmq_url="amqps://mq.example.test",
+        )
+        assert settings.secret_values() == ["a" * 32]
+
+    def test_malformed_url_is_skipped(self) -> None:
+        settings = _secret_settings(redis_url="redis://svc:fict-pass@[::1/0")
+        assert "fict-pass" not in settings.secret_values()
 
 
 @pytest.mark.unit

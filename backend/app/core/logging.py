@@ -17,14 +17,9 @@ import logging
 import re
 import sys
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, TextIO
-from urllib.parse import unquote, urlsplit
+from typing import Protocol, TextIO
 
 import structlog
-from pydantic import SecretStr
-
-if TYPE_CHECKING:
-    from app.config import Settings
 
 # Third-party loggers captured via the stdlib bridge. Explicitly reset
 # to NOTSET + propagate=True so they defer to the root logger's level
@@ -143,33 +138,6 @@ def _mask_cookie(match: re.Match[str]) -> str:
     return f"{match['prefix']}{opening}{REDACTED}"
 
 
-def _collect_secret_values(settings: Settings) -> list[str]:
-    """Return the non-empty configured secret values to mask exactly.
-
-    Derived from the `Settings` field classification of
-    `docs/conventions.md` (Secret Field Typing): the value of every
-    `SecretStr` field, and the percent-decoded password component of
-    every credential-bearing URL field (a `str` declared with
-    `repr=False`). The length threshold is applied by
-    `_build_redaction_processor()`.
-    """
-    values: set[str] = set()
-    for name, field in type(settings).model_fields.items():
-        value = getattr(settings, name)
-        if isinstance(value, SecretStr):
-            values.add(value.get_secret_value())
-        elif not field.repr and isinstance(value, str):
-            try:
-                password = urlsplit(value).password
-            except ValueError:
-                # Malformed URL: the userinfo pattern still applies.
-                continue
-            if password:
-                values.add(unquote(password))
-    values.discard("")
-    return sorted(values)
-
-
 def _redact_text(text: str, exact_pattern: re.Pattern[str] | None) -> str:
     """Apply every redaction category to a single string."""
     if exact_pattern is not None:
@@ -217,13 +185,37 @@ def _build_redaction_processor(
     return processor
 
 
+class LoggingSettings(Protocol):
+    """The configuration both logging pipelines read.
+
+    A structural type, so that Core imports no application module
+    (docs/architecture.md, Backend Layer Architecture): the application
+    settings satisfy it. `log_level` and `log_format` are already
+    validated and normalized (uppercase and lowercase respectively).
+    """
+
+    @property
+    def app_name(self) -> str: ...
+
+    @property
+    def log_level(self) -> str: ...
+
+    @property
+    def log_format(self) -> str: ...
+
+    def secret_values(self) -> list[str]:
+        """The configured secret values to mask exactly (logging.md,
+        Redaction Processor)."""
+        ...
+
+
 def resolve_log_format(log_format: str, *, stream: TextIO | None = None) -> str:
     """Resolve the effective log output format.
 
     `auto` resolves to `console` when the target stream is a TTY and to
     `json` otherwise. Explicit `json` or `console` values are returned
     unchanged. `log_format` is expected to already be validated/
-    normalized (lowercase) by `Settings`.
+    normalized (lowercase), as `LoggingSettings.log_format` is.
     """
     if log_format != "auto":
         return log_format
@@ -231,7 +223,9 @@ def resolve_log_format(log_format: str, *, stream: TextIO | None = None) -> str:
     return "console" if target.isatty() else "json"
 
 
-def configure_logging(settings: Settings, *, stream: TextIO | None = None) -> None:
+def configure_logging(
+    settings: LoggingSettings, *, stream: TextIO | None = None
+) -> None:
     """Configure the structlog + stdlib logging pipeline.
 
     Idempotent: safe to call multiple times — each call fully replaces
@@ -268,7 +262,7 @@ def configure_logging(settings: Settings, *, stream: TextIO | None = None) -> No
     formatter = structlog.stdlib.ProcessorFormatter(
         processors=[
             structlog.stdlib.ProcessorFormatter.remove_processors_meta,
-            _build_redaction_processor(_collect_secret_values(settings)),
+            _build_redaction_processor(settings.secret_values()),
             renderer,
         ],
         foreign_pre_chain=processors,
@@ -289,7 +283,7 @@ def configure_logging(settings: Settings, *, stream: TextIO | None = None) -> No
         third_party_logger.propagate = True
 
 
-def configure_cli_logging(settings: Settings) -> None:
+def configure_cli_logging(settings: LoggingSettings) -> None:
     """Configure minimal logging for CLI (Click) processes.
 
     Per `docs/features/platform/logging.md` (Scope of this pipeline),
@@ -320,7 +314,7 @@ def configure_cli_logging(settings: Settings) -> None:
     formatter = structlog.stdlib.ProcessorFormatter(
         processors=[
             structlog.stdlib.ProcessorFormatter.remove_processors_meta,
-            _build_redaction_processor(_collect_secret_values(settings)),
+            _build_redaction_processor(settings.secret_values()),
             structlog.dev.ConsoleRenderer(colors=False),
         ],
         foreign_pre_chain=_SHARED_PROCESSORS,
