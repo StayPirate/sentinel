@@ -303,15 +303,17 @@ endpoints and the sliding refresh set and the logout endpoint clears. The
 cookie is named `__Host-sentinel_session` and has the attributes `HttpOnly`,
 `Secure`, `SameSite=Strict`, and `Path=/`, and no `Domain` attribute.
 
-Credential selection (Shared Credential Resolution) reads the cookie pairs of
-the `Cookie` request header and considers only a pair whose name is exactly
-`__Host-sentinel_session`. The name is compared after removing only the
-spaces and horizontal tabs that separate the pair from its neighbors, with no
-other decoding or normalization, so a pair with any other name is ignored:
-for example `sentinel_session`, the same name with a differently capitalized
-prefix, or the name preceded by another whitespace character such as U+00A0.
-If the name occurs more than once, the request carries an invalid credential:
-a browser that enforces the prefix sends at most one such cookie, so a second
+Credential selection (Shared Credential Resolution) reads the first `Cookie`
+request header field, splits it on `;` into pairs, and removes only the spaces
+and horizontal tabs around each pair. A pair's name is the text before its
+first `=` and its value the rest, used without unquoting or other decoding; a
+segment without `=` has no name. Only a pair whose name is exactly
+`__Host-sentinel_session` is considered, so a pair with any other name is
+ignored: for example `sentinel_session`, the same name with a differently
+capitalized prefix, or the name preceded by another whitespace octet such as
+`0x85` or `0xA0`. When the cookie is the selected credential source and its
+name occurs more than once, the request carries an invalid credential: a
+browser that enforces the prefix sends at most one such cookie, so a second
 one was planted.
 
 A browser accepts a cookie whose name starts with `__Host-` only from a
@@ -721,8 +723,9 @@ validation contract:
 2. If the `Authorization` header is absent, check for the session cookie
    (`__Host-sentinel_session`, read as defined in Session cookie; a cookie
    with any other name is not considered):
-   - If the cookie occurs more than once: an invalid credential is selected,
-     and step 4 rejects it.
+   - If the cookie occurs more than once: an invalid credential is selected.
+     The request receives the generic 401 of step 4 without credential type
+     determination, lookup, or log record.
    - If the cookie has a non-empty value: extract its value as the token and go
      to step 3. A whitespace-only value is non-empty and therefore selects an
      invalid credential rather than anonymous access.
@@ -1122,8 +1125,8 @@ cookie. A selected credential beginning with `stl_ak_` produces the
 API-key-specific 400 response below.
 
 If the token is not a valid JWT (invalid signature, malformed), or the
-session cookie occurs more than once, return
-HTTP 401 with code `AUTH_NOT_AUTHENTICATED` and body
+session cookie is the selected source and occurs more than once, return HTTP
+401 with code `AUTH_NOT_AUTHENTICATED` and body
 `{"code": "AUTH_NOT_AUTHENTICATED", "detail": "Authentication required"}`.
 This endpoint does not use `get_current_user` and therefore handles
 authentication failure directly (same response format for client

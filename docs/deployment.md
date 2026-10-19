@@ -358,9 +358,12 @@ Before the first production deployment:
 - [ ] Reverse proxy / ingress forwards the `Host`, `Origin`, and
       `Sec-Fetch-Site` request headers to the backend unchanged
       (`docs/features/identity/authentication.md`, Cross-Origin Request
-      Protection), verified by a `POST` to an `/api` path through the public
-      hostname with `Sec-Fetch-Site: cross-site`, which returns
-      `403 AUTH_CROSS_ORIGIN_REJECTED`
+      Protection). Verified through the public hostname: `POST
+      /api/v1/auth/logout` without credentials returns
+      `403 AUTH_CROSS_ORIGIN_REJECTED` with `Sec-Fetch-Site: cross-site`, and
+      with only `Origin: https://other.example`, and returns
+      `401 AUTH_NOT_AUTHENTICATED` with only an `Origin` naming the public
+      hostname
 - [ ] No component serving the Sentinel host (reverse proxy, ingress, UI
       server) logs the `Cookie` request header, which carries the session
       token on every path (`docs/features/identity/authentication.md`,

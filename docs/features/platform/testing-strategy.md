@@ -3620,15 +3620,18 @@ scenarios are required:
 - Login and sliding refresh set `__Host-sentinel_session` with `HttpOnly`,
   `Secure`, `SameSite=Strict`, and `Path=/` and without `Domain`
 - A valid JWT in a cookie with any other name, including `sentinel_session`,
-  `__HOST-sentinel_session`, and the exact name preceded by U+0085 or
-  U+00A0, selects no credential: mandatory authentication returns the
-  generic 401 and optional authentication is anonymous
+  `__HOST-sentinel_session`, and the exact name preceded by the single octet
+  `0x85` or `0xA0` in the raw header (not their UTF-8 encodings), selects no
+  credential: mandatory authentication returns the generic 401 and optional
+  authentication is anonymous
 - When such a cookie carrying another user's valid JWT accompanies the
   session cookie, before or after it, the session cookie alone authenticates
   the request
-- A `Cookie` header containing the exact name twice returns the generic 401
-  under mandatory and optional authentication and at logout, even when both
-  values are valid JWTs
+- Without an `Authorization` header, a `Cookie` header containing the exact
+  name twice returns the generic 401 under mandatory and optional
+  authentication and at logout, even when both values are valid JWTs, and
+  emits no API key warning even when the values start with `stl_ak_`; with a
+  valid Bearer JWT the duplicated cookie is not considered
 
 **Cross-origin request protection:**
 
@@ -3656,11 +3659,11 @@ scenarios are required:
   constraints, and authentication: an unknown path and a method the path does
   not serve, including one that no endpoint serves such as `PUT`, return the
   `403`, not a routing response, and so does a malformed JSON body. A
-  rejected logout or state-changing request carrying a valid
-  session cookie, a rejected request carrying a valid API key, and a rejected
-  login with an existing account's credentials have no effect: no mutation,
-  audit event, session invalidation, `last_used_at` touch, or lockout counter
-  change, and the response sets no cookie
+  rejected logout or state-changing request carrying a valid session cookie,
+  a rejected request carrying a valid API key, and a rejected login with an
+  existing account's credentials have no effect: no mutation, audit event,
+  session invalidation, `last_used_at` touch, or lockout counter change, and
+  the response sets no cookie
 - The decision is identical with a session cookie, a Bearer JWT, an API key,
   and no credential
 - Each rejection emits exactly one `cross_origin_request_rejected` WARNING
