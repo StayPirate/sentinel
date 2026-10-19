@@ -6,9 +6,8 @@ a `compose up --wait` that never becomes healthy) can occupy a runner —
 and its `concurrency` group — for up to six hours before GitHub kills
 it. See issue #69.
 
-This test parses workflow YAML with a minimal indentation-based scanner
-rather than a full YAML parser, because `pyproject.toml` declares no
-YAML parser dependency.
+Workflows are parsed as YAML (`tests/support/yaml_files.py`), so every job
+is checked whatever its formatting.
 """
 
 from __future__ import annotations
@@ -18,71 +17,28 @@ from pathlib import Path
 
 import pytest
 
+from tests.support.yaml_files import (
+    YamlMapping,
+    load_yaml,
+    load_yaml_file,
+    workflow_jobs,
+)
+
 WORKFLOWS_DIR = Path(__file__).resolve().parents[3] / ".github" / "workflows"
 
-# GitHub Actions workflow indentation, as used consistently across this
-# repository's workflow files: job ids are nested 2 spaces under `jobs:`,
-# and job-level properties (runs-on, timeout-minutes, steps, ...) are
-# nested a further 2 spaces under the job id.
-JOB_ID_INDENT = 2
-JOB_PROPERTY_INDENT = 4
 
+def _jobs_missing_timeout(workflow: YamlMapping) -> list[str]:
+    """Return the ids of jobs without a job-level `timeout-minutes` that is a
+    positive number of minutes.
 
-def _job_bodies(workflow_text: str) -> dict[str, list[str]]:
-    """Split a workflow file's `jobs:` block into per-job line groups.
-
-    Returns a mapping of job id -> every line belonging to that job's
-    body (excluding the job id line itself), up to the next sibling job
-    or the end of the `jobs:` block. Line indentation is preserved so
-    callers can distinguish job-level properties from nested step-level
-    properties.
+    A step-level `timeout-minutes` bounds a single step, not the job's
+    360-minute default, and does not satisfy the job-level requirement.
     """
-    lines = workflow_text.splitlines()
-    try:
-        jobs_index = next(
-            index for index, line in enumerate(lines) if line.rstrip() == "jobs:"
-        )
-    except StopIteration:
-        return {}
-
-    jobs: dict[str, list[str]] = {}
-    current_job: str | None = None
-    for line in lines[jobs_index + 1 :]:
-        if not line.strip():
-            continue
-        indent = len(line) - len(line.lstrip(" "))
-        if indent == 0:
-            # Dedent past the jobs: block entirely (a new top-level key).
-            break
-        if indent == JOB_ID_INDENT and line.rstrip().endswith(":"):
-            current_job = line.strip().rstrip(":")
-            jobs[current_job] = []
-            continue
-        if current_job is not None:
-            jobs[current_job].append(line)
-
-    return jobs
-
-
-def _jobs_missing_timeout(workflow_text: str) -> list[str]:
-    """Return job ids that do not declare a job-level `timeout-minutes`.
-
-    Only a `timeout-minutes:` key at `JOB_PROPERTY_INDENT` counts — a
-    step-level `timeout-minutes` (nested further, under a `steps:` list
-    item) bounds a single step, not the job's overall 360-minute
-    default, and must not be mistaken for the job-level declaration this
-    test requires.
-    """
-    jobs = _job_bodies(workflow_text)
     missing: list[str] = []
-    for job_name, body_lines in jobs.items():
-        has_job_level_timeout = any(
-            line.strip().startswith("timeout-minutes:")
-            and (len(line) - len(line.lstrip(" "))) == JOB_PROPERTY_INDENT
-            for line in body_lines
-        )
-        if not has_job_level_timeout:
-            missing.append(job_name)
+    for job_id, job in workflow_jobs(workflow).items():
+        timeout = job.get("timeout-minutes")
+        if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout <= 0:
+            missing.append(job_id)
     return missing
 
 
@@ -93,12 +49,7 @@ def _workflow_files() -> list[Path]:
 @pytest.mark.unit
 @pytest.mark.parametrize("workflow_path", _workflow_files(), ids=lambda p: p.name)
 def test_every_job_declares_timeout_minutes(workflow_path: Path) -> None:
-    text = workflow_path.read_text(encoding="utf-8")
-    jobs = _job_bodies(text)
-
-    assert jobs, f"{workflow_path.name}: no jobs found (parser or file issue)"
-
-    missing = _jobs_missing_timeout(text)
+    missing = _jobs_missing_timeout(load_yaml_file(workflow_path))
 
     assert not missing, (
         f"{workflow_path.name}: job(s) missing 'timeout-minutes': {missing}"
@@ -106,28 +57,8 @@ def test_every_job_declares_timeout_minutes(workflow_path: Path) -> None:
 
 
 @pytest.mark.unit
-def test_job_bodies_isolates_sibling_jobs() -> None:
-    text = textwrap.dedent(
-        """\
-        name: Example
-        jobs:
-          first:
-            runs-on: ubuntu-latest
-            timeout-minutes: 5
-            steps:
-              - run: echo hi
-          second:
-            runs-on: ubuntu-latest
-            steps:
-              - run: echo bye
-        """
-    )
-
-    jobs = _job_bodies(text)
-
-    assert set(jobs) == {"first", "second"}
-    assert any("timeout-minutes: 5" in line for line in jobs["first"])
-    assert not any("timeout-minutes" in line for line in jobs["second"])
+def test_workflow_files_are_found() -> None:
+    assert len(_workflow_files()) > 1
 
 
 @pytest.mark.unit
@@ -148,7 +79,7 @@ def test_jobs_missing_timeout_detects_job_without_declaration() -> None:
         """
     )
 
-    assert _jobs_missing_timeout(text) == ["missing"]
+    assert _jobs_missing_timeout(load_yaml(text, source="probe")) == ["missing"]
 
 
 @pytest.mark.unit
@@ -169,4 +100,37 @@ def test_jobs_missing_timeout_ignores_step_level_declaration() -> None:
         """
     )
 
-    assert _jobs_missing_timeout(text) == ["example"]
+    assert _jobs_missing_timeout(load_yaml(text, source="probe")) == ["example"]
+
+
+@pytest.mark.unit
+def test_jobs_missing_timeout_sees_every_job_whatever_its_formatting() -> None:
+    # A trailing comment on a job id, a quoted job id, and a flow mapping
+    # are valid YAML; none of them may hide a job from the check.
+    text = textwrap.dedent(
+        """\
+        jobs:
+          commented:  # no timeout
+            runs-on: ubuntu-latest
+          "quoted":
+            runs-on: ubuntu-latest
+          flow: {runs-on: ubuntu-latest, timeout-minutes: 5}
+          flow-missing: {runs-on: ubuntu-latest}
+        """
+    )
+
+    assert _jobs_missing_timeout(load_yaml(text, source="probe")) == [
+        "commented",
+        "quoted",
+        "flow-missing",
+    ]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("value", ["", "0", "-5", "true", '"10"'])
+def test_jobs_missing_timeout_rejects_a_value_that_is_not_a_timeout(
+    value: str,
+) -> None:
+    text = f"jobs:\n  example:\n    timeout-minutes: {value}\n"
+
+    assert _jobs_missing_timeout(load_yaml(text, source="probe")) == ["example"]

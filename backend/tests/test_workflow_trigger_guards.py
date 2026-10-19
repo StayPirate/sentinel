@@ -30,6 +30,9 @@ against synthetic GitHub context values, proving the actual AND
 relationship — a push-triggered, successful run is allowed, but every
 other combination (wrong event, failed conclusion, or both) is
 rejected. See issue #185.
+
+The condition is read from the parsed workflow (`tests/support/yaml_files.py`),
+so it is always the job-level `if:`, whatever the order of the job's keys.
 """
 
 from __future__ import annotations
@@ -38,32 +41,17 @@ from pathlib import Path
 
 import pytest
 
+from tests.support.yaml_files import load_yaml_file, workflow_jobs
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
+WORKFLOWS_DIR = REPO_ROOT / ".github" / "workflows"
 
 
-def _job_if_condition(workflow_path: Path, job_name_marker: str) -> str:
-    """Extract the job-level `if:` condition block as a single string."""
-    lines = workflow_path.read_text(encoding="utf-8").splitlines()
-    marker_index = next(
-        index for index, line in enumerate(lines) if job_name_marker in line
-    )
-    if_index = next(
-        index
-        for index in range(marker_index, len(lines))
-        if lines[index].strip().startswith("if:")
-    )
-    if_indent = len(lines[if_index]) - len(lines[if_index].lstrip())
-    condition_lines = [lines[if_index].strip()]
-
-    for line in lines[if_index + 1 :]:
-        if not line.strip():
-            break
-        indentation = len(line) - len(line.lstrip())
-        if indentation <= if_indent:
-            break
-        condition_lines.append(line.strip())
-
-    return " ".join(condition_lines)
+def _job_if_condition(workflow_path: Path, job_id: str) -> str:
+    """Return the job-level `if:` condition of `job_id`."""
+    condition = workflow_jobs(load_yaml_file(workflow_path))[job_id].get("if")
+    assert isinstance(condition, str), f"{job_id}: no job-level if: condition"
+    return condition
 
 
 def _evaluate_condition(
@@ -86,13 +74,12 @@ def _evaluate_condition(
     *structure* (operators, parentheses) does come from the workflow
     file's text, so `__builtins__` is stripped from the eval globals as
     a defense-in-depth measure — this expression never needs to call
-    any builtin.
+    any builtin. An optional `${{ }}` wrapper is removed and line breaks
+    of a block scalar are folded into spaces, as GitHub Actions reads them.
     """
-    expr = condition.strip()
-    if expr.startswith("if:"):
-        expr = expr[len("if:") :].strip()
-    if expr.startswith(">"):
-        expr = expr[1:].strip()
+    expr = " ".join(condition.split())
+    if expr.startswith("${{") and expr.endswith("}}"):
+        expr = expr[len("${{") : -len("}}")].strip()
     expr = expr.replace("github.event_name", repr(event_name))
     expr = expr.replace("github.event.workflow_run.event", repr(workflow_run_event))
     expr = expr.replace(
@@ -109,8 +96,7 @@ class TestBuildImagesGuard:
     caused by a `push` event that concluded successfully."""
 
     def _condition(self) -> str:
-        workflow_path = REPO_ROOT / ".github" / "workflows" / "build-images.yml"
-        return _job_if_condition(workflow_path, "name: Build Backend Image")
+        return _job_if_condition(WORKFLOWS_DIR / "build-images.yml", "build-backend")
 
     def test_tag_push_always_allowed(self) -> None:
         # event_name='push' takes the `github.event_name != 'workflow_run'`
@@ -162,8 +148,7 @@ class TestReleasePleaseGuard:
     that concluded successfully."""
 
     def _condition(self) -> str:
-        workflow_path = REPO_ROOT / ".github" / "workflows" / "release-please.yml"
-        return _job_if_condition(workflow_path, "  release-please:")
+        return _job_if_condition(WORKFLOWS_DIR / "release-please.yml", "release-please")
 
     def test_push_triggered_successful_ci_run_allowed(self) -> None:
         assert _evaluate_condition(
@@ -195,4 +180,60 @@ class TestReleasePleaseGuard:
             event_name="workflow_run",
             workflow_run_event="pull_request",
             workflow_run_conclusion="failure",
+        )
+
+
+@pytest.mark.unit
+class TestConditionExtraction:
+    def test_job_level_condition_is_read_whatever_the_key_order(
+        self, tmp_path: Path
+    ) -> None:
+        # A step-level `if:` that precedes the job-level one in the file is
+        # not the job's guard.
+        workflow_path = tmp_path / "workflow.yml"
+        workflow_path.write_text(
+            "jobs:\n"
+            "  build:\n"
+            "    steps:\n"
+            "      - name: Step\n"
+            "        if: github.event_name == 'workflow_run'\n"
+            "        run: echo\n"
+            "    name: Build\n"
+            "    if: >\n"
+            "      github.event.workflow_run.event == 'push' &&\n"
+            "       github.event.workflow_run.conclusion == 'success'\n",
+            encoding="utf-8",
+        )
+
+        condition = _job_if_condition(workflow_path, "build")
+
+        assert _evaluate_condition(
+            condition,
+            event_name="workflow_run",
+            workflow_run_event="push",
+            workflow_run_conclusion="success",
+        )
+        assert not _evaluate_condition(
+            condition,
+            event_name="workflow_run",
+            workflow_run_event="pull_request",
+            workflow_run_conclusion="success",
+        )
+
+    def test_job_without_condition_fails(self, tmp_path: Path) -> None:
+        workflow_path = tmp_path / "workflow.yml"
+        workflow_path.write_text(
+            "jobs:\n  build:\n    steps:\n      - if: always()\n        run: echo\n",
+            encoding="utf-8",
+        )
+
+        with pytest.raises(AssertionError, match="build: no job-level if"):
+            _job_if_condition(workflow_path, "build")
+
+    def test_expression_wrapper_is_removed(self) -> None:
+        assert not _evaluate_condition(
+            "${{ github.event_name == 'push' }}",
+            event_name="workflow_run",
+            workflow_run_event="push",
+            workflow_run_conclusion="success",
         )

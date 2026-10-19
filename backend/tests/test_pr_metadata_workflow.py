@@ -1,35 +1,56 @@
-"""Regression tests for the pull request metadata workflow."""
+"""Regression tests for the pull request metadata workflow.
+
+The validation step is read from the parsed workflow
+(`tests/support/yaml_files.py`) and its script is executed with
+representative event metadata.
+"""
 
 from __future__ import annotations
 
 import os
 import subprocess
-import textwrap
 from pathlib import Path
 
 import pytest
+
+from tests.support.yaml_files import (
+    YamlMapping,
+    load_yaml_file,
+    named_step,
+    workflow_jobs,
+)
 
 WORKFLOW_PATH = (
     Path(__file__).resolve().parents[2] / ".github" / "workflows" / "pr-metadata.yml"
 )
 
 
+def _validation_step() -> YamlMapping:
+    jobs = workflow_jobs(load_yaml_file(WORKFLOW_PATH))
+    assert list(jobs) == ["validate"]
+    return named_step(jobs["validate"], "Validate title and issue linkage")
+
+
 def _workflow_script() -> str:
     """Extract the shell script executed by the metadata workflow."""
-    lines = WORKFLOW_PATH.read_text(encoding="utf-8").splitlines()
-    run_index = next(
-        index for index, line in enumerate(lines) if line.strip() == "run: |"
-    )
-    run_indent = len(lines[run_index]) - len(lines[run_index].lstrip())
-    script_lines: list[str] = []
+    script = _validation_step()["run"]
+    assert isinstance(script, str)
+    return script
 
-    for line in lines[run_index + 1 :]:
-        indentation = len(line) - len(line.lstrip())
-        if line.strip() and indentation <= run_indent:
-            break
-        script_lines.append(line)
 
-    return textwrap.dedent("\n".join(script_lines))
+@pytest.mark.unit
+def test_pr_metadata_event_values_enter_shell_only_through_environment() -> None:
+    # The title, body, and branch are attacker-controlled; interpolated into
+    # the script they would be executed as shell.
+    step = _validation_step()
+
+    assert step["env"] == {
+        "PR_TITLE": "${{ github.event.pull_request.title }}",
+        "PR_BODY": "${{ github.event.pull_request.body }}",
+        "PR_AUTHOR": "${{ github.event.pull_request.user.login }}",
+        "PR_HEAD_REF": "${{ github.event.pull_request.head.ref }}",
+    }
+    assert "${{" not in step["run"]
 
 
 def _validate_metadata(

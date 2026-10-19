@@ -13,6 +13,10 @@ Covers two related invariants:
    gate runs against that exact local artifact, and its immutable image
    ID feeds both SBOM generation and publication. See issues #185 and
    #473.
+
+The workflow is parsed as YAML (`tests/support/yaml_files.py`); only the
+version comments after pinned action references and whole-file absence
+checks read its text.
 """
 
 from __future__ import annotations
@@ -25,11 +29,46 @@ from pathlib import Path
 
 import pytest
 
+from tests.support.yaml_files import (
+    YamlMapping,
+    job_steps,
+    load_yaml_file,
+    named_step,
+    step_index,
+    string_values,
+    workflow_jobs,
+)
+
 WORKFLOW_PATH = (
     Path(__file__).resolve().parents[2] / ".github" / "workflows" / "build-images.yml"
 )
 
-STEP_NAME_MARKER = "name: Push tested image (same digest)"
+BUILD_JOB = "build-backend"
+RELEASE_METADATA_JOB = "publish-release-metadata"
+
+BUILD_STEP = "Build backend image (load only, no push)"
+SMOKE_STEP = "Image smoke test (blocking gate)"
+SBOM_STEP = "Generate and validate release SBOM candidate"
+PUSH_STEP = "Push tested image (same digest)"
+GUARD_STEP = "Verify release is unpublished"
+GUARD_RUN = "./scripts/check-release-unpublished.sh"
+PUBLISH_RELEASE_RUN = "./scripts/publish-release.sh"
+RELEASE_IF = "startsWith(github.ref, 'refs/tags/v')"
+SMOKE_OUTPUT = "${{ steps.image-smoke.outputs.image_id }}"
+RELEASE_GUARD_ENV = {
+    "GH_TOKEN": "${{ secrets.GITHUB_TOKEN }}",
+    "RELEASE_TAG": "${{ github.ref_name }}",
+}
+
+
+def _jobs() -> dict[str, YamlMapping]:
+    return workflow_jobs(load_yaml_file(WORKFLOW_PATH))
+
+
+def _uses(step: YamlMapping, action: str) -> bool:
+    """Whether `step` uses `action` (`owner/name`) at any reference."""
+    return str(step.get("uses", "")).startswith(f"{action}@")
+
 
 # Logs both `docker tag <source> <target>` and `docker push <target>`
 # invocations (space-separated, one call per line) so tests can assert
@@ -68,9 +107,8 @@ exit 0
 
 def _push_loop_script() -> str:
     """Return the standalone script invoked by the image push step."""
-    workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
-    assert STEP_NAME_MARKER in workflow
-    assert "run: ./scripts/publish-image.sh" in workflow
+    push_step = named_step(_jobs()[BUILD_JOB], PUSH_STEP)
+    assert push_step["run"] == "./scripts/publish-image.sh"
     return (
         Path(__file__).resolve().parents[2] / "scripts" / "publish-image.sh"
     ).read_text(encoding="utf-8")
@@ -209,63 +247,30 @@ def test_every_pushed_tag_is_sourced_from_the_smoke_image(tmp_path: Path) -> Non
     ]
 
 
-_STEP_MARKER = re.compile(r"^ {6}- ")
-
-
-def _step_start_indices(lines: list[str]) -> list[int]:
-    """Indices of every top-level step marker line (`      - `).
-
-    Both jobs use flat step lists at a fixed 6-space indent. This matches
-    the minimal, dependency-free scanning approach already used by
-    `test_workflow_timeouts.py` rather than introducing a PyYAML parse.
-    """
-    return [index for index, line in enumerate(lines) if _STEP_MARKER.match(line)]
-
-
-def _step_block(lines: list[str], start_index: int, boundaries: list[int]) -> list[str]:
-    later_boundaries = [b for b in boundaries if b > start_index]
-    end_index = later_boundaries[0] if later_boundaries else len(lines)
-    return lines[start_index:end_index]
-
-
 @pytest.mark.unit
 def test_image_is_built_exactly_once_without_pushing() -> None:
-    lines = WORKFLOW_PATH.read_text(encoding="utf-8").splitlines()
-    boundaries = _step_start_indices(lines)
-
-    build_step_starts = [
-        start
-        for start in boundaries
-        if any(
-            "uses: docker/build-push-action" in line
-            for line in _step_block(lines, start, boundaries)
-        )
+    build_steps = [
+        step
+        for job in _jobs().values()
+        for step in job_steps(job)
+        if _uses(step, "docker/build-push-action")
     ]
 
-    assert len(build_step_starts) == 1, (
+    assert len(build_steps) == 1, (
         "Expected exactly one docker/build-push-action step; a second "
         "build invocation would produce a different digest than the one "
         "smoke-tested, breaking the 'published == tested' guarantee"
     )
-
-    block_text = "\n".join(_step_block(lines, build_step_starts[0], boundaries))
-    assert "push: false" in block_text
-    assert "load: true" in block_text
+    assert build_steps[0]["name"] == BUILD_STEP
+    assert build_steps[0]["with"]["push"] is False
+    assert build_steps[0]["with"]["load"] is True
 
 
 @pytest.mark.unit
 def test_smoke_test_step_precedes_push_step() -> None:
-    lines = WORKFLOW_PATH.read_text(encoding="utf-8").splitlines()
-    smoke_index = next(
-        index
-        for index, line in enumerate(lines)
-        if "name: Image smoke test (blocking gate)" in line
-    )
-    push_index = next(
-        index for index, line in enumerate(lines) if STEP_NAME_MARKER in line
-    )
+    job = _jobs()[BUILD_JOB]
 
-    assert smoke_index < push_index, (
+    assert step_index(job, SMOKE_STEP) < step_index(job, PUSH_STEP), (
         "The blocking smoke gate must run before the publish step so a "
         "failing smoke test prevents any push"
     )
@@ -273,160 +278,124 @@ def test_smoke_test_step_precedes_push_step() -> None:
 
 @pytest.mark.unit
 def test_smoke_step_uses_loaded_image_without_compose_override() -> None:
-    workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
-    smoke_step = workflow.split("- name: Image smoke test (blocking gate)", 1)[1].split(
-        "- name: Select SBOM metadata", 1
-    )[0]
+    smoke_step = named_step(_jobs()[BUILD_JOB], SMOKE_STEP)
 
-    assert "SENTINEL_IMAGE: ${{ env.SMOKE_IMAGE }}" in smoke_step
-    assert "./scripts/image-smoke.sh --no-build" in smoke_step
-    assert "COMPOSE_CMD" not in workflow
+    assert smoke_step["env"]["SENTINEL_IMAGE"] == "${{ env.SMOKE_IMAGE }}"
+    assert smoke_step["run"] == "./scripts/image-smoke.sh --no-build"
+    assert "COMPOSE_CMD" not in WORKFLOW_PATH.read_text(encoding="utf-8")
 
 
 @pytest.mark.unit
 def test_smoke_output_is_the_sbom_and_publish_source() -> None:
-    workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
-    smoke_step = workflow.split("- name: Image smoke test (blocking gate)", 1)[1].split(
-        "- name: Select SBOM metadata", 1
-    )[0]
-    sbom_step = workflow.split(
-        "- name: Generate and validate release SBOM candidate", 1
-    )[1].split("- name: Retain validated SBOM", 1)[0]
-    publish_step = workflow.split(STEP_NAME_MARKER, 1)[1].split(
-        "  publish-release-metadata:", 1
-    )[0]
+    job = _jobs()[BUILD_JOB]
+    sbom_step = named_step(job, SBOM_STEP)
 
-    smoke_output = "${{ steps.image-smoke.outputs.image_id }}"
-    assert "id: image-smoke" in smoke_step
-    assert f"TESTED_IMAGE: {smoke_output}" in sbom_step
-    assert '"${TESTED_IMAGE}"' in sbom_step
-    assert '"${SMOKE_IMAGE}"' not in sbom_step
-    assert f"SMOKE_IMAGE: {smoke_output}" in publish_step
-    assert "SMOKE_IMAGE: sentinel-backend:smoke" not in publish_step
+    assert named_step(job, SMOKE_STEP)["id"] == "image-smoke"
+    assert sbom_step["env"]["TESTED_IMAGE"] == SMOKE_OUTPUT
+    assert '"${TESTED_IMAGE}"' in sbom_step["run"]
+    assert not any("SMOKE_IMAGE" in value for value in string_values(sbom_step))
+    assert named_step(job, PUSH_STEP)["env"]["SMOKE_IMAGE"] == SMOKE_OUTPUT
 
 
 @pytest.mark.unit
 def test_sbom_gate_precedes_push_and_release_metadata_depends_on_build() -> None:
-    workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+    jobs = _jobs()
+    build_job = jobs[BUILD_JOB]
+    release_job = jobs[RELEASE_METADATA_JOB]
+    attest_steps = [
+        step for step in job_steps(release_job) if _uses(step, "actions/attest")
+    ]
 
     assert (
-        workflow.index("name: Build backend image (load only, no push)")
-        < workflow.index("name: Image smoke test (blocking gate)")
-        < workflow.index("name: Generate and validate release SBOM candidate")
-        < workflow.index(STEP_NAME_MARKER)
+        step_index(build_job, BUILD_STEP)
+        < step_index(build_job, SMOKE_STEP)
+        < step_index(build_job, SBOM_STEP)
+        < step_index(build_job, PUSH_STEP)
     )
-    assert "if: startsWith(github.ref, 'refs/tags/v')" in workflow
-    assert "needs: build-backend" in workflow
-    assert workflow.count("create-storage-record: false") == 2
-    assert workflow.count("push-to-registry: true") == 2
+    assert release_job["if"] == RELEASE_IF
+    assert release_job["needs"] == BUILD_JOB
+    assert len(attest_steps) == 2
+    for step in attest_steps:
+        assert step["with"]["create-storage-record"] is False
+        assert step["with"]["push-to-registry"] is True
     # Release assets are uploaded only by scripts/publish-release.sh, which
     # publishes the draft after the upload (test_publish_release_script.py).
-    assert "gh release" not in workflow
+    assert "gh release" not in WORKFLOW_PATH.read_text(encoding="utf-8")
 
 
 @pytest.mark.unit
 def test_release_attestations_use_build_outputs_and_expected_predicates() -> None:
-    workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+    steps = job_steps(_jobs()[RELEASE_METADATA_JOB])
+    attest_steps = [step for step in steps if _uses(step, "actions/attest")]
+    download_steps = [
+        step for step in steps if _uses(step, "actions/download-artifact")
+    ]
+    sbom_path = (
+        "${{ runner.temp }}/release-sbom/"
+        "${{ needs.build-backend.outputs.sbom-file-name }}"
+    )
 
-    attest_references = re.findall(
-        r"uses: actions/attest@([0-9a-f]{40}) # v[0-9]+\.[0-9]+\.[0-9]+",
-        workflow,
-    )
-    assert len(attest_references) == 2
-    assert len(set(attest_references)) == 1
-    assert (
-        workflow.count(
-            "subject-digest: ${{ needs.build-backend.outputs.image-digest }}"
+    assert len(attest_steps) == 2
+    assert len({step["uses"] for step in attest_steps}) == 1
+    for step in attest_steps:
+        assert step["with"]["subject-digest"] == (
+            "${{ needs.build-backend.outputs.image-digest }}"
         )
-        == 2
+    assert [step["with"].get("sbom-path") for step in attest_steps] == [
+        sbom_path,
+        None,
+    ]
+    assert len(download_steps) == 1
+    assert download_steps[0]["with"]["name"] == (
+        "${{ needs.build-backend.outputs.sbom-artifact-name }}"
     )
-    assert (
-        "sbom-path: ${{ runner.temp }}/release-sbom/"
-        "${{ needs.build-backend.outputs.sbom-file-name }}" in workflow
+    # The version comment after a pinned reference is not YAML data.
+    commented_references = re.findall(
+        r"uses: (actions/attest@[0-9a-f]{40}) # v[0-9]+\.[0-9]+\.[0-9]+",
+        WORKFLOW_PATH.read_text(encoding="utf-8"),
     )
-    assert "name: ${{ needs.build-backend.outputs.sbom-artifact-name }}" in workflow
+    assert commented_references == [step["uses"] for step in attest_steps]
 
 
 @pytest.mark.unit
 def test_build_job_exports_exact_release_metadata_outputs() -> None:
-    workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
-    outputs = workflow.split("    outputs:", 1)[1].split("    permissions:", 1)[0]
-
-    assert "image-name: ${{ steps.push.outputs.image_name }}" in outputs
-    assert "image-digest: ${{ steps.push.outputs.digest }}" in outputs
-    assert (
-        "sbom-artifact-name: ${{ steps.sbom-metadata.outputs.artifact_name }}"
-        in outputs
-    )
-    assert "sbom-file-name: ${{ steps.sbom-metadata.outputs.file_name }}" in outputs
+    assert _jobs()[BUILD_JOB]["outputs"] == {
+        "image-name": "${{ steps.push.outputs.image_name }}",
+        "image-digest": "${{ steps.push.outputs.digest }}",
+        "sbom-artifact-name": "${{ steps.sbom-metadata.outputs.artifact_name }}",
+        "sbom-file-name": "${{ steps.sbom-metadata.outputs.file_name }}",
+    }
 
 
 @pytest.mark.unit
 def test_release_metadata_job_has_only_required_write_permissions() -> None:
-    workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
-    job = workflow.split("  publish-release-metadata:", 1)[1]
+    permissions = _jobs()[RELEASE_METADATA_JOB]["permissions"]
 
-    permissions = job.split("    steps:", 1)[0]
-    permission_lines = {
-        line.strip()
-        for line in permissions.splitlines()
-        if line.strip().endswith(": write")
-    }
-    assert permission_lines == {
-        "attestations: write",
-        "contents: write",
-        "id-token: write",
-        "packages: write",
+    assert isinstance(permissions, dict)
+    assert {scope for scope, access in permissions.items() if access == "write"} == {
+        "attestations",
+        "contents",
+        "id-token",
+        "packages",
     }
 
 
 @pytest.mark.unit
 def test_sbom_metadata_outputs_enter_shell_via_environment() -> None:
-    workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
-    step = workflow.split("- name: Generate and validate release SBOM candidate", 1)[
-        1
-    ].split("- name: Retain validated SBOM", 1)[0]
+    step = named_step(_jobs()[BUILD_JOB], SBOM_STEP)
 
-    assert "SBOM_FILE_PATH: ${{ steps.sbom-metadata.outputs.file_path }}" in step
-    assert "SBOM_VERSION: ${{ steps.sbom-metadata.outputs.version }}" in step
-    run_block = step.split("run:", 1)[1]
-    assert "steps.sbom-metadata.outputs" not in run_block
+    assert step["env"]["SBOM_FILE_PATH"] == (
+        "${{ steps.sbom-metadata.outputs.file_path }}"
+    )
+    assert step["env"]["SBOM_VERSION"] == "${{ steps.sbom-metadata.outputs.version }}"
+    assert "${{" not in step["run"]
 
 
 @pytest.mark.unit
 def test_sbom_subject_name_is_normalized_for_ghcr() -> None:
-    workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+    step = named_step(_jobs()[BUILD_JOB], SBOM_STEP)
 
-    assert '"${REGISTRY}/${IMAGE_NAME,,}"' in workflow
-
-
-GUARD_STEP_NAME = "name: Verify release is unpublished"
-GUARD_RUN = "run: ./scripts/check-release-unpublished.sh"
-PUBLISH_RELEASE_RUN = "run: ./scripts/publish-release.sh"
-_JOB_MARKER = re.compile(r"^ {2}[a-z][a-z0-9-]*:$")
-
-
-def _job_steps(job_key: str) -> list[str]:
-    """Return the text of each top-level step of one job, in order."""
-    lines = WORKFLOW_PATH.read_text(encoding="utf-8").splitlines()
-    start = lines.index(f"  {job_key}:")
-    later_jobs = [
-        index
-        for index, line in enumerate(lines)
-        if index > start and _JOB_MARKER.match(line)
-    ]
-    job_lines = lines[start : later_jobs[0] if later_jobs else len(lines)]
-    boundaries = _step_start_indices(job_lines)
-    return [
-        "\n".join(_step_block(job_lines, boundary, boundaries))
-        for boundary in boundaries
-    ]
-
-
-def _step_index(steps: list[str], marker: str) -> int:
-    matches = [index for index, step in enumerate(steps) if marker in step]
-    assert len(matches) == 1, f"Expected exactly one step containing {marker!r}"
-    return matches[0]
+    assert '"${REGISTRY}/${IMAGE_NAME,,}"' in step["run"]
 
 
 @pytest.mark.unit
@@ -434,81 +403,75 @@ def test_build_job_guards_published_release_immediately_before_push() -> None:
     # docs/deployment.md (Release Publication and Immutability): a rerun must
     # fail before the first registry push once the GitHub Release is
     # published, so the X.Y.Z tag of a published release never moves.
-    steps = _job_steps("build-backend")
+    job = _jobs()[BUILD_JOB]
+    guard = named_step(job, GUARD_STEP)
 
-    guard_index = _step_index(steps, GUARD_STEP_NAME)
-    assert _step_index(steps, STEP_NAME_MARKER) == guard_index + 1
-    guard = steps[guard_index]
-    assert "if: startsWith(github.ref, 'refs/tags/v')" in guard
-    assert "GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}" in guard
-    assert "RELEASE_TAG: ${{ github.ref_name }}" in guard
-    assert GUARD_RUN in guard
+    assert step_index(job, PUSH_STEP) == step_index(job, GUARD_STEP) + 1
+    assert guard["if"] == RELEASE_IF
+    assert RELEASE_GUARD_ENV.items() <= guard["env"].items()
+    assert guard["run"] == GUARD_RUN
 
 
 @pytest.mark.unit
 def test_release_metadata_job_guards_published_release_before_attesting() -> None:
-    workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
-    job_header = workflow.split("  publish-release-metadata:", 1)[1].split(
-        "    steps:", 1
-    )[0]
-    steps = _job_steps("publish-release-metadata")
+    job = _jobs()[RELEASE_METADATA_JOB]
+    steps = job_steps(job)
+    guard_index = step_index(job, GUARD_STEP)
+    attest_indices = [
+        index for index, step in enumerate(steps) if _uses(step, "actions/attest")
+    ]
 
     # The job-level condition, not the guard, keeps master builds out of it.
-    assert "    if: startsWith(github.ref, 'refs/tags/v')" in job_header
-    guard_index = _step_index(steps, GUARD_STEP_NAME)
-    attest_indices = [
-        index for index, step in enumerate(steps) if "uses: actions/attest@" in step
-    ]
-    assert "uses: actions/checkout@" in steps[0]
+    assert job["if"] == RELEASE_IF
+    assert _uses(steps[0], "actions/checkout")
     assert guard_index == 1
     assert len(attest_indices) == 2
     assert guard_index < min(attest_indices)
     guard = steps[guard_index]
-    assert "GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}" in guard
-    assert "RELEASE_TAG: ${{ github.ref_name }}" in guard
-    assert GUARD_RUN in guard
+    assert RELEASE_GUARD_ENV.items() <= guard["env"].items()
+    assert guard["run"] == GUARD_RUN
 
 
 @pytest.mark.unit
 def test_release_publication_is_the_last_step_and_uses_attestation_bundles() -> None:
-    steps = _job_steps("publish-release-metadata")
+    job = _jobs()[RELEASE_METADATA_JOB]
+    sbom_attestation = named_step(job, "Attest release SBOM")
+    provenance_attestation = named_step(job, "Attest release build provenance")
+    publication = job_steps(job)[-1]
 
-    sbom_attestation = steps[_step_index(steps, "name: Attest release SBOM")]
-    provenance_attestation = steps[
-        _step_index(steps, "name: Attest release build provenance")
-    ]
-    assert "id: attest-sbom" in sbom_attestation
-    assert "sbom-path:" in sbom_attestation
-    assert "id: attest-provenance" in provenance_attestation
-    assert "sbom-path:" not in provenance_attestation
-
-    publication = steps[-1]
-    assert "name: Publish GitHub Release" in publication
-    assert PUBLISH_RELEASE_RUN in publication
-    assert "GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}" in publication
-    assert "RELEASE_TAG: ${{ github.ref_name }}" in publication
-    assert (
-        "SBOM_PATH: ${{ runner.temp }}/release-sbom/"
-        "${{ needs.build-backend.outputs.sbom-file-name }}" in publication
-    )
-    assert (
-        "SBOM_BUNDLE_PATH: ${{ steps.attest-sbom.outputs.bundle-path }}" in publication
-    )
-    assert (
-        "PROVENANCE_BUNDLE_PATH: ${{ steps.attest-provenance.outputs.bundle-path }}"
-        in publication
-    )
+    assert sbom_attestation["id"] == "attest-sbom"
+    assert "sbom-path" in sbom_attestation["with"]
+    assert provenance_attestation["id"] == "attest-provenance"
+    assert "sbom-path" not in provenance_attestation["with"]
+    assert publication["name"] == "Publish GitHub Release"
+    assert publication["run"] == PUBLISH_RELEASE_RUN
+    expected_env = RELEASE_GUARD_ENV | {
+        "SBOM_PATH": (
+            "${{ runner.temp }}/release-sbom/"
+            "${{ needs.build-backend.outputs.sbom-file-name }}"
+        ),
+        "SBOM_BUNDLE_PATH": "${{ steps.attest-sbom.outputs.bundle-path }}",
+        "PROVENANCE_BUNDLE_PATH": "${{ steps.attest-provenance.outputs.bundle-path }}",
+    }
+    assert expected_env.items() <= publication["env"].items()
 
 
 @pytest.mark.unit
 def test_release_scripts_receive_workflow_values_only_through_environment() -> None:
-    workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
-    run_lines = [
-        line.strip()
-        for line in workflow.splitlines()
-        if "check-release-unpublished.sh" in line or "publish-release.sh" in line
+    workflow = load_yaml_file(WORKFLOW_PATH)
+    runs = [
+        step.get("run")
+        for job in workflow_jobs(workflow).values()
+        for step in job_steps(job)
+    ]
+    mentions = [
+        value
+        for value in string_values(workflow)
+        if "check-release-unpublished.sh" in value or "publish-release.sh" in value
     ]
 
-    assert run_lines.count(GUARD_RUN) == 2
-    assert run_lines.count(PUBLISH_RELEASE_RUN) == 1
-    assert len(run_lines) == 3
+    # Each script is a whole `run:` command without arguments, and no other
+    # value (an argument, an input, or an interpolated command) names one.
+    assert runs.count(GUARD_RUN) == 2
+    assert runs.count(PUBLISH_RELEASE_RUN) == 1
+    assert len(mentions) == 3
