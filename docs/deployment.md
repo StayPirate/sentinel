@@ -481,6 +481,21 @@ dependencies. The `[build-system]` `uv_build` requirement is the exception:
 it is a bounded range outside `backend/uv.lock`, updated together with the
 `uv` binary (see Container Build Conventions, uv image pinning).
 
+Standalone Python scripts under `scripts/` that run through
+`uv run --script` (for example `scripts/capture-ibs-rabbitmq.py`) declare
+their own dependencies in PEP 723 inline metadata, pinned to exact
+versions. `renovate.jsonc` enables Renovate's `pep723` manager, which
+matches no file by default, for these scripts and includes it in the
+backend's minor/patch grouping and major-update rules, so a minor or patch
+update of a dependency shared with the backend lands in the same grouped
+PR. These pins are outside `backend/uv.lock`, the file that Dependabot
+alerts and `pip-audit` below scan. A Renovate vulnerability-fix PR raised
+from a backend alert also updates a script pin of the same package, but a
+dependency used only by a script receives no vulnerability response. A
+script dependency that the backend also declares is therefore pinned to
+the backend's locked version. The scripts are developer utilities and
+never reach the image.
+
 Known vulnerabilities in the locked Python dependency set are handled by
 three complementary mechanisms:
 

@@ -7,9 +7,8 @@ and its `concurrency` group — for up to six hours before GitHub kills
 it. See issue #69.
 
 This test parses workflow YAML with a minimal indentation-based scanner
-rather than a full YAML parser, to avoid depending on PyYAML, which is
-only a transitive dependency of `uvicorn[standard]` and is not declared
-directly in `pyproject.toml`.
+rather than a full YAML parser, because `pyproject.toml` declares no
+YAML parser dependency.
 """
 
 from __future__ import annotations
