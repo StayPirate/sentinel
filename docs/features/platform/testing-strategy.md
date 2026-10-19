@@ -1697,9 +1697,11 @@ and semver tags from ever being published. The tested and published
 artifacts are guaranteed identical — no second build is performed.
 
 The SBOM gate runs only after artifact verification succeeds and scans that
-same candidate identity. Image smoke, SBOM generation/validation, and
-publication therefore form one ordered chain; none may silently substitute a
-different tag resolution, pulled image, or rebuilt artifact.
+same candidate identity. The candidate's OpenAPI document is then extracted
+from the same identity (`docs/deployment.md`, API Documentation Publication).
+Image smoke, SBOM generation/validation, OpenAPI extraction, and publication
+therefore form one ordered chain; none may silently substitute a different tag
+resolution, pulled image, or rebuilt artifact.
 
 ### SBOM Gate
 
@@ -1727,8 +1729,10 @@ gate and before pushing the image. Structural unit tests verify workflow
 permissions, release-only publication conditions, fixed artifact naming,
 step ordering, digest consistency, and fail-fast behavior. Script tests verify
 the published-release guard (`docs/deployment.md`, Release Publication and
-Immutability) and the release-asset upload that precedes publication of the
-draft GitHub Release. These tests mock publication commands; the first
+Immutability), the OpenAPI extraction from the candidate image, and the
+release-asset upload that precedes publication of the draft GitHub Release,
+including its refusal without the OpenAPI document of the release version.
+These tests mock the container and publication commands; the first
 version-tag execution after a change to these steps is the end-to-end
 verification of GitHub OIDC signing, the Attestations API, GHCR OCI
 attachment, GitHub Release asset upload, and draft-release publication.

@@ -11,8 +11,8 @@ Covers two related invariants:
 2. **Single build, tested artifact published unchanged**: the image is
    built exactly once (`push: false`, `load: true`), the blocking smoke
    gate runs against that exact local artifact, and its immutable image
-   ID feeds both SBOM generation and publication. See issues #185 and
-   #473.
+   ID feeds SBOM generation, OpenAPI extraction, and publication. See
+   issues #185, #473, and #1036.
 
 The workflow is parsed as YAML (`tests/support/yaml_files.py`); only the
 version comments after pinned action references and whole-file absence
@@ -49,6 +49,8 @@ RELEASE_METADATA_JOB = "publish-release-metadata"
 BUILD_STEP = "Build backend image (load only, no push)"
 SMOKE_STEP = "Image smoke test (blocking gate)"
 SBOM_STEP = "Generate and validate release SBOM candidate"
+OPENAPI_STEP = "Extract OpenAPI document"
+RETAIN_OPENAPI_STEP = "Retain OpenAPI document"
 PUSH_STEP = "Push tested image (same digest)"
 GUARD_STEP = "Verify release is unpublished"
 GUARD_RUN = "./scripts/check-release-unpublished.sh"
@@ -59,6 +61,8 @@ RELEASE_GUARD_ENV = {
     "GH_TOKEN": "${{ secrets.GITHUB_TOKEN }}",
     "RELEASE_TAG": "${{ github.ref_name }}",
 }
+OPENAPI_ARTIFACT = "${{ env.OPENAPI_ARTIFACT_NAME }}"
+RELEASE_OPENAPI_DIR = "${{ runner.temp }}/release-openapi"
 
 
 def _jobs() -> dict[str, YamlMapping]:
@@ -345,10 +349,13 @@ def test_release_attestations_use_build_outputs_and_expected_predicates() -> Non
         sbom_path,
         None,
     ]
-    assert len(download_steps) == 1
-    assert download_steps[0]["with"]["name"] == (
-        "${{ needs.build-backend.outputs.sbom-artifact-name }}"
-    )
+    assert [step["with"] for step in download_steps] == [
+        {
+            "name": "${{ needs.build-backend.outputs.sbom-artifact-name }}",
+            "path": "${{ runner.temp }}/release-sbom",
+        },
+        {"name": OPENAPI_ARTIFACT, "path": RELEASE_OPENAPI_DIR},
+    ]
     # The version comment after a pinned reference is not YAML data.
     commented_references = re.findall(
         r"uses: (actions/attest@[0-9a-f]{40}) # v[0-9]+\.[0-9]+\.[0-9]+",
@@ -452,8 +459,64 @@ def test_release_publication_is_the_last_step_and_uses_attestation_bundles() -> 
         ),
         "SBOM_BUNDLE_PATH": "${{ steps.attest-sbom.outputs.bundle-path }}",
         "PROVENANCE_BUNDLE_PATH": "${{ steps.attest-provenance.outputs.bundle-path }}",
+        "OPENAPI_PATH": f"{RELEASE_OPENAPI_DIR}/openapi.json",
     }
     assert expected_env.items() <= publication["env"].items()
+
+
+@pytest.mark.unit
+def test_openapi_document_is_extracted_from_the_tested_image_before_any_push() -> None:
+    # docs/deployment.md (API Documentation Publication): every build
+    # extracts the document from the smoke-tested candidate, so a failed
+    # extraction prevents publication and surfaces on master builds too.
+    job = _jobs()[BUILD_JOB]
+    extract = named_step(job, OPENAPI_STEP)
+    retain = named_step(job, RETAIN_OPENAPI_STEP)
+
+    assert (
+        step_index(job, SMOKE_STEP)
+        < step_index(job, SBOM_STEP)
+        < step_index(job, OPENAPI_STEP)
+        < step_index(job, RETAIN_OPENAPI_STEP)
+        < step_index(job, GUARD_STEP)
+        < step_index(job, PUSH_STEP)
+    )
+    assert "if" not in extract
+    assert "if" not in retain
+    assert extract["env"] == {"TESTED_IMAGE": SMOKE_OUTPUT}
+    assert extract["run"] == (
+        './scripts/extract-openapi.sh "${TESTED_IMAGE}" '
+        '"${RUNNER_TEMP}/openapi/openapi.json"'
+    )
+    assert _uses(retain, "actions/upload-artifact")
+    assert retain["with"] == {
+        "name": OPENAPI_ARTIFACT,
+        "path": "${{ runner.temp }}/openapi/openapi.json",
+        "if-no-files-found": "error",
+        "overwrite": True,
+        "retention-days": 7,
+    }
+
+
+@pytest.mark.unit
+def test_release_job_downloads_the_openapi_artifact_of_its_run() -> None:
+    workflow = load_yaml_file(WORKFLOW_PATH)
+    job = workflow_jobs(workflow)[RELEASE_METADATA_JOB]
+    steps = job_steps(job)
+    download_indices = [
+        index
+        for index, step in enumerate(steps)
+        if _uses(step, "actions/download-artifact")
+        and step["with"]["name"] == OPENAPI_ARTIFACT
+    ]
+
+    # Both jobs resolve the same per-run name; a rerun of the release job
+    # therefore attaches the document its build job retained.
+    assert workflow["env"]["OPENAPI_ARTIFACT_NAME"] == (
+        "sentinel-openapi-${{ github.run_id }}"
+    )
+    assert len(download_indices) == 1
+    assert step_index(job, GUARD_STEP) < download_indices[0] < len(steps) - 1
 
 
 @pytest.mark.unit
