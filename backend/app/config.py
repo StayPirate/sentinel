@@ -91,6 +91,12 @@ _HEADER_SECRET_FIELDS = ("nvd_api_key", "github_token")
 (docs/conventions.md, Secret Field Typing)."""
 
 
+_UNRESTRICTED_CORS_ORIGINS = frozenset({"*", "null"})
+"""`CORS_ORIGINS` entries that, with credentials allowed, would admit every
+origin (`*`) or every opaque origin (`null`) (docs/configuration.md,
+Application)."""
+
+
 _VALID_LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 _VALID_LOG_FORMATS = ("auto", "json", "console")
 
@@ -130,7 +136,7 @@ class Settings(BaseSettings):
     celery_enable_utc: bool = True
 
     # CORS
-    cors_origins: CommaSeparated = ["http://localhost:5173"]
+    cors_origins: CommaSeparated = []
 
     # IBS Integration
     ibs_api_url: str = "https://api.suse.de"
@@ -198,6 +204,24 @@ class Settings(BaseSettings):
                 )
                 raise ValueError(msg)
             return normalized
+        return value
+
+    @field_validator("cors_origins")
+    @classmethod
+    def _validate_cors_origins(cls, value: list[str]) -> list[str]:
+        """Reject a `*` or `null` CORS_ORIGINS entry at startup.
+
+        The CORS middleware allows credentials, so either entry would grant
+        authenticated cross-origin access to arbitrary origins. See
+        docs/configuration.md (Application).
+        """
+        if any(origin.strip() in _UNRESTRICTED_CORS_ORIGINS for origin in value):
+            msg = (
+                "Invalid CORS_ORIGINS: the entries * and null are not permitted "
+                "(credentials are allowed, so either would admit arbitrary "
+                "origins)."
+            )
+            raise ValueError(msg)
         return value
 
     @model_validator(mode="after")
