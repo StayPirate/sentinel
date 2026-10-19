@@ -229,12 +229,6 @@ CELERY_BROKER_URL=redis://localhost:6379/1
 # /var/lib/sentinel/git is usually not writable on a developer host)
 GIT_CLONE_BASE_DIR=/tmp/sentinel-git
 
-# SSO (optional for local — omit to disable SSO)
-SSO_ISSUER_URL=https://id.suse.com
-SSO_CLIENT_ID=<your-client-id>
-SSO_CLIENT_SECRET=<your-client-secret>
-SSO_REDIRECT_URI=http://localhost:5173/auth/callback
-
 # CORS
 CORS_ORIGINS=http://localhost:5173
 
@@ -244,7 +238,7 @@ DEBUG=true
 
 #### Creating the First Local User
 
-With SSO disabled (no SSO env vars), create a local admin user via CLI:
+Create a local admin user via CLI:
 
 ```bash
 cd backend && uv run python -m app.cli manage-user create \

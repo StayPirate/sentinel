@@ -5,12 +5,12 @@
 Define the authentication framework for Sentinel: how users prove their
 identity and how the system verifies that identity on every request.
 
-Sentinel supports two authentication providers — SSO via `id.suse.com`
-(see `docs/features/identity/sso-authentication.md`) and local credentials (see
-`docs/features/identity/local-authentication.md`). Both providers produce the
-same artifact: a signed JWT that the client presents on subsequent
-requests. Programmatic clients may instead present API keys managed under
-`docs/features/identity/api-key-management.md`.
+Sentinel defines two authentication providers — SSO via `id.suse.com`
+(see `docs/features/identity/sso-authentication.md`, a deferred specification)
+and local credentials (see `docs/features/identity/local-authentication.md`).
+Both providers produce the same artifact: a signed JWT that the client
+presents on subsequent requests. Programmatic clients may instead present API
+keys managed under `docs/features/identity/api-key-management.md`.
 
 This specification defines the shared infrastructure consumed by both
 providers: token format, session management, credential validation,

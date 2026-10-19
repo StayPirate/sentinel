@@ -7,6 +7,13 @@ lifecycle, logout, error code namespace (`AUTH_*`)
 
 ---
 
+## Status
+
+**Deferred**. This specification is not yet active. SSO authenticates only
+externally-provisioned users and never creates accounts (see No
+auto-provisioning), so it depends on
+`docs/features/identity/identity-provisioning.md`, which is also deferred.
+
 ## Purpose
 
 Provide single sign-on authentication for Sentinel using the SUSE

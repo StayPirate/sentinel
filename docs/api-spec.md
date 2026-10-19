@@ -601,28 +601,35 @@ Error codes are grouped by prefix:
 | Prefix | Domain | Examples |
 |--------|--------|----------|
 | `VALIDATION_*` | Input validation | `VALIDATION_ERROR` |
-| `AUTH_*` | Authentication and authorization | `AUTH_NOT_AUTHENTICATED`, `AUTH_INSUFFICIENT_PERMISSION`, `AUTH_API_KEY_NOT_FOUND`, `AUTH_API_KEY_NAME_CONFLICT`, `AUTH_API_KEY_NAME_INVALID`, `AUTH_API_KEY_INVALID_EXPIRY`, `AUTH_SSO_FAILED`, `AUTH_SSO_USER_NOT_FOUND`, `AUTH_SSO_USER_INACTIVE`, `AUTH_SESSION_REQUIRED`, `AUTH_INVALID_CREDENTIALS`, `AUTH_ACCOUNT_LOCKED`, `AUTH_SSO_STATE_INVALID`, `AUTH_SSO_DISABLED`, `AUTH_LOGOUT_NOT_APPLICABLE` |
+| `AUTH_*` | Authentication and authorization | `AUTH_NOT_AUTHENTICATED`, `AUTH_INSUFFICIENT_PERMISSION`, `AUTH_API_KEY_NOT_FOUND`, `AUTH_API_KEY_NAME_CONFLICT`, `AUTH_API_KEY_NAME_INVALID`, `AUTH_API_KEY_INVALID_EXPIRY`, `AUTH_SESSION_REQUIRED`, `AUTH_INVALID_CREDENTIALS`, `AUTH_ACCOUNT_LOCKED`, `AUTH_LOGOUT_NOT_APPLICABLE`; reserved: `AUTH_SSO_FAILED`, `AUTH_SSO_USER_NOT_FOUND`, `AUTH_SSO_USER_INACTIVE`, `AUTH_SSO_STATE_INVALID`, `AUTH_SSO_DISABLED` |
 | `TICKET_*` | Ticket operations | `TICKET_NOT_FOUND`, `TICKET_INVALID_TRANSITION`, `TICKET_NOT_MUTABLE`, `TICKET_NOT_CONFIDENTIAL`, `TICKET_DUPLICATE_TARGET_DUPLICATED`, `TICKET_DUPLICATE_CONCURRENT_MODIFICATION`, `TICKET_SELF_DUPLICATE`, `TICKET_CVE_CONFLICT`, `TICKET_CVE_ALREADY_SET`, `TICKET_SEVERITY_DERIVED`, `TICKET_ASSIGNEE_NOT_VA`, `TICKET_ASSIGNEE_INACTIVE` |
 | `CVE_*` | CVE operations | `CVE_NOT_FOUND`, `CVE_FETCH_FAILED`, `CVE_INVALID_SOURCE`, `CVE_INVALID_FORMAT` |
 | `CVSS_*` | CVSS assessment and default-version operations | `CVSS_INVALID_VECTOR`, `CVSS_ASSESSMENT_NOT_FOUND`, `CVSS_RECALC_ALREADY_IN_PROGRESS`, `CVSS_PREVIEW_TIMEOUT` |
 | `RESOURCE_*` | Generic resource errors | `RESOURCE_NOT_FOUND`, `RESOURCE_CONFLICT`, `RESOURCE_NOT_EDITABLE` |
 | `PACKAGE_*` | Package operations | `PACKAGE_NOT_FOUND_IN_SMELT`, `PACKAGE_TARGETS_UNRESOLVED`, `PACKAGE_ALREADY_EXCLUDED`, `PACKAGE_NOT_EXCLUDED` |
 | `PRODUCT_*` | Product catalog operations | `PRODUCT_CATALOG_NOT_READY` |
-| `ROLE_MAPPING_*` | Role mapping operations | `ROLE_MAPPING_GROUP_NOT_FOUND`, `ROLE_MAPPING_INVALID_GROUP_NAME` |
+| `ROLE_MAPPING_*` | Role mapping operations | reserved: `ROLE_MAPPING_GROUP_NOT_FOUND`, `ROLE_MAPPING_INVALID_GROUP_NAME` |
 | `FETCHER_*` | Fetcher operations | `FETCHER_NOT_FOUND`, `FETCHER_ALREADY_RUNNING`, `FETCHER_DEREGISTERED`, `FETCHER_DISABLED`, `FETCHER_SETTING_UNKNOWN`, `FETCHER_SETTING_INVALID` |
 | `USER_*` | User operations | `USER_NOT_FOUND`, `USER_ALREADY_EXISTS`, `USER_INACTIVE`, `USER_EXTERNAL_STATUS_READONLY`, `USER_EXTERNAL_FIELD_READONLY`, `USER_EXTERNAL_PASSWORD_FORBIDDEN`, `USER_SELF_ROLE_REMOVAL`, `USER_SELF_DEACTIVATION`, `USER_PASSWORD_POLICY_VIOLATION` |
 | `DATE_RANGE_*` | Date range filter validation | `DATE_RANGE_INVERTED`, `DATE_RANGE_TOO_WIDE` |
 | `ROUTE_*` | Request routing (see Routing Responses) | `ROUTE_NOT_FOUND`, `ROUTE_METHOD_NOT_ALLOWED` |
 | `INTERNAL_*` | Unhandled server error | `INTERNAL_ERROR` |
-| `<DEPENDENCY>_UNAVAILABLE` | Infrastructure dependency availability (external service or broker unavailable, including unconfirmed task publication) | `REDIS_UNAVAILABLE`, `SMELT_UNAVAILABLE`, `CELERY_UNAVAILABLE`, `PROVISIONING_UNAVAILABLE`, `SSO_UNAVAILABLE` |
+| `<DEPENDENCY>_UNAVAILABLE` | Infrastructure dependency availability (external service or broker unavailable, including unconfirmed task publication) | `REDIS_UNAVAILABLE`, `SMELT_UNAVAILABLE`, `CELERY_UNAVAILABLE`; reserved: `PROVISIONING_UNAVAILABLE`, `SSO_UNAVAILABLE` |
 
 Rules:
 
 - Every new error introduced in the codebase MUST have a corresponding code
   with the appropriate prefix
-- Codes are defined as a Python enum in the backend (`app/core/errors.py`)
-  and are part of the API contract — removing or renaming a code is a
-  breaking change
+- Every code except a reserved one is defined as a Python enum in the backend
+  (`app/core/errors.py`) and is part of the API contract — removing or
+  renaming it is a breaking change
+- A reserved code, listed after "reserved:" above and marked "(reserved)" in
+  Infrastructure Dependency Errors, is defined by a deferred specification
+  (`docs/features/identity/sso-authentication.md` or
+  `docs/features/identity/identity-provisioning.md`). It is not in the enum,
+  and no endpoint returns it while that specification is deferred; it is
+  added to the enum when the specification becomes active. Its name is not
+  used for another error
 - When an error does not fit an existing category, use the `RESOURCE_*`
   prefix for generic cases or introduce a new prefix if a distinct domain
   emerges
@@ -660,9 +667,9 @@ Examples:
 | Code | Dependency |
 |------|------------|
 | `REDIS_UNAVAILABLE` | Redis cache/session store |
-| `PROVISIONING_UNAVAILABLE` | External identity provider |
+| `PROVISIONING_UNAVAILABLE` | External identity provider (reserved) |
 | `SMELT_UNAVAILABLE` | SMELT API |
-| `SSO_UNAVAILABLE` | SSO identity provider (OIDC discovery) |
+| `SSO_UNAVAILABLE` | SSO identity provider, OIDC discovery (reserved) |
 | `CELERY_UNAVAILABLE` | Celery task broker unavailable or task acceptance unconfirmed; the owning endpoint defines which publication exceptions produce this code, and the code never proves broker rejection |
 
 ### Global Responses
