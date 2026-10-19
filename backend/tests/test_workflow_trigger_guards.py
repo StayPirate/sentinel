@@ -183,27 +183,39 @@ class TestReleasePleaseGuard:
         )
 
 
+_JOB_CONDITION = (
+    "    if: >\n"
+    "      github.event.workflow_run.event == 'push' &&\n"
+    "       github.event.workflow_run.conclusion == 'success'\n"
+)
+_STEPS = (
+    "    steps:\n"
+    "      - name: Step\n"
+    "        if: github.event_name == 'workflow_run'\n"
+    "        run: echo\n"
+)
+
+
 @pytest.mark.unit
 class TestConditionExtraction:
+    @pytest.mark.parametrize(
+        "job_body",
+        [
+            # The job-level `if:` precedes `name:`, and a step-level `if:`
+            # follows `name:`.
+            _JOB_CONDITION + "    name: Build\n" + _STEPS,
+            # A step-level `if:` precedes the job-level one.
+            _STEPS + "    name: Build\n" + _JOB_CONDITION,
+        ],
+        ids=["job-if-before-name", "step-if-first"],
+    )
     def test_job_level_condition_is_read_whatever_the_key_order(
-        self, tmp_path: Path
+        self, tmp_path: Path, job_body: str
     ) -> None:
-        # A step-level `if:` that precedes the job-level one in the file is
-        # not the job's guard.
+        # Neither a step-level condition nor the key order may stand in for
+        # the job's guard.
         workflow_path = tmp_path / "workflow.yml"
-        workflow_path.write_text(
-            "jobs:\n"
-            "  build:\n"
-            "    steps:\n"
-            "      - name: Step\n"
-            "        if: github.event_name == 'workflow_run'\n"
-            "        run: echo\n"
-            "    name: Build\n"
-            "    if: >\n"
-            "      github.event.workflow_run.event == 'push' &&\n"
-            "       github.event.workflow_run.conclusion == 'success'\n",
-            encoding="utf-8",
-        )
+        workflow_path.write_text("jobs:\n  build:\n" + job_body, encoding="utf-8")
 
         condition = _job_if_condition(workflow_path, "build")
 
@@ -230,10 +242,18 @@ class TestConditionExtraction:
         with pytest.raises(AssertionError, match="build: no job-level if"):
             _job_if_condition(workflow_path, "build")
 
-    def test_expression_wrapper_is_removed(self) -> None:
-        assert not _evaluate_condition(
-            "${{ github.event_name == 'push' }}",
-            event_name="workflow_run",
-            workflow_run_event="push",
-            workflow_run_conclusion="success",
+    @pytest.mark.parametrize(
+        ("event_name", "allowed"), [("push", True), ("pull_request", False)]
+    )
+    def test_expression_wrapper_is_removed(
+        self, event_name: str, allowed: bool
+    ) -> None:
+        assert (
+            _evaluate_condition(
+                "${{ github.event_name == 'push' }}",
+                event_name=event_name,
+                workflow_run_event="push",
+                workflow_run_conclusion="success",
+            )
+            is allowed
         )

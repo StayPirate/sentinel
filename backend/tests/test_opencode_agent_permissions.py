@@ -321,6 +321,15 @@ def test_bash_rules_include_every_rule_whatever_its_formatting() -> None:
 
 
 @pytest.mark.unit
-def test_definition_without_front_matter_fails() -> None:
+@pytest.mark.parametrize(
+    "text",
+    [
+        "## Role\n",
+        "## Role\n---\ntext\n---\n",  # thematic breaks in the body only
+        "---\ndescription: Example\n## Role\n",  # unclosed front matter
+    ],
+    ids=["no-delimiter", "body-rules-only", "unclosed"],
+)
+def test_definition_without_front_matter_fails(text: str) -> None:
     with pytest.raises(AssertionError, match=r"example\.md: no front matter"):
-        _split_front_matter("## Role\n", "example.md")
+        _split_front_matter(text, "example.md")

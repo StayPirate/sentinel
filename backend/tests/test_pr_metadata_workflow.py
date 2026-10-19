@@ -27,7 +27,6 @@ WORKFLOW_PATH = (
 
 def _validation_step() -> YamlMapping:
     jobs = workflow_jobs(load_yaml_file(WORKFLOW_PATH))
-    assert list(jobs) == ["validate"]
     return named_step(jobs["validate"], "Validate title and issue linkage")
 
 

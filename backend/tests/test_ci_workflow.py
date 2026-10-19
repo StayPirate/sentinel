@@ -230,15 +230,18 @@ def test_pull_request_image_job_smokes_loaded_image_without_override() -> None:
 @pytest.mark.unit
 def test_ci_and_release_workflows_share_sbom_gate() -> None:
     for path in (WORKFLOW_PATH, RELEASE_WORKFLOW_PATH):
+        workflow = load_yaml_file(path)
         gate_runs = [
             step["run"]
-            for job in workflow_jobs(load_yaml_file(path)).values()
+            for job in workflow_jobs(workflow).values()
             for step in job_steps(job)
             if "sbom-gate.sh" in str(step.get("run", ""))
         ]
+        mentions = sum(value.count("sbom-gate.sh") for value in string_values(workflow))
 
         assert len(gate_runs) == 1, path.name
         assert gate_runs[0].startswith("./scripts/sbom-gate.sh "), path.name
+        assert mentions == 1, path.name
 
 
 @pytest.mark.unit
@@ -324,12 +327,14 @@ def test_coverage_upload_job_fails_on_pull_request_error_with_pinned_cli() -> No
 @pytest.mark.unit
 def test_codecov_token_is_scoped_to_coverage_upload_job() -> None:
     workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
-    upload_step = named_step(
-        _ci_jobs()["coverage-upload"], "Upload coverage to Codecov"
-    )
+    jobs_with_token = [
+        job_id
+        for job_id, job in _ci_jobs().items()
+        if any("secrets.CODECOV_TOKEN" in value for value in string_values(job))
+    ]
 
     assert workflow.count("secrets.CODECOV_TOKEN") == 1
-    assert upload_step["env"]["CODECOV_TOKEN"] == "${{ secrets.CODECOV_TOKEN }}"
+    assert jobs_with_token == ["coverage-upload"]
 
 
 @pytest.mark.unit

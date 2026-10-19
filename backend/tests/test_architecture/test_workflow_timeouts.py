@@ -27,19 +27,26 @@ from tests.support.yaml_files import (
 WORKFLOWS_DIR = Path(__file__).resolve().parents[3] / ".github" / "workflows"
 
 
+def _is_timeout(value: object) -> bool:
+    """Whether `value` declares a timeout: a positive number of minutes, or an
+    expression that GitHub Actions evaluates at run time."""
+    if isinstance(value, str):
+        return value.startswith("${{") and value.endswith("}}")
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
 def _jobs_missing_timeout(workflow: YamlMapping) -> list[str]:
-    """Return the ids of jobs without a job-level `timeout-minutes` that is a
-    positive number of minutes.
+    """Return the ids of jobs that do not declare a job-level
+    `timeout-minutes`.
 
     A step-level `timeout-minutes` bounds a single step, not the job's
     360-minute default, and does not satisfy the job-level requirement.
     """
-    missing: list[str] = []
-    for job_id, job in workflow_jobs(workflow).items():
-        timeout = job.get("timeout-minutes")
-        if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout <= 0:
-            missing.append(job_id)
-    return missing
+    return [
+        job_id
+        for job_id, job in workflow_jobs(workflow).items()
+        if not _is_timeout(job.get("timeout-minutes"))
+    ]
 
 
 def _workflow_files() -> list[Path]:
@@ -127,10 +134,23 @@ def test_jobs_missing_timeout_sees_every_job_whatever_its_formatting() -> None:
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("value", ["", "0", "-5", "true", '"10"'])
-def test_jobs_missing_timeout_rejects_a_value_that_is_not_a_timeout(
-    value: str,
+@pytest.mark.parametrize(
+    ("value", "declared"),
+    [
+        ("10", True),
+        ("${{ inputs.timeout }}", True),
+        ("", False),
+        ("0", False),
+        ("-5", False),
+        ("true", False),
+        ('"10"', False),
+    ],
+)
+def test_jobs_missing_timeout_accepts_only_a_timeout_value(
+    value: str, declared: bool
 ) -> None:
     text = f"jobs:\n  example:\n    timeout-minutes: {value}\n"
 
-    assert _jobs_missing_timeout(load_yaml(text, source="probe")) == ["example"]
+    missing = _jobs_missing_timeout(load_yaml(text, source="probe"))
+
+    assert missing == ([] if declared else ["example"])
