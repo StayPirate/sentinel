@@ -131,7 +131,8 @@ client on the SUSE identity provider (`id.suse.com`).
      client):
      - `https://sentinel.suse.de/auth/callback` (production)
      - `https://sentinel-staging.suse.de/auth/callback` (staging)
-     - `http://localhost:5173/auth/callback` (local development)
+     - `http://localhost:{port}/auth/callback` (local development, where
+       `{port}` is the port of the UI development server)
 3. After registration, you will receive:
    - `client_id` — set as `SSO_CLIENT_ID`
    - `client_secret` — set as `SSO_CLIENT_SECRET`
@@ -145,7 +146,7 @@ its environment:
 |-------------|-------------------|
 | Production | `https://sentinel.suse.de/auth/callback` |
 | Staging | `https://sentinel-staging.suse.de/auth/callback` |
-| Local dev | `http://localhost:5173/auth/callback` |
+| Local dev | `http://localhost:{port}/auth/callback`, where `{port}` is the port of the UI development server |
 
 The IdP validates that the `redirect_uri` in each authorization request
 matches one of the registered URIs. A mismatch causes the IdP to reject
@@ -228,9 +229,6 @@ CELERY_BROKER_URL=redis://localhost:6379/1
 # Git-based fetchers: an absolute, writable clone directory (the default
 # /var/lib/sentinel/git is usually not writable on a developer host)
 GIT_CLONE_BASE_DIR=/tmp/sentinel-git
-
-# CORS
-CORS_ORIGINS=http://localhost:5173
 
 # Debug
 DEBUG=true

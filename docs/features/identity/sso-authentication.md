@@ -68,7 +68,8 @@ environment:
 
 - Production: `https://sentinel.suse.de/auth/callback`
 - Staging: `https://sentinel-staging.suse.de/auth/callback`
-- Local dev: `http://localhost:5173/auth/callback`
+- Local dev: `http://localhost:{port}/auth/callback`, where `{port}` is the
+  port of the UI development server
 
 At startup, Sentinel validates that `SSO_REDIRECT_URI` is a well-formed
 URL with HTTPS scheme (the HTTP scheme is allowed only when the host is

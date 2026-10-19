@@ -180,6 +180,10 @@ their description.
 ├── skills/           # Multi-step workflow definitions
 ├── opencode.example.jsonc  # Example local model selection (see Model Tiering)
 ├── opencode.jsonc    # Local model selection (untracked, per contributor)
-├── package.json      # Plugin dependency (@opencode-ai/plugin)
 └── README.md         # This file
 ```
+
+OpenCode also generates its plugin dependency files in this directory
+(`package.json`, `node_modules/`, and a lockfile) together with a `.gitignore`
+that ignores them and itself. They are local to each checkout and never
+tracked.

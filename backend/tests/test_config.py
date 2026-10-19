@@ -1627,7 +1627,8 @@ class TestSecretValues:
 @pytest.mark.unit
 class TestCorsOriginsParsing:
     """CORS_ORIGINS comma-separated parsing (`docs/conventions.md`,
-    Configuration Management -> List-type environment variables).
+    Configuration Management -> List-type environment variables), default,
+    and startup validation (`docs/configuration.md`, Application).
 
     Exercises both the pure `_split_comma()` helper directly (fast,
     exhaustive edge cases) and the full `Settings.cors_origins` field
@@ -1635,7 +1636,7 @@ class TestCorsOriginsParsing:
     contract)."""
 
     def test_split_comma_single_value(self) -> None:
-        assert _split_comma("http://localhost:5173") == ["http://localhost:5173"]
+        assert _split_comma("https://ui.example.test") == ["https://ui.example.test"]
 
     def test_split_comma_multiple_values(self) -> None:
         assert _split_comma("http://a.com,http://b.com") == [
@@ -1666,9 +1667,9 @@ class TestCorsOriginsParsing:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("JWT_SECRET_KEY", "a" * 32)
-        monkeypatch.setenv("CORS_ORIGINS", "http://localhost:5173")
+        monkeypatch.setenv("CORS_ORIGINS", "https://ui.example.test")
         s = Settings(_env_file=None)
-        assert s.cors_origins == ["http://localhost:5173"]
+        assert s.cors_origins == ["https://ui.example.test"]
 
     def test_settings_cors_origins_env_var_multiple_values(
         self, monkeypatch: pytest.MonkeyPatch
@@ -1686,13 +1687,54 @@ class TestCorsOriginsParsing:
         s = Settings(_env_file=None)
         assert s.cors_origins == []
 
-    def test_settings_cors_origins_default_when_unset(
+    def test_settings_cors_origins_unset_yields_no_origins(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("JWT_SECRET_KEY", "a" * 32)
         monkeypatch.delenv("CORS_ORIGINS", raising=False)
         s = Settings(_env_file=None)
-        assert s.cors_origins == ["http://localhost:5173"]
+        assert s.cors_origins == []
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "*",
+            "null",
+            " * ",
+            " null ",
+            "https://ui.example.test,*",
+            "https://a.example.test, null ,https://b.example.test",
+        ],
+    )
+    def test_settings_cors_origins_unrestricted_entry_fails_startup(
+        self, monkeypatch: pytest.MonkeyPatch, value: str
+    ) -> None:
+        monkeypatch.setenv("JWT_SECRET_KEY", "a" * 32)
+        monkeypatch.setenv("CORS_ORIGINS", value)
+        with pytest.raises(ValidationError, match="Invalid CORS_ORIGINS:"):
+            Settings(_env_file=None)
+
+    def test_settings_cors_origins_unrestricted_entry_in_list_fails_startup(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A list value bypasses the comma splitting and its trimming; the
+        entry is still rejected."""
+        monkeypatch.setenv("JWT_SECRET_KEY", "a" * 32)
+        with pytest.raises(ValidationError, match="Invalid CORS_ORIGINS:"):
+            Settings(_env_file=None, cors_origins=[" * "])
+
+    def test_settings_cors_origins_origin_containing_null_is_accepted(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Only an entry equal to `null` is rejected, not one containing it."""
+        monkeypatch.setenv("JWT_SECRET_KEY", "a" * 32)
+        monkeypatch.setenv("CORS_ORIGINS", "https://null.example.test")
+        s = Settings(_env_file=None)
+        assert s.cors_origins == ["https://null.example.test"]
+
+    def test_not_listed_in_env_example(self) -> None:
+        env_example = Path(__file__).resolve().parents[1] / ".env.example"
+        assert "CORS_ORIGINS" not in env_example.read_text(encoding="utf-8")
 
 
 _MQ_PASSWORD = "mq-password-not-for-production"

@@ -17,7 +17,10 @@ encodes an error's `input`, however deeply nested, and the fallback of the
 production `HTTPException` handler (`_http_exception_handler`): a framework
 error other than routing or body decoding renders and logs as an unhandled
 exception. The routing and body-decoding responses are covered end to end
-in `tests/test_api/test_framework_errors.py`.
+in `tests/test_api/test_framework_errors.py`. Also covers the CORS
+middleware registration (`docs/configuration.md`, Application): the real
+app's options and, on a standalone app with those options, the responses
+with no configured origin, a configured origin, and an unconfigured one.
 
 A minimal standalone FastAPI app registers the real, imported handler
 function (not a re-implementation) plus one route that deliberately
@@ -51,13 +54,15 @@ from typing import Any
 import pytest
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
-from httpx import ASGITransport, AsyncClient
+from fastapi.middleware.cors import CORSMiddleware
+from httpx import ASGITransport, AsyncClient, Response
 from sqlalchemy import delete, select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 import app.main as main_module
+from app.config import settings
 from app.core.errors import AppError, ErrorCode
 from app.main import (
     _app_error_handler,
@@ -340,6 +345,119 @@ class TestAppErrorHandler:
             "detail": "real detail",
             "existing_ticket_id": "SNTL-7",
         }
+
+
+_UI_ORIGIN = "https://ui.example.test"
+_OTHER_ORIGIN = "https://other.example.test"
+
+
+def _cors_options() -> dict[str, Any]:
+    """A copy of the options of the one `CORSMiddleware` registered on the
+    real app; the registration itself is never modified."""
+    registrations = [
+        kwargs
+        for cls, _, kwargs in main_module.app.user_middleware
+        if cls is CORSMiddleware
+    ]
+    assert len(registrations) == 1
+    return dict(registrations[0])
+
+
+async def _cors_response(
+    allow_origins: list[str], origin: str, *, preflight: bool
+) -> Response:
+    """A request from `origin` to a standalone app registering the real CORS
+    options with `allow_origins` instead of the configured origins: a
+    preflight for a `PATCH` with every allowed request header, or a `GET`."""
+    test_app = FastAPI()
+    test_app.add_middleware(
+        CORSMiddleware, **{**_cors_options(), "allow_origins": allow_origins}
+    )
+
+    @test_app.get("/resource")
+    async def resource() -> dict[str, bool]:
+        return {"ok": True}
+
+    async with AsyncClient(
+        transport=ASGITransport(app=test_app), base_url="http://test"
+    ) as client:
+        if preflight:
+            return await client.options(
+                "/resource",
+                headers={
+                    "Origin": origin,
+                    "Access-Control-Request-Method": "PATCH",
+                    "Access-Control-Request-Headers": (
+                        "Authorization, Content-Type, X-Request-ID"
+                    ),
+                },
+            )
+        return await client.get("/resource", headers={"Origin": origin})
+
+
+@pytest.mark.unit
+class TestCorsConfiguration:
+    """`CORS_ORIGINS` and the fixed CORS constants (`docs/configuration.md`,
+    Application). The registration tests read the real app, so they hold
+    whatever origins the environment configures; the behavior tests supply
+    their own origins and are independent of it."""
+
+    def test_real_app_allows_exactly_the_configured_origins(self) -> None:
+        assert _cors_options()["allow_origins"] is settings.cors_origins
+
+    def test_real_app_uses_the_documented_constants(self) -> None:
+        options = _cors_options()
+        del options["allow_origins"]
+        assert options == {
+            "allow_credentials": True,
+            "allow_methods": ["GET", "POST", "PATCH", "DELETE"],
+            "allow_headers": ["Authorization", "Content-Type", "X-Request-ID"],
+            "expose_headers": ["X-Request-ID", "Retry-After"],
+        }
+
+    async def test_preflight_without_origins_is_rejected(self) -> None:
+        response = await _cors_response([], _UI_ORIGIN, preflight=True)
+
+        assert response.status_code == 400
+        assert "access-control-allow-origin" not in response.headers
+
+    async def test_request_without_origins_grants_no_origin(self) -> None:
+        response = await _cors_response([], _UI_ORIGIN, preflight=False)
+
+        assert response.status_code == 200
+        assert "access-control-allow-origin" not in response.headers
+
+    async def test_preflight_from_configured_origin_is_allowed_with_credentials(
+        self,
+    ) -> None:
+        response = await _cors_response([_UI_ORIGIN], _UI_ORIGIN, preflight=True)
+
+        assert response.status_code == 200
+        assert response.headers["access-control-allow-origin"] == _UI_ORIGIN
+        assert response.headers["access-control-allow-credentials"] == "true"
+
+    async def test_configured_origin_can_read_request_id_and_retry_after(
+        self,
+    ) -> None:
+        """The documented "clients should log or display the request ID"
+        (`docs/api-spec.md`, Request Tracing) holds for a cross-origin
+        browser client only when the header is exposed to it."""
+        response = await _cors_response([_UI_ORIGIN], _UI_ORIGIN, preflight=False)
+
+        assert response.headers["access-control-allow-origin"] == _UI_ORIGIN
+        exposed = response.headers["access-control-expose-headers"].lower()
+        assert {name.strip() for name in exposed.split(",")} == {
+            "x-request-id",
+            "retry-after",
+        }
+
+    async def test_unconfigured_origin_is_rejected(self) -> None:
+        preflight = await _cors_response([_UI_ORIGIN], _OTHER_ORIGIN, preflight=True)
+        request = await _cors_response([_UI_ORIGIN], _OTHER_ORIGIN, preflight=False)
+
+        assert preflight.status_code == 400
+        assert "access-control-allow-origin" not in preflight.headers
+        assert "access-control-allow-origin" not in request.headers
 
 
 async def _delete_default_cvss_version_setting(
