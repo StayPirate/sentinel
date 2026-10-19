@@ -69,12 +69,27 @@ coordination across multiple maintained distribution versions.
 - Build or submit packages (IBS handles builds)
 - Manage product lifecycle or release schedules (SMELT/AIMAAS own this)
 - Provision user identities (deferred to external identity provider)
-- Provide a web UI (frontend is developed in a separate repository)
+- Provide a web UI (the UI is developed in the separate `sentinel-aura`
+  repository)
 
-**Repository scope:** this repository contains all product specifications (in
-`docs/features/`) and the backend implementation (FastAPI, Celery workers,
-migrations, CI/CD). The frontend will be developed in a dedicated repository
-against the published OpenAPI contract.
+**Repository scope:** this repository contains the backend implementation
+(FastAPI, Celery workers, migrations, CI/CD) and the domain and API contract
+specifications (in `docs/features/` and the cross-cutting documents). These
+specifications include the obligations that their contracts place on clients,
+such as session cookie handling, error handling by the `code` field, and
+non-disclosure semantics.
+
+The `sentinel-aura` repository owns the UI and its specifications: navigation,
+screens, presentation, and client-side behavior. The UI uses Sentinel only
+through the API, as defined by the published OpenAPI contract and the
+specifications of this repository. UI specifications never define backend
+behavior: a capability that the UI needs and the API lacks is specified and
+implemented in this repository first.
+
+Client-side behavior that specifications in this repository already describe,
+such as `docs/features/identity/authentication.md` (Frontend session
+behavior), remains authoritative here until a change moves it to the UI
+repository. New client-side behavior is specified only in the UI repository.
 
 ---
 

@@ -240,10 +240,11 @@ For every quantity, list, collection, or range in the spec:
 
 ### 4. User-facing scenario gaps
 
-Apply UI-specific questions only when the specification explicitly owns a
-frontend contract. The Sentinel frontend is maintained in another repository;
-backend-only specs do not need to define navigation, rendering, or client-side
-feedback. For every applicable user interaction or observable backend action:
+Do not ask UI-specific questions. Navigation, screens, presentation, and
+client-side behavior are specified in the separate `sentinel-aura` repository
+(`docs/architecture.md`, System Boundary), so their absence is never a gap
+here; client obligations defined by an API contract remain in scope. For every
+applicable user interaction or observable backend action:
 
 - What happens if the user performs the same action twice? (idempotency)
 - For an asynchronous or cancellable server operation, what happens if the

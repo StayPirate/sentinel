@@ -2,8 +2,9 @@
 
 Sentinel is a FastAPI, PostgreSQL, Celery, and Redis platform for managing
 security updates for SUSE and openSUSE distributions. This repository contains
-the backend and its product specifications; the frontend is maintained
-separately.
+the backend and its domain and API contract specifications; the web UI and its
+specifications are maintained in the separate `sentinel-aura` repository (see
+`docs/architecture.md`, System Boundary).
 
 This file is the always-on operational policy for OpenCode agents. It owns
 safety gates, workflow, reviewer triggers, and authority routing. It summarizes

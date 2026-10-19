@@ -170,8 +170,8 @@ structural complexity without presenting it to the user for a decision.
   (Function Specification Completeness)
 - Do feature specs satisfy the documentation structure or templates required
   by `docs/conventions.md` and their owning cross-cutting specifications? Do
-  not require a UI section unless the feature's documented contract includes
-  frontend behavior
+  not require a UI section: UI behavior is specified in the separate
+  `sentinel-aura` repository (`docs/architecture.md`, System Boundary)
 
 ### Data model coherence
 
