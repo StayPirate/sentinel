@@ -27,7 +27,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 import redis.asyncio as redis_asyncio
-from fastapi import Depends, FastAPI, Request, Response
+from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import delete
@@ -992,6 +992,17 @@ class TestSlidingRefresh:
         assert "set-cookie" in response.headers
         assert response.headers["set-cookie"].startswith(f"{SESSION_COOKIE_NAME}=")
         assert issued.token not in response.headers["set-cookie"]
+        # authentication.md (Session cookie): the same attributes as at
+        # login — `Path=/` and no `Domain`, as the `__Host-` prefix requires.
+        _, *attributes = (
+            part.strip() for part in response.headers["set-cookie"].split(";")
+        )
+        assert {attribute.lower() for attribute in attributes} == {
+            "httponly",
+            "path=/",
+            "samesite=strict",
+            "secure",
+        }
 
     async def test_no_refresh_before_threshold(
         self,
@@ -1366,47 +1377,205 @@ class TestGetOptionalCurrentUserAnonymous:
         assert response.status_code == 200
 
 
-@pytest.mark.unit
-class TestResolvePrincipalWhitespaceCookie:
-    """A whitespace-only cookie *value* reaching `_resolve_principal()`
-    is a selected, invalid credential — not anonymous access (see
-    authentication.md, Shared Credential Resolution step 2).
+async def _valid_jwt(
+    db_session: AsyncSession, user_factory: Callable[..., Awaitable[User]]
+) -> tuple[User, str]:
+    """A fresh user and a valid JWT of a new session of that user."""
+    user = await user_factory()
+    created = await create_session(
+        db_session,
+        user,
+        SessionCreationReason.LOCAL_LOGIN,
+        expected_password_hash=None,
+    )
+    assert created is not None
+    return user, created.token
 
-    Exercised by calling `_resolve_principal()` directly with a
-    duck-typed request: Starlette's own `Cookie` header parser
-    (`starlette.requests.cookie_parser`) unconditionally `.strip()`s
-    cookie values before application code ever sees them, so a
-    whitespace-only *raw* cookie cannot reach this function through a
-    real HTTP round trip (verified separately — Starlette normalizes it
-    to an empty string). This test proves the documented behavior of
-    the shared resolver itself, independent of that framework-level
-    normalization.
-    """
 
-    async def test_whitespace_only_cookie_value_is_selected_and_rejected(
-        self,
+def _raw_cookie_header(*pairs: tuple[bytes, str]) -> bytes:
+    """A raw `Cookie` header value from `(name_octets, value)` pairs, so a
+    name can carry single octets such as 0x85 that are not UTF-8."""
+    return b"; ".join(name + b"=" + value.encode("ascii") for name, value in pairs)
+
+
+_SESSION_NAME = SESSION_COOKIE_NAME.encode("ascii")
+
+# Names that select no credential (authentication.md, Session cookie): the
+# unprefixed name, a differently capitalized prefix, and the exact name
+# behind the single octets 0x85 and 0xA0, which a server stripping Unicode
+# whitespace from names would match (not their UTF-8 encodings, which even
+# such a server keeps distinct).
+_OTHER_SESSION_NAMES = [
+    pytest.param(b"sentinel_session", id="unprefixed"),
+    pytest.param(b"__HOST-sentinel_session", id="capitalized-prefix"),
+    pytest.param(b"\x85" + _SESSION_NAME, id="0x85-prefix"),
+    pytest.param(b"\xa0" + _SESSION_NAME, id="0xA0-prefix"),
+]
+
+
+@pytest.mark.e2e
+class TestWhitespaceOnlyCookieValue:
+    """A session cookie value made only of whitespace other than spaces and
+    horizontal tabs is non-empty: a selected, invalid credential, not
+    anonymous access. A value of only spaces and horizontal tabs is empty
+    after parsing (authentication.md, Session cookie; Shared Credential
+    Resolution step 2). The session cookie is read from the raw `Cookie`
+    header, so a real round trip carries these octets to the resolver."""
+
+    @pytest.mark.parametrize("path", ["/whoami", "/optional-whoami"])
+    async def test_other_whitespace_value_is_selected_and_rejected(
+        self, dep_client: AsyncClient, path: str
     ) -> None:
-        class _FakeHeaders:
-            def get(self, key: str) -> str | None:
-                return None
+        response = await dep_client.get(
+            path, headers={b"cookie": _SESSION_NAME + b"=\x0b\xa0"}
+        )
 
-        class _FakeCookies:
-            def get(self, key: str) -> str | None:
-                return "   "
+        assert response.status_code == 401
+        assert response.json() == {
+            "code": "AUTH_NOT_AUTHENTICATED",
+            "detail": "Authentication required",
+        }
 
-        class _FakeRequest:
-            headers = _FakeHeaders()
-            cookies = _FakeCookies()
+    async def test_space_and_tab_only_value_is_anonymous(
+        self, dep_client: AsyncClient
+    ) -> None:
+        response = await dep_client.get(
+            "/optional-whoami",
+            headers={"cookie": f"{SESSION_COOKIE_NAME}= \t ; theme=dark"},
+        )
 
-        with pytest.raises(AppError) as exc_info:
-            await dependencies._resolve_principal(
-                cast(Request, _FakeRequest()),
-                Response(),
-                cast(AsyncSession, None),
+        assert response.status_code == 200
+        assert response.json() == {"user_id": None, "credential_kind": None}
+
+
+@pytest.mark.e2e
+class TestSessionCookieName:
+    """Only a cookie named exactly `__Host-sentinel_session` is the session
+    cookie (authentication.md, Session cookie; testing-strategy.md,
+    Authentication and Session, Session cookie)."""
+
+    @pytest.mark.parametrize("name", _OTHER_SESSION_NAMES)
+    async def test_other_name_selects_no_credential(
+        self,
+        dep_client: AsyncClient,
+        db_session: AsyncSession,
+        user_factory: Callable[..., Awaitable[User]],
+        redis_client: redis_asyncio.Redis,
+        name: bytes,
+    ) -> None:
+        _, token = await _valid_jwt(db_session, user_factory)
+        headers = {b"cookie": _raw_cookie_header((name, token))}
+
+        mandatory = await dep_client.get("/whoami", headers=headers)
+        optional = await dep_client.get("/optional-whoami", headers=headers)
+
+        assert mandatory.status_code == 401
+        assert mandatory.json()["code"] == "AUTH_NOT_AUTHENTICATED"
+        assert optional.status_code == 200
+        assert optional.json() == {"user_id": None, "credential_kind": None}
+
+    @pytest.mark.parametrize("name", _OTHER_SESSION_NAMES)
+    @pytest.mark.parametrize("planted_first", [True, False], ids=["before", "after"])
+    async def test_planted_cookie_never_replaces_the_session_cookie(
+        self,
+        dep_client: AsyncClient,
+        db_session: AsyncSession,
+        user_factory: Callable[..., Awaitable[User]],
+        redis_client: redis_asyncio.Redis,
+        name: bytes,
+        planted_first: bool,
+    ) -> None:
+        victim, victim_token = await _valid_jwt(db_session, user_factory)
+        _, attacker_token = await _valid_jwt(db_session, user_factory)
+        pairs = [(_SESSION_NAME, victim_token), (name, attacker_token)]
+        if planted_first:
+            pairs.reverse()
+        headers = {b"cookie": _raw_cookie_header(*pairs)}
+
+        for path in ("/whoami", "/optional-whoami"):
+            response = await dep_client.get(path, headers=headers)
+            assert response.status_code == 200
+            assert response.json()["user_id"] == str(victim.id)
+
+
+@pytest.mark.e2e
+class TestDuplicatedSessionCookie:
+    """A session cookie that occurs more than once is an invalid credential
+    when the cookie is the selected source, rejected with no type
+    determination, lookup, or log record (authentication.md, Session cookie;
+    Shared Credential Resolution step 2)."""
+
+    @pytest.mark.parametrize("path", ["/whoami", "/optional-whoami"])
+    async def test_two_valid_jwts_are_rejected(
+        self,
+        dep_client: AsyncClient,
+        db_session: AsyncSession,
+        user_factory: Callable[..., Awaitable[User]],
+        redis_client: redis_asyncio.Redis,
+        path: str,
+    ) -> None:
+        _, first = await _valid_jwt(db_session, user_factory)
+        _, second = await _valid_jwt(db_session, user_factory)
+        headers = {
+            b"cookie": _raw_cookie_header(
+                (_SESSION_NAME, first), (_SESSION_NAME, second)
             )
+        }
 
-        assert exc_info.value.status_code == 401
-        assert exc_info.value.code == ErrorCode.AUTH_NOT_AUTHENTICATED
+        response = await dep_client.get(path, headers=headers)
+
+        assert response.status_code == 401
+        assert response.json() == {
+            "code": "AUTH_NOT_AUTHENTICATED",
+            "detail": "Authentication required",
+        }
+
+    @pytest.mark.parametrize("path", ["/whoami", "/optional-whoami"])
+    async def test_api_key_values_are_neither_looked_up_nor_logged(
+        self,
+        dep_client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        path: str,
+    ) -> None:
+        lookup = AsyncMock()
+        monkeypatch.setattr(api_key_service, "get_key_by_hash", lookup)
+        first, _ = _make_api_key_credential()
+        second, _ = _make_api_key_credential()
+        headers = {
+            b"cookie": _raw_cookie_header(
+                (_SESSION_NAME, first), (_SESSION_NAME, second)
+            )
+        }
+
+        with caplog.at_level(logging.DEBUG, logger="app"):
+            response = await dep_client.get(path, headers=headers)
+
+        assert response.status_code == 401
+        lookup.assert_not_awaited()
+        assert _app_records(caplog) == []
+
+    async def test_valid_bearer_takes_precedence(
+        self,
+        dep_client: AsyncClient,
+        db_session: AsyncSession,
+        user_factory: Callable[..., Awaitable[User]],
+        redis_client: redis_asyncio.Redis,
+    ) -> None:
+        bearer_user, bearer_token = await _valid_jwt(db_session, user_factory)
+        _, first = await _valid_jwt(db_session, user_factory)
+        _, second = await _valid_jwt(db_session, user_factory)
+        headers = {
+            "Authorization": f"Bearer {bearer_token}",
+            "cookie": _raw_cookie_header(
+                (_SESSION_NAME, first), (_SESSION_NAME, second)
+            ).decode("latin-1"),
+        }
+
+        response = await dep_client.get("/whoami", headers=headers)
+
+        assert response.status_code == 200
+        assert response.json()["user_id"] == str(bearer_user.id)
 
 
 @pytest.mark.e2e

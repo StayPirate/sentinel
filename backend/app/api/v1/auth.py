@@ -20,7 +20,11 @@ from app.api.dependencies import (
     unauthenticated_error as _unauthenticated_error,
 )
 from app.config import settings
-from app.core.credentials import API_KEY_PREFIX, extract_credential
+from app.core.credentials import (
+    API_KEY_PREFIX,
+    DuplicateSessionCookie,
+    extract_credential,
+)
 from app.core.errors import AppError, ErrorCode
 from app.core.jwt import InvalidTokenError, decode_for_logout
 from app.database import DatabaseSession, register_post_commit_callback
@@ -39,10 +43,12 @@ router = APIRouter(prefix="/api/v1/auth", tags=["Authentication"])
 # The exact cookie-clearing header text from authentication.md (Logout,
 # step 5). Built manually rather than via `Response.set_cookie()`:
 # Python's stdlib `http.cookies` unconditionally double-quotes an empty
-# cookie value (`sentinel_session=""`), which would diverge from the
-# documented literal header value below (`sentinel_session=`, no quotes).
+# cookie value (`__Host-sentinel_session=""`), which would diverge from the
+# documented literal header value below (`__Host-sentinel_session=`, no
+# quotes). Its attributes match `set_session_cookie()`, so the browser
+# replaces the cookie it holds.
 _CLEAR_COOKIE_HEADER = (
-    f"{_COOKIE_NAME}=; Path=/api; Max-Age=0; HttpOnly; Secure; SameSite=Strict"
+    f"{_COOKIE_NAME}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Strict"
 )
 
 
@@ -159,8 +165,8 @@ async def login(body: LoginRequest, db: DatabaseSession) -> Response:
         401: {
             "model": ErrorResponse,
             "description": (
-                "`AUTH_NOT_AUTHENTICATED`: no credential was sent, or it is not "
-                "a validly signed JWT."
+                "`AUTH_NOT_AUTHENTICATED`: no credential was sent, it is not a "
+                "validly signed JWT, or the session cookie occurs more than once."
             ),
         },
     },
@@ -168,9 +174,9 @@ async def login(body: LoginRequest, db: DatabaseSession) -> Response:
 async def logout(request: Request, db: DatabaseSession) -> Response:
     """Logout — see `docs/features/identity/authentication.md` (Logout)."""
     credential = extract_credential(
-        request.headers.get("authorization"), request.cookies.get(_COOKIE_NAME)
+        request.headers.get("authorization"), request.headers.get("cookie")
     )
-    if credential is None:
+    if credential is None or isinstance(credential, DuplicateSessionCookie):
         raise _unauthenticated_error()
     if credential.startswith(API_KEY_PREFIX):
         raise AppError(
