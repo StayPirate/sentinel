@@ -4,6 +4,10 @@
 This script imports the FastAPI app and dumps its OpenAPI schema to stdout
 as formatted JSON. It does not require a running server, database, or Redis
 connection — FastAPI builds the schema statically from route decorators.
+It imports only the standard library and `app`, so it also runs inside the
+backend image, fed on standard input: `scripts/extract-openapi.sh` produces
+the release asset that way (`docs/deployment.md`, API Documentation
+Publication).
 
 Usage:
     python scripts/generate_openapi.py > openapi.json

@@ -1,10 +1,11 @@
 """Tests for draft-release publication (`scripts/publish-release.sh`).
 
-Every release asset — the SBOM and the Sigstore bundles of both image
-attestations — must be attached to the draft GitHub Release before it is
-published, because release immutability locks the assets on publication
-(`docs/deployment.md`, Release Supply-Chain Artifacts and Release Publication
-and Immutability; issue #457).
+Every release asset — the SBOM, the Sigstore bundles of both image
+attestations, and the OpenAPI document — must be attached to the draft GitHub
+Release before it is published, because release immutability locks the assets
+on publication (`docs/deployment.md`, Release Supply-Chain Artifacts, Release
+Publication and Immutability, and API Documentation Publication; issues #457
+and #1036).
 """
 
 from __future__ import annotations
@@ -42,6 +43,7 @@ class _Inputs:
     sbom: Path
     sbom_bundle: Path
     provenance_bundle: Path
+    openapi: Path
     runner_temp: Path
 
 
@@ -53,17 +55,34 @@ def _bundle(path: Path, marker: str) -> Path:
     return path
 
 
+def _openapi_document(version: str) -> str:
+    return (
+        json.dumps(
+            {
+                "openapi": "3.1.0",
+                "info": {"title": "Sentinel", "version": version},
+                "paths": {},
+            }
+        )
+        + "\n"
+    )
+
+
 def _inputs(tmp_path: Path) -> _Inputs:
     source = tmp_path / "source"
     source.mkdir()
     sbom = source / "sentinel-1.2.3.sbom.cdx.json"
     sbom.write_text('{"bomFormat": "CycloneDX"}\n', encoding="utf-8")
+    # The workflow artifact keeps the extraction's unversioned file name.
+    openapi = source / "openapi.json"
+    openapi.write_text(_openapi_document("1.2.3"), encoding="utf-8")
     runner_temp = tmp_path / "runner-temp"
     runner_temp.mkdir()
     return _Inputs(
         sbom=sbom,
         sbom_bundle=_bundle(source / "sbom-attestation.json", "sbom"),
         provenance_bundle=_bundle(source / "provenance-attestation.json", "slsa"),
+        openapi=openapi,
         runner_temp=runner_temp,
     )
 
@@ -95,6 +114,7 @@ def _run_publish(
         "SBOM_PATH": str(inputs.sbom),
         "SBOM_BUNDLE_PATH": str(inputs.sbom_bundle),
         "PROVENANCE_BUNDLE_PATH": str(inputs.provenance_bundle),
+        "OPENAPI_PATH": str(inputs.openapi),
         "RUNNER_TEMP": str(inputs.runner_temp),
     }
     env |= env_overrides or {}
@@ -107,7 +127,7 @@ def _run_publish(
 def _uploaded_assets(gh_calls: list[str]) -> list[Path]:
     upload = next(call for call in gh_calls if call.startswith("release upload "))
     arguments = upload.split()
-    return [Path(argument) for argument in arguments[3:6]]
+    return [Path(argument) for argument in arguments[3:7]]
 
 
 @pytest.mark.unit
@@ -138,16 +158,21 @@ def test_publish_names_release_assets_after_the_version(tmp_path: Path) -> None:
     result, gh_calls = _run_publish(tmp_path, inputs)
 
     assert result.returncode == 0
-    sbom, sbom_bundle, provenance_bundle = _uploaded_assets(gh_calls)
-    assert [sbom.name, sbom_bundle.name, provenance_bundle.name] == [
+    sbom, sbom_bundle, provenance_bundle, openapi = _uploaded_assets(gh_calls)
+    assert [sbom.name, sbom_bundle.name, provenance_bundle.name, openapi.name] == [
         "sentinel-1.2.3.sbom.cdx.json",
         "sentinel-1.2.3.sbom.sigstore.json",
         "sentinel-1.2.3.provenance.sigstore.json",
+        "sentinel-1.2.3.openapi.json",
     ]
     assert sbom.read_bytes() == inputs.sbom.read_bytes()
     assert sbom_bundle.read_bytes() == inputs.sbom_bundle.read_bytes()
     assert provenance_bundle.read_bytes() == inputs.provenance_bundle.read_bytes()
+    assert openapi.read_bytes() == inputs.openapi.read_bytes()
     assert sbom.parent.parent == inputs.runner_temp
+    assert {asset.parent for asset in (sbom_bundle, provenance_bundle, openapi)} == {
+        sbom.parent
+    }
 
 
 @pytest.mark.unit
@@ -230,6 +255,37 @@ def test_publish_rejects_a_missing_or_foreign_attestation_bundle(
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
+    "content",
+    [
+        None,
+        "",
+        "not json",
+        "[]",
+        _openapi_document("1.2.4"),
+        '{"info": {"version": "1.2.3"}, "paths": {}}',
+        '{"openapi": "3.1.0", "paths": {}}',
+    ],
+)
+def test_publish_refuses_without_the_openapi_document_of_the_release(
+    tmp_path: Path, content: str | None
+) -> None:
+    inputs = _inputs(tmp_path)
+    if content is None:
+        inputs.openapi.unlink()
+    else:
+        inputs.openapi.write_text(content, encoding="utf-8")
+
+    result, gh_calls = _run_publish(tmp_path, inputs)
+
+    assert result.returncode != 0
+    assert (
+        f"Not the OpenAPI document of version 1.2.3: {inputs.openapi}" in result.stderr
+    )
+    assert gh_calls == []
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
     "variable",
     [
         "RELEASE_TAG",
@@ -237,6 +293,7 @@ def test_publish_rejects_a_missing_or_foreign_attestation_bundle(
         "SBOM_PATH",
         "SBOM_BUNDLE_PATH",
         "PROVENANCE_BUNDLE_PATH",
+        "OPENAPI_PATH",
         "RUNNER_TEMP",
     ],
 )

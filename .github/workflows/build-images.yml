@@ -21,6 +21,7 @@ env:
   REGISTRY: ghcr.io
   SMOKE_IMAGE: sentinel-backend:smoke
   IMAGE_NAME: ${{ github.repository }}
+  OPENAPI_ARTIFACT_NAME: sentinel-openapi-${{ github.run_id }}
 
 jobs:
   build-backend:
@@ -131,6 +132,23 @@ jobs:
           overwrite: true
           retention-days: 7
 
+      # The tested candidate generates its own OpenAPI document
+      # (docs/deployment.md, API Documentation Publication); a version-tag
+      # build attaches it to the GitHub Release.
+      - name: Extract OpenAPI document
+        env:
+          TESTED_IMAGE: ${{ steps.image-smoke.outputs.image_id }}
+        run: ./scripts/extract-openapi.sh "${TESTED_IMAGE}" "${RUNNER_TEMP}/openapi/openapi.json"
+
+      - name: Retain OpenAPI document
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ env.OPENAPI_ARTIFACT_NAME }}
+          path: ${{ runner.temp }}/openapi/openapi.json
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 7
+
       # A published GitHub Release is final (docs/deployment.md, Release
       # Publication and Immutability). Checked immediately before the first
       # registry push so that no rerun can move the X.Y.Z tag of a published
@@ -187,6 +205,11 @@ jobs:
           name: ${{ needs.build-backend.outputs.sbom-artifact-name }}
           path: ${{ runner.temp }}/release-sbom
 
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ env.OPENAPI_ARTIFACT_NAME }}
+          path: ${{ runner.temp }}/release-openapi
+
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ${{ env.REGISTRY }}
@@ -212,8 +235,9 @@ jobs:
           push-to-registry: true
           create-storage-record: false
 
-      # Last step: attaches the SBOM and both attestation bundles to the
-      # draft release created by release-please, then publishes it.
+      # Last step: attaches the SBOM, both attestation bundles, and the
+      # OpenAPI document to the draft release created by release-please, then
+      # publishes it.
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -221,4 +245,5 @@ jobs:
           SBOM_PATH: ${{ runner.temp }}/release-sbom/${{ needs.build-backend.outputs.sbom-file-name }}
           SBOM_BUNDLE_PATH: ${{ steps.attest-sbom.outputs.bundle-path }}
           PROVENANCE_BUNDLE_PATH: ${{ steps.attest-provenance.outputs.bundle-path }}
+          OPENAPI_PATH: ${{ runner.temp }}/release-openapi/openapi.json
         run: ./scripts/publish-release.sh

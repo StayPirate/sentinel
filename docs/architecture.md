@@ -81,7 +81,8 @@ non-disclosure semantics.
 
 The `sentinel-aura` repository owns the UI and its specifications: navigation,
 screens, presentation, and client-side behavior. The UI uses Sentinel only
-through the API, as defined by the published OpenAPI contract and the
+through the API, as defined by the OpenAPI contract published with each
+release (`docs/deployment.md`, API Documentation Publication) and the
 specifications of this repository. UI specifications never define backend
 behavior: a capability that the UI needs and the API lacks is specified and
 implemented in this repository first.
