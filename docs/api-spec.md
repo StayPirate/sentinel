@@ -1017,7 +1017,8 @@ of non-standard behavior.
 
 Section-level declarations (e.g., "Global responses per api-spec.md
 apply to all endpoints in this section") are not necessary and MUST NOT
-be used — the derivation rules apply uniformly by access level and path.
+be used — the derivation rules apply uniformly by access level, method, path,
+and query shape.
 
 #### Derived Responses in the OpenAPI Document
 

@@ -302,17 +302,27 @@ A browser session carries its JWT in the session cookie, which the login
 endpoints and the sliding refresh set and the logout endpoint clears. The
 cookie is named `__Host-sentinel_session` and has the attributes `HttpOnly`,
 `Secure`, `SameSite=Strict`, and `Path=/`, and no `Domain` attribute.
-Credential selection considers only a cookie with exactly this name (Shared
-Credential Resolution): a cookie with any other name, including
-`sentinel_session` or the same name with a differently capitalized prefix, is
-ignored.
+
+Credential selection (Shared Credential Resolution) reads the cookie pairs of
+the `Cookie` request header and considers only a pair whose name is exactly
+`__Host-sentinel_session`. The name is compared after removing only the
+spaces and horizontal tabs that separate the pair from its neighbors, with no
+other decoding or normalization, so a pair with any other name is ignored:
+for example `sentinel_session`, the same name with a differently capitalized
+prefix, or the name preceded by another whitespace character such as U+00A0.
+If the name occurs more than once, the request carries an invalid credential:
+a browser that enforces the prefix sends at most one such cookie, so a second
+one was planted.
 
 A browser accepts a cookie whose name starts with `__Host-` only from a
 secure origin, with `Secure` and `Path=/`, and without `Domain`, so only the
 API host itself can set it. A page on another host of the same site therefore
 cannot plant a cookie of that name to replace the user's session with another
-one or with an invalid value. `Path=/` is required by the prefix; a narrower
-path would provide no isolation within the API's origin.
+one or with an invalid value. `Path=/` is required by the prefix; within the
+API's origin a narrower path would isolate nothing in the browser. The browser
+consequently sends the cookie with every request to the API host, including
+requests that another component behind the same host serves, which must not
+log it (`docs/deployment.md`, Pre-Production Checklist).
 
 ### Session liveness check
 
@@ -709,8 +719,10 @@ validation contract:
    - If the value uses any other scheme or has no parseable scheme, treat it
      as header absent and proceed to step 2.
 2. If the `Authorization` header is absent, check for the session cookie
-   (`__Host-sentinel_session`; a cookie with any other name is not
-   considered, see Session cookie):
+   (`__Host-sentinel_session`, read as defined in Session cookie; a cookie
+   with any other name is not considered):
+   - If the cookie occurs more than once: an invalid credential is selected,
+     and step 4 rejects it.
    - If the cookie has a non-empty value: extract its value as the token and go
      to step 3. A whitespace-only value is non-empty and therefore selects an
      invalid credential rather than anonymous access.
@@ -993,23 +1005,25 @@ The decision reads the first occurrence of the request's `Origin`,
    `same-site`, `cross-site`, and a value the Fetch Metadata specification
    does not define.
 3. If `Origin` is absent or empty, accept.
-4. Accept when `Origin` has the form `scheme://host` or `scheme://host:port`
-   and its host, followed by `:port` when the value states a port, equals
-   `Host` compared ASCII case-insensitively. Reject any other value,
-   including `null`. Forwarded headers such as `X-Forwarded-Host` and
-   `Forwarded` are not consulted.
+4. Accept when `Origin` is exactly `scheme://host` or `scheme://host:port`,
+   with a non-empty host and no user information, path (not even `/`),
+   query, or fragment, and its host, followed by `:port` when the value
+   states a port, equals `Host` compared ASCII case-insensitively. Reject
+   every other case, including `null` and a request without `Host`.
+   Forwarded headers such as `X-Forwarded-Host` and `Forwarded` are not
+   consulted, and the scheme is not compared because TLS can end before the
+   application.
 
 Every current major browser sends `Sec-Fetch-Site`, which a page can neither
-set nor remove, and its value distinguishes a page of the API's own origin
-from a same-site page. Rule 4 covers a browser that sends only `Origin`. A
-request with neither header comes from a client that is not a browser, or
-from a browser too old to send either, for which `SameSite=Strict` remains the
-only protection. Consequently:
+set nor remove, and its value distinguishes a page of the API's own origin,
+scheme included, from a same-site page. Rule 4 covers a browser that sends
+only `Origin`. A request with neither header comes from a client that is not
+a browser, or from a browser too old to send either, which this protection
+cannot cover. Consequently:
 
 - a browser client served from the API's origin needs no configuration;
-- a browser client served from another origin, same-site or cross-site, is
-  accepted only when its origin is listed in `CORS_ORIGINS`, which it needs
-  in any case to read responses; and
+- a browser client served from another origin, same-site or cross-site, needs
+  its origin listed in `CORS_ORIGINS`, as it does to read responses; and
 - clients that are not browsers, such as Bearer JWT and API key clients, are
   unaffected.
 
@@ -1103,10 +1117,12 @@ The lightweight dependency uses the same credential-source precedence as
 `get_current_user`: a non-empty `Authorization: Bearer` value takes precedence
 over the `__Host-sentinel_session` cookie; an absent or whitespace-only bearer
 value falls back to the cookie. It does not fall back to a valid cookie after a
-non-empty bearer credential fails. A selected credential beginning with
-`stl_ak_` produces the API-key-specific 400 response below.
+non-empty bearer credential fails. It reads the cookie as defined in Session
+cookie. A selected credential beginning with `stl_ak_` produces the
+API-key-specific 400 response below.
 
-If the token is not a valid JWT (invalid signature, malformed), return
+If the token is not a valid JWT (invalid signature, malformed), or the
+session cookie occurs more than once, return
 HTTP 401 with code `AUTH_NOT_AUTHENTICATED` and body
 `{"code": "AUTH_NOT_AUTHENTICATED", "detail": "Authentication required"}`.
 This endpoint does not use `get_current_user` and therefore handles
@@ -1181,10 +1197,14 @@ code `AUTH_LOGOUT_NOT_APPLICABLE` and message:
   cross-site requests only, so pages on other hosts of the same site remain
   able to trigger authenticated requests and to set cookies: Cross-Origin
   Request Protection rejects their unsafe requests, and the `__Host-` prefix
-  prevents them from replacing the session cookie. A browser that sends
-  neither `Sec-Fetch-Site` nor `Origin` with an unsafe request, or that does
-  not enforce cookie prefixes, has only the `SameSite=Strict` protection;
-  every current major browser does both.
+  prevents them from replacing the session cookie. Both rely on the browser:
+  one that sends neither `Sec-Fetch-Site` nor `Origin` with an unsafe
+  request, or that does not enforce cookie prefixes, leaves users unprotected
+  against pages on other hosts of the same site; every current major browser
+  does both. A page on another host of the same site can still log a user
+  out, for example by planting a second cookie with the session cookie's name
+  in such a browser or by overflowing the browser's cookie storage for the
+  domain, which evicts the session cookie in any browser.
 - **No concurrent session limit**: there is no enforced maximum number
   of active sessions per user. Users may have sessions on multiple
   devices simultaneously. This is a deliberate choice for an internal
@@ -1219,9 +1239,9 @@ code `AUTH_LOGOUT_NOT_APPLICABLE` and message:
     surface for cookie theft
   - Existing compensating controls: `Secure` flag (HTTPS only), `HttpOnly`
     (no script access to the token), `SameSite=Strict` (not sent with
-    cross-site requests),
-    maximum session lifetime (`SESSION_MAX_LIFETIME_DAYS`), admin
-    deactivation (invalidates all sessions immediately)
+    cross-site requests), maximum session lifetime
+    (`SESSION_MAX_LIFETIME_DAYS`), admin deactivation (invalidates all
+    sessions immediately)
   - Detection of session theft is not a goal for this tool; prevention
     via the cookie flags above is the primary defense
 - **OIDC state parameter not single-use (accepted risk)**: the OIDC

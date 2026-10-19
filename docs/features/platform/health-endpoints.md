@@ -12,7 +12,9 @@ because they are infrastructure concerns, not domain API. They require no
 authentication and do not follow the standard API response envelope. The
 exemption covers only the `GET` responses documented below: another method, or
 a path below either endpoint, receives the routing responses of
-`docs/api-spec.md` (Routing Responses) in the standard error envelope.
+`docs/api-spec.md` (Routing Responses) in the standard error envelope, unless
+Cross-Origin Request Protection rejects an unsafe method first
+(`docs/api-spec.md`, Cross-Origin Request Protection).
 
 ## Endpoints
 

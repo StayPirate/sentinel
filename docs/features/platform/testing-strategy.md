@@ -3619,34 +3619,44 @@ scenarios are required:
 
 - Login and sliding refresh set `__Host-sentinel_session` with `HttpOnly`,
   `Secure`, `SameSite=Strict`, and `Path=/` and without `Domain`
-- A valid JWT in a cookie with any other name, including `sentinel_session`
-  and `__HOST-sentinel_session`, selects no credential: mandatory
-  authentication returns the generic 401 and optional authentication is
-  anonymous
-- When a `sentinel_session` cookie carrying another user's valid JWT
-  accompanies the session cookie, in either order, the session cookie alone
-  authenticates the request
+- A valid JWT in a cookie with any other name, including `sentinel_session`,
+  `__HOST-sentinel_session`, and the exact name preceded by U+0085 or
+  U+00A0, selects no credential: mandatory authentication returns the
+  generic 401 and optional authentication is anonymous
+- When such a cookie carrying another user's valid JWT accompanies the
+  session cookie, before or after it, the session cookie alone authenticates
+  the request
+- A `Cookie` header containing the exact name twice returns the generic 401
+  under mandatory and optional authentication and at logout, even when both
+  values are valid JWTs
 
 **Cross-origin request protection:**
 
 - Through the registered application, for each unsafe method an endpoint
   serves (`POST`, `PATCH`, `DELETE`): `Sec-Fetch-Site` values `same-site`,
-  `cross-site`, and an undefined value return `403 AUTH_CROSS_ORIGIN_REJECTED`;
-  `same-origin` and `none` reach the endpoint's normal outcome
+  `cross-site`, `Same-Origin`, and an undefined value return
+  `403 AUTH_CROSS_ORIGIN_REJECTED` with the documented detail and an
+  `X-Request-ID` header; `same-origin` and `none` reach the endpoint's normal
+  outcome
 - An `Origin` listed in `CORS_ORIGINS` is accepted with `Sec-Fetch-Site`
   `cross-site` or `same-site` and without `Sec-Fetch-Site`
-- Without `Sec-Fetch-Site`: an `Origin` whose host and port equal `Host`,
-  in any letter case, is accepted; a different host, a different port,
-  `null`, and a value that is not an origin are rejected, also when
-  `X-Forwarded-Host` or `Forwarded` names the `Origin` host; a request with
-  neither `Origin` nor `Sec-Fetch-Site` is accepted
+- `Sec-Fetch-Site` decides whenever it is present and not empty:
+  `same-origin` with an `Origin` that differs from `Host` is accepted, and
+  `cross-site` with an `Origin` that equals `Host` is rejected
+- Without `Sec-Fetch-Site`, or with an empty one: an `Origin` whose host and
+  port equal `Host`, in any letter case, is accepted; a different host, a
+  different port, `null`, a request without `Host`, and values that are not
+  an origin, such as `https://host/`, `https://user@host`, and `https://`,
+  are rejected, also when `X-Forwarded-Host` or `Forwarded` names the
+  `Origin` host; a request with an empty or absent `Origin` is accepted
 - Only the first occurrence of each header is considered
 - `GET`, `HEAD`, and `OPTIONS` requests, including a CORS preflight, are
   never rejected, whatever their headers
 - The rejection precedes routing, body decoding, the shared request-input
   constraints, and authentication: an unknown path and a method the path does
-  not serve return the `403`, not a routing response, and so does a malformed
-  JSON body. A rejected logout or state-changing request carrying a valid
+  not serve, including one that no endpoint serves such as `PUT`, return the
+  `403`, not a routing response, and so does a malformed JSON body. A
+  rejected logout or state-changing request carrying a valid
   session cookie, a rejected request carrying a valid API key, and a rejected
   login with an existing account's credentials have no effect: no mutation,
   audit event, session invalidation, `last_used_at` touch, or lockout counter
