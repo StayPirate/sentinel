@@ -619,12 +619,12 @@ async def get_optional_current_user(
     (`get_optional_current_user`): applies Shared Credential Resolution
     to Public endpoints that declare `Authentication: Optional`. Returns
     `None` only when no credential is selected — no user/session/API-key
-    lookup, refresh, `last_used_at` touch, or unknown-key WARNING occurs
-    in that case. A selected credential is validated exactly as in
-    `get_current_user`: success returns the same `AuthenticatedPrincipal`
-    with the same side effects (JWT refresh, API-key `last_used_at`
-    touch); rejection raises the same generic 401 rather than degrading
-    to anonymous access.
+    lookup, refresh, `last_used_at` touch, `api_key_validation_failed`
+    WARNING, or `api_key_rejected` WARNING occurs in that case. A
+    selected credential is validated exactly as in `get_current_user`:
+    success returns the same `AuthenticatedPrincipal` with the same side
+    effects (JWT refresh, API-key `last_used_at` touch); rejection raises
+    the same generic 401 rather than degrading to anonymous access.
     """
     return await _resolve_principal(request, response, db)
 

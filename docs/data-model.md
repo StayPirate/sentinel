@@ -1,7 +1,8 @@
 # Data Model
 
 This document describes the database schema for Sentinel. All models are
-implemented as SQLAlchemy ORM classes in `backend/app/models/`.
+implemented as SQLAlchemy ORM classes in `backend/app/models/`, except
+`RoleMapping`, which belongs to a deferred specification (see RoleMapping).
 
 ## Contents
 
@@ -1472,11 +1473,11 @@ retained with its prior `catalog_last_seen_at`.
 
 Platform users with role-based access. Users are populated from an
 external identity provider (see
-`docs/features/identity/identity-provisioning.md`) or created locally via
-the authenticated administrator API or bootstrap/recovery CLI. Users can hold
-zero, one, or multiple roles via the UserRole
-junction table. Authenticated users with no roles have an effective scope
-of `non_confidential` and no capabilities; unlike unauthenticated users,
+`docs/features/identity/identity-provisioning.md`, a deferred specification)
+or created locally via the authenticated administrator API or
+bootstrap/recovery CLI. Users can hold zero, one, or multiple roles via the
+UserRole junction table. Authenticated users with no roles have an effective
+scope of `non_confidential` and no capabilities; unlike unauthenticated users,
 they can access specific confidential tickets via `TicketAccessGrant` or an
 included `TicketPackageMaintainer` association.
 
@@ -1541,9 +1542,9 @@ Order) for its locking protocol.
 #### Role Enum
 
 Sentinel platform roles. Category A — state-machine (VARCHAR + CHECK
-constraints: `chk_user_role_role_valid` on `user_role`,
-`chk_role_mapping_role_valid` on `role_mapping`). Adding a value
-requires an Alembic migration.
+constraints: `chk_user_role_role_valid` on `user_role`, and
+`chk_role_mapping_role_valid` on the deferred `role_mapping` table, see
+RoleMapping). Adding a value requires an Alembic migration.
 
 | Value | Description |
 |-------|-------------|
@@ -1563,6 +1564,10 @@ definitions in code (not stored in the database). See
 | Any other value | External group name — role derived from that group's RoleMapping rule |
 
 #### RoleMapping
+
+This entity belongs to `docs/features/identity/identity-provisioning.md`, a
+deferred specification. It has no model or migration while that specification
+is deferred; the table below is the schema that applies once it is active.
 
 Stores the mapping rules between external identity provider groups and
 Sentinel roles. Configured by admins via the UI or API. When a mapping

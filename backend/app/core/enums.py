@@ -19,11 +19,12 @@ from typing import Final
 class Role(StrEnum):
     """Sentinel platform roles.
 
-    Category A — state-machine (VARCHAR + CHECK constraints:
-    `chk_user_role_role_valid` on `user_role`,
-    `chk_role_mapping_role_valid` on `role_mapping`). Adding a value
-    requires an Alembic migration. See `docs/features/identity/rbac.md`
-    (Predefined Roles) and `docs/data-model.md` (Role Enum).
+    Category A — state-machine (VARCHAR + CHECK constraint
+    `chk_user_role_role_valid` on `user_role`; `chk_role_mapping_role_valid`
+    belongs to the `role_mapping` table of the deferred external
+    provisioning specification). Adding a value requires an Alembic
+    migration. See `docs/features/identity/rbac.md` (Predefined Roles) and
+    `docs/data-model.md` (Role Enum).
     """
 
     ADMIN = "Admin"

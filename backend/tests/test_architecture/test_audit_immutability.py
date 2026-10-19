@@ -4,8 +4,8 @@ See `docs/features/platform/audit-trail-infrastructure.md`
 (Immutability): "No application-level UPDATE or DELETE operations are
 permitted on [audit event] tables." This module provides a mechanical
 check so the rule does not rely solely on reviewer attention (see
-`docs/features/platform/testing-strategy.md`, Structural Tests —
-Audit Immutability Testing).
+`docs/features/platform/testing-strategy.md`, Immutability Testing and
+Structural Tests — Audit immutability).
 
 Scope: this test detects the two idiomatic SQLAlchemy 2.0 Core
 bulk-mutation forms used throughout this codebase — `update(Model)...`
@@ -20,9 +20,8 @@ implementation would realistically use, which is what this test
 guards against.
 
 Audit event models are discovered dynamically via
-`AuditEventMixin.__subclasses__()`, so this test starts protecting each
-new audit trail (ticket, identity, setting, fetcher) automatically as
-soon as its model is defined — no update to this test file is needed.
+`AuditEventMixin.__subclasses__()`, so this test covers every concrete
+audit trail, including one added later, without a change to this file.
 """
 
 from __future__ import annotations
@@ -100,8 +99,7 @@ def _audit_event_model_names() -> set[str]:
 @pytest.mark.unit
 class TestFindForbiddenMutationsDetector:
     """Unit tests for the pure AST detector, using synthetic sources and
-    fictional model names — independent of whether any real audit
-    trail exists yet.
+    fictional model names — independent of the real audit event models.
     """
 
     def test_detects_bulk_update_by_bare_name(self) -> None:
@@ -134,15 +132,12 @@ class TestNoForbiddenMutationsInServiceLayer:
     """Scans every real module under `app/services/` for the forbidden
     patterns, against the currently-registered audit event models.
 
-    `IdentityAuditEvent` (`app/models/identity_audit_event.py`) is the
-    first production `AuditEventMixin` subclass; the test-only
-    `SampleAuditEvent` (`tests/support/audit_models.py`) remains
-    registered alongside it. Neither name appears in any
-    `app/services/` module today, so this test currently passes because
-    no service performs a bulk `update()`/`delete()` against an audit
-    table — not because `model_names` is empty — and starts protecting
-    each further domain audit trail automatically as its model is
-    defined, with no update to this test file needed.
+    Importing `app.models` registers every production audit event model;
+    the test-only `SampleAuditEvent` (`tests/support/audit_models.py`)
+    is also registered when its module has been imported. The services
+    reference the production models, so the test passes because no
+    service performs a bulk `update()`/`delete()` against an audit
+    table, not because `model_names` is empty.
     """
 
     def test_no_service_module_bulk_updates_or_deletes_an_audit_table(self) -> None:

@@ -33,7 +33,7 @@ endpoint contract.
 | Capability | Operations Covered |
 |---|---|
 | `manage_users` | Create local users, update user fields, manage user roles, reset password, deactivate/reactivate, unlock, view deactivation impact, view/revoke all API keys, view admin-scoped identity audit log |
-| `manage_role_mappings` | Group-to-role mapping CRUD, preview role mapping |
+| `manage_role_mappings` | Group-to-role mapping CRUD, preview role mapping. These operations belong to [identity-provisioning](identity-provisioning.md), a deferred specification |
 | `manage_settings` | View/update system settings, preview the impact of a default-CVSS version change, trigger CVSS recalculation, view settings audit log |
 | `manage_fetchers` | Trigger manual fetcher run, rerun complete Ticket convergence for an accessible eligible Ticket, enable/disable fetchers, view/modify fetcher config, view fetcher audit log, view error details, view error tracebacks, view triggered_by_user identity, view disabled_by/enabled_by actors |
 | `admin_ticket_ops` | Set track affectedness to `FIXED` from any status |
@@ -174,8 +174,8 @@ Any logged-in user, regardless of role. Includes all Public access plus:
 | View deactivation impact | `manage_users` |
 | View/revoke all API keys | `manage_users` |
 | View admin-scoped identity audit log | `manage_users` |
-| Group-to-role mapping CRUD | `manage_role_mappings` |
-| Preview role mapping | `manage_role_mappings` |
+| Group-to-role mapping CRUD (deferred) | `manage_role_mappings` |
+| Preview role mapping (deferred) | `manage_role_mappings` |
 | View/update system settings | `manage_settings` |
 | Preview impact of a default-CVSS version change | `manage_settings` |
 | Trigger CVSS recalculation | `manage_settings` |
@@ -442,9 +442,9 @@ here with the required authorization level and a link to the owning spec.
 | Method | Endpoint | Authorization | Owning Spec |
 |--------|----------|---------------|-------------|
 | POST | `/api/v1/auth/login` | Public | [local-authentication](local-authentication.md#login) |
-| GET | `/api/v1/auth/sso/authorize` | Public | [sso-authentication](sso-authentication.md#sso-authorize) |
-| POST | `/api/v1/auth/sso/callback` | Public | [sso-authentication](sso-authentication.md#sso-callback) |
-| GET | `/api/v1/auth/providers` | Public | [sso-authentication](sso-authentication.md#list-auth-providers) |
+| GET | `/api/v1/auth/sso/authorize` | Public | [sso-authentication](sso-authentication.md#sso-authorize) (deferred) |
+| POST | `/api/v1/auth/sso/callback` | Public | [sso-authentication](sso-authentication.md#sso-callback) (deferred) |
+| GET | `/api/v1/auth/providers` | Public | [sso-authentication](sso-authentication.md#list-auth-providers) (deferred) |
 | POST | `/api/v1/auth/logout` | Authenticated | [authentication](authentication.md#logout) |
 
 ### Users
@@ -592,10 +592,10 @@ here with the required authorization level and a link to the owning spec.
 | POST | `/api/v1/admin/users/{user}/reactivate` | `manage_users` | [user-management](user-management.md#reactivate-user) |
 | GET | `/api/v1/admin/users/{user}/deactivation-impact` | `manage_users` | [user-management](user-management.md#get-deactivation-impact) |
 | POST | `/api/v1/admin/users/{user}/unlock` | `manage_users` | [user-management](user-management.md#unlock-user) |
-| GET | `/api/v1/admin/role-mappings` | `manage_role_mappings` | [identity-provisioning](identity-provisioning.md#list-role-mappings) |
-| POST | `/api/v1/admin/role-mappings` | `manage_role_mappings` | [identity-provisioning](identity-provisioning.md#create-role-mapping) |
-| POST | `/api/v1/admin/role-mappings/preview` | `manage_role_mappings` | [identity-provisioning](identity-provisioning.md#preview-role-mapping) |
-| DELETE | `/api/v1/admin/role-mappings/{id}` | `manage_role_mappings` | [identity-provisioning](identity-provisioning.md#delete-role-mapping) |
+| GET | `/api/v1/admin/role-mappings` | `manage_role_mappings` | [identity-provisioning](identity-provisioning.md#list-role-mappings) (deferred) |
+| POST | `/api/v1/admin/role-mappings` | `manage_role_mappings` | [identity-provisioning](identity-provisioning.md#create-role-mapping) (deferred) |
+| POST | `/api/v1/admin/role-mappings/preview` | `manage_role_mappings` | [identity-provisioning](identity-provisioning.md#preview-role-mapping) (deferred) |
+| DELETE | `/api/v1/admin/role-mappings/{id}` | `manage_role_mappings` | [identity-provisioning](identity-provisioning.md#delete-role-mapping) (deferred) |
 
 ### Infrastructure
 
@@ -611,10 +611,15 @@ here with the required authorization level and a link to the owning spec.
 - Capability names (e.g., `create_ticket`, `manage_users`) = requires the
   specified capability; see Predefined Roles for which roles include each
   capability
+- "(deferred)" = the owning specification is deferred (see its Status
+  section): the endpoint is not part of the API while that specification is
+  deferred, and its row records the authorization that applies once it is
+  active
 - User creation: external users are created by the external sync process (see
-  [identity-provisioning](identity-provisioning.md)); local users are created
-  through the authenticated administrator API or the bootstrap/recovery CLI
-  (see [user-management](user-management.md#create-user-admin))
+  [identity-provisioning](identity-provisioning.md), a deferred
+  specification); local users are created through the authenticated
+  administrator API or the bootstrap/recovery CLI (see
+  [user-management](user-management.md#create-user-admin))
 
 † Field-level capability — the endpoint has a base access level, but
   this specific request body field requires an additional capability.
@@ -820,19 +825,21 @@ See `docs/data-model.md`. Key tables:
   manager_id, synced_at)
 - **UserRole**: junction table linking users to roles with `group_name`
   (external group name or `_manual` for manual assignments)
-- **RoleMapping**: maps external group names to Sentinel roles
+- **RoleMapping**: maps external group names to Sentinel roles. It belongs to
+  [identity-provisioning](identity-provisioning.md), a deferred specification,
+  and has no table while that specification is deferred
 - **Role** enum: `Admin`, `Vulnerability Analyst`, `Restricted Analyst`
 
 The capability-to-role mapping and scope-to-role mapping are static
 definitions in code (not stored in the database). No new tables are
 required. The Role enum uses VARCHAR(30) columns protected by CHECK
-constraints (`chk_user_role_role_valid`, `chk_role_mapping_role_valid`)
-— Category A (state-machine, security-critical). Adding a new role
-requires an Alembic migration (DROP + ADD constraints — reversible).
-Values are never removed from the CHECK if existing records reference
-them. Deprecated roles (if ever needed) would be handled via a
-migration that reassigns affected users and then removes the value
-from the constraints.
+constraints (`chk_user_role_role_valid`, and `chk_role_mapping_role_valid` on
+the deferred `role_mapping` table) — Category A (state-machine,
+security-critical). Adding a new role requires an Alembic migration (DROP +
+ADD constraints — reversible). Values are never removed from the CHECK if
+existing records reference them. Deprecated roles (if ever needed) would be
+handled via a migration that reassigns affected users and then removes the
+value from the constraints.
 
 ### Role Wire Format
 

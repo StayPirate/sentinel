@@ -68,7 +68,7 @@ flowchart TB
     BEAT <--> RD
     CONSUMER -->|"inline domain writes"| PG
 
-    API -->|"OIDC/SSO"| IDP
+    API -.->|"OIDC/SSO (deferred)"| IDP
 
     WORKER -->|"REST API"| NVD
     WORKER -->|"REST API"| REDHAT
@@ -89,6 +89,10 @@ flowchart TB
     style external fill:#f3e8ff,stroke:#7c3aed
 ```
 
+The dashed SSO connection to the SUSE IdP belongs to
+[sso-authentication.md](features/identity/sso-authentication.md#status), a
+deferred specification.
+
 ---
 
 ## Data Model
@@ -97,7 +101,11 @@ Entity-relationship diagram showing all database tables and their
 connections. Only primary keys and foreign keys are shown for readability.
 See [data-model.md](data-model.md) for full column details.
 
-The diagram contains 34 physical tables across the groups summarized below.
+The diagram contains 34 tables across the groups summarized below.
+`RoleMapping` belongs to
+[identity-provisioning.md](features/identity/identity-provisioning.md#status),
+a deferred specification, and has no physical table while that specification
+is deferred.
 
 ```mermaid
 erDiagram
@@ -410,7 +418,7 @@ erDiagram
 | **CVE Enrichment** | CVEAffectedVersion, CVECWE, CVESSVCAssessment, CVEKEVEntry, CVEEPSSScore | Supplementary CVE intelligence from secondary sources (CISA, FIRST) |
 | **Ticket Domain** | Ticket, TicketAuditEvent, TicketAccessGrant, TicketReference, TicketPackage, TicketPackageMaintainer, TicketPackageTrack, TicketPackageProduct | Security workflow, audit trail, and access control |
 | **Product Domain** | Product, ProductRepository | SUSE distribution products and update repositories |
-| **Identity Domain** | User, UserRole, RoleMapping, Session, ApiKey, IdentityAuditEvent | Users, roles, sessions, API keys, and identity audit trail |
+| **Identity Domain** | User, UserRole, RoleMapping (deferred), Session, ApiKey, IdentityAuditEvent | Users, roles, sessions, API keys, and identity audit trail |
 | **IBS Integration** | IBSRequest, IBSRequestAction, IBSRequestActionTrack | Current IBS request parents, normalized submission/release actions, and exact track correlations |
 | **Platform** | FetcherConfig, FetcherRun, FetcherAuditEvent, SystemSetting, SettingAuditEvent | Background task monitoring and system configuration |
 | **Operational** | TrackReleaseCheckpoint | Per-track expanded IBS source state last successfully examined |

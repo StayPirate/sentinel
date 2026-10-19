@@ -5,10 +5,10 @@ authoritative error response contract this module implements: every
 error response body is `{"code": "...", "detail": "..."}` (plus an
 optional `errors` array for `VALIDATION_ERROR`, and the top-level
 `existing_ticket_id` of `TICKET_CVE_CONFLICT`). `ErrorCode` is the
-"Python enum in the backend (`app/core/errors.py`)" the spec refers to
-as the canonical registry of valid codes — new codes are added
-incrementally as the corresponding feature is implemented, not
-pre-declared for unimplemented features.
+"Python enum in the backend (`app/core/errors.py`)" the spec refers to:
+it holds every registered code except the reserved codes of deferred
+specifications, which are added when their specification becomes
+active.
 
 `AppError` is the exception API-layer code raises to produce this
 envelope; it is translated to a JSON response by the global exception

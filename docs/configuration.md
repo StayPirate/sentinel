@@ -79,6 +79,10 @@ application constants, not configurable via environment variables.
 
 ## SSO Configuration
 
+These settings belong to `docs/features/identity/sso-authentication.md`, a
+deferred specification. Sentinel does not read them while that specification
+is deferred, and the behavior below applies once it is active.
+
 All SSO settings are **optional**. If any of the required SSO settings
 (`SSO_ISSUER_URL`, `SSO_CLIENT_ID`, `SSO_CLIENT_SECRET`,
 `SSO_REDIRECT_URI`) is empty or unset, the application starts with **SSO
