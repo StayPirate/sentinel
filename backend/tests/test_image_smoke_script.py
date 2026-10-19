@@ -10,6 +10,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.support.yaml_files import load_yaml_file, string_values
+
 ROOT_DIR = Path(__file__).resolve().parents[2]
 SCRIPT_PATH = ROOT_DIR / "scripts" / "image-smoke.sh"
 IMAGE_ID = f"sha256:{'a' * 64}"
@@ -23,6 +25,9 @@ ROLE_CONTAINERS = {
     "beat": "dddddddddddd",
     "ibs-consumer": "ffffffffffff",
 }
+# The infrastructure services of docker-compose.smoke.yml and their images,
+# in the order of the runner's bounded pre-pull list.
+INFRASTRUCTURE_IMAGES = {"postgres": "postgres:18", "redis": "redis:8"}
 
 PYTHON_STUB = r"""#!/usr/bin/env bash
 set -euo pipefail
@@ -708,18 +713,35 @@ def test_runner_retains_original_candidate_reference_for_capture_and_drift(
 
 @pytest.mark.unit
 def test_compose_pins_app_roles_and_uses_dynamic_loopback_port() -> None:
-    compose = (ROOT_DIR / "docker-compose.smoke.yml").read_text(encoding="utf-8")
+    compose_path = ROOT_DIR / "docker-compose.smoke.yml"
+    compose_text = compose_path.read_text(encoding="utf-8")
+    # Merge keys are resolved: each role is checked with the values it
+    # inherits from the shared application anchor.
+    services = load_yaml_file(compose_path)["services"]
 
-    assert "image: ${IMAGE_SMOKE_IMAGE_ID:?IMAGE_SMOKE_IMAGE_ID is required}" in compose
-    assert "build:" not in compose
-    assert "SENTINEL_IMAGE" not in compose
-    assert "IMAGE_SMOKE_PORT" not in compose
-    assert '- "127.0.0.1::8000"' in compose
-    assert "image: postgres:18" in compose
-    assert "image: redis:8" in compose
-    api_section = compose.split("  api:\n", 1)[1].split("\n  migrate:\n", 1)[0]
-    assert "command:" not in api_section
-    assert "http://localhost:8000/ready" in api_section
+    assert set(services) == set(ROLE_CONTAINERS) | set(INFRASTRUCTURE_IMAGES)
+    for role in ROLE_CONTAINERS:
+        assert services[role]["image"] == (
+            "${IMAGE_SMOKE_IMAGE_ID:?IMAGE_SMOKE_IMAGE_ID is required}"
+        ), role
+        assert "build" not in services[role], role
+    for name, image in INFRASTRUCTURE_IMAGES.items():
+        assert services[name]["image"] == image
+    # Only the API publishes a port: a daemon-allocated host port on loopback.
+    assert {
+        name: service["ports"]
+        for name, service in services.items()
+        if "ports" in service
+    } == {"api": ["127.0.0.1::8000"]}
+    api = services["api"]
+    assert "command" not in api
+    assert any(
+        "http://localhost:8000/ready" in part
+        for part in string_values(api["healthcheck"])
+    )
+    assert "build:" not in compose_text
+    assert "SENTINEL_IMAGE" not in compose_text
+    assert "IMAGE_SMOKE_PORT" not in compose_text
 
 
 @pytest.mark.unit
@@ -732,8 +754,7 @@ def test_runner_no_build_reuses_local_image_and_pulls_only_infrastructure(
     docker_calls = _docker_calls(calls)
     assert not any(call.startswith("docker build ") for call in docker_calls)
     assert [call for call in docker_calls if call.startswith("docker pull ")] == [
-        "docker pull postgres:18",
-        "docker pull redis:8",
+        f"docker pull {image}" for image in INFRASTRUCTURE_IMAGES.values()
     ]
 
 

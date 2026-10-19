@@ -1,11 +1,17 @@
-"""Structural tests for OpenCode reviewer command permissions."""
+"""Structural tests for OpenCode reviewer command permissions.
+
+The YAML front matter of each definition is parsed
+(`tests/support/yaml_files.py`); only the permission comment, which is not
+YAML data, is read from its text.
+"""
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 import pytest
+
+from tests.support.yaml_files import YamlMapping, load_yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 AGENTS_DIR = REPO_ROOT / ".opencode" / "agents"
@@ -168,26 +174,29 @@ ROLE_EXTENSIONS = {
     ),
 }
 
-_BASH_RULE_RE = re.compile(r'^    "([^"]+)": (allow|ask|deny)$')
+
+def _split_front_matter(text: str, name: str) -> tuple[str, str]:
+    """Return the YAML front matter and the body of a definition."""
+    lines = text.splitlines(keepends=True)
+    delimiters = [index for index, line in enumerate(lines) if line.rstrip() == "---"]
+    assert len(delimiters) > 1, f"{name}: no front matter"
+    assert delimiters[0] == 0, f"{name}: no front matter"
+    end = delimiters[1]
+    return "".join(lines[1:end]), "".join(lines[end + 1 :])
 
 
-def _frontmatter(path: Path) -> list[str]:
-    text = path.read_text(encoding="utf-8")
-    _, frontmatter, _ = text.split("---", 2)
-    return frontmatter.splitlines()
+def _permissions(front_matter: str, name: str) -> YamlMapping:
+    permission = load_yaml(front_matter, source=name).get("permission")
+    assert isinstance(permission, dict), f"{name}: no permission mapping"
+    return permission
 
 
-def _bash_rules(frontmatter: list[str]) -> tuple[tuple[str, str], ...]:
-    start = frontmatter.index("  bash:") + 1
-    rules: list[tuple[str, str]] = []
-    for line in frontmatter[start:]:
-        if line.lstrip().startswith("#"):
-            continue
-        match = _BASH_RULE_RE.fullmatch(line)
-        if not match:
-            break
-        rules.append((match.group(1), match.group(2)))
-    return tuple(rules)
+def _bash_rules(permission: YamlMapping) -> tuple[tuple[str, str], ...]:
+    """The ordered Bash permission rules; OpenCode applies the last match, so
+    the order is part of the policy."""
+    rules = permission.get("bash", {})
+    assert isinstance(rules, dict)
+    return tuple(rules.items())
 
 
 @pytest.mark.unit
@@ -219,11 +228,17 @@ def test_reviewer_permissions_match_shared_baseline() -> None:
         )
 
     for path in agent_paths:
-        frontmatter = _frontmatter(path)
-        if "  edit: deny" not in frontmatter:
+        front_matter, _ = _split_front_matter(
+            path.read_text(encoding="utf-8"), path.name
+        )
+        permission = _permissions(front_matter, path.name)
+        if permission.get("edit") != "deny":
             errors.append(f"{path.name}: edit permission must be deny")
+        # Comments are not YAML data, so this check reads the text.
         comments = {
-            line.strip() for line in frontmatter if line.lstrip().startswith("#")
+            line.strip()
+            for line in front_matter.splitlines()
+            if line.lstrip().startswith("#")
         }
         if not set(DEFENSE_IN_DEPTH_COMMENT) <= comments:
             errors.append(
@@ -231,7 +246,7 @@ def test_reviewer_permissions_match_shared_baseline() -> None:
             )
 
         expected = READ_ONLY_BASELINE + ROLE_EXTENSIONS.get(path.stem, ())
-        actual = _bash_rules(frontmatter)
+        actual = _bash_rules(permission)
         if actual != expected:
             errors.append(
                 f"{path.name}: bash rules differ from the shared baseline "
@@ -248,8 +263,7 @@ def test_reviewer_prompts_expose_role_and_output_contracts() -> None:
 
     errors: list[str] = []
     for path in agent_paths:
-        text = path.read_text(encoding="utf-8")
-        _, _, body = text.split("---", 2)
+        _, body = _split_front_matter(path.read_text(encoding="utf-8"), path.name)
         # Only the discovery-facing role and the final report contract are
         # fixed anchors; specialist procedures intentionally vary by reviewer.
         headings = {
@@ -277,3 +291,45 @@ def test_opencode_command_definitions_are_direct_children() -> None:
         "Nested Markdown files are registered as unintended OpenCode commands:\n"
         + "\n".join(str(path) for path in nested_commands)
     )
+
+
+@pytest.mark.unit
+def test_bash_rules_include_every_rule_whatever_its_formatting() -> None:
+    # Quoting style, unquoted keys, and comments do not end the rule list,
+    # and a `---` inside a value does not end the front matter.
+    front_matter, body = _split_front_matter(
+        "---\n"
+        "description: Example --- with a dash run\n"
+        "permission:\n"
+        "  edit: deny\n"
+        "  bash:\n"
+        '    "rm *": deny\n'
+        "    # a comment\n"
+        "    'curl *': allow\n"
+        "    git status: allow\n"
+        "---\n"
+        "## Role\n",
+        "example.md",
+    )
+
+    assert _bash_rules(_permissions(front_matter, "example.md")) == (
+        ("rm *", "deny"),
+        ("curl *", "allow"),
+        ("git status", "allow"),
+    )
+    assert body == "## Role\n"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "text",
+    [
+        "## Role\n",
+        "## Role\n---\ntext\n---\n",  # thematic breaks in the body only
+        "---\ndescription: Example\n## Role\n",  # unclosed front matter
+    ],
+    ids=["no-delimiter", "body-rules-only", "unclosed"],
+)
+def test_definition_without_front_matter_fails(text: str) -> None:
+    with pytest.raises(AssertionError, match=r"example\.md: no front matter"):
+        _split_front_matter(text, "example.md")

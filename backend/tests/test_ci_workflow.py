@@ -12,45 +12,60 @@ This test extracts the exact shell script from the step and executes it
 against fixture files in an isolated temporary directory (never against
 this repository's real `backend/` files), verifying both the match and
 each mismatch case.
+
+The workflow and `codecov.yml` are parsed as YAML
+(`tests/support/yaml_files.py`); only the Renovate hint comment and
+whole-file absence checks read the workflow text.
 """
 
 from __future__ import annotations
 
 import re
 import subprocess
-import textwrap
 from pathlib import Path
 
 import pytest
 
-WORKFLOW_PATH = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "ci.yml"
-
-STEP_NAME_MARKER = (
-    "name: Verify Dockerfile and pyproject.toml Python version match .python-version"
+from tests.support.yaml_files import (
+    YamlMapping,
+    job_steps,
+    load_yaml_file,
+    named_step,
+    step_index,
+    string_values,
+    workflow_jobs,
 )
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "ci.yml"
+RELEASE_WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "build-images.yml"
+CODECOV_CONFIG_PATH = REPO_ROOT / "codecov.yml"
+
+DRIFT_CHECK_STEP = (
+    "Verify Dockerfile and pyproject.toml Python version match .python-version"
+)
+BUILD_STEP = "Build backend image (load only, no push)"
+SMOKE_STEP = "Image smoke test (blocking gate)"
+SBOM_STEP = "Generate and validate release SBOM candidate"
+SBOM_UPLOAD_STEP = "Upload release SBOM candidate"
+SCOPE_STEP = "Determine dependency audit scope"
+AUDIT_STEP = "Run pip-audit (dependency vulnerabilities)"
+
+
+def _ci_jobs() -> dict[str, YamlMapping]:
+    return workflow_jobs(load_yaml_file(WORKFLOW_PATH))
+
+
+def _uses(step: YamlMapping, action: str) -> bool:
+    """Whether `step` uses `action` (`owner/name`) at any reference."""
+    return str(step.get("uses", "")).startswith(f"{action}@")
 
 
 def _drift_check_script() -> str:
     """Extract the shell script executed by the version drift check step."""
-    lines = WORKFLOW_PATH.read_text(encoding="utf-8").splitlines()
-    marker_index = next(
-        index for index, line in enumerate(lines) if STEP_NAME_MARKER in line
-    )
-    run_index = next(
-        index
-        for index in range(marker_index, len(lines))
-        if lines[index].strip() == "run: |"
-    )
-    run_indent = len(lines[run_index]) - len(lines[run_index].lstrip())
-    script_lines: list[str] = []
-
-    for line in lines[run_index + 1 :]:
-        indentation = len(line) - len(line.lstrip())
-        if line.strip() and indentation <= run_indent:
-            break
-        script_lines.append(line)
-
-    return textwrap.dedent("\n".join(script_lines))
+    script = named_step(_ci_jobs()["backend-lint"], DRIFT_CHECK_STEP)["run"]
+    assert isinstance(script, str)
+    return script
 
 
 def _run_drift_check(
@@ -168,178 +183,179 @@ def test_drift_check_accepts_well_formed_minor_only_version(tmp_path: Path) -> N
 @pytest.mark.unit
 def test_pull_request_image_job_generates_validated_sbom_candidate() -> None:
     workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
-    image_job = workflow.split("  image-smoke:", 1)[1]
-    smoke_step = image_job.split("- name: Image smoke test", 1)[1].split(
-        "- name: Generate and validate", 1
-    )[0]
-    sbom_step = image_job.split("- name: Generate and validate", 1)[1].split(
-        "- name: Upload release SBOM", 1
-    )[0]
+    image_job = _ci_jobs()["image-smoke"]
+    smoke_step = named_step(image_job, SMOKE_STEP)
+    sbom_step = named_step(image_job, SBOM_STEP)
+    upload_step = named_step(image_job, SBOM_UPLOAD_STEP)
 
-    assert "if: github.event_name == 'pull_request'" in workflow
-    assert "name: Generate and validate release SBOM candidate" in workflow
-    assert "./scripts/sbom-gate.sh" in workflow
-    assert "name: sentinel-sbom-candidate" in workflow
-    assert '"ghcr.io/${IMAGE_NAME,,}"' in workflow
-    assert "retention-days: 7" in workflow
+    assert image_job["if"] == "github.event_name == 'pull_request'"
+    assert sbom_step["run"].startswith("./scripts/sbom-gate.sh ")
+    assert '"ghcr.io/${IMAGE_NAME,,}"' in sbom_step["run"]
+    assert _uses(upload_step, "actions/upload-artifact")
+    assert upload_step["with"]["name"] == "sentinel-sbom-candidate"
+    assert upload_step["with"]["retention-days"] == 7
     assert "actions/attest@" not in workflow
     assert "gh release upload" not in workflow
-    assert "id: image-smoke" in smoke_step
-    assert "TESTED_IMAGE: ${{ steps.image-smoke.outputs.image_id }}" in sbom_step
-    assert '"${TESTED_IMAGE}"' in sbom_step
-    assert '"${SMOKE_IMAGE}"' not in sbom_step
+    assert smoke_step["id"] == "image-smoke"
     assert (
-        workflow.index("name: Build backend image (load only, no push)")
-        < workflow.index("name: Image smoke test (blocking gate)")
-        < workflow.index("name: Generate and validate release SBOM candidate")
+        sbom_step["env"]["TESTED_IMAGE"] == "${{ steps.image-smoke.outputs.image_id }}"
+    )
+    assert '"${TESTED_IMAGE}"' in sbom_step["run"]
+    assert not any("SMOKE_IMAGE" in value for value in string_values(sbom_step))
+    assert (
+        step_index(image_job, BUILD_STEP)
+        < step_index(image_job, SMOKE_STEP)
+        < step_index(image_job, SBOM_STEP)
+        < step_index(image_job, SBOM_UPLOAD_STEP)
     )
 
 
 @pytest.mark.unit
 def test_pull_request_image_job_smokes_loaded_image_without_override() -> None:
-    workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
-    image_job = workflow.split("  image-smoke:", 1)[1]
-    build_step = image_job.split("- name: Build backend image", 1)[1].split(
-        "- name: Image smoke test", 1
-    )[0]
-    smoke_step = image_job.split("- name: Image smoke test", 1)[1].split(
-        "- name: Generate and validate", 1
-    )[0]
+    image_job = _ci_jobs()["image-smoke"]
+    build_steps = [
+        step for step in job_steps(image_job) if _uses(step, "docker/build-push-action")
+    ]
+    smoke_step = named_step(image_job, SMOKE_STEP)
 
-    assert image_job.count("uses: docker/build-push-action") == 1
-    assert "push: false" in build_step
-    assert "load: true" in build_step
-    assert "SENTINEL_IMAGE: ${{ env.SMOKE_IMAGE }}" in smoke_step
-    assert "./scripts/image-smoke.sh --no-build" in smoke_step
-    assert "COMPOSE_CMD" not in image_job
+    assert len(build_steps) == 1
+    assert build_steps[0]["name"] == BUILD_STEP
+    assert build_steps[0]["with"]["push"] is False
+    assert build_steps[0]["with"]["load"] is True
+    assert smoke_step["env"]["SENTINEL_IMAGE"] == "${{ env.SMOKE_IMAGE }}"
+    assert smoke_step["run"] == "./scripts/image-smoke.sh --no-build"
+    assert "COMPOSE_CMD" not in WORKFLOW_PATH.read_text(encoding="utf-8")
 
 
 @pytest.mark.unit
 def test_ci_and_release_workflows_share_sbom_gate() -> None:
-    release_workflow = (
-        Path(__file__).resolve().parents[2]
-        / ".github"
-        / "workflows"
-        / "build-images.yml"
-    ).read_text(encoding="utf-8")
-    ci_workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+    for path in (WORKFLOW_PATH, RELEASE_WORKFLOW_PATH):
+        workflow = load_yaml_file(path)
+        gate_runs = [
+            step["run"]
+            for job in workflow_jobs(workflow).values()
+            for step in job_steps(job)
+            if "sbom-gate.sh" in str(step.get("run", ""))
+        ]
+        mentions = sum(value.count("sbom-gate.sh") for value in string_values(workflow))
 
-    gate_command = "./scripts/sbom-gate.sh"
-    assert ci_workflow.count(gate_command) == 1
-    assert release_workflow.count(gate_command) == 1
-
-
-def _backend_security_job() -> str:
-    workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
-    return workflow.split("  backend-security:", 1)[1].split("\n  shell-lint:", 1)[0]
+        assert len(gate_runs) == 1, path.name
+        assert gate_runs[0].startswith("./scripts/sbom-gate.sh "), path.name
+        assert mentions == 1, path.name
 
 
 @pytest.mark.unit
 def test_pip_audit_runs_only_when_audit_scope_requires_it() -> None:
     # testing-strategy.md (CI Pipeline, gate 6); issue #708.
-    job = _backend_security_job()
-    scope_step = job.split("- name: Determine dependency audit scope", 1)[1].split(
-        "- name: Run pip-audit", 1
-    )[0]
-    audit_step = job.split("- name: Run pip-audit", 1)[1]
+    job = _ci_jobs()["backend-security"]
+    checkout_step = job_steps(job)[0]
+    scope_step = named_step(job, SCOPE_STEP)
+    audit_step = named_step(job, AUDIT_STEP)
 
-    assert "name: Backend Security Scan" in job
-    assert "fetch-depth: 2" in job
-    assert "id: audit-scope" in scope_step
-    assert "run: ../scripts/dependency-audit-scope.sh" in scope_step
-    assert "EVENT_NAME: ${{ github.event_name }}" in scope_step
-    assert "HEAD_REF: ${{ github.head_ref }}" in scope_step
-    assert "PUSH_BEFORE: ${{ github.event.before }}" in scope_step
-    assert "if: steps.audit-scope.outputs.required == 'true'" in audit_step
-    assert "uvx pip-audit@" in audit_step
+    assert job["name"] == "Backend Security Scan"
+    assert _uses(checkout_step, "actions/checkout")
+    assert checkout_step["with"]["fetch-depth"] == 2
+    assert scope_step["id"] == "audit-scope"
+    assert scope_step["run"] == "../scripts/dependency-audit-scope.sh"
+    assert (
+        scope_step["env"].items()
+        >= {
+            "EVENT_NAME": "${{ github.event_name }}",
+            "HEAD_REF": "${{ github.head_ref }}",
+            "PUSH_BEFORE": "${{ github.event.before }}",
+        }.items()
+    )
+    assert step_index(job, SCOPE_STEP) < step_index(job, AUDIT_STEP)
+    assert audit_step["if"] == "steps.audit-scope.outputs.required == 'true'"
+    assert "uvx pip-audit@" in audit_step["run"]
     assert "continue-on-error" not in audit_step
     # Untrusted context values reach the script only through env, never by
     # interpolation into the shell command.
-    assert "${{" not in scope_step.split("run:", 1)[1]
-
-
-CODECOV_CONFIG_PATH = Path(__file__).resolve().parents[2] / "codecov.yml"
-
-
-def _ci_job(job_id: str) -> str:
-    """Return the text of one top-level job of ci.yml."""
-    workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
-    job = workflow.split(f"\n  {job_id}:\n", 1)[1]
-    return re.split(r"\n  [a-z][a-z0-9-]*:\n", job, maxsplit=1)[0]
+    assert "${{" not in scope_step["run"]
 
 
 @pytest.mark.unit
 def test_backend_tests_hand_coverage_report_to_upload_job() -> None:
     # docs/deployment.md (Workflow Conventions, Coverage reporting); issue #823.
-    job = _ci_job("backend-test")
-    retain_step = job.split("- name: Retain coverage report", 1)[1].split("- name:", 1)[
-        0
-    ]
+    job = _ci_jobs()["backend-test"]
+    retain_step = named_step(job, "Retain coverage report")
 
-    assert "codecov/codecov-action" not in job
-    assert "if: ${{ !cancelled() }}" in retain_step
-    assert "uses: actions/upload-artifact@" in retain_step
-    assert "name: backend-coverage" in retain_step
-    assert "path: backend/coverage.xml" in retain_step
-    assert "if-no-files-found: error" in retain_step
+    assert not any(_uses(step, "codecov/codecov-action") for step in job_steps(job))
+    assert retain_step["if"] == "${{ !cancelled() }}"
+    assert _uses(retain_step, "actions/upload-artifact")
+    assert retain_step["with"]["name"] == "backend-coverage"
+    assert retain_step["with"]["path"] == "backend/coverage.xml"
+    assert retain_step["with"]["if-no-files-found"] == "error"
 
 
 @pytest.mark.unit
 def test_coverage_upload_job_fails_on_pull_request_error_with_pinned_cli() -> None:
-    job = _ci_job("coverage-upload")
+    job = _ci_jobs()["coverage-upload"]
+    steps = job_steps(job)
+    checkout_step = next(step for step in steps if _uses(step, "actions/checkout"))
+    download_step = next(
+        step for step in steps if _uses(step, "actions/download-artifact")
+    )
+    upload_step = named_step(job, "Upload coverage to Codecov")
 
-    assert "name: Coverage Upload" in job
-    assert "needs: backend-test" in job
-    assert "if: ${{ !cancelled() }}" in job
-    assert "persist-credentials: false" in job
-    assert "name: backend-coverage" in job
-    assert "uses: codecov/codecov-action@" in job
-    assert "files: backend/coverage.xml" in job
-    assert "disable_search: true" in job
+    assert job["name"] == "Coverage Upload"
+    assert job["needs"] == "backend-test"
+    assert job["if"] == "${{ !cancelled() }}"
+    assert checkout_step["with"]["persist-credentials"] is False
+    assert download_step["with"]["name"] == "backend-coverage"
+    assert _uses(upload_step, "codecov/codecov-action")
+    assert upload_step["with"]["files"] == "backend/coverage.xml"
+    assert upload_step["with"]["disable_search"] is True
     # Fails only where the required Codecov statuses gate a merge; a push to
     # master must not turn the CI run that gates release-please and
     # build-images red because of Codecov.
-    assert "fail_ci_if_error: ${{ github.event_name == 'pull_request' }}" in job
+    assert upload_step["with"]["fail_ci_if_error"] == (
+        "${{ github.event_name == 'pull_request' }}"
+    )
     # The CLI version is an exact release, never "latest", and carries the
-    # hint comment the renovate.jsonc custom manager matches.
+    # hint comment the renovate.jsonc custom manager matches; the comment is
+    # not YAML data, so it is read from the text.
+    version = upload_step["with"]["version"]
+    assert re.fullmatch(r"v\d+\.\d+\.\d+", version)
     assert re.search(
         r"# renovate: datasource=github-releases depName=codecov/codecov-cli\n"
-        r"\s+version: \"v\d+\.\d+\.\d+\"\n",
-        job,
+        rf"\s+version: \"{re.escape(version)}\"\n",
+        WORKFLOW_PATH.read_text(encoding="utf-8"),
     )
 
 
 @pytest.mark.unit
 def test_codecov_token_is_scoped_to_coverage_upload_job() -> None:
     workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+    jobs_with_token = [
+        job_id
+        for job_id, job in _ci_jobs().items()
+        if any("secrets.CODECOV_TOKEN" in value for value in string_values(job))
+    ]
 
     assert workflow.count("secrets.CODECOV_TOKEN") == 1
-    assert "secrets.CODECOV_TOKEN" in _ci_job("coverage-upload")
+    assert jobs_with_token == ["coverage-upload"]
 
 
 @pytest.mark.unit
 def test_codecov_statuses_are_informational_and_do_not_wait_for_ci() -> None:
     # Required merge checks must never fail on coverage values nor wait on,
     # or fail because of, other (possibly advisory) CI checks.
-    config = CODECOV_CONFIG_PATH.read_text(encoding="utf-8")
-    codecov_section = config.split("\ncodecov:\n", 1)[1].split("\ncoverage:\n", 1)[0]
-    status_section = config.split("\ncoverage:\n", 1)[1]
-    project = status_section.split("    project:\n", 1)[1].split("    patch:\n", 1)[0]
-    patch = status_section.split("    patch:\n", 1)[1]
+    config = load_yaml_file(CODECOV_CONFIG_PATH)
+    status = config["coverage"]["status"]
 
-    assert "\n  require_ci_to_pass: false\n" in codecov_section
-    assert "\n    wait_for_ci: false\n" in codecov_section
-    assert "\n    notify_error: true\n" in codecov_section
-    assert "      default:\n        informational: true\n" in project
-    assert "      default:\n        informational: true\n" in patch
+    assert config["codecov"]["require_ci_to_pass"] is False
+    assert config["codecov"]["notify"]["wait_for_ci"] is False
+    assert config["codecov"]["notify"]["notify_error"] is True
+    for kind in ("project", "patch"):
+        assert status[kind]["default"]["informational"] is True
 
 
 @pytest.mark.unit
 def test_bandit_and_security_job_run_unconditionally() -> None:
-    job = _backend_security_job()
-    header = job.split("steps:", 1)[0]
-    bandit_step = job.split("- name: Run bandit", 1)[1].split("- name:", 1)[0]
+    job = _ci_jobs()["backend-security"]
+    bandit_step = named_step(job, "Run bandit (static analysis)")
 
-    assert "if:" not in header
-    assert "if:" not in bandit_step
-    assert "uvx bandit@" in bandit_step
+    assert "if" not in job
+    assert "if" not in bandit_step
+    assert "uvx bandit@" in bandit_step["run"]

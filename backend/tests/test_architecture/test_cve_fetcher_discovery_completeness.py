@@ -39,7 +39,6 @@ proves `fetcher_discovery.py` imports every concrete fetcher module.
 
 from __future__ import annotations
 
-import ast
 import json
 import os
 import re
@@ -59,6 +58,7 @@ from app.services.base_cve_fetcher import _CVE_SOURCE_TYPE_MAP, BaseCVEFetcher
 from app.services.base_fetcher import FETCHER_REGISTRY, BaseFetcher
 from tests.support.cve_discovery import assert_complete_cve_discovery
 from tests.support.module_imports import APP_ROOT
+from tests.support.yaml_files import load_yaml_file
 
 _BACKEND_DIR: Final = APP_ROOT.parent
 _REPOSITORY_ROOT: Final = _BACKEND_DIR.parent
@@ -163,9 +163,6 @@ _FENCED_BLOCK: Final = re.compile(
 )
 _CODE_SPAN: Final = re.compile(r"`([^`]+)`")
 
-_SERVICE_INDENT: Final = 2
-_PROPERTY_INDENT: Final = 4
-
 
 def command_role(argv: Sequence[str]) -> tuple[str, str | None]:
     """The entry target and process role of one `uvicorn`, `celery`, or
@@ -210,46 +207,26 @@ def _dockerfile_cmd() -> list[str]:
     return cast(list[str], json.loads(cmd[-1]))
 
 
-def _command_argv(value: str) -> list[str]:
-    """A Compose `command`: a flow sequence of quoted strings, or a string."""
-    if value.startswith("["):
-        return [str(item) for item in ast.literal_eval(value)]
+def _command_argv(value: object) -> list[str] | None:
+    """A Compose `command`: a sequence, a string split like a shell command,
+    or `None` when the service keeps the image CMD."""
+    if value is None:
+        return None
+    if isinstance(value, list):
+        return [str(item) for item in value]
+    assert isinstance(value, str), f"unexpected Compose command {value!r}"
     return shlex.split(value)
 
 
 def _compose_commands(path: Path) -> dict[str, list[str] | None]:
-    """The `command` of every service under `services:` (`None` when the
-    service keeps the image CMD), read with a minimal indentation scanner,
-    as `tests/test_architecture/test_workflow_timeouts.py` does, because
-    PyYAML is not a declared dependency."""
-    values: dict[str, list[str] | None] = {}
-    in_services = False
-    service: str | None = None
-    parts: list[str] | None = None
-    for line in path.read_text(encoding="utf-8").splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        indent = len(line) - len(line.lstrip(" "))
-        if indent == 0:
-            in_services = stripped == "services:"
-            service = parts = None
-            continue
-        if not in_services:
-            continue
-        if indent == _SERVICE_INDENT and stripped.endswith(":"):
-            service, parts = stripped.removesuffix(":"), None
-            values[service] = None
-        elif service is not None and indent == _PROPERTY_INDENT:
-            key, _, rest = stripped.partition(":")
-            parts = [rest.strip()] if key == "command" else None
-            if parts is not None:
-                values[service] = parts
-        elif parts is not None and indent > _PROPERTY_INDENT:
-            parts.append(stripped)
+    """The `command` of every service under `services:`, including one
+    inherited through a merge key (`None` when the service keeps the image
+    CMD)."""
+    services = load_yaml_file(path)["services"]
+    assert isinstance(services, dict)
     return {
-        name: None if value is None else _command_argv(" ".join(value).strip())
-        for name, value in values.items()
+        name: _command_argv(service.get("command"))
+        for name, service in services.items()
     }
 
 
@@ -334,6 +311,32 @@ class TestRoleCommands:
             "git-worker",
             "beat",
             _CONSUMER_ROLE,
+        }
+
+    def test_compose_commands_include_merged_commands(self, tmp_path: Path) -> None:
+        """A command inherited through a merge key is the service's command,
+        so a role cannot appear to keep the image CMD while running another
+        entry module; a string command is split like a shell command."""
+        path = tmp_path / "compose.yml"
+        path.write_text(
+            "x-inherited: &inherited\n"
+            '  command: ["uvicorn", "tests.support.example:app"]\n'
+            "x-plain: &plain\n"
+            "  image: example.test/sentinel\n"
+            "services:\n"
+            "  api:\n"
+            "    <<: *inherited\n"
+            "  worker:  # a trailing comment\n"
+            "    <<: *inherited\n"
+            "    command: celery -A app.celery_app worker\n"
+            "  beat: {<<: *plain}\n",
+            encoding="utf-8",
+        )
+
+        assert _compose_commands(path) == {
+            "api": ["uvicorn", "tests.support.example:app"],
+            "worker": ["celery", "-A", "app.celery_app", "worker"],
+            "beat": None,
         }
 
     def test_deployment_doc_role_commands_load_the_production_entry_modules(
