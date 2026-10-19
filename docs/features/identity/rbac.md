@@ -612,9 +612,9 @@ here with the required authorization level and a link to the owning spec.
   specified capability; see Predefined Roles for which roles include each
   capability
 - "(deferred)" = the owning specification is deferred (see its Status
-  section): the endpoint is not part of the API while that specification is
-  deferred, and its row records the authorization that applies once it is
-  active
+  section): the operation or endpoint is not part of the API while that
+  specification is deferred, and its row records the authorization that
+  applies once it is active
 - User creation: external users are created by the external sync process (see
   [identity-provisioning](identity-provisioning.md), a deferred
   specification); local users are created through the authenticated

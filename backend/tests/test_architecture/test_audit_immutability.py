@@ -134,10 +134,10 @@ class TestNoForbiddenMutationsInServiceLayer:
 
     Importing `app.models` registers every production audit event model;
     the test-only `SampleAuditEvent` (`tests/support/audit_models.py`)
-    is also registered when its module has been imported. The services
-    reference the production models, so the test passes because no
-    service performs a bulk `update()`/`delete()` against an audit
-    table, not because `model_names` is empty.
+    is also registered when its module has been imported. `model_names`
+    is therefore never empty and the services reference these models, so
+    the check is not vacuous: it passes because no service performs a
+    bulk `update()`/`delete()` against an audit table.
     """
 
     def test_no_service_module_bulk_updates_or_deletes_an_audit_table(self) -> None:

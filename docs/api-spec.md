@@ -623,8 +623,9 @@ Rules:
 - Every code except a reserved one is defined as a Python enum in the backend
   (`app/core/errors.py`) and is part of the API contract — removing or
   renaming it is a breaking change
-- A reserved code, listed after "reserved:", is defined by a deferred
-  specification (`docs/features/identity/sso-authentication.md` or
+- A reserved code, listed after "reserved:" above and marked "(reserved)" in
+  Infrastructure Dependency Errors, is defined by a deferred specification
+  (`docs/features/identity/sso-authentication.md` or
   `docs/features/identity/identity-provisioning.md`). It is not in the enum,
   and no endpoint returns it while that specification is deferred; it is
   added to the enum when the specification becomes active. Its name is not
@@ -668,7 +669,7 @@ Examples:
 | `REDIS_UNAVAILABLE` | Redis cache/session store |
 | `PROVISIONING_UNAVAILABLE` | External identity provider (reserved) |
 | `SMELT_UNAVAILABLE` | SMELT API |
-| `SSO_UNAVAILABLE` | SSO identity provider (OIDC discovery) (reserved) |
+| `SSO_UNAVAILABLE` | SSO identity provider, OIDC discovery (reserved) |
 | `CELERY_UNAVAILABLE` | Celery task broker unavailable or task acceptance unconfirmed; the owning endpoint defines which publication exceptions produce this code, and the code never proves broker rejection |
 
 ### Global Responses
