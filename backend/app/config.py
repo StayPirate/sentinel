@@ -211,9 +211,9 @@ class Settings(BaseSettings):
     def _validate_cors_origins(cls, value: list[str]) -> list[str]:
         """Reject a `*` or `null` CORS_ORIGINS entry at startup.
 
-        The CORS middleware allows credentials, so either entry would grant
-        authenticated cross-origin access to arbitrary origins. See
-        docs/configuration.md (Application).
+        The CORS middleware allows credentials, so either entry would let
+        arbitrary origins read the responses to their credentialed requests.
+        See docs/configuration.md (Application).
         """
         if any(origin.strip() in _UNRESTRICTED_CORS_ORIGINS for origin in value):
             msg = (

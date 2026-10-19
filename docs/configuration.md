@@ -51,7 +51,7 @@ policy, and container resource limits.
 |---------|------|---------|-------------|------------|
 | `APP_NAME` | string | `sentinel` | Application name, emitted as the `app` field of every runtime structured log record (`docs/features/platform/logging.md`, Standard Log Record Schema) | — |
 | `DEBUG` | bool | `false` | Enable verbose error responses (stack traces in API errors). Does not affect logging — see `docs/features/platform/logging.md` | — |
-| `CORS_ORIGINS` | list (comma-separated) | `""` (no origins) | Origins of browser clients served from a different origin than the API that may make cross-origin API requests. Empty or unset: no cross-origin access is granted. An entry equal to `*` or `null` fails startup | — |
+| `CORS_ORIGINS` | list (comma-separated) | `""` (no origins) | Origins of browser clients, served from an origin other than the API's, that may make API requests. Empty or unset: no cross-origin access is granted. An entry equal to `*` or `null` fails startup | — |
 
 `CORS_ORIGINS` is needed only when a browser client is served from a
 different origin than the API. A client served from the same origin, such as
@@ -67,10 +67,11 @@ CORS is configured with `allow_credentials=True`, restricted methods
 (`Authorization`, `Content-Type`, `X-Request-ID`), and exposed response
 headers (`X-Request-ID`, `Retry-After`). These values are application
 constants, not configurable via environment variables. Because credentials
-are allowed, an entry of `*` would grant authenticated access to every origin
-and an entry of `null` to every opaque origin, such as a sandboxed frame or a
-local file. The application therefore refuses to start when an entry, after
-trimming, equals `*` or `null`; the error names only the variable.
+are allowed, an entry of `*` would let every origin, and an entry of `null`
+every opaque origin such as a sandboxed frame or a local file, read the
+responses to its credentialed requests. The application therefore refuses to
+start when an entry, after trimming, equals `*` or `null`; the error names
+only the variable.
 
 ## Logging
 
