@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.1](https://github.com/StayPirate/sentinel/compare/v0.10.0...v0.10.1) (2026-10-19)
+
+
+### Bug Fixes
+
+* resolve the implementation roadmap closure audit findings ([#1020](https://github.com/StayPirate/sentinel/issues/1020)) ([eb5f636](https://github.com/StayPirate/sentinel/commit/eb5f63684db585feb6bacc6d89d63dfc27f00d9b)), closes [#1018](https://github.com/StayPirate/sentinel/issues/1018)
+
 ## [0.10.0](https://github.com/StayPirate/sentinel/compare/v0.9.0...v0.10.0) (2026-10-17)
 
 
