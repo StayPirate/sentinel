@@ -426,9 +426,10 @@ checking) without changing the shared configuration.
   `ErrorResponse` model, a subclass, or a union of them, and a description
   that names each code of the status in the form `` `CODE`: condition. ``.
   It does not declare the global or shared responses: `app/api/openapi.py`
-  declares `422` and `500` for every router included under `/api/v1/` and
+  declares `422` and `500` for every router included under `/api/v1/`,
   derives `401`, `403`, and `400 DATE_RANGE_INVERTED` from each route's
-  dependency graph. A route-level declaration of a status replaces the
+  dependency graph, and derives `403 AUTH_CROSS_ORIGIN_REJECTED` from each
+  route's method. A route-level declaration of a status replaces the
   shared `422`, so a route-level `422` names `VALIDATION_ERROR` and admits
   `ValidationErrorResponse`, in a union with `ErrorResponse` when the status
   also has a dedicated code. A route-level declaration keeps precedence over

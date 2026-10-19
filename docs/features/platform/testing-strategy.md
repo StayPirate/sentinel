@@ -3615,6 +3615,53 @@ scenarios are required:
   missing and repeated sessions, exact empty 204 behavior, and the
   cookie-clearing header
 
+**Session cookie:**
+
+- Login and sliding refresh set `__Host-sentinel_session` with `HttpOnly`,
+  `Secure`, `SameSite=Strict`, and `Path=/` and without `Domain`
+- A valid JWT in a cookie with any other name, including `sentinel_session`
+  and `__HOST-sentinel_session`, selects no credential: mandatory
+  authentication returns the generic 401 and optional authentication is
+  anonymous
+- When a `sentinel_session` cookie carrying another user's valid JWT
+  accompanies the session cookie, in either order, the session cookie alone
+  authenticates the request
+
+**Cross-origin request protection:**
+
+- Through the registered application, for each unsafe method an endpoint
+  serves (`POST`, `PATCH`, `DELETE`): `Sec-Fetch-Site` values `same-site`,
+  `cross-site`, and an undefined value return `403 AUTH_CROSS_ORIGIN_REJECTED`;
+  `same-origin` and `none` reach the endpoint's normal outcome
+- An `Origin` listed in `CORS_ORIGINS` is accepted with `Sec-Fetch-Site`
+  `cross-site` or `same-site` and without `Sec-Fetch-Site`
+- Without `Sec-Fetch-Site`: an `Origin` whose host and port equal `Host`,
+  in any letter case, is accepted; a different host, a different port,
+  `null`, and a value that is not an origin are rejected, also when
+  `X-Forwarded-Host` or `Forwarded` names the `Origin` host; a request with
+  neither `Origin` nor `Sec-Fetch-Site` is accepted
+- Only the first occurrence of each header is considered
+- `GET`, `HEAD`, and `OPTIONS` requests, including a CORS preflight, are
+  never rejected, whatever their headers
+- The rejection precedes routing, body decoding, the shared request-input
+  constraints, and authentication: an unknown path and a method the path does
+  not serve return the `403`, not a routing response, and so does a malformed
+  JSON body. A rejected logout or state-changing request carrying a valid
+  session cookie, a rejected request carrying a valid API key, and a rejected
+  login with an existing account's credentials have no effect: no mutation,
+  audit event, session invalidation, `last_used_at` touch, or lockout counter
+  change, and the response sets no cookie
+- The decision is identical with a session cookie, a Bearer JWT, an API key,
+  and no credential
+- Each rejection emits exactly one `cross_origin_request_rejected` WARNING
+  with `request_id`, `method`, and the documented `reason`, containing neither
+  header value, the path, nor any credential; an accepted request emits none
+- A test derives every route with an unsafe method from the registered
+  application and proves that each rejects a `cross-site` request, so a new
+  endpoint is covered without a new test
+- The OpenAPI document names `AUTH_CROSS_ORIGIN_REJECTED` in the `403` of
+  every unsafe operation under `/api/v1/` and of no other operation
+
 **Lockout concurrency:**
 
 - Exactly `LOGIN_MAX_ATTEMPTS` password verifications are permitted

@@ -355,6 +355,10 @@ Before the first production deployment:
 - [ ] DNS configured for `sentinel.suse.de`
 - [ ] TLS certificate provisioned for `sentinel.suse.de`
 - [ ] Reverse proxy / ingress configured to route `/api` to backend
+- [ ] Reverse proxy / ingress forwards the `Host`, `Origin`, and
+      `Sec-Fetch-Site` request headers to the backend unchanged
+      (`docs/features/identity/authentication.md`, Cross-Origin Request
+      Protection)
 - [ ] Rate limiting configured on the reverse proxy for public authentication
       endpoints (see issue #682)
 - [ ] CORS origins set correctly

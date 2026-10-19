@@ -58,9 +58,13 @@ different origin than the API. A client served from the same origin, such as
 a UI and an API published behind one host, needs no entry. Each entry is an
 exact origin — scheme, host, and any non-default port, without a path or
 trailing slash, for example `https://ui.example.com`. A request whose
-`Origin` header matches no entry exactly is granted no cross-origin access:
-its preflight request is rejected and no response names its origin in
-`Access-Control-Allow-Origin`.
+`Origin` header names another origin that matches no entry exactly is granted
+no cross-origin access: its preflight request is rejected, no response names
+its origin in `Access-Control-Allow-Origin`, and Cross-Origin Request
+Protection rejects it when its method is unsafe. The entries are also the only
+other origins whose unsafe requests that protection accepts
+(`docs/features/identity/authentication.md`, Cross-Origin Request
+Protection).
 
 CORS is configured with `allow_credentials=True`, restricted methods
 (`GET`, `POST`, `PATCH`, `DELETE`), restricted headers

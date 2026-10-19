@@ -175,6 +175,17 @@ capability requirements without a Ticket accessibility step.
 
 ## Request Conventions
 
+### Cross-Origin Request Protection
+
+Every request whose method is not `GET`, `HEAD`, or `OPTIONS` is subject to
+the cross-origin request protection defined in
+`docs/features/identity/authentication.md` (Cross-Origin Request
+Protection), on every path and whatever credential it carries, if any. The
+protection is evaluated first, before routing (see Routing Responses), JSON
+body decoding, every shared request-input constraint, authentication, and
+authorization. A request it rejects receives `403 AUTH_CROSS_ORIGIN_REJECTED`
+and no other outcome, whether or not routing would select an endpoint for it.
+
 ### Query Parameter Length Limit
 
 Every string query parameter has an individual maximum length of 500
@@ -601,7 +612,7 @@ Error codes are grouped by prefix:
 | Prefix | Domain | Examples |
 |--------|--------|----------|
 | `VALIDATION_*` | Input validation | `VALIDATION_ERROR` |
-| `AUTH_*` | Authentication and authorization | `AUTH_NOT_AUTHENTICATED`, `AUTH_INSUFFICIENT_PERMISSION`, `AUTH_API_KEY_NOT_FOUND`, `AUTH_API_KEY_NAME_CONFLICT`, `AUTH_API_KEY_NAME_INVALID`, `AUTH_API_KEY_INVALID_EXPIRY`, `AUTH_SESSION_REQUIRED`, `AUTH_INVALID_CREDENTIALS`, `AUTH_ACCOUNT_LOCKED`, `AUTH_LOGOUT_NOT_APPLICABLE`; reserved: `AUTH_SSO_FAILED`, `AUTH_SSO_USER_NOT_FOUND`, `AUTH_SSO_USER_INACTIVE`, `AUTH_SSO_STATE_INVALID`, `AUTH_SSO_DISABLED` |
+| `AUTH_*` | Authentication and authorization | `AUTH_NOT_AUTHENTICATED`, `AUTH_INSUFFICIENT_PERMISSION`, `AUTH_API_KEY_NOT_FOUND`, `AUTH_API_KEY_NAME_CONFLICT`, `AUTH_API_KEY_NAME_INVALID`, `AUTH_API_KEY_INVALID_EXPIRY`, `AUTH_SESSION_REQUIRED`, `AUTH_INVALID_CREDENTIALS`, `AUTH_ACCOUNT_LOCKED`, `AUTH_LOGOUT_NOT_APPLICABLE`, `AUTH_CROSS_ORIGIN_REJECTED`; reserved: `AUTH_SSO_FAILED`, `AUTH_SSO_USER_NOT_FOUND`, `AUTH_SSO_USER_INACTIVE`, `AUTH_SSO_STATE_INVALID`, `AUTH_SSO_DISABLED` |
 | `TICKET_*` | Ticket operations | `TICKET_NOT_FOUND`, `TICKET_INVALID_TRANSITION`, `TICKET_NOT_MUTABLE`, `TICKET_NOT_CONFIDENTIAL`, `TICKET_DUPLICATE_TARGET_DUPLICATED`, `TICKET_DUPLICATE_CONCURRENT_MODIFICATION`, `TICKET_SELF_DUPLICATE`, `TICKET_CVE_CONFLICT`, `TICKET_CVE_ALREADY_SET`, `TICKET_SEVERITY_DERIVED`, `TICKET_ASSIGNEE_NOT_VA`, `TICKET_ASSIGNEE_INACTIVE` |
 | `CVE_*` | CVE operations | `CVE_NOT_FOUND`, `CVE_FETCH_FAILED`, `CVE_INVALID_SOURCE`, `CVE_INVALID_FORMAT` |
 | `CVSS_*` | CVSS assessment and default-version operations | `CVSS_INVALID_VECTOR`, `CVSS_ASSESSMENT_NOT_FOUND`, `CVSS_RECALC_ALREADY_IN_PROGRESS`, `CVSS_PREVIEW_TIMEOUT` |
@@ -674,14 +685,16 @@ Examples:
 
 ### Global Responses
 
-The following responses may be returned by any endpoint that processes
-authentication due to shared dependencies. Individual endpoint error tables
-document only endpoint-specific errors; global responses are not repeated.
+The following responses may be returned by any endpoint because of shared
+request handling; Response Applicability Derivation states which of them
+apply to each endpoint. Individual endpoint error tables document only
+endpoint-specific errors; global responses are not repeated.
 
 | Status | Code                     | Condition                                      | Source                         |
 |--------|--------------------------|------------------------------------------------|--------------------------------|
 | 401    | `AUTH_NOT_AUTHENTICATED` | Credential required but absent, or selected credential invalid | Authentication dependency |
 | 403    | `AUTH_INSUFFICIENT_PERMISSION` | User authenticated but lacks required capability | `require_capability` dependency |
+| 403    | `AUTH_CROSS_ORIGIN_REJECTED` | Unsafe request sent by a browser for a page of an origin that is neither the API's own nor a configured browser client | Cross-Origin Request Protection |
 | 422    | `VALIDATION_ERROR`       | JSON request body cannot be decoded, request body/query/path fails schema validation, or a shared request-input constraint fails (see Request Conventions) | Body decoding, FastAPI automatic (Pydantic), or a shared app-level dependency |
 | 500    | `INTERNAL_ERROR`         | Unhandled server error                         | Framework                      |
 
@@ -697,8 +710,11 @@ Notes:
   populated with field-level details
 - The OpenAPI document describes these responses for every operation they
   apply to (see Derived Responses in the OpenAPI Document)
-- The 403 response detail is always `"Insufficient permissions"` — it
-  MUST NOT disclose which capability was required
+- The `AUTH_INSUFFICIENT_PERMISSION` detail is always `"Insufficient
+  permissions"` — it MUST NOT disclose which capability was required
+- `AUTH_CROSS_ORIGIN_REJECTED` applies to every operation with an unsafe
+  method, Public ones included, and precedes every other outcome (see
+  Cross-Origin Request Protection)
 
 #### What belongs in an endpoint error table
 
@@ -714,10 +730,11 @@ the global one for the same status (e.g., `AUTH_SESSION_REQUIRED` instead
 of generic `AUTH_INSUFFICIENT_PERMISSION`).
 
 **Exclude**: generic `401 AUTH_NOT_AUTHENTICATED`, generic `403
-AUTH_INSUFFICIENT_PERMISSION`, generic `422 VALIDATION_ERROR` (Pydantic
-schema failures), `500 INTERNAL_ERROR`, and the shared
-`DATE_RANGE_INVERTED` response for endpoints that declare both date range
-parameters. These are derivable and provide no endpoint-specific information.
+AUTH_INSUFFICIENT_PERMISSION`, `403 AUTH_CROSS_ORIGIN_REJECTED`, generic `422
+VALIDATION_ERROR` (Pydantic schema failures), `500 INTERNAL_ERROR`, and the
+shared `DATE_RANGE_INVERTED` response for endpoints that declare both date
+range parameters. These are derivable and provide no endpoint-specific
+information.
 
 **Conditional authorization**: when an endpoint has authorization logic beyond
 a fixed `require_capability()` guard, document the complete condition in the
@@ -735,9 +752,9 @@ domain-specific validation with a **dedicated error code** (e.g.,
 `CVSS_INVALID_VECTOR`, `FETCHER_SETTING_INVALID`) warrants a table row.
 
 **Reading contract**: if an endpoint section has no error table, it
-produces only the responses derivable from its access level and path
-(see Response Applicability Derivation below). If it has an error table,
-the table lists only endpoint-specific errors — global and scoped
+produces only the responses derivable from its access level, method, path,
+and query shape (see Response Applicability Derivation below). If it has an
+error table, the table lists only endpoint-specific errors — global and scoped
 responses are always implicit and derivable from context. Per-endpoint
 reference lines are not used.
 
@@ -746,7 +763,8 @@ reference lines are not used.
 Routing selects the endpoint for a request from its path and method. A request
 for which routing selects no endpoint receives one of these responses, or the
 trailing-slash redirect described below, on every path, including paths outside
-`/api/v1/`:
+`/api/v1/`, unless Cross-Origin Request Protection, which precedes routing,
+rejects it first:
 
 | Status | Code | Detail | Condition |
 |--------|------|--------|-----------|
@@ -935,9 +953,10 @@ for the full specification.
 ### Response Applicability Derivation
 
 Global and scoped responses are mechanically derivable from the endpoint's
-access level, path pattern, and declared query shape. Per-endpoint reference
-lines are **not required** and MUST NOT be added to new or existing endpoints.
-The derivation tables below are the single normative source of truth.
+access level, method, path pattern, and declared query shape. Per-endpoint
+reference lines are **not required** and MUST NOT be added to new or existing
+endpoints. The derivation tables below are the single normative source of
+truth.
 
 #### Global Response Derivation
 
@@ -980,6 +999,12 @@ do not produce `TICKET_NOT_MUTABLE`. In particular, manual reference POST,
 PATCH, and DELETE remain valid for `Ignored` and `Duplicated` Tickets and never
 derive this response.
 
+#### Method Response Derivation
+
+| Method | Applicable shared responses |
+|---|---|
+| Any method other than `GET`, `HEAD`, or `OPTIONS` | `403 AUTH_CROSS_ORIGIN_REJECTED`, whatever the access level |
+
 #### Genuine Exceptions
 
 If an endpoint **deviates** from the derivation rules above (e.g., an
@@ -997,10 +1022,10 @@ be used — the derivation rules apply uniformly by access level and path.
 #### Derived Responses in the OpenAPI Document
 
 The OpenAPI document is the machine-readable contract for API clients, so
-it documents for every operation under `/api/v1/` the global, scoped, and
-query-shape responses derived above and the codes of its endpoint error
-table, each with the standard error envelope as its schema. The schema of
-`422 VALIDATION_ERROR` includes the `errors` array.
+it documents for every operation under `/api/v1/` the global, scoped,
+query-shape, and method responses derived above and the codes of its endpoint
+error table, each with the standard error envelope as its schema. The schema
+of `422 VALIDATION_ERROR` includes the `errors` array.
 
 The schema types `code` as a string, so the description of each error
 response names every code its status carries. When several codes share a
