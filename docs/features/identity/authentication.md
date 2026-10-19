@@ -728,7 +728,8 @@ validation contract:
      determination, lookup, or log record.
    - If the cookie has a non-empty value: extract its value as the token and go
      to step 3. A whitespace-only value is non-empty and therefore selects an
-     invalid credential rather than anonymous access.
+     invalid credential rather than anonymous access (after parsing, a value
+     of only spaces and horizontal tabs is empty).
    - If the cookie is absent or empty: no credential is selected. The
      dependency-specific behavior below applies.
 3. Determine credential type:
