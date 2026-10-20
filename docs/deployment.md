@@ -473,11 +473,11 @@ Renovate App remains the only component that creates dependency-update PRs.
 
 The lookup authenticates to github.com with the workflow's read-only
 `GITHUB_TOKEN`. Because that token belongs to an organization repository,
-GitHub applies the IP allow list of any organization that enforces one to the
-token's requests, including requests for that organization's public
-repositories, and GitHub-hosted runners have no stable addresses such a list
-could permit. The `aquasecurity` organization enforces such a list, so the
-lookups of `aquasecurity/trivy-action` (`github-tags`) and `aquasecurity/trivy`
+GitHub refuses its API lookups of repositories, public ones included, owned by
+another organization whose IP allow list does not include the runner's
+address. That list is outside this repository's control. The `aquasecurity`
+organization enforces such a list, so the lookups of
+`aquasecurity/trivy-action` (`github-tags`) and `aquasecurity/trivy`
 (`github-releases`) are refused. `scripts/validate_renovate_log.py` tolerates
 the lookup failure of exactly these two packages, and lists it in its output,
 only when the same log records that refusal for the same package and

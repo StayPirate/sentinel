@@ -45,22 +45,44 @@ def _write_records(tmp_path: Path, records: Records) -> Path:
     return log_path
 
 
+def _trivy_action_refusals(records: Records) -> Records:
+    return [
+        record
+        for record in records
+        if "err" in record and record["packageName"] == TRIVY_ACTION
+    ]
+
+
+def _trivy_action_dependencies(records: Records) -> Records:
+    return [
+        dependency
+        for record in records
+        if record.get("msg") == "packageFiles with updates"
+        for package_file in record["config"]["github-actions"]
+        for dependency in package_file["deps"]
+        if dependency["packageName"] == TRIVY_ACTION
+    ]
+
+
+def _set_trivy_action_warning(records: Records, message: str) -> Records:
+    for dependency in _trivy_action_dependencies(records):
+        dependency["warnings"] = [{"topic": TRIVY_ACTION, "message": message}]
+    return records
+
+
 def _drop_refusals(records: Records) -> Records:
     return [record for record in records if "err" not in record]
 
 
-def _drop_trivy_action_refusal(records: Records) -> Records:
-    return [
-        record
-        for record in records
-        if "err" not in record or record["packageName"] != TRIVY_ACTION
-    ]
+def _refuse_another_package(records: Records) -> Records:
+    for refusal in _trivy_action_refusals(records):
+        refusal["packageName"] = "aquasecurity/example-tool"
+    return records
 
 
-def _move_trivy_action_refusal_to_releases(records: Records) -> Records:
-    for record in records:
-        if "err" in record and record["packageName"] == TRIVY_ACTION:
-            record["datasource"] = "github-releases"
+def _refuse_another_datasource(records: Records) -> Records:
+    for refusal in _trivy_action_refusals(records):
+        refusal["datasource"] = "github-releases"
     return records
 
 
@@ -72,20 +94,26 @@ def _name_another_organization_in_refusals(records: Records) -> Records:
     return records
 
 
-def _replace_trivy_action_warnings(records: Records) -> Records:
-    for record in records:
-        if record.get("msg") != "packageFiles with updates":
-            continue
-        for package_file in record["config"]["github-actions"]:
-            for dependency in package_file["deps"]:
-                if dependency["packageName"] == TRIVY_ACTION:
-                    dependency["warnings"] = [
-                        {
-                            "topic": TRIVY_ACTION,
-                            "message": "Could not determine new digest for update",
-                        }
-                    ]
-    return records
+def _move_trivy_action_lookup_to_releases(records: Records) -> Records:
+    for refusal in _trivy_action_refusals(records):
+        refusal["datasource"] = "github-releases"
+    for dependency in _trivy_action_dependencies(records):
+        dependency["datasource"] = "github-releases"
+    return _set_trivy_action_warning(
+        records, f"Failed to look up github-releases package {TRIVY_ACTION}: no-result"
+    )
+
+
+def _report_other_lookup_failure(records: Records) -> Records:
+    return _set_trivy_action_warning(
+        records, f"Failed to look up github-tags package {TRIVY_ACTION}: other-reason"
+    )
+
+
+def _report_other_warning(records: Records) -> Records:
+    return _set_trivy_action_warning(
+        records, "Could not determine new digest for update"
+    )
 
 
 @pytest.mark.unit
@@ -131,13 +159,13 @@ def test_validator_tolerates_ip_allow_list_refusal_of_exempt_packages() -> None:
             id="without-refusal-record",
         ),
         pytest.param(
-            _drop_trivy_action_refusal,
+            _refuse_another_package,
             [TRIVY_ACTION_WARNING],
             [TRIVY_WARNING],
             id="refusal-for-another-package",
         ),
         pytest.param(
-            _move_trivy_action_refusal_to_releases,
+            _refuse_another_datasource,
             [TRIVY_ACTION_WARNING],
             [TRIVY_WARNING],
             id="refusal-for-another-datasource",
@@ -149,14 +177,26 @@ def test_validator_tolerates_ip_allow_list_refusal_of_exempt_packages() -> None:
             id="refusal-naming-another-organization",
         ),
         pytest.param(
-            _replace_trivy_action_warnings,
+            _move_trivy_action_lookup_to_releases,
+            ["(github-releases package aquasecurity/trivy-action)"],
+            [TRIVY_WARNING],
+            id="exempt-package-with-another-datasource",
+        ),
+        pytest.param(
+            _report_other_lookup_failure,
+            [TRIVY_ACTION_WARNING],
+            [TRIVY_WARNING],
+            id="other-lookup-failure-reason",
+        ),
+        pytest.param(
+            _report_other_warning,
             [TRIVY_ACTION_WARNING],
             [TRIVY_WARNING],
             id="other-warning-for-exempt-package",
         ),
     ],
 )
-def test_validator_rejects_exempt_package_warning_without_matching_refusal(
+def test_validator_rejects_exempt_package_warning_without_exact_refused_lookup(
     tmp_path: Path,
     mutate: Callable[[Records], Records],
     blocking: list[str],
