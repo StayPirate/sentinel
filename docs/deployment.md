@@ -1122,14 +1122,20 @@ Releases up to and including 0.10.2 keep their images at
 `ghcr.io/staypirate/sentinel`, and their attestations name
 `StayPirate/sentinel` as the source repository and
 `StayPirate/sentinel/.github/workflows/build-images.yml` as the signer
-workflow. GitHub's Attestations API returns these attestations under the
-`StayPirate` account, not under the moved repository. To verify one of these
-releases, use the old image name and signer workflow with `--owner StayPirate`
-in place of `--repo`, or keep `--repo StayPirate/sentinel` and add
-`--bundle-from-oci` or the release's `--bundle` asset. `gh release verify` and
-`gh release verify-asset` no longer find the GitHub release attestation of
-these releases; their assets remain immutable, and the bundle assets keep the
-signed statements.
+workflow. `gh release verify` and `gh release verify-asset` no longer find
+the GitHub release attestation of these releases, but their assets remain
+immutable in `vulnwatch/sentinel`. Verify one of these releases with its bundle
+assets, downloaded from the release in `vulnwatch/sentinel`: run the commands
+above with the old image name, `--repo StayPirate/sentinel`,
+`--signer-workflow StayPirate/sentinel/.github/workflows/build-images.yml`, and
+`--bundle sentinel-<version>.provenance.sigstore.json` (respectively
+`--bundle sentinel-<version>.sbom.sigstore.json`). The bundle binds the digest
+attested when the release was published. The forms that look attestations up
+by name instead also succeed — `--bundle-from-oci`, or `--owner StayPirate` in
+place of `--repo`, because GitHub's Attestations API returns these attestations
+under the `StayPirate` account rather than the moved repository — but they
+trust whatever the `StayPirate` account and `ghcr.io/staypirate/sentinel` hold,
+and the `StayPirate/sentinel` name can be re-created after the move.
 
 ### Release Publication and Immutability
 
