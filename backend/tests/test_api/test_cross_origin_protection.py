@@ -125,9 +125,9 @@ class TestEveryUnsafeOperation:
             response = await client.request(
                 method, path, headers={"Sec-Fetch-Site": value}
             )
-            assert (response.status_code, response.json()) == (
+            assert (response.status_code, response.content) == (
                 baseline.status_code,
-                baseline.json(),
+                baseline.content,
             )
 
 
