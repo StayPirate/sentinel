@@ -471,6 +471,20 @@ requests, and is not a required merge check. A failure is intentionally
 visible as a red Actions status while remaining non-blocking; the Mend-hosted
 Renovate App remains the only component that creates dependency-update PRs.
 
+The lookup authenticates to github.com with the workflow's read-only
+`GITHUB_TOKEN`. Because that token belongs to an organization repository,
+GitHub refuses its API lookups of repositories, public ones included, owned by
+another organization whose IP allow list does not include the runner's
+address. That list is outside this repository's control. The `aquasecurity`
+organization enforces such a list, so the lookups of
+`aquasecurity/trivy-action` (`github-tags`) and `aquasecurity/trivy`
+(`github-releases`) are refused. `scripts/validate_renovate_log.py` tolerates
+the lookup failure of exactly these two packages, and lists it in its output,
+only when the same log records that refusal for the same package and
+datasource. Every other lookup warning, including any other warning for these
+two packages, still fails the check. The exception changes neither
+`renovate.jsonc` nor the Mend-hosted Renovate App.
+
 **Python dependency updates and vulnerability response.** Renovate's
 `pep621` manager reads `backend/pyproject.toml` together with
 `backend/uv.lock`. The declared requirements are open-ended floors
