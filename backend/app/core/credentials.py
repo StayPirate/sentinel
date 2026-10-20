@@ -36,9 +36,6 @@ class DuplicateSessionCookie:
 
     __slots__ = ()
 
-    def __repr__(self) -> str:
-        return "DUPLICATE_SESSION_COOKIE"
-
 
 DUPLICATE_SESSION_COOKIE: Final = DuplicateSessionCookie()
 """The selected credential when the session cookie occurs more than once.

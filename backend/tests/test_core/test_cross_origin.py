@@ -5,9 +5,10 @@ Protection) for the decision rules and the rejection under test, and
 `docs/features/platform/testing-strategy.md` (Authentication and Session,
 Cross-origin request protection) for the mandatory scenarios. The decision
 function is tested directly; the middleware wraps a recording ASGI app, so
-these tests prove that a rejected request never reaches it. The registered
-application, the session-cookie and logout effects, and the OpenAPI document
-are covered end to end in `tests/test_api/test_cross_origin_protection.py`.
+these tests prove that a rejected request never reaches it. The registration
+in `app.main` is covered in `tests/test_main.py`; the registered application,
+its effects, and the OpenAPI document end to end in
+`tests/test_api/test_cross_origin_protection.py`.
 """
 
 from __future__ import annotations
@@ -16,13 +17,10 @@ from collections.abc import Sequence
 from typing import Any
 
 import pytest
-from fastapi.middleware.cors import CORSMiddleware
 from httpx import ASGITransport, AsyncClient, Response
 from starlette.responses import PlainTextResponse
 from starlette.types import Message, Receive, Scope, Send
 
-import app.main as main_module
-from app.config import settings
 from app.core.cross_origin import (
     REJECTION_DETAIL,
     SAFE_METHODS,
@@ -30,7 +28,6 @@ from app.core.cross_origin import (
     CrossOriginRejectionReason,
     cross_origin_rejection,
 )
-from app.core.middleware import RequestIDMiddleware
 
 _HOST = "api.example.test"
 _API_ORIGIN = f"https://{_HOST}"
@@ -322,6 +319,39 @@ class TestMiddleware:
         assert sent[0]["status"] == 403
         assert inner.scopes == []
 
+    @pytest.mark.parametrize(
+        ("hosts", "rejected"),
+        [
+            pytest.param([_HOST, "sibling.example.test"], False, id="first-matches"),
+            pytest.param(["sibling.example.test", _HOST], True, id="second-matches"),
+        ],
+    )
+    async def test_only_the_first_host_is_considered(
+        self, hosts: list[str], rejected: bool
+    ) -> None:
+        """A raw ASGI request, since an HTTP client sends a single `Host`."""
+        inner = _RecordingApp()
+        protected = CrossOriginProtectionMiddleware(inner, trusted_origins=())
+        sent: list[Message] = []
+
+        async def receive() -> Message:
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def send(message: Message) -> None:
+            sent.append(message)
+
+        scope: dict[str, Any] = {
+            "type": "http",
+            "method": "POST",
+            "path": "/resource",
+            "headers": [(b"origin", _API_ORIGIN.encode())]
+            + [(b"host", host.encode()) for host in hosts],
+        }
+        await protected(scope, receive, send)
+
+        assert sent[0]["status"] == (403 if rejected else 200)
+        assert len(inner.scopes) == (0 if rejected else 1)
+
     async def test_non_http_scopes_pass_through(self) -> None:
         inner = _RecordingApp()
         protected = CrossOriginProtectionMiddleware(inner, trusted_origins=())
@@ -335,29 +365,3 @@ class TestMiddleware:
         await protected({"type": "lifespan"}, receive, send)
 
         assert [scope["type"] for scope in inner.scopes] == ["lifespan"]
-
-
-@pytest.mark.unit
-class TestRegistration:
-    """`app.main` registers the protection with `CORS_ORIGINS`, inside
-    `RequestIDMiddleware` and outside `CORSMiddleware`."""
-
-    def test_trusts_exactly_the_configured_origins(self) -> None:
-        registrations = [
-            kwargs
-            for cls, _, kwargs in main_module.app.user_middleware
-            if cls is CrossOriginProtectionMiddleware
-        ]
-
-        assert registrations == [{"trusted_origins": settings.cors_origins}]
-        assert registrations[0]["trusted_origins"] is settings.cors_origins
-
-    def test_runs_after_request_ids_and_before_cors(self) -> None:
-        # `user_middleware` lists the outermost middleware first.
-        classes = [cls for cls, _, _ in main_module.app.user_middleware]
-
-        assert classes == [
-            RequestIDMiddleware,
-            CrossOriginProtectionMiddleware,
-            CORSMiddleware,
-        ]

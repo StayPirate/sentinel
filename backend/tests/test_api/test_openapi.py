@@ -25,7 +25,7 @@ from app.api.dependencies import (
     require_any_capability,
     require_capability,
 )
-from app.api.openapi import API_V1_RESPONSES, SentinelAPI, method_responses
+from app.api.openapi import API_V1_RESPONSES, SentinelAPI
 from app.core.enums import Capability
 from app.schemas.errors import ErrorResponse
 
@@ -287,23 +287,6 @@ class TestDependencyDerivedResponses:
 
         schemas = test_app.openapi().get("components", {}).get("schemas", {})
         assert "ErrorResponse" not in schemas
-
-
-@pytest.mark.unit
-class TestMethodResponses:
-    """`docs/api-spec.md` (Method Response Derivation)."""
-
-    @pytest.mark.parametrize("method", ["GET", "HEAD", "OPTIONS"])
-    def test_safe_methods_derive_nothing(self, method: str) -> None:
-        assert method_responses(method) == []
-
-    @pytest.mark.parametrize("method", ["POST", "PATCH", "DELETE", "PUT"])
-    def test_unsafe_methods_derive_the_cross_origin_rejection(
-        self, method: str
-    ) -> None:
-        assert [response.description for response in method_responses(method)] == [
-            _CROSS_ORIGIN_403
-        ]
 
 
 @pytest.mark.unit

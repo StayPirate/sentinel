@@ -106,29 +106,36 @@ class TestEveryUnsafeOperation:
         assert {"POST", "PATCH", "DELETE"} <= methods
 
     @pytest.mark.parametrize(("method", "path"), _UNSAFE_OPERATIONS)
-    async def test_rejects_forged_requests_and_accepts_same_origin(
+    async def test_forged_request_returns_403_and_same_origin_reaches_endpoint(
         self, client: AsyncClient, method: str, path: str
     ) -> None:
         """Derived from the registered routes, so a new endpoint is covered
-        without a new test. Without a credential an accepted request reaches
-        the endpoint's own outcome, such as its 401."""
+        without a new test. An accepted request has the outcome of the same
+        request without `Sec-Fetch-Site`; without a credential that is the
+        endpoint's own response, such as its 401."""
         for value in _REJECTED_SEC_FETCH_SITE:
             response = await client.request(
                 method, path, headers={"Sec-Fetch-Site": value}
             )
             _assert_rejected(response)
 
+        baseline = await client.request(method, path)
+        _assert_not_rejected(baseline)
         for value in _ACCEPTED_SEC_FETCH_SITE:
             response = await client.request(
                 method, path, headers={"Sec-Fetch-Site": value}
             )
-            _assert_not_rejected(response)
+            assert (response.status_code, response.json()) == (
+                baseline.status_code,
+                baseline.json(),
+            )
 
 
 @pytest.mark.e2e
 class TestOriginFallback:
     """Without `Sec-Fetch-Site`, or with an empty one, through the registered
-    application; an accepted logout without a credential returns its 401."""
+    application, whose test client sends `Host: test`; an accepted logout
+    without a credential returns its 401."""
 
     @pytest.mark.parametrize(
         "headers",
@@ -142,38 +149,28 @@ class TestOriginFallback:
             pytest.param({}, id="no-origin"),
         ],
     )
-    async def test_accepted(self, client: AsyncClient, headers: dict[str, str]) -> None:
+    async def test_origin_matching_host_or_absent_origin_is_accepted(
+        self, client: AsyncClient, headers: dict[str, str]
+    ) -> None:
         response = await client.post(_LOGOUT, headers=headers)
 
         assert response.status_code == 401
         assert response.json()["code"] == "AUTH_NOT_AUTHENTICATED"
 
-    @pytest.mark.parametrize(
-        "headers",
-        [
-            pytest.param({"Origin": _SIBLING_ORIGIN}, id="other-host"),
-            pytest.param({"Origin": "http://test:8000"}, id="other-port"),
-            pytest.param({"Origin": "null"}, id="null"),
-            pytest.param({"Origin": "http://test/"}, id="path"),
-            pytest.param({"Origin": "http://user@test"}, id="userinfo"),
-            pytest.param({"Origin": "http://"}, id="no-host"),
-            pytest.param(
-                {"Origin": _SIBLING_ORIGIN, "X-Forwarded-Host": "sibling.example.test"},
-                id="x-forwarded-host",
-            ),
-            pytest.param(
-                {"Origin": _SIBLING_ORIGIN, "Forwarded": "host=sibling.example.test"},
-                id="forwarded",
-            ),
-        ],
-    )
-    async def test_rejected(self, client: AsyncClient, headers: dict[str, str]) -> None:
-        _assert_rejected(await client.post(_LOGOUT, headers=headers))
+    async def test_origin_of_another_host_is_rejected(
+        self, client: AsyncClient
+    ) -> None:
+        """The other rejected forms are covered by the decision tests in
+        `tests/test_core/test_cross_origin.py`; this proves the request's
+        `Host` reaches the decision in the registered application."""
+        _assert_rejected(
+            await client.post(_LOGOUT, headers={"Origin": _SIBLING_ORIGIN})
+        )
 
 
 @pytest.mark.e2e
 class TestSafeMethods:
-    async def test_get_is_never_rejected(self, client: AsyncClient) -> None:
+    async def test_get_cross_site_is_not_rejected(self, client: AsyncClient) -> None:
         response = await client.get(
             "/health", headers={"Origin": "null", "Sec-Fetch-Site": "cross-site"}
         )
@@ -181,14 +178,16 @@ class TestSafeMethods:
         assert response.status_code == 200
 
     @pytest.mark.parametrize("method", ["HEAD", "OPTIONS"])
-    async def test_head_and_options_reach_routing(
+    async def test_head_and_options_cross_site_reach_routing(
         self, client: AsyncClient, method: str
     ) -> None:
         response = await client.request(method, _LOGOUT, headers=_CROSS_SITE)
 
         assert response.status_code == 405
 
-    async def test_cors_preflight_is_never_rejected(self, client: AsyncClient) -> None:
+    async def test_cors_preflight_from_unlisted_origin_reaches_cors(
+        self, client: AsyncClient
+    ) -> None:
         """A preflight from an origin that is not configured receives the CORS
         middleware's own rejection, not the protection's."""
         response = await client.options(
@@ -219,14 +218,16 @@ class TestPrecedence:
             pytest.param("PUT", "/not-an-endpoint", 404, id="put-unknown-path"),
         ],
     )
-    async def test_routing(
+    async def test_cross_site_rejection_precedes_routing(
         self, client: AsyncClient, method: str, path: str, accepted_status: int
     ) -> None:
         _assert_rejected(await client.request(method, path, headers=_CROSS_SITE))
         accepted = await client.request(method, path, headers=_SAME_ORIGIN)
         assert accepted.status_code == accepted_status
 
-    async def test_body_decoding(self, client: AsyncClient) -> None:
+    async def test_cross_site_rejection_precedes_body_decoding(
+        self, client: AsyncClient
+    ) -> None:
         malformed = b'{"username": '
         json_type = {"Content-Type": "application/json"}
 
@@ -244,7 +245,9 @@ class TestPrecedence:
         _assert_rejected(rejected)
         assert accepted.status_code == 422
 
-    async def test_inadmissible_character(self, client: AsyncClient) -> None:
+    async def test_cross_site_rejection_precedes_input_constraints(
+        self, client: AsyncClient
+    ) -> None:
         path = "/api/v1/tickets/SNTL-%00/ignore"
 
         _assert_rejected(await client.post(path, headers=_CROSS_SITE))
@@ -289,23 +292,24 @@ class TestNoEffect:
         target = await user_factory()
         client.cookies.set(SESSION_COOKIE_NAME, await _session_token(db_session, admin))
         path = f"/api/v1/admin/users/{target.id}/deactivate"
+        audit_events = (
+            select(func.count())
+            .select_from(IdentityAuditEvent)
+            .where(IdentityAuditEvent.target_user_id == target.id)
+        )
 
         rejected = await client.post(path, headers=_CROSS_SITE)
 
         _assert_rejected(rejected)
         await db_session.refresh(target)
         assert target.active is True
-        audit_events = await db_session.scalar(
-            select(func.count())
-            .select_from(IdentityAuditEvent)
-            .where(IdentityAuditEvent.target_user_id == target.id)
-        )
-        assert audit_events == 0
+        assert await db_session.scalar(audit_events) == 0
 
         accepted = await client.post(path, headers=_SAME_ORIGIN)
         assert accepted.status_code == 200
         await db_session.refresh(target)
         assert target.active is False
+        assert await db_session.scalar(audit_events) == 1
 
     async def test_rejected_api_key_request_is_not_looked_up_or_touched(
         self,
@@ -348,6 +352,7 @@ class TestNoEffect:
         await guard_and_increment(user.username)
         counter_key = f"login_attempts:{user.username}"
         body = {"username": user.username, "password": password}
+        sessions = select(func.count()).select_from(Session).filter_by(user_id=user.id)
 
         rejected = await client.post(
             "/api/v1/auth/login", json=body, headers=_CROSS_SITE
@@ -355,16 +360,18 @@ class TestNoEffect:
 
         _assert_rejected(rejected)
         assert await redis_client.get(counter_key) == "1"
-        sessions = await db_session.scalar(
-            select(func.count()).select_from(Session).filter_by(user_id=user.id)
-        )
-        assert sessions == 0
+        assert await db_session.scalar(sessions) == 0
         await db_session.refresh(user)
         assert user.last_login_at is None
 
+        # Controls: the same requests, accepted, change both.
+        wrong_password = {**body, "password": f"{password}-wrong"}
+        failed = await client.post("/api/v1/auth/login", json=wrong_password)
+        assert failed.status_code == 401
+        assert await redis_client.get(counter_key) == "2"
         accepted = await client.post("/api/v1/auth/login", json=body)
         assert accepted.status_code == 200
-        assert await redis_client.get(counter_key) == "2"
+        assert await db_session.scalar(sessions) == 1
 
 
 @pytest.mark.e2e

@@ -154,6 +154,3 @@ class TestReadSessionCookie:
     )
     def test_duplicated_name_is_reported(self, header: str) -> None:
         assert read_session_cookie(header) is DUPLICATE_SESSION_COOKIE
-
-    def test_duplicate_marker_names_itself(self) -> None:
-        assert repr(DUPLICATE_SESSION_COOKIE) == "DUPLICATE_SESSION_COOKIE"
