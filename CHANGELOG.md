@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.10.2](https://github.com/StayPirate/sentinel/compare/v0.10.1...v0.10.2) (2026-10-20)
+
+
+### Bug Fixes
+
+* default CORS_ORIGINS to none and reject * and null origins ([#1040](https://github.com/StayPirate/sentinel/issues/1040)) ([d62c6a2](https://github.com/StayPirate/sentinel/commit/d62c6a26e607cbd96e463c8427f88cf2c8bdc887)), closes [#1037](https://github.com/StayPirate/sentinel/issues/1037)
+* reject forged same-site requests and harden the session cookie ([#1044](https://github.com/StayPirate/sentinel/issues/1044)) ([0efe301](https://github.com/StayPirate/sentinel/commit/0efe301eec6b8517d22d15ff8ddf167ec3bd28fc))
+
 ## [0.10.1](https://github.com/StayPirate/sentinel/compare/v0.10.0...v0.10.1) (2026-10-19)
 
 
