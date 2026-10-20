@@ -41,6 +41,9 @@ jobs:
 
       - name: Run read-only Renovate lookup
         env:
+          # Organizations that enforce a GitHub IP allow list refuse this
+          # token's lookups; see docs/deployment.md (Workflow Conventions)
+          # for the lookup failures the validator tolerates.
           RENOVATE_GITHUB_COM_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
