@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.14"
-# dependencies = ["vulnwatch-nonexistent-renovate-check==1.0.0"]
+# dependencies = ["aio-pika==10.1.1"]
 # ///
 """Capture IBS RabbitMQ events into an append-only JSONL file.
 
