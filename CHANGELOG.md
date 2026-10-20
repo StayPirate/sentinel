@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.3](https://github.com/vulnwatch/sentinel/compare/v0.10.2...v0.10.3) (2026-10-20)
+
+
+### Bug Fixes
+
+* point project URLs to the vulnwatch repository ([#1049](https://github.com/vulnwatch/sentinel/issues/1049)) ([15673c5](https://github.com/vulnwatch/sentinel/commit/15673c59c07c201388f0b3f9ebd58bea66ccb4f7))
+
 ## [0.10.2](https://github.com/StayPirate/sentinel/compare/v0.10.1...v0.10.2) (2026-10-20)
 
 
