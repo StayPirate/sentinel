@@ -23,13 +23,26 @@ TRIVY_WARNING = "(github-releases package aquasecurity/trivy)"
 Records = list[dict[str, Any]]
 
 
-def _run_validator(log_path: Path) -> subprocess.CompletedProcess[str]:
+def _run_validator(
+    log_path: Path, *, merge_output: bool = False
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, str(SCRIPT_PATH), str(log_path)],
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT if merge_output else subprocess.PIPE,
         text=True,
         check=False,
     )
+
+
+def _write_mixed_log(tmp_path: Path) -> Path:
+    log_path = tmp_path / "renovate.ndjson"
+    log_path.write_text(
+        IP_ALLOW_LIST_LOG.read_text(encoding="utf-8")
+        + (FIXTURE_DIR / "lookup-warning.ndjson").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    return log_path
 
 
 def _read_records(log_path: Path) -> Records:
@@ -236,14 +249,7 @@ def test_validator_rejects_ip_allow_list_refusal_of_non_exempt_organization(
 def test_validator_rejects_other_warning_alongside_tolerated_ones(
     tmp_path: Path,
 ) -> None:
-    log_path = tmp_path / "renovate.ndjson"
-    log_path.write_text(
-        IP_ALLOW_LIST_LOG.read_text(encoding="utf-8")
-        + (FIXTURE_DIR / "lookup-warning.ndjson").read_text(encoding="utf-8"),
-        encoding="utf-8",
-    )
-
-    result = _run_validator(log_path)
+    result = _run_validator(_write_mixed_log(tmp_path))
 
     assert result.returncode == 1
     assert "docker package anchore/syft" in result.stderr
@@ -251,6 +257,21 @@ def test_validator_rejects_other_warning_alongside_tolerated_ones(
     assert TRIVY_WARNING not in result.stderr
     assert TRIVY_ACTION_WARNING in result.stdout
     assert TRIVY_WARNING in result.stdout
+
+
+@pytest.mark.unit
+def test_validator_combined_output_lists_tolerated_before_blocking_warnings(
+    tmp_path: Path,
+) -> None:
+    result = _run_validator(_write_mixed_log(tmp_path), merge_output=True)
+
+    output = result.stdout
+    assert result.returncode == 1
+    assert (
+        output.index(TRIVY_WARNING)
+        < output.index("Renovate package lookup warnings found:")
+        < output.index("docker package anchore/syft")
+    )
 
 
 @pytest.mark.unit

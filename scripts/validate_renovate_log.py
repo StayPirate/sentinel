@@ -197,6 +197,9 @@ def main() -> int:
         )
         for warning in warnings.tolerated:
             print(f"- {warning}")
+        # Keep the tolerated list ahead of the blocking warnings written to
+        # stderr when both streams end up in one log.
+        sys.stdout.flush()
 
     if warnings.blocking:
         print("Renovate package lookup warnings found:", file=sys.stderr)
